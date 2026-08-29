@@ -1086,6 +1086,22 @@ struct Peer {
      *  (live 0.34.5: 171 getheaders/sec). HeadersSyncState continuations
      *  still clear it so IBD presync can walk. */
     NodeClock::time_point m_last_getheaders_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /** Header-sync continuation anchor: height of the terminal header of the
+     *  last solicited full-size HEADERS batch that we continued from with a
+     *  send-window bypass. A bypassed continuation getheaders is only allowed
+     *  when the new batch's terminal is STRICTLY higher than this (monotonic:
+     *  a peer replaying the same batch cannot extract repeated bypass sends),
+     *  or -- throttled by m_headers_continuation_at -- when the terminal sits
+     *  at our best header (retry after a deferred/failed continuation).
+     *  Without the bypass, every send-window slot is consumed by tip-anchored
+     *  locators whose fork-point-anchored 2000-header replies end exactly at
+     *  best_header, and header sync pins at fork_point+2000 forever (live
+     *  2026-08: fleet-wide freeze at 201278 = 199278+2000 while a connected
+     *  peer held 201758). */
+    int32_t m_headers_continuation_height GUARDED_BY(NetEventsInterface::g_msgproc_mutex){-1};
+    /** Last time a non-monotonic (terminal-at-best-header) continuation
+     *  bypass was sent to this peer. */
+    NodeClock::time_point m_headers_continuation_at GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** Issue #107: unsolicited already-known header replay accounting. */
     std::chrono::steady_clock::time_point m_dup_header_window_start GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     uint64_t m_dup_header_bytes GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
@@ -1705,8 +1721,10 @@ private:
     /** Request further headers from this peer with a given locator.
      * We don't issue a getheaders message if we have a recent one outstanding.
      * This returns true if a getheaders is actually sent, and false otherwise.
+     * `bypass_send_window` skips the 2-minute send-rate window; callers must
+     * bound it themselves (see Peer::m_headers_continuation_height).
      */
-    bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window = false) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     /** Potentially fetch blocks from this peer upon receipt of a new headers tip */
     void HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -9268,7 +9286,7 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
     return DupHeaderDisposition::None;
 }
 
-bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer)
+bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window)
 {
     // NOT eligibility-gated. Headers are cheap and self-validating, and they
     // establish pindexBestKnownBlock -- without which a peer is unusable for
@@ -9282,7 +9300,8 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
     // Rate-limit on last *send*, not last answered. Connecting HEADERS
     // still clear m_last_getheaders_timestamp (solicited / duplicate
     // accounting) but must not reopen the 2-minute window.
-    if (current_time - peer.m_last_getheaders_sent > HEADERS_RESPONSE_TIME) {
+    if (bypass_send_window ||
+        current_time - peer.m_last_getheaders_sent > HEADERS_RESPONSE_TIME) {
         MakeAndPushMessage(pfrom, NetMsgType::GETHEADERS, locator, uint256());
         peer.m_last_getheaders_sent = current_time;
         peer.m_last_getheaders_timestamp = current_time;
@@ -11960,11 +11979,15 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
         !received_new_header) {
         bool already_known_ancestor{false};
         int tip_height{-1};
+        int best_header_height{-1};
         {
             LOCK(cs_main);
             already_known_ancestor =
                 IsAncestorOfBestHeaderOrTip(last_received_header);
             tip_height = m_chainman.ActiveHeight();
+            best_header_height = m_chainman.m_best_header != nullptr
+                ? m_chainman.m_best_header->nHeight
+                : -1;
         }
         if (already_known_ancestor) {
             const DupHeaderDisposition disp{NoteDuplicateHeadersNoProgress(
@@ -11992,6 +12015,57 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 // suffix reply → send again, four getheaders/sec). Restore
                 // the gate. Further probes belong to SendMessages.
                 peer.m_last_getheaders_timestamp = NodeClock::now();
+
+                // Header-sync deadlock fix (live 2026-08, fleet frozen at
+                // 201278 = fork_point 199278 + 2000): every getheaders we
+                // send is anchored at the active tip (HeaderSyncLocatorStart
+                // deliberately avoids anchoring at a long non-extending
+                // best-header tower), so a peer holding the majority chain
+                // answers from our fork point with a full 2000-header batch
+                // ending exactly at our best_header. That batch lands HERE
+                // as a solicited duplicate, and returning without asking for
+                // the NEXT batch pins best_header at fork_point+2000 forever
+                // even though the connected peer has more (macpro2 at
+                // 201758). A solicited FULL-size all-known batch is exactly
+                // the signature of "our locator caused the duplication and
+                // the peer may have more": continue from the batch terminal,
+                // like the normal-path continuation below. Bounded: the
+                // bypass requires the terminal to be strictly higher than
+                // any previous continuation to this peer (a replayed batch
+                // extracts nothing), or -- rate-limited to one per
+                // HEADERS_RESPONSE_TIME/4 -- a terminal sitting at our
+                // best_header (retry after a deferred continuation reply).
+                // We only change which peer we ask and when; acceptance,
+                // caps and PARK are untouched.
+                if (solicited_headers && !have_headers_sync &&
+                    nCount == m_opts.max_headers_result) {
+                    const auto now{NodeClock::now()};
+                    const int32_t terminal_height{last_received_header->nHeight};
+                    const bool monotonic{
+                        terminal_height > peer.m_headers_continuation_height};
+                    const bool frontier_retry{
+                        terminal_height >= best_header_height &&
+                        (peer.m_headers_continuation_at ==
+                             NodeClock::time_point{} ||
+                         now - peer.m_headers_continuation_at >
+                             HEADERS_RESPONSE_TIME / 4)};
+                    if ((monotonic || frontier_retry) &&
+                        MaybeSendGetHeaders(pfrom,
+                                            GetLocator(last_received_header),
+                                            peer,
+                                            /*bypass_send_window=*/true)) {
+                        peer.m_headers_continuation_height = std::max(
+                            peer.m_headers_continuation_height, terminal_height);
+                        if (!monotonic) peer.m_headers_continuation_at = now;
+                        LogInfo("header-sync continuation: peer=%d served a "
+                                "solicited duplicate suffix ending %d "
+                                "(best_header %d, tip %d); requesting headers "
+                                "beyond %d\n",
+                                pfrom.GetId(), terminal_height,
+                                best_header_height, tip_height,
+                                terminal_height);
+                    }
+                }
             }
             return;
         }
@@ -12190,8 +12264,19 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 }
             }
         }
+        // Bypass the 2-minute send window when the terminal advanced past any
+        // previous continuation to this peer: the reply to a probe sent
+        // seconds ago must be able to chain to the next batch (one bypassed
+        // getheaders per strictly-higher terminal height; a replaying peer
+        // extracts nothing). Without it a >2000-header gap syncs at one batch
+        // per HEADERS_RESPONSE_TIME.
+        const bool continuation_monotonic{
+            pindexLast->nHeight > peer.m_headers_continuation_height};
         if (chase_more &&
-            MaybeSendGetHeaders(pfrom, GetLocator(pindexLast), peer)) {
+            MaybeSendGetHeaders(pfrom, GetLocator(pindexLast), peer,
+                                /*bypass_send_window=*/continuation_monotonic)) {
+            peer.m_headers_continuation_height = std::max(
+                peer.m_headers_continuation_height, pindexLast->nHeight);
             LogDebug(BCLog::NET, "more getheaders (%d) to end to peer=%d (startheight:%d)\n",
                     pindexLast->nHeight, pfrom.GetId(), peer.m_starting_height);
         }
@@ -20183,16 +20268,34 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             NodeClock::now() - peer->m_last_getheaders_timestamp <= HEADERS_RESPONSE_TIME};
         const bool best_known_extends_tip{node::HeaderSyncBestKnownExtendsTip(
             state.pindexBestKnownBlock, tip_for_headers)};
-        const bool must_probe{node::HeaderSyncMustProbe(
-            tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
+        // Override every tip-relative gate when the peer provably knows a
+        // header we do not have: it announced a block we cannot look up, or
+        // its VERSION height exceeds our BEST HEADER. Stale VERSION/BestKnown
+        // snapshots below our tip otherwise seal such a peer out of
+        // getheaders forever (live 2026-08: rtx6000 at best_header 201278
+        // never asked the connected peer holding 201758; sfo3 with all 172
+        // peers at synced_headers=-1). Preference/sync-slot gating must never
+        // be able to shut this off; pacing stays BEST_KNOWN_PROBE_INTERVAL.
+        const int32_t best_header_height_for_probe{
+            m_chainman.m_best_header != nullptr
+                ? m_chainman.m_best_header->nHeight
+                : -1};
+        const bool peer_beyond_best_header{node::HeaderSyncPeerBeyondBestHeader(
+            best_header_height_for_probe,
             peer->m_starting_height.load(),
-            state.pindexBestKnownBlock == nullptr,
-            tip_is_stale,
-            headers_in_flight,
-            state.pindexBestKnownBlock != nullptr
-                ? state.pindexBestKnownBlock->nHeight
-                : -1,
-            best_known_extends_tip)};
+            /*announced_unknown_block=*/!state.hashLastUnknownBlock.IsNull())};
+        const bool must_probe{
+            node::HeaderSyncMustProbe(
+                tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
+                peer->m_starting_height.load(),
+                state.pindexBestKnownBlock == nullptr,
+                tip_is_stale,
+                headers_in_flight,
+                state.pindexBestKnownBlock != nullptr
+                    ? state.pindexBestKnownBlock->nHeight
+                    : -1,
+                best_known_extends_tip) ||
+            peer_beyond_best_header};
 
         // F1/F2: a peer advertising above our tip with no best-known is
         // enough to request headers. fPreferredDownload remains a
@@ -20451,10 +20554,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     } else if (MaybeSendGetHeaders(*pto, GetLocator(start), *peer)) {
                         last_probe = current_time;
                         LogInfo("best-known probe: getheaders to peer=%d "
-                                "(advertised %d, our tip %d, best_known_extends=%s)\n",
+                                "(advertised %d, our tip %d, best_header %d, "
+                                "best_known_extends=%s, beyond_best_header=%s)\n",
                                 pto->GetId(), peer->m_starting_height.load(),
-                                tip->nHeight,
-                                best_known_extends_tip ? "yes" : "no");
+                                tip->nHeight, best_header_height_for_probe,
+                                best_known_extends_tip ? "yes" : "no",
+                                peer_beyond_best_header ? "yes" : "no");
                     } else {
                         log_probe_declined("getheaders_in_flight");
                     }

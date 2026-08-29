@@ -232,6 +232,45 @@ inline constexpr int CATCHUP_FAR_BEHIND_YIELD{100};
 }
 
 /**
+ * Probe override: this peer provably (or by its own claim) knows a header
+ * we do not have, so header sync MUST be able to request headers from it
+ * regardless of every tip-relative gate.
+ *
+ * HeaderSyncMustProbe / HeaderSyncAdvertisedHeightUnusable compare against
+ * the ACTIVE TIP and against BestKnown, both of which can be stale
+ * snapshots: a long-lived connection whose VERSION height (or whose
+ * resolved BestKnown) sits below our tip is sealed out of getheaders
+ * forever, even while it keeps announcing blocks whose headers we lack
+ * (live 2026-08: sfo3 relay seed, 172 peers ALL at synced_headers=-1;
+ * rtx6000 never asked the one peer holding 201279..201758 while
+ * best_header sat at 201278).
+ *
+ * Two signals, each sufficient:
+ *  - `announced_unknown_block`: the peer announced (INV / unconnecting
+ *    HEADERS / CMPCTBLOCK) a block whose header we cannot look up
+ *    (CNodeState::hashLastUnknownBlock is set). By definition the peer is
+ *    beyond our best header. Honest resolution clears the hash; a sybil
+ *    feeding a bogus hash extracts at most one rate-limited getheaders per
+ *    BEST_KNOWN_PROBE_INTERVAL, whose reply we validate as always.
+ *  - VERSION height strictly above our BEST HEADER (not merely our tip):
+ *    even a stale handshake snapshot above everything we know is worth one
+ *    rate-limited probe.
+ *
+ * Never gated on preferred-peer count, the nSyncStarted slot, IBD, or
+ * MatMul service bits (0.34.1 F1 principle). Callers keep the per-peer
+ * BEST_KNOWN_PROBE_INTERVAL pacing and MaybeSendGetHeaders send window.
+ */
+[[nodiscard]] inline bool HeaderSyncPeerBeyondBestHeader(
+    int32_t best_header_height,
+    int32_t peer_starting_height,
+    bool announced_unknown_block)
+{
+    if (announced_unknown_block) return true;
+    if (peer_starting_height <= 0) return false;
+    return peer_starting_height > best_header_height;
+}
+
+/**
  * Mainnet checkpoint 186000 is the nMinimumChainWork IBD anchor. A peer
  * advertising below it cannot finish HeadersSyncState presync past that
  * work, so it burns the single nSyncStarted slot and disconnects
