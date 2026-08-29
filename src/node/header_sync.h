@@ -498,6 +498,21 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
     return recv_bytes_for_request > 0;
 }
 
+/** Direct-fetch cap: 1-wide catch-up used to request only the single
+ *  lowest hole per HEADERS event. A proven body source (frontier / GPU /
+ *  archive / already served a body) may take the full per-peer window of
+ *  lowest missing hashes, still root-first (SF-7). */
+[[nodiscard]] inline unsigned int HeadersDirectFetchCap(
+    bool root_first_order,
+    bool proven_body_source,
+    bool one_wide,
+    unsigned int max_in_transit,
+    unsigned int catchup_one)
+{
+    if (root_first_order && proven_body_source) return max_in_transit;
+    return one_wide ? catchup_one : max_in_transit;
+}
+
 } // namespace node
 
 #endif // BTX_NODE_HEADER_SYNC_H

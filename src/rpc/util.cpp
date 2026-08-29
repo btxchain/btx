@@ -759,6 +759,7 @@ static void CheckRequiredOrDefault(const RPCArg& param)
 TMPL_INST(nullptr, const UniValue*, maybe_arg;);
 TMPL_INST(nullptr, std::optional<double>, maybe_arg ? std::optional{maybe_arg->get_real()} : std::nullopt;);
 TMPL_INST(nullptr, std::optional<bool>, maybe_arg ? std::optional{maybe_arg->get_bool()} : std::nullopt;);
+TMPL_INST(nullptr, std::optional<int>, maybe_arg ? std::optional{maybe_arg->getInt<int>()} : std::nullopt;);
 TMPL_INST(nullptr, const std::string*, maybe_arg ? &maybe_arg->get_str() : nullptr;);
 
 // Required arg or optional arg with default value.

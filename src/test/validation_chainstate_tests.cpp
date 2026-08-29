@@ -3374,6 +3374,276 @@ BOOST_FIXTURE_TEST_CASE(chainstate_consensus_signer_rejoins_signed_frontier_from
     SelfSignedLosingTwinRejoinsSignedFrontier(*this, /*trusted_mirror=*/false);
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstate_shallow_heavier_twin_auto_recovers_without_operator, TestChain100Setup)
+{
+    // RB-14 Part A: this signer attested the losing twin at H. A strictly
+    // heavier competing fork already HAVE_DATA inside park_depth must
+    // ActivateBestChain without reconsiderblock / store wipe / injecting
+    // winner attestations. Production hysteresis (margin=2) still defers
+    // a 1-proof lead unless work-based recovery arms.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& park_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_depth);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t start;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& hysteresis_depth;
+        std::optional<uint32_t> saved_hysteresis_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nReorgProtectionStartHeight = start;
+            action = saved_action;
+            park_depth = saved_park_depth;
+            hysteresis_depth = saved_hysteresis_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
+            mode = saved_mode;
+        }
+    } restore{consensus, consensus.nReorgProtectionStartHeight,
+              action, action, park_depth, park_depth,
+              hysteresis_depth, hysteresis_depth,
+              hysteresis_work_margin, hysteresis_work_margin, mode, mode};
+    consensus.nReorgProtectionStartHeight = 10;
+    action = kernel::DeepReorgAction::PARK;
+    park_depth = 6;
+    hysteresis_depth = 0;
+    hysteresis_work_margin = 2;
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* fork{nullptr};
+    CBlockIndex* original_root{nullptr};
+    CBlockIndex* original_tip{nullptr};
+    {
+        LOCK(::cs_main);
+        original_tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(original_tip != nullptr);
+        fork = original_tip->pprev;
+        original_root = original_tip;
+    }
+    BOOST_REQUIRE(fork && original_root);
+    const uint256 original_hash{original_tip->GetBlockHash()};
+    const int original_height{original_tip->nHeight};
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_root));
+    CBlockIndex* competing_root{nullptr};
+    CBlockIndex* competing_tip{nullptr};
+    for (int i = 0; i < 2; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        LOCK(::cs_main);
+        competing_tip = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        if (i == 0) competing_root = competing_tip;
+    }
+    BOOST_REQUIRE(competing_root && competing_tip);
+    BOOST_REQUIRE_EQUAL(competing_tip->nHeight, original_height + 1);
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, competing_root));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_root);
+    }
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                  original_hash);
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::HasLocalSigner());
+    BOOST_REQUIRE(!node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      original_hash, original_height) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorum(original_hash, original_height));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(
+        competing_tip->GetBlockHash(), competing_tip->nHeight));
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(competing_root);
+        BOOST_REQUIRE(competing_tip->nChainWork > original_tip->nChainWork);
+        BOOST_REQUIRE(kernel::WorkBasedReorgRecoveryMayArm(
+            original_height - fork->nHeight, /*park_depth=*/6));
+        BOOST_REQUIRE(kernel::ShallowHeaderWorkMayLeadAutoRecovery(
+            original_height - fork->nHeight, /*park_depth=*/6,
+            competing_tip->nChainWork > original_tip->nChainWork));
+        BOOST_CHECK(!chainman.GetReorgRecoveryRecord().has_value());
+        BOOST_CHECK(!chainman.IsAttestedAbandonForkCandidate(competing_tip));
+        chainman.RecalculateBestHeader();
+        BOOST_REQUIRE(chainman.m_best_header != nullptr);
+        BOOST_CHECK_EQUAL(chainman.m_best_header, competing_tip);
+    }
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == competing_tip);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.IsOnParkedReorgBranch(competing_tip)));
+    chainman.CheckBlockIndex();
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_deep_heavier_twin_stays_parked, TestChain100Setup)
+{
+    // RB-14 Part A safety: a strictly-heavier competing fork past park_depth
+    // must still PARK. Dump-and-run that ExactReplays itself must not
+    // auto-unpark. Same stranded-signer overlay as the shallow twin.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& park_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_depth);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t start;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& hysteresis_depth;
+        std::optional<uint32_t> saved_hysteresis_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nReorgProtectionStartHeight = start;
+            action = saved_action;
+            park_depth = saved_park_depth;
+            hysteresis_depth = saved_hysteresis_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
+            mode = saved_mode;
+        }
+    } restore{consensus, consensus.nReorgProtectionStartHeight,
+              action, action, park_depth, park_depth,
+              hysteresis_depth, hysteresis_depth,
+              hysteresis_work_margin, hysteresis_work_margin, mode, mode};
+    consensus.nReorgProtectionStartHeight = 10;
+    action = kernel::DeepReorgAction::PARK;
+    park_depth = 6;
+    hysteresis_depth = 0;
+    hysteresis_work_margin = 2;
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* fork{nullptr};
+    CBlockIndex* original_root{nullptr};
+    CBlockIndex* original_tip{nullptr};
+    {
+        LOCK(::cs_main);
+        original_tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(original_tip != nullptr);
+        BOOST_REQUIRE(original_tip->nHeight >= 100);
+        fork = chainstate.m_chain[93];
+        original_root = chainstate.m_chain[fork->nHeight + 1];
+    }
+    BOOST_REQUIRE(fork && original_root && original_tip);
+    const uint256 original_hash{original_tip->GetBlockHash()};
+    const int original_height{original_tip->nHeight};
+    const int reorg_depth{original_height - fork->nHeight};
+    BOOST_REQUIRE_EQUAL(reorg_depth, 7);
+    BOOST_REQUIRE(!kernel::WorkBasedReorgRecoveryMayArm(reorg_depth, /*park_depth=*/6));
+    BOOST_REQUIRE(!kernel::ShallowHeaderWorkMayLeadAutoRecovery(
+        reorg_depth, /*park_depth=*/6, /*strictly_heavier_header_work=*/true));
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_root));
+    CBlockIndex* competing_root{nullptr};
+    CBlockIndex* competing_tip{nullptr};
+    for (int i = 0; i < 8; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        LOCK(::cs_main);
+        competing_tip = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        if (i == 0) competing_root = competing_tip;
+    }
+    BOOST_REQUIRE(competing_root && competing_tip);
+    BOOST_REQUIRE_EQUAL(competing_tip->nHeight, fork->nHeight + 8);
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, competing_root));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_root);
+    }
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                  original_hash);
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'b')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::HasLocalSigner());
+    BOOST_REQUIRE(!node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      original_hash, original_height) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(competing_root);
+        BOOST_REQUIRE(competing_tip->nChainWork > original_tip->nChainWork);
+        BOOST_CHECK(!chainman.GetReorgRecoveryRecord().has_value());
+        chainman.RecalculateBestHeader();
+        BOOST_REQUIRE(chainman.m_best_header != nullptr);
+        BOOST_CHECK(!kernel::ShallowHeaderWorkMayLeadAutoRecovery(
+            reorg_depth, /*park_depth=*/6,
+            competing_tip->nChainWork > original_tip->nChainWork));
+        // Overlay must not treat a deep rewrite as a shallow auto-recovery
+        // chase. EnsureBestHeader may still rank claimed work for GETDATA;
+        // ConnectTip PARK below is the refusal.
+    }
+
+    state = BlockValidationState{};
+    BOOST_CHECK(chainstate.ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
+        BOOST_CHECK(chainman.IsOnParkedReorgBranch(competing_tip));
+        BOOST_CHECK(!chainman.GetReorgRecoveryRecord().has_value());
+        BOOST_CHECK(!chainman.IsAutomaticReorgRecoveryCandidate(competing_tip));
+    }
+    chainman.CheckBlockIndex();
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstate_trusted_follow_rejoins_signed_frontier_from_self_signed_twin, TestChain100Setup)
 {
     // Same local attestation store as the consensus miner (self-signed

@@ -203,6 +203,26 @@ static size_t CountQueuedGetDataForHash(CNode& node, const uint256& hash)
     return n;
 }
 
+static std::vector<uint256> QueuedGetDataHashes(CNode& node)
+{
+    LOCK(node.cs_vSend);
+    std::vector<uint256> out;
+    for (const auto& msg : node.vSendMsg) {
+        if (msg.m_type != NetMsgType::GETDATA) continue;
+        DataStream stream{msg.data};
+        std::vector<CInv> inv;
+        try {
+            stream >> inv;
+        } catch (const std::ios_base::failure&) {
+            continue;
+        }
+        for (const auto& item : inv) {
+            out.push_back(item.hash);
+        }
+    }
+    return out;
+}
+
 static size_t CountQueuedGetMmAttestForHash(CNode& node, const uint256& hash)
 {
     LOCK(node.cs_vSend);
@@ -9601,6 +9621,97 @@ BOOST_AUTO_TEST_CASE(inflight_payload_bytes_grant_expiry_grace)
         "a <4KiB BLOCKTXN payload must keep the GETDATA in flight");
     BOOST_CHECK_EQUAL(delivering_after.vHeightInFlight.front(),
                       starting_tip->nHeight + 1);
+
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
+BOOST_AUTO_TEST_CASE(direct_fetch_proven_source_requests_lowest_holes)
+{
+    // SF-7: 1-wide catch-up direct-fetch used to GETDATA only the single
+    // lowest hole per HEADERS event. A proven body source (archive) takes
+    // the full window of lowest missing hashes, still root-first /
+    // ascending. Headers must be new (not already in the index) so #107
+    // does not skip HeadersDirectFetchBlocks.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    CNode archive{/*id=*/5450, /*sock=*/nullptr, CAddress{},
+                  /*nKeyedNetGroupIn=*/5450, /*nLocalHostNonceIn=*/0,
+                  CAddress{}, /*addrNameIn=*/"sf7-archive",
+                  ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(archive, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(archive);
+    connman.FlushSendBuffer(archive);
+    struct FinalizePeer {
+        PeerManager& peerman;
+        ConnmanTestMsg& connman;
+        CNode& archive;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(archive);
+            connman.RemoveTestNode(archive);
+        }
+    } finalize{peerman, connman, archive};
+
+    std::vector<CBlock> hdrs;
+    uint256 prev_hash{tip->GetBlockHash()};
+    int32_t prev_height{tip->nHeight};
+    int64_t prev_time{tip->GetBlockTime()};
+    int64_t prev_mtp{tip->GetMedianTimePast()};
+    uint32_t prev_bits{tip->nBits};
+    for (unsigned int tag = 0x71; tag < 0x71 + 4; ++tag) {
+        CBlock block;
+        block.SetNull();
+        block.hashPrevBlock = prev_hash;
+        block.hashMerkleRoot = uint256::FromHex(
+            std::string(62, '0') + strprintf("%02x", tag & 0xff)).value();
+        block.nTime = prev_time + 1;
+        block.nBits = prev_bits;
+        block.nVersion = VERSIONBITS_TOP_BITS;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            block, prev_height + 1, chainman.GetConsensus(), 5'000'000,
+            prev_mtp));
+        hdrs.emplace_back(block.GetBlockHeader());
+        prev_hash = block.GetHash();
+        prev_height += 1;
+        prev_time = block.nTime;
+        prev_mtp = std::max(prev_mtp, static_cast<int64_t>(block.nTime));
+        prev_bits = block.nBits;
+    }
+    BOOST_REQUIRE_EQUAL(hdrs.size(), 4U);
+    std::vector<uint256> want;
+    want.reserve(hdrs.size());
+    for (const CBlock& h : hdrs) {
+        want.push_back(h.GetHash());
+    }
+
+    archive.fPauseSend = false;
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        archive, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+    archive.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(archive);
+
+    const std::vector<uint256> got{QueuedGetDataHashes(archive)};
+    BOOST_REQUIRE_MESSAGE(
+        got.size() >= 4,
+        "proven-source direct-fetch must request all four lowest holes");
+    BOOST_CHECK_EQUAL(got[0], want[0]);
+    BOOST_CHECK_EQUAL(got[1], want[1]);
+    BOOST_CHECK_EQUAL(got[2], want[2]);
+    BOOST_CHECK_EQUAL(got[3], want[3]);
 
     NeutralizeUnconnectedHeaders(chainman);
     peerman.ResetMatMulVerifyAdmissionForTest();

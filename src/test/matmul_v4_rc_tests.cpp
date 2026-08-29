@@ -2320,6 +2320,17 @@ BOOST_AUTO_TEST_CASE(rc_check_pow_toy_dims_mine_and_wrong_digest)
     header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
     BOOST_CHECK(!header.matmul_digest.IsNull());
     BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
+    {
+        // V1/RB-8: the unqualified flag must come from THIS replay, not
+        // g_last_exact_replay. A leftover true must be overwritten.
+        bool unqualified{true};
+        std::string detail;
+        const auto outcome{CheckMatMulProofOfWork_RCOutcome(
+            header, p, kHeight, /*carrier_missing=*/nullptr, &detail,
+            &unqualified)};
+        BOOST_CHECK(outcome == MatMulRCValidationOutcome::VALID);
+        BOOST_CHECK(!unqualified);
+    }
 
     CBlockHeader bad = header;
     bad.matmul_digest = uint256::ONE;

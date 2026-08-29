@@ -10245,6 +10245,24 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // Do not OR in ConsensusMinerMayReorgPastParkForStaleHeavierFork:
             // GETDATA of a heavier fork (77283c72) must not auto-follow past
             // park_depth=6 (2026-08-10/11 dump-and-run, 151- and 8-deep).
+            //
+            // RB-14 Part A: a self-signed losing twin pins m_best_header to the
+            // attested loser, so ReceivedBlockTransactions never re-sees the
+            // already-HAVE_DATA winner. Arm from the candidate's own header
+            // work here, still only inside WorkBasedReorgRecoveryMayArm.
+            // Unsigned miners keep hysteresis (do not arm on every HAVE_DATA
+            // shallow fork). Do not call durable HasQuorum from FMWC.
+            if (m_chainman.m_options.matmul_validation_mode ==
+                    kernel::MatMulValidationMode::CONSENSUS &&
+                node::matmul_trusted::HasLocalSigner() &&
+                old_tip != nullptr &&
+                node::matmul_trusted::HasQuorumInMemory(
+                    old_tip->GetBlockHash(), old_tip->nHeight)) {
+                if (!m_chainman.MaybeTrackReorgRecovery(pindexNew)) {
+                    LogError("%s: failed to persist reorg recovery while ranking %s\n",
+                             __func__, pindexNew->GetBlockHash().ToString());
+                }
+            }
             const bool recovery_escape{
                 m_chainman.IsAutomaticReorgRecoveryCandidate(pindexNew) ||
                 m_chainman.IsAttestedAbandonForkCandidate(pindexNew)};
@@ -12583,9 +12601,13 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
         // honest losing-tip extensions while the dump drips.
         {
             const CBlockIndex* claimed{candidate};
+            // Use a taller followed header only when it is on the competing
+            // branch. m_best_header pinned to the attested loser (active
+            // chain) must not hide the winner's own accepted-header work.
             if (m_best_header != nullptr &&
                 m_best_header->nHeight > claimed->nHeight &&
-                m_best_header->GetAncestor(fork->nHeight) == fork) {
+                m_best_header->GetAncestor(fork->nHeight) == fork &&
+                !m_active_chainstate->m_chain.Contains(m_best_header)) {
                 claimed = m_best_header;
             }
             if (CadenceHoldShouldHold(active_tip, claimed, GetTime(), depth,
@@ -12612,13 +12634,16 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
                 node::ReorgRecoveryRecord::Mode::TRUSTED_AUTHORITY);
         } else if (m_options.matmul_validation_mode ==
                    kernel::MatMulValidationMode::CONSENSUS) {
-            // An inferior authenticated side fork must not be able to freeze
-            // honest tip growth. Equal authenticated work is the shallow-race
-            // boundary; greater work is immediately actionable below.
+            // An inferior side fork must not freeze honest tip growth. Rank
+            // strictly-heavier by the candidate's own accepted-header
+            // nChainWork even when overlay pinned m_best_header to a
+            // locally-signed loser. ExactReplay/HAVE_DATA still required
+            // before ConnectTip (IsAutomaticReorgRecoveryCandidate).
             if (!(candidate->nStatus & BLOCK_HAVE_DATA) ||
                 !candidate->IsValid(BLOCK_VALID_TRANSACTIONS) ||
                 !candidate->HaveNumChainTxs() ||
                 !IsBlockAuthenticated(*candidate, GetConsensus()) ||
+                candidate->nChainWork <= active_tip->nChainWork ||
                 candidate->nAuthenticatedChainWork <=
                 active_tip->nAuthenticatedChainWork) {
                 return true;
@@ -21682,6 +21707,11 @@ void ChainstateManager::RecalculateBestHeader()
     // Competing forks still need current-config in-memory quorum below.
     CBlockIndex* attested_frontier{const_cast<CBlockIndex*>(active_tip)};
     CBlockIndex* authority_best{nullptr};
+    CBlockIndex* shallow_header_work_best{nullptr};
+    const uint32_t park_depth = m_options.max_reorg_depth_park.value_or(
+        kernel::GetReorgProtectionProfileSettings(
+            m_options.reorg_protection_profile)
+            .park_depth);
     for (auto& [_, candidate] : m_blockman.m_block_index) {
         if (m_interrupt) {
             EnsureBestHeaderNotBehindConnectedTip();
@@ -21708,8 +21738,25 @@ void ChainstateManager::RecalculateBestHeader()
         }
         // Pin-steered competing forks may displace m_best_header only on
         // trusted mirrors (CPU archives). Consensus miners advertise the
-        // ExactReplay-valid tip branch (T50).
+        // ExactReplay-valid tip branch (T50), except RB-14 Part A: rank a
+        // strictly-heavier competing SHALLOW fork by its own accepted-header
+        // nChainWork even when overlay would pin to a locally-signed loser.
+        // Deep forks stay ignored here (dump-and-run). ConnectTip still
+        // ExactReplays (IsAutomaticReorgRecoveryCandidate).
         if (!node::matmul_trusted::IsTrustedMirror()) {
+            const CBlockIndex* const fork{ActiveChain().FindFork(&candidate)};
+            const int depth{
+                (fork != nullptr && fork != active_tip)
+                    ? active_tip->nHeight - fork->nHeight
+                    : 0};
+            if (kernel::ShallowHeaderWorkMayLeadAutoRecovery(
+                    depth, park_depth,
+                    candidate.nChainWork > active_tip->nChainWork)) {
+                if (shallow_header_work_best == nullptr ||
+                    PreferMostWorkHeader(*shallow_header_work_best, candidate)) {
+                    shallow_header_work_best = &candidate;
+                }
+            }
             continue;
         }
         if (candidate.nChainWork < active_tip->nChainWork) continue;
@@ -21749,6 +21796,9 @@ void ChainstateManager::RecalculateBestHeader()
             }
         }
         SetBestHeader(followed);
+    }
+    if (shallow_header_work_best != nullptr) {
+        SetBestHeader(shallow_header_work_best);
     }
     if (authority_best != nullptr &&
         node::matmul_trusted::IsTrustedMirror()) {

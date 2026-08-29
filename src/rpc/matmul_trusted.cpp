@@ -1140,22 +1140,39 @@ RPCHelpMan listmatmulattestationblocklist()
         }};
 }
 
+//! Inclusive height span this RPC will clear in one call. The C++ adapter is
+//! unbounded (invalidateblock may release a long suffix); the public RPC is
+//! not, so a mistyped range cannot wipe the whole mint map.
+constexpr int MAX_CLEAR_MINTED_ATTESTATION_RANGE{256};
+
 RPCHelpMan clearmintedattestation()
 {
     return RPCHelpMan{
         "clearmintedattestation",
-        "Release this node's local ExactReplay attestation mint slot at a "
-        "height or inclusive height range so the node can SignLocal / serve "
-        "the hash it now follows after a chain switch.\n"
-        "This does not delete stored attestations, does not forge or accept "
-        "any statement, and does not skip the competing-quorum stolen-WIF "
+        "Release this node's local ExactReplay attestation mint slots at the "
+        "active tip, a height, or an inclusive height range so this process "
+        "can SignAuthoritative / serve the hash it now follows.\n"
+        "This only changes what THIS node will re-mint or serve. It does not "
+        "delete stored attestations, does not forge or accept any statement, "
+        "does not reorg, and does not skip the competing-quorum stolen-WIF "
         "guard. Re-minting still requires a local ExactReplay via the normal "
-        "SignAuthoritative path. Inbound P2P MMATTEST cannot invoke this.\n",
+        "SignAuthoritative path. Inbound P2P MMATTEST cannot invoke this.\n"
+        "Requires a configured local signer. Archives and graviton mirrors "
+        "must not call this: it is for releasing this signer's HeightOccupied "
+        "record, not a quorum vote.\n"
+        "If this signer is stuck on a losing twin (a strictly-heavier "
+        "competing header that this node's retained HeightOccupied record "
+        "will not follow), prefer `invalidateblock` of the losing "
+        "fork-child: disconnect auto-releases the minted suffix. Use this "
+        "RPC only when you intend to clear mint slots without invalidating "
+        "the block.\n",
         {
-            {"height", RPCArg::Type::NUM, RPCArg::Optional::NO,
-             "First height whose local mint slot should be released"},
-            {"end_height", RPCArg::Type::NUM, RPCArg::DefaultHint{"height"},
-             "Inclusive end of the range. Omit to clear only `height`."},
+            {"height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED,
+             "First height whose local mint slot should be released. Omit to "
+             "use the active-chain tip height."},
+            {"end_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED,
+             "Inclusive end of the range. Omit to clear only `height`. "
+             "The inclusive span may not exceed 256 heights."},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
             {
@@ -1165,6 +1182,7 @@ RPCHelpMan clearmintedattestation()
                 {RPCResult::Type::NUM, "to_height", ""},
             }},
         RPCExamples{
+            HelpExampleCli("clearmintedattestation", "") +
             HelpExampleCli("clearmintedattestation", "199295") +
             HelpExampleCli("clearmintedattestation", "199290 199295")},
         [](const RPCHelpMan& self, const JSONRPCRequest& request) {
@@ -1173,11 +1191,31 @@ RPCHelpMan clearmintedattestation()
                     RPC_MISC_ERROR,
                     "MatMul attestation store is not configured");
             }
-            const int from_height{self.Arg<int>("height")};
-            int to_height{from_height};
-            if (request.params.size() > 1 && !request.params[1].isNull()) {
-                to_height = self.Arg<int>("end_height");
+            if (!node::matmul_trusted::HasLocalSigner()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "clearmintedattestation requires a local attestation "
+                    "signer; it only releases this process's mint slots");
             }
+            const std::optional<int> height_arg{self.MaybeArg<int>("height")};
+            const std::optional<int> end_height_arg{
+                self.MaybeArg<int>("end_height")};
+            int from_height;
+            if (height_arg) {
+                from_height = *height_arg;
+            } else {
+                ChainstateManager& chainman{
+                    EnsureAnyChainman(request.context)};
+                LOCK(cs_main);
+                const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+                if (!tip) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        "No active chain tip; pass height explicitly");
+                }
+                from_height = tip->nHeight;
+            }
+            const int to_height{end_height_arg.value_or(from_height)};
             if (from_height < 0 || to_height < 0) {
                 throw JSONRPCError(
                     RPC_INVALID_PARAMETER,
@@ -1187,6 +1225,18 @@ RPCHelpMan clearmintedattestation()
                 throw JSONRPCError(
                     RPC_INVALID_PARAMETER,
                     "end_height must be >= height");
+            }
+            const int64_t span{
+                static_cast<int64_t>(to_height) - from_height + 1};
+            if (span > MAX_CLEAR_MINTED_ATTESTATION_RANGE) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    strprintf(
+                        "Inclusive height range may not exceed %d "
+                        "(got %d). Split the range or use invalidateblock "
+                        "on the losing fork-child to auto-release a suffix.",
+                        MAX_CLEAR_MINTED_ATTESTATION_RANGE,
+                        span));
             }
             UniValue out{UniValue::VOBJ};
             out.pushKV(

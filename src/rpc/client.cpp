@@ -102,6 +102,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "redeemmatmulserviceproof", 0, "challenge" },
     { "submitmatmulattestations", 0, "attestations" },
     { "importmatmulattestations", 0, "attestations" },
+    { "clearmintedattestation", 0, "height" },
+    { "clearmintedattestation", 1, "end_height" },
     { "verifymatmulserviceproofs", 0, "proofs" },
     { "verifymatmulserviceproofs", 1, "lookup_local_status" },
     { "redeemmatmulserviceproofs", 0, "proofs" },

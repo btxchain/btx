@@ -104,6 +104,7 @@ BOOST_AUTO_TEST_CASE(emergency_park_closes_dump_and_run_reorg)
     BOOST_CHECK(!DeepReorgShouldPark(archive.action, archive.park_depth, 151, false));
 
     using kernel::WorkBasedReorgRecoveryMayArm;
+    using kernel::ShallowHeaderWorkMayLeadAutoRecovery;
     // Shallow races may arm work-based unpark. Parked depth must not:
     // dump-and-run that ExactReplays itself would auto-connect.
     BOOST_CHECK(WorkBasedReorgRecoveryMayArm(/*reorg_depth=*/1, /*park_depth=*/6));
@@ -115,6 +116,11 @@ BOOST_AUTO_TEST_CASE(emergency_park_closes_dump_and_run_reorg)
     BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(151, REORG_PROTECTION_DEPTH_DISABLED));
     BOOST_CHECK(DeepReorgShouldPark(DeepReorgAction::PARK, 6, 7, false));
     BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(7, 6));
+    BOOST_CHECK(ShallowHeaderWorkMayLeadAutoRecovery(1, 6, true));
+    BOOST_CHECK(ShallowHeaderWorkMayLeadAutoRecovery(6, 6, true));
+    BOOST_CHECK(!ShallowHeaderWorkMayLeadAutoRecovery(6, 6, false));
+    BOOST_CHECK(!ShallowHeaderWorkMayLeadAutoRecovery(7, 6, true));
+    BOOST_CHECK(!ShallowHeaderWorkMayLeadAutoRecovery(151, 6, true));
 }
 
 BOOST_AUTO_TEST_CASE(cadence_hold_closes_live_tip_extension_burst)

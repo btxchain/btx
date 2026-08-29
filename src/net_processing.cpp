@@ -9262,9 +9262,15 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
             ReclaimCatchupSuccessorRequests(tip_for_work->nHeight + 1,
                                             "headers-direct-fetch-catchup");
         }
-        const unsigned int fetch_cap{
-            one_wide ? CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER
-                     : static_cast<unsigned int>(MAX_BLOCKS_IN_TRANSIT_PER_PEER)};
+        const bool proven_body_source{
+            this_peer_frontier_source ||
+            PeerIsGpuAuthority(pfrom.GetId(), *nodestate) ||
+            pfrom.HasArchiveOrMirrorService() ||
+            nodestate->m_has_served_block};
+        const unsigned int fetch_cap{node::HeadersDirectFetchCap(
+            root_first_order, proven_body_source, one_wide,
+            static_cast<unsigned int>(MAX_BLOCKS_IN_TRANSIT_PER_PEER),
+            CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER)};
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
         const int cadence_allowed{m_chainman.GetCadenceHoldAllowedHeight(tip_for_work, GetTime())};

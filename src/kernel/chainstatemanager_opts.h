@@ -229,6 +229,19 @@ inline constexpr ReorgProtectionProfileSettings GetReorgProtectionProfileSetting
            reorg_depth <= static_cast<int>(park_depth);
 }
 
+//! Rank a competing fork by its own accepted-header nChainWork for chase /
+//! work-based auto-recovery, even when m_best_header is pinned to a locally
+//! attested loser (self-signed twin). Depth must stay inside the PARK window.
+//! A deep rewrite that ExactReplays itself must not auto-unpark.
+[[nodiscard]] inline constexpr bool ShallowHeaderWorkMayLeadAutoRecovery(
+    int reorg_depth,
+    uint32_t park_depth,
+    bool strictly_heavier_header_work)
+{
+    return strictly_heavier_header_work &&
+           WorkBasedReorgRecoveryMayArm(reorg_depth, park_depth);
+}
+
 //! Highest connected ancestor whose nTime is not in the future. After a
 //! future-stamped burst is partially connected, walking back keeps the
 //! height horizon pinned to the last wall-clock-honest tip (anti-drip).

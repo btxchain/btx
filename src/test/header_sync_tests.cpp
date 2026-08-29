@@ -384,6 +384,17 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
     BOOST_CHECK(!node::HeaderSyncInFlightPayloadGrantsGrace(0));
     BOOST_CHECK(node::HeaderSyncInFlightPayloadGrantsGrace(1));
     BOOST_CHECK(node::HeaderSyncInFlightPayloadGrantsGrace(4095));
+    BOOST_CHECK_EQUAL(
+        node::HeadersDirectFetchCap(/*root_first=*/true, /*proven=*/true,
+                                    /*one_wide=*/true, 16, 1),
+        16U);
+    BOOST_CHECK_EQUAL(
+        node::HeadersDirectFetchCap(true, /*not_proven=*/false, true, 16, 1),
+        1U);
+    BOOST_CHECK_EQUAL(
+        node::HeadersDirectFetchCap(/*not_root_first=*/false, true,
+                                    /*one_wide=*/false, 16, 1),
+        16U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
