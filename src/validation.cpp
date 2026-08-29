@@ -19411,8 +19411,18 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
     }
 
     m_shielded_account_registry_roots.clear();
+    // Past nShieldedPoolDisableHeight the dumper emits the canonical closed
+    // frozen section: zero live counts, zero recent-output history and zero
+    // account-registry root history (GetShieldedSnapshotSectionHeader returns
+    // a default header and AppendShieldedSnapshotPayload writes no payload).
+    // Mirror that encoding on load: expect an empty window instead of the
+    // SHIELDED_ANCHOR_DEPTH window, which no default node at/after the
+    // disable height can produce.
+    const bool shielded_pool_closed{
+        tip != nullptr && GetConsensus().IsShieldedPoolDisabled(tip->nHeight)};
     if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION) {
-        const size_t expected_recent_history = ExpectedShieldedRecentHistoryCount(tip);
+        const size_t expected_recent_history{
+            shielded_pool_closed ? 0 : ExpectedShieldedRecentHistoryCount(tip)};
         if (header.m_recent_output_counts.size() != expected_recent_history) {
             LogPrintf("LoadShieldedSnapshotSection: v7 account-registry snapshot has %u recent output-count entries, expected %u at height=%d hash=%s\n",
                       static_cast<unsigned int>(header.m_recent_output_counts.size()),
@@ -19424,12 +19434,14 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
                                   static_cast<unsigned int>(expected_recent_history),
                                   tip != nullptr ? tip->nHeight : -1));
         }
-        if (!LoadShieldedAccountRegistryRootWindow(
-                header.m_account_registry_roots,
-                m_shielded_account_registry.Root(),
-                expected_recent_history + 1U,
-                "LoadShieldedSnapshotSection",
-                m_shielded_account_registry_roots)) {
+        if (shielded_pool_closed) {
+            m_shielded_account_registry_roots.clear();
+        } else if (!LoadShieldedAccountRegistryRootWindow(
+                       header.m_account_registry_roots,
+                       m_shielded_account_registry.Root(),
+                       expected_recent_history + 1U,
+                       "LoadShieldedSnapshotSection",
+                       m_shielded_account_registry_roots)) {
             return fail("invalid shielded account-registry root history in snapshot section");
         }
     } else if (m_active_chainstate != nullptr &&
@@ -19438,7 +19450,8 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
             return fail("failed to rebuild shielded account-registry history from local blocks");
         }
     } else if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
-        const size_t expected_recent_history = ExpectedShieldedRecentHistoryCount(tip);
+        const size_t expected_recent_history{
+            shielded_pool_closed ? 0 : ExpectedShieldedRecentHistoryCount(tip)};
         if (header.m_recent_output_counts.size() != expected_recent_history) {
             LogPrintf("LoadShieldedSnapshotSection: v6 account-registry snapshot has %u recent output-count entries, expected %u at height=%d hash=%s\n",
                       static_cast<unsigned int>(header.m_recent_output_counts.size()),
@@ -19450,17 +19463,21 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
                                   static_cast<unsigned int>(expected_recent_history),
                                   tip != nullptr ? tip->nHeight : -1));
         }
-        std::deque<uint256> derived_roots;
-        if (!DeriveShieldedAccountRegistryHistoryFromV6Snapshot(m_shielded_merkle_tree,
-                                                                m_shielded_account_registry,
-                                                                header.m_recent_output_counts,
-                                                                derived_roots)) {
-            LogPrintf("LoadShieldedSnapshotSection: v6 account-registry snapshot lacks enough data to derive recent root history at height=%d hash=%s\n",
-                      tip != nullptr ? tip->nHeight : -1,
-                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-            return fail("shielded v6 snapshot lacks enough data to derive recent account-registry root history");
+        if (shielded_pool_closed) {
+            m_shielded_account_registry_roots.clear();
+        } else {
+            std::deque<uint256> derived_roots;
+            if (!DeriveShieldedAccountRegistryHistoryFromV6Snapshot(m_shielded_merkle_tree,
+                                                                    m_shielded_account_registry,
+                                                                    header.m_recent_output_counts,
+                                                                    derived_roots)) {
+                LogPrintf("LoadShieldedSnapshotSection: v6 account-registry snapshot lacks enough data to derive recent root history at height=%d hash=%s\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                return fail("shielded v6 snapshot lacks enough data to derive recent account-registry root history");
+            }
+            m_shielded_account_registry_roots = std::move(derived_roots);
         }
-        m_shielded_account_registry_roots = std::move(derived_roots);
     } else {
         return fail("legacy shielded snapshot lacks account-registry history and local blocks are unavailable to rebuild it");
     }
@@ -20793,14 +20810,24 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     }
                 }
             } else {
-                const size_t expected_account_registry_roots =
-                    ExpectedShieldedRecentHistoryCount(tip) + 1U;
-                if (!LoadShieldedAccountRegistryRootWindow(
-                        persisted_account_registry_roots,
-                        m_shielded_account_registry.Root(),
-                        expected_account_registry_roots,
-                        "EnsureShieldedStateInitialized",
-                        m_shielded_account_registry_roots)) {
+                // A closed-frozen snapshot at/after nShieldedPoolDisableHeight
+                // persists an empty account-registry root window; the empty
+                // window is canonical and must not be rejected as incomplete.
+                const bool shielded_pool_closed{
+                    tip != nullptr &&
+                    GetConsensus().IsShieldedPoolDisabled(tip->nHeight)};
+                const size_t expected_account_registry_roots{
+                    shielded_pool_closed
+                        ? 0
+                        : ExpectedShieldedRecentHistoryCount(tip) + 1U};
+                if (shielded_pool_closed) {
+                    m_shielded_account_registry_roots.clear();
+                } else if (!LoadShieldedAccountRegistryRootWindow(
+                               persisted_account_registry_roots,
+                               m_shielded_account_registry.Root(),
+                               expected_account_registry_roots,
+                               "EnsureShieldedStateInitialized",
+                               m_shielded_account_registry_roots)) {
                     LogPrintf("EnsureShieldedStateInitialized: snapshot account-registry history blocks unavailable and persisted root window is incomplete at height=%d hash=%s\n",
                               tip != nullptr ? tip->nHeight : -1,
                               tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
