@@ -420,9 +420,13 @@ static UniValue GetNetworkHashPS(int lookup, int height, const CChain& active_ch
         chain_rate = workDiff.getdouble() / static_cast<double>(timeDiff);
     }
 
-    if (Params().GetConsensus().fMatMulPOW && chain_rate == 0.0) {
+    // MatMul chain-work is not SHA256 hashes. Easy regtest targets produce a
+    // tiny work/time that miners print as 0.0 KH/s even while the solver is
+    // running. Prefer the local digest rate whenever it is the larger, useful
+    // number (issue 77). Hard mainnet work estimates stay above local digest/s.
+    if (Params().GetConsensus().fMatMulPOW) {
         const double local = LocalMatMulDigestRate();
-        if (local > 0.0) return local;
+        if (local > chain_rate) return local;
     }
     return chain_rate;
 }

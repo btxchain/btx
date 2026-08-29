@@ -558,11 +558,8 @@ BOOST_AUTO_TEST_CASE(getmininginfo_reports_nonzero_matmul_rate_after_generate)
 {
     (void)CallRPC("generateblock", GenerateBlockParams(/*submit=*/true));
     const auto info = CallRPC("getmininginfo").get_obj();
-    BOOST_CHECK(info.find_value("matmul_digests_per_second").isNum());
-    BOOST_CHECK(info.find_value("networkhashps").isNum());
-    BOOST_CHECK(
-        info.find_value("networkhashps").get_real() > 0.0 ||
-        info.find_value("matmul_digests_per_second").get_real() > 0.0);
+    BOOST_CHECK_GT(info.find_value("matmul_digests_per_second").get_real(), 0.0);
+    BOOST_CHECK_GT(info.find_value("networkhashps").get_real(), 0.0);
 }
 
 BOOST_AUTO_TEST_CASE(getmininginfo_backend_runtime_includes_v4_dispatch_stats)
