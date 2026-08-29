@@ -595,6 +595,36 @@ BOOST_AUTO_TEST_CASE(getmininginfo_backend_runtime_includes_v4_dispatch_stats)
     BOOST_CHECK_GE(backend.find_value("metal_successes").getInt<uint64_t>(), v4_metal_ok);
 }
 
+BOOST_AUTO_TEST_CASE(getmatmulchallenge_solve_runtime_reports_v4_cuda_kernel_successes)
+{
+    matmul_v4::accel::ResetStats();
+
+    CBlockHeader header{};
+    header.nVersion = 0x20000000;
+    header.nTime = 1'770'000'000;
+    header.nBits = 0x207fffff;
+    header.matmul_dim = 8;
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestDispatched(header, /*n=*/8, /*rounds=*/2, digest, payload));
+
+    const auto challenge = CallRPC("getmatmulchallenge").get_obj();
+    const auto runtime = challenge.find_value("service_profile").get_obj().find_value("runtime_observability").get_obj();
+    const auto solve = runtime.find_value("solve_runtime").get_obj();
+    const auto backend = runtime.find_value("backend_runtime").get_obj();
+    const auto v4 = backend.find_value("v4_dispatch").get_obj();
+    const uint64_t v4_cuda_ok =
+        v4.find_value("cuda_ok").getInt<uint64_t>() + v4.find_value("cuda_batch_ok").getInt<uint64_t>();
+    BOOST_CHECK(solve.find_value("cuda_kernel_successes").isNum());
+    BOOST_CHECK(solve.find_value("metal_kernel_successes").isNum());
+    BOOST_CHECK_EQUAL(
+        solve.find_value("cuda_kernel_successes").getInt<uint64_t>(),
+        backend.find_value("cuda_successes").getInt<uint64_t>());
+    BOOST_CHECK_GE(backend.find_value("requested_cuda").getInt<uint64_t>(), v4_cuda_ok);
+    BOOST_CHECK_GE(backend.find_value("cuda_successes").getInt<uint64_t>(), v4_cuda_ok);
+    BOOST_CHECK_GE(solve.find_value("cuda_kernel_successes").getInt<uint64_t>(), v4_cuda_ok);
+}
+
 BOOST_AUTO_TEST_CASE(getmininginfo_required_backend_satisfied_false_when_rc_quarantined)
 {
     class ScopedEnv {

@@ -1099,10 +1099,17 @@ static double MeanMicrosToMillis(const uint64_t total_micros, const uint64_t cou
 static UniValue BuildSolveRuntimeProfile()
 {
     const MatMulSolveRuntimeStats stats = ProbeMatMulSolveRuntimeStats();
+    const auto v3 = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+    const auto v4 = matmul_v4::accel::ProbeStats();
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("attempts", stats.attempts);
     obj.pushKV("solved_attempts", stats.solved_attempts);
     obj.pushKV("failed_attempts", stats.failed_attempts);
+    // Issue 44: operators were reading solved_attempts (proofs found) as a CUDA
+    // health meter. Surface kernel successes here, folded from v3+v4, so a GPU
+    // that is hashing but has not won a block is not reported as idle.
+    obj.pushKV("metal_kernel_successes", v3.metal_successes + v4.metal_ok + v4.metal_batch_ok);
+    obj.pushKV("cuda_kernel_successes", v3.cuda_successes + v4.cuda_ok + v4.cuda_batch_ok);
     obj.pushKV("total_elapsed_ms", MicrosToMillis(stats.total_elapsed_us));
     obj.pushKV("mean_elapsed_ms", MeanMicrosToMillis(stats.total_elapsed_us, stats.attempts));
     obj.pushKV("last_elapsed_ms", MicrosToMillis(stats.last_elapsed_us));
@@ -7297,6 +7304,8 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "attempts", "Solve attempts recorded since process start"},
                                     {RPCResult::Type::NUM, "solved_attempts", "Successful solves that found a valid proof since process start (not GPU kernel launches)"},
                                     {RPCResult::Type::NUM, "failed_attempts", "Failed solve attempts recorded since process start"},
+                                    {RPCResult::Type::NUM, "metal_kernel_successes", "Metal digest kernels that succeeded (v3 solver plus v4 dispatch); independent of solved_attempts"},
+                                    {RPCResult::Type::NUM, "cuda_kernel_successes", "CUDA digest kernels that succeeded (v3 solver plus v4 dispatch); independent of solved_attempts"},
                                     {RPCResult::Type::NUM, "total_elapsed_ms", "Total solve runtime accumulated since process start"},
                                     {RPCResult::Type::NUM, "mean_elapsed_ms", "Mean solve runtime per attempt"},
                                     {RPCResult::Type::NUM, "last_elapsed_ms", "Elapsed time of the latest solve attempt"},
@@ -7754,6 +7763,8 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "attempts", "Solve attempts recorded since process start"},
                                     {RPCResult::Type::NUM, "solved_attempts", "Successful solves that found a valid proof since process start (not GPU kernel launches)"},
                                     {RPCResult::Type::NUM, "failed_attempts", "Failed solve attempts recorded since process start"},
+                                    {RPCResult::Type::NUM, "metal_kernel_successes", "Metal digest kernels that succeeded (v3 solver plus v4 dispatch); independent of solved_attempts"},
+                                    {RPCResult::Type::NUM, "cuda_kernel_successes", "CUDA digest kernels that succeeded (v3 solver plus v4 dispatch); independent of solved_attempts"},
                                     {RPCResult::Type::NUM, "total_elapsed_ms", "Total solve runtime accumulated since process start"},
                                     {RPCResult::Type::NUM, "mean_elapsed_ms", "Mean solve runtime per attempt"},
                                     {RPCResult::Type::NUM, "last_elapsed_ms", "Elapsed time of the latest solve attempt"},
