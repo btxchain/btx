@@ -362,6 +362,27 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
     return capped;
 }
 
+/**
+ * inflight=0 while m_best_header is already ahead: SendMessages must
+ * still run FindNextBlocks / GETDATA. Seeding BestKnown does not wait
+ * for an inbound BLOCK. Live rtx6000 2026-08-29: seed logged seven
+ * times, inflight stayed 0, no root-first GETDATA.
+ */
+[[nodiscard]] inline bool HeaderSyncMustDriveFetchWhileStalled(
+    bool inflight_empty,
+    int32_t tip_height,
+    int32_t best_header_height,
+    int32_t peer_starting_height,
+    int32_t best_known_height,
+    int stall_ahead = 2)
+{
+    if (!inflight_empty) return false;
+    if (tip_height < 0) return false;
+    if (best_header_height - tip_height < stall_ahead) return false;
+    return peer_starting_height > tip_height ||
+           best_known_height > tip_height;
+}
+
 } // namespace node
 
 #endif // BTX_NODE_HEADER_SYNC_H

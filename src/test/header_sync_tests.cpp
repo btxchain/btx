@@ -296,6 +296,17 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
         199672);
     BOOST_CHECK_EQUAL(
         node::HeaderSyncSeedBestKnownHeight(kTip, kTip, kTower), -1);
+
+    BOOST_CHECK(node::HeaderSyncMustDriveFetchWhileStalled(
+        /*inflight_empty=*/true, kTip, kTower, kTower, /*best_known=*/-1));
+    BOOST_CHECK(node::HeaderSyncMustDriveFetchWhileStalled(
+        true, kTip, kTower, /*at_tip_advertised=*/kTip, /*seeded=*/kTower));
+    BOOST_CHECK(!node::HeaderSyncMustDriveFetchWhileStalled(
+        /*inflight_busy=*/false, kTip, kTower, kTower, kTower));
+    BOOST_CHECK(!node::HeaderSyncMustDriveFetchWhileStalled(
+        true, kTip, kTower, kTip, kTip));
+    BOOST_CHECK(!node::HeaderSyncMustDriveFetchWhileStalled(
+        true, kTip, /*header_not_ahead=*/kTip, kTower, kTower));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

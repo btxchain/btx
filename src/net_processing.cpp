@@ -4986,6 +4986,17 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     const int tip_height{tip != nullptr ? tip->nHeight : 0};
     const int best_header_height{
         m_chainman.m_best_header != nullptr ? m_chainman.m_best_header->nHeight : 0};
+    const int starting_for_stall{
+        state->m_starting_height >= 0 ? state->m_starting_height
+                                      : peer.m_starting_height.load()};
+    const bool stalled_behind_header_tower{node::HeaderSyncMustDriveFetchWhileStalled(
+        mapBlocksInFlight.empty(),
+        tip != nullptr ? tip->nHeight : -1,
+        m_chainman.m_best_header != nullptr ? m_chainman.m_best_header->nHeight : -1,
+        starting_for_stall,
+        state->pindexBestKnownBlock != nullptr
+            ? state->pindexBestKnownBlock->nHeight
+            : -1)};
     const int blocks_in_flight_global{static_cast<int>(mapBlocksInFlight.size())};
     const auto now_for_diag{GetTime<std::chrono::microseconds>()};
     const int oldest_inflight_age_s{static_cast<int>(count_seconds(
@@ -5042,14 +5053,16 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             signed_frontier.blocks_behind,
             attestor_park)};
     const bool attestor_yielding{yield_to_this_peer || yield_to_frontier};
-    if (node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
+    if (!stalled_behind_header_tower &&
+        node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
             IsSignedFrontierBodyCatchUp(),
             this_peer_frontier_source,
             CountCapableSignedFrontierBodySources() > 0)) {
         log_skip("signed_frontier_prefer_archive");
         return;
     }
-    if (!PeerMaySignedFrontierCatchUpGetData(peer, *state)) {
+    if (!stalled_behind_header_tower &&
+        !PeerMaySignedFrontierCatchUpGetData(peer, *state)) {
         log_skip("signed_frontier_not_getdata_source");
         return;
     }
@@ -5160,9 +5173,16 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                     node::matmul_trusted::IsTrustedMirror(),
                     /*extends_tip=*/false,
                     state->pindexBestKnownBlock->nChainWork > tip->nChainWork)};
+            const bool stalled_header_tower{
+                stalled_behind_header_tower &&
+                m_chainman.m_best_header != nullptr &&
+                m_chainman.m_best_header->GetAncestor(
+                    state->pindexBestKnownBlock->nHeight) ==
+                    state->pindexBestKnownBlock};
             if (!recovery_target && !configured_attested_race &&
                 !yield_to_this_peer && !local_signer_lost_twin &&
-                !consensus_peer_short_reorg && !heavier_competing_fork) {
+                !consensus_peer_short_reorg && !heavier_competing_fork &&
+                !stalled_header_tower) {
                 log_skip("competing_not_active_tip_chain");
                 return;
             }
@@ -9975,6 +9995,8 @@ void PeerManagerImpl::MaybeSeedBestKnownFromHeaderTower(
     LogInfo("Seeded peer=%d best-known to header-tower height=%d "
             "(tip=%d m_best_header=%d advertised=%d)\n",
             peer_id, seed->nHeight, tip->nHeight, best->nHeight, starting);
+    // Do not wait for an inbound BLOCK/HEADERS to run the GETDATA walk.
+    m_connman.WakeMessageHandler();
 }
 
 void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
@@ -19629,6 +19651,22 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 sync_blocks_and_headers_from_peer = true;
             }
         }
+        if (node::HeaderSyncMustDriveFetchWhileStalled(
+                mapBlocksInFlight.empty(),
+                tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
+                m_chainman.m_best_header != nullptr
+                    ? m_chainman.m_best_header->nHeight
+                    : -1,
+                state.m_starting_height >= 0
+                    ? state.m_starting_height
+                    : peer->m_starting_height.load(),
+                state.pindexBestKnownBlock != nullptr
+                    ? state.pindexBestKnownBlock->nHeight
+                    : -1)) {
+            // IBD's sync-peer gate otherwise skips FindNextBlocks after
+            // BestKnown is seeded and must_probe goes false.
+            sync_blocks_and_headers_from_peer = true;
+        }
 
         if (!state.fSyncStarted && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks() &&
             !node::HeaderSyncAdvertisedHeightUnusable(
@@ -20370,14 +20408,28 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         MaybeRecoverStalledBlockFetch(current_time);
         std::vector<CInv> vGetData;
         const bool can_request_blocks_from_peer{current_time >= state.m_block_download_paused_until};
+        const CBlockIndex* const tip_for_fetch{m_chainman.ActiveChain().Tip()};
+        const bool stalled_behind_header_tower{node::HeaderSyncMustDriveFetchWhileStalled(
+            mapBlocksInFlight.empty(),
+            tip_for_fetch != nullptr ? tip_for_fetch->nHeight : -1,
+            m_chainman.m_best_header != nullptr
+                ? m_chainman.m_best_header->nHeight
+                : -1,
+            state.m_starting_height >= 0
+                ? state.m_starting_height
+                : peer->m_starting_height.load(),
+            state.pindexBestKnownBlock != nullptr
+                ? state.pindexBestKnownBlock->nHeight
+                : -1)};
         const bool should_request_blocks_from_peer{
             node::matmul_trusted::TrustedMirrorGpuMayServeBlocks(
                 PeerIsGpuAuthority(pto->GetId(), state),
                 CanServeBlocks(*peer),
                 /*version_handshake_complete=*/peer->m_starting_height.load() >= 0) &&
-            PeerMaySignedFrontierCatchUpGetData(*peer, state) &&
+            (PeerMaySignedFrontierCatchUpGetData(*peer, state) ||
+             stalled_behind_header_tower) &&
             can_request_blocks_from_peer &&
-            ShouldRequestBlocksFromMatMulPeer(
+            (ShouldRequestBlocksFromMatMulPeer(
                 // Fetching is not validating: an ordinary peer may relay a
                 // block we then validate ourselves. Passing eligibility as
                 // true keeps the tier a PREFERENCE (see fPreferredDownload
@@ -20386,7 +20438,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 /*can_serve_blocks=*/true, /*peer_is_eligible=*/true,
                 /*request_window_open=*/true, sync_blocks_and_headers_from_peer,
                 IsLimitedPeer(*peer), m_chainman.IsInitialBlockDownload(),
-                state.vBlocksInFlight.size(), MAX_BLOCKS_IN_TRANSIT_PER_PEER)};
+                state.vBlocksInFlight.size(), MAX_BLOCKS_IN_TRANSIT_PER_PEER) ||
+             stalled_behind_header_tower)};
         if (!should_request_blocks_from_peer) {
             const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
             const int best_header_ahead{
