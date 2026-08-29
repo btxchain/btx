@@ -13421,7 +13421,12 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                     // even if a pin later covers the hash (freeze-DoS M2).
                     if (exact_recompute_required &&
                         indexed != nullptr &&
-                        m_chainman.IsOnParkedReorgBranch(indexed)) {
+                        m_chainman.IsOnParkedReorgBranch(indexed) &&
+                        // RB-16: a body on the heavier tower we are ACQUIRING
+                        // must ExactReplay even if its branch was parked -- the
+                        // acquisition escape deliberately validates it; migration
+                        // stays park/deepforkautoresolve-gated.
+                        !m_chainman.AcquisitionEscapeCoversBlock(indexed)) {
                         exact_recompute_required = false;
                         skip_competing_exactreplay = true;
                     } else if (node::matmul_trusted::

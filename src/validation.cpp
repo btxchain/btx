@@ -11786,13 +11786,35 @@ bool ChainstateManager::AcquisitionEscapeCoversBlock(const CBlockIndex* index) c
     if (!AcquisitionTipIsStale()) return false;
     // A block already on our active chain is not "being acquired".
     if (m_active_chainstate->m_chain.Contains(index)) return false;
-    // The block's fork root (LCA with the active chain) must be an exempt
-    // tower root. This is true for every ancestor of the acquired tower tip,
-    // regardless of the individual block's own work -- so a low mid-tower body
-    // is covered even though it is below the minority tip in chainwork.
-    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(index)};
-    if (fork == nullptr) return false;
-    return m_acquisition_exempt_towers.count(fork->GetBlockHash()) != 0;
+    // The block is covered if it DESCENDS FROM an exempt tower root (the fork
+    // LCA) and is off the active chain, i.e. it sits on that heavier competing
+    // fork. This holds for every ancestor of the tower tip regardless of the
+    // block's own work, so a low mid-tower body below the minority tip is
+    // covered. (Descendant-of-root, not FindFork(index)==root, is robust to
+    // minority-fork reorgs that would move index's own LCA.)
+    bool covered{false};
+    for (const auto& entry : m_acquisition_exempt_towers) {
+        const CBlockIndex* const root{m_blockman.LookupBlockIndex(entry.first)};
+        if (root == nullptr) continue;
+        if (index->nHeight >= root->nHeight &&
+            index->GetAncestor(root->nHeight) == root) {
+            covered = true;
+            break;
+        }
+    }
+    // Rate-limited diagnostic so the live node can show why a fetched
+    // acquired-tower body is / is not admitted for ExactReplay.
+    static std::atomic<int64_t> s_last_log{0};
+    const int64_t now_s{GetTime()};
+    if (now_s - s_last_log.load(std::memory_order_relaxed) >= 5) {
+        s_last_log.store(now_s, std::memory_order_relaxed);
+        LogPrintf("acquisition-escape CoversBlock hash=%s height=%d covered=%d "
+                  "towers=%d contains=0 stale=1\n",
+                  index->GetBlockHash().ToString(), index->nHeight,
+                  covered ? 1 : 0,
+                  static_cast<int>(m_acquisition_exempt_towers.size()));
+    }
+    return covered;
 }
 
 bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
@@ -11811,12 +11833,18 @@ bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
     const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(candidate)};
     if (fork == nullptr) return false;
     const uint256 root{fork->GetBlockHash()};
-    // Prune slots whose tower is now failed or already on the active chain.
+    // Prune only FAILED / missing tower roots. The root is the fork LCA, which
+    // is ALWAYS on the active chain -- so a Contains() test here erased every
+    // registered root (leaving only the last-registered one), which wiped the
+    // majority tower's root whenever a minor competing fork registered after
+    // it, and CoversBlock then returned false for the majority bodies (live
+    // rtx6000: 36MB fetched, deferred=41, CoversBlock hits=0). Migration off
+    // the tower is handled by the clear-on-better-chain-progress in
+    // NoteTipConnected, not here.
     for (auto it = m_acquisition_exempt_towers.begin();
          it != m_acquisition_exempt_towers.end();) {
         const CBlockIndex* idx{m_blockman.LookupBlockIndex(it->first)};
-        if (idx == nullptr || (idx->nStatus & BLOCK_FAILED_MASK) ||
-            m_active_chainstate->m_chain.Contains(idx)) {
+        if (idx == nullptr || (idx->nStatus & BLOCK_FAILED_MASK)) {
             it = m_acquisition_exempt_towers.erase(it);
         } else {
             ++it;
