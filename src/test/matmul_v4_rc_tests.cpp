@@ -2835,6 +2835,63 @@ BOOST_AUTO_TEST_CASE(rc_enqueue_refund_receipt_rolls_source_counters_back_once)
     RefundGlobalMatMulRCBudget(kWorkUnits, charged_at);
 }
 
+BOOST_AUTO_TEST_CASE(rc_tip_child_progress_lane_is_independent_and_scaled)
+{
+    Consensus::Params p;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulRCPeerVerifyBudgetPerMin = 1;
+    constexpr int32_t kHeight{100};
+    BOOST_REQUIRE(p.IsMatMulRCFamilyActive(kHeight));
+    const uint32_t base{
+        EffectiveMatMulRCPeerVerifyBudgetPerMin(p, /*is_ibd=*/false, kHeight)};
+    BOOST_REQUIRE_GT(base, 0U);
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulRCTipChildPeerBudgetPerMin(p, false, kHeight, /*catchup_scale=*/0),
+        base);
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulRCTipChildPeerBudgetPerMin(p, false, kHeight, /*catchup_scale=*/1),
+        base);
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulRCTipChildPeerBudgetPerMin(p, false, kHeight, /*catchup_scale=*/8),
+        base * 8);
+
+    MatMulPeerVerificationBudget address;
+    MatMulPeerVerificationBudget netgroup;
+    const auto now{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        address, netgroup, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/0));
+    BOOST_CHECK_EQUAL(address.expensive_rc_verifications_this_minute, 1U);
+    BOOST_CHECK_EQUAL(address.rc_progress_verifications_this_minute, 0U);
+    // Progress lane is independent: a spent competing window still admits a
+    // followed tip-child charge.
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        address, netgroup, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/1));
+    BOOST_CHECK_EQUAL(address.rc_progress_verifications_this_minute, 1U);
+    BOOST_CHECK(!ConsumeMatMulRCSourceVerifyBudgets(
+        address, netgroup, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/1));
+    BOOST_CHECK_EQUAL(address.rc_progress_verifications_this_minute, 1U);
+    RefundMatMulRCPeerVerifyBudget(address, 1, now);
+    RefundMatMulRCPeerVerifyBudget(netgroup, 1, now);
+    BOOST_CHECK_EQUAL(address.expensive_rc_verifications_this_minute, 0U);
+    BOOST_CHECK_EQUAL(address.rc_progress_verifications_this_minute, 0U);
+
+    MatMulPeerVerificationBudget scaled_addr;
+    MatMulPeerVerificationBudget scaled_net;
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        scaled_addr, scaled_net, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/8));
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        scaled_addr, scaled_net, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/8));
+    BOOST_CHECK_EQUAL(scaled_addr.rc_progress_verifications_this_minute, 2U);
+    BOOST_CHECK_EQUAL(scaled_addr.expensive_rc_verifications_this_minute, 0U);
+}
+
 BOOST_AUTO_TEST_CASE(handoff_peer_budget_miss_restores_ticket_and_refunds_debit)
 {
     Consensus::Params p;

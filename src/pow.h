@@ -54,6 +54,14 @@ struct MatMulPeerVerificationBudget {
     /** ENC_RC recompute units -- independent window/counter from EncDr/LT. */
     uint32_t expensive_rc_verifications_this_minute{0};
     std::chrono::steady_clock::time_point rc_window_start{};
+    /** RB-6 followed tip-child ExactReplay lane: independent per-minute
+     *  window/counter from the competing RC lane, so a competing body from
+     *  the same source cannot starve the followed tip-child (MMRC-CATCHUP-01)
+     *  and a tip-child cannot spend the competing lane's allowance. The
+     *  allowance is the default RC peer budget, widened only by the bounded
+     *  catch-up scale of a genuine followed-chain backlog. */
+    uint32_t rc_progress_verifications_this_minute{0};
+    std::chrono::steady_clock::time_point rc_progress_window_start{};
     uint32_t phase2_failures{0};
     std::chrono::steady_clock::time_point phase2_first_failure_time{};
 };
@@ -666,6 +674,9 @@ uint32_t MatMulRCWorkUnits(const Consensus::Params& params, int32_t reference_he
 uint32_t EffectiveMatMulRCMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height = -1);
 uint32_t EffectiveMatMulRCGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);
 uint32_t EffectiveMatMulRCPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd, int32_t reference_height = -1);
+uint32_t EffectiveMatMulRCTipChildPeerBudgetPerMin(
+    const Consensus::Params& params, bool is_ibd, int32_t reference_height,
+    uint32_t catchup_scale);
 bool ConsumeMatMulPeerVerifyBudget(
     MatMulPeerVerificationBudget& budget,
     const Consensus::Params& params,
@@ -680,8 +691,17 @@ bool ConsumeMatMulRCPeerVerifyBudget(
     std::chrono::steady_clock::time_point now,
     bool is_ibd = false,
     int32_t reference_height = std::numeric_limits<int32_t>::max());
+bool ConsumeMatMulRCTipChildPeerVerifyBudget(
+    MatMulPeerVerificationBudget& budget,
+    const Consensus::Params& params,
+    std::chrono::steady_clock::time_point now,
+    bool is_ibd,
+    int32_t reference_height,
+    uint32_t catchup_scale);
 /** Atomically debit both reconnect-resistant RC source dimensions. A failure
- *  restores both budgets to their exact pre-attempt windows and counts. */
+ *  restores both budgets to their exact pre-attempt windows and counts.
+ *  catchup_scale 0 selects the competing RC counters (unchanged). A positive
+ *  scale selects the RB-6 followed tip-child progress lane. */
 bool ConsumeMatMulRCSourceVerifyBudgets(
     MatMulPeerVerificationBudget& address_budget,
     MatMulPeerVerificationBudget& keyed_netgroup_budget,
@@ -689,7 +709,8 @@ bool ConsumeMatMulRCSourceVerifyBudgets(
     uint32_t verification_count,
     std::chrono::steady_clock::time_point now,
     bool is_ibd = false,
-    int32_t reference_height = std::numeric_limits<int32_t>::max());
+    int32_t reference_height = std::numeric_limits<int32_t>::max(),
+    uint32_t catchup_scale = 0);
 /** Refund one source counter only when charged_at still belongs to its current
  *  window. Used solely for admission/enqueue rollback before work starts. */
 void RefundMatMulRCPeerVerifyBudget(

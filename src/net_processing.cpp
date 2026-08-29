@@ -324,8 +324,9 @@ enum class DupHeaderDisposition : uint8_t {
 };
 
 /** Unique next block on the followed (or unique-attested) chain of the live
- *  tip. MMRC-CATCHUP-01: this candidate may bypass per-minute RC rate
- *  counters. Pending-cap, ExactReplay, and competing siblings stay gated. */
+ *  tip. MMRC-CATCHUP-01: this candidate consumes the dedicated RB-6
+ *  progress-lane RC window (rate-limited, scaled by the genuine catch-up
+ *  backlog). Pending-cap, ExactReplay, and competing siblings stay gated. */
 [[nodiscard]] static bool IsAuthenticatedChainProgressCandidate(
     const ChainstateManager& chainman,
     const CBlock& block,
@@ -652,9 +653,11 @@ static std::chrono::steady_clock::duration MatMulRCSourceBudgetRetryDelay(
     const MatMulPeerVerificationBudget& keyed_netgroup_budget,
     std::chrono::steady_clock::time_point now)
 {
-    return ClampMatMulBudgetDeferredDelay(std::max(
+    return ClampMatMulBudgetDeferredDelay(std::max({
         MatMulBudgetWindowRetryDelay(address_budget.rc_window_start, now),
-        MatMulBudgetWindowRetryDelay(keyed_netgroup_budget.rc_window_start, now)));
+        MatMulBudgetWindowRetryDelay(keyed_netgroup_budget.rc_window_start, now),
+        MatMulBudgetWindowRetryDelay(address_budget.rc_progress_window_start, now),
+        MatMulBudgetWindowRetryDelay(keyed_netgroup_budget.rc_progress_window_start, now)}));
 }
 
 static uint32_t LimitMatMulRCCatchupScaleToScheduler(uint32_t requested_scale)
@@ -6797,15 +6800,36 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
         *retry_delay = MATMUL_BUDGET_DEFER_COOLDOWN;
     }
     if (verification_count == 0) return true;
-    // MMRC-CATCHUP-01: one in-flight ExactReplay of the followed tip-child
-    // bypasses only the per-minute rate windows. Do not raise the 1/min
-    // defaults. Pending-cap, cheap checks, and competing siblings stay gated.
+    // RB-6: followed tip-children must NOT skip the per-minute rate windows.
+    // The old unconditional bypass let a peer burn unbounded full-GPU
+    // ExactReplay on merkle-consistent but state-invalid "tip-child" bodies
+    // (self-mined valid-PoW header + well-formed body that only ExactReplay
+    // rejects). The progress lane now consumes its own per-minute window
+    // (independent of the competing lane so a competing body from the same
+    // source cannot starve the followed tip-child - MMRC-CATCHUP-01),
+    // widened ONLY by the bounded catch-up scale of a genuine followed-chain
+    // backlog: near the tip the default 1/min applies; far behind the
+    // allowance tracks the same bounded multiplier as the global catch-up
+    // lift. Competing siblings keep the default windows unchanged.
+    uint32_t progress_scale{0};
     if (authenticated_chain_progress && rc_recompute) {
+        const int active_height{
+            std::max(0, m_best_height.load(std::memory_order_relaxed))};
+        const int best_followed_height{
+            m_chainman.BestFollowedHeaderHeight()};
+        const int behind{std::max(0, best_followed_height - active_height)};
+        progress_scale = 1;
+        if (behind >= MATMUL_RC_CATCHUP_DEPTH_THRESHOLD) {
+            progress_scale = LimitMatMulRCCatchupScaleToScheduler(
+                std::clamp<uint32_t>(
+                    static_cast<uint32_t>(behind / MATMUL_RC_CATCHUP_DEPTH_THRESHOLD),
+                    MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER,
+                    MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER_MAX));
+        }
         LogDebug(BCLog::NET,
-                 "Authenticated-chain MatMul progress lane: bypassing per-minute "
-                 "RC rate counters peer=%s (pending cap unchanged)\n",
-                 peer.m_addr.ToStringAddr());
-        return true;
+                 "Authenticated-chain MatMul progress lane: pacing per-minute "
+                 "RC rate counters peer=%s scale=%u backlog=%d\n",
+                 peer.m_addr.ToStringAddr(), progress_scale, behind);
     }
     auto allow_idle_catchup = [&]() -> bool {
         if (m_matmul_pending_verifications.load(std::memory_order_relaxed) != 0 ||
@@ -6829,7 +6853,8 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
             netgroup_state.last_update = now;
             if (!ConsumeMatMulRCSourceVerifyBudgets(
                     budget_state.budget, netgroup_state.budget, params,
-                    verification_count, now, is_ibd, reference_height)) {
+                    verification_count, now, is_ibd, reference_height,
+                    progress_scale)) {
                 if (retry_delay != nullptr) {
                     *retry_delay = MatMulRCSourceBudgetRetryDelay(
                         budget_state.budget, netgroup_state.budget, now);
