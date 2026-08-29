@@ -384,6 +384,23 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
     BOOST_CHECK(!node::HeaderSyncInFlightPayloadGrantsGrace(0));
     BOOST_CHECK(node::HeaderSyncInFlightPayloadGrantsGrace(1));
     BOOST_CHECK(node::HeaderSyncInFlightPayloadGrantsGrace(4095));
+    // E-1: grace is age-bounded. A trickle owner (bytes>0) loses grace once
+    // its request has been in flight past the cap, so it cannot pin the slot.
+    {
+        const auto cap{std::chrono::duration_cast<std::chrono::microseconds>(
+            node::HEADER_SYNC_INFLIGHT_GRACE_MAX_AGE)};
+        // Fresh request with payload: grace granted.
+        BOOST_CHECK(node::HeaderSyncInFlightPayloadGrantsGrace(
+            256, /*request_age=*/std::chrono::microseconds::zero(), cap));
+        // Aged past the cap even with credited bytes: no grace (reclaimable).
+        BOOST_CHECK(!node::HeaderSyncInFlightPayloadGrantsGrace(
+            256, /*request_age=*/cap, cap));
+        BOOST_CHECK(!node::HeaderSyncInFlightPayloadGrantsGrace(
+            256, cap + std::chrono::microseconds{1}, cap));
+        // Zero bytes never grants grace regardless of age.
+        BOOST_CHECK(!node::HeaderSyncInFlightPayloadGrantsGrace(
+            0, std::chrono::microseconds::zero(), cap));
+    }
     BOOST_CHECK_EQUAL(
         node::HeadersDirectFetchCap(/*root_first=*/true, /*proven=*/true,
                                     /*one_wide=*/true, 16, 1),

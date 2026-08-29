@@ -489,13 +489,28 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
     return any_peer_has_served;
 }
 
+/** E-1: a request stays "delivering" only while it has received payload
+ *  AND has been in flight less than this. A dribble of near-empty messages
+ *  (e.g. a 33-byte zero-tx BLOCKTXN that never completes the compact block)
+ *  must not grant INDEFINITE grace and pin the in-flight slot forever,
+ *  defeating RB-5/N5 rotation and every download-expiry path. */
+inline constexpr auto HEADER_SYNC_INFLIGHT_GRACE_MAX_AGE{std::chrono::minutes{5}};
+
 /** ExpireOverdue grants grace iff this GETDATA has received payload
- *  bytes. Peer-total nRecvBytes (pings, addrs, prior traffic) is not a
- *  substitute, and there is no 4KiB chatter margin (SF-6). */
+ *  bytes AND has not been in flight past HEADER_SYNC_INFLIGHT_GRACE_MAX_AGE.
+ *  Peer-total nRecvBytes (pings, addrs, prior traffic) is not a substitute,
+ *  and there is no 4KiB chatter margin (SF-6). The age cap is the E-1 fix:
+ *  a genuinely-delivering peer finishes a block in well under the cap, while
+ *  a trickle-staller's slot is reclaimed instead of pinned forever. Callers
+ *  that pass only recv_bytes (unit tests, non-catch-up paths) keep the old
+ *  unbounded-any-byte behavior via the defaults. */
 [[nodiscard]] inline bool HeaderSyncInFlightPayloadGrantsGrace(
-    uint64_t recv_bytes_for_request)
+    uint64_t recv_bytes_for_request,
+    std::chrono::microseconds request_age = std::chrono::microseconds::zero(),
+    std::chrono::microseconds max_grace_age = std::chrono::microseconds::max())
 {
-    return recv_bytes_for_request > 0;
+    if (recv_bytes_for_request == 0) return false;
+    return request_age < max_grace_age;
 }
 
 /** Direct-fetch cap: 1-wide catch-up used to request only the single

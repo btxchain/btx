@@ -4024,8 +4024,15 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
         bool peer_delivering{false};
         if (far_behind) {
             for (const QueuedBlock& entry : state.vBlocksInFlight) {
+                // E-1: age-bound the grace so a trickle owner cannot suppress
+                // the whole peer's expiry indefinitely with ~33 bytes / 90s.
+                const auto entry_age{entry.requested_at.count() > 0
+                                         ? now - entry.requested_at
+                                         : std::chrono::microseconds::zero()};
                 if (node::HeaderSyncInFlightPayloadGrantsGrace(
-                        entry.recv_bytes_for_request)) {
+                        entry.recv_bytes_for_request, entry_age,
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            node::HEADER_SYNC_INFLIGHT_GRACE_MAX_AGE))) {
                     peer_delivering = true;
                     break;
                 }
@@ -4043,9 +4050,16 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
             if (m_matmul_block_lifecycle.HasRetainedBody(entry.pindex->GetBlockHash())) {
                 continue;
             }
-            if (node::HeaderSyncInFlightPayloadGrantsGrace(
-                    entry.recv_bytes_for_request)) {
-                continue;
+            {
+                const auto entry_age{entry.requested_at.count() > 0
+                                         ? now - entry.requested_at
+                                         : std::chrono::microseconds::zero()};
+                if (node::HeaderSyncInFlightPayloadGrantsGrace(
+                        entry.recv_bytes_for_request, entry_age,
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            node::HEADER_SYNC_INFLIGHT_GRACE_MAX_AGE))) {
+                    continue;
+                }
             }
 
             const auto requested_at = entry.requested_at.count() > 0
@@ -16841,9 +16855,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("trailing data after blocktxn = %u bytes", vRecv.size()));
             return;
         }
+        // E-1: a zero-tx BLOCKTXN (33 bytes) carries no block payload and must
+        // not credit in-flight progress -- otherwise it pins the slot forever.
+        // Only a BLOCKTXN that actually delivered transactions counts.
+        const size_t blocktxn_payload{resp.txn.empty() ? size_t{0} : payload_bytes};
         WITH_LOCK(cs_main, NoteInFlightRequestPayload(
-                               pfrom.GetId(), resp.blockhash, payload_bytes));
-        NotePeerServedBlockBody(pfrom.GetId());
+                               pfrom.GetId(), resp.blockhash, blocktxn_payload));
+        if (!resp.txn.empty()) NotePeerServedBlockBody(pfrom.GetId());
 
         if (m_chainman.IsDiscoveryRelay()) {
             WITH_LOCK(cs_main, RemoveBlockRequest(resp.blockhash, pfrom.GetId()));
