@@ -327,8 +327,13 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
  * becomes a GETDATA source until HEADERS arrive. When the node already
  * has those headers, waiting for a duplicate HEADERS batch leaves
  * last_common pinned at the tip. Seed only peers that advertised above
- * us; never an at-tip peer; never replace a BestKnown already above tip.
- * Locators still start at the active tip (HeaderSyncLocatorStart).
+ * us; never an at-tip peer.
+ *
+ * Raise BestKnown even when it is already slightly above tip: draining
+ * two retained bodies left BestKnown at 199389 while m_best_header was
+ * 199801, then already_at_peer_best / root_retained_body issued no
+ * GETDATA for the rest of the tower (live 2026-08-29). Do not replace a
+ * BestKnown already at/above the seed target (min(advertised, tower)).
  *
  * `best_header_extends_or_heavier` is GetAncestor(tip)==tip OR
  * nChainWork > tip. Fetch only; ConnectTip still ExactReplays and PARK
@@ -344,9 +349,9 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
     if (tip_height < 0 || best_header_height <= tip_height) return false;
     if (peer_starting_height <= tip_height) return false;
     if (!best_header_extends_or_heavier) return false;
-    if (!HeaderSyncBestKnownStuckAtTip(tip_height, best_known_height)) {
-        return false;
-    }
+    const int32_t target{std::min(peer_starting_height, best_header_height)};
+    if (target <= tip_height) return false;
+    if (best_known_height >= target) return false;
     return true;
 }
 

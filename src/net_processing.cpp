@@ -5431,8 +5431,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         if (m_matmul_block_lifecycle.HasRetainedBody(missing_hash)) {
             // Same stall as HAVE_DATA-unconnected: the followed-chain body is
             // already in the lifecycle store (pending-cap / budget / ticketless
-            // retry). Re-getdata of this hash or its successors cannot connect
-            // until the scheduler re-admits. GETMMATTEST the retained hash so
+            // retry). Re-getdata of this hash cannot connect until the
+            // scheduler re-admits. GETMMATTEST the retained hash so
             // quorum can lift ConnectTip without waiting for the 1s retry loop.
             // Local signers never arm signed-frontier catch-up, so also
             // RefreshRetry(0) when yielding to the longer attested GPU.
@@ -5446,8 +5446,14 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                 (attestor_yielding && this_peer_gpu && catch_up_target)) {
                 RequestMatMulTrustedAttestations(missing_hash, peer.m_id);
             }
-            log_skip("root_retained_body");
-            return;
+            // Stalled behind a known HEADER_ONLY tower: do not stop after
+            // replaying retained bodies. FindNextBlocks skips the retained
+            // hash and GETDATA the next missing tower block (live 2026-08-29:
+            // two retained connects, then inflight=0 at 199389 / 412 behind).
+            if (!stalled_behind_header_tower) {
+                log_skip("root_retained_body");
+                return;
+            }
         }
     }
 
@@ -5462,7 +5468,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             ? std::numeric_limits<int>::max()
             : static_cast<int>(window_end64)};
     const int cadence_allowed{m_chainman.GetCadenceHoldAllowedHeight(tip, GetTime())};
-    if (cadence_allowed < nWindowEnd) {
+    if (!stalled_behind_header_tower && cadence_allowed < nWindowEnd) {
         LogDebug(BCLog::NET,
                  "Cadence hold clamping GETDATA window peer=%d end=%d -> %d tip=%d\n",
                  peer.m_id, nWindowEnd, cadence_allowed, tip_height);

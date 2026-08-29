@@ -284,6 +284,10 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
         kTip, /*at_tip_peer=*/kTip, -1, kTower, true));
     BOOST_CHECK(!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
         kTip, kTower, /*already_ahead=*/kTower, kTower, true));
+    // Retained-body drain: BestKnown is 199388 while the tower is 199801.
+    // Must still raise to the tower or GETDATA never refills.
+    BOOST_CHECK(node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+        kTip, kTower, /*retained_ahead=*/kTip + 2, kTower, true));
     BOOST_CHECK(!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
         kTip, kTower, -1, kTower, /*not_extends_or_heavier=*/false));
     BOOST_CHECK(!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
