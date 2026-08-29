@@ -430,6 +430,123 @@ BOOST_AUTO_TEST_CASE(insufficient_peer_consensus_still_applies_at_same_height)
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
 }
 
+BOOST_AUTO_TEST_CASE(consensus_samples_keep_only_outbound_with_hash)
+{
+    const std::vector<node::MiningChainGuardPeerSample> peers{
+        {100, 1000, 1000, "aa", true},
+        {100, 1000, 1000, "", true},
+        {101, 1000, 1000, "bb", false},
+        {100, 1000, 1000, "cc", true},
+        {99, 1000, 1000, "", false},
+    };
+    const auto filtered = node::FilterMiningChainGuardConsensusSamples(peers);
+    BOOST_REQUIRE_EQUAL(filtered.size(), 2U);
+    BOOST_CHECK_EQUAL(filtered[0].hash, "aa");
+    BOOST_CHECK(filtered[0].outbound);
+    BOOST_CHECK_EQUAL(filtered[1].hash, "cc");
+    BOOST_CHECK(filtered[1].outbound);
+}
+
+BOOST_AUTO_TEST_CASE(hashless_outbound_peers_do_not_satisfy_peer_consensus)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+
+    const std::vector<node::MiningChainGuardPeerSample> hashless{
+        {100, 1000, 1000},
+        {100, 1000, 1000},
+        {100, 1000, 1000},
+    };
+    const auto visibility_heights = node::FilterMiningChainGuardPeerHeights(
+        /*local_tip_height=*/100,
+        /*now=*/1000,
+        hashless,
+        options);
+    const auto visibility = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/100,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        visibility_heights,
+        options);
+    BOOST_CHECK(visibility.healthy);
+    BOOST_CHECK_EQUAL(visibility.reason, "healthy");
+
+    const auto consensus = node::FilterMiningChainGuardConsensusSamples(hashless);
+    BOOST_CHECK(consensus.empty());
+    const auto consensus_heights = node::FilterMiningChainGuardPeerHeights(
+        /*local_tip_height=*/100,
+        /*now=*/1000,
+        consensus,
+        options);
+    const auto refined = node::RefineMiningChainGuardConsensus(
+        visibility,
+        /*local_tip_height=*/100,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        consensus_heights,
+        options);
+    BOOST_CHECK(!refined.healthy);
+    BOOST_CHECK_EQUAL(refined.reason, "insufficient_peer_consensus");
+    BOOST_CHECK_EQUAL(refined.peer_count, 0);
+
+    const std::string tip_hash{
+        "ad62b638c0ac1b15870bfd8fa949c8d154e9d0dc27c99b64c740f315870120ac"};
+    const std::vector<node::MiningChainGuardPeerSample> hashed{
+        {100, 1000, 1000, tip_hash},
+        {100, 1000, 1000, tip_hash},
+        {100, 1000, 1000, tip_hash},
+    };
+    const auto hashed_heights = node::FilterMiningChainGuardPeerHeights(
+        /*local_tip_height=*/100,
+        /*now=*/1000,
+        hashed,
+        options);
+    auto hashed_visibility = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/100,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        hashed_heights,
+        options);
+    const auto hashed_consensus = node::FilterMiningChainGuardConsensusSamples(hashed);
+    BOOST_REQUIRE_EQUAL(hashed_consensus.size(), 3U);
+    auto hashed_refined = node::RefineMiningChainGuardConsensus(
+        hashed_visibility,
+        /*local_tip_height=*/100,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        hashed_heights,
+        options);
+    node::ApplyPeerTipHashCheck(hashed_refined, 100, tip_hash, hashed_consensus);
+    BOOST_CHECK(hashed_refined.healthy);
+    BOOST_CHECK_EQUAL(hashed_refined.reason, "healthy");
+    BOOST_CHECK_EQUAL(hashed_refined.same_tip_hash_peers, 3);
+}
+
+BOOST_AUTO_TEST_CASE(catch_up_visibility_is_not_reclassified_as_insufficient_peer_consensus)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+
+    const auto visibility = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/199378,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        std::vector<int>{199801, 199801, 199801},
+        options);
+    BOOST_CHECK_EQUAL(visibility.reason, "local_tip_behind_peer_median");
+
+    const auto refined = node::RefineMiningChainGuardConsensus(
+        visibility,
+        /*local_tip_height=*/199378,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        /*consensus_heights=*/{},
+        options);
+    BOOST_CHECK_EQUAL(refined.reason, "local_tip_behind_peer_median");
+    BOOST_CHECK_EQUAL(refined.peer_count, 3);
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(refined));
+}
+
 BOOST_FIXTURE_TEST_CASE(miningpeermesh_replaces_defaults_and_rpc_reports_it, TestingSetup)
 {
     node::ResetMiningChainGuardMeshRefreshForTest();

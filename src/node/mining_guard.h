@@ -41,6 +41,9 @@ struct MiningChainGuardPeerSample {
     int64_t last_block_time{0};
     int64_t last_block_announcement{0};
     std::string hash;
+    /** Outbound (or block-relay) peer. Inbound samples never count toward
+     *  hash-evidence consensus even if they later carry a learned hash. */
+    bool outbound{true};
 };
 
 struct MiningChainGuardStatus {
@@ -103,6 +106,23 @@ std::vector<int> FilterMiningChainGuardPeerHeights(
     int local_tip_height,
     int64_t now,
     const std::vector<MiningChainGuardPeerSample>& peers,
+    const MiningChainGuardOptions& options);
+
+/** Hash-evidence consensus set: outbound peers with a learned BestKnown hash.
+ *  Height-only / inbound samples stay in the visibility set for catch-up. */
+std::vector<MiningChainGuardPeerSample> FilterMiningChainGuardConsensusSamples(
+    const std::vector<MiningChainGuardPeerSample>& peers);
+
+/** Re-run min-peer / near-tip gates on hash-evidence heights when the
+ *  visibility pass landed on a consensus-lane reason. Catch-up reasons are
+ *  returned unchanged so headers-level visibility still reports behind, not
+ *  isolation. */
+MiningChainGuardStatus RefineMiningChainGuardConsensus(
+    const MiningChainGuardStatus& visibility,
+    int local_tip_height,
+    bool initial_block_download,
+    bool network_active,
+    const std::vector<int>& consensus_heights,
     const MiningChainGuardOptions& options);
 
 MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node);

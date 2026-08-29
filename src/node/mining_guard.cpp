@@ -10,6 +10,7 @@
 #include <net_processing.h>
 #include <node/context.h>
 #include <sync.h>
+#include <uint256.h>
 #include <util/time.h>
 #include <validation.h>
 
@@ -324,6 +325,69 @@ std::vector<int> FilterMiningChainGuardPeerHeights(
     return filtered;
 }
 
+std::vector<MiningChainGuardPeerSample> FilterMiningChainGuardConsensusSamples(
+    const std::vector<MiningChainGuardPeerSample>& peers)
+{
+    std::vector<MiningChainGuardPeerSample> consensus;
+    consensus.reserve(peers.size());
+    for (const auto& peer : peers) {
+        if (peer.outbound && !peer.hash.empty()) {
+            consensus.push_back(peer);
+        }
+    }
+    return consensus;
+}
+
+MiningChainGuardStatus RefineMiningChainGuardConsensus(
+    const MiningChainGuardStatus& visibility,
+    int local_tip_height,
+    bool initial_block_download,
+    bool network_active,
+    const std::vector<int>& consensus_heights,
+    const MiningChainGuardOptions& options)
+{
+    if (visibility.reason != "healthy" &&
+        visibility.reason != "insufficient_peer_consensus" &&
+        visibility.reason != "insufficient_near_tip_peers") {
+        return visibility;
+    }
+    return EvaluateMiningChainGuard(
+        local_tip_height, initial_block_download, network_active, consensus_heights, options);
+}
+
+namespace {
+bool MiningChainGuardKnownHashOnActiveOrBestChain(
+    const ChainstateManager& chainman,
+    const std::string& hash_hex)
+{
+    AssertLockHeld(::cs_main);
+    const auto parsed = uint256::FromHex(hash_hex);
+    if (!parsed) return false;
+    const CBlockIndex* index = chainman.m_blockman.LookupBlockIndex(*parsed);
+    if (index == nullptr) return false;
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    if (tip != nullptr && tip->GetAncestor(index->nHeight) == index) return true;
+    const CBlockIndex* best = chainman.m_best_header;
+    if (best != nullptr && best->GetAncestor(index->nHeight) == index) return true;
+    return false;
+}
+
+std::vector<MiningChainGuardPeerSample> FilterMiningChainGuardOnChainConsensusSamples(
+    const ChainstateManager& chainman,
+    const std::vector<MiningChainGuardPeerSample>& peers)
+{
+    AssertLockHeld(::cs_main);
+    std::vector<MiningChainGuardPeerSample> on_chain;
+    on_chain.reserve(peers.size());
+    for (const auto& peer : peers) {
+        if (MiningChainGuardKnownHashOnActiveOrBestChain(chainman, peer.hash)) {
+            on_chain.push_back(peer);
+        }
+    }
+    return on_chain;
+}
+} // namespace
+
 MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
 {
     const MiningChainGuardOptions options = GetMiningChainGuardOptions(node);
@@ -387,6 +451,7 @@ MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
 
         MiningChainGuardPeerSample sample;
         sample.height = peer_height;
+        sample.outbound = !peer_stats.fInbound;
         sample.hash = peer_stats.fInbound ? std::string{} : state_stats.m_best_known_block_hash;
         sample.last_block_time = peer_stats.m_last_block_time.count();
         sample.last_block_announcement =
@@ -395,12 +460,31 @@ MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
     }
 
     const int64_t now = GetTime<std::chrono::seconds>().count();
-    const auto peer_heights =
+    const auto visibility_heights =
         FilterMiningChainGuardPeerHeights(local_tip_height, now, peer_samples, options);
 
     auto status = EvaluateMiningChainGuard(
-        local_tip_height, initial_block_download, network_active, peer_heights, options);
-    ApplyPeerTipHashCheck(status, local_tip_height, local_tip_hash, peer_samples);
+        local_tip_height, initial_block_download, network_active, visibility_heights, options);
+
+    const auto consensus_samples = FilterMiningChainGuardConsensusSamples(peer_samples);
+    std::vector<MiningChainGuardPeerSample> on_chain_samples;
+    {
+        LOCK(cs_main);
+        on_chain_samples =
+            FilterMiningChainGuardOnChainConsensusSamples(*node.chainman, consensus_samples);
+    }
+    const auto consensus_heights =
+        FilterMiningChainGuardPeerHeights(local_tip_height, now, on_chain_samples, options);
+    status = RefineMiningChainGuardConsensus(
+        status,
+        local_tip_height,
+        initial_block_download,
+        network_active,
+        consensus_heights,
+        options);
+    // Hash-split still sees every learned outbound hash, including competing
+    // forks that the on-chain count correctly excluded.
+    ApplyPeerTipHashCheck(status, local_tip_height, local_tip_hash, consensus_samples);
     return ApplyDeferredReorgWarning(std::move(status), options, now);
 }
 
