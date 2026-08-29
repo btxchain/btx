@@ -19054,7 +19054,8 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         !node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData(
             this_gpu,
             m_signed_frontier_catch_up.load(std::memory_order_relaxed),
-            this_archive)};
+            this_archive,
+            pfrom->m_consensus_catchup_serve.load(std::memory_order_relaxed))};
     const bool skip_archive_blocks{
         node::matmul_trusted::MsghandSkipArchiveBlockGetData(
             node::matmul_trusted::HasLocalSigner(),
