@@ -5130,6 +5130,21 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     MaybeSeedBestKnownFromHeaderTower(peer.m_id, *state, peer);
 
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+    // RB-16 RESTART-SAFE REGISTRATION (must run BEFORE any download skip below):
+    // the exempt-tower set that AcquisitionEscapeCoversBlock reads to admit
+    // acquired bodies is memory-only and was otherwise populated only in the live
+    // header-acceptance lead gate (validation.cpp), which never re-fires for a
+    // node that already holds the heavier tower's headers persisted (binary
+    // upgrade / restart). Re-derive it here from the peer's best-known tip
+    // whenever we are stale-stuck below a strictly-heavier chain. Placed at the
+    // top of FindNextBlocksToDownload so it fires even when a downstream skip
+    // (e.g. the parked-branch return) would otherwise stop this peer. The call is
+    // fully self-guarding (stale + strictly-heavier + off-active-chain + tip+2048
+    // lead bound), bounded (<=2 towers, heaviest retained), and idempotent.
+    if (state->pindexBestKnownBlock != nullptr &&
+        m_chainman.AcquisitionEscapeActive(state->pindexBestKnownBlock)) {
+        m_chainman.AcquisitionEscapeMayAcquireHeavierFork(state->pindexBestKnownBlock);
+    }
     const bool catch_up{DownloadFailoverCatchUp(m_chainman, state->pindexBestKnownBlock)};
     const bool one_wide{CatchUpOneWideFetch(
         m_chainman, IsSignedFrontierBodyCatchUp(), state->pindexBestKnownBlock)};
@@ -5325,6 +5340,17 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         state->pindexBestKnownBlock != nullptr &&
         m_chainman.IsOnParkedReorgBranch(state->pindexBestKnownBlock) &&
         !yield_to_this_peer &&
+        // RB-16: acquisition (fetch + full ExactReplay of a strictly-heavier
+        // stale tower) must proceed even when that tower's branch is PARKED --
+        // otherwise a restarted node that already parked the deep reorg can
+        // never GETDATA the tower bodies and stays stuck below a known heavier
+        // chain forever (live rtx6000: peers with best-known=201278 skipped
+        // reason=followed-branch-parked, inflight=0, GPU idle). This exempts the
+        // DOWNLOAD only; migration stays park/deepforkautoresolve-gated and
+        // ConnectTip still refuses the parked reorg until a covered body's
+        // ExactReplay + the migration policy permit it. Bounded/self-guarded via
+        // AcquisitionEscapeActive (stale + strictly-heavier + tip+2048 lead).
+        !m_chainman.AcquisitionEscapeActive(state->pindexBestKnownBlock) &&
         !node::HeaderSyncMayFetchParkedHeavierTower(
             stalled_header_tower,
             node::matmul_trusted::IsTrustedMirror(),
@@ -5464,27 +5490,6 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // If the peer reorganized, our previous pindexLastCommonBlock may not be an ancestor
     // of its current tip anymore. Go back enough to fix that.
     state->pindexLastCommonBlock = LastCommonAncestor(state->pindexLastCommonBlock, state->pindexBestKnownBlock);
-
-    // RB-16 RESTART-SAFETY: the exempt-tower set (which AcquisitionEscapeCoversBlock
-    // reads to admit acquired bodies for ExactReplay) is memory-only and is
-    // otherwise populated ONLY in the live header-acceptance lead gate
-    // (validation.cpp AcquisitionEscapeMayAcquireHeavierFork at the "skipping
-    // unauthenticated header lead" site). A node that already holds the heavier
-    // tower's headers persisted -- exactly the case right after a binary upgrade
-    // / restart -- never re-accepts those headers, so registration never re-fires,
-    // the set stays empty, CoversBlock rejects every acquired body, and the node
-    // sits below a known heavier chain forever with the GPU idle (live rtx6000:
-    // headers 201278, active 199416, esc_reg flat, cov=0 after restart). Re-derive
-    // the registration here from the peer's best-known tip whenever we are
-    // stale-stuck and that chain is strictly heavier. The call is fully
-    // self-guarding (stale + strictly-heavier + off-active-chain + tip+2048 lead
-    // bound), bounded (<=2 towers, heaviest retained on evict), and idempotent
-    // (an existing root just refreshes its work), so driving it once per download
-    // pass per peer is safe and makes acquisition restart-safe for ALL users.
-    if (state->pindexBestKnownBlock != nullptr &&
-        m_chainman.AcquisitionEscapeActive(state->pindexBestKnownBlock)) {
-        m_chainman.AcquisitionEscapeMayAcquireHeavierFork(state->pindexBestKnownBlock);
-    }
 
     // ROOT-FIRST: HaveNumChainTxs() can outlive BLOCK_HAVE_DATA (prune / partial
     // loss), and a prior walk can leave pindexLastCommonBlock sitting past a
