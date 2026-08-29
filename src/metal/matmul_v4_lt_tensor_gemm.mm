@@ -22,19 +22,26 @@
 
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 
+#include "matmul_v4_lt_tensor_gemm_source.h"
+
 #include <logging.h>
 #include <matmul/matmul_v4_lt.h>
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
+#include <limits.h>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
+#include <mach-o/dyld.h>
+#include <unistd.h>
 
 namespace matmul_v4::metal {
 namespace {
@@ -42,54 +49,47 @@ namespace {
 constexpr uint32_t kTensorTileM = 32;
 constexpr uint32_t kTensorTileN = 32;
 
-static NSString* const kTensorGemmLibrarySource = @R"MSL(
-#include <metal_stdlib>
-#if defined(__METAL_VERSION__) && (__METAL_VERSION__ >= 400) && \
-    __has_include(<MetalPerformancePrimitives/MetalPerformancePrimitives.h>)
-#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-#define BTX_LT_HAVE_TENSOR_OPS 1
-#endif
-
-using namespace metal;
-
-#define BTX_LT_TENSOR_TILE_M 32
-#define BTX_LT_TENSOR_TILE_N 32
-
-struct GemmParams {
-    uint m_rows;
-    uint k;
-    uint n_cols;
-};
-
-#if defined(BTX_LT_HAVE_TENSOR_OPS)
-kernel void matmul_v4_lt_s8_gemm_s32_tensor(
-    constant GemmParams& p [[buffer(0)]],
-    device int8_t* x [[buffer(1)]],
-    device int8_t* y [[buffer(2)]],
-    device int32_t* d [[buffer(3)]],
-    uint2 tgid [[threadgroup_position_in_grid]])
+void AppendUniquePath(std::vector<std::string>& paths, const char* path)
 {
-    using namespace mpp;
-    using namespace mpp::tensor_ops;
-
-    constexpr auto desc = matmul2d_descriptor(BTX_LT_TENSOR_TILE_M, BTX_LT_TENSOR_TILE_N);
-    matmul2d<desc, execution_simdgroup> op;
-
-    auto mX = tensor(x, dextents<int, 2>{(int)p.k, (int)p.m_rows}, array<int, 2>{1, (int)p.k});
-    auto mY = tensor(y, dextents<int, 2>{(int)p.n_cols, (int)p.k}, array<int, 2>{1, (int)p.n_cols});
-    auto mD = tensor(d, dextents<int, 2>{(int)p.n_cols, (int)p.m_rows}, array<int, 2>{1, (int)p.n_cols});
-
-    const int row0 = (int)(tgid.y * BTX_LT_TENSOR_TILE_M);
-    const int col0 = (int)(tgid.x * BTX_LT_TENSOR_TILE_N);
-
-    auto tX = mX.slice(0, row0);
-    auto tY = mY.slice(col0, 0);
-    auto tD = mD.slice(col0, row0);
-
-    op.run(tX, tY, tD);
+    if (path == nullptr || path[0] == '\0') return;
+    if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
+        paths.emplace_back(path);
+    }
 }
+
+std::optional<std::string> ExecutableDirectory()
+{
+    uint32_t size = PATH_MAX;
+    std::vector<char> buffer(size);
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        buffer.resize(size);
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+            return std::nullopt;
+        }
+    }
+
+    char resolved[PATH_MAX];
+    const char* executable_path = realpath(buffer.data(), resolved) != nullptr ? resolved : buffer.data();
+    std::string path{executable_path};
+    const auto separator = path.find_last_of('/');
+    if (separator == std::string::npos) {
+        return std::nullopt;
+    }
+    return path.substr(0, separator);
+}
+
+std::vector<std::string> LtTensorMetallibCandidatePaths()
+{
+    std::vector<std::string> paths;
+    AppendUniquePath(paths, std::getenv("BTX_MATMUL_V4_LT_TENSOR_METALLIB_PATH"));
+    if (const auto executable_dir = ExecutableDirectory()) {
+        AppendUniquePath(paths, (*executable_dir + "/metal/matmul_v4_lt_tensor_gemm.metallib").c_str());
+    }
+#if defined(BTX_MATMUL_V4_LT_TENSOR_METALLIB_PATH)
+    AppendUniquePath(paths, BTX_MATMUL_V4_LT_TENSOR_METALLIB_PATH);
 #endif
-)MSL";
+    return paths;
+}
 
 struct GemmParamsHost {
     uint32_t m_rows{0};
@@ -200,23 +200,55 @@ TensorOpsContext& Ctx()
                 return;
             }
 
-            MTLCompileOptions* options = [MTLCompileOptions new];
-            options.languageVersion = static_cast<MTLLanguageVersion>(4 << 16);
-
+            // Prefer a build-time Metal 4 metallib so launchd/daemon btxd does
+            // not have to reach MTLCompilerService (issue 51). Fall back to
+            // newLibraryWithSource only when no metallib is present.
             NSError* err = nil;
-            id<MTLLibrary> lib = [ctx.device newLibraryWithSource:kTensorGemmLibrarySource
-                                                          options:options
-                                                            error:&err];
+            id<MTLLibrary> lib = nil;
+            std::string load_source;
+            for (const auto& candidate_path : LtTensorMetallibCandidatePaths()) {
+                NSString* precompiled_path = [NSString stringWithUTF8String:candidate_path.c_str()];
+                if (![[NSFileManager defaultManager] fileExistsAtPath:precompiled_path]) {
+                    continue;
+                }
+                err = nil;
+                lib = [ctx.device newLibraryWithURL:[NSURL fileURLWithPath:precompiled_path] error:&err];
+                if (lib != nil) {
+                    load_source = "precompiled_metallib";
+                    break;
+                }
+            }
+            if (lib == nil) {
+                MTLCompileOptions* options = [MTLCompileOptions new];
+                options.languageVersion = static_cast<MTLLanguageVersion>(4 << 16);
+                err = nil;
+                lib = [ctx.device newLibraryWithSource:[NSString stringWithUTF8String:kBtxLtTensorGemmMetalKernelSource]
+                                               options:options
+                                                 error:&err];
+                if (lib != nil) load_source = "inline_source_fallback";
+            }
+            id<MTLFunction> fn = lib != nil
+                ? [lib newFunctionWithName:@"matmul_v4_lt_s8_gemm_s32_tensor"]
+                : nil;
+            if (lib != nil && fn == nil && load_source == "precompiled_metallib") {
+                // Stale or TensorOps-less metallib: try runtime metal4 compile.
+                MTLCompileOptions* options = [MTLCompileOptions new];
+                options.languageVersion = static_cast<MTLLanguageVersion>(4 << 16);
+                err = nil;
+                lib = [ctx.device newLibraryWithSource:[NSString stringWithUTF8String:kBtxLtTensorGemmMetalKernelSource]
+                                               options:options
+                                                 error:&err];
+                load_source = lib != nil ? "inline_source_fallback" : load_source;
+                fn = lib != nil ? [lib newFunctionWithName:@"matmul_v4_lt_s8_gemm_s32_tensor"] : nil;
+            }
             if (lib == nil) {
                 ctx.tensor_path_reason = err != nil
                     ? std::string{"metal4_compile_failed:"} + [[err localizedDescription] UTF8String]
                     : "metal4_compile_failed";
                 return;
             }
-
-            id<MTLFunction> fn = [lib newFunctionWithName:@"matmul_v4_lt_s8_gemm_s32_tensor"];
             if (fn == nil) {
-                ctx.tensor_path_reason = "tensor_ops_kernel_absent";
+                ctx.tensor_path_reason = "tensor_ops_kernel_absent:" + load_source;
                 return;
             }
             ctx.tensor_pipeline = [ctx.device newComputePipelineStateWithFunction:fn error:&err];
@@ -227,12 +259,13 @@ TensorOpsContext& Ctx()
                 return;
             }
             ctx.compile_ok = true;
-            ctx.tensor_path_reason = "ok";
+            ctx.tensor_path_reason = "ok:" + load_source;
         }
         if (!ctx.compile_ok) {
             LogPrintf("MATMUL-METAL WARNING: Metal 4 INT8 TensorOps not admitted (%s). "
-                      "v4 mining will use CPU. This is often MTLCompilerService unreachable "
-                      "in a daemon/launchd context; a silent CPU fallback is the defect this line reports.\n",
+                      "v4 mining will use CPU. Prefer a build-time metallib "
+                      "(BTX_MATMUL_V4_LT_TENSOR_METALLIB_PATH); runtime compile needs "
+                      "MTLCompilerService, which launchd/daemon often cannot reach.\n",
                       ctx.tensor_path_reason);
         }
     });

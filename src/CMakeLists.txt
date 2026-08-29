@@ -1105,9 +1105,12 @@ if(APPLE AND BTX_ENABLE_METAL)
       ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_rc_rowleaf_gpu_kernels.metal)
   set(BTX_RC_FP3_LDE_METAL_SOURCE
       ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_rc_fp3_lde_gpu.metal)
+  set(BTX_LT_TENSOR_METAL_SOURCE
+      ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_lt_tensor_gemm.metal)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${BTX_RC_ROWLEAF_METAL_SOURCE}
     ${BTX_RC_FP3_LDE_METAL_SOURCE}
+    ${BTX_LT_TENSOR_METAL_SOURCE}
   )
   file(READ ${BTX_RC_ROWLEAF_METAL_SOURCE}
        BTX_RC_ROWLEAF_METAL_SOURCE_TEXT)
@@ -1121,6 +1124,13 @@ if(APPLE AND BTX_ENABLE_METAL)
   configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_rc_fp3_lde_gpu_source.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/matmul_v4_rc_fp3_lde_gpu_source.h
+    @ONLY
+  )
+  file(READ ${BTX_LT_TENSOR_METAL_SOURCE}
+       BTX_LT_TENSOR_METAL_SOURCE_TEXT)
+  configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_lt_tensor_gemm_source.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/matmul_v4_lt_tensor_gemm_source.h
     @ONLY
   )
   target_include_directories(btx_matmul_backend PRIVATE
@@ -1194,10 +1204,10 @@ if(APPLE AND BTX_ENABLE_METAL)
       COMMENT "Compiling prebuilt Metal oracle kernels"
       VERBATIM
     )
-    # The v4 kernels compile under the default (pre-Metal-4) language version:
-    # the mpp::tensor_ops section is guarded by __METAL_VERSION__/__has_include
-    # and the Metal 4 tensor pipeline is always runtime-compiled by the host
-    # glue with an explicit metal4.0 language version (see matmul_v4_accel.mm).
+    # Portable ALU kernels stay on the default (pre-Metal-4) language version so
+    # the shipped metallib does not require a Metal 4 toolchain. TensorOps used
+    # to be runtime-compiled with metal4.0 (see matmul_v4_accel.mm); that needs
+    # MTLCompilerService, which launchd/daemon btxd often cannot reach (issue 51).
     add_custom_command(
       OUTPUT ${BTX_MATMUL_V4_METALLIB}
       COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c ${BTX_MATMUL_V4_METAL_SOURCE} -o ${BTX_MATMUL_V4_METAL_AIR}
@@ -1242,7 +1252,65 @@ if(APPLE AND BTX_ENABLE_METAL)
     add_custom_target(btx_matmul_v4_bmx4_metallib DEPENDS ${BTX_MATMUL_V4_BMX4_METALLIB})
     add_custom_target(btx_rc_rowleaf_metallib DEPENDS ${BTX_RC_ROWLEAF_METALLIB})
     add_custom_target(btx_rc_fp3_lde_metallib DEPENDS ${BTX_RC_FP3_LDE_METALLIB})
-    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib btx_matmul_v4_metallib btx_matmul_v4_bmx4_metallib btx_rc_rowleaf_metallib btx_rc_fp3_lde_metallib)
+    # Issue 51: probe Metal 4 so TensorOps can be precompiled. A daemon cannot
+    # always reach MTLCompilerService; newLibraryWithURL does not need it.
+    set(BTX_METAL4_PROBE_SRC ${CMAKE_CURRENT_BINARY_DIR}/btx_metal4_probe.metal)
+    file(WRITE ${BTX_METAL4_PROBE_SRC} "kernel void btx_metal4_probe(device int* d [[buffer(0)]]) { d[0] = 1; }\n")
+    execute_process(
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -std=metal4.0 -c ${BTX_METAL4_PROBE_SRC} -o ${CMAKE_CURRENT_BINARY_DIR}/btx_metal4_probe.air
+      RESULT_VARIABLE BTX_METAL4_COMPILER_RESULT
+      ERROR_VARIABLE BTX_METAL4_COMPILER_ERROR
+      OUTPUT_QUIET
+    )
+    set(BTX_METAL4_METALLIB_TARGETS)
+    set(BTX_METAL4_COMPILE_DEFINITIONS)
+    if(BTX_METAL4_COMPILER_RESULT EQUAL 0)
+      message(STATUS "Precompiling Metal 4 TensorOps metallibs (issue 51; no runtime MTLCompilerService)")
+      set(BTX_MATMUL_V4_METAL4_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_accel_kernels_metal4.air)
+      set(BTX_MATMUL_V4_METAL4_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_accel_kernels_metal4.metallib)
+      set(BTX_MATMUL_V4_BMX4_METAL4_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_bmx4_accel_kernels_metal4.air)
+      set(BTX_MATMUL_V4_BMX4_METAL4_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_bmx4_accel_kernels_metal4.metallib)
+      set(BTX_LT_TENSOR_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_lt_tensor_gemm.air)
+      set(BTX_LT_TENSOR_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_lt_tensor_gemm.metallib)
+      add_custom_command(
+        OUTPUT ${BTX_MATMUL_V4_METAL4_METALLIB}
+        COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -std=metal4.0 -c ${BTX_MATMUL_V4_METAL_SOURCE} -o ${BTX_MATMUL_V4_METAL4_AIR}
+        COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metallib ${BTX_MATMUL_V4_METAL4_AIR} -o ${BTX_MATMUL_V4_METAL4_METALLIB}
+        DEPENDS ${BTX_MATMUL_V4_METAL_SOURCE}
+        COMMENT "Compiling prebuilt MatMul v4 Metal 4 TensorOps kernels"
+        VERBATIM
+      )
+      add_custom_command(
+        OUTPUT ${BTX_MATMUL_V4_BMX4_METAL4_METALLIB}
+        COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -std=metal4.0 -c ${BTX_MATMUL_V4_BMX4_METAL_SOURCE} -o ${BTX_MATMUL_V4_BMX4_METAL4_AIR}
+        COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metallib ${BTX_MATMUL_V4_BMX4_METAL4_AIR} -o ${BTX_MATMUL_V4_BMX4_METAL4_METALLIB}
+        DEPENDS ${BTX_MATMUL_V4_BMX4_METAL_SOURCE}
+        COMMENT "Compiling prebuilt MatMul v4 BMX4-C Metal 4 TensorOps kernels"
+        VERBATIM
+      )
+      add_custom_command(
+        OUTPUT ${BTX_LT_TENSOR_METALLIB}
+        COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -std=metal4.0 -c ${BTX_LT_TENSOR_METAL_SOURCE} -o ${BTX_LT_TENSOR_METAL_AIR}
+        COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metallib ${BTX_LT_TENSOR_METAL_AIR} -o ${BTX_LT_TENSOR_METALLIB}
+        DEPENDS ${BTX_LT_TENSOR_METAL_SOURCE}
+        COMMENT "Compiling prebuilt LT ExactGemm TensorOps kernels"
+        VERBATIM
+      )
+      add_custom_target(btx_matmul_v4_metal4_metallib DEPENDS ${BTX_MATMUL_V4_METAL4_METALLIB})
+      add_custom_target(btx_matmul_v4_bmx4_metal4_metallib DEPENDS ${BTX_MATMUL_V4_BMX4_METAL4_METALLIB})
+      add_custom_target(btx_lt_tensor_metallib DEPENDS ${BTX_LT_TENSOR_METALLIB})
+      list(APPEND BTX_METAL4_METALLIB_TARGETS
+        btx_matmul_v4_metal4_metallib
+        btx_matmul_v4_bmx4_metal4_metallib
+        btx_lt_tensor_metallib)
+      list(APPEND BTX_METAL4_COMPILE_DEFINITIONS
+        BTX_MATMUL_V4_METAL4_METALLIB_PATH=\"${BTX_MATMUL_V4_METAL4_METALLIB}\"
+        BTX_MATMUL_V4_BMX4_METAL4_METALLIB_PATH=\"${BTX_MATMUL_V4_BMX4_METAL4_METALLIB}\"
+        BTX_MATMUL_V4_LT_TENSOR_METALLIB_PATH=\"${BTX_LT_TENSOR_METALLIB}\")
+    else()
+      message(STATUS "Metal 4 compiler unavailable; TensorOps stays runtime-compiled (${BTX_METAL4_COMPILER_ERROR})")
+    endif()
+    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib btx_matmul_v4_metallib btx_matmul_v4_bmx4_metallib btx_rc_rowleaf_metallib btx_rc_fp3_lde_metallib ${BTX_METAL4_METALLIB_TARGETS})
     target_compile_definitions(btx_matmul_backend PRIVATE
       BTX_MATMUL_METALLIB_PATH=\"${BTX_MATMUL_METALLIB}\"
       BTX_ORACLE_METALLIB_PATH=\"${BTX_ORACLE_METALLIB}\"
@@ -1250,6 +1318,7 @@ if(APPLE AND BTX_ENABLE_METAL)
       BTX_MATMUL_V4_BMX4_METALLIB_PATH=\"${BTX_MATMUL_V4_BMX4_METALLIB}\"
       BTX_RC_ROWLEAF_METALLIB_PATH=\"${BTX_RC_ROWLEAF_METALLIB}\"
       BTX_RC_FP3_LDE_METALLIB_PATH=\"${BTX_RC_FP3_LDE_METALLIB}\"
+      ${BTX_METAL4_COMPILE_DEFINITIONS}
     )
   else()
     if(BTX_MATMUL_METAL_PRECOMPILE_KERNELS)
