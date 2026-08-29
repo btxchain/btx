@@ -68,7 +68,7 @@ BOOST_AUTO_TEST_CASE(locator_start_chases_heavier_disconnected_fork)
 
 BOOST_AUTO_TEST_CASE(locator_start_does_not_chase_long_competing_header_tower)
 {
-    // Direct predicate: live rtx6000 2026-08-29 tip 199385 vs m_best_header
+    // Direct predicate: a live consensus-archive node 2026-08-29 tip 199385 vs m_best_header
     // 199801 on withdrawn 33c834f8 (lead 416).
     BOOST_CHECK(!node::HeaderSyncChaseHeavierCompetingLocator(
         /*extends_active_tip=*/false, /*heavier=*/true, 199801, 199385));
@@ -267,7 +267,7 @@ BOOST_AUTO_TEST_CASE(far_behind_yields_gpu_protect)
 
 BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
 {
-    // Live rtx6000 2026-08-29: tip 199386, m_best_header 199801, 6 peers
+    // A live consensus-archive node 2026-08-29: tip 199386, m_best_header 199801, 6 peers
     // advertising above, selector kept asking peer=29 at the frozen tip.
     constexpr int32_t kTip{199386};
     constexpr int32_t kTower{199801};

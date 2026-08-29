@@ -158,7 +158,7 @@ ProductionGateAction ApplyStrictProductionEligibilityGate(
         if (acceleration.gemm.gemm_s8s8 != nullptr) {
             // Catch-up ExactReplay on the available byte-exact GEMM.
             // Zeroing it left require_device true and digest_requests=0
-            // (live rtx6000 2026-08-29). The v3 mining digest pool is a
+            // (a live consensus-archive node 2026-08-29). The v3 mining digest pool is a
             // separate lazy allocator; RC GEMM does not touch it.
             resolution_reason += ":unverifiable_catchup_replay";
             return ProductionGateAction::UnverifiableDevice;

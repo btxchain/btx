@@ -366,7 +366,7 @@ BOOST_AUTO_TEST_CASE(insufficient_peers_marks_island_suspect_without_hash_split)
 
 BOOST_AUTO_TEST_CASE(far_behind_headers_are_catch_up_not_insufficient_peer_consensus)
 {
-    // Live rtx6000 2026-08-29: blocks=199378 headers=199801, 23 peers
+    // A live consensus-archive node 2026-08-29: blocks=199378 headers=199801, 23 peers
     // above tip. Evaluating insufficient_peer_consensus before median
     // behind made "healthy" unreachable by construction: peers above the
     // local tip cannot produce same-hash-at-our-height. Catch-up is not

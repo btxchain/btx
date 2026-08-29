@@ -1,7 +1,7 @@
 # 0.34.3 freeze CUDA+Metal Profile-1 ExactReplay goldens
 
-Measured on freeze `633d9e08` after CUDA (macpro2, `sm_120`) and Metal
-(macstudio-1, `m4_class`) both linked `btxd`, `btx-cli`, and
+Measured on freeze `633d9e08` after CUDA (<node>, `sm_120`) and Metal
+(<node>, `m4_class`) both linked `btxd`, `btx-cli`, and
 `matmul-v4-rc-harness` with `WITH_ZMQ=ON` at `F`. Compare reports
 `complete_multi_gpu_match=true`, `allow_partial=false`, `cuda_metal_match=true`.
 Nonce-1 digest is unchanged from 0.34.1/0.34.2; the reseal is required because

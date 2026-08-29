@@ -4685,7 +4685,7 @@ BOOST_AUTO_TEST_CASE(rc_pending_cap_still_retains_for_retry)
 }
 
 // v0.34.2 network-wide deadlock (jarekpiot, independently confirmed on
-// macpro2; dixonping asked for this exact shape). One linear tip-child,
+// <node>; dixonping asked for this exact shape). One linear tip-child,
 // no competing sibling at that height, active tip past the last attested
 // block so nAuthenticatedChainWork < nChainWork. Tag v0.34.2 classified
 // that child as competing, subtracted one work-unit from a one-job cap,
@@ -4872,7 +4872,7 @@ BOOST_AUTO_TEST_CASE(linear_tip_child_replays_when_authenticated_work_lags)
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
-// Consensus archive catch-up (rtx6000 2026-08-29): unique followed
+// Consensus archive catch-up (<node> 2026-08-29): unique followed
 // tip-child, no rcadmit, many headers already on the followed chain.
 // Ticketless persist must ExactReplay in AcceptBlock and ConnectTip must
 // move. Competing siblings stay off the GPU (no 51% shortcut).
@@ -5013,7 +5013,7 @@ BOOST_AUTO_TEST_CASE(ticketless_followed_tip_child_converges_without_rcadmit)
     }
 }
 
-// Live rtx6000 2026-08-29: IBD latched off, competing valid-PoW HEADERS
+// A live consensus-archive node 2026-08-29: IBD latched off, competing valid-PoW HEADERS
 // at/above the connected tip (withdrawn 0.34.1 fork 33c834f8 shape),
 // m_best_header leaves IndexIsFollowedTipChild(tip, tip+1) false, so
 // IndependentConsensusMaySpendExactReplayGpu used to refuse every body
@@ -8065,7 +8065,7 @@ BOOST_AUTO_TEST_CASE(authority_mode_serves_getheaders_to_inbound_non_authority)
 
 BOOST_AUTO_TEST_CASE(best_header_below_tip_rerequests_headers_and_converges)
 {
-    // Live 0.34.3 macpro2: blocks=199310, headers=199024. PreferTrustAdjusted
+    // Live 0.34.3 <node>: blocks=199310, headers=199024. PreferTrustAdjusted
     // ranked an authenticated ancestor above the connected tip, so locators
     // started at 199023 and never asked for tip+1. This case rewinds
     // m_best_header below the tip, asserts SendMessages re-establishes it,
@@ -8150,7 +8150,7 @@ BOOST_AUTO_TEST_CASE(best_header_below_tip_rerequests_headers_and_converges)
 
 BOOST_AUTO_TEST_CASE(heavier_competing_fork_probes_and_getdata_past_short_reorg)
 {
-    // Live 0.34.4 macpro2: tip 199310 on 8b5da5a5, headers-only fork from
+    // Live 0.34.4 <node>: tip 199310 on 8b5da5a5, headers-only fork from
     // 199294 (33c834f8) at the 72-block unauth lead cap, peer VERSION 199523.
     // HeaderSyncMustProbe treated BestKnown 199382 as "ahead" (zero
     // getheaders). FindNextBlocksToDownload skipped competing_not_active_
@@ -8332,7 +8332,7 @@ BOOST_AUTO_TEST_CASE(heavier_competing_fork_n_plus_72_getdata_fork_child)
 
 BOOST_AUTO_TEST_CASE(header_tower_seeds_best_known_without_duplicate_headers)
 {
-    // Live rtx6000 2026-08-29: buffer pool ready, deferred-replay gone, but
+    // A live consensus-archive node 2026-08-29: buffer pool ready, deferred-replay gone, but
     // inflight=0 / block_recv=0. m_best_header=199801, 6 peers advertise
     // above tip, selector asked peer=29 at 199386 (already_at_peer_best).
     // Headers are already in the index — do not wait for a duplicate
@@ -8433,7 +8433,7 @@ BOOST_AUTO_TEST_CASE(header_tower_seeds_best_known_without_duplicate_headers)
 
 BOOST_AUTO_TEST_CASE(best_header_follows_headers_only_suffix_not_pinned_to_tip)
 {
-    // macpro2 0.34.5: getchaintips 200258 headers-only branchlen=944 while
+    // <node> 0.34.5: getchaintips 200258 headers-only branchlen=944 while
     // getblockchaininfo headers==blocks. Same-chain suffix must be the
     // download target. ConnectTip is unchanged.
     LOCK(NetEventsInterface::g_msgproc_mutex);
@@ -8988,7 +8988,7 @@ BOOST_AUTO_TEST_CASE(recalculate_best_header_runs_when_unconfigured)
 
 BOOST_AUTO_TEST_CASE(silent_getdata_peer_rerequested_from_other_and_tip_advances)
 {
-    // Live 0.34.5 macpro2: headers 960 ahead, one peer accepted getdata for
+    // Live 0.34.5 <node>: headers 960 ahead, one peer accepted getdata for
     // tip+1 and never delivered. select=root_in_flight looped forever.
     // SendMessages ran on other peers (probe spam) and never evaluated the
     // silent owner's timeout. getblockfrompeer to a different peer advanced

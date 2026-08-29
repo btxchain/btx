@@ -29,7 +29,7 @@ namespace node {
  * A short heavier disconnected fork (lead ≤ HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD)
  * is still the locator origin (jarekpiot: chasing 0d5ffded@199398 must not
  * restart at the losing connected tip). A long HEADER_ONLY competing
- * tower (live rtx6000 2026-08-29: tip 199385, m_best_header 199801 on
+ * tower (a live consensus-archive node 2026-08-29: tip 199385, m_best_header 199801 on
  * withdrawn 33c834f8) must not be: locators from that tower never learn
  * tip-extending headers from peers advertising above us, so BestKnown
  * stays at the frozen tip and FindNextBlocks reports already_at_peer_best.
@@ -97,7 +97,7 @@ inline constexpr int HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD{6};
  * (synced_headers=-1), and the mining chain guard -- which counts only
  * peers with a KNOWN tip -- reported peer_count=0 /
  * insufficient_peer_consensus with dozens of live connections (measured
- * 2026-08-27 on macpro2: 82 connections, peer_count 0). Learning a
+ * 2026-08-27 on <node>: 82 connections, peer_count 0). Learning a
  * same-height peer's tip is one rate-limited getheaders
  * (BEST_KNOWN_PROBE_INTERVAL) and is a read; it cannot feed us a chain
  * we would not validate.
@@ -310,7 +310,7 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
 
 /**
  * BestKnown cannot walk toward the HEADER_ONLY tower: unset, or at/below
- * the connected tip. Live rtx6000 2026-08-29: peer=29 BestKnown==tip
+ * the connected tip. A live consensus-archive node 2026-08-29: peer=29 BestKnown==tip
  * 199386, m_best_header=199801, inflight=0, select=already_at_peer_best.
  */
 [[nodiscard]] inline bool HeaderSyncBestKnownStuckAtTip(
@@ -365,7 +365,7 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
 /**
  * inflight=0 while m_best_header is already ahead: SendMessages must
  * still run FindNextBlocks / GETDATA. Seeding BestKnown does not wait
- * for an inbound BLOCK. Live rtx6000 2026-08-29: seed logged seven
+ * for an inbound BLOCK. A live consensus-archive node 2026-08-29: seed logged seven
  * times, inflight stayed 0, no root-first GETDATA.
  */
 [[nodiscard]] inline bool HeaderSyncMustDriveFetchWhileStalled(

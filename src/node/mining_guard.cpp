@@ -204,7 +204,7 @@ MiningChainGuardStatus EvaluateMiningChainGuard(
         // insufficient_peer_consensus. The old order required
         // min_peer_count known BestKnown hashes first, so headers-level
         // visibility of 23 peers ahead still looked like an empty mesh
-        // (live rtx6000 / PR 126).
+        // (a live consensus-archive node / PR 126).
         if (status.median_peer_tip > local_tip_height + options.max_median_tip_gap) {
             status.reason = "local_tip_behind_peer_median";
             return status;

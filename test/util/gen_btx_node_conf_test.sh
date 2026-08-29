@@ -56,9 +56,9 @@ fi
 # Managed-direct profile checks.
 rg -q '^dnsseed=0$' "${MANAGED_CONF}"
 rg -q '^fixedseeds=0$' "${MANAGED_CONF}"
-rg -q '^addnode=178\.128\.135\.6:19335$' "${MANAGED_CONF}"
-rg -q '^addnode=143\.244\.209\.243:19335$' "${MANAGED_CONF}"
-rg -q '^addnode=68\.183\.240\.79:19335$' "${MANAGED_CONF}"
+rg -q '^addnode=192\.0\.2\.10:19335$' "${MANAGED_CONF}"
+rg -q '^addnode=192\.0\.2\.11:19335$' "${MANAGED_CONF}"
+rg -q '^addnode=192\.0\.2\.12:19335$' "${MANAGED_CONF}"
 if rg -q '^connect=node\.btx' "${MANAGED_CONF}"; then
   echo "unexpected public strict-connect entry in managed-direct profile" >&2
   exit 1

@@ -486,7 +486,7 @@ inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 6;
  *  height, then hash. This is not fork choice. ConnectTip still fully
  *  validates every body. PreferTrustAdjustedHeader's 6-block unauth cap
  *  left m_best_header on the connected tip while a 944-deep headers-only
- *  suffix sat in the index (macpro2 0.34.5: headers==blocks, lockstep). */
+ *  suffix sat in the index (<node> 0.34.5: headers==blocks, lockstep). */
 [[nodiscard]] inline bool PreferMostWorkHeader(const CBlockIndex& current,
                                                const CBlockIndex& candidate)
 {

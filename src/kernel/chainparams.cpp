@@ -843,7 +843,7 @@ public:
         // mined past, while ~75% of reachable peers stayed on pre-recovery
         // rules; the warning above ("any reachable height is a hard fork")
         // came true and split the network at 199295/199299. Measured
-        // 2026-08-27 (CLAIMED-WORK-DIAG on macpro2): first divergence is
+        // 2026-08-27 (CLAIMED-WORK-DIAG on <node>): first divergence is
         // exactly height 199299 -- majority branch 199299 a71e0c1c claimed
         // 1e27264f = plain-ASERT value; re-anchored rules demanded 1e26e130
         // -- and the majority chain validates cleanly with the re-anchor

@@ -9562,7 +9562,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     }
     // Consensus ENC-DR / RC: ConnectBlock does not ExactReplay. A HAVE_DATA
     // tip-child persisted without the verified bit must not become the
-    // active tip (Numair: every body is fully ExactReplay'd before
+    // active tip ([an operator]: every body is fully ExactReplay'd before
     // ConnectTip). Cannot run CUDA here: mempool is held. AcceptBlock
     // reverifies unconnected tip-children; ABC retries this candidate.
     if (pindexNew->nHeight > 0 &&
@@ -14873,7 +14873,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // for any unconnected tip-child that still lacks ExactReplay, even if
     // the body was first persisted unrequested (ticketless followed
     // catch-up). Requiring fRequested skipped GPU forever once HAVE_DATA
-    // was set (live rtx6000: digest_requests=0, non-terminal requeue).
+    // was set (a live consensus-archive node: digest_requests=0, non-terminal requeue).
     const bool needs_consensus_exact_replay{
         (pindex->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
         GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS &&
@@ -21434,7 +21434,7 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
     // Floor only an ancestor of the connected tip (headers-below-blocks).
     // Never use nHeight < tip alone: that would clamp a heavier competing
     // fork. Never assign the tip when a higher-work header is already
-    // selected (macpro2 0.34.5: 944-deep headers-only suffix).
+    // selected (<node> 0.34.5: 944-deep headers-only suffix).
     const bool behind_on_active{
         m_best_header->nHeight <= tip->nHeight &&
         tip->GetAncestor(m_best_header->nHeight) == m_best_header};

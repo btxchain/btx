@@ -2595,7 +2595,7 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
         false, /*on_or_extends_active_tip=*/true, 99, 100, kNearTip, false));
     BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
         false, true, 100, 100, kNearTip, false));
-    // Catch-up above the connected tip (live rtx6000 2026-08-29): unattested
+    // Catch-up above the connected tip (a live consensus-archive node 2026-08-29): unattested
     // bodies that extend the active chain must occupy ExactReplay. The old
     // upper bound (index_height <= tip_height) HEADER_ONLY-skipped them
     // while a competing twin sat on m_best_header.
@@ -3857,7 +3857,7 @@ BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_truste
     // Local signing key, serve unset → default 1.
     // Regression: AppInitParameterInteraction used to call CKey::GetPubKey()
     // on this WIF before bitcoind constructed ECC_Context. That null-derefs
-    // secp256k1_context_sign (macpro2 0.34, kernel segfault at 0 in
+    // secp256k1_context_sign (<node> 0.34, kernel segfault at 0 in
     // secp256k1_ec_pubkey_create, ~1.2s after start). Staging must not
     // derive the pubkey; FinalizeConfiguration does that after ECC_Start.
     {

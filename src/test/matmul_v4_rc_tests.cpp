@@ -1450,7 +1450,7 @@ BOOST_AUTO_TEST_CASE(rc_allow_unverifiable_catchup_still_exactreplays)
 {
     // -allowunverifiablematmulconsensus must not skip ExactReplay. A canary
     // miss used to zero the GEMM, then strict-device failed with
-    // strict_device_no_eligible_provider (live rtx6000: digest_requests=0,
+    // strict_device_no_eligible_provider (a live consensus-archive node: digest_requests=0,
     // buffer_pool_uninitialized). Catch-up must still replay on the available
     // GEMM, or on CPU if the device backend was gated empty.
     rc::ClearRCExactReplayAlternateProviders();

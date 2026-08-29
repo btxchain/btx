@@ -549,7 +549,7 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  an already-attested winner. Already-canonical near-tip holes stay
  *  on-device for IBD.
  *
- *  Catch-up (live rtx6000 2026-08-29): a consensus node that is merely
+ *  Catch-up (a live consensus-archive node 2026-08-29): a consensus node that is merely
  *  behind must ExactReplay bodies ABOVE its connected tip. The old upper
  *  bound (`index_height <= tip_height`) made that impossible, so
  *  MatMulMaySpendExactReplayGpu returned false, the followed-suffix
@@ -615,7 +615,7 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *
  *  The old predicate required tip_height >= frontier_height, so a node
  *  that was merely behind reported on_active_chain=false. Admission then
- *  treated catch-up as a competing fork (live rtx6000 2026-08-29:
+ *  treated catch-up as a competing fork (a live consensus-archive node 2026-08-29:
  *  blocks=199378 headers=199801, GPU 0%, digest_requests=0). Being
  *  behind is not evidence of an attack. */
 [[nodiscard]] inline bool SignedFrontierIsOnActiveChain(
@@ -1041,7 +1041,7 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  stay on the short-reorg path (1–6). Trusted mirrors keep their own
  *  authority / short-reorg gates.
  *
- *  Live 2026-08-28: after invalidate 33c834f8, macpro2 sat at 199310 on
+ *  Live 2026-08-28: after invalidate 33c834f8, <node> sat at 199310 on
  *  8b5da5a5 while a headers-only fork (LCA 199294, 88 headers, at the
  *  72-block unauth lead cap) had more claimed work and peers advertised
  *  199523. competing_not_active_tip_chain skipped GETDATA because the
@@ -1063,7 +1063,7 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  ancestor by snapping to ActiveTip, then the overlay undid competing
  *  promotions (jarekpiot). 0.34.5 also vetoed extends_tip, which pinned
  *  headers==blocks while a 944-deep more-work suffix grew in the index
- *  (macpro2 2026-08-28). Download targeting is not ConnectTip: parked /
+ *  (<node> 2026-08-28). Download targeting is not ConnectTip: parked /
  *  failed / below-tip stay out; trusted mirrors keep authority-steered
  *  follow. `extends_tip` is informational. */
 [[nodiscard]] inline bool ConsensusMinerMayFollowHeavierDisconnectedHeader(
@@ -1431,7 +1431,7 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  can ExactReplay. Trusted mirrors persist a pin-covered hash (they never
  *  P2P ExactReplay). Independent consensus must persist the unique followed
  *  tip-child: waiting for rcadmit is a near-tip anti-DoS policy, and a
- *  node that is merely behind never receives those tickets (live rtx6000
+ *  node that is merely behind never receives those tickets (a live consensus-archive node
  *  2026-08-29). Competing same-height siblings keep persist_without_gpu
  *  false so they remain RetainUntilTicketOrRetry / HEADER_ONLY. */
 [[nodiscard]] inline bool TicketlessRcBodyMayPersistWithoutGpu(
@@ -1995,7 +1995,7 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     // HEADERS announcements, PONG, ...) were never dispatched, so an
     // authority-mode node served header bytes only to ARCHIVE/MIRROR
     // service-bit peers and starved plain consensus peers forever
-    // (measured 2026-08-27 on macpro2: recv.getheaders>0 with
+    // (measured 2026-08-27 on <node>: recv.getheaders>0 with
     // sent.headers==0 for every no-bit / CONSENSUS-only peer). Serving
     // headers is a read; authority rules govern which BODIES we trust,
     // not who may ask us questions.

@@ -13418,7 +13418,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             // (work_units > cap - reserved always held), so the followed
             // tip-child body deferred forever. Live 2026-08-27/28: consensus
             // nodes froze exactly one block past the last attested height
-            // (jarekpiot on tag v0.34.2; independently confirmed on macpro2).
+            // (jarekpiot on tag v0.34.2; independently confirmed on <node>).
             // The competing-lane reservation still protects the followed
             // lane from competing bodies; verification itself is unchanged.
             direct_authenticated_tip_child =

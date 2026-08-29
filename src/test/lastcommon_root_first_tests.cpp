@@ -399,7 +399,7 @@ BOOST_AUTO_TEST_CASE(heavier_fork_n_plus_72_keeps_fork_child_missing)
 
 BOOST_AUTO_TEST_CASE(header_tower_best_known_finds_first_missing_body)
 {
-    // Live rtx6000: last_common pinned at tip while m_best_header is T+400.
+    // A live consensus-archive node: last_common pinned at tip while m_best_header is T+400.
     // Once BestKnown is the tower, root-first must name tip+1, not none.
     constexpr int k_tip{10};
     constexpr int k_ahead{400};

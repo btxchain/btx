@@ -57,7 +57,7 @@ heavier competing-fork GETDATA / probe fix.
 This split was made visible by per-peer byte tables and chaintips from
 **MendeMatthias**, **jarekpiot**, **Jpp-matata**, and **dixonping**.
 The 0.34.2 deadlock was read off tag `v0.34.2` by **jarekpiot** and
-independently confirmed on macpro2; **dixonping** asked for the
+independently confirmed on <node>; **dixonping** asked for the
 regression test that 0.34.2 lacked. **jarekpiot** then carried the
 tip-child / RC-slot deadlock through to a proposed fix (PR 126).
 
@@ -302,7 +302,7 @@ from them, and committed headers off genesis.
 ## 0.34.4 follow-up: heavier competing fork (33c834f8 / 199523)
 
 0.34.4 snapped `m_best_header` up to the connected tip. Measured:
-macpro2 `blocks=199310 headers=199024` → `199310/199310`. Peers then
+<node> `blocks=199310 headers=199024` → `199310/199310`. Peers then
 advertised 199523. The node still sent zero getheaders;
 `reconsiderblock 33c834f8` left the tip at 199310 after two minutes.
 
@@ -364,7 +364,7 @@ block past the last attested height. The stall survived a clean restart.
 GPU sat at 0%. Logs looped `Re-admitting budget-deferred body` then
 `MatMul pending verification cap reached` about once a second.
 
-Cause, read off the tag by **jarekpiot** and confirmed on macpro2:
+Cause, read off the tag by **jarekpiot** and confirmed on <node>:
 `IsBlockAuthenticated` only via `BLOCK_EXACT_REPLAY_VERIFIED` or
 `BLOCK_TRUSTED_REPLAY_ATTESTED`; with signers retired, ExactReplay is
 the only authenticator left. `direct_authenticated_tip_child` required

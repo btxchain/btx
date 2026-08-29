@@ -17,8 +17,7 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "release" / "verify_release_btxd.py"
-LEGACY_CPU = pathlib.Path(
-    "/home/administrator/Documents/btxchain/.03342-binaries/"
+LEGACY_CPU = pathlib.Path.home() / ".cache" / "btx-legacy" / (
     "btx-0.33.4.2-linux-x86_64-cpu.tar.gz"
 )
 

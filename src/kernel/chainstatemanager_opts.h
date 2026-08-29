@@ -393,7 +393,7 @@ template <typename Node>
 //! Same-chain HEADER_ONLY suffix of this many blocks is catch-up, not a
 //! withheld dump. Cadence would otherwise connect burst_max per ABC and
 //! leave a consensus archive frozen while bodies sit on disk (live
-//! rtx6000: 423 headers ahead, tip stalled). Competing forks
+//! <node>: 423 headers ahead, tip stalled). Competing forks
 //! (best_header does not extend the tip) still hold. ExactReplay still
 //! runs before every ConnectTip.
 [[nodiscard]] inline constexpr bool CadenceHoldFollowedCatchUpDisarms(
