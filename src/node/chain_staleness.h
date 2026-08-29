@@ -71,7 +71,17 @@ inline uint256 BlockIndexHashOrNull(const CBlockIndex* index)
         // GPU path. Pre-fork nAuthenticatedChainWork == nChainWork, so this is
         // behaviour-identical while the MatMul v4 fork is disabled.
         //
-        // The EXTENDING behind_best_header>6 path is deliberately UNCHANGED:
+        // The EXTENDING behind_best_header>6 path is deliberately UNCHANGED
+        // (E-3 adv5: INHERENT-TRADEOFF-FINAL). A cheap 7-header extending tower
+        // can force a CURRENT merchant's is_stale=true, but that is a
+        // settlement-HOLD grief (safe direction), and every candidate fix --
+        // capping the unauthenticated extending lead, or gating on tip-advance
+        // velocity / body corroboration -- risks UNDER-reporting an honest
+        // node that is genuinely far behind, which is settle-while-behind
+        // (double-spend blinding, the exact hole 77493d74/V6 closed) and worse
+        // than the grief. The root cause is the public-net header-spam-gate
+        // being disabled (a documented chainparams tradeoff), not fixable at
+        // the staleness layer without CPU-oracling headers.
         // an honest node that is genuinely far behind (e.g. a self-qualified
         // archive catching up) must keep reporting is_stale=true so merchants
         // do not credit deposits while behind. Over-reporting there is the

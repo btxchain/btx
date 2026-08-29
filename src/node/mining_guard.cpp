@@ -373,8 +373,18 @@ bool MiningChainGuardKnownHashOnActiveOrBestChain(
     if (index == nullptr) return false;
     const CBlockIndex* tip = chainman.ActiveChain().Tip();
     if (tip != nullptr && tip->GetAncestor(index->nHeight) == index) return true;
+    // E-5 (adv5): m_best_header follows cheap forged extending headers, so an
+    // attacker could advance it and make sybil BestKnown hashes on that forged
+    // tower count as "on-chain consensus". Require the counted best-header
+    // ancestor to be a block we actually HOLD the body for (BLOCK_HAVE_DATA) --
+    // a pure header-only forged tower has no bodies and no longer inflates the
+    // guard's consensus sample. Active-chain blocks always have HAVE_DATA, so
+    // the honest path is unchanged. Guard stays advisory (mining never pauses).
     const CBlockIndex* best = chainman.m_best_header;
-    if (best != nullptr && best->GetAncestor(index->nHeight) == index) return true;
+    if (best != nullptr && best->GetAncestor(index->nHeight) == index &&
+        (index->nStatus & BLOCK_HAVE_DATA)) {
+        return true;
+    }
     return false;
 }
 

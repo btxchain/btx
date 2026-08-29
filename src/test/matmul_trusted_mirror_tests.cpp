@@ -1527,6 +1527,15 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
         false, /*extends_active_tip=*/false, false, 199338, 199336,
         /*far_behind=*/true));
+    // E-7 (adv5): far-behind persist is bounded to the lead window; an
+    // unsolicited body far beyond it is dropped, not disk-filled.
+    BOOST_CHECK(PersistFollowedSuffixBodyWithoutGpu(
+        false, true, false, 199336 + node::matmul_trusted::PERSIST_FOLLOWED_SUFFIX_MAX_LEAD, 199336,
+        /*far_behind=*/true));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        false, true, false,
+        199336 + node::matmul_trusted::PERSIST_FOLLOWED_SUFFIX_MAX_LEAD + 1, 199336,
+        /*far_behind=*/true));
     using node::matmul_trusted::TicketlessRcBodyMayPersistWithoutGpu;
     BOOST_CHECK(TicketlessRcBodyMayPersistWithoutGpu(
         /*trusted_mirror_authority_cover=*/true, /*followed_tip_child=*/false));

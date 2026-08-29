@@ -1524,6 +1524,13 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  actually need — dropping them to protect the GPU was the live HEADER_ONLY
  *  re-getdata churn (180 drops / 3000 log lines after eae5de60). Competing
  *  forks that do not extend the tip still drop. */
+//! E-7 (adv5): bound the far-behind pre-GPU persist to this many blocks ahead
+//! of the tip. >= BLOCK_DOWNLOAD_WINDOW so every SOLICITED catch-up fetch is
+//! still persisted (no eae5de60 re-getdata churn), but an UNSOLICITED body far
+//! beyond the window (extending header exists, body flooded ahead) is dropped
+//! instead of disk-filling before ExactReplay reaches it.
+inline constexpr int32_t PERSIST_FOLLOWED_SUFFIX_MAX_LEAD{1024};
+
 [[nodiscard]] inline bool PersistFollowedSuffixBodyWithoutGpu(
     bool trusted_mirror,
     bool extends_active_tip,
@@ -1534,7 +1541,12 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
 {
     if (!extends_active_tip) return false;
     if (index_height <= tip_height) return false;
-    if (far_behind) return true;
+    if (far_behind) {
+        // Bounded lead: root-first ConnectTip slides the window as it
+        // ExactReplays; a fake body fails, the tip stalls, and the persist set
+        // stays bounded to PERSIST_FOLLOWED_SUFFIX_MAX_LEAD.
+        return index_height <= tip_height + PERSIST_FOLLOWED_SUFFIX_MAX_LEAD;
+    }
     if (trusted_mirror) return false;
     if (pprev_is_tip) return false;
     return true;
