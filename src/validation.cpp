@@ -14233,6 +14233,15 @@ static bool ContextualCheckBlock(const CBlock& block,
                 bool encdr_ok;
                 bool rc_local_execution_failure{false};
                 std::string rc_execution_detail;
+                // Snapshot cs_main-guarded quorum before any CUDA unlock.
+                // check_rc() may run inside CsMainScopedRelease; LookupBlockIndex
+                // / IndexHasTrustedMatMulAuthority must not (V1/RB-8).
+                const CBlockIndex* const exact_index{
+                    chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+                const bool have_trusted_quorum{
+                    chainman.IndexHasTrustedMatMulAuthority(exact_index) ||
+                    node::matmul_trusted::HasQuorumInMemory(
+                        block.GetHash(), nHeight)};
                 const auto check_rc = [&]() {
                     if (trusted_profile1) {
                         // Never ExactReplay on a trusted Profile-1 mirror.
@@ -14297,11 +14306,13 @@ static bool ContextualCheckBlock(const CBlock& block,
                     }
                     const matmul::v4::rc::ScopedExactReplayCancellation
                         shutdown_cancel{&chainman.m_interrupt.Flag()};
+                    bool unqualified_device_authority{false};
                     const auto outcome{
                         CheckMatMulProofOfWork_RCOutcome(
                             block, consensusParams, nHeight,
                             /*carrier_missing=*/nullptr,
-                            &rc_execution_detail)};
+                            &rc_execution_detail,
+                            &unqualified_device_authority)};
                     rc_local_execution_failure =
                         outcome ==
                             MatMulRCValidationOutcome::
@@ -14324,20 +14335,12 @@ static bool ContextualCheckBlock(const CBlock& block,
                     // unqualified_device_authority, so the full-GPU-speed
                     // mainline is byte-for-byte unchanged even with a leftover
                     // flag (rtx6000-class).
-                    if (valid &&
-                        matmul::v4::rc::GetLastExactReplayVerifyResult()
-                            .value_or(
-                                matmul::v4::rc::ExactReplayVerifyResult{})
-                            .unqualified_device_authority) {
-                        const CBlockIndex* const uq_index{
-                            chainman.m_blockman.LookupBlockIndex(
-                                block.GetHash())};
-                        const bool have_quorum{
-                            chainman.IndexHasTrustedMatMulAuthority(
-                                uq_index) ||
-                            node::matmul_trusted::HasQuorumInMemory(
-                                block.GetHash(), nHeight)};
-                        if (!have_quorum) {
+                    // The flag comes from THIS replay's return value, not
+                    // g_last_exact_replay (a concurrent replay can overwrite
+                    // the process-global). Quorum was snapshotted under cs_main
+                    // before CsMainScopedRelease.
+                    if (valid && unqualified_device_authority) {
+                        if (!have_trusted_quorum) {
                             rc_local_execution_failure = true;
                             rc_execution_detail =
                                 "unqualified device is not a consensus "
@@ -14367,8 +14370,6 @@ static bool ContextualCheckBlock(const CBlock& block,
                     ConsumeMatMulRCWinnerResealAuthority(
                         block, nHeight, consensusParams,
                         &winner_authority_provider)};
-                const CBlockIndex* exact_index{
-                    chainman.m_blockman.LookupBlockIndex(block.GetHash())};
                 const bool test_hook_forces_release{
                     MatMulExactReplayUnderReleasedCsMainHookInstalled()};
                 if (trusted_profile1 && !test_hook_forces_release) {
@@ -17696,9 +17697,25 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
     if (!pending && have_stored && stored >= m_compiled_validation_epoch) {
         return true;
     }
-    // pending && stored >= compiled is a crash-resume, not "done". Keep
-    // pending and skip already-checkpointed heights (SF-14).
-    if (!(pending && have_stored && stored >= m_compiled_validation_epoch)) {
+    // pending && stored >= compiled is a crash-resume of THIS compiled
+    // epoch, not "done". Keep pending and skip already-checkpointed
+    // heights (SF-14). A watermark from an older compiled epoch must not
+    // skip re-checks under a newer epoch (assessment MEDIUM-3).
+    const bool resume_this_epoch{
+        pending && have_stored && stored >= m_compiled_validation_epoch};
+    if (!resume_this_epoch) {
+        if (watermark > 0) {
+            LogPrintf("%s: discarding stale heal watermark height=%u "
+                      "(stored_epoch=%u compiled_epoch=%u)\n",
+                      __func__, watermark, stored, m_compiled_validation_epoch);
+            if (!m_blockman.m_block_tree_db->WriteValidationEpochHealWatermark(
+                    std::nullopt)) {
+                LogError("%s: failed to erase stale validation-epoch heal watermark\n",
+                         __func__);
+                return false;
+            }
+            watermark = 0;
+        }
         if (!m_blockman.m_block_tree_db->WriteValidationEpochPending(true)) {
             LogError("%s: failed to persist validation-epoch pending marker "
                      "(stored_epoch=%u compiled_epoch=%u)\n",
@@ -17706,7 +17723,7 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
             return false;
         }
     }
-    if (watermark > 0) {
+    if (resume_this_epoch && watermark > 0) {
         LogPrintf("%s: resuming validation-epoch heal from height %u "
                   "(stored_epoch=%u compiled_epoch=%u)\n",
                   __func__, watermark, stored, m_compiled_validation_epoch);

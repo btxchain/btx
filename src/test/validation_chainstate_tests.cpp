@@ -5001,6 +5001,47 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_resumes_after_checkpoint_abort, TestCha
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(validation_epoch_ignores_stale_watermark_from_prior_epoch, TestChain100Setup)
+{
+    // A leftover watermark from an interrupted older epoch must not skip
+    // re-checks after a compiled-epoch bump.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+
+    CBlockIndex* below{nullptr};
+    CBlockIndex* above{nullptr};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainstate.m_chain.Height() >= 80);
+        below = chainstate.m_chain[40];
+        above = chainstate.m_chain[80];
+        BOOST_REQUIRE(below && above);
+        for (CBlockIndex* pindex : {below, above}) {
+            pindex->nStatus &= ~(BLOCK_HAVE_UNDO | BLOCK_MANUALLY_INVALIDATED |
+                                 BLOCK_FAILED_MASK);
+            pindex->nStatus |= BLOCK_FAILED_VALID;
+            chainman.m_failed_blocks.insert(pindex);
+        }
+        BOOST_REQUIRE(chainman.GetBlockValidationEpoch() >= 1U);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpochPending(true));
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpochHealWatermark(
+            static_cast<uint32_t>(below->nHeight)));
+        {
+            ASSERT_DEBUG_LOG("discarding stale heal watermark");
+            BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
+        }
+        BOOST_CHECK_EQUAL(below->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_EQUAL(above->nStatus & BLOCK_FAILED_MASK, 0U);
+        uint32_t stored{0};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpoch(stored));
+        BOOST_CHECK_EQUAL(stored, chainman.GetBlockValidationEpoch());
+        uint32_t wm{99};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpochHealWatermark(wm));
+        BOOST_CHECK_EQUAL(wm, 0U);
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(validation_epoch_preserves_pre0345_invalidateblock, TestChain100Setup)
 {
     // SF-15: pre-0.34.5 invalidateblock persisted FAILED_VALID + HAVE_UNDO

@@ -427,7 +427,8 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
 [[nodiscard]] MatMulRCValidationOutcome CheckMatMulProofOfWork_RCOutcome(
     const CBlockHeader& header, const Consensus::Params& params,
     int32_t block_height, bool* carrier_missing = nullptr,
-    std::string* detail = nullptr);
+    std::string* detail = nullptr,
+    bool* unqualified_device_authority = nullptr);
 
 /** ENC_RC_COUPLED additive DIGEST_RECOMPUTE checker. Requires both RC and
  *  coupled activation. Before succinct authority it recomputes the resident

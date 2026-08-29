@@ -4566,10 +4566,14 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
 
 MatMulRCValidationOutcome CheckMatMulProofOfWork_RCOutcome(
     const CBlockHeader& header, const Consensus::Params& params,
-    int32_t block_height, bool* carrier_missing, std::string* detail)
+    int32_t block_height, bool* carrier_missing, std::string* detail,
+    bool* unqualified_device_authority)
 {
     if (carrier_missing != nullptr) *carrier_missing = false;
     if (detail != nullptr) detail->clear();
+    if (unqualified_device_authority != nullptr) {
+        *unqualified_device_authority = false;
+    }
     const auto start = std::chrono::steady_clock::now();
     const auto finish = [&](MatMulRCValidationOutcome outcome) {
         RegisterMatMulValidationRuntimeSample(
@@ -4664,6 +4668,9 @@ MatMulRCValidationOutcome CheckMatMulProofOfWork_RCOutcome(
                                                                 &*bnTarget,
                                                                 params.nMatMulRCProfile);
     if (detail != nullptr) *detail = replay.note;
+    if (unqualified_device_authority != nullptr) {
+        *unqualified_device_authority = replay.unqualified_device_authority;
+    }
     if (!replay.ok) {
         switch (replay.outcome) {
         case matmul::v4::rc::ExactReplayVerifyOutcome::InvalidConsensus:
