@@ -156,10 +156,10 @@ ProductionGateAction ApplyStrictProductionEligibilityGate(
     }
     if (g_allow_unverifiable_catchup_replay.load(std::memory_order_acquire)) {
         if (acceleration.gemm.gemm_s8s8 != nullptr) {
-            // Catch-up ExactReplay on the available device. The CUDA
-            // digest buffer pool is lazy: the first GEMM call initializes
-            // it. Zeroing the GEMM here left digest_requests=0 and
-            // buffer_pool_uninitialized (live rtx6000 2026-08-29).
+            // Catch-up ExactReplay on the available byte-exact GEMM.
+            // Zeroing it left require_device true and digest_requests=0
+            // (live rtx6000 2026-08-29). The v3 mining digest pool is a
+            // separate lazy allocator; RC GEMM does not touch it.
             resolution_reason += ":unverifiable_catchup_replay";
             return ProductionGateAction::UnverifiableDevice;
         }

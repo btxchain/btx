@@ -42,6 +42,12 @@ MatMulBufferPoolStats ProbeMatMulBufferPool()
     return stats;
 }
 
+bool EnsureMatMulBufferPoolReady(std::string& reason)
+{
+    reason = "disabled_by_build";
+    return false;
+}
+
 MatMulDispatchConfig ProbeMatMulDispatchConfig()
 {
     MatMulDispatchConfig config;

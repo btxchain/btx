@@ -1487,6 +1487,25 @@ BOOST_AUTO_TEST_CASE(rc_allow_unverifiable_catchup_still_exactreplays)
         cpu_catchup.acceleration_resolution_reason.find(
             ":unverifiable_catchup_cpu") != std::string::npos);
     BOOST_CHECK_EQUAL(cpu_catchup.acceleration_backend, "cpu_unverifiable_catchup");
+    BOOST_CHECK(!cpu_catchup.require_device);
+
+    // Header-tower catch-up still rejects a tampered digest. The flag
+    // opts out of device self-qualification, not out of ExactReplay.
+    CBlockHeader tampered{header};
+    tampered.matmul_digest = uint256::ONE;
+    const auto device_reject{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            tampered, params, /*height=*/0, acceleration,
+            /*production_eligible=*/false)};
+    BOOST_CHECK(!device_reject.ok);
+    const auto cpu_reject{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            tampered, params, /*height=*/0, cpu_accel,
+            /*production_eligible=*/false)};
+    BOOST_CHECK(!cpu_reject.ok);
+    BOOST_CHECK(
+        cpu_reject.outcome ==
+        rc::ExactReplayVerifyOutcome::InvalidConsensus);
 
     rc::ResetRCExactReplayProviderHealthForTest();
     BOOST_CHECK(!rc::GetRCExactReplayAllowUnverifiableCatchUp());
