@@ -509,6 +509,12 @@ public:
     bool WriteBlockIndexDB(std::optional<uint32_t> validation_epoch = std::nullopt,
                            std::optional<bool> validation_epoch_pending = std::nullopt,
                            const std::set<uint256>* parked_reorg_branches = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Queue a block-index row for the next WriteBlockIndexDB batch. */
+    void MarkBlockIndexDirty(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        m_dirty_blockindex.insert(&index);
+    }
     bool LoadBlockIndexDB(
         const std::optional<uint256>& snapshot_blockhash,
         const std::optional<AssumeutxoData>& attested_assumeutxo = std::nullopt)

@@ -5329,6 +5329,116 @@ static RPCHelpMan getblocklocations()
     };
 }
 
+static UniValue BlockIndexStatusJSON(const CBlockIndex& index)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("hash", index.GetBlockHash().GetHex());
+    obj.pushKV("height", index.nHeight);
+    obj.pushKV("nStatus", static_cast<int64_t>(index.nStatus));
+    obj.pushKV("failed_valid", bool(index.nStatus & BLOCK_FAILED_VALID));
+    obj.pushKV("failed_child", bool(index.nStatus & BLOCK_FAILED_CHILD));
+    obj.pushKV("manually_invalidated", bool(index.nStatus & BLOCK_MANUALLY_INVALIDATED));
+    obj.pushKV("have_data", bool(index.nStatus & BLOCK_HAVE_DATA));
+    obj.pushKV("have_undo", bool(index.nStatus & BLOCK_HAVE_UNDO));
+    return obj;
+}
+
+static RPCHelpMan getblockindexstatus()
+{
+    return RPCHelpMan{"getblockindexstatus",
+                "\nReturn persisted-style block-index status flags (-regtest only).\n"
+                "Used to prove validation-epoch self-heal against a real datadir.\n",
+                {
+                    {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash"},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "hash", "Block hash"},
+                        {RPCResult::Type::NUM, "height", "Block height"},
+                        {RPCResult::Type::NUM, "nStatus", "Raw CBlockIndex::nStatus"},
+                        {RPCResult::Type::BOOL, "failed_valid", "BLOCK_FAILED_VALID is set"},
+                        {RPCResult::Type::BOOL, "failed_child", "BLOCK_FAILED_CHILD is set"},
+                        {RPCResult::Type::BOOL, "manually_invalidated", "BLOCK_MANUALLY_INVALIDATED is set"},
+                        {RPCResult::Type::BOOL, "have_data", "BLOCK_HAVE_DATA is set"},
+                        {RPCResult::Type::BOOL, "have_undo", "BLOCK_HAVE_UNDO is set"},
+                    }},
+                RPCExamples{HelpExampleCli("getblockindexstatus", "\"hash\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!Params().IsMockableChain()) {
+        throw std::runtime_error("getblockindexstatus is for regression testing (-regtest mode) only");
+    }
+    const uint256 hash(ParseHashV(request.params[0], "blockhash"));
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    LOCK(cs_main);
+    const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(hash)};
+    if (index == nullptr) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+    }
+    return BlockIndexStatusJSON(*index);
+},
+    };
+}
+
+static RPCHelpMan mockvalidationepoch()
+{
+    return RPCHelpMan{"mockvalidationepoch",
+                "\nWrite the stored validation epoch and optionally strip BLOCK_MANUALLY_INVALIDATED "
+                "so the next restart looks like a poisoned 0.34.0–0.34.4 index (-regtest only).\n"
+                "Does not run the heal; the heal fires on the subsequent startup.\n",
+                {
+                    {"epoch", RPCArg::Type::NUM, RPCArg::Optional::NO, "Persisted validation epoch to write (0 simulates a pre-heal binary)"},
+                    {"strip_manual", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, drop BLOCK_MANUALLY_INVALIDATED from every index entry and persist, leaving BLOCK_FAILED_* (the buggy-build poison shape)"},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "epoch", "Value written to the block-tree DB"},
+                        {RPCResult::Type::NUM, "stripped_manual", "Index entries whose MANUAL bit was cleared"},
+                    }},
+                RPCExamples{HelpExampleCli("mockvalidationepoch", "0 true")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!Params().IsMockableChain()) {
+        throw std::runtime_error("mockvalidationepoch is for regression testing (-regtest mode) only");
+    }
+    const int64_t epoch64{request.params[0].getInt<int64_t>()};
+    if (epoch64 < 0 || epoch64 > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "epoch out of range");
+    }
+    const uint32_t epoch{static_cast<uint32_t>(epoch64)};
+    const bool strip_manual{
+        request.params[1].isNull() ? false : request.params[1].get_bool()};
+
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    unsigned stripped{0};
+    {
+        LOCK(cs_main);
+        if (strip_manual) {
+            for (CBlockIndex* pindex : chainman.m_blockman.GetAllBlockIndices()) {
+                if ((pindex->nStatus & BLOCK_MANUALLY_INVALIDATED) == 0) continue;
+                pindex->nStatus &= ~BLOCK_MANUALLY_INVALIDATED;
+                chainman.m_blockman.MarkBlockIndexDirty(*pindex);
+                ++stripped;
+            }
+        }
+        if (!chainman.m_blockman.WriteBlockIndexDB()) {
+            throw JSONRPCError(RPC_DATABASE_ERROR, "Failed to persist block index");
+        }
+        if (!chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(epoch)) {
+            throw JSONRPCError(RPC_DATABASE_ERROR, "Failed to persist validation epoch");
+        }
+    }
+
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("epoch", static_cast<int64_t>(epoch));
+    obj.pushKV("stripped_manual", static_cast<int64_t>(stripped));
+    return obj;
+},
+    };
+}
+
 
 void RegisterBlockchainRPCCommands(CRPCTable& t)
 {
@@ -5371,6 +5481,8 @@ void RegisterBlockchainRPCCommands(CRPCTable& t)
         {"hidden", &getblockfileinfo},
         {"hidden", &invalidateblock},
         {"hidden", &reconsiderblock},
+        {"hidden", &getblockindexstatus},
+        {"hidden", &mockvalidationepoch},
         {"blockchain", &waitfornewblock},
         {"blockchain", &waitforblock},
         {"blockchain", &waitforblockheight},
