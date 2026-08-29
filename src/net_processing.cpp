@@ -10069,6 +10069,20 @@ void PeerManagerImpl::MaybeSeedBestKnownFromHeaderTower(
     const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
     const CBlockIndex* const best{m_chainman.m_best_header};
     if (tip == nullptr || best == nullptr) return;
+    // V4/RB-11: the LOCAL header tower is a fetch TARGET, not proof this peer
+    // holds those blocks. Only fabricate a tower BestKnown for a peer that can
+    // actually serve bodies (CanServeBlocks / GPU authority / manual / noban).
+    // Seeding an arbitrary inbound peer that merely advertised VERSION>tip
+    // misdirected GETDATA to a peer without the block and poisoned
+    // mining-guard peer-height visibility (a VERSION sybil looked like it held
+    // our tower). Real body sources still get seeded so catch-up starts.
+    const bool peer_may_serve_bodies{
+        node::matmul_trusted::StalledTowerFetchPeerMayServeBodies(
+            PeerIsGpuAuthority(peer_id, state),
+            CanServeBlocks(peer),
+            /*version_handshake_complete=*/peer.m_starting_height.load() >= 0,
+            state.m_manual, state.m_noban)};
+    if (!peer_may_serve_bodies) return;
     const int starting{
         state.m_starting_height >= 0 ? state.m_starting_height
                                      : peer.m_starting_height.load()};
@@ -20553,10 +20567,27 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // slot, fPreferredDownload, or PeerMay. Those gates left a stalled
         // consensus archive at inflight=0 with the predicate true (rtx6000
         // 2026-08-29: headers=199801, blocks=199387, zero getdata).
+        // V3/RB-10: keep the hoist (a stalled archive must GETDATA without
+        // waiting on the IBD sync-slot / fPreferredDownload / PeerMay gates),
+        // but AND it with "this peer can actually serve bodies". Without this
+        // the hoist fired during IBD and for inbound miners / pruned /
+        // non-block-source peers (LoadingBlocks is disk-only, not IBD), so any
+        // handshake advertising height>tip absorbed GETDATA and replied
+        // notfound/ignore -- a zero-PoW catch-up-starvation DoS. GPU
+        // authorities are still eligible even if VERSION omitted NODE_NETWORK.
+        const bool peer_may_serve_bodies{
+            node::matmul_trusted::StalledTowerFetchPeerMayServeBodies(
+                PeerIsGpuAuthority(pto->GetId(), state),
+                CanServeBlocks(*peer),
+                /*version_handshake_complete=*/
+                peer->m_starting_height.load() >= 0,
+                pto->IsManualConn(),
+                pto->HasPermission(NetPermissionFlags::NoBan))};
         const bool drive_stalled_tower_fetch{
             stalled_behind_header_tower &&
             !m_chainman.m_blockman.LoadingBlocks() &&
-            !pto->IsAddrFetchConn()};
+            !pto->IsAddrFetchConn() &&
+            peer_may_serve_bodies};
         const bool should_request_blocks_from_peer{
             node::matmul_trusted::TrustedMirrorGpuMayServeBlocks(
                 PeerIsGpuAuthority(pto->GetId(), state),

@@ -1929,6 +1929,27 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorGpuMayServeBlocks(
         /*gpu_authority=*/true, /*has_network_service=*/false,
         /*version_handshake_complete=*/false));
+    using node::matmul_trusted::StalledTowerFetchPeerMayServeBodies;
+    // V3/RB-10 + V4/RB-11: only a body-serve-capable peer is a hoist-GETDATA
+    // or tower-seed target. A GPU authority qualifies without NODE_NETWORK; a
+    // NODE_NETWORK peer qualifies; manual/noban override.
+    BOOST_CHECK(StalledTowerFetchPeerMayServeBodies(
+        /*gpu_authority=*/true, /*can_serve_blocks=*/false,
+        /*version_handshake_complete=*/true, /*manual=*/false,
+        /*noban=*/false));
+    BOOST_CHECK(StalledTowerFetchPeerMayServeBodies(
+        false, /*can_serve_blocks=*/true, true, false, false));
+    BOOST_CHECK(StalledTowerFetchPeerMayServeBodies(
+        false, false, true, /*manual=*/true, false));
+    BOOST_CHECK(StalledTowerFetchPeerMayServeBodies(
+        false, false, true, false, /*noban=*/true));
+    // A plain inbound non-block-source advertising height>tip is NOT a target
+    // (the V3/V4 DoS + guard-poison it used to hit).
+    BOOST_CHECK(!StalledTowerFetchPeerMayServeBodies(
+        false, false, true, false, false));
+    // Handshake-incomplete peer is never a target even if it would serve.
+    BOOST_CHECK(!StalledTowerFetchPeerMayServeBodies(
+        true, true, /*version_handshake_complete=*/false, false, false));
     using node::matmul_trusted::TrustedMirrorKeepFetchingCoveredUnconnected;
     BOOST_CHECK(TrustedMirrorKeepFetchingCoveredUnconnected(
         /*signed_frontier_catch_up=*/true,

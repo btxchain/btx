@@ -2458,6 +2458,27 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     return gpu_authority || has_network_service;
 }
 
+/** V3/RB-10 + V4/RB-11: a stalled archive may hoist GETDATA to -- and seed a
+ *  local-header-tower fetch TARGET onto -- ONLY a peer that can actually serve
+ *  bodies. The hoist and the tower seed both used to fire for any handshake
+ *  advertising height>tip, so an inbound miner / pruned / non-block-source
+ *  peer absorbed GETDATA (notfound/ignore, zero-PoW catch-up-starvation DoS)
+ *  and had a fabricated BestKnown that poisoned mining-guard peer-height
+ *  visibility. GPU authorities qualify even when VERSION omitted NODE_NETWORK;
+ *  manual / noban peers are trusted overrides. This is a fetch/seed
+ *  ELIGIBILITY gate only -- acceptance still fully ExactReplays every body. */
+[[nodiscard]] inline bool StalledTowerFetchPeerMayServeBodies(
+    bool gpu_authority,
+    bool can_serve_blocks,
+    bool version_handshake_complete,
+    bool manual,
+    bool noban)
+{
+    return TrustedMirrorGpuMayServeBlocks(
+               gpu_authority, can_serve_blocks, version_handshake_complete) ||
+           manual || noban;
+}
+
 /** Root-first must not delete a fresh GETDATA because a second peer is
  *  eligible as a parallel owner. Live public CPU archive 2026-08-16: MayDuplicate
  *  (owners<2) called RemoveBlockRequest(nullopt); the GPU BLOCK then
