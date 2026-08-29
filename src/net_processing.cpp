@@ -1047,8 +1047,15 @@ struct Peer {
     /** Work queue of items requested by this peer **/
     std::deque<CInv> m_getdata_requests GUARDED_BY(m_getdata_requests_mutex);
 
-    /** Time of the last getheaders message to this peer */
+    /** Time of the last getheaders message to this peer.
+     *  Cleared when a connecting HEADERS reply is treated as the answer
+     *  (solicited / duplicate / no-progress). Not the send-rate clock. */
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /** When we last *sent* getheaders to this peer. Connecting replies
+     *  must not clear this: that reset the 2-minute window at RTT
+     *  (live 0.34.5: 171 getheaders/sec). HeadersSyncState continuations
+     *  still clear it so IBD presync can walk. */
+    NodeClock::time_point m_last_getheaders_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** Issue #107: unsolicited already-known header replay accounting. */
     std::chrono::steady_clock::time_point m_dup_header_window_start GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     uint64_t m_dup_header_bytes GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
@@ -8826,7 +8833,12 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
             pfrom.fDisconnect = true;
         }
         // If it is a valid continuation, we should treat the existing getheaders request as responded to.
-        if (result.success) peer.m_last_getheaders_timestamp = {};
+        // HeadersSyncState is one-request-per-batch by design: also clear
+        // the send clock so IBD presync is not stalled for 2 minutes.
+        if (result.success) {
+            peer.m_last_getheaders_timestamp = {};
+            peer.m_last_getheaders_sent = {};
+        }
         if (result.request_more) {
             auto locator = peer.m_headers_sync->NextHeadersRequestLocator();
             // If we were instructed to ask for a locator, it should not be empty.
@@ -8835,7 +8847,7 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
             Assume(result.success);
             if (!locator.vHave.empty()) {
                 // It should be impossible for the getheaders request to fail,
-                // because we just cleared the last getheaders timestamp.
+                // because we just cleared the last getheaders send clock.
                 if (MaybeSendGetHeaders(pfrom, locator, peer)) {
                     LogDebug(BCLog::NET, "more getheaders (from %s) to peer=%d\n",
                         locator.vHave.front().ToString(), pfrom.GetId());
@@ -9028,10 +9040,12 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
 
     const auto current_time = NodeClock::now();
 
-    // Only allow a new getheaders message to go out if we don't have a recent
-    // one already in-flight
-    if (current_time - peer.m_last_getheaders_timestamp > HEADERS_RESPONSE_TIME) {
+    // Rate-limit on last *send*, not last answered. Connecting HEADERS
+    // still clear m_last_getheaders_timestamp (solicited / duplicate
+    // accounting) but must not reopen the 2-minute window.
+    if (current_time - peer.m_last_getheaders_sent > HEADERS_RESPONSE_TIME) {
         MakeAndPushMessage(pfrom, NetMsgType::GETHEADERS, locator, uint256());
+        peer.m_last_getheaders_sent = current_time;
         peer.m_last_getheaders_timestamp = current_time;
         LogInfo("sending getheaders (%zu locator hashes) peer=%d\n",
                 locator.vHave.size(), pfrom.GetId());

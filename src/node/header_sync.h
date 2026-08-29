@@ -143,7 +143,8 @@ inline constexpr int HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD{6};
  * Per-peer best-known probe pacing. `have_prior_probe` is false until
  * this peer has been asked. Elapsed time is not reset when headers
  * arrive — that was the live spam (duplicate suffix replies cleared
- * m_last_getheaders_timestamp and immediately re-sent).
+ * m_last_getheaders_timestamp). Send rate is m_last_getheaders_sent,
+ * which connecting replies must not reset.
  */
 [[nodiscard]] inline bool HeaderSyncProbeIntervalElapsed(
     bool have_prior_probe,

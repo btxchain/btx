@@ -9353,6 +9353,37 @@ BOOST_AUTO_TEST_CASE(best_known_probe_is_rate_limited_and_skips_height_zero)
     probe.fPauseSend = false;
     BOOST_CHECK(peerman.SendMessages(&probe));
     BOOST_CHECK_EQUAL(CountQueuedMessageType(probe, NetMsgType::GETHEADERS), 0U);
+
+    // SF-1: connecting HEADERS clear m_last_getheaders_timestamp (answered)
+    // but must not reset m_last_getheaders_sent. An INV that would otherwise
+    // request headers must wait HEADERS_RESPONSE_TIME.
+    CBlockIndex* connecting{MakePeermanHeaderChild(chainman, *tip, 0xd1)};
+    std::vector<CBlock> connecting_hdrs{connecting->GetBlockHeader()};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        probe, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(connecting_hdrs))));
+    probe.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(probe);
+    connman.FlushSendBuffer(probe);
+
+    auto inv_unknown = [&](unsigned char tag) {
+        const uint256 hash{uint256::FromHex(
+            std::string(62, 'e') + strprintf("%02x", tag)).value()};
+        std::vector<CInv> inv{{MSG_BLOCK, hash}};
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            probe, NetMsg::Make(NetMsgType::INV, inv)));
+        probe.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(probe);
+    };
+    inv_unknown(0x01);
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedMessageType(probe, NetMsgType::GETHEADERS) == 0U,
+        "connecting HEADERS must not reset the per-peer getheaders send window");
+    SetMockTime(std::chrono::seconds{GetTime() + 180});
+    connman.FlushSendBuffer(probe);
+    inv_unknown(0x02);
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedMessageType(probe, NetMsgType::GETHEADERS) >= 1U,
+        "continuation getheaders must send once HEADERS_RESPONSE_TIME elapses");
     peerman.FinalizeNode(probe);
 
     CNode height_zero{/*id=*/5411, /*sock=*/nullptr, CAddress{},
