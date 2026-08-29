@@ -5455,17 +5455,20 @@ static RPCHelpMan mockvalidationepoch()
 {
     return RPCHelpMan{"mockvalidationepoch",
                 "\nWrite the stored validation epoch and optionally strip BLOCK_MANUALLY_INVALIDATED "
-                "so the next restart looks like a poisoned 0.34.0–0.34.4 index (-regtest only).\n"
+                "and BLOCK_HAVE_UNDO so the next restart looks like a poisoned 0.34.0–0.34.4 index "
+                "(-regtest only).\n"
                 "Does not run the heal; the heal fires on the subsequent startup.\n",
                 {
                     {"epoch", RPCArg::Type::NUM, RPCArg::Optional::NO, "Persisted validation epoch to write (0 simulates a pre-heal binary)"},
-                    {"strip_manual", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, drop BLOCK_MANUALLY_INVALIDATED from every index entry and persist, leaving BLOCK_FAILED_* (the buggy-build poison shape)"},
+                    {"strip_manual", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, drop BLOCK_MANUALLY_INVALIDATED from every index entry and persist, leaving BLOCK_FAILED_* (the buggy-build poison shape unless strip_undo is false)"},
+                    {"strip_undo", RPCArg::Type::BOOL, RPCArg::DefaultHint{"same as strip_manual"}, "If true, also drop BLOCK_HAVE_UNDO from FAILED entries. Defaults to strip_manual. Pass false with strip_manual=true to simulate a pre-0.34.5 invalidateblock (FAILED_VALID + HAVE_UNDO, no MANUAL bit)."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
                         {RPCResult::Type::NUM, "epoch", "Value written to the block-tree DB"},
                         {RPCResult::Type::NUM, "stripped_manual", "Index entries whose MANUAL bit was cleared"},
+                        {RPCResult::Type::NUM, "stripped_undo", "FAILED index entries whose HAVE_UNDO bit was cleared"},
                     }},
                 RPCExamples{HelpExampleCli("mockvalidationepoch", "0 true")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -5480,9 +5483,12 @@ static RPCHelpMan mockvalidationepoch()
     const uint32_t epoch{static_cast<uint32_t>(epoch64)};
     const bool strip_manual{
         request.params[1].isNull() ? false : request.params[1].get_bool()};
+    const bool strip_undo{
+        request.params[2].isNull() ? strip_manual : request.params[2].get_bool()};
 
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     unsigned stripped{0};
+    unsigned stripped_undo{0};
     {
         LOCK(cs_main);
         if (strip_manual) {
@@ -5491,6 +5497,15 @@ static RPCHelpMan mockvalidationepoch()
                 pindex->nStatus &= ~BLOCK_MANUALLY_INVALIDATED;
                 chainman.m_blockman.MarkBlockIndexDirty(*pindex);
                 ++stripped;
+            }
+        }
+        if (strip_undo) {
+            for (CBlockIndex* pindex : chainman.m_blockman.GetAllBlockIndices()) {
+                if ((pindex->nStatus & BLOCK_FAILED_MASK) == 0) continue;
+                if ((pindex->nStatus & BLOCK_HAVE_UNDO) == 0) continue;
+                pindex->nStatus &= ~BLOCK_HAVE_UNDO;
+                chainman.m_blockman.MarkBlockIndexDirty(*pindex);
+                ++stripped_undo;
             }
         }
         if (!chainman.m_blockman.WriteBlockIndexDB()) {
@@ -5504,6 +5519,7 @@ static RPCHelpMan mockvalidationepoch()
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("epoch", static_cast<int64_t>(epoch));
     obj.pushKV("stripped_manual", static_cast<int64_t>(stripped));
+    obj.pushKV("stripped_undo", static_cast<int64_t>(stripped_undo));
     return obj;
 },
     };

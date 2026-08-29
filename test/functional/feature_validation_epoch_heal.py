@@ -10,12 +10,15 @@ did — BLOCK_FAILED_VALID on disk, persisted epoch older than the compiled
 one — then restarts btxd and asserts the startup heal log and the resulting
 tip. Three cases:
 
-  1. Rescue: a valid heaviest-work block was marked FAILED (no MANUAL bit).
-     Heal must clear the mark, re-validate, and ActivateBestChain must follow it.
+  1. Rescue: a valid heaviest-work block was marked FAILED (no MANUAL bit,
+     no HAVE_UNDO). Heal must clear the mark, re-validate, and ActivateBestChain
+     must follow it.
   2. Safety: a genuinely invalid body (CheckBlock fails) is marked FAILED.
      Heal must re-mark it invalid. The active tip must not move onto it.
   3. Operator intent: invalidateblock set BLOCK_MANUALLY_INVALIDATED.
      Heal must leave it failed; the operator fork must not resurrect.
+  4. Pre-0.34.5 operator: invalidateblock persisted as FAILED_VALID + HAVE_UNDO
+     with no MANUAL bit. Heal must leave it failed.
 
 Do not weaken an assertion to make a case pass. A failure here is a
 release blocker (PR 128 / 0.34.5).
@@ -41,14 +44,14 @@ HEAL_SUMMARY_RE = re.compile(
 class ValidationEpochHealTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 3
-        # Isolate the three cases. Zero hysteresis so a 1-block reorg back
+        self.num_nodes = 4
+        # Isolate the cases. Zero hysteresis so a 1-block reorg back
         # onto the rescued tip is not deferred (unit tests do the same).
         common = [
             "-reorghysteresisdepth=0",
             "-reorghysteresisworkmargin=0",
         ]
-        self.extra_args = [common, common, common]
+        self.extra_args = [common, common, common, common]
 
     def setup_network(self):
         self.setup_nodes()
@@ -153,9 +156,11 @@ class ValidationEpochHealTest(BitcoinTestFramework):
 
         mock = node.mockvalidationepoch(0, True)
         assert_greater_than(mock["stripped_manual"], 0)
+        assert_greater_than(mock["stripped_undo"], 0)
         poisoned = node.getblockindexstatus(poison_hash)
         assert_equal(poisoned["failed_valid"], True)
         assert_equal(poisoned["manually_invalidated"], False)
+        assert_equal(poisoned["have_undo"], False)
         self.log.info(
             f"poisoned index (FAILED, no MANUAL), stored epoch=0, "
             f"stripped_manual={mock['stripped_manual']} nStatus={poisoned['nStatus']}"
@@ -202,10 +207,12 @@ class ValidationEpochHealTest(BitcoinTestFramework):
         node.invalidateblock(original_hash)
         mock = node.mockvalidationepoch(0, True)
         assert_greater_than(mock["stripped_manual"], 0)
+        assert_greater_than(mock["stripped_undo"], 0)
         poisoned = node.getblockindexstatus(original_hash)
         assert_equal(poisoned["failed_valid"], True)
         assert_equal(poisoned["manually_invalidated"], False)
         assert_equal(poisoned["have_data"], True)
+        assert_equal(poisoned["have_undo"], False)
         disconnected_height = node.getblockcount()
         assert_equal(disconnected_height, original_height - 1)
         self.log.info(
@@ -298,13 +305,57 @@ class ValidationEpochHealTest(BitcoinTestFramework):
         self.log.info("CASE 3 PASS")
         return heal
 
+    def case_pre0345_operator(self, node):
+        self.log.info("CASE 4 — pre-0.34.5 invalidateblock (FAILED+HAVE_UNDO, no MANUAL) must not resurrect")
+        self.mine(node, 6)
+        original = node.getblockchaininfo()
+        original_height = original["blocks"]
+        original_hash = original["bestblockhash"]
+        parent_hash = node.getblockhash(original_height - 1)
+
+        node.invalidateblock(original_hash)
+        after_invalidate = node.getblockindexstatus(original_hash)
+        assert_equal(after_invalidate["failed_valid"], True)
+        assert_equal(after_invalidate["have_undo"], True)
+
+        mock = node.mockvalidationepoch(0, True, False)
+        assert_greater_than(mock["stripped_manual"], 0)
+        assert_equal(mock["stripped_undo"], 0)
+        poisoned = node.getblockindexstatus(original_hash)
+        assert_equal(poisoned["failed_valid"], True)
+        assert_equal(poisoned["manually_invalidated"], False)
+        assert_equal(poisoned["have_undo"], True)
+
+        heal, chunk = self.restart_and_heal(node)
+        assert_equal(heal["stored"], 0)
+        assert_greater_than(heal["left_manual"], 0)
+        if f"clearing failure flags for block {original_hash}" in chunk:
+            raise AssertionError(
+                f"heal cleared pre-0.34.5 operator-invalid {original_hash}:\n{chunk}"
+            )
+
+        after = node.getblockchaininfo()
+        status = node.getblockindexstatus(original_hash)
+        invalid_tip = self.chaintip(node, original_hash)
+        assert_equal(after["bestblockhash"], parent_hash)
+        assert_equal(after["blocks"], original_height - 1)
+        assert_equal(status["failed_valid"], True)
+        assert_equal(status["manually_invalidated"], False)
+        assert_equal(status["have_undo"], True)
+        assert invalid_tip is not None
+        assert_equal(invalid_tip["status"], "invalid")
+        self.log.info("CASE 4 PASS")
+        return heal
+
     def run_test(self):
         heal1 = self.case_rescue(self.nodes[0])
         heal2 = self.case_safety(self.nodes[1])
         heal3 = self.case_operator(self.nodes[2])
+        heal4 = self.case_pre0345_operator(self.nodes[3])
         self.log.info("CASE 1 heal line: " + heal1["line"])
         self.log.info("CASE 2 heal line: " + heal2["line"])
         self.log.info("CASE 3 heal line: " + heal3["line"])
+        self.log.info("CASE 4 heal line: " + heal4["line"])
 
 
 if __name__ == "__main__":

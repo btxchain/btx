@@ -2294,7 +2294,8 @@ public:
      * UnparkReorgBranchContainingBlock / reorg-recovery may drop a park.
      * ConnectBlock does not re-run ContextualCheck*; a flags-only clear
      * would accept a block the old binary rejected for ExactReplay/ASERT.
-     * BLOCK_MANUALLY_INVALIDATED (invalidateblock) is never cleared here.
+     * BLOCK_MANUALLY_INVALIDATED (invalidateblock) is never cleared here,
+     * nor is the pre-0.34.5 operator shape (FAILED_VALID + HAVE_UNDO).
      */
     [[nodiscard]] bool MaybeClearStaleInvalidMarksForValidationEpoch() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 

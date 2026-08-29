@@ -4451,6 +4451,18 @@ static void StripManualInvalidationBits(ChainstateManager& chainman)
     }
 }
 
+static void StripHaveUndoOnFailedBlocks(ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    // Buggy-build poison was rejected at connect and never wrote undo.
+    // Clearing HAVE_UNDO after StripManual makes the index match that
+    // shape; leaving HAVE_UNDO is the pre-0.34.5 invalidateblock shape.
+    for (auto& [_, idx] : chainman.m_blockman.m_block_index) {
+        if ((idx.nStatus & BLOCK_FAILED_MASK) == 0) continue;
+        idx.nStatus &= ~BLOCK_HAVE_UNDO;
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(validation_epoch_clears_poisoned_valid_marks, TestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -4486,6 +4498,7 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_clears_poisoned_valid_marks, TestChain1
         BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_MASK);
         BOOST_CHECK(invalidate_at->nStatus & BLOCK_MANUALLY_INVALIDATED);
         StripManualInvalidationBits(chainman);
+        StripHaveUndoOnFailedBlocks(chainman);
         BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
         BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
         BOOST_CHECK_EQUAL(invalidate_at->nStatus & BLOCK_FAILED_MASK, 0U);
@@ -4657,6 +4670,7 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_heals_poisoned_fork_shape, TestChain100
         BOOST_CHECK(decoy_index->nStatus & BLOCK_FAILED_MASK);
         BOOST_CHECK(heavy_tip->nStatus & BLOCK_FAILED_MASK);
         StripManualInvalidationBits(chainman);
+        StripHaveUndoOnFailedBlocks(chainman);
         BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
         BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
         BOOST_CHECK_EQUAL(poison_root->nStatus & BLOCK_FAILED_MASK, 0U);
@@ -4944,6 +4958,47 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_resumes_after_checkpoint_abort, TestCha
         BOOST_CHECK(!pending);
         BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpochHealWatermark(wm));
         BOOST_CHECK_EQUAL(wm, 0U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(validation_epoch_preserves_pre0345_invalidateblock, TestChain100Setup)
+{
+    // SF-15: pre-0.34.5 invalidateblock persisted FAILED_VALID + HAVE_UNDO
+    // without BLOCK_MANUALLY_INVALIDATED. The heal must not resurrect it.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& hysteresis = const_cast<std::optional<uint32_t>&>(
+        chainman.m_options.reorg_hysteresis_work_margin);
+    hysteresis = 0;
+
+    CBlockIndex* original_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(original_tip != nullptr);
+    const uint256 original_hash = original_tip->GetBlockHash();
+    const uint256 parent_hash = original_tip->pprev->GetBlockHash();
+
+    BlockValidationState inval;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(inval, original_tip));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(original_tip->nStatus & BLOCK_FAILED_VALID);
+        BOOST_CHECK(original_tip->nStatus & BLOCK_HAVE_UNDO);
+        BOOST_CHECK(original_tip->nStatus & BLOCK_MANUALLY_INVALIDATED);
+        StripManualInvalidationBits(chainman);
+        BOOST_CHECK_EQUAL(original_tip->nStatus & BLOCK_MANUALLY_INVALIDATED, 0U);
+        BOOST_CHECK(original_tip->nStatus & BLOCK_HAVE_UNDO);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
+        BOOST_CHECK(original_tip->nStatus & BLOCK_FAILED_MASK);
+        BOOST_CHECK(original_tip->nStatus & BLOCK_HAVE_UNDO);
+        BOOST_CHECK_EQUAL(chainman.InvalidMarksClearedOnUpgrade(), 0U);
+    }
+    BlockValidationState abc;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), parent_hash);
+        BOOST_CHECK_NE(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
+        BOOST_CHECK(original_tip->nStatus & BLOCK_FAILED_MASK);
     }
 }
 

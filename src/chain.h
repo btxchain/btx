@@ -152,6 +152,9 @@ enum BlockStatus : uint32_t {
     //! validation-epoch bump can clear poisoned FAILED marks without
     //! resurrecting a fork the operator deliberately killed. Cleared only
     //! by explicit reconsiderblock. Bit 512 is BLOCK_TRUSTED_REPLAY_ATTESTED.
+    //! Pre-0.34.5 binaries persisted operator intent as BLOCK_FAILED_VALID
+    //! plus BLOCK_HAVE_UNDO (the target had been connected) without this
+    //! bit; the epoch heal treats that shape as operator-invalid too.
     BLOCK_MANUALLY_INVALIDATED   = 1024,
 };
 

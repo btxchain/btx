@@ -34,6 +34,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "mockscheduler", 0, "delta_time" },
     { "mockvalidationepoch", 0, "epoch" },
     { "mockvalidationepoch", 1, "strip_manual" },
+    { "mockvalidationepoch", 2, "strip_undo" },
     { "utxoupdatepsbt", 1, "descriptors" },
     { "utxoupdatepsbt", 2, "prevtxs" },
     { "generatetoaddress", 0, "nblocks" },

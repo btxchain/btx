@@ -17663,6 +17663,8 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
     manual_lineage.reserve(by_height.size());
     for (CBlockIndex* pindex : by_height) {
         if ((pindex->nStatus & BLOCK_MANUALLY_INVALIDATED) != 0 ||
+            (((pindex->nStatus & BLOCK_FAILED_VALID) != 0) &&
+             ((pindex->nStatus & BLOCK_HAVE_UNDO) != 0)) ||
             (pindex->pprev != nullptr &&
              manual_lineage.find(pindex->pprev) != manual_lineage.end())) {
             manual_lineage.insert(pindex);
