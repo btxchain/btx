@@ -3237,6 +3237,7 @@ bool PeerManagerImpl::StoreMatMulDeferredBody(const uint256& hash,
             .reference_height = reference_height,
             .work_units = work_units,
             .pin_progress = pin_progress,
+            .idle_retry_bypass_available = true,
         }, now)};
     if (!retained) {
         LogWarning("Unable to retain deferred MatMul body %s: lifecycle capacity is occupied by active work\n",
@@ -8075,6 +8076,13 @@ void PeerManagerImpl::BlockConnected(
     // Update this for all chainstate roles so that we don't mistakenly see peers
     // helping us do background IBD as having a stale tip.
     m_last_tip_update = GetTime<std::chrono::seconds>();
+
+    // Once a block is active, retained verification state for that hash is
+    // terminal. This also cancels a live generation, preventing a late
+    // callback or idle retry from re-admitting an already-connected body.
+    if (role != ChainstateRole::BACKGROUND) {
+        m_matmul_block_lifecycle.TerminalConnected(pindex->GetBlockHash());
+    }
 
     // In case the dynamic timeout was doubled once or more, reduce it slowly back to
     // its current phase floor.

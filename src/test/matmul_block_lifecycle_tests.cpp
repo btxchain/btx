@@ -142,16 +142,36 @@ BOOST_AUTO_TEST_CASE(repeated_deferral_terminal_requeues)
     BOOST_CHECK(!lifecycle.IsActive(hash, now + 2s));
 }
 
-BOOST_AUTO_TEST_CASE(idle_catchup_ignores_retry_cooldown)
+BOOST_AUTO_TEST_CASE(idle_catchup_retry_bypass_is_one_shot)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
     const auto now{node::MatMulBlockLifecycle::Clock::now()};
     const uint256 hash{
         uint256::FromHex(std::string(63, '0') + "5").value()};
-    BOOST_REQUIRE(lifecycle.Retain(hash, Body(8, 50, now), now));
-    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
+    auto body{Body(8, 50, now + 60s)};
+    body.idle_retry_bypass_available = true;
+    BOOST_REQUIRE(lifecycle.Retain(hash, std::move(body), now));
     BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 1s).has_value());
-    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s, /*ignore_retry_delay=*/true).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(
+        uint256{}, now + 1s, /*allow_idle_retry_bypass=*/true).has_value());
+    BOOST_CHECK(!lifecycle.NextRetry(
+        uint256{}, now + 2s, /*allow_idle_retry_bypass=*/true).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(non_terminal_retry_disables_idle_bypass)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "d").value()};
+    auto body{Body(13, 50, now)};
+    body.idle_retry_bypass_available = true;
+    BOOST_REQUIRE(lifecycle.Retain(hash, std::move(body), now));
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
+    BOOST_CHECK(!lifecycle.NextRetry(
+        uint256{}, now + 1s, /*allow_idle_retry_bypass=*/true).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(capacity_does_not_evict_active_generation)
@@ -192,6 +212,33 @@ BOOST_AUTO_TEST_CASE(park_releases_cap_and_terminal_frees_bytes)
     lifecycle.Terminal(*token);
     BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
     BOOST_CHECK_EQUAL(lifecycle.RetainedCountForTest(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(connected_block_clears_live_lifecycle_generation)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const auto block{BlockWithNonce(14)};
+    const uint256 hash{block->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(14, 75, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    auto lease{std::make_shared<int>(1)};
+    std::weak_ptr<int> weak_lease{lease};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now));
+    lease.reset();
+    BOOST_REQUIRE(lifecycle.Start(*token, now));
+
+    lifecycle.TerminalConnected(hash);
+    BOOST_CHECK(cancelled->load());
+    BOOST_CHECK(weak_lease.expired());
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
+
+    lifecycle.Terminal(*token); // late completion is a harmless no-op
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
 }
 
 BOOST_AUTO_TEST_CASE(async_pending_without_body_does_not_block_download)

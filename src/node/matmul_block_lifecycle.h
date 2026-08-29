@@ -69,6 +69,10 @@ public:
         //! Non-terminal deferrals since this body was last freshly retained.
         //! RefreshRetry increments; TerminalRequeue resets.
         uint32_t deferral_count{0};
+        //! A newly budget-deferred body may bypass its first retry deadline
+        //! when the verifier is otherwise idle. The bypass is consumed by
+        //! NextRetry so idle catch-up cannot defeat every later cooldown.
+        bool idle_retry_bypass_available{false};
     };
 
     struct Token {
@@ -227,6 +231,9 @@ public:
         Entry& entry{it->second};
         const auto original_stored_at{
             entry.body ? entry.body->stored_at : now};
+        const bool idle_retry_bypass_available{
+            entry.body ? entry.body->idle_retry_bypass_available
+                       : body.idle_retry_bypass_available};
         if (entry.body) {
             AccountSourceRemove(entry.body->source_netgroup, entry.body->bytes);
             m_retained_bytes -= entry.body->bytes;
@@ -234,6 +241,9 @@ public:
         // Capacity TTL is non-refreshing for a hash: retries or repeated
         // deliveries cannot pin retained bytes forever.
         body.stored_at = original_stored_at;
+        // A duplicate delivery for the same hash must not restore a bypass
+        // already consumed by the scheduler.
+        body.idle_retry_bypass_available = idle_retry_bypass_available;
         entry.body = std::move(body);
         AccountSourceAdd(entry.body->source_netgroup, entry.body->bytes);
         m_retained_bytes += entry.body->bytes;
@@ -258,15 +268,21 @@ public:
     std::optional<std::pair<uint256, RetainedBody>> NextRetry(
         const uint256& preferred_parent,
         Clock::time_point now = Clock::now(),
-        bool ignore_retry_delay = false)
+        bool allow_idle_retry_bypass = false)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         PruneExpiredRetained(now);
         auto selected{m_entries.end()};
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             const Entry& entry{it->second};
-            if (!entry.body || IsActive(entry.state) ||
-                (!ignore_retry_delay && now < entry.body->retry_not_before)) {
+            if (!entry.body || IsActive(entry.state)) {
+                continue;
+            }
+            const bool retry_due{now >= entry.body->retry_not_before};
+            const bool may_bypass{
+                allow_idle_retry_bypass &&
+                entry.body->idle_retry_bypass_available};
+            if (!retry_due && !may_bypass) {
                 continue;
             }
             if (entry.body->block->hashPrevBlock == preferred_parent) {
@@ -279,6 +295,9 @@ public:
             }
         }
         if (selected == m_entries.end()) return std::nullopt;
+        if (now < selected->second.body->retry_not_before) {
+            selected->second.body->idle_retry_bypass_available = false;
+        }
         return std::make_pair(selected->first, *selected->second.body);
     }
 
@@ -289,6 +308,7 @@ public:
         const auto it{m_entries.find(hash)};
         if (it == m_entries.end() || !it->second.body) return false;
         it->second.body->retry_not_before = now + delay;
+        it->second.body->idle_retry_bypass_available = false;
         ++it->second.body->deferral_count;
         return true;
     }
@@ -321,6 +341,7 @@ public:
         body.deferral_count = 0;
         body.stored_at = now;
         body.retry_not_before = now + delay;
+        body.idle_retry_bypass_available = false;
         auto [nit, inserted] = m_entries.try_emplace(hash);
         (void)inserted;
         Entry& entry{nit->second};
@@ -409,6 +430,7 @@ public:
             return true;
         }
         entry->body->retry_not_before = now + delay;
+        entry->body->idle_retry_bypass_available = false;
         entry->state = State::TRANSIENT_FAILURE;
         entry->updated_at = now;
         return true;
@@ -483,6 +505,7 @@ public:
             return true;
         }
         it->second.body->retry_not_before = now + delay;
+        it->second.body->idle_retry_bypass_available = false;
         it->second.state = State::TRANSIENT_FAILURE;
         it->second.updated_at = now;
         return true;
@@ -508,6 +531,18 @@ public:
         if (it != m_entries.end() && !IsActive(it->second.state)) {
             EraseEntry(it);
         }
+    }
+
+    /**
+     * Active-chain connection is terminal for every lifecycle generation.
+     * Cancel live work and release the retained body so a late callback or
+     * retry scan cannot re-admit an already-connected block.
+     */
+    void TerminalConnected(const uint256& hash)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it != m_entries.end()) EraseEntry(it);
     }
 
     void Terminal(const Token& token)
