@@ -316,6 +316,15 @@ public:
     /** True while a complete body is held for scheduler re-admission. */
     [[nodiscard]] virtual bool HasMatMulRetainedBodyForTest(const uint256& hash) const = 0;
     [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
+    /** Issue #130 regression: retain a MatMul lifecycle body directly, bypassing
+     *  the ExactReplay deferral path so the guard is testable in CUDA-off builds. */
+    virtual void RetainMatMulBodyForTest(
+        const std::shared_ptr<const CBlock>& block) = 0;
+    /** Issue #130 regression: invoke the real BlockConnected callback with a
+     *  chosen block index, to simulate a stale async callback after a reorg. */
+    virtual void SimulateBlockConnectedForTest(
+        const std::shared_ptr<const CBlock>& block,
+        const CBlockIndex* pindex) = 0;
     /** Drive scheduler re-admission of a HAVE_DATA followed tip-child.
      *  Production calls this from CScheduler, never from SendMessages
      *  (g_msgproc_mutex). Tests must not hold that mutex. */

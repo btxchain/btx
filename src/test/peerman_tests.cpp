@@ -10446,4 +10446,40 @@ BOOST_AUTO_TEST_CASE(fresh_mirror_deadlock_empty_archive_consensus_headers_and_r
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
+BOOST_AUTO_TEST_CASE(block_connected_terminate_skips_reorged_away_body)
+{
+    // Issue #130 regression: BlockConnected is drained asynchronously, so a stale
+    // callback for a block that a reorg has since disconnected must NOT erase a
+    // fresh retained lifecycle body re-retained for that hash on the new chain.
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    peerman.ResetMatMulVerifyAdmissionForTest();
+
+    // A candidate block extending the tip, left UNCONNECTED (header-only) so it is
+    // not on the active chain -- i.e. the "reorged-away" block.
+    CBlock offchain{node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
+        .CreateNewBlock()->block};
+    auto offchain_ptr{std::make_shared<const CBlock>(offchain)};
+    const uint256 offchain_hash{offchain_ptr->GetHash()};
+
+    const CBlockIndex* offchain_index{nullptr};
+    {
+        BlockValidationState state;
+        std::vector<CBlockHeader> headers{offchain_ptr->GetBlockHeader()};
+        BOOST_REQUIRE(m_node.chainman->ProcessNewBlockHeaders(
+            headers, /*min_pow_checked=*/true, state, &offchain_index));
+        BOOST_REQUIRE(offchain_index != nullptr);
+        LOCK(::cs_main);
+        BOOST_REQUIRE(!m_node.chainman->ActiveChain().Contains(offchain_index));
+    }
+
+    peerman.RetainMatMulBodyForTest(offchain_ptr);
+    BOOST_REQUIRE(peerman.HasMatMulRetainedBodyForTest(offchain_hash));
+
+    // Stale BlockConnected for the reorged-away block: the active-chain guard
+    // must skip TerminalConnected, so the fresh retained body survives.
+    peerman.SimulateBlockConnectedForTest(offchain_ptr, offchain_index);
+    BOOST_CHECK(peerman.HasMatMulRetainedBodyForTest(offchain_hash));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
