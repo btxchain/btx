@@ -15300,7 +15300,34 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         !ActiveChain().Contains(pindex) &&
         (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
         (fRequested || needs_consensus_exact_replay)};
-    if (fAlreadyHave && !reverify_tip_child) return true;
+    // RB-16 CONVERGENCE: a HAVE_DATA body on a heavier tower under ACQUISITION
+    // escape (stale tip + registered exempt tower) whose parent chain is
+    // already connectable -- parent on the active chain (the fork root) or
+    // itself ExactReplay-verified with data -- must re-enter
+    // ContextualCheckBlock so the acquired tower's verdicts assemble
+    // CONTIGUOUSLY from its fork root. Without this the fAlreadyHave early
+    // return fossilized on-disk mid-tower bodies forever (live rtx6000: tip
+    // 199416, headers 201500, GPU ExactReplaying 199460+ out of order while
+    // 199313..199459 sat HAVE_DATA/unverified -- so no connected heavier
+    // chain ever existed for deepforkautoresolve/ABC to migrate to). The
+    // parent-connectable requirement keeps admission strictly root-first;
+    // CoversBlock keeps it bounded (<=2 towers, 600s stale gate,
+    // ACQUISITION_ESCAPE_MAX_LEAD). Unrequested P2P pushes of such bodies
+    // still bail in the !fRequested anti-DoS block below (nTx!=0 /
+    // less-work), so only local catch-up or requested downloads reach CUDA.
+    const bool reverify_acquired_fork_body{
+        fAlreadyHave &&
+        needs_consensus_exact_replay &&
+        pindex->pprev != nullptr &&
+        !ActiveChain().Contains(pindex) &&
+        (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
+        (ActiveChain().Contains(pindex->pprev) ||
+         ((pindex->pprev->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+          (pindex->pprev->nStatus & BLOCK_HAVE_DATA) != 0)) &&
+        AcquisitionEscapeCoversBlock(pindex)};
+    const bool reverify_have_data{reverify_tip_child ||
+                                  reverify_acquired_fork_body};
+    if (fAlreadyHave && !reverify_have_data) return true;
     if (!fRequested) {  // If we didn't ask for it:
         // Followed-chain historical holes (active-tip / snapshot-base
         // ancestors) are less-work by construction and may be pruned
@@ -15367,13 +15394,13 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // nTx / VALID_TRANSACTIONS may never have been raised. Do not skip
     // ReceivedBlockTransactions in that case — otherwise ABC cannot select it.
     if (pindex->nStatus & BLOCK_HAVE_DATA) {
-        if (reverify_tip_child && pindex->nTx == 0) {
+        if (reverify_have_data && pindex->nTx == 0) {
             const FlatFilePos pos{pindex->GetBlockPos()};
             if (!pos.IsNull()) {
                 ReceivedBlockTransactions(block, pindex, pos);
             }
         }
-        if (reverify_tip_child) {
+        if (reverify_have_data) {
             ActiveChainstate().TryAddBlockIndexCandidate(pindex);
         }
         return true;
