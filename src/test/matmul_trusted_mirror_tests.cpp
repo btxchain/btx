@@ -2735,6 +2735,53 @@ BOOST_AUTO_TEST_CASE(tip_extending_occupancy_cap_blocks_sibling_flood)
     BOOST_CHECK(!decision.replace_index.has_value());
 }
 
+BOOST_AUTO_TEST_CASE(refutation_index_height_lookup_blocks_poisoned_key)
+{
+    RuntimeReset reset;
+    const CKey pin{NewKey()};
+    const uint256 chain{Hex256('a')};
+    const uint256 hash{Hex256('b')};
+    const uint256 context{Hex256('c')};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {pin.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/false, std::chrono::milliseconds{10}, error));
+
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = chain;
+    statement.block_hash = hash;
+    statement.block_height = 40;
+    statement.replay_authority_context = context;
+    const auto refute{matmul::trusted::SignRefutation(statement, pin)};
+    BOOST_REQUIRE(refute.has_value());
+
+    // Lookup says the header lives at 12. A caller that forwards the
+    // self-declared height 40 must not store under 40.
+    node::matmul_trusted::SetBlockIndexHeightLookup(
+        [hash](const uint256& query) -> std::optional<int32_t> {
+            if (query == hash) return 12;
+            return std::nullopt;
+        });
+    BOOST_CHECK(node::matmul_trusted::AddRefutation(*refute, hash, 40) ==
+                matmul::trusted::AddResult::WrongHeight);
+
+    statement.block_height = 12;
+    const auto honest{matmul::trusted::SignRefutation(statement, pin)};
+    BOOST_REQUIRE(honest.has_value());
+    BOOST_CHECK(node::matmul_trusted::AddRefutation(*honest, hash, 999) ==
+                matmul::trusted::AddResult::Accepted);
+
+    node::matmul_trusted::SetBlockIndexHeightLookup(
+        [](const uint256&) -> std::optional<int32_t> { return std::nullopt; });
+    BOOST_CHECK(node::matmul_trusted::AddRefutation(*honest, hash, 12) ==
+                matmul::trusted::AddResult::WrongHeight);
+}
+
 BOOST_AUTO_TEST_CASE(authority_frontier_tracks_accepted_attestations)
 {
     RuntimeReset reset;

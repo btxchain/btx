@@ -84,6 +84,16 @@ void ResetForTest();
     const CPubKey& pubkey, std::string& persist_error);
 [[nodiscard]] std::vector<matmul::trusted::ExactReplayAttestation> HeardAttestations();
 [[nodiscard]] matmul::trusted::AttestationLogHead LogHead();
+/**
+ * Block-index height of `block_hash`, or nullopt if unknown. Callers
+ * (P2P/RPC) already gate on a known Profile-1 header; this lookup is
+ * the store adapter's cross-check so a forgotten gate cannot poison
+ * m_refutations at a self-declared height.
+ */
+using BlockIndexHeightLookup =
+    std::function<std::optional<int32_t>(const uint256& block_hash)>;
+void SetBlockIndexHeightLookup(BlockIndexHeightLookup lookup);
+
 [[nodiscard]] matmul::trusted::AddResult AddRefutation(
     const matmul::trusted::ExactReplayRefutation& refutation,
     const uint256& expected_hash,

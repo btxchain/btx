@@ -437,6 +437,12 @@ public:
         const uint256& block_hash,
         int32_t block_height) const;
 
+    /**
+     * Store a pin/admitted refutation. `expected_height` must be the
+     * block-index height of `expected_hash`, not a peer-declared value.
+     * VerifyRefutationCrypto rejects a mismatch so a lying statement
+     * cannot occupy an arbitrary map key.
+     */
     [[nodiscard]] AddResult AddRefutation(
         const ExactReplayRefutation& refutation,
         const uint256& expected_hash,

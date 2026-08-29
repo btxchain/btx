@@ -39,6 +39,7 @@ namespace {
 
 std::mutex g_mutex;
 std::shared_ptr<matmul::trusted::AttestationStore> g_store;
+BlockIndexHeightLookup g_block_index_height;
 struct StagedConfiguration {
     matmul::trusted::StoreConfig config;
     std::optional<std::string> local_signer_wif;
@@ -1069,6 +1070,7 @@ void Reset()
     ClosePersistence();
     std::lock_guard lock{g_mutex};
     g_store.reset();
+    g_block_index_height = {};
     CleanseStagedConfigurationLocked();
     g_trusted_mirror = false;
     g_serve_attestations = false;
@@ -1238,6 +1240,12 @@ matmul::trusted::AttestationLogHead LogHead()
     return store ? store->LogHead() : matmul::trusted::AttestationLogHead{};
 }
 
+void SetBlockIndexHeightLookup(BlockIndexHeightLookup lookup)
+{
+    std::lock_guard lock{g_mutex};
+    g_block_index_height = std::move(lookup);
+}
+
 matmul::trusted::AddResult AddRefutation(
     const matmul::trusted::ExactReplayRefutation& refutation,
     const uint256& expected_hash,
@@ -1245,6 +1253,23 @@ matmul::trusted::AddResult AddRefutation(
 {
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::UntrustedSigner;
+    BlockIndexHeightLookup lookup;
+    {
+        std::lock_guard lock{g_mutex};
+        lookup = g_block_index_height;
+    }
+    // Index height wins over any caller-supplied value. A lying
+    // statement.block_height must not key m_refutations.
+    if (lookup) {
+        const auto indexed{lookup(expected_hash)};
+        if (!indexed.has_value() ||
+            *indexed != refutation.statement.block_height) {
+            return matmul::trusted::AddResult::WrongHeight;
+        }
+        expected_height = *indexed;
+    } else if (expected_height != refutation.statement.block_height) {
+        return matmul::trusted::AddResult::WrongHeight;
+    }
     return store->AddRefutation(refutation, expected_hash, expected_height);
 }
 

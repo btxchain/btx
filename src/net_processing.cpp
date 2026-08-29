@@ -18165,6 +18165,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 return;
             }
             bool known_profile1{false};
+            int32_t index_height{-1};
             {
                 LOCK(cs_main);
                 const CBlockIndex* const index{
@@ -18179,9 +18180,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     m_chainparams.GetConsensus()
                         .IsMatMulTrustedReplayAttestationActive(
                             index->nHeight)};
+                if (have_index) index_height = index->nHeight;
                 const bool height_matches{
                     have_index &&
-                    index->nHeight == refutation.statement.block_height};
+                    index_height == refutation.statement.block_height};
                 known_profile1 =
                     node::matmul_trusted::MmAttestRefuteKnownProfile1Block(
                         have_index, failed, profile1, height_matches);
@@ -18202,8 +18204,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 continue;
             }
             const auto result{node::matmul_trusted::AddRefutation(
-                refutation, refutation.statement.block_hash,
-                refutation.statement.block_height)};
+                refutation, refutation.statement.block_hash, index_height)};
             if (result != matmul::trusted::AddResult::Accepted &&
                 result != matmul::trusted::AddResult::Duplicate) {
                 LogDebug(BCLog::NET,

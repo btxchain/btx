@@ -1040,6 +1040,25 @@ BOOST_AUTO_TEST_CASE(refutation_ttl_prunes_buckets)
     BOOST_CHECK_EQUAL(store.GetStats().refutation_buckets, 0);
 }
 
+BOOST_AUTO_TEST_CASE(refutation_rejects_declared_height_not_in_index)
+{
+    const auto pin{MakeKeys(1)};
+    const uint256 chain{TestHash(0xe1)};
+    const uint256 hash{TestHash(0xe2)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    AttestationStore store{config};
+    auto refute{SignRefutation(MakeStatement(chain, hash, 40), pin[0])};
+    BOOST_REQUIRE(refute.has_value());
+    // Caller supplies a height that is not the statement (and would not be
+    // the block-index height). Must not occupy that map key.
+    BOOST_CHECK(store.AddRefutation(*refute, hash, /*expected_height=*/99) ==
+                AddResult::WrongHeight);
+    BOOST_CHECK(store.GetRefutations(hash, 99).empty());
+    BOOST_CHECK(store.GetRefutations(hash, 40).empty());
+    BOOST_CHECK(store.AddRefutation(*refute, hash, 40) == AddResult::Accepted);
+    BOOST_CHECK_EQUAL(store.GetRefutations(hash, 40).size(), 1);
+}
+
 BOOST_AUTO_TEST_CASE(refutation_map_is_capped)
 {
     const auto pin{MakeKeys(1)};

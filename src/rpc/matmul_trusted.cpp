@@ -685,6 +685,7 @@ RPCHelpMan submitmatmulrefutation()
             const uint256 hash{refutation.statement.block_hash};
             ChainstateManager& chainman{EnsureAnyChainman(request.context)};
             bool known_profile1{false};
+            int32_t index_height{-1};
             {
                 LOCK(cs_main);
                 const CBlockIndex* const index{
@@ -698,9 +699,10 @@ RPCHelpMan submitmatmulrefutation()
                     chainman.GetConsensus()
                         .IsMatMulTrustedReplayAttestationActive(
                             index->nHeight)};
+                if (have_index) index_height = index->nHeight;
                 const bool height_matches{
                     have_index &&
-                    index->nHeight == refutation.statement.block_height};
+                    index_height == refutation.statement.block_height};
                 known_profile1 =
                     node::matmul_trusted::MmAttestRefuteKnownProfile1Block(
                         have_index, failed, profile1, height_matches);
@@ -710,14 +712,14 @@ RPCHelpMan submitmatmulrefutation()
                     RPC_INVALID_ADDRESS_OR_KEY,
                     "Unknown, failed, non-Profile-1, or height-mismatched block");
             }
-            const int32_t height{refutation.statement.block_height};
             const auto add_result{
-                node::matmul_trusted::AddRefutation(refutation, hash, height)};
+                node::matmul_trusted::AddRefutation(
+                    refutation, hash, index_height)};
             UniValue result{UniValue::VOBJ};
             result.pushKV(
                 "result", matmul::trusted::AddResultName(add_result));
             result.pushKV(
-                "quorum", node::matmul_trusted::HasQuorum(hash, height));
+                "quorum", node::matmul_trusted::HasQuorum(hash, index_height));
             return result;
         }};
 }

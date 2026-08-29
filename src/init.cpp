@@ -2306,6 +2306,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     // Creating the chainstate manager internally creates a BlockManager, opens
     // the blocks tree db, and wipes existing block files in case of a reindex.
     // The coinsdb is opened at a later point on LoadChainstate.
+    node::matmul_trusted::SetBlockIndexHeightLookup({});
     Assert(!node.chainman); // Was reset above
     try {
         node.chainman = std::make_unique<ChainstateManager>(*Assert(node.shutdown_signal), chainman_opts, blockman_opts);
@@ -2316,6 +2317,16 @@ static ChainstateLoadResult InitAndLoadChainstate(
         return {ChainstateLoadStatus::FAILURE_FATAL, Untranslated(strprintf("Failed to initialize ChainstateManager: %s", e.what()))};
     }
     ChainstateManager& chainman = *node.chainman;
+    node::matmul_trusted::SetBlockIndexHeightLookup(
+        [chainman_ptr = node.chainman.get()](
+            const uint256& hash) -> std::optional<int32_t> {
+            if (chainman_ptr == nullptr) return std::nullopt;
+            LOCK(::cs_main);
+            const CBlockIndex* const index{
+                chainman_ptr->m_blockman.LookupBlockIndex(hash)};
+            if (index == nullptr) return std::nullopt;
+            return index->nHeight;
+        });
     if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
 
     // This is defined and set here instead of inline in validation.h to avoid a hard
