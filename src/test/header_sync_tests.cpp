@@ -334,6 +334,13 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
     BOOST_CHECK(!node::HeaderSyncMaySpreadCatchUpFetch(
         true, true, 0, 16, /*global_blocks_in_flight=*/1024, 1024));
 
+    BOOST_CHECK(node::HeaderSyncIbdFetchFallbackMayDownload(
+        /*peer_inflight=*/0, /*max_per_peer=*/16, /*downloading=*/0, /*cap=*/8));
+    BOOST_CHECK(node::HeaderSyncIbdFetchFallbackMayDownload(1, 16, 1, 8));
+    BOOST_CHECK(!node::HeaderSyncIbdFetchFallbackMayDownload(
+        /*peer_full=*/16, 16, 1, 8));
+    BOOST_CHECK(!node::HeaderSyncIbdFetchFallbackMayDownload(0, 16, /*at_cap=*/8, 8));
+
     BOOST_CHECK(node::HeaderSyncMayFetchParkedHeavierTower(
         /*stalled=*/true, /*trusted_mirror=*/false, /*parked=*/true,
         /*heavier=*/true, kTower, kTip));

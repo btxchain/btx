@@ -416,6 +416,21 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
     return global_blocks_in_flight < download_window;
 }
 
+/** IBD inbound/non-preferred fallback. One in-flight block anywhere used
+ *  to exclude every fallback peer (mapBlocksInFlight.empty()). Per-peer
+ *  slots plus a bounded global peer cap restore parallelism. */
+[[nodiscard]] inline bool HeaderSyncIbdFetchFallbackMayDownload(
+    size_t peer_blocks_in_flight,
+    int max_blocks_per_peer,
+    int peers_downloading,
+    int max_parallel_peers)
+{
+    if (max_blocks_per_peer <= 0 || max_parallel_peers <= 0) return false;
+    if (peer_blocks_in_flight >= static_cast<size_t>(max_blocks_per_peer)) {
+        return false;
+    }
+    return peers_downloading < max_parallel_peers;
+}
 
 /** PARK must not freeze GETDATA of a long heavier HEADER_ONLY tower.
  *  FindNextBlocksToDownload used to return at PARKED_NEEDS_OPERATOR

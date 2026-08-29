@@ -125,6 +125,10 @@ static const unsigned int MAX_INV_SZ = 50000;
 static const unsigned int MAX_GETDATA_SZ = 1000;
 /** Number of blocks that can be requested at any given time from a single peer. */
 static const int MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16;
+/** IBD/catch-up: how many peers may hold in-flight GETDATA at once. The
+ *  inbound fallback used to require mapBlocksInFlight.empty(), so one
+ *  preferred peer's 16-slot window was the only parallelism (SF-4). */
+static constexpr int MAX_PARALLEL_BLOCK_DOWNLOAD_PEERS{8};
 /** Number of shielded block-data payloads cached in memory to avoid repeated disk reads. */
 static constexpr size_t MAX_SHIELDEDDATA_CACHE_ENTRIES{8};
 /** Maximum aggregate cached shielded block-data payload bytes. */
@@ -19865,7 +19869,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // == 0; that is inverted — 0.34 giving a miner 62 CONSENSUS
             // peers closed the only path out. Preferred count is never a
             // gate (same principle as MaybeSendGetHeaders).
-            if (mapBlocksInFlight.empty()) {
+            if (node::HeaderSyncIbdFetchFallbackMayDownload(
+                    state.vBlocksInFlight.size(),
+                    MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+                    m_peers_downloading_from,
+                    MAX_PARALLEL_BLOCK_DOWNLOAD_PEERS)) {
                 sync_blocks_and_headers_from_peer = true;
             }
         }
