@@ -11575,6 +11575,23 @@ int ChainstateManager::GetCadenceHoldAllowedHeight(const CBlockIndex* tip, int64
         return std::numeric_limits<int>::max();
     }
 
+    // Honest catch-up: bodies lag a same-chain HEADER_ONLY suffix of
+    // ≥100. The one-shot anchor cannot fold via Contains(m_best_header)
+    // while those bodies are still missing, so ConnectTip/GETDATA stuck
+    // at arm-tip + burst + 1/90s. Fold the pin (do not return INT_MAX —
+    // burst_max still caps each ABC pass). Competing forks and shorter
+    // dumps still hold. ExactReplay before ConnectTip is unchanged.
+    if (m_cadence_hold_anchor_height.has_value() && m_best_header != nullptr &&
+        m_best_header->nHeight >= tip->nHeight &&
+        m_best_header->GetAncestor(tip->nHeight) == tip &&
+        kernel::CadenceHoldFollowedCatchUpDisarms(
+            /*best_header_extends_tip=*/true,
+            m_best_header->nHeight - tip->nHeight)) {
+        m_cadence_hold_anchor_height.reset();
+        m_cadence_hold_anchor_time.reset();
+        m_cadence_hold_anchor_mono.reset();
+    }
+
     // Fold the anchor once the followed header is on the active chain so
     // the next burst re-arms from the new live tip.
     if (m_cadence_hold_anchor_height.has_value() && m_best_header != nullptr &&

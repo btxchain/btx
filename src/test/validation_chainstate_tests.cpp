@@ -4146,6 +4146,46 @@ BOOST_FIXTURE_TEST_CASE(chainstate_cadence_hold_production_origin_selection, Tes
     SetMockTime(now0 + spacing);
     BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, now0 + spacing), extra0);
 
+    // SF-2: same-chain HEADER_ONLY suffix ≥100 folds the one-shot anchor so
+    // honest catch-up is not stuck at arm-tip + 1/90s. Competing forks do not.
+    {
+        std::array<CBlockIndex, 100> catchup{};
+        CBlockIndex* prev{tip};
+        for (auto& node : catchup) {
+            node.pprev = prev;
+            node.nHeight = prev->nHeight + 1;
+            node.nTime = prev->nTime + static_cast<unsigned int>(spacing);
+            prev = &node;
+        }
+        BOOST_REQUIRE_EQUAL(catchup.back().nHeight, tip_h + 100);
+        BOOST_REQUIRE_EQUAL(catchup.back().GetAncestor(tip_h), tip);
+
+        CBlockIndex fork_root;
+        fork_root.pprev = tip->pprev;
+        fork_root.nHeight = tip->nHeight;
+        fork_root.nTime = tip->nTime;
+        CBlockIndex fork_tip;
+        fork_tip.pprev = &fork_root;
+        fork_tip.nHeight = tip_h + 100;
+        fork_tip.nTime = tip->nTime + static_cast<unsigned int>(100 * spacing);
+        BOOST_REQUIRE(fork_tip.GetAncestor(tip_h) != tip);
+
+        chainman.ResetCadenceHoldStateForTest();
+        SetMockTime(now0);
+        chainman.m_best_header = &fork_tip;
+        chainman.ArmCadenceHoldAnchor(tip, now0);
+        const int64_t later{now0 + 10 * spacing};
+        SetMockTime(later);
+        chainman.NoteTipConnected(later);
+        BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, later),
+                          extra0 + 10);
+
+        chainman.m_best_header = &catchup.back();
+        BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, later), extra0);
+        BOOST_CHECK(!chainman.CadenceHoldShouldHold(tip, &catchup[0], later, 0, false));
+        BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, &catchup[static_cast<size_t>(DEFAULT_CADENCE_BURST_MAX)], later, 0, false));
+    }
+
     chainman.m_best_header = restore.saved_best_header;
 }
 
