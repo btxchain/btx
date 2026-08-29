@@ -9652,9 +9652,16 @@ BOOST_AUTO_TEST_CASE(direct_fetch_proven_source_requests_lowest_holes)
                   ConnectionType::OUTBOUND_FULL_RELAY,
                   /*inbound_onion=*/false, /*network_key=*/0};
     connman.Handshake(archive, /*successfully_connected=*/true, services,
-                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight + 20);
     connman.AddTestNode(archive);
     connman.FlushSendBuffer(archive);
+    BOOST_REQUIRE(archive.HasArchiveOrMirrorService());
+    {
+        CNodeStateStats hs;
+        BOOST_REQUIRE(peerman.GetNodeStateStats(archive.GetId(), hs));
+        BOOST_REQUIRE(hs.vHeightInFlight.empty());
+    }
     struct FinalizePeer {
         PeerManager& peerman;
         ConnmanTestMsg& connman;
@@ -9703,15 +9710,35 @@ BOOST_AUTO_TEST_CASE(direct_fetch_proven_source_requests_lowest_holes)
         archive, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
     archive.fPauseSend = false;
     (void)connman.ProcessMessagesOnce(archive);
+    BOOST_REQUIRE_MESSAGE(!archive.fDisconnect,
+                          "archive must stay connected after connecting headers");
 
+    const CBlockIndex* last_idx{WITH_LOCK(
+        ::cs_main, return chainman.m_blockman.LookupBlockIndex(want.back()))};
+    BOOST_REQUIRE_MESSAGE(last_idx != nullptr,
+                          "direct-fetch headers must be accepted into the index");
+
+    CNodeStateStats after;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(archive.GetId(), after));
     const std::vector<uint256> got{QueuedGetDataHashes(archive)};
     BOOST_REQUIRE_MESSAGE(
-        got.size() >= 4,
-        "proven-source direct-fetch must request all four lowest holes");
-    BOOST_CHECK_EQUAL(got[0], want[0]);
-    BOOST_CHECK_EQUAL(got[1], want[1]);
-    BOOST_CHECK_EQUAL(got[2], want[2]);
-    BOOST_CHECK_EQUAL(got[3], want[3]);
+        after.vHeightInFlight.size() >= 4 || got.size() >= 4,
+        strprintf("proven-source direct-fetch must request all four lowest holes "
+                  "(inflight=%u getdata=%u disconnect=%d)",
+                  after.vHeightInFlight.size(), got.size(),
+                  archive.fDisconnect));
+    if (after.vHeightInFlight.size() >= 4) {
+        BOOST_CHECK_EQUAL(after.vHeightInFlight[0], tip->nHeight + 1);
+        BOOST_CHECK_EQUAL(after.vHeightInFlight[1], tip->nHeight + 2);
+        BOOST_CHECK_EQUAL(after.vHeightInFlight[2], tip->nHeight + 3);
+        BOOST_CHECK_EQUAL(after.vHeightInFlight[3], tip->nHeight + 4);
+    }
+    if (got.size() >= 4) {
+        BOOST_CHECK_EQUAL(got[0], want[0]);
+        BOOST_CHECK_EQUAL(got[1], want[1]);
+        BOOST_CHECK_EQUAL(got[2], want[2]);
+        BOOST_CHECK_EQUAL(got[3], want[3]);
+    }
 
     NeutralizeUnconnectedHeaders(chainman);
     peerman.ResetMatMulVerifyAdmissionForTest();
