@@ -4678,4 +4678,109 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_heals_poisoned_fork_shape, TestChain100
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(validation_epoch_ignores_headers_only_attacker_for_best_work, TestChain100Setup)
+{
+    // SF-12: a heavier headers-only branch must not become best_work and
+    // consume the epoch while a lighter data-backed poison stays hidden.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    auto& hysteresis = const_cast<std::optional<uint32_t>&>(
+        chainman.m_options.reorg_hysteresis_work_margin);
+    hysteresis = 0;
+
+    CBlockIndex* original_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(original_tip != nullptr);
+    const uint256 original_hash = original_tip->GetBlockHash();
+
+    BlockValidationState inval;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(inval, original_tip));
+    std::vector<CBlockIndex*> attacker;
+    for (int i = 0; i < 8; ++i) {
+        const uint256 h = CreateAndProcessBlock({}, script).GetHash();
+        attacker.push_back(WITH_LOCK(::cs_main, {
+            return chainman.m_blockman.LookupBlockIndex(h);
+        }));
+        BOOST_REQUIRE(attacker.back() != nullptr);
+    }
+    BOOST_REQUIRE(chainstate.InvalidateBlock(inval, attacker.front()));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_tip);
+    }
+    BlockValidationState abc;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
+        for (CBlockIndex* pindex : attacker) {
+            pindex->nStatus &= ~(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO |
+                                 BLOCK_MANUALLY_INVALIDATED);
+            pindex->nStatus |= BLOCK_FAILED_VALID;
+            chainman.m_failed_blocks.insert(pindex);
+        }
+        StripManualInvalidationBits(chainman);
+    }
+
+    CBlock poison_block = CreateBlock({}, script, chainstate);
+    CBlockIndex* poison{nullptr};
+    {
+        LOCK(::cs_main);
+        poison = chainman.m_blockman.AddToBlockIndex(
+            poison_block, chainman.m_best_header);
+        BOOST_REQUIRE(poison != nullptr);
+        const FlatFilePos pos{
+            chainman.m_blockman.WriteBlock(poison_block, poison->nHeight)};
+        BOOST_REQUIRE(!pos.IsNull());
+        chainman.ReceivedBlockTransactions(poison_block, poison, pos);
+        poison->nStatus &= ~BLOCK_HAVE_UNDO;
+        poison->nStatus |= BLOCK_FAILED_VALID;
+        chainman.m_failed_blocks.insert(poison);
+        BOOST_CHECK(poison->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK(attacker.back()->nChainWork > poison->nChainWork);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
+        BOOST_CHECK_EQUAL(poison->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK(attacker.front()->nStatus & BLOCK_FAILED_MASK);
+        uint32_t stored{0};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpoch(stored));
+        BOOST_CHECK_EQUAL(stored, chainman.GetBlockValidationEpoch());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(validation_epoch_defers_when_no_data_backed_lineage, TestChain100Setup)
+{
+    // SF-12: headers-only FAILED marks with no data-backed best_work must
+    // not consume the epoch. Marking HAVE_DATA ancestors MANUAL would pull
+    // the fork into manual_lineage via pprev, so strip data instead: every
+    // remaining FAILED sits on a headers-only index with no connectable
+    // lineage, which is the archive shape this gate exists for.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+
+    CBlockIndex* tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    {
+        LOCK(::cs_main);
+        for (auto& [_, idx] : chainman.m_blockman.m_block_index) {
+            idx.nStatus &= ~(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO |
+                             BLOCK_MANUALLY_INVALIDATED);
+        }
+        tip->nStatus = (tip->nStatus & ~BLOCK_FAILED_MASK) | BLOCK_FAILED_VALID;
+        chainman.m_failed_blocks.insert(tip);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        {
+            ASSERT_DEBUG_LOG("no data-backed lineage to heal");
+            BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
+        }
+        uint32_t stored{0};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpoch(stored));
+        BOOST_CHECK_EQUAL(stored, 0U);
+        bool pending{false};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpochPending(pending));
+        BOOST_CHECK(pending);
+        BOOST_CHECK(tip->nStatus & BLOCK_FAILED_MASK);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

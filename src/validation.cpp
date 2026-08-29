@@ -17679,6 +17679,7 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
     CBlockIndex* best_work{nullptr};
     for (CBlockIndex* pindex : by_height) {
         if (has_manual(pindex)) continue;
+        if ((pindex->nStatus & BLOCK_HAVE_DATA) == 0) continue;
         if ((pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE) continue;
         if (best_work == nullptr || more_work(*best_work, *pindex)) {
             best_work = pindex;
@@ -17864,6 +17865,22 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
 
     RecalculateBestHeader();
 
+    if (best_work == nullptr) {
+        bool leftover_failed{false};
+        for (CBlockIndex* pindex : by_height) {
+            if ((pindex->nStatus & BLOCK_FAILED_MASK) == 0) continue;
+            if (has_manual(pindex)) continue;
+            leftover_failed = true;
+            break;
+        }
+        if (leftover_failed) {
+            LogWarning("%s: epoch heal deferred: no data-backed lineage to heal "
+                       "(stored_epoch=%u compiled_epoch=%u)\n",
+                       __func__, stored, m_compiled_validation_epoch);
+            return true;
+        }
+    }
+
     if (!m_blockman.WriteBlockIndexDB(m_compiled_validation_epoch,
                                       /*validation_epoch_pending=*/false,
                                       &m_parked_reorg_branch_roots)) {
@@ -17874,7 +17891,7 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
         return false;
     }
     LogWarning("validation epoch %u -> %u: cleared %u BLOCK_FAILED_* mark(s) "
-               "on the heaviest-work lineage, re-checked headers/bodies, "
+               "on the heaviest data-backed lineage, re-checked headers/bodies, "
                "re-marked %u, unparked %u, left %u operator-invalid; "
                "ActivateBestChain follows after LoadChainTip\n",
                stored, m_compiled_validation_epoch,

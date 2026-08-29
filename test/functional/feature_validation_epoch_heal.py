@@ -33,7 +33,7 @@ from test_framework.util import (
 
 HEAL_SUMMARY_RE = re.compile(
     r"validation epoch (\d+) -> (\d+): cleared (\d+) BLOCK_FAILED_\* mark\(s\) "
-    r"on the heaviest-work lineage, re-checked headers/bodies, "
+    r"on the heaviest data-backed lineage, re-checked headers/bodies, "
     r"re-marked (\d+), unparked (\d+), left (\d+) operator-invalid"
 )
 
