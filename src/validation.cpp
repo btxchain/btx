@@ -17765,21 +17765,48 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
         }
 
         if ((pindex->nStatus & BLOCK_HAVE_DATA) == 0) continue;
+        // Provider-less / quorum-pending startup is retryable. ConnectTip
+        // already retries ExactReplay; permanently re-poisoning here made
+        // every CPU-only / early-boot heal a one-way trap (SF-11).
         if (m_active_chainstate == nullptr) {
-            LogWarning("%s: re-marked %s height=%d: HAVE_DATA but no chainstate "
-                       "to read the body\n",
+            LogWarning("%s: deferred body re-check for %s height=%d "
+                       "(no chainstate yet); ConnectTip retries\n",
                        __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
-            mark_failed_valid(pindex);
-            ++remade;
             continue;
         }
         CBlock block;
         BlockValidationState body_state;
-        if (!ReadShieldedRebuildBlock(*m_active_chainstate, *pindex, block) ||
-            !CheckBlock(block, body_state, GetConsensus()) ||
-            !ContextualCheckBlock(block, body_state, *this, pindex->pprev,
+        if (ConsumeRetryableMatMulConnectFailureForTest(body_state)) {
+            LogWarning("%s: deferred body re-check for %s height=%d (%s); "
+                       "ConnectTip retries\n",
+                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
+                       body_state.ToString());
+            continue;
+        }
+        if (!ReadShieldedRebuildBlock(*m_active_chainstate, *pindex, block)) {
+            LogWarning("%s: deferred body re-check for %s height=%d "
+                       "(body unreadable at startup); ConnectTip retries\n",
+                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
+            continue;
+        }
+        if (!CheckBlock(block, body_state, GetConsensus())) {
+            LogWarning("%s: re-marked %s height=%d after body re-check (%s)\n",
+                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
+                       body_state.ToString());
+            mark_failed_valid(pindex);
+            ++remade;
+            continue;
+        }
+        if (!ContextualCheckBlock(block, body_state, *this, pindex->pprev,
                                   /*fCheckPOW=*/true,
                                   /*may_release_cs_main=*/true)) {
+            if (body_state.IsError()) {
+                LogWarning("%s: deferred body re-check for %s height=%d (%s); "
+                           "ConnectTip retries\n",
+                           __func__, pindex->GetBlockHash().ToString(),
+                           pindex->nHeight, body_state.ToString());
+                continue;
+            }
             LogWarning("%s: re-marked %s height=%d after body re-check (%s)\n",
                        __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
                        body_state.ToString());

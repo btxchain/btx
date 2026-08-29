@@ -23,6 +23,7 @@
 #include <test/util/coins.h>
 #include <test/util/mining.h>
 #include <test/util/random.h>
+#include <test/util/logging.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
 #include <util/check.h>
@@ -4557,6 +4558,59 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_rerejects_genuinely_invalid, TestChain1
         BOOST_REQUIRE(bad_index != nullptr);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), tip_hash);
         BOOST_CHECK(bad_index->nStatus & BLOCK_FAILED_MASK);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(validation_epoch_defers_retryable_exactreplay_failures, TestChain100Setup)
+{
+    // SF-11: a retryable ExactReplay miss at heal time (provider-less /
+    // quorum-pending / test-injected Error) must stay cleared so ABC's
+    // ConnectTip retry path can ExactReplay. Permanent re-poison was a
+    // one-way trap on CPU-only / early-boot upgrades.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    auto& hysteresis = const_cast<std::optional<uint32_t>&>(
+        chainman.m_options.reorg_hysteresis_work_margin);
+    hysteresis = 0;
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    const uint256 tip_hash = tip->GetBlockHash();
+
+    CBlock child = CreateBlock({}, script, chainstate);
+    CBlockIndex* child_index{nullptr};
+    {
+        LOCK(::cs_main);
+        child_index = chainman.m_blockman.AddToBlockIndex(child, chainman.m_best_header);
+        BOOST_REQUIRE(child_index != nullptr);
+        const FlatFilePos pos{
+            chainman.m_blockman.WriteBlock(child, child_index->nHeight)};
+        BOOST_REQUIRE(!pos.IsNull());
+        chainman.ReceivedBlockTransactions(child, child_index, pos);
+        child_index->nStatus &= ~BLOCK_HAVE_UNDO;
+        child_index->nStatus |= BLOCK_FAILED_VALID;
+        chainman.m_failed_blocks.insert(child_index);
+        BOOST_CHECK(child_index->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK_EQUAL(child_index->nStatus & BLOCK_HAVE_UNDO, 0U);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        chainman.SetRetryableMatMulConnectFailureForTest(true);
+        {
+            ASSERT_DEBUG_LOG("deferred body re-check");
+            BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
+        }
+        chainman.SetRetryableMatMulConnectFailureForTest(false);
+        BOOST_CHECK_EQUAL(child_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_GE(chainman.InvalidMarksClearedOnUpgrade(), 1U);
+    }
+    BlockValidationState abc;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), child.GetHash());
+        BOOST_CHECK_NE(chainstate.m_chain.Tip()->GetBlockHash(), tip_hash);
+        BOOST_CHECK_EQUAL(child_index->nStatus & BLOCK_FAILED_MASK, 0U);
     }
 }
 
