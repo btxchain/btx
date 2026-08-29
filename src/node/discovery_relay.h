@@ -263,9 +263,12 @@ inline constexpr int MAX_INBOUND_DISCOVERY_ONLY{4};
     return PeerLooksOnRecentNetwork(starting_height, effective_watermark);
 }
 
-//! Record an inbound handshake into addrman. Only the peer we actually
-//! connected to, never the ADDR gossip they send. Relays are ~97%
-//! inbound; without this, addrman never learns the live network.
+//! Mark an inbound handshake as eligible to remember a listen endpoint.
+//! This must NOT persist the accepted TCP socket: that address is the
+//! peer's ephemeral SOURCE port, not the port they listen on. Gossiping
+//! source ports made reachable listeners undialable network-wide.
+//! Persist only a later same-IP self-ADDR
+//! (MayRetainInboundSelfAnnouncement).
 [[nodiscard]] inline bool MayRetainInboundHandshake(bool inbound,
                                                     bool routable,
                                                     uint64_t services,
@@ -275,6 +278,36 @@ inline constexpr int MAX_INBOUND_DISCOVERY_ONLY{4};
     if (!inbound || !routable) return false;
     return MayAdvertiseConnectedPeer(services, starting_height,
                                      effective_watermark);
+}
+
+//! Persist an inbound peer's self-advertised listen endpoint. Never the
+//! TCP source port of the accepted socket. Eligibility is VERSION-time
+//! (MayRetainInboundHandshake). Same-IP binds the announcement to the
+//! peer we already have a handshake with — not their ADDR gossip of
+//! third parties (Sybil). CGNAT/hairpin (announced IP ≠ source IP) is
+//! not retained: better than poisoning addrman with a dead source port.
+//! Do not reject advertised_port == source_port: a listener can reuse
+//! its listen port as the outbound source (SO_REUSEADDR).
+[[nodiscard]] inline bool MayRetainInboundSelfAnnouncement(
+    bool inbound,
+    bool retain_eligible,
+    bool advertised_routable,
+    bool same_ip,
+    bool may_advertise_endpoint)
+{
+    if (!inbound || !retain_eligible) return false;
+    if (!advertised_routable || !same_ip) return false;
+    return may_advertise_endpoint;
+}
+
+//! GETADDR extra-push of a currently-connected peer's socket address.
+//! Outbound/manual endpoints are the address we dialed (listen port).
+//! Inbound socket addresses are ephemeral source ports and must never
+//! be gossiped — extra-push their self-advertised listen endpoint
+//! instead, once ADDR has supplied it.
+[[nodiscard]] inline bool MayPushConnectedPeerSocketAddress(bool inbound)
+{
+    return !inbound;
 }
 
 } // namespace node::discovery_relay

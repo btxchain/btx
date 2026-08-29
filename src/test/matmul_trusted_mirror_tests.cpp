@@ -542,6 +542,24 @@ BOOST_AUTO_TEST_CASE(discovery_relay_addr_policy_hides_gpu_attestors)
     BOOST_CHECK(!MayRetainInboundHandshake(
         true, /*routable=*/false, NODE_NETWORK | NODE_WITNESS, 199400, 199390));
 
+    // Inbound handshake only marks eligibility. Persist a same-IP listen
+    // announcement, never the TCP source port, never a third-party IP.
+    BOOST_CHECK(MayRetainInboundSelfAnnouncement(
+        /*inbound=*/true, /*retain_eligible=*/true, /*advertised_routable=*/true,
+        /*same_ip=*/true, /*may_advertise_endpoint=*/true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        true, /*retain_eligible=*/false, true, true, true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        /*inbound=*/false, true, true, true, true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        true, true, /*advertised_routable=*/false, true, true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        true, true, true, /*same_ip=*/false, true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        true, true, true, true, /*may_advertise_endpoint=*/false));
+    BOOST_CHECK(MayPushConnectedPeerSocketAddress(/*inbound=*/false));
+    BOOST_CHECK(!MayPushConnectedPeerSocketAddress(/*inbound=*/true));
+
     BOOST_CHECK(ServicesAreDiscoveryOnly(NODE_MATMUL_DISCOVERY));
     BOOST_CHECK(!ServicesAreDiscoveryOnly(
         NODE_MATMUL_DISCOVERY | NODE_NETWORK));
@@ -588,7 +606,7 @@ BOOST_AUTO_TEST_CASE(discovery_relay_addr_policy_hides_gpu_attestors)
     // (no !IsDiscoveryRelay short-circuit), so hideaddr and
     // CONSENSUS|ARCHIVE endpoints never leave the node.
 
-    BOOST_CHECK(PeerLooksOnRecentNetwork(50, /*archive_reported_height=*/-1));
+    BOOST_CHECK(!PeerLooksOnRecentNetwork(50, /*archive_reported_height=*/-1));
     BOOST_CHECK(!PeerLooksOnRecentNetwork(-1, 50));
     BOOST_CHECK(PeerLooksOnRecentNetwork(100, 100));
     BOOST_CHECK(PeerLooksOnRecentNetwork(100 + RECENT_HEIGHT_LAG, 100));

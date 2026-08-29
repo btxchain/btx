@@ -1030,6 +1030,13 @@ struct Peer {
     std::atomic_bool m_wants_addrv2{false};
     /** Whether this peer has already sent us a getaddr message. */
     bool m_getaddr_recvd GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
+    /** Discovery-relay: inbound VERSION qualified this peer to retain a
+     *  listen endpoint. The accepted socket (ephemeral source port) is
+     *  never stored; wait for a same-IP self-ADDR. */
+    bool m_inbound_retain_eligible GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
+    /** Self-advertised listen endpoint from inbound ADDR. Empty until a
+     *  same-IP announcement is accepted. */
+    std::optional<CService> m_advertised_listen GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** Number of addresses that can be processed from this peer. Start at 1 to
      *  permit self-announcement. */
     double m_addr_token_bucket GUARDED_BY(NetEventsInterface::g_msgproc_mutex){1.0};
@@ -14858,10 +14865,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     /*inbound=*/true, /*routable=*/true,
                     static_cast<uint64_t>(nServices), starting_height,
                     watermark)) {
-                CAddress advertised{pfrom.addr, nServices, Now<NodeSeconds>()};
-                m_addrman.Add({advertised}, advertised);
-                m_addrman.Good(advertised);
-                m_addrman.SetServices(advertised, nServices);
+                // Eligibility only. pfrom.addr is the accepted socket —
+                // IP plus the peer's ephemeral TCP SOURCE port — and
+                // must not enter addrman or GETADDR extra-push. Wait
+                // for a same-IP self-ADDR of the listen port.
+                peer->m_inbound_retain_eligible = true;
             }
         }
 
@@ -15620,15 +15628,30 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             ++num_proc;
             const bool reachable{g_reachable_nets.Contains(addr)};
             if (addr.nTime > current_a_time - 10min && !peer->m_getaddr_sent && vAddr.size() <= 10 && addr.IsRoutable()) {
-                // Relay to a limited number of other nodes
-                if (!m_chainman.IsDiscoveryRelay() ||
+                // Relay to a limited number of other nodes. Inbound
+                // bulk gossip stays off (Sybil). Inbound self-ADDR of
+                // the listen port is the one exception: that is how a
+                // reachable listener becomes dialable network-wide.
+                const bool learn_from_this_peer{
+                    !m_chainman.IsDiscoveryRelay() ||
                     node::discovery_relay::MayLearnAddressFromPeer(
                         pfrom.IsInboundConn(), pfrom.IsManualConn(),
-                        pfrom.IsAddrFetchConn())) {
-                    if (node::discovery_relay::MayAdvertiseEndpoint(
-                            static_cast<uint64_t>(addr.nServices), addr)) {
-                        RelayAddress(pfrom.GetId(), addr, reachable);
-                    }
+                        pfrom.IsAddrFetchConn())};
+                const bool inbound_listen{
+                    m_chainman.IsDiscoveryRelay() &&
+                    node::discovery_relay::MayRetainInboundSelfAnnouncement(
+                        pfrom.IsInboundConn(),
+                        peer->m_inbound_retain_eligible,
+                        /*advertised_routable=*/true,
+                        static_cast<const CNetAddr&>(addr) ==
+                            static_cast<const CNetAddr&>(pfrom.addr),
+                        node::discovery_relay::MayAdvertiseEndpoint(
+                            static_cast<uint64_t>(addr.nServices), addr))};
+                if (inbound_listen ||
+                    (learn_from_this_peer &&
+                     node::discovery_relay::MayAdvertiseEndpoint(
+                         static_cast<uint64_t>(addr.nServices), addr))) {
+                    RelayAddress(pfrom.GetId(), addr, reachable);
                 }
             }
             // Do not store addresses outside our network
@@ -15652,6 +15675,29 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 });
             }
             m_addrman.Add(vAddrOk, pfrom.addr, 2h);
+        } else if (m_chainman.IsDiscoveryRelay() &&
+                   peer->m_inbound_retain_eligible) {
+            std::vector<CAddress> self_ok;
+            for (const CAddress& addr : vAddrOk) {
+                if (node::discovery_relay::MayRetainInboundSelfAnnouncement(
+                        pfrom.IsInboundConn(),
+                        /*retain_eligible=*/true,
+                        addr.IsRoutable(),
+                        static_cast<const CNetAddr&>(addr) ==
+                            static_cast<const CNetAddr&>(pfrom.addr),
+                        node::discovery_relay::MayAdvertiseEndpoint(
+                            static_cast<uint64_t>(addr.nServices), addr))) {
+                    self_ok.push_back(addr);
+                }
+            }
+            if (!self_ok.empty()) {
+                m_addrman.Add(self_ok, pfrom.addr, 2h);
+                for (const CAddress& addr : self_ok) {
+                    m_addrman.Good(addr);
+                    m_addrman.SetServices(addr, addr.nServices);
+                    peer->m_advertised_listen = addr;
+                }
+            }
         }
         if (vAddr.size() < 1000) peer->m_getaddr_sent = false;
 
@@ -18861,14 +18907,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 m_discovery_archive_reported_height.load(
                     std::memory_order_relaxed)};
             std::unordered_map<NodeId, int> starting_heights;
+            std::unordered_map<NodeId, CService> advertised_listen;
             {
                 LOCK(m_peer_mutex);
                 starting_heights.reserve(m_peer_map.size());
+                advertised_listen.reserve(m_peer_map.size());
                 for (const auto& [id, connected] : m_peer_map) {
                     starting_heights.emplace(
                         id,
                         connected->m_starting_height.load(
                             std::memory_order_relaxed));
+                    if (connected->m_advertised_listen) {
+                        advertised_listen.emplace(
+                            id, *connected->m_advertised_listen);
+                    }
                 }
             }
             std::vector<int32_t> network_heights;
@@ -18897,12 +18949,21 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         services, height_it->second, watermark)) {
                     return;
                 }
+                CService endpoint;
+                if (node::discovery_relay::MayPushConnectedPeerSocketAddress(
+                        pnode->IsInboundConn())) {
+                    endpoint = pnode->addr;
+                } else {
+                    const auto listen_it{advertised_listen.find(pnode->GetId())};
+                    if (listen_it == advertised_listen.end()) return;
+                    endpoint = listen_it->second;
+                }
                 if (!node::discovery_relay::MayAdvertiseEndpoint(
-                        services, pnode->addr)) {
+                        services, endpoint)) {
                     return;
                 }
                 CAddress advertised{
-                    pnode->addr, ServiceFlags(services), Now<NodeSeconds>()};
+                    endpoint, ServiceFlags(services), Now<NodeSeconds>()};
                 PushAddress(*peer, advertised);
             });
         }
