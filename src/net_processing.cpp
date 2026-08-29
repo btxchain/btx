@@ -5141,8 +5141,16 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // (e.g. the parked-branch return) would otherwise stop this peer. The call is
     // fully self-guarding (stale + strictly-heavier + off-active-chain + tip+2048
     // lead bound), bounded (<=2 towers, heaviest retained), and idempotent.
-    if (state->pindexBestKnownBlock != nullptr &&
-        m_chainman.AcquisitionEscapeActive(state->pindexBestKnownBlock)) {
+    // NB: call AcquisitionEscapeMayAcquireHeavierFork DIRECTLY, not gated by
+    // AcquisitionEscapeActive -- the latter returns true only once the tower is
+    // ALREADY in m_acquisition_exempt_towers, so gating registration on it is a
+    // chicken-and-egg that never registers anything (live rtx6000: esc=0,
+    // valve never armed). MayAcquire is fully self-guarding (AcquisitionTipIsStale
+    // + strictly-heavier + off-active-chain + tip+2048 lead) and idempotent, and
+    // early-returns cheaply when not applicable, so calling it once per download
+    // pass per peer is safe. This mirrors the original registration site in the
+    // header-acceptance lead gate (validation.cpp), which also calls it directly.
+    if (state->pindexBestKnownBlock != nullptr) {
         m_chainman.AcquisitionEscapeMayAcquireHeavierFork(state->pindexBestKnownBlock);
     }
     const bool catch_up{DownloadFailoverCatchUp(m_chainman, state->pindexBestKnownBlock)};
