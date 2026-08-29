@@ -30,6 +30,7 @@
 #include <array>
 #include <chrono>
 #include <limits>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -3208,6 +3209,76 @@ BOOST_AUTO_TEST_CASE(unattestable_reject_counter_is_distinct_not_hot_loop)
     BOOST_CHECK(AttestationBackoffMapMustEvict(MATMUL_ATTESTATION_BACKOFF_MAX));
     BOOST_CHECK(AttestationBackoffMapMustEvict(MATMUL_ATTESTATION_BACKOFF_MAX + 1));
     BOOST_CHECK(!AttestationBackoffMapMustEvict(/*map_size=*/10, /*max_size=*/0));
+}
+
+BOOST_AUTO_TEST_CASE(attestation_backoff_ttl_and_newest_victim_bound_the_map)
+{
+    using node::matmul_trusted::AttestationBackoffArmBudgetAllows;
+    using node::matmul_trusted::AttestationBackoffEntryExpired;
+    using node::matmul_trusted::AttestationBackoffPreferNewerVictim;
+    using node::matmul_trusted::EvictNewestAttestationBackoffToCap;
+    using node::matmul_trusted::MATMUL_ATTESTATION_BACKOFF_ARM_MAX;
+    using node::matmul_trusted::PruneExpiredAttestationBackoff;
+
+    BOOST_CHECK(AttestationBackoffEntryExpired(/*now=*/10, /*not_before=*/10));
+    BOOST_CHECK(AttestationBackoffEntryExpired(/*now=*/11, /*not_before=*/10));
+    BOOST_CHECK(!AttestationBackoffEntryExpired(/*now=*/9, /*not_before=*/10));
+
+    BOOST_CHECK(AttestationBackoffPreferNewerVictim(/*candidate=*/5, /*current=*/3));
+    BOOST_CHECK(!AttestationBackoffPreferNewerVictim(/*candidate=*/3, /*current=*/5));
+
+    struct Backoff {
+        std::chrono::steady_clock::time_point not_before{};
+    };
+    const auto t0{std::chrono::steady_clock::time_point{}};
+    const auto HashN = [](uint64_t n) {
+        uint256 h{};
+        h.data()[0] = static_cast<unsigned char>(n);
+        h.data()[1] = static_cast<unsigned char>(n >> 8);
+        h.data()[2] = static_cast<unsigned char>(n >> 16);
+        return h;
+    };
+
+    std::map<uint256, Backoff> ttl;
+    ttl[HashN(1)].not_before = t0 + std::chrono::seconds{1};
+    ttl[HashN(2)].not_before = t0 + std::chrono::seconds{3};
+    PruneExpiredAttestationBackoff(ttl, t0 + std::chrono::seconds{2});
+    BOOST_CHECK_EQUAL(ttl.size(), 1U);
+    BOOST_CHECK(ttl.count(HashN(2)));
+    BOOST_CHECK(!ttl.count(HashN(1)));
+
+    std::map<uint256, Backoff> newest;
+    newest[HashN(0)].not_before = t0 + std::chrono::seconds{1};
+    newest[HashN(1)].not_before = t0 + std::chrono::seconds{2};
+    newest[HashN(2)].not_before = t0 + std::chrono::seconds{3};
+    EvictNewestAttestationBackoffToCap(newest, /*max_size=*/3);
+    BOOST_CHECK_EQUAL(newest.size(), 2U);
+    BOOST_CHECK(newest.count(HashN(0)));
+    BOOST_CHECK(newest.count(HashN(1)));
+    BOOST_CHECK(!newest.count(HashN(2)));
+
+    constexpr size_t cap{32};
+    std::map<uint256, Backoff> flood;
+    for (size_t i = 0; i < cap + 1000; ++i) {
+        PruneExpiredAttestationBackoff(flood, t0);
+        EvictNewestAttestationBackoffToCap(flood, cap);
+        flood[HashN(i)].not_before = t0 + std::chrono::seconds{static_cast<long>(i + 1)};
+    }
+    BOOST_CHECK_LE(flood.size(), cap);
+    BOOST_CHECK(flood.count(HashN(0)));
+    BOOST_CHECK(flood.count(HashN(cap - 2)));
+    BOOST_CHECK(!flood.count(HashN(cap - 1)));
+    BOOST_CHECK(!flood.count(HashN(cap)));
+    BOOST_CHECK(flood.count(HashN(cap + 999)));
+
+    BOOST_CHECK(AttestationBackoffArmBudgetAllows(0, 1000, 0));
+    BOOST_CHECK(AttestationBackoffArmBudgetAllows(0, 1000, 1000));
+    BOOST_CHECK(AttestationBackoffArmBudgetAllows(
+        MATMUL_ATTESTATION_BACKOFF_ARM_MAX - 1, 1000, 1000));
+    BOOST_CHECK(!AttestationBackoffArmBudgetAllows(
+        MATMUL_ATTESTATION_BACKOFF_ARM_MAX, 1000, 1000));
+    BOOST_CHECK(AttestationBackoffArmBudgetAllows(
+        MATMUL_ATTESTATION_BACKOFF_ARM_MAX, 1060, 1000));
 }
 
 BOOST_AUTO_TEST_CASE(attestations_survive_simulated_restart)

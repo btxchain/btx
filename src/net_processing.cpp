@@ -2064,7 +2064,15 @@ private:
     };
     std::map<uint256, MatMulAttestationBackoff> m_matmul_attestation_backoff
         GUARDED_BY(cs_main);
+    //! Arm timestamps in the current rate-budget window (new hashes only).
+    std::deque<int64_t> m_matmul_attestation_backoff_arms
+        GUARDED_BY(cs_main);
+    std::chrono::steady_clock::time_point m_matmul_attestation_backoff_arm_log
+        GUARDED_BY(cs_main){};
     void MaybeEvictAttestationBackoff() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] bool AllowAttestationBackoffArm(
+        std::chrono::steady_clock::time_point now)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     //! Rate-limited stall diagnostics for trusted mirrors.
     std::chrono::steady_clock::time_point m_matmul_trusted_last_stall_log
         GUARDED_BY(cs_main){};
@@ -9465,31 +9473,54 @@ void PeerManagerImpl::MaybeEvictAttestationBackoff()
 {
     AssertLockHeld(cs_main);
     const auto now{std::chrono::steady_clock::now()};
-    for (auto it = m_matmul_attestation_backoff.begin();
-         it != m_matmul_attestation_backoff.end();) {
-        if (now >= it->second.not_before) {
-            it = m_matmul_attestation_backoff.erase(it);
-        } else {
-            ++it;
-        }
+    node::matmul_trusted::PruneExpiredAttestationBackoff(
+        m_matmul_attestation_backoff, now);
+    node::matmul_trusted::EvictNewestAttestationBackoffToCap(
+        m_matmul_attestation_backoff);
+}
+
+bool PeerManagerImpl::AllowAttestationBackoffArm(
+    std::chrono::steady_clock::time_point now)
+{
+    AssertLockHeld(cs_main);
+    const int64_t now_s{
+        std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch())
+            .count()};
+    const int64_t window{
+        node::matmul_trusted::MATMUL_ATTESTATION_BACKOFF_ARM_WINDOW_SECONDS};
+    while (!m_matmul_attestation_backoff_arms.empty() &&
+           now_s - m_matmul_attestation_backoff_arms.front() >= window) {
+        m_matmul_attestation_backoff_arms.pop_front();
     }
-    while (node::matmul_trusted::AttestationBackoffMapMustEvict(
-        m_matmul_attestation_backoff.size())) {
-        auto oldest{m_matmul_attestation_backoff.begin()};
-        for (auto it = m_matmul_attestation_backoff.begin();
-             it != m_matmul_attestation_backoff.end(); ++it) {
-            if (it->second.not_before < oldest->second.not_before) {
-                oldest = it;
-            }
+    const int64_t window_start{
+        m_matmul_attestation_backoff_arms.empty()
+            ? int64_t{0}
+            : m_matmul_attestation_backoff_arms.front()};
+    if (!node::matmul_trusted::AttestationBackoffArmBudgetAllows(
+            m_matmul_attestation_backoff_arms.size(), now_s, window_start)) {
+        if (m_matmul_attestation_backoff_arm_log.time_since_epoch().count() == 0 ||
+            now - m_matmul_attestation_backoff_arm_log >=
+                MATMUL_TRUSTED_MIRROR_STALL_LOG_INTERVAL) {
+            m_matmul_attestation_backoff_arm_log = now;
+            LogDebug(
+                BCLog::NET,
+                "matmul attestation backoff arm budget exhausted "
+                "armed=%zu map=%zu\n",
+                m_matmul_attestation_backoff_arms.size(),
+                m_matmul_attestation_backoff.size());
         }
-        m_matmul_attestation_backoff.erase(oldest);
+        return false;
     }
+    m_matmul_attestation_backoff_arms.push_back(now_s);
+    return true;
 }
 
 bool PeerManagerImpl::NoteTrustedMirrorUnattestableReject(const uint256& hash)
 {
     AssertLockHeld(cs_main);
     const auto now{std::chrono::steady_clock::now()};
+    // TTL sweep + cap on every touch (repeat hits used to skip eviction).
+    MaybeEvictAttestationBackoff();
     auto it{m_matmul_attestation_backoff.find(hash)};
     const bool already_cached{it != m_matmul_attestation_backoff.end()};
     const bool window_active{
@@ -9500,8 +9531,8 @@ bool PeerManagerImpl::NoteTrustedMirrorUnattestableReject(const uint256& hash)
         })) {
         return false;
     }
-    if (!already_cached) {
-        MaybeEvictAttestationBackoff();
+    if (!already_cached && !AllowAttestationBackoffArm(now)) {
+        return false;
     }
     auto& backoff{already_cached ? it->second
                                  : m_matmul_attestation_backoff[hash]};
@@ -10607,7 +10638,15 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
                 // exponential signer-absent delay (may exceed the sticky base).
                 const bool counted{
                     NoteTrustedMirrorUnattestableReject(hash)};
-                auto& backoff{m_matmul_attestation_backoff[hash]};
+                auto backoff_it{m_matmul_attestation_backoff.find(hash)};
+                if (backoff_it == m_matmul_attestation_backoff.end()) {
+                    m_matmul_attestation_requested.erase(existing);
+                    if (counted) {
+                        MaybeLogTrustedMirrorStall(tip_height);
+                    }
+                    return;
+                }
+                auto& backoff{backoff_it->second};
                 backoff.signer_absent = true;
                 backoff.consecutive_misses =
                     std::min(backoff.consecutive_misses + 1,

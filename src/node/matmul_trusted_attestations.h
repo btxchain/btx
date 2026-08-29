@@ -3014,11 +3014,79 @@ struct TrustedRejectStickyView {
 //! Negative cache for unattestable GETMMATTEST hashes. A competing
 //! HEADER_ONLY flood must not grow this map without bound (s4 M-4.3a).
 static constexpr size_t MATMUL_ATTESTATION_BACKOFF_MAX{4096};
+//! Distinct new-hash arms per window. Stops a flood from driving O(n)
+//! at-cap scans on every msghand insert.
+static constexpr size_t MATMUL_ATTESTATION_BACKOFF_ARM_MAX{512};
+static constexpr int64_t MATMUL_ATTESTATION_BACKOFF_ARM_WINDOW_SECONDS{60};
 
 [[nodiscard]] inline constexpr bool AttestationBackoffMapMustEvict(
     size_t map_size, size_t max_size = MATMUL_ATTESTATION_BACKOFF_MAX)
 {
     return max_size > 0 && map_size >= max_size;
+}
+
+[[nodiscard]] inline constexpr bool AttestationBackoffEntryExpired(
+    int64_t now, int64_t not_before)
+{
+    return now >= not_before;
+}
+
+/** Newest-armed victim. A flood of fresh hashes evicts itself instead of
+ *  purging the older legitimate negative cache. */
+template <typename TimePoint>
+[[nodiscard]] constexpr bool AttestationBackoffPreferNewerVictim(
+    TimePoint candidate_not_before, TimePoint current_victim_not_before)
+{
+    return candidate_not_before > current_victim_not_before;
+}
+
+/** Drop entries whose sticky window has elapsed. Same prune-on-touch
+ *  pattern as open-attestor directory TTL (SF-22a). `mapped_type` must
+ *  expose `not_before` comparable with `now`. */
+template <typename Map, typename TimePoint>
+void PruneExpiredAttestationBackoff(Map& map, TimePoint now)
+{
+    for (auto it = map.begin(); it != map.end();) {
+        if (now >= it->second.not_before) {
+            it = map.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+/** At-cap eviction of the newest `not_before`. Call after the TTL sweep. */
+template <typename Map>
+void EvictNewestAttestationBackoffToCap(
+    Map& map, size_t max_size = MATMUL_ATTESTATION_BACKOFF_MAX)
+{
+    while (AttestationBackoffMapMustEvict(map.size(), max_size) && !map.empty()) {
+        auto victim{map.begin()};
+        for (auto it = map.begin(); it != map.end(); ++it) {
+            if (AttestationBackoffPreferNewerVictim(
+                    it->second.not_before, victim->second.not_before)) {
+                victim = it;
+            }
+        }
+        map.erase(victim);
+    }
+}
+
+/** First `max` arms in `window_seconds` are allowed; a new window always
+ *  allows the first arm. `count` is arms already recorded in this window. */
+[[nodiscard]] inline bool AttestationBackoffArmBudgetAllows(
+    size_t count,
+    int64_t now,
+    int64_t window_start,
+    size_t max = MATMUL_ATTESTATION_BACKOFF_ARM_MAX,
+    int64_t window_seconds = MATMUL_ATTESTATION_BACKOFF_ARM_WINDOW_SECONDS)
+{
+    if (max == 0 || window_seconds <= 0) return true;
+    if (window_start <= 0 || now < window_start ||
+        now - window_start >= window_seconds) {
+        return true;
+    }
+    return count < max;
 }
 
 } // namespace node::matmul_trusted
