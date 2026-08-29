@@ -1093,6 +1093,7 @@ void ResetLastExactReplayVerifyResultForTest();
 [[nodiscard]] RCExactReplayProviderHealth
 GetRCExactReplayProviderHealth();
 void ResetRCExactReplayProviderHealthForTest();
+void SetRCExactReplayProviderHealthForTest(RCExactReplayProviderHealth health);
 
 /** Observer invoked when strict validation exhausts all eligible providers.
  *

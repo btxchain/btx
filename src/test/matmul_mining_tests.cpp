@@ -13,6 +13,7 @@
 #include <key.h>
 #include <matmul/accel_v4.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/pow_v4.h>
 #include <net.h>
 #include <node/matmul_trusted_attestations.h>
@@ -33,6 +34,7 @@
 
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -585,6 +587,54 @@ BOOST_AUTO_TEST_CASE(getmininginfo_backend_runtime_includes_v4_dispatch_stats)
         + backend.find_value("requested_metal").getInt<uint64_t>()
         + backend.find_value("requested_cuda").getInt<uint64_t>();
     BOOST_CHECK_GE(requested_total, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(getmininginfo_required_backend_satisfied_false_when_rc_quarantined)
+{
+    class ScopedEnv {
+        std::string m_name;
+        std::optional<std::string> m_previous;
+    public:
+        ScopedEnv(const char* name, const char* value) : m_name(name)
+        {
+            if (const char* prev = std::getenv(name)) {
+                m_previous = std::string{prev};
+            }
+            setenv(name, value, 1);
+        }
+        ~ScopedEnv()
+        {
+            if (m_previous) {
+                setenv(m_name.c_str(), m_previous->c_str(), 1);
+            } else {
+                unsetenv(m_name.c_str());
+            }
+        }
+    };
+
+    matmul::v4::rc::ResetRCExactReplayProviderHealthForTest();
+    // Pin both request and requirement to CPU so a GPU host still starts satisfied.
+    ScopedEnv require_backend("BTX_MATMUL_REQUIRE_BACKEND", "cpu");
+    ScopedEnv mining_backend("BTX_MATMUL_BACKEND", "cpu");
+
+    const auto ok = CallRPC("getmininginfo").get_obj().find_value("backend_runtime").get_obj();
+    BOOST_REQUIRE(ok.find_value("required_backend_enabled").get_bool());
+    BOOST_CHECK(ok.find_value("required_backend_satisfied").get_bool());
+
+    matmul::v4::rc::RCExactReplayProviderHealth quarantined;
+    quarantined.quarantined = true;
+    quarantined.reason = "test_quarantine";
+    matmul::v4::rc::SetRCExactReplayProviderHealthForTest(quarantined);
+
+    const auto bad = CallRPC("getmininginfo").get_obj().find_value("backend_runtime").get_obj();
+    BOOST_CHECK(!bad.find_value("required_backend_satisfied").get_bool());
+    BOOST_CHECK(
+        bad.find_value("backend_requirement_reason").get_str().find("quarantined") !=
+        std::string::npos);
+
+    matmul::v4::rc::ResetRCExactReplayProviderHealthForTest();
+    const auto restored = CallRPC("getmininginfo").get_obj().find_value("backend_runtime").get_obj();
+    BOOST_CHECK(restored.find_value("required_backend_satisfied").get_bool());
 }
 
 BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_and_time_policy)

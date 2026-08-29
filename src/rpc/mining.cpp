@@ -1628,12 +1628,33 @@ static UniValue BuildBackendRuntimeProfile(
             ? matmul::backend::ToString(backend_requirement.required)
             : std::string{});
     obj.pushKV("required_backend_valid", backend_requirement.valid);
-    obj.pushKV(
-        "required_backend_satisfied",
-        matmul::accelerated::IsBackendRequirementSatisfied(
-            backend_requirement,
-            backend_selection));
-    obj.pushKV("backend_requirement_reason", backend_requirement.reason);
+    const bool backend_satisfied = matmul::accelerated::IsBackendRequirementSatisfied(
+        backend_requirement,
+        backend_selection);
+    const auto rc_health = matmul::v4::rc::GetRCExactReplayProviderHealth();
+    const bool rc_scheduler_degraded =
+        matmul::v4::rc::GetRCAcceleratorScheduler().GetStats().combined_authority_miner_degraded;
+    const bool rc_degraded =
+        rc_health.quarantined || rc_health.validator_readiness_lost || rc_scheduler_degraded;
+    const bool satisfied =
+        backend_satisfied && (!backend_requirement.enabled || !rc_degraded);
+    std::string requirement_reason = backend_requirement.reason;
+    if (backend_requirement.enabled && rc_degraded) {
+        if (rc_health.quarantined) {
+            if (!requirement_reason.empty()) requirement_reason += "; ";
+            requirement_reason += "rc_exact_replay_provider_quarantined";
+        }
+        if (rc_health.validator_readiness_lost) {
+            if (!requirement_reason.empty()) requirement_reason += "; ";
+            requirement_reason += "rc_validator_readiness_lost";
+        }
+        if (rc_scheduler_degraded) {
+            if (!requirement_reason.empty()) requirement_reason += "; ";
+            requirement_reason += "rc_combined_authority_miner_degraded";
+        }
+    }
+    obj.pushKV("required_backend_satisfied", satisfied);
+    obj.pushKV("backend_requirement_reason", requirement_reason);
     const uint64_t v4_metal_req = V4MetalRequests(v4);
     const uint64_t v4_cuda_req = V4CudaRequests(v4);
     const uint64_t v4_device_req = v4_metal_req + v4_cuda_req + V4HipRequests(v4) + V4AscendRequests(v4);
@@ -6332,7 +6353,7 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::BOOL, "required_backend_enabled", "Whether BTX_MATMUL_REQUIRE_BACKEND is active"},
                             {RPCResult::Type::STR, "required_backend", "Required backend when enabled"},
                             {RPCResult::Type::BOOL, "required_backend_valid", "Whether the required backend name is recognized"},
-                            {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement"},
+                            {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement and RC ExactReplay is not degraded when a backend is required"},
                             {RPCResult::Type::STR, "backend_requirement_reason", "Requirement parsing or enforcement reason"},
                             {RPCResult::Type::NUM, "digest_requests", "Digest requests served (v3 solver plus v4 dispatch invocations)"},
                             {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU (v3 plus v4)"},
@@ -7356,7 +7377,7 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::BOOL, "required_backend_enabled", "Whether BTX_MATMUL_REQUIRE_BACKEND is active"},
                                     {RPCResult::Type::STR, "required_backend", "Required backend when enabled"},
                                     {RPCResult::Type::BOOL, "required_backend_valid", "Whether the required backend name is recognized"},
-                                    {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement"},
+                                    {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement and RC ExactReplay is not degraded when a backend is required"},
                                     {RPCResult::Type::STR, "backend_requirement_reason", "Requirement parsing or enforcement reason"},
                                     {RPCResult::Type::NUM, "digest_requests", "Digest requests served (v3 solver plus v4 dispatch invocations)"},
                                     {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU (v3 plus v4)"},
@@ -7813,7 +7834,7 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::BOOL, "required_backend_enabled", "Whether BTX_MATMUL_REQUIRE_BACKEND is active"},
                                     {RPCResult::Type::STR, "required_backend", "Required backend when enabled"},
                                     {RPCResult::Type::BOOL, "required_backend_valid", "Whether the required backend name is recognized"},
-                                    {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement"},
+                                    {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement and RC ExactReplay is not degraded when a backend is required"},
                                     {RPCResult::Type::STR, "backend_requirement_reason", "Requirement parsing or enforcement reason"},
                                     {RPCResult::Type::NUM, "digest_requests", "Digest requests served (v3 solver plus v4 dispatch invocations)"},
                                     {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU (v3 plus v4)"},

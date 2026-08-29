@@ -335,6 +335,13 @@ void ResetRCExactReplayProviderHealthForTest()
     g_allow_unverifiable_catchup_replay.store(false, std::memory_order_release);
 }
 
+void SetRCExactReplayProviderHealthForTest(RCExactReplayProviderHealth health)
+{
+    std::lock_guard<std::mutex> lock{
+        g_exact_replay_provider_health_mutex};
+    g_exact_replay_provider_health = std::move(health);
+}
+
 bool RegisterRCExactReplayAlternateProvider(
     const RCExactReplayAlternateProvider& provider,
     std::string* reason)
