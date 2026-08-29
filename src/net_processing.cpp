@@ -1465,6 +1465,20 @@ public:
     {
         return HasMatMulRetainedBodyForTest(hash);
     }
+    void RetainMatMulBodyForTest(
+        const std::shared_ptr<const CBlock>& block) override
+    {
+        node::MatMulBlockLifecycle::RetainedBody body;
+        body.block = block;
+        body.bytes = 1;
+        m_matmul_block_lifecycle.Retain(block->GetHash(), std::move(body));
+    }
+    void SimulateBlockConnectedForTest(
+        const std::shared_ptr<const CBlock>& block,
+        const CBlockIndex* pindex) override
+    {
+        BlockConnected(ChainstateRole::NORMAL, block, pindex);
+    }
     void RetryMatMulDeferredBodiesForTest() override
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !NetEventsInterface::g_msgproc_mutex)
     {
@@ -8077,7 +8091,20 @@ void PeerManagerImpl::BlockConnected(
     // terminal. This also cancels a live generation, preventing a late
     // callback or idle retry from re-admitting an already-connected body.
     if (role != ChainstateRole::BACKGROUND) {
-        m_matmul_block_lifecycle.TerminalConnected(pindex->GetBlockHash());
+        // #130 review fix: BlockConnected is drained asynchronously, so a reorg
+        // may have disconnected this block before this callback runs. Erasing by
+        // hash unconditionally would delete a *fresh* lifecycle generation that
+        // was re-retained for the same hash on the new active chain (cancelling
+        // live valid work). Only terminate when the block is still on the active
+        // chain at the moment the callback actually runs.
+        bool still_active{false};
+        {
+            LOCK(cs_main);
+            still_active = m_chainman.ActiveChain().Contains(pindex);
+        }
+        if (still_active) {
+            m_matmul_block_lifecycle.TerminalConnected(pindex->GetBlockHash());
+        }
     }
 
     // In case the dynamic timeout was doubled once or more, reduce it slowly back to
