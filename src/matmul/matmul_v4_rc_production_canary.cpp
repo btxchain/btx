@@ -1109,6 +1109,13 @@ RCProductionCanaryStatus GetLastRCProductionCanaryStatus()
     return g_last_production_canary;
 }
 
+bool RCProductionGoldenMismatchBlocksMining(
+    const RCProductionCanaryStatus& status, const std::string& provider)
+{
+    return status.provider == provider && status.exact_manifest_match &&
+           status.outcome == RCProductionCanaryOutcome::DigestMismatch;
+}
+
 const char* RCProductionCanaryOutcomeName(RCProductionCanaryOutcome outcome)
 {
     switch (outcome) {
@@ -1151,6 +1158,11 @@ void ResetRCProductionCanaryForTest()
 {
     StoreStatus({});
     SetRCProductionProviderIdentityOverrideForTest(std::nullopt);
+}
+
+void SetRCProductionCanaryStatusForTest(RCProductionCanaryStatus status)
+{
+    StoreStatus(status);
 }
 
 } // namespace matmul::v4::rc

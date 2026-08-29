@@ -22,6 +22,7 @@
 
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 
+#include <logging.h>
 #include <matmul/matmul_v4_lt.h>
 
 #import <Foundation/Foundation.h>
@@ -228,6 +229,12 @@ TensorOpsContext& Ctx()
             ctx.compile_ok = true;
             ctx.tensor_path_reason = "ok";
         }
+        if (!ctx.compile_ok) {
+            LogPrintf("MATMUL-METAL WARNING: Metal 4 INT8 TensorOps not admitted (%s). "
+                      "v4 mining will use CPU. This is often MTLCompilerService unreachable "
+                      "in a daemon/launchd context; a silent CPU fallback is the defect this line reports.\n",
+                      ctx.tensor_path_reason);
+        }
     });
     return ctx;
 }
@@ -302,6 +309,9 @@ TensorOpsContext& Ctx()
         std::vector<int32_t> gpu;
         if (!LaunchTensorOpsS8S8Raw(left, right, kDim, kDim, kDim, gpu) || gpu != cpu) {
             Ctx().tensor_path_reason = "exact_gemm_s8s8_self_qual_failed";
+            LogPrintf("MATMUL-METAL WARNING: ExactGemm TensorOps self-qual failed (%s). "
+                      "v4 Metal is not admissible; mining will use CPU.\n",
+                      Ctx().tensor_path_reason);
             return;
         }
 
@@ -319,6 +329,9 @@ TensorOpsContext& Ctx()
         std::vector<int32_t> gpu_panel;
         if (!LaunchTensorOpsS8S8Raw(G, W, kN, kN, kW, gpu_panel) || gpu_panel != cpu_panel) {
             Ctx().tensor_path_reason = "exact_gemm_s8s8_panel_self_qual_failed";
+            LogPrintf("MATMUL-METAL WARNING: ExactGemm TensorOps self-qual failed (%s). "
+                      "v4 Metal is not admissible; mining will use CPU.\n",
+                      Ctx().tensor_path_reason);
             return;
         }
         ok = true;

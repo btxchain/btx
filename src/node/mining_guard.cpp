@@ -190,26 +190,34 @@ MiningChainGuardStatus EvaluateMiningChainGuard(
         return status;
     }
 
+    if (status.peer_count > 0) {
+        status.best_peer_tip = *std::max_element(peer_heights.begin(), peer_heights.end());
+        status.worst_peer_tip = *std::min_element(peer_heights.begin(), peer_heights.end());
+        status.median_peer_tip = ComputeMedianTip(peer_heights);
+        status.near_tip_peers = std::count_if(
+            peer_heights.begin(), peer_heights.end(), [&](int peer_height) {
+                return std::abs(peer_height - local_tip_height) <= options.near_tip_window;
+            });
+
+        // Catch-up is not isolation. A node with even one peer clearly
+        // above its tip must report local_tip_behind, not
+        // insufficient_peer_consensus. The old order required
+        // min_peer_count known BestKnown hashes first, so headers-level
+        // visibility of 23 peers ahead still looked like an empty mesh
+        // (live rtx6000 / PR 126).
+        if (status.median_peer_tip > local_tip_height + options.max_median_tip_gap) {
+            status.reason = "local_tip_behind_peer_median";
+            return status;
+        }
+
+        if (status.median_peer_tip < local_tip_height - options.max_median_tip_gap) {
+            status.reason = "local_tip_ahead_of_peer_median";
+            return status;
+        }
+    }
+
     if (status.peer_count < options.min_peer_count) {
         status.reason = "insufficient_peer_consensus";
-        return status;
-    }
-
-    status.best_peer_tip = *std::max_element(peer_heights.begin(), peer_heights.end());
-    status.worst_peer_tip = *std::min_element(peer_heights.begin(), peer_heights.end());
-    status.median_peer_tip = ComputeMedianTip(peer_heights);
-    status.near_tip_peers = std::count_if(
-        peer_heights.begin(), peer_heights.end(), [&](int peer_height) {
-            return std::abs(peer_height - local_tip_height) <= options.near_tip_window;
-        });
-
-    if (status.median_peer_tip < local_tip_height - options.max_median_tip_gap) {
-        status.reason = "local_tip_ahead_of_peer_median";
-        return status;
-    }
-
-    if (status.median_peer_tip > local_tip_height + options.max_median_tip_gap) {
-        status.reason = "local_tip_behind_peer_median";
         return status;
     }
 
@@ -238,6 +246,13 @@ void ApplyPeerTipHashCheck(
         status.island_suspect =
             status.reason == "insufficient_peer_consensus" ||
             status.reason == "insufficient_near_tip_peers";
+        return;
+    }
+
+    // Catch-up: peers sit above our tip, so same-height hash agreement
+    // cannot be observed. That is not mining-alone.
+    if (status.reason == "local_tip_behind_peer_median") {
+        status.island_suspect = false;
         return;
     }
 
@@ -352,24 +367,31 @@ MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
     peer_samples.reserve(node_stats.size());
 
     for (const CNodeStats& peer_stats : node_stats) {
-        // Guard against local mining on minority forks using the node's own
-        // outbound view of the network rather than potentially spoofed inbound peers.
-        if (peer_stats.fInbound) continue;
-
         CNodeStateStats state_stats;
         if (!node.peerman->GetNodeStateStats(peer_stats.nodeid, state_stats)) continue;
 
         const int peer_height =
-            state_stats.nSyncHeight >= 0 ? state_stats.nSyncHeight : state_stats.nCommonHeight;
-        if (peer_height >= 0) {
-            MiningChainGuardPeerSample sample;
-            sample.height = peer_height;
-            sample.hash = state_stats.m_best_known_block_hash;
-            sample.last_block_time = peer_stats.m_last_block_time.count();
-            sample.last_block_announcement =
-                TicksSinceEpoch<std::chrono::seconds>(state_stats.m_last_block_announcement);
-            peer_samples.push_back(sample);
-        }
+            state_stats.nSyncHeight >= 0
+                ? state_stats.nSyncHeight
+                : (state_stats.nCommonHeight >= 0
+                       ? state_stats.nCommonHeight
+                       : state_stats.m_starting_height);
+        if (peer_height < 0) continue;
+
+        // Isolation / hash-split uses the outbound view. Catch-up also
+        // counts inbound peers that advertise above the local tip:
+        // VERSION height is headers-level visibility, and requiring a
+        // BestKnown hash first is how a far-behind archive reported
+        // insufficient_peer_consensus with 23 peers ahead.
+        if (peer_stats.fInbound && peer_height <= local_tip_height) continue;
+
+        MiningChainGuardPeerSample sample;
+        sample.height = peer_height;
+        sample.hash = peer_stats.fInbound ? std::string{} : state_stats.m_best_known_block_hash;
+        sample.last_block_time = peer_stats.m_last_block_time.count();
+        sample.last_block_announcement =
+            TicksSinceEpoch<std::chrono::seconds>(state_stats.m_last_block_announcement);
+        peer_samples.push_back(sample);
     }
 
     const int64_t now = GetTime<std::chrono::seconds>().count();

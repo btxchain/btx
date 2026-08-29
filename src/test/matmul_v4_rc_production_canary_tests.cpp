@@ -728,4 +728,24 @@ BOOST_AUTO_TEST_CASE(canary_admits_m5_class_without_a_manifest_row)
     rc::ResetRCProductionCanaryForTest();
 }
 
+BOOST_AUTO_TEST_CASE(present_row_digest_mismatch_blocks_mining_gate)
+{
+    rc::RCProductionCanaryStatus status;
+    status.provider = "cuda_sm89";
+    status.exact_manifest_match = true;
+    status.outcome = rc::RCProductionCanaryOutcome::DigestMismatch;
+    BOOST_CHECK(rc::RCProductionGoldenMismatchBlocksMining(status, "cuda_sm89"));
+    BOOST_CHECK(!rc::RCProductionGoldenMismatchBlocksMining(status, "metal_int8_exact"));
+
+    status.outcome = rc::RCProductionCanaryOutcome::MissingGolden;
+    BOOST_CHECK(!rc::RCProductionGoldenMismatchBlocksMining(status, "cuda_sm89"));
+
+    status.outcome = rc::RCProductionCanaryOutcome::Passed;
+    BOOST_CHECK(!rc::RCProductionGoldenMismatchBlocksMining(status, "cuda_sm89"));
+
+    status.outcome = rc::RCProductionCanaryOutcome::DigestMismatch;
+    status.exact_manifest_match = false;
+    BOOST_CHECK(!rc::RCProductionGoldenMismatchBlocksMining(status, "cuda_sm89"));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -7547,6 +7547,23 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
     const auto resolved_rc =
         matmul_v4::accel::ResolveExactGemmBackendForRC();
 
+    // RB-4: fail closed in the miner loop exactly like validation. A reviewed
+    // golden row present for this provider/epoch whose production digest
+    // mismatched the device refuses mining; absence of a row (688bbbe4) stays
+    // admissible via byte-exact self-qualification.
+    const auto production_canary{
+        matmul::v4::rc::GetLastRCProductionCanaryStatus()};
+    if (matmul::v4::rc::RCProductionGoldenMismatchBlocksMining(
+            production_canary, resolved_rc.provider)) {
+        LogWarning(
+            "SolveMatMulV4RC: refusing to mine on provider=%s: production "
+            "digest mismatches reviewed golden manifest_entry_id=%s\n",
+            resolved_rc.provider, production_canary.manifest_entry_id);
+        RegisterMatMulSolveRuntimeSample(
+            false, std::chrono::steady_clock::now() - start);
+        return false;
+    }
+
     while (max_tries > 0) {
         if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
@@ -7883,10 +7900,25 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
         }
+        // RB-3: never seal a device-only digest. Recompute the winner on the
+        // CPU oracle at the LIVE params_rc dims and require byte-exact equality
+        // (A14 discipline, same as the BMX4C/LT/coupled solvers).
+        const uint256 cpu_resealed =
+            matmul::v4::rc::ConfirmRCWinnerCpuOracle(
+                block, params_rc, block_height, resealed);
+        if (cpu_resealed.IsNull() ||
+            UintToArith256(cpu_resealed) > effective_target) {
+            LogWarning("SolveMatMulV4RC: winner CPU reference diverged from device "
+                       "reseal at nonce=%llu; refusing to seal\n",
+                       static_cast<unsigned long long>(block.nNonce64));
+            RegisterMatMulSolveRuntimeSample(
+                false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
         const auto reseal_completed{
             std::chrono::steady_clock::now()};
-        if (UintToArith256(resealed) <= effective_target) {
-            block.matmul_digest = resealed;
+        if (UintToArith256(cpu_resealed) <= effective_target) {
+            block.matmul_digest = cpu_resealed;
             if constexpr (
                 matmul::v4::rc::
                     kRCStage3SuccinctAuthorityReady) {
@@ -7929,7 +7961,7 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                 // uses block_target. Solo/consensus mining has
                 // block_target == effective_target, so this is a no-op there.
                 const auto pr = matmul::v4::rc::ProveWinnerEpisodeV7(
-                    block, params_rc, block_height, block_target, resealed);
+                    block, params_rc, block_height, block_target, cpu_resealed);
                 if (pr.timing.ok) {
                     matmul::v4::rc::RCFreivaldsSampledCarrier carrier;
                     std::string cwhy;
@@ -7957,7 +7989,7 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             // BTX_RC_VERIFY_GKR=1 may validate them without raising height.
             if (matmul::v4::rc::EnvRCWinnerGkrEnabled()) {
                 const auto pr = matmul::v4::rc::ProveWinnerEpisode(block, params_rc, block_height,
-                                                                   resealed);
+                                                                   cpu_resealed);
                 std::vector<unsigned char> ser;
                 (void)matmul::v4::rc::SerializeRCGkrProof(pr.proof, ser);
                 matmul::v4::rc::RCGkrProofCachePut(block.GetHash(), std::move(ser));
@@ -7979,7 +8011,7 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             if constexpr (!matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
                 if (!params.fMatMulRCUseToyDims &&
                     params.nMatMulRCProfile == 1 &&
-                    UintToArith256(resealed) <= block_target) {
+                    UintToArith256(cpu_resealed) <= block_target) {
                     const auto ttl =
                         std::chrono::duration_cast<
                             std::chrono::milliseconds>(

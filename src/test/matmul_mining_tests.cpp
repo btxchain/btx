@@ -11,11 +11,14 @@
 #include <interfaces/mining.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <key.h>
+#include <matmul/accel_v4.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/pow_v4.h>
 #include <net.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <pow.h>
+#include <primitives/block.h>
 #include <rpc/protocol.h>
 #include <rpc/server.h>
 #include <serialize.h>
@@ -34,6 +37,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -539,11 +543,51 @@ BOOST_AUTO_TEST_CASE(getmininginfo_reports_matmul_algorithm)
     BOOST_CHECK(backend_runtime.find_value("required_backend_enabled").isBool());
     BOOST_CHECK(backend_runtime.find_value("required_backend_satisfied").isBool());
     BOOST_CHECK(backend_runtime.find_value("metal_fallbacks_to_cpu").isNum());
+    BOOST_CHECK(backend_runtime.find_value("v4_dispatch").isObject());
+    BOOST_CHECK(backend_runtime.find_value("v4_dispatch").get_obj().find_value("requests").isNum());
+    BOOST_CHECK(backend_runtime.find_value("v4_dispatch").get_obj().find_value("metal_ok").isNum());
+    BOOST_CHECK(backend_runtime.find_value("v4_dispatch").get_obj().find_value("cuda_ok").isNum());
 
     const auto time_policy = info.find_value("time_policy").get_obj();
     BOOST_CHECK_EQUAL(time_policy.find_value("height").getInt<int>(), ActiveHeight() + 1);
     BOOST_CHECK(time_policy.find_value("future_mtp_limit_active").isBool());
     BOOST_CHECK(time_policy.find_value("recommended_action").isStr());
+}
+
+BOOST_AUTO_TEST_CASE(getmininginfo_reports_nonzero_matmul_rate_after_generate)
+{
+    (void)CallRPC("generateblock", GenerateBlockParams(/*submit=*/true));
+    const auto info = CallRPC("getmininginfo").get_obj();
+    BOOST_CHECK(info.find_value("matmul_digests_per_second").isNum());
+    BOOST_CHECK(info.find_value("networkhashps").isNum());
+    BOOST_CHECK(
+        info.find_value("networkhashps").get_real() > 0.0 ||
+        info.find_value("matmul_digests_per_second").get_real() > 0.0);
+}
+
+BOOST_AUTO_TEST_CASE(getmininginfo_backend_runtime_includes_v4_dispatch_stats)
+{
+    matmul_v4::accel::ResetStats();
+
+    CBlockHeader header{};
+    header.nVersion = 0x20000000;
+    header.nTime = 1'770'000'000;
+    header.nBits = 0x207fffff;
+    header.matmul_dim = 8;
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestDispatched(header, /*n=*/8, /*rounds=*/2, digest, payload));
+
+    const auto info = CallRPC("getmininginfo").get_obj();
+    const auto backend = info.find_value("backend_runtime").get_obj();
+    const auto v4 = backend.find_value("v4_dispatch").get_obj();
+    BOOST_CHECK_GE(v4.find_value("requests").getInt<uint64_t>(), 1U);
+    BOOST_CHECK_GE(backend.find_value("digest_requests").getInt<uint64_t>(), 1U);
+    const uint64_t requested_total =
+        backend.find_value("requested_cpu").getInt<uint64_t>()
+        + backend.find_value("requested_metal").getInt<uint64_t>()
+        + backend.find_value("requested_cuda").getInt<uint64_t>();
+    BOOST_CHECK_GE(requested_total, 1U);
 }
 
 BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_and_time_policy)

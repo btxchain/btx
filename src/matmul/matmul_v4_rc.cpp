@@ -2619,6 +2619,24 @@ RCWinnerResealResult ResealRCWinnerStrict(
     return out;
 }
 
+uint256 ConfirmRCWinnerCpuOracle(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const uint256& device_resealed)
+{
+    if (device_resealed.IsNull()) {
+        return {};
+    }
+    const uint256 cpu_resealed = RecomputeResidentCurriculumReference(
+        header, params, height, {}, /*out_rounds=*/nullptr,
+        /*out_timing=*/nullptr, lt::ExactGemmBackend{});
+    if (cpu_resealed.IsNull() || cpu_resealed != device_resealed) {
+        return {};
+    }
+    return cpu_resealed;
+}
+
 uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
                       std::vector<RCRoundTranscript>* out_rounds,
                       const lt::ExactGemmBackend& gemm)

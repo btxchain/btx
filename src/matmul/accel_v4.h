@@ -105,6 +105,12 @@ struct Stats {
     uint64_t ascend_batch_ok{0};
     uint64_t ascend_batch_mismatch{0};
     uint64_t ascend_batch_fallback{0};
+
+    std::string active_backend{"unresolved"};
+    std::string requested_backend{"unresolved"};
+    std::string admission_warning;
+    std::string last_metal_fallback_error;
+    std::string last_cuda_fallback_error;
 };
 
 /** Human-readable backend label ("cpu" / "cuda" / "metal" / "hip" / "ascend"). */

@@ -243,6 +243,14 @@ ProbeRCProductionProviderIdentity(const std::string& resolved_provider);
     const RCProductionGoldenLookup& lookup,
     const RCStrictDeviceEpisodeResult* replay);
 
+/** RB-4: fail-closed miner-loop gate. True only when a unique reviewed golden
+ * row was found for `provider` (status.exact_manifest_match) and the startup
+ * production canary observed a digest MISMATCH against it. Absence of a row
+ * (MissingGolden + byte-exact self-qualification, 688bbbe4) and a passed
+ * reviewed row both return false. */
+[[nodiscard]] bool RCProductionGoldenMismatchBlocksMining(
+    const RCProductionCanaryStatus& status, const std::string& provider);
+
 /** Fixed, domain-separated, epoch-bound input header for production canaries. */
 [[nodiscard]] CBlockHeader MakeRCProductionCanaryHeader(
     const RCProductionEpochIdentity& epoch, uint64_t nonce);
@@ -341,6 +349,8 @@ IssueRCProductionProviderCapabilityForTest(
 void SetRCProductionProviderIdentityOverrideForTest(
     std::optional<RCProductionProviderIdentity> identity);
 void ResetRCProductionCanaryForTest();
+/** Test-only snapshot install. Does not mint a production capability. */
+void SetRCProductionCanaryStatusForTest(RCProductionCanaryStatus status);
 
 } // namespace matmul::v4::rc
 

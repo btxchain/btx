@@ -354,7 +354,27 @@ static void EnsureMatMulAttestedMiningParent(
  * or from the last difficulty change if 'lookup' is -1.
  * If 'height' is -1, compute the estimate from current chain tip.
  * If 'height' is a valid block height, compute the estimate at the time when a given block was found.
+ *
+ * On MatMul chains the SHA256-style chain-work estimate is often 0 (same-timestamp
+ * regtest blocks, or genesis while the miner is already hashing). Fall back to
+ * this node's observed digest rate so getmininginfo/getnetworkhashps are not stuck
+ * at 0 while the solver is running (issue 77).
  */
+static double LocalMatMulDigestRate()
+{
+    const MatMulSolveRuntimeStats solve = ProbeMatMulSolveRuntimeStats();
+    if (solve.total_elapsed_us == 0) return 0.0;
+    const MatMulSolvePipelineStats pipeline = ProbeMatMulSolvePipelineStats();
+    const auto v4 = matmul_v4::accel::ProbeStats();
+    const auto v3 = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+    uint64_t digests = pipeline.batched_nonce_attempts;
+    if (digests == 0) digests = v4.requests;
+    if (digests == 0) digests = v3.digest_requests;
+    if (digests == 0) digests = solve.attempts;
+    if (digests == 0) return 0.0;
+    return static_cast<double>(digests) * 1'000'000.0 / static_cast<double>(solve.total_elapsed_us);
+}
+
 static UniValue GetNetworkHashPS(int lookup, int height, const CChain& active_chain) {
     if (lookup < -1 || lookup == 0) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid nblocks. Must be a positive number or -1.");
@@ -370,35 +390,41 @@ static UniValue GetNetworkHashPS(int lookup, int height, const CChain& active_ch
         pb = active_chain[height];
     }
 
-    if (pb == nullptr || !pb->nHeight)
+    if (pb == nullptr)
         return 0;
 
-    // If lookup is -1, then use blocks since last difficulty change.
-    if (lookup == -1)
-        lookup = pb->nHeight % Params().GetConsensus().DifficultyAdjustmentInterval() + 1;
+    double chain_rate = 0.0;
+    if (pb->nHeight) {
+        // If lookup is -1, then use blocks since last difficulty change.
+        if (lookup == -1)
+            lookup = pb->nHeight % Params().GetConsensus().DifficultyAdjustmentInterval() + 1;
 
-    // If lookup is larger than chain, then set it to chain length.
-    if (lookup > pb->nHeight)
-        lookup = pb->nHeight;
+        // If lookup is larger than chain, then set it to chain length.
+        if (lookup > pb->nHeight)
+            lookup = pb->nHeight;
 
-    const CBlockIndex* pb0 = pb;
-    int64_t minTime = pb0->GetBlockTime();
-    int64_t maxTime = minTime;
-    for (int i = 0; i < lookup; i++) {
-        pb0 = pb0->pprev;
-        int64_t time = pb0->GetBlockTime();
-        minTime = std::min(time, minTime);
-        maxTime = std::max(time, maxTime);
+        const CBlockIndex* pb0 = pb;
+        int64_t minTime = pb0->GetBlockTime();
+        int64_t maxTime = minTime;
+        for (int i = 0; i < lookup; i++) {
+            pb0 = pb0->pprev;
+            int64_t time = pb0->GetBlockTime();
+            minTime = std::min(time, minTime);
+            maxTime = std::max(time, maxTime);
+        }
+
+        arith_uint256 workDiff = pb->nChainWork - pb0->nChainWork;
+        int64_t timeDiff = maxTime - minTime;
+        // Same-timestamp blocks (typical fast regtest) used to return 0.
+        if (timeDiff <= 0) timeDiff = 1;
+        chain_rate = workDiff.getdouble() / static_cast<double>(timeDiff);
     }
 
-    // In case there's a situation where minTime == maxTime, we don't want a divide by zero exception.
-    if (minTime == maxTime)
-        return 0;
-
-    arith_uint256 workDiff = pb->nChainWork - pb0->nChainWork;
-    int64_t timeDiff = maxTime - minTime;
-
-    return workDiff.getdouble() / timeDiff;
+    if (Params().GetConsensus().fMatMulPOW && chain_rate == 0.0) {
+        const double local = LocalMatMulDigestRate();
+        if (local > 0.0) return local;
+    }
+    return chain_rate;
 }
 
 static bool TryGetNextBlockHeight(const CBlockIndex* pindex_prev, int& next_height)
@@ -1559,6 +1585,11 @@ static UniValue BuildV4DispatchProfile(const matmul_v4::accel::Stats& v4)
     obj.pushKV("ascend_batch_ok", v4.ascend_batch_ok);
     obj.pushKV("ascend_batch_mismatch", v4.ascend_batch_mismatch);
     obj.pushKV("ascend_batch_fallback", v4.ascend_batch_fallback);
+    obj.pushKV("active_backend", v4.active_backend);
+    obj.pushKV("requested_backend", v4.requested_backend);
+    obj.pushKV("admission_warning", v4.admission_warning);
+    obj.pushKV("last_metal_fallback_error", v4.last_metal_fallback_error);
+    obj.pushKV("last_cuda_fallback_error", v4.last_cuda_fallback_error);
     return obj;
 }
 
@@ -1651,8 +1682,16 @@ static UniValue BuildBackendRuntimeProfile(
     cuda_pool.pushKV("reason", cuda_pool_stats.reason);
     obj.pushKV("cuda_buffer_pool", std::move(cuda_pool));
 
-    obj.pushKV("last_metal_fallback_error", stats.last_metal_fallback_error);
-    obj.pushKV("last_cuda_fallback_error", stats.last_cuda_fallback_error);
+    if (stats.last_metal_fallback_error.empty()) {
+        obj.pushKV("last_metal_fallback_error", v4.last_metal_fallback_error);
+    } else {
+        obj.pushKV("last_metal_fallback_error", stats.last_metal_fallback_error);
+    }
+    if (stats.last_cuda_fallback_error.empty()) {
+        obj.pushKV("last_cuda_fallback_error", v4.last_cuda_fallback_error);
+    } else {
+        obj.pushKV("last_cuda_fallback_error", stats.last_cuda_fallback_error);
+    }
     obj.pushKV("last_gpu_input_error", stats.last_gpu_input_error);
     obj.pushKV("v4_dispatch", BuildV4DispatchProfile(v4));
 
@@ -5600,7 +5639,9 @@ static RPCHelpMan getnetworkhashps()
     return RPCHelpMan{"getnetworkhashps",
                 "\nReturns the estimated network hashes per second based on the last n blocks.\n"
                 "Pass in [blocks] to override # of blocks, -1 specifies since last difficulty change.\n"
-                "Pass in [height] to estimate the network speed at the time when a certain block was found.\n",
+                "Pass in [height] to estimate the network speed at the time when a certain block was found.\n"
+                "On MatMul chains, same-timestamp windows use a 1s denominator instead of returning 0, and\n"
+                "the call falls back to this node's local digest rate when chain-work is still 0.\n",
                 {
                     {"nblocks", RPCArg::Type::NUM, RPCArg::Default{120}, "The number of previous blocks to calculate estimate from, or -1 for blocks since last difficulty change."},
                     {"height", RPCArg::Type::NUM, RPCArg::Default{-1}, "To estimate at the time of the given height."},
@@ -6203,7 +6244,8 @@ static RPCHelpMan getmininginfo()
                         {RPCResult::Type::STR_HEX, "bits", "The current nBits, compact representation of the block difficulty target"},
                         {RPCResult::Type::NUM, "difficulty", "The current difficulty"},
                         {RPCResult::Type::STR_HEX, "target", "The current target"},
-                        {RPCResult::Type::NUM, "networkhashps", "The network hashes per second"},
+                        {RPCResult::Type::NUM, "networkhashps", "The network hashes per second. On MatMul chains this falls back to local digest/s when chain-work is 0."},
+                        {RPCResult::Type::NUM, "matmul_digests_per_second", /*optional=*/true, "Local MatMul digest attempts per second from this node's solver (not SHA256 hashes)"},
                         {RPCResult::Type::NUM, "pooledtx", "The size of the mempool"},
                         {RPCResult::Type::STR, "chain", "current network name (" LIST_CHAIN_NAMES ")"},
                         {RPCResult::Type::STR, "algorithm", "current proof-of-work algorithm (alias of powalgorithm)"},
@@ -6550,6 +6592,11 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::NUM, "ascend_batch_ok", "Accepted Ascend batched windows"},
                                 {RPCResult::Type::NUM, "ascend_batch_mismatch", "Ascend batched windows rejected by CPU verify"},
                                 {RPCResult::Type::NUM, "ascend_batch_fallback", "Ascend batched fall-throughs to CPU"},
+                                {RPCResult::Type::STR, "active_backend", "Last resolved v4 dispatch backend, or unresolved"},
+                                {RPCResult::Type::STR, "requested_backend", "Last requested v4 backend, or unresolved"},
+                                {RPCResult::Type::STR, "admission_warning", "Last v4 admission mismatch reason, empty if admitted"},
+                                {RPCResult::Type::STR, "last_metal_fallback_error", "Most recent v4 Metal fallback reason"},
+                                {RPCResult::Type::STR, "last_cuda_fallback_error", "Most recent v4 CUDA fallback reason"},
                             }},
                             {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                         }},
@@ -6628,6 +6675,9 @@ static RPCHelpMan getmininginfo()
     obj.pushKV("difficulty", GetDifficulty(tip));
     obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
     obj.pushKV("networkhashps",    getnetworkhashps().HandleRequest(request));
+    if (chainman.GetConsensus().fMatMulPOW) {
+        obj.pushKV("matmul_digests_per_second", LocalMatMulDigestRate());
+    }
     obj.pushKV("pooledtx",         (uint64_t)mempool.size());
     obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
     const std::string algorithm =
@@ -7380,6 +7430,11 @@ static RPCHelpMan getmatmulchallenge()
                                         {RPCResult::Type::NUM, "ascend_batch_ok", "Accepted Ascend batched windows"},
                                         {RPCResult::Type::NUM, "ascend_batch_mismatch", "Ascend batched windows rejected by CPU verify"},
                                         {RPCResult::Type::NUM, "ascend_batch_fallback", "Ascend batched fall-throughs to CPU"},
+                                {RPCResult::Type::STR, "active_backend", "Last resolved v4 dispatch backend, or unresolved"},
+                                {RPCResult::Type::STR, "requested_backend", "Last requested v4 backend, or unresolved"},
+                                {RPCResult::Type::STR, "admission_warning", "Last v4 admission mismatch reason, empty if admitted"},
+                                {RPCResult::Type::STR, "last_metal_fallback_error", "Most recent v4 Metal fallback reason"},
+                                {RPCResult::Type::STR, "last_cuda_fallback_error", "Most recent v4 CUDA fallback reason"},
                                     }},
                                     {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                                 }},
@@ -7832,6 +7887,11 @@ static RPCHelpMan getmatmulchallengeprofile()
                                         {RPCResult::Type::NUM, "ascend_batch_ok", "Accepted Ascend batched windows"},
                                         {RPCResult::Type::NUM, "ascend_batch_mismatch", "Ascend batched windows rejected by CPU verify"},
                                         {RPCResult::Type::NUM, "ascend_batch_fallback", "Ascend batched fall-throughs to CPU"},
+                                {RPCResult::Type::STR, "active_backend", "Last resolved v4 dispatch backend, or unresolved"},
+                                {RPCResult::Type::STR, "requested_backend", "Last requested v4 backend, or unresolved"},
+                                {RPCResult::Type::STR, "admission_warning", "Last v4 admission mismatch reason, empty if admitted"},
+                                {RPCResult::Type::STR, "last_metal_fallback_error", "Most recent v4 Metal fallback reason"},
+                                {RPCResult::Type::STR, "last_cuda_fallback_error", "Most recent v4 CUDA fallback reason"},
                                     }},
                                     {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                                 }},

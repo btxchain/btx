@@ -390,6 +390,20 @@ template <typename Node>
            best_header_loaded_from_disk;
 }
 
+//! Same-chain HEADER_ONLY suffix of this many blocks is catch-up, not a
+//! withheld dump. Cadence would otherwise connect burst_max per ABC and
+//! leave a consensus archive frozen while bodies sit on disk (live
+//! rtx6000: 423 headers ahead, tip stalled). Competing forks
+//! (best_header does not extend the tip) still hold. ExactReplay still
+//! runs before every ConnectTip.
+[[nodiscard]] inline constexpr bool CadenceHoldFollowedCatchUpDisarms(
+    bool best_header_extends_tip,
+    int followed_ahead,
+    int far_behind_yield = 100)
+{
+    return best_header_extends_tip && followed_ahead >= far_behind_yield;
+}
+
 //! Restart: nTimeReceived and last ConnectTip are empty. Do not treat
 //! attacker-chosen nTime as stale (nTime-forged dump-on-restart).
 [[nodiscard]] inline constexpr bool CadenceHoldRestartLeavesHoldArmed(

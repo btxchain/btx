@@ -200,12 +200,13 @@ private:
 /**
  * Closed livelock disposition for a ticketless RC body.
  *
- * Followed historical holes persist without ExactReplay GPU (HAVE_DATA;
- * ConnectTip still waits for quorum). A tip-child persists without GPU on
- * mirrors/signers, and is retained on independent consensus until a ticket
- * or requested retry can run ExactReplay. Competing near-tip siblings stay
- * HEADER_ONLY with a per-peer non-refreshing cooldown so one ticketless
- * source cannot censor every peer or steal miner GPU.
+ * Followed historical holes persist without occupying the admission
+ * slot (HAVE_DATA; AcceptBlock ExactReplays on consensus, ConnectTip
+ * waits for quorum on mirrors). A followed tip-child persists the same
+ * way so catch-up does not wait for rcadmit tickets that never arrive.
+ * Competing near-tip siblings stay HEADER_ONLY with a per-peer
+ * non-refreshing cooldown so one ticketless source cannot censor every
+ * peer or steal miner GPU.
  */
 enum class TicketlessRCBodyAction : uint8_t {
     PersistWithoutGpu,

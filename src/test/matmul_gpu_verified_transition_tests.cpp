@@ -207,6 +207,13 @@ BOOST_AUTO_TEST_CASE(cadence_hold_closes_live_tip_extension_burst)
         /*from_snapshot=*/false, true, true));
     BOOST_CHECK(!CadenceHoldSnapshotCatchUpDisarms(true, /*extends_tip=*/false, true));
 
+    using kernel::CadenceHoldFollowedCatchUpDisarms;
+    BOOST_CHECK(CadenceHoldFollowedCatchUpDisarms(
+        /*extends_tip=*/true, /*followed_ahead=*/423));
+    BOOST_CHECK(CadenceHoldFollowedCatchUpDisarms(true, 100));
+    BOOST_CHECK(!CadenceHoldFollowedCatchUpDisarms(true, 99));
+    BOOST_CHECK(!CadenceHoldFollowedCatchUpDisarms(/*extends_tip=*/false, 423));
+
     // PARK owns reorg_depth > 6. Shallow-fork dump (fork_depth <= 6) still holds.
     BOOST_CHECK(!CadenceHoldShouldHold(burst, live_window, spacing, tip_t, tip_t, tip_h,
                                        tip_h + 34, /*fork_depth=*/7, park, false, false));

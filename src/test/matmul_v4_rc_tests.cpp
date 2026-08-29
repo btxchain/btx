@@ -82,6 +82,19 @@ bool WrongGemmS8S8(const std::vector<int8_t>& /*L*/, const std::vector<int8_t>& 
     return true;
 }
 
+/** Matches the CPU oracle below production-like intensive dims; diverges when
+ *  inner or cols reach 256. Self-qual toy/medium stay at d_ff=128. */
+bool ScaleSelectiveGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                            uint32_t rows, uint32_t inner, uint32_t cols,
+                            std::vector<int32_t>& out)
+{
+    if (inner >= 256 || cols >= 256) {
+        out.assign(static_cast<size_t>(rows) * cols, 123456789);
+        return true;
+    }
+    return OracleGemmS8S8(L, R, rows, inner, cols, out);
+}
+
 bool WrongGemmS32S8(const std::vector<int32_t>& /*L*/, const std::vector<int8_t>& /*R*/,
                     uint32_t rows, uint32_t /*inner*/, uint32_t cols, std::vector<int32_t>& out)
 {
@@ -3216,6 +3229,113 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_device_fault_reseal)
     BOOST_CHECK_EQUAL(failed.acceleration.cpu_calls, 0u);
     BOOST_CHECK_EQUAL(failed.acceleration.cpu_fallbacks, 1u);
     BOOST_CHECK(!failed.acceleration.first_failure.empty());
+}
+
+BOOST_AUTO_TEST_CASE(rc_winner_cpu_oracle_refuses_divergent_device)
+{
+    // ResealRCWinnerStrict is device-vs-device: a consistently wrong kernel
+    // still returns Sealed. Mining must additionally match the CPU oracle.
+    lt::ExactGemmBackend bad;
+    bad.gemm_s8s8 = &WrongGemmS8S8;
+    bad.gemm_s32s8 = &WrongGemmS32S8;
+
+    const auto header = MakeRCHeader(4242);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 cpu = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    const uint256 mined_bad = rc::MineRCEpisode(header, params, 0, nullptr, bad);
+    BOOST_REQUIRE(mined_bad != cpu);
+
+    const auto self_consistent = rc::ResealRCWinnerStrict(
+        header, params, 0, mined_bad, bad, "test_divergent_device");
+    BOOST_CHECK(self_consistent.outcome == rc::RCWinnerResealOutcome::Sealed);
+    BOOST_CHECK(self_consistent.digest == mined_bad);
+
+    const uint256 confirmed_bad = rc::ConfirmRCWinnerCpuOracle(
+        header, params, 0, mined_bad);
+    BOOST_CHECK(confirmed_bad.IsNull());
+
+    const uint256 confirmed_cpu = rc::ConfirmRCWinnerCpuOracle(
+        header, params, 0, cpu);
+    BOOST_CHECK(confirmed_cpu == cpu);
+
+    lt::ExactGemmBackend selective;
+    selective.gemm_s8s8 = &ScaleSelectiveGemmS8S8;
+    const auto selfqual = rc::ProbeRCSelfQual(selective);
+    BOOST_CHECK(selfqual.mining_accelerator_ok);
+
+    auto live_ish = rc::MakeToyRCEpisodeParams();
+    live_ish.d_model = 64;
+    live_ish.d_ff = 256;
+    BOOST_REQUIRE(rc::ValidateRCEpisodeParams(live_ish));
+    const uint256 live_cpu =
+        rc::RecomputeResidentCurriculumReference(header, live_ish, 0);
+    const uint256 live_device =
+        rc::MineRCEpisode(header, live_ish, 0, nullptr, selective);
+    BOOST_CHECK(live_device != live_cpu);
+    BOOST_CHECK(rc::ConfirmRCWinnerCpuOracle(header, live_ish, 0, live_device).IsNull());
+    BOOST_CHECK(rc::ConfirmRCWinnerCpuOracle(header, live_ish, 0, live_cpu) == live_cpu);
+}
+
+BOOST_AUTO_TEST_CASE(rc_mining_refuses_golden_mismatch_admits_missing_row)
+{
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.nMatMulRCProfile = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulV4Dimension = 256;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kParentMtp = 1'700'000'000;
+    BOOST_REQUIRE(p.GetMatMulEncodingProfile(kHeight) ==
+                  Consensus::MatMulEncodingProfile::ENC_RC);
+
+    const auto resolved = matmul_v4::accel::ResolveExactGemmBackendForRC();
+    rc::ResetRCProductionCanaryForTest();
+
+    rc::RCProductionCanaryStatus mismatch;
+    mismatch.provider = resolved.provider;
+    mismatch.exact_manifest_match = true;
+    mismatch.outcome = rc::RCProductionCanaryOutcome::DigestMismatch;
+    mismatch.manifest_entry_id = "unit-test-golden-row";
+    rc::SetRCProductionCanaryStatusForTest(mismatch);
+
+    CBlockHeader refused = MakeRCHeader(7);
+    refused.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    refused.nBits = UintToArith256(p.powLimit).GetCompact();
+    uint64_t mismatch_tries = 8;
+    BOOST_CHECK(!SolveMatMul(refused, p, mismatch_tries, kHeight,
+                             /*abort_flag=*/nullptr,
+                             /*freivalds_payload_out=*/nullptr,
+                             /*share_target_override=*/nullptr, kParentMtp));
+    BOOST_CHECK(refused.matmul_digest.IsNull());
+
+    rc::RCProductionCanaryStatus missing;
+    missing.provider = resolved.provider;
+    missing.exact_manifest_match = false;
+    missing.outcome = rc::RCProductionCanaryOutcome::MissingGolden;
+    missing.passed = true;
+    missing.activation_ready = true;
+    missing.admission_path = rc::RCProductionAdmissionPath::SelfQualification;
+    rc::SetRCProductionCanaryStatusForTest(missing);
+
+    CBlockHeader admitted = MakeRCHeader(9);
+    admitted.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    admitted.nBits = UintToArith256(p.powLimit).GetCompact();
+    uint64_t admit_tries = 32;
+    BOOST_REQUIRE(SolveMatMul(admitted, p, admit_tries, kHeight,
+                              /*abort_flag=*/nullptr,
+                              /*freivalds_payload_out=*/nullptr,
+                              /*share_target_override=*/nullptr, kParentMtp));
+    BOOST_CHECK(!admitted.matmul_digest.IsNull());
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    BOOST_CHECK_EQUAL(
+        admitted.matmul_digest,
+        rc::RecomputeResidentCurriculumReference(admitted, params_rc, kHeight));
+
+    rc::ResetRCProductionCanaryForTest();
 }
 
 BOOST_AUTO_TEST_CASE(rc_stage_h_winner_reseal_honors_miner_cancellation)

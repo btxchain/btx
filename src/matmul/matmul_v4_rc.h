@@ -628,6 +628,17 @@ struct RCMerkleProof {
     const std::atomic_bool* cancelled = nullptr,
     const std::atomic_bool* secondary_cancelled = nullptr);
 
+/** RB-3 miner gate: recompute the winner on the empty ExactGemmBackend CPU
+ *  oracle at the supplied (live) episode dims. Returns the CPU digest when it
+ *  is non-null and byte-equal to `device_resealed`; otherwise null. Callers
+ *  must refuse to seal a null result. Device-vs-device reseal is not enough:
+ *  a kernel that passes the 32x32/64x16 self-probe can still diverge here. */
+[[nodiscard]] uint256 ConfirmRCWinnerCpuOracle(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const uint256& device_resealed);
+
 /** Portable/diagnostic miner entry: same digest as the CPU reference.
  *  May inject ExactGemmBackend after RC self-qualification (fail-closed →
  *  empty backend = CPU). Production Profile 1 candidate mining and winner

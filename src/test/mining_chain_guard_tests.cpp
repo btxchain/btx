@@ -364,6 +364,72 @@ BOOST_AUTO_TEST_CASE(insufficient_peers_marks_island_suspect_without_hash_split)
     BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
 }
 
+BOOST_AUTO_TEST_CASE(far_behind_headers_are_catch_up_not_insufficient_peer_consensus)
+{
+    // Live rtx6000 2026-08-29: blocks=199378 headers=199801, 23 peers
+    // above tip. Evaluating insufficient_peer_consensus before median
+    // behind made "healthy" unreachable by construction: peers above the
+    // local tip cannot produce same-hash-at-our-height. Catch-up is not
+    // isolation. The mining guard still never pauses mining.
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+    BOOST_CHECK_EQUAL(options.min_peer_count, 3);
+    BOOST_CHECK_EQUAL(options.max_median_tip_gap, 2);
+
+    std::vector<int> rtx6000_peers(23, 199801);
+    const auto many = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/199378,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        rtx6000_peers,
+        options);
+    BOOST_CHECK(!many.healthy);
+    BOOST_CHECK_EQUAL(many.reason, "local_tip_behind_peer_median");
+    BOOST_CHECK_EQUAL(many.peer_count, 23);
+    BOOST_CHECK_EQUAL(many.median_peer_tip, 199801);
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(many));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(many),
+                      "mine_current_tip_and_catch_up");
+
+    auto few_ahead = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/199378,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        std::vector<int>{199801, 199801},
+        options);
+    BOOST_CHECK(!few_ahead.healthy);
+    BOOST_CHECK_EQUAL(few_ahead.reason, "local_tip_behind_peer_median");
+    BOOST_CHECK_EQUAL(few_ahead.peer_count, 2);
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(few_ahead));
+
+    node::ApplyPeerTipHashCheck(
+        few_ahead,
+        /*local_tip_height=*/199378,
+        /*local_tip_hash=*/"aa",
+        {{199801, 0, 0, "bb"}, {199801, 0, 0, "cc"}});
+    BOOST_CHECK(!few_ahead.island_suspect);
+    BOOST_CHECK_EQUAL(few_ahead.reason, "local_tip_behind_peer_median");
+    BOOST_CHECK_EQUAL(few_ahead.same_tip_hash_peers, 0);
+}
+
+BOOST_AUTO_TEST_CASE(insufficient_peer_consensus_still_applies_at_same_height)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+    options.min_peer_count = 3;
+
+    const auto status = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/199378,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        std::vector<int>{199378, 199378},
+        options);
+    BOOST_CHECK(!status.healthy);
+    BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
+    BOOST_CHECK_EQUAL(status.peer_count, 2);
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+}
+
 BOOST_FIXTURE_TEST_CASE(miningpeermesh_replaces_defaults_and_rpc_reports_it, TestingSetup)
 {
     node::ResetMiningChainGuardMeshRefreshForTest();
