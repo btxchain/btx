@@ -489,6 +489,15 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
     return any_peer_has_served;
 }
 
+/** ExpireOverdue grants grace iff this GETDATA has received payload
+ *  bytes. Peer-total nRecvBytes (pings, addrs, prior traffic) is not a
+ *  substitute, and there is no 4KiB chatter margin (SF-6). */
+[[nodiscard]] inline bool HeaderSyncInFlightPayloadGrantsGrace(
+    uint64_t recv_bytes_for_request)
+{
+    return recv_bytes_for_request > 0;
+}
+
 } // namespace node
 
 #endif // BTX_NODE_HEADER_SYNC_H

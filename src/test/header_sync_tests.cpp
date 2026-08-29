@@ -381,6 +381,9 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
         false, false, false, /*nobody_served_yet=*/false));
     BOOST_CHECK(node::HeaderSyncSkipPeerWithoutBodyAvailability(
         false, false, false, /*any_served=*/true));
+    BOOST_CHECK(!node::HeaderSyncInFlightPayloadGrantsGrace(0));
+    BOOST_CHECK(node::HeaderSyncInFlightPayloadGrantsGrace(1));
+    BOOST_CHECK(node::HeaderSyncInFlightPayloadGrantsGrace(4095));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
