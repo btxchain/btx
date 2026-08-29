@@ -6,7 +6,7 @@
 # bases (ff80e629 / f12a27d0) sit on the withdrawn 0.34.1 branch, not
 # the majority chain (issue 127). A node that already loaded one will
 # not start on 0.34.5; wipe the datadir and sync from genesis (or load
-# assumeutxo-191266 on a fresh datadir). There is no invalidateblock
+# assumeutxo-201500 on a fresh datadir). There is no invalidateblock
 # rescue.
 
 **Do not `invalidateblock` 33c834f8.** The live chain **descends from**
@@ -152,9 +152,10 @@ data). **0.34.5 removes those compiled entries** and will refuse to start
 if `chainstate_snapshot/` still names those hashes.
 
 **There is no in-place rescue.** Wipe the datadir and sync from genesis,
-or load [assumeutxo-191266](https://github.com/btxchain/btx/releases/tag/assumeutxo-191266)
+or load [assumeutxo-201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500)
 on a **fresh** chainstate. Do not keep `chainstate_snapshot/` from the
-bad pin. Do not `invalidateblock`.
+bad pin. Do not `invalidateblock`. 199300 is withdrawn; it needs a
+resync from an empty datadir.
 
 Old 0.34.3 workaround (stop, remove `chainstate_snapshot/`, start twice)
 only helps if the background chainstate never connected the withdrawn
@@ -204,7 +205,7 @@ Linux. See [#111](https://github.com/btxchain/btx/issues/111) and
 Same platform and epoch matrix as 0.33.4.2: Linux, macOS 13+, Windows
 10+. Mainnet remains on MatMul v3 below height 185000; Epoch-A Profile 1
 ExactReplay applies at and above height 185000. Compact `F`, `powLimit`,
-the 191714 `nBits` dump floor, and the compiled AssumeUTXO pin at 191266
+the 191714 `nBits` dump floor, and the compiled AssumeUTXO pin at 201500
 are unchanged. **EncDr stall recovery at 199299 is withdrawn** — that
 flag day shipped in 0.34.1 after the height was already mined and
 partitioned the network. `nMatMulStallRecoveryHeight` is `INT_MAX`;
@@ -824,21 +825,29 @@ classes, or future versions. How to freeze, measure, seal, and ship:
 (`ff80e629…`) and [assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299)
 (`f12a27d0…`) are on the withdrawn 0.34.1 branch. Do not load them.
 0.34.5 no longer compiles those bases (`loadtxoutset` will reject them).
+A node that already loaded one **must resync from an empty datadir**.
 Issue [#127](https://github.com/btxchain/btx/issues/127).
 
-Still compiled and on the majority chain (below the 199299 split):
+Current pin, dumped after a node had already converged with the live
+network (synced 199298 to tip; dump taken at 201620):
 
-- [assumeutxo-191266](https://github.com/btxchain/btx/releases/tag/assumeutxo-191266)
-  (`snapshot.dat` SHA256 `6ca84f9ce0bde6d0e4c17503f544bf293743c67b37881833f9a0e1f3adee504e`)
-- height **191266**, blockhash `de6e3c9db527970c13b2ba834c19ff8f4d8829aee0c93ba6cde3a5039504efa8`
+- [assumeutxo-201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500)
+  (`btx-assumeutxo-201500.dat` SHA256 `08c52c8b34e878c4d48546cfec066bc48fceed51d7287b4ff7ec7b5727cf52c7`)
+- height **201500**, blockhash `3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c`
+- `txoutset_hash` `4743962b836a3ed1e541bb6da747fc28a7d98926b5d6bc8e23928ed3b1981d93`
+- `nchaintx` 301211
+- `shielded_state_commitment` `94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541`
+  (same closed-pool pin as 191266)
+
+191266 remains compiled as an older majority-chain snapshot below the
+199299 split.
 
 ```bash
-btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
+btx-cli -rpcclienttimeout=0 loadtxoutset btx-assumeutxo-201500.dat
 ```
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Fresh chainstate only.
-Or sync from genesis. A replacement pin near 199300 will not ship until
-that height is checkpointed on the majority hash.
+Or sync from genesis.
 
 # Included public work
 

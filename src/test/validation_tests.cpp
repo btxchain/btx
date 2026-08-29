@@ -246,14 +246,19 @@ BOOST_AUTO_TEST_CASE(closed_shielded_snapshot_pin_matches_mainnet_assumeutxo)
     ArgsManager args;
     const auto params = CreateChainParams(args, ChainType::MAIN);
     BOOST_REQUIRE(params);
-    // 0.34.5 withdrew the 199300 assumeutxo entry. The closed-pool
-    // shielded commitment is still compiled at 191266 (same 94343b76…).
-    const auto au = params->AssumeutxoForHeight(191'266);
+    // 0.34.5 withdrew the 199300 assumeutxo entry. 201500 carries the same
+    // closed-pool shielded commitment as 191266 (94343b76…).
+    const auto au = params->AssumeutxoForHeight(201'500);
     BOOST_REQUIRE(au.has_value());
     BOOST_CHECK_EQUAL(
         au->shielded_state_commitment.GetHex(),
         "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+    BOOST_REQUIRE(params->AssumeutxoForHeight(191'266));
+    BOOST_CHECK_EQUAL(
+        params->AssumeutxoForHeight(191'266)->shielded_state_commitment.GetHex(),
+        au->shielded_state_commitment.GetHex());
     BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedPoolDisableHeight, 199'300);
+    BOOST_REQUIRE(params->AssumeutxoForHeight(191'266));
     BOOST_CHECK(!params->AssumeutxoForHeight(199'299));
     BOOST_CHECK(!params->AssumeutxoForHeight(199'300));
 }
@@ -849,6 +854,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         190'467,
         190'507,
         191'266,
+        201'500,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -882,6 +888,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(190'467));
     BOOST_CHECK(params->AssumeutxoForHeight(190'507));
     BOOST_CHECK(params->AssumeutxoForHeight(191'266));
+    BOOST_CHECK(params->AssumeutxoForHeight(201'500));
     BOOST_CHECK(!params->AssumeutxoForHeight(199'299));
     BOOST_CHECK(!params->AssumeutxoForHeight(199'300));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
@@ -898,17 +905,20 @@ BOOST_AUTO_TEST_CASE(assumeutxo_bases_must_sit_on_checkpoint_lineage)
     // Gate: no assumeutxo at/after the first divergent height (199299)
     // unless that height is also a checkpoint with the same hash. Also
     // forbid the known withdrawn hashes, and require any assumeutxo at a
-    // checkpoint height to match that checkpoint. loadtxoutset of remaining
-    // compiled heights (through 191266) is unchanged.
+    // checkpoint height to match that checkpoint. 201500 is the majority
+    // replacement for withdrawn 199300 and is checkpointed to the same hash.
     ArgsManager args;
     const auto params = CreateChainParams(args, ChainType::MAIN);
     BOOST_REQUIRE(params);
     const auto& checkpoints = params->Checkpoints().mapCheckpoints;
     BOOST_REQUIRE(!checkpoints.empty());
-    BOOST_CHECK_EQUAL(checkpoints.rbegin()->first, 186000);
+    BOOST_CHECK_EQUAL(checkpoints.rbegin()->first, 201500);
     BOOST_CHECK_EQUAL(
         checkpoints.at(186000).GetHex(),
         "0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129");
+    BOOST_CHECK_EQUAL(
+        checkpoints.at(201500).GetHex(),
+        "3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c");
     BOOST_CHECK_EQUAL(
         params->GetConsensus().defaultAssumeValid.GetHex(),
         "0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129");
@@ -924,7 +934,12 @@ BOOST_AUTO_TEST_CASE(assumeutxo_bases_must_sit_on_checkpoint_lineage)
     BOOST_REQUIRE(withdrawn_199299);
     BOOST_CHECK(!params->AssumeutxoForBlockhash(*withdrawn_199300));
     BOOST_CHECK(!params->AssumeutxoForBlockhash(*withdrawn_199299));
-    BOOST_CHECK_EQUAL(params->HighestAssumeutxoHeight(), 191266);
+    BOOST_CHECK_EQUAL(params->HighestAssumeutxoHeight(), 201500);
+    const auto au_201500 = params->AssumeutxoForHeight(201500);
+    BOOST_REQUIRE(au_201500);
+    BOOST_CHECK_EQUAL(
+        au_201500->blockhash.GetHex(),
+        checkpoints.at(201500).GetHex());
 
     constexpr int first_divergent_height{199299};
     for (int height : params->GetAvailableSnapshotHeights()) {

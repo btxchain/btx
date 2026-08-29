@@ -1030,14 +1030,19 @@ public:
                 // forking below it, closing that window. When added, the
                 // height was ~300 blocks behind the tip, far beyond
                 // park_depth 6, so it cannot pin a block that might still
-                // legitimately reorg. The live tip has since walked ~13k
-                // past this anchor; IBD above 186000 is work-only until the
-                // next release refreshes the checkpoint (see nMinimumChainWork
-                // comment). Do not compile an assumeutxo base above this
-                // checkpoint unless that height is itself checkpointed to the
+                // legitimately reorg. 201500 below is the post-split majority
+                // pin (issue 127). Do not compile an assumeutxo base above
+                // 186000 unless that height is itself checkpointed to the
                 // majority hash — 199299/199300 were the withdrawn 0.34.1
-                // branch (issue 127).
+                // branch.
                 {186000, uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"}},
+                // Majority-chain pin after the 199299 split (issue 127). The
+                // withdrawn 0.34.1 bases at 199299/199300 (f12a27d0 / ff80e629)
+                // are not this hash. Dumped from a node that had already
+                // synced 199298 to the live tip; 201500 is an ancestor of a
+                // tip the network agrees on. Compiled assumeutxo at this
+                // height is allowed only because this checkpoint matches.
+                {201500, uint256{"3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c"}},
             }
         };
         m_assumeutxo_data = {
@@ -1229,13 +1234,23 @@ public:
                 .blockhash = consteval_ctor(uint256{"de6e3c9db527970c13b2ba834c19ff8f4d8829aee0c93ba6cde3a5039504efa8"}),
                 .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
             },
+            {
+                // main assumeutxo snapshot at height 201'500 (snapshot v9).
+                // Replaces withdrawn 199300 (ff80e629, issue 127). Same
+                // closed-pool shielded pin as 191266 (94343b76…).
+                .height = 201'500,
+                .hash_serialized = AssumeutxoHash{uint256{"4743962b836a3ed1e541bb6da747fc28a7d98926b5d6bc8e23928ed3b1981d93"}},
+                .m_chain_tx_count = 301'211,
+                .blockhash = consteval_ctor(uint256{"3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c"}),
+                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+            },
             // 199299 (f12a27d0) and 199300 (ff80e629) were dumped from the
             // withdrawn 0.34.1 branch. Last common majority block is 199298
             // (be78622c…). loadtxoutset of those bases strands the node;
             // 0.34.3 then refuses the reorg that would disconnect the
-            // snapshot. Removed in 0.34.5 (issue 127). Do not re-add an
-            // assumeutxo at height >= 199299 unless that height is also a
-            // matching checkpoint on the majority chain.
+            // snapshot. Removed in 0.34.5 (issue 127). Do not re-add those
+            // hashes. A post-split assumeutxo is allowed only when the
+            // height is also a matching majority checkpoint (201500).
         };
         chainTxData = ChainTxData{
             .nTime = 1785786086,

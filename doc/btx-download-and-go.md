@@ -2,10 +2,11 @@
 
 > **Current line:** see [release notes](release-notes.md). Epoch A is live
 > at height 185000. EncDr stall recovery at 199299 is withdrawn. Fast-start
-> snapshot: [assumeutxo-191266](https://github.com/btxchain/btx/releases/tag/assumeutxo-191266).
+> snapshot: [assumeutxo-201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500).
 > Do not load assumeutxo-199299 / assumeutxo-199300 (withdrawn 0.34.1 branch,
-> [issue 127](https://github.com/btxchain/btx/issues/127)).
-> Use `loadtxoutset` (not `loadtxoutsetattested`) on a fresh chainstate.
+> [issue 127](https://github.com/btxchain/btx/issues/127)); those datadirs
+> need a resync from empty. Use `loadtxoutset` (not `loadtxoutsetattested`)
+> on a fresh chainstate.
 
 This guide is the shortest path from a precompiled BTX binary to:
 

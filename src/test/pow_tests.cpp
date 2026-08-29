@@ -37,6 +37,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -307,6 +308,15 @@ public:
 #endif
     }
 };
+
+bool SkipUnlessMetalMining(const char* why)
+{
+    if (matmul::accelerated::ResolveMiningBackendFromEnvironment().active == matmul::backend::Kind::METAL) {
+        return false;
+    }
+    BOOST_TEST_MESSAGE(std::string("Skipping ") + why + ": Metal backend unavailable");
+    return true;
+}
 
 class ScopedRequireBackendEnv
 {
@@ -2560,7 +2570,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_CLOSE(params->TxData().dTxRate, 0.015165177474, 0.000001);
 
     const auto& checkpoints = params->Checkpoints().mapCheckpoints;
-    BOOST_REQUIRE_EQUAL(checkpoints.size(), 4U);
+    BOOST_REQUIRE_EQUAL(checkpoints.size(), 5U);
     const auto it_0 = checkpoints.find(0);
     BOOST_REQUIRE(it_0 != checkpoints.end());
     BOOST_CHECK_EQUAL(
@@ -2581,7 +2591,12 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_EQUAL(
         it_186000->second.GetHex(),
         "0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129");
-    BOOST_CHECK_EQUAL(std::prev(checkpoints.end())->first, 186000);
+    const auto it_201500 = checkpoints.find(201500);
+    BOOST_REQUIRE(it_201500 != checkpoints.end());
+    BOOST_CHECK_EQUAL(
+        it_201500->second.GetHex(),
+        "3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c");
+    BOOST_CHECK_EQUAL(std::prev(checkpoints.end())->first, 201500);
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -2855,17 +2870,30 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_191266->shielded_state_commitment.GetHex(),
         "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
 
+    const auto assumeutxo_201500 = params->AssumeutxoForHeight(201500);
+    BOOST_REQUIRE(assumeutxo_201500.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_201500->height, 201500);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_201500->hash_serialized.ToString(),
+        "4743962b836a3ed1e541bb6da747fc28a7d98926b5d6bc8e23928ed3b1981d93");
+    BOOST_CHECK_EQUAL(assumeutxo_201500->m_chain_tx_count, 301211U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_201500->blockhash.GetHex(),
+        "3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c");
+    BOOST_CHECK_EQUAL(
+        assumeutxo_201500->shielded_state_commitment.GetHex(),
+        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+
     BOOST_CHECK(!params->AssumeutxoForHeight(199299));
     BOOST_CHECK(!params->AssumeutxoForHeight(199300));
 
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 25U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 26U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 191266);
-    // Checkpoints may trail assumeutxo (186000 checkpoint vs 191266 snapshot).
-    // An assumeutxo at/after the 199299 split is forbidden without a matching
-    // checkpoint (issue 127).
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 201500);
+    // 201500 is checkpointed to the same majority hash as the snapshot
+    // (issue 127: post-split assumeutxo requires a matching checkpoint).
 }
 
 BOOST_AUTO_TEST_CASE(HasValidProofOfWork_matmul_phase1_checks)
@@ -3747,6 +3775,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batches_for_metal_product_minin
     ScopedBackendEnv backend_env("metal");
     ScopedSolverThreadsEnv solver_threads_env(nullptr);
     ScopedApplePerfLogicalCpuOverrideEnv perf_override_env("10");
+    if (SkipUnlessMetalMining("metal product-mining auto-policy batch test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     // This case exercises the legacy shared-matrix batch policy, not the
@@ -3978,6 +4007,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_defaults_to_single_nonce_batch_for_mainnet_sha
 {
     ScopedBatchSizeEnv batch_size_env(nullptr);
     ScopedBackendEnv backend_env("metal");
+    if (SkipUnlessMetalMining("mainnet-shape Metal default batch test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
@@ -4178,6 +4208,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batch_on_tuned_mainnet_shape)
     ScopedBatchSizeEnv batch_size_env("2");
     ScopedBackendEnv backend_env("metal");
     ScopedSolverThreadsEnv solver_threads_env("8");
+    if (SkipUnlessMetalMining("tuned mainnet-shape Metal batch test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
@@ -4265,6 +4296,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_enables_parallel_solver_when_configured)
     ScopedBatchSizeEnv batch_size_env(nullptr);
     ScopedBackendEnv backend_env("metal");
     ScopedSolverThreadsEnv solver_threads_env("2");
+    if (SkipUnlessMetalMining("Metal parallel-solver config test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
@@ -4300,6 +4332,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_keeps_async_prepare_enabled_for_multi_nonce_ba
 {
     ScopedBatchSizeEnv batch_size_env("4");
     ScopedBackendEnv backend_env("metal");
+    if (SkipUnlessMetalMining("Metal async-prepare multi-nonce batch test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
@@ -4345,9 +4378,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_respects_async_prepare_disable_override)
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
-    consensus.nMatMulDimension = 512;
-    consensus.nMatMulTranscriptBlockSize = 16;
-    consensus.nMatMulNoiseRank = 8;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
     CBlockHeader candidate{};

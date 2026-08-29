@@ -7,14 +7,15 @@ For notes on the design of Assumeutxo, please refer to [the design doc](/doc/des
 
 ## Loading a snapshot
 
-The current `main` pin is height **191266**. Download
-[assumeutxo-191266](https://github.com/btxchain/btx/releases/tag/assumeutxo-191266)
-(`snapshot.dat` SHA256 `6ca84f9ce0bde6d0e4c17503f544bf293743c67b37881833f9a0e1f3adee504e`).
+The current `main` pin is height **201500**. Download
+[assumeutxo-201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500)
+(`btx-assumeutxo-201500.dat` SHA256 `08c52c8b34e878c4d48546cfec066bc48fceed51d7287b4ff7ec7b5727cf52c7`).
 Use `loadtxoutset` on a fresh chainstate. Do not use `loadtxoutsetattested`.
 Do **not** load assumeutxo-199299 or assumeutxo-199300: those bases
 (`f12a27d0…` / `ff80e629…`) sit on the withdrawn 0.34.1 branch
 ([issue 127](https://github.com/btxchain/btx/issues/127)). 0.34.5 no longer
-compiles them.
+compiles them. A node that already loaded one must wipe the datadir and
+resync (from genesis or from assumeutxo-201500 on a **new** empty datadir).
 
 BTX release snapshots are published as a small bundle:
 
