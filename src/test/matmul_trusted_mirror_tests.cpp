@@ -74,14 +74,20 @@ public:
                       CClientUIInterface::MSG_ERROR) {
                       m_last_error = message.original;
                   }
+                  if ((style & CClientUIInterface::MSG_WARNING) ==
+                      CClientUIInterface::MSG_WARNING) {
+                      m_last_warning = message.original;
+                  }
                   return true; // Handled: keep the message off the test log.
               })}
     {
     }
     const std::string& LastError() const { return m_last_error; }
+    const std::string& LastWarning() const { return m_last_warning; }
 
 private:
     std::string m_last_error;
+    std::string m_last_warning;
     boost::signals2::scoped_connection m_connection;
 };
 
@@ -4238,6 +4244,26 @@ BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_truste
         BOOST_CHECK(node::matmul_trusted::HasLocalSigner());
         BOOST_CHECK(!node::matmul_trusted::ServesAttestations());
     }
+}
+
+BOOST_AUTO_TEST_CASE(matmulattestationserve_without_key_warns_and_starts)
+{
+    // Live footgun: matmulattestationserve=1 with no pin and no WIF used to
+    // InitError, and systemd Restart=always crash-looped the node (653
+    // restarts). Must start, warn, and leave serving disabled.
+    RuntimeReset reset;
+    ArgsManager args;
+    args.ForceSetArg("-matmulvalidation", "consensus");
+    args.ForceSetArg("-matmulattestationserve", "1");
+    InitErrorCapture capture;
+    BOOST_REQUIRE(AppInitParameterInteraction(args));
+    BOOST_CHECK(capture.LastError().empty());
+    BOOST_CHECK(capture.LastWarning().find("matmulattestationserve") !=
+                std::string::npos);
+    BOOST_CHECK(capture.LastWarning().find("disabled") != std::string::npos);
+    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+    BOOST_CHECK(!node::matmul_trusted::HasLocalSigner());
+    BOOST_CHECK(!node::matmul_trusted::ServesAttestations());
 }
 
 BOOST_AUTO_TEST_CASE(better_work_twin_blocked_by_local_commitment_predicate)

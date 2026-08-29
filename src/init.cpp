@@ -1574,11 +1574,6 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
     const bool has_local_attestation_signer{!signer_text.empty()};
 
-    const bool attestation_config_requested{
-        trusted_mirror_mode || !trusted_signers.empty() ||
-        has_local_attestation_signer ||
-        args.IsArgSet("-matmulattestationserve") ||
-        !attestation_blocklist.empty()};
     const int64_t trusted_threshold{
         args.GetIntArg("-matmultrustedthreshold", 1)};
     const bool open_attestors{
@@ -1587,7 +1582,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         args.GetIntArg("-matmulopenthreshold", 0)};
     const int64_t trusted_wait_ms{
         args.GetIntArg("-matmultrustedwaitms", 60'000)};
-    const bool serve_attestations{
+    bool serve_attestations{
         args.GetBoolArg("-matmulattestationserve",
                         node::matmul_trusted::DefaultMatMulAttestationServe(
                             has_local_attestation_signer,
@@ -1607,6 +1602,19 @@ bool AppInitParameterInteraction(const ArgsManager& args)
          open_attestors)) {
         return InitError(_("Discovery relay mode (-matmulvalidation=relay) is not MatMul authority and must not load a pin, signing key, GETMMATTEST serve, attestation blocklist, or open attestors. Archives follow GPU attestors via the pin; this node only introduces peers. Remove those flags or run -matmulvalidation=trusted / consensus."));
     }
+    // -matmulattestationserve=1 with no pin and no local WIF used to
+    // InitError. systemd Restart=always then crash-loops the node (live:
+    // 653 restarts). Keep fail-closed on serving; do not refuse start.
+    if (serve_attestations && trusted_signers.empty() &&
+        !has_local_attestation_signer) {
+        InitWarning(_("Ignoring -matmulattestationserve=1: serving GETMMATTEST requires at least one -matmultrustedpubkey or a local signer key. Continuing as a normal node with attestation serving disabled."));
+        serve_attestations = false;
+    }
+    const bool attestation_config_requested{
+        trusted_mirror_mode || !trusted_signers.empty() ||
+        has_local_attestation_signer ||
+        serve_attestations ||
+        !attestation_blocklist.empty()};
     if (attestation_config_requested) {
         if (trusted_signers.empty() &&
             !has_local_attestation_signer) {
