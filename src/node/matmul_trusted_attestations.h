@@ -1094,7 +1094,11 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
 /** ExactReplay only the next connectable hole on that fork (LCA+1, or a
  *  descendant whose parent already has HAVE_DATA). Higher HEADER_ONLY
  *  bodies persist without GPU so an 86-block burst cannot occupy the
- *  device; GETDATA of the remaining holes is unsuppressed separately. */
+ *  device; GETDATA of the remaining holes is unsuppressed separately
+ *  (HeavierHeaderTowerHoleMayGetData). `may_fetch` is
+ *  ConsensusMinerMayFetchCompetingHeavierFork, which vetoes extends_tip
+ *  — once the first bodies connect, ExactReplay of grandchildren still
+ *  requires parent HAVE_DATA, not this fetch helper. */
 [[nodiscard]] inline bool HeavierCompetingForkHoleMayExactReplay(
     bool may_fetch,
     bool is_immediate_fork_child,
@@ -1102,6 +1106,26 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
 {
     if (!may_fetch) return false;
     return is_immediate_fork_child || parent_has_data;
+}
+
+/** GETDATA of a hole on the heavier header tower. Unlike
+ *  ConsensusMinerMayFetchCompetingHeavierFork this does NOT veto
+ *  extends_tip: after 199389 connects, that veto made
+ *  IndexIsOnHeavierCompetingFork false and IsHeaderOnlyFetchSuppressed
+ *  skipped 199390+ forever (live 2026-08-29, inflight=0). Replay stays
+ *  next-hole-only; this only unsuppresses download. Failed / already-
+ *  connected indexes are not fetch targets. */
+[[nodiscard]] inline bool HeavierHeaderTowerHoleMayGetData(
+    bool trusted_mirror,
+    bool on_active_chain,
+    bool failed,
+    bool tower_contains_index,
+    bool tower_work_gt_tip)
+{
+    if (trusted_mirror) return false;
+    if (on_active_chain || failed) return false;
+    if (!tower_contains_index) return false;
+    return tower_work_gt_tip;
 }
 
 /** Same 20×nPowTargetSpacing window as PeerManagerImpl::CanDirectFetch.

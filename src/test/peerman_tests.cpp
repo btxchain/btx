@@ -8431,6 +8431,116 @@ BOOST_AUTO_TEST_CASE(header_tower_seeds_best_known_without_duplicate_headers)
     node::matmul_trusted::ResetForTest();
 }
 
+BOOST_AUTO_TEST_CASE(parked_heavier_header_tower_still_getdata)
+{
+    // Live 2026-08-29 after bdd8272e: tip 199389, m_best_header 199801 on a
+    // parked competing fork, seed BestKnown to 199801, PARKED_NEEDS_OPERATOR
+    // returned before FindNextBlocks (inflight=0, block_recv=0). Short
+    // parked peers stay suppressed (parked_reorg_suppresses_only_parked).
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+
+    constexpr int k_below{8};
+    constexpr int k_ahead{8};
+    const CBlockIndex* fork_root{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(fork_root != nullptr);
+    for (int i = 0; i < k_below; ++i) {
+        mineBlock(m_node, std::chrono::seconds{fork_root->GetBlockTime() + 1 + i});
+    }
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE_EQUAL(tip->nHeight, fork_root->nHeight + k_below);
+    {
+        LOCK(::cs_main);
+        for (CBlockIndex* walk{const_cast<CBlockIndex*>(tip)}; walk != nullptr;
+             walk = walk->pprev) {
+            walk->nAuthenticatedChainWork = walk->nChainWork;
+        }
+        chainman.SetBestHeader(const_cast<CBlockIndex*>(tip));
+        peerman.SetBestBlock(tip->nHeight,
+                             std::chrono::seconds{tip->GetBlockTime()});
+    }
+
+    std::vector<CBlockIndex*> fork;
+    const CBlockIndex* walk{fork_root};
+    for (int i = 0; i < k_below + k_ahead; ++i) {
+        fork.push_back(MakePeermanHeaderChild(chainman, *walk, 0xc0 + (i & 0xff)));
+        walk = fork.back();
+    }
+    BOOST_REQUIRE_EQUAL(fork.back()->nHeight, tip->nHeight + k_ahead);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return fork.back()->GetAncestor(tip->nHeight) != tip));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return fork.back()->nChainWork > tip->nChainWork));
+    BOOST_CHECK_GT(fork.back()->nHeight - tip->nHeight,
+                   node::HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD);
+
+    auto& action{const_cast<kernel::DeepReorgAction&>(
+        chainman.m_options.deep_reorg_action)};
+    const kernel::DeepReorgAction saved_action{action};
+    action = kernel::DeepReorgAction::PARK;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ParkReorgBranch(fork.front()));
+        BOOST_REQUIRE(chainman.IsOnParkedReorgBranch(fork.back()));
+        chainman.SetBestHeader(fork.back());
+        BOOST_REQUIRE_EQUAL(chainman.GetChainRecoveryState().phase,
+                            ChainRecoveryPhase::PARKED_NEEDS_OPERATOR);
+    }
+    struct RestorePark {
+        ChainstateManager& chainman;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        CBlockIndex* parked_tip;
+        ~RestorePark()
+        {
+            LOCK(::cs_main);
+            chainman.UnparkReorgBranchContainingBlock(parked_tip);
+            action = saved_action;
+        }
+    } restore{chainman, action, saved_action, fork.back()};
+
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 55 * 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode peer{/*id=*/6200, /*sock=*/nullptr, CAddress{},
+               /*nKeyedNetGroupIn=*/6200, /*nLocalHostNonceIn=*/0,
+               CAddress{}, /*addrNameIn=*/"parked-heavier-tower",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/fork.back()->nHeight);
+    connman.FlushSendBuffer(peer);
+
+    std::vector<CBlock> hdrs;
+    hdrs.reserve(fork.size());
+    for (CBlockIndex* idx : fork) hdrs.emplace_back(idx->GetBlockHeader());
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+    connman.FlushSendBuffer(peer);
+
+    SetMockTime(std::chrono::seconds{GetTime() + 180});
+    peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedGetDataForHash(peer, fork.front()->GetBlockHash()) > 0,
+        "long parked heavier HEADER_ONLY tower must still GETDATA");
+
+    peerman.FinalizeNode(peer);
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+    node::matmul_trusted::ResetForTest();
+}
+
 BOOST_AUTO_TEST_CASE(best_header_follows_headers_only_suffix_not_pinned_to_tip)
 {
     // <node> 0.34.5: getchaintips 200258 headers-only branchlen=944 while

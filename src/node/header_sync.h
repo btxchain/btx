@@ -388,6 +388,30 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
            best_known_height > tip_height;
 }
 
+/** PARK must not freeze GETDATA of a long heavier HEADER_ONLY tower.
+ *  FindNextBlocksToDownload used to return at PARKED_NEEDS_OPERATOR
+ *  whenever BestKnown sat on a parked root (live 2026-08-29: seed to
+ *  199801, phase=followed-branch-parked, inflight=0, zero root-first
+ *  summaries). Short parked peers stay suppressed (lead ≤ 6, same as
+ *  HeaderSyncChaseHeavierCompetingLocator). ConnectTip / DeepReorgShouldPark
+ *  are unchanged — this is fetch only. */
+[[nodiscard]] inline bool HeaderSyncMayFetchParkedHeavierTower(
+    bool stalled_behind_header_tower,
+    bool trusted_mirror,
+    bool parked_best_known,
+    bool best_work_gt_tip,
+    int32_t best_known_height,
+    int32_t tip_height)
+{
+    if (!stalled_behind_header_tower) return false;
+    if (trusted_mirror) return false;
+    if (!parked_best_known) return false;
+    if (!best_work_gt_tip) return false;
+    if (tip_height < 0) return false;
+    return (best_known_height - tip_height) >
+           HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD;
+}
+
 } // namespace node
 
 #endif // BTX_NODE_HEADER_SYNC_H

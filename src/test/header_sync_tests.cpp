@@ -311,6 +311,26 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
         true, kTip, kTower, kTip, kTip));
     BOOST_CHECK(!node::HeaderSyncMustDriveFetchWhileStalled(
         true, kTip, /*header_not_ahead=*/kTip, kTower, kTower));
+
+    BOOST_CHECK(node::HeaderSyncMayFetchParkedHeavierTower(
+        /*stalled=*/true, /*trusted_mirror=*/false, /*parked=*/true,
+        /*heavier=*/true, kTower, kTip));
+    BOOST_CHECK(!node::HeaderSyncMayFetchParkedHeavierTower(
+        true, false, true, true, kTip + 2, kTip));
+    BOOST_CHECK(!node::HeaderSyncMayFetchParkedHeavierTower(
+        true, false, true, true,
+        kTip + node::HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD, kTip));
+    BOOST_CHECK(node::HeaderSyncMayFetchParkedHeavierTower(
+        true, false, true, true,
+        kTip + node::HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD + 1, kTip));
+    BOOST_CHECK(!node::HeaderSyncMayFetchParkedHeavierTower(
+        /*not_stalled=*/false, false, true, true, kTower, kTip));
+    BOOST_CHECK(!node::HeaderSyncMayFetchParkedHeavierTower(
+        true, /*trusted_mirror=*/true, true, true, kTower, kTip));
+    BOOST_CHECK(!node::HeaderSyncMayFetchParkedHeavierTower(
+        true, false, /*not_parked=*/false, true, kTower, kTip));
+    BOOST_CHECK(!node::HeaderSyncMayFetchParkedHeavierTower(
+        true, false, true, /*not_heavier=*/false, kTower, kTip));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

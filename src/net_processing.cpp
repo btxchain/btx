@@ -4488,6 +4488,8 @@ static bool TrustedMirrorMayDownloadIndex(
 //! (BestKnown / claimed work > tip, fork below tip). Live 2026-08-28:
 //! headers accepted to 199384, lowest_missing=199299, then
 //! select=root_header_only_skip because the first body was HEADER_ONLY'd.
+//! ExactReplay uses this (extends_tip veto). GETDATA uses
+//! IndexIsOnHeavierHeaderTowerForFetch, which does not veto extends_tip.
 [[nodiscard]] static bool IndexIsOnHeavierCompetingFork(
     const ChainstateManager& chainman,
     const CBlockIndex* tip,
@@ -4512,6 +4514,34 @@ static bool TrustedMirrorMayDownloadIndex(
     return on_heavier(peer_best) ||
            on_heavier(chainman.m_best_header) ||
            on_heavier(chainman.m_best_claimed_header);
+}
+
+//! GETDATA unsuppression for a hole on the heavier header tower, including
+//! after the first bodies connect and extends_tip makes
+//! IndexIsOnHeavierCompetingFork false (live 2026-08-29: 199389 connected,
+//! 199390+ stayed suppressed, inflight=0). Replay stays next-hole-only.
+[[nodiscard]] static bool IndexIsOnHeavierHeaderTowerForFetch(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index,
+    const CBlockIndex* peer_best)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (tip == nullptr || index == nullptr) return false;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    const bool on_active{chainman.ActiveChain().Contains(index)};
+    auto on_tower = [&](const CBlockIndex* best) {
+        if (best == nullptr) return false;
+        return node::matmul_trusted::HeavierHeaderTowerHoleMayGetData(
+            node::matmul_trusted::IsTrustedMirror(),
+            on_active,
+            /*failed=*/false,
+            best->GetAncestor(index->nHeight) == index,
+            best->nChainWork > tip->nChainWork);
+    };
+    return on_tower(peer_best) ||
+           on_tower(chainman.m_best_header) ||
+           on_tower(chainman.m_best_claimed_header);
 }
 
 //! Next connectable hole on that fork: the LCA+1 child, or any descendant
@@ -4569,7 +4599,17 @@ static bool TrustedMirrorMayDownloadIndex(
     // hash in m_header_only_competing and FindNextBlocks skipped it forever
     // while peer 275's BestKnown sat at 199384. A node that accepted those
     // headers must still GETDATA the fork child.
-    if (IndexIsOnHeavierCompetingFork(chainman, tip, index, peer_best_known)) {
+    // Live 2026-08-29: after 199389 connected, extends_tip made
+    // IndexIsOnHeavierCompetingFork false; fetch uses the separate helper
+    // that does not veto extends_tip. A hole that already extends the
+    // connected tip (followed suffix) is never skip-set suppressed even
+    // when m_best_header sits on a different heavier fork.
+    if (IndexIsOnHeavierHeaderTowerForFetch(chainman, tip, index,
+                                            peer_best_known)) {
+        return false;
+    }
+    if (tip != nullptr && index->nHeight > tip->nHeight &&
+        index->GetAncestor(tip->nHeight) == tip) {
         return false;
     }
     return competing.count(index->GetBlockHash()) != 0 ||
@@ -5007,6 +5047,13 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         state->pindexBestKnownBlock != nullptr
             ? state->pindexBestKnownBlock->nHeight
             : -1)};
+    const bool stalled_header_tower{
+        stalled_behind_header_tower &&
+        state->pindexBestKnownBlock != nullptr &&
+        m_chainman.m_best_header != nullptr &&
+        m_chainman.m_best_header->GetAncestor(
+            state->pindexBestKnownBlock->nHeight) ==
+            state->pindexBestKnownBlock};
     const int blocks_in_flight_global{static_cast<int>(mapBlocksInFlight.size())};
     const auto now_for_diag{GetTime<std::chrono::microseconds>()};
     const int oldest_inflight_age_s{static_cast<int>(count_seconds(
@@ -5130,10 +5177,22 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // PARK applies only to the persisted competing branch. Active-tip
     // descendants remain downloadable, otherwise a safety park becomes a
     // node-wide freeze and prevents the active branch from making progress.
+    // A long stalled heavier HEADER_ONLY tower that happens to be parked
+    // must still GETDATA (live 2026-08-29: seed to 199801, then this
+    // return left inflight=0 / zero root-first summaries). Short parked
+    // peers stay suppressed. ConnectTip still refuses the parked reorg.
     if (recovery.phase == ChainRecoveryPhase::PARKED_NEEDS_OPERATOR &&
         state->pindexBestKnownBlock != nullptr &&
         m_chainman.IsOnParkedReorgBranch(state->pindexBestKnownBlock) &&
-        !yield_to_this_peer) {
+        !yield_to_this_peer &&
+        !node::HeaderSyncMayFetchParkedHeavierTower(
+            stalled_header_tower,
+            node::matmul_trusted::IsTrustedMirror(),
+            /*parked_best_known=*/true,
+            tip != nullptr &&
+                state->pindexBestKnownBlock->nChainWork > tip->nChainWork,
+            state->pindexBestKnownBlock->nHeight,
+            tip != nullptr ? tip->nHeight : -1)) {
         log_skip(recovery.reason);
         return;
     }
@@ -5183,12 +5242,6 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                     node::matmul_trusted::IsTrustedMirror(),
                     /*extends_tip=*/false,
                     state->pindexBestKnownBlock->nChainWork > tip->nChainWork)};
-            const bool stalled_header_tower{
-                stalled_behind_header_tower &&
-                m_chainman.m_best_header != nullptr &&
-                m_chainman.m_best_header->GetAncestor(
-                    state->pindexBestKnownBlock->nHeight) ==
-                    state->pindexBestKnownBlock};
             if (!recovery_target && !configured_attested_race &&
                 !yield_to_this_peer && !local_signer_lost_twin &&
                 !consensus_peer_short_reorg && !heavier_competing_fork &&
@@ -13178,8 +13231,10 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                             // ExactReplay at ConnectTip; do not occupy the
                             // skip set.
                             if (indexed != nullptr &&
-                                IndexIsOnHeavierCompetingFork(
-                                    m_chainman, tip, indexed, peer_best)) {
+                                (IndexIsOnHeavierCompetingFork(
+                                     m_chainman, tip, indexed, peer_best) ||
+                                 IndexIsOnHeavierHeaderTowerForFetch(
+                                     m_chainman, tip, indexed, peer_best))) {
                                 exact_recompute_required = false;
                                 persist_heavier_competing_fork = true;
                             } else if (indexed != nullptr && tip != nullptr &&

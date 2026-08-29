@@ -2270,6 +2270,28 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(HeavierCompetingForkHoleMayExactReplay(true, false, true));
     BOOST_CHECK(!HeavierCompetingForkHoleMayExactReplay(true, false, false));
     BOOST_CHECK(!HeavierCompetingForkHoleMayExactReplay(false, true, true));
+    using node::matmul_trusted::HeavierHeaderTowerHoleMayGetData;
+    // Fetch is not ExactReplay: extends_tip still GETDATA's the remaining
+    // holes. ConsensusMinerMayFetchCompetingHeavierFork(..., extends_tip)
+    // stays false so GPU replay does not burst the tower.
+    BOOST_CHECK(HeavierHeaderTowerHoleMayGetData(
+        /*trusted_mirror=*/false, /*on_active_chain=*/false, /*failed=*/false,
+        /*tower_contains_index=*/true, /*tower_work_gt_tip=*/true));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        false, false, false, true, /*tower_work_gt_tip=*/false));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        false, /*on_active_chain=*/true, false, true, true));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        false, false, /*failed=*/true, true, true));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        false, false, false, /*tower_contains_index=*/false, true));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        /*trusted_mirror=*/true, false, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(
+        false, /*extends_tip=*/true, true));
+    BOOST_CHECK(!HeavierCompetingForkHoleMayExactReplay(
+        /*may_fetch=*/false, /*is_immediate_fork_child=*/true,
+        /*parent_has_data=*/true));
     using node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork;
     using node::matmul_trusted::ConsensusMinerTipStaleVsDirectFetchWindow;
     BOOST_CHECK(ConsensusMinerMayReorgPastParkForStaleHeavierFork(
