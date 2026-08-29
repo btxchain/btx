@@ -12180,7 +12180,9 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 if (kernel::UnauthenticatedHeaderLeadAtCap(
                         tip->nHeight, pindexLast->nHeight, extends_tip,
                         attested_or_frontier,
-                        m_chainman.IsInitialBlockDownload()) &&
+                        m_chainman.IsInitialBlockDownload(),
+                        kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
+                        m_chainman.GetParams().HighestAssumeutxoHeight()) &&
                     // RB-16: keep chasing a heavier competing tower's headers
                     // past the +72 cap while our tip is stale (acquisition).
                     !m_chainman.AcquisitionEscapeActive(pindexLast)) {
@@ -12235,7 +12237,9 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 m_chainman.IndexIsCoveredBySignedFrontier(pindexLast)};
             skip_direct_fetch = kernel::UnauthenticatedHeaderLeadAtCap(
                 tip->nHeight, pindexLast->nHeight, extends_tip,
-                attested_or_frontier, m_chainman.IsInitialBlockDownload()) &&
+                attested_or_frontier, m_chainman.IsInitialBlockDownload(),
+                kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
+                m_chainman.GetParams().HighestAssumeutxoHeight()) &&
                 // RB-16: directly fetch a heavier competing tower while the
                 // tip is stale so its bodies can be acquired + ExactReplayed.
                 !m_chainman.AcquisitionEscapeActive(pindexLast);

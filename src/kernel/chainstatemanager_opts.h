@@ -544,9 +544,20 @@ template <typename Node>
     bool extends_active_tip,
     bool attested_or_frontier,
     bool in_ibd,
-    int max_lead = MAX_UNAUTHENTICATED_HEADER_LEAD)
+    int max_lead = MAX_UNAUTHENTICATED_HEADER_LEAD,
+    int assumeutxo_ceiling = 0)
 {
     if (in_ibd || attested_or_frontier || extends_active_tip) return false;
+    // A node must ALWAYS be able to sync headers up to a compiled-in assumeutxo
+    // base -- a trusted weak-subjectivity anchor. Otherwise a node stranded on a
+    // minority fork BELOW the base can never learn the base header, so it can
+    // never loadtxoutset to fast-recover (the header-lead cap and the escape
+    // valve's tip+2048 lead both sit below the base for a deeply-behind node).
+    // The ceiling is a fixed compiled constant (HighestAssumeutxoHeight), so
+    // this can never be abused for an unbounded header flood; headers ABOVE the
+    // ceiling keep the full anti-flood cap. Permanent fix for this and any
+    // future stranded-node-below-a-snapshot-base situation.
+    if (assumeutxo_ceiling > 0 && header_height <= assumeutxo_ceiling) return false;
     if (tip_height < 0 || header_height < 0 || max_lead < 0) return false;
     return header_height > tip_height + max_lead;
 }
@@ -560,9 +571,14 @@ template <typename Node>
     bool extends_active_tip,
     bool attested_or_frontier,
     bool in_ibd,
-    int max_lead = MAX_UNAUTHENTICATED_HEADER_LEAD)
+    int max_lead = MAX_UNAUTHENTICATED_HEADER_LEAD,
+    int assumeutxo_ceiling = 0)
 {
     if (in_ibd || attested_or_frontier || extends_active_tip) return false;
+    // See UnauthenticatedHeaderLeadExceeded: never stop chasing / GETDATA of
+    // headers up to a compiled-in assumeutxo base, so a stranded node can always
+    // reach the base header and loadtxoutset. Bounded by the fixed ceiling.
+    if (assumeutxo_ceiling > 0 && header_height <= assumeutxo_ceiling) return false;
     if (tip_height < 0 || header_height < 0 || max_lead < 0) return false;
     return header_height >= tip_height + max_lead;
 }

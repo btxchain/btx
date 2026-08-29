@@ -15054,7 +15054,9 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                     IndexIsCoveredBySignedFrontier(pindexPrev)};
                 if (kernel::UnauthenticatedHeaderLeadExceeded(
                         tip->nHeight, header_height, extends_tip,
-                        attested_or_frontier, IsInitialBlockDownload()) &&
+                        attested_or_frontier, IsInitialBlockDownload(),
+                        kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
+                        GetParams().HighestAssumeutxoHeight()) &&
                     // RB-16 acquisition escape valve: a STALE tip must be able
                     // to ACQUIRE a strictly-heavier competing tower's headers
                     // past the +72 cap so its bodies can be fetched + fully
