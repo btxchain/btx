@@ -4049,7 +4049,17 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
         const bool may_pause{node::matmul_trusted::CatchUpMayPauseOnSlowDelivery(
             far_behind, keep_catchup_source, last_gpu_or_frontier_source,
             peers_downloading_before)};
-        if (node::matmul_trusted::CatchUpNeverPunishSlowDelivery(far_behind) ||
+        // N5/RB-5: a persistently-silent far-behind owner that is neither
+        // manual/noban nor the last source may be ROTATED out of its slot so
+        // three colluding never-deliver peers cannot pin all
+        // CATCHUP_MIN_PARALLEL_OWNERS slots and starve the honest 4th. Let its
+        // timeout count accumulate (do NOT reset it while far behind) so
+        // "persistent" can arm; manual/noban and last-source peers still reset.
+        const bool rotatable_far_behind{
+            far_behind && !(state->m_manual || state->m_noban) &&
+            !last_gpu_or_frontier_source && !only_eligible_source};
+        if ((node::matmul_trusted::CatchUpNeverPunishSlowDelivery(far_behind) &&
+             !rotatable_far_behind) ||
             (keep_catchup_source && last_gpu_or_frontier_source)) {
             state->m_block_download_timeout_count = 0;
         } else {
@@ -4058,7 +4068,12 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
         const bool persistent{
             state->m_block_download_timeout_count >=
             BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER};
-        if (may_pause) {
+        const bool may_rotate_silent_owner{
+            node::matmul_trusted::CatchUpMayRotateSilentFarBehindOwner(
+                far_behind, persistent, state->m_manual || state->m_noban,
+                last_gpu_or_frontier_source,
+                /*another_eligible_source=*/!only_eligible_source)};
+        if (may_pause || may_rotate_silent_owner) {
             state->m_block_download_paused_until =
                 now + (persistent ? MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN
                                   : BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN);
@@ -4071,8 +4086,9 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
         LogInfo("Block download deadline: releasing %s (height %d) from "
                 "silent peer=%d after %ds; %s (consecutive_timeouts=%d%s%s%s)\n",
                 item.hash.ToString(), item.height, item.nodeid, item.age_s,
-                may_pause ? "paused for re-request from a different peer"
-                          : "kept catch-up source",
+                (may_pause || may_rotate_silent_owner)
+                    ? "paused for re-request from a different peer"
+                    : "kept catch-up source",
                 state->m_block_download_timeout_count,
                 keep_catchup_source ? ", keep_catchup_source" : "",
                 far_behind ? ", far_behind" : "",

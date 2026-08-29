@@ -2078,6 +2078,36 @@ inline constexpr auto CATCHUP_PEER_SILENCE_TIMEOUT{std::chrono::minutes{5}};
     return far_behind;
 }
 
+/** N5/RB-5: a far-behind hole wants CATCHUP_MIN_PARALLEL_OWNERS (3) owners
+ *  and CatchUpNeverPunishSlowDelivery never pauses/disconnects any far-behind
+ *  peer, so three colluding peers that accept a GETDATA and then deliver
+ *  nothing occupy all three owner slots forever and the honest 4th peer never
+ *  becomes an owner (live rtx6000: inflight>0, block_recv=0).
+ *
+ *  Permit ROTATING a persistently-silent far-behind owner out of its slot --
+ *  a temporary PAUSE (deprioritise), never a disconnect, so addrman and the
+ *  5-minute patience are preserved. Only after the peer has been completely
+ *  silent (no ~4KiB progress) across enough peer-silence windows to be
+ *  "persistent", and never for a manual/noban peer, the last GPU/frontier
+ *  source, or when no other eligible source exists. A genuinely slow-but-
+ *  delivering honest archive never becomes overdue (it makes byte progress
+ *  inside the window), so it is never rotated. This lets the honest 4th take a
+ *  freed slot while the network still never fast-disconnects a catch-up
+ *  source. */
+[[nodiscard]] inline bool CatchUpMayRotateSilentFarBehindOwner(
+    bool far_behind,
+    bool persistent_silence,
+    bool manual_or_noban,
+    bool last_gpu_or_frontier_source,
+    bool another_eligible_source)
+{
+    if (!far_behind) return false;
+    if (manual_or_noban) return false;
+    if (last_gpu_or_frontier_source) return false;
+    if (!another_eligible_source) return false;
+    return persistent_silence;
+}
+
 /** Pause only when we are not far behind AND this is not the last GPU /
  *  frontier source. keep_catchup_source alone is not enough: live logs
  *  showed 128 keep_catchup_source hits with 144 pauses because skip_pause

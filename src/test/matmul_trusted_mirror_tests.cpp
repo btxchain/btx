@@ -2144,6 +2144,30 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         false, true, false, false, /*only_eligible_source=*/true));
     BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
         false, true, /*manual_or_noban=*/true, false, false));
+    using node::matmul_trusted::CatchUpMayRotateSilentFarBehindOwner;
+    // N5/RB-5: a persistently-silent far-behind owner may be ROTATED (paused,
+    // not disconnected) so 3 colluders cannot pin all owner slots.
+    BOOST_CHECK(CatchUpMayRotateSilentFarBehindOwner(
+        /*far_behind=*/true, /*persistent_silence=*/true,
+        /*manual_or_noban=*/false, /*last_gpu_or_frontier_source=*/false,
+        /*another_eligible_source=*/true));
+    // Not yet persistent -> patience preserved (no rotation).
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        true, /*persistent_silence=*/false, false, false, true));
+    // Never rotate a manual/noban peer, the last GPU/frontier source, or the
+    // only eligible source; never rotate when not far behind.
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        true, true, /*manual_or_noban=*/true, false, true));
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        true, true, false, /*last_gpu_or_frontier_source=*/true, true));
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        true, true, false, false, /*another_eligible_source=*/false));
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        /*far_behind=*/false, true, false, false, true));
+    // Disconnect is still never permitted while far behind (rotation is a
+    // pause only) -- addrman and the 5-minute patience are preserved.
+    BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
+        /*far_behind=*/true, /*persistent=*/true, false, false, false));
     {
         const auto spacing{std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::seconds{90})};
