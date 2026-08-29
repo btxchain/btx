@@ -8439,7 +8439,14 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
     const bool drain_archive_blocks{
         node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
             pfrom.IsManualConn() || !pfrom.IsInboundConn(),
-            pfrom.HasArchiveOrMirrorService())};
+            pfrom.HasArchiveOrMirrorService()) ||
+        // A converging CONSENSUS verifier (behind our tip, no ARCHIVE bit)
+        // drains all its queued catch-up bodies in one visit so it is not
+        // clamped to one block per ~45s msghand lap. It is not routed to the
+        // ArchiveBlockServe worker (that only serves ARCHIVE/MIRROR peers),
+        // so msghand stays its serve path -- skip_archive_blocks below keys
+        // only on the archive service bit.
+        pfrom.m_consensus_catchup_serve.load(std::memory_order_relaxed)};
     const bool skip_archive_blocks{
         node::matmul_trusted::MsghandSkipArchiveBlockGetData(
             node::matmul_trusted::HasLocalSigner(),
@@ -15196,7 +15203,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         ignore_non_gpu_inbound &&
         !node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData(
             this_gpu, m_signed_frontier_catch_up.load(std::memory_order_relaxed),
-            this_archive_target)};
+            this_archive_target,
+            pfrom.m_consensus_catchup_serve.load(std::memory_order_relaxed))};
     const bool authority_ingest{
         node::matmul_trusted::IsTrustedMirror() ||
         node::matmul_trusted::HasLocalSigner()};
@@ -19771,6 +19779,32 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 : -1)};
         if (stalled_behind_header_tower) {
             sync_blocks_and_headers_from_peer = true;
+        }
+
+        // Recognise a self-qualified CONSENSUS verifier that is behind our
+        // tip as a catch-up block-serve target. Such a peer advertises
+        // NODE_MATMUL_CONSENSUS but not the ARCHIVE/MIRROR bit (the serve=0
+        // GPU attestor class), so the serving-side gates otherwise treat it
+        // as a near-tip miner and drop/skip its GETDATA, freezing it at
+        // block_recv=0. "Behind" (best-known or VERSION height below our tip
+        // by more than the stall margin) is what keeps a near-tip miner
+        // flood out, so the archive-serve throughput protection is intact.
+        {
+            const bool peer_is_consensus{
+                (pto->m_nServices.load(std::memory_order_relaxed) &
+                 static_cast<uint64_t>(NODE_MATMUL_CONSENSUS)) ==
+                static_cast<uint64_t>(NODE_MATMUL_CONSENSUS)};
+            const int peer_height{
+                state.pindexBestKnownBlock != nullptr
+                    ? state.pindexBestKnownBlock->nHeight
+                    : peer->m_starting_height.load()};
+            const bool peer_behind_our_tip{
+                tip_for_headers != nullptr && peer_height >= 0 &&
+                peer_height <
+                    tip_for_headers->nHeight - BLOCK_FETCH_STALL_HEADERS_AHEAD};
+            pto->m_consensus_catchup_serve.store(
+                peer_is_consensus && peer_behind_our_tip,
+                std::memory_order_relaxed);
         }
 
         if (!state.fSyncStarted && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks() &&

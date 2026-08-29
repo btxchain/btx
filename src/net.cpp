@@ -3613,7 +3613,9 @@ void CConnman::ThreadMessageHandler()
                             trusted_mirror_catch_up,
                             pnode->IsInboundConn(), pnode->IsManualConn(),
                             pnode->fSuccessfullyConnected.load(),
-                            archive_target)) {
+                            archive_target,
+                            pnode->m_consensus_catchup_serve.load(
+                                std::memory_order_relaxed))) {
                     // Do not set fMoreWork: that busy-spins msghand at
                     // ~90% with 148 miner inbounds (live public CPU archive after the
                     // skip patch) and wedges RPC. Archives already ran

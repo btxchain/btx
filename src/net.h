@@ -869,6 +869,17 @@ public:
     std::atomic_bool m_prefer_block_serve{false};
     /** Live: process-queue GETDATA or unconsumed m_getdata_requests. */
     std::atomic_bool m_has_getdata_requests{false};
+    /** This peer is a self-qualified CONSENSUS verifier (advertises
+     *  NODE_MATMUL_CONSENSUS) that is BEHIND our tip and therefore
+     *  converging: it must be served block bodies (a read) rather than
+     *  dropped/skipped as if it were a near-tip miner flood. Set by
+     *  net_processing SendMessages where the peer's height and our tip are
+     *  both known under cs_main. A near-tip miner is never flagged (it is
+     *  not behind), so the archive-serve throughput protection is intact.
+     *  This is the "CONSENSUS without ARCHIVE (serve=0)" GPU attestor class:
+     *  it never advertises the ARCHIVE/MIRROR bit, so without this flag the
+     *  serving gates starved it (block_recv=0) while it tried to catch up. */
+    std::atomic_bool m_consensus_catchup_serve{false};
     /** VERSION nServices. Msghand prefer/skip uses ARCHIVE/MIRROR bits so
      *  miner CONSENSUS GETDATA is not Preferred with archives. */
     std::atomic<uint64_t> m_nServices{0};

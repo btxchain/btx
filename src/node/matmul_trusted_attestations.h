@@ -2018,10 +2018,15 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     bool this_peer_inbound,
     bool this_peer_manual,
     bool this_peer_handshake_complete,
-    bool this_is_archive_serve_target)
+    bool this_is_archive_serve_target,
+    bool this_peer_consensus_catchup = false)
 {
     (void)this_peer_inbound;
     (void)this_peer_manual;
+    // Never skip a converging CONSENSUS verifier's message processing: its
+    // block GETDATA must be answered so it can reach the tip. It is not a
+    // near-tip miner (it is behind our tip) and serving it is a read.
+    if (this_peer_consensus_catchup) return false;
     // The signer-side skip is gated on archive GETDATA actually being
     // pending. Discarding archive_getdata_pending here turned this into
     // an unconditional skip of every fully-handshaked non-ARCHIVE/MIRROR
@@ -2424,10 +2429,18 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
 [[nodiscard]] inline bool TrustedMirrorMayServeNonAuthorityGetData(
     bool this_peer_is_gpu_authority,
     bool catching_up_behind_frontier,
-    bool this_archive_or_mirror = false)
+    bool this_archive_or_mirror = false,
+    bool this_peer_consensus_catchup = false)
 {
     if (this_peer_is_gpu_authority) return true;
     if (this_archive_or_mirror) return true;
+    // A self-qualified CONSENSUS verifier that is behind our tip is
+    // converging, not spamming: serving it block bodies is a read and is
+    // the whole point of catch-up. It advertises CONSENSUS without the
+    // ARCHIVE/MIRROR bit (serve=0 GPU attestor), so the archive exception
+    // above never covers it; without this branch a mirror that is itself
+    // catching up dropped its GETDATA and the verifier froze (block_recv=0).
+    if (this_peer_consensus_catchup) return true;
     return !catching_up_behind_frontier;
 }
 

@@ -1907,6 +1907,19 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*this_peer_is_gpu_authority=*/false, /*catching_up_behind_frontier=*/true,
         /*this_archive_or_mirror=*/true));
     BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(false, true, true));
+    // Convergence regression (rtx6000 block_recv=0): a self-qualified
+    // CONSENSUS verifier that is behind our tip advertises CONSENSUS without
+    // the ARCHIVE/MIRROR bit (serve=0). Even while WE catch up to the signed
+    // frontier, its block GETDATA must be served (a read), not dropped.
+    BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(
+        /*this_peer_is_gpu_authority=*/false,
+        /*catching_up_behind_frontier=*/true,
+        /*this_archive_or_mirror=*/false,
+        /*this_peer_consensus_catchup=*/true));
+    // Without the catch-up flag the same non-archive peer is still deferred
+    // while we catch up (near-tip miner flood protection is preserved).
+    BOOST_CHECK(!TrustedMirrorMayServeNonAuthorityGetData(
+        false, true, false, /*this_peer_consensus_catchup=*/false));
     using node::matmul_trusted::TrustedMirrorGpuMayServeBlocks;
     BOOST_CHECK(TrustedMirrorGpuMayServeBlocks(
         /*gpu_authority=*/true, /*has_network_service=*/false));
@@ -2068,6 +2081,17 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         true, true, false, /*this_peer_inbound=*/false, false, true, false));
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         true, true, false, false, /*this_peer_manual=*/true, true, false));
+    // Convergence regression: a behind CONSENSUS verifier (serve=0 GPU
+    // attestor) must NEVER be skipped -- neither while a signer serves
+    // archive GETDATA nor while a trusted mirror catches up -- or it freezes
+    // at block_recv=0. It is not a near-tip miner; serving it is a read.
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/true, /*archive_getdata_pending=*/true, false,
+        true, false, true, /*this_is_archive_serve_target=*/false,
+        /*this_peer_consensus_catchup=*/true));
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
+        true, false, true, false, /*this_peer_consensus_catchup=*/true));
     using node::matmul_trusted::KeepCatchupSourceOnDownloadTimeout;
     BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(
         /*signed_frontier_catch_up=*/true, /*persistent_timeout=*/false,
