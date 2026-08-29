@@ -411,6 +411,10 @@ public:
         int32_t from_height, int32_t to_height) const;
 
     /** True after NotifyActiveChainBlockDisconnected until the hash reconnects. */
+    //! V5/RB-12 durable withdrawal: seed a withdrawn-local-vote tombstone at
+    //! startup so Add() refuses a relayed/reloaded copy of our own abandoned
+    //! signature. Loaded from the durable 'w' records before attestations.
+    void SeedOffActiveChain(int32_t height, const uint256& block_hash);
     [[nodiscard]] bool IsOffActiveChain(int32_t height,
                                         const uint256& block_hash) const;
 

@@ -359,6 +359,28 @@ BOOST_AUTO_TEST_CASE(reorg_withdraws_local_vote_but_keeps_peer_copy)
     BOOST_CHECK(store.SignLocal(hash_b, 40) == AddResult::Accepted);
     BOOST_CHECK(store.LocalMintedHash(40) == hash_b);
     BOOST_CHECK(!store.HasQuorum(hash_a, 40));
+
+    // adv5 regression: a RELAYED / RELOADED copy of OUR OWN withdrawn vote for
+    // the abandoned hash must NOT re-enter the live set and re-form quorum
+    // (dual-quorum mirror freeze). Re-injecting keys[0]'s own hash_a statement
+    // is refused as Duplicate; the peer copy stays but quorum does not re-form.
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_a, 40), keys[0]),
+                          hash_a, 40) == AddResult::Duplicate);
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_a, 40).size(), 1U);
+    BOOST_CHECK(!store.HasQuorum(hash_a, 40));
+
+    // Seeding the tombstone (as startup does from durable) keeps the refusal
+    // even if the off-active-chain set had been cleared; a peer copy of ANOTHER
+    // signer is still admissible as history.
+    store.SeedOffActiveChain(40, hash_a);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_a, 40), keys[0]),
+                          hash_a, 40) == AddResult::Duplicate);
+    BOOST_CHECK(!store.HasQuorum(hash_a, 40));
+
+    // Once hash_a re-connects (reorg back), the tombstone clears and our vote
+    // is admissible again.
+    store.NotifyActiveChainBlockConnected(40, hash_a);
+    BOOST_CHECK(!store.IsOffActiveChain(40, hash_a));
 }
 
 BOOST_AUTO_TEST_CASE(competing_quorum_still_occupies_after_reorg_of_other_hash)

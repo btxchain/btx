@@ -786,6 +786,22 @@ AddResult AttestationStore::Add(
 
         const bool pinned{m_trusted_signers.count(attestation.signer) != 0};
 
+        // V5/RB-12 durable withdrawal (adv5): once this node's OWN validated
+        // reorg withdrew its local signature for a hash (recorded in
+        // m_off_active_chain, seeded from the durable tombstone at startup), a
+        // relayed copy of that SAME local-signer vote -- captured from gossip
+        // or reloaded from disk -- must NOT re-enter the live quorum set and
+        // re-arm the dual-quorum same-height mirror freeze a2929379 closed.
+        // Only OUR withdrawn vote is refused; peer copies (other signers) stay
+        // as history. Reported as Duplicate so the inbound MMATTEST relay path
+        // (Accepted-only) does not re-propagate our abandoned vote.
+        if (m_config.local_signer.has_value() &&
+            attestation.signer == m_config.local_signer->GetPubKey() &&
+            m_off_active_chain.count(key) != 0) {
+            ++m_stats.duplicates;
+            return AddResult::Duplicate;
+        }
+
         if (!pinned) {
             if (!m_config.open_attestors) {
                 ++m_stats.rejected;
@@ -1014,6 +1030,15 @@ bool AttestationStore::NotifyActiveChainBlockDisconnected(
         }
     }
     return true;
+}
+
+void AttestationStore::SeedOffActiveChain(int32_t height,
+                                          const uint256& block_hash)
+{
+    if (height < 0 || block_hash.IsNull()) return;
+    std::lock_guard lock{m_mutex};
+    m_off_active_chain.insert(BlockKey{height, block_hash});
+    CapOffActiveChainLocked();
 }
 
 void AttestationStore::NotifyActiveChainBlockConnected(

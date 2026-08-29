@@ -148,6 +148,34 @@ struct DurableBlocklistState {
     }
 };
 
+// V5/RB-12 durable withdrawal tombstone (adv5): (height, hash) this node's own
+// validated reorg disconnected while its local signer had voted. Seeded into
+// the store's off-active-chain set at startup BEFORE attestations load, so a
+// reloaded or relayed copy of our abandoned vote cannot re-form quorum.
+struct DurableWithdrawnVoteKey {
+    static constexpr uint8_t PREFIX{'w'};
+    uint8_t prefix{PREFIX};
+    uint256 authority_namespace{};
+    int32_t height{-1};
+    uint256 block_hash{};
+
+    SERIALIZE_METHODS(DurableWithdrawnVoteKey, obj)
+    {
+        READWRITE(obj.prefix, obj.authority_namespace, obj.height,
+                  obj.block_hash);
+    }
+};
+
+struct DurableWithdrawnVotePrefix {
+    uint8_t prefix{DurableWithdrawnVoteKey::PREFIX};
+    uint256 authority_namespace{};
+
+    SERIALIZE_METHODS(DurableWithdrawnVotePrefix, obj)
+    {
+        READWRITE(obj.prefix, obj.authority_namespace);
+    }
+};
+
 //! Scalable authority history. The hot AttestationStore remains bounded;
 //! historical quorum proofs live in LevelDB and are queried on demand.
 std::unique_ptr<CDBWrapper> g_durable_db;
@@ -623,6 +651,52 @@ bool LoadDurableAttestations(
     }
     LogPrintf("Verified %zu durable MatMul attestation block record(s)\n",
               records);
+    return true;
+}
+
+void PersistWithdrawnLocalVote(int32_t height, const uint256& block_hash)
+{
+    if (height < 0 || block_hash.IsNull()) return;
+    std::lock_guard io_lock{g_persist_io_mutex};
+    if (!g_durable_db || !g_durable_namespace.has_value()) return;
+    const bool ok{g_durable_db->Write(
+        DurableWithdrawnVoteKey{.authority_namespace = *g_durable_namespace,
+                                .height = height, .block_hash = block_hash},
+        uint8_t{1}, /*fSync=*/true)};
+    if (!ok) {
+        LogPrintf("matmul: failed to persist withdrawn-local-vote tombstone "
+                  "height=%d hash=%s\n", height, block_hash.ToString());
+    }
+}
+
+void EraseWithdrawnLocalVote(int32_t height, const uint256& block_hash)
+{
+    if (height < 0 || block_hash.IsNull()) return;
+    std::lock_guard io_lock{g_persist_io_mutex};
+    if (!g_durable_db || !g_durable_namespace.has_value()) return;
+    (void)g_durable_db->Erase(
+        DurableWithdrawnVoteKey{.authority_namespace = *g_durable_namespace,
+                                .height = height, .block_hash = block_hash},
+        /*fSync=*/false);
+}
+
+bool LoadWithdrawnLocalVotes(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store)
+{
+    if (!g_durable_db) return true;
+    const uint256 authority_namespace{AuthorityNamespace(*store)};
+    std::unique_ptr<CDBIterator> cursor{g_durable_db->NewIterator()};
+    cursor->Seek(DurableWithdrawnVotePrefix{
+        .authority_namespace = authority_namespace});
+    for (; cursor->Valid(); cursor->Next()) {
+        DurableWithdrawnVoteKey key;
+        if (!cursor->GetKey(key) ||
+            key.prefix != DurableWithdrawnVoteKey::PREFIX ||
+            key.authority_namespace != authority_namespace) {
+            break;
+        }
+        store->SeedOffActiveChain(key.height, key.block_hash);
+    }
     return true;
 }
 
@@ -1402,6 +1476,9 @@ bool NotifyActiveChainBlockDisconnected(int32_t height,
         }
     }
     if (released_store || released_hint) {
+        // V5/RB-12 (adv5): make the withdrawal DURABLE so a reloaded or relayed
+        // copy of our abandoned vote cannot re-form quorum after restart.
+        PersistWithdrawnLocalVote(height, disconnected_hash);
         LogPrintf("matmul: released local mint slot at height %d after "
                   "active-chain disconnect of %s\n",
                   height, disconnected_hash.ToString());
@@ -1417,6 +1494,9 @@ void NotifyActiveChainBlockConnected(int32_t height,
     if (store) {
         store->NotifyActiveChainBlockConnected(height, connected_hash);
     }
+    // The hash is back on the active chain: drop its withdrawal tombstone so a
+    // future re-vote / reload is allowed again.
+    EraseWithdrawnLocalVote(height, connected_hash);
 }
 
 size_t ClearMintedAttestations(int32_t from_height, int32_t to_height)
@@ -1676,6 +1756,7 @@ bool OpenPersistence(const fs::path& path, std::string& error)
             g_durable_namespace = AuthorityNamespace(*store);
             if (!LoadBlocklistState(store, error) ||
                 !LoadOpenAttestorState(store) ||
+                !LoadWithdrawnLocalVotes(store) ||
                 !LoadDurableAttestations(store, error) ||
                 !LoadPersistenceSnapshot(store, path, error) ||
                 !LoadWal(store, path, error) ||
