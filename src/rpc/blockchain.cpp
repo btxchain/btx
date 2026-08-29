@@ -1957,7 +1957,7 @@ RPCHelpMan getblockchaininfo()
                     {
                         {RPCResult::Type::NUM, "height", "Highest stored quorum height"},
                         {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Hash recorded for that height, if known"},
-                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is an ancestor of (or is) the active tip"},
+                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is on the same chain as the active tip (ancestor, equal, or descendant / catch-up)"},
                         {RPCResult::Type::NUM, "on_chain_attested_height", "Highest quorum ancestor of the active tip, or -1 if none"},
                         {RPCResult::Type::NUM, "blocks_behind", "max(0, height - on_chain_attested_height). Zero on a healthy linear chain; large with on_active_chain=false is a stranded fork"},
                     }},

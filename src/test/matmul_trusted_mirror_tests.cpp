@@ -1524,6 +1524,25 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
         false, /*extends_active_tip=*/false, false, 199338, 199336,
         /*far_behind=*/true));
+    using node::matmul_trusted::TicketlessRcBodyMayPersistWithoutGpu;
+    BOOST_CHECK(TicketlessRcBodyMayPersistWithoutGpu(
+        /*trusted_mirror_authority_cover=*/true, /*followed_tip_child=*/false));
+    BOOST_CHECK(TicketlessRcBodyMayPersistWithoutGpu(
+        false, /*followed_tip_child=*/true));
+    BOOST_CHECK(!TicketlessRcBodyMayPersistWithoutGpu(false, false));
+    using node::matmul_trusted::SignedFrontierIsOnActiveChain;
+    BOOST_CHECK(SignedFrontierIsOnActiveChain(
+        true, true, /*tip_height=*/199801, /*frontier_height=*/199801,
+        /*tip_ancestor_at_frontier_is_frontier=*/true,
+        /*frontier_ancestor_at_tip_is_tip=*/true));
+    BOOST_CHECK(SignedFrontierIsOnActiveChain(
+        true, true, /*tip_height=*/199378, /*frontier_height=*/199801,
+        /*tip_ancestor_at_frontier_is_frontier=*/false,
+        /*frontier_ancestor_at_tip_is_tip=*/true));
+    BOOST_CHECK(!SignedFrontierIsOnActiveChain(
+        true, true, 199378, 199801, false, /*frontier_ancestor_at_tip_is_tip=*/false));
+    BOOST_CHECK(!SignedFrontierIsOnActiveChain(
+        true, /*has_frontier=*/false, 199378, 199801, false, false));
     using node::matmul_trusted::PreferSignedFrontierCatchUpBlockPeer;
     BOOST_CHECK(!PreferSignedFrontierCatchUpBlockPeer(
         /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
@@ -2576,11 +2595,24 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
         false, /*on_or_extends_active_tip=*/true, 99, 100, kNearTip, false));
     BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
         false, true, 100, 100, kNearTip, false));
-    // Unattested pull-ahead (another twin slot): off the device.
-    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+    // Catch-up above the connected tip (live rtx6000 2026-08-29): unattested
+    // bodies that extend the active chain must occupy ExactReplay. The old
+    // upper bound (index_height <= tip_height) HEADER_ONLY-skipped them
+    // while a competing twin sat on m_best_header.
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
         false, true, 102, 100, kNearTip, false));
-    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
         false, true, 104, 100, kNearTip, false));
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
+        false, true, 199380, 199378, kNearTip, false));
+    // Immediate unattested tip-child stays off this helper (twin storm).
+    // ClaimConfigured / ConsensusMayClaimUnattestedTipChildBody owns it.
+    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+        /*pprev_is_tip=*/true, /*on_or_extends_active_tip=*/true, 101, 100,
+        kNearTip, false));
+    // Competing unattested fork that does not extend the connected tip.
+    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+        false, false, 199382, 199378, kNearTip, false));
     // Competing unattested twin at the same height: off the device.
     BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
         false, false, 191323, 191323, kNearTip, false));

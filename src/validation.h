@@ -1758,8 +1758,9 @@ public:
     [[nodiscard]] bool IndexHasTrustedMatMulAuthority(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True when index is an ancestor of, is, or descends from any stored
      *  quorum hash at HighestAttestedHeight. Unlike
-     *  GetSignedFrontierStatus().on_active_chain, this stays true while
-     *  catching up (tip height < frontier height) on the attested chain. */
+     *  GetSignedFrontierStatus().on_active_chain (which is also true
+     *  while catching up on the same chain), this stays true for ancestry
+     *  of any stored frontier hash. */
     [[nodiscard]] bool IndexLeadsToSignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ShouldDeferLosingTipExtension(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAutomaticReorgRecoveryCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -1772,8 +1773,11 @@ public:
     /**
      * Signed-frontier diagnostic. Highest stored quorum height (no HAVE_DATA
      * required) versus the highest quorum ancestor of the active tip.
-     * getmatmulattestedtip.hash only sees HAVE_DATA on this chain, so a
-     * stranded fork reports on_active_chain=true there; this does not.
+     * on_active_chain is true when the frontier hash is on the same chain as
+     * the connected tip, including catch-up (frontier is a descendant). A
+     * stranded competing fork reports on_active_chain=false and a climbing
+     * blocks_behind. getmatmulattestedtip.hash only sees HAVE_DATA on this
+     * chain, so a stranded fork can look healthy there; this does not.
      */
     struct SignedFrontierStatus {
         bool available{false};

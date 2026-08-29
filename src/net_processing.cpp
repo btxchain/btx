@@ -13228,8 +13228,11 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                         (tip != nullptr &&
                          block.hashPrevBlock == tip->GetBlockHash());
             persist_without_gpu =
-                node::matmul_trusted::IsTrustedMirror() &&
-                m_chainman.IndexHasTrustedMatMulAuthority(indexed);
+                node::matmul_trusted::TicketlessRcBodyMayPersistWithoutGpu(
+                    node::matmul_trusted::IsTrustedMirror() &&
+                        m_chainman.IndexHasTrustedMatMulAuthority(indexed),
+                    indexed != nullptr &&
+                        m_chainman.IndexIsFollowedTipChild(tip, indexed));
         }
         const auto gate_action{node::ClassifyTicketlessRCBody(
             persist_followed_hole, tip_child, persist_without_gpu)};
@@ -13462,21 +13465,31 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                             (tip != nullptr &&
                              block.hashPrevBlock == tip->GetBlockHash());
                 persist_without_gpu =
-                    node::matmul_trusted::IsTrustedMirror() &&
-                    m_chainman.IndexHasTrustedMatMulAuthority(indexed);
+                    node::matmul_trusted::TicketlessRcBodyMayPersistWithoutGpu(
+                        node::matmul_trusted::IsTrustedMirror() &&
+                            m_chainman.IndexHasTrustedMatMulAuthority(indexed),
+                        (indexed != nullptr &&
+                         m_chainman.IndexIsFollowedTipChild(tip, indexed)) ||
+                            (indexed == nullptr && tip_child &&
+                             m_chainman.BestHeaderExtendsTip(tip) &&
+                             m_chainman.m_best_header != nullptr &&
+                             m_chainman.m_best_header->GetAncestor(
+                                 tip->nHeight + 1) != nullptr &&
+                             m_chainman.m_best_header
+                                     ->GetAncestor(tip->nHeight + 1)
+                                     ->GetBlockHash() == block_hash));
             }
             const auto action{node::ClassifyTicketlessRCBody(
                 followed_historical_hole, tip_child, persist_without_gpu)};
             if (action == node::TicketlessRCBodyAction::PersistWithoutGpu) {
-                // Historical holes always persist. Trusted mirrors also
-                // persist a tip-child: they never P2P ExactReplay.
-                // ConnectTip still waits for quorum. Local signers ExactReplay
-                // the followed tip-child (MaySpend) so they can attest.
-                // Treat as requested so less-work holes actually get
-                // HAVE_DATA through AcceptBlock.
+                // Historical holes always persist. Followed tip-children
+                // persist so AcceptBlock ExactReplays without an rcadmit
+                // ticket (catch-up). Competing siblings keep retain /
+                // HEADER_ONLY. Trusted mirrors persist a pin-covered
+                // hash and wait for quorum at ConnectTip.
                 LogDebug(BCLog::NET,
                          "Persisting ticketless followed-chain %s hash=%s from "
-                         "peer=%d without ExactReplay GPU\n",
+                         "peer=%d for AcceptBlock ExactReplay\n",
                          source, block_hash.ToString(), node.GetId());
                 admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
                 admission.retain_as_requested = true;

@@ -177,7 +177,7 @@ RPCHelpMan getmatmultrustedstatus()
                     {
                         {RPCResult::Type::STR_HEX, "hash", "Attested block hash"},
                         {RPCResult::Type::NUM, "height", "Attested block height"},
-                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that block is an ancestor of (or is) the active tip"},
+                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that block is on the same chain as the active tip (ancestor, equal, or descendant / catch-up)"},
                         {RPCResult::Type::BOOL, "active_tip_has_quorum", "Whether the active tip itself currently has quorum"},
                     }},
                 {RPCResult::Type::STR, "warning", ""},
@@ -368,7 +368,7 @@ RPCHelpMan getmatmulattestedtip()
                 {RPCResult::Type::BOOL, "configured", "Whether a trusted-signer set is configured"},
                 {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Attested block hash"},
                 {RPCResult::Type::NUM, "height", /*optional=*/true, "Attested block height"},
-                {RPCResult::Type::BOOL, "on_active_chain", /*optional=*/true, "Whether that HAVE_DATA attested block is an ancestor of (or is) the active tip"},
+                {RPCResult::Type::BOOL, "on_active_chain", /*optional=*/true, "Whether that HAVE_DATA attested block is on the same chain as the active tip (including catch-up)"},
                 {RPCResult::Type::BOOL, "active_tip_has_quorum", /*optional=*/true, "Whether the active tip itself currently has quorum"},
                 {RPCResult::Type::STR_HEX, "active_tip_hash", /*optional=*/true, "Active chain tip hash"},
                 {RPCResult::Type::NUM, "active_tip_height", /*optional=*/true, "Active chain tip height"},
@@ -377,7 +377,7 @@ RPCHelpMan getmatmulattestedtip()
                     {
                         {RPCResult::Type::NUM, "height", "Highest stored quorum height"},
                         {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Hash recorded for that height, if known"},
-                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is an ancestor of (or is) the active tip"},
+                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is on the same chain as the active tip (ancestor, equal, or descendant / catch-up)"},
                         {RPCResult::Type::NUM, "on_chain_attested_height", "Highest quorum ancestor of the active tip, or -1 if none"},
                         {RPCResult::Type::NUM, "blocks_behind", "max(0, height - on_chain_attested_height)"},
                     }},

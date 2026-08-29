@@ -523,12 +523,23 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  of local submitblock.
  *
  *  Local submitblock uses CandidateMining, not this P2P admission path.
- *  This helper is historical / pull-ahead DoS only: unattested pprev==tip
- *  returns false so an 80-twin burst cannot occupy every slot. The unique
- *  unattested tip-child ExactReplay path is ClaimConfigured /
- *  ConsensusMayClaimUnattestedTipChildBody — pin quorum must not veto it.
- *  Covered hashes still replay so ConnectTip can take an already-attested
- *  winner. Already-canonical near-tip holes stay on-device for IBD. */
+ *  Unattested pprev==tip returns false so an 80-twin burst cannot occupy
+ *  every slot. The unique unattested tip-child ExactReplay path is
+ *  ClaimConfigured / ConsensusMayClaimUnattestedTipChildBody — pin quorum
+ *  must not veto it. Covered hashes still replay so ConnectTip can take
+ *  an already-attested winner. Already-canonical near-tip holes stay
+ *  on-device for IBD.
+ *
+ *  Catch-up (live rtx6000 2026-08-29): a consensus node that is merely
+ *  behind must ExactReplay bodies ABOVE its connected tip. The old upper
+ *  bound (`index_height <= tip_height`) made that impossible, so
+ *  MatMulMaySpendExactReplayGpu returned false, the followed-suffix
+ *  persist hatch saw far_behind=0 (UncappedFollowedChainAhead ignores a
+ *  competing twin on m_best_header), and HEADER_ONLY skip left
+ *  inflight=0 / GPU 0% / digest_requests=0. `on_or_extends_active_tip`
+ *  is computed as GetAncestor(tip)==tip (or the index is already an
+ *  ancestor of the tip): the block builds on the connected chain, not a
+ *  fork from below it. Unattested non-extending forks stay off. */
 [[nodiscard]] inline bool IndependentConsensusMaySpendExactReplayGpu(
     bool pprev_is_tip,
     bool on_or_extends_active_tip,
@@ -546,8 +557,10 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     // competing sibling just because it extends the tip.
     if (pprev_is_tip) return false;
     if (on_or_extends_active_tip) {
-        return index_height >= tip_height - near_tip_depth &&
-               index_height <= tip_height;
+        // Height above the connected tip is catch-up on our chain, not a
+        // pull-ahead twin slot. Historical holes stay inside near_tip_depth.
+        if (index_height > tip_height) return true;
+        return index_height >= tip_height - near_tip_depth;
     }
     return false;
 }
@@ -578,10 +591,37 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     return TrustedMirrorIsShortTipReorg(lca_depth);
 }
 
+/** True when the signed frontier and the connected tip are the same
+ *  chain, including catch-up (frontier is a descendant of the tip).
+ *
+ *  The old predicate required tip_height >= frontier_height, so a node
+ *  that was merely behind reported on_active_chain=false. Admission then
+ *  treated catch-up as a competing fork (live rtx6000 2026-08-29:
+ *  blocks=199378 headers=199801, GPU 0%, digest_requests=0). Being
+ *  behind is not evidence of an attack. */
+[[nodiscard]] inline bool SignedFrontierIsOnActiveChain(
+    bool has_tip,
+    bool has_frontier,
+    int32_t tip_height,
+    int32_t frontier_height,
+    bool tip_ancestor_at_frontier_is_frontier,
+    bool frontier_ancestor_at_tip_is_tip)
+{
+    if (!has_tip || !has_frontier) return false;
+    if (tip_height >= frontier_height) {
+        return tip_ancestor_at_frontier_is_frontier;
+    }
+    return frontier_ancestor_at_tip_is_tip;
+}
+
 /** While the signed frontier is off the active chain, budget-deferred
  *  retry may only re-admit the attested fork-child / frontier path.
  *  Historical losing twins (live 195579/195599/195601) occupied admission
- *  every 20s–2min with GPU at 0% and inflight=0. */
+ *  every 20s–2min with GPU at 0% and inflight=0.
+ *
+ *  Same-chain catch-up must not take this gate: callers pass
+ *  frontier_off_active_chain from GetSignedFrontierStatus, which now
+ *  reports on_active_chain=true while the frontier extends the tip. */
 [[nodiscard]] inline bool ShouldRetryBudgetDeferredWhileFrontierOffChain(
     bool frontier_off_active_chain,
     bool hash_is_short_reorg_attested_fork_child,
@@ -1366,6 +1406,20 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     if (far_behind_yield > 0 && yield_ahead >= far_behind_yield) return false;
     if (signed_frontier_catch_up) return true;
     return ahead < narrow_max_ahead;
+}
+
+/** Ticketless RC body may persist (HAVE_DATA) so AcceptBlock / ConnectTip
+ *  can ExactReplay. Trusted mirrors persist a pin-covered hash (they never
+ *  P2P ExactReplay). Independent consensus must persist the unique followed
+ *  tip-child: waiting for rcadmit is a near-tip anti-DoS policy, and a
+ *  node that is merely behind never receives those tickets (live rtx6000
+ *  2026-08-29). Competing same-height siblings keep persist_without_gpu
+ *  false so they remain RetainUntilTicketOrRetry / HEADER_ONLY. */
+[[nodiscard]] inline bool TicketlessRcBodyMayPersistWithoutGpu(
+    bool trusted_mirror_authority_cover,
+    bool followed_tip_child)
+{
+    return trusted_mirror_authority_cover || followed_tip_child;
 }
 
 /** Persist a followed-chain descendant (height > tip, ancestor at tip is

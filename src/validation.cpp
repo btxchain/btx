@@ -9554,6 +9554,32 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                                ": cadence hold");
         }
     }
+    // Consensus ENC-DR / RC: ConnectBlock does not ExactReplay. A HAVE_DATA
+    // tip-child persisted without the verified bit must not become the
+    // active tip (Numair: every body is fully ExactReplay'd before
+    // ConnectTip). Cannot run CUDA here: mempool is held. AcceptBlock
+    // reverifies unconnected tip-children; ABC retries this candidate.
+    if (pindexNew->nHeight > 0 &&
+        m_chainman.GetMatMulValidationMode() ==
+            kernel::MatMulValidationMode::CONSENSUS &&
+        m_chainman.GetConsensus().fMatMulPOW &&
+        m_chainman.GetConsensus().IsMatMulV4Active(pindexNew->nHeight) &&
+        m_chainman.GetConsensus()
+                .GetMatMulProfileParams(pindexNew->nHeight)
+                .commitment == Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE &&
+        !(pindexNew->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
+        !node::matmul_trusted::SkipExactReplayForGpuAttestation(
+            m_chainman.IndexHasTrustedMatMulAuthority(pindexNew),
+            node::matmul_trusted::IsTrustedMirror()) &&
+        !m_chainman.IsMatMulRecomputeAssumeValidTrusted(
+            pindexNew, pindexNew->nHeight) &&
+        !m_chainman.IsInitialBlockDownload()) {
+        LogInfo("ConnectTip: defer hash=%s height=%d (ExactReplay required "
+                "before activation)\n",
+                pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
+        return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
+                           ": ExactReplay required before ConnectTip");
+    }
     const auto connect_t0{SteadyClock::now()};
     const bool covered_fast_path{
         m_chainman.GetMatMulValidationMode() ==
@@ -11847,10 +11873,17 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
         if (out.hash_known) {
             const CBlockIndex* const frontier_index{
                 m_blockman.LookupBlockIndex(out.hash)};
-            out.on_active_chain =
+            out.on_active_chain = node::matmul_trusted::SignedFrontierIsOnActiveChain(
+                /*has_tip=*/true,
+                frontier_index != nullptr,
+                tip->nHeight,
+                frontier_index != nullptr ? frontier_index->nHeight : out.height,
                 frontier_index != nullptr &&
-                tip->nHeight >= frontier_index->nHeight &&
-                tip->GetAncestor(frontier_index->nHeight) == frontier_index;
+                    tip->nHeight >= frontier_index->nHeight &&
+                    tip->GetAncestor(frontier_index->nHeight) == frontier_index,
+                frontier_index != nullptr &&
+                    frontier_index->nHeight >= tip->nHeight &&
+                    frontier_index->GetAncestor(tip->nHeight) == tip);
         } else if (out.on_chain_attested_height == out.height) {
             // Height-only: cannot prove a fork at equal height.
             out.on_active_chain = true;
@@ -14352,6 +14385,10 @@ static bool ContextualCheckBlock(const CBlock& block,
                     if (const auto fake{
                             RunMatMulExactReplayUnderReleasedCsMainHook()}) {
                         encdr_ok = *fake;
+                        if (encdr_ok && rc_authority != nullptr) {
+                            *rc_authority =
+                                MatMulRCAuthorityProvenance::LOCAL_EXACT_REPLAY;
+                        }
                     } else {
                         if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
                             encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
@@ -14825,13 +14862,23 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // ConnectTip, so submitblock still returned "duplicate" and ABC
     // never selected the validator-chain child of attested 189685.
     // Re-enter ContextualCheck + (if needed) ReceivedBlockTransactions
-    // for any requested/forced unconnected tip-child.
+    // for any unconnected tip-child that still lacks ExactReplay, even if
+    // the body was first persisted unrequested (ticketless followed
+    // catch-up). Requiring fRequested skipped GPU forever once HAVE_DATA
+    // was set (live rtx6000: digest_requests=0, non-terminal requeue).
+    const bool needs_consensus_exact_replay{
+        (pindex->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+        GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS &&
+        !node::matmul_trusted::SkipExactReplayForGpuAttestation(
+            IndexHasTrustedMatMulAuthority(pindex),
+            node::matmul_trusted::IsTrustedMirror())};
     const bool reverify_tip_child{
-        fAlreadyHave && fRequested &&
+        fAlreadyHave &&
         pindex->pprev != nullptr &&
         pindex->pprev == ActiveTip() &&
         !ActiveChain().Contains(pindex) &&
-        (pindex->nStatus & BLOCK_FAILED_MASK) == 0};
+        (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
+        (fRequested || needs_consensus_exact_replay)};
     if (fAlreadyHave && !reverify_tip_child) return true;
     if (!fRequested) {  // If we didn't ask for it:
         // Followed-chain historical holes (active-tip / snapshot-base
