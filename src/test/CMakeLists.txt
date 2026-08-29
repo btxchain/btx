@@ -21,6 +21,7 @@ add_executable(test_btx
   bip32_tests.cpp
   bip324_tests.cpp
   blockchain_tests.cpp
+  chain_staleness_tests.cpp
   blockencodings_tests.cpp
   blockfilter_index_tests.cpp
   blockfilter_tests.cpp

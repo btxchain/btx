@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <arith_uint256.h>
 #include <base58.h>
 #include <core_io.h>
 #include <interfaces/chain.h>
@@ -15,10 +16,13 @@
 #include <rpc/util.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
+#include <uint256.h>
 #include <util/time.h>
+#include <validation.h>
 
 #include <any>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -844,6 +848,131 @@ BOOST_AUTO_TEST_CASE(rpc_control_method_classifier)
     BOOST_CHECK_EQUAL(*PeekJsonRpcMethod(
                           R"({"params":{"method":"getblockchaininfo"},"method":"stop")"),
                       "stop");
+}
+
+static bool WarningsMentionStale(const UniValue& warnings)
+{
+    const std::string needle{"is_stale"};
+    if (warnings.isArray()) {
+        for (size_t i = 0; i < warnings.size(); ++i) {
+            if (warnings[i].get_str().find(needle) != std::string::npos) return true;
+            if (warnings[i].get_str().find("stale") != std::string::npos) return true;
+        }
+        return false;
+    }
+    if (warnings.isStr()) {
+        return warnings.get_str().find("stale") != std::string::npos;
+    }
+    return false;
+}
+
+BOOST_AUTO_TEST_CASE(getblockcount_stale_header_tower_does_not_change_numeric)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_best;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_best = chainman.m_best_header;
+    }
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{9}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip;
+    fake.nHeight = tip->nHeight + 20;
+    fake.nChainWork = tip->nChainWork;
+
+    UniValue numeric;
+    UniValue verbose;
+    UniValue info;
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(&fake);
+        numeric = CallRPC("getblockcount");
+        verbose = CallRPC("getblockcount true");
+        info = CallRPC("getblockchaininfo");
+        chainman.SetBestHeader(original_best);
+    }
+
+    BOOST_CHECK(numeric.isNum());
+    BOOST_CHECK_EQUAL(numeric.getInt<int>(), tip->nHeight);
+    BOOST_REQUIRE(verbose.isObject());
+    BOOST_CHECK_EQUAL(verbose["blocks"].getInt<int>(), tip->nHeight);
+    BOOST_CHECK_EQUAL(verbose["behind_best_header"].getInt<int>(), 20);
+    BOOST_CHECK(verbose["is_stale"].get_bool());
+    BOOST_CHECK(!verbose["competing_heavier_header"].get_bool());
+    BOOST_REQUIRE(info.isObject());
+    BOOST_CHECK(info["is_stale"].get_bool());
+    BOOST_CHECK_EQUAL(info["behind_best_header"].getInt<int>(), 20);
+    BOOST_CHECK(WarningsMentionStale(info["warnings"]));
+}
+
+BOOST_AUTO_TEST_CASE(getblockchaininfo_not_stale_for_small_linear_header_gap)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_best;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_best = chainman.m_best_header;
+    }
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{3}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip;
+    fake.nHeight = tip->nHeight + 3;
+    fake.nChainWork = tip->nChainWork;
+
+    UniValue info;
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(&fake);
+        info = CallRPC("getblockchaininfo");
+        chainman.SetBestHeader(original_best);
+    }
+    BOOST_CHECK_EQUAL(info["behind_best_header"].getInt<int>(), 3);
+    BOOST_CHECK(!info["is_stale"].get_bool());
+}
+
+BOOST_AUTO_TEST_CASE(getblockchaininfo_stale_on_competing_heavier_header)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_best;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_best = chainman.m_best_header;
+    }
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{11}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip->pprev;
+    fake.nHeight = tip->nHeight;
+    fake.nChainWork = tip->nChainWork + arith_uint256{1000};
+
+    UniValue verbose;
+    UniValue info;
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(&fake);
+        verbose = CallRPC("getblockcount true");
+        info = CallRPC("getblockchaininfo");
+        chainman.SetBestHeader(original_best);
+    }
+    BOOST_CHECK(verbose["is_stale"].get_bool());
+    BOOST_CHECK(verbose["competing_heavier_header"].get_bool());
+    BOOST_CHECK(info["is_stale"].get_bool());
+    BOOST_CHECK(info["competing_heavier_header"].get_bool());
+    BOOST_CHECK(WarningsMentionStale(info["warnings"]));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

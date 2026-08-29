@@ -30,6 +30,7 @@
 #include <netaddress.h>
 #include <netbase.h>
 #include <node/blockstorage.h>
+#include <node/chain_staleness.h>
 #include <node/coin.h>
 #include <node/context.h>
 #include <node/interface_ui.h>
@@ -559,6 +560,19 @@ public:
     {
         const int height{WITH_LOCK(::cs_main, return chainman().ActiveChain().Height())};
         return height >= 0 ? std::optional{height} : std::nullopt;
+    }
+    interfaces::ChainTipStaleness getTipStaleness() override
+    {
+        LOCK(::cs_main);
+        const auto computed{node::ComputeChainTipStaleness(chainman().ActiveTip(), chainman().m_best_header)};
+        interfaces::ChainTipStaleness out;
+        out.blocks = computed.blocks;
+        out.headers = computed.headers;
+        out.behind_best_header = computed.behind_best_header;
+        out.header_extends_tip = computed.header_extends_tip;
+        out.competing_heavier_header = computed.competing_heavier_header;
+        out.is_stale = computed.is_stale;
+        return out;
     }
     uint256 getBlockHash(int height) override
     {

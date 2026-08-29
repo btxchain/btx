@@ -42,8 +42,10 @@ void WalletSettlementSafetyToJSON(const CWallet& wallet,
 {
     const unsigned int required_confirmations = wallet.GetReorgSafetyDepth();
     const bool reorg_hold_active = wallet.IsReorgSettlementHoldActive();
+    const interfaces::ChainTipStaleness stale{wallet.GetTipStaleness()};
+    const bool settlement_held = reorg_hold_active || stale.is_stale;
     const bool safe =
-        !reorg_hold_active &&
+        !settlement_held &&
         !assumed_confirmations &&
         confirmations >= static_cast<int>(required_confirmations) &&
         !(wtx.IsCoinBase() && wallet.IsTxImmatureCoinBase(wtx));
@@ -54,9 +56,14 @@ void WalletSettlementSafetyToJSON(const CWallet& wallet,
     entry.pushKV("settlement_reorg_hold_remaining_blocks", wallet.GetReorgHoldRemainingBlocks());
     entry.pushKV("settlement_reorg_hold_until_time", wallet.GetReorgHoldUntilTime());
     entry.pushKV("settlement_reorg_hold_remaining_seconds", wallet.GetReorgHoldRemainingSeconds());
+    entry.pushKV("chain_stale", stale.is_stale);
+    entry.pushKV("behind_best_header", stale.behind_best_header);
+    entry.pushKV("competing_heavier_header", stale.competing_heavier_header);
     entry.pushKV("settlement_safe", safe);
 
-    if (safe) {
+    if (stale.is_stale) {
+        entry.pushKV("settlement_status", "chain_stale");
+    } else if (safe) {
         entry.pushKV("settlement_status", "safe");
     } else if (assumed_confirmations) {
         entry.pushKV("settlement_status", "assumed");
@@ -549,8 +556,11 @@ static std::vector<RPCResult> TransactionDescriptionString()
            {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_blocks", "Blocks remaining before the current reorg settlement hold expires."},
            {RPCResult::Type::NUM_TIME, "settlement_reorg_hold_until_time", "Unix timestamp at or after which the current reorg settlement hold expires, or -1 if no hold has been observed."},
            {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_seconds", "Seconds remaining before the current reorg settlement hold expires."},
-           {RPCResult::Type::BOOL, "settlement_safe", "Whether this transaction has enough verified confirmations for reorg-aware settlement under the wallet policy and no active reorg settlement hold."},
-           {RPCResult::Type::STR, "settlement_status", "One of safe, assumed, conflicted, unconfirmed, immature, reorg_hold, or confirming."},
+           {RPCResult::Type::BOOL, "chain_stale", "True when this wallet's node is frozen behind a known-heavier or much-longer header chain. Do not credit this transaction until false."},
+           {RPCResult::Type::NUM, "behind_best_header", "max(0, followed headers - connected blocks)."},
+           {RPCResult::Type::BOOL, "competing_heavier_header", "True when the followed header has more chainwork than the connected tip and is not on the same chain."},
+           {RPCResult::Type::BOOL, "settlement_safe", "Whether this transaction has enough verified confirmations for reorg-aware settlement under the wallet policy, no active reorg settlement hold, and the node is not chain_stale."},
+           {RPCResult::Type::STR, "settlement_status", "One of safe, assumed, conflicted, unconfirmed, immature, reorg_hold, chain_stale, or confirming."},
            {RPCResult::Type::STR, "wallet_tx_state", "One of confirmed, in_mempool, inactive, abandoned, mempool_conflicted, or block_conflicted."},
            {RPCResult::Type::STR_HEX, "conflicting_blockhash", /*optional=*/true, "Block hash of the block that conflicts with this wallet transaction."},
            {RPCResult::Type::NUM, "conflicting_blockheight", /*optional=*/true, "Block height of the block that conflicts with this wallet transaction."},

@@ -38,6 +38,7 @@
 #include <node/matmul_trusted_attestations.h>
 #include <node/transaction.h>
 #include <node/utxo_snapshot.h>
+#include <node/chain_staleness.h>
 #include <node/warnings.h>
 #include <matmul/trusted_utxo_snapshot_attestation.h>
 #include <primitives/transaction.h>
@@ -347,24 +348,84 @@ UniValue blockToJSON(BlockManager& blockman, const CBlock& block, const CBlockIn
     return result;
 }
 
+static void PushChainTipStalenessFields(UniValue& obj, const node::ChainTipStaleness& stale)
+{
+    obj.pushKV("behind_best_header", stale.behind_best_header);
+    obj.pushKV("is_stale", stale.is_stale);
+    obj.pushKV("competing_heavier_header", stale.competing_heavier_header);
+    obj.pushKV("header_extends_tip", stale.header_extends_tip);
+    if (!stale.best_header_hash.IsNull() && stale.best_header_hash != stale.bestblockhash) {
+        obj.pushKV("best_header_hash", stale.best_header_hash.GetHex());
+    }
+}
+
+static void AppendChainStaleRpcWarning(UniValue& warnings, const bool is_stale)
+{
+    if (!is_stale) return;
+    const std::string message{std::string{node::CHAIN_STALE_RPC_WARNING}};
+    if (warnings.isArray()) {
+        warnings.push_back(message);
+        return;
+    }
+    if (warnings.isStr()) {
+        std::string combined = warnings.get_str();
+        if (!combined.empty()) combined += '\n';
+        combined += message;
+        warnings.setStr(std::move(combined));
+        return;
+    }
+    warnings.setStr(message);
+}
+
 static RPCHelpMan getblockcount()
 {
     return RPCHelpMan{"getblockcount",
-                "\nReturns the height of the most-work fully-validated chain.\n"
-                "The genesis block has height 0.\n",
-                {},
-                RPCResult{
-                    RPCResult::Type::NUM, "", "The current block count"},
+                "Returns the height of the most-work fully-validated chain.\n"
+                "The genesis block has height 0.\n"
+                "The default numeric return is the connected-chain height only. It does not mean this node is current. If getblockchaininfo.is_stale is true, or getblockcount verbose=true reports is_stale, do not credit deposits from this view. Verbose mode adds fields without changing the default numeric return.\n",
+                {
+                    {"verbose", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, return an object with blocks, headers, behind_best_header, is_stale, and competing_heavier_header instead of the numeric height"},
+                },
+                {
+                    RPCResult{"for verbose = false",
+                RPCResult::Type::NUM, "", "The current connected-chain block count. Not a liveness signal; check is_stale before crediting deposits."},
+                    RPCResult{"for verbose = true",
+                RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::NUM, "blocks", "the height of the most-work fully-validated chain"},
+                    {RPCResult::Type::NUM, "headers", "the current number of headers we have validated"},
+                    {RPCResult::Type::STR_HEX, "bestblockhash", "the hash of the currently best connected block"},
+                    {RPCResult::Type::NUM, "behind_best_header", "max(0, headers - blocks). Zero when the followed header is at or behind the connected tip"},
+                    {RPCResult::Type::BOOL, "is_stale", "True when this node has a known-heavier competing header chain, or is more than 6 headers ahead of the connected tip. Do not credit deposits from this node's confirmations until false"},
+                    {RPCResult::Type::BOOL, "competing_heavier_header", "True when m_best_header has more chainwork than the active tip and is not an ancestor/descendant of that tip"},
+                    {RPCResult::Type::BOOL, "header_extends_tip", "True when the followed header chain descends from the connected tip (linear catch-up, not a competing fork)"},
+                    {RPCResult::Type::STR_HEX, "best_header_hash", /*optional=*/true, "Hash of m_best_header when it differs from the connected tip"},
+                }},
+                },
                 RPCExamples{
                     HelpExampleCli("getblockcount", "")
+            + HelpExampleCli("getblockcount", "true")
             + HelpExampleRpc("getblockcount", "")
+            + HelpExampleRpc("getblockcount", "true")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     EnsureNotDiscoveryRelay(chainman);
+    const bool verbose{self.Arg<bool>("verbose")};
     LOCK(cs_main);
-    return chainman.ActiveChain().Height();
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    const int height = chainman.ActiveChain().Height();
+    if (!verbose) {
+        return height;
+    }
+    const auto stale = node::ComputeChainTipStaleness(tip, chainman.m_best_header);
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("blocks", height);
+    obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    obj.pushKV("bestblockhash", tip ? tip->GetBlockHash().GetHex() : uint256::ZERO.GetHex());
+    PushChainTipStalenessFields(obj, stale);
+    return obj;
 },
     };
 }
@@ -1934,6 +1995,11 @@ RPCHelpMan getblockchaininfo()
                 {RPCResult::Type::STR, "chain", "current network name (" LIST_CHAIN_NAMES ")"},
                 {RPCResult::Type::NUM, "blocks", "the height of the most-work fully-validated chain. The genesis block has height 0"},
                 {RPCResult::Type::NUM, "headers", "the current number of headers we have validated"},
+                {RPCResult::Type::NUM, "behind_best_header", "max(0, headers - blocks). Zero when the followed header is at or behind the connected tip"},
+                {RPCResult::Type::BOOL, "is_stale", "True when this node has a known-heavier competing header chain, or is more than 6 headers ahead of the connected tip. Do not credit deposits from this node's confirmations until false"},
+                {RPCResult::Type::BOOL, "competing_heavier_header", "True when m_best_header has more chainwork than the active tip and is not an ancestor/descendant of that tip"},
+                {RPCResult::Type::BOOL, "header_extends_tip", "True when the followed header chain descends from the connected tip (linear catch-up, not a competing fork)"},
+                {RPCResult::Type::STR_HEX, "best_header_hash", /*optional=*/true, "Hash of m_best_header when it differs from the connected tip"},
                 {RPCResult::Type::STR, "bestblockhash", "the hash of the currently best block"},
                 {RPCResult::Type::STR_HEX, "bits", "nBits: compact representation of the block difficulty target"},
                 {RPCResult::Type::STR_HEX, "target", "The difficulty target"},
@@ -2009,6 +2075,8 @@ RPCHelpMan getblockchaininfo()
     obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
     obj.pushKV("blocks", height);
     obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    const auto stale = node::ComputeChainTipStaleness(&tip, chainman.m_best_header);
+    PushChainTipStalenessFields(obj, stale);
     obj.pushKV("bestblockhash", tip.GetBlockHash().GetHex());
     obj.pushKV("bits", strprintf("%08x", tip.nBits));
     obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
@@ -2071,7 +2139,9 @@ RPCHelpMan getblockchaininfo()
     }
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
-    obj.pushKV("warnings", node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings")));
+    UniValue warnings{node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings"))};
+    AppendChainStaleRpcWarning(warnings, stale.is_stale);
+    obj.pushKV("warnings", std::move(warnings));
     return obj;
 },
     };

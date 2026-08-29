@@ -1257,6 +1257,18 @@ public:
         return (m_reorg_hold_blocks > 0 && GetReorgHoldRemainingBlocks() > 0) ||
                (m_reorg_hold_seconds > 0 && GetReorgHoldRemainingSeconds() > 0);
     }
+    //! Connected tip vs a known-heavier or much-longer followed header chain.
+    //! A freeze never fires blockDisconnected, so this is a read-time check.
+    interfaces::ChainTipStaleness GetTipStaleness() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool IsChainStaleBehindBestHeader() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    //! True when settlement-safe wallet RPCs must not report settled: either a
+    //! disconnect-armed reorg hold is active, or the node is stale behind a
+    //! header chain it can already see.
+    bool IsSettlementReportingHeld() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return IsReorgSettlementHoldActive() || IsChainStaleBehindBestHeader();
+    }
     uint256 GetLastBlockHash() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
     {
         AssertLockHeld(cs_wallet);

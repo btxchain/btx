@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <addresstype.h>
+#include <arith_uint256.h>
 #include <interfaces/chain.h>
 #include <key_io.h>
 #include <node/blockstorage.h>
@@ -1172,6 +1173,84 @@ BOOST_FIXTURE_TEST_CASE(tx_depth_unset_last_processed_height_returns_zero, Basic
     BOOST_CHECK_EQUAL(wallet.GetTxDepthInMainChain(confirmed), 0);
     BOOST_CHECK_EQUAL(wallet.GetTxDepthInMainChain(conflicted), 0);
     BOOST_CHECK_EQUAL(wallet.GetTxDepthInMainChain(inactive), 0);
+}
+
+BOOST_AUTO_TEST_CASE(frozen_header_tower_holds_settlement_without_disconnect)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_best;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_best = chainman.m_best_header;
+    }
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{9}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip;
+    fake.nHeight = tip->nHeight + 20;
+    fake.nChainWork = tip->nChainWork;
+
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(&fake);
+    }
+    {
+        LOCK(m_wallet.cs_wallet);
+        const auto stale = m_wallet.GetTipStaleness();
+        BOOST_CHECK(stale.is_stale);
+        BOOST_CHECK_EQUAL(stale.behind_best_header, 20);
+        BOOST_CHECK(!stale.competing_heavier_header);
+        // Freeze never disconnects a block, so the disconnect-armed hold stays
+        // inactive. Settlement reporting still holds via the read-time check.
+        BOOST_CHECK(!m_wallet.IsReorgSettlementHoldActive());
+        BOOST_CHECK(m_wallet.IsChainStaleBehindBestHeader());
+        BOOST_CHECK(m_wallet.IsSettlementReportingHeld());
+    }
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(original_best);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(competing_heavier_header_holds_settlement_without_disconnect)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_best;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_best = chainman.m_best_header;
+    }
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{11}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip->pprev;
+    fake.nHeight = tip->nHeight;
+    fake.nChainWork = tip->nChainWork + arith_uint256{1000};
+
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(&fake);
+    }
+    {
+        LOCK(m_wallet.cs_wallet);
+        const auto stale = m_wallet.GetTipStaleness();
+        BOOST_CHECK(stale.is_stale);
+        BOOST_CHECK(stale.competing_heavier_header);
+        BOOST_CHECK(!m_wallet.IsReorgSettlementHoldActive());
+        BOOST_CHECK(m_wallet.IsSettlementReportingHeld());
+    }
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(original_best);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
