@@ -11704,6 +11704,94 @@ void ChainstateManager::NoteTipConnected(int64_t now)
     AssertLockHeld(::cs_main);
     m_last_tip_connect_time = now;
     m_last_tip_connect_mono = CadenceHoldMonotonicNowSeconds();
+    // RB-16: the tip advanced, so the acquisition stall is over -- release all
+    // exempt-tower slots (a migration onto the acquired chain also lands here).
+    m_acquisition_exempt_towers.clear();
+}
+
+bool ChainstateManager::AcquisitionTipIsStale() const
+{
+    AssertLockHeld(::cs_main);
+    if (m_active_chainstate == nullptr) return false;
+    // IBD already exempts the header-lead caps and fetches freely.
+    if (IsInitialBlockDownload()) return false;
+    if (!m_last_tip_connect_mono.has_value()) return false;
+    return (CadenceHoldMonotonicNowSeconds() - *m_last_tip_connect_mono) >=
+           ACQUISITION_ESCAPE_STALL_SECONDS;
+}
+
+bool ChainstateManager::AcquisitionEscapeActive(const CBlockIndex* candidate) const
+{
+    AssertLockHeld(::cs_main);
+    if (candidate == nullptr || m_active_chainstate == nullptr) return false;
+    if (!AcquisitionTipIsStale()) return false;
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip == nullptr) return false;
+    if (!(candidate->nChainWork > tip->nChainWork)) return false;      // strictly heavier
+    if (candidate->GetAncestor(tip->nHeight) == tip) return false;     // competing, not extending
+    // Bounded exempt lead: a fake tower cannot grow the index unboundedly.
+    if (candidate->nHeight - tip->nHeight > ACQUISITION_ESCAPE_MAX_LEAD) return false;
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(candidate)};
+    if (fork == nullptr) return false;
+    return m_acquisition_exempt_towers.count(fork->GetBlockHash()) != 0;
+}
+
+bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
+    const CBlockIndex* candidate)
+{
+    AssertLockHeld(::cs_main);
+    if (candidate == nullptr || m_active_chainstate == nullptr) return false;
+    if (!AcquisitionTipIsStale()) return false;
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip == nullptr) return false;
+    if (!(candidate->nChainWork > tip->nChainWork)) return false;
+    if (candidate->GetAncestor(tip->nHeight) == tip) return false;
+    // Bounded exempt lead (RB-6-style): do not index a bogus tower without
+    // bound. The clear-on-ConnectTip slides this window as real bodies validate.
+    if (candidate->nHeight - tip->nHeight > ACQUISITION_ESCAPE_MAX_LEAD) return false;
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(candidate)};
+    if (fork == nullptr) return false;
+    const uint256 root{fork->GetBlockHash()};
+    // Prune slots whose tower is now failed or already on the active chain.
+    for (auto it = m_acquisition_exempt_towers.begin();
+         it != m_acquisition_exempt_towers.end();) {
+        const CBlockIndex* idx{m_blockman.LookupBlockIndex(it->first)};
+        if (idx == nullptr || (idx->nStatus & BLOCK_FAILED_MASK) ||
+            m_active_chainstate->m_chain.Contains(idx)) {
+            it = m_acquisition_exempt_towers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    auto existing{m_acquisition_exempt_towers.find(root)};
+    if (existing != m_acquisition_exempt_towers.end()) {
+        if (candidate->nChainWork > existing->second) {
+            existing->second = candidate->nChainWork;
+        }
+        return true;
+    }
+    if (m_acquisition_exempt_towers.size() < ACQUISITION_ESCAPE_MAX_TOWERS) {
+        m_acquisition_exempt_towers.emplace(root, candidate->nChainWork);
+        LogPrintf("acquisition-escape: exempting heavier competing tower "
+                  "fork_root=%s from header-lead/last-common caps (tip stale, "
+                  "candidate work > tip); fetch + full ExactReplay to acquire, "
+                  "migration still park/deepforkautoresolve-gated\n",
+                  root.ToString());
+        return true;
+    }
+    // Budget full: evict the lightest tower only if the candidate is heavier,
+    // so the real (heaviest) majority chain always keeps a slot.
+    auto lightest{m_acquisition_exempt_towers.begin()};
+    for (auto it = std::next(m_acquisition_exempt_towers.begin());
+         it != m_acquisition_exempt_towers.end(); ++it) {
+        if (it->second < lightest->second) lightest = it;
+    }
+    if (candidate->nChainWork > lightest->second) {
+        m_acquisition_exempt_towers.erase(lightest);
+        m_acquisition_exempt_towers.emplace(root, candidate->nChainWork);
+        return true;
+    }
+    return false;
 }
 
 void ChainstateManager::ResetCadenceHoldStateForTest()
@@ -14853,7 +14941,14 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                     IndexIsCoveredBySignedFrontier(pindexPrev)};
                 if (kernel::UnauthenticatedHeaderLeadExceeded(
                         tip->nHeight, header_height, extends_tip,
-                        attested_or_frontier, IsInitialBlockDownload())) {
+                        attested_or_frontier, IsInitialBlockDownload()) &&
+                    // RB-16 acquisition escape valve: a STALE tip must be able
+                    // to ACQUIRE a strictly-heavier competing tower's headers
+                    // past the +72 cap so its bodies can be fetched + fully
+                    // ExactReplay-validated; park / deepforkautoresolve then
+                    // decides MIGRATION. Bounded to a few towers; non-stale
+                    // nodes keep the full anti-flood cap.
+                    !AcquisitionEscapeMayAcquireHeavierFork(pindexPrev)) {
                     LogDebug(BCLog::VALIDATION,
                              "skipping unauthenticated header lead %s height=%d tip=%d\n",
                              hash.ToString(), header_height, tip->nHeight);

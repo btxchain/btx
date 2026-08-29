@@ -391,7 +391,8 @@ LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_com
 LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
                                                          const CBlockIndex* tip,
                                                          const CBlockIndex* best_known,
-                                                         const CChain* active_chain)
+                                                         const CChain* active_chain,
+                                                         bool acquisition_escape)
 {
     if (tip == nullptr || in.last_common == nullptr) return in;
     if (in.last_common->nHeight >= tip->nHeight) return in;
@@ -412,6 +413,15 @@ LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResu
         best_known->GetAncestor(tip->nHeight) != tip};
     if (LastCommonKeepHeavierCompetingFork(
             heavier_competing, tip->nHeight, in.last_common->nHeight)) {
+        return in;
+    }
+    // RB-16 acquisition escape valve: a STALE tip acquiring a strictly-heavier
+    // competing tower must keep last_common + lowest_missing at the fork root
+    // (do NOT snap onto the tip) so FindNextBlocks GETDATAs the heavier fork's
+    // bodies from the LCA up. Without this the deep-tower snap drops
+    // lowest_missing -> no_missing_body -> inflight=0 forever. Fetch only;
+    // ExactReplay before ConnectTip and park/migration gating are unchanged.
+    if (heavier_competing && acquisition_escape) {
         return in;
     }
 

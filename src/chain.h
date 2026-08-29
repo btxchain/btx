@@ -777,7 +777,8 @@ inline constexpr int LAST_COMMON_KEEP_HEAVIER_FORK_BELOW{24};
 LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
                                                          const CBlockIndex* tip,
                                                          const CBlockIndex* best_known,
-                                                         const CChain* active_chain);
+                                                         const CChain* active_chain,
+                                                         bool acquisition_escape = false);
 
 /** Get a locator for a block index entry. */
 CBlockLocator GetLocator(const CBlockIndex* index);

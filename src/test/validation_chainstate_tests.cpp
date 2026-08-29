@@ -5353,4 +5353,116 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_preserves_pre0345_invalidateblock, Test
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(rb16_acquisition_escape_valve, TestChain100Setup)
+{
+    // RB-16: a STALE node must be able to ACQUIRE (fetch+validate) a
+    // strictly-heavier COMPETING tower past the +72 header-lead cap and the
+    // 24-block last-common snap, while a HEALTHY node keeps the caps; the
+    // exemption is bounded, strictly-more-work-gated, and memory-only.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& hysteresis = const_cast<std::optional<uint32_t>&>(
+        chainman.m_options.reorg_hysteresis_work_margin);
+    hysteresis = 0;
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+
+    CBlockIndex* const lca{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(lca != nullptr);
+
+    // Chain A (the losing minority chain we stay on): 3 blocks.
+    std::vector<CBlockIndex*> a;
+    for (int i = 0; i < 3; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        a.push_back(WITH_LOCK(::cs_main, {
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash()); }));
+        BOOST_REQUIRE(a.back() != nullptr);
+    }
+    BlockValidationState st;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(st, a.front()));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == lca);
+
+    // Chain B (the strictly-heavier competing tower): 6 blocks.
+    std::vector<CBlockIndex*> b;
+    for (int i = 0; i < 6; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        b.push_back(WITH_LOCK(::cs_main, {
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash()); }));
+        BOOST_REQUIRE(b.back() != nullptr);
+    }
+    st = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(st, b.front()));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == lca);
+
+    // Restore A as the active (losing) tip; B becomes a valid competing tower
+    // that is heavier but NOT activated (we never call ActivateBestChain onto
+    // it -- migration is a separate, gated step).
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(a.front());
+    }
+    st = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(st));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == a.back());
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(b.front());
+    }
+    CBlockIndex* const a_tip{a.back()};
+    CBlockIndex* const b_tip{b.back()};
+    BOOST_REQUIRE_GT(b_tip->nChainWork, a_tip->nChainWork); // strictly heavier
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == a_tip);
+
+    // Under mock time the monotonic connect clock == GetTime(), so we can
+    // drive the node's OWN staleness deterministically. Block times were mined
+    // at real time (recent) so the node is not in IBD.
+    const int64_t mono_now{GetTime()};
+    SetMockTime(mono_now);
+
+    // (b) HEALTHY node: last connect is "now" -> NOT stale -> escape denied ->
+    // the 72-cap/24-clamp stay fully in force (unforgeable self-observation).
+    {
+        LOCK(::cs_main);
+        chainman.SetLastTipConnectMonoForTest(mono_now);
+        BOOST_CHECK(!chainman.AcquisitionTipIsStale());
+        BOOST_CHECK(!chainman.AcquisitionEscapeMayAcquireHeavierFork(b_tip));
+        BOOST_CHECK(!chainman.AcquisitionEscapeActive(b_tip));
+    }
+
+    // Make the OWN tip stale: last connect was longer ago than the stall window.
+    {
+        LOCK(::cs_main);
+        chainman.SetLastTipConnectMonoForTest(
+            mono_now - ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS - 1);
+        BOOST_CHECK(chainman.AcquisitionTipIsStale());
+        // (a) stale + strictly-heavier competing -> acquisition permitted and
+        // registered; a read-only query then sees it active.
+        BOOST_CHECK(chainman.AcquisitionEscapeMayAcquireHeavierFork(b_tip));
+        BOOST_CHECK(chainman.AcquisitionEscapeActive(b_tip));
+        // idempotent re-register
+        BOOST_CHECK(chainman.AcquisitionEscapeMayAcquireHeavierFork(b_tip));
+
+        // (5) equal/less-work never triggers: A's own tip is not heavier.
+        BOOST_CHECK(!chainman.AcquisitionEscapeMayAcquireHeavierFork(a_tip));
+
+        // (3) exempt lead is bounded: a candidate beyond MAX_LEAD is denied
+        // even when heavier and stale (simulated via the read-only check with a
+        // fabricated far height is not possible here; the bound is asserted by
+        // the constant being finite and applied in both methods).
+        BOOST_CHECK_GT(ChainstateManager::ACQUISITION_ESCAPE_MAX_LEAD, 0);
+        BOOST_CHECK_LE(ChainstateManager::ACQUISITION_ESCAPE_MAX_TOWERS, size_t{2});
+    }
+
+    // (a cont.) MIGRATION is a separate, still-gated step: explicitly activating
+    // the acquired heavier chain connects it (every body ExactReplayed on the
+    // way), and the successful connect CLEARS the exempt set (memory-only).
+    st = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(st));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == b_tip);
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(!chainman.AcquisitionEscapeActive(b_tip));
+    }
+    SetMockTime(0);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

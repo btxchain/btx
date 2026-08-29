@@ -5457,7 +5457,11 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         &m_chainman.ActiveChain())};
     const LastCommonRootFirstResult root_first{AdvanceLastCommonPastActiveTip(
         root_first_clamped, tip, state->pindexBestKnownBlock,
-        &m_chainman.ActiveChain())};
+        &m_chainman.ActiveChain(),
+        // RB-16: a stale tip acquiring a heavier tower keeps last_common at the
+        // fork root instead of snapping past it (else lowest_missing is dropped
+        // and inflight stays 0 forever).
+        m_chainman.AcquisitionEscapeActive(state->pindexBestKnownBlock))};
     state->pindexLastCommonBlock = root_first.last_common;
         if (root_first.lowest_missing != nullptr &&
         !IsHeaderOnlyFetchSuppressed(m_chainman, tip, root_first.lowest_missing,
@@ -12108,7 +12112,10 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 if (kernel::UnauthenticatedHeaderLeadAtCap(
                         tip->nHeight, pindexLast->nHeight, extends_tip,
                         attested_or_frontier,
-                        m_chainman.IsInitialBlockDownload())) {
+                        m_chainman.IsInitialBlockDownload()) &&
+                    // RB-16: keep chasing a heavier competing tower's headers
+                    // past the +72 cap while our tip is stale (acquisition).
+                    !m_chainman.AcquisitionEscapeActive(pindexLast)) {
                     chase_more = false;
                 }
             }
@@ -12160,7 +12167,10 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 m_chainman.IndexIsCoveredBySignedFrontier(pindexLast)};
             skip_direct_fetch = kernel::UnauthenticatedHeaderLeadAtCap(
                 tip->nHeight, pindexLast->nHeight, extends_tip,
-                attested_or_frontier, m_chainman.IsInitialBlockDownload());
+                attested_or_frontier, m_chainman.IsInitialBlockDownload()) &&
+                // RB-16: directly fetch a heavier competing tower while the
+                // tip is stale so its bodies can be acquired + ExactReplayed.
+                !m_chainman.AcquisitionEscapeActive(pindexLast);
         }
     }
     if (!skip_direct_fetch) {

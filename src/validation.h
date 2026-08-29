@@ -1194,6 +1194,17 @@ private:
     //! use paced-dump first-seen (headers arrived together hours ago).
     mutable std::optional<int64_t> m_last_tip_connect_time GUARDED_BY(::cs_main);
     mutable std::optional<int64_t> m_last_tip_connect_mono GUARDED_BY(::cs_main);
+    //! RB-16 acquisition escape valve: fork-root hashes of heavier COMPETING
+    //! towers currently EXEMPT from the unauthenticated-header-lead (72) cap and
+    //! the last-common heavier-fork snap, so a node whose tip is STALE can
+    //! ACQUIRE + fully ExactReplay-validate the heavier chain (the anti-flood
+    //! caps otherwise gate DATA ACQUISITION, stranding any node >72 behind).
+    //! MIGRATION stays gated by park / deepforkautoresolve / quorum / operator.
+    //! Value = heaviest candidate tip chainwork seen on that tower, for
+    //! lightest-eviction so the real majority chain always keeps a slot.
+    //! Bounded to ACQUISITION_ESCAPE_MAX_TOWERS; cleared on any ConnectTip.
+    mutable std::map<uint256, arith_uint256> m_acquisition_exempt_towers
+        GUARDED_BY(::cs_main);
     mutable std::optional<int> m_cadence_hold_logged_allowed GUARDED_BY(::cs_main);
     std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
     /**
@@ -1701,6 +1712,14 @@ public:
     //! Test-only: drop hold-anchor and last-ConnectTip so restart / idle /
     //! dump-header origin selection can be driven without mining a new chain.
     void ResetCadenceHoldStateForTest() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Test-only: drive the acquisition-escape staleness clock directly so the
+    //! stale-tip path can be exercised without a 600s wall-clock wait.
+    void SetLastTipConnectMonoForTest(std::optional<int64_t> mono)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        m_last_tip_connect_mono = mono;
+    }
     //! Test-only RAII: point ActiveChainstate() at `stub` so production
     //! cadence-hold reads a real m_from_snapshot_blockhash. Restores the
     //! prior pointer. `stub` must outlive this object.
@@ -1819,6 +1838,32 @@ public:
      */
     const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! RB-16 acquisition escape valve. Tip is "stale" after this many seconds
+    //! with no successful ConnectTip (~6-7 missed blocks); a steady-state node
+    //! connects every spacing so it never trips it.
+    static constexpr int64_t ACQUISITION_ESCAPE_STALL_SECONDS{600};
+    static constexpr size_t ACQUISITION_ESCAPE_MAX_TOWERS{2};
+    //! Bound the exempt header lead so a bogus heavier-looking tower cannot
+    //! grow the index unboundedly: exempt headers only up to tip+this. Because
+    //! the exempt set is CLEARED on every ConnectTip, a genuine tower slides
+    //! this window forward as its bodies validate and advance the tip, while a
+    //! fake tower whose bodies never connect stays capped here (its GPU
+    //! ExactReplay is separately rate-limited by the per-peer RC budget, RB-6).
+    static constexpr int ACQUISITION_ESCAPE_MAX_LEAD{2048};
+    //! True when the tip has not connected a block for ACQUISITION_ESCAPE_
+    //! STALL_SECONDS and the node is not in IBD (IBD already exempts + fetches).
+    [[nodiscard]] bool AcquisitionTipIsStale() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! MUTATING: may this node exempt `candidate`'s heavier competing tower from
+    //! the header-lead / last-common caps to ACQUIRE its bodies? Registers the
+    //! tower (evicting the lightest when the 2-tower budget is full and the
+    //! candidate is heavier). Only fetch+validate is enabled; migration is
+    //! still park/deepforkautoresolve/quorum-gated. Read-only sites use
+    //! AcquisitionEscapeActive.
+    [[nodiscard]] bool AcquisitionEscapeMayAcquireHeavierFork(
+        const CBlockIndex* candidate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Read-only: is `candidate`'s tower currently under acquisition escape?
+    [[nodiscard]] bool AcquisitionEscapeActive(const CBlockIndex* candidate) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * LOCAL POLICY (-deepforkautoresolve): may this node auto-migrate to a
      * DEEP (> park_depth) strictly-heavier competing fork because network
