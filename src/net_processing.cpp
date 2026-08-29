@@ -3274,6 +3274,38 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
     const ChainstateManager& chainman)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+//! RB-16 ORDER: parent-connectable predicate shared by the root-first
+//! frontier driver, the covered-body ExactReplay admission gate, and the
+//! RC progress-lane assignment. A body on the acquired tower can only ever
+//! ConnectTip after its parent, so a covered body whose parent is neither on
+//! the active chain (the fork root) nor already ExactReplay-verified with
+//! data must not spend the scarce GPU / RC verification budget: its verdict
+//! would float uselessly while the contiguous frontier starves (live
+//! rtx6000 2026-08-30: async verify at 200529..200532 while the driver's
+//! frontier 199297/199298 stayed budget-deferred, tip frozen at 199416).
+[[nodiscard]] static bool AcquiredBodyParentConnectable(
+    const ChainstateManager& chainman,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    if (index == nullptr) return false;
+    const CBlockIndex* const parent{index->pprev};
+    if (parent == nullptr) return false;
+    return chainman.ActiveChain().Contains(parent) ||
+           ((parent->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+            (parent->nStatus & BLOCK_HAVE_DATA) != 0);
+}
+
+//! RB-16 ORDER: while acquiring a heavier tower, GETDATA only a bounded
+//! lookahead above the tower's lowest unverified parent-connectable body.
+//! Bodies above that window cannot be verified yet (admission is
+//! parent-connectable-gated) and would only churn the retained-body store;
+//! 16 matches MAX_BLOCKS_IN_TRANSIT_PER_PEER and stays within the
+//! per-netgroup retained-body cap so nothing overflows into the
+//! synchronous-replay fallback.
+static constexpr int ACQUISITION_ESCAPE_FETCH_LOOKAHEAD{16};
+
 //! RB-16 CONVERGENCE: while acquiring a heavier competing tower (stale tip,
 //! registered exempt tower), find the LOWEST unverified body above the fork
 //! root whose parent is already connectable -- parent on the active chain
@@ -3307,13 +3339,7 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
          walk = walk->pprev) {
         if ((walk->nStatus & BLOCK_FAILED_MASK) != 0) continue;
         if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
-        const CBlockIndex* const parent{walk->pprev};
-        if (parent == nullptr) continue;
-        const bool parent_connectable{
-            chainman.ActiveChain().Contains(parent) ||
-            ((parent->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
-             (parent->nStatus & BLOCK_HAVE_DATA) != 0)};
-        if (!parent_connectable) continue;
+        if (!AcquiredBodyParentConnectable(chainman, walk)) continue;
         lowest = walk; // keep descending: the lowest match wins
     }
     if (lowest == nullptr) return nullptr;
@@ -4981,8 +5007,30 @@ static bool TrustedMirrorMayDownloadIndex(
         !chainman.AcquisitionEscapeCoversBlock(index)) return false;
     if (node::matmul_trusted::IsTrustedMirror()) return false;
     if (chainman.AcquisitionEscapeCoversBlock(index)) {
-        g_configured_claimed_tip_child = index->GetBlockHash();
-        return true;
+        // RB-16 ORDER: the acquired tower must spend GPU ROOT-FIRST. Only a
+        // covered body whose parent is already connectable (active chain or
+        // ExactReplay-verified with data) may take the device; a high
+        // floating covered body would burn the RC/EncDr pending budget on a
+        // verdict that cannot ConnectTip yet while the contiguous frontier
+        // starves (live rtx6000 2026-08-30: tip frozen at 199416, GPU busy
+        // at 200529+). It is NOT admitted through the later heuristics
+        // either (next-hole accepts a merely HAVE_DATA parent) -- it waits,
+        // retained, until the frontier reaches it. Bounded: the frontier
+        // admits one body at a time and each body replays at most once.
+        if (AcquiredBodyParentConnectable(chainman, index)) {
+            g_configured_claimed_tip_child = index->GetBlockHash();
+            return true;
+        }
+        static std::atomic<int64_t> s_last_order_log{0};
+        const int64_t now_s{GetTime()};
+        if (now_s - s_last_order_log.load(std::memory_order_relaxed) >= 5) {
+            s_last_order_log.store(now_s, std::memory_order_relaxed);
+            LogInfo("acquisition-escape ExactReplay admission DEFERRED "
+                    "hash=%s height=%d: parent not connectable yet "
+                    "(root-first ordering)\n",
+                    index->GetBlockHash().ToString(), index->nHeight);
+        }
+        return false;
     }
     // Live 2026-08-20: local-signer ExactReplay required pprev==tip, so the
     // attested equal-work sibling (LCA+1) was HEADER_ONLY-skipped and the
@@ -5858,6 +5906,28 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                  "Cadence hold clamping GETDATA window peer=%d end=%d -> %d tip=%d\n",
                  peer.m_id, nWindowEnd, cadence_allowed, tip_height);
         nWindowEnd = cadence_allowed;
+    }
+    // RB-16 ORDER: while acquiring a heavier tower, fetch only a bounded
+    // lookahead above the lowest unverified parent-connectable body. Covered
+    // bodies above that window are not ExactReplay-admissible yet (parent-
+    // connectable gate) and would only churn the bounded retained store /
+    // re-getdata; the window slides up as each frontier body verifies.
+    // Self-guarded like 43e2aa87: non-acquiring nodes are untouched.
+    if (m_chainman.AcquisitionEscapeActive(state->pindexBestKnownBlock)) {
+        if (const CBlockIndex* const acq_frontier{
+                FindLowestUnverifiedAcquiredBody(m_chainman)};
+            acq_frontier != nullptr &&
+            acq_frontier->nHeight + ACQUISITION_ESCAPE_FETCH_LOOKAHEAD <
+                nWindowEnd) {
+            LogDebug(BCLog::NET,
+                     "Acquisition root-first clamping GETDATA window peer=%d "
+                     "end=%d -> %d frontier=%d tip=%d\n",
+                     peer.m_id, nWindowEnd,
+                     acq_frontier->nHeight + ACQUISITION_ESCAPE_FETCH_LOOKAHEAD,
+                     acq_frontier->nHeight, tip_height);
+            nWindowEnd =
+                acq_frontier->nHeight + ACQUISITION_ESCAPE_FETCH_LOOKAHEAD;
+        }
     }
 
     const size_t before{vBlocks.size()};
@@ -12894,8 +12964,12 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             if (!progress_lane) {
                 const CBlockIndex* const bidx{
                     m_chainman.m_blockman.LookupBlockIndex(hash)};
+                // RB-16 ORDER: parent-connectable frontier only -- a high
+                // floating covered body must not drain the progress-lane
+                // verification budget (it cannot ConnectTip yet).
                 if (bidx != nullptr &&
-                    m_chainman.AcquisitionEscapeCoversBlock(bidx)) {
+                    m_chainman.AcquisitionEscapeCoversBlock(bidx) &&
+                    AcquiredBodyParentConnectable(m_chainman, bidx)) {
                     progress_lane = true;
                 }
             }
@@ -13622,6 +13696,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     bool persist_lost_twin_for_signer{false};
     bool persist_heavier_competing_fork{false};
     bool persist_followed_suffix{false};
+    bool retain_acquired_floating_body{false};
     const bool from_gpu_attestor{
         node.IsManualConn() ||
         node.HasPermission(NetPermissionFlags::NoBan)};
@@ -13758,6 +13833,22 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                             // ExactReplay at ConnectTip; do not occupy the
                             // skip set.
                             if (indexed != nullptr &&
+                                !node::matmul_trusted::IsTrustedMirror() &&
+                                m_chainman.AcquisitionEscapeCoversBlock(
+                                    indexed) &&
+                                !AcquiredBodyParentConnectable(m_chainman,
+                                                               indexed)) {
+                                // RB-16 ORDER: a covered acquired-tower body
+                                // above the parent-connectable frontier must
+                                // not be persisted here -- on a CONSENSUS
+                                // node AcceptBlock's ContextualCheckBlock
+                                // would ExactReplay it SYNCHRONOUSLY,
+                                // re-monopolizing the device out of order.
+                                // Retain it (bounded store, frontier-first
+                                // NextRetry) until the frontier reaches it.
+                                exact_recompute_required = false;
+                                retain_acquired_floating_body = true;
+                            } else if (indexed != nullptr &&
                                 (IndexIsOnHeavierCompetingFork(
                                      m_chainman, tip, indexed, peer_best) ||
                                  IndexIsOnHeavierHeaderTowerForFetch(
@@ -13849,6 +13940,33 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
         admission.retain_as_requested = true;
         maybe_request_attestations_without_gpu();
+        return true;
+    }
+    if (retain_acquired_floating_body) {
+        // Rate-limited: 16-wide GETDATA delivers bursts of these while the
+        // frontier grinds; one line per 5s is enough to observe the decision.
+        static std::atomic<int64_t> s_last_retain_log{0};
+        const int64_t now_retain_s{GetTime()};
+        if (now_retain_s - s_last_retain_log.load(std::memory_order_relaxed) >= 5) {
+            s_last_retain_log.store(now_retain_s, std::memory_order_relaxed);
+            LogInfo("Retaining acquired-tower body hash=%s height=%d from "
+                    "peer=%d until the root-first frontier reaches its "
+                    "parent (no GPU/RC budget spent)\n",
+                    block_hash.ToString(), exact_reference_height,
+                    node.GetId());
+        }
+        admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
+        admission.is_ibd = is_ibd;
+        admission.encdr_profile = exact_encdr_profile;
+        admission.rc_profile =
+            m_chainparams.GetConsensus().IsMatMulRCFamilyActive(
+                exact_reference_height);
+        admission.reference_height = exact_reference_height;
+        admission.work_units = admission.rc_profile
+            ? MatMulRCWorkUnits(m_chainparams.GetConsensus(),
+                                exact_reference_height)
+            : uint32_t{1};
+        admission.retain_as_requested = true;
         return true;
     }
     if (persist_heavier_competing_fork) {
@@ -14048,9 +14166,13 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             const CBlockIndex* active_tip{m_chainman.ActiveTip()};
             const CBlockIndex* const covered_index{
                 m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+            // RB-16 ORDER: only the parent-connectable frontier of the
+            // acquired tower earns the reserved (progress) RC lane; a high
+            // floating covered body must not occupy the pending cap.
             acquisition_covered =
                 covered_index != nullptr &&
-                m_chainman.AcquisitionEscapeCoversBlock(covered_index);
+                m_chainman.AcquisitionEscapeCoversBlock(covered_index) &&
+                AcquiredBodyParentConnectable(m_chainman, covered_index);
             // A direct child of the active tip is the followed chain by
             // definition: every connected ancestor already passed PoW,
             // ExactReplay and script validation. Requiring the tip's
