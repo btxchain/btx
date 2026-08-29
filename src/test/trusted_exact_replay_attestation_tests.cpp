@@ -307,7 +307,13 @@ BOOST_AUTO_TEST_CASE(reorg_releases_mint_slot_inbound_cannot)
     BOOST_CHECK(store.LocalMintedHash(20) == hash_b);
     BOOST_CHECK(minted_b.statement.block_hash == hash_b);
     BOOST_CHECK_EQUAL(store.GetAttestations(hash_b, 20).size(), 1);
-    BOOST_CHECK(store.GetAttestations(hash_a, 20).size() >= 1);
+    // V5/RB-12: the node's own validated reorg of hash_a withdraws its local
+    // vote for that abandoned twin from the live/gossiped set so it can no
+    // longer hold two live pin signatures at one height (the dual-quorum
+    // mirror freeze). hash_a carried only the local vote here, so its bucket
+    // is now empty; a peer copy would have survived (see
+    // reorg_withdraws_local_vote_but_keeps_peer_copy).
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_a, 20).size(), 0U);
 
     // Open attestor who signed the disconnected hash can re-sign the new one
     // without being frozen for equivocation.
@@ -318,6 +324,41 @@ BOOST_AUTO_TEST_CASE(reorg_releases_mint_slot_inbound_cannot)
     BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_b, 21), extra[0]),
                           hash_b, 21) == AddResult::Heard);
     BOOST_CHECK(!store.IsFrozenOpenSigner(extra[0].GetPubKey()));
+}
+
+BOOST_AUTO_TEST_CASE(reorg_withdraws_local_vote_but_keeps_peer_copy)
+{
+    // V5/RB-12: on the node's OWN validated reorg away from a hash it locally
+    // minted, its local vote is withdrawn from the live/gossiped bucket so the
+    // signer cannot keep a live pin quorum on the abandoned twin (the
+    // dual-quorum same-height mirror freeze). Peer copies survive as history,
+    // but the abandoned-hash quorum decays below threshold.
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x91)};
+    const uint256 hash_a{TestHash(0x92)};
+    const uint256 hash_b{TestHash(0x93)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.local_signer = keys[0];
+    AttestationStore store{config};
+
+    // hash_a reaches pin quorum: local mint (keys[0]) + a peer copy (keys[1]).
+    BOOST_REQUIRE(store.SignLocal(hash_a, 40) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, hash_a, 40), keys[1]),
+                            hash_a, 40) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(hash_a, 40));
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_a, 40).size(), 2U);
+
+    // Own validated reorg of hash_a: local vote withdrawn, peer copy kept,
+    // abandoned-twin quorum decays -> no dual-live-pin freeze can form.
+    BOOST_CHECK(store.NotifyActiveChainBlockDisconnected(40, hash_a));
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_a, 40).size(), 1U);
+    BOOST_CHECK(!store.HasQuorum(hash_a, 40));
+
+    // The mint slot is free for the followed hash; the node holds no live
+    // quorum on the abandoned twin while it attests the new one.
+    BOOST_CHECK(store.SignLocal(hash_b, 40) == AddResult::Accepted);
+    BOOST_CHECK(store.LocalMintedHash(40) == hash_b);
+    BOOST_CHECK(!store.HasQuorum(hash_a, 40));
 }
 
 BOOST_AUTO_TEST_CASE(competing_quorum_still_occupies_after_reorg_of_other_hash)

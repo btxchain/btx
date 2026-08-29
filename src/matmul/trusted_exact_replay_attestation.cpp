@@ -983,6 +983,36 @@ bool AttestationStore::NotifyActiveChainBlockDisconnected(
         return false;
     }
     m_local_minted_hash_by_height.erase(minted);
+    // V5/RB-12: the mint-slot release alone (RB-7) re-opens SignLocal for the
+    // new hash, but the OLD local signature stayed live in m_buckets and kept
+    // being gossiped / served over GETMMATTEST. A signer flipped 1-6 blocks by
+    // a short reorg then held two live pin signatures at one height; mirrors
+    // that heard both fail-closed on dual-quorum same-height twins and FROZE
+    // (settlement freeze, repeatable with only near-tip hashrate).
+    //
+    // This is the node's OWN validated reorg away from a hash it locally
+    // minted, so it must WITHDRAW its own vote for that abandoned twin: the
+    // signer no longer vouches that hash is canonical. Only the local
+    // signature is removed (peers' copies stay as history); an external
+    // message can never trigger this path (DisconnectTip only). Once the
+    // signer stops serving its abandoned vote the stale quorum decays and the
+    // dual-live-pin freeze does not form.
+    if (m_config.local_signer.has_value()) {
+        const CPubKey local_pk{m_config.local_signer->GetPubKey()};
+        const auto bucket_it{
+            m_buckets.find(BlockKey{height, disconnected_hash})};
+        if (bucket_it != m_buckets.end()) {
+            const auto sig_it{bucket_it->second.attestations.find(local_pk)};
+            if (sig_it != bucket_it->second.attestations.end()) {
+                bucket_it->second.attestations.erase(sig_it);
+                if (m_attestation_count > 0) --m_attestation_count;
+                if (bucket_it->second.attestations.empty()) {
+                    m_buckets.erase(bucket_it);
+                }
+                m_changed.notify_all();
+            }
+        }
+    }
     return true;
 }
 
