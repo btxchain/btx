@@ -10484,9 +10484,8 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         // anywhere (MaybeTrackReorgRecovery is untouched), so a restart -- when
         // the memory-only first-seen signals are unknown -- re-parks: today's
         // behavior verbatim (df-attack R3).
-        ChainstateManager::DeepForkAutoResolveVerdict df_verdict;
         const bool deep_fork_auto_resolve{
-            m_chainman.DeepForkAutoResolveMayAct(pindexMostWork, &df_verdict)};
+            m_chainman.DeepForkAutoResolveMayAct(pindexMostWork)};
         const bool recovery_escape{
             m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
             m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork) ||
