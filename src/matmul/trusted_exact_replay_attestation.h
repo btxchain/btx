@@ -343,11 +343,15 @@ struct StoreStats {
  * substitute for local ExactReplay. Each bucket is keyed by both height and
  * hash, and each configured signer contributes at most one vote.
  *
- * HasQuorum is PinQuorum only (M-of-N of `-matmultrustedpubkey`). That is
- * the sole SkipExactReplay / signed-frontier / trusted-mirror authority.
- * Open attestors may speak and be listed after co-signing a pin-quorum
- * hash; they must not become MatMul PoW for CPU archives or consensus+pin
- * miners. Stolen open keys therefore cannot mint fake work for those nodes.
+ * HasQuorum is PinQuorum only (M-of-N of `-matmultrustedpubkey`).
+ * SkipExactReplay is trusted-mirror AND HasQuorum: pin quorum never
+ * skips ExactReplay on consensus miners, and the pin is not
+ * FindMostWorkChain or getblocktemplate fork choice on consensus.
+ * Signed-frontier / GETDATA preference may follow pin quorum as
+ * telemetry. Open attestors may speak and be listed after co-signing a
+ * pin-quorum hash; they must not become MatMul PoW for CPU archives or
+ * consensus+pin miners. Stolen open keys therefore cannot mint fake
+ * work for those nodes.
  */
 class AttestationStore
 {

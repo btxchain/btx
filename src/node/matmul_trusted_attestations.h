@@ -2133,10 +2133,11 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
 
 /** ConnectTip / lost-twin ExactReplay skip.
  *
- *  CPU archives (trusted mirrors) skip when pin quorum already covers the
- *  hash. Consensus miners never skip because a foreign signature exists:
- *  attestation is not PoW. Catch-up height is not attestation; unattested
- *  hashes still replay on every role. */
+ *  Pin quorum does **not** skip ExactReplay. Only a trusted mirror
+ *  (`-matmulvalidation=trusted`) may skip, and only when pin quorum
+ *  already covers this hash. Consensus miners (with or without a pin)
+ *  always ExactReplay: attestation is not PoW. Catch-up height is not
+ *  attestation; unattested hashes still replay on every role. */
 [[nodiscard]] inline bool SkipExactReplayForGpuAttestation(
     bool has_valid_gpu_attestation,
     bool trusted_mirror)
