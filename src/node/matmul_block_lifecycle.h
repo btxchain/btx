@@ -116,9 +116,15 @@ public:
     MatMulBlockLifecycle(size_t max_retained_count,
                          size_t max_retained_bytes,
                          Clock::duration retained_max_age,
-                         Clock::duration async_stale_after)
+                         Clock::duration async_stale_after,
+                         size_t max_retained_count_per_source =
+                             std::numeric_limits<size_t>::max(),
+                         size_t max_retained_bytes_per_source =
+                             std::numeric_limits<size_t>::max())
         : m_max_retained_count{max_retained_count},
           m_max_retained_bytes{max_retained_bytes},
+          m_max_retained_count_per_source{max_retained_count_per_source},
+          m_max_retained_bytes_per_source{max_retained_bytes_per_source},
           m_retained_max_age{retained_max_age},
           m_async_stale_after{async_stale_after}
     {
@@ -185,6 +191,7 @@ public:
                 Clock::time_point now = Clock::now())
     {
         if (!body.block || body.bytes > m_max_retained_bytes) return false;
+        if (body.bytes > m_max_retained_bytes_per_source) return false;
         std::lock_guard<std::mutex> lock(m_mutex);
         PruneExpiredRetained(now);
 
@@ -194,6 +201,20 @@ public:
                 ? existing->second.body->bytes
                 : 0};
         const size_t old_count{old_bytes != 0 ? 1U : 0U};
+        const uint64_t src{body.source_netgroup};
+        const bool replacing_same_source{
+            existing != m_entries.end() && existing->second.body &&
+            existing->second.body->source_netgroup == src};
+        const size_t old_src_count{replacing_same_source ? 1U : 0U};
+        const size_t old_src_bytes{replacing_same_source ? old_bytes : 0U};
+        while (SourceCount(src) - old_src_count + 1 >
+                   m_max_retained_count_per_source ||
+               SourceBytes(src) - old_src_bytes + body.bytes >
+                   m_max_retained_bytes_per_source) {
+            auto victim{OldestEvictableForSource(hash, src)};
+            if (victim == m_entries.end()) return false;
+            EraseEntry(victim);
+        }
         while (RetainedCount() - old_count + 1 > m_max_retained_count ||
                m_retained_bytes - old_bytes + body.bytes >
                    m_max_retained_bytes) {
@@ -206,11 +227,15 @@ public:
         Entry& entry{it->second};
         const auto original_stored_at{
             entry.body ? entry.body->stored_at : now};
-        if (entry.body) m_retained_bytes -= entry.body->bytes;
+        if (entry.body) {
+            AccountSourceRemove(entry.body->source_netgroup, entry.body->bytes);
+            m_retained_bytes -= entry.body->bytes;
+        }
         // Capacity TTL is non-refreshing for a hash: retries or repeated
         // deliveries cannot pin retained bytes forever.
         body.stored_at = original_stored_at;
         entry.body = std::move(body);
+        AccountSourceAdd(entry.body->source_netgroup, entry.body->bytes);
         m_retained_bytes += entry.body->bytes;
         if (inserted || !IsActive(entry.state)) {
             entry.state = State::BODY_RETAINED;
@@ -300,6 +325,7 @@ public:
         (void)inserted;
         Entry& entry{nit->second};
         entry.body = std::move(body);
+        AccountSourceAdd(entry.body->source_netgroup, entry.body->bytes);
         m_retained_bytes += entry.body->bytes;
         entry.state = State::BODY_RETAINED;
         entry.updated_at = now;
@@ -514,6 +540,12 @@ public:
         return m_retained_bytes;
     }
 
+    size_t RetainedCountForSourceForTest(uint64_t netgroup) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return SourceCount(netgroup);
+    }
+
 private:
     struct Entry {
         State state{State::BODY_RETAINED};
@@ -608,12 +640,70 @@ private:
         return oldest;
     }
 
+    Map::iterator OldestEvictableForSource(const uint256& protected_hash,
+                                           uint64_t netgroup)
+    {
+        auto oldest{m_entries.end()};
+        for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
+            if (it->first == protected_hash || !it->second.body ||
+                IsActive(it->second.state) || it->second.body->pin_progress ||
+                it->second.body->source_netgroup != netgroup) {
+                continue;
+            }
+            if (oldest == m_entries.end() ||
+                it->second.body->stored_at < oldest->second.body->stored_at) {
+                oldest = it;
+            }
+        }
+        return oldest;
+    }
+
+    size_t SourceCount(uint64_t netgroup) const
+    {
+        const auto it{m_retained_count_by_source.find(netgroup)};
+        return it == m_retained_count_by_source.end() ? 0 : it->second;
+    }
+
+    size_t SourceBytes(uint64_t netgroup) const
+    {
+        const auto it{m_retained_bytes_by_source.find(netgroup)};
+        return it == m_retained_bytes_by_source.end() ? 0 : it->second;
+    }
+
+    void AccountSourceAdd(uint64_t netgroup, size_t bytes)
+    {
+        m_retained_count_by_source[netgroup] += 1;
+        m_retained_bytes_by_source[netgroup] += bytes;
+    }
+
+    void AccountSourceRemove(uint64_t netgroup, size_t bytes)
+    {
+        auto count_it{m_retained_count_by_source.find(netgroup)};
+        if (count_it != m_retained_count_by_source.end()) {
+            if (count_it->second <= 1) {
+                m_retained_count_by_source.erase(count_it);
+            } else {
+                --count_it->second;
+            }
+        }
+        auto bytes_it{m_retained_bytes_by_source.find(netgroup)};
+        if (bytes_it != m_retained_bytes_by_source.end()) {
+            if (bytes_it->second <= bytes) {
+                m_retained_bytes_by_source.erase(bytes_it);
+            } else {
+                bytes_it->second -= bytes;
+            }
+        }
+    }
+
     void EraseEntry(Map::iterator it)
     {
         if (it->second.cancelled) {
             it->second.cancelled->store(true, std::memory_order_relaxed);
         }
         if (it->second.body) {
+            AccountSourceRemove(it->second.body->source_netgroup,
+                                it->second.body->bytes);
             m_retained_bytes -= it->second.body->bytes;
         }
         m_entries.erase(it);
@@ -621,12 +711,16 @@ private:
 
     const size_t m_max_retained_count;
     const size_t m_max_retained_bytes;
+    const size_t m_max_retained_count_per_source;
+    const size_t m_max_retained_bytes_per_source;
     const Clock::duration m_retained_max_age;
     const Clock::duration m_async_stale_after;
 
     mutable std::mutex m_mutex;
     Map m_entries;
     size_t m_retained_bytes{0};
+    std::map<uint64_t, size_t> m_retained_count_by_source;
+    std::map<uint64_t, size_t> m_retained_bytes_by_source;
     uint64_t m_next_generation{0};
     ProgressVector m_progress;
 };

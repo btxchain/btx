@@ -526,6 +526,11 @@ static constexpr auto BEST_KNOWN_PROBE_INTERVAL{2min};
  *  peer cannot use it as a memory amplifier. */
 static constexpr size_t MATMUL_DEFERRED_BODY_MAX_COUNT{64};
 static constexpr size_t MATMUL_DEFERRED_BODY_MAX_BYTES{128 * 1024 * 1024};
+/** Per-netgroup share so one attacker cannot fill the global store and
+ *  disconnect honest peers that still need a slot (SF-8). */
+static constexpr size_t MATMUL_DEFERRED_BODY_MAX_COUNT_PER_NETGROUP{16};
+static constexpr size_t MATMUL_DEFERRED_BODY_MAX_BYTES_PER_NETGROUP{
+    32 * 1024 * 1024};
 /** A stored body older than this is dropped; it will be re-downloaded if still
  *  wanted. ExactReplay on a live GPU is ~11s/block, so 10 minutes only covers
  *  ~54 deferred bodies — past that, catch-up ages out faster than it validates.
@@ -1947,7 +1952,9 @@ private:
     /** Single owner of retained bodies and expensive async-attempt resources. */
     node::MatMulBlockLifecycle m_matmul_block_lifecycle{
         MATMUL_DEFERRED_BODY_MAX_COUNT, MATMUL_DEFERRED_BODY_MAX_BYTES,
-        MATMUL_DEFERRED_BODY_MAX_AGE, MATMUL_ASYNC_VERIFY_STALE_AFTER};
+        MATMUL_DEFERRED_BODY_MAX_AGE, MATMUL_ASYNC_VERIFY_STALE_AFTER,
+        MATMUL_DEFERRED_BODY_MAX_COUNT_PER_NETGROUP,
+        MATMUL_DEFERRED_BODY_MAX_BYTES_PER_NETGROUP};
     std::optional<node::MatMulBlockLifecycle::Token>
     MarkMatMulAsyncVerification(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void UnmarkMatMulAsyncVerification(

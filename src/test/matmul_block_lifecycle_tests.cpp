@@ -11,6 +11,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -30,13 +31,15 @@ std::shared_ptr<const CBlock> BlockWithNonce(uint32_t nonce)
 
 node::MatMulBlockLifecycle::RetainedBody Body(uint32_t nonce,
                                                size_t bytes,
-                                               std::chrono::steady_clock::time_point retry)
+                                               std::chrono::steady_clock::time_point retry,
+                                               uint64_t source_netgroup = 0)
 {
-    return {
-        .block = BlockWithNonce(nonce),
-        .retry_not_before = retry,
-        .bytes = bytes,
-    };
+    node::MatMulBlockLifecycle::RetainedBody body;
+    body.block = BlockWithNonce(nonce);
+    body.retry_not_before = retry;
+    body.bytes = bytes;
+    body.source_netgroup = source_netgroup;
+    return body;
 }
 
 } // namespace
@@ -316,6 +319,45 @@ BOOST_AUTO_TEST_CASE(pinned_progress_body_survives_sibling_flood)
     BOOST_CHECK(lifecycle.HasRetainedBody(hole));
     BOOST_CHECK(!lifecycle.HasRetainedBody(junk));
     BOOST_CHECK(lifecycle.HasRetainedBody(junk2));
+}
+
+BOOST_AUTO_TEST_CASE(per_source_caps_cannot_starve_other_netgroup)
+{
+    // SF-8: one netgroup filling the store must evict its own oldest
+    // bodies first and must not prevent an independent source from
+    // retaining.
+    node::MatMulBlockLifecycle lifecycle{8, 1000, 10min, 10s, 2, 250};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    std::vector<uint256> attacker;
+    auto t{now};
+    for (int i = 0; i < 6; ++i) {
+        const uint256 hash{
+            uint256::FromHex(std::string(62, '0') +
+                             strprintf("%02x", 0x31 + i)).value()};
+        attacker.push_back(hash);
+        BOOST_REQUIRE(lifecycle.Retain(
+            hash, Body(21 + i, 50, t, /*source_netgroup=*/1), t));
+        t += 1s;
+    }
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForSourceForTest(1), 2U);
+    BOOST_CHECK_LE(lifecycle.RetainedCountForTest(), 8U);
+    BOOST_CHECK(!lifecycle.HasRetainedBody(attacker[0]));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(attacker[1]));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(attacker[2]));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(attacker[3]));
+    BOOST_CHECK(lifecycle.HasRetainedBody(attacker[4]));
+    BOOST_CHECK(lifecycle.HasRetainedBody(attacker[5]));
+
+    const uint256 honest{
+        uint256::FromHex(std::string(62, '0') + "40").value()};
+    BOOST_REQUIRE(lifecycle.Retain(
+        honest, Body(40, 50, t, /*source_netgroup=*/2), t));
+    BOOST_CHECK(lifecycle.HasRetainedBody(honest));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForSourceForTest(1), 2U);
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForSourceForTest(2), 1U);
+    BOOST_CHECK(lifecycle.HasRetainedBody(attacker[4]));
+    BOOST_CHECK(lifecycle.HasRetainedBody(attacker[5]));
+    BOOST_CHECK_LE(lifecycle.RetainedCountForTest(), 8U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
