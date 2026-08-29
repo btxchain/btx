@@ -11741,10 +11741,26 @@ bool ChainstateManager::AcquisitionTipIsStale() const
     if (m_active_chainstate == nullptr) return false;
     // IBD already exempts the header-lead caps and fetches freely.
     if (IsInitialBlockDownload()) return false;
-    if (!m_last_tip_connect_mono.has_value()) return false;
     const int64_t now{CadenceHoldMonotonicNowSeconds()};
-    // Frozen tip: no successful ConnectTip at all for the stall window.
-    if ((now - *m_last_tip_connect_mono) >= ACQUISITION_ESCAPE_STALL_SECONDS) return true;
+    // RB-16 restart-safety: a node that BOOTED onto a frozen tip and has
+    // connected nothing has no m_last_tip_connect_mono, so the old
+    // `if (!has_value()) return false` made the staleness gate un-trippable and
+    // a restarted stuck node (rtx6000 live: UpdateTip count=0 across the whole
+    // uptime, tip frozen at 199416 below a known 201278 tower) could NEVER
+    // self-rescue -- defeating "automatic on upgrade for ALL users". Capture a
+    // startup baseline lazily and fall back to it whenever a clock is unset, so
+    // the frozen-tip path still trips after the stall window. Downstream
+    // (AcquisitionEscapeActive / MayAcquire) still requires a strictly-heavier
+    // off-active-chain tower, so a frozen node with no heavier tower is "stale"
+    // but does nothing.
+    if (!m_acquisition_stale_baseline_mono.has_value()) {
+        m_acquisition_stale_baseline_mono = now;
+    }
+    // Frozen tip: no successful ConnectTip for the stall window (or, at boot
+    // with nothing connected, no progress since the startup baseline).
+    const int64_t frozen_since{
+        m_last_tip_connect_mono.value_or(*m_acquisition_stale_baseline_mono)};
+    if ((now - frozen_since) >= ACQUISITION_ESCAPE_STALL_SECONDS) return true;
     // RB-16 fix: the tip IS connecting, but only on a strictly-lighter
     // COMPETING fork while a heavier tower is known (e.g. a minority fork that
     // slowly extends: 199394->199398). Those connects reset m_last_tip_connect_
@@ -11756,10 +11772,14 @@ bool ChainstateManager::AcquisitionTipIsStale() const
     if (!(best->nChainWork > tip->nChainWork)) return false;
     if (best->GetAncestor(tip->nHeight) == tip) return false; // best extends tip
     // Never made better-chain progress (e.g. booted onto the minority fork) or
-    // last made it longer than the stall window ago: acquisition-stale.
-    return !m_last_better_chain_progress_mono.has_value() ||
-           (now - *m_last_better_chain_progress_mono) >=
-               ACQUISITION_ESCAPE_STALL_SECONDS;
+    // last made it longer than the stall window ago: acquisition-stale. The
+    // "never" case falls back to the startup baseline so it still requires the
+    // 600s confirmation window rather than arming instantly on a heavier tower
+    // seen at boot (which is cheap to forge at the header layer).
+    const int64_t last_progress{
+        m_last_better_chain_progress_mono.value_or(
+            *m_acquisition_stale_baseline_mono)};
+    return (now - last_progress) >= ACQUISITION_ESCAPE_STALL_SECONDS;
 }
 
 bool ChainstateManager::AcquisitionEscapeActive(const CBlockIndex* candidate) const

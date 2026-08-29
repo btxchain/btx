@@ -1202,6 +1202,16 @@ private:
     //! must be defined on the BETTER-CHAIN axis, not on "any ConnectTip".
     mutable std::optional<int64_t> m_last_better_chain_progress_mono
         GUARDED_BY(::cs_main);
+    //! RB-16 restart-safety: MockableSteadyClock baseline captured lazily on the
+    //! first AcquisitionTipIsStale() evaluation (~startup). A node that BOOTS
+    //! onto a frozen tip and connects nothing has neither m_last_tip_connect_mono
+    //! nor m_last_better_chain_progress_mono set, so without a baseline the
+    //! staleness gate could never trip and a restarted stuck node could never
+    //! self-rescue (rtx6000 / a user upgrading a stuck binary). Both unset-clock
+    //! cases fall back to this baseline, so the 600s confirmation window still
+    //! applies (no instant arm on a transient/forged header tower seen at boot).
+    mutable std::optional<int64_t> m_acquisition_stale_baseline_mono
+        GUARDED_BY(::cs_main);
     //! RB-16 acquisition escape valve: fork-root hashes of heavier COMPETING
     //! towers currently EXEMPT from the unauthenticated-header-lead (72) cap and
     //! the last-common heavier-fork snap, so a node whose tip is STALE can
