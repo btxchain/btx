@@ -7,6 +7,7 @@
 #define BITCOIN_NET_PROCESSING_H
 
 #include <net.h>
+#include <matmul/trusted_exact_replay_attestation.h>
 #include <node/protocol_version.h>
 #include <threadsafety.h>
 #include <txorphanage.h>
@@ -271,6 +272,11 @@ public:
 
     /** Relay transaction to all peers. */
     virtual void RelayTransaction(const uint256& txid, const uint256& wtxid) = 0;
+
+    /** Push locally produced MatMul attestations to connected protocol peers.
+     *  Returns the number of peers queued. */
+    virtual size_t RelayMatMulAttestations(
+        const std::vector<matmul::trusted::ExactReplayAttestation>& attestations) = 0;
 
     /** Set the Dandelion++ manager (owned by NodeContext). */
     virtual void SetDandelionManager(Dandelion::DandelionManager* mgr) = 0;

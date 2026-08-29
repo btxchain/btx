@@ -596,6 +596,7 @@ BTX_BASE_SCRIPTS = [
     'p2p_matmul_encdr_pending_cap_retain.py',
     'feature_matmul_trusted_mirror_backfill.py',
     'feature_block_download_slot_reclaim.py',
+    'feature_block_download_root_handoff.py',
     'feature_attested_utxo_snapshot_p2p.py',
     'feature_matmul_rc_activation.py',
     'feature_btx_multinode_genesis.py',

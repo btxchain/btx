@@ -1487,6 +1487,21 @@ bool HasLocalSignatureAtHeight(const uint256& block_hash, int32_t block_height)
     return it->second != block_hash;
 }
 
+std::vector<std::pair<int32_t, uint256>> LocalSignedAttestations(
+    int32_t first_height, int32_t last_height)
+{
+    std::vector<std::pair<int32_t, uint256>> result;
+    if (first_height < 0 || last_height < first_height) return result;
+    std::lock_guard lock{g_mutex};
+    for (auto it = g_local_signed_hash_by_height.lower_bound(first_height);
+         it != g_local_signed_hash_by_height.end() &&
+         it->first <= last_height;
+         ++it) {
+        if (!it->second.IsNull()) result.push_back(*it);
+    }
+    return result;
+}
+
 matmul::trusted::WaitResult WaitForQuorum(
     const uint256& block_hash,
     int32_t block_height,

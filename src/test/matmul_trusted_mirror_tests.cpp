@@ -724,6 +724,11 @@ BOOST_AUTO_TEST_CASE(clear_off_chain_local_attestation_releases_height)
 
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(occupied, 199303) ==
                   matmul::trusted::AddResult::Accepted);
+    const auto occupied_snapshot{
+        node::matmul_trusted::LocalSignedAttestations(199303, 199303)};
+    BOOST_REQUIRE_EQUAL(occupied_snapshot.size(), 1U);
+    BOOST_CHECK_EQUAL(occupied_snapshot.front().first, 199303);
+    BOOST_CHECK_EQUAL(occupied_snapshot.front().second, occupied);
     BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
                     replacement, 199303) ==
                 matmul::trusted::AddResult::HeightOccupied);
@@ -735,9 +740,15 @@ BOOST_AUTO_TEST_CASE(clear_off_chain_local_attestation_releases_height)
     BOOST_CHECK(!node::matmul_trusted::HasQuorum(occupied, 199303));
     BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(
         replacement, 199303));
+    BOOST_CHECK(node::matmul_trusted::LocalSignedAttestations(
+                    199303, 199303).empty());
     BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
                     replacement, 199303) ==
                 matmul::trusted::AddResult::Accepted);
+    const auto replacement_snapshot{
+        node::matmul_trusted::LocalSignedAttestations(199303, 199303)};
+    BOOST_REQUIRE_EQUAL(replacement_snapshot.size(), 1U);
+    BOOST_CHECK_EQUAL(replacement_snapshot.front().second, replacement);
 }
 
 BOOST_AUTO_TEST_CASE(wait_timeout_clamp_rejects_insane_values)

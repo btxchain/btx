@@ -39,7 +39,19 @@ RECLAIM_SLACK_SECONDS = 20
 NUM_BLOCKS = 32
 
 
-class SilentStaller(P2PDataStore):
+class ChainPeer(P2PDataStore):
+    def peer_connect_send_version(self, services):
+        super().peer_connect_send_version(services)
+        self.on_connection_send_msg.nStartingHeight = NUM_BLOCKS
+
+    def on_getheaders(self, message):
+        # This test supplies the complete header set explicitly after the
+        # datastore is attached. Do not make the generic datastore walk raw
+        # BTX payload wrappers during the outbound handshake.
+        pass
+
+
+class SilentStaller(ChainPeer):
     """Accepts getdata for blocks and never delivers bodies."""
 
     def on_getdata(self, message):
@@ -137,7 +149,7 @@ class BlockDownloadSlotReclaimTest(BitcoinTestFramework):
         # them out before responses are processed.
         self.log.info("Connect an honest peer after reclaim and expect tip catch-up")
         honest = target.add_outbound_p2p_connection(
-            P2PDataStore(), p2p_idx=1, connection_type="outbound-full-relay")
+            ChainPeer(), p2p_idx=1, connection_type="outbound-full-relay")
         honest.block_store = block_dict
         honest.send_message(headers)
 

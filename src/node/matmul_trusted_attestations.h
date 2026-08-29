@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <uint256.h>
@@ -141,6 +142,10 @@ VerifyUtxoSnapshotManifest(
  *  In-memory map from durable load and local Sign; no LevelDB read. */
 [[nodiscard]] bool HasLocalSignatureAtHeight(const uint256& block_hash,
                                              int32_t block_height);
+/** Snapshot the local signer's retained height commitments in an inclusive
+ *  range. Used by an explicitly acknowledged chain-migration transaction. */
+[[nodiscard]] std::vector<std::pair<int32_t, uint256>> LocalSignedAttestations(
+    int32_t first_height, int32_t last_height);
 /**
  * Blocking wait retained for tests and rare sync callers. Trusted-mirror
  * verify workers must NOT use this on the hot path: they park the job and

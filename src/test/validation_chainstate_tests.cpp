@@ -16,6 +16,7 @@
 #include <pow.h>
 #include <random.h>
 #include <rpc/blockchain.h>
+#include <rpc/server.h>
 #include <sync.h>
 #include <test/util/chainstate.h>
 #include <test/util/coins.h>
@@ -23,6 +24,7 @@
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <univalue.h>
 #include <util/check.h>
 #include <util/mempressure.h>
 #include <util/time.h>
@@ -172,7 +174,8 @@ void CheckGoldStandardUnchanged(const ConsensusGoldStandardChoice& with_attestat
 //! FindUnique nominated the same-height fork-child (dual-quorum flip)
 //! instead of the frontier. Cover both store states.
 void SelfSignedLosingTwinRejoinsSignedFrontier(TestChain100Setup& t,
-                                               bool trusted_mirror)
+                                               bool trusted_mirror,
+                                               bool has_local_signer = true)
 {
     ChainstateManager& chainman = *Assert(t.m_node.chainman);
     Chainstate& chainstate = chainman.ActiveChainstate();
@@ -257,16 +260,23 @@ void SelfSignedLosingTwinRejoinsSignedFrontier(TestChain100Setup& t,
     config.replay_authority_context = replay_ctx;
     config.trusted_signers = {signer.GetPubKey()};
     config.threshold = 1;
-    config.local_signer = signer;
+    if (has_local_signer) config.local_signer = signer;
     std::string error;
     BOOST_REQUIRE(node::matmul_trusted::Configure(
         std::move(config), trusted_mirror, /*serve=*/false,
         std::chrono::milliseconds{50}, error));
-    BOOST_REQUIRE(node::matmul_trusted::HasLocalSigner());
+    BOOST_REQUIRE(node::matmul_trusted::HasLocalSigner() == has_local_signer);
     BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror() == trusted_mirror);
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
-                      losing_tip->GetBlockHash(), losing_tip->nHeight) ==
-                  matmul::trusted::AddResult::Accepted);
+    if (has_local_signer) {
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                          losing_tip->GetBlockHash(), losing_tip->nHeight) ==
+                      matmul::trusted::AddResult::Accepted);
+    } else {
+        BOOST_REQUIRE(InjectHistoricalAttestation(
+                          signer, chain_id, replay_ctx,
+                          losing_tip->GetBlockHash(), losing_tip->nHeight) ==
+                      matmul::trusted::AddResult::Accepted);
+    }
     for (CBlockIndex* idx : attested) {
         BOOST_REQUIRE(InjectHistoricalAttestation(
                           signer, chain_id, replay_ctx, idx->GetBlockHash(),
@@ -3418,6 +3428,16 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_follow_rejoins_signed_frontier_from_s
     SelfSignedLosingTwinRejoinsSignedFrontier(*this, /*trusted_mirror=*/true);
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstate_non_signing_trusted_mirror_automatically_rejoins_migrated_frontier, TestChain100Setup)
+{
+    // Graviton topology: the mirror retains quorum for the old fork child,
+    // has no local WIF, then receives replacement quorum plus a signed
+    // frontier strictly above the old tip. It must follow the replacement
+    // chain without a local clear, invalidateblock, or attestation request.
+    SelfSignedLosingTwinRejoinsSignedFrontier(
+        *this, /*trusted_mirror=*/true, /*has_local_signer=*/false);
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_rejoins_deep_signed_frontier, TestChain100Setup)
 {
     // Live 2026-08-16: trusted archives crawled 13–180 unattested HAVE_DATA
@@ -4104,11 +4124,19 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attestation_recovery_freshly_exact_replays_ac
 
     const CScript script{
         GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    const auto occupied{std::make_shared<const CBlock>(
+        CreateBlock({}, script, chainstate))};
     const auto replacement{std::make_shared<const CBlock>(
         CreateBlock({}, script, chainstate))};
+    BOOST_REQUIRE_NE(occupied->GetHash(), replacement->GetHash());
     bool new_block{false};
     BOOST_REQUIRE(chainman.ProcessNewBlock(
         replacement, /*force_processing=*/true,
+        /*min_pow_checked=*/true, &new_block));
+    BOOST_REQUIRE(new_block);
+    new_block = false;
+    BOOST_REQUIRE(chainman.ProcessNewBlock(
+        occupied, /*force_processing=*/true,
         /*min_pow_checked=*/true, &new_block));
     BOOST_REQUIRE(new_block);
     CBlockIndex* const replacement_index{WITH_LOCK(::cs_main, {
@@ -4123,8 +4151,14 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attestation_recovery_freshly_exact_replays_ac
     BOOST_CHECK(!(replacement_index->nStatus &
                   BLOCK_EXACT_REPLAY_VERIFIED));
 
-    const uint256 occupied_hash{
-        uint256::FromHex(std::string(64, 'd')).value()};
+    const uint256 occupied_hash{occupied->GetHash()};
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, {
+        const CBlockIndex* const occupied_index{
+            chainman.m_blockman.LookupBlockIndex(occupied_hash)};
+        return occupied_index != nullptr &&
+               !chainstate.m_chain.Contains(occupied_index) &&
+               occupied_index->nHeight == replacement_height;
+    }));
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
                       occupied_hash, replacement_height) ==
                   matmul::trusted::AddResult::Accepted);
@@ -4195,16 +4229,128 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attestation_recovery_freshly_exact_replays_ac
                     replacement->GetHash(), replacement_height) ==
                 matmul::trusted::AddResult::HeightOccupied);
 
-    size_t removed{0};
-    BOOST_REQUIRE(node::matmul_trusted::ClearLocalAttestation(
-        occupied_hash, replacement_height, removed, error));
-    BOOST_CHECK_EQUAL(removed, 1U);
-    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
-                    replacement->GetHash(), replacement_height) ==
-                matmul::trusted::AddResult::Accepted);
+    // Advance and sign one active descendant before reconciling the occupied
+    // fork height. A connected non-signing mirror needs this strictly-ahead
+    // frontier to disambiguate two still-valid same-height signatures.
+    const auto replacement_frontier{std::make_shared<const CBlock>(
+        CreateBlock({}, script, chainstate))};
+    new_block = false;
+    BOOST_REQUIRE(chainman.ProcessNewBlock(
+        replacement_frontier, /*force_processing=*/true,
+        /*min_pow_checked=*/true, &new_block));
+    BOOST_REQUIRE(new_block);
+    CBlockIndex* const replacement_frontier_index{WITH_LOCK(::cs_main, {
+        return chainman.m_blockman.LookupBlockIndex(
+            replacement_frontier->GetHash());
+    })};
+    BOOST_REQUIRE(replacement_frontier_index != nullptr);
+    BOOST_REQUIRE_EQUAL(replacement_frontier_index->nHeight,
+                        replacement_height + 1);
+    BOOST_REQUIRE_EQUAL(replacement_frontier_index->pprev, replacement_index);
+    // The unit fixture has no MatMul verify worker to finish a second queued
+    // Profile-1 body. Model that completed worker handoff so ActivateBestChain
+    // exercises the RPC against a genuinely active, ExactReplay-proven
+    // descendant instead of leaving the body at VALID_TRANSACTIONS.
+    {
+        LOCK(::cs_main);
+        replacement_frontier_index->RaiseValidity(BLOCK_VALID_SCRIPTS);
+        replacement_frontier_index->nStatus |= BLOCK_EXACT_REPLAY_VERIFIED;
+        chainstate.setBlockIndexCandidates.insert(replacement_frontier_index);
+    }
+    BlockValidationState frontier_state;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(frontier_state));
+    CBlockIndex* const observed_frontier_tip{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE_MESSAGE(
+        observed_frontier_tip == replacement_frontier_index,
+        strprintf("replacement frontier did not activate: active=%s:%d "
+                  "candidate=%s:%d status=%x txs=%d",
+                  observed_frontier_tip->GetBlockHash().ToString(),
+                  observed_frontier_tip->nHeight,
+                  replacement_frontier_index->GetBlockHash().ToString(),
+                  replacement_frontier_index->nHeight,
+                  replacement_frontier_index->nStatus,
+                  replacement_frontier_index->nTx));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, {
+        return (replacement_frontier_index->nStatus &
+                BLOCK_EXACT_REPLAY_VERIFIED) != 0;
+    }));
+    if (node::matmul_trusted::Get(
+            replacement_frontier->GetHash(),
+            replacement_frontier_index->nHeight).empty()) {
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                          replacement_frontier->GetHash(),
+                          replacement_frontier_index->nHeight) ==
+                      matmul::trusted::AddResult::Accepted);
+    }
+
+    // One explicitly acknowledged migration transaction discovers the fork
+    // range, freshly replays the active replacement, clears the stale local
+    // commitment, signs the replacement, and queues its relay. Operators do
+    // not perform one clear plus one GETMMATTEST request per height.
+    JSONRPCRequest migration_request;
+    migration_request.context = &m_node;
+    migration_request.strMethod = "migratelocalmatmulattestations";
+    migration_request.params = UniValue{UniValue::VARR};
+    migration_request.params.push_back(occupied_hash.GetHex());
+    migration_request.params.push_back(
+        replacement_frontier->GetHash().GetHex());
+    migration_request.params.push_back(true);
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    UniValue migration;
+    try {
+        migration = tableRPC.execute(migration_request);
+    } catch (const UniValue& rpc_error) {
+        BOOST_FAIL(rpc_error.write());
+    }
+    BOOST_CHECK_EQUAL(migration["old_tip"].get_str(),
+                      occupied_hash.GetHex());
+    BOOST_CHECK_EQUAL(migration["replacement_tip"].get_str(),
+                      replacement_frontier->GetHash().GetHex());
+    BOOST_CHECK_EQUAL(migration["fork_height"].getInt<int32_t>(),
+                      parent->nHeight);
+    BOOST_CHECK_EQUAL(migration["migrated_count"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(migration["already_migrated_count"].getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(migration["relayed_attestation_count"].getInt<int>(), 2);
+    BOOST_CHECK_EQUAL(migration["relay_peers"].getInt<int>(), 0);
+    BOOST_CHECK(migration["mirror_auto_migration_ready"].get_bool());
+    BOOST_REQUIRE(migration.exists("relayed_frontier"));
+    BOOST_CHECK_EQUAL(
+        migration["relayed_frontier"]["height"].getInt<int32_t>(),
+        replacement_frontier_index->nHeight);
+    BOOST_CHECK_EQUAL(
+        migration["relayed_frontier"]["hash"].get_str(),
+        replacement_frontier->GetHash().GetHex());
+    BOOST_CHECK(!migration["chain_selection_operation_performed"].get_bool());
+    BOOST_REQUIRE_EQUAL(migration["migrations"].size(), 1U);
+    BOOST_CHECK_EQUAL(migration["migrations"][0]["height"].getInt<int32_t>(),
+                      replacement_height);
+    BOOST_CHECK_EQUAL(
+        migration["migrations"][0]["cleared_blockhash"].get_str(),
+        occupied_hash.GetHex());
+    BOOST_CHECK_EQUAL(
+        migration["migrations"][0]["replacement_blockhash"].get_str(),
+        replacement->GetHash().GetHex());
+    BOOST_CHECK(node::matmul_trusted::Get(
+                    occupied_hash, replacement_height).empty());
+    BOOST_CHECK(!node::matmul_trusted::Get(
+                     replacement->GetHash(), replacement_height).empty());
+
+    // A retry is a relay-only no-op for the already migrated height. This is
+    // how a reconnecting mirror receives the replacements without another
+    // manual per-block export/request pass.
+    const UniValue repeated_migration{tableRPC.execute(migration_request)};
+    BOOST_CHECK_EQUAL(
+        repeated_migration["migrated_count"].getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(
+        repeated_migration["already_migrated_count"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(
+        repeated_migration["relayed_attestation_count"].getInt<int>(), 2);
+    BOOST_CHECK(
+        repeated_migration["mirror_auto_migration_ready"].get_bool());
     BOOST_CHECK_EQUAL(
         WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()),
-        replacement_index);
+        replacement_frontier_index);
 }
 
 //! Production cadence extra is last ConnectTip / hold-anchor / now,now — not

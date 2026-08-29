@@ -100,6 +100,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "submitmatmulattestations", 0, "attestations" },
     { "importmatmulattestations", 0, "attestations" },
     { "clearlocalmatmulattestation", 2, "acknowledge_equivocation" },
+    { "migratelocalmatmulattestations", 2, "acknowledge_equivocation" },
     { "verifymatmulserviceproofs", 0, "proofs" },
     { "verifymatmulserviceproofs", 1, "lookup_local_status" },
     { "redeemmatmulserviceproofs", 0, "proofs" },

@@ -6,6 +6,7 @@
 
 #include <chain.h>
 #include <kernel/chainstatemanager_opts.h>
+#include <net_processing.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
 #include <node/matmul_trusted_attestations.h>
@@ -714,6 +715,515 @@ RPCHelpMan clearlocalmatmulattestation()
         }};
 }
 
+RPCHelpMan migratelocalmatmulattestations()
+{
+    static constexpr int32_t MAX_MIGRATION_DEPTH{256};
+    struct MigrationCandidate {
+        int32_t height{-1};
+        uint256 old_hash{};
+        uint256 replacement_hash{};
+        bool replay_previously_verified{false};
+    };
+    struct AlreadyMigrated {
+        int32_t height{-1};
+        uint256 replacement_hash{};
+    };
+
+    return RPCHelpMan{
+        "migratelocalmatmulattestations",
+        "Reconcile this consensus signer's retained local attestations after "
+        "an explicitly initiated chain migration. The old tip must be known "
+        "and off-chain; the replacement tip must be the current active tip. "
+        "The RPC finds their common ancestor, freshly ExactReplays every "
+        "active replacement whose height is occupied by this signer's old "
+        "branch, clears only those stale local records, signs the active "
+        "replacements, and pushes the resulting MMATTEST batch to connected "
+        "peers. When the signer has already advanced beyond the old tip, the "
+        "highest retained active-chain signature is included so a non-signing "
+        "trusted mirror can identify and automatically follow the replacement "
+        "frontier instead of remaining on the dual-attested old tip. It never "
+        "changes block validity or chain selection. Published "
+        "old signatures cannot be revoked, so acknowledgement is mandatory. "
+        "The migration is bounded to 256 fork heights. A stopped partial run "
+        "is restartable with the same arguments: already migrated heights "
+        "are skipped for mutation and their retained local signatures are "
+        "relayed again.\n",
+        {
+            {"oldtiphash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "Known tip of the branch being left"},
+            {"replacementtiphash", RPCArg::Type::STR_HEX,
+             RPCArg::Optional::NO,
+             "Current active tip anchoring the replacement branch"},
+            {"acknowledge_equivocation", RPCArg::Type::BOOL,
+             RPCArg::Optional::NO,
+             "Must be true to acknowledge that published old signatures "
+             "remain valid"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_HEX, "old_tip", ""},
+                {RPCResult::Type::STR_HEX, "replacement_tip", ""},
+                {RPCResult::Type::STR_HEX, "fork_hash", ""},
+                {RPCResult::Type::NUM, "fork_height", ""},
+                {RPCResult::Type::NUM, "migrated_count", ""},
+                {RPCResult::Type::NUM, "already_migrated_count", ""},
+                {RPCResult::Type::NUM, "relayed_attestation_count", ""},
+                {RPCResult::Type::NUM, "relay_peers", ""},
+                {RPCResult::Type::BOOL, "mirror_auto_migration_ready", "True when the relayed active frontier is strictly above the old tip"},
+                {RPCResult::Type::OBJ, "relayed_frontier", /*optional=*/true, "Highest retained active-chain signature included for mirror handoff", {
+                    {RPCResult::Type::NUM, "height", ""},
+                    {RPCResult::Type::STR_HEX, "hash", ""},
+                }},
+                {RPCResult::Type::ARR, "migrations", "", {
+                    {RPCResult::Type::OBJ, "", "", {
+                        {RPCResult::Type::NUM, "height", ""},
+                        {RPCResult::Type::STR_HEX, "cleared_blockhash", ""},
+                        {RPCResult::Type::STR_HEX, "replacement_blockhash", ""},
+                        {RPCResult::Type::BOOL, "replacement_exact_replay_previously_verified", ""},
+                        {RPCResult::Type::STR, "sign_result", ""},
+                    }},
+                }},
+                {RPCResult::Type::BOOL, "chain_selection_operation_performed", "Always false"},
+                {RPCResult::Type::STR, "warning", ""},
+            }},
+        RPCExamples{HelpExampleCli(
+            "migratelocalmatmulattestations",
+            "\"oldtiphash\" \"active-replacement-tip-hash\" true")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) {
+            if (!request.params[2].get_bool()) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "acknowledge_equivocation must be true");
+            }
+            if (!node::matmul_trusted::HasLocalSigner()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "No local MatMul attestation signer is configured");
+            }
+
+            const NodeContext& node{EnsureAnyNodeContext(request.context)};
+            ChainstateManager& chainman{EnsureChainman(node)};
+            PeerManager& peerman{EnsurePeerman(node)};
+            if (chainman.GetMatMulValidationMode() !=
+                kernel::MatMulValidationMode::CONSENSUS) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "Attestation migration requires consensus MatMul "
+                    "validation mode");
+            }
+
+            const uint256 old_tip_hash{
+                ParseHashV(request.params[0], "oldtiphash")};
+            const uint256 replacement_tip_hash{
+                ParseHashV(request.params[1], "replacementtiphash")};
+            uint256 fork_hash{};
+            int32_t fork_height{-1};
+            int32_t old_tip_height{-1};
+            std::vector<MigrationCandidate> candidates;
+            std::vector<AlreadyMigrated> already_migrated;
+            std::optional<AlreadyMigrated> relay_frontier;
+
+            {
+                LOCK(cs_main);
+                const CBlockIndex* const old_tip{
+                    chainman.m_blockman.LookupBlockIndex(old_tip_hash)};
+                const CBlockIndex* const replacement_tip{
+                    chainman.m_blockman.LookupBlockIndex(
+                        replacement_tip_hash)};
+                if (old_tip == nullptr) {
+                    throw JSONRPCError(
+                        RPC_INVALID_ADDRESS_OR_KEY, "Unknown oldtiphash");
+                }
+                if (replacement_tip == nullptr) {
+                    throw JSONRPCError(
+                        RPC_INVALID_ADDRESS_OR_KEY,
+                        "Unknown replacementtiphash");
+                }
+                if (chainman.ActiveChain().Contains(old_tip)) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "oldtiphash is still on the active chain");
+                }
+                if (chainman.ActiveTip() != replacement_tip) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "replacementtiphash is not the current active tip");
+                }
+                const CBlockIndex* const fork{
+                    LastCommonAncestor(old_tip, replacement_tip)};
+                if (fork == nullptr) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        "Old and replacement tips have no common ancestor");
+                }
+                fork_hash = fork->GetBlockHash();
+                fork_height = fork->nHeight;
+                old_tip_height = old_tip->nHeight;
+                if (old_tip_height - fork_height > MAX_MIGRATION_DEPTH) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        strprintf("Old branch depth %d exceeds migration "
+                                  "bound %d",
+                                  old_tip_height - fork_height,
+                                  MAX_MIGRATION_DEPTH));
+                }
+
+                const auto local_signed{
+                    node::matmul_trusted::LocalSignedAttestations(
+                        fork_height + 1, old_tip_height)};
+                for (const auto& [height, signed_hash] : local_signed) {
+                    const CBlockIndex* const old_at_height{
+                        old_tip->GetAncestor(height)};
+                    const CBlockIndex* const replacement{
+                        chainman.ActiveChain()[height]};
+                    if (old_at_height == nullptr || replacement == nullptr) {
+                        throw JSONRPCError(
+                            RPC_INVALID_PARAMETER,
+                            strprintf("Cannot map locally signed height %d "
+                                      "across the requested fork",
+                                      height));
+                    }
+                    const bool matches_old{
+                        old_at_height->GetBlockHash() == signed_hash};
+                    const bool matches_replacement{
+                        replacement->GetBlockHash() == signed_hash};
+                    if (!matches_old && !matches_replacement) {
+                        throw JSONRPCError(
+                            RPC_INVALID_PARAMETER,
+                            strprintf("Local commitment at height %d belongs "
+                                      "to neither the requested old branch "
+                                      "nor the active replacement branch",
+                                      height));
+                    }
+                    if ((replacement->nStatus & BLOCK_FAILED_MASK) ||
+                        !(replacement->nStatus & BLOCK_HAVE_DATA) ||
+                        !replacement->IsValid(BLOCK_VALID_SCRIPTS)) {
+                        throw JSONRPCError(
+                            RPC_INVALID_PARAMETER,
+                            strprintf("Active replacement at height %d lacks "
+                                      "a fully validated stored body",
+                                      height));
+                    }
+                    if (!chainman.GetConsensus()
+                             .IsMatMulTrustedReplayAttestationActive(height)) {
+                        throw JSONRPCError(
+                            RPC_INVALID_PARAMETER,
+                            strprintf("Height %d is outside the MatMul "
+                                      "attestation regime",
+                                      height));
+                    }
+                    if (matches_replacement) {
+                        if (!(replacement->nStatus &
+                              BLOCK_EXACT_REPLAY_VERIFIED)) {
+                            throw JSONRPCError(
+                                RPC_MISC_ERROR,
+                                strprintf("Already migrated active block at "
+                                          "height %d lacks ExactReplay "
+                                          "provenance",
+                                          height));
+                        }
+                        already_migrated.push_back({
+                            .height = height,
+                            .replacement_hash = signed_hash,
+                        });
+                        continue;
+                    }
+                    candidates.push_back({
+                        .height = height,
+                        .old_hash = signed_hash,
+                        .replacement_hash = replacement->GetBlockHash(),
+                    });
+                }
+
+                // A replacement vote at the old tip's height is still a
+                // dual-quorum twin from a mirror's perspective: the already
+                // published old vote remains valid. Relay the highest retained
+                // active signature strictly above the old tip as the direction
+                // signal. FindUniqueCompetingAttestedIndex already treats that
+                // signed frontier as the safe automatic-abandon target for a
+                // trusted mirror, including one with no local WIF.
+                const auto active_signed{
+                    node::matmul_trusted::LocalSignedAttestations(
+                        old_tip_height + 1, replacement_tip->nHeight)};
+                for (auto it = active_signed.rbegin();
+                     it != active_signed.rend(); ++it) {
+                    const auto& [height, signed_hash] = *it;
+                    const CBlockIndex* const active{
+                        chainman.ActiveChain()[height]};
+                    if (active == nullptr ||
+                        active->GetBlockHash() != signed_hash ||
+                        (active->nStatus & BLOCK_FAILED_MASK) ||
+                        !(active->nStatus & BLOCK_HAVE_DATA) ||
+                        !(active->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) ||
+                        !active->IsValid(BLOCK_VALID_SCRIPTS)) {
+                        continue;
+                    }
+                    relay_frontier = AlreadyMigrated{
+                        .height = height,
+                        .replacement_hash = signed_hash,
+                    };
+                    break;
+                }
+            }
+
+            // Preflight every replacement before clearing the first local
+            // commitment. ExactReplay releases cs_main internally; the active
+            // tip and every replacement are rechecked as one snapshot below.
+            for (auto& candidate : candidates) {
+                ChainstateManager::MatMulExactReplayRecoveryResult replay;
+                BlockValidationState replay_state;
+                LOCK(cs_main);
+                if (!chainman.ExactReplayActiveMatMulBlock(
+                        candidate.replacement_hash, replay_state, replay)) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        strprintf("Fresh replacement ExactReplay failed at "
+                                  "height %d: %s",
+                                  candidate.height,
+                                  replay_state.ToString()));
+                }
+                candidate.replay_previously_verified =
+                    replay.previously_verified;
+            }
+
+            {
+                LOCK(cs_main);
+                if (chainman.ActiveTip() == nullptr ||
+                    chainman.ActiveTip()->GetBlockHash() !=
+                        replacement_tip_hash) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        "Active tip changed during migration preflight; no "
+                        "attestation was cleared");
+                }
+                for (const auto& candidate : candidates) {
+                    const CBlockIndex* const replacement{
+                        chainman.ActiveChain()[candidate.height]};
+                    if (replacement == nullptr ||
+                        replacement->GetBlockHash() !=
+                            candidate.replacement_hash ||
+                        (replacement->nStatus & BLOCK_FAILED_MASK) ||
+                        !(replacement->nStatus &
+                          BLOCK_EXACT_REPLAY_VERIFIED)) {
+                        throw JSONRPCError(
+                            RPC_MISC_ERROR,
+                            "Active chain changed during migration preflight; "
+                            "no attestation was cleared");
+                    }
+                }
+            }
+
+            UniValue migrations{UniValue::VARR};
+            std::vector<matmul::trusted::ExactReplayAttestation> produced;
+            produced.reserve(candidates.size() + already_migrated.size() +
+                             (relay_frontier.has_value() ? 1 : 0));
+            const auto local_signer{node::matmul_trusted::LocalSigner()};
+            if (!local_signer.has_value()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "Local MatMul attestation signer disappeared during "
+                    "migration preflight");
+            }
+            for (const auto& existing : already_migrated) {
+                const auto retained{node::matmul_trusted::Get(
+                    existing.replacement_hash, existing.height)};
+                const auto local{std::find_if(
+                    retained.begin(), retained.end(),
+                    [&](const auto& attestation) {
+                        return attestation.signer == *local_signer;
+                    })};
+                if (local == retained.end()) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        strprintf("Local commitment at already migrated "
+                                  "height %d has no retained signature",
+                                  existing.height));
+                }
+                produced.push_back(*local);
+            }
+            if (relay_frontier.has_value()) {
+                const auto retained{node::matmul_trusted::Get(
+                    relay_frontier->replacement_hash,
+                    relay_frontier->height)};
+                const auto local{std::find_if(
+                    retained.begin(), retained.end(),
+                    [&](const auto& attestation) {
+                        return attestation.signer == *local_signer;
+                    })};
+                if (local == retained.end()) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        strprintf("Active mirror-handoff frontier at height "
+                                  "%d has no retained local signature",
+                                  relay_frontier->height));
+                }
+                produced.push_back(*local);
+            }
+            size_t newly_produced{0};
+            for (const auto& candidate : candidates) {
+                size_t removed{0};
+                std::string error;
+                matmul::trusted::ExactReplayAttestation attestation;
+                matmul::trusted::AddResult sign_result{
+                    matmul::trusted::AddResult::NoLocalSigner};
+                std::string failure;
+                bool chain_changed{false};
+                {
+                    // Anchor each durable height mutation to the requested
+                    // active tip. Holding cs_main through clear+sign prevents
+                    // a reorg in the dangerous gap between those operations;
+                    // the lock is released between heights so a bounded
+                    // migration does not monopolize chainstate throughout.
+                    LOCK(cs_main);
+                    const CBlockIndex* const replacement{
+                        chainman.ActiveChain()[candidate.height]};
+                    if (chainman.ActiveTip() == nullptr ||
+                        chainman.ActiveTip()->GetBlockHash() !=
+                            replacement_tip_hash ||
+                        replacement == nullptr ||
+                        replacement->GetBlockHash() !=
+                            candidate.replacement_hash ||
+                        !(replacement->nStatus &
+                          BLOCK_EXACT_REPLAY_VERIFIED)) {
+                        chain_changed = true;
+                        failure = "active chain changed before the durable "
+                                  "height mutation";
+                    } else if (!node::matmul_trusted::ClearLocalAttestation(
+                                   candidate.old_hash, candidate.height,
+                                   removed, error)) {
+                        failure = strprintf("clear failed: %s", error);
+                    } else {
+                        sign_result =
+                            node::matmul_trusted::SignAuthoritative(
+                                candidate.replacement_hash,
+                                candidate.height, &attestation);
+                        if (!node::matmul_trusted::
+                                 SignAuthoritativeServesGetMmAttest(
+                                     sign_result)) {
+                            // Preserve rerun-ability if the replacement could
+                            // not be minted after the old durable record was
+                            // removed. Published old signatures were never
+                            // revoked, and restoring the local commitment keeps
+                            // the height fail-closed.
+                            const auto restore{
+                                node::matmul_trusted::SignAuthoritative(
+                                    candidate.old_hash,
+                                    candidate.height)};
+                            failure = strprintf(
+                                "replacement sign failed: %s; old local "
+                                "commitment restore=%s",
+                                matmul::trusted::AddResultName(sign_result),
+                                matmul::trusted::AddResultName(restore));
+                        }
+                    }
+                }
+                if (!failure.empty()) {
+                    size_t partial_relay_peers{0};
+                    bool partial_relay_performed{false};
+                    {
+                        LOCK(cs_main);
+                        if (!chain_changed &&
+                            chainman.ActiveTip() != nullptr &&
+                            chainman.ActiveTip()->GetBlockHash() ==
+                                replacement_tip_hash) {
+                            partial_relay_peers =
+                                peerman.RelayMatMulAttestations(produced);
+                            partial_relay_performed = true;
+                        }
+                    }
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        strprintf("Attestation migration stopped at height %d "
+                                  "after %u completed height(s); partial "
+                                  "relay_performed=%s relay_peers=%u: %s. "
+                                  "Re-run the same command "
+                                  "after correcting the cause; completed "
+                                  "heights are skipped for mutation and "
+                                  "re-relayed idempotently.",
+                                  candidate.height,
+                                  static_cast<unsigned>(newly_produced),
+                                  partial_relay_performed ? "true" : "false",
+                                  static_cast<unsigned>(partial_relay_peers),
+                                  failure));
+                }
+                produced.push_back(std::move(attestation));
+                ++newly_produced;
+
+                UniValue item{UniValue::VOBJ};
+                item.pushKV("height", candidate.height);
+                item.pushKV("cleared_blockhash",
+                            candidate.old_hash.GetHex());
+                item.pushKV("replacement_blockhash",
+                            candidate.replacement_hash.GetHex());
+                item.pushKV(
+                    "replacement_exact_replay_previously_verified",
+                    candidate.replay_previously_verified);
+                item.pushKV("sign_result",
+                            matmul::trusted::AddResultName(sign_result));
+                migrations.push_back(std::move(item));
+            }
+
+            size_t relay_peers{0};
+            {
+                LOCK(cs_main);
+                if (chainman.ActiveTip() == nullptr ||
+                    chainman.ActiveTip()->GetBlockHash() !=
+                        replacement_tip_hash) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        strprintf("Active tip changed after %u height(s) "
+                                  "were migrated; replacement signatures "
+                                  "were retained locally but not relayed. "
+                                  "Re-run against the intended active chain.",
+                                  static_cast<unsigned>(newly_produced)));
+                }
+                relay_peers = peerman.RelayMatMulAttestations(produced);
+            }
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("old_tip", old_tip_hash.GetHex());
+            result.pushKV("replacement_tip",
+                          replacement_tip_hash.GetHex());
+            result.pushKV("fork_hash", fork_hash.GetHex());
+            result.pushKV("fork_height", fork_height);
+            result.pushKV("migrated_count",
+                          static_cast<uint64_t>(candidates.size()));
+            result.pushKV(
+                "already_migrated_count",
+                static_cast<uint64_t>(already_migrated.size()));
+            result.pushKV("relayed_attestation_count",
+                          static_cast<uint64_t>(produced.size()));
+            result.pushKV("relay_peers",
+                          static_cast<uint64_t>(relay_peers));
+            result.pushKV("mirror_auto_migration_ready",
+                          relay_frontier.has_value());
+            if (relay_frontier.has_value()) {
+                UniValue frontier{UniValue::VOBJ};
+                frontier.pushKV("height", relay_frontier->height);
+                frontier.pushKV("hash",
+                                relay_frontier->replacement_hash.GetHex());
+                result.pushKV("relayed_frontier", std::move(frontier));
+            }
+            result.pushKV("migrations", std::move(migrations));
+            result.pushKV("chain_selection_operation_performed", false);
+            result.pushKV(
+                "warning",
+                relay_frontier.has_value()
+                    ? "Published signatures for the old branch remain valid; "
+                      "the replacement signatures are explicit same-key "
+                      "equivocations authorized for this migration. The "
+                      "relayed active frontier is strictly above the old tip, "
+                      "so connected non-signing trusted mirrors can abandon "
+                      "the dual-attested old tip automatically."
+                    : "Published signatures for the old branch remain valid; "
+                      "the replacement signatures are explicit same-key "
+                      "equivocations authorized for this migration. No "
+                      "retained active signature is yet strictly above the "
+                      "old tip, so a trusted mirror remains fail-closed until "
+                      "the signer advances and the migration is re-run.");
+            return result;
+        }};
+}
+
 RPCHelpMan submitmatmulattestations()
 {
     return RPCHelpMan{
@@ -1379,6 +1889,7 @@ void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
         {"blockchain", &getfinalityinfo},
         {"mining", &getmatmulattestations},
         {"hidden", &clearlocalmatmulattestation},
+        {"hidden", &migratelocalmatmulattestations},
         {"mining", &submitmatmulattestations},
         {"mining", &submitmatmulrefutation},
     };

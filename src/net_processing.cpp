@@ -1259,6 +1259,9 @@ public:
     void LimitOrphanTxSize(uint32_t nMaxOrphans) override EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     void SendPings() override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void RelayTransaction(const uint256& txid, const uint256& wtxid) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    size_t RelayMatMulAttestations(
+        const std::vector<matmul::trusted::ExactReplayAttestation>& attestations) override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void SetDandelionManager(Dandelion::DandelionManager* mgr) override;
     void SetBestBlock(int height, std::chrono::seconds time) override
     {
@@ -2134,6 +2137,19 @@ private:
         std::chrono::microseconds stale_after) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Release all fully-stale owners of the canonical first-hole request and
+     *  pause them before returning to peer selection. Returns true when a
+     *  handoff was performed. */
+    bool HandoffStaleBlockRequest(
+        const uint256& hash, int height, std::chrono::microseconds now,
+        std::chrono::microseconds stale_after, NodeId evaluating_peer)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** Operator-facing owner diagnostics for a requested hash. */
+    std::string BlockRequestOwnerSummary(
+        const uint256& hash, std::chrono::microseconds now) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** Have we requested this block from an outbound peer */
     bool IsBlockRequestedFromOutbound(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_peer_mutex);
 
@@ -2850,6 +2866,79 @@ bool PeerManagerImpl::BlockInFlightFullyStale(const uint256& hash,
             return false;
         }
     }
+    return true;
+}
+
+std::string PeerManagerImpl::BlockRequestOwnerSummary(
+    const uint256& hash, std::chrono::microseconds now) const
+{
+    AssertLockHeld(cs_main);
+    std::string summary;
+    for (auto range = mapBlocksInFlight.equal_range(hash);
+         range.first != range.second; ++range.first) {
+        const auto [nodeid, block_it]{range.first->second};
+        const CNodeState* const state{State(nodeid)};
+        const auto requested_at{block_it->requested_at};
+        const int age_s{
+            requested_at.count() == 0
+                ? -1
+                : static_cast<int>(count_seconds(
+                      std::chrono::duration_cast<std::chrono::seconds>(
+                          now > requested_at ? now - requested_at : 0us)))};
+        size_t queue_pos{0};
+        if (state != nullptr) {
+            for (auto it = state->vBlocksInFlight.begin();
+                 it != state->vBlocksInFlight.end() && it != block_it;
+                 ++it) {
+                ++queue_pos;
+            }
+        }
+        if (!summary.empty()) summary += ",";
+        summary += strprintf("peer=%d/age=%ds/queue=%u", nodeid, age_s,
+                             static_cast<unsigned>(queue_pos));
+    }
+    return summary.empty() ? "none" : summary;
+}
+
+bool PeerManagerImpl::HandoffStaleBlockRequest(
+    const uint256& hash, int height, std::chrono::microseconds now,
+    std::chrono::microseconds stale_after, NodeId evaluating_peer)
+{
+    AssertLockHeld(cs_main);
+    if (!BlockInFlightFullyStale(hash, now, stale_after)) return false;
+
+    std::set<NodeId> owners;
+    for (auto range = mapBlocksInFlight.equal_range(hash);
+         range.first != range.second; ++range.first) {
+        owners.insert(range.first->second.first);
+    }
+    if (owners.empty()) return false;
+
+    const std::string owner_summary{BlockRequestOwnerSummary(hash, now)};
+    RemoveBlockRequest(hash, std::nullopt);
+
+    // The old canonical-root path removed the stale ownership and then kept
+    // walking in the same peer's SendMessages pass. That peer could immediately
+    // reacquire the hash with requested_at=now, so owner churn kept the same
+    // missing root perpetually "fresh" and only a process restart changed the
+    // source. Make this a real handoff: every prior owner gets a short cooldown,
+    // and the caller returns to peer selection before allocating the hash again.
+    for (const NodeId nodeid : owners) {
+        if (CNodeState* const state{State(nodeid)}) {
+            state->m_block_download_paused_until = std::max(
+                state->m_block_download_paused_until,
+                now + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN);
+        }
+    }
+
+    LogInfo("Block download root handoff: block=%s height=%d stale_after=%ds "
+            "owners=[%s] evaluating_peer=%d owner_cooldown=%ds\n",
+            hash.ToString(), height,
+            static_cast<int>(count_seconds(
+                std::chrono::duration_cast<std::chrono::seconds>(stale_after))),
+            owner_summary, evaluating_peer,
+            static_cast<int>(count_seconds(
+                BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN)));
     return true;
 }
 
@@ -4771,7 +4860,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         root_first_clamped, tip, state->pindexBestKnownBlock,
         &m_chainman.ActiveChain())};
     state->pindexLastCommonBlock = root_first.last_common;
-        if (root_first.lowest_missing != nullptr &&
+    if (root_first.lowest_missing != nullptr &&
         !IsHeaderOnlyFetchSuppressed(m_chainman, tip, root_first.lowest_missing,
                                      m_header_only_competing,
                                      m_header_only_followed_skip,
@@ -4788,8 +4877,15 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         // then arrived unsolicited and was ticket-dropped (live public CPU archive
         // 2026-08-16).
         const uint256 hole{root_first.lowest_missing->GetBlockHash()};
-        if (IsBlockRequested(hole)) {
-            RemoveBlockRequest(hole, std::nullopt);
+        if (IsBlockRequested(hole) &&
+            HandoffStaleBlockRequest(hole, root_first.lowest_missing->nHeight,
+                                     now_for_diag, rerequest_stale_after,
+                                     peer.m_id)) {
+            // Do not let the peer whose SendMessages pass detected staleness
+            // reacquire the root immediately. A subsequent eligible peer gets
+            // the now-free hash; if this was the only source, its bounded
+            // cooldown expires and it may be tried again.
+            return;
         }
     }
 
@@ -4879,9 +4975,15 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         if (m_last_root_first_summary.count() == 0 ||
             now_for_diag >= m_last_root_first_summary + BLOCK_ROOT_FIRST_SUMMARY_INTERVAL) {
             m_last_root_first_summary = now_for_diag;
+            const std::string owner_summary{
+                root_first.lowest_missing != nullptr
+                    ? BlockRequestOwnerSummary(
+                          root_first.lowest_missing->GetBlockHash(),
+                          now_for_diag)
+                    : "none"};
             LogInfo("Block download root-first: peer=%d tip=%d last_common=%d "
                     "lowest_missing=%s missing_height=%d select=%s clamp=%s "
-                    "reason=%s in_flight_global=%d\n",
+                    "reason=%s in_flight_global=%d owners=[%s]\n",
                     peer.m_id, tip_height,
                     state->pindexLastCommonBlock != nullptr
                         ? state->pindexLastCommonBlock->nHeight
@@ -4895,7 +4997,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                     select_reason,
                     root_first.clamped ? "yes" : "no",
                     root_first.reason,
-                    blocks_in_flight_global);
+                    blocks_in_flight_global,
+                    owner_summary);
         }
     }
 
@@ -7170,6 +7273,28 @@ void PeerManagerImpl::RelayTransaction(const uint256& txid, const uint256& wtxid
     if (queued_for_relay) {
         m_connman.WakeMessageHandler();
     }
+}
+
+size_t PeerManagerImpl::RelayMatMulAttestations(
+    const std::vector<matmul::trusted::ExactReplayAttestation>& attestations)
+{
+    if (attestations.empty()) return 0;
+    size_t relayed{0};
+    m_connman.ForEachNode([&](CNode* target) {
+        if (target->GetCommonVersion() < MATMUL_ATTESTATION_VERSION) return;
+        for (size_t first{0}; first < attestations.size();
+             first += MATMUL_ATTESTATIONS_PER_MESSAGE) {
+            const size_t last{std::min(
+                attestations.size(),
+                first + static_cast<size_t>(
+                            MATMUL_ATTESTATIONS_PER_MESSAGE))};
+            std::vector<matmul::trusted::ExactReplayAttestation> batch{
+                attestations.begin() + first, attestations.begin() + last};
+            MakeAndPushMessage(*target, NetMsgType::MMATTEST, batch);
+        }
+        ++relayed;
+    });
+    return relayed;
 }
 
 void PeerManagerImpl::RelayAddress(NodeId originator,
