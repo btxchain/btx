@@ -526,4 +526,41 @@ BOOST_AUTO_TEST_CASE(ibd_age_only_stale_tip_still_announces_and_may_mine)
     BOOST_CHECK(!MayFastRelayNewTipChild(true, false, true, /*work=*/false));
 }
 
+BOOST_AUTO_TEST_CASE(deep_fork_auto_resolve_predicates)
+{
+    using kernel::DeepForkAutoResolveDepthInScope;
+    using kernel::DeepForkAutoResolveBlockSeenLive;
+    using kernel::DeepForkAutoResolveSustained;
+    using kernel::DeepReorgAction;
+
+    // In scope only when enabled, PARK, and reorg_depth > park_depth.
+    BOOST_CHECK(DeepForkAutoResolveDepthInScope(
+        /*enabled=*/true, DeepReorgAction::PARK, /*park_depth=*/6, /*depth=*/53));
+    BOOST_CHECK(!DeepForkAutoResolveDepthInScope(
+        false, DeepReorgAction::PARK, 6, 53));
+    BOOST_CHECK(!DeepForkAutoResolveDepthInScope(
+        true, DeepReorgAction::WARN, 6, 53));
+    // Shallow (<= park_depth) is the work-based recovery window, NOT this.
+    BOOST_CHECK(!DeepForkAutoResolveDepthInScope(
+        true, DeepReorgAction::PARK, 6, 6));
+
+    // Seen-live: honest block seen while our tip was near its height passes;
+    // a dump block first seen when our tip was already far ahead fails; an
+    // unknown (-1, restart) fails safe.
+    BOOST_CHECK(DeepForkAutoResolveBlockSeenLive(
+        /*tip_height_at_first_seen=*/101, /*block_height=*/100, /*slack=*/2));
+    BOOST_CHECK(DeepForkAutoResolveBlockSeenLive(100, 100, 2));
+    BOOST_CHECK(!DeepForkAutoResolveBlockSeenLive(
+        /*tip_at_first_seen=*/153, /*block_height=*/100, 2)); // dump: tip far ahead
+    BOOST_CHECK(!DeepForkAutoResolveBlockSeenLive(
+        /*unknown=*/-1, 100, 2));
+
+    // Sustained: needs a real span and a fresh newest first-seen; unknowns park.
+    BOOST_CHECK(DeepForkAutoResolveSustained(
+        /*span=*/2000, /*now_minus_last_seen=*/60, /*sustain=*/1800, /*fresh=*/180));
+    BOOST_CHECK(!DeepForkAutoResolveSustained(1000, 60, 1800, 180)); // too short
+    BOOST_CHECK(!DeepForkAutoResolveSustained(2000, 600, 1800, 180)); // stale
+    BOOST_CHECK(!DeepForkAutoResolveSustained(-1, 60, 1800, 180));    // unknown
+}
+
 BOOST_AUTO_TEST_SUITE_END()

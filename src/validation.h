@@ -1819,6 +1819,30 @@ public:
      */
     const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * LOCAL POLICY (-deepforkautoresolve): may this node auto-migrate to a
+     * DEEP (> park_depth) strictly-heavier competing fork because network
+     * observation shows it is honest (seen live block-by-block as our tip
+     * climbed, sustained, still fresh), rather than parking + RB-14 warn?
+     * Fork-choice preference only -- never a consensus/validity decision; the
+     * candidate still goes through the normal ExactReplay-before-ConnectTip
+     * path. Fails SAFE (returns false) on any unknown/ambiguous signal, so the
+     * default is byte-for-byte today's PARK. `verdict`, when non-null, is
+     * filled with the per-signal booleans for RPC/operator visibility.
+     */
+    struct DeepForkAutoResolveVerdict {
+        bool enabled{false};
+        bool in_scope{false};
+        bool no_deterministic_tiebreak{false};
+        bool candidate_usable{false};
+        bool seen_live{false};
+        bool sustained{false};
+        bool acted{false};
+        int reorg_depth{0};
+    };
+    bool DeepForkAutoResolveMayAct(const CBlockIndex* candidate,
+                                   DeepForkAutoResolveVerdict* verdict = nullptr)
+        const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::optional<node::ReorgRecoveryRecord> GetReorgRecoveryRecord() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
         return m_reorg_recovery;

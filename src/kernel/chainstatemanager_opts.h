@@ -229,6 +229,55 @@ inline constexpr ReorgProtectionProfileSettings GetReorgProtectionProfileSetting
            reorg_depth <= static_cast<int>(park_depth);
 }
 
+//! -deepforkautoresolve is the strictly-DEEP complement of the shallow
+//! work-based recovery above: it acts only when reorg_depth > park_depth (the
+//! window WorkBasedReorgRecoveryMayArm must never be widened into). A local
+//! policy, never a consensus rule.
+[[nodiscard]] inline constexpr bool DeepForkAutoResolveDepthInScope(
+    bool enabled,
+    DeepReorgAction action,
+    uint32_t park_depth,
+    int reorg_depth)
+{
+    return enabled &&
+           action == DeepReorgAction::PARK &&
+           park_depth != REORG_PROTECTION_DEPTH_DISABLED &&
+           reorg_depth > static_cast<int>(park_depth);
+}
+
+//! Per-suffix-block honesty: the node's own tip height when it FIRST saw this
+//! block must not have already led the block's height by more than the slack.
+//! An honest live competing chain is seen as our tip climbs
+//! (tip_height_at_first_seen ~= block_height); any post-hoc reveal (flash OR
+//! paced) was first seen when our tip was already at the pre-attack height
+//! (>> the low suffix blocks). Unknown (< 0) => not honest => park. This is
+//! the ONE signal an attacker cannot forge after the fact (df-attack R1).
+[[nodiscard]] inline constexpr bool DeepForkAutoResolveBlockSeenLive(
+    int32_t tip_height_at_first_seen,
+    int32_t block_height,
+    int32_t height_slack)
+{
+    if (tip_height_at_first_seen < 0) return false;
+    if (height_slack < 0) return false;
+    return tip_height_at_first_seen <=
+           block_height + static_cast<int32_t>(height_slack);
+}
+
+//! Sustained-observation + still-live time floor over the suffix first-seen
+//! span. Weakest signal (pure wall-clock, waited out by a paced dump) — a
+//! cost-raising AND-term only; the height signal above is the real gate.
+//! Unknown spans (< 0) => park.
+[[nodiscard]] inline constexpr bool DeepForkAutoResolveSustained(
+    int64_t first_seen_span_s,
+    int64_t now_minus_last_seen_s,
+    int64_t sustain_s,
+    int64_t freshness_s)
+{
+    if (first_seen_span_s < 0 || now_minus_last_seen_s < 0) return false;
+    if (first_seen_span_s < sustain_s) return false;
+    return now_minus_last_seen_s <= freshness_s;
+}
+
 //! Rank a competing fork by its own accepted-header nChainWork for chase /
 //! work-based auto-recovery, even when m_best_header is pinned to a locally
 //! attested loser (self-signed twin). Depth must stay inside the PARK window.
@@ -613,6 +662,22 @@ struct ChainstateManagerOpts {
     //! at test speed; production mainnet emergency sets DEFAULT_CADENCE_BURST_MAX
     //! via -cadenceburstmax / ApplyArgsManOptions.
     uint32_t cadence_burst_max{0};
+    //! -deepforkautoresolve: default-on LOCAL POLICY that auto-migrates this
+    //! node to an HONEST deep (> park_depth) strictly-heavier competing fork
+    //! using network-observation signals, instead of parking + RB-14 warn.
+    //! It is a local fork-choice preference (like park-depth / assumevalid),
+    //! NEVER a consensus rule: it changes which valid chain THIS node follows,
+    //! never validity, and fails SAFE to today's PARK when signals are
+    //! ambiguous. Only effective under the PARK deep-reorg action.
+    bool deep_fork_auto_resolve{true};
+    //! Minimum wall-clock span (s) the competing suffix must have been observed
+    //! extending before it may be auto-followed. Default 20x spacing.
+    int64_t deep_fork_auto_resolve_sustain_s{1800};
+    //! Max age (s) of the newest suffix first-seen; older => not live => park.
+    int64_t deep_fork_auto_resolve_freshness_s{180};
+    //! Max blocks our tip may have led a suffix block's height at first-seen
+    //! and still count as "seen live". The unforgeable dump discriminator.
+    int32_t deep_fork_auto_resolve_height_slack{2};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};
     Notifications& notifications;

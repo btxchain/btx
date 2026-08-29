@@ -10265,7 +10265,8 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             }
             const bool recovery_escape{
                 m_chainman.IsAutomaticReorgRecoveryCandidate(pindexNew) ||
-                m_chainman.IsAttestedAbandonForkCandidate(pindexNew)};
+                m_chainman.IsAttestedAbandonForkCandidate(pindexNew) ||
+                m_chainman.DeepForkAutoResolveMayAct(pindexNew)};
             if (old_tip != nullptr &&
                 fork != nullptr &&
                 fork != old_tip &&
@@ -10476,9 +10477,20 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         // Fetch (GETDATA) of a heavier competing fork is not follow.
         // recovery_escape stays the attested/automatic shallow-race pair;
         // a stale tip plus more claimed work must still park at depth > 6.
+        // Deterministic escapes (shallow work-based recovery, attested
+        // abandon) first; then the LOCAL -deepforkautoresolve observation
+        // policy as the SECOND layer for a deep honest fork with no quorum on
+        // either side. Fails safe to park on any ambiguity. Not persisted
+        // anywhere (MaybeTrackReorgRecovery is untouched), so a restart -- when
+        // the memory-only first-seen signals are unknown -- re-parks: today's
+        // behavior verbatim (df-attack R3).
+        ChainstateManager::DeepForkAutoResolveVerdict df_verdict;
+        const bool deep_fork_auto_resolve{
+            m_chainman.DeepForkAutoResolveMayAct(pindexMostWork, &df_verdict)};
         const bool recovery_escape{
             m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
-            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork)};
+            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork) ||
+            deep_fork_auto_resolve};
         const bool park = kernel::DeepReorgShouldPark(
             cm_opts.deep_reorg_action, park_depth, reorg_depth, recovery_escape);
 
@@ -10500,6 +10512,8 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED ? park_depth : 0,
                 pindexOldTip->nHeight, pindexFork->nHeight, pindexMostWork->nHeight,
                 park ? _("Parking the branch and staying on the current chain pending operator action.")
+                     : deep_fork_auto_resolve
+                         ? _("Auto-activating the observation-scored honest deep-reorg branch (deep-fork auto-resolve): seen live block-by-block as our tip climbed, sustained, and still fresh, with no quorum on either fork.")
                      : recovery_escape
                          ? _("Activating the uniquely authenticated shallow-race recovery branch.")
                          : _("Following the most-work chain (warn-only)."));
@@ -12256,6 +12270,103 @@ bool ChainstateManager::IsAttestedAbandonForkCandidate(
         return false;
     }
     return candidate == FindUniqueCompetingAttestedIndex();
+}
+
+bool ChainstateManager::DeepForkAutoResolveMayAct(
+    const CBlockIndex* candidate,
+    DeepForkAutoResolveVerdict* verdict) const
+{
+    AssertLockHeld(::cs_main);
+    DeepForkAutoResolveVerdict v;
+    const auto finish = [&](bool acted) {
+        v.acted = acted;
+        if (verdict != nullptr) *verdict = v;
+        return acted;
+    };
+    if (candidate == nullptr || m_active_chainstate == nullptr) return finish(false);
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip == nullptr || candidate == tip ||
+        m_active_chainstate->m_chain.Contains(candidate)) {
+        return finish(false);
+    }
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(candidate)};
+    if (fork == nullptr || fork == tip) return finish(false);
+    const int reorg_depth{tip->nHeight - fork->nHeight};
+    v.reorg_depth = reorg_depth;
+
+    const auto profile_settings{
+        kernel::GetReorgProtectionProfileSettings(m_options.reorg_protection_profile)};
+    const uint32_t park_depth{
+        m_options.max_reorg_depth_park.value_or(profile_settings.park_depth)};
+    // Strictly the DEEP complement of the shallow work-based recovery window;
+    // the shallow (<= park_depth) window is owned by MaybeTrackReorgRecovery
+    // and must NOT be touched here.
+    v.enabled = m_options.deep_fork_auto_resolve;
+    v.in_scope = kernel::DeepForkAutoResolveDepthInScope(
+        m_options.deep_fork_auto_resolve, m_options.deep_reorg_action,
+        park_depth, reorg_depth);
+    if (!v.in_scope) return finish(false);
+    // Local policy only follows STRICTLY-heavier work, never equal work.
+    if (!(candidate->nChainWork > tip->nChainWork)) return finish(false);
+
+    // Layer 1 (deterministic) stays authoritative: never let observation
+    // override or duplicate a quorum / attested-abandon / shallow-recovery
+    // decision. Observation is only the SECOND layer when neither fork has a
+    // deterministic tiebreak (the 201633 shape: both signers on the loser).
+    if (IsAutomaticReorgRecoveryCandidate(candidate) ||
+        IsAttestedAbandonForkCandidate(candidate) ||
+        node::matmul_trusted::HasQuorum(candidate->GetBlockHash(), candidate->nHeight) ||
+        node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight)) {
+        return finish(false);
+    }
+    v.no_deterministic_tiebreak = true;
+
+    // Candidate must be FULLY validated (bodies present + ExactReplay passed),
+    // mirroring IsAutomaticReorgRecoveryCandidate. Header-only heavier towers
+    // never migrate (dump-and-run protection).
+    if (!(candidate->nStatus & BLOCK_HAVE_DATA) ||
+        !candidate->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+        !candidate->HaveNumChainTxs()) {
+        return finish(false);
+    }
+    v.candidate_usable = true;
+
+    // Signals over the competing suffix (fork+1 .. candidate). ALL must pass
+    // (AND); any unknown fails safe to park.
+    const int32_t slack{m_options.deep_fork_auto_resolve_height_slack};
+    const int64_t now_s{GetTime()};
+    bool seen_live{true};
+    int64_t first_seen_min{std::numeric_limits<int64_t>::max()};
+    int64_t first_seen_max{std::numeric_limits<int64_t>::min()};
+    for (const CBlockIndex* b{candidate}; b != nullptr && b != fork; b = b->pprev) {
+        // The whole suffix must be body-present + ExactReplay-valid, not just
+        // the tip -- otherwise a partially-validated dump could pass.
+        if (!(b->nStatus & BLOCK_HAVE_DATA) ||
+            !b->IsValid(BLOCK_VALID_TRANSACTIONS) || !b->HaveNumChainTxs()) {
+            return finish(false);
+        }
+        if (!kernel::DeepForkAutoResolveBlockSeenLive(
+                b->nActiveTipHeightAtFirstSeen, b->nHeight, slack)) {
+            seen_live = false;
+        }
+        if (b->nTimeReceived <= 0) { // unknown first-seen (disk load / restart)
+            return finish(false);
+        }
+        first_seen_min = std::min(first_seen_min, b->nTimeReceived);
+        first_seen_max = std::max(first_seen_max, b->nTimeReceived);
+    }
+    v.seen_live = seen_live;
+    if (!seen_live) return finish(false);
+
+    const int64_t span_s{
+        first_seen_max >= first_seen_min ? first_seen_max - first_seen_min : -1};
+    v.sustained = kernel::DeepForkAutoResolveSustained(
+        span_s, now_s - first_seen_max,
+        m_options.deep_fork_auto_resolve_sustain_s,
+        m_options.deep_fork_auto_resolve_freshness_s);
+    if (!v.sustained) return finish(false);
+
+    return finish(true);
 }
 
 void ChainstateManager::NoteAuthenticatedRecoveryCandidate(CBlockIndex* candidate)
@@ -14755,6 +14866,14 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     CBlockIndex* const prev_best{m_best_header};
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
+    // Stamp the victim-relative first-seen tip height ONCE, on first index
+    // creation, for the local -deepforkautoresolve policy. Memory-only; never
+    // consensus. Guarded on the -1 default so re-announcements do not reset it.
+    if (pindex != nullptr && pindex->nActiveTipHeightAtFirstSeen < 0) {
+        const CBlockIndex* const active_tip{ActiveChainstate().m_chain.Tip()};
+        pindex->nActiveTipHeightAtFirstSeen =
+            active_tip != nullptr ? active_tip->nHeight : 0;
+    }
     MaybeUpdateBestClaimedHeader(pindex);
 
     // PreferTrustAdjustedHeader's unauth allowance is denominated in the

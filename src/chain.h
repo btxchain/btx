@@ -256,6 +256,18 @@ public:
     //! on this, not nTimeReceived.
     int64_t nTimeBodyReceived{0};
 
+    //! (memory only) This node's ACTIVE tip height at the instant this header
+    //! was first added to the index. -1 means unknown (disk load / restart).
+    //! Never serialized. This is the ONE fork-honesty signal an attacker
+    //! cannot forge after the fact: an honest live competing chain is seen
+    //! block-by-block while our tip is near each block's height
+    //! (nActiveTipHeightAtFirstSeen ~= nHeight), whereas any post-hoc reveal
+    //! (flash OR paced) is first seen when our tip is already at the
+    //! pre-attack height (>> the low suffix blocks' heights). Used only by
+    //! the LOCAL -deepforkautoresolve policy; consensus/validity never read
+    //! it. Unknown => policy fails safe to PARK.
+    int32_t nActiveTipHeightAtFirstSeen{-1};
+
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
 
