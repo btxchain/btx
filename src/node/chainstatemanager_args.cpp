@@ -254,6 +254,25 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         opts.signature_cache_bytes = clamped_size_each;
     }
 
+    // TEST-ONLY: -acquisitionstallseconds overrides the RB-16 acquisition-escape
+    // staleness window (default 600s) so live convergence tests need not wait 10
+    // minutes per restart. It changes ONLY how long a frozen node waits before
+    // the escape valve may arm -- never any validation, ExactReplay, or
+    // migration gate. Floored at 1s. A loud warning is logged so it can never be
+    // mistaken for a production setting.
+    if (auto value{args.GetIntArg("-acquisitionstallseconds")}) {
+        if (*value < 1) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -acquisitionstallseconds value (%d), must be at least 1",
+                *value))};
+        }
+        opts.acquisition_stall_seconds = *value;
+        LogPrintf("WARNING: -acquisitionstallseconds=%d is a TEST-ONLY override of "
+                  "the acquisition-escape staleness window (production default is "
+                  "%d). Do NOT use in production.\n",
+                  *value, 600);
+    }
+
     return {};
 }
 } // namespace node

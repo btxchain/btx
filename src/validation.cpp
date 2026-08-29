@@ -11742,6 +11742,11 @@ bool ChainstateManager::AcquisitionTipIsStale() const
     // IBD already exempts the header-lead caps and fetches freely.
     if (IsInitialBlockDownload()) return false;
     const int64_t now{CadenceHoldMonotonicNowSeconds()};
+    // TEST-ONLY: -acquisitionstallseconds overrides the 600s window so live
+    // convergence tests need not wait 10 minutes per restart. Production leaves
+    // it unset -> ACQUISITION_ESCAPE_STALL_SECONDS.
+    const int64_t stall_seconds{
+        m_options.acquisition_stall_seconds.value_or(ACQUISITION_ESCAPE_STALL_SECONDS)};
     // RB-16 restart-safety: a node that BOOTED onto a frozen tip and has
     // connected nothing has no m_last_tip_connect_mono, so the old
     // `if (!has_value()) return false` made the staleness gate un-trippable and
@@ -11760,7 +11765,7 @@ bool ChainstateManager::AcquisitionTipIsStale() const
     // with nothing connected, no progress since the startup baseline).
     const int64_t frozen_since{
         m_last_tip_connect_mono.value_or(*m_acquisition_stale_baseline_mono)};
-    if ((now - frozen_since) >= ACQUISITION_ESCAPE_STALL_SECONDS) return true;
+    if ((now - frozen_since) >= stall_seconds) return true;
     // RB-16 fix: the tip IS connecting, but only on a strictly-lighter
     // COMPETING fork while a heavier tower is known (e.g. a minority fork that
     // slowly extends: 199394->199398). Those connects reset m_last_tip_connect_
@@ -11779,7 +11784,7 @@ bool ChainstateManager::AcquisitionTipIsStale() const
     const int64_t last_progress{
         m_last_better_chain_progress_mono.value_or(
             *m_acquisition_stale_baseline_mono)};
-    return (now - last_progress) >= ACQUISITION_ESCAPE_STALL_SECONDS;
+    return (now - last_progress) >= stall_seconds;
 }
 
 bool ChainstateManager::AcquisitionEscapeActive(const CBlockIndex* candidate) const
