@@ -353,6 +353,17 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
         true, false, /*not_parked=*/false, true, kTower, kTip));
     BOOST_CHECK(!node::HeaderSyncMayFetchParkedHeavierTower(
         true, false, true, /*not_heavier=*/false, kTower, kTip));
+
+    BOOST_CHECK(!node::HeaderSyncSkipPeerWithoutBodyAvailability(
+        /*has_served=*/true, false, false, /*any_served=*/true));
+    BOOST_CHECK(!node::HeaderSyncSkipPeerWithoutBodyAvailability(
+        false, /*manual=*/true, false, true));
+    BOOST_CHECK(!node::HeaderSyncSkipPeerWithoutBodyAvailability(
+        false, false, /*gpu=*/true, true));
+    BOOST_CHECK(!node::HeaderSyncSkipPeerWithoutBodyAvailability(
+        false, false, false, /*nobody_served_yet=*/false));
+    BOOST_CHECK(node::HeaderSyncSkipPeerWithoutBodyAvailability(
+        false, false, false, /*any_served=*/true));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

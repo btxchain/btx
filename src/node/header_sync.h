@@ -441,6 +441,21 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
            HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD;
 }
 
+/** Prefer peers that have delivered a body once any peer has. Header-only
+ *  BestKnown work is not availability. Manual/noban/GPU/frontier stay
+ *  eligible so bootstrap and the signer are not skipped. Fresh IBD (no
+ *  peer has served) keeps the work-only gate. Fetch preference only. */
+[[nodiscard]] inline bool HeaderSyncSkipPeerWithoutBodyAvailability(
+    bool has_served_block,
+    bool manual_or_noban,
+    bool gpu_or_frontier_source,
+    bool any_peer_has_served)
+{
+    if (has_served_block) return false;
+    if (manual_or_noban || gpu_or_frontier_source) return false;
+    return any_peer_has_served;
+}
+
 } // namespace node
 
 #endif // BTX_NODE_HEADER_SYNC_H

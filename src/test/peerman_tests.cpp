@@ -9306,6 +9306,143 @@ BOOST_AUTO_TEST_CASE(silent_getdata_peer_rerequested_from_other_and_tip_advances
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
+BOOST_AUTO_TEST_CASE(header_only_peer_skipped_once_another_served_a_body)
+{
+    // SF-3: BestKnown work is not body availability. After peer A delivers
+    // tip+1, GETDATA for tip+2 must go to A, not header-only B. B becomes
+    // eligible again after it delivers a body.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* starting_tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(starting_tip != nullptr);
+    SetMockTime(std::chrono::seconds{starting_tip->GetBlockTime() + 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    CBlock child = node::BlockAssembler{
+        chainman.ActiveChainstate(), nullptr, {}, m_node}
+                       .CreateNewBlock()
+                       ->block;
+    child.hashMerkleRoot = BlockMerkleRoot(child);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        child, static_cast<uint32_t>(starting_tip->nHeight + 1),
+        chainman.GetConsensus(), 5'000'000,
+        starting_tip->GetMedianTimePast()));
+    child.fChecked = true;
+    BlockValidationState hdr_state;
+    BOOST_REQUIRE_MESSAGE(
+        chainman.ProcessNewBlockHeaders(
+            {{child.GetBlockHeader()}}, /*min_pow_checked=*/true, hdr_state),
+        hdr_state.ToString());
+    const uint256 child_hash{child.GetHash()};
+    CBlockIndex* child_index{WITH_LOCK(
+        ::cs_main, return chainman.m_blockman.LookupBlockIndex(child_hash))};
+    BOOST_REQUIRE(child_index != nullptr);
+    CBlockIndex* grandchild{MakePeermanHeaderChild(chainman, *child_index, 0x52)};
+
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    CNode body_peer{/*id=*/5430, /*sock=*/nullptr, CAddress{},
+                    /*nKeyedNetGroupIn=*/5430, /*nLocalHostNonceIn=*/0,
+                    CAddress{}, /*addrNameIn=*/"sf3-body",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false, /*network_key=*/0};
+    CNode headers_only{/*id=*/5431, /*sock=*/nullptr, CAddress{},
+                       /*nKeyedNetGroupIn=*/5431, /*nLocalHostNonceIn=*/0,
+                       CAddress{}, /*addrNameIn=*/"sf3-headers",
+                       ConnectionType::OUTBOUND_FULL_RELAY,
+                       /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(body_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.Handshake(headers_only, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(body_peer);
+    connman.AddTestNode(headers_only);
+    connman.FlushSendBuffer(body_peer);
+    connman.FlushSendBuffer(headers_only);
+    struct FinalizePeers {
+        PeerManager& peerman;
+        ConnmanTestMsg& connman;
+        CNode& body_peer;
+        CNode& headers_only;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(body_peer);
+            peerman.FinalizeNode(headers_only);
+            connman.RemoveTestNode(body_peer);
+            connman.RemoveTestNode(headers_only);
+        }
+    } finalize{peerman, connman, body_peer, headers_only};
+
+    auto advertise = [&](CNode& peer) {
+        std::vector<CBlock> hdrs{child.GetBlockHeader(), grandchild->GetBlockHeader()};
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+        peer.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(peer);
+        connman.FlushSendBuffer(peer);
+    };
+    advertise(body_peer);
+    advertise(headers_only);
+
+    body_peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&body_peer));
+    connman.FlushSendBuffer(body_peer);
+    body_peer.fPauseSend = false;
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        body_peer, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(child))));
+    body_peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(body_peer);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE(PeermanWaitFor([&] {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            chainman.m_blockman.LookupBlockIndex(child_hash)};
+        return idx != nullptr && (idx->nStatus & BLOCK_HAVE_DATA) != 0;
+    }));
+    for (int i = 0; i < 5; ++i) {
+        (void)peerman.SendMessages(&body_peer);
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        if (WITH_LOCK(::cs_main, {
+                const CBlockIndex* idx{
+                    chainman.m_blockman.LookupBlockIndex(child_hash)};
+                return idx != nullptr && chainman.ActiveChain().Contains(idx);
+            })) {
+            break;
+        }
+    }
+    BOOST_REQUIRE_EQUAL(
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash()),
+        child_hash);
+
+    connman.FlushSendBuffer(headers_only);
+    headers_only.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&headers_only));
+    CNodeStateStats hdr_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(headers_only.GetId(), hdr_stats));
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedGetDataForHash(headers_only, grandchild->GetBlockHash()) == 0U &&
+            (hdr_stats.vHeightInFlight.empty() ||
+             hdr_stats.vHeightInFlight.front() != grandchild->nHeight),
+        "header-only peer must not be GETDATA'd once another peer served a body");
+
+    connman.FlushSendBuffer(body_peer);
+    body_peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&body_peer));
+    CNodeStateStats body_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(body_peer.GetId(), body_stats));
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedGetDataForHash(body_peer, grandchild->GetBlockHash()) > 0 ||
+            (!body_stats.vHeightInFlight.empty() &&
+             body_stats.vHeightInFlight.front() == grandchild->nHeight),
+        "the body-serving peer must still GETDATA the next hole");
+
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
 BOOST_AUTO_TEST_CASE(best_known_probe_is_rate_limited_and_skips_height_zero)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
