@@ -789,6 +789,10 @@ struct QueuedBlock {
     /** Peer recv-byte counter at request time. ExpireOverdue must not treat
      *  a block that is already on the wire / in the msghand queue as silent. */
     uint64_t recv_bytes_at_request{0};
+    /** Payload bytes of THIS GETDATA (BLOCK / CMPCTBLOCK / BLOCKTXN /
+     *  chunked manifest or chunk). Chatter and prior traffic do not
+     *  increment it; any value > 0 means the peer is delivering (SF-6). */
+    uint64_t recv_bytes_for_request{0};
 };
 
 /** Payload for shielded bundle block-data responses. */
@@ -2524,6 +2528,9 @@ private:
     void PersistExactReplayVerdictAndRelay(const uint256& hash)
         LOCKS_EXCLUDED(cs_main);
     void NotePeerServedBlockBody(NodeId nodeid);
+    /** Credit payload bytes onto the matching in-flight GETDATA, if any. */
+    void NoteInFlightRequestPayload(NodeId nodeid, const uint256& hash, size_t nbytes)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void MaybeLogAttestationServe(const char* reason,
                                   const uint256& hash,
                                   int32_t height,
@@ -3603,6 +3610,20 @@ void PeerManagerImpl::NotePeerServedBlockBody(NodeId nodeid)
     }
 }
 
+void PeerManagerImpl::NoteInFlightRequestPayload(NodeId nodeid, const uint256& hash, size_t nbytes)
+{
+    AssertLockHeld(cs_main);
+    if (nbytes == 0 || hash.IsNull()) return;
+    CNodeState* state{State(nodeid)};
+    if (state == nullptr) return;
+    for (QueuedBlock& entry : state->vBlocksInFlight) {
+        if (entry.pindex != nullptr && entry.pindex->GetBlockHash() == hash) {
+            entry.recv_bytes_for_request += nbytes;
+            return;
+        }
+    }
+}
+
 bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, std::list<QueuedBlock>::iterator** pit)
 {
     const uint256& hash{block.GetBlockHash()};
@@ -3995,19 +4016,16 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
         const auto gpu_deadline{
             std::chrono::duration_cast<std::chrono::microseconds>(
                 BLOCK_INFLIGHT_HARD_RECLAIM_AFTER)};
-        uint64_t now_recv{0};
-        m_connman.ForNode(nodeid, [&](CNode* pnode) {
-            LOCK(pnode->cs_vRecv);
-            now_recv = pnode->nRecvBytes;
-            return true;
-        });
         // Far behind: expire only when the peer has delivered nothing at
-        // all (no ~4KiB recv on any in-flight GETDATA). A peer that is
-        // feeding bodies on a 60–90s cadence must not lose other requests.
+        // all on any in-flight GETDATA. Payload of this request (not the
+        // peer's total nRecvBytes, not a 4KiB chatter margin) is the
+        // signal. A peer feeding bodies on a 60–90s cadence must not lose
+        // other requests. Fully silent requests still hit the deadline.
         bool peer_delivering{false};
         if (far_behind) {
             for (const QueuedBlock& entry : state.vBlocksInFlight) {
-                if (now_recv > entry.recv_bytes_at_request + 4096) {
+                if (node::HeaderSyncInFlightPayloadGrantsGrace(
+                        entry.recv_bytes_for_request)) {
                     peer_delivering = true;
                     break;
                 }
@@ -4025,7 +4043,10 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
             if (m_matmul_block_lifecycle.HasRetainedBody(entry.pindex->GetBlockHash())) {
                 continue;
             }
-            if (now_recv > entry.recv_bytes_at_request + 4096) continue;
+            if (node::HeaderSyncInFlightPayloadGrantsGrace(
+                    entry.recv_bytes_for_request)) {
+                continue;
+            }
 
             const auto requested_at = entry.requested_at.count() > 0
                                           ? entry.requested_at
@@ -14994,6 +15015,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
         node::BlockChunkManifest manifest;
+        const size_t payload_bytes{vRecv.size()};
         vRecv >> manifest;
         if (!vRecv.empty()) {
             WITH_LOCK(cs_main, RemoveBlockRequest(manifest.block_hash,
@@ -15079,6 +15101,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                  "Accepted chunked block manifest %s bytes=%u chunks=%u peer=%d\n",
                  manifest.block_hash.ToString(), manifest.total_size,
                  manifest.chunk_count, pfrom.GetId());
+        WITH_LOCK(cs_main, NoteInFlightRequestPayload(
+                               pfrom.GetId(), manifest.block_hash, payload_bytes));
         return;
     }
 
@@ -15089,6 +15113,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
         node::BlockChunkMessage chunk;
+        const size_t payload_bytes{vRecv.size()};
         try {
             vRecv >> chunk;
         } catch (const std::ios_base::failure&) {
@@ -15146,6 +15171,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, "malformed or out-of-order blkchunk");
             return;
         }
+        WITH_LOCK(cs_main, NoteInFlightRequestPayload(
+                               pfrom.GetId(), expected_hash, payload_bytes));
         if (result == node::BlockChunkAddResult::ACCEPTED) return;
 
         DropInboundBlockChunks(pfrom.GetId());
@@ -15435,7 +15462,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     }
     if (msg_type == NetMsgType::GETMMATTEST &&
         m_signed_frontier_catch_up.load(std::memory_order_relaxed) &&
-        !this_gpu) {
+        !this_gpu &&
+        !pfrom.m_consensus_catchup_serve.load(std::memory_order_relaxed)) {
         if (ShouldLogIgnoredNonAuthorityMsg(msg_type)) {
             LogInfo("Deferring inbound GETMMATTEST while catching up to GPU-signed frontier (peer=%d)\n",
                     pfrom.GetId());
@@ -16364,11 +16392,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         CBlockHeaderAndShortTxIDs cmpctblock;
+        const size_t payload_bytes{vRecv.size()};
         vRecv >> cmpctblock;
         if (!vRecv.empty()) {
             Misbehaving(*peer, strprintf("trailing data after cmpctblock = %u bytes", vRecv.size()));
             return;
         }
+        WITH_LOCK(cs_main, NoteInFlightRequestPayload(
+                               pfrom.GetId(), cmpctblock.header.GetHash(),
+                               payload_bytes));
         NotePeerServedBlockBody(pfrom.GetId());
 
         // Ignore while importing, but free any in-flight slot for this hash.
@@ -16797,11 +16829,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if (msg_type == NetMsgType::BLOCKTXN)
     {
         BlockTransactions resp;
+        const size_t payload_bytes{vRecv.size()};
         vRecv >> resp;
         if (!vRecv.empty()) {
             Misbehaving(*peer, strprintf("trailing data after blocktxn = %u bytes", vRecv.size()));
             return;
         }
+        WITH_LOCK(cs_main, NoteInFlightRequestPayload(
+                               pfrom.GetId(), resp.blockhash, payload_bytes));
         NotePeerServedBlockBody(pfrom.GetId());
 
         if (m_chainman.IsDiscoveryRelay()) {
@@ -17781,10 +17816,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // for hashes already on this signer's active chain (live 2026-08-16:
         // window=16 refused a public CPU archive's 190689; then addnode/manual IBD peers at
         // 185006/190041 consumed every cached token).
+        // RB-14 MMATTEST-serving gap: a self-qualified CONSENSUS verifier that
+        // is catching up (serve=0 GPU attestor, no ARCHIVE/MIRROR bit -- the
+        // same class c881a494 addressed for block bodies) must be able to
+        // FETCH cached signatures for hashes on this signer's active chain,
+        // like an archive/mirror, so a stranded/migrating consensus signer can
+        // obtain quorum corroboration for a heavier fork (postmortem 201633:
+        // "peers served bodies but not attestations"). Serving cached
+        // signatures is a read.
         const bool catchup_requester{
             (peer->m_their_services &
              (NODE_MATMUL_ATTESTATION_ARCHIVE |
-              NODE_MATMUL_TRUSTED_MIRROR)) != 0};
+              NODE_MATMUL_TRUSTED_MIRROR)) != 0 ||
+            pfrom.m_consensus_catchup_serve.load(std::memory_order_relaxed)};
         const bool live_window{
             node::matmul_trusted::GetMmAttestIsLiveWindow(height, tip_height)};
         if (!node::matmul_trusted::TrustedSignerMayServeCachedCatchUpGetMmAttest(
@@ -18543,11 +18587,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if (msg_type == NetMsgType::BLOCK)
     {
         std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
+        const size_t payload_bytes{vRecv.size()};
         vRecv >> TX_WITH_WITNESS(*pblock);
         if (!vRecv.empty()) {
             Misbehaving(*peer, strprintf("trailing data after block = %u bytes", vRecv.size()));
             return;
         }
+        WITH_LOCK(cs_main, NoteInFlightRequestPayload(
+                               pfrom.GetId(), pblock->GetHash(), payload_bytes));
         NotePeerServedBlockBody(pfrom.GetId());
 
         if (m_chainman.IsDiscoveryRelay()) {
