@@ -1086,6 +1086,10 @@ BOOST_AUTO_TEST_CASE(getblockchaininfo_stale_on_competing_heavier_header)
     fake.pprev = tip->pprev;
     fake.nHeight = tip->nHeight;
     fake.nChainWork = tip->nChainWork + arith_uint256{1000};
+    // adv5-followup a / V6: is_stale on a heavier COMPETING header requires it
+    // to be REAL (a body we hold, or authenticated work) -- a header-only spam
+    // twin must not flip the settlement-safety signal. Give the fake a body.
+    fake.nStatus = BLOCK_HAVE_DATA;
 
     UniValue verbose;
     UniValue info;

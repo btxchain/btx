@@ -1234,6 +1234,10 @@ BOOST_AUTO_TEST_CASE(competing_heavier_header_holds_settlement_without_disconnec
     fake.pprev = tip->pprev;
     fake.nHeight = tip->nHeight;
     fake.nChainWork = tip->nChainWork + arith_uint256{1000};
+    // adv5-followup a / V6: a heavier COMPETING header holds settlement only
+    // when it is REAL (a body we hold / authenticated), never a header-only
+    // spam twin. Give the fake a body.
+    fake.nStatus = BLOCK_HAVE_DATA;
 
     {
         LOCK(cs_main);

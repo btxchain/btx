@@ -121,7 +121,11 @@ BOOST_AUTO_TEST_CASE(forged_competing_header_only_tower_is_not_stale)
 
     const auto stale = node::ComputeChainTipStaleness(&tip, &forged);
     BOOST_CHECK(!stale.header_extends_tip);
-    BOOST_CHECK(!stale.competing_heavier_header);
+    // (adv5-followup a) The DIAGNOSTIC field reports the raw fact (a heavier
+    // competing header DOES exist), per its documented RPC semantic.
+    BOOST_CHECK(stale.competing_heavier_header);
+    // The SAFETY signal is NOT flipped by a forged header-only same-height
+    // twin (no authenticated work, no body): this is the V6/RB-13 protection.
     BOOST_CHECK(!stale.is_stale);
 
     // The SAME forged tower once we actually hold its body (a reorg we are

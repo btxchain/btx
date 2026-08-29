@@ -89,11 +89,17 @@ inline uint256 BlockIndexHashOrNull(const CBlockIndex* index)
         // hole 77493d74 closed.
         const bool competing_heavier{
             best_header->nChainWork > tip->nChainWork && !out.header_extends_tip};
+        // (adv5-followup a) The DIAGNOSTIC field reports the raw fact per its
+        // documented RPC semantic ("more chainwork than the tip and not on the
+        // same chain") -- so it is accurate while m_best_header IS the heavier
+        // competing tip (e.g. during an RB-16 acquisition). The is_stale SAFETY
+        // trigger stays GUARDED on authenticated/HAVE_DATA (V6/RB-13): a
+        // forged header-only SAME-HEIGHT twin must not flip is_stale.
         const bool competing_is_real{
             best_header->nAuthenticatedChainWork > tip->nChainWork ||
             (best_header->nStatus & BLOCK_HAVE_DATA)};
-        out.competing_heavier_header = competing_heavier && competing_is_real;
-        out.is_stale = out.competing_heavier_header ||
+        out.competing_heavier_header = competing_heavier;
+        out.is_stale = (competing_heavier && competing_is_real) ||
                        out.behind_best_header > CHAIN_STALE_BEHIND_HEADERS;
     } else if (!tip && best_header) {
         out.behind_best_header = std::max(0, best_header->nHeight);
