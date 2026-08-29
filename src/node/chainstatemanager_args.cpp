@@ -220,8 +220,7 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
     if (!opts.deep_fork_auto_resolve &&
         opts.chainparams.GetChainType() == ChainType::MAIN &&
         opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY) {
-        LogWarning("Deep-fork auto-resolve is disabled (-deepforkautoresolve=0). A signer/node stranded on a losing deep fork will PARK + RB-14 warn and require manual invalidateblock to migrate to the honest heavier chain. Local policy only.
-");
+        LogWarning("Deep-fork auto-resolve is disabled (-deepforkautoresolve=0). A signer/node stranded on a losing deep fork will PARK + RB-14 warn and require manual invalidateblock to migrate to the honest heavier chain. Local policy only.\n");
     }
 
     ReadDatabaseArgs(args, opts.coins_db);
