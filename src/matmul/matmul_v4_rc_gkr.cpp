@@ -52,9 +52,17 @@ std::vector<RCExactReplayAlternateProvider>
     g_exact_replay_alternate_providers;
 std::mutex g_validator_readiness_notifier_mutex;
 RCValidatorReadinessLossNotifier g_validator_readiness_notifier;
+RCValidatorReadinessRestoredNotifier g_validator_readiness_restored_notifier;
 
 constexpr const char* PROVIDER_RECOVERY_ACTION{
-    "repair/reset the accelerator and restart btxd, or restart with a different qualified provider; never invalidate or punish the announcing peer"};
+    "automatic byte-exact re-test after backoff; repair/reset the accelerator if the self-check keeps failing; never invalidate or punish the announcing peer"};
+
+int64_t SteadyNowSeconds()
+{
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 bool IsProviderQuarantined(const std::string& provider,
                            RCExactReplayProviderHealth* health = nullptr)
@@ -71,8 +79,10 @@ bool IsProviderQuarantined(const std::string& provider,
 }
 
 void QuarantineProvider(const std::string& provider,
-                        const std::string& reason)
+                        const std::string& reason,
+                        const bool divergent)
 {
+    std::string recovery;
     {
         std::lock_guard<std::mutex> lock{
             g_exact_replay_provider_health_mutex};
@@ -82,10 +92,15 @@ void QuarantineProvider(const std::string& provider,
             g_exact_replay_provider_quarantines[provider]};
         ++provider_health.quarantine_events;
         provider_health.quarantined = true;
+        provider_health.divergent = divergent;
+        provider_health.quarantined_at_seconds = SteadyNowSeconds();
+        provider_health.recovery_self_checks = 0;
         provider_health.provider = provider;
         provider_health.reason = reason;
-        provider_health.operator_recovery =
-            PROVIDER_RECOVERY_ACTION;
+        provider_health.operator_recovery = divergent
+            ? "automatic byte-exact re-test after backoff; stays quarantined until the self-check passes (repair/reset may be required)"
+            : "automatic: device un-quarantines after the transient backoff or a byte-exact self-check pass; no restart required";
+        recovery = provider_health.operator_recovery;
         g_exact_replay_provider_health = provider_health;
         // Provider quarantine and aggregate validator readiness are separate:
         // a healthy independent provider may preserve readiness, while a
@@ -96,8 +111,85 @@ void QuarantineProvider(const std::string& provider,
     }
     LogWarning(
         "MatMul Profile-1 provider quarantined: provider=%s "
-        "reason=%s; recovery=%s\n",
-        provider, reason, PROVIDER_RECOVERY_ACTION);
+        "reason=%s divergent=%d; recovery=%s\n",
+        provider, reason, divergent ? 1 : 0, recovery);
+}
+
+void UnquarantineProvider(const std::string& provider,
+                          const std::string& recovery_reason)
+{
+    {
+        std::lock_guard<std::mutex> lock{
+            g_exact_replay_provider_health_mutex};
+        auto it{g_exact_replay_provider_quarantines.find(provider)};
+        if (it == g_exact_replay_provider_quarantines.end() ||
+            !it->second.quarantined) {
+            return;
+        }
+        auto& provider_health{it->second};
+        const bool validator_readiness_lost{
+            g_exact_replay_provider_health.validator_readiness_lost};
+        ++provider_health.recovery_self_checks;
+        provider_health.quarantined = false;
+        provider_health.reason = recovery_reason;
+        provider_health.operator_recovery.clear();
+        if (g_exact_replay_provider_health.provider == provider) {
+            g_exact_replay_provider_health = provider_health;
+            g_exact_replay_provider_health.validator_readiness_lost =
+                validator_readiness_lost;
+        }
+    }
+    LogWarning(
+        "MatMul Profile-1 provider auto-un-quarantined: provider=%s reason=%s\n",
+        provider, recovery_reason);
+}
+
+void ExtendProviderQuarantine(const std::string& provider)
+{
+    std::lock_guard<std::mutex> lock{
+        g_exact_replay_provider_health_mutex};
+    auto it{g_exact_replay_provider_quarantines.find(provider)};
+    if (it == g_exact_replay_provider_quarantines.end() ||
+        !it->second.quarantined) {
+        return;
+    }
+    auto& provider_health{it->second};
+    ++provider_health.quarantine_events;
+    provider_health.quarantined_at_seconds = SteadyNowSeconds();
+    if (g_exact_replay_provider_health.provider == provider) {
+        const bool validator_readiness_lost{
+            g_exact_replay_provider_health.validator_readiness_lost};
+        g_exact_replay_provider_health = provider_health;
+        g_exact_replay_provider_health.validator_readiness_lost =
+            validator_readiness_lost;
+    }
+}
+
+void RestoreProviderReadinessAfterByteExactRecovery(
+    const std::string& provider)
+{
+    {
+        std::lock_guard<std::mutex> lock{
+            g_exact_replay_provider_health_mutex};
+        auto& aggregate{g_exact_replay_provider_health};
+        if (!aggregate.quarantined && !aggregate.validator_readiness_lost) {
+            return;
+        }
+        if (!aggregate.provider.empty() && aggregate.provider != provider) {
+            return;
+        }
+        aggregate.quarantined = false;
+        aggregate.validator_readiness_lost = false;
+        aggregate.reason = "byte_exact_self_check_passed";
+        aggregate.operator_recovery.clear();
+        ++aggregate.recovery_self_checks;
+    }
+    std::lock_guard<std::mutex> lock{
+        g_validator_readiness_notifier_mutex};
+    if (g_validator_readiness_restored_notifier) {
+        g_validator_readiness_restored_notifier(
+            provider, "byte_exact_self_check_passed");
+    }
 }
 
 void NotifyValidatorReadinessLost(const std::string& provider,
@@ -216,6 +308,21 @@ void ClearRCValidatorReadinessLossNotifier()
     std::lock_guard<std::mutex> lock{
         g_validator_readiness_notifier_mutex};
     g_validator_readiness_notifier = nullptr;
+}
+
+void SetRCValidatorReadinessRestoredNotifier(
+    RCValidatorReadinessRestoredNotifier notifier)
+{
+    std::lock_guard<std::mutex> lock{
+        g_validator_readiness_notifier_mutex};
+    g_validator_readiness_restored_notifier = std::move(notifier);
+}
+
+void ClearRCValidatorReadinessRestoredNotifier()
+{
+    std::lock_guard<std::mutex> lock{
+        g_validator_readiness_notifier_mutex};
+    g_validator_readiness_restored_notifier = nullptr;
 }
 
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy)
@@ -340,6 +447,45 @@ void SetRCExactReplayProviderHealthForTest(RCExactReplayProviderHealth health)
     std::lock_guard<std::mutex> lock{
         g_exact_replay_provider_health_mutex};
     g_exact_replay_provider_health = std::move(health);
+}
+
+void SetRCExactReplayProviderQuarantineForTest(
+    const std::string& provider, const RCExactReplayProviderHealth& health)
+{
+    std::lock_guard<std::mutex> lock{
+        g_exact_replay_provider_health_mutex};
+    g_exact_replay_provider_quarantines[provider] = health;
+    g_exact_replay_provider_health = health;
+}
+
+int64_t RCExactReplayQuarantineBackoffSeconds(
+    const RCExactReplayProviderHealth& health)
+{
+    const int64_t base{health.divergent
+                           ? kRCExactReplayDivergentRecheckBackoffSeconds
+                           : kRCExactReplayTransientQuarantineBackoffSeconds};
+    const uint64_t events{std::max<uint64_t>(1, health.quarantine_events)};
+    const uint64_t shift{std::min<uint64_t>(events - 1, 6)};
+    return std::min<int64_t>(base << shift,
+                             kRCExactReplayQuarantineBackoffMaxSeconds);
+}
+
+RCExactReplayQuarantineRecoveryState GetRCExactReplayQuarantineRecoveryState(
+    const RCExactReplayProviderHealth& health)
+{
+    if (!health.quarantined) {
+        return RCExactReplayQuarantineRecoveryState::NotQuarantined;
+    }
+    // Pre-upgrade entries have no timestamp. Treat them as due so a
+    // transient device heals on the next strict replay without a restart.
+    if (health.quarantined_at_seconds == 0) {
+        return RCExactReplayQuarantineRecoveryState::SelfCheckDue;
+    }
+    const int64_t now_seconds{SteadyNowSeconds()};
+    return now_seconds - health.quarantined_at_seconds >=
+               RCExactReplayQuarantineBackoffSeconds(health)
+               ? RCExactReplayQuarantineRecoveryState::SelfCheckDue
+               : RCExactReplayQuarantineRecoveryState::NotDue;
 }
 
 bool RegisterRCExactReplayAlternateProvider(
@@ -5273,14 +5419,30 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
             }
         }
 
+        bool recovered_candidate{false};
+        bool divergent_self_check{false};
         RCExactReplayProviderHealth health;
         if (IsProviderQuarantined(candidate.provider, &health)) {
-            if (!candidate.alternate) primary_was_unavailable = true;
-            ExactReplayVerifyResult unavailable;
-            SetProviderUnavailableResult(unavailable, primary_provider,
-                                         "strict_device_provider_quarantined", &health);
-            last_failure = std::move(unavailable);
-            continue;
+            if (GetRCExactReplayQuarantineRecoveryState(health) ==
+                RCExactReplayQuarantineRecoveryState::NotDue) {
+                if (!candidate.alternate) primary_was_unavailable = true;
+                ExactReplayVerifyResult unavailable;
+                SetProviderUnavailableResult(
+                    unavailable, primary_provider,
+                    "strict_device_provider_quarantined", &health);
+                last_failure = std::move(unavailable);
+                continue;
+            }
+            // RB-1/N9: backoff elapsed. The strict replay below (zero CPU
+            // fallback + digest equality) IS the byte-exact self-check.
+            recovered_candidate = true;
+            if (!health.divergent) {
+                UnquarantineProvider(
+                    candidate.provider,
+                    "transient_execution_failure_backoff_elapsed");
+            } else {
+                divergent_self_check = true;
+            }
         }
 
         attempted_provider_ids.push_back(candidate.provider);
@@ -5323,6 +5485,14 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
         if (result.ok ||
             (result.outcome == ExactReplayVerifyOutcome::InvalidConsensus &&
              result.digest == header.matmul_digest)) {
+            if (recovered_candidate) {
+                if (divergent_self_check) {
+                    UnquarantineProvider(candidate.provider,
+                                         "byte_exact_self_check_passed");
+                }
+                RestoreProviderReadinessAfterByteExactRecovery(
+                    candidate.provider);
+            }
             if (!mismatches.empty()) {
                 for (const auto& mismatch : mismatches) {
                     if (!RCProductionProviderCapabilitiesIndependent(
@@ -5332,7 +5502,8 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
                     }
                     const std::string reason{
                         "digest_mismatch_confirmed_by_independent_provider"};
-                    QuarantineProvider(mismatch.provider, reason);
+                    QuarantineProvider(mismatch.provider, reason,
+                                       /*divergent=*/true);
                     if (result.quarantined_provider.empty()) {
                         result.quarantined_provider = mismatch.provider;
                         result.provider_health_reason = reason;
@@ -5390,11 +5561,20 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
                 result.acceleration_failure.empty()
                     ? "strict_device_inflight_failure"
                     : result.acceleration_failure};
-            QuarantineProvider(candidate.provider, reason);
+            if (divergent_self_check) {
+                ExtendProviderQuarantine(candidate.provider);
+            } else {
+                QuarantineProvider(candidate.provider, reason,
+                                   /*divergent=*/false);
+            }
             result.provider_quarantined = true;
             result.quarantined_provider = candidate.provider;
             result.provider_health_reason = reason;
-            result.operator_recovery = PROVIDER_RECOVERY_ACTION;
+            result.operator_recovery = health.operator_recovery.empty()
+                ? (divergent_self_check
+                       ? "automatic byte-exact re-test after backoff; stays quarantined until the self-check passes (repair/reset may be required)"
+                       : "automatic: device un-quarantines after the transient backoff or a byte-exact self-check pass; no restart required")
+                : health.operator_recovery;
             result.note += "; execution-failed provider quarantined";
         }
         last_failure = std::move(result);

@@ -1050,10 +1050,12 @@ struct ExactReplayVerifyResult {
 
 /** Runtime health of one strict ExactReplay provider.
  *
- * An in-flight execution/coverage failure, or a digest proven faulty by an
- * independent provider, quarantines the affected provider for the process
- * lifetime. An unconfirmed digest disagreement never does: it remains a
- * retryable block-scoped ambiguity and cannot let a peer disable validation. */
+ * An in-flight execution/coverage failure quarantines the provider until a
+ * backoff elapses (transient) or a byte-exact self-check passes (divergent).
+ * A digest proven faulty by an independent provider is a divergent
+ * quarantine: it stays quarantined, but is still automatically re-tested
+ * after a longer backoff and only a byte-exact strict-device replay clears
+ * it. An unconfirmed digest disagreement never quarantines. */
 struct RCExactReplayProviderHealth {
     bool quarantined{false};
     /** True only when adjudication exhausted every eligible provider. */
@@ -1062,6 +1064,13 @@ struct RCExactReplayProviderHealth {
     std::string provider;
     std::string reason;
     std::string operator_recovery;
+    /** True when quarantined for a confirmed digest divergence (independent
+     * provider); false for a transient ExecutionFailure. */
+    bool divergent{false};
+    /** steady_clock seconds when the current quarantine started (0 = legacy). */
+    int64_t quarantined_at_seconds{0};
+    /** Successful byte-exact self-checks completed while quarantined. */
+    uint64_t recovery_self_checks{0};
 };
 
 /** One process-local strict ExactReplay implementation authorized by the exact
@@ -1076,6 +1085,16 @@ struct RCExactReplayAlternateProvider {
 
 inline constexpr size_t kRCExactReplayMaxAlternateProviders{8};
 inline constexpr uint32_t kRCExactReplayMaxAdjudicationAttempts{2};
+inline constexpr int64_t kRCExactReplayTransientQuarantineBackoffSeconds{60};
+inline constexpr int64_t kRCExactReplayDivergentRecheckBackoffSeconds{600};
+inline constexpr int64_t kRCExactReplayQuarantineBackoffMaxSeconds{3600};
+
+/** RB-1/N9 auto-recovery decision for one quarantined provider. */
+enum class RCExactReplayQuarantineRecoveryState : uint8_t {
+    NotQuarantined = 0,
+    NotDue = 1,       // backoff not elapsed -> keep skipped
+    SelfCheckDue = 2, // backoff elapsed -> strict replay is the byte-exact self-check
+};
 
 /** Process startup configuration. Set before validation workers start. */
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy);
@@ -1101,17 +1120,25 @@ void ResetLastExactReplayVerifyResultForTest();
 GetRCExactReplayProviderHealth();
 void ResetRCExactReplayProviderHealthForTest();
 void SetRCExactReplayProviderHealthForTest(RCExactReplayProviderHealth health);
+void SetRCExactReplayProviderQuarantineForTest(
+    const std::string& provider, const RCExactReplayProviderHealth& health);
+[[nodiscard]] RCExactReplayQuarantineRecoveryState
+GetRCExactReplayQuarantineRecoveryState(
+    const RCExactReplayProviderHealth& health);
+[[nodiscard]] int64_t RCExactReplayQuarantineBackoffSeconds(
+    const RCExactReplayProviderHealth& health);
 
 /** Observer invoked when strict validation exhausts all eligible providers.
  *
- * Individual provider quarantine is terminal for the life of the process, but
- * a healthy independent provider may preserve validator readiness. Concurrent
- * detection and late-registration reconciliation can deliver a terminal
- * readiness-loss state more than once, so observers must be idempotent. The
- * node layer uses it to withdraw the validation-tier service bits it published
- * at startup on the strength of that provider: a node that can no longer run
- * strict-device ExactReplay must stop telling the network it validates MatMul
- * consensus, rather than keeping a bit that was true only at init time.
+ * Individual provider quarantine auto-recovers after a backoff (transient
+ * ExecutionFailure) or a byte-exact strict-device self-check (divergent).
+ * Concurrent detection and late-registration reconciliation can deliver a
+ * terminal readiness-loss state more than once, so observers must be
+ * idempotent. The node layer uses it to withdraw the validation-tier service
+ * bits it published at startup on the strength of that provider: a node that
+ * can no longer run strict-device ExactReplay must stop telling the network
+ * it validates MatMul consensus, rather than keeping a bit that was true only
+ * at init time.
  *
  * Called with the notifier lifetime lock held, but with no provider-health
  * lock held. Must not re-enter this module. Clear waits for any active callback
@@ -1123,6 +1150,16 @@ using RCValidatorReadinessLossNotifier =
 void SetRCValidatorReadinessLossNotifier(
     RCValidatorReadinessLossNotifier notifier);
 void ClearRCValidatorReadinessLossNotifier();
+
+/** Observer invoked when a previously-lost provider passes a byte-exact
+ * strict-device replay and aggregate validator readiness is restored.
+ * Node layer re-publishes the withdrawn service bits (no restart). */
+using RCValidatorReadinessRestoredNotifier =
+    std::function<void(const std::string& provider,
+                       const std::string& reason)>;
+void SetRCValidatorReadinessRestoredNotifier(
+    RCValidatorReadinessRestoredNotifier notifier);
+void ClearRCValidatorReadinessRestoredNotifier();
 
 /** Toy regtest episodes exercise strict device execution without authorizing a
  * public production provider. Every non-toy shape remains golden-gated. */

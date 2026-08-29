@@ -417,6 +417,7 @@ void Shutdown(NodeContext& node)
     if (node.peerman && node.validation_signals) node.validation_signals->UnregisterValidationInterface(node.peerman.get());
     // The observer captures &node; drop it before connman is torn down.
     matmul::v4::rc::ClearRCValidatorReadinessLossNotifier();
+    matmul::v4::rc::ClearRCValidatorReadinessRestoredNotifier();
     if (node.connman) node.connman->Stop();
 
     StopTorControl();
@@ -3772,9 +3773,29 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 "unavailable (last_provider=%s, reason=%s). Disconnected %u "
                 "peer(s) so they re-handshake without stale service flags. "
                 "This node no longer advertises MatMul consensus validation; "
-                "runtime presence will be re-probed on a bounded cooldown, "
-                "but restart with a fully qualified provider to restore it.\n",
+                "a byte-exact auto-recovery will restore it without restart.\n",
                 provider, reason, dropped);
+        };
+
+    const auto restore_validator_readiness =
+        [&node, rc_runtime_monitor_enabled, rc_runtime_ready](
+            const std::string& provider, const std::string& reason) {
+            if (rc_runtime_monitor_enabled) {
+                rc_runtime_ready->store(true, std::memory_order_release);
+            }
+            node.chainman->GetNotifications().warningUnset(
+                kernel::Warning::MATMUL_RC_NEXT_BLOCK_UNVERIFIABLE);
+            if (!node.connman) return;
+            const ServiceFlags restored{static_cast<ServiceFlags>(
+                static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
+                static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE))};
+            node.connman->AddLocalServices(restored);
+            const size_t reconnected{node.connman->DisconnectAllNodes()};
+            LogWarning(
+                "Restored NODE_MATMUL_CONSENSUS and NODE_MATMUL_ATTESTATION_ARCHIVE "
+                "after byte-exact auto-recovery (provider=%s reason=%s); "
+                "reconnected %u peer(s), no restart required.\n",
+                provider, reason, reconnected);
         };
 
     // Start fail-closed with readiness-dependent bits withheld. This removes
@@ -3788,9 +3809,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // readiness loss caused by pre-network import or ActivateBestChain work.
     matmul::v4::rc::SetRCValidatorReadinessLossNotifier(
         withdraw_validator_readiness);
+    matmul::v4::rc::SetRCValidatorReadinessRestoredNotifier(
+        restore_validator_readiness);
 
     if (!node.connman->Start(scheduler, connOptions)) {
         matmul::v4::rc::ClearRCValidatorReadinessLossNotifier();
+        matmul::v4::rc::ClearRCValidatorReadinessRestoredNotifier();
         return false;
     }
 
@@ -3836,12 +3860,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
         // A production-shape canary can be extremely expensive. This monitor
         // therefore does one cheap, non-secret runtime-identity observation per
-        // cooldown and only while unavailable. It never clears process-lifetime
-        // quarantine, mutates provider registration, runs self-qualification,
-        // reruns a golden canary, or republishes service bits. Those operations
-        // require a single atomic recovery protocol that the provider layer does
-        // not currently expose; claiming recovery from presence alone would be
-        // a fail-open consensus bug.
+        // cooldown and only while unavailable. It never clears quarantine,
+        // mutates provider registration, runs self-qualification, or reruns a
+        // golden canary. Quarantine auto-recovers from a byte-exact strict
+        // replay after backoff (RB-1/N9); claiming recovery from runtime
+        // presence alone would be a fail-open consensus bug.
         scheduler.scheduleEvery(
             [rc_runtime_ready, publish_rc_unverifiable_warning] {
                 if (rc_runtime_ready->load(std::memory_order_acquire)) return;

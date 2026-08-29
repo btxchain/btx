@@ -1931,6 +1931,11 @@ static UniValue BuildBackendRuntimeProfile(
         health.pushKV("reason", provider_health.reason);
         health.pushKV(
             "operator_recovery", provider_health.operator_recovery);
+        health.pushKV("divergent", provider_health.divergent);
+        health.pushKV(
+            "quarantined_at_seconds", provider_health.quarantined_at_seconds);
+        health.pushKV(
+            "recovery_self_checks", provider_health.recovery_self_checks);
         health.pushKV(
             "registered_alternate_providers",
             matmul::v4::rc::GetRCExactReplayAlternateProviders().size());
@@ -6496,6 +6501,9 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::STR, "provider", "Quarantined provider"},
                                     {RPCResult::Type::STR, "reason", "Quarantine reason"},
                                     {RPCResult::Type::STR, "operator_recovery", "Required operator recovery action"},
+                                    {RPCResult::Type::BOOL, "divergent", "True when quarantine is a confirmed digest divergence; false for a transient ExecutionFailure"},
+                                    {RPCResult::Type::NUM, "quarantined_at_seconds", "steady_clock seconds when the current quarantine started"},
+                                    {RPCResult::Type::NUM, "recovery_self_checks", "Successful byte-exact self-checks completed while quarantined"},
                                     {RPCResult::Type::NUM, "registered_alternate_providers", "Bounded independently qualified alternate-provider registry entries"},
                                 }},
                             }},

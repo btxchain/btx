@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -2008,6 +2009,201 @@ BOOST_AUTO_TEST_CASE(
     rc::ClearRCExactReplayAlternateProviders();
     rc::ResetRCProductionCanaryForTest();
     rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_transient_execution_failure_auto_recovers_after_backoff)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    auto header{MakeRCHeader(0x5452414e5349454e)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 honest_digest{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    header.matmul_digest = honest_digest;
+    BOOST_REQUIRE(!honest_digest.IsNull());
+
+    lt::ExactGemmBackend healthy_backend;
+    healthy_backend.gemm_s8s8 = &OracleGemmS8S8;
+    lt::ExactGemmBackend failing_backend;
+    failing_backend.gemm_s8s8 = &DecliningGemmS8S8;
+    const rc::RCExactReplayAcceleration failing{
+        .gemm = failing_backend,
+        .backend = "test:transient-provider",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+
+    // One transient GEMM ExecutionFailure -> quarantined, divergent=false.
+    const auto first{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, failing)};
+    BOOST_CHECK(!first.ok);
+    BOOST_CHECK(first.failure_kind == rc::RCExactReplayFailureKind::ExecutionFailure);
+    BOOST_CHECK(first.provider_quarantined);
+    auto health{rc::GetRCExactReplayProviderHealth()};
+    BOOST_CHECK(health.quarantined);
+    BOOST_CHECK(!health.divergent);
+    BOOST_CHECK_EQUAL(health.quarantine_events, 1U);
+
+    // Immediately after: backoff not due -> provider skipped, block retryable.
+    const rc::RCExactReplayAcceleration healthy{
+        .gemm = healthy_backend,
+        .backend = "test:transient-provider",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto blocked{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, healthy)};
+    BOOST_CHECK(!blocked.ok);
+    BOOST_CHECK(blocked.failure_kind == rc::RCExactReplayFailureKind::ProviderUnavailable);
+
+    // Age the quarantine past the transient backoff (test seam).
+    const int64_t now_seconds{
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()};
+    auto stale{health};
+    stale.quarantined = true;
+    stale.divergent = false;
+    stale.quarantined_at_seconds =
+        now_seconds - 2 * rc::kRCExactReplayTransientQuarantineBackoffSeconds;
+    rc::SetRCExactReplayProviderQuarantineForTest("test:transient-provider", stale);
+
+    // Backoff elapsed: auto un-quarantine; the strict replay is the byte-exact
+    // self-check (zero CPU fallback, digest equality) -> full speed restored.
+    const auto recovered{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, healthy)};
+    BOOST_CHECK(recovered.ok);
+    BOOST_CHECK(recovered.outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK_EQUAL(recovered.digest, honest_digest);
+    BOOST_CHECK_GT(recovered.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(recovered.cpu_gemm_calls, 0U);
+    const auto after{rc::GetRCExactReplayProviderHealth()};
+    BOOST_CHECK(!after.quarantined);
+    BOOST_CHECK(!after.validator_readiness_lost); // readiness auto-restored
+    BOOST_CHECK_GE(after.recovery_self_checks, 1U);
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_divergent_provider_stays_quarantined_until_byte_exact_self_check)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    auto header{MakeRCHeader(0x444956455247454e)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 honest_digest{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    header.matmul_digest = honest_digest;
+    BOOST_REQUIRE(!honest_digest.IsNull());
+    const auto epoch{MakeReplayCapabilityEpoch(params, header.matmul_dim)};
+
+    lt::ExactGemmBackend wrong_backend;
+    wrong_backend.gemm_s8s8 = &WrongGemmS8S8;
+    const auto wrong_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:divergent-a", wrong_backend, epoch)};
+    BOOST_REQUIRE(!wrong_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = wrong_backend,
+        .provider = "test:divergent-a",
+        .capability = wrong_capability,
+    }));
+    lt::ExactGemmBackend healthy_backend;
+    healthy_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const auto healthy_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:divergent-b", healthy_backend, epoch)};
+    BOOST_REQUIRE(!healthy_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = healthy_backend,
+        .provider = "test:divergent-b",
+        .capability = healthy_capability,
+    }));
+    const rc::RCExactReplayAcceleration wrong_primary{
+        .gemm = wrong_backend,
+        .backend = "test:divergent-a",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+
+    // Independent provider reproduces the header: divergence CONFIRMED ->
+    // divergent quarantine (not transient).
+    const auto recovered{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, wrong_primary)};
+    BOOST_CHECK(recovered.ok);
+    BOOST_CHECK_EQUAL(recovered.quarantined_provider, "test:divergent-a");
+    auto health{rc::GetRCExactReplayProviderHealth()};
+    BOOST_CHECK(health.quarantined);
+    BOOST_CHECK(health.divergent);
+    BOOST_CHECK_EQUAL(
+        health.reason, "digest_mismatch_confirmed_by_independent_provider");
+
+    // Even after the divergent backoff elapses, a FAILING re-test keeps the
+    // provider quarantined (only a byte-exact pass clears divergence).
+    const int64_t now_seconds{
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()};
+    auto stale{health};
+    stale.quarantined = true;
+    stale.divergent = true;
+    stale.quarantined_at_seconds =
+        now_seconds - 2 * rc::kRCExactReplayDivergentRecheckBackoffSeconds;
+    rc::SetRCExactReplayProviderQuarantineForTest("test:divergent-a", stale);
+    const auto still_failing{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, wrong_primary)};
+    BOOST_CHECK(!still_failing.ok || still_failing.provider_quarantined);
+    BOOST_CHECK(rc::GetRCExactReplayProviderHealth().quarantined);
+    BOOST_CHECK(rc::GetRCExactReplayProviderHealth().divergent);
+
+    // Independent recovery of the header re-stamps the quarantine. Age it
+    // again so the same provider name can run the byte-exact self-check.
+    const int64_t heal_now_seconds{
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()};
+    auto heal_stale{rc::GetRCExactReplayProviderHealth()};
+    heal_stale.quarantined = true;
+    heal_stale.divergent = true;
+    heal_stale.quarantined_at_seconds =
+        heal_now_seconds - 2 * rc::kRCExactReplayDivergentRecheckBackoffSeconds;
+    rc::SetRCExactReplayProviderQuarantineForTest("test:divergent-a", heal_stale);
+
+    // The SAME aged state with a healthy backend passes byte-exact -> clear.
+    const rc::RCExactReplayAcceleration healthy_primary{
+        .gemm = healthy_backend,
+        .backend = "test:divergent-a",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto healed{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, healthy_primary)};
+    BOOST_CHECK(healed.ok);
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
+    BOOST_CHECK_GE(rc::GetRCExactReplayProviderHealth().recovery_self_checks, 1U);
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_quarantine_backoff_escalates_and_caps)
+{
+    rc::RCExactReplayProviderHealth h;
+    h.quarantined = true;
+    h.divergent = false;
+    h.quarantine_events = 1;
+    BOOST_CHECK_EQUAL(rc::RCExactReplayQuarantineBackoffSeconds(h),
+                      rc::kRCExactReplayTransientQuarantineBackoffSeconds);
+    h.quarantine_events = 2;
+    BOOST_CHECK_EQUAL(rc::RCExactReplayQuarantineBackoffSeconds(h),
+                      2 * rc::kRCExactReplayTransientQuarantineBackoffSeconds);
+    h.quarantine_events = 100;
+    BOOST_CHECK_EQUAL(rc::RCExactReplayQuarantineBackoffSeconds(h),
+                      rc::kRCExactReplayQuarantineBackoffMaxSeconds);
+    h.divergent = true;
+    h.quarantine_events = 1;
+    BOOST_CHECK_EQUAL(rc::RCExactReplayQuarantineBackoffSeconds(h),
+                      rc::kRCExactReplayDivergentRecheckBackoffSeconds);
 }
 
 BOOST_AUTO_TEST_CASE(rc_device_mismatch_auto_fallback_remains_diagnostic_only)
