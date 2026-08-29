@@ -84,6 +84,17 @@ namespace node {
     return known_not_ahead();
 }
 
+/** A connecting duplicate batch needs another GETHEADERS only when it ends
+ *  below the peer's VERSION height. Comparing VERSION to the active tip makes
+ *  a known competing best-header batch re-request itself forever: the locator
+ *  snaps to the active fork, the peer returns the same competing suffix, and
+ *  processing that suffix clears the request timestamp again. */
+[[nodiscard]] inline bool DuplicateHeadersNeedFollowup(
+    int32_t peer_starting_height, int32_t last_header_height)
+{
+    return peer_starting_height > last_header_height;
+}
+
 } // namespace node
 
 #endif // BTX_NODE_HEADER_SYNC_H

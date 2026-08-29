@@ -40,8 +40,12 @@ skip past those holes, and receipt of the roots over P2P must automatically
 activate the authority branch without invalidateblock, reconsiderblock, a
 restart, or any other operator recovery action.
 
-It also guards deep-reorg finality (failure C): a competing rewrite deeper than
-EMERGENCY park_depth must still be refused by both authority and mirror.
+It also guards authenticated deep-reorg recovery (failure C): EMERGENCY
+park_depth must continue to reject an ordinary deep rewrite, but it must not
+strand a consensus signer on a lower-work tip after every replacement body has
+passed local ExactReplay. Once the signer activates that branch, its retained
+old-chain attestations must be replaced automatically and a non-signing mirror
+must follow the newly signed frontier over P2P without an RPC migration.
 
 CheckBlockIndex stays on (-checkblockindex=1; regtest fDefaultConsistencyChecks).
 Gate-evicted unattested HAVE_DATA candidates must not abort the mirror. If the
@@ -270,7 +274,9 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         authority, mirror, loser, relay = self.nodes
 
         self.log.info("Bring up shared tip through Profile-1 activation")
-        self.connect_nodes(0, 1)
+        # Mirror download authority is deliberately outbound: inbound archive
+        # service bits are discovery hints and must not grant body authority.
+        self.connect_nodes(1, 0)
         self.connect_nodes(0, 2)
         self.connect_nodes(0, 3)
         fork_height = ACTIVATION_HEIGHT + 2
@@ -389,9 +395,10 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         )
 
         self.log.info(
-            "Deep-reorg guard: rewrite deeper than park_depth must stay refused"
+            "Authenticated deep recovery: signer ExactReplays past park_depth, "
+            "migrates attestations, and mirror follows automatically"
         )
-        self._test_deep_reorg_refusal(authority, mirror, loser)
+        self._test_deep_authenticated_recovery(authority, mirror, loser)
 
         self.stop_node(0, expected_stderr=INLINE_SIGNER_WARNING)
         self.stop_node(1, expected_stderr=TRUST_WARNING.format(1))
@@ -491,7 +498,7 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         self._disconnect_all()
 
         # Align everyone on the post-convergence tip, then create a fresh race.
-        self.connect_nodes(0, 1)
+        self.connect_nodes(1, 0)
         self.connect_nodes(0, 2)
         self.connect_nodes(0, 3)
         tip_hash = authority.getbestblockhash()
@@ -556,8 +563,16 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         # the followed best-header chain → bodies download → tip moves.
         # Claimed-work download: even when headers_ahead > allowance, tip must
         # advance without invalidateblock / restart.
+        # A requested batch may make the target tip visible briefly before an
+        # earlier body in the same batch finishes the fork transition.  Wait
+        # for both the target tip and a drained block-download queue so this
+        # assertion observes the settled chainstate.
         self.wait_until(
-            lambda: mirror.getbestblockhash() == authority_tip,
+            lambda: (
+                mirror.getbestblockhash() == authority_tip
+                and mirror.getblockcount() == authority_height
+                and all(not peer.get("inflight") for peer in mirror.getpeerinfo())
+            ),
             timeout=300,
         )
         assert_equal(mirror.getblockcount(), authority_height)
@@ -607,7 +622,7 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         """
         self._disconnect_all()
 
-        self.connect_nodes(0, 1)
+        self.connect_nodes(1, 0)
         self.connect_nodes(0, 2)
         self.connect_nodes(0, 3)
         tip_hash = authority.getbestblockhash()
@@ -750,12 +765,12 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         assert_equal(mirror.getbestblockhash(), authority.getbestblockhash())
         self._disconnect_all()
 
-    def _test_deep_reorg_refusal(self, authority, mirror, loser):
+    def _test_deep_authenticated_recovery(self, authority, mirror, loser):
         # Ensure mirror follows authority on the canonical tip first.
         self._disconnect_all()
 
         # Grow a settled tip well above park_depth so a deep rewrite is possible.
-        self.connect_nodes(0, 1)
+        self.connect_nodes(1, 0)
         self.generate(authority, PARK_DEPTH + 3, sync_fun=self.no_op)
         self.wait_until(
             lambda: mirror.getbestblockhash() == authority.getbestblockhash(),
@@ -766,9 +781,6 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         fork_height = tip_height - (PARK_DEPTH + 2)
         assert_greater_than(fork_height, REORG_PROTECTION_START)
         fork_hash = authority.getblockhash(fork_height)
-
-        rejected_before = authority.getdifficultyhealth(5)["reorg_protection"]["rejected_reorgs"]
-        mirror_rejected_before = mirror.getdifficultyhealth(5)["reorg_protection"]["rejected_reorgs"]
 
         self.log.info(
             f"Build competing branch from height {fork_height} deeper than park_depth={PARK_DEPTH}"
@@ -786,34 +798,51 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         assert_greater_than(loser.getblockcount(), tip_height)
         competing_tip = loser.getbestblockhash()
 
-        # Authority is consensus: RPC submit is enough to exercise PARK.
+        # Every replacement body is admitted through the consensus node, so
+        # ExactReplay provenance—not the shared attestation key—is what permits
+        # this signer to escape the local PARK policy. The validation-interface
+        # callback must then replace stale local signatures without an operator
+        # calling migratelocalmatmulattestations.
         submit_chain_via_rpc(loser, authority, stop_hash=fork_hash)
-        assert_equal(authority.getbestblockhash(), tip_hash)
-        assert_equal(authority.getblockcount(), tip_height)
+        self.wait_until(
+            lambda: authority.getbestblockhash() == competing_tip,
+            timeout=300,
+        )
+        assert_equal(authority.getblockcount(), loser.getblockcount())
+        authority.syncwithvalidationinterfacequeue()
 
-        # Mirror: deliver competing bodies with attestations so ActivateBestChain
-        # actually considers the rewrite and must PARK it.
-        submit_attested_chain_via_rpc(loser, mirror, stop_hash=fork_hash)
-        assert_equal(mirror.getbestblockhash(), tip_hash)
-        assert_equal(mirror.getblockcount(), tip_height)
+        def replacement_frontier_ready():
+            attested = authority.getmatmultrustedstatus().get("attested_tip") or {}
+            return (
+                attested.get("height", -1) > tip_height
+                and attested.get("on_active_chain") is True
+            )
 
-        # Competing headers may be known, but must not become the active tip.
-        auth_tips = {t["hash"]: t for t in authority.getchaintips()}
-        assert competing_tip in auth_tips or any(
-            t.get("height", 0) >= loser.getblockcount() for t in authority.getchaintips()
+        self.wait_until(
+            replacement_frontier_ready,
+            timeout=120,
         )
 
         auth_rp = authority.getdifficultyhealth(5)["reorg_protection"]
         mirror_rp = mirror.getdifficultyhealth(5)["reorg_protection"]
-        assert_greater_than_or_equal(auth_rp["rejected_reorgs"], rejected_before + 1)
-        assert_greater_than_or_equal(
-            mirror_rp["rejected_reorgs"], mirror_rejected_before + 1
-        )
         assert_equal(auth_rp["parking_enabled"], True)
         assert_equal(mirror_rp["parking_enabled"], True)
 
-        # Mirror still must not chase the parked rewrite once reconnected to authority.
+        # The mirror receives both bodies and the replacement signed frontier
+        # from its configured authority peer. No submitblock,
+        # submitmatmulattestations, clear RPC, reconsiderblock, restart, or
+        # network toggle is used after the signer changes branch.
         self.connect_nodes(1, 0)
+        self.wait_until(
+            lambda: mirror.getbestblockhash() == competing_tip,
+            timeout=300,
+        )
+        mirror_status = mirror.getmatmultrustedstatus()
+        assert_equal(mirror_status["attested_tip"]["hash"], competing_tip)
+        assert_equal(mirror_status["attested_tip"]["on_active_chain"], True)
+
+        # A subsequent ordinary tip extension must continue to flow; recovery
+        # is incomplete if either node merely lands on another stranded tip.
         self.generate(authority, 1, sync_fun=self.no_op)
         self.wait_until(
             lambda: mirror.getbestblockhash() == authority.getbestblockhash(),

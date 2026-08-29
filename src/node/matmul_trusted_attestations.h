@@ -420,8 +420,15 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
 [[nodiscard]] inline bool TrustedMirrorMayAdoptCompetingAttestedIndex(
     bool attested_suffix_of_active_tip,
     int lca_depth,
-    bool on_signed_frontier_chain = false)
+    bool on_signed_frontier_chain = false,
+    bool signed_frontier_selects_other_branch = false)
 {
+    // Once a newer signed frontier identifies another branch, an older
+    // short-range quorum is historical evidence, not a competing fork-choice
+    // instruction.  Keep waiting for/fetching the selected frontier's bodies
+    // instead of rolling onto the fossil merely because its bodies arrived
+    // first.
+    if (signed_frontier_selects_other_branch) return false;
     return attested_suffix_of_active_tip ||
            TrustedMirrorIsShortTipReorg(lca_depth) ||
            on_signed_frontier_chain;
@@ -687,10 +694,12 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  (its parent is the fork-child). Fetch it once competing headers have
  *  pulled ahead, or descendants stay stuck on parent_has_data_or_is_lca.
  *
- *  Never fetch (or ExactReplay) a twin whose height already has quorum on
- *  a different hash. SignAuthoritative is HeightOccupied; overlay will not
- *  reorg the attested tip. Live 2026-08-24: GETDATA looped on 8b5da5a5 at
- *  199295 (select=root_in_flight) while both GPUs needed to mine 199298.
+ *  A trusted mirror never fetches a twin whose height already has quorum on
+ *  a different hash. A consensus signer may fetch it only when a descendant
+ *  branch has strictly more work; ExactReplay and post-activation local
+ *  attestation replacement remain mandatory. Live 2026-08-24: GETDATA
+ *  looped on 8b5da5a5 at 199295 (select=root_in_flight) while both GPUs
+ *  needed to mine 199298.
  *
  *  A lone EncDr competing sibling with no descendant headers stays off
  *  the device. This is fetch + ExactReplay, not ConnectTip: equal-work
@@ -709,10 +718,20 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     bool better_or_equal_work,
     bool parent_has_data_or_is_lca,
     bool competing_headers_pulled_ahead,
-    bool competing_quorum_at_index = false)
+    bool competing_quorum_at_index = false,
+    bool local_signer_strictly_more_work_branch = false)
 {
     if (!has_local_signer && !is_trusted_mirror) return false;
     if (!has_tip || !has_index || index_is_tip || index_failed) return false;
+    // A consensus signer validates bodies itself. Once a valid descendant
+    // establishes strictly more claimed work, fetch that branch root-first at
+    // any depth and ExactReplay it before ordinary most-work activation. The
+    // six-block bound and occupied-height refusal belong to trusted mirrors;
+    // applying them here stranded signers on a lower-work signed branch.
+    if (local_signer_strictly_more_work_branch && has_local_signer &&
+        !is_trusted_mirror) {
+        return parent_has_data_or_is_lca;
+    }
     if (competing_quorum_at_index) return false;
     // Twin of the tip or of an ancestor. Do not require work >= current
     // tip: an ancestor twin has less chainwork once the attested chain
@@ -750,9 +769,10 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  tip but never complete header sync (synced_headers=-1). Overlay
  *  RecalculateBestHeader pins m_best_header, so BestKnown stays unset and
  *  FindNextBlocksToDownload logs no_best_known. Seed BestKnown from the
- *  local claimed-work competing fork so GETDATA can start. Local signer
- *  and trusted archive (the latter so signers can GETDATA the persisted
- *  body). Independent consensus miners without a local signer keep skip. */
+ *  local claimed-work competing fork so GETDATA can start. Never seed above
+ *  the individual peer's VERSION starting height. Local signer and trusted
+ *  archive (the latter so signers can GETDATA the persisted body).
+ *  Independent consensus miners without a local signer keep skip. */
 [[nodiscard]] inline bool SeedLocalSignerLostTwinBestKnown(
     bool has_local_signer,
     bool is_trusted_mirror,
@@ -760,16 +780,77 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     int starting_height,
     int tip_height,
     int claimed_height,
-    bool claimed_is_short_reorg_competing_fork,
+    bool claimed_is_eligible_competing_fork,
     bool claimed_work_ge_tip,
-    bool fork_child_height_occupied = false)
+    bool fork_child_height_occupied = false,
+    bool local_signer_strictly_more_work_branch = false)
 {
     if (!has_local_signer && !is_trusted_mirror) return false;
     if (!best_known_unset) return false;
     if (starting_height <= tip_height) return false;
     if (claimed_height <= tip_height) return false;
-    if (fork_child_height_occupied) return false;
-    return claimed_is_short_reorg_competing_fork && claimed_work_ge_tip;
+    if (fork_child_height_occupied &&
+        !(local_signer_strictly_more_work_branch && has_local_signer &&
+          !is_trusted_mirror)) {
+        return false;
+    }
+    return claimed_is_eligible_competing_fork && claimed_work_ge_tip;
+}
+
+/** Cap a locally inferred BestKnown header at what this peer claimed in its
+ * VERSION message. A negative starting height means no usable cap. */
+[[nodiscard]] inline int32_t ClampSyntheticBestKnownHeightToPeer(
+    int32_t seed_height, int32_t starting_height)
+{
+    if (seed_height < 0 || starting_height < 0) return seed_height;
+    return std::min(seed_height, starting_height);
+}
+
+/** A signer may inspect a valid, strictly-higher-work branch at any fork
+ * depth because every body remains subject to ExactReplay. This is
+ * deliberately separate from TRUSTED_MIRROR_SHORT_REORG_DEPTH: a mirror
+ * cannot turn a claimed-work header tower into validation authority. The
+ * download caller separately excludes parked branches; fully downloaded and
+ * ExactReplay-proven branches may later be unparked by chain selection. */
+[[nodiscard]] inline bool LocalSignerMayRecoverGreaterWorkBranch(
+    bool has_local_signer,
+    bool is_trusted_mirror,
+    bool candidate_valid_tree,
+    bool candidate_failed,
+    bool candidate_extends_tip,
+    bool candidate_strictly_more_work)
+{
+    return has_local_signer && !is_trusted_mirror && candidate_valid_tree &&
+           !candidate_failed && !candidate_extends_tip &&
+           candidate_strictly_more_work;
+}
+
+/** Post-activation authorization for replacing this process's stale local
+ * commitment. Published signatures remain irrevocable, but the local mint
+ * slot may follow an ordinary strictly-more-work reorg only when the active
+ * replacement was fully stored, script-valid, and locally ExactReplayed.
+ * Trusted mirrors never enter this signer mutation path. */
+[[nodiscard]] inline bool LocalSignerMayAutomaticallyReplaceAttestation(
+    bool has_local_signer,
+    bool is_trusted_mirror,
+    bool consensus_validation,
+    bool old_hash_off_active_chain,
+    bool replacement_on_active_chain,
+    bool replacement_differs,
+    bool replacement_has_data,
+    bool replacement_valid_scripts,
+    bool replacement_exact_replay_verified,
+    bool replacement_failed,
+    bool active_tip_strictly_more_work_than_old_hash,
+    bool old_hash_belongs_to_reorg_branch)
+{
+    return has_local_signer && !is_trusted_mirror && consensus_validation &&
+           old_hash_off_active_chain && replacement_on_active_chain &&
+           replacement_differs && replacement_has_data &&
+           replacement_valid_scripts && replacement_exact_replay_verified &&
+           !replacement_failed &&
+           active_tip_strictly_more_work_than_old_hash &&
+           old_hash_belongs_to_reorg_branch;
 }
 
 /** FindMostWorkChain / candidate-set gate for any node that tracks a
@@ -1568,10 +1649,17 @@ static constexpr int32_t ATTESTOR_DRIFT_YIELD_DEPTH{6};
     int starting_height = std::numeric_limits<int>::max(),
     int tip_height = std::numeric_limits<int>::min(),
     int best_known_height = std::numeric_limits<int>::min(),
-    bool best_known_extends_tip = false)
+    bool best_known_extends_tip = false,
+    bool next_block_attestation_active = true)
 {
     if (!signed_frontier_catch_up) return true;
     if (!version_handshake_complete) return false;
+    // A mirror may enter signed-frontier catch-up while its active tip is
+    // still below the first attestation-active height. Let any otherwise
+    // block-serving peer provide that ordinary root block: it receives full
+    // validation and cannot carry a trusted replay attestation yet. The
+    // authority-source restriction resumes at the first active height.
+    if (!next_block_attestation_active) return true;
     // Manual/noban includes sibling archive -connect, not only the GPU.
     // Live public CPU archive 2026-08-17: GETDATA for tip+1 went to a behind sibling
     // (VERSION height 190767 vs tip 190816) and occupied the 1-wide slot.
@@ -1797,23 +1885,25 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     return this_peer_handshake_complete;
 }
 
-/** Do not ProcessMessages non-archive peers while we must serve an
- *  archive or while a trusted mirror is catching up to the GPU frontier.
- *  Must skip outbound miners too: ClassifyMsghandPeer still puts every
- *  outbound in Preferred, and the inbound-only skip left addrman
- *  GETDATA on the signer draining BLOCK under cs_main (live 46s/block
- *  after bd3f6b5f). Handshake and ARCHIVE/MIRROR still run. */
+/** Do not ProcessMessages non-archive peers while a signer must serve an
+ *  archive, or unauthenticated peers while a trusted mirror catches up.
+ *  The signer-side gate must skip outbound miners too: ClassifyMsghandPeer
+ *  still puts every outbound in Preferred, and the inbound-only skip left
+ *  addrman GETDATA on the signer draining BLOCK under cs_main (live 46s/block
+ *  after bd3f6b5f). A mirror's manual/NoBan recovery source is different:
+ *  the body-download policy explicitly permits it, so suppressing its
+ *  HEADERS, PONG, and BLOCK queue wedges recovery before GETDATA can run.
+ *  Handshake and ARCHIVE/MIRROR peers always run. */
 [[nodiscard]] inline bool SkipMinerProcessMessagesDuringArchiveGetData(
     bool local_signer,
     bool archive_getdata_pending,
     bool trusted_mirror_catch_up,
     bool this_peer_inbound,
-    bool this_peer_manual,
+    bool this_peer_manual_or_noban,
     bool this_peer_handshake_complete,
     bool this_is_archive_serve_target)
 {
     (void)this_peer_inbound;
-    (void)this_peer_manual;
     // The signer-side skip is gated on archive GETDATA actually being
     // pending. Discarding archive_getdata_pending here turned this into
     // an unconditional skip of every fully-handshaked non-ARCHIVE/MIRROR
@@ -1825,8 +1915,10 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     // sent.headers==0 for every no-bit / CONSENSUS-only peer). Serving
     // headers is a read; authority rules govern which BODIES we trust,
     // not who may ask us questions.
-    const bool skip_now{(local_signer && archive_getdata_pending) ||
-                        trusted_mirror_catch_up};
+    const bool signer_skip{local_signer && archive_getdata_pending};
+    const bool mirror_skip{trusted_mirror_catch_up &&
+                           !this_peer_manual_or_noban};
+    const bool skip_now{signer_skip || mirror_skip};
     if (!skip_now) return false;
     if (this_is_archive_serve_target) return false;
     if (!this_peer_handshake_complete) return false;
@@ -1867,15 +1959,18 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
            (blocks_behind > 0 || followed_ahead_uncapped > 0);
 }
 
-/** GPU-attestor body without local quorum: persist, GETMMATTEST, do not
- *  HEADER_ONLY-drop (live re-getdata then 102s timeout). Connect only
- *  once attestation covers the hash. */
+/** Profile-1 GPU-attestor body without local quorum: persist, GETMMATTEST, do
+ *  not HEADER_ONLY-drop (live re-getdata then 102s timeout). Connect only once
+ *  attestation covers the hash. Pre-activation bodies must take their normal
+ *  validation path because no attestation can exist for them. */
 [[nodiscard]] inline bool TrustedMirrorRetainGpuBodyAwaitingAttestation(
     bool trusted_mirror,
     bool from_gpu_attestor,
-    bool has_quorum)
+    bool has_quorum,
+    bool attestation_active)
 {
-    return trusted_mirror && from_gpu_attestor && !has_quorum;
+    return trusted_mirror && from_gpu_attestor && !has_quorum &&
+           attestation_active;
 }
 
 /** Retry delay after retaining a GPU body that still lacks quorum.

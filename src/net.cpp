@@ -3601,7 +3601,9 @@ void CConnman::ThreadMessageHandler()
                         SkipMinerProcessMessagesDuringArchiveGetData(
                             local_signer, archive_getdata_pending,
                             trusted_mirror_catch_up,
-                            pnode->IsInboundConn(), pnode->IsManualConn(),
+                            pnode->IsInboundConn(),
+                            pnode->IsManualConn() ||
+                                pnode->HasPermission(NetPermissionFlags::NoBan),
                             pnode->fSuccessfullyConnected.load(),
                             archive_target)) {
                     // Do not set fMoreWork: that busy-spins msghand at

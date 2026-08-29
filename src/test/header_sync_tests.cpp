@@ -63,4 +63,15 @@ BOOST_AUTO_TEST_CASE(must_probe_table)
     BOOST_CHECK(node::HeaderSyncMustProbe(199310, 199310, true, true, false));
 }
 
+BOOST_AUTO_TEST_CASE(duplicate_headers_followup_uses_batch_end)
+{
+    // Peer has fulfilled its advertised height: do not hot-loop the same
+    // competing suffix merely because the active tip is still behind it.
+    BOOST_CHECK(!node::DuplicateHeadersNeedFollowup(
+        /*peer_starting_height=*/203881, /*last_header_height=*/203881));
+    BOOST_CHECK(!node::DuplicateHeadersNeedFollowup(203880, 203881));
+    // A partial duplicate batch below VERSION can still have a continuation.
+    BOOST_CHECK(node::DuplicateHeadersNeedFollowup(203881, 203850));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

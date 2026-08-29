@@ -391,9 +391,11 @@ LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_com
 LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
                                                          const CBlockIndex* tip,
                                                          const CBlockIndex* best_known,
-                                                         const CChain* active_chain)
+                                                         const CChain* active_chain,
+                                                         bool preserve_competing_root)
 {
     if (tip == nullptr || in.last_common == nullptr) return in;
+    if (preserve_competing_root) return in;
     if (in.last_common->nHeight >= tip->nHeight) return in;
 
     LastCommonRootFirstResult out = in;

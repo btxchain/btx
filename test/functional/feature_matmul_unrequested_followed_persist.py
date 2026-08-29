@@ -17,7 +17,8 @@ must remain getdata-eligible (p2p_unrequested_blocks.py).
 This test:
   - loads an attested snapshot so pre-snapshot hashes are followed holes
     (ancestors of the snapshot tip) with no HAVE_DATA
-  - pushes those bodies unrequested over P2P and requires HAVE_DATA
+  - pushes those bodies unrequested from an outbound archive and requires
+    HAVE_DATA (unsolicited inbound bodies remain authority-only)
   - pushes an unrequested low-work competing fork and requires it is NOT
     persisted
   - reconnects to the archive and requires <20 Requesting-block log lines
@@ -39,7 +40,6 @@ from test_framework.util import (
     assert_equal,
     assert_greater_than,
     assert_greater_than_or_equal,
-    assert_raises_rpc_error,
 )
 from test_framework.authproxy import JSONRPCException
 from test_framework.wallet_util import generate_keypair
@@ -281,7 +281,16 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
             "Deliver unrequested followed-chain bodies; they must persist HAVE_DATA"
         )
         log_start = mirror.debug_log_size(encoding="utf-8")
-        peer = mirror.add_p2p_connection(P2PInterface(), services=ARCHIVE_SERVICES)
+        # Recovery downloads come from an archive/mirror connection selected
+        # outbound by this node. An inbound P2P fixture is intentionally
+        # rejected by the authority-only unsolicited-body gate even when it
+        # merely advertises the archive service bit.
+        peer = mirror.add_outbound_p2p_connection(
+            P2PInterface(),
+            p2p_idx=0,
+            connection_type="outbound-full-relay",
+            services=ARCHIVE_SERVICES,
+        )
         for blockhash in pre_snapshot_hashes:
             raw = archive.getblock(blockhash, False)
             block = from_hex(CBlock(), raw)
@@ -294,15 +303,16 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
         genesis = int("0x" + archive.getblockhash(0), 0)
         competing = create_block(genesis, create_coinbase(1), int(time.time()) + 50)
         competing.solve()
-        peer.send_and_ping(msg_block(competing))
-        assert_raises_rpc_error(
-            -1,
-            "Block not available (not fully downloaded)",
-            mirror.getblock,
-            competing.hash,
-        )
+        # The anti-DoS rejection disconnects this outbound source before it can
+        # answer a synchronization ping. The disconnect is the expected wire
+        # result; verify the body stayed unavailable afterward.
+        with mirror.assert_debug_log(
+            expected_msgs=["invalid claimed block-header work"]
+        ):
+            peer.send_message(msg_block(competing))
+            peer.wait_for_disconnect()
+        assert not body_available(mirror, competing.hash)
 
-        peer.peer_disconnect()
         mirror.disconnect_p2ps()
 
         self.log.info("Reconnect; followed hashes must not unbounded re-getdata")

@@ -974,6 +974,10 @@ public:
 
     void TryAddBlockIndexCandidate(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Re-add already-held descendants of the selected trusted signed
+     * frontier after a fork-root transition changes their eligibility. */
+    bool ReconsiderTrustedSignedFrontierCandidates() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     void PruneBlockIndexCandidates();
 
     void ClearBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

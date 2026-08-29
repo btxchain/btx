@@ -697,12 +697,15 @@ LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_com
  * lowest_missing=twin of the active tip).
  *
  * A hole that is not a descendant of `tip` is dropped. Descendants of the
- * connected tip (the way forward) are re-derived from `tip`.
+ * connected tip (the way forward) are re-derived from `tip`. Callers that
+ * have independently authorized a competing recovery branch pass
+ * `preserve_competing_root`; its fork root must remain requestable.
  */
 LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
                                                          const CBlockIndex* tip,
                                                          const CBlockIndex* best_known,
-                                                         const CChain* active_chain);
+                                                         const CChain* active_chain,
+                                                         bool preserve_competing_root = false);
 
 /** Get a locator for a block index entry. */
 CBlockLocator GetLocator(const CBlockIndex* index);

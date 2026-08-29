@@ -12,8 +12,9 @@ competing most-work headers-only tree must not be fetched or activated.
 
 This test:
   - dumps an attested snapshot at height H on the signer archive
-  - gives the trusted mirror headers H+1..H+N (no bodies) plus a heavier
-    unattested competing headers-only fork from H
+  - gives the trusted mirror the shared headers through H, a heavier
+    unattested competing headers-only fork, and then the signed H+1..H+N
+    frontier (all without bodies)
   - loads the snapshot with loadtxoutsetattested
   - restarts the mirror and checks the snapshot chainstate survives
   - reconnects over P2P only (no getblockfrompeer / invalidateblock /
@@ -172,7 +173,21 @@ class MatMulTrustedMirrorFollowForwardTest(BitcoinTestFramework):
         ]
         peer = dest.add_p2p_connection(P2PInterface(), services=services)
         if not with_attestations:
-            peer.send_and_ping(msg_headers(headers=headers))
+            # Processing these headers can put the mirror into catch-up mode,
+            # which deliberately deprioritizes subsequent messages from this
+            # unauthenticated inbound peer (including the synchronization
+            # PING). Observe header admission through read-only RPC instead of
+            # turning that scheduler policy into a test deadlock.
+            peer.send_message(msg_headers(headers=headers))
+
+            def final_header_known():
+                try:
+                    dest.getblockheader(hashes[-1])
+                    return True
+                except JSONRPCException:
+                    return False
+
+            self.wait_until(final_header_known, timeout=180)
             peer.peer_disconnect()
             dest.disconnect_p2ps()
             return
@@ -277,41 +292,50 @@ class MatMulTrustedMirrorFollowForwardTest(BitcoinTestFramework):
         )
 
         followed_hashes = collect_hashes(authority, authority_tip, genesis_hash)
+        competing_headers = collect_hashes(
+            competitor, competing_tip, genesis_hash
+        )
         competing_suffix = collect_hashes(competitor, competing_tip, snapshot_hash)
+        assert_equal(
+            len(competing_headers), SNAPSHOT_HEIGHT + COMPETING_COUNT
+        )
         assert_equal(len(competing_suffix), COMPETING_COUNT)
         missing_followed = followed_hashes[SNAPSHOT_HEIGHT:]
         assert_equal(len(missing_followed), FORWARD_COUNT)
 
         self.log.info(
-            "Mirror (genesis): attested headers through H+N, then competing headers-only"
+            "Mirror (genesis): competing header tree, then the signed H+N "
+            "frontier"
         )
         assert_equal(mirror.getblockcount(), 0)
+        # Competing most-work headers are accepted into the index so the
+        # test can prove they stay headers-only. They extend H, so snapshot
+        # load still sees the snapshot base on the header chain. Deliver the
+        # shared prefix and suffix in one HEADERS message: once headers pull
+        # ahead, the mirror intentionally deprioritizes later messages from an
+        # unauthenticated inbound peer while it waits for signed authority.
         self._push_headers(
             mirror,
-            followed_hashes,
+            competing_headers,
+            competitor,
+            services=NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS,
+            with_attestations=False,
+        )
+        # Activate signed-frontier catch-up only after the public competitor is
+        # known. During catch-up, unauthenticated inbound queues are deliberately
+        # deprioritized; attempting to inject this branch afterward would test
+        # scheduler policy rather than snapshot follow-forward.
+        self._push_headers(
+            mirror,
+            missing_followed,
             authority,
             services=ARCHIVE_SERVICES,
             with_attestations=True,
         )
         self.wait_until(
             lambda: mirror.getblockchaininfo()["headers"] >= authority_height
-            and any(t["hash"] == authority_tip for t in mirror.getchaintips()),
-            timeout=180,
-        )
-        # Competing most-work headers are accepted into the index so the
-        # test can prove they stay headers-only. They extend H, so snapshot
-        # load still sees the snapshot base on the header chain.
-        self._push_headers(
-            mirror,
-            competing_suffix,
-            competitor,
-            services=NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS,
-            with_attestations=False,
-        )
-        self.wait_until(
-            lambda: any(
-                t["hash"] == competing_tip for t in mirror.getchaintips()
-            ),
+            and any(t["hash"] == authority_tip for t in mirror.getchaintips())
+            and any(t["hash"] == competing_tip for t in mirror.getchaintips()),
             timeout=180,
         )
         tips = {t["hash"]: t for t in mirror.getchaintips()}

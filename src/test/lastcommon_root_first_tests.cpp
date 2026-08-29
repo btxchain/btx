@@ -299,4 +299,39 @@ BOOST_AUTO_TEST_CASE(last_common_behind_tip_advances_past_same_height_twin)
     BOOST_CHECK(advanced.lowest_missing == nullptr);
 }
 
+BOOST_AUTO_TEST_CASE(authorized_competing_recovery_preserves_missing_root)
+{
+    ChainFixture f;
+    CBlockIndex* genesis = f.Add(nullptr, 0);
+    ChainFixture::MarkHaveData(genesis, /*have_chain_txs=*/true);
+    CBlockIndex* fork = f.Add(genesis, 1);
+    ChainFixture::MarkHaveData(fork, /*have_chain_txs=*/true);
+
+    CBlockIndex* active = fork;
+    for (int h = 2; h <= 7; ++h) {
+        active = f.Add(active, h);
+        ChainFixture::MarkHaveData(active, /*have_chain_txs=*/true);
+    }
+
+    CBlockIndex* recovery_root = f.Add(fork, 2);
+    CBlockIndex* recovery_tip = recovery_root;
+    for (int h = 3; h <= 12; ++h) {
+        recovery_tip = f.Add(recovery_tip, h);
+    }
+
+    CChain active_chain;
+    active_chain.SetTip(*active);
+    const LastCommonRootFirstResult clamped = ClampLastCommonToRootFirst(
+        /*last_common=*/fork, recovery_tip, active, &active_chain);
+    BOOST_REQUIRE(clamped.lowest_missing != nullptr);
+    BOOST_CHECK(clamped.lowest_missing == recovery_root);
+
+    const LastCommonRootFirstResult preserved = AdvanceLastCommonPastActiveTip(
+        clamped, active, recovery_tip, &active_chain,
+        /*preserve_competing_root=*/true);
+    BOOST_CHECK(preserved.last_common == fork);
+    BOOST_CHECK(preserved.lowest_missing == recovery_root);
+    BOOST_CHECK_NE(std::string(preserved.reason), "advanced_past_active_tip");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

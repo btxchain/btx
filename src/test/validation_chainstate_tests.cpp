@@ -13,6 +13,7 @@
 #include <matmul/trusted_exact_replay_attestation.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/warnings.h>
+#include <net_processing.h>
 #include <pow.h>
 #include <random.h>
 #include <rpc/blockchain.h>
@@ -3573,6 +3574,149 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_rejoins_deep_signed_frontier, 
                 nullptr);
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstate_consensus_signer_exact_replay_escapes_deep_reorg_park, TestChain100Setup)
+{
+    // TRUSTED_MIRROR_SHORT_REORG_DEPTH and emergency PARK must not strand a
+    // consensus signer after every body on a strictly-higher-work branch has
+    // local ExactReplay provenance. Claimed headers or a trusted mirror do not
+    // receive this escape.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& action = const_cast<kernel::DeepReorgAction&>(
+        chainman.m_options.deep_reorg_action);
+    auto& park_depth = const_cast<std::optional<uint32_t>&>(
+        chainman.m_options.max_reorg_depth_park);
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        chainman.m_options.matmul_validation_mode);
+    const int32_t saved_start{consensus.nReorgProtectionStartHeight};
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_bmx{consensus.nMatMulBMX4CHeight};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    const auto saved_action{action};
+    const auto saved_park_depth{park_depth};
+    const auto saved_mode{mode};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t start;
+        int32_t v4;
+        int32_t bmx;
+        int32_t rc;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nReorgProtectionStartHeight = start;
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulBMX4CHeight = bmx;
+            consensus.nMatMulRCHeight = rc;
+            action = saved_action;
+            park_depth = saved_park_depth;
+            mode = saved_mode;
+        }
+    } restore{consensus, saved_start, saved_v4, saved_bmx, saved_rc,
+              action, saved_action, park_depth, saved_park_depth, mode,
+              saved_mode};
+
+    consensus.nReorgProtectionStartHeight = 10;
+    action = kernel::DeepReorgAction::PARK;
+    park_depth = node::matmul_trusted::TRUSTED_MIRROR_SHORT_REORG_DEPTH;
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    const CScript script_a{
+        GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    CKey branch_b_dest;
+    branch_b_dest.MakeNewKey(/*fCompressed=*/true);
+    const CScript script_b{
+        GetScriptForDestination(PKHash(branch_b_dest.GetPubKey()))};
+    CBlockIndex* const fork{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(fork != nullptr);
+    constexpr int kOldDepth{
+        node::matmul_trusted::TRUSTED_MIRROR_SHORT_REORG_DEPTH + 2};
+
+    std::vector<CBlockIndex*> old_branch;
+    for (int i = 0; i < kOldDepth; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script_a)};
+        old_branch.push_back(WITH_LOCK(::cs_main, {
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        }));
+        BOOST_REQUIRE(old_branch.back() != nullptr);
+    }
+    CBlockIndex* const old_tip{old_branch.back()};
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, old_branch.front()));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == fork);
+
+    std::vector<CBlockIndex*> replacement_branch;
+    for (int i = 0; i < kOldDepth + 1; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script_b)};
+        replacement_branch.push_back(WITH_LOCK(::cs_main, {
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        }));
+        BOOST_REQUIRE(replacement_branch.back() != nullptr);
+    }
+    CBlockIndex* const replacement_tip{replacement_branch.back()};
+    BOOST_REQUIRE_GT(replacement_tip->nChainWork, old_tip->nChainWork);
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(
+        state, replacement_branch.front()));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(old_branch.front());
+    }
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) ==
+                  old_tip);
+
+    const int32_t activation_height{fork->nHeight + 1};
+    consensus.nMatMulV4Height = activation_height;
+    consensus.nMatMulBMX4CHeight = activation_height;
+    consensus.nMatMulRCHeight = activation_height;
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(
+        activation_height));
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'e')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/true,
+        std::chrono::milliseconds{50}, error));
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(replacement_branch.front());
+        for (CBlockIndex* index : replacement_branch) {
+            BOOST_REQUIRE(index->nStatus & BLOCK_HAVE_DATA);
+            BOOST_REQUIRE(index->IsValid(BLOCK_VALID_TRANSACTIONS));
+            index->nStatus |= BLOCK_EXACT_REPLAY_VERIFIED;
+        }
+        chainstate.TryAddBlockIndexCandidate(replacement_tip);
+    }
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) ==
+                  replacement_tip);
+    BOOST_CHECK(!WITH_LOCK(::cs_main, {
+        return chainman.IsOnParkedReorgBranch(replacement_tip);
+    }));
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_connects_frontier_suffix_without_per_block_quorum, TestChain100Setup)
 {
     // Dumb-mirror catch-up: the GPU attests only the frontier hash. Archives
@@ -4284,10 +4428,35 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attestation_recovery_freshly_exact_replays_ac
                       matmul::trusted::AddResult::Accepted);
     }
 
-    // One explicitly acknowledged migration transaction discovers the fork
-    // range, freshly replays the active replacement, clears the stale local
-    // commitment, signs the replacement, and queues its relay. Operators do
-    // not perform one clear plus one GETMMATTEST request per height.
+    // Model the UpdatedBlockTip notification emitted by the completed reorg.
+    // The signer automatically clears only its off-chain fork commitment,
+    // signs the already-ExactReplay-proven active replacement, and includes
+    // the strictly-ahead frontier for non-signing mirrors. No clear,
+    // migration, GETMMATTEST, or network-pause RPC is required.
+    BOOST_REQUIRE(m_node.validation_signals != nullptr);
+    BOOST_REQUIRE(m_node.peerman != nullptr);
+    m_node.validation_signals->RegisterValidationInterface(
+        m_node.peerman.get());
+    struct ScopedPeermanRegistration {
+        ValidationSignals& signals;
+        PeerManager* peerman;
+        ~ScopedPeermanRegistration()
+        {
+            signals.UnregisterValidationInterface(peerman);
+        }
+    } peerman_registration{*m_node.validation_signals,
+                           m_node.peerman.get()};
+    m_node.validation_signals->UpdatedBlockTip(
+        replacement_frontier_index, parent,
+        /*fInitialDownload=*/false);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(node::matmul_trusted::Get(
+                    occupied_hash, replacement_height).empty());
+    BOOST_CHECK(!node::matmul_trusted::Get(
+                     replacement->GetHash(), replacement_height).empty());
+
+    // The operator RPC remains an idempotent diagnostic/relay fallback. After
+    // automatic reconciliation it must report no mutation work.
     JSONRPCRequest migration_request;
     migration_request.context = &m_node;
     migration_request.strMethod = "migratelocalmatmulattestations";
@@ -4309,8 +4478,8 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attestation_recovery_freshly_exact_replays_ac
                       replacement_frontier->GetHash().GetHex());
     BOOST_CHECK_EQUAL(migration["fork_height"].getInt<int32_t>(),
                       parent->nHeight);
-    BOOST_CHECK_EQUAL(migration["migrated_count"].getInt<int>(), 1);
-    BOOST_CHECK_EQUAL(migration["already_migrated_count"].getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(migration["migrated_count"].getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(migration["already_migrated_count"].getInt<int>(), 1);
     BOOST_CHECK_EQUAL(migration["relayed_attestation_count"].getInt<int>(), 2);
     BOOST_CHECK_EQUAL(migration["relay_peers"].getInt<int>(), 0);
     BOOST_CHECK(migration["mirror_auto_migration_ready"].get_bool());
@@ -4322,23 +4491,13 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attestation_recovery_freshly_exact_replays_ac
         migration["relayed_frontier"]["hash"].get_str(),
         replacement_frontier->GetHash().GetHex());
     BOOST_CHECK(!migration["chain_selection_operation_performed"].get_bool());
-    BOOST_REQUIRE_EQUAL(migration["migrations"].size(), 1U);
-    BOOST_CHECK_EQUAL(migration["migrations"][0]["height"].getInt<int32_t>(),
-                      replacement_height);
-    BOOST_CHECK_EQUAL(
-        migration["migrations"][0]["cleared_blockhash"].get_str(),
-        occupied_hash.GetHex());
-    BOOST_CHECK_EQUAL(
-        migration["migrations"][0]["replacement_blockhash"].get_str(),
-        replacement->GetHash().GetHex());
+    BOOST_REQUIRE_EQUAL(migration["migrations"].size(), 0U);
     BOOST_CHECK(node::matmul_trusted::Get(
                     occupied_hash, replacement_height).empty());
     BOOST_CHECK(!node::matmul_trusted::Get(
                      replacement->GetHash(), replacement_height).empty());
 
-    // A retry is a relay-only no-op for the already migrated height. This is
-    // how a reconnecting mirror receives the replacements without another
-    // manual per-block export/request pass.
+    // A retry remains a relay-only no-op for reconnect diagnostics.
     const UniValue repeated_migration{tableRPC.execute(migration_request)};
     BOOST_CHECK_EQUAL(
         repeated_migration["migrated_count"].getInt<int>(), 0);

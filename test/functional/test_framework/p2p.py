@@ -56,9 +56,11 @@ from test_framework.messages import (
     msg_getcfilters,
     msg_getdata,
     msg_getheaders,
+    msg_getmmattest,
     msg_getmmsketch,
     msg_generic,
     msg_mmsketch,
+    msg_mmattest,
     msg_headers,
     msg_inv,
     msg_mempool,
@@ -143,10 +145,12 @@ MESSAGEMAP = {
     b"getcfilters": msg_getcfilters,
     b"getdata": msg_getdata,
     b"getheaders": msg_getheaders,
+    b"getmmattest": msg_getmmattest,
     b"getmmsketch": msg_getmmsketch,
     b"headers": msg_headers,
     b"inv": msg_inv,
     b"mmsketch": msg_mmsketch,
+    b"mmattest": msg_mmattest,
     b"mempool": msg_mempool,
     b"merkleblock": msg_merkleblock,
     b"notfound": msg_notfound,
@@ -560,9 +564,11 @@ class P2PInterface(P2PConnection):
     def on_getblocktxn(self, message): pass
     def on_getdata(self, message): pass
     def on_getheaders(self, message): pass
+    def on_getmmattest(self, message): pass
     def on_getmmsketch(self, message): pass
     def on_headers(self, message): pass
     def on_mmsketch(self, message): pass
+    def on_mmattest(self, message): pass
     def on_mempool(self, message): pass
     def on_merkleblock(self, message): pass
     def on_notfound(self, message): pass

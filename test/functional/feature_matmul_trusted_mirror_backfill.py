@@ -20,6 +20,7 @@ Coverage:
 
 import os
 import re
+import shutil
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -123,6 +124,15 @@ class MatMulTrustedMirrorBackfillTest(BitcoinTestFramework):
         )
         assert os.path.exists(attest_path), attest_path
         os.remove(attest_path)
+        # The durable LevelDB and append-only WAL supersede the legacy
+        # snapshot file. Remove all three stores so this test continues to
+        # exercise historical regeneration rather than restart recovery.
+        attest_db_path = attest_path + ".db"
+        attest_wal_path = attest_path + ".wal"
+        assert os.path.isdir(attest_db_path), attest_db_path
+        shutil.rmtree(attest_db_path)
+        if os.path.exists(attest_wal_path):
+            os.remove(attest_wal_path)
         self.start_node(0, extra_args=self.archive_args)
         assert_equal(authority.getblockcount(), tip_height)
         assert_equal(authority.getbestblockhash(), authority_tip)

@@ -9792,6 +9792,46 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
         signed_frontier_on_competing_fork);
 }
 
+//! A consensus signer can safely escape local deep-reorg parking only after
+//! every Profile-1 body on the competing path is stored and has persistent
+//! local ExactReplay provenance. Claimed headers alone never qualify, and a
+//! trusted mirror can never acquire this authority.
+static bool LocalSignerExactReplayReorgCandidate(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* candidate)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (tip == nullptr || candidate == nullptr ||
+        !node::matmul_trusted::LocalSignerMayRecoverGreaterWorkBranch(
+            node::matmul_trusted::HasLocalSigner(),
+            node::matmul_trusted::IsTrustedMirror(),
+            candidate->IsValid(BLOCK_VALID_TRANSACTIONS),
+            (candidate->nStatus & BLOCK_FAILED_MASK) != 0,
+            candidate->nHeight >= tip->nHeight &&
+                candidate->GetAncestor(tip->nHeight) == tip,
+            candidate->nChainWork > tip->nChainWork)) {
+        return false;
+    }
+    const CBlockIndex* const fork{LastCommonAncestor(tip, candidate)};
+    if (fork == nullptr) return false;
+    for (const CBlockIndex* walk{candidate}; walk != fork;
+         walk = walk->pprev) {
+        if (walk == nullptr ||
+            (walk->nStatus & BLOCK_FAILED_MASK) != 0 ||
+            (walk->nStatus & BLOCK_HAVE_DATA) == 0 ||
+            !walk->IsValid(BLOCK_VALID_TRANSACTIONS)) {
+            return false;
+        }
+        if (chainman.GetConsensus()
+                .IsMatMulTrustedReplayAttestationActive(walk->nHeight) &&
+            (walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 CBlockIndex* Chainstate::FindMostWorkChain()
 {
     AssertLockHeld(::cs_main);
@@ -10013,16 +10053,23 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                  m_chain.Tip() != nullptr &&
                  pindexNew->nChainWork >= m_chain.Tip()->nChainWork) ||
                 pindexNew == unique_abandon};
-            if (!authority_escape ||
+            const bool signer_exact_replay_escape{
+                LocalSignerExactReplayReorgCandidate(
+                    m_chainman, m_chain.Tip(), pindexNew)};
+            if ((!authority_escape && !signer_exact_replay_escape) ||
                 !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
                 skipped_this_call.insert(pindexNew);
                 setBlockIndexCandidates.erase(pindexNew);
                 ++skipped_count;
                 continue;
             }
-            LogWarning("%s: auto-unparked uniquely attested authority branch hash=%s height=%d (park-escape; unattested heavier rewrites stay parked)\n",
-                       __func__, pindexNew->GetBlockHash().ToString(),
-                       pindexNew->nHeight);
+            LogWarning(
+                "%s: auto-unparked authenticated recovery branch hash=%s "
+                "height=%d (authority=%d signer_exact_replay=%d; "
+                "unattested heavier rewrites stay parked)\n",
+                __func__, pindexNew->GetBlockHash().ToString(),
+                pindexNew->nHeight, authority_escape,
+                signer_exact_replay_escape);
         }
         if (pindexNew != unique_abandon &&
             m_chainman.ShouldDeferLosingTipExtension(pindexNew)) {
@@ -10210,7 +10257,9 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // ahead (the normal already-have-data recovery case).
             const bool recovery_escape{
                 m_chainman.IsAutomaticReorgRecoveryCandidate(pindexNew) ||
-                m_chainman.IsAttestedAbandonForkCandidate(pindexNew)};
+                m_chainman.IsAttestedAbandonForkCandidate(pindexNew) ||
+                LocalSignerExactReplayReorgCandidate(
+                    m_chainman, old_tip, pindexNew)};
             if (old_tip != nullptr &&
                 fork != nullptr &&
                 fork != old_tip &&
@@ -10420,7 +10469,9 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
             reorg_depth > static_cast<int>(warn_depth);
         const bool recovery_escape{
             m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
-            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork)};
+            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork) ||
+            LocalSignerExactReplayReorgCandidate(
+                m_chainman, pindexOldTip, pindexMostWork)};
         const bool park = kernel::DeepReorgShouldPark(
             cm_opts.deep_reorg_action, park_depth, reorg_depth, recovery_escape);
 
@@ -10443,7 +10494,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 pindexOldTip->nHeight, pindexFork->nHeight, pindexMostWork->nHeight,
                 park ? _("Parking the branch and staying on the current chain pending operator action.")
                      : recovery_escape
-                         ? _("Activating the uniquely authenticated shallow-race recovery branch.")
+                         ? _("Activating the fully authenticated recovery branch.")
                          : _("Following the most-work chain (warn-only)."));
 
             // Loud alarm on every deep reorg, regardless of action.
@@ -10906,6 +10957,17 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     pindexMostWork = nullptr;
                 }
 
+                // A trusted-frontier reorg can first connect only the fork
+                // root. Descendants that were already stored were excluded
+                // from the candidate set while they were on an unselected
+                // branch; reconsider them now that the root is active and
+                // force selection to observe any newly eligible work.
+                if (!fInvalidFound &&
+                    ReconsiderTrustedSignedFrontierCandidates() &&
+                    pindexMostWork == m_chain.Tip()) {
+                    pindexMostWork = nullptr;
+                }
+
                 // This will have been toggled in
                 // ActivateBestChainStep -> ConnectTip -> MaybeCompleteSnapshotValidation,
                 // if at all, so we should catch it here.
@@ -11295,7 +11357,24 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
         m_chain.Contains(pindex)) {
         return;
     }
-    const bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
+    bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
+    if (parked && pindex != nullptr && tip != nullptr) {
+        const bool signer_exact_replay_escape{
+            LocalSignerExactReplayReorgCandidate(
+                m_chainman, tip, pindex)};
+        const bool trusted_frontier_escape{
+            node::matmul_trusted::IsTrustedMirror() &&
+            m_chainman.IsAttestedAbandonForkCandidate(pindex)};
+        if ((signer_exact_replay_escape || trusted_frontier_escape) &&
+            m_chainman.UnparkReorgBranchContainingBlock(pindex)) {
+            parked = false;
+            LogWarning(
+                "%s: auto-unparked fully authenticated candidate hash=%s "
+                "height=%d signer_exact_replay=%d trusted_frontier=%d\n",
+                __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
+                signer_exact_replay_escape, trusted_frontier_escape);
+        }
+    }
     const bool defer_losing{m_chainman.ShouldDeferLosingTipExtension(pindex)};
     if (parked || defer_losing) {
         if (pindex != nullptr && tip != nullptr && pindex->pprev == tip) {
@@ -11370,6 +11449,39 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
             setBlockIndexCandidates.insert(pindex);
         }
     }
+}
+
+bool Chainstate::ReconsiderTrustedSignedFrontierCandidates()
+{
+    AssertLockHeld(cs_main);
+    if (!node::matmul_trusted::IsTrustedMirror() || m_chain.Tip() == nullptr) {
+        return false;
+    }
+    const auto status{m_chainman.GetSignedFrontierStatus()};
+    if (!status.available || !status.hash_known) return false;
+    const CBlockIndex* const frontier{
+        m_blockman.LookupBlockIndex(status.hash)};
+    if (frontier == nullptr || (frontier->nStatus & BLOCK_FAILED_MASK)) {
+        return false;
+    }
+
+    bool added_ahead{false};
+    for (CBlockIndex* walk{const_cast<CBlockIndex*>(frontier)};
+         walk != nullptr && !m_chain.Contains(walk); walk = walk->pprev) {
+        if ((walk->nStatus & BLOCK_FAILED_MASK) ||
+            (walk->nStatus & BLOCK_HAVE_DATA) == 0 ||
+            !walk->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+            !walk->HaveNumChainTxs()) {
+            continue;
+        }
+        const bool was_present{setBlockIndexCandidates.count(walk) != 0};
+        TryAddBlockIndexCandidate(walk);
+        if (!was_present && setBlockIndexCandidates.count(walk) != 0 &&
+            walk->nChainWork > m_chain.Tip()->nChainWork) {
+            added_ahead = true;
+        }
+    }
+    return added_ahead;
 }
 
 const CBlockIndex* ChainstateManager::FindParkedReorgBranchRoot(const CBlockIndex* pindex) const
@@ -11974,6 +12086,7 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     // every frontier hint at a height (not last-writer) so a later
     // loser MMATTEST cannot hide the winner.
     const bool tip_has_quorum{IndexHasTrustedMatMulAuthority(tip)};
+    const SignedFrontierStatus signed_frontier{GetSignedFrontierStatus()};
 
     std::vector<const CBlockIndex*> competing;
     auto consider = [&](const CBlockIndex* idx) {
@@ -12028,6 +12141,10 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
                 lca == tip && idx->nHeight > tip->nHeight};
             const bool on_signed_frontier_chain{
                 IndexIsOnSignedFrontierChain(idx)};
+            const bool signed_frontier_selects_other_branch{
+                signed_frontier.available && signed_frontier.hash_known &&
+                signed_frontier.height >= idx->nHeight &&
+                !on_signed_frontier_chain};
             // Bound competing forks even when the tip has no quorum (signer
             // typically attests ~1 behind). Unbounded fossil MMATTEST hijacked
             // FMWC and left the attested HAVE_DATA tip-child unconnected.
@@ -12035,7 +12152,8 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
             // archives sat 13–180 blocks off it on an unattested HAVE_DATA
             // tower (2026-08-16) and must rejoin.
             if (!node::matmul_trusted::TrustedMirrorMayAdoptCompetingAttestedIndex(
-                    attested_suffix, lca_depth, on_signed_frontier_chain)) {
+                    attested_suffix, lca_depth, on_signed_frontier_chain,
+                    signed_frontier_selects_other_branch)) {
                 return;
             }
         }

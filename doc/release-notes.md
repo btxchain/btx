@@ -149,6 +149,44 @@ partitioned the network. `nMatMulStallRecoveryHeight` is `INT_MAX`;
 
 # Notable Changes
 
+## Automatic signer and mirror recovery from a higher-work fork
+
+A consensus validator with a configured local MatMul attestation signer no
+longer inherits the trusted mirror's six-block lost-twin download bound. When
+a valid competing header branch has strictly more work, the signer now fetches
+the branch root-first at any depth and independently ExactReplays every
+Profile-1 body. Claimed headers alone cannot activate the branch. A deep branch
+that was parked by the generic reorg defense is automatically unparked only
+after every replacement Profile-1 body is stored with persistent local
+ExactReplay provenance. Trusted mirrors retain their pin-directed fail-closed
+rules and do not gain this authority.
+
+After ordinary most-work activation, a consensus signer automatically
+reconciles local attestations from the displaced fork. It clears only
+off-active-chain commitments belonging to that reorg, signs replacements only
+when the active block is stored, script-valid, and persistently
+ExactReplay-verified, and relays the replacements together with the current
+signed frontier. A non-signing trusted mirror can therefore follow the new
+attested branch without `invalidateblock`, attestation-clear/migration RPCs,
+network toggles, or a daemon restart. Previously published signatures remain
+valid and are not retractable.
+
+Block download recovery also remembers failed ownership per block and peer for
+60 seconds, so silent or incapable peers cannot immediately reacquire the same
+canonical missing root after its 15-second catch-up timeout. Synthetic
+BestKnown seeding is capped at each peer's VERSION starting height. Together
+these changes let another eligible peer supply a wedged root automatically;
+`getblockfrompeer` and process restart are no longer recovery steps.
+Catch-up's immediate two-owner allowance now requires a genuinely distinct
+peer, and the wire path emits `getdata` only after recording new ownership.
+This prevents a current owner from receiving the same request in a tight loop
+while its original request remains in flight.
+
+Header synchronization now tracks an outstanding `getheaders` response
+separately from its retry timestamp. A retry holdoff inserted after duplicate
+or cached-invalid headers no longer causes the next unsolicited replay batch
+to be misclassified as solicited and exempted from flood accounting.
+
 ## 0.34.3: consensus ExactReplay deadlock (tag v0.34.2)
 
 Every `-matmulvalidation=consensus` node on v0.34.2 froze exactly one

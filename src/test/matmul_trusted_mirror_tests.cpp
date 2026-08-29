@@ -1056,6 +1056,24 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
         true, false, true, true, false, false, 199295, 199295, true, 1, true,
         true, true, /*competing_quorum_at_index=*/true));
+    // A signer is not a trusted mirror. Once a validated descendant is
+    // strictly higher-work it fetches the occupied fork at arbitrary depth;
+    // ExactReplay remains mandatory before activation/signature replacement.
+    BOOST_CHECK(HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199295, 199340, false,
+        /*lca_depth=*/46, /*better_or_equal_work=*/false,
+        /*parent_has_data_or_is_lca=*/true,
+        /*competing_headers_pulled_ahead=*/true,
+        /*competing_quorum_at_index=*/true,
+        /*local_signer_strictly_more_work_branch=*/true));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, /*is_trusted_mirror=*/true, true, true, false, false, 199295,
+        199340, false, 46, false, true, true, true,
+        /*local_signer_strictly_more_work_branch=*/true));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199296, 199340, false, 46,
+        false, /*parent_has_data_or_is_lca=*/false, true, true,
+        /*local_signer_strictly_more_work_branch=*/true));
     BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
         true, false, true, true, false, false, 199295, 199295, true, 1, true,
         true, /*competing_headers_pulled_ahead=*/false));
@@ -1089,11 +1107,19 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*has_local_signer=*/true, /*is_trusted_mirror=*/false,
         /*best_known_unset=*/true, /*starting_height=*/199309,
         /*tip_height=*/199297, /*claimed_height=*/199309,
-        /*claimed_is_short_reorg_competing_fork=*/true,
+        /*claimed_is_eligible_competing_fork=*/true,
         /*claimed_work_ge_tip=*/true));
     BOOST_CHECK(!SeedLocalSignerLostTwinBestKnown(
         true, false, true, 199309, 199297, 199309, true, true,
         /*fork_child_height_occupied=*/true));
+    BOOST_CHECK(SeedLocalSignerLostTwinBestKnown(
+        true, false, true, 203810, 203781, 203810, true, true,
+        /*fork_child_height_occupied=*/true,
+        /*local_signer_strictly_more_work_branch=*/true));
+    BOOST_CHECK(!SeedLocalSignerLostTwinBestKnown(
+        true, /*is_trusted_mirror=*/true, true, 203810, 203781, 203810,
+        true, true, true,
+        /*local_signer_strictly_more_work_branch=*/true));
     BOOST_CHECK(!SeedLocalSignerLostTwinBestKnown(
         true, false, /*best_known_unset=*/false, 199309, 199297, 199309, true,
         true));
@@ -1152,6 +1178,37 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         true, false, true, true, false, false, /*index_height=*/199296,
         /*tip_height=*/199297, /*same_parent=*/true, /*lca_depth=*/2,
         /*better_or_equal_work=*/false, true, true));
+    using node::matmul_trusted::LocalSignerMayRecoverGreaterWorkBranch;
+    BOOST_CHECK(LocalSignerMayRecoverGreaterWorkBranch(
+        true, false, true, false, false, true));
+    BOOST_CHECK(!LocalSignerMayRecoverGreaterWorkBranch(
+        true, /*is_trusted_mirror=*/true, true, false, false, true));
+    BOOST_CHECK(!LocalSignerMayRecoverGreaterWorkBranch(
+        true, false, /*candidate_valid_tree=*/false, false, false, true));
+    BOOST_CHECK(!LocalSignerMayRecoverGreaterWorkBranch(
+        true, false, true, false, false,
+        /*candidate_strictly_more_work=*/false));
+    using node::matmul_trusted::ClampSyntheticBestKnownHeightToPeer;
+    BOOST_CHECK_EQUAL(ClampSyntheticBestKnownHeightToPeer(203810, 199309),
+                      199309);
+    BOOST_CHECK_EQUAL(ClampSyntheticBestKnownHeightToPeer(203810, 203900),
+                      203810);
+    BOOST_CHECK_EQUAL(ClampSyntheticBestKnownHeightToPeer(203810, -1),
+                      203810);
+    using node::matmul_trusted::
+        LocalSignerMayAutomaticallyReplaceAttestation;
+    BOOST_CHECK(LocalSignerMayAutomaticallyReplaceAttestation(
+        true, false, true, true, true, true, true, true, true, false,
+        true, true));
+    BOOST_CHECK(!LocalSignerMayAutomaticallyReplaceAttestation(
+        true, /*is_trusted_mirror=*/true, true, true, true, true, true, true,
+        true, false, true, true));
+    BOOST_CHECK(!LocalSignerMayAutomaticallyReplaceAttestation(
+        true, false, true, true, true, true, true, true,
+        /*replacement_exact_replay_verified=*/false, false, true, true));
+    BOOST_CHECK(!LocalSignerMayAutomaticallyReplaceAttestation(
+        true, false, true, true, true, true, true, true, true, false,
+        /*active_tip_strictly_more_work_than_old_hash=*/false, true));
     using node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate;
     BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
         /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
@@ -1684,6 +1741,20 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
         true, false, /*outbound=*/false, /*archive_or_mirror=*/true, true,
         /*starting_height=*/190858, /*tip_height=*/190781));
+    // Before the first attestation-active height, an inbound signer must be
+    // able to provide fully validated ordinary blocks. Otherwise the mirror
+    // can never reach the first height at which that signer can authenticate
+    // itself with MMATTEST. Profile-1 bodies remain authority-gated.
+    BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
+        true, false, /*outbound=*/false, /*archive_or_mirror=*/false, true,
+        /*starting_height=*/8, /*tip_height=*/1,
+        /*best_known_height=*/8, /*best_known_extends_tip=*/true,
+        /*next_block_attestation_active=*/false));
+    BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
+        true, false, /*outbound=*/false, /*archive_or_mirror=*/false, true,
+        /*starting_height=*/8, /*tip_height=*/5,
+        /*best_known_height=*/8, /*best_known_extends_tip=*/true,
+        /*next_block_attestation_active=*/true));
     BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
         true, false, /*outbound=*/true, /*archive_or_mirror=*/false, true,
         190858, 190781));
@@ -2038,6 +2109,12 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
         true, false, true, false));
+    // A configured manual/NoBan source is eligible to supply mirror catch-up
+    // bodies. Its message queue must not be suppressed once the handshake
+    // completes, or HEADERS/PONG/BLOCK remain queued forever.
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
+        true, /*this_peer_manual_or_noban=*/true, true, false));
     // A signer with NO archive GETDATA pending must NOT skip: the
     // unconditional form starved every non-ARCHIVE/MIRROR peer of all
     // message processing (0 header bytes served to consensus peers,
@@ -2201,11 +2278,15 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!IsTrustedMirrorMsghandCatchUp(false, true, 0, 112));
     using node::matmul_trusted::TrustedMirrorRetainGpuBodyAwaitingAttestation;
     BOOST_CHECK(TrustedMirrorRetainGpuBodyAwaitingAttestation(
-        true, /*from_gpu_attestor=*/true, /*has_quorum=*/false));
+        true, /*from_gpu_attestor=*/true, /*has_quorum=*/false,
+        /*attestation_active=*/true));
     BOOST_CHECK(!TrustedMirrorRetainGpuBodyAwaitingAttestation(
-        true, true, /*has_quorum=*/true));
+        true, true, /*has_quorum=*/true, true));
     BOOST_CHECK(!TrustedMirrorRetainGpuBodyAwaitingAttestation(
-        true, /*from_gpu_attestor=*/false, false));
+        true, /*from_gpu_attestor=*/false, false, true));
+    BOOST_CHECK(!TrustedMirrorRetainGpuBodyAwaitingAttestation(
+        true, /*from_gpu_attestor=*/true, /*has_quorum=*/false,
+        /*attestation_active=*/false));
     BOOST_CHECK_EQUAL(
         node::matmul_trusted::GPU_RETAIN_ATTESTATION_RETRY.count(), 2);
 }
@@ -2450,6 +2531,15 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
         false, 180, /*on_signed_frontier_chain=*/true));
     BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
         false, 180, /*on_signed_frontier_chain=*/false));
+    // A newer signed frontier on another branch suppresses even a short,
+    // already-downloaded fossil. Recovery must fetch the selected frontier,
+    // not take the body that happened to arrive first.
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, 1, /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_selects_other_branch=*/true));
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
+        true, 0, /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_selects_other_branch=*/true));
     using node::matmul_trusted::ConsensusSignerMayAbandonQuorumTipForSignedFrontier;
     // Same-height dual-quorum twin: keep 190354 (do not flip-flop).
     BOOST_CHECK(!ConsensusSignerMayAbandonQuorumTipForSignedFrontier(

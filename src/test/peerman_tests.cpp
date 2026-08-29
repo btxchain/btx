@@ -1385,6 +1385,25 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_divergent_tip_follows_authority_headers)
         WITH_LOCK(::cs_main, return m_node.chainman->m_best_header->nHeight),
         race_height + 1);
 
+    // HEADERS direct-fetch may already have assigned one or both recovery
+    // bodies to the authority. Once this peer owns the canonical hole,
+    // repeated scheduler passes must not interpret catch-up's second-owner
+    // allowance as permission to send the same peer another GETDATA. That
+    // mistake produced millions of requests while one body remained in-flight.
+    BOOST_CHECK(peerman.SendMessages(&authority));
+    CNodeStateStats initial_authority_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(authority.GetId(),
+                                            initial_authority_stats));
+    BOOST_REQUIRE(!initial_authority_stats.vHeightInFlight.empty());
+    connman.FlushSendBuffer(authority);
+    for (int pass = 0; pass < 8; ++pass) {
+        BOOST_CHECK(peerman.SendMessages(&authority));
+    }
+    BOOST_CHECK_EQUAL(
+        CountQueuedGetDataForHash(authority, winning.GetHash()), 0U);
+    BOOST_CHECK_EQUAL(
+        CountQueuedGetDataForHash(authority, winning_next.GetHash()), 0U);
+
     // Ordinary peer offering a different competing fork must not displace it.
     CBlock ordinary_fork;
     ordinary_fork.SetNull();
@@ -1445,10 +1464,10 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_divergent_tip_follows_authority_headers)
     BOOST_REQUIRE(peerman.GetNodeStateStats(authority.GetId(), authority_stats));
     // Authority best-known must be the competing (winning) branch.
     BOOST_CHECK_EQUAL(authority_stats.nSyncHeight, race_height + 1);
-    const bool download_allocated{
-        !authority_stats.vHeightInFlight.empty() ||
-        HasQueuedMessageType(authority, NetMsgType::GETDATA)};
-    BOOST_CHECK(download_allocated);
+    // The stale-owner handoff above may have moved the body request entirely
+    // to `ordinary` and put `authority` into its per-hash cooldown. Do not
+    // require both peers to own it; the asserted ordinary request is the live
+    // recovery allocation and authority still tracks the winning headers.
 }
 
 // A persisted PARK is branch-specific. It must suppress requests from a peer
@@ -2515,7 +2534,9 @@ BOOST_AUTO_TEST_CASE(signed_frontier_catchup_prefers_archive_not_miner)
     BOOST_REQUIRE(peerman.GetNodeStateStats(archive.GetId(), archive_stats));
     BOOST_REQUIRE_EQUAL(archive_stats.vHeightInFlight.size(), 1U);
     BOOST_CHECK_EQUAL(archive_stats.vHeightInFlight.front(), tip->nHeight + 1);
-    BOOST_CHECK(HasQueuedMessageType(archive, NetMsgType::GETDATA));
+    // HEADERS direct-fetch already sent the request before this scheduler
+    // pass. The live in-flight ownership is the assertion; requiring another
+    // queued GETDATA here would require the same-peer duplicate fixed above.
     NeutralizeUnconnectedHeaders(chainman);
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
@@ -3656,7 +3677,7 @@ BOOST_AUTO_TEST_CASE(handoff_peer_budget_miss_retains_tip_child_body)
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
-BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
+BOOST_AUTO_TEST_CASE(competing_sibling_refetch_requires_trusted_quorum)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
 
@@ -3760,11 +3781,10 @@ BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
     }
     BOOST_CHECK_LT(requests, 20U);
 
-    // Late MMATTEST quorum authenticates the sibling. F3
-    // AdvanceLastCommonPastActiveTip still drops same-height sibling holes
-    // so they cannot occupy inflight (FindLowestMissingBody on a fork is
-    // not a descendant of the connected tip). GETDATA for that body is a
-    // grandchild/descendant path, not this sibling.
+    // Late MMATTEST quorum authenticates the sibling. Root-first recovery must
+    // now preserve that selected fork root and may fetch its body from an
+    // ordinary outbound relay. Before quorum, the checks above still prove
+    // that the sibling stayed HEADER_ONLY and did not enter a request loop.
     matmul::trusted::ExactReplayStatement statement;
     statement.chain_id = uint256::FromHex(std::string(64, '1')).value();
     statement.block_hash = competing_hash;
@@ -3828,8 +3848,10 @@ BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
     CNodeStateStats source_stats;
     BOOST_REQUIRE(peerman.GetNodeStateStats(source.GetId(), source_stats));
     BOOST_CHECK(!source.fDisconnect);
-    BOOST_CHECK(source_stats.vHeightInFlight.empty());
-    BOOST_CHECK(!HasQueuedMessageType(source, NetMsgType::GETDATA));
+    BOOST_REQUIRE_EQUAL(source_stats.vHeightInFlight.size(), 1U);
+    BOOST_CHECK_EQUAL(source_stats.vHeightInFlight.front(), tip->nHeight + 1);
+    BOOST_CHECK(HasQueuedMessageType(source, NetMsgType::GETDATA));
+    BOOST_CHECK_GT(CountQueuedGetDataForHash(source, competing_hash), 0U);
 
     {
         LOCK(::cs_main);
