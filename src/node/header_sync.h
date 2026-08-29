@@ -308,6 +308,60 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
     return std::max(std::min(computed, cap), floor);
 }
 
+/**
+ * BestKnown cannot walk toward the HEADER_ONLY tower: unset, or at/below
+ * the connected tip. Live rtx6000 2026-08-29: peer=29 BestKnown==tip
+ * 199386, m_best_header=199801, inflight=0, select=already_at_peer_best.
+ */
+[[nodiscard]] inline bool HeaderSyncBestKnownStuckAtTip(
+    int32_t tip_height,
+    int32_t best_known_height)
+{
+    return best_known_height < 0 || best_known_height <= tip_height;
+}
+
+/**
+ * Fill BestKnown from m_best_header so FindNextBlocks walks the tower.
+ *
+ * VERSION height is not a block hash, so a peer advertising T+400 never
+ * becomes a GETDATA source until HEADERS arrive. When the node already
+ * has those headers, waiting for a duplicate HEADERS batch leaves
+ * last_common pinned at the tip. Seed only peers that advertised above
+ * us; never an at-tip peer; never replace a BestKnown already above tip.
+ * Locators still start at the active tip (HeaderSyncLocatorStart).
+ *
+ * `best_header_extends_or_heavier` is GetAncestor(tip)==tip OR
+ * nChainWork > tip. Fetch only; ConnectTip still ExactReplays and PARK
+ * still owns depth>6.
+ */
+[[nodiscard]] inline bool HeaderSyncMaySeedBestKnownFromHeaderTower(
+    int32_t tip_height,
+    int32_t peer_starting_height,
+    int32_t best_known_height,
+    int32_t best_header_height,
+    bool best_header_extends_or_heavier)
+{
+    if (tip_height < 0 || best_header_height <= tip_height) return false;
+    if (peer_starting_height <= tip_height) return false;
+    if (!best_header_extends_or_heavier) return false;
+    if (!HeaderSyncBestKnownStuckAtTip(tip_height, best_known_height)) {
+        return false;
+    }
+    return true;
+}
+
+/** Cap the seed at what the peer advertised so we do not ask a 199672
+ *  peer for the 199801 tip. */
+[[nodiscard]] inline int32_t HeaderSyncSeedBestKnownHeight(
+    int32_t tip_height,
+    int32_t peer_starting_height,
+    int32_t best_header_height)
+{
+    const int32_t capped{std::min(peer_starting_height, best_header_height)};
+    if (capped <= tip_height) return -1;
+    return capped;
+}
+
 } // namespace node
 
 #endif // BTX_NODE_HEADER_SYNC_H

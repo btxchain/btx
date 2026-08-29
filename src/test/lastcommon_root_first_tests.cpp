@@ -397,4 +397,48 @@ BOOST_AUTO_TEST_CASE(heavier_fork_n_plus_72_keeps_fork_child_missing)
     BOOST_CHECK(advanced.last_common != tip);
 }
 
+BOOST_AUTO_TEST_CASE(header_tower_best_known_finds_first_missing_body)
+{
+    // Live rtx6000: last_common pinned at tip while m_best_header is T+400.
+    // Once BestKnown is the tower, root-first must name tip+1, not none.
+    constexpr int k_tip{10};
+    constexpr int k_ahead{400};
+    ChainFixture f;
+    CBlockIndex* genesis = f.Add(nullptr, 0);
+    ChainFixture::MarkHaveData(genesis, /*have_chain_txs=*/true);
+    std::vector<CBlockIndex*> active;
+    active.push_back(genesis);
+    for (int h = 1; h <= k_tip; ++h) {
+        CBlockIndex* idx = f.Add(active.back(), h);
+        ChainFixture::MarkHaveData(idx, /*have_chain_txs=*/true);
+        active.push_back(idx);
+    }
+    CBlockIndex* tip = active.back();
+    std::vector<CBlockIndex*> tower;
+    CBlockIndex* walk = tip;
+    for (int h = k_tip + 1; h <= k_tip + k_ahead; ++h) {
+        walk = f.Add(walk, h);
+        tower.push_back(walk);
+    }
+    BOOST_CHECK_EQUAL(tower.back()->nHeight, k_tip + k_ahead);
+    BOOST_CHECK(tower.back()->GetAncestor(tip->nHeight) == tip);
+    BOOST_CHECK(tower.back()->nChainWork > tip->nChainWork);
+
+    CChain chain;
+    chain.SetTip(*tip);
+
+    const LastCommonRootFirstResult stuck = ClampLastCommonToRootFirst(
+        /*last_common=*/tip, /*best_known=*/tip, tip, &chain);
+    BOOST_CHECK(stuck.lowest_missing == nullptr);
+    BOOST_CHECK(stuck.last_common == tip);
+
+    const LastCommonRootFirstResult walk_tower = ClampLastCommonToRootFirst(
+        /*last_common=*/tip, /*best_known=*/tower.back(), tip, &chain);
+    BOOST_REQUIRE(walk_tower.lowest_missing != nullptr);
+    BOOST_CHECK_EQUAL(walk_tower.lowest_missing->nHeight, k_tip + 1);
+    BOOST_CHECK(walk_tower.lowest_missing == tower.front());
+    BOOST_CHECK(walk_tower.last_common == tip);
+    BOOST_CHECK(walk_tower.last_common != tower.back());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

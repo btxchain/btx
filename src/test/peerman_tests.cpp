@@ -8330,6 +8330,107 @@ BOOST_AUTO_TEST_CASE(heavier_competing_fork_n_plus_72_getdata_fork_child)
     node::matmul_trusted::ResetForTest();
 }
 
+BOOST_AUTO_TEST_CASE(header_tower_seeds_best_known_without_duplicate_headers)
+{
+    // Live rtx6000 2026-08-29: buffer pool ready, deferred-replay gone, but
+    // inflight=0 / block_recv=0. m_best_header=199801, 6 peers advertise
+    // above tip, selector asked peer=29 at 199386 (already_at_peer_best).
+    // Headers are already in the index — do not wait for a duplicate
+    // HEADERS batch to set BestKnown.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    constexpr int k_ahead{80};
+    std::vector<CBlockIndex*> tower;
+    const CBlockIndex* walk{tip};
+    for (int i = 0; i < k_ahead; ++i) {
+        tower.push_back(MakePeermanHeaderChild(chainman, *walk, 0xa0 + (i & 0xff)));
+        walk = tower.back();
+    }
+    BOOST_REQUIRE_EQUAL(tower.size(), static_cast<size_t>(k_ahead));
+    BOOST_REQUIRE_EQUAL(tower.back()->nHeight, tip->nHeight + k_ahead);
+    {
+        LOCK(::cs_main);
+        chainman.SetBestHeader(tower.back());
+        peerman.SetBestBlock(tip->nHeight,
+                             std::chrono::seconds{tip->GetBlockTime()});
+    }
+    BOOST_CHECK(WITH_LOCK(::cs_main, {
+        return chainman.m_best_header == tower.back() &&
+               tower.back()->GetAncestor(tip->nHeight) == tip &&
+               tower.back()->nChainWork > tip->nChainWork;
+    }));
+
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 55 * 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode at_tip{/*id=*/6100, /*sock=*/nullptr, CAddress{},
+                 /*nKeyedNetGroupIn=*/6100, /*nLocalHostNonceIn=*/0,
+                 CAddress{}, /*addrNameIn=*/"header-tower-at-tip",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(at_tip, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight);
+    connman.FlushSendBuffer(at_tip);
+
+    constexpr int k_ahead_peers{6};
+    std::vector<std::unique_ptr<CNode>> ahead;
+    ahead.reserve(k_ahead_peers);
+    for (int i = 0; i < k_ahead_peers; ++i) {
+        ahead.push_back(std::make_unique<CNode>(
+            /*id=*/6101 + i, /*sock=*/nullptr, CAddress{},
+            static_cast<uint64_t>(6101 + i), /*nLocalHostNonceIn=*/0,
+            CAddress{}, strprintf("header-tower-ahead-%d", i),
+            ConnectionType::OUTBOUND_FULL_RELAY,
+            /*inbound_onion=*/false, /*network_key=*/0));
+        connman.Handshake(*ahead.back(), /*successfully_connected=*/true,
+                          services, services, PROTOCOL_VERSION,
+                          /*relay_txs=*/true,
+                          /*starting_height=*/tower.back()->nHeight);
+        connman.FlushSendBuffer(*ahead.back());
+    }
+
+    SetMockTime(std::chrono::seconds{GetTime() + 180});
+    at_tip.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&at_tip));
+    BOOST_CHECK_EQUAL(
+        CountQueuedGetDataForHash(at_tip, tower.front()->GetBlockHash()), 0U);
+
+    size_t getdata{0};
+    int inflight_peers{0};
+    for (auto& peer : ahead) {
+        peer->fPauseSend = false;
+        BOOST_CHECK(peerman.SendMessages(peer.get()));
+        getdata += CountQueuedGetDataForHash(*peer, tower.front()->GetBlockHash());
+        CNodeStateStats st;
+        BOOST_REQUIRE(peerman.GetNodeStateStats(peer->GetId(), st));
+        BOOST_CHECK_EQUAL(st.nSyncHeight, tower.back()->nHeight);
+        if (!st.vHeightInFlight.empty()) ++inflight_peers;
+    }
+    BOOST_REQUIRE_MESSAGE(getdata > 0,
+                          "peers advertising the HEADER_ONLY tower must be "
+                          "GETDATA sources without a duplicate HEADERS batch");
+    BOOST_REQUIRE_MESSAGE(inflight_peers > 0,
+                          "inflight must become nonzero once the selector "
+                          "targets the header tower");
+
+    peerman.FinalizeNode(at_tip);
+    for (auto& peer : ahead) peerman.FinalizeNode(*peer);
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+    node::matmul_trusted::ResetForTest();
+}
+
 BOOST_AUTO_TEST_CASE(best_header_follows_headers_only_suffix_not_pinned_to_tip)
 {
     // macpro2 0.34.5: getchaintips 200258 headers-only branchlen=944 while

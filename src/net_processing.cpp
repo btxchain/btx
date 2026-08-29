@@ -2585,6 +2585,12 @@ private:
      *  from the claimed-work competing fork so lost-twin GETDATA can start. */
     void MaybeSeedLocalSignerLostTwinBestKnown(NodeId peer_id, CNodeState& state)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Headers already in the index (m_best_header ahead) but this peer's
+     *  BestKnown is stuck at/below tip: use the tower as the GETDATA walk
+     *  target so FindNextBlocks is not already_at_peer_best. */
+    void MaybeSeedBestKnownFromHeaderTower(NodeId peer_id, CNodeState& state,
+                                           const Peer& peer)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Prefer GETMMATTEST for the ActiveTip child, the short-reorg missing
      *  body, and the short-reorg fork child (LCA+1) even when bodies are
      *  already complete. Never the competing 1879xx miner fork. Fan-out
@@ -4955,6 +4961,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     ProcessBlockAvailability(peer.m_id);
     MaybeSeedGpuSignedFrontierBestKnown(peer.m_id, *state);
     MaybeSeedLocalSignerLostTwinBestKnown(peer.m_id, *state);
+    MaybeSeedBestKnownFromHeaderTower(peer.m_id, *state, peer);
 
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
     const bool catch_up{DownloadFailoverCatchUp(m_chainman, state->pindexBestKnownBlock)};
@@ -9934,6 +9941,40 @@ void PeerManagerImpl::MaybeSeedLocalSignerLostTwinBestKnown(
     LogInfo("Seeded local-signer peer=%d best-known to claimed-work fork "
             "height=%d (lost-twin recovery, tip=%d)\n",
             peer_id, claimed->nHeight, tip->nHeight);
+}
+
+void PeerManagerImpl::MaybeSeedBestKnownFromHeaderTower(
+    NodeId peer_id, CNodeState& state, const Peer& peer)
+{
+    AssertLockHeld(cs_main);
+    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+    const CBlockIndex* const best{m_chainman.m_best_header};
+    if (tip == nullptr || best == nullptr) return;
+    const int starting{
+        state.m_starting_height >= 0 ? state.m_starting_height
+                                     : peer.m_starting_height.load()};
+    const int known{
+        state.pindexBestKnownBlock != nullptr
+            ? state.pindexBestKnownBlock->nHeight
+            : -1};
+    const bool extends{
+        best->nHeight >= tip->nHeight &&
+        best->GetAncestor(tip->nHeight) == tip};
+    const bool heavier{best->nChainWork > tip->nChainWork};
+    if (!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+            tip->nHeight, starting, known, best->nHeight,
+            extends || heavier)) {
+        return;
+    }
+    const int32_t seed_h{node::HeaderSyncSeedBestKnownHeight(
+        tip->nHeight, starting, best->nHeight)};
+    if (seed_h < 0) return;
+    const CBlockIndex* const seed{best->GetAncestor(seed_h)};
+    if (seed == nullptr || seed->nHeight <= tip->nHeight) return;
+    state.pindexBestKnownBlock = seed;
+    LogInfo("Seeded peer=%d best-known to header-tower height=%d "
+            "(tip=%d m_best_header=%d advertised=%d)\n",
+            peer_id, seed->nHeight, tip->nHeight, best->nHeight, starting);
 }
 
 void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(

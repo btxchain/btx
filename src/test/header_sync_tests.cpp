@@ -265,4 +265,37 @@ BOOST_AUTO_TEST_CASE(far_behind_yields_gpu_protect)
     BOOST_CHECK(node::FollowedHeaderSuffixNeedsDownloadFailover(199336, 1136));
 }
 
+BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
+{
+    // Live rtx6000 2026-08-29: tip 199386, m_best_header 199801, 6 peers
+    // advertising above, selector kept asking peer=29 at the frozen tip.
+    constexpr int32_t kTip{199386};
+    constexpr int32_t kTower{199801};
+    BOOST_CHECK(node::HeaderSyncBestKnownStuckAtTip(kTip, /*null*/ -1));
+    BOOST_CHECK(node::HeaderSyncBestKnownStuckAtTip(kTip, kTip));
+    BOOST_CHECK(!node::HeaderSyncBestKnownStuckAtTip(kTip, kTower));
+
+    BOOST_CHECK(node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+        kTip, /*advertised=*/kTower, /*best_known=*/-1, kTower,
+        /*extends_or_heavier=*/true));
+    BOOST_CHECK(node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+        kTip, kTower, /*best_known_at_tip=*/kTip, kTower, true));
+    BOOST_CHECK(!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+        kTip, /*at_tip_peer=*/kTip, -1, kTower, true));
+    BOOST_CHECK(!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+        kTip, kTower, /*already_ahead=*/kTower, kTower, true));
+    BOOST_CHECK(!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+        kTip, kTower, -1, kTower, /*not_extends_or_heavier=*/false));
+    BOOST_CHECK(!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+        kTip, kTower, -1, /*header_not_ahead=*/kTip, true));
+
+    BOOST_CHECK_EQUAL(
+        node::HeaderSyncSeedBestKnownHeight(kTip, kTower, kTower), kTower);
+    BOOST_CHECK_EQUAL(
+        node::HeaderSyncSeedBestKnownHeight(kTip, /*peer=*/199672, kTower),
+        199672);
+    BOOST_CHECK_EQUAL(
+        node::HeaderSyncSeedBestKnownHeight(kTip, kTip, kTower), -1);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
