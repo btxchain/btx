@@ -1417,6 +1417,12 @@ static UniValue BuildForkHealthSummary(ChainstateManager& chainman) EXCLUSIVE_LO
         best_header->GetAncestor(active_tip->nHeight) != active_tip) {
         observations.push_back("best_header_diverged_from_active_tip");
     }
+    const auto twin_blocked{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            active_tip, chainman.m_best_header, chainman.m_best_claimed_header)};
+    if (twin_blocked.blocked) {
+        observations.push_back("better_work_twin_blocked_by_local_commitment");
+    }
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("active_height", active_tip != nullptr ? active_tip->nHeight : -1);
@@ -6656,6 +6662,7 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue or clamp_time"},
                         }},
                         {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "The block challenge (aka. block script), in hexadecimal (only present if the current network is a signet)"},
+                        {RPCResult::Type::BOOL, "better_work_twin_blocked_by_local_commitment", "True when this signer is stuck on a losing twin because it holds a retained local height commitment. Advisory. Preferred recovery: invalidateblock of the losing fork-child"},
                         {RPCResult::Type::OBJ, "next", "The next block",
                         {
                             {RPCResult::Type::NUM, "height", "The next height"},
@@ -6731,6 +6738,10 @@ static RPCHelpMan getmininginfo()
     }
     obj.pushKV("chain_guard", MiningChainGuardToJSON(chain_guard_status));
     obj.pushKV("fork_health", BuildForkHealthSummary(chainman));
+    const auto twin_blocked{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &tip, chainman.m_best_header, chainman.m_best_claimed_header)};
+    obj.pushKV("better_work_twin_blocked_by_local_commitment", twin_blocked.blocked);
     obj.pushKV(
         "backend_runtime",
         BuildBackendRuntimeProfile(
@@ -6761,7 +6772,22 @@ static RPCHelpMan getmininginfo()
             chainman.GetConsensus().signet_challenge;
         obj.pushKV("signet_challenge", HexStr(signet_challenge));
     }
-    obj.pushKV("warnings", node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings")));
+    UniValue warnings{node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings"))};
+    if (twin_blocked.blocked) {
+        const std::string message{
+            std::string{node::matmul_trusted::BETTER_WORK_TWIN_BLOCKED_RPC_WARNING}};
+        if (warnings.isArray()) {
+            warnings.push_back(message);
+        } else if (warnings.isStr()) {
+            std::string combined = warnings.get_str();
+            if (!combined.empty()) combined += '\n';
+            combined += message;
+            warnings.setStr(std::move(combined));
+        } else {
+            warnings.setStr(message);
+        }
+    }
+    obj.pushKV("warnings", std::move(warnings));
     return obj;
 },
     };

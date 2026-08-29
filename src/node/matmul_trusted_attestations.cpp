@@ -4,6 +4,7 @@
 
 #include <node/matmul_trusted_attestations.h>
 
+#include <chain.h>
 #include <dbwrapper.h>
 #include <hash.h>
 #include <key_io.h>
@@ -1819,6 +1820,69 @@ size_t HistoricalReverifyInflightForTest()
 {
     std::lock_guard lock{g_reverify_mutex};
     return g_reverify_inflight.size();
+}
+
+BetterWorkTwinLocalCommitment DetectBetterWorkTwinBlockedByLocalCommitment(
+    const CBlockIndex* tip,
+    const CBlockIndex* best_header,
+    const CBlockIndex* best_claimed_header)
+{
+    BetterWorkTwinLocalCommitment out;
+    if (!HasLocalSigner() || !tip || !tip->phashBlock) return out;
+
+    const CBlockIndex* competing{nullptr};
+    const auto consider = [&](const CBlockIndex* idx) {
+        if (!idx || idx == tip || !idx->phashBlock) return;
+        if (idx->GetAncestor(tip->nHeight) == tip) return;
+        if (idx->nChainWork <= tip->nChainWork) return;
+        if (!competing || idx->nChainWork > competing->nChainWork) {
+            competing = idx;
+        }
+    };
+    consider(best_header);
+    consider(best_claimed_header);
+    if (!competing) return out;
+
+    const CBlockIndex* const lca{LastCommonAncestor(tip, competing)};
+    const CBlockIndex* local_child{nullptr};
+    const CBlockIndex* twin_child{nullptr};
+    int32_t fork_height{-1};
+    if (!lca) {
+        fork_height = tip->nHeight;
+        local_child = tip;
+        twin_child = competing->GetAncestor(tip->nHeight);
+        if (!twin_child) twin_child = competing;
+    } else {
+        fork_height = lca->nHeight + 1;
+        local_child = tip->GetAncestor(fork_height);
+        twin_child = competing->GetAncestor(fork_height);
+    }
+    if (!local_child || !twin_child ||
+        !local_child->phashBlock || !twin_child->phashBlock ||
+        local_child == twin_child) {
+        return out;
+    }
+
+    const uint256 local_hash{local_child->GetBlockHash()};
+    const uint256 twin_hash{twin_child->GetBlockHash()};
+    const auto minted{LocalMintedHash(fork_height)};
+    const bool mint_eq_local{minted.has_value() && *minted == local_hash};
+    const bool mint_ne_twin{minted.has_value() && *minted != twin_hash};
+    if (!BetterWorkTwinBlockedByLocalCommitment(
+            /*has_local_signer=*/true,
+            /*competing_strictly_heavier=*/true,
+            /*competing_extends_tip=*/false,
+            mint_eq_local,
+            mint_ne_twin)) {
+        return out;
+    }
+
+    out.blocked = true;
+    out.fork_height = fork_height;
+    out.better_work_height = competing->nHeight;
+    out.local_committed_hash = local_hash;
+    out.better_work_twin_hash = twin_hash;
+    return out;
 }
 
 } // namespace node::matmul_trusted

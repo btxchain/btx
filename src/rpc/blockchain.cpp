@@ -377,6 +377,37 @@ static void AppendChainStaleRpcWarning(UniValue& warnings, const bool is_stale)
     warnings.setStr(message);
 }
 
+static void AppendRpcWarningMessage(UniValue& warnings, std::string_view message)
+{
+    const std::string text{message};
+    if (warnings.isArray()) {
+        warnings.push_back(text);
+        return;
+    }
+    if (warnings.isStr()) {
+        std::string combined = warnings.get_str();
+        if (!combined.empty()) combined += '\n';
+        combined += text;
+        warnings.setStr(std::move(combined));
+        return;
+    }
+    warnings.setStr(text);
+}
+
+static void PushBetterWorkTwinLocalCommitmentFields(
+    UniValue& obj,
+    const node::matmul_trusted::BetterWorkTwinLocalCommitment& state)
+{
+    obj.pushKV("better_work_twin_blocked_by_local_commitment", state.blocked);
+    if (!state.blocked) return;
+    UniValue detail{UniValue::VOBJ};
+    detail.pushKV("fork_height", state.fork_height);
+    detail.pushKV("local_committed_hash", state.local_committed_hash.GetHex());
+    detail.pushKV("better_work_twin_hash", state.better_work_twin_hash.GetHex());
+    detail.pushKV("better_work_height", state.better_work_height);
+    obj.pushKV("better_work_twin_local_commitment", std::move(detail));
+}
+
 static RPCHelpMan getblockcount()
 {
     return RPCHelpMan{"getblockcount",
@@ -1999,6 +2030,14 @@ RPCHelpMan getblockchaininfo()
                 {RPCResult::Type::BOOL, "is_stale", "True when this node has a known-heavier competing header chain, or is more than 6 headers ahead of the connected tip. Do not credit deposits from this node's confirmations until false"},
                 {RPCResult::Type::BOOL, "competing_heavier_header", "True when m_best_header has more chainwork than the active tip and is not an ancestor/descendant of that tip"},
                 {RPCResult::Type::BOOL, "header_extends_tip", "True when the followed header chain descends from the connected tip (linear catch-up, not a competing fork)"},
+                {RPCResult::Type::BOOL, "better_work_twin_blocked_by_local_commitment", "True when this process is a local signer, a strictly-heavier competing header fork is known, and this node still holds a local mint slot on the active fork-child. Advisory only; does not change admission. Preferred recovery is invalidateblock of the losing fork-child"},
+                {RPCResult::Type::OBJ, "better_work_twin_local_commitment", /*optional=*/true, "Present when better_work_twin_blocked_by_local_commitment is true",
+                    {
+                        {RPCResult::Type::NUM, "fork_height", "Height of the fork-child"},
+                        {RPCResult::Type::STR_HEX, "local_committed_hash", "Hash this node minted at fork_height (the losing child)"},
+                        {RPCResult::Type::STR_HEX, "better_work_twin_hash", "Fork-child hash on the heavier competing twin"},
+                        {RPCResult::Type::NUM, "better_work_height", "Tip height of the heavier competing header"},
+                    }},
                 {RPCResult::Type::STR_HEX, "best_header_hash", /*optional=*/true, "Hash of m_best_header when it differs from the connected tip"},
                 {RPCResult::Type::STR, "bestblockhash", "the hash of the currently best block"},
                 {RPCResult::Type::STR_HEX, "bits", "nBits: compact representation of the block difficulty target"},
@@ -2077,6 +2116,10 @@ RPCHelpMan getblockchaininfo()
     obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
     const auto stale = node::ComputeChainTipStaleness(&tip, chainman.m_best_header);
     PushChainTipStalenessFields(obj, stale);
+    const auto twin_blocked{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &tip, chainman.m_best_header, chainman.m_best_claimed_header)};
+    PushBetterWorkTwinLocalCommitmentFields(obj, twin_blocked);
     obj.pushKV("bestblockhash", tip.GetBlockHash().GetHex());
     obj.pushKV("bits", strprintf("%08x", tip.nBits));
     obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
@@ -2141,6 +2184,10 @@ RPCHelpMan getblockchaininfo()
     NodeContext& node = EnsureAnyNodeContext(request.context);
     UniValue warnings{node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings"))};
     AppendChainStaleRpcWarning(warnings, stale.is_stale);
+    if (twin_blocked.blocked) {
+        AppendRpcWarningMessage(
+            warnings, node::matmul_trusted::BETTER_WORK_TWIN_BLOCKED_RPC_WARNING);
+    }
     obj.pushKV("warnings", std::move(warnings));
     return obj;
 },

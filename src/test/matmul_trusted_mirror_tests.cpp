@@ -2,9 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <arith_uint256.h>
 #include <boost/signals2/connection.hpp>
 #include <boost/test/unit_test.hpp>
 
+#include <chain.h>
 #include <chainparams.h>
 #include <common/args.h>
 #include <hash.h>
@@ -4227,6 +4229,103 @@ BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_truste
         BOOST_CHECK(node::matmul_trusted::HasLocalSigner());
         BOOST_CHECK(!node::matmul_trusted::ServesAttestations());
     }
+}
+
+BOOST_AUTO_TEST_CASE(better_work_twin_blocked_by_local_commitment_predicate)
+{
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        /*has_local_signer=*/false,
+        /*competing_strictly_heavier=*/true,
+        /*competing_extends_tip=*/false,
+        /*local_mint_equals_active_fork_child=*/true,
+        /*local_mint_differs_from_competing_fork_child=*/true));
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, /*competing_strictly_heavier=*/false, false, true, true));
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, true, /*competing_extends_tip=*/true, true, true));
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, true, false, /*local_mint_equals_active_fork_child=*/false, true));
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, true, false, true, /*local_mint_differs_from_competing_fork_child=*/false));
+    BOOST_CHECK(node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, true, false, true, true));
+}
+
+BOOST_AUTO_TEST_CASE(detect_better_work_twin_blocked_by_local_commitment)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const CKey other{NewKey()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = Hex256('1');
+    config.replay_authority_context = Hex256('2');
+    config.trusted_signers = {signer.GetPubKey(), other.GetPubKey()};
+    config.threshold = 2;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{10}, error));
+
+    CBlockIndex genesis;
+    CBlockIndex lose;
+    CBlockIndex win;
+    CBlockIndex win_tip;
+    uint256 genesis_hash{Hex256('0')};
+    uint256 lose_hash{Hex256('a')};
+    uint256 win_hash{Hex256('b')};
+    uint256 win_tip_hash{Hex256('c')};
+    genesis.phashBlock = &genesis_hash;
+    genesis.nHeight = 0;
+    genesis.nChainWork = arith_uint256{1};
+    lose.phashBlock = &lose_hash;
+    lose.pprev = &genesis;
+    lose.nHeight = 1;
+    lose.nChainWork = arith_uint256{2};
+    win.phashBlock = &win_hash;
+    win.pprev = &genesis;
+    win.nHeight = 1;
+    win.nChainWork = arith_uint256{3};
+    win_tip.phashBlock = &win_tip_hash;
+    win_tip.pprev = &win;
+    win_tip.nHeight = 2;
+    win_tip.nChainWork = arith_uint256{4};
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(lose_hash, 1) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    const auto blocked{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &lose, /*best_header=*/&lose, /*best_claimed_header=*/&win_tip)};
+    BOOST_CHECK(blocked.blocked);
+    BOOST_CHECK_EQUAL(blocked.fork_height, 1);
+    BOOST_CHECK(blocked.local_committed_hash == lose_hash);
+    BOOST_CHECK(blocked.better_work_twin_hash == win_hash);
+    BOOST_CHECK_EQUAL(blocked.better_work_height, 2);
+
+    const auto extending{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &lose, /*best_header=*/&lose, /*best_claimed_header=*/nullptr)};
+    BOOST_CHECK(!extending.blocked);
+
+    CBlockIndex catch_up;
+    uint256 catch_up_hash{Hex256('d')};
+    catch_up.phashBlock = &catch_up_hash;
+    catch_up.pprev = &lose;
+    catch_up.nHeight = 2;
+    catch_up.nChainWork = arith_uint256{5};
+    const auto catch_up_state{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &lose, &catch_up, nullptr)};
+    BOOST_CHECK(!catch_up_state.blocked);
+
+    BOOST_REQUIRE(node::matmul_trusted::ClearMintedAttestations(1, 1) == 1);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(win_hash, 1) ==
+                  matmul::trusted::AddResult::Accepted);
+    const auto minted_winner{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &lose, &lose, &win_tip)};
+    BOOST_CHECK(!minted_winner.blocked);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

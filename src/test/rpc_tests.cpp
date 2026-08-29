@@ -1103,4 +1103,101 @@ BOOST_AUTO_TEST_CASE(getblockchaininfo_stale_on_competing_heavier_header)
     BOOST_CHECK(WarningsMentionStale(info["warnings"]));
 }
 
+static bool WarningsMentionNeedle(const UniValue& warnings, std::string_view needle)
+{
+    if (warnings.isArray()) {
+        for (size_t i = 0; i < warnings.size(); ++i) {
+            if (warnings[i].get_str().find(std::string{needle}) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (warnings.isStr()) {
+        return warnings.get_str().find(std::string{needle}) != std::string::npos;
+    }
+    return false;
+}
+
+BOOST_AUTO_TEST_CASE(getblockchaininfo_better_work_twin_blocked_by_local_commitment)
+{
+    struct Reset {
+        ~Reset() { node::matmul_trusted::ResetForTest(); }
+    } reset;
+
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_claimed;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_claimed = chainman.m_best_claimed_header;
+    }
+
+    UniValue idle{CallRPC("getblockchaininfo")};
+    BOOST_CHECK(!idle["better_work_twin_blocked_by_local_commitment"].get_bool());
+
+    const CKey signer{MakeTestKey()};
+    const CKey other{MakeTestKey()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256{uint8_t{1}};
+    config.replay_authority_context = uint256{uint8_t{2}};
+    config.trusted_signers = {signer.GetPubKey(), other.GetPubKey()};
+    config.threshold = 2;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{10}, error));
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      tip->GetBlockHash(), tip->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{12}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip->pprev;
+    fake.nHeight = tip->nHeight;
+    fake.nChainWork = tip->nChainWork + arith_uint256{1000};
+
+    {
+        LOCK(cs_main);
+        chainman.m_best_claimed_header = &fake;
+    }
+    const UniValue info{CallRPC("getblockchaininfo")};
+    const UniValue mining{CallRPC("getmininginfo")};
+    {
+        LOCK(cs_main);
+        chainman.m_best_claimed_header = original_claimed;
+    }
+
+    BOOST_CHECK(info["better_work_twin_blocked_by_local_commitment"].get_bool());
+    BOOST_REQUIRE(info.exists("better_work_twin_local_commitment"));
+    BOOST_CHECK_EQUAL(
+        info["better_work_twin_local_commitment"]["fork_height"].getInt<int>(),
+        tip->nHeight);
+    BOOST_CHECK_EQUAL(
+        info["better_work_twin_local_commitment"]["local_committed_hash"].get_str(),
+        tip->GetBlockHash().GetHex());
+    BOOST_CHECK_EQUAL(
+        info["better_work_twin_local_commitment"]["better_work_twin_hash"].get_str(),
+        fake_hash.GetHex());
+    BOOST_CHECK(WarningsMentionNeedle(
+        info["warnings"], "better_work_twin_blocked_by_local_commitment"));
+    BOOST_CHECK(mining["better_work_twin_blocked_by_local_commitment"].get_bool());
+    BOOST_CHECK(WarningsMentionNeedle(
+        mining["warnings"], "better_work_twin_blocked_by_local_commitment"));
+    bool saw_observation{false};
+    const UniValue& observations{mining["fork_health"]["observations"]};
+    BOOST_REQUIRE(observations.isArray());
+    for (size_t i = 0; i < observations.size(); ++i) {
+        if (observations[i].get_str() ==
+            "better_work_twin_blocked_by_local_commitment") {
+            saw_observation = true;
+        }
+    }
+    BOOST_CHECK(saw_observation);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

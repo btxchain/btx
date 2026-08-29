@@ -1160,12 +1160,11 @@ RPCHelpMan clearmintedattestation()
         "Requires a configured local signer. Archives and graviton mirrors "
         "must not call this: it is for releasing this signer's HeightOccupied "
         "record, not a quorum vote.\n"
-        "If this signer is stuck on a losing twin (a strictly-heavier "
-        "competing header that this node's retained HeightOccupied record "
-        "will not follow), prefer `invalidateblock` of the losing "
-        "fork-child: disconnect auto-releases the minted suffix. Use this "
-        "RPC only when you intend to clear mint slots without invalidating "
-        "the block.\n",
+        "If this signer is stuck on a losing twin "
+        "(getblockchaininfo.better_work_twin_blocked_by_local_commitment), "
+        "prefer `invalidateblock` of the losing fork-child: disconnect "
+        "auto-releases the minted suffix. Use this RPC only when you intend "
+        "to clear mint slots without invalidating the block.\n",
         {
             {"height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED,
              "First height whose local mint slot should be released. Omit to "

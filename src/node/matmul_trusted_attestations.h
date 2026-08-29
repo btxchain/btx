@@ -22,6 +22,8 @@
 #include <uint256.h>
 #include <util/fs.h>
 
+class CBlockIndex;
+
 namespace node::matmul_trusted {
 
 /** Process-local operator trust runtime.
@@ -128,6 +130,45 @@ void NotifyActiveChainBlockConnected(int32_t height,
  */
 size_t ClearMintedAttestations(int32_t from_height, int32_t to_height);
 [[nodiscard]] std::optional<uint256> LocalMintedHash(int32_t height);
+
+/**
+ * Operator-visible RB-14 stuck-on-losing-twin: this signer ExactReplay'd and
+ * minted the active fork-child, while a strictly-heavier competing twin is
+ * known. Admission / anti-equivocation is unchanged; this is a status
+ * predicate so operators know to `invalidateblock` the losing fork-child.
+ */
+struct BetterWorkTwinLocalCommitment {
+    bool blocked{false};
+    int32_t fork_height{-1};
+    int32_t better_work_height{-1};
+    uint256 local_committed_hash{};
+    uint256 better_work_twin_hash{};
+};
+
+inline constexpr std::string_view BETTER_WORK_TWIN_BLOCKED_RPC_WARNING{
+    "better_work_twin_blocked_by_local_commitment: this signer holds a retained local height commitment on the active fork-child while a strictly-heavier competing twin is known. Preferred recovery is one invalidateblock of the losing fork-child (disconnect auto-releases mint slots). clearmintedattestation only clears this node's mint slots and does not reorg."};
+
+[[nodiscard]] inline bool BetterWorkTwinBlockedByLocalCommitment(
+    bool has_local_signer,
+    bool competing_strictly_heavier,
+    bool competing_extends_tip,
+    bool local_mint_equals_active_fork_child,
+    bool local_mint_differs_from_competing_fork_child)
+{
+    if (!has_local_signer) return false;
+    if (!competing_strictly_heavier) return false;
+    if (competing_extends_tip) return false;
+    return local_mint_equals_active_fork_child &&
+           local_mint_differs_from_competing_fork_child;
+}
+
+/** Diagnostic only. Callers that read chain indexes should hold cs_main. */
+[[nodiscard]] BetterWorkTwinLocalCommitment
+DetectBetterWorkTwinBlockedByLocalCommitment(
+    const CBlockIndex* tip,
+    const CBlockIndex* best_header,
+    const CBlockIndex* best_claimed_header);
+
 /**
  * Sign a UTXO snapshot statement with the configured local attestation key.
  * Returns nullopt when unconfigured or the statement's chain/authority fields
