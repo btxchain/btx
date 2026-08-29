@@ -902,6 +902,104 @@ BOOST_AUTO_TEST_CASE(open_signed_entries_capped_at_one_height)
     BOOST_CHECK_LE(store.OpenSignedEntryCount(), 3);
 }
 
+BOOST_AUTO_TEST_CASE(constructor_resolves_open_directory_cap_defaults)
+{
+    const auto pin{MakeKeys(1)};
+    auto config{MakeConfig(TestHash(0xf0), pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    AttestationStore store{config};
+    BOOST_CHECK_EQUAL(store.MaxAdmittedOpen(), DEFAULT_MAX_ADMITTED_OPEN);
+    BOOST_CHECK_EQUAL(store.MaxOpenSignedHeights(),
+                      DEFAULT_MAX_OPEN_SIGNED_HEIGHTS);
+    BOOST_CHECK_EQUAL(store.MaxOpenSignedEntries(),
+                      DEFAULT_MAX_OPEN_SIGNED_ENTRIES);
+    BOOST_CHECK_EQUAL(store.MaxFrozenOpen(), DEFAULT_MAX_FROZEN_OPEN);
+    BOOST_CHECK_EQUAL(store.MaxRefutations(), DEFAULT_MAX_REFUTATIONS);
+    BOOST_CHECK_EQUAL(store.MaxLogLeaves(), DEFAULT_MAX_LOG_LEAVES);
+    BOOST_CHECK_EQUAL(store.MaxWindowChallenges(),
+                      DEFAULT_MAX_WINDOW_CHALLENGES);
+    BOOST_CHECK_EQUAL(store.MaxHeardAttestations(), 4096);
+}
+
+BOOST_AUTO_TEST_CASE(open_directory_ttl_prunes_heard_and_signed_heights)
+{
+    const auto pin{MakeKeys(1)};
+    const auto extra{MakeKeys(1)};
+    const uint256 chain{TestHash(0xf1)};
+    const uint256 block{TestHash(0xf2)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.ttl = 1ms;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, block, 7), pin[0]),
+                            block, 7) == AddResult::Accepted);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 7), extra[0]),
+                          block, 7) == AddResult::Heard);
+    BOOST_CHECK_EQUAL(store.OpenSignedHeightCount(), 1);
+    BOOST_CHECK_EQUAL(store.GetStats().heard_attestations, 1);
+
+    std::this_thread::sleep_for(5ms);
+    store.PruneExpired();
+    BOOST_CHECK_EQUAL(store.OpenSignedHeightCount(), 0);
+    BOOST_CHECK_EQUAL(store.GetStats().heard_attestations, 0);
+    BOOST_CHECK_EQUAL(store.GetStats().open_signed_heights, 0);
+    // Pin authority buckets are not the open-directory DoS surface; they
+    // follow the same TTL unless durable retention is on.
+    BOOST_CHECK_EQUAL(store.GetAttestations(block, 7).size(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(open_directory_ttl_runs_under_durable_retention)
+{
+    const auto pin{MakeKeys(1)};
+    const auto extra{MakeKeys(1)};
+    const uint256 chain{TestHash(0xf3)};
+    const uint256 block{TestHash(0xf4)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.ttl = 1ms;
+    AttestationStore store{config};
+    store.SetDurableRetention(true);
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, block, 8), pin[0]),
+                            block, 8) == AddResult::Accepted);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 8), extra[0]),
+                          block, 8) == AddResult::Heard);
+    std::this_thread::sleep_for(5ms);
+    store.PruneExpired();
+    BOOST_CHECK_EQUAL(store.GetAttestations(block, 8).size(), 1);
+    BOOST_CHECK_EQUAL(store.OpenSignedHeightCount(), 0);
+    BOOST_CHECK_EQUAL(store.GetStats().heard_attestations, 0);
+}
+
+BOOST_AUTO_TEST_CASE(log_leaves_and_window_challenges_are_capped)
+{
+    const auto keys{MakeKeys(1)};
+    const uint256 chain{TestHash(0xf5)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/1)};
+    config.max_log_leaves = 2;
+    config.max_window_challenges = 1;
+    AttestationStore store{config};
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, TestHash(0x01), 1),
+                                     keys[0]),
+                            TestHash(0x01), 1) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, TestHash(0x02), 2),
+                                     keys[0]),
+                            TestHash(0x02), 2) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, TestHash(0x03), 3),
+                                     keys[0]),
+                            TestHash(0x03), 3) == AddResult::Accepted);
+    BOOST_CHECK_EQUAL(store.LogHead().tree_size, 2);
+    BOOST_CHECK(!store.LogInclusionProof(StatementHash(
+                    MakeStatement(chain, TestHash(0x01), 1))).has_value());
+
+    store.ChallengeWindowReplay(8, TestHash(0x0a));
+    store.ChallengeWindowReplay(9, TestHash(0x0b));
+    const auto challenges{store.WindowReplayChallenges()};
+    BOOST_REQUIRE_EQUAL(challenges.size(), 1);
+    BOOST_CHECK_EQUAL(challenges[0].height, 9);
+}
+
 BOOST_AUTO_TEST_CASE(frozen_open_set_is_capped)
 {
     const auto pin{MakeKeys(1)};
@@ -922,6 +1020,24 @@ BOOST_AUTO_TEST_CASE(frozen_open_set_is_capped)
                               b, height) == AddResult::Equivocation);
     }
     BOOST_CHECK_EQUAL(store.FrozenOpenSigners().size(), 2);
+}
+
+BOOST_AUTO_TEST_CASE(refutation_ttl_prunes_buckets)
+{
+    const auto pin{MakeKeys(1)};
+    const uint256 chain{TestHash(0xd5)};
+    const uint256 hash{TestHash(0xd6)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.ttl = 1ms;
+    AttestationStore store{config};
+    auto refute{SignRefutation(MakeStatement(chain, hash, 91), pin[0])};
+    BOOST_REQUIRE(refute.has_value());
+    BOOST_CHECK(store.AddRefutation(*refute, hash, 91) == AddResult::Accepted);
+    BOOST_CHECK_EQUAL(store.GetRefutations(hash, 91).size(), 1);
+    std::this_thread::sleep_for(5ms);
+    store.PruneExpired();
+    BOOST_CHECK(store.GetRefutations(hash, 91).empty());
+    BOOST_CHECK_EQUAL(store.GetStats().refutation_buckets, 0);
 }
 
 BOOST_AUTO_TEST_CASE(refutation_map_is_capped)

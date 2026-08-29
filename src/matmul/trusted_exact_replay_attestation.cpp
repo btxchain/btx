@@ -597,6 +597,16 @@ void AttestationStore::FreezeOpenLocked(const CPubKey& pubkey)
         CapFrozenOpenLocked();
     }
     m_admitted_open.erase(pubkey);
+    for (auto it = m_open_signed_at_height.begin();
+         it != m_open_signed_at_height.end();) {
+        it->second.erase(pubkey);
+        if (it->second.empty()) {
+            m_open_signed_updated.erase(it->first);
+            it = m_open_signed_at_height.erase(it);
+        } else {
+            ++it;
+        }
+    }
     for (auto it = m_buckets.begin(); it != m_buckets.end();) {
         auto att_it{it->second.attestations.find(pubkey)};
         if (att_it == it->second.attestations.end()) {
@@ -673,10 +683,12 @@ void AttestationStore::PruneOpenDirectoryLocked()
 {
     while (m_open_signed_at_height.size() > m_config.max_open_signed_heights &&
            !m_open_signed_at_height.empty()) {
+        m_open_signed_updated.erase(m_open_signed_at_height.begin()->first);
         m_open_signed_at_height.erase(m_open_signed_at_height.begin());
     }
     while (OpenSignedEntryCountLocked() > m_config.max_open_signed_entries &&
            !m_open_signed_at_height.empty()) {
+        m_open_signed_updated.erase(m_open_signed_at_height.begin()->first);
         m_open_signed_at_height.erase(m_open_signed_at_height.begin());
     }
 }
@@ -731,6 +743,7 @@ void AttestationStore::CapRefutationsLocked()
         auto oldest{m_refutations.begin()};
         const BlockKey dropped{oldest->first};
         m_refutations.erase(oldest);
+        m_refutation_updated.erase(dropped);
         m_pin_refuted.erase(dropped);
     }
 }
@@ -796,10 +809,12 @@ AddResult AttestationStore::Add(
                 if (existing_hash != signed_at.end() ||
                     signed_at.size() < m_config.max_open_signers_per_height) {
                     signed_at[attestation.signer] = expected_hash;
+                    m_open_signed_updated[expected_height] = now;
                 }
             } else if (m_config.max_open_signers_per_height > 0) {
                 m_open_signed_at_height[expected_height][attestation.signer] =
                     expected_hash;
+                m_open_signed_updated[expected_height] = now;
             }
             PruneOpenDirectoryLocked();
 
@@ -938,6 +953,7 @@ void AttestationStore::ReleaseOpenSignedMatchingHashLocked(
     }
     if (signers.empty()) {
         m_open_signed_at_height.erase(height_it);
+        m_open_signed_updated.erase(height);
     }
 }
 
@@ -988,6 +1004,7 @@ size_t AttestationStore::ClearLocalMintSlots(int32_t from_height,
     while (it != m_local_minted_hash_by_height.end() &&
            it->first <= to_height) {
         m_open_signed_at_height.erase(it->first);
+        m_open_signed_updated.erase(it->first);
         it = m_local_minted_hash_by_height.erase(it);
         ++cleared;
     }
@@ -996,6 +1013,7 @@ size_t AttestationStore::ClearLocalMintSlots(int32_t from_height,
     auto open_it{m_open_signed_at_height.lower_bound(from_height)};
     while (open_it != m_open_signed_at_height.end() &&
            open_it->first <= to_height) {
+        m_open_signed_updated.erase(open_it->first);
         open_it = m_open_signed_at_height.erase(open_it);
     }
     return cleared;
@@ -1210,14 +1228,50 @@ void AttestationStore::EraseLocked(
 
 void AttestationStore::PruneExpiredLocked(Clock::time_point now)
 {
-    if (m_durable_retention) return;
-    for (auto it = m_buckets.begin(); it != m_buckets.end();) {
-        if (now - it->second.updated < m_config.ttl) {
+    if (!m_durable_retention) {
+        for (auto it = m_buckets.begin(); it != m_buckets.end();) {
+            if (now - it->second.updated < m_config.ttl) {
+                ++it;
+                continue;
+            }
+            auto expired{it++};
+            EraseLocked(expired, true);
+        }
+    }
+    // Open-directory maps are a mem/disk DoS surface, not authority. TTL
+    // them even when pin buckets are durable.
+    PruneExpiredDirectoryLocked(now);
+}
+
+void AttestationStore::PruneExpiredDirectoryLocked(Clock::time_point now)
+{
+    for (auto it = m_heard_updated.begin(); it != m_heard_updated.end();) {
+        if (now - it->second < m_config.ttl) {
             ++it;
             continue;
         }
-        auto expired{it++};
-        EraseLocked(expired, true);
+        m_heard.erase(it->first);
+        it = m_heard_updated.erase(it);
+    }
+    for (auto it = m_open_signed_updated.begin();
+         it != m_open_signed_updated.end();) {
+        if (now - it->second < m_config.ttl) {
+            ++it;
+            continue;
+        }
+        m_open_signed_at_height.erase(it->first);
+        it = m_open_signed_updated.erase(it);
+    }
+    for (auto it = m_refutation_updated.begin();
+         it != m_refutation_updated.end();) {
+        if (now - it->second < m_config.ttl) {
+            ++it;
+            continue;
+        }
+        const BlockKey key{it->first};
+        m_refutations.erase(key);
+        m_pin_refuted.erase(key);
+        it = m_refutation_updated.erase(it);
     }
 }
 
@@ -1347,6 +1401,11 @@ StoreStats AttestationStore::GetStats() const
     stats.heard_attestations = m_heard.size();
     stats.admitted_open = m_admitted_open.size();
     stats.frozen_open = m_frozen_open.size();
+    stats.open_signed_heights = m_open_signed_at_height.size();
+    stats.open_signed_entries = OpenSignedEntryCountLocked();
+    stats.refutation_buckets = m_refutations.size();
+    stats.log_leaves = m_log_leaves.size();
+    stats.window_challenges = m_window_challenges.size();
     return stats;
 }
 
@@ -1633,6 +1692,9 @@ AddResult AttestationStore::AddRefutation(
     }
     {
         std::lock_guard lock{m_mutex};
+        // Directory TTL even on a refute-only flood; pin buckets are not
+        // this path's DoS surface (Add() / PruneExpired handle those).
+        PruneExpiredDirectoryLocked(Clock::now());
         if (IsBlockedLocked(refutation.signer)) {
             ++m_stats.rejected;
             return AddResult::BlocklistedSigner;
@@ -1653,6 +1715,7 @@ AddResult AttestationStore::AddRefutation(
             return AddResult::Duplicate;
         }
         bucket.emplace(refutation.signer, refutation);
+        m_refutation_updated[key] = Clock::now();
         RefreshPinRefutedLocked(key);
         CapRefutationsLocked();
         ++m_stats.accepted;

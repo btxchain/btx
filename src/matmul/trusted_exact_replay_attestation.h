@@ -328,6 +328,11 @@ struct StoreStats {
     size_t heard_attestations{0};
     size_t admitted_open{0};
     size_t frozen_open{0};
+    size_t open_signed_heights{0};
+    size_t open_signed_entries{0};
+    size_t refutation_buckets{0};
+    size_t log_leaves{0};
+    size_t window_challenges{0};
 };
 
 /**
@@ -483,6 +488,32 @@ public:
     {
         return m_config.max_attestations;
     }
+    [[nodiscard]] size_t MaxHeardAttestations() const
+    {
+        return m_config.max_heard_attestations;
+    }
+    [[nodiscard]] size_t MaxAdmittedOpen() const
+    {
+        return m_config.max_admitted_open;
+    }
+    [[nodiscard]] size_t MaxOpenSignedHeights() const
+    {
+        return m_config.max_open_signed_heights;
+    }
+    [[nodiscard]] size_t MaxOpenSignedEntries() const
+    {
+        return m_config.max_open_signed_entries;
+    }
+    [[nodiscard]] size_t MaxFrozenOpen() const { return m_config.max_frozen_open; }
+    [[nodiscard]] size_t MaxRefutations() const
+    {
+        return m_config.max_refutations;
+    }
+    [[nodiscard]] size_t MaxLogLeaves() const { return m_config.max_log_leaves; }
+    [[nodiscard]] size_t MaxWindowChallenges() const
+    {
+        return m_config.max_window_challenges;
+    }
     [[nodiscard]] const std::set<CPubKey>& TrustedSigners() const
     {
         return m_trusted_signers;
@@ -581,6 +612,7 @@ private:
         const ExactReplayAttestation& attestation, Clock::time_point now);
     void AppendLogLeafLocked(const uint256& leaf);
     void PruneExpiredLocked(Clock::time_point now);
+    void PruneExpiredDirectoryLocked(Clock::time_point now);
     void PruneOpenDirectoryLocked();
     [[nodiscard]] size_t OpenSignedEntryCountLocked() const;
     void RefreshPinRefutedLocked(const BlockKey& key);
@@ -634,7 +666,9 @@ private:
     std::set<CPubKey> m_frozen_open;
     std::deque<CPubKey> m_frozen_open_order;
     std::map<int32_t, std::map<CPubKey, uint256>> m_open_signed_at_height;
+    std::map<int32_t, Clock::time_point> m_open_signed_updated;
     std::map<BlockKey, std::map<CPubKey, ExactReplayRefutation>> m_refutations;
+    std::map<BlockKey, Clock::time_point> m_refutation_updated;
     std::set<BlockKey> m_pin_refuted;
     std::vector<uint256> m_log_leaves;
     std::vector<WindowReplayChallenge> m_window_challenges;
