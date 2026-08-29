@@ -19925,7 +19925,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         if (!state.fSyncStarted && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks() &&
             !node::HeaderSyncAdvertisedHeightUnusable(
                 tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
-                peer->m_starting_height.load())) {
+                peer->m_starting_height.load(),
+                state.pindexBestKnownBlock != nullptr
+                    ? state.pindexBestKnownBlock->nHeight
+                    : -1)) {
             // Only actively request headers from a single peer, unless we're close to today.
             //
             // Preference-only handoff: after an ordinary peer loses fPreferredDownload at

@@ -148,6 +148,9 @@ BOOST_AUTO_TEST_CASE(must_probe_table)
     BOOST_CHECK(!node::HeaderSyncMustProbe(199310, -1, true, true, false));
     // same-height stale, BestKnown null
     BOOST_CHECK(node::HeaderSyncMustProbe(199310, 199310, true, true, false));
+    // SF-5: stale VERSION snapshot, BestKnown already above tip → probe.
+    BOOST_CHECK(node::HeaderSyncMustProbe(199334, 199300, false, false, false,
+                                          /*best_known_height=*/199340));
 }
 
 BOOST_AUTO_TEST_CASE(probe_interval_and_suffix_failover_helpers)
@@ -175,6 +178,13 @@ BOOST_AUTO_TEST_CASE(probe_interval_and_suffix_failover_helpers)
     BOOST_CHECK(!node::HeaderSyncAdvertisedHeightUnusable(199334, 200294));
     BOOST_CHECK(!node::HeaderSyncAdvertisedHeightUnusable(0, 0));
     BOOST_CHECK(!node::HeaderSyncAdvertisedHeightUnusable(-1, 0));
+    BOOST_CHECK(!node::HeaderSyncAdvertisedHeightUnusable(199334, 199300, 199340));
+    BOOST_CHECK(!node::HeaderSyncAdvertisedHeightUnusable(199334, 0, 199334));
+    BOOST_CHECK(node::HeaderSyncAdvertisedHeightUnusable(199334, 199300, 199300));
+    BOOST_CHECK(node::HeaderSyncMustProbe(
+        199334, /*stale_version=*/199300, /*best_known_null=*/false,
+        /*tip_is_stale=*/false, /*headers_in_flight=*/false,
+        /*best_known=*/199340, /*extends_tip=*/true));
 }
 
 BOOST_AUTO_TEST_CASE(initial_sync_prefers_checkpoint_anchor_and_skips_low_work_failures)

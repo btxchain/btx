@@ -125,8 +125,15 @@ inline constexpr int HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD{6};
  */
 [[nodiscard]] inline bool HeaderSyncAdvertisedHeightUnusable(
     int32_t local_tip_height,
-    int32_t peer_starting_height)
+    int32_t peer_starting_height,
+    int32_t best_known_height = -1)
 {
+    // Live BestKnown is the real tip we have learned. VERSION is a
+    // handshake snapshot: a peer that connected below tip (or at 0)
+    // must not be permanently excluded after it catches up (SF-5).
+    if (best_known_height >= 0) {
+        return local_tip_height > 0 && best_known_height < local_tip_height;
+    }
     // Unset VERSION (-1) is not a tip to chase. Height 0 is genesis:
     // skip it only once we ourselves are past genesis (live 0.34.5:
     // probes to peers advertising 0). A peer behind our connected tip
@@ -197,10 +204,21 @@ inline constexpr int CATCHUP_FAR_BEHIND_YIELD{100};
     bool best_known_extends_tip = false)
 {
     (void)headers_in_flight;
+    const int32_t known_for_unusable = best_known_is_null ? -1 : best_known_height;
     if (HeaderSyncAdvertisedHeightUnusable(local_tip_height,
-                                           peer_starting_height)) {
+                                           peer_starting_height,
+                                           known_for_unusable)) {
         return false;
     }
+    // VERSION was behind (or height 0) but HEADERS/INV have already shown
+    // this peer above tip: still probe. Do not take this path when VERSION
+    // itself was usable — BestKnown ahead on our chain must stay a skip.
+    const bool version_unusable =
+        HeaderSyncAdvertisedHeightUnusable(local_tip_height, peer_starting_height);
+    if (version_unusable && best_known_height > local_tip_height) {
+        return true;
+    }
+    if (version_unusable) return false;
     const auto known_not_ahead = [&] {
         if (best_known_is_null) return true;
         if (!best_known_extends_tip) return true;
