@@ -566,4 +566,166 @@ BOOST_AUTO_TEST_CASE(selfqual_gemm_mismatch_gate_preserves_deficit_reason)
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
 }
 
+BOOST_AUTO_TEST_CASE(lookup_treats_unknown_class_as_absence_not_duplicate)
+{
+    const auto manifest{GoldenCohort()};
+    auto m5{Provider()};
+    m5.provider_family = "metal";
+    m5.device_architecture = "m5_class";
+    const auto none{rc::LookupRCProductionGolden(m5, Epoch(), manifest)};
+    BOOST_CHECK(none.status == rc::RCProductionGoldenLookupStatus::None);
+    BOOST_CHECK(none.entry == nullptr);
+
+    const auto unique{rc::LookupRCProductionGolden(Provider(), Epoch(), manifest)};
+    BOOST_CHECK(unique.status == rc::RCProductionGoldenLookupStatus::Unique);
+    BOOST_REQUIRE(unique.entry != nullptr);
+    BOOST_CHECK_EQUAL(unique.entry->id, "unit-test-only");
+
+    const std::vector<rc::RCProductionGoldenManifestEntry> dup{Golden(), Golden()};
+    const auto duplicate{rc::LookupRCProductionGolden(Provider(), Epoch(), dup)};
+    BOOST_CHECK(duplicate.status == rc::RCProductionGoldenLookupStatus::Duplicate);
+    BOOST_CHECK(duplicate.entry == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(committed_manifest_has_no_m5_row)
+{
+    const auto& committed{rc::CommittedRCProductionGoldenManifest()};
+    BOOST_REQUIRE(!committed.empty());
+    auto m5{Provider()};
+    m5.provider_family = "metal";
+    m5.device_architecture = "m5_class";
+    const auto none{rc::LookupRCProductionGolden(
+        m5, committed.front().epoch, committed)};
+    BOOST_CHECK(none.status == rc::RCProductionGoldenLookupStatus::None);
+
+    auto m4{m5};
+    m4.device_architecture = "m4_class";
+    const auto matched{rc::LookupRCProductionGolden(
+        m4, committed.front().epoch, committed)};
+    BOOST_CHECK(matched.status == rc::RCProductionGoldenLookupStatus::Unique);
+}
+
+BOOST_AUTO_TEST_CASE(self_qual_without_golden_row_is_admissible)
+{
+    rc::RCProductionGoldenLookup none;
+    const auto admitted{rc::DecideRCProductionMiningAdmission(
+        /*self_qualified=*/true, none, /*replay=*/nullptr)};
+    BOOST_CHECK(admitted.admissible);
+    BOOST_CHECK(admitted.passed);
+    BOOST_CHECK(admitted.activation_ready);
+    BOOST_CHECK(admitted.path == rc::RCProductionAdmissionPath::SelfQualification);
+    BOOST_CHECK(admitted.outcome == rc::RCProductionCanaryOutcome::MissingGolden);
+    BOOST_CHECK_EQUAL(admitted.reason, "admitted_by_self_qualification");
+    BOOST_CHECK(!admitted.exact_manifest_match);
+    BOOST_CHECK_EQUAL(
+        rc::RCProductionAdmissionPathName(admitted.path), "self_qualification");
+}
+
+BOOST_AUTO_TEST_CASE(matching_row_with_digest_mismatch_is_not_admissible)
+{
+    const auto golden{Golden()};
+    rc::RCProductionGoldenLookup unique;
+    unique.status = rc::RCProductionGoldenLookupStatus::Unique;
+    unique.entry = &golden;
+
+    rc::RCStrictDeviceEpisodeResult replay;
+    replay.outcome = rc::RCStrictDeviceEpisodeOutcome::Complete;
+    replay.digest = golden.expected_digest;
+    replay.acceleration.require_device = true;
+    replay.acceleration.fully_accelerated = true;
+    replay.acceleration.device_backend_present = true;
+    replay.acceleration.device_macs = rc::TotalRCEpisodeMacs(golden.epoch.params);
+
+    const auto matched{rc::DecideRCProductionMiningAdmission(
+        /*self_qualified=*/true, unique, &replay)};
+    BOOST_CHECK(matched.admissible);
+    BOOST_CHECK(matched.path == rc::RCProductionAdmissionPath::ReviewedGolden);
+    BOOST_CHECK(matched.exact_manifest_match);
+
+    replay.digest = NonNullDigest(0x43);
+    const auto mismatch{rc::DecideRCProductionMiningAdmission(
+        /*self_qualified=*/true, unique, &replay)};
+    BOOST_CHECK(!mismatch.admissible);
+    BOOST_CHECK(!mismatch.passed);
+    BOOST_CHECK(!mismatch.activation_ready);
+    BOOST_CHECK(mismatch.path == rc::RCProductionAdmissionPath::None);
+    BOOST_CHECK(mismatch.outcome == rc::RCProductionCanaryOutcome::DigestMismatch);
+    BOOST_CHECK(mismatch.exact_manifest_match);
+}
+
+BOOST_AUTO_TEST_CASE(failed_self_qual_is_not_admissible_even_without_a_row)
+{
+    rc::RCProductionGoldenLookup none;
+    const auto refused{rc::DecideRCProductionMiningAdmission(
+        /*self_qualified=*/false, none, /*replay=*/nullptr)};
+    BOOST_CHECK(!refused.admissible);
+    BOOST_CHECK(!refused.passed);
+    BOOST_CHECK(!refused.activation_ready);
+    BOOST_CHECK(refused.path == rc::RCProductionAdmissionPath::None);
+    BOOST_CHECK_EQUAL(refused.reason, "self_qualification_failed");
+}
+
+BOOST_AUTO_TEST_CASE(canary_admits_m5_class_without_a_manifest_row)
+{
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    rc::ResetRCProductionCanaryForTest();
+
+    rc::RCProductionProviderIdentity m5;
+    m5.provider_family = "metal";
+    m5.device_architecture = "m5_class";
+    m5.driver_identity = "test-osversion";
+    m5.runtime_identity = "test-osrelease";
+    m5.complete = true;
+    m5.reason = "complete";
+    rc::SetRCProductionProviderIdentityOverrideForTest(m5);
+
+    matmul::v4::lt::ExactGemmBackend dummy;
+    dummy.gemm_s8s8 = +[](const std::vector<int8_t>& /*L*/,
+                          const std::vector<int8_t>& /*R*/, uint32_t rows,
+                          uint32_t inner, uint32_t cols,
+                          std::vector<int32_t>& out) -> bool {
+        out.assign(static_cast<size_t>(rows) * cols, 0);
+        return true;
+    };
+
+    matmul_v4::accel::ResolvedRCExactGemm fake;
+    fake.requested = "metal";
+    fake.provider = "metal_int8_exact";
+    fake.reason = "generic_exactgemm_and_rc_self_qualified";
+    fake.policy = "ProductionPreferred";
+    fake.qualification_scope = "toy_and_scaled_medium";
+    fake.device_requested = true;
+    fake.self_qualified = true;
+    fake.automatic_policy_eligible = true;
+    fake.backend = dummy;
+    matmul_v4::accel::SetLastRCExactGemmResolutionForTest(fake);
+
+    Consensus::Params consensus{Params().GetConsensus()};
+    consensus.nMatMulRCHeight = 500'000;
+    consensus.nMatMulRCProfile = 1;
+    consensus.fMatMulRCUseToyDims = false;
+    consensus.nMatMulV4Dimension = 4096;
+
+    const auto status{rc::RunRCProductionStartupCanary(
+        "metal_int8_exact", dummy, consensus, consensus.nMatMulRCHeight)};
+    BOOST_CHECK(status.outcome == rc::RCProductionCanaryOutcome::MissingGolden);
+    BOOST_CHECK(status.admission_path ==
+                rc::RCProductionAdmissionPath::SelfQualification);
+    BOOST_CHECK_EQUAL(status.reason, "admitted_by_self_qualification");
+    BOOST_CHECK(status.passed);
+    BOOST_CHECK(status.activation_ready);
+    BOOST_CHECK(!status.exact_manifest_match);
+    BOOST_CHECK(!status.attempted);
+    BOOST_CHECK_EQUAL(status.provider_identity.device_architecture, "m5_class");
+
+    std::string capability_reason;
+    BOOST_CHECK(rc::GetRCProductionProviderCapability(
+        "metal_int8_exact", dummy, consensus, consensus.nMatMulRCHeight,
+        &capability_reason).has_value());
+    BOOST_CHECK(capability_reason.empty());
+
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    rc::ResetRCProductionCanaryForTest();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

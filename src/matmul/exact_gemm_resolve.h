@@ -28,18 +28,23 @@ struct ResolvedRCExactGemm {
     bool device_requested{false};
     bool self_qualified{false};
     /** Correctness-qualified lane selected by the automatic provider-family
-     *  policy. This is necessary but not sufficient for production use. */
+     *  policy. Necessary for mining; sufficient only together with
+     *  production_eligible (self-qual and, when a golden row exists, digest
+     *  match). */
     bool automatic_policy_eligible{false};
-    /** Separate from byte-exact self-qualification and family policy. True
-     *  only after an exact provider/device/runtime/epoch manifest match and a
-     *  strict full-production startup canary. */
+    /** True when this provider may mine: automatic policy eligible, and either
+     *  a reviewed golden digest matched or byte-exact self-qualification
+     *  admitted the device with no matching manifest row. A digest mismatch
+     *  against a known row remains fail-closed. */
     bool production_eligible{false};
-    /** Activation-readiness gates. These deliberately remain false until
-     *  independently reproduced production-shape goldens are committed and a
-     *  full startup/epoch canary matches them. */
+    /** Whether the compiled manifest currently contains a coherent reviewed
+     *  cohort. Reporting only: absence of a row for THIS device is not a
+     *  mining refusal. */
     bool production_goldens_available{false};
     bool startup_canary_passed{false};
     bool activation_ready{false};
+    /** "none" | "reviewed_golden" | "self_qualification" */
+    std::string admission_path{"none"};
 };
 
 /** Build an injectable ExactGemmBackend for MatExpand / LT mining. An explicit

@@ -1501,19 +1501,86 @@ static UniValue ConsensusGuardAlerts(const CChain& active_chain, const Consensus
     return alerts;
 }
 
+static uint64_t V4Sum3(uint64_t a, uint64_t b, uint64_t c)
+{
+    return a + b + c;
+}
+
+static uint64_t V4MetalRequests(const matmul_v4::accel::Stats& s)
+{
+    return V4Sum3(s.metal_ok, s.metal_mismatch, s.metal_fallback)
+         + V4Sum3(s.metal_batch_ok, s.metal_batch_mismatch, s.metal_batch_fallback);
+}
+
+static uint64_t V4CudaRequests(const matmul_v4::accel::Stats& s)
+{
+    return V4Sum3(s.cuda_ok, s.cuda_mismatch, s.cuda_fallback)
+         + V4Sum3(s.cuda_batch_ok, s.cuda_batch_mismatch, s.cuda_batch_fallback);
+}
+
+static uint64_t V4HipRequests(const matmul_v4::accel::Stats& s)
+{
+    return V4Sum3(s.hip_ok, s.hip_mismatch, s.hip_fallback)
+         + V4Sum3(s.hip_batch_ok, s.hip_batch_mismatch, s.hip_batch_fallback);
+}
+
+static uint64_t V4AscendRequests(const matmul_v4::accel::Stats& s)
+{
+    return V4Sum3(s.ascend_ok, s.ascend_mismatch, s.ascend_fallback)
+         + V4Sum3(s.ascend_batch_ok, s.ascend_batch_mismatch, s.ascend_batch_fallback);
+}
+
+static UniValue BuildV4DispatchProfile(const matmul_v4::accel::Stats& v4)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("requests", v4.requests);
+    obj.pushKV("batch_requests", v4.batch_requests);
+    obj.pushKV("metal_ok", v4.metal_ok);
+    obj.pushKV("metal_mismatch", v4.metal_mismatch);
+    obj.pushKV("metal_fallback", v4.metal_fallback);
+    obj.pushKV("metal_batch_ok", v4.metal_batch_ok);
+    obj.pushKV("metal_batch_mismatch", v4.metal_batch_mismatch);
+    obj.pushKV("metal_batch_fallback", v4.metal_batch_fallback);
+    obj.pushKV("cuda_ok", v4.cuda_ok);
+    obj.pushKV("cuda_mismatch", v4.cuda_mismatch);
+    obj.pushKV("cuda_fallback", v4.cuda_fallback);
+    obj.pushKV("cuda_batch_ok", v4.cuda_batch_ok);
+    obj.pushKV("cuda_batch_mismatch", v4.cuda_batch_mismatch);
+    obj.pushKV("cuda_batch_fallback", v4.cuda_batch_fallback);
+    obj.pushKV("hip_ok", v4.hip_ok);
+    obj.pushKV("hip_mismatch", v4.hip_mismatch);
+    obj.pushKV("hip_fallback", v4.hip_fallback);
+    obj.pushKV("hip_batch_ok", v4.hip_batch_ok);
+    obj.pushKV("hip_batch_mismatch", v4.hip_batch_mismatch);
+    obj.pushKV("hip_batch_fallback", v4.hip_batch_fallback);
+    obj.pushKV("ascend_ok", v4.ascend_ok);
+    obj.pushKV("ascend_mismatch", v4.ascend_mismatch);
+    obj.pushKV("ascend_fallback", v4.ascend_fallback);
+    obj.pushKV("ascend_batch_ok", v4.ascend_batch_ok);
+    obj.pushKV("ascend_batch_mismatch", v4.ascend_batch_mismatch);
+    obj.pushKV("ascend_batch_fallback", v4.ascend_batch_fallback);
+    return obj;
+}
+
 static UniValue BuildBackendRuntimeProfile(
     bool include_rc_runtime = false,
     double target_spacing_s = 0)
 {
     const auto stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+    const auto v4 = matmul_v4::accel::ProbeStats();
     const auto prehash_stats = ProbeMatMulGpuPreHashScanStats();
     const auto cuda_pool_stats = btx::cuda::ProbeMatMulBufferPool();
     UniValue obj(UniValue::VOBJ);
     // Surface the daemon's OWN resolved mining backend + reason so a silent fallback to CPU is
-    // visible here (issue #43): when active_backend != requested_backend (e.g. requested=metal but
+    // visible here: when active_backend != requested_backend (e.g. requested=metal but
     // active=cpu), backend_selection_reason explains why -- previously this was only observable via
     // the separate btx-matmul-backend-info process, which resolves Metal in a different context and
     // can disagree with the mining daemon.
+    //
+    // Production mining at v4 heights goes through matmul_v4::accel::ComputeDigestDispatched, which
+    // never increments the v3 counters below. Fold ProbeStats() into the existing operator-facing
+    // fields so requested_metal/cuda_successes actually move when Metal/CUDA are solving (issue 43
+    // / the CUDA side of issue 44). Nested v4_dispatch keeps the raw per-kernel counters.
     const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
     const auto backend_requirement = matmul::accelerated::ResolveBackendRequirementFromEnvironment();
     obj.pushKV("requested_backend", matmul::backend::ToString(backend_selection.requested));
@@ -1532,18 +1599,23 @@ static UniValue BuildBackendRuntimeProfile(
             backend_requirement,
             backend_selection));
     obj.pushKV("backend_requirement_reason", backend_requirement.reason);
-    obj.pushKV("digest_requests", stats.digest_requests);
-    obj.pushKV("requested_cpu", stats.requested_cpu);
-    obj.pushKV("requested_metal", stats.requested_metal);
-    obj.pushKV("requested_cuda", stats.requested_cuda);
+    const uint64_t v4_metal_req = V4MetalRequests(v4);
+    const uint64_t v4_cuda_req = V4CudaRequests(v4);
+    const uint64_t v4_device_req = v4_metal_req + v4_cuda_req + V4HipRequests(v4) + V4AscendRequests(v4);
+    const uint64_t v4_invocations = v4.requests + v4.batch_requests;
+    const uint64_t v4_cpu_req = v4_invocations > v4_device_req ? v4_invocations - v4_device_req : 0;
+    obj.pushKV("digest_requests", stats.digest_requests + v4_invocations);
+    obj.pushKV("requested_cpu", stats.requested_cpu + v4_cpu_req);
+    obj.pushKV("requested_metal", stats.requested_metal + v4_metal_req);
+    obj.pushKV("requested_cuda", stats.requested_cuda + v4_cuda_req);
     obj.pushKV("requested_unknown", stats.requested_unknown);
-    obj.pushKV("metal_successes", stats.metal_successes);
-    obj.pushKV("metal_fallbacks_to_cpu", stats.metal_fallbacks_to_cpu);
-    obj.pushKV("metal_digest_mismatches", stats.metal_digest_mismatches);
+    obj.pushKV("metal_successes", stats.metal_successes + v4.metal_ok + v4.metal_batch_ok);
+    obj.pushKV("metal_fallbacks_to_cpu", stats.metal_fallbacks_to_cpu + v4.metal_fallback + v4.metal_batch_fallback);
+    obj.pushKV("metal_digest_mismatches", stats.metal_digest_mismatches + v4.metal_mismatch + v4.metal_batch_mismatch);
     obj.pushKV("metal_retry_without_uploaded_base_attempts", stats.metal_retry_without_uploaded_base_attempts);
     obj.pushKV("metal_retry_without_uploaded_base_successes", stats.metal_retry_without_uploaded_base_successes);
-    obj.pushKV("cuda_successes", stats.cuda_successes);
-    obj.pushKV("cuda_fallbacks_to_cpu", stats.cuda_fallbacks_to_cpu);
+    obj.pushKV("cuda_successes", stats.cuda_successes + v4.cuda_ok + v4.cuda_batch_ok);
+    obj.pushKV("cuda_fallbacks_to_cpu", stats.cuda_fallbacks_to_cpu + v4.cuda_fallback + v4.cuda_batch_fallback);
     obj.pushKV("gpu_input_generation_attempts", stats.gpu_input_generation_attempts);
     obj.pushKV("gpu_input_generation_successes", stats.gpu_input_generation_successes);
     obj.pushKV("gpu_input_generation_failures", stats.gpu_input_generation_failures);
@@ -1582,6 +1654,7 @@ static UniValue BuildBackendRuntimeProfile(
     obj.pushKV("last_metal_fallback_error", stats.last_metal_fallback_error);
     obj.pushKV("last_cuda_fallback_error", stats.last_cuda_fallback_error);
     obj.pushKV("last_gpu_input_error", stats.last_gpu_input_error);
+    obj.pushKV("v4_dispatch", BuildV4DispatchProfile(v4));
 
     if (include_rc_runtime) {
         // This is a non-triggering snapshot: an RPC call must not unexpectedly
@@ -1604,6 +1677,8 @@ static UniValue BuildBackendRuntimeProfile(
         rc_exact_replay.pushKV(
             "production_eligible", rc_resolution.production_eligible);
         rc_exact_replay.pushKV(
+            "admission_path", rc_resolution.admission_path);
+        rc_exact_replay.pushKV(
             "production_goldens_available",
             rc_resolution.production_goldens_available);
         rc_exact_replay.pushKV(
@@ -1618,6 +1693,10 @@ static UniValue BuildBackendRuntimeProfile(
             "outcome",
             matmul::v4::rc::RCProductionCanaryOutcomeName(
                 production_canary.outcome));
+        canary.pushKV(
+            "admission_path",
+            matmul::v4::rc::RCProductionAdmissionPathName(
+                production_canary.admission_path));
         canary.pushKV("attempted", production_canary.attempted);
         canary.pushKV("passed", production_canary.passed);
         canary.pushKV(
@@ -6209,18 +6288,18 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::BOOL, "required_backend_valid", "Whether the required backend name is recognized"},
                             {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement"},
                             {RPCResult::Type::STR, "backend_requirement_reason", "Requirement parsing or enforcement reason"},
-                            {RPCResult::Type::NUM, "digest_requests", "Digest requests served"},
-                            {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU"},
-                            {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal"},
-                            {RPCResult::Type::NUM, "requested_cuda", "Digest requests targeting CUDA"},
+                            {RPCResult::Type::NUM, "digest_requests", "Digest requests served (v3 solver plus v4 dispatch invocations)"},
+                            {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU (v3 plus v4)"},
+                            {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal (v3 solver plus v4 dispatch)"},
+                            {RPCResult::Type::NUM, "requested_cuda", "Digest requests targeting CUDA (v3 solver plus v4 dispatch)"},
                             {RPCResult::Type::NUM, "requested_unknown", "Digest requests targeting an unknown backend"},
-                            {RPCResult::Type::NUM, "metal_successes", "Successful Metal digest computations"},
-                            {RPCResult::Type::NUM, "metal_fallbacks_to_cpu", "Metal requests that fell back to CPU"},
-                            {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected"},
+                            {RPCResult::Type::NUM, "metal_successes", "Successful Metal digest computations (v3 plus v4)"},
+                            {RPCResult::Type::NUM, "metal_fallbacks_to_cpu", "Metal requests that fell back to CPU (v3 plus v4)"},
+                            {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected (v3 plus v4)"},
                             {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_attempts", "Metal retries attempted without uploaded base matrices"},
                             {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_successes", "Successful retries without uploaded base matrices"},
-                            {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations"},
-                            {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU"},
+                            {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations (v3 plus v4)"},
+                            {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU (v3 plus v4)"},
                             {RPCResult::Type::NUM, "gpu_input_generation_attempts", "GPU input-generation attempts"},
                             {RPCResult::Type::NUM, "gpu_input_generation_successes", "Successful GPU input-generation attempts"},
                             {RPCResult::Type::NUM, "gpu_input_generation_failures", "Failed GPU input-generation attempts"},
@@ -6267,21 +6346,23 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::STR, "qualification_scope", "Largest exact replay scope covered by current self-qualification"},
                                 {RPCResult::Type::BOOL, "self_qualified", "Whether toy/scaled-medium exactness qualification passed"},
                                 {RPCResult::Type::BOOL, "automatic_policy_eligible", "Whether the provider is eligible for automatic selection"},
-                                {RPCResult::Type::BOOL, "production_eligible", "Whether the exact provider/runtime/epoch production canary passed"},
-                                {RPCResult::Type::BOOL, "production_goldens_available", "Whether independently reproduced production-shape goldens are committed"},
-                                {RPCResult::Type::BOOL, "startup_canary_passed", "Whether the production-shape startup/epoch canary passed"},
+                                {RPCResult::Type::BOOL, "production_eligible", "Whether the provider may mine: byte-exact self-qualification passed, and either a reviewed golden digest matched or no matching row exists"},
+                                {RPCResult::Type::STR, "admission_path", "none, reviewed_golden, or self_qualification (admitted with no matching manifest row)"},
+                                {RPCResult::Type::BOOL, "production_goldens_available", "Whether independently reproduced production-shape goldens are compiled in; reporting only, not a mining gate"},
+                                {RPCResult::Type::BOOL, "startup_canary_passed", "Whether the production-shape startup/epoch canary passed or self-qualification admitted the device"},
                                 {RPCResult::Type::BOOL, "activation_ready", "Whether all provider activation-readiness gates passed"},
                                 {RPCResult::Type::OBJ, "production_canary", "Provider/device/runtime/epoch-bound production canary status",
                                 {
-                                    {RPCResult::Type::STR, "outcome", "Canary outcome"},
+                                    {RPCResult::Type::STR, "outcome", "Canary outcome; missing_golden is reporting when admission_path is self_qualification"},
+                                    {RPCResult::Type::STR, "admission_path", "none, reviewed_golden, or self_qualification"},
                                     {RPCResult::Type::BOOL, "attempted", "Whether a full production replay was attempted"},
-                                    {RPCResult::Type::BOOL, "passed", "Whether the strict replay exactly matched the reviewed golden"},
+                                    {RPCResult::Type::BOOL, "passed", "Whether mining admission succeeded (reviewed golden match or self-qualification with no matching row)"},
                                     {RPCResult::Type::BOOL, "manifest_has_reviewed_goldens", "Whether any complete reviewed production golden is compiled in"},
                                     {RPCResult::Type::BOOL, "build_provenance_matches", "Whether the running binary's clean implementation fingerprint matches the reviewed manifest cohort"},
                                     {RPCResult::Type::BOOL, "build_source_dirty", "Whether the running binary was built from build-relevant local changes; dirty builds cannot authorize production"},
                                     {RPCResult::Type::STR_HEX, "build_source_revision", "Full source revision embedded in the running binary"},
                                     {RPCResult::Type::STR_HEX, "build_source_tree_fingerprint", "Build-relevant implementation fingerprint embedded in the running binary"},
-                                    {RPCResult::Type::BOOL, "exact_manifest_match", "Whether the provider class and production workload matched a reviewed manifest entry; the live capability separately binds runtime and activation height"},
+                                    {RPCResult::Type::BOOL, "exact_manifest_match", "Whether the provider class matched a reviewed manifest entry; false with self_qualification admission is not a refusal"},
                                     {RPCResult::Type::NUM, "manifest_entries", "Compiled manifest entry count"},
                                     {RPCResult::Type::STR, "manifest_entry_id", "Matched public manifest entry identifier"},
                                     {RPCResult::Type::STR, "provider", "Resolved provider label"},
@@ -6429,7 +6510,7 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::BOOL, "complete_sample_set", "All lifecycle components are measured"},
                                     {RPCResult::Type::BOOL, "within_target_spacing", "Uncorrelated latest-component estimate is below target spacing"},
                                     {RPCResult::Type::BOOL, "correlated_end_to_end_sample", "True only when all components are bound to one exact block; false in this launch candidate"},
-                                    {RPCResult::Type::BOOL, "hardware_evidence_gates_passed", "Production goldens, startup canary, and GPU lifecycle ratification gates pass"},
+                                    {RPCResult::Type::BOOL, "hardware_evidence_gates_passed", "Startup canary or self-qualification admission, and GPU lifecycle ratification, pass"},
                                     {RPCResult::Type::BOOL, "operationally_ready", "Requires a correlated end-to-end block sample plus target-spacing and hardware evidence gates"},
                                     {RPCResult::Type::NUM, "target_spacing_s", "Configured target spacing"},
                                     {RPCResult::Type::NUM, "candidate_s", "Candidate execution component"},
@@ -6440,6 +6521,35 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::NUM, "complete_lifecycle_s", "Sum of the measured lifecycle components"},
                                     {RPCResult::Type::STR, "reason", "Readiness or missing-evidence reason"},
                                 }},
+                            }},
+                            {RPCResult::Type::OBJ, "v4_dispatch", "MatMul v4 per-kernel dispatch counters used by production mining at v4 heights",
+                            {
+                                {RPCResult::Type::NUM, "requests", "Per-nonce v4 digest dispatch invocations"},
+                                {RPCResult::Type::NUM, "batch_requests", "Batched v4 window dispatch invocations"},
+                                {RPCResult::Type::NUM, "metal_ok", "Accepted Metal per-nonce results"},
+                                {RPCResult::Type::NUM, "metal_mismatch", "Metal per-nonce results rejected by CPU verify"},
+                                {RPCResult::Type::NUM, "metal_fallback", "Metal per-nonce fall-throughs to CPU"},
+                                {RPCResult::Type::NUM, "metal_batch_ok", "Accepted Metal batched windows"},
+                                {RPCResult::Type::NUM, "metal_batch_mismatch", "Metal batched windows rejected by CPU verify"},
+                                {RPCResult::Type::NUM, "metal_batch_fallback", "Metal batched fall-throughs to CPU"},
+                                {RPCResult::Type::NUM, "cuda_ok", "Accepted CUDA per-nonce results"},
+                                {RPCResult::Type::NUM, "cuda_mismatch", "CUDA per-nonce results rejected by CPU verify"},
+                                {RPCResult::Type::NUM, "cuda_fallback", "CUDA per-nonce fall-throughs to CPU"},
+                                {RPCResult::Type::NUM, "cuda_batch_ok", "Accepted CUDA batched windows"},
+                                {RPCResult::Type::NUM, "cuda_batch_mismatch", "CUDA batched windows rejected by CPU verify"},
+                                {RPCResult::Type::NUM, "cuda_batch_fallback", "CUDA batched fall-throughs to CPU"},
+                                {RPCResult::Type::NUM, "hip_ok", "Accepted HIP per-nonce results"},
+                                {RPCResult::Type::NUM, "hip_mismatch", "HIP per-nonce results rejected by CPU verify"},
+                                {RPCResult::Type::NUM, "hip_fallback", "HIP per-nonce fall-throughs to CPU"},
+                                {RPCResult::Type::NUM, "hip_batch_ok", "Accepted HIP batched windows"},
+                                {RPCResult::Type::NUM, "hip_batch_mismatch", "HIP batched windows rejected by CPU verify"},
+                                {RPCResult::Type::NUM, "hip_batch_fallback", "HIP batched fall-throughs to CPU"},
+                                {RPCResult::Type::NUM, "ascend_ok", "Accepted Ascend per-nonce results"},
+                                {RPCResult::Type::NUM, "ascend_mismatch", "Ascend per-nonce results rejected by CPU verify"},
+                                {RPCResult::Type::NUM, "ascend_fallback", "Ascend per-nonce fall-throughs to CPU"},
+                                {RPCResult::Type::NUM, "ascend_batch_ok", "Accepted Ascend batched windows"},
+                                {RPCResult::Type::NUM, "ascend_batch_mismatch", "Ascend batched windows rejected by CPU verify"},
+                                {RPCResult::Type::NUM, "ascend_batch_fallback", "Ascend batched fall-throughs to CPU"},
                             }},
                             {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                         }},
@@ -7076,7 +7186,7 @@ static RPCHelpMan getmatmulchallenge()
                                 }},
                                 {RPCResult::Type::OBJ, "solve_runtime", "", {
                                     {RPCResult::Type::NUM, "attempts", "Solve attempts recorded since process start"},
-                                    {RPCResult::Type::NUM, "solved_attempts", "Successful solve attempts recorded since process start"},
+                                    {RPCResult::Type::NUM, "solved_attempts", "Successful solves that found a valid proof since process start (not GPU kernel launches)"},
                                     {RPCResult::Type::NUM, "failed_attempts", "Failed solve attempts recorded since process start"},
                                     {RPCResult::Type::NUM, "total_elapsed_ms", "Total solve runtime accumulated since process start"},
                                     {RPCResult::Type::NUM, "mean_elapsed_ms", "Mean solve runtime per attempt"},
@@ -7194,18 +7304,18 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::BOOL, "required_backend_valid", "Whether the required backend name is recognized"},
                                     {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement"},
                                     {RPCResult::Type::STR, "backend_requirement_reason", "Requirement parsing or enforcement reason"},
-                                    {RPCResult::Type::NUM, "digest_requests", "Digest requests served"},
-                                    {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU"},
-                                    {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal"},
-                                    {RPCResult::Type::NUM, "requested_cuda", "Digest requests targeting CUDA"},
+                                    {RPCResult::Type::NUM, "digest_requests", "Digest requests served (v3 solver plus v4 dispatch invocations)"},
+                                    {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU (v3 plus v4)"},
+                                    {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal (v3 solver plus v4 dispatch)"},
+                                    {RPCResult::Type::NUM, "requested_cuda", "Digest requests targeting CUDA (v3 solver plus v4 dispatch)"},
                                     {RPCResult::Type::NUM, "requested_unknown", "Digest requests targeting an unknown backend"},
-                                    {RPCResult::Type::NUM, "metal_successes", "Successful Metal digest computations"},
-                                    {RPCResult::Type::NUM, "metal_fallbacks_to_cpu", "Metal requests that fell back to CPU"},
-                                    {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected"},
+                                    {RPCResult::Type::NUM, "metal_successes", "Successful Metal digest computations (v3 plus v4)"},
+                                    {RPCResult::Type::NUM, "metal_fallbacks_to_cpu", "Metal requests that fell back to CPU (v3 plus v4)"},
+                                    {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected (v3 plus v4)"},
                                     {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_attempts", "Metal retries attempted without uploaded base matrices"},
                                     {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_successes", "Successful retries without uploaded base matrices"},
-                                    {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations"},
-                                    {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU"},
+                                    {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations (v3 plus v4)"},
+                                    {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU (v3 plus v4)"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_attempts", "GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_successes", "Successful GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_failures", "Failed GPU input-generation attempts"},
@@ -7241,6 +7351,35 @@ static RPCHelpMan getmatmulchallenge()
                                         {RPCResult::Type::NUM, "b", "Last CUDA digest pool MatMul block size"},
                                         {RPCResult::Type::NUM, "r", "Last CUDA digest pool MatMul rank"},
                                         {RPCResult::Type::STR, "reason", "CUDA buffer pool probe status"},
+                                    }},
+                                    {RPCResult::Type::OBJ, "v4_dispatch", "MatMul v4 per-kernel dispatch counters used by production mining at v4 heights",
+                                    {
+                                        {RPCResult::Type::NUM, "requests", "Per-nonce v4 digest dispatch invocations"},
+                                        {RPCResult::Type::NUM, "batch_requests", "Batched v4 window dispatch invocations"},
+                                        {RPCResult::Type::NUM, "metal_ok", "Accepted Metal per-nonce results"},
+                                        {RPCResult::Type::NUM, "metal_mismatch", "Metal per-nonce results rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "metal_fallback", "Metal per-nonce fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "metal_batch_ok", "Accepted Metal batched windows"},
+                                        {RPCResult::Type::NUM, "metal_batch_mismatch", "Metal batched windows rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "metal_batch_fallback", "Metal batched fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "cuda_ok", "Accepted CUDA per-nonce results"},
+                                        {RPCResult::Type::NUM, "cuda_mismatch", "CUDA per-nonce results rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "cuda_fallback", "CUDA per-nonce fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "cuda_batch_ok", "Accepted CUDA batched windows"},
+                                        {RPCResult::Type::NUM, "cuda_batch_mismatch", "CUDA batched windows rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "cuda_batch_fallback", "CUDA batched fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "hip_ok", "Accepted HIP per-nonce results"},
+                                        {RPCResult::Type::NUM, "hip_mismatch", "HIP per-nonce results rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "hip_fallback", "HIP per-nonce fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "hip_batch_ok", "Accepted HIP batched windows"},
+                                        {RPCResult::Type::NUM, "hip_batch_mismatch", "HIP batched windows rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "hip_batch_fallback", "HIP batched fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "ascend_ok", "Accepted Ascend per-nonce results"},
+                                        {RPCResult::Type::NUM, "ascend_mismatch", "Ascend per-nonce results rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "ascend_fallback", "Ascend per-nonce fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "ascend_batch_ok", "Accepted Ascend batched windows"},
+                                        {RPCResult::Type::NUM, "ascend_batch_mismatch", "Ascend batched windows rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "ascend_batch_fallback", "Ascend batched fall-throughs to CPU"},
                                     }},
                                     {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                                 }},
@@ -7499,7 +7638,7 @@ static RPCHelpMan getmatmulchallengeprofile()
                                 }},
                                 {RPCResult::Type::OBJ, "solve_runtime", "", {
                                     {RPCResult::Type::NUM, "attempts", "Solve attempts recorded since process start"},
-                                    {RPCResult::Type::NUM, "solved_attempts", "Successful solve attempts recorded since process start"},
+                                    {RPCResult::Type::NUM, "solved_attempts", "Successful solves that found a valid proof since process start (not GPU kernel launches)"},
                                     {RPCResult::Type::NUM, "failed_attempts", "Failed solve attempts recorded since process start"},
                                     {RPCResult::Type::NUM, "total_elapsed_ms", "Total solve runtime accumulated since process start"},
                                     {RPCResult::Type::NUM, "mean_elapsed_ms", "Mean solve runtime per attempt"},
@@ -7617,18 +7756,18 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::BOOL, "required_backend_valid", "Whether the required backend name is recognized"},
                                     {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement"},
                                     {RPCResult::Type::STR, "backend_requirement_reason", "Requirement parsing or enforcement reason"},
-                                    {RPCResult::Type::NUM, "digest_requests", "Digest requests served"},
-                                    {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU"},
-                                    {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal"},
-                                    {RPCResult::Type::NUM, "requested_cuda", "Digest requests targeting CUDA"},
+                                    {RPCResult::Type::NUM, "digest_requests", "Digest requests served (v3 solver plus v4 dispatch invocations)"},
+                                    {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU (v3 plus v4)"},
+                                    {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal (v3 solver plus v4 dispatch)"},
+                                    {RPCResult::Type::NUM, "requested_cuda", "Digest requests targeting CUDA (v3 solver plus v4 dispatch)"},
                                     {RPCResult::Type::NUM, "requested_unknown", "Digest requests targeting an unknown backend"},
-                                    {RPCResult::Type::NUM, "metal_successes", "Successful Metal digest computations"},
-                                    {RPCResult::Type::NUM, "metal_fallbacks_to_cpu", "Metal requests that fell back to CPU"},
-                                    {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected"},
+                                    {RPCResult::Type::NUM, "metal_successes", "Successful Metal digest computations (v3 plus v4)"},
+                                    {RPCResult::Type::NUM, "metal_fallbacks_to_cpu", "Metal requests that fell back to CPU (v3 plus v4)"},
+                                    {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected (v3 plus v4)"},
                                     {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_attempts", "Metal retries attempted without uploaded base matrices"},
                                     {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_successes", "Successful retries without uploaded base matrices"},
-                                    {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations"},
-                                    {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU"},
+                                    {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations (v3 plus v4)"},
+                                    {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU (v3 plus v4)"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_attempts", "GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_successes", "Successful GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_failures", "Failed GPU input-generation attempts"},
@@ -7664,6 +7803,35 @@ static RPCHelpMan getmatmulchallengeprofile()
                                         {RPCResult::Type::NUM, "b", "Last CUDA digest pool MatMul block size"},
                                         {RPCResult::Type::NUM, "r", "Last CUDA digest pool MatMul rank"},
                                         {RPCResult::Type::STR, "reason", "CUDA buffer pool probe status"},
+                                    }},
+                                    {RPCResult::Type::OBJ, "v4_dispatch", "MatMul v4 per-kernel dispatch counters used by production mining at v4 heights",
+                                    {
+                                        {RPCResult::Type::NUM, "requests", "Per-nonce v4 digest dispatch invocations"},
+                                        {RPCResult::Type::NUM, "batch_requests", "Batched v4 window dispatch invocations"},
+                                        {RPCResult::Type::NUM, "metal_ok", "Accepted Metal per-nonce results"},
+                                        {RPCResult::Type::NUM, "metal_mismatch", "Metal per-nonce results rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "metal_fallback", "Metal per-nonce fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "metal_batch_ok", "Accepted Metal batched windows"},
+                                        {RPCResult::Type::NUM, "metal_batch_mismatch", "Metal batched windows rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "metal_batch_fallback", "Metal batched fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "cuda_ok", "Accepted CUDA per-nonce results"},
+                                        {RPCResult::Type::NUM, "cuda_mismatch", "CUDA per-nonce results rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "cuda_fallback", "CUDA per-nonce fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "cuda_batch_ok", "Accepted CUDA batched windows"},
+                                        {RPCResult::Type::NUM, "cuda_batch_mismatch", "CUDA batched windows rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "cuda_batch_fallback", "CUDA batched fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "hip_ok", "Accepted HIP per-nonce results"},
+                                        {RPCResult::Type::NUM, "hip_mismatch", "HIP per-nonce results rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "hip_fallback", "HIP per-nonce fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "hip_batch_ok", "Accepted HIP batched windows"},
+                                        {RPCResult::Type::NUM, "hip_batch_mismatch", "HIP batched windows rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "hip_batch_fallback", "HIP batched fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "ascend_ok", "Accepted Ascend per-nonce results"},
+                                        {RPCResult::Type::NUM, "ascend_mismatch", "Ascend per-nonce results rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "ascend_fallback", "Ascend per-nonce fall-throughs to CPU"},
+                                        {RPCResult::Type::NUM, "ascend_batch_ok", "Accepted Ascend batched windows"},
+                                        {RPCResult::Type::NUM, "ascend_batch_mismatch", "Ascend batched windows rejected by CPU verify"},
+                                        {RPCResult::Type::NUM, "ascend_batch_fallback", "Ascend batched fall-throughs to CPU"},
                                     }},
                                     {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                                 }},

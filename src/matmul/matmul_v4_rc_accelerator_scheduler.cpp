@@ -722,7 +722,6 @@ RCAcceleratorScheduler::AssessLifecycle(double target_spacing_s) const
         out.complete_lifecycle_s < target_spacing_s;
     const auto production_canary{GetLastRCProductionCanaryStatus()};
     out.hardware_evidence_gates_passed =
-        production_canary.manifest_has_reviewed_goldens &&
         production_canary.activation_ready &&
         Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED;
     // Lane values are independent latest-component samples, not one
@@ -742,7 +741,7 @@ RCAcceleratorScheduler::AssessLifecycle(double target_spacing_s) const
             "complete lifecycle is not below target spacing";
     } else if (!out.hardware_evidence_gates_passed) {
         out.reason =
-            "latest-component estimate is below target spacing but production goldens/startup canary remain unratified";
+            "latest-component estimate is below target spacing but startup canary / self-qualification admission remains unratified";
     } else if (!out.correlated_end_to_end_sample) {
         out.reason =
             "latest-component estimate and hardware gates pass, but no block-correlated end-to-end sample exists";
