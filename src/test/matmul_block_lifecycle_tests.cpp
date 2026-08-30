@@ -11,6 +11,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -30,13 +31,15 @@ std::shared_ptr<const CBlock> BlockWithNonce(uint32_t nonce)
 
 node::MatMulBlockLifecycle::RetainedBody Body(uint32_t nonce,
                                                size_t bytes,
-                                               std::chrono::steady_clock::time_point retry)
+                                               std::chrono::steady_clock::time_point retry,
+                                               uint64_t source_netgroup = 0)
 {
-    return {
-        .block = BlockWithNonce(nonce),
-        .retry_not_before = retry,
-        .bytes = bytes,
-    };
+    node::MatMulBlockLifecycle::RetainedBody body;
+    body.block = BlockWithNonce(nonce);
+    body.retry_not_before = retry;
+    body.bytes = bytes;
+    body.source_netgroup = source_netgroup;
+    return body;
 }
 
 } // namespace
@@ -117,6 +120,40 @@ BOOST_AUTO_TEST_CASE(retry_cooldown_prevents_header_only_hot_loop)
     BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(wake_retry_once_does_not_erase_cooldown)
+{
+    using Reason = node::MatMulBlockLifecycle::RetryWakeReason;
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "5").value()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(7, 50, now), now));
+
+    // A failed re-admission installs a 60s cooldown.
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 30s).has_value());
+
+    // First causal wake for a reason pulls the retry deadline to now.
+    BOOST_CHECK(lifecycle.WakeRetryOnce(hash, Reason::RECOVERY_ROOT, now + 30s));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 30s).has_value());
+
+    // Re-arm the cooldown as another re-admission would, then hammer the same
+    // reason: it must NOT overwrite the cooldown (the mainnet-201633 wedge).
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now + 30s));
+    for (int i = 0; i < 5; ++i) {
+        BOOST_CHECK(
+            !lifecycle.WakeRetryOnce(hash, Reason::RECOVERY_ROOT, now + 31s + std::chrono::seconds{i}));
+    }
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 60s).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 30s + 60s).has_value());
+
+    // A DISTINCT causal event still wakes the body exactly once.
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now + 30s + 60s));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 30s + 90s).has_value());
+    BOOST_CHECK(lifecycle.WakeRetryOnce(hash, Reason::TRUSTED_AUTHORITY, now + 30s + 90s));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 30s + 90s).has_value());
+}
+
 BOOST_AUTO_TEST_CASE(repeated_deferral_terminal_requeues)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
@@ -139,16 +176,36 @@ BOOST_AUTO_TEST_CASE(repeated_deferral_terminal_requeues)
     BOOST_CHECK(!lifecycle.IsActive(hash, now + 2s));
 }
 
-BOOST_AUTO_TEST_CASE(idle_catchup_ignores_retry_cooldown)
+BOOST_AUTO_TEST_CASE(idle_catchup_retry_bypass_is_one_shot)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
     const auto now{node::MatMulBlockLifecycle::Clock::now()};
     const uint256 hash{
         uint256::FromHex(std::string(63, '0') + "5").value()};
-    BOOST_REQUIRE(lifecycle.Retain(hash, Body(8, 50, now), now));
-    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
+    auto body{Body(8, 50, now + 60s)};
+    body.idle_retry_bypass_available = true;
+    BOOST_REQUIRE(lifecycle.Retain(hash, std::move(body), now));
     BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 1s).has_value());
-    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s, /*ignore_retry_delay=*/true).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(
+        uint256{}, now + 1s, /*allow_idle_retry_bypass=*/true).has_value());
+    BOOST_CHECK(!lifecycle.NextRetry(
+        uint256{}, now + 2s, /*allow_idle_retry_bypass=*/true).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(non_terminal_retry_disables_idle_bypass)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "d").value()};
+    auto body{Body(13, 50, now)};
+    body.idle_retry_bypass_available = true;
+    BOOST_REQUIRE(lifecycle.Retain(hash, std::move(body), now));
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
+    BOOST_CHECK(!lifecycle.NextRetry(
+        uint256{}, now + 1s, /*allow_idle_retry_bypass=*/true).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(capacity_does_not_evict_active_generation)
@@ -189,6 +246,104 @@ BOOST_AUTO_TEST_CASE(park_releases_cap_and_terminal_frees_bytes)
     lifecycle.Terminal(*token);
     BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
     BOOST_CHECK_EQUAL(lifecycle.RetainedCountForTest(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(connected_block_clears_live_lifecycle_generation)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const auto block{BlockWithNonce(14)};
+    const uint256 hash{block->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(14, 75, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    auto lease{std::make_shared<int>(1)};
+    std::weak_ptr<int> weak_lease{lease};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now));
+    lease.reset();
+    BOOST_REQUIRE(lifecycle.Start(*token, now));
+
+    lifecycle.TerminalConnected(hash);
+    // Deployment-blocker fix (PR #132 review): a RUNNING full-body replay
+    // bypasses the cancel latch (ProtectsBodyReplay) and still owns the lease /
+    // capacity. TerminalConnected must therefore raise the terminal signal but
+    // NOT release capacity/lease -- that stays owned until the worker
+    // acknowledges via Terminal()/Retry(). Otherwise the running replay executes
+    // against capacity already reported free.
+    BOOST_CHECK(cancelled->load());               // terminal signal raised
+    BOOST_CHECK(!weak_lease.expired());           // lease NOT released early
+    BOOST_CHECK(lifecycle.StateForTest(hash).has_value()); // entry retained
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 75U); // capacity owned
+
+    lifecycle.Terminal(*token); // worker acknowledges completion -> now cleared
+    BOOST_CHECK(weak_lease.expired());
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
+}
+
+// A terminal_on_connect entry that goes stale (worker still in flight after the
+// 10-min window) must be ERASED by stale expiry, not flipped to a retryable
+// body -- otherwise NextRetry re-admits an already-connected hash and reopens
+// the lease/capacity double-book the deferred-erase fix closed.
+BOOST_AUTO_TEST_CASE(connected_block_stale_expiry_erases_not_readmits)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const auto block{BlockWithNonce(21)};
+    const uint256 hash{block->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(21, 75, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    auto lease{std::make_shared<int>(1)};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now));
+    lease.reset();
+    BOOST_REQUIRE(lifecycle.Start(*token, now));
+
+    lifecycle.TerminalConnected(hash); // block connected while replay in flight
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 75U); // still owned
+
+    // Worker still has not acknowledged 11 min later: stale expiry fires.
+    const auto later{now + 11min};
+    BOOST_CHECK_EQUAL(lifecycle.ExpireStaleAttempts(later), 1U);
+    // Erased with accounting released -- NOT left as a retryable body.
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForTest(), 0U);
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
+    // And it is never handed back out for re-admission.
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, later).has_value());
+}
+
+// The connected hash must never be re-admitted: a retryable-failure completion
+// arriving after TerminalConnected ERASES the entry rather than retaining it.
+BOOST_AUTO_TEST_CASE(connected_block_retry_does_not_readmit)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const auto block{BlockWithNonce(15)};
+    const uint256 hash{block->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(15, 75, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    auto lease{std::make_shared<int>(1)};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now));
+    lease.reset();
+    BOOST_REQUIRE(lifecycle.Start(*token, now));
+
+    lifecycle.TerminalConnected(hash);            // block connected mid-replay
+    BOOST_REQUIRE(lifecycle.StateForTest(hash).has_value()); // deferred
+
+    // Worker acknowledges a retryable failure: must ERASE (not retain) -- the
+    // hash is on the active chain, so it must not become a retry candidate.
+    BOOST_CHECK(lifecycle.Retry(*token, 60s, now));
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 120s).has_value());
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
 }
 
 BOOST_AUTO_TEST_CASE(async_pending_without_body_does_not_block_download)
@@ -316,6 +471,45 @@ BOOST_AUTO_TEST_CASE(pinned_progress_body_survives_sibling_flood)
     BOOST_CHECK(lifecycle.HasRetainedBody(hole));
     BOOST_CHECK(!lifecycle.HasRetainedBody(junk));
     BOOST_CHECK(lifecycle.HasRetainedBody(junk2));
+}
+
+BOOST_AUTO_TEST_CASE(per_source_caps_cannot_starve_other_netgroup)
+{
+    // SF-8: one netgroup filling the store must evict its own oldest
+    // bodies first and must not prevent an independent source from
+    // retaining.
+    node::MatMulBlockLifecycle lifecycle{8, 1000, 10min, 10s, 2, 250};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    std::vector<uint256> attacker;
+    auto t{now};
+    for (int i = 0; i < 6; ++i) {
+        const uint256 hash{
+            uint256::FromHex(std::string(62, '0') +
+                             strprintf("%02x", 0x31 + i)).value()};
+        attacker.push_back(hash);
+        BOOST_REQUIRE(lifecycle.Retain(
+            hash, Body(21 + i, 50, t, /*source_netgroup=*/1), t));
+        t += 1s;
+    }
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForSourceForTest(1), 2U);
+    BOOST_CHECK_LE(lifecycle.RetainedCountForTest(), 8U);
+    BOOST_CHECK(!lifecycle.HasRetainedBody(attacker[0]));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(attacker[1]));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(attacker[2]));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(attacker[3]));
+    BOOST_CHECK(lifecycle.HasRetainedBody(attacker[4]));
+    BOOST_CHECK(lifecycle.HasRetainedBody(attacker[5]));
+
+    const uint256 honest{
+        uint256::FromHex(std::string(62, '0') + "40").value()};
+    BOOST_REQUIRE(lifecycle.Retain(
+        honest, Body(40, 50, t, /*source_netgroup=*/2), t));
+    BOOST_CHECK(lifecycle.HasRetainedBody(honest));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForSourceForTest(1), 2U);
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForSourceForTest(2), 1U);
+    BOOST_CHECK(lifecycle.HasRetainedBody(attacker[4]));
+    BOOST_CHECK(lifecycle.HasRetainedBody(attacker[5]));
+    BOOST_CHECK_LE(lifecycle.RetainedCountForTest(), 8U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

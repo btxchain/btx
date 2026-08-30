@@ -10,6 +10,7 @@
 #include <net_processing.h>
 #include <node/context.h>
 #include <sync.h>
+#include <uint256.h>
 #include <util/time.h>
 #include <validation.h>
 
@@ -24,6 +25,7 @@
 namespace node {
 namespace {
 std::atomic<int64_t> g_last_default_mesh_refresh{0};
+std::atomic<int64_t> g_last_guard_recovery_escalation{0};
 
 int ComputeMedianTip(std::vector<int> peer_heights)
 {
@@ -51,6 +53,11 @@ const std::vector<std::string>& DefaultMiningPeerMesh()
 void ResetMiningChainGuardMeshRefreshForTest()
 {
     g_last_default_mesh_refresh.store(0);
+}
+
+void ResetMiningChainGuardRecoveryEscalationForTest()
+{
+    g_last_guard_recovery_escalation.store(0);
 }
 
 MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node)
@@ -190,26 +197,34 @@ MiningChainGuardStatus EvaluateMiningChainGuard(
         return status;
     }
 
+    if (status.peer_count > 0) {
+        status.best_peer_tip = *std::max_element(peer_heights.begin(), peer_heights.end());
+        status.worst_peer_tip = *std::min_element(peer_heights.begin(), peer_heights.end());
+        status.median_peer_tip = ComputeMedianTip(peer_heights);
+        status.near_tip_peers = std::count_if(
+            peer_heights.begin(), peer_heights.end(), [&](int peer_height) {
+                return std::abs(peer_height - local_tip_height) <= options.near_tip_window;
+            });
+
+        // Catch-up is not isolation. A node with even one peer clearly
+        // above its tip must report local_tip_behind, not
+        // insufficient_peer_consensus. The old order required
+        // min_peer_count known BestKnown hashes first, so headers-level
+        // visibility of 23 peers ahead still looked like an empty mesh
+        // (a live consensus-archive node / PR 126).
+        if (status.median_peer_tip > local_tip_height + options.max_median_tip_gap) {
+            status.reason = "local_tip_behind_peer_median";
+            return status;
+        }
+
+        if (status.median_peer_tip < local_tip_height - options.max_median_tip_gap) {
+            status.reason = "local_tip_ahead_of_peer_median";
+            return status;
+        }
+    }
+
     if (status.peer_count < options.min_peer_count) {
         status.reason = "insufficient_peer_consensus";
-        return status;
-    }
-
-    status.best_peer_tip = *std::max_element(peer_heights.begin(), peer_heights.end());
-    status.worst_peer_tip = *std::min_element(peer_heights.begin(), peer_heights.end());
-    status.median_peer_tip = ComputeMedianTip(peer_heights);
-    status.near_tip_peers = std::count_if(
-        peer_heights.begin(), peer_heights.end(), [&](int peer_height) {
-            return std::abs(peer_height - local_tip_height) <= options.near_tip_window;
-        });
-
-    if (status.median_peer_tip < local_tip_height - options.max_median_tip_gap) {
-        status.reason = "local_tip_ahead_of_peer_median";
-        return status;
-    }
-
-    if (status.median_peer_tip > local_tip_height + options.max_median_tip_gap) {
-        status.reason = "local_tip_behind_peer_median";
         return status;
     }
 
@@ -238,6 +253,13 @@ void ApplyPeerTipHashCheck(
         status.island_suspect =
             status.reason == "insufficient_peer_consensus" ||
             status.reason == "insufficient_near_tip_peers";
+        return;
+    }
+
+    // Catch-up: peers sit above our tip, so same-height hash agreement
+    // cannot be observed. That is not mining-alone.
+    if (status.reason == "local_tip_behind_peer_median") {
+        status.island_suspect = false;
         return;
     }
 
@@ -309,6 +331,79 @@ std::vector<int> FilterMiningChainGuardPeerHeights(
     return filtered;
 }
 
+std::vector<MiningChainGuardPeerSample> FilterMiningChainGuardConsensusSamples(
+    const std::vector<MiningChainGuardPeerSample>& peers)
+{
+    std::vector<MiningChainGuardPeerSample> consensus;
+    consensus.reserve(peers.size());
+    for (const auto& peer : peers) {
+        if (peer.outbound && !peer.hash.empty()) {
+            consensus.push_back(peer);
+        }
+    }
+    return consensus;
+}
+
+MiningChainGuardStatus RefineMiningChainGuardConsensus(
+    const MiningChainGuardStatus& visibility,
+    int local_tip_height,
+    bool initial_block_download,
+    bool network_active,
+    const std::vector<int>& consensus_heights,
+    const MiningChainGuardOptions& options)
+{
+    if (visibility.reason != "healthy" &&
+        visibility.reason != "insufficient_peer_consensus" &&
+        visibility.reason != "insufficient_near_tip_peers") {
+        return visibility;
+    }
+    return EvaluateMiningChainGuard(
+        local_tip_height, initial_block_download, network_active, consensus_heights, options);
+}
+
+namespace {
+bool MiningChainGuardKnownHashOnActiveOrBestChain(
+    const ChainstateManager& chainman,
+    const std::string& hash_hex)
+{
+    AssertLockHeld(::cs_main);
+    const auto parsed = uint256::FromHex(hash_hex);
+    if (!parsed) return false;
+    const CBlockIndex* index = chainman.m_blockman.LookupBlockIndex(*parsed);
+    if (index == nullptr) return false;
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    if (tip != nullptr && tip->GetAncestor(index->nHeight) == index) return true;
+    // E-5 (adv5): m_best_header follows cheap forged extending headers, so an
+    // attacker could advance it and make sybil BestKnown hashes on that forged
+    // tower count as "on-chain consensus". Require the counted best-header
+    // ancestor to be a block we actually HOLD the body for (BLOCK_HAVE_DATA) --
+    // a pure header-only forged tower has no bodies and no longer inflates the
+    // guard's consensus sample. Active-chain blocks always have HAVE_DATA, so
+    // the honest path is unchanged. Guard stays advisory (mining never pauses).
+    const CBlockIndex* best = chainman.m_best_header;
+    if (best != nullptr && best->GetAncestor(index->nHeight) == index &&
+        (index->nStatus & BLOCK_HAVE_DATA)) {
+        return true;
+    }
+    return false;
+}
+
+std::vector<MiningChainGuardPeerSample> FilterMiningChainGuardOnChainConsensusSamples(
+    const ChainstateManager& chainman,
+    const std::vector<MiningChainGuardPeerSample>& peers)
+{
+    AssertLockHeld(::cs_main);
+    std::vector<MiningChainGuardPeerSample> on_chain;
+    on_chain.reserve(peers.size());
+    for (const auto& peer : peers) {
+        if (MiningChainGuardKnownHashOnActiveOrBestChain(chainman, peer.hash)) {
+            on_chain.push_back(peer);
+        }
+    }
+    return on_chain;
+}
+} // namespace
+
 MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
 {
     const MiningChainGuardOptions options = GetMiningChainGuardOptions(node);
@@ -352,33 +447,60 @@ MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
     peer_samples.reserve(node_stats.size());
 
     for (const CNodeStats& peer_stats : node_stats) {
-        // Guard against local mining on minority forks using the node's own
-        // outbound view of the network rather than potentially spoofed inbound peers.
-        if (peer_stats.fInbound) continue;
-
         CNodeStateStats state_stats;
         if (!node.peerman->GetNodeStateStats(peer_stats.nodeid, state_stats)) continue;
 
         const int peer_height =
-            state_stats.nSyncHeight >= 0 ? state_stats.nSyncHeight : state_stats.nCommonHeight;
-        if (peer_height >= 0) {
-            MiningChainGuardPeerSample sample;
-            sample.height = peer_height;
-            sample.hash = state_stats.m_best_known_block_hash;
-            sample.last_block_time = peer_stats.m_last_block_time.count();
-            sample.last_block_announcement =
-                TicksSinceEpoch<std::chrono::seconds>(state_stats.m_last_block_announcement);
-            peer_samples.push_back(sample);
-        }
+            state_stats.nSyncHeight >= 0
+                ? state_stats.nSyncHeight
+                : (state_stats.nCommonHeight >= 0
+                       ? state_stats.nCommonHeight
+                       : state_stats.m_starting_height);
+        if (peer_height < 0) continue;
+
+        // Isolation / hash-split uses the outbound view. Catch-up also
+        // counts inbound peers that advertise above the local tip:
+        // VERSION height is headers-level visibility, and requiring a
+        // BestKnown hash first is how a far-behind archive reported
+        // insufficient_peer_consensus with 23 peers ahead.
+        if (peer_stats.fInbound && peer_height <= local_tip_height) continue;
+
+        MiningChainGuardPeerSample sample;
+        sample.height = peer_height;
+        sample.outbound = !peer_stats.fInbound;
+        sample.hash = peer_stats.fInbound ? std::string{} : state_stats.m_best_known_block_hash;
+        sample.last_block_time = peer_stats.m_last_block_time.count();
+        sample.last_block_announcement =
+            TicksSinceEpoch<std::chrono::seconds>(state_stats.m_last_block_announcement);
+        peer_samples.push_back(sample);
     }
 
     const int64_t now = GetTime<std::chrono::seconds>().count();
-    const auto peer_heights =
+    const auto visibility_heights =
         FilterMiningChainGuardPeerHeights(local_tip_height, now, peer_samples, options);
 
     auto status = EvaluateMiningChainGuard(
-        local_tip_height, initial_block_download, network_active, peer_heights, options);
-    ApplyPeerTipHashCheck(status, local_tip_height, local_tip_hash, peer_samples);
+        local_tip_height, initial_block_download, network_active, visibility_heights, options);
+
+    const auto consensus_samples = FilterMiningChainGuardConsensusSamples(peer_samples);
+    std::vector<MiningChainGuardPeerSample> on_chain_samples;
+    {
+        LOCK(cs_main);
+        on_chain_samples =
+            FilterMiningChainGuardOnChainConsensusSamples(*node.chainman, consensus_samples);
+    }
+    const auto consensus_heights =
+        FilterMiningChainGuardPeerHeights(local_tip_height, now, on_chain_samples, options);
+    status = RefineMiningChainGuardConsensus(
+        status,
+        local_tip_height,
+        initial_block_download,
+        network_active,
+        consensus_heights,
+        options);
+    // Hash-split still sees every learned outbound hash, including competing
+    // forks that the on-chain count correctly excluded.
+    ApplyPeerTipHashCheck(status, local_tip_height, local_tip_hash, consensus_samples);
     return ApplyDeferredReorgWarning(std::move(status), options, now);
 }
 
@@ -423,13 +545,21 @@ void MaybeRequestMiningChainGuardRecovery(const MiningChainGuardStatus& status, 
         status.reason == "peer_tip_hash_mismatch" ||
         status.reason == "deferred_reorg_candidate" ||
         status.reason == "peer_monitor_unavailable") {
-        node.connman->SetTryNewOutboundPeer(true);
-        node.connman->StartExtraBlockRelayPeers();
+        const int64_t now = GetTime<std::chrono::seconds>().count();
+        const int escalation_interval = std::max(
+            options.mesh_refresh_seconds, DEFAULT_MINING_CHAIN_GUARD_MESH_REFRESH_SECONDS);
+        int64_t last_escalation = g_last_guard_recovery_escalation.load();
+        while (MiningChainGuardRecoveryEscalationDue(now, last_escalation, escalation_interval) &&
+               !g_last_guard_recovery_escalation.compare_exchange_weak(last_escalation, now)) {
+        }
+        if (MiningChainGuardRecoveryEscalationDue(now, last_escalation, escalation_interval)) {
+            node.connman->SetTryNewOutboundPeer(true);
+            node.connman->StartExtraBlockRelayPeers();
+        }
 
         if (options.refresh_default_mesh &&
             options.mesh_refresh_seconds > 0 &&
             status.network_active) {
-            const int64_t now = GetTime<std::chrono::seconds>().count();
             int64_t last = g_last_default_mesh_refresh.load();
             while (now - last >= options.mesh_refresh_seconds &&
                    !g_last_default_mesh_refresh.compare_exchange_weak(last, now)) {

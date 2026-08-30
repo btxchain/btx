@@ -50,7 +50,13 @@ class PackageReleaseArchiveTest(unittest.TestCase):
         btx_util.write_text("util\n", encoding="utf-8")
         return btxd, btx_cli
 
+    def _stub_ship_gate(self):
+        self.module.verify_shipped_btxd = lambda path: None
+        self.module.verify_shipped_cli = lambda path: None
+        self.module.verify_shipped_macos_cli = lambda path: None
+
     def test_linux_archive_includes_binaries_and_helpers(self):
+        self._stub_ship_gate()
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_root = self._build_source_root(root)
@@ -102,6 +108,7 @@ class PackageReleaseArchiveTest(unittest.TestCase):
         )
 
     def test_windows_archive_uses_zip_and_exe_names(self):
+        self._stub_ship_gate()
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_root = self._build_source_root(root)
@@ -135,6 +142,7 @@ class PackageReleaseArchiveTest(unittest.TestCase):
             self.assertIn("btx-29.2/contrib/faststart/btx-agent-setup.py", names)
 
     def test_stage_release_tree_rejects_missing_support_file(self):
+        self._stub_ship_gate()
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_root = root / "source-root"
@@ -155,6 +163,7 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                 )
 
     def test_tarball_is_reproducible_with_source_date_epoch(self):
+        self._stub_ship_gate()
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_root = self._build_source_root(root)
@@ -206,6 +215,90 @@ class PackageReleaseArchiveTest(unittest.TestCase):
             archive_a = output_a / "btx-29.2-x86_64-linux-gnu.tar.gz"
             archive_b = output_b / "btx-29.2-x86_64-linux-gnu.tar.gz"
             self.assertEqual(archive_a.read_bytes(), archive_b.read_bytes())
+
+    def test_ship_target_aliases_share_canonical_triples(self):
+        self.assertEqual(
+            self.module.archive_filename("0.34.5", "linux-x86_64-cpu", None),
+            self.module.archive_filename("0.34.5", "linux-x86_64", None),
+        )
+        self.assertEqual(
+            self.module.archive_filename("0.34.5", "macos-arm64-metal", None),
+            self.module.archive_filename("0.34.5", "macos-arm64", None),
+        )
+        self.assertEqual(
+            self.module.archive_filename("0.34.5", "linux-x86_64-cuda12", None),
+            "btx-0.34.5-x86_64-linux-gnu-cuda12.tar.gz",
+        )
+        self.assertEqual(
+            self.module.archive_filename("0.34.5", "linux-x86_64-cuda", None),
+            self.module.archive_filename("0.34.5", "linux-x86_64-cuda12", None),
+        )
+
+    def test_verify_shipped_btxd_refuses_unrecognized_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            btxd = pathlib.Path(tmpdir) / "btxd"
+            btxd.write_text("daemon\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "unrecognized file"):
+                self.module.verify_shipped_btxd(btxd)
+
+    def test_verify_shipped_cli_refuses_unrecognized_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cli = pathlib.Path(tmpdir) / "btx-cli"
+            cli.write_text("cli\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "unrecognized file"):
+                self.module.verify_shipped_cli(cli)
+
+    def test_packaging_refuses_text_stub_btxd(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source_root = self._build_source_root(root)
+            btxd, btx_cli = self._write_binaries(root)
+            with self.assertRaisesRegex(RuntimeError, "unrecognized file"):
+                self.module.main(
+                    [
+                        "--output-dir",
+                        str(root / "out"),
+                        "--version",
+                        "0.34.5",
+                        "--platform-id",
+                        "linux-x86_64-cpu",
+                        "--btxd",
+                        str(btxd),
+                        "--btx-cli",
+                        str(btx_cli),
+                        "--source-root",
+                        str(source_root),
+                    ]
+                )
+
+    def test_packaging_refuses_btxd_built_without_zmq(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source_root = self._build_source_root(root)
+            btxd = root / "btxd"
+            btx_cli = root / "btx-cli"
+            btx_util = root / "btx-util"
+            # ELF magic + hidden-arg string, no ENABLE_ZMQ help: 0.33.4.2 CPU shape.
+            btxd.write_bytes(b"\x7fELF" + b"\x00" * 12 + b"-zmqpubhashblock\x00")
+            btx_cli.write_bytes(b"\x7fELF" + b"\x00" * 16)
+            btx_util.write_bytes(b"\x7fELF" + b"\x00" * 16)
+            with self.assertRaisesRegex((RuntimeError, Exception), "ENABLE_ZMQ help text"):
+                self.module.main(
+                    [
+                        "--output-dir",
+                        str(root / "out"),
+                        "--version",
+                        "0.34.5",
+                        "--platform-id",
+                        "linux-x86_64",
+                        "--btxd",
+                        str(btxd),
+                        "--btx-cli",
+                        str(btx_cli),
+                        "--source-root",
+                        str(source_root),
+                    ]
+                )
 
 
 if __name__ == "__main__":

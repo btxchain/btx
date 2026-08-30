@@ -55,7 +55,9 @@ a `btxd` that still contained `-zmqpubhashblock` strings (hidden args) while
 Release configure lines must still pass `-DWITH_ZMQ=ON` explicitly, and every
 shipped `btxd` must pass `scripts/release/verify_release_btxd.py` against the
 **real binary** (`libexec/btxd.real` in a published tarball; `bin/btxd` in a
-build tree). Since 0.34.1 packaged `bin/btxd` is a `#!/bin/sh` wrapper:
+build tree). Guix, native packaging, collect, cut, and publish all invoke that
+gate on the artifact users download. An unrecognized file is FAIL, not a skip.
+Since 0.34.1 packaged `bin/btxd` is a `#!/bin/sh` wrapper:
 `ldd bin/btxd` / `otool -L bin/btxd` are vacuous. Linux `ldd libexec/btxd.real`
 shows `libzmq`; macOS: static `libzmq.a` / `libevent_*.a` / `libomp.a`, no
 Homebrew dylibs. Disable only

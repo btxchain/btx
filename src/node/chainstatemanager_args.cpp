@@ -201,6 +201,28 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         LogWarning("Cadence burst hold is disabled (-cadenceburstmax=0). A rented-hashpower dump can jump this node's live tip by tens of future-stamped blocks in seconds. See doc/design/0.34-dump-and-run-reorg.md.\n");
     }
 
+    // -deepforkautoresolve: default-on LOCAL POLICY. Auto-migrate to an
+    // observation-scored HONEST deep (> park_depth) strictly-heavier fork
+    // instead of parking + RB-14 warn. Fail-safe to park when ambiguous.
+    if (auto value{args.GetBoolArg("-deepforkautoresolve")}) {
+        opts.deep_fork_auto_resolve = *value;
+    }
+    if (auto value{args.GetIntArg("-deepforkautoresolvesustain")}) {
+        opts.deep_fork_auto_resolve_sustain_s = std::max<int64_t>(0, *value);
+    }
+    if (auto value{args.GetIntArg("-deepforkautoresolvefreshness")}) {
+        opts.deep_fork_auto_resolve_freshness_s = std::max<int64_t>(0, *value);
+    }
+    if (auto value{args.GetIntArg("-deepforkautoresolveheightslack")}) {
+        opts.deep_fork_auto_resolve_height_slack =
+            static_cast<int32_t>(std::clamp<int64_t>(*value, 0, 1000));
+    }
+    if (!opts.deep_fork_auto_resolve &&
+        opts.chainparams.GetChainType() == ChainType::MAIN &&
+        opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY) {
+        LogWarning("Deep-fork auto-resolve is disabled (-deepforkautoresolve=0). A signer/node stranded on a losing deep fork will PARK + RB-14 warn and require manual invalidateblock to migrate to the honest heavier chain. Local policy only.\n");
+    }
+
     ReadDatabaseArgs(args, opts.coins_db);
     ReadCoinsViewArgs(args, opts.coins_view);
 
@@ -230,6 +252,25 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         size_t clamped_size_each = std::max<int64_t>(*max_size, 0) * (1 << 20) / 2;
         opts.script_execution_cache_bytes = clamped_size_each;
         opts.signature_cache_bytes = clamped_size_each;
+    }
+
+    // TEST-ONLY: -acquisitionstallseconds overrides the RB-16 acquisition-escape
+    // staleness window (default 600s) so live convergence tests need not wait 10
+    // minutes per restart. It changes ONLY how long a frozen node waits before
+    // the escape valve may arm -- never any validation, ExactReplay, or
+    // migration gate. Floored at 1s. A loud warning is logged so it can never be
+    // mistaken for a production setting.
+    if (auto value{args.GetIntArg("-acquisitionstallseconds")}) {
+        if (*value < 1) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -acquisitionstallseconds value (%d), must be at least 1",
+                *value))};
+        }
+        opts.acquisition_stall_seconds = *value;
+        LogPrintf("WARNING: -acquisitionstallseconds=%d is a TEST-ONLY override of "
+                  "the acquisition-escape staleness window (production default is "
+                  "%d). Do NOT use in production.\n",
+                  *value, 600);
     }
 
     return {};

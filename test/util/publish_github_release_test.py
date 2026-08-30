@@ -215,6 +215,29 @@ class PublishGitHubReleaseTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "SHA256SUMS mismatch"):
                 self.module.ensure_bundle(bundle_dir)
 
+    def test_ensure_bundle_refuses_ungated_dummy_platform_archive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            bundle_dir = root / "bundle"
+            bundle_dir.mkdir()
+            archive = bundle_dir / "btx-29.2-x86_64-linux-gnu.tar.gz"
+            archive.write_bytes(b"not-a-tarball")
+            manifest_path = bundle_dir / "btx-release-manifest.json"
+            manifest = {
+                "checksum_file": "SHA256SUMS",
+                "platform_assets": {
+                    "linux-x86_64": {"asset_name": archive.name},
+                },
+            }
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            (bundle_dir / "SHA256SUMS").write_text(
+                f"{self.module.sha256_file(manifest_path)}  {manifest_path.name}\n"
+                f"{self.module.sha256_file(archive)}  {archive.name}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "ZMQ/release gate failed"):
+                self.module.ensure_bundle(bundle_dir)
+
     def test_ensure_bundle_rejects_symlinks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bundle_dir = self._build_bundle(pathlib.Path(tmpdir))

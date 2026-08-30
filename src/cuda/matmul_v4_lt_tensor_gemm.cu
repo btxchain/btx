@@ -11,6 +11,8 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -29,6 +31,11 @@
 // ExactGemmS32S8 / DeviceGemmS32S8Tiled and MUST NOT claim IMMA for that lane.
 //
 // Target arches (PR #89): sm_90 (H100/H200), sm_100 (B200), sm_120 (5090).
+// Pre-Hopper (Ampere/Ada sm_8x, #131): native s8 IMMA is exposed only for the
+// TN orientation, so GetOrCreateShapePlan falls back to a transposed-B plan
+// (device-side transpose + TRANSB=OP_T) when the NN heuristic finds no native
+// IMMA algorithm. The fallback is self-qualifying (SelfTestImmaOnce byte-exact
+// gate) and leaves the Hopper+/Blackwell NN path bit-for-bit unchanged.
 
 namespace matmul_v4::cuda {
 namespace {
@@ -45,6 +52,10 @@ struct ImmaLtPool {
         cublasLtMatmulAlgo_t algo{};
         size_t required_workspace{0};
         bool native_imma{false};
+        //! Pre-Hopper native s8 IMMA is only exposed for op(B)=B^T. When set,
+        //! b_layout describes B stored transposed (N×K) and the launch path
+        //! materializes it with a device-side transpose (byte-exact copy).
+        bool transpose_b{false};
     };
 
     std::mutex mu;
@@ -54,9 +65,11 @@ struct ImmaLtPool {
     void* dA{nullptr};
     void* dB{nullptr};
     void* dC{nullptr};
+    void* dBt{nullptr};
     size_t a_bytes{0};
     size_t b_bytes{0};
     size_t c_bytes{0};
+    size_t bt_bytes{0};
     std::vector<ShapePlan> plans;
     bool ready{false};
 
@@ -82,6 +95,7 @@ struct ImmaLtPool {
         free_p(dA, a_bytes);
         free_p(dB, b_bytes);
         free_p(dC, c_bytes);
+        free_p(dBt, bt_bytes);
         if (lt) {
             cublasLtDestroy(lt);
             lt = nullptr;
@@ -134,6 +148,20 @@ struct ImmaLtPool {
         };
         return grow(dA, a_bytes, need_a) && grow(dB, b_bytes, need_b) && grow(dC, c_bytes, need_c);
     }
+
+    [[nodiscard]] bool EnsureBt(size_t need_bt)
+    {
+        if (need_bt <= bt_bytes) return true;
+        if (dBt) {
+            cudaFree(dBt);
+            dBt = nullptr;
+            bt_bytes = 0;
+        }
+        if (need_bt == 0) return true;
+        if (cudaMalloc(&dBt, need_bt) != cudaSuccess) return false;
+        bt_bytes = need_bt;
+        return true;
+    }
 };
 
 ImmaLtPool& ImmaPool()
@@ -149,6 +177,33 @@ void DestroyShapePlan(ImmaLtPool::ShapePlan& plan)
     if (plan.a_layout) cublasLtMatrixLayoutDestroy(plan.a_layout);
     if (plan.op_desc) cublasLtMatmulDescDestroy(plan.op_desc);
     plan = {};
+}
+
+/** Transpose a row-major K×N int8 matrix B into a row-major N×K matrix Bt
+ *  (Bt[n*K + k] == B[k*N + n]). Pre-Hopper cuBLASLt exposes native s8 IMMA only
+ *  for the TN orientation (op(B)=B^T), so we materialize Bt and set TRANSB=OP_T.
+ *  This is a pure byte copy -- no arithmetic -- so the ExactGemm result is
+ *  bit-identical; the 33-wide shared tile avoids shared-memory bank conflicts. */
+__global__ void TransposeS8_KN_to_NK(const int8_t* __restrict__ B,
+                                     int8_t* __restrict__ Bt,
+                                     uint32_t K, uint32_t N)
+{
+    __shared__ int8_t tile[32][33];
+    const uint32_t k0 = blockIdx.y * 32u;
+    const uint32_t n0 = blockIdx.x * 32u;
+    const uint32_t k_in = k0 + threadIdx.y;
+    const uint32_t n_in = n0 + threadIdx.x;
+    if (k_in < K && n_in < N) {
+        tile[threadIdx.y][threadIdx.x] =
+            B[static_cast<size_t>(k_in) * N + n_in];
+    }
+    __syncthreads();
+    const uint32_t n_out = n0 + threadIdx.y;
+    const uint32_t k_out = k0 + threadIdx.x;
+    if (n_out < N && k_out < K) {
+        Bt[static_cast<size_t>(n_out) * K + k_out] =
+            tile[threadIdx.x][threadIdx.y];
+    }
 }
 
 /** Caller MUST hold ImmaPool().mu. NVIDIA recommends querying a heuristic once
@@ -172,25 +227,22 @@ void DestroyShapePlan(ImmaLtPool::ShapePlan& plan)
         return nullptr;
     }
     const cublasOperation_t op_n = CUBLAS_OP_N;
-    if (cublasLtMatmulDescSetAttribute(plan.op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_n, sizeof(op_n)) != CUBLAS_STATUS_SUCCESS ||
-        cublasLtMatmulDescSetAttribute(plan.op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n)) != CUBLAS_STATUS_SUCCESS) {
-        error = "cublasLtMatmulDescSetAttribute failed";
+    if (cublasLtMatmulDescSetAttribute(plan.op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_n, sizeof(op_n)) != CUBLAS_STATUS_SUCCESS) {
+        error = "cublasLtMatmulDescSetAttribute TRANSA failed";
         DestroyShapePlan(plan);
         return nullptr;
     }
-    // Row-major ExactGemm layout: A[M×K], B[K×N], C[M×N] with leading dims K,N,N.
-    if (cublasLtMatrixLayoutCreate(&plan.a_layout, CUDA_R_8I, M, K, K) != CUBLAS_STATUS_SUCCESS ||
-        cublasLtMatrixLayoutCreate(&plan.b_layout, CUDA_R_8I, K, N, N) != CUBLAS_STATUS_SUCCESS ||
-        cublasLtMatrixLayoutCreate(&plan.c_layout, CUDA_R_32I, M, N, N) != CUBLAS_STATUS_SUCCESS) {
-        error = "cublasLtMatrixLayoutCreate failed";
-        DestroyShapePlan(plan);
-        return nullptr;
-    }
+    // A[M×K] and C[M×N] are row-major and identical for both B orientations.
     const cublasLtOrder_t order = CUBLASLT_ORDER_ROW;
+    if (cublasLtMatrixLayoutCreate(&plan.a_layout, CUDA_R_8I, M, K, K) != CUBLAS_STATUS_SUCCESS ||
+        cublasLtMatrixLayoutCreate(&plan.c_layout, CUDA_R_32I, M, N, N) != CUBLAS_STATUS_SUCCESS) {
+        error = "cublasLtMatrixLayoutCreate A/C failed";
+        DestroyShapePlan(plan);
+        return nullptr;
+    }
     if (cublasLtMatrixLayoutSetAttribute(plan.a_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)) != CUBLAS_STATUS_SUCCESS ||
-        cublasLtMatrixLayoutSetAttribute(plan.b_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)) != CUBLAS_STATUS_SUCCESS ||
         cublasLtMatrixLayoutSetAttribute(plan.c_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)) != CUBLAS_STATUS_SUCCESS) {
-        error = "cublasLtMatrixLayoutSetAttribute failed";
+        error = "cublasLtMatrixLayoutSetAttribute A/C failed";
         DestroyShapePlan(plan);
         return nullptr;
     }
@@ -209,40 +261,98 @@ void DestroyShapePlan(ImmaLtPool::ShapePlan& plan)
         return nullptr;
     }
 
-    // The fastest result for a small self-test shape can be SIMT. Ask for
-    // several candidates and accept only a native integer Tensor Core kernel.
-    constexpr int kMaxHeuristics = 16;
-    cublasLtMatmulHeuristicResult_t heuristics[kMaxHeuristics]{};
-    int returned = 0;
-    if (cublasLtMatmulAlgoGetHeuristic(pool.lt, plan.op_desc, plan.a_layout, plan.b_layout,
-                                       plan.c_layout, plan.c_layout, preference, kMaxHeuristics,
-                                       heuristics, &returned) != CUBLAS_STATUS_SUCCESS) {
-        error = "no IMMA s8xs8->s32 heuristic";
-        cublasLtMatmulPreferenceDestroy(preference);
-        DestroyShapePlan(plan);
-        return nullptr;
-    }
     constexpr uint64_t kRequiredImpl =
         CUBLASLT_NUMERICAL_IMPL_FLAGS_IMMA |
         CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_32I |
         CUBLASLT_NUMERICAL_IMPL_FLAGS_INPUT_8I;
-    for (int i = 0; i < returned; ++i) {
-        if (heuristics[i].state != CUBLAS_STATUS_SUCCESS) continue;
-        uint64_t impl_flags = 0;
-        size_t written = 0;
-        if (cublasLtMatmulAlgoCapGetAttribute(
-                &heuristics[i].algo, CUBLASLT_ALGO_CAP_NUMERICAL_IMPL_FLAGS,
-                &impl_flags, sizeof(impl_flags), &written) != CUBLAS_STATUS_SUCCESS ||
-            written != sizeof(impl_flags) || (impl_flags & kRequiredImpl) != kRequiredImpl) {
-            continue;
+
+    // Build the B operand for a given orientation and accept only a native
+    // integer Tensor Core algorithm. NN (B row-major K×N, TRANSB=OP_N) is the
+    // canonical Hopper+/Blackwell path and is tried first. If no native IMMA
+    // algorithm exists for NN -- the pre-Hopper (Ampere/Ada sm_8x) case, where
+    // s8 IMMA is only exposed for op(B)=B^T -- retry with B stored transposed
+    // (N×K, TRANSB=OP_T) plus a device-side transpose at launch (#131). The
+    // choice is by actual algorithm availability, never a hard arch gate.
+    // SelfTestImmaOnce byte-exact-checks representative small shapes (both
+    // orientations exercise the same IMMA families), but production Rank-1 /
+    // RC-ExactReplay shapes are admitted here on heuristic availability alone --
+    // the ultimate byte-exact gate for those is consensus ExactReplay itself,
+    // which recomputes and rejects any block whose digest a wrong algorithm
+    // would produce (self-policing; a wrong build cannot split consensus, only
+    // fail to sync). See adversarial finding F1.
+    auto search = [&](bool transpose_b) -> bool {
+        if (plan.b_layout) {
+            cublasLtMatrixLayoutDestroy(plan.b_layout);
+            plan.b_layout = nullptr;
         }
-        plan.algo = heuristics[i].algo;
-        plan.required_workspace = heuristics[i].workspaceSize;
-        plan.native_imma = true;
-        break;
+        const cublasOperation_t op_b = transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N;
+        if (cublasLtMatmulDescSetAttribute(plan.op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_b, sizeof(op_b)) != CUBLAS_STATUS_SUCCESS) {
+            return false;
+        }
+        // NN: B row-major K×N ld=N. TN: Bt row-major N×K ld=K, op(B)=Bt^T=B.
+        const uint32_t b_rows = transpose_b ? N : K;
+        const uint32_t b_cols = transpose_b ? K : N;
+        if (cublasLtMatrixLayoutCreate(&plan.b_layout, CUDA_R_8I, b_rows, b_cols, b_cols) != CUBLAS_STATUS_SUCCESS) {
+            return false;
+        }
+        if (cublasLtMatrixLayoutSetAttribute(plan.b_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)) != CUBLAS_STATUS_SUCCESS) {
+            return false;
+        }
+        constexpr int kMaxHeuristics = 16;
+        cublasLtMatmulHeuristicResult_t heuristics[kMaxHeuristics]{};
+        int returned = 0;
+        if (cublasLtMatmulAlgoGetHeuristic(pool.lt, plan.op_desc, plan.a_layout, plan.b_layout,
+                                           plan.c_layout, plan.c_layout, preference, kMaxHeuristics,
+                                           heuristics, &returned) != CUBLAS_STATUS_SUCCESS) {
+            return false;
+        }
+        for (int i = 0; i < returned; ++i) {
+            if (heuristics[i].state != CUBLAS_STATUS_SUCCESS) continue;
+            uint64_t impl_flags = 0;
+            size_t written = 0;
+            if (cublasLtMatmulAlgoCapGetAttribute(
+                    &heuristics[i].algo, CUBLASLT_ALGO_CAP_NUMERICAL_IMPL_FLAGS,
+                    &impl_flags, sizeof(impl_flags), &written) != CUBLAS_STATUS_SUCCESS ||
+                written != sizeof(impl_flags) || (impl_flags & kRequiredImpl) != kRequiredImpl) {
+                continue;
+            }
+            plan.algo = heuristics[i].algo;
+            plan.required_workspace = heuristics[i].workspaceSize;
+            plan.native_imma = true;
+            plan.transpose_b = transpose_b;
+            return true;
+        }
+        return false;
+    };
+
+    // BTX_LT_FORCE_TN is a validation/diagnostic override so the pre-Hopper TN
+    // path can be exercised on a Hopper+/Blackwell box that would otherwise
+    // always satisfy NN. It only changes which orientation is *tried*; the
+    // byte-exact SelfTestImmaOnce gate still governs admission, so it can never
+    // enable a non-bit-identical result.
+    const bool force_tn{std::getenv("BTX_LT_FORCE_TN") != nullptr};
+    if (force_tn) {
+        // Loud, once: a diagnostic override that forces the pre-Hopper TN
+        // orientation. If TN has no native IMMA algorithm for a shape on this
+        // GPU, the negative result is cached and the whole IMMA lane disables
+        // for the process (CPU/device fallback only) -- so it must never be set
+        // in production, especially on Hopper+/Blackwell (audit F3).
+        static std::once_flag warn_once;
+        std::call_once(warn_once, [] {
+            std::fprintf(stderr,
+                "WARNING: BTX_LT_FORCE_TN is set -- forcing the pre-Hopper "
+                "transposed-B IMMA orientation. Diagnostic/validation use only; "
+                "if this GPU lacks a native TN IMMA algorithm the entire IMMA "
+                "accelerator lane will be DISABLED for this process. Do NOT set "
+                "this in production.\n");
+        });
     }
+    const bool found = force_tn
+                           ? search(/*transpose_b=*/true)
+                           : (search(/*transpose_b=*/false) ||
+                              search(/*transpose_b=*/true));
     cublasLtMatmulPreferenceDestroy(preference);
-    if (!plan.native_imma) {
+    if (!found) {
         error = "heuristics returned no native IMMA+s32 algorithm";
         pool.plans.push_back(plan); // Cache the negative result too.
         return nullptr;
@@ -267,13 +377,45 @@ void DestroyShapePlan(ImmaLtPool::ShapePlan& plan)
     ImmaLtPool::ShapePlan* plan = GetOrCreateShapePlan(pool, M, N, K, error);
     if (plan == nullptr) return false;
 
+    // Pre-Hopper TN path (#131): materialize Bt = B^T (N×K) so cuBLASLt can use
+    // its native s8 IMMA algorithm. Byte-exact copy on the same stream, so it
+    // stays ordered before the matmul and changes no arithmetic.
+    const int8_t* b_operand = dB;
+    if (plan->transpose_b) {
+        const size_t need_bt = static_cast<size_t>(N) * K * sizeof(int8_t);
+        if (!pool.EnsureBt(need_bt)) {
+            error = "Bt transpose scratch alloc failed";
+            return false;
+        }
+        const dim3 block(32, 32);
+        const dim3 grid((N + 31) / 32, (K + 31) / 32);
+        TransposeS8_KN_to_NK<<<grid, block, 0, stream>>>(
+            dB, static_cast<int8_t*>(pool.dBt), K, N);
+        if (cudaGetLastError() != cudaSuccess) {
+            error = "Bt transpose launch failed";
+            return false;
+        }
+        b_operand = static_cast<const int8_t*>(pool.dBt);
+    }
+
     const int32_t alpha = 1;
     const int32_t beta = 0;
     if (cublasLtMatmul(pool.lt, plan->op_desc, &alpha, dA, plan->a_layout,
-                       dB, plan->b_layout, &beta, dC, plan->c_layout, dC, plan->c_layout,
+                       b_operand, plan->b_layout, &beta, dC, plan->c_layout, dC, plan->c_layout,
                        &plan->algo, pool.workspace, pool.workspace_bytes, stream) != CUBLAS_STATUS_SUCCESS) {
         error = "cublasLtMatmul IMMA failed";
         return false;
+    }
+    if (plan->transpose_b) {
+        // dBt is a pool-shared scratch and the pool mutex serializes only the
+        // host-side enqueue, not GPU execution. Wait for this matmul to finish
+        // reading dBt before returning (releasing the pool mutex) so a concurrent
+        // TN call on another stream cannot overwrite the transpose mid-read (F2).
+        // Confined to the pre-Hopper TN fallback; the NN path stays fully async.
+        if (cudaStreamSynchronize(stream) != cudaSuccess) {
+            error = "Bt transpose stream synchronize failed";
+            return false;
+        }
     }
     return true;
 }

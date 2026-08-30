@@ -12,16 +12,26 @@ may be approved for merge or release.
 
 ## Decision
 
-Epoch A requires matching production-shape ExactReplay evidence from the CUDA
-and Metal implementations. HIP remains optional, but any HIP provider must
-reproduce the same corpus before it can be production-authorized. Portable CPU
-ExactReplay remains the backend-neutral diagnostic oracle and dispute tool; it
-is not counted as an independently viable launch provider because it cannot
-meet the production service bound.
+Epoch A records matching production-shape ExactReplay evidence from the
+CUDA and Metal implementations this line measured. HIP remains optional
+in that comparison corpus. Portable CPU ExactReplay remains the
+backend-neutral diagnostic oracle and dispute tool; it is not counted
+as an independently viable launch provider because it cannot meet the
+production service bound.
 
-This decision concerns operational production-golden eligibility only. It does
-not make device identity, driver version, or provider choice part of consensus.
-Every correct backend must still compute the same deterministic predicate.
+**Mining admission does not require a manifest row.** A device that
+passes the mandatory byte-exact `ExactGemmS8S8` CPU-versus-GPU
+self-test is admissible even when the compiled manifest has no matching
+reviewed row (`admission_path=self_qualification`). The manifest is a
+comparison corpus, not a network blessing and not a permission list. A
+digest **mismatch** against a unique known row is still fail-closed. A
+device that fails self-qualification is not admissible. Floating-point-only
+paths remain inadmissible. Every correct backend must still compute the
+same deterministic predicate; blocks are ExactReplayed by every peer.
+
+This decision concerns operational production-golden **comparison** only.
+It does not make device identity, driver version, or provider choice part
+of consensus.
 
 ## Assurance argument
 
@@ -38,13 +48,16 @@ following fail-closed checks pass:
    and zero CPU calls, MACs, or fallbacks;
 5. an exact code-freeze revision, a SHA-256 fingerprint of the build-relevant
    source tree, and the SHA-256 of each harness binary; and
-6. a live startup canary that independently rechecks the deployed provider and
-   exact epoch tuple before readiness is advertised.
+6. a live startup canary that independently rechecks the deployed provider
+   against a unique matching manifest row when one exists. Absence of a
+   row is not a refusal; a digest mismatch against a known row is.
 
 These controls replace self-asserted provider labels and stale cross-revision
 artifacts. They do not claim that two GPUs prove the absence of a common
-specification bug. The portable implementation, intermediate diagnostics,
-frozen headers, and offline replay remain available to investigate divergence.
+specification bug. They are not a blessing from this repository that other
+hardware must obtain before mining. The portable implementation, intermediate
+diagnostics, frozen headers, and offline replay remain available to
+investigate divergence.
 
 ## Revision and evidence rule
 

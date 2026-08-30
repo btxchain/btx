@@ -200,12 +200,13 @@ private:
 /**
  * Closed livelock disposition for a ticketless RC body.
  *
- * Followed historical holes persist without ExactReplay GPU (HAVE_DATA;
- * ConnectTip still waits for quorum). A tip-child persists without GPU on
- * mirrors/signers, and is retained on independent consensus until a ticket
- * or requested retry can run ExactReplay. Competing near-tip siblings stay
- * HEADER_ONLY with a per-peer non-refreshing cooldown so one ticketless
- * source cannot censor every peer or steal miner GPU.
+ * Followed historical holes persist without occupying the admission
+ * slot (HAVE_DATA; AcceptBlock ExactReplays on consensus, ConnectTip
+ * waits for quorum on mirrors). A followed tip-child persists the same
+ * way so catch-up does not wait for rcadmit tickets that never arrive.
+ * Competing near-tip siblings stay HEADER_ONLY with a per-peer
+ * non-refreshing cooldown so one ticketless source cannot censor every
+ * peer or steal miner GPU.
  */
 enum class TicketlessRCBodyAction : uint8_t {
     PersistWithoutGpu,
@@ -228,6 +229,21 @@ enum class TicketlessRCBodyAction : uint8_t {
         return TicketlessRCBodyAction::PersistWithoutGpu;
     }
     return TicketlessRCBodyAction::RetainUntilTicketOrRetry;
+}
+
+/** RCADMIT / header-first ExactReplay may proceed when the parent is the
+ *  active tip, even if nAuthenticatedChainWork lags nChainWork. Requiring
+ *  equality made the v0.34.2 deadlock: the sidecar was ignored, the body
+ *  was RETAIN_FOR_RETRY forever, and the one-job cap never ExactReplayed
+ *  (jarekpiot; peerman_tests/linear_tip_child_replays_when_authenticated_work_lags). */
+[[nodiscard]] constexpr bool RCAdmitParentEligible(
+    bool has_parent,
+    bool parent_is_active_tip,
+    bool parent_auth_equals_chain_work) noexcept
+{
+    if (!has_parent) return false;
+    if (parent_is_active_tip) return true;
+    return parent_auth_equals_chain_work;
 }
 
 /**

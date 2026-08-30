@@ -93,12 +93,41 @@ inline void AddHiddenNetAddr(const CNetAddr& addr)
 //! Relays must not fill AddrMan from random inbound ADDR (cheap Sybil).
 //! Learn from outbound, addnode/manual, or DNS addr-fetch only — the
 //! channel archives use after they followed the GPU pin.
+//!
+//! This is INGEST of gossip, not "may we remember the peer we are
+//! already TCP-connected to." Mixing the two was why 45 tip-class
+//! inbounds were connected and missing from addrman: GETADDR extra-push
+//! reused this helper and skipped every inbound.
 [[nodiscard]] inline bool MayLearnAddressFromPeer(bool inbound,
                                                   bool manual,
                                                   bool addr_fetch)
 {
     if (manual || addr_fetch) return true;
     return !inbound;
+}
+
+//! Third-highest NODE_NETWORK VERSION height among currently connected
+//! peers. Max is one inbound Sybil at INT_MAX; median of a 185109-heavy
+//! inbound set is the stale cohort. Third-highest survives two fakes
+//! and still tracks the live cluster (measured: 65 tip-class inbounds).
+[[nodiscard]] inline int32_t RobustConnectedWatermark(
+    std::vector<int32_t> network_peer_heights)
+{
+    if (network_peer_heights.empty()) return -1;
+    std::sort(network_peer_heights.begin(), network_peer_heights.end(),
+              [](int32_t a, int32_t b) { return a > b; });
+    const size_t idx{std::min(network_peer_heights.size() - 1, size_t{2})};
+    return network_peer_heights[idx];
+}
+
+[[nodiscard]] inline int32_t EffectiveIntroductionWatermark(
+    int32_t archive_reported_height,
+    const std::vector<int32_t>& network_peer_heights)
+{
+    const int32_t connected{RobustConnectedWatermark(network_peer_heights)};
+    if (archive_reported_height < 0) return connected;
+    if (connected < 0) return archive_reported_height;
+    return std::max(archive_reported_height, connected);
 }
 
 //! ADDR_FETCH (-seednode / DNS) currently requires NODE_NETWORK via
@@ -111,13 +140,19 @@ inline void AddHiddenNetAddr(const CNetAddr& addr)
     return (services & NODE_MATMUL_DISCOVERY) == NODE_MATMUL_DISCOVERY;
 }
 
-//! Handshake keep is ADDR_FETCH AND DISCOVERY only. A non-fetch inbound
-//! advertising DISCOVERY must still satisfy GetDesirableServiceFlags
-//! (NODE_NETWORK). Do not treat this as a general peer-limit bypass.
+//! Keep a DISCOVERY-only hop we already connected to, so GETADDR can
+//! run. DNS uses ADDR_FETCH. Compiled seeds are stamped NETWORK by
+//! ConvertSeeds, then VERSION reveals DISCOVERY; without this keep the
+//! full-outbound hop is dropped before GETADDR (fresh-datadir
+//! dnsseed=0: both compiled IPs, 200000908 vs 00000009).
+//! addr_fetch is accepted for call-site compatibility; DISCOVERY-only
+//! is enough. Inbound still uses GetDesirableServiceFlags because
+//! ExpectServicesFromConn is false there.
 [[nodiscard]] inline bool HandshakeKeepsDiscoveryPeer(bool addr_fetch,
                                                       uint64_t services)
 {
-    return addr_fetch && AddrFetchMayKeepDiscoveryPeer(services);
+    (void)addr_fetch;
+    return AddrFetchMayKeepDiscoveryPeer(services);
 }
 
 //! Discovery-only: DISCOVERY without NODE_NETWORK / NODE_NETWORK_LIMITED.
@@ -195,20 +230,96 @@ inline constexpr int MAX_INBOUND_DISCOVERY_ONLY{4};
 
 //! Connected peer is on the recent GPU-reported network if its VERSION
 //! height is within RECENT_HEIGHT_LAG of the watermark. No GETMMATTEST.
-//! No pin. No FindMostWorkChain. When no miner/archive has reported yet,
-//! a connected peer with a completed VERSION still qualifies so addnode'd
-//! public miners can bootstrap introduction without an archive.
+//! No pin. No FindMostWorkChain.
+//!
+//! Watermark < 0 means no miner/archive sample yet. Passing every
+//! versioned peer in that case made seed GETADDR introduction vacuous
+//! (measured: discovery_archive_reported_height=-1, every inbound
+//! classified "recent"). Fail closed; callers that have connected
+//! NODE_NETWORK peers must pass EffectiveIntroductionWatermark first
+//! (addnode'd miners bootstrap from that, not from this -1 hatch).
 [[nodiscard]] inline bool PeerLooksOnRecentNetwork(int32_t peer_starting_height,
                                                    int32_t archive_reported_height,
                                                    int32_t max_lag = RECENT_HEIGHT_LAG)
 {
     if (peer_starting_height < 0) return false;
-    if (archive_reported_height < 0) return true;
+    if (archive_reported_height < 0) return false;
     if (max_lag < 0) return false;
     const int64_t delta{
         static_cast<int64_t>(peer_starting_height) -
         static_cast<int64_t>(archive_reported_height)};
     return delta <= max_lag && delta >= -static_cast<int64_t>(max_lag);
+}
+
+//! Advertise a currently-connected peer's own endpoint on GETADDR.
+//! Distinct from MayLearnAddressFromPeer. Discovery-only peers are not
+//! IBD sources; do not hand them to a bootstrapping consensus node.
+[[nodiscard]] inline bool MayAdvertiseConnectedPeer(uint64_t services,
+                                                    int32_t starting_height,
+                                                    int32_t effective_watermark)
+{
+    if (!MayAdvertiseAddress(services)) return false;
+    if (ServicesAreDiscoveryOnly(services)) return false;
+    return PeerLooksOnRecentNetwork(starting_height, effective_watermark);
+}
+
+//! Mark an inbound handshake as eligible to remember a listen endpoint.
+//! This must NOT persist the accepted TCP socket: that address is the
+//! peer's ephemeral SOURCE port, not the port they listen on. Gossiping
+//! source ports made reachable listeners undialable network-wide.
+//! Persist only a later same-IP self-ADDR
+//! (MayRetainInboundSelfAnnouncement).
+[[nodiscard]] inline bool MayRetainInboundHandshake(bool inbound,
+                                                    bool routable,
+                                                    uint64_t services,
+                                                    int32_t starting_height,
+                                                    int32_t effective_watermark)
+{
+    if (!inbound || !routable) return false;
+    return MayAdvertiseConnectedPeer(services, starting_height,
+                                     effective_watermark);
+}
+
+//! Persist an inbound peer's self-advertised listen endpoint. Never the
+//! TCP source port of the accepted socket. Eligibility is VERSION-time
+//! (MayRetainInboundHandshake). Same-IP binds the announcement to the
+//! peer we already have a handshake with — not their ADDR gossip of
+//! third parties (Sybil). CGNAT/hairpin (announced IP ≠ source IP) is
+//! not retained: better than poisoning addrman with a dead source port.
+//! Do not reject advertised_port == source_port: a listener can reuse
+//! its listen port as the outbound source (SO_REUSEADDR).
+[[nodiscard]] inline bool MayRetainInboundSelfAnnouncement(
+    bool inbound,
+    bool retain_eligible,
+    bool advertised_routable,
+    bool same_ip,
+    bool may_advertise_endpoint)
+{
+    if (!inbound || !retain_eligible) return false;
+    if (!advertised_routable || !same_ip) return false;
+    return may_advertise_endpoint;
+}
+
+//! RB-15 (all nodes): drop an inbound peer's self-ADDR that carries the
+//! ACCEPTED SOURCE port -- the ephemeral, undialable endpoint of the accepted
+//! socket. The peer's real listen endpoint arrives on a different port, so
+//! this loses nothing while keeping addrman/gossip free of unreachable entries.
+[[nodiscard]] inline bool IsInboundSourcePortSelfAnnouncement(
+    bool inbound,
+    bool same_netaddr,
+    bool same_port)
+{
+    return inbound && same_netaddr && same_port;
+}
+
+//! GETADDR extra-push of a currently-connected peer's socket address.
+//! Outbound/manual endpoints are the address we dialed (listen port).
+//! Inbound socket addresses are ephemeral source ports and must never
+//! be gossiped — extra-push their self-advertised listen endpoint
+//! instead, once ADDR has supplied it.
+[[nodiscard]] inline bool MayPushConnectedPeerSocketAddress(bool inbound)
+{
+    return !inbound;
 }
 
 } // namespace node::discovery_relay

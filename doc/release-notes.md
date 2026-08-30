@@ -1,10 +1,37 @@
-# STOP: 0.34.1 partitions nodes from mainnet. 0.34.2 deadlocks. 0.34.3
-# catches up one block then stalls with headers below blocks.
+# STOP: 0.34.1 partitions nodes. 0.34.2 deadlocks. 0.34.3 stalls with
+# headers below blocks. 0.34.4 closed that header gap. 0.34.5 is the
+# sealed binary that actually bootstraps.
+#
+# Do not load assumeutxo-199300 or assumeutxo-199299. Those compiled
+# bases (ff80e629 / f12a27d0) sit on the withdrawn 0.34.1 branch, not
+# the majority chain (issue 127). A node that already loaded one will
+# not start on 0.34.5; wipe the datadir and sync from genesis (or load
+# assumeutxo-201500 on a fresh datadir). There is no invalidateblock
+# rescue.
 
-**v0.34.4** is the binary that unsticks a node whose `m_best_header` sits
-below its connected tip (live 0.34.3: `blocks=199310`, `headers=199024`).
-Install 0.34.4. Do not run 0.34.1. Do not run 0.34.2 on a consensus
-node. 0.34.3 is superseded for this catch-up stall.
+**Do not `invalidateblock` 33c834f8.** The live chain **descends from**
+`33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82` at
+height 199295. Walked 2026-08-28 from headers-only 199384
+(`2e6394bc0ad6a055…`): ancestor at 199295 **is** 33c834f8; ancestor at
+199294 is the still-common `0ca79e602f1b44d4…`. Invalidating that hash
+strands the node permanently on the `8b5da5a5` island (confirmations −1
+on every 33c834f8 descendant; no error; looks like a sync bug). If you
+already ran it:
+
+```
+btx-cli reconsiderblock 33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82
+```
+
+`33c834f8` is **not** a recommended invalidate target. The old Case A
+"invalidate the first post-fork block" is wrong whenever that block is
+an ancestor of the current chain. See Case A.
+
+**v0.34.4** closed the headers-below-blocks stall (live: `blocks=199310`,
+`headers=199024` → both 199310). That is independent of Case A. If
+33c834f8 is locally invalid, run `reconsiderblock` regardless of binary
+version. An earlier reconsider on 0.34.4 did not always climb the tip
+(GETDATA of the competing fork was still skipped); the recovery command
+is still `reconsiderblock`, not another invalidate.
 
 **v0.34.1 is an accidental consensus hard fork.** Commit `1c87fcd6`
 (PR 119) set `consensus.nMatMulStallRecoveryHeight = 199299` in
@@ -12,23 +39,32 @@ node. 0.34.3 is superseded for this catch-up stall.
 above that line said any reachable height is a hard fork. 0.34.1
 recomputes a different ASERT target for every majority header after
 199299, `CalculateClaimedHeadersWork` returns `nullopt`, and
-`net_processing.cpp` disconnects the peer. Measured: majority 199299
-`a71e0c1c` claims `1e27264f` (plain ASERT); 0.34.1 carries `1e2b22b5`
-(re-anchored). About 21 of 94 reachable peers ran 0.34.1 and were
-stranded; 73 never left the real chain.
+`net_processing.cpp` disconnects the peer. Measured at the original
+split: majority 199299 `a71e0c1c` claims `1e27264f` (plain ASERT);
+0.34.1 carries `1e2b22b5` (re-anchored). About 21 of 94 reachable peers
+ran 0.34.1 and were stranded; 73 never left the real chain. The
+**longer advertised chain now uses those re-anchored bits** (walked
+199299 `f12a27d0` claims `1e2b22b5`).
 
 **v0.34.2 withdraws that re-anchor** but shipped without the
 ExactReplay admission fix, so every `-matmulvalidation=consensus` node
 froze exactly one block past the last attested height. **v0.34.3
 unsticks that deadlock** but left `m_best_header` on the last
 fully-authenticated ancestor, so getheaders never asked for tip+1.
-**v0.34.4 is the headers-below-blocks fix.**
+**v0.34.4 is the headers-below-blocks fix.** This follow-up is the
+heavier competing-fork GETDATA / probe fix.
 
 This split was made visible by per-peer byte tables and chaintips from
 **MendeMatthias**, **jarekpiot**, **Jpp-matata**, and **dixonping**.
 The 0.34.2 deadlock was read off tag `v0.34.2` by **jarekpiot** and
-independently confirmed on macpro2; **dixonping** asked for the
-regression test that 0.34.2 lacked.
+independently confirmed on <node>; **dixonping** asked for the
+regression test that 0.34.2 lacked. **jarekpiot** then carried the
+tip-child / RC-slot deadlock through to a proposed fix (PR 126).
+
+When miners or operators find a problem on this line, the expectation
+is a **full fix and a proposed solution**, not a report alone. This
+line is meant to be maintained by whoever runs it. Several of you have
+already been doing exactly that.
 
 ---
 
@@ -37,17 +73,22 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.4**. The `v0.34` tag and 0.34.0
-seal remain the pool-close cut. 0.34.1 is withdrawn: it partitions
-nodes from mainnet. 0.34.2 is withdrawn for consensus nodes: it deadlocks
-one block past the last attestation. 0.34.3 is withdrawn for the
-headers-below-blocks stall. Freeze `F` is recorded in
-[0.34.4-freeze.md](evidence/0.34.4-freeze.md); seal and tarballs follow
-the corpus. Git describe on `main` remains the 0.33.4.2
-line until 0.34 merges
-([release-notes-0.33.4.2.md](release-notes/release-notes-0.33.4.2.md)).
+`CLIENT_VERSION` in this tree is **0.34.5** once the freeze lands.
+The `v0.34` tag and 0.34.0 seal remain the pool-close cut. 0.34.1 is
+withdrawn: it partitions nodes from mainnet. 0.34.2 is withdrawn for
+consensus nodes: it deadlocks one block past the last attestation.
+0.34.3 is withdrawn for the headers-below-blocks stall. 0.34.4 closed
+that header gap but compiled-in seeds were disconnected for missing
+`NODE_NETWORK`, and a CPU tarball / source build **exited** instead of
+starting. 0.34.5 is the sealed follow-up: keep discovery relays, answer
+GETADDR, start without a diagnostic flag, fetch a heavier fork without
+following it past park depth 6, and — once the entire competing suffix
+is locally ExactReplay-verified — un-park that majority fork with no
+operator action. See
+[release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
 
-Please report bugs using the issue tracker at GitHub:
+Please report bugs using the issue tracker at GitHub, and when you
+have a diagnosis, bring the patch:
 
   <https://github.com/btxchain/btx/issues>
 
@@ -57,55 +98,71 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-Install 0.34.4. Three different `invalidateblock` situations exist.
-Same RPC, three outcomes. One of them used to abort the node. Do not
-mix them.
+Install 0.34.5. Three different `invalidateblock`
+situations exist. Same RPC, three outcomes. One of them used to abort
+the node. Do not mix them. **Case A changed:** do not `invalidateblock`
+33c834f8. If you already did, `reconsiderblock` it.
 
-## Case A — fork-rejoin, full chainstate (0.34.1 split only): `invalidateblock` is required
+## Case A — 199295 split: do **not** invalidate an ancestor of the live chain
 
-If you ran 0.34.1 **without** an AssumeUTXO snapshot, binary replacement
-is not enough. That chainstate will not reorg onto the majority on
-restart. After installing 0.34.3, start the node, then invalidate
-**the first post-fork block** (reversible with `reconsiderblock`). Do
-not invalidate from a still-running 0.34.1 binary: that binary still
-rejects the majority chain. Upgrade first, then invalidate.
+`invalidateblock` of "the first post-fork block" is **wrong** when that
+block is an ancestor of the chain hashpower is extending. Height 199295
+`33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82` **is**
+such an ancestor. Walked 2026-08-28 from a live headers-only tip at
+199384: that tip's ancestor at 199295 is 33c834f8, and its ancestor at
+199294 is the still-common
+`0ca79e602f1b44d4c9f3acec7659cb9735a5fad6a888fd2e4c70ababf1e5cec9`.
+
+**`33c834f8` is not a recommended `invalidateblock` target.** Invalidating
+it forks you off the live chain onto the `8b5da5a5…` sibling at the same
+height. The node then correctly refuses every 33c834f8 descendant. That
+refusal is permanent until you undo it. It is not a download-pipeline
+bug.
+
+**If you already ran `invalidateblock 33c834f8…`, recover with:**
 
 ```
+btx-cli reconsiderblock 33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82
+```
+
+**Look at `getblockhash 199295` before touching anything else.**
+
+- If it is **33c834f8**, you are already on the live line. Do nothing
+  with `invalidateblock`.
+- If it is **8b5da5a5…** (`8b5da5a571ab2b0afb2942c9e28ee44bb0ab825a2a1aeb7d3d241c75cfded962`)
+  or 33c834f8 shows `confirmations: -1`, you already invalidated the
+  live ancestor: run `reconsiderblock` as above. Do **not** invalidate
+  33c834f8 again.
+- If `getblockhash 199295` errors, this node is below the split. No
+  invalidate is required.
+
+Do not invalidate from a still-running 0.34.1 binary: that binary still
+rejects plain-ASERT 199299. Upgrade first.
+
+```
+btx-cli getblockhash 199295
 btx-cli getchaintips
-btx-cli invalidateblock <hash of the first block on your 0.34.1 branch>
 ```
 
-On the fork measured on macpro2 the first post-fork block is height
-199295, hash
-`33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82`.
-Your hash may differ; use `getchaintips`.
-
-If you never ran 0.34.1 (you stayed on the majority chain), skip Case A
-and Case B.
+If you never ran 0.34.1 and never invalidated 33c834f8, skip Case A.
 
 ## Case B — fork-rejoin, AssumeUTXO snapshot: do **not** `invalidateblock`
 
 If this node loaded the compiled AssumeUTXO snapshot at height 199300
-(`chainstate_snapshot/` exists), the first post-fork block 199299 sits
-**below** the snapshot base. That base has a block body but no undo
-data — it was never connected. `invalidateblock` of 199299 (and
-`reconsiderblock` of the majority chain) used to hit
-`DisconnectBlock: ReadBlockUndo nFile=-1`, then `Failed to disconnect
-block`, then abort. 0.34.3 refuses that reorg with a clear RPC error
-and leaves the node running.
+(`ff80e629…`) or 199299 (`f12a27d0…`), you are on the withdrawn 0.34.1
+branch. 0.34.3 refuses `invalidateblock` of that snapshot base (no undo
+data). **0.34.5 removes those compiled entries** and will refuse to start
+if `chainstate_snapshot/` still names those hashes.
 
-**Do not invalidateblock.** The background chainstate already follows
-the majority chain with complete undo data. Workaround, confirmed on a
-live miner:
+**There is no in-place rescue.** Wipe the datadir and sync from genesis,
+or load [assumeutxo-201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500)
+on a **fresh** chainstate. Do not keep `chainstate_snapshot/` from the
+bad pin. Do not `invalidateblock`. 199300 is withdrawn; it needs a
+resync from an empty datadir.
 
-1. Stop `btxd` cleanly (`btx-cli stop`; wait for exit).
-2. Remove the `chainstate_snapshot/` directory from the datadir.
-3. Start once so the background chainstate becomes active. If prompted,
-   allow a shielded rebuild.
-4. Stop cleanly and start again.
-
-Then the node is on the majority chain. Case A `invalidateblock` is
-not needed after this fallback.
+Old 0.34.3 workaround (stop, remove `chainstate_snapshot/`, start twice)
+only helps if the background chainstate never connected the withdrawn
+fork. Treat it as unreliable; a full resync is the supported recovery.
 
 ## Case C — unauthenticated suffix (0.34.2 deadlock): `invalidateblock` is harmful
 
@@ -121,9 +178,25 @@ outcome.
 
 ## After replacing the binary
 
-Shut down cleanly, wait for exit, install 0.34.3. Keep Metal `.metallib`
+Shut down cleanly, wait for exit, install a 0.34.5 binary (this
+convergence stack). 0.34.4 closed the header gap; it did not acquire
+and ExactReplay a parked deep majority fork. Keep Metal `.metallib`
 files next to `btxd`. Back up wallets and configuration before
 upgrading.
+
+A fallen-behind node (inherited datadir, frozen tip, parked deep fork)
+recovers on that upgrade with no `invalidateblock` and no snapshot
+surgery. A datadir that loaded assumeutxo-199299 or assumeutxo-199300
+still needs a wipe (Case B).
+
+**Building 0.34.5 from source is how a fork is supposed to work.**
+Compile, self-qualify ExactGemmS8S8 on *your* GPU (CPU-versus-device
+must be byte-identical), and participate. Consensus judges your
+blocks. **Build provenance is advisory:** a source-tree fingerprint
+mismatch warns and continues; it does not exit and it does not skip
+verification. A Metal-only (or HIP-only) golden cohort is valid; CUDA
+hardware is not required to ship a manifest.
+`-allowunverifiablematmulconsensus` is a deprecated no-op. Remove it.
 
 Tarball SHA256s are filled in when the three assets are staged (Linux
 CPU, Linux CUDA, macOS arm64 Metal). Every shipped `btxd` is linked
@@ -141,13 +214,174 @@ Linux. See [#111](https://github.com/btxchain/btx/issues/111) and
 Same platform and epoch matrix as 0.33.4.2: Linux, macOS 13+, Windows
 10+. Mainnet remains on MatMul v3 below height 185000; Epoch-A Profile 1
 ExactReplay applies at and above height 185000. Compact `F`, `powLimit`,
-the 191714 `nBits` dump floor, and the compiled AssumeUTXO pin at 199300
+the 191714 `nBits` dump floor, and the compiled AssumeUTXO pin at 201500
 are unchanged. **EncDr stall recovery at 199299 is withdrawn** — that
 flag day shipped in 0.34.1 after the height was already mined and
 partitioned the network. `nMatMulStallRecoveryHeight` is `INT_MAX`;
 `num/den` stay `1/1`.
 
 # Notable Changes
+
+## 0.34.5: automatic convergence (this follow-up)
+
+A node that has fallen behind the majority now recovers on binary
+upgrade with no operator action. Header sync continues from the batch
+terminal (`524c9ecb`; fleet freeze at header height 201278). GPU
+ExactReplay budget is spent root-first (`7e5fc248`, `72e4d19c`,
+`2f50a192`). A stale node (default 600s) may acquire at most two
+strictly-heavier competing towers out to tip+2048 (`63cc064a`). A
+parked deep majority fork is un-parked only once every suffix block is
+locally ExactReplay-verified (`a34cf488`, `f4573109`, `7fd6d91c`).
+Depth-6 dump-and-run parking is intact. Header sync is never capped
+below the compiled assumeutxo base (`4542bcd9`). The closed-shielded
+201500 snapshot section loads (`18cc8bd6`, issue 129).
+
+Full write-up, bounds, and audit posture:
+[release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
+
+## 0.34.5: sealed bootstrap (this release)
+
+This is the sealed binary. 0.34.4 tarballs did not let a third party
+join: compiled seeds advertised `NODE_MATMUL_DISCOVERY` without
+`NODE_NETWORK`, consensus nodes disconnected them, and GETADDR on the
+relays was ~157 received / 30 answered. A CPU tarball and any source
+build then **exited** at startup, which looked like the same failure.
+
+**Kept (genuine):**
+
+- Initial-sync peer selection (**MendeMatthias**, sealed v0.34.4, network
+  healthy at 200131): a fresh node sat at `headers=0 blocks=0` for 45
+  minutes with 7 low-work disconnects because the scarce `nSyncStarted`
+  slot went to peers parked at 128530 / 185109 / 189611 (23–29 MB of
+  headers) while the peer advertising the actual tip received 90 bytes
+  of `getheaders` and one request. Presync ended below the height-186000
+  `nMinimumChainWork` checkpoint. IBD now prefers peers whose VERSION
+  height is at or above that checkpoint, and de-prioritizes any address
+  that already failed a low-work headers sync.
+- `RecalculateBestHeader` for independent validators (**MendeMatthias**).
+  Both production call sites (startup after `LoadBlockIndex`, and
+  `ActivateSnapshot`) were gated on `matmul_trusted::IsConfigured()`,
+  which is false for the recommended `-matmulvalidation=consensus` with
+  no `-matmultrustedpubkey`. The only path that can lower `m_best_header`
+  therefore never ran on the configuration we tell people to use. It is
+  always invoked when there is an active tip.
+- `must_probe` hoist (`8b0b0425`) plus BestKnown must **extend the tip**
+  (`0fdd8739`).
+- Best-header **floor**, not pin (`EnsureBestHeaderNotBehindConnectedTip`).
+  Never sit below the connected tip (0.34.3 headers-below-blocks). **Must**
+  sit on a heavier valid disconnected fork above it. 0.34.4 collapsed
+  those: **jarekpiot** reproduced on sealed v0.34.4 with no
+  `invalidateblock` — GPU authority on `8b5da5a5@199326`, ingested
+  `33c834f8` tower `0d5ffded@199398` (work `030b4fd9e7bfad` vs
+  `030b4fd97ff51b`), `getchaintips` showed the branchtip,
+  `headers==blocks`, `best_header_ahead=0`,
+  `competing_not_active_tip_chain`. The IsConfigured overlay was undoing
+  every competing promotion. `getblockfrompeer` cannot override a pin.
+- Snapshot `loadtxoutset` closed loop (**MendeMatthias**, line-level on
+  v0.34.4, no fork, no invalid blocks): `ShouldFetchBackgroundSnapshotBlocks`
+  required `active >= best_header-1` (199300 vs 199303 never assigned
+  background capacity), so `MaybeCompleteSnapshotValidation` stayed SKIPPED,
+  `IsSnapshotValidated` stayed false, and `snapshot_base_missing` skipped
+  GETDATA. Height gap, not invalidity. Background fetch no longer waits on
+  that one-block proximity; a peer whose BestKnown extends the active tip
+  is not skipped. Fast-start docs recommend `loadtxoutset`.
+- Park split (`ed52178e`): GETDATA of a heavier fork is not follow.
+  Depth-6 park stays wired. Stale-heavier is **not** `recovery_escape`.
+- Discovery-relay retention and GETADDR (`ab15f616`):
+  `HandshakeKeepsDiscoveryPeer` keeps `NODE_MATMUL_DISCOVERY` on full
+  outbound, not only ADDR_FETCH; relays `Good` recent inbound NETWORK
+  peers, answer GETADDR immediately, extra-push connected useful peers.
+- Doc correction: do **not** `invalidateblock` 33c834f8. Recover with
+  `reconsiderblock` if you already did.
+- Consensus/CPU/source-build **starts** without
+  `-allowunverifiablematmulconsensus` (deprecated no-op).
+- **Build provenance is advisory.** `build_provenance_mismatch` warns
+  and continues. Runtime ExactGemmS8S8 CPU-versus-GPU self-qual stays
+  fail-closed; that is the real protection. The fingerprint is an
+  authorship claim, not a correctness property. A clone that self-
+  qualifies on its own hardware validates; consensus judges the blocks.
+  Case provenance *would* have caught that self-qual at toy/medium
+  shape can miss a production-shape digest bug: the production canary
+  episode still runs when a golden row exists and still fail-closes on
+  `digest_mismatch`. It no longer fail-closes on fingerprint alone.
+- **CUDA is not required to ship a manifest.**
+  `RCProductionGoldenManifestCohortValid` accepts a Metal-only or
+  HIP-only cohort. Rows in one cohort still share `source_revision`,
+  fingerprint, and digest. Requiring Nvidia silicon to publish goldens
+  was a vendor dependency; MendeMatthias could not self-seal an
+  Apple-only fork without either buying CUDA hardware or rebinding a
+  CUDA row he had not measured.
+
+**Dropped (invalidateblock workarounds, never shipped):**
+
+- Uncommitted island-skip / reserved RC lane / retained-body GETDATA
+  fallthrough. Those existed to drag bodies of a chain we had marked
+  invalid. After `reconsiderblock`, park either refuses (correct) or
+  the hole is ordinary IBD. Not in this tree.
+
+Measured after deploying `ab15f616` to both seeds (still local
+binaries — this release replaces them with tarballs): inbound GETADDR
+answered 160/160 and 132/132. A fresh datadir with `dnsseed=0
+fixedseeds=1` kept both compiled seeds, processed 943+941 addresses
+from them, and committed headers off genesis.
+
+## 0.34.4 follow-up: heavier competing fork (33c834f8 / 199523)
+
+0.34.4 snapped `m_best_header` up to the connected tip. Measured:
+<node> `blocks=199310 headers=199024` → `199310/199310`. Peers then
+advertised 199523. The node still sent zero getheaders;
+`reconsiderblock 33c834f8` left the tip at 199310 after two minutes.
+
+Two independent defects, one loop:
+
+1. `HeaderSyncMustProbe` treated a BestKnown **height** above the tip as
+   "already ahead" even when that BestKnown did not extend the active
+   tip (199382 on 33c834f8 vs 199310 on 8b5da5a5).
+2. `FindNextBlocksToDownload` skipped `competing_not_active_tip_chain`
+   for any competing fork deeper than the EncDr short-reorg window
+   (1–6). The live fork's LCA is 199294 (depth 16).
+   `HeadersDirectFetchBlocks` was already closed because
+   `CanDirectFetch` requires a tip younger than 20×spacing; the 199310
+   tip was ~91 hours old. Unauthenticated header lead is 72, so the
+   headers-only tip sat at 199382 = 199310+72 and never moved.
+
+Fix: probe when BestKnown does not extend the tip; GETDATA a competing
+fork whose claimed `nChainWork` is **strictly** above the active tip
+(equal-work EncDr twins stay skipped). Tests:
+`header_sync_tests/must_probe_table`,
+`peerman_tests/heavier_competing_fork_probes_and_getdata_past_short_reorg`.
+
+Default EMERGENCY park depth 6 still refuses an automatic 16-block
+reorg onto that fork. If 33c834f8 is marked invalid locally, the
+operator path is Case A `reconsiderblock`, not another invalidate.
+
+**jarekpiot** (PR 126, tip-child / RC-slot deadlock), **dixonping**,
+**MendeMatthias**, and **Jpp-matata** diagnosed the earlier 0.34.x
+stalls; this follow-up is the remaining catch-up hole they pointed at
+from chaintips and per-peer bytes.
+
+## 0.34.5: provenance is advisory; a single-family cohort is valid
+
+0.34.4 treated `build_provenance_mismatch` as a hard canary failure:
+the episode never ran, GEMM was cleared, and consensus startup
+`InitError`'d unless `-allowunverifiablematmulconsensus=1`. A source
+build and a CPU tarball looked like a dead node. That is not
+decentralized.
+
+0.34.5:
+
+- **Starts.** No diagnostic flag. CPU without a GPU warns
+  `MatMul RC DEGRADED START`, withholds `NODE_MATMUL_CONSENSUS`, and
+  stalls at the RC body boundary (it cannot ExactReplay Profile-1).
+- **Provenance warns.** Fingerprint miss logs `build provenance is
+  advisory` and continues. Self-qual and (when a golden row exists)
+  the production-shape digest check still fail closed.
+- **One family is enough.** Metal-only and HIP-only manifests are
+  valid. CUDA is not a gate.
+
+Remove `allowunverifiablematmulconsensus` from every `btx.conf`. If a
+legitimately built node still needs that flag, that is a bug in this
+change.
 
 ## 0.34.3: consensus ExactReplay deadlock (tag v0.34.2)
 
@@ -156,7 +390,7 @@ block past the last attested height. The stall survived a clean restart.
 GPU sat at 0%. Logs looped `Re-admitting budget-deferred body` then
 `MatMul pending verification cap reached` about once a second.
 
-Cause, read off the tag by **jarekpiot** and confirmed on macpro2:
+Cause, read off the tag by **jarekpiot** and confirmed on <node>:
 `IsBlockAuthenticated` only via `BLOCK_EXACT_REPLAY_VERIFIED` or
 `BLOCK_TRUSTED_REPLAY_ATTESTED`; with signers retired, ExactReplay is
 the only authenticator left. `direct_authenticated_tip_child` required
@@ -339,11 +573,11 @@ archive. If a host refuses because it is configured trusted with
 threshold 1, switch it to `-matmulvalidation=consensus`. The override
 is the single-stolen-key hijack surface this rule removes.
 
-A CPU host with no qualified ExactReplay provider cannot start
-`-matmulvalidation=consensus` either. That is a different fail-closed
-(`RefuseUnverifiableMatMulConsensusStartup`): Profile-1 needs a
-self-qualified accelerator, not a stolen-WIF skip. Do not pass
-`-allowunverifiablematmulconsensus=1` on unattended nodes. Public DNS
+A CPU host with no qualified ExactReplay provider **starts**
+`-matmulvalidation=consensus` in 0.34.5: it warns, withholds
+`NODE_MATMUL_CONSENSUS`, and cannot cross the RC body boundary. That is
+degraded discovery, not independent validation. Profile-1 still needs a
+self-qualified accelerator to advertise consensus or to mine. Public DNS
 seeds on CPU run `-matmulvalidation=relay`. A trusted archive still
 needs an M-of-N pin, which is not this M=2 startup guard's job to
 invent.
@@ -496,7 +730,13 @@ trees had passed `-DWITH_ZMQ=ON`; the CPU tree had not.
   text advertises ZMQ without a real libzmq link, and on macOS refuses
   any `/opt/homebrew` load command. Since 0.34.1 it also refuses to
   treat the packaged `bin/btxd` shell wrapper as the binary: it
-  verifies `libexec/btxd.real`.
+  verifies `libexec/btxd.real`. Since 0.34.5 the same script is a
+  fail-non-zero step of Guix `build.sh`, native `package_release_archive.py`,
+  `collect_release_assets.py`, `cut_release.py`, `cut_local_release.py`,
+  and `publish_github_release.py`. An unrecognized file is FAIL, not a
+  skip. `--archive` unpacks the tarball users download and gates the
+  real binary. `test/util/verify_release_btxd_test.py` proves the gate
+  exits non-zero on a `btxd` built without ZMQ (the 0.33.4.2 CPU shape).
 - [release-process.md](release-process.md) makes that `ldd`/`otool`
   check mandatory before a tarball is staged.
 
@@ -572,7 +812,8 @@ Block fetch stall detected: tip=0 best_header_ahead=2000 peer_best_ahead=2000 in
 already be in the index.
 
 0.34 accepts inbound **HEADERS** from any peer while the active tip is
-below `max(last checkpoint, highest AssumeUTXO pin)` (mainnet 199300),
+below `max(last checkpoint, highest AssumeUTXO pin)` (mainnet
+**201500**),
 and the frontier seed only *raises* BestKnown. Bodies stay
 authority-only. You do not need an operator-controlled archive to
 learn the header chain. See
@@ -607,26 +848,40 @@ classes, or future versions. How to freeze, measure, seal, and ship:
 
 # Fast-start snapshot
 
-Published assumeutxo pin (v9, shielded pool closed):
-[assumeutxo-199300](https://github.com/btxchain/btx/releases/tag/assumeutxo-199300)
+**Withdrawn:** [assumeutxo-199300](https://github.com/btxchain/btx/releases/tag/assumeutxo-199300)
+(`ff80e629…`) and [assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299)
+(`f12a27d0…`) are on the withdrawn 0.34.1 branch. Do not load them.
+0.34.5 no longer compiles those bases (`loadtxoutset` will reject them).
+A node that already loaded one **must resync from an empty datadir**.
+Issue [#127](https://github.com/btxchain/btx/issues/127).
 
-- height **199300**, blockhash `ff80e6299692a63345674a23b0638658c737529d12e78fc7f42afb3812afc9eb`
-- `txoutset_hash` `eb73aed769a9ef5b8f6c9cc4002388e49e4818a1e4cc6cd9d87e107aed5a1352`
-- `snapshot.dat` SHA256 `b7ee1459dead9fdb4ed4ee524a6faa66aa0a43ef5280cec00f841289df08e48a`
-- `nchaintx` 298984, size 452893894 bytes
+Current pin, dumped after a node had already converged with the live
+network (synced 199298 to tip; dump taken at 201620):
+
+- [assumeutxo-201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500)
+  (`btx-assumeutxo-201500.dat` SHA256 `08c52c8b34e878c4d48546cfec066bc48fceed51d7287b4ff7ec7b5727cf52c7`)
+- height **201500**, blockhash `3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c`
+- `txoutset_hash` `4743962b836a3ed1e541bb6da747fc28a7d98926b5d6bc8e23928ed3b1981d93`
+- `nchaintx` 301211
 - `shielded_state_commitment` `94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541`
+  (same closed-pool pin as 191266)
+
+191266 remains compiled as an older majority-chain snapshot below the
+199299 split.
 
 ```bash
-btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
+btx-cli -rpcclienttimeout=0 loadtxoutset btx-assumeutxo-201500.dat
 ```
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Fresh chainstate only.
-v0.34.0 cannot load this height; v0.34.1 can.
-A 0.34 trusted mirror can now ingest the header chain from public
-peers first; 0.33.4.2 could not (see the bootstrap deadlock above).
+Or sync from genesis. The closed-shielded 201500 section is loadable
+(`18cc8bd6`, issue 129).
 
 # Included public work
 
+- btxchain/btx #128 — 0.34.5 convergence / self-heal (see
+  [release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md))
+- btxchain/btx #129 — closed-shielded assumeutxo-201500 load
 - btxchain/btx #123 — 0.34 ExactReplay gold standard, discovery relays,
   archive-authority split
 - btxchain/btx #124 — trusted-mirror bootstrap deadlock (HEADERS during

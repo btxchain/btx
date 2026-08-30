@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -85,6 +86,72 @@ std::atomic_bool g_logged_cuda_batch_fallback{false};
 std::atomic_bool g_logged_metal_batch_fallback{false};
 std::atomic_bool g_logged_hip_batch_fallback{false};
 std::atomic_bool g_logged_ascend_batch_fallback{false};
+
+std::atomic<int64_t> g_cuda_fallback_last_relog_ms{0};
+std::atomic<int64_t> g_metal_fallback_last_relog_ms{0};
+std::atomic<int64_t> g_hip_fallback_last_relog_ms{0};
+std::atomic<int64_t> g_ascend_fallback_last_relog_ms{0};
+std::atomic<int64_t> g_cuda_batch_fallback_last_relog_ms{0};
+std::atomic<int64_t> g_metal_batch_fallback_last_relog_ms{0};
+std::atomic<int64_t> g_hip_batch_fallback_last_relog_ms{0};
+std::atomic<int64_t> g_ascend_batch_fallback_last_relog_ms{0};
+std::atomic<int64_t> g_admission_last_relog_ms{0};
+
+std::mutex g_error_mutex;
+std::string g_last_metal_fallback_error;
+std::string g_last_cuda_fallback_error;
+std::string g_last_admission_warning;
+std::atomic<int> g_last_resolved_backend{-1};
+std::atomic<int> g_last_requested_backend{-1};
+
+void LogV4FallbackSustained(std::atomic<int64_t>& last_relog_ms,
+                            const char* backend,
+                            uint64_t total_fallbacks,
+                            const std::string& reason,
+                            bool batched)
+{
+    using namespace std::chrono;
+    constexpr int64_t kRelogIntervalMs{5 * 60 * 1000};
+    const int64_t now_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+    int64_t previous = last_relog_ms.load(std::memory_order_relaxed);
+    if (previous != 0 && (now_ms - previous) < kRelogIntervalMs) {
+        return;
+    }
+    if (!last_relog_ms.compare_exchange_strong(previous, now_ms, std::memory_order_relaxed)) {
+        return;
+    }
+    LogPrintf("MATMUL-V4 WARNING: %s%s backend still falling back to CPU (%llu total fallbacks; last reason: %s)\n",
+              backend,
+              batched ? " batched" : "",
+              static_cast<unsigned long long>(total_fallbacks),
+              reason);
+}
+
+void RememberFallbackError(Kind kind, const std::string& reason)
+{
+    std::lock_guard<std::mutex> lock{g_error_mutex};
+    if (kind == Kind::METAL) {
+        g_last_metal_fallback_error = reason;
+    } else if (kind == Kind::CUDA) {
+        g_last_cuda_fallback_error = reason;
+    }
+}
+
+void LogV4AdmissionSustained(const std::string& requested, Kind active, const std::string& reason)
+{
+    using namespace std::chrono;
+    constexpr int64_t kRelogIntervalMs{5 * 60 * 1000};
+    const int64_t now_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+    int64_t previous = g_admission_last_relog_ms.load(std::memory_order_relaxed);
+    if (previous != 0 && (now_ms - previous) < kRelogIntervalMs) {
+        return;
+    }
+    if (!g_admission_last_relog_ms.compare_exchange_strong(previous, now_ms, std::memory_order_relaxed)) {
+        return;
+    }
+    LogPrintf("MATMUL-V4 WARNING: still mining on %s; requested backend %s was not admitted (%s)\n",
+              ToString(active), requested, reason);
+}
 
 std::string DefaultBackendRequest()
 {
@@ -202,19 +269,42 @@ void RecordFallback(Kind kind, const std::string& reason)
 {
     std::atomic<uint64_t>* counter = nullptr;
     std::atomic_bool* log_once = nullptr;
+    std::atomic<int64_t>* last_relog = nullptr;
     const char* label = "";
     switch (kind) {
-    case Kind::CUDA: counter = &g_cuda_fallback; log_once = &g_logged_cuda_fallback; label = "CUDA"; break;
-    case Kind::METAL: counter = &g_metal_fallback; log_once = &g_logged_metal_fallback; label = "METAL"; break;
-    case Kind::HIP: counter = &g_hip_fallback; log_once = &g_logged_hip_fallback; label = "HIP"; break;
-    case Kind::ASCEND: counter = &g_ascend_fallback; log_once = &g_logged_ascend_fallback; label = "ASCEND"; break;
+    case Kind::CUDA:
+        counter = &g_cuda_fallback;
+        log_once = &g_logged_cuda_fallback;
+        last_relog = &g_cuda_fallback_last_relog_ms;
+        label = "CUDA";
+        break;
+    case Kind::METAL:
+        counter = &g_metal_fallback;
+        log_once = &g_logged_metal_fallback;
+        last_relog = &g_metal_fallback_last_relog_ms;
+        label = "METAL";
+        break;
+    case Kind::HIP:
+        counter = &g_hip_fallback;
+        log_once = &g_logged_hip_fallback;
+        last_relog = &g_hip_fallback_last_relog_ms;
+        label = "HIP";
+        break;
+    case Kind::ASCEND:
+        counter = &g_ascend_fallback;
+        log_once = &g_logged_ascend_fallback;
+        last_relog = &g_ascend_fallback_last_relog_ms;
+        label = "ASCEND";
+        break;
     case Kind::CPU: return;
     }
-    counter->fetch_add(1, std::memory_order_relaxed);
+    const uint64_t total = counter->fetch_add(1, std::memory_order_relaxed) + 1;
+    RememberFallbackError(kind, reason);
     bool expected{false};
     if (log_once->compare_exchange_strong(expected, true)) {
         LogPrintf("MATMUL-V4 WARNING: %s backend fallback to CPU (%s)\n", label, reason);
     }
+    LogV4FallbackSustained(*last_relog, label, total, reason, /*batched=*/false);
 }
 
 void RecordBatchOk(Kind kind)
@@ -243,19 +333,42 @@ void RecordBatchFallback(Kind kind, const std::string& reason)
 {
     std::atomic<uint64_t>* counter = nullptr;
     std::atomic_bool* log_once = nullptr;
+    std::atomic<int64_t>* last_relog = nullptr;
     const char* label = "";
     switch (kind) {
-    case Kind::CUDA: counter = &g_cuda_batch_fallback; log_once = &g_logged_cuda_batch_fallback; label = "CUDA"; break;
-    case Kind::METAL: counter = &g_metal_batch_fallback; log_once = &g_logged_metal_batch_fallback; label = "METAL"; break;
-    case Kind::HIP: counter = &g_hip_batch_fallback; log_once = &g_logged_hip_batch_fallback; label = "HIP"; break;
-    case Kind::ASCEND: counter = &g_ascend_batch_fallback; log_once = &g_logged_ascend_batch_fallback; label = "ASCEND"; break;
+    case Kind::CUDA:
+        counter = &g_cuda_batch_fallback;
+        log_once = &g_logged_cuda_batch_fallback;
+        last_relog = &g_cuda_batch_fallback_last_relog_ms;
+        label = "CUDA";
+        break;
+    case Kind::METAL:
+        counter = &g_metal_batch_fallback;
+        log_once = &g_logged_metal_batch_fallback;
+        last_relog = &g_metal_batch_fallback_last_relog_ms;
+        label = "METAL";
+        break;
+    case Kind::HIP:
+        counter = &g_hip_batch_fallback;
+        log_once = &g_logged_hip_batch_fallback;
+        last_relog = &g_hip_batch_fallback_last_relog_ms;
+        label = "HIP";
+        break;
+    case Kind::ASCEND:
+        counter = &g_ascend_batch_fallback;
+        log_once = &g_logged_ascend_batch_fallback;
+        last_relog = &g_ascend_batch_fallback_last_relog_ms;
+        label = "ASCEND";
+        break;
     case Kind::CPU: return;
     }
-    counter->fetch_add(1, std::memory_order_relaxed);
+    const uint64_t total = counter->fetch_add(1, std::memory_order_relaxed) + 1;
+    RememberFallbackError(kind, reason);
     bool expected{false};
     if (log_once->compare_exchange_strong(expected, true)) {
         LogPrintf("MATMUL-V4 WARNING: %s batched backend fallback to CPU (%s)\n", label, reason);
     }
+    LogV4FallbackSustained(*last_relog, label, total, reason, /*batched=*/true);
 }
 
 // Byte-exact CPU reference for a whole window: each nonce via the single-nonce
@@ -544,15 +657,23 @@ Kind ResolveBackend()
         matmul_v4::backend::ResolveBackend(requested);
     const Kind active = FromBackendKind(selection.active);
     const Kind requested_kind = FromBackendKind(selection.requested);
+    g_last_resolved_backend.store(static_cast<int>(active), std::memory_order_relaxed);
+    g_last_requested_backend.store(static_cast<int>(requested_kind), std::memory_order_relaxed);
+
+    const bool mismatch = !selection.requested_known || active != requested_kind;
+    if (mismatch) {
+        std::lock_guard<std::mutex> lock{g_error_mutex};
+        g_last_admission_warning = selection.reason;
+    }
 
     // Emit one clear line describing the RESOLVED v4 mining backend the first
     // time this is called (mirrors v3 ResolveMiningBackendFromEnvironment), so a
     // silent CPU fallback from an unavailable / inadmissible GPU request can
-    // never hide.
+    // never hide. Re-log a sustained admission miss every 5 minutes (issue 51).
     static std::atomic_bool logged_resolved{false};
     bool expected{false};
     if (logged_resolved.compare_exchange_strong(expected, true)) {
-        if (selection.requested_known && active == requested_kind) {
+        if (!mismatch) {
             LogPrintf("MatMul-v4 mining backend: %s (requested=%s, %s)\n",
                       ToString(active), requested, selection.reason);
         } else {
@@ -560,6 +681,9 @@ Kind ResolveBackend()
                       "certification registry did not admit it -> %s]\n",
                       ToString(active), requested, selection.reason);
         }
+    }
+    if (mismatch) {
+        LogV4AdmissionSustained(requested, active, selection.reason);
     }
 
     return active;
@@ -716,11 +840,15 @@ ResolvedRCExactGemm RecordRCResolution(ResolvedRCExactGemm out)
     out.production_goldens_available =
         canary.manifest_has_reviewed_goldens;
     out.startup_canary_passed = same_provider && canary.passed;
+    // exact_manifest_match is reporting: a known-row digest mismatch still
+    // leaves canary.passed false. Absence of a row is not a mining refusal.
     out.production_eligible = out.automatic_policy_eligible &&
-        same_provider && canary.exact_manifest_match && canary.passed;
+        same_provider && canary.passed;
     out.activation_ready = out.production_eligible &&
         canary.activation_ready;
-    if (out.activation_ready) {
+    out.admission_path =
+        matmul::v4::rc::RCProductionAdmissionPathName(canary.admission_path);
+    if (out.activation_ready && canary.exact_manifest_match) {
         out.qualification_scope = "production_profile1_exact_epoch";
     }
     {
@@ -1452,6 +1580,16 @@ Stats ProbeStats()
     stats.ascend_batch_ok = g_ascend_batch_ok.load(std::memory_order_relaxed);
     stats.ascend_batch_mismatch = g_ascend_batch_mismatch.load(std::memory_order_relaxed);
     stats.ascend_batch_fallback = g_ascend_batch_fallback.load(std::memory_order_relaxed);
+    const int resolved = g_last_resolved_backend.load(std::memory_order_relaxed);
+    const int requested = g_last_requested_backend.load(std::memory_order_relaxed);
+    stats.active_backend = resolved < 0 ? "unresolved" : ToString(static_cast<Kind>(resolved));
+    stats.requested_backend = requested < 0 ? "unresolved" : ToString(static_cast<Kind>(requested));
+    {
+        std::lock_guard<std::mutex> lock{g_error_mutex};
+        stats.admission_warning = g_last_admission_warning;
+        stats.last_metal_fallback_error = g_last_metal_fallback_error;
+        stats.last_cuda_fallback_error = g_last_cuda_fallback_error;
+    }
     return stats;
 }
 
@@ -1491,6 +1629,23 @@ void ResetStats()
     g_logged_metal_batch_fallback.store(false, std::memory_order_relaxed);
     g_logged_hip_batch_fallback.store(false, std::memory_order_relaxed);
     g_logged_ascend_batch_fallback.store(false, std::memory_order_relaxed);
+    g_cuda_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_metal_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_hip_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_ascend_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_cuda_batch_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_metal_batch_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_hip_batch_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_ascend_batch_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_admission_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_last_resolved_backend.store(-1, std::memory_order_relaxed);
+    g_last_requested_backend.store(-1, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock{g_error_mutex};
+        g_last_metal_fallback_error.clear();
+        g_last_cuda_fallback_error.clear();
+        g_last_admission_warning.clear();
+    }
 }
 
 } // namespace matmul_v4::accel

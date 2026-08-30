@@ -310,4 +310,13 @@ void AppendLastProcessedBlock(UniValue& entry, const CWallet& wallet)
     entry.pushKV("lastprocessedblock", std::move(lastprocessedblock));
 }
 
+void AppendChainStaleness(UniValue& entry, const CWallet& wallet)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    const interfaces::ChainTipStaleness stale{wallet.GetTipStaleness()};
+    entry.pushKV("chain_stale", stale.is_stale);
+    entry.pushKV("behind_best_header", stale.behind_best_header);
+    entry.pushKV("competing_heavier_header", stale.competing_heavier_header);
+}
+
 } // namespace wallet

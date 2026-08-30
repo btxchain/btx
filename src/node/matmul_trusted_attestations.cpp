@@ -4,6 +4,7 @@
 
 #include <node/matmul_trusted_attestations.h>
 
+#include <chain.h>
 #include <dbwrapper.h>
 #include <hash.h>
 #include <key_io.h>
@@ -39,6 +40,7 @@ namespace {
 
 std::mutex g_mutex;
 std::shared_ptr<matmul::trusted::AttestationStore> g_store;
+BlockIndexHeightLookup g_block_index_height;
 struct StagedConfiguration {
     matmul::trusted::StoreConfig config;
     std::optional<std::string> local_signer_wif;
@@ -59,6 +61,10 @@ uint256 g_authority_peer_tip_hash{};
 //! not last-writer: dual-attested siblings (live 2026-08-15) must both stay
 //! visible to FindUniqueCompetingAttestedIndex after restart.
 std::map<int32_t, std::set<uint256>> g_attested_by_height;
+//! Pin-quorum hashes at every height, not just the 512-block FMWC hint
+//! window. HasCompetingQuorum / SignAuthoritative consult this so an
+//! evicted-height re-joining signer cannot mint a second twin.
+std::map<int32_t, std::set<uint256>> g_quorum_hashes_by_height;
 //! Height -> hash this process's local key already signed. Survives hot-cache
 //! eviction; populated at durable load and on each local Sign. First hash wins.
 std::map<int32_t, uint256> g_local_signed_hash_by_height;
@@ -139,6 +145,34 @@ struct DurableBlocklistState {
     SERIALIZE_METHODS(DurableBlocklistState, obj)
     {
         READWRITE(obj.blocked);
+    }
+};
+
+// V5/RB-12 durable withdrawal tombstone (adv5): (height, hash) this node's own
+// validated reorg disconnected while its local signer had voted. Seeded into
+// the store's off-active-chain set at startup BEFORE attestations load, so a
+// reloaded or relayed copy of our abandoned vote cannot re-form quorum.
+struct DurableWithdrawnVoteKey {
+    static constexpr uint8_t PREFIX{'w'};
+    uint8_t prefix{PREFIX};
+    uint256 authority_namespace{};
+    int32_t height{-1};
+    uint256 block_hash{};
+
+    SERIALIZE_METHODS(DurableWithdrawnVoteKey, obj)
+    {
+        READWRITE(obj.prefix, obj.authority_namespace, obj.height,
+                  obj.block_hash);
+    }
+};
+
+struct DurableWithdrawnVotePrefix {
+    uint8_t prefix{DurableWithdrawnVoteKey::PREFIX};
+    uint256 authority_namespace{};
+
+    SERIALIZE_METHODS(DurableWithdrawnVotePrefix, obj)
+    {
+        READWRITE(obj.prefix, obj.authority_namespace);
     }
 };
 
@@ -356,22 +390,20 @@ bool ImportAttestations(
     const uint256 authority_namespace{AuthorityNamespace(*store)};
     const auto local_pk{store->LocalSignerPubKey()};
     std::map<int32_t, uint256> local_signed;
+    std::map<int32_t, std::set<uint256>> imported_quorum;
     std::map<DurableAttestationKey,
              std::vector<matmul::trusted::ExactReplayAttestation>> durable;
     for (size_t index{0}; index < loaded.size(); ++index) {
         const auto& attestation{loaded[index]};
-        const auto verified{store->OpenAttestorsEnabled()
-                                ? matmul::trusted::VerifyAttestationCrypto(
-                                      attestation, store->ChainId(),
-                                      store->ReplayAuthorityContext(),
-                                      attestation.statement.block_hash,
-                                      attestation.statement.block_height)
-                                : matmul::trusted::VerifyAttestation(
-                                      attestation, store->ChainId(),
-                                      store->ReplayAuthorityContext(),
-                                      attestation.statement.block_hash,
-                                      attestation.statement.block_height,
-                                      store->TrustedSigners())};
+        // Durable/WAL/archive records seed the signed frontier only for
+        // current pin members. Open/Heard signatures are directory, not
+        // authority; VerifyAttestationCrypto would mint a frontier from them.
+        const auto verified{matmul::trusted::VerifyAttestation(
+            attestation, store->ChainId(),
+            store->ReplayAuthorityContext(),
+            attestation.statement.block_hash,
+            attestation.statement.block_height,
+            store->TrustedSigners())};
         if (verified != matmul::trusted::VerifyResult::Valid) {
             // Flat V1 archives/WALs predate authority namespaces. Preserve
             // intentional chain/context/signer rotation by ignoring a
@@ -400,13 +432,15 @@ bool ImportAttestations(
         const auto result{store->Add(
             attestation, attestation.statement.block_hash,
             attestation.statement.block_height)};
-        if (result == matmul::trusted::AddResult::BlocklistedSigner) {
+        if (result == matmul::trusted::AddResult::BlocklistedSigner ||
+            result == matmul::trusted::AddResult::Heard ||
+            result == matmul::trusted::AddResult::UntrustedSigner ||
+            result == matmul::trusted::AddResult::FrozenSigner) {
             continue;
         }
         if (result != matmul::trusted::AddResult::Accepted &&
             result != matmul::trusted::AddResult::Duplicate &&
-            result != matmul::trusted::AddResult::Capacity &&
-            result != matmul::trusted::AddResult::Heard) {
+            result != matmul::trusted::AddResult::Capacity) {
             error = strprintf(
                 "attestation archive record %zu from %s was rejected: %s",
                 index, fs::PathToString(source),
@@ -417,6 +451,8 @@ bool ImportAttestations(
         if (store->HasQuorum(attestation.statement.block_hash,
                              attestation.statement.block_height)) {
             highest = std::max(highest, attestation.statement.block_height);
+            imported_quorum[attestation.statement.block_height].insert(
+                attestation.statement.block_hash);
             if (local_pk.has_value()) {
                 for (const auto& vote :
                      store->GetAttestations(attestation.statement.block_hash,
@@ -468,6 +504,11 @@ bool ImportAttestations(
         std::lock_guard lock{g_mutex};
         g_highest_attested_height =
             std::max(g_highest_attested_height, highest);
+        for (const auto& [height, hashes] : imported_quorum) {
+            for (const auto& hash : hashes) {
+                g_quorum_hashes_by_height[height].insert(hash);
+            }
+        }
         for (const auto& [height, hash] : local_signed) {
             g_local_signed_hash_by_height.emplace(height, hash);
         }
@@ -496,6 +537,7 @@ bool LoadDurableAttestations(
     int32_t highest{-1};
     const auto local_pk{store->LocalSignerPubKey()};
     std::map<int32_t, uint256> local_signed;
+    std::map<int32_t, std::set<uint256>> all_quorum;
     // Verify the complete namespace, but hydrate only the newest cache-sized
     // tail. Adding every historical record to a full bounded store makes each
     // later insertion scan the entire cache for an eviction candidate.
@@ -519,6 +561,7 @@ bool LoadDurableAttestations(
             return false;
         }
         std::set<CPubKey> seen;
+        std::vector<matmul::trusted::ExactReplayAttestation> pin_only;
         for (const auto& attestation : attestations) {
             if (attestation.statement.block_hash != key.block_hash ||
                 attestation.statement.block_height != key.height ||
@@ -526,19 +569,13 @@ bool LoadDurableAttestations(
                 error = "durable attestation database key/value mismatch";
                 return false;
             }
-            const auto verified{store->OpenAttestorsEnabled()
-                                    ? matmul::trusted::VerifyAttestationCrypto(
-                                          attestation, store->ChainId(),
-                                          store->ReplayAuthorityContext(),
-                                          key.block_hash, key.height)
-                                    : matmul::trusted::VerifyAttestation(
-                                          attestation, store->ChainId(),
-                                          store->ReplayAuthorityContext(),
-                                          key.block_hash, key.height,
-                                          store->TrustedSigners())};
+            const auto verified{matmul::trusted::VerifyAttestation(
+                attestation, store->ChainId(),
+                store->ReplayAuthorityContext(),
+                key.block_hash, key.height,
+                store->TrustedSigners())};
             if (verified != matmul::trusted::VerifyResult::Valid) {
-                if (store->OpenAttestorsEnabled() ||
-                    verified != matmul::trusted::VerifyResult::UntrustedSigner) {
+                if (verified != matmul::trusted::VerifyResult::UntrustedSigner) {
                     error = strprintf(
                         "durable attestation database record rejected: %s",
                         matmul::trusted::VerifyResultName(verified));
@@ -546,37 +583,27 @@ bool LoadDurableAttestations(
                 }
                 continue;
             }
+            pin_only.push_back(attestation);
         }
-        if (store->OpenAttestorsEnabled()) {
-            size_t pin_votes{0};
-            for (const auto& attestation : attestations) {
-                if (store->TrustedSigners().count(attestation.signer) != 0) {
-                    ++pin_votes;
-                }
-            }
-            if (pin_votes >= store->Threshold()) {
-                for (const auto& attestation : attestations) {
-                    if (store->TrustedSigners().count(attestation.signer) == 0) {
-                        store->AdmitOpenSigner(attestation.signer);
-                    }
-                }
-            }
+        if (pin_only.empty()) {
+            continue;
         }
         const TailKey tail_key{key.height, key.block_hash};
         const bool pin_quorum{store->HasQuorumFromAttestations(
-            attestations, key.block_hash, key.height)};
+            pin_only, key.block_hash, key.height)};
         if (pin_quorum) {
             highest = std::max(highest, key.height);
+            all_quorum[key.height].insert(key.block_hash);
             if (local_pk.has_value()) {
-                for (const auto& attestation : attestations) {
+                for (const auto& attestation : pin_only) {
                     if (attestation.signer == *local_pk) {
                         local_signed.emplace(key.height, key.block_hash);
                     }
                 }
             }
         }
-        hot_tail_attestations += attestations.size();
-        hot_tail.emplace(tail_key, std::move(attestations));
+        hot_tail_attestations += pin_only.size();
+        hot_tail.emplace(tail_key, std::move(pin_only));
         while (hot_tail.size() > store->MaxBlocks() ||
                hot_tail_attestations > store->MaxAttestations()) {
             hot_tail_attestations -= hot_tail.begin()->second.size();
@@ -606,6 +633,11 @@ bool LoadDurableAttestations(
         std::lock_guard lock{g_mutex};
         g_highest_attested_height =
             std::max(g_highest_attested_height, highest);
+        for (const auto& [height, hashes] : all_quorum) {
+            for (const auto& hash : hashes) {
+                g_quorum_hashes_by_height[height].insert(hash);
+            }
+        }
         for (const auto& [height, hash] : local_signed) {
             g_local_signed_hash_by_height.emplace(height, hash);
         }
@@ -622,6 +654,52 @@ bool LoadDurableAttestations(
     return true;
 }
 
+void PersistWithdrawnLocalVote(int32_t height, const uint256& block_hash)
+{
+    if (height < 0 || block_hash.IsNull()) return;
+    std::lock_guard io_lock{g_persist_io_mutex};
+    if (!g_durable_db || !g_durable_namespace.has_value()) return;
+    const bool ok{g_durable_db->Write(
+        DurableWithdrawnVoteKey{.authority_namespace = *g_durable_namespace,
+                                .height = height, .block_hash = block_hash},
+        uint8_t{1}, /*fSync=*/true)};
+    if (!ok) {
+        LogPrintf("matmul: failed to persist withdrawn-local-vote tombstone "
+                  "height=%d hash=%s\n", height, block_hash.ToString());
+    }
+}
+
+void EraseWithdrawnLocalVote(int32_t height, const uint256& block_hash)
+{
+    if (height < 0 || block_hash.IsNull()) return;
+    std::lock_guard io_lock{g_persist_io_mutex};
+    if (!g_durable_db || !g_durable_namespace.has_value()) return;
+    (void)g_durable_db->Erase(
+        DurableWithdrawnVoteKey{.authority_namespace = *g_durable_namespace,
+                                .height = height, .block_hash = block_hash},
+        /*fSync=*/false);
+}
+
+bool LoadWithdrawnLocalVotes(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store)
+{
+    if (!g_durable_db) return true;
+    const uint256 authority_namespace{AuthorityNamespace(*store)};
+    std::unique_ptr<CDBIterator> cursor{g_durable_db->NewIterator()};
+    cursor->Seek(DurableWithdrawnVotePrefix{
+        .authority_namespace = authority_namespace});
+    for (; cursor->Valid(); cursor->Next()) {
+        DurableWithdrawnVoteKey key;
+        if (!cursor->GetKey(key) ||
+            key.prefix != DurableWithdrawnVoteKey::PREFIX ||
+            key.authority_namespace != authority_namespace) {
+            break;
+        }
+        store->SeedOffActiveChain(key.height, key.block_hash);
+    }
+    return true;
+}
+
 bool PersistDurableAttestations(
     Span<const matmul::trusted::ExactReplayAttestation> pending,
     std::string& error)
@@ -634,9 +712,13 @@ bool PersistDurableAttestations(
         error = "durable attestation authority namespace is unavailable";
         return false;
     }
+    auto store{Store()};
     std::map<DurableAttestationKey,
              std::vector<matmul::trusted::ExactReplayAttestation>> grouped;
     for (const auto& attestation : pending) {
+        if (!store || !store->IsAuthoritySigner(attestation.signer)) {
+            continue;
+        }
         grouped[DurableAttestationKey{
             .authority_namespace = *g_durable_namespace,
             .height = attestation.statement.block_height,
@@ -653,13 +735,21 @@ bool PersistDurableAttestations(
             return false;
         }
         std::set<CPubKey> seen;
-        for (const auto& existing : attestations) seen.insert(existing.signer);
-        for (auto& addition : additions) {
-            if (seen.insert(addition.signer).second) {
-                attestations.push_back(std::move(addition));
+        std::vector<matmul::trusted::ExactReplayAttestation> kept;
+        for (const auto& existing : attestations) {
+            if (store && store->IsAuthoritySigner(existing.signer) &&
+                seen.insert(existing.signer).second) {
+                kept.push_back(existing);
             }
         }
-        write_batch.Write(key, attestations);
+        for (auto& addition : additions) {
+            if (seen.insert(addition.signer).second) {
+                kept.push_back(std::move(addition));
+            }
+        }
+        if (!kept.empty()) {
+            write_batch.Write(key, kept);
+        }
     }
     if (!grouped.empty() && !g_durable_db->WriteBatch(write_batch, true)) {
         error = "failed to sync durable attestation batch";
@@ -679,6 +769,11 @@ std::vector<matmul::trusted::ExactReplayAttestation> ReadDurableAttestations(
                               .height = block_height,
                               .block_hash = block_hash}, out)};
     if (status.status != CDBWrapper::ReadStatus::Code::OK) return {};
+    if (auto store{Store()}) {
+        std::erase_if(out, [&](const matmul::trusted::ExactReplayAttestation& a) {
+            return !store->IsAuthoritySigner(a.signer);
+        });
+    }
     return out;
 }
 
@@ -1069,6 +1164,7 @@ void Reset()
     ClosePersistence();
     std::lock_guard lock{g_mutex};
     g_store.reset();
+    g_block_index_height = {};
     CleanseStagedConfigurationLocked();
     g_trusted_mirror = false;
     g_serve_attestations = false;
@@ -1077,6 +1173,7 @@ void Reset()
     g_authority_peer_tip_hint = -1;
     g_authority_peer_tip_hash.SetNull();
     g_attested_by_height.clear();
+    g_quorum_hashes_by_height.clear();
     g_local_signed_hash_by_height.clear();
     g_persist_enabled = false;
     g_persist_path.clear();
@@ -1238,6 +1335,12 @@ matmul::trusted::AttestationLogHead LogHead()
     return store ? store->LogHead() : matmul::trusted::AttestationLogHead{};
 }
 
+void SetBlockIndexHeightLookup(BlockIndexHeightLookup lookup)
+{
+    std::lock_guard lock{g_mutex};
+    g_block_index_height = std::move(lookup);
+}
+
 matmul::trusted::AddResult AddRefutation(
     const matmul::trusted::ExactReplayRefutation& refutation,
     const uint256& expected_hash,
@@ -1245,6 +1348,23 @@ matmul::trusted::AddResult AddRefutation(
 {
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::UntrustedSigner;
+    BlockIndexHeightLookup lookup;
+    {
+        std::lock_guard lock{g_mutex};
+        lookup = g_block_index_height;
+    }
+    // Index height wins over any caller-supplied value. A lying
+    // statement.block_height must not key m_refutations.
+    if (lookup) {
+        const auto indexed{lookup(expected_hash)};
+        if (!indexed.has_value() ||
+            *indexed != refutation.statement.block_height) {
+            return matmul::trusted::AddResult::WrongHeight;
+        }
+        expected_height = *indexed;
+    } else if (expected_height != refutation.statement.block_height) {
+        return matmul::trusted::AddResult::WrongHeight;
+    }
     return store->AddRefutation(refutation, expected_hash, expected_height);
 }
 
@@ -1298,13 +1418,17 @@ matmul::trusted::AddResult SignAuthoritative(
 {
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::NoLocalSigner;
-    // Never mint a second local signature at a height that already has
-    // quorum on a different hash (live 2026-08-15: 94f70747 then a9590c15
-    // at 190354). In-memory hints cover the hot window; SignLocal also
-    // refuses against the store's own buckets. The local-signed height map
-    // survives hot-cache eviction (durable load + each local Sign).
-    if (HasCompetingQuorum(block_hash, block_height) ||
-        HasLocalSignatureAtHeight(block_hash, block_height)) {
+    // Dual-quorum: never mint a second local signature at a height that
+    // already has pin quorum on a different hash (live 2026-08-15:
+    // 94f70747 then a9590c15 at 190354). g_quorum_hashes_by_height survives
+    // the 512-block FMWC hint window and hot-cache eviction. The
+    // local-signed height map also survives eviction (durable load + each
+    // local Sign). Hashes this node itself disconnected do not occupy:
+    // that is a local validated reorg, not a stolen-WIF jam.
+    if (HasLocalSignatureAtHeight(block_hash, block_height)) {
+        return matmul::trusted::AddResult::HeightOccupied;
+    }
+    if (HasCompetingQuorum(block_hash, block_height)) {
         return matmul::trusted::AddResult::HeightOccupied;
     }
     matmul::trusted::ExactReplayAttestation signed_attestation;
@@ -1331,6 +1455,90 @@ matmul::trusted::AddResult SignAuthoritative(
         PersistAfterMutation(signed_attestation);
     }
     return result;
+}
+
+bool NotifyActiveChainBlockDisconnected(int32_t height,
+                                        const uint256& disconnected_hash)
+{
+    if (height < 0 || disconnected_hash.IsNull()) return false;
+    auto store{Store()};
+    const bool released_store{
+        store && store->NotifyActiveChainBlockDisconnected(
+                     height, disconnected_hash)};
+    bool released_hint{false};
+    {
+        std::lock_guard lock{g_mutex};
+        const auto it{g_local_signed_hash_by_height.find(height)};
+        if (it != g_local_signed_hash_by_height.end() &&
+            it->second == disconnected_hash) {
+            g_local_signed_hash_by_height.erase(it);
+            released_hint = true;
+        }
+    }
+    if (released_store || released_hint) {
+        // V5/RB-12 (adv5): make the withdrawal DURABLE so a reloaded or relayed
+        // copy of our abandoned vote cannot re-form quorum after restart.
+        PersistWithdrawnLocalVote(height, disconnected_hash);
+        LogPrintf("matmul: released local mint slot at height %d after "
+                  "active-chain disconnect of %s\n",
+                  height, disconnected_hash.ToString());
+    }
+    return released_store || released_hint;
+}
+
+void NotifyActiveChainBlockConnected(int32_t height,
+                                     const uint256& connected_hash)
+{
+    if (height < 0 || connected_hash.IsNull()) return;
+    auto store{Store()};
+    if (store) {
+        store->NotifyActiveChainBlockConnected(height, connected_hash);
+    }
+    // The hash is back on the active chain: drop its withdrawal tombstone so a
+    // future re-vote / reload is allowed again.
+    EraseWithdrawnLocalVote(height, connected_hash);
+}
+
+size_t ClearMintedAttestations(int32_t from_height, int32_t to_height)
+{
+    if (from_height > to_height) return 0;
+    std::set<int32_t> cleared;
+    auto store{Store()};
+    if (store) {
+        for (const int32_t height :
+             store->LocalMintedHeights(from_height, to_height)) {
+            cleared.insert(height);
+        }
+        store->ClearLocalMintSlots(from_height, to_height);
+    }
+    {
+        std::lock_guard lock{g_mutex};
+        auto it{g_local_signed_hash_by_height.lower_bound(from_height)};
+        while (it != g_local_signed_hash_by_height.end() &&
+               it->first <= to_height) {
+            cleared.insert(it->first);
+            it = g_local_signed_hash_by_height.erase(it);
+        }
+    }
+    if (!cleared.empty()) {
+        LogPrintf("matmul: operator cleared %zu local mint slot(s) in [%d, %d]\n",
+                  cleared.size(), from_height, to_height);
+    }
+    return cleared.size();
+}
+
+std::optional<uint256> LocalMintedHash(int32_t height)
+{
+    auto store{Store()};
+    if (store) {
+        if (auto minted{store->LocalMintedHash(height)}) return minted;
+    }
+    std::lock_guard lock{g_mutex};
+    const auto it{g_local_signed_hash_by_height.find(height)};
+    if (it == g_local_signed_hash_by_height.end() || it->second.IsNull()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 std::optional<matmul::trusted::UtxoSnapshotSignature> SignUtxoSnapshot(
@@ -1390,11 +1598,18 @@ bool HasQuorumInMemory(const uint256& block_hash, int32_t block_height)
 bool HasCompetingQuorum(const uint256& block_hash, int32_t block_height)
 {
     if (block_height < 0 || block_hash.IsNull()) return false;
-    for (const auto& hint : AttestedFrontierHints()) {
-        if (hint.height == block_height && hint.hash != block_hash &&
-            !hint.hash.IsNull() && HasQuorumInMemory(hint.hash, hint.height)) {
-            return true;
-        }
+    std::set<uint256> others;
+    {
+        std::lock_guard lock{g_mutex};
+        const auto it{g_quorum_hashes_by_height.find(block_height)};
+        if (it == g_quorum_hashes_by_height.end()) return false;
+        others = it->second;
+    }
+    auto store{Store()};
+    for (const auto& other : others) {
+        if (other == block_hash || other.IsNull()) continue;
+        if (store && store->IsOffActiveChain(block_height, other)) continue;
+        return true;
     }
     return false;
 }
@@ -1496,6 +1711,7 @@ void NoteAcceptedAttestationHeight(int32_t height, const uint256& hash)
         g_highest_attested_height = height;
     }
     if (!hash.IsNull()) {
+        g_quorum_hashes_by_height[height].insert(hash);
         g_attested_by_height[height].insert(hash);
         const int32_t floor_height{
             g_highest_attested_height - ATTESTED_FRONTIER_HINT_WINDOW};
@@ -1540,6 +1756,7 @@ bool OpenPersistence(const fs::path& path, std::string& error)
             g_durable_namespace = AuthorityNamespace(*store);
             if (!LoadBlocklistState(store, error) ||
                 !LoadOpenAttestorState(store) ||
+                !LoadWithdrawnLocalVotes(store) ||
                 !LoadDurableAttestations(store, error) ||
                 !LoadPersistenceSnapshot(store, path, error) ||
                 !LoadWal(store, path, error) ||
@@ -1684,6 +1901,69 @@ size_t HistoricalReverifyInflightForTest()
 {
     std::lock_guard lock{g_reverify_mutex};
     return g_reverify_inflight.size();
+}
+
+BetterWorkTwinLocalCommitment DetectBetterWorkTwinBlockedByLocalCommitment(
+    const CBlockIndex* tip,
+    const CBlockIndex* best_header,
+    const CBlockIndex* best_claimed_header)
+{
+    BetterWorkTwinLocalCommitment out;
+    if (!HasLocalSigner() || !tip || !tip->phashBlock) return out;
+
+    const CBlockIndex* competing{nullptr};
+    const auto consider = [&](const CBlockIndex* idx) {
+        if (!idx || idx == tip || !idx->phashBlock) return;
+        if (idx->GetAncestor(tip->nHeight) == tip) return;
+        if (idx->nChainWork <= tip->nChainWork) return;
+        if (!competing || idx->nChainWork > competing->nChainWork) {
+            competing = idx;
+        }
+    };
+    consider(best_header);
+    consider(best_claimed_header);
+    if (!competing) return out;
+
+    const CBlockIndex* const lca{LastCommonAncestor(tip, competing)};
+    const CBlockIndex* local_child{nullptr};
+    const CBlockIndex* twin_child{nullptr};
+    int32_t fork_height{-1};
+    if (!lca) {
+        fork_height = tip->nHeight;
+        local_child = tip;
+        twin_child = competing->GetAncestor(tip->nHeight);
+        if (!twin_child) twin_child = competing;
+    } else {
+        fork_height = lca->nHeight + 1;
+        local_child = tip->GetAncestor(fork_height);
+        twin_child = competing->GetAncestor(fork_height);
+    }
+    if (!local_child || !twin_child ||
+        !local_child->phashBlock || !twin_child->phashBlock ||
+        local_child == twin_child) {
+        return out;
+    }
+
+    const uint256 local_hash{local_child->GetBlockHash()};
+    const uint256 twin_hash{twin_child->GetBlockHash()};
+    const auto minted{LocalMintedHash(fork_height)};
+    const bool mint_eq_local{minted.has_value() && *minted == local_hash};
+    const bool mint_ne_twin{minted.has_value() && *minted != twin_hash};
+    if (!BetterWorkTwinBlockedByLocalCommitment(
+            /*has_local_signer=*/true,
+            /*competing_strictly_heavier=*/true,
+            /*competing_extends_tip=*/false,
+            mint_eq_local,
+            mint_ne_twin)) {
+        return out;
+    }
+
+    out.blocked = true;
+    out.fork_height = fork_height;
+    out.better_work_height = competing->nHeight;
+    out.local_committed_hash = local_hash;
+    out.better_work_twin_hash = twin_hash;
+    return out;
 }
 
 } // namespace node::matmul_trusted

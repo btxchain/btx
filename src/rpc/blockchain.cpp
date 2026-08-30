@@ -38,6 +38,7 @@
 #include <node/matmul_trusted_attestations.h>
 #include <node/transaction.h>
 #include <node/utxo_snapshot.h>
+#include <node/chain_staleness.h>
 #include <node/warnings.h>
 #include <matmul/trusted_utxo_snapshot_attestation.h>
 #include <primitives/transaction.h>
@@ -347,24 +348,115 @@ UniValue blockToJSON(BlockManager& blockman, const CBlock& block, const CBlockIn
     return result;
 }
 
+static void PushChainTipStalenessFields(UniValue& obj, const node::ChainTipStaleness& stale)
+{
+    obj.pushKV("behind_best_header", stale.behind_best_header);
+    obj.pushKV("is_stale", stale.is_stale);
+    obj.pushKV("competing_heavier_header", stale.competing_heavier_header);
+    obj.pushKV("header_extends_tip", stale.header_extends_tip);
+    if (!stale.best_header_hash.IsNull() && stale.best_header_hash != stale.bestblockhash) {
+        obj.pushKV("best_header_hash", stale.best_header_hash.GetHex());
+    }
+}
+
+static void AppendChainStaleRpcWarning(UniValue& warnings, const bool is_stale)
+{
+    if (!is_stale) return;
+    const std::string message{std::string{node::CHAIN_STALE_RPC_WARNING}};
+    if (warnings.isArray()) {
+        warnings.push_back(message);
+        return;
+    }
+    if (warnings.isStr()) {
+        std::string combined = warnings.get_str();
+        if (!combined.empty()) combined += '\n';
+        combined += message;
+        warnings.setStr(std::move(combined));
+        return;
+    }
+    warnings.setStr(message);
+}
+
+static void AppendRpcWarningMessage(UniValue& warnings, std::string_view message)
+{
+    const std::string text{message};
+    if (warnings.isArray()) {
+        warnings.push_back(text);
+        return;
+    }
+    if (warnings.isStr()) {
+        std::string combined = warnings.get_str();
+        if (!combined.empty()) combined += '\n';
+        combined += text;
+        warnings.setStr(std::move(combined));
+        return;
+    }
+    warnings.setStr(text);
+}
+
+static void PushBetterWorkTwinLocalCommitmentFields(
+    UniValue& obj,
+    const node::matmul_trusted::BetterWorkTwinLocalCommitment& state)
+{
+    obj.pushKV("better_work_twin_blocked_by_local_commitment", state.blocked);
+    if (!state.blocked) return;
+    UniValue detail{UniValue::VOBJ};
+    detail.pushKV("fork_height", state.fork_height);
+    detail.pushKV("local_committed_hash", state.local_committed_hash.GetHex());
+    detail.pushKV("better_work_twin_hash", state.better_work_twin_hash.GetHex());
+    detail.pushKV("better_work_height", state.better_work_height);
+    obj.pushKV("better_work_twin_local_commitment", std::move(detail));
+}
+
 static RPCHelpMan getblockcount()
 {
     return RPCHelpMan{"getblockcount",
-                "\nReturns the height of the most-work fully-validated chain.\n"
-                "The genesis block has height 0.\n",
-                {},
-                RPCResult{
-                    RPCResult::Type::NUM, "", "The current block count"},
+                "Returns the height of the most-work fully-validated chain.\n"
+                "The genesis block has height 0.\n"
+                "The default numeric return is the connected-chain height only. It does not mean this node is current. If getblockchaininfo.is_stale is true, or getblockcount verbose=true reports is_stale, do not credit deposits from this view. Verbose mode adds fields without changing the default numeric return.\n",
+                {
+                    {"verbose", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, return an object with blocks, headers, behind_best_header, is_stale, and competing_heavier_header instead of the numeric height"},
+                },
+                {
+                    RPCResult{"for verbose = false",
+                RPCResult::Type::NUM, "", "The current connected-chain block count. Not a liveness signal; check is_stale before crediting deposits."},
+                    RPCResult{"for verbose = true",
+                RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::NUM, "blocks", "the height of the most-work fully-validated chain"},
+                    {RPCResult::Type::NUM, "headers", "the current number of headers we have validated"},
+                    {RPCResult::Type::STR_HEX, "bestblockhash", "the hash of the currently best connected block"},
+                    {RPCResult::Type::NUM, "behind_best_header", "max(0, headers - blocks). Zero when the followed header is at or behind the connected tip"},
+                    {RPCResult::Type::BOOL, "is_stale", "True when this node has a known-heavier competing header chain, or is more than 6 headers ahead of the connected tip. Do not credit deposits from this node's confirmations until false"},
+                    {RPCResult::Type::BOOL, "competing_heavier_header", "True when m_best_header has more chainwork than the active tip and is not an ancestor/descendant of that tip"},
+                    {RPCResult::Type::BOOL, "header_extends_tip", "True when the followed header chain descends from the connected tip (linear catch-up, not a competing fork)"},
+                    {RPCResult::Type::STR_HEX, "best_header_hash", /*optional=*/true, "Hash of m_best_header when it differs from the connected tip"},
+                }},
+                },
                 RPCExamples{
                     HelpExampleCli("getblockcount", "")
+            + HelpExampleCli("getblockcount", "true")
             + HelpExampleRpc("getblockcount", "")
+            + HelpExampleRpc("getblockcount", "true")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
     EnsureNotDiscoveryRelay(chainman);
+    const bool verbose{self.Arg<bool>("verbose")};
     LOCK(cs_main);
-    return chainman.ActiveChain().Height();
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    const int height = chainman.ActiveChain().Height();
+    if (!verbose) {
+        return height;
+    }
+    const auto stale = node::ComputeChainTipStaleness(tip, chainman.m_best_header);
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("blocks", height);
+    obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    obj.pushKV("bestblockhash", tip ? tip->GetBlockHash().GetHex() : uint256::ZERO.GetHex());
+    PushChainTipStalenessFields(obj, stale);
+    return obj;
 },
     };
 }
@@ -1934,6 +2026,19 @@ RPCHelpMan getblockchaininfo()
                 {RPCResult::Type::STR, "chain", "current network name (" LIST_CHAIN_NAMES ")"},
                 {RPCResult::Type::NUM, "blocks", "the height of the most-work fully-validated chain. The genesis block has height 0"},
                 {RPCResult::Type::NUM, "headers", "the current number of headers we have validated"},
+                {RPCResult::Type::NUM, "behind_best_header", "max(0, headers - blocks). Zero when the followed header is at or behind the connected tip"},
+                {RPCResult::Type::BOOL, "is_stale", "True when this node has a known-heavier competing header chain, or is more than 6 headers ahead of the connected tip. Do not credit deposits from this node's confirmations until false"},
+                {RPCResult::Type::BOOL, "competing_heavier_header", "True when m_best_header has more chainwork than the active tip and is not an ancestor/descendant of that tip"},
+                {RPCResult::Type::BOOL, "header_extends_tip", "True when the followed header chain descends from the connected tip (linear catch-up, not a competing fork)"},
+                {RPCResult::Type::BOOL, "better_work_twin_blocked_by_local_commitment", "True when this process is a local signer, a strictly-heavier competing header fork is known, and this node still holds a local mint slot on the active fork-child. Advisory only; does not change admission. Preferred recovery is invalidateblock of the losing fork-child"},
+                {RPCResult::Type::OBJ, "better_work_twin_local_commitment", /*optional=*/true, "Present when better_work_twin_blocked_by_local_commitment is true",
+                    {
+                        {RPCResult::Type::NUM, "fork_height", "Height of the fork-child"},
+                        {RPCResult::Type::STR_HEX, "local_committed_hash", "Hash this node minted at fork_height (the losing child)"},
+                        {RPCResult::Type::STR_HEX, "better_work_twin_hash", "Fork-child hash on the heavier competing twin"},
+                        {RPCResult::Type::NUM, "better_work_height", "Tip height of the heavier competing header"},
+                    }},
+                {RPCResult::Type::STR_HEX, "best_header_hash", /*optional=*/true, "Hash of m_best_header when it differs from the connected tip"},
                 {RPCResult::Type::STR, "bestblockhash", "the hash of the currently best block"},
                 {RPCResult::Type::STR_HEX, "bits", "nBits: compact representation of the block difficulty target"},
                 {RPCResult::Type::STR_HEX, "target", "The difficulty target"},
@@ -1957,11 +2062,13 @@ RPCHelpMan getblockchaininfo()
                     {
                         {RPCResult::Type::NUM, "height", "Highest stored quorum height"},
                         {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Hash recorded for that height, if known"},
-                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is an ancestor of (or is) the active tip"},
+                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is on the same chain as the active tip (ancestor, equal, or descendant / catch-up)"},
                         {RPCResult::Type::NUM, "on_chain_attested_height", "Highest quorum ancestor of the active tip, or -1 if none"},
                         {RPCResult::Type::NUM, "blocks_behind", "max(0, height - on_chain_attested_height). Zero on a healthy linear chain; large with on_active_chain=false is a stranded fork"},
                     }},
                 {RPCResult::Type::STR_HEX, "chainwork", "total amount of work in active chain, in hexadecimal"},
+                {RPCResult::Type::NUM, "validationepoch", "compiled block-validation epoch; bumped when consensus-relevant validation changes"},
+                {RPCResult::Type::NUM, "invalidmarksclearedonupgrade", "BLOCK_FAILED_* index entries cleared on this start because the stored epoch was older"},
                 {RPCResult::Type::NUM, "size_on_disk", "the estimated size of the block and undo files on disk"},
                 {RPCResult::Type::BOOL, "pruned", "if the blocks are subject to pruning"},
                 {RPCResult::Type::NUM, "pruneheight", /*optional=*/true, "height of the last block pruned, plus one (only present if pruning is enabled)"},
@@ -2007,6 +2114,12 @@ RPCHelpMan getblockchaininfo()
     obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
     obj.pushKV("blocks", height);
     obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    const auto stale = node::ComputeChainTipStaleness(&tip, chainman.m_best_header);
+    PushChainTipStalenessFields(obj, stale);
+    const auto twin_blocked{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &tip, chainman.m_best_header, chainman.m_best_claimed_header)};
+    PushBetterWorkTwinLocalCommitmentFields(obj, twin_blocked);
     obj.pushKV("bestblockhash", tip.GetBlockHash().GetHex());
     obj.pushKV("bits", strprintf("%08x", tip.nBits));
     obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
@@ -2045,6 +2158,9 @@ RPCHelpMan getblockchaininfo()
         obj.pushKV("matmul_signed_frontier", std::move(signed_frontier));
     }
     obj.pushKV("chainwork", tip.nChainWork.GetHex());
+    obj.pushKV("validationepoch", static_cast<uint64_t>(chainman.GetBlockValidationEpoch()));
+    obj.pushKV("invalidmarksclearedonupgrade",
+               static_cast<uint64_t>(chainman.InvalidMarksClearedOnUpgrade()));
     obj.pushKV("size_on_disk", chainman.m_blockman.CalculateCurrentUsage());
     obj.pushKV("pruned", chainman.m_blockman.IsPruneMode());
     if (chainman.m_blockman.IsPruneMode()) {
@@ -2066,7 +2182,13 @@ RPCHelpMan getblockchaininfo()
     }
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
-    obj.pushKV("warnings", node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings")));
+    UniValue warnings{node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings"))};
+    AppendChainStaleRpcWarning(warnings, stale.is_stale);
+    if (twin_blocked.blocked) {
+        AppendRpcWarningMessage(
+            warnings, node::matmul_trusted::BETTER_WORK_TWIN_BLOCKED_RPC_WARNING);
+    }
+    obj.pushKV("warnings", std::move(warnings));
     return obj;
 },
     };
@@ -5324,6 +5446,132 @@ static RPCHelpMan getblocklocations()
     };
 }
 
+static UniValue BlockIndexStatusJSON(const CBlockIndex& index)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("hash", index.GetBlockHash().GetHex());
+    obj.pushKV("height", index.nHeight);
+    obj.pushKV("nStatus", static_cast<int64_t>(index.nStatus));
+    obj.pushKV("failed_valid", bool(index.nStatus & BLOCK_FAILED_VALID));
+    obj.pushKV("failed_child", bool(index.nStatus & BLOCK_FAILED_CHILD));
+    obj.pushKV("manually_invalidated", bool(index.nStatus & BLOCK_MANUALLY_INVALIDATED));
+    obj.pushKV("have_data", bool(index.nStatus & BLOCK_HAVE_DATA));
+    obj.pushKV("have_undo", bool(index.nStatus & BLOCK_HAVE_UNDO));
+    return obj;
+}
+
+static RPCHelpMan getblockindexstatus()
+{
+    return RPCHelpMan{"getblockindexstatus",
+                "\nReturn persisted-style block-index status flags (-regtest only).\n"
+                "Used to prove validation-epoch self-heal against a real datadir.\n",
+                {
+                    {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash"},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "hash", "Block hash"},
+                        {RPCResult::Type::NUM, "height", "Block height"},
+                        {RPCResult::Type::NUM, "nStatus", "Raw CBlockIndex::nStatus"},
+                        {RPCResult::Type::BOOL, "failed_valid", "BLOCK_FAILED_VALID is set"},
+                        {RPCResult::Type::BOOL, "failed_child", "BLOCK_FAILED_CHILD is set"},
+                        {RPCResult::Type::BOOL, "manually_invalidated", "BLOCK_MANUALLY_INVALIDATED is set"},
+                        {RPCResult::Type::BOOL, "have_data", "BLOCK_HAVE_DATA is set"},
+                        {RPCResult::Type::BOOL, "have_undo", "BLOCK_HAVE_UNDO is set"},
+                    }},
+                RPCExamples{HelpExampleCli("getblockindexstatus", "\"hash\"")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!Params().IsMockableChain()) {
+        throw std::runtime_error("getblockindexstatus is for regression testing (-regtest mode) only");
+    }
+    const uint256 hash(ParseHashV(request.params[0], "blockhash"));
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    LOCK(cs_main);
+    const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(hash)};
+    if (index == nullptr) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+    }
+    return BlockIndexStatusJSON(*index);
+},
+    };
+}
+
+static RPCHelpMan mockvalidationepoch()
+{
+    return RPCHelpMan{"mockvalidationepoch",
+                "\nWrite the stored validation epoch and optionally strip BLOCK_MANUALLY_INVALIDATED "
+                "and BLOCK_HAVE_UNDO so the next restart looks like a poisoned 0.34.0–0.34.4 index "
+                "(-regtest only).\n"
+                "Does not run the heal; the heal fires on the subsequent startup.\n",
+                {
+                    {"epoch", RPCArg::Type::NUM, RPCArg::Optional::NO, "Persisted validation epoch to write (0 simulates a pre-heal binary)"},
+                    {"strip_manual", RPCArg::Type::BOOL, RPCArg::Default{false}, "If true, drop BLOCK_MANUALLY_INVALIDATED from every index entry and persist, leaving BLOCK_FAILED_* (the buggy-build poison shape unless strip_undo is false)"},
+                    {"strip_undo", RPCArg::Type::BOOL, RPCArg::DefaultHint{"same as strip_manual"}, "If true, also drop BLOCK_HAVE_UNDO from FAILED entries. Defaults to strip_manual. Pass false with strip_manual=true to simulate a pre-0.34.5 invalidateblock (FAILED_VALID + HAVE_UNDO, no MANUAL bit)."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "epoch", "Value written to the block-tree DB"},
+                        {RPCResult::Type::NUM, "stripped_manual", "Index entries whose MANUAL bit was cleared"},
+                        {RPCResult::Type::NUM, "stripped_undo", "FAILED index entries whose HAVE_UNDO bit was cleared"},
+                    }},
+                RPCExamples{HelpExampleCli("mockvalidationepoch", "0 true")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!Params().IsMockableChain()) {
+        throw std::runtime_error("mockvalidationepoch is for regression testing (-regtest mode) only");
+    }
+    const int64_t epoch64{request.params[0].getInt<int64_t>()};
+    if (epoch64 < 0 || epoch64 > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "epoch out of range");
+    }
+    const uint32_t epoch{static_cast<uint32_t>(epoch64)};
+    const bool strip_manual{
+        request.params[1].isNull() ? false : request.params[1].get_bool()};
+    const bool strip_undo{
+        request.params[2].isNull() ? strip_manual : request.params[2].get_bool()};
+
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    unsigned stripped{0};
+    unsigned stripped_undo{0};
+    {
+        LOCK(cs_main);
+        if (strip_manual) {
+            for (CBlockIndex* pindex : chainman.m_blockman.GetAllBlockIndices()) {
+                if ((pindex->nStatus & BLOCK_MANUALLY_INVALIDATED) == 0) continue;
+                pindex->nStatus &= ~BLOCK_MANUALLY_INVALIDATED;
+                chainman.m_blockman.MarkBlockIndexDirty(*pindex);
+                ++stripped;
+            }
+        }
+        if (strip_undo) {
+            for (CBlockIndex* pindex : chainman.m_blockman.GetAllBlockIndices()) {
+                if ((pindex->nStatus & BLOCK_FAILED_MASK) == 0) continue;
+                if ((pindex->nStatus & BLOCK_HAVE_UNDO) == 0) continue;
+                pindex->nStatus &= ~BLOCK_HAVE_UNDO;
+                chainman.m_blockman.MarkBlockIndexDirty(*pindex);
+                ++stripped_undo;
+            }
+        }
+        if (!chainman.m_blockman.WriteBlockIndexDB()) {
+            throw JSONRPCError(RPC_DATABASE_ERROR, "Failed to persist block index");
+        }
+        if (!chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(epoch)) {
+            throw JSONRPCError(RPC_DATABASE_ERROR, "Failed to persist validation epoch");
+        }
+    }
+
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("epoch", static_cast<int64_t>(epoch));
+    obj.pushKV("stripped_manual", static_cast<int64_t>(stripped));
+    obj.pushKV("stripped_undo", static_cast<int64_t>(stripped_undo));
+    return obj;
+},
+    };
+}
+
 
 void RegisterBlockchainRPCCommands(CRPCTable& t)
 {
@@ -5366,6 +5614,8 @@ void RegisterBlockchainRPCCommands(CRPCTable& t)
         {"hidden", &getblockfileinfo},
         {"hidden", &invalidateblock},
         {"hidden", &reconsiderblock},
+        {"hidden", &getblockindexstatus},
+        {"hidden", &mockvalidationepoch},
         {"blockchain", &waitfornewblock},
         {"blockchain", &waitforblock},
         {"blockchain", &waitforblockheight},

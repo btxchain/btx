@@ -297,6 +297,11 @@ void ValidationSignals::NewPoWValidBlock(const CBlockIndex *pindex, const std::s
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NewPoWValidBlock(pindex, block); });
 }
 
+void ValidationSignals::ProcessNewBlockFinished(const CBlock& block) {
+    LOG_EVENT("%s: block hash=%s", __func__, block.GetHash().ToString());
+    m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.ProcessNewBlockFinished(block); });
+}
+
 void ValidationSignals::NewBlockTemplate(const std::shared_ptr<node::CBlockTemplate>& blocktemplate) {
     LOG_EVENT("%s", __func__);
     m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.NewBlockTemplate(blocktemplate); });

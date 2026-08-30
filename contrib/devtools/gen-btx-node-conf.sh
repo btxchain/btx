@@ -23,31 +23,33 @@ case "${BOOTSTRAP_MODE}" in
     ;;
 esac
 
+# RFC 5737 TEST-NET-1 examples. Substitute your own private archival
+# peers. Do not commit live operator addresses.
 managed_direct_peers() {
   case "${1}" in
     local)
       cat <<'EOF'
-addnode=178.128.135.6:19335
-addnode=143.244.209.243:19335
-addnode=68.183.240.79:19335
+addnode=192.0.2.10:19335
+addnode=192.0.2.11:19335
+addnode=192.0.2.12:19335
 EOF
       ;;
     fra)
       cat <<'EOF'
-addnode=178.128.135.6:19335
-addnode=143.244.209.243:19335
+addnode=192.0.2.10:19335
+addnode=192.0.2.11:19335
 EOF
       ;;
     nyc)
       cat <<'EOF'
-addnode=68.183.240.79:19335
-addnode=143.244.209.243:19335
+addnode=192.0.2.12:19335
+addnode=192.0.2.11:19335
 EOF
       ;;
     sfo)
       cat <<'EOF'
-addnode=68.183.240.79:19335
-addnode=178.128.135.6:19335
+addnode=192.0.2.12:19335
+addnode=192.0.2.10:19335
 EOF
       ;;
     *)
@@ -142,8 +144,9 @@ else
   fi
   cat <<EOF
 
-# Managed direct-peer mode:
-# disables public seed discovery and pins canonical direct archival peers for the controlled fleet.
+# Private-set direct-peer mode:
+# disables public seed discovery and pins example RFC 5737 archival
+# peers. Substitute your own addresses; do not commit live operator IPs.
 dnsseed=0
 fixedseeds=0
 ${MANAGED_PEERS}

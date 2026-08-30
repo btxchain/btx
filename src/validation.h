@@ -71,6 +71,12 @@ struct PrecomputedTransactionData;
 struct LockPoints;
 struct AssumeutxoData;
 
+namespace matmul {
+namespace trusted {
+struct ExactReplayAttestation;
+}
+}
+
 enum class ShieldedAutoRepairKind {
     ANCHOR_HISTORY,
     STATE_REBUILD,
@@ -1188,7 +1194,44 @@ private:
     //! use paced-dump first-seen (headers arrived together hours ago).
     mutable std::optional<int64_t> m_last_tip_connect_time GUARDED_BY(::cs_main);
     mutable std::optional<int64_t> m_last_tip_connect_mono GUARDED_BY(::cs_main);
+    //! RB-16 fix: MockableSteadyClock seconds of the last ConnectTip that was
+    //! progress toward the BEST-KNOWN chain (tip reaches/beats m_best_header,
+    //! or m_best_header extends the tip). A tip that only connects blocks on a
+    //! strictly-LIGHTER competing fork (a slowly growing minority fork) keeps
+    //! m_last_tip_connect_mono fresh, so the acquisition-escape staleness gate
+    //! must be defined on the BETTER-CHAIN axis, not on "any ConnectTip".
+    mutable std::optional<int64_t> m_last_better_chain_progress_mono
+        GUARDED_BY(::cs_main);
+    //! RB-16 restart-safety: MockableSteadyClock baseline captured lazily on the
+    //! first AcquisitionTipIsStale() evaluation (~startup). A node that BOOTS
+    //! onto a frozen tip and connects nothing has neither m_last_tip_connect_mono
+    //! nor m_last_better_chain_progress_mono set, so without a baseline the
+    //! staleness gate could never trip and a restarted stuck node could never
+    //! self-rescue (rtx6000 / a user upgrading a stuck binary). Both unset-clock
+    //! cases fall back to this baseline, so the 600s confirmation window still
+    //! applies (no instant arm on a transient/forged header tower seen at boot).
+    mutable std::optional<int64_t> m_acquisition_stale_baseline_mono
+        GUARDED_BY(::cs_main);
+    //! RB-16 acquisition escape valve: fork-root hashes of heavier COMPETING
+    //! towers currently EXEMPT from the unauthenticated-header-lead (72) cap and
+    //! the last-common heavier-fork snap, so a node whose tip is STALE can
+    //! ACQUIRE + fully ExactReplay-validate the heavier chain (the anti-flood
+    //! caps otherwise gate DATA ACQUISITION, stranding any node >72 behind).
+    //! MIGRATION stays gated by park / deepforkautoresolve / quorum / operator.
+    //! Value = heaviest candidate tip chainwork seen on that tower, for
+    //! lightest-eviction so the real majority chain always keeps a slot.
+    //! Bounded to ACQUISITION_ESCAPE_MAX_TOWERS; cleared only on a
+    //! better-chain-progress ConnectTip (a minority-fork-only connect must not
+    //! wipe a tower mid-acquisition, or the +72 request cap re-arms and the
+    //! tower can never re-register: it needs a past-cap header that no longer
+    //! arrives once the chase stops).
+    mutable std::map<uint256, arith_uint256> m_acquisition_exempt_towers
+        GUARDED_BY(::cs_main);
     mutable std::optional<int> m_cadence_hold_logged_allowed GUARDED_BY(::cs_main);
+    //! Rate limit for the deepforkautoresolve verdict diagnostic in
+    //! DeepForkAutoResolveMayAct (at most one LogInfo line per interval,
+    //! except acted=1 verdicts, which always log).
+    mutable int64_t m_deep_fork_verdict_log_time_s GUARDED_BY(::cs_main){0};
     std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
     /**
      * Authenticated/quorum branch tips used by exceptional shallow-race
@@ -1391,8 +1434,14 @@ public:
     /** Persist a successful header-derived ExactReplay verdict. Does not
      *  raise BLOCK_VALID_* by itself. Recomputes authenticated chain work
      *  for this block's lineage so GETHEADERS and trust-adjusted ranking
-     *  see the ExactReplayed prefix (body-first then replay left work stale). */
-    bool PersistMatMulExactReplayVerdict(const uint256& block_hash)
+     *  see the ExactReplayed prefix (body-first then replay left work stale).
+     *  When this process has a local signer and the index is on the active
+     *  chain, SignAuthoritative may fill `produced`. The caller must gossip
+     *  that attestation after releasing cs_main (validation does not push
+     *  P2P). Never publish an attestation this process did not just sign. */
+    bool PersistMatMulExactReplayVerdict(
+        const uint256& block_hash,
+        matmul::trusted::ExactReplayAttestation* produced = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Record that a trusted mirror observed pin coverage of this hash.
@@ -1535,6 +1584,16 @@ public:
      * invalidate/reconsider/reorg rescan may move it backwards.
      */
     std::atomic<int32_t> m_best_followed_header_height{-1};
+    uint32_t m_invalid_marks_cleared_on_upgrade{0};
+    uint32_t m_compiled_validation_epoch{BLOCK_VALIDATION_EPOCH};
+    //! 0 means the production default (512). Tests set 1 to force a
+    //! checkpoint after every re-checked block (SF-14).
+    size_t m_epoch_heal_recheck_batch_for_test{0};
+    bool m_epoch_heal_abort_after_checkpoint_for_test{false};
+    //! When true, IsMatMulRecomputeAssumeValidTrusted is false. Epoch
+    //! revalidation must not honor buried-recompute trust for blocks the
+    //! previous binary rejected.
+    bool m_untrusted_epoch_revalidation{false};
 
     //! The total number of bytes available for us to use across all in-memory
     //! coins caches. This will be split somehow across chainstates.
@@ -1679,6 +1738,26 @@ public:
     //! Test-only: drop hold-anchor and last-ConnectTip so restart / idle /
     //! dump-header origin selection can be driven without mining a new chain.
     void ResetCadenceHoldStateForTest() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Test-only: drive the acquisition-escape staleness clock directly so the
+    //! stale-tip path can be exercised without a 600s wall-clock wait. Also
+    //! refreshes the better-chain progress clock, mirroring a HEALTHY
+    //! (progress) ConnectTip.
+    void SetLastTipConnectMonoForTest(std::optional<int64_t> mono)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        m_last_tip_connect_mono = mono;
+        m_last_better_chain_progress_mono = mono;
+    }
+    //! Test-only: age ONLY the better-chain progress clock while leaving the
+    //! tip-connect clock fresh -- a tip that keeps connecting blocks on a
+    //! strictly-lighter competing (minority) fork.
+    void SetAcquisitionProgressMonoForTest(std::optional<int64_t> mono)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        m_last_better_chain_progress_mono = mono;
+    }
     //! Test-only RAII: point ActiveChainstate() at `stub` so production
     //! cadence-hold reads a real m_from_snapshot_blockhash. Restores the
     //! prior pointer. `stub` must outlive this object.
@@ -1740,8 +1819,9 @@ public:
     [[nodiscard]] bool IndexHasTrustedMatMulAuthority(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True when index is an ancestor of, is, or descends from any stored
      *  quorum hash at HighestAttestedHeight. Unlike
-     *  GetSignedFrontierStatus().on_active_chain, this stays true while
-     *  catching up (tip height < frontier height) on the attested chain. */
+     *  GetSignedFrontierStatus().on_active_chain (which is also true
+     *  while catching up on the same chain), this stays true for ancestry
+     *  of any stored frontier hash. */
     [[nodiscard]] bool IndexLeadsToSignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ShouldDeferLosingTipExtension(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAutomaticReorgRecoveryCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -1754,8 +1834,11 @@ public:
     /**
      * Signed-frontier diagnostic. Highest stored quorum height (no HAVE_DATA
      * required) versus the highest quorum ancestor of the active tip.
-     * getmatmulattestedtip.hash only sees HAVE_DATA on this chain, so a
-     * stranded fork reports on_active_chain=true there; this does not.
+     * on_active_chain is true when the frontier hash is on the same chain as
+     * the connected tip, including catch-up (frontier is a descendant). A
+     * stranded competing fork reports on_active_chain=false and a climbing
+     * blocks_behind. getmatmulattestedtip.hash only sees HAVE_DATA on this
+     * chain, so a stranded fork can look healthy there; this does not.
      */
     struct SignedFrontierStatus {
         bool available{false};
@@ -1793,6 +1876,102 @@ public:
      */
     const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! RB-16 acquisition escape valve. Tip is "stale" after this many seconds
+    //! with no successful ConnectTip (~6-7 missed blocks); a steady-state node
+    //! connects every spacing so it never trips it.
+    static constexpr int64_t ACQUISITION_ESCAPE_STALL_SECONDS{600};
+    static constexpr size_t ACQUISITION_ESCAPE_MAX_TOWERS{2};
+    //! Bound the exempt header lead so a bogus heavier-looking tower cannot
+    //! grow the index unboundedly: exempt headers only up to tip+this. Because
+    //! the exempt set is CLEARED on every ConnectTip, a genuine tower slides
+    //! this window forward as its bodies validate and advance the tip, while a
+    //! fake tower whose bodies never connect stays capped here (its GPU
+    //! ExactReplay is separately rate-limited by the per-peer RC budget, RB-6).
+    static constexpr int ACQUISITION_ESCAPE_MAX_LEAD{2048};
+    //! True when the tip has not connected a block for ACQUISITION_ESCAPE_
+    //! STALL_SECONDS and the node is not in IBD (IBD already exempts + fetches).
+    [[nodiscard]] bool AcquisitionTipIsStale() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! MUTATING: may this node exempt `candidate`'s heavier competing tower from
+    //! the header-lead / last-common caps to ACQUIRE its bodies? Registers the
+    //! tower (evicting the lightest when the 2-tower budget is full and the
+    //! candidate is heavier). Only fetch+validate is enabled; migration is
+    //! still park/deepforkautoresolve/quorum-gated. Read-only sites use
+    //! AcquisitionEscapeActive.
+    [[nodiscard]] bool AcquisitionEscapeMayAcquireHeavierFork(
+        const CBlockIndex* candidate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Read-only: is `candidate`'s tower currently under acquisition escape?
+    [[nodiscard]] bool AcquisitionEscapeActive(const CBlockIndex* candidate) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Read-only: does an ACTIVE acquisition-escape exempt tower COVER this
+    //! block (the block sits on that heavier competing fork we are deliberately
+    //! acquiring while stale-stuck)? Unlike AcquisitionEscapeActive this does
+    //! NOT require the block itself to out-work the tip -- a low mid-tower body
+    //! is below the minority tip in work but must still be ExactReplay-admitted.
+    //! Used to ADMIT ExactReplay (bypass the parked-branch veto and the
+    //! competing-body budget deferral) for the tower we are acquiring; bounded
+    //! by the same <=2 towers + stuck-state gate. Migration stays park/
+    //! deepforkautoresolve-gated; a fake tower's bodies fail ExactReplay.
+    [[nodiscard]] bool AcquisitionEscapeCoversBlock(const CBlockIndex* index) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Slot-wedge hardening: a registered exempt tower whose BODY fails
+    //! validation (BLOCK_FAILED_MASK on any block descending from its root)
+    //! is dead -- its chain can never fully ExactReplay-verify, so it must
+    //! not keep occupying one of the <=2 exemption slots (the root itself is
+    //! the fork LCA on the ACTIVE chain and never carries a FAILED bit, so
+    //! the root-only prune in AcquisitionEscapeMayAcquireHeavierFork cannot
+    //! evict it). Called wherever a block body is marked FAILED; erases every
+    //! tower whose root is an ancestor of `failed` so the honest majority
+    //! tower can register. Never touches consensus state: it only releases a
+    //! local anti-flood cap exemption.
+    void AcquisitionEscapeNoteBlockFailed(const CBlockIndex* failed)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * LOCAL POLICY (-deepforkautoresolve): may this node auto-migrate to a
+     * DEEP (> park_depth) strictly-heavier competing fork because network
+     * observation shows it is honest (seen live block-by-block as our tip
+     * climbed, sustained, still fresh), rather than parking + RB-14 warn?
+     * Fork-choice preference only -- never a consensus/validity decision; the
+     * candidate still goes through the normal ExactReplay-before-ConnectTip
+     * path. Fails SAFE (returns false) on any unknown/ambiguous signal, so the
+     * default is byte-for-byte today's PARK. `verdict`, when non-null, is
+     * filled with the per-signal booleans for RPC/operator visibility.
+     */
+    struct DeepForkAutoResolveVerdict {
+        bool enabled{false};
+        bool in_scope{false};
+        bool heavier{false};
+        bool no_deterministic_tiebreak{false};
+        bool candidate_usable{false};
+        bool seen_live{false};
+        bool sustained{false};
+        //! Whole competing suffix (fork+1..candidate) carries BLOCK_HAVE_DATA
+        //! + BLOCK_EXACT_REPLAY_VERIFIED (the RB-16 acquisition stack's
+        //! product). In MayAct's FINAL gate it substitutes for seen_live &&
+        //! sustained (a fully body-ExactReplayed heavier fork embodies real
+        //! majority PoW; the observation score exists for header-only /
+        //! cheap towers, which still require it). REQUIRED by
+        //! DeepForkAutoResolveMayUnpark, so only a fully ExactReplay-acquired
+        //! tower may lift its own deep-reorg park.
+        bool suffix_exact_replayed{false};
+        bool acted{false};
+        int reorg_depth{0};
+    };
+    bool DeepForkAutoResolveMayAct(const CBlockIndex* candidate,
+                                   DeepForkAutoResolveVerdict* verdict = nullptr)
+        const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * RB-16 migration hand-off: may a PARKED deep-reorg branch containing
+     * `candidate` be atomically un-parked so the normal ActivateBestChain /
+     * ConnectTip path can migrate to it? STRICTER than MayAct alone: every
+     * MayAct observation gate must hold AND the entire competing suffix must
+     * be BLOCK_HAVE_DATA + BLOCK_EXACT_REPLAY_VERIFIED. A header-only or
+     * partially verified heavier tower therefore can never lift its own park
+     * (depth-6 dump-and-run protection intact); after the unpark, ConnectTip
+     * still refuses any unverified body ("ExactReplay required before
+     * ConnectTip") and ConnectBlock still runs full UTXO/script validation.
+     */
+    [[nodiscard]] bool DeepForkAutoResolveMayUnpark(const CBlockIndex* candidate)
+        const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::optional<node::ReorgRecoveryRecord> GetReorgRecoveryRecord() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
         return m_reorg_recovery;
@@ -1969,11 +2148,16 @@ public:
     //! header in our block-index not known to be invalid, recalculate it.
     void RecalculateBestHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Snap m_best_header up to ActiveTip when it sits strictly below the
-     *  connected chain (an authenticated ancestor, or any fork shorter than
-     *  the tip). PreferTrustAdjustedHeader can rank that ancestor above a
-     *  long unauthenticated suffix; getheaders locators then never ask for
-     *  tip+1. Competing forks *ahead* of the tip are left alone. */
+    /** Floor m_best_header at ActiveTip; do not pin it there.
+     *  PreferTrustAdjustedHeader can leave best_header on an authenticated
+     *  ancestor *below* the connected tip (0.34.3: headers=199024,
+     *  blocks=199310), or on an invalidateblock'd suffix that still
+     *  descends from the tip (Case B). Those snap up (or off the failed
+     *  branch) to the connected tip. A heavier *valid disconnected* fork
+     *  above the tip must remain (or become) m_best_header so headers
+     *  and GETDATA chase it (jarekpiot: 0.34.4 pin, headers==blocks
+     *  while getchaintips showed 0d5ffded@199398). Trusted mirrors do
+     *  not take that promotion. */
     void EnsureBestHeaderNotBehindConnectedTip() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Publish a new authoritative followed header and its exact height. */
@@ -2250,6 +2434,41 @@ public:
      * chain so ActivateBestChain() can retry them under the current rules.
      */
     void AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * If the on-disk validation epoch is older than the compiled epoch (or a
+     * pending-revalidation marker is set), clear non-manual BLOCK_FAILED_*
+     * marks on the heaviest data-backed lineage, re-run CheckBlockHeader /
+     * ContextualCheckBlockHeader and (when BLOCK_HAVE_DATA) CheckBlock /
+     * ContextualCheckBlock with assumevalid trust disabled, remake genuine
+     * invalids, and persist nStatus + epoch + parked roots. Progress is
+     * checkpointed by height so a crash does not redo already-rechecked
+     * blocks. Parked deep-reorg branches are never unparked here; only
+     * UnparkReorgBranchContainingBlock / reorg-recovery may drop a park.
+     * ConnectBlock does not re-run ContextualCheck*; a flags-only clear
+     * would accept a block the old binary rejected for ExactReplay/ASERT.
+     * BLOCK_MANUALLY_INVALIDATED (invalidateblock) is never cleared here,
+     * nor is the pre-0.34.5 operator shape (FAILED_VALID + HAVE_UNDO).
+     */
+    [[nodiscard]] bool MaybeClearStaleInvalidMarksForValidationEpoch() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    [[nodiscard]] uint32_t GetBlockValidationEpoch() const { return m_compiled_validation_epoch; }
+    void SetCompiledValidationEpochForTest(uint32_t epoch)
+    {
+        m_compiled_validation_epoch = epoch;
+    }
+    void SetEpochHealRecheckBatchForTest(size_t n)
+    {
+        m_epoch_heal_recheck_batch_for_test = n;
+    }
+    void SetEpochHealAbortAfterCheckpointForTest(bool abort_after)
+    {
+        m_epoch_heal_abort_after_checkpoint_for_test = abort_after;
+    }
+    [[nodiscard]] uint32_t InvalidMarksClearedOnUpgrade() const
+    {
+        return m_invalid_marks_cleared_on_upgrade;
+    }
 
     /** Return true once per active tip for each automatic shielded repair class. */
     [[nodiscard]] bool MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind kind)

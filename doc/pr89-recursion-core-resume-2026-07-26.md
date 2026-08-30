@@ -52,7 +52,7 @@ coordination/market.
 - Branch: `claude/matmul-v4-stage3-recursion-core-af23sj` (stage3 build worktree).
   HEAD `ae5302e` = normalization commit, on top of `91ee0a37` = 14/14 CS-level checkpoint.
 - Off-box backups: `~/stage3-backups/stage3-src-*.tar.gz` (local) mirrored to the GPU
-  rack / read-only host isolated dir `~/btx-linux-backup/` (checksum-verified).
+  rack / read-only host isolated dir `<backup-tree>/` (checksum-verified).
 - Build: worktree `~/stage3-build`, build dir `build-s3`; fast gate `test_btx
   --run_test=matmul_v4_rc_stage3_recursive_tests` (expect 18/18).
 

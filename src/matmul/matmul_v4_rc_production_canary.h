@@ -73,7 +73,9 @@ struct RCProductionEpochIdentity {
  * canary-header input; the live capability separately binds the configured
  * height. Runtime/driver identity is probed and reported at qualification time,
  * not stored as a manifest-field wildcard. A pending/null/unreviewed entry can
- * never authorize a provider.
+ * never authorize a provider. Absence of a matching row is not a mining
+ * refusal: byte-exact ExactGemmS8S8 self-qualification admits the device.
+ * A digest mismatch against a unique matching row remains fail-closed.
  */
 struct RCProductionGoldenManifestEntry {
     std::string id;
@@ -94,6 +96,8 @@ struct RCProductionGoldenManifestEntry {
 enum class RCProductionCanaryOutcome : uint8_t {
     NotRun = 0,
     Passed = 1,
+    /** No unique reviewed row for this device class. Reporting only when
+     *  byte-exact self-qualification passed; not a mining refusal. */
     MissingGolden = 2,
     ProviderIdentityUnavailable = 3,
     ProviderNotPolicyEligible = 4,
@@ -103,8 +107,40 @@ enum class RCProductionCanaryOutcome : uint8_t {
     BuildProvenanceMismatch = 8,
 };
 
+/** How this process admitted (or refused) mining for the live provider. */
+enum class RCProductionAdmissionPath : uint8_t {
+    None = 0,
+    ReviewedGolden = 1,
+    SelfQualification = 2,
+};
+
+enum class RCProductionGoldenLookupStatus : uint8_t {
+    None = 0,
+    Unique = 1,
+    Duplicate = 2,
+};
+
+struct RCProductionGoldenLookup {
+    RCProductionGoldenLookupStatus status{
+        RCProductionGoldenLookupStatus::None};
+    const RCProductionGoldenManifestEntry* entry{nullptr};
+};
+
+/** Pure mining-admission decision. Does not run devices. */
+struct RCProductionAdmissionDecision {
+    bool admissible{false};
+    RCProductionAdmissionPath path{RCProductionAdmissionPath::None};
+    RCProductionCanaryOutcome outcome{RCProductionCanaryOutcome::NotRun};
+    std::string reason;
+    bool exact_manifest_match{false};
+    bool passed{false};
+    bool activation_ready{false};
+};
+
 struct RCProductionCanaryStatus {
     RCProductionCanaryOutcome outcome{RCProductionCanaryOutcome::NotRun};
+    RCProductionAdmissionPath admission_path{
+        RCProductionAdmissionPath::None};
     bool manifest_has_reviewed_goldens{false};
     bool build_provenance_matches{false};
     bool build_source_dirty{true};
@@ -147,11 +183,10 @@ private:
 
 /** Reviewed production goldens compiled into this source revision.
  *
- * This tree ships the classes it measured (CUDA). Additional provider rows
- * (Metal class, HIP, …) are added by the builder that measured them, in that
- * builder's manifest, then resealed. Portable CPU is not an accepted
- * independent reproduction path. Extra families present in a cohort must
- * byte-match the CUDA digest.
+ * This tree ships the classes it measured. Additional provider rows
+ * are added by the builder that measured them, in that builder's
+ * manifest. Portable CPU is not an accepted independent reproduction
+ * path. Extra families present in a cohort must byte-match each other.
  */
 [[nodiscard]] const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest();
@@ -161,7 +196,8 @@ CommittedRCProductionGoldenManifest();
 [[nodiscard]] std::vector<RCProductionGoldenManifestEntry>
 ParseRCProductionGoldenManifestData(std::string_view encoded);
 
-/** Require one coherent independently reproduced CUDA cohort; other families optional. */
+/** Require one coherent independently reproduced cohort. Any single
+ *  admitted family (CUDA, Metal, HIP, …) is enough; CUDA is not required. */
 [[nodiscard]] bool RCProductionGoldenManifestCohortValid(
     const std::vector<RCProductionGoldenManifestEntry>& manifest);
 
@@ -188,6 +224,32 @@ ProbeRCProductionProviderIdentity(const std::string& resolved_provider);
     const RCProductionProviderIdentity& provider,
     const RCProductionEpochIdentity& epoch,
     const std::vector<RCProductionGoldenManifestEntry>& manifest);
+
+/** Locate a reviewed row for this provider class and epoch.
+ *
+ * Unlike FindRCProductionGolden, this does not require the whole cohort to
+ * be coherent: a unique matching row is still compared. Duplicate matching
+ * rows fail closed. Zero matches is absence, not a digest failure. */
+[[nodiscard]] RCProductionGoldenLookup LookupRCProductionGolden(
+    const RCProductionProviderIdentity& provider,
+    const RCProductionEpochIdentity& epoch,
+    const std::vector<RCProductionGoldenManifestEntry>& manifest);
+
+/** Mining admission: unique matching row compares digest; absence of a row
+ *  admits when self-qualification passed; self-qual failure and digest
+ *  mismatch remain fail-closed. */
+[[nodiscard]] RCProductionAdmissionDecision DecideRCProductionMiningAdmission(
+    bool self_qualified,
+    const RCProductionGoldenLookup& lookup,
+    const RCStrictDeviceEpisodeResult* replay);
+
+/** RB-4: fail-closed miner-loop gate. True only when a unique reviewed golden
+ * row was found for `provider` (status.exact_manifest_match) and the startup
+ * production canary observed a digest MISMATCH against it. Absence of a row
+ * (MissingGolden + byte-exact self-qualification, 688bbbe4) and a passed
+ * reviewed row both return false. */
+[[nodiscard]] bool RCProductionGoldenMismatchBlocksMining(
+    const RCProductionCanaryStatus& status, const std::string& provider);
 
 /** Fixed, domain-separated, epoch-bound input header for production canaries. */
 [[nodiscard]] CBlockHeader MakeRCProductionCanaryHeader(
@@ -269,7 +331,8 @@ GetRCProductionProviderCapability(
 
 /** Narrow unit-test issuer. It accepts only `test:` provider ids and remains
  * process-local/resettable. Production provider ids can only receive a token
- * from RunRCProductionStartupCanary after an exact reviewed golden passes. */
+ * from RunRCProductionStartupCanary after admission (reviewed golden match
+ * or byte-exact self-qualification with no matching row). */
 [[nodiscard]] RCProductionProviderCapability
 IssueRCProductionProviderCapabilityForTest(
     const std::string& provider,
@@ -280,7 +343,14 @@ IssueRCProductionProviderCapabilityForTest(
 [[nodiscard]] RCProductionCanaryStatus GetLastRCProductionCanaryStatus();
 [[nodiscard]] const char* RCProductionCanaryOutcomeName(
     RCProductionCanaryOutcome outcome);
+[[nodiscard]] const char* RCProductionAdmissionPathName(
+    RCProductionAdmissionPath path);
+/** Test-only identity probe override. ResetRCProductionCanaryForTest clears it. */
+void SetRCProductionProviderIdentityOverrideForTest(
+    std::optional<RCProductionProviderIdentity> identity);
 void ResetRCProductionCanaryForTest();
+/** Test-only snapshot install. Does not mint a production capability. */
+void SetRCProductionCanaryStatusForTest(RCProductionCanaryStatus status);
 
 } // namespace matmul::v4::rc
 

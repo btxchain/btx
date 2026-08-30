@@ -166,6 +166,16 @@ protected:
      */
     virtual void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& block) {};
 
+    /**
+     * Fired from ProcessNewBlock after AcceptBlock + ActivateBestChain
+     * succeed. Not fired for ReplayBlocks / reindex ConnectTip. PeerManager
+     * uses this to gossip a locally signed ExactReplay attestation for
+     * generate/submitblock (those RPCs never enter ProcessBlockSync).
+     *
+     * Called on the ProcessNewBlock caller's thread, without cs_main.
+     */
+    virtual void ProcessNewBlockFinished(const CBlock& block) {}
+
     virtual void NewBlockTemplate(const std::shared_ptr<node::CBlockTemplate>& blocktemplate) {}
     /**
      * Notifies the validation interface that it is being unregistered
@@ -260,6 +270,7 @@ public:
     void ChainStateFlushed(ChainstateRole, const CBlockLocator &);
     void BlockChecked(const CBlock&, const BlockValidationState&);
     void NewPoWValidBlock(const CBlockIndex *, const std::shared_ptr<const CBlock>&);
+    void ProcessNewBlockFinished(const CBlock&);
     void NewBlockTemplate(const std::shared_ptr<node::CBlockTemplate>& blocktemplate);
 };
 

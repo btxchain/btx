@@ -673,6 +673,24 @@ BOOST_AUTO_TEST_CASE(cuda_digest_buffer_pool_probe_reports_reuse_after_successfu
     BOOST_CHECK_EQUAL(pool_after_second.inflight_submissions, 0U);
 }
 
+BOOST_AUTO_TEST_CASE(cuda_digest_buffer_pool_ensure_ready_marks_initialized)
+{
+    const auto probe = btx::cuda::ProbeMatMulDigestAcceleration();
+    std::string reason;
+    const bool ready = btx::cuda::EnsureMatMulBufferPoolReady(reason);
+    if (!probe.available) {
+        BOOST_CHECK(!ready);
+        BOOST_CHECK(!reason.empty());
+        return;
+    }
+    BOOST_CHECK(ready);
+    BOOST_CHECK_EQUAL(reason, "buffer_pool_slots_ready");
+    const auto pool = btx::cuda::ProbeMatMulBufferPool();
+    BOOST_CHECK(pool.initialized);
+    BOOST_CHECK_EQUAL(pool.reason, "buffer_pool_slots_ready");
+    BOOST_CHECK_GT(pool.slot_count, 0U);
+}
+
 BOOST_AUTO_TEST_CASE(cuda_base_matrix_cache_requires_matching_content_keys)
 {
     constexpr uint32_t kN = 8;

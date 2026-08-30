@@ -32,6 +32,9 @@ class ReleaseBundleManifestTest(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
 
+    def _bypass_archive_gate(self):
+        self.module.verify_staged_primary_archives = lambda *args, **kwargs: None
+
     def test_classify_primary_platform_asset_detects_supported_archives(self):
         info = self.module.classify_primary_platform_asset("btx-29.2-x86_64-linux-gnu.tar.gz")
         self.assertIsNotNone(info)
@@ -51,6 +54,33 @@ class ReleaseBundleManifestTest(unittest.TestCase):
             self.module.classify_primary_platform_asset(
                 "btx-29.2-x86_64-linux-gnu-codesigning.tar.gz"
             )
+        )
+
+        cpu_info = self.module.classify_primary_platform_asset(
+            "btx-0.33.4.2-linux-x86_64-cpu.tar.gz"
+        )
+        self.assertIsNotNone(cpu_info)
+        self.assertEqual(cpu_info["platform_id"], "linux-x86_64")
+        self.assertEqual(cpu_info["flavor"], "cpu")
+
+        metal_info = self.module.classify_primary_platform_asset(
+            "btx-0.34.5-macos-arm64-metal.tar.gz"
+        )
+        self.assertIsNotNone(metal_info)
+        self.assertEqual(metal_info["platform_id"], "macos-arm64")
+
+        cuda_ship = self.module.classify_primary_platform_asset(
+            "btx-0.34.5-linux-x86_64-cuda.tar.gz"
+        )
+        self.assertIsNotNone(cuda_ship)
+        self.assertEqual(cuda_ship["platform_id"], "linux-x86_64-cuda")
+        self.assertEqual(cuda_ship["flavor"], "cuda")
+        self.assertNotEqual(
+            self.module.classify_primary_platform_asset(
+                "btx-0.34.5-linux-x86_64-cuda12.tar.gz"
+            )["platform_id"],
+            "linux-x86_64-cuda",
+            "cuda12 must not collapse into the unversioned CUDA id",
         )
 
     def test_build_manifest_includes_platform_assets(self):
@@ -163,6 +193,7 @@ class ReleaseBundleManifestTest(unittest.TestCase):
                 )
 
     def test_main_accepts_stable_matrix_and_includes_optional_platforms(self):
+        self._bypass_archive_gate()
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_dir = root / "source"
@@ -203,6 +234,7 @@ class ReleaseBundleManifestTest(unittest.TestCase):
             )
 
     def test_main_stages_snapshot_and_signature_artifacts(self):
+        self._bypass_archive_gate()
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_dir = root / "source"
@@ -290,6 +322,7 @@ class ReleaseBundleManifestTest(unittest.TestCase):
                 self.module.validate_snapshot_inputs(snapshot, snapshot_manifest)
 
     def test_main_stages_guix_attestations_with_signer_metadata(self):
+        self._bypass_archive_gate()
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_dir = root / "source"
@@ -400,6 +433,7 @@ class ReleaseBundleManifestTest(unittest.TestCase):
                 )
 
     def test_main_sign_with_invokes_signer(self):
+        self._bypass_archive_gate()
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_dir = root / "source"
@@ -507,6 +541,29 @@ class ReleaseBundleManifestTest(unittest.TestCase):
                         str(snapshot),
                         "--required-platform",
                         "linux-x86_64",
+                    ]
+                )
+
+    def test_main_refuses_dummy_primary_archives(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            for name in (
+                "btx-29.2-x86_64-linux-gnu.tar.gz",
+                "btx-29.2-x86_64-linux-gnu-cuda12.tar.gz",
+                "btx-29.2-aarch64-linux-gnu.tar.gz",
+                "btx-29.2-arm64-apple-darwin.tar.gz",
+            ):
+                (source_dir / name).write_bytes(b"not-a-tarball")
+
+            with self.assertRaisesRegex(Exception, "not a readable shippable archive|not a recognized archive"):
+                self.module.main(
+                    [
+                        "--output-dir",
+                        str(root / "bundle"),
+                        "--source",
+                        str(source_dir),
                     ]
                 )
 

@@ -4566,10 +4566,14 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
 
 MatMulRCValidationOutcome CheckMatMulProofOfWork_RCOutcome(
     const CBlockHeader& header, const Consensus::Params& params,
-    int32_t block_height, bool* carrier_missing, std::string* detail)
+    int32_t block_height, bool* carrier_missing, std::string* detail,
+    bool* unqualified_device_authority)
 {
     if (carrier_missing != nullptr) *carrier_missing = false;
     if (detail != nullptr) detail->clear();
+    if (unqualified_device_authority != nullptr) {
+        *unqualified_device_authority = false;
+    }
     const auto start = std::chrono::steady_clock::now();
     const auto finish = [&](MatMulRCValidationOutcome outcome) {
         RegisterMatMulValidationRuntimeSample(
@@ -4664,6 +4668,9 @@ MatMulRCValidationOutcome CheckMatMulProofOfWork_RCOutcome(
                                                                 &*bnTarget,
                                                                 params.nMatMulRCProfile);
     if (detail != nullptr) *detail = replay.note;
+    if (unqualified_device_authority != nullptr) {
+        *unqualified_device_authority = replay.unqualified_device_authority;
+    }
     if (!replay.ok) {
         switch (replay.outcome) {
         case matmul::v4::rc::ExactReplayVerifyOutcome::InvalidConsensus:
@@ -5652,6 +5659,19 @@ uint32_t EffectiveMatMulRCPeerVerifyBudgetPerMin(const Consensus::Params& params
     return jobs * wu;
 }
 
+uint32_t EffectiveMatMulRCTipChildPeerBudgetPerMin(
+    const Consensus::Params& params, bool is_ibd, int32_t reference_height,
+    uint32_t catchup_scale)
+{
+    const uint32_t base{
+        EffectiveMatMulRCPeerVerifyBudgetPerMin(params, is_ibd, reference_height)};
+    if (base == 0 || catchup_scale <= 1) return base;
+    if (base > std::numeric_limits<uint32_t>::max() / catchup_scale) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return base * catchup_scale;
+}
+
 bool ConsumeMatMulRCPeerVerifyBudget(MatMulPeerVerificationBudget& budget,
                                      const Consensus::Params& params,
                                      std::chrono::steady_clock::time_point now, bool is_ibd,
@@ -5672,6 +5692,27 @@ bool ConsumeMatMulRCPeerVerifyBudget(MatMulPeerVerificationBudget& budget,
     return true;
 }
 
+bool ConsumeMatMulRCTipChildPeerVerifyBudget(
+    MatMulPeerVerificationBudget& budget,
+    const Consensus::Params& params,
+    std::chrono::steady_clock::time_point now, bool is_ibd,
+    int32_t reference_height, uint32_t catchup_scale)
+{
+    if (budget.rc_progress_window_start == std::chrono::steady_clock::time_point{} ||
+        now - budget.rc_progress_window_start >= std::chrono::minutes{1}) {
+        budget.rc_progress_window_start = now;
+        budget.rc_progress_verifications_this_minute = 0;
+    }
+    const uint32_t effective_budget{EffectiveMatMulRCTipChildPeerBudgetPerMin(
+        params, is_ibd, reference_height, catchup_scale)};
+    if (effective_budget == 0) return false;
+    if (budget.rc_progress_verifications_this_minute >= effective_budget) {
+        return false;
+    }
+    ++budget.rc_progress_verifications_this_minute;
+    return true;
+}
+
 bool ConsumeMatMulRCSourceVerifyBudgets(
     MatMulPeerVerificationBudget& address_budget,
     MatMulPeerVerificationBudget& keyed_netgroup_budget,
@@ -5679,29 +5720,49 @@ bool ConsumeMatMulRCSourceVerifyBudgets(
     uint32_t verification_count,
     std::chrono::steady_clock::time_point now,
     bool is_ibd,
-    int32_t reference_height)
+    int32_t reference_height,
+    uint32_t catchup_scale)
 {
-    const auto saved_address_window{address_budget.rc_window_start};
+    const bool progress_lane{catchup_scale > 0};
+    const auto saved_address_window{
+        progress_lane ? address_budget.rc_progress_window_start
+                      : address_budget.rc_window_start};
     const uint32_t saved_address_count{
-        address_budget.expensive_rc_verifications_this_minute};
-    const auto saved_netgroup_window{keyed_netgroup_budget.rc_window_start};
+        progress_lane
+            ? address_budget.rc_progress_verifications_this_minute
+            : address_budget.expensive_rc_verifications_this_minute};
+    const auto saved_netgroup_window{
+        progress_lane ? keyed_netgroup_budget.rc_progress_window_start
+                      : keyed_netgroup_budget.rc_window_start};
     const uint32_t saved_netgroup_count{
-        keyed_netgroup_budget.expensive_rc_verifications_this_minute};
+        progress_lane
+            ? keyed_netgroup_budget.rc_progress_verifications_this_minute
+            : keyed_netgroup_budget.expensive_rc_verifications_this_minute};
 
     const auto restore = [&] {
-        address_budget.rc_window_start = saved_address_window;
-        address_budget.expensive_rc_verifications_this_minute =
-            saved_address_count;
-        keyed_netgroup_budget.rc_window_start = saved_netgroup_window;
-        keyed_netgroup_budget.expensive_rc_verifications_this_minute =
-            saved_netgroup_count;
+        if (progress_lane) {
+            address_budget.rc_progress_window_start = saved_address_window;
+            address_budget.rc_progress_verifications_this_minute = saved_address_count;
+            keyed_netgroup_budget.rc_progress_window_start = saved_netgroup_window;
+            keyed_netgroup_budget.rc_progress_verifications_this_minute = saved_netgroup_count;
+        } else {
+            address_budget.rc_window_start = saved_address_window;
+            address_budget.expensive_rc_verifications_this_minute = saved_address_count;
+            keyed_netgroup_budget.rc_window_start = saved_netgroup_window;
+            keyed_netgroup_budget.expensive_rc_verifications_this_minute = saved_netgroup_count;
+        }
     };
     for (uint32_t i = 0; i < verification_count; ++i) {
-        if (!ConsumeMatMulRCPeerVerifyBudget(
-                address_budget, params, now, is_ibd, reference_height) ||
-            !ConsumeMatMulRCPeerVerifyBudget(
-                keyed_netgroup_budget, params, now, is_ibd,
-                reference_height)) {
+        const bool ok{progress_lane
+            ? (ConsumeMatMulRCTipChildPeerVerifyBudget(
+                   address_budget, params, now, is_ibd, reference_height, catchup_scale) &&
+               ConsumeMatMulRCTipChildPeerVerifyBudget(
+                   keyed_netgroup_budget, params, now, is_ibd, reference_height, catchup_scale))
+            : (ConsumeMatMulRCPeerVerifyBudget(
+                   address_budget, params, now, is_ibd, reference_height) &&
+               ConsumeMatMulRCPeerVerifyBudget(
+                   keyed_netgroup_budget, params, now, is_ibd, reference_height))};
+        if (!ok) {
             restore();
             return false;
         }
@@ -5714,16 +5775,18 @@ void RefundMatMulRCPeerVerifyBudget(
     uint32_t verification_count,
     std::chrono::steady_clock::time_point charged_at)
 {
-    if (verification_count == 0 ||
-        budget.rc_window_start ==
-            std::chrono::steady_clock::time_point{} ||
-        charged_at < budget.rc_window_start ||
-        charged_at - budget.rc_window_start >= std::chrono::minutes{1}) {
-        return;
-    }
-    if (verification_count <=
-        budget.expensive_rc_verifications_this_minute) {
+    if (verification_count == 0) return;
+    if (budget.rc_window_start != std::chrono::steady_clock::time_point{} &&
+        charged_at >= budget.rc_window_start &&
+        charged_at - budget.rc_window_start < std::chrono::minutes{1} &&
+        verification_count <= budget.expensive_rc_verifications_this_minute) {
         budget.expensive_rc_verifications_this_minute -= verification_count;
+    }
+    if (budget.rc_progress_window_start != std::chrono::steady_clock::time_point{} &&
+        charged_at >= budget.rc_progress_window_start &&
+        charged_at - budget.rc_progress_window_start < std::chrono::minutes{1} &&
+        verification_count <= budget.rc_progress_verifications_this_minute) {
+        budget.rc_progress_verifications_this_minute -= verification_count;
     }
 }
 
@@ -7547,6 +7610,23 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
     const auto resolved_rc =
         matmul_v4::accel::ResolveExactGemmBackendForRC();
 
+    // RB-4: fail closed in the miner loop exactly like validation. A reviewed
+    // golden row present for this provider/epoch whose production digest
+    // mismatched the device refuses mining; absence of a row (688bbbe4) stays
+    // admissible via byte-exact self-qualification.
+    const auto production_canary{
+        matmul::v4::rc::GetLastRCProductionCanaryStatus()};
+    if (matmul::v4::rc::RCProductionGoldenMismatchBlocksMining(
+            production_canary, resolved_rc.provider)) {
+        LogWarning(
+            "SolveMatMulV4RC: refusing to mine on provider=%s: production "
+            "digest mismatches reviewed golden manifest_entry_id=%s\n",
+            resolved_rc.provider, production_canary.manifest_entry_id);
+        RegisterMatMulSolveRuntimeSample(
+            false, std::chrono::steady_clock::now() - start);
+        return false;
+    }
+
     while (max_tries > 0) {
         if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
@@ -7883,10 +7963,25 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
         }
+        // RB-3: never seal a device-only digest. Recompute the winner on the
+        // CPU oracle at the LIVE params_rc dims and require byte-exact equality
+        // (A14 discipline, same as the BMX4C/LT/coupled solvers).
+        const uint256 cpu_resealed =
+            matmul::v4::rc::ConfirmRCWinnerCpuOracle(
+                block, params_rc, block_height, resealed);
+        if (cpu_resealed.IsNull() ||
+            UintToArith256(cpu_resealed) > effective_target) {
+            LogWarning("SolveMatMulV4RC: winner CPU reference diverged from device "
+                       "reseal at nonce=%llu; refusing to seal\n",
+                       static_cast<unsigned long long>(block.nNonce64));
+            RegisterMatMulSolveRuntimeSample(
+                false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
         const auto reseal_completed{
             std::chrono::steady_clock::now()};
-        if (UintToArith256(resealed) <= effective_target) {
-            block.matmul_digest = resealed;
+        if (UintToArith256(cpu_resealed) <= effective_target) {
+            block.matmul_digest = cpu_resealed;
             if constexpr (
                 matmul::v4::rc::
                     kRCStage3SuccinctAuthorityReady) {
@@ -7929,7 +8024,7 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                 // uses block_target. Solo/consensus mining has
                 // block_target == effective_target, so this is a no-op there.
                 const auto pr = matmul::v4::rc::ProveWinnerEpisodeV7(
-                    block, params_rc, block_height, block_target, resealed);
+                    block, params_rc, block_height, block_target, cpu_resealed);
                 if (pr.timing.ok) {
                     matmul::v4::rc::RCFreivaldsSampledCarrier carrier;
                     std::string cwhy;
@@ -7957,7 +8052,7 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             // BTX_RC_VERIFY_GKR=1 may validate them without raising height.
             if (matmul::v4::rc::EnvRCWinnerGkrEnabled()) {
                 const auto pr = matmul::v4::rc::ProveWinnerEpisode(block, params_rc, block_height,
-                                                                   resealed);
+                                                                   cpu_resealed);
                 std::vector<unsigned char> ser;
                 (void)matmul::v4::rc::SerializeRCGkrProof(pr.proof, ser);
                 matmul::v4::rc::RCGkrProofCachePut(block.GetHash(), std::move(ser));
@@ -7979,7 +8074,7 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             if constexpr (!matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
                 if (!params.fMatMulRCUseToyDims &&
                     params.nMatMulRCProfile == 1 &&
-                    UintToArith256(resealed) <= block_target) {
+                    UintToArith256(cpu_resealed) <= block_target) {
                     const auto ttl =
                         std::chrono::duration_cast<
                             std::chrono::milliseconds>(

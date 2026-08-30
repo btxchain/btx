@@ -229,6 +229,68 @@ inline constexpr ReorgProtectionProfileSettings GetReorgProtectionProfileSetting
            reorg_depth <= static_cast<int>(park_depth);
 }
 
+//! -deepforkautoresolve is the strictly-DEEP complement of the shallow
+//! work-based recovery above: it acts only when reorg_depth > park_depth (the
+//! window WorkBasedReorgRecoveryMayArm must never be widened into). A local
+//! policy, never a consensus rule.
+[[nodiscard]] inline constexpr bool DeepForkAutoResolveDepthInScope(
+    bool enabled,
+    DeepReorgAction action,
+    uint32_t park_depth,
+    int reorg_depth)
+{
+    return enabled &&
+           action == DeepReorgAction::PARK &&
+           park_depth != REORG_PROTECTION_DEPTH_DISABLED &&
+           reorg_depth > static_cast<int>(park_depth);
+}
+
+//! Per-suffix-block honesty: the node's own tip height when it FIRST saw this
+//! block must not have already led the block's height by more than the slack.
+//! An honest live competing chain is seen as our tip climbs
+//! (tip_height_at_first_seen ~= block_height); any post-hoc reveal (flash OR
+//! paced) was first seen when our tip was already at the pre-attack height
+//! (>> the low suffix blocks). Unknown (< 0) => not honest => park. This is
+//! the ONE signal an attacker cannot forge after the fact (df-attack R1).
+[[nodiscard]] inline constexpr bool DeepForkAutoResolveBlockSeenLive(
+    int32_t tip_height_at_first_seen,
+    int32_t block_height,
+    int32_t height_slack)
+{
+    if (tip_height_at_first_seen < 0) return false;
+    if (height_slack < 0) return false;
+    return tip_height_at_first_seen <=
+           block_height + static_cast<int32_t>(height_slack);
+}
+
+//! Sustained-observation + still-live time floor over the suffix first-seen
+//! span. Weakest signal (pure wall-clock, waited out by a paced dump) — a
+//! cost-raising AND-term only; the height signal above is the real gate.
+//! Unknown spans (< 0) => park.
+[[nodiscard]] inline constexpr bool DeepForkAutoResolveSustained(
+    int64_t first_seen_span_s,
+    int64_t now_minus_last_seen_s,
+    int64_t sustain_s,
+    int64_t freshness_s)
+{
+    if (first_seen_span_s < 0 || now_minus_last_seen_s < 0) return false;
+    if (first_seen_span_s < sustain_s) return false;
+    return now_minus_last_seen_s <= freshness_s;
+}
+
+//! Rank a competing fork by its own accepted-header nChainWork for chase /
+//! work-based auto-recovery, even when m_best_header is pinned to a locally
+//! attested loser (self-signed twin). Depth must stay inside the PARK window.
+//! A deep rewrite that ExactReplays itself must not auto-unpark.
+[[nodiscard]] inline constexpr bool ShallowHeaderWorkMayLeadAutoRecovery(
+    int reorg_depth,
+    uint32_t park_depth,
+    bool strictly_heavier_header_work)
+{
+    return strictly_heavier_header_work &&
+           WorkBasedReorgRecoveryMayArm(reorg_depth, park_depth);
+}
+
 //! Highest connected ancestor whose nTime is not in the future. After a
 //! future-stamped burst is partially connected, walking back keeps the
 //! height horizon pinned to the last wall-clock-honest tip (anti-drip).
@@ -390,6 +452,20 @@ template <typename Node>
            best_header_loaded_from_disk;
 }
 
+//! Same-chain HEADER_ONLY suffix of this many blocks is catch-up, not a
+//! withheld dump. Cadence would otherwise connect burst_max per ABC and
+//! leave a consensus archive frozen while bodies sit on disk (live
+//! <node>: 423 headers ahead, tip stalled). Competing forks
+//! (best_header does not extend the tip) still hold. ExactReplay still
+//! runs before every ConnectTip.
+[[nodiscard]] inline constexpr bool CadenceHoldFollowedCatchUpDisarms(
+    bool best_header_extends_tip,
+    int followed_ahead,
+    int far_behind_yield = 100)
+{
+    return best_header_extends_tip && followed_ahead >= far_behind_yield;
+}
+
 //! Restart: nTimeReceived and last ConnectTip are empty. Do not treat
 //! attacker-chosen nTime as stale (nTime-forged dump-on-restart).
 [[nodiscard]] inline constexpr bool CadenceHoldRestartLeavesHoldArmed(
@@ -468,9 +544,20 @@ template <typename Node>
     bool extends_active_tip,
     bool attested_or_frontier,
     bool in_ibd,
-    int max_lead = MAX_UNAUTHENTICATED_HEADER_LEAD)
+    int max_lead = MAX_UNAUTHENTICATED_HEADER_LEAD,
+    int assumeutxo_ceiling = 0)
 {
     if (in_ibd || attested_or_frontier || extends_active_tip) return false;
+    // A node must ALWAYS be able to sync headers up to a compiled-in assumeutxo
+    // base -- a trusted weak-subjectivity anchor. Otherwise a node stranded on a
+    // minority fork BELOW the base can never learn the base header, so it can
+    // never loadtxoutset to fast-recover (the header-lead cap and the escape
+    // valve's tip+2048 lead both sit below the base for a deeply-behind node).
+    // The ceiling is a fixed compiled constant (HighestAssumeutxoHeight), so
+    // this can never be abused for an unbounded header flood; headers ABOVE the
+    // ceiling keep the full anti-flood cap. Permanent fix for this and any
+    // future stranded-node-below-a-snapshot-base situation.
+    if (assumeutxo_ceiling > 0 && header_height <= assumeutxo_ceiling) return false;
     if (tip_height < 0 || header_height < 0 || max_lead < 0) return false;
     return header_height > tip_height + max_lead;
 }
@@ -484,9 +571,14 @@ template <typename Node>
     bool extends_active_tip,
     bool attested_or_frontier,
     bool in_ibd,
-    int max_lead = MAX_UNAUTHENTICATED_HEADER_LEAD)
+    int max_lead = MAX_UNAUTHENTICATED_HEADER_LEAD,
+    int assumeutxo_ceiling = 0)
 {
     if (in_ibd || attested_or_frontier || extends_active_tip) return false;
+    // See UnauthenticatedHeaderLeadExceeded: never stop chasing / GETDATA of
+    // headers up to a compiled-in assumeutxo base, so a stranded node can always
+    // reach the base header and loadtxoutset. Bounded by the fixed ceiling.
+    if (assumeutxo_ceiling > 0 && header_height <= assumeutxo_ceiling) return false;
     if (tip_height < 0 || header_height < 0 || max_lead < 0) return false;
     return header_height >= tip_height + max_lead;
 }
@@ -581,11 +673,35 @@ struct ChainstateManagerOpts {
     //! Required extra work margin expressed in current-tip block equivalents.
     //! Zero disables the hysteresis margin.
     std::optional<uint32_t> reorg_hysteresis_work_margin{};
+    //! TEST-ONLY override for the RB-16 acquisition-escape staleness window
+    //! (seconds). When unset the production constant ACQUISITION_ESCAPE_STALL_
+    //! SECONDS (600) applies. Exposed via the hidden -acquisitionstallseconds
+    //! debug arg purely so live convergence tests need not wait 10 minutes per
+    //! restart; it changes ONLY how long a frozen node waits before the escape
+    //! valve may arm (never any validation/migration gate), and a loud warning
+    //! is logged when set. Not for production use.
+    std::optional<int64_t> acquisition_stall_seconds{};
     //! Live-tip burst allowance in blocks. 0 disables. Default 0 so unit
     //! tests that construct Options without ApplyArgsManOptions keep mining
     //! at test speed; production mainnet emergency sets DEFAULT_CADENCE_BURST_MAX
     //! via -cadenceburstmax / ApplyArgsManOptions.
     uint32_t cadence_burst_max{0};
+    //! -deepforkautoresolve: default-on LOCAL POLICY that auto-migrates this
+    //! node to an HONEST deep (> park_depth) strictly-heavier competing fork
+    //! using network-observation signals, instead of parking + RB-14 warn.
+    //! It is a local fork-choice preference (like park-depth / assumevalid),
+    //! NEVER a consensus rule: it changes which valid chain THIS node follows,
+    //! never validity, and fails SAFE to today's PARK when signals are
+    //! ambiguous. Only effective under the PARK deep-reorg action.
+    bool deep_fork_auto_resolve{true};
+    //! Minimum wall-clock span (s) the competing suffix must have been observed
+    //! extending before it may be auto-followed. Default 20x spacing.
+    int64_t deep_fork_auto_resolve_sustain_s{1800};
+    //! Max age (s) of the newest suffix first-seen; older => not live => park.
+    int64_t deep_fork_auto_resolve_freshness_s{180};
+    //! Max blocks our tip may have led a suffix block's height at first-seen
+    //! and still count as "seen live". The unforgeable dump discriminator.
+    int32_t deep_fork_auto_resolve_height_slack{2};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};
     Notifications& notifications;

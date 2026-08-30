@@ -147,6 +147,15 @@ enum BlockStatus : uint32_t {
     //! unlike BLOCK_EXACT_REPLAY_VERIFIED it MUST NOT short-circuit validation
     //! after restart because the configured signer set/threshold may change.
     BLOCK_TRUSTED_REPLAY_ATTESTED = 512,
+
+    //! Operator invalidateblock. Independent of BLOCK_FAILED_MASK so a
+    //! validation-epoch bump can clear poisoned FAILED marks without
+    //! resurrecting a fork the operator deliberately killed. Cleared only
+    //! by explicit reconsiderblock. Bit 512 is BLOCK_TRUSTED_REPLAY_ATTESTED.
+    //! Pre-0.34.5 binaries persisted operator intent as BLOCK_FAILED_VALID
+    //! plus BLOCK_HAVE_UNDO (the target had been connected) without this
+    //! bit; the epoch heal treats that shape as operator-invalid too.
+    BLOCK_MANUALLY_INVALIDATED   = 1024,
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -246,6 +255,18 @@ public:
     //! Never serialized. CadenceFirstSeen / usable-chain predicates key
     //! on this, not nTimeReceived.
     int64_t nTimeBodyReceived{0};
+
+    //! (memory only) This node's ACTIVE tip height at the instant this header
+    //! was first added to the index. -1 means unknown (disk load / restart).
+    //! Never serialized. This is the ONE fork-honesty signal an attacker
+    //! cannot forge after the fact: an honest live competing chain is seen
+    //! block-by-block while our tip is near each block's height
+    //! (nActiveTipHeightAtFirstSeen ~= nHeight), whereas any post-hoc reveal
+    //! (flash OR paced) is first seen when our tip is already at the
+    //! pre-attack height (>> the low suffix blocks' heights). Used only by
+    //! the LOCAL -deepforkautoresolve policy; consensus/validity never read
+    //! it. Unknown => policy fails safe to PARK.
+    int32_t nActiveTipHeightAtFirstSeen{-1};
 
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
@@ -476,6 +497,33 @@ inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 6;
                                              const CBlockIndex& candidate,
                                              unsigned int unauth_allowance_blocks = TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS);
 
+/** Download / getheaders locator ranking: most nChainWork, then highest
+ *  height, then hash. This is not fork choice. ConnectTip still fully
+ *  validates every body. PreferTrustAdjustedHeader's 6-block unauth cap
+ *  left m_best_header on the connected tip while a 944-deep headers-only
+ *  suffix sat in the index (<node> 0.34.5: headers==blocks, lockstep). */
+[[nodiscard]] inline bool PreferMostWorkHeader(const CBlockIndex& current,
+                                               const CBlockIndex& candidate)
+{
+    if (candidate.nStatus & BLOCK_FAILED_MASK) return false;
+    if (current.nChainWork != candidate.nChainWork) {
+        return current.nChainWork < candidate.nChainWork;
+    }
+    if (current.nHeight != candidate.nHeight) {
+        return current.nHeight < candidate.nHeight;
+    }
+    return candidate.GetBlockHash() < current.GetBlockHash();
+}
+
+/** Compile-time constant. Bump only in the release whose validation
+ *  actually changed. Missing stored epoch is 0 (every 0.34.0–0.34.4
+ *  datadir). Never derived from chain state, never RPC-settable.
+ *  0.34.5 is epoch 1: clear non-manual FAILED marks, re-run
+ *  CheckBlockHeader/ContextualCheckBlockHeader and (when HAVE_DATA)
+ *  CheckBlock/ContextualCheckBlock, remake genuine invalids, then
+ *  persist the new epoch in the same block-tree batch. */
+inline constexpr uint32_t BLOCK_VALIDATION_EPOCH = 1;
+
 /** After an ancestor's authenticated work changes, re-derive
  *  nAuthenticatedChainWork for every known descendant in parent-first order.
  *  Header-only children contribute zero authenticated proof but must inherit
@@ -691,18 +739,46 @@ LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_com
                                                      const CChain* active_chain);
 
 /**
+ * Keep last_common at a heavier competing-fork LCA only while that LCA is
+ * still near the connected tip (lost-twin / short reorg; live 2026-08-28
+ * Δ≈18). A deep HEADER_ONLY tower (rtx6000 2026-08-29: last_common=199312,
+ * tip=199394, Δ=82, m_best_header=199801) must snap last_common onto the
+ * tip so FindNextBlocks does not fill the download window with competing
+ * twins of bodies we already have. Fetch only; ExactReplay before ConnectTip
+ * is unchanged.
+ */
+inline constexpr int LAST_COMMON_KEEP_HEAVIER_FORK_BELOW{24};
+
+[[nodiscard]] inline bool LastCommonKeepHeavierCompetingFork(
+    bool heavier_competing,
+    int32_t tip_height,
+    int32_t last_common_height)
+{
+    if (!heavier_competing) return false;
+    if (last_common_height < 0 || tip_height < last_common_height) return false;
+    return (tip_height - last_common_height) <= LAST_COMMON_KEEP_HEAVIER_FORK_BELOW;
+}
+
+/**
  * 0.34.1 F3: if last_common sits strictly behind the connected tip, snap it
  * to the tip so FindNextBlocksToDownload cannot pin GETDATA on a same-height
  * competitor forever (live: last_common=199299, tip=199300,
  * lowest_missing=twin of the active tip).
  *
- * A hole that is not a descendant of `tip` is dropped. Descendants of the
- * connected tip (the way forward) are re-derived from `tip`.
+ * A hole that is not a descendant of `tip` is dropped, except a strictly
+ * heavier competing fork whose LCA is still within
+ * LAST_COMMON_KEEP_HEAVIER_FORK_BELOW of the tip (live 2026-08-28: hole
+ * 199304 vs tip 199312). A long withdrawn HEADER_ONLY tower must not win
+ * this exception (rtx6000: last_common sat at 199312 while tip was 199394,
+ * select=already_at_peer_best / no useful GETDATA, block_recv=0).
+ * Descendants of the connected tip (the way forward) are re-derived from
+ * `tip`.
  */
 LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
                                                          const CBlockIndex* tip,
                                                          const CBlockIndex* best_known,
-                                                         const CChain* active_chain);
+                                                         const CChain* active_chain,
+                                                         bool acquisition_escape = false);
 
 /** Get a locator for a block index entry. */
 CBlockLocator GetLocator(const CBlockIndex* index);

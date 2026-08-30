@@ -447,7 +447,7 @@ RPCHelpMan getbalances()
                 {RPCResult::Type::OBJ, "mine", "balances from outputs that the wallet can sign",
                 {
                     {RPCResult::Type::STR_AMOUNT, "trusted", "trusted balance (outputs created by the wallet or confirmed outputs)"},
-                    {RPCResult::Type::STR_AMOUNT, "settlement_safe", "trusted balance with at least wallet_reorg_safety_depth verified confirmations and no active reorg settlement hold"},
+                    {RPCResult::Type::STR_AMOUNT, "settlement_safe", "trusted balance with at least wallet_reorg_safety_depth verified confirmations, no active reorg settlement hold, and chain_stale=false"},
                     {RPCResult::Type::STR_AMOUNT, "untrusted_pending", "untrusted pending balance (outputs created by others that are in the mempool)"},
                     {RPCResult::Type::STR_AMOUNT, "immature", "balance from immature coinbase outputs"},
                     {RPCResult::Type::STR_AMOUNT, "used", /*optional=*/true, "(only present if avoid_reuse is set) balance from coins sent to addresses that were previously spent from (potentially privacy violating)"},
@@ -455,7 +455,7 @@ RPCHelpMan getbalances()
                 {RPCResult::Type::OBJ, "watchonly", /*optional=*/true, "watchonly balances (not present if wallet does not watch anything)",
                 {
                     {RPCResult::Type::STR_AMOUNT, "trusted", "trusted balance (outputs created by the wallet or confirmed outputs)"},
-                    {RPCResult::Type::STR_AMOUNT, "settlement_safe", "trusted balance with at least wallet_reorg_safety_depth verified confirmations and no active reorg settlement hold"},
+                    {RPCResult::Type::STR_AMOUNT, "settlement_safe", "trusted balance with at least wallet_reorg_safety_depth verified confirmations, no active reorg settlement hold, and chain_stale=false"},
                     {RPCResult::Type::STR_AMOUNT, "untrusted_pending", "untrusted pending balance (outputs created by others that are in the mempool)"},
                     {RPCResult::Type::STR_AMOUNT, "immature", "balance from immature coinbase outputs"},
                 }},
@@ -467,6 +467,9 @@ RPCHelpMan getbalances()
                 {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_blocks", "Blocks remaining before the current reorg settlement hold expires"},
                 {RPCResult::Type::NUM_TIME, "settlement_reorg_hold_until_time", "Unix timestamp at or after which the current reorg settlement hold expires, or -1 if no hold has been observed"},
                 {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_seconds", "Seconds remaining before the current reorg settlement hold expires"},
+                {RPCResult::Type::BOOL, "chain_stale", "True when this wallet's node is frozen behind a known-heavier or much-longer header chain. Do not credit deposits from this view until false"},
+                {RPCResult::Type::NUM, "behind_best_header", "max(0, followed headers - connected blocks)"},
+                {RPCResult::Type::BOOL, "competing_heavier_header", "True when the followed header has more chainwork than the connected tip and is not on the same chain"},
                 RESULT_LAST_PROCESSED_BLOCK,
             }
             },
@@ -489,11 +492,12 @@ RPCHelpMan getbalances()
     const unsigned int reorg_safety_depth = wallet.GetReorgSafetyDepth();
     const auto settlement_bal = GetBalance(wallet, reorg_safety_depth);
     const bool reorg_hold_active = wallet.IsReorgSettlementHoldActive();
+    const bool settlement_held = wallet.IsSettlementReportingHeld();
     UniValue balances{UniValue::VOBJ};
     {
         UniValue balances_mine{UniValue::VOBJ};
         balances_mine.pushKV("trusted", ValueFromAmount(bal.m_mine_trusted));
-        balances_mine.pushKV("settlement_safe", ValueFromAmount(reorg_hold_active ? 0 : settlement_bal.m_mine_trusted));
+        balances_mine.pushKV("settlement_safe", ValueFromAmount(settlement_held ? 0 : settlement_bal.m_mine_trusted));
         balances_mine.pushKV("untrusted_pending", ValueFromAmount(bal.m_mine_untrusted_pending));
         balances_mine.pushKV("immature", ValueFromAmount(bal.m_mine_immature));
         if (wallet.IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE)) {
@@ -508,7 +512,7 @@ RPCHelpMan getbalances()
     if (spk_man && spk_man->HaveWatchOnly()) {
         UniValue balances_watchonly{UniValue::VOBJ};
         balances_watchonly.pushKV("trusted", ValueFromAmount(bal.m_watchonly_trusted));
-        balances_watchonly.pushKV("settlement_safe", ValueFromAmount(reorg_hold_active ? 0 : settlement_bal.m_watchonly_trusted));
+        balances_watchonly.pushKV("settlement_safe", ValueFromAmount(settlement_held ? 0 : settlement_bal.m_watchonly_trusted));
         balances_watchonly.pushKV("untrusted_pending", ValueFromAmount(bal.m_watchonly_untrusted_pending));
         balances_watchonly.pushKV("immature", ValueFromAmount(bal.m_watchonly_immature));
         balances.pushKV("watchonly", std::move(balances_watchonly));
@@ -522,6 +526,7 @@ RPCHelpMan getbalances()
     balances.pushKV("settlement_reorg_hold_remaining_blocks", wallet.GetReorgHoldRemainingBlocks());
     balances.pushKV("settlement_reorg_hold_until_time", wallet.GetReorgHoldUntilTime());
     balances.pushKV("settlement_reorg_hold_remaining_seconds", wallet.GetReorgHoldRemainingSeconds());
+    AppendChainStaleness(balances, wallet);
     AppendLastProcessedBlock(balances, wallet);
     return balances;
 },
@@ -573,7 +578,10 @@ RPCHelpMan listunspent()
                             {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_blocks", "Blocks remaining before the current reorg settlement hold expires"},
                             {RPCResult::Type::NUM_TIME, "settlement_reorg_hold_until_time", "Unix timestamp at or after which the current reorg settlement hold expires, or -1 if no hold has been observed"},
                             {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_seconds", "Seconds remaining before the current reorg settlement hold expires"},
-                            {RPCResult::Type::BOOL, "settlement_safe", "Whether this output has enough confirmations for reorg-aware settlement under the wallet policy and no active reorg settlement hold"},
+                            {RPCResult::Type::BOOL, "chain_stale", "True when this wallet's node is frozen behind a known-heavier or much-longer header chain. Do not credit this output until false"},
+                            {RPCResult::Type::NUM, "behind_best_header", "max(0, followed headers - connected blocks)"},
+                            {RPCResult::Type::BOOL, "competing_heavier_header", "True when the followed header has more chainwork than the connected tip and is not on the same chain"},
+                            {RPCResult::Type::BOOL, "settlement_safe", "Whether this output has enough confirmations for reorg-aware settlement under the wallet policy, no active reorg settlement hold, and the node is not chain_stale"},
                             {RPCResult::Type::NUM, "ancestorcount", /*optional=*/true, "The number of in-mempool ancestor transactions, including this one (if transaction is in the mempool)"},
                             {RPCResult::Type::NUM, "ancestorsize", /*optional=*/true, "The virtual transaction size of in-mempool ancestors, including this one (if transaction is in the mempool)"},
                             {RPCResult::Type::STR_AMOUNT, "ancestorfees", /*optional=*/true, "The total fees of in-mempool ancestors (including this one) with fee deltas used for mining priority in " + CURRENCY_ATOM + " (if transaction is in the mempool)"},
@@ -688,6 +696,7 @@ RPCHelpMan listunspent()
     const bool avoid_reuse = pwallet->IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE);
     const unsigned int reorg_safety_depth = pwallet->GetReorgSafetyDepth();
     const bool reorg_hold_active = pwallet->IsReorgSettlementHoldActive();
+    const bool settlement_held = pwallet->IsSettlementReportingHeld();
 
     for (const COutput& out : vecOutputs) {
         CTxDestination address;
@@ -751,7 +760,8 @@ RPCHelpMan listunspent()
         entry.pushKV("settlement_reorg_hold_remaining_blocks", pwallet->GetReorgHoldRemainingBlocks());
         entry.pushKV("settlement_reorg_hold_until_time", pwallet->GetReorgHoldUntilTime());
         entry.pushKV("settlement_reorg_hold_remaining_seconds", pwallet->GetReorgHoldRemainingSeconds());
-        entry.pushKV("settlement_safe", !reorg_hold_active && out.safe && out.depth >= static_cast<int>(reorg_safety_depth));
+        AppendChainStaleness(entry, *pwallet);
+        entry.pushKV("settlement_safe", !settlement_held && out.safe && out.depth >= static_cast<int>(reorg_safety_depth));
         if (!out.depth) {
             size_t ancestor_count, descendant_count, ancestor_size;
             CAmount ancestor_fees;

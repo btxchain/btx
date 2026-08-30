@@ -93,6 +93,18 @@ struct BlockInfo {
     BlockInfo(const uint256& hash LIFETIMEBOUND) : hash(hash) {}
 };
 
+//! Connected-tip vs followed-header stall. A frozen node can see a much longer
+//! valid header chain it has not connected; wallet and RPC callers must not
+//! treat getHeight() as "current" when is_stale is true.
+struct ChainTipStaleness {
+    int blocks{-1};
+    int headers{-1};
+    int behind_best_header{0};
+    bool header_extends_tip{true};
+    bool competing_heavier_header{false};
+    bool is_stale{false};
+};
+
 //! The action to be taken after updating a settings value.
 //! WRITE indicates that the updated value must be written to disk,
 //! while SKIP_WRITE indicates that the change will be kept in memory-only
@@ -137,6 +149,11 @@ public:
     //! chain only contains genesis block, nullopt if chain does not contain
     //! any blocks)
     virtual std::optional<int> getHeight() = 0;
+
+    //! Connected tip vs m_best_header. is_stale means this node can see a
+    //! known-heavier competing header chain, or is more than 6 headers ahead of
+    //! the connected tip. getHeight() is then a stale view, not a live tip.
+    virtual ChainTipStaleness getTipStaleness() = 0;
 
     //! Get block hash. Height must be valid or this function will abort.
     virtual uint256 getBlockHash(int height) = 0;

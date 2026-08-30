@@ -72,3 +72,16 @@ matmul-v4-report-*.json
 # session working artifacts (never commit)
 /scratchpad/
 scratchpad-*.md
+
+# Release/build artifacts must NEVER be committed — ship them as GitHub Release
+# assets, not in the repo tree (a 378MB CUDA tarball once broke every push and
+# exceeds GitHub's 100MB/file limit). See contrib/devtools/check-no-committed-binaries.sh.
+/dist/
+/dist-*/
+*.tar.gz
+*.tgz
+*.tar
+*.tar.xz
+*.zip
+*.dmg
+*.7z

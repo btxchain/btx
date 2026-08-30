@@ -34,11 +34,11 @@ RC_SCHEMA_VERSION = 2
 # and including it in a "maximum required-provider envelope" would set network
 # difficulty from a provider that will contribute a negligible share of hashrate.
 #
-# Metal remains a REQUIRED provider for golden-corpus reproduction, which is a
-# correctness property: CUDA and Metal must derive byte-identical digests. See
-# RCProductionGoldenManifestCohortValid, which still demands both. This constant
-# governs difficulty calibration only. Do not conflate the two gates -- widening
-# this back to include Metal would silently reprice the fork.
+# Metal remains a valid golden-corpus family (CUDA and Metal must derive
+# byte-identical digests when both are present). See
+# RCProductionGoldenManifestCohortValid: a single-family cohort is enough.
+# This constant governs difficulty calibration only. Do not conflate the two
+# gates -- widening this back to include Metal would silently reprice the fork.
 REQUIRED_PROVIDERS = ("cuda",)
 PROVIDER_PREFIXES = {"cuda": "cuda_", "metal": "metal_"}
 CANONICAL_RC_EPISODE_MACS = 141_149_805_215_744

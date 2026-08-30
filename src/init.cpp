@@ -20,6 +20,7 @@
 #include <common/system.h>
 #include <consensus/amount.h>
 #include <cuda/cuda_context.h>
+#include <cuda/matmul_accel.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <dandelion.h>
 #include <consensus/consensus.h>
@@ -416,6 +417,7 @@ void Shutdown(NodeContext& node)
     if (node.peerman && node.validation_signals) node.validation_signals->UnregisterValidationInterface(node.peerman.get());
     // The observer captures &node; drop it before connman is torn down.
     matmul::v4::rc::ClearRCValidatorReadinessLossNotifier();
+    matmul::v4::rc::ClearRCValidatorReadinessRestoredNotifier();
     if (node.connman) node.connman->Stop();
 
     StopTorControl();
@@ -607,7 +609,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), trusted, relay, economic, or spv. trusted performs ordinary block/body/script validation but replaces local Profile-1 ExactReplay with an explicitly configured M-of-N signed archive-validator quorum; it is an operator-trusted mirror, not an independently validating full node. relay is the 0.34 public discovery node: ADDR only, not MatMul authority, not a chain-tip oracle, and it never requests or serves GETMMATTEST. Mainnet allows consensus, trusted, and relay. Economic/SPV still skip MatMul authority and remain forbidden on mainnet.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-discoveryrelayhideaddr=<ip>", "Do not learn, GETADDR, or getnodeaddresses this IP. Repeatable. Use on discovery relays and trusted archives to hide GPU attestor addresses that advertise CONSENSUS without ARCHIVE (serve=0). Relays InitError if -addnode/-connect/-seednode targets a hidden address.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: strict-device on a chain with a finite RC activation height, auto-fallback while RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-allowunverifiablematmulconsensus", "Allow a consensus-mode node to start on a production chain even when no qualified MatMul ExactReplay provider is available (default: 0). The node cannot cross the RC activation boundary until a provider becomes ready. This emergency diagnostic override is unsafe for unattended nodes.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-allowunverifiablematmulconsensus", "Allow consensus-mode catch-up ExactReplay when the local device did not self-qualify (startup canary / production goldens miss). Startup still warns and withholds NODE_MATMUL_CONSENSUS. Mining stays fail-closed. Catch-up still fully ExactReplays every body before ConnectTip, on the available CUDA/Metal GEMM if present, otherwise on CPU. Without this flag a canary miss zeros the GEMM and digest_requests stays 0 (a live consensus-archive node: buffer_pool_uninitialized). Do not treat this as skipping ExactReplay.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted. Mainnet trusted mirrors require at least 2 independent signers and M=2 (a 1-of-1 quorum is ExactReplay skip authority). Pass -allowsinglekeytrustedmirror=1 only as an explicit transition override.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1). On mainnet with -matmulvalidation=trusted, M<2 or N<2 is refused: above the Profile-1 activation height the quorum replaces the MatMul proof-of-work check, so a 1-of-1 quorum makes one key the node's sole proof-of-work authority. Override with -allowsinglekeytrustedmirror=1. On -matmulvalidation=consensus the pin is telemetry and never skips ExactReplay. Configure 2 independent signers with M=2.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowsinglekeytrustedmirror", "Allow a mainnet trusted mirror to start with N<2 or M<2 (default: 0). That topology is a single stolen WIF hijacking ExactReplay skip. Transition override only; logged and alarming. Consensus+pin is never refused for 1-of-1 (the pin is telemetry).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -634,7 +636,12 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-parkdeepreorg", "Per-node deep-reorg parking action override (NON-CONSENSUS). When 1 and -maxreorgdepthpark/profile park depth is set, the node refuses to auto-switch to a branch deeper than that depth and stays on its current tip pending operator action. When 0, it follows the automated fork-choice policy and only alarms/defers by hysteresis. When unset, the selected profile decides (the default emergency profile parks beyond depth 6).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxreorgdepthwarn=<n>", "Warn/alarm when a candidate branch would reorganize more than this many blocks (default: active -reorgprotectionprofile warn depth, standard=3). Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxreorgdepthpark=<n>", "Park/refuse automatic switch when a candidate branch would reorganize more than this many blocks and parking is enabled (default: 6 for emergency; disabled for other built-in profiles). Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-acquisitionstallseconds=<n>", "TEST-ONLY. Override the RB-16 acquisition-escape staleness window in seconds (default: 600). Only changes how long a frozen node waits before the escape valve may arm -- never any validation, ExactReplay, or migration gate. Intended solely to speed up live convergence tests; do NOT use in production. Must be >= 1.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-cadenceburstmax=<n>", strprintf("While this node's validated tip is live, hold ConnectTip/GETDATA so a dumped burst cannot jump more than this many blocks ahead of wall-clock 90s cadence (default: %u on mainnet emergency, 0 elsewhere; 0 disables). Local policy, not consensus. See doc/design/0.34-dump-and-run-reorg.md.", kernel::DEFAULT_CADENCE_BURST_MAX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-deepforkautoresolve", "Default-on LOCAL POLICY (non-consensus): auto-migrate this node to an HONEST deep (> park depth) strictly-heavier competing fork using network observation (seen live block-by-block as our tip climbed, sustained, still fresh, no attestation quorum on either fork), instead of parking and requiring manual invalidateblock. Refuses a flash-revealed or paced dump-and-run and fails safe to PARK + the deep-reorg warning when signals are ambiguous. Fork-choice preference only; block validity and ExactReplay-before-ConnectTip are unchanged. Set 0 to disable (proactive miners who intervene manually). Only effective under the PARK deep-reorg action.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-deepforkautoresolvesustain=<s>", "Deep-fork auto-resolve: minimum wall-clock seconds the competing suffix must have been observed extending before it may be auto-followed (default 1800).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-deepforkautoresolvefreshness=<s>", "Deep-fork auto-resolve: maximum age in seconds of the newest suffix block's first-seen; older means not live, so park (default 180).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-deepforkautoresolveheightslack=<n>", "Deep-fork auto-resolve: max blocks this node's tip may have already led a suffix block's height when the block was first seen and still count it as seen-live (default 2). The unforgeable dump discriminator.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-localfinalitydepth=<n>", "Report practical local finality after this many confirmations in mining/difficulty RPCs (default: active -reorgprotectionprofile finality depth, emergency=72, standard=12). This is not consensus finality. Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-reorghysteresisdepth=<n>", "Require extra work before auto-switching to a late branch that would reorganize more than this many blocks (default: active -reorgprotectionprofile hysteresis depth; built-in profiles use 0, so any depth-1-or-deeper rewrite needs extra work). Set to 0 to protect every active-chain rewrite; use -reorghysteresisworkmargin=0 to disable. Must be >= 0.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-reorghysteresisworkmargin=<n>", "Extra work margin, in current-tip block equivalents, required for shallow reorg hysteresis (default: active -reorgprotectionprofile margin; standard/emergency=2). Set to 0 to disable hysteresis while keeping warnings/optional parking.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1311,14 +1318,19 @@ bool RefuseUnverifiableMatMulConsensusStartup(
     bool strict_device_ready,
     bool allow_unverifiable_startup)
 {
-    const auto& consensus{chainparams.GetConsensus()};
-    const bool production_rc_epoch_configured{
-        consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() &&
-        !consensus.fMatMulRCUseToyDims};
-    return production_rc_epoch_configured &&
-           validation_mode == "consensus" &&
-           !strict_device_ready &&
-           !allow_unverifiable_startup;
+    // 0.34.5: an ordinary operator (CPU tarball, or `git clone && cmake
+    // --build` of a tag whose fingerprint no longer matches the sealed
+    // goldens) must be able to start. Exiting here made a fresh datadir
+    // indistinguishable from a seed/discovery failure, and it made every
+    // source build require a diagnostic flag. Mining and
+    // NODE_MATMUL_CONSENSUS stay fail-closed in the caller; this predicate
+    // no longer aborts startup. Arguments are kept so tests can name the
+    // historical inputs.
+    (void)chainparams;
+    (void)validation_mode;
+    (void)strict_device_ready;
+    (void)allow_unverifiable_startup;
+    return false;
 }
 
 MatMulRCRuntimeReprobeResult RunUnavailableMatMulRCRuntimeReprobe(
@@ -1563,11 +1575,6 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
     const bool has_local_attestation_signer{!signer_text.empty()};
 
-    const bool attestation_config_requested{
-        trusted_mirror_mode || !trusted_signers.empty() ||
-        has_local_attestation_signer ||
-        args.IsArgSet("-matmulattestationserve") ||
-        !attestation_blocklist.empty()};
     const int64_t trusted_threshold{
         args.GetIntArg("-matmultrustedthreshold", 1)};
     const bool open_attestors{
@@ -1576,7 +1583,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         args.GetIntArg("-matmulopenthreshold", 0)};
     const int64_t trusted_wait_ms{
         args.GetIntArg("-matmultrustedwaitms", 60'000)};
-    const bool serve_attestations{
+    bool serve_attestations{
         args.GetBoolArg("-matmulattestationserve",
                         node::matmul_trusted::DefaultMatMulAttestationServe(
                             has_local_attestation_signer,
@@ -1596,6 +1603,19 @@ bool AppInitParameterInteraction(const ArgsManager& args)
          open_attestors)) {
         return InitError(_("Discovery relay mode (-matmulvalidation=relay) is not MatMul authority and must not load a pin, signing key, GETMMATTEST serve, attestation blocklist, or open attestors. Archives follow GPU attestors via the pin; this node only introduces peers. Remove those flags or run -matmulvalidation=trusted / consensus."));
     }
+    // -matmulattestationserve=1 with no pin and no local WIF used to
+    // InitError. systemd Restart=always then crash-loops the node (live:
+    // 653 restarts). Keep fail-closed on serving; do not refuse start.
+    if (serve_attestations && trusted_signers.empty() &&
+        !has_local_attestation_signer) {
+        InitWarning(_("Ignoring -matmulattestationserve=1: serving GETMMATTEST requires at least one -matmultrustedpubkey or a local signer key. Continuing as a normal node with attestation serving disabled."));
+        serve_attestations = false;
+    }
+    const bool attestation_config_requested{
+        trusted_mirror_mode || !trusted_signers.empty() ||
+        has_local_attestation_signer ||
+        serve_attestations ||
+        !attestation_blocklist.empty()};
     if (attestation_config_requested) {
         if (trusted_signers.empty() &&
             !has_local_attestation_signer) {
@@ -1685,7 +1705,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         // Do not DecodeSecret/GetPubKey here. AppInitParameterInteraction
         // runs before bitcoind constructs ECC_Context (bitcoind.cpp).
         // CKey::GetPubKey() calls secp256k1_ec_pubkey_create with a null
-        // secp256k1_context_sign and SIGSEGVs at address 0 — macpro2 0.34
+        // secp256k1_context_sign and SIGSEGVs at address 0 — <node> 0.34
         // CUDA start, 2026-08-27, kernel: segfault at 0 in
         // secp256k1_ec_pubkey_create. Stage the WIF; derive the pubkey in
         // FinalizeConfiguration after ECC_Start. The collocated-signer
@@ -2300,6 +2320,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     // Creating the chainstate manager internally creates a BlockManager, opens
     // the blocks tree db, and wipes existing block files in case of a reindex.
     // The coinsdb is opened at a later point on LoadChainstate.
+    node::matmul_trusted::SetBlockIndexHeightLookup({});
     Assert(!node.chainman); // Was reset above
     try {
         node.chainman = std::make_unique<ChainstateManager>(*Assert(node.shutdown_signal), chainman_opts, blockman_opts);
@@ -2310,6 +2331,16 @@ static ChainstateLoadResult InitAndLoadChainstate(
         return {ChainstateLoadStatus::FAILURE_FATAL, Untranslated(strprintf("Failed to initialize ChainstateManager: %s", e.what()))};
     }
     ChainstateManager& chainman = *node.chainman;
+    node::matmul_trusted::SetBlockIndexHeightLookup(
+        [chainman_ptr = node.chainman.get()](
+            const uint256& hash) -> std::optional<int32_t> {
+            if (chainman_ptr == nullptr) return std::nullopt;
+            LOCK(::cs_main);
+            const CBlockIndex* const index{
+                chainman_ptr->m_blockman.LookupBlockIndex(hash)};
+            if (index == nullptr) return std::nullopt;
+            return index->nHeight;
+        });
     if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
 
     // This is defined and set here instead of inline in validation.h to avoid a hard
@@ -2383,6 +2414,18 @@ static bool InitializeMatMulRCReadinessPostDaemon(
     // Only the final daemon process may hold canary-issued provider
     // capabilities. Never retain a registry assembled before fork().
     matmul::v4::rc::ClearRCExactReplayAlternateProviders();
+    matmul::v4::rc::SetRCExactReplayAllowUnverifiableCatchUp(
+        args.GetBoolArg("-allowunverifiablematmulconsensus", false));
+    if (args.GetBoolArg("-allowunverifiablematmulconsensus", false)) {
+        std::string pool_reason;
+        if (btx::cuda::EnsureMatMulBufferPoolReady(pool_reason)) {
+            LogPrintf("MatMul CUDA digest buffer pool reserved for catch-up ExactReplay (%s)\n",
+                      pool_reason);
+        } else {
+            LogPrintf("MatMul CUDA digest buffer pool not reserved (%s); catch-up ExactReplay still uses the available device GEMM or CPU\n",
+                      pool_reason);
+        }
+    }
     const std::string matmul_validation_mode{
         args.GetArg("-matmulvalidation", "consensus")};
     const auto rc_execution_policy{
@@ -2503,14 +2546,16 @@ static bool InitializeMatMulRCReadinessPostDaemon(
     }
     LogPrintf(
         "MatMul RC execution policy: %s provider=%s ready=%d reason=%s "
-        "workspace_required=%llu workspace_capacity=%llu\n",
+        "workspace_required=%llu workspace_capacity=%llu "
+        "allow_unverifiable_catchup=%d\n",
         matmul::v4::rc::RCExactReplayExecutionPolicyName(
             rc_execution_policy),
         rc_provider, rc_strict_device_ready, rc_resolution_reason,
         static_cast<unsigned long long>(
             rc_workspace_required_bytes),
         static_cast<unsigned long long>(
-            rc_workspace_capacity_bytes));
+            rc_workspace_capacity_bytes),
+        matmul::v4::rc::GetRCExactReplayAllowUnverifiableCatchUp() ? 1 : 0);
 
     // Actionable guidance when this node cannot validate post-activation blocks.
     //
@@ -2529,35 +2574,54 @@ static bool InitializeMatMulRCReadinessPostDaemon(
     if (RefuseUnverifiableMatMulConsensusStartup(
             chainparams, matmul_validation_mode, rc_strict_device_ready,
             args.GetBoolArg("-allowunverifiablematmulconsensus", false))) {
+        // Unreachable after 0.34.5 (predicate always false). Kept so a
+        // future fail-closed restore does not lose the operator-facing text.
         return InitError(strprintf(
             _("MatMul consensus startup refused: no qualified ExactReplay "
               "provider is ready (provider=%s, reason=%s, "
-              "workspace_required=%llu, workspace_capacity=%llu). Provide a "
-              "qualified accelerator, run as a trusted archive "
-              "(-matmulvalidation=trusted with an M-of-N pin), run as a "
-              "discovery relay (-matmulvalidation=relay) if this host only "
-              "introduces peers, or use -allowunverifiablematmulconsensus=1 only "
-              "for supervised diagnostics. Economic/SPV remain forbidden on mainnet."),
+              "workspace_required=%llu, workspace_capacity=%llu)."),
             rc_provider, rc_resolution_reason,
             static_cast<unsigned long long>(rc_workspace_required_bytes),
             static_cast<unsigned long long>(rc_workspace_capacity_bytes)));
     }
     if (unverifiable_consensus) {
-        LogPrintf(
-            "MatMul RC UNSAFE OVERRIDE: this node has NO qualified ExactReplay device "
-            "(provider=%s reason=%s) and is running -matmulvalidation=consensus. "
-            "It will validate normally up to the Epoch-A activation height and "
-            "then STALL one block below it, deferring every MatMul block with "
-            "\"ExactReplay: local execution failed\". Choose one:\n"
-            "  (a) provide a qualified GPU (see the operator runbook; a Profile-1 "
-            "episode needs ~%llu bytes of device workspace), or\n"
-            "  (b) run as a trusted mirror instead: -matmulvalidation=trusted "
-            "plus -matmultrustedpubkey=<signer> (repeat for N signers) and "
-            "-matmultrustedthreshold=<M>, which replaces local ExactReplay with "
-            "a signed archive-validator quorum. A trusted mirror is NOT an "
-            "independently validating full node.\n",
-            rc_provider, rc_resolution_reason,
-            static_cast<unsigned long long>(rc_workspace_required_bytes));
+        const bool allow_unverifiable_catchup{
+            args.GetBoolArg("-allowunverifiablematmulconsensus", false)};
+        if (allow_unverifiable_catchup) {
+            LogPrintf(
+                "MatMul RC DEGRADED START: this node has NO qualified ExactReplay device "
+                "(provider=%s reason=%s) and is running -matmulvalidation=consensus "
+                "with -allowunverifiablematmulconsensus=1. NODE_MATMUL_CONSENSUS is "
+                "withheld and mining stays fail-closed. Catch-up still fully "
+                "ExactReplays every body before ConnectTip, on the available device "
+                "GEMM if present, otherwise on CPU. The CUDA mining digest buffer "
+                "pool is reserved at startup so the chain guard does not freeze on "
+                "buffer_pool_uninitialized before the first mining digest. "
+                "Reseal goldens (doc/release-process.md) to advertise consensus and "
+                "mine. workspace_required=%llu\n",
+                rc_provider, rc_resolution_reason,
+                static_cast<unsigned long long>(rc_workspace_required_bytes));
+        } else {
+            LogPrintf(
+                "MatMul RC DEGRADED START: this node has NO qualified ExactReplay device "
+                "(provider=%s reason=%s) and is running -matmulvalidation=consensus. "
+                "Startup is allowed so a CPU tarball and a source build can join "
+                "discovery and header-sync; NODE_MATMUL_CONSENSUS is withheld. "
+                "The node will validate normally up to the Epoch-A activation height and "
+                "then STALL one block below it, deferring every MatMul block with "
+                "\"ExactReplay: local execution failed\". Choose one:\n"
+                "  (a) provide a qualified GPU (see the operator runbook; a Profile-1 "
+                "episode needs ~%llu bytes of device workspace), or\n"
+                "  (b) run as a trusted mirror instead: -matmulvalidation=trusted "
+                "plus -matmultrustedpubkey=<signer> (repeat for N signers) and "
+                "-matmultrustedthreshold=<M>, which replaces local ExactReplay with "
+                "a signed archive-validator quorum. A trusted mirror is NOT an "
+                "independently validating full node.\n"
+                "  (c) if this is a source build whose fingerprint moved, reseal "
+                "goldens (doc/release-process.md) so mining admission can pass.\n",
+                rc_provider, rc_resolution_reason,
+                static_cast<unsigned long long>(rc_workspace_required_bytes));
+        }
     }
 
     // Publish validation-tier services only after provider readiness is known.
@@ -3722,9 +3786,29 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 "unavailable (last_provider=%s, reason=%s). Disconnected %u "
                 "peer(s) so they re-handshake without stale service flags. "
                 "This node no longer advertises MatMul consensus validation; "
-                "runtime presence will be re-probed on a bounded cooldown, "
-                "but restart with a fully qualified provider to restore it.\n",
+                "a byte-exact auto-recovery will restore it without restart.\n",
                 provider, reason, dropped);
+        };
+
+    const auto restore_validator_readiness =
+        [&node, rc_runtime_monitor_enabled, rc_runtime_ready](
+            const std::string& provider, const std::string& reason) {
+            if (rc_runtime_monitor_enabled) {
+                rc_runtime_ready->store(true, std::memory_order_release);
+            }
+            node.chainman->GetNotifications().warningUnset(
+                kernel::Warning::MATMUL_RC_NEXT_BLOCK_UNVERIFIABLE);
+            if (!node.connman) return;
+            const ServiceFlags restored{static_cast<ServiceFlags>(
+                static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
+                static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE))};
+            node.connman->AddLocalServices(restored);
+            const size_t reconnected{node.connman->DisconnectAllNodes()};
+            LogWarning(
+                "Restored NODE_MATMUL_CONSENSUS and NODE_MATMUL_ATTESTATION_ARCHIVE "
+                "after byte-exact auto-recovery (provider=%s reason=%s); "
+                "reconnected %u peer(s), no restart required.\n",
+                provider, reason, reconnected);
         };
 
     // Start fail-closed with readiness-dependent bits withheld. This removes
@@ -3738,9 +3822,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // readiness loss caused by pre-network import or ActivateBestChain work.
     matmul::v4::rc::SetRCValidatorReadinessLossNotifier(
         withdraw_validator_readiness);
+    matmul::v4::rc::SetRCValidatorReadinessRestoredNotifier(
+        restore_validator_readiness);
 
     if (!node.connman->Start(scheduler, connOptions)) {
         matmul::v4::rc::ClearRCValidatorReadinessLossNotifier();
+        matmul::v4::rc::ClearRCValidatorReadinessRestoredNotifier();
         return false;
     }
 
@@ -3786,12 +3873,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
         // A production-shape canary can be extremely expensive. This monitor
         // therefore does one cheap, non-secret runtime-identity observation per
-        // cooldown and only while unavailable. It never clears process-lifetime
-        // quarantine, mutates provider registration, runs self-qualification,
-        // reruns a golden canary, or republishes service bits. Those operations
-        // require a single atomic recovery protocol that the provider layer does
-        // not currently expose; claiming recovery from presence alone would be
-        // a fail-open consensus bug.
+        // cooldown and only while unavailable. It never clears quarantine,
+        // mutates provider registration, runs self-qualification, or reruns a
+        // golden canary. Quarantine auto-recovers from a byte-exact strict
+        // replay after backoff (RB-1/N9); claiming recovery from runtime
+        // presence alone would be a fail-open consensus bug.
         scheduler.scheduleEvery(
             [rc_runtime_ready, publish_rc_unverifiable_warning] {
                 if (rc_runtime_ready->load(std::memory_order_acquire)) return;

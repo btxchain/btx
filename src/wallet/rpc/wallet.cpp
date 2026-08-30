@@ -59,7 +59,7 @@ static RPCHelpMan getwalletinfo()
                         {RPCResult::Type::NUM, "walletversion", "the wallet version"},
                         {RPCResult::Type::STR, "format", "the database format (bdb or sqlite)"},
                         {RPCResult::Type::STR_AMOUNT, "balance", "DEPRECATED. Identical to getbalances().mine.trusted"},
-                        {RPCResult::Type::STR_AMOUNT, "settlement_safe_balance", "Spendable wallet balance with at least wallet_reorg_safety_depth verified confirmations and no active reorg settlement hold."},
+                        {RPCResult::Type::STR_AMOUNT, "settlement_safe_balance", "Spendable wallet balance with at least wallet_reorg_safety_depth verified confirmations, no active reorg settlement hold, and chain_stale=false."},
                         {RPCResult::Type::NUM, "wallet_reorg_safety_depth", "Confirmations required before wallet RPCs report a transaction or balance as settlement-safe."},
                         {RPCResult::Type::NUM, "wallet_reorg_hold_blocks", "Blocks after a reorg before wallet RPCs resume settlement-safe reporting."},
                         {RPCResult::Type::NUM, "wallet_reorg_hold_seconds", "Seconds after a reorg before wallet RPCs resume settlement-safe reporting."},
@@ -68,6 +68,9 @@ static RPCHelpMan getwalletinfo()
                         {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_blocks", "Blocks remaining before the current reorg settlement hold expires."},
                         {RPCResult::Type::NUM_TIME, "settlement_reorg_hold_until_time", "Unix timestamp at or after which the current reorg settlement hold expires, or -1 if no hold has been observed."},
                         {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_seconds", "Seconds remaining before the current reorg settlement hold expires."},
+                        {RPCResult::Type::BOOL, "chain_stale", "True when this wallet's node is frozen behind a known-heavier or much-longer header chain. Do not credit deposits from this view until false."},
+                        {RPCResult::Type::NUM, "behind_best_header", "max(0, followed headers - connected blocks)."},
+                        {RPCResult::Type::BOOL, "competing_heavier_header", "True when the followed header has more chainwork than the connected tip and is not on the same chain."},
                         {RPCResult::Type::STR_HEX, "last_reorg_disconnected_block", /*optional=*/true, "Most recent disconnected block hash that activated the wallet reorg hold."},
                         {RPCResult::Type::NUM, "last_reorg_disconnected_height", /*optional=*/true, "Height of the most recent disconnected block that activated the wallet reorg hold."},
                         {RPCResult::Type::STR_AMOUNT, "unconfirmed_balance", "DEPRECATED. Identical to getbalances().mine.untrusted_pending"},
@@ -117,11 +120,12 @@ static RPCHelpMan getwalletinfo()
     const unsigned int reorg_safety_depth = pwallet->GetReorgSafetyDepth();
     const auto settlement_bal = GetBalance(*pwallet, reorg_safety_depth);
     const bool reorg_hold_active = pwallet->IsReorgSettlementHoldActive();
+    const bool settlement_held = pwallet->IsSettlementReportingHeld();
     obj.pushKV("walletname", pwallet->GetName());
     obj.pushKV("walletversion", pwallet->GetVersion());
     obj.pushKV("format", pwallet->GetDatabase().Format());
     obj.pushKV("balance", ValueFromAmount(bal.m_mine_trusted));
-    obj.pushKV("settlement_safe_balance", ValueFromAmount(reorg_hold_active ? 0 : settlement_bal.m_mine_trusted));
+    obj.pushKV("settlement_safe_balance", ValueFromAmount(settlement_held ? 0 : settlement_bal.m_mine_trusted));
     obj.pushKV("wallet_reorg_safety_depth", static_cast<int64_t>(reorg_safety_depth));
     obj.pushKV("wallet_reorg_hold_blocks", static_cast<int64_t>(pwallet->GetReorgHoldBlocks()));
     obj.pushKV("wallet_reorg_hold_seconds", static_cast<int64_t>(pwallet->GetReorgHoldSeconds()));
@@ -130,6 +134,7 @@ static RPCHelpMan getwalletinfo()
     obj.pushKV("settlement_reorg_hold_remaining_blocks", pwallet->GetReorgHoldRemainingBlocks());
     obj.pushKV("settlement_reorg_hold_until_time", pwallet->GetReorgHoldUntilTime());
     obj.pushKV("settlement_reorg_hold_remaining_seconds", pwallet->GetReorgHoldRemainingSeconds());
+    AppendChainStaleness(obj, *pwallet);
     if (pwallet->GetLastReorgDisconnectedHeight() >= 0) {
         obj.pushKV("last_reorg_disconnected_block", pwallet->GetLastReorgDisconnectedBlock().GetHex());
         obj.pushKV("last_reorg_disconnected_height", pwallet->GetLastReorgDisconnectedHeight());

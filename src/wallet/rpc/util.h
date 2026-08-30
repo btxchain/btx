@@ -64,6 +64,7 @@ std::string ValidateWalletBundleArchiveRelativePath(const std::string& relative_
 void EnsureUniqueWalletBundleArchiveRelativePaths(const std::vector<std::string>& relative_paths);
 void EnsureNoHistoricalShieldedPartialRescan(const CWallet& wallet, int start_height);
 void AppendLastProcessedBlock(UniValue& entry, const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+void AppendChainStaleness(UniValue& entry, const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 } //  namespace wallet
 
 #endif // BITCOIN_WALLET_RPC_UTIL_H

@@ -104,6 +104,7 @@ BOOST_AUTO_TEST_CASE(emergency_park_closes_dump_and_run_reorg)
     BOOST_CHECK(!DeepReorgShouldPark(archive.action, archive.park_depth, 151, false));
 
     using kernel::WorkBasedReorgRecoveryMayArm;
+    using kernel::ShallowHeaderWorkMayLeadAutoRecovery;
     // Shallow races may arm work-based unpark. Parked depth must not:
     // dump-and-run that ExactReplays itself would auto-connect.
     BOOST_CHECK(WorkBasedReorgRecoveryMayArm(/*reorg_depth=*/1, /*park_depth=*/6));
@@ -115,6 +116,11 @@ BOOST_AUTO_TEST_CASE(emergency_park_closes_dump_and_run_reorg)
     BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(151, REORG_PROTECTION_DEPTH_DISABLED));
     BOOST_CHECK(DeepReorgShouldPark(DeepReorgAction::PARK, 6, 7, false));
     BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(7, 6));
+    BOOST_CHECK(ShallowHeaderWorkMayLeadAutoRecovery(1, 6, true));
+    BOOST_CHECK(ShallowHeaderWorkMayLeadAutoRecovery(6, 6, true));
+    BOOST_CHECK(!ShallowHeaderWorkMayLeadAutoRecovery(6, 6, false));
+    BOOST_CHECK(!ShallowHeaderWorkMayLeadAutoRecovery(7, 6, true));
+    BOOST_CHECK(!ShallowHeaderWorkMayLeadAutoRecovery(151, 6, true));
 }
 
 BOOST_AUTO_TEST_CASE(cadence_hold_closes_live_tip_extension_burst)
@@ -206,6 +212,13 @@ BOOST_AUTO_TEST_CASE(cadence_hold_closes_live_tip_extension_burst)
     BOOST_CHECK(!CadenceHoldSnapshotCatchUpDisarms(
         /*from_snapshot=*/false, true, true));
     BOOST_CHECK(!CadenceHoldSnapshotCatchUpDisarms(true, /*extends_tip=*/false, true));
+
+    using kernel::CadenceHoldFollowedCatchUpDisarms;
+    BOOST_CHECK(CadenceHoldFollowedCatchUpDisarms(
+        /*extends_tip=*/true, /*followed_ahead=*/423));
+    BOOST_CHECK(CadenceHoldFollowedCatchUpDisarms(true, 100));
+    BOOST_CHECK(!CadenceHoldFollowedCatchUpDisarms(true, 99));
+    BOOST_CHECK(!CadenceHoldFollowedCatchUpDisarms(/*extends_tip=*/false, 423));
 
     // PARK owns reorg_depth > 6. Shallow-fork dump (fork_depth <= 6) still holds.
     BOOST_CHECK(!CadenceHoldShouldHold(burst, live_window, spacing, tip_t, tip_t, tip_h,
@@ -350,6 +363,22 @@ BOOST_AUTO_TEST_CASE(consensus_without_signer_does_not_park_bypass)
         false, true, true, true));
     BOOST_CHECK(!ConsensusMinerMayFetchCompetingShortReorg(
         false, false, true, true));
+    using node::matmul_trusted::ConsensusMinerMayFetchCompetingHeavierFork;
+    BOOST_CHECK(ConsensusMinerMayFetchCompetingHeavierFork(false, false, true));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(true, false, true));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(false, true, true));
+    using node::matmul_trusted::ConsensusMinerMayFollowHeavierDisconnectedHeader;
+    BOOST_CHECK(ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, false, false, true, true));
+    BOOST_CHECK(ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, /*extends_tip=*/true, false, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        true, false, false, false, true, true));
+    using node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork;
+    BOOST_CHECK(ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        false, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        false, false, true, false));
     using node::matmul_trusted::ExactReplayGpuThrottleRequiresPin;
     using node::matmul_trusted::ExactReplayAdmissionThrottleApplies;
     using node::matmul_trusted::MatMulSpeculativeRcPendingLimit;
@@ -495,6 +524,43 @@ BOOST_AUTO_TEST_CASE(ibd_age_only_stale_tip_still_announces_and_may_mine)
     BOOST_CHECK(!MayFastRelayNewTipChild(/*extends=*/false, false, true, true));
     BOOST_CHECK(!MayFastRelayNewTipChild(true, /*loading=*/true, true, true));
     BOOST_CHECK(!MayFastRelayNewTipChild(true, false, true, /*work=*/false));
+}
+
+BOOST_AUTO_TEST_CASE(deep_fork_auto_resolve_predicates)
+{
+    using kernel::DeepForkAutoResolveDepthInScope;
+    using kernel::DeepForkAutoResolveBlockSeenLive;
+    using kernel::DeepForkAutoResolveSustained;
+    using kernel::DeepReorgAction;
+
+    // In scope only when enabled, PARK, and reorg_depth > park_depth.
+    BOOST_CHECK(DeepForkAutoResolveDepthInScope(
+        /*enabled=*/true, DeepReorgAction::PARK, /*park_depth=*/6, /*depth=*/53));
+    BOOST_CHECK(!DeepForkAutoResolveDepthInScope(
+        false, DeepReorgAction::PARK, 6, 53));
+    BOOST_CHECK(!DeepForkAutoResolveDepthInScope(
+        true, DeepReorgAction::WARN, 6, 53));
+    // Shallow (<= park_depth) is the work-based recovery window, NOT this.
+    BOOST_CHECK(!DeepForkAutoResolveDepthInScope(
+        true, DeepReorgAction::PARK, 6, 6));
+
+    // Seen-live: honest block seen while our tip was near its height passes;
+    // a dump block first seen when our tip was already far ahead fails; an
+    // unknown (-1, restart) fails safe.
+    BOOST_CHECK(DeepForkAutoResolveBlockSeenLive(
+        /*tip_height_at_first_seen=*/101, /*block_height=*/100, /*slack=*/2));
+    BOOST_CHECK(DeepForkAutoResolveBlockSeenLive(100, 100, 2));
+    BOOST_CHECK(!DeepForkAutoResolveBlockSeenLive(
+        /*tip_at_first_seen=*/153, /*block_height=*/100, 2)); // dump: tip far ahead
+    BOOST_CHECK(!DeepForkAutoResolveBlockSeenLive(
+        /*unknown=*/-1, 100, 2));
+
+    // Sustained: needs a real span and a fresh newest first-seen; unknowns park.
+    BOOST_CHECK(DeepForkAutoResolveSustained(
+        /*span=*/2000, /*now_minus_last_seen=*/60, /*sustain=*/1800, /*fresh=*/180));
+    BOOST_CHECK(!DeepForkAutoResolveSustained(1000, 60, 1800, 180)); // too short
+    BOOST_CHECK(!DeepForkAutoResolveSustained(2000, 600, 1800, 180)); // stale
+    BOOST_CHECK(!DeepForkAutoResolveSustained(-1, 60, 1800, 180));    // unknown
 }
 
 BOOST_AUTO_TEST_SUITE_END()

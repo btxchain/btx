@@ -1,3 +1,9 @@
+# WITHDRAWN — do not load this snapshot
+
+`base_hash` `ff80e6299692a63345674a23b0638658c737529d12e78fc7f42afb3812afc9eb`
+is on the withdrawn 0.34.1 branch, not the majority chain (issue 127).
+0.34.5 removes this compiled assumeutxo entry. Historical dump notes follow.
+
 # Mainnet assumeutxo refresh — height 199'300
 
 Generated 2026-08-27 from a synced archival mainnet node (`prune=0`,
@@ -33,14 +39,11 @@ stored in git. It is published as a GitHub prerelease asset.
 
 ## Operator load
 
-Requires **v0.34.1** (or later) so this height is in `m_assumeutxo_data`.
-v0.34.0 cannot load it.
+**Do not run this.** 0.34.5 rejects this hash. Historical command only:
 
 ```bash
-curl -L -o snapshot.dat https://github.com/btxchain/btx/releases/download/assumeutxo-199300/snapshot.dat
-sha256sum -c SHA256SUMS
-btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
-btx-cli getchainstates
+# WITHDRAWN — this strands the node on the 0.34.1 branch (issue 127)
+# curl -L -o snapshot.dat https://github.com/btxchain/btx/releases/download/assumeutxo-199300/snapshot.dat
 ```
 
 Do not use this file with `loadtxoutsetattested`. Attested snapshots remain

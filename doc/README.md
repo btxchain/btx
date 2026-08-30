@@ -49,6 +49,7 @@ service-profile, or release-publication workflow:
 - [BTX Download-and-Go Guide](btx-download-and-go.md)
 - [Linux Release Build Variants](linux-release-builds.md)
 - [Assumeutxo Usage](assumeutxo.md)
+- [0.34.5 release notes — automatic convergence / self-heal](release-notes/release-notes-0.34.5.md)
 - [BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.md)
 - [BTX GitHub Release Automation](btx-github-release-automation.md)
 - [Release Process](release-process.md)

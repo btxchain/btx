@@ -246,12 +246,21 @@ BOOST_AUTO_TEST_CASE(closed_shielded_snapshot_pin_matches_mainnet_assumeutxo)
     ArgsManager args;
     const auto params = CreateChainParams(args, ChainType::MAIN);
     BOOST_REQUIRE(params);
-    const auto au = params->AssumeutxoForHeight(199'300);
+    // 0.34.5 withdrew the 199300 assumeutxo entry. 201500 carries the same
+    // closed-pool shielded commitment as 191266 (94343b76…).
+    const auto au = params->AssumeutxoForHeight(201'500);
     BOOST_REQUIRE(au.has_value());
     BOOST_CHECK_EQUAL(
         au->shielded_state_commitment.GetHex(),
         "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+    BOOST_REQUIRE(params->AssumeutxoForHeight(191'266));
+    BOOST_CHECK_EQUAL(
+        params->AssumeutxoForHeight(191'266)->shielded_state_commitment.GetHex(),
+        au->shielded_state_commitment.GetHex());
     BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedPoolDisableHeight, 199'300);
+    BOOST_REQUIRE(params->AssumeutxoForHeight(191'266));
+    BOOST_CHECK(!params->AssumeutxoForHeight(199'299));
+    BOOST_CHECK(!params->AssumeutxoForHeight(199'300));
 }
 
 BOOST_AUTO_TEST_CASE(non_mainnet_shielded_pool_disable_height_is_unset)
@@ -845,8 +854,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         190'467,
         190'507,
         191'266,
-        199'299,
-        199'300,
+        201'500,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -880,10 +888,74 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(190'467));
     BOOST_CHECK(params->AssumeutxoForHeight(190'507));
     BOOST_CHECK(params->AssumeutxoForHeight(191'266));
-    BOOST_CHECK(params->AssumeutxoForHeight(199'299));
-    BOOST_CHECK(params->AssumeutxoForHeight(199'300));
+    BOOST_CHECK(params->AssumeutxoForHeight(201'500));
+    BOOST_CHECK(!params->AssumeutxoForHeight(199'299));
+    BOOST_CHECK(!params->AssumeutxoForHeight(199'300));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
+}
+
+BOOST_AUTO_TEST_CASE(assumeutxo_bases_must_sit_on_checkpoint_lineage)
+{
+    // Class defect (issue 127): a compiled assumeutxo base that is not an
+    // ancestor of the checkpoint lineage can be shipped silently. The
+    // 199300 pin ff80e629 sat on the withdrawn 0.34.1 branch; majority
+    // 199300 is 029041a1. Last common block is 199298 (be78622c).
+    //
+    // Gate: no assumeutxo at/after the first divergent height (199299)
+    // unless that height is also a checkpoint with the same hash. Also
+    // forbid the known withdrawn hashes, and require any assumeutxo at a
+    // checkpoint height to match that checkpoint. 201500 is the majority
+    // replacement for withdrawn 199300 and is checkpointed to the same hash.
+    ArgsManager args;
+    const auto params = CreateChainParams(args, ChainType::MAIN);
+    BOOST_REQUIRE(params);
+    const auto& checkpoints = params->Checkpoints().mapCheckpoints;
+    BOOST_REQUIRE(!checkpoints.empty());
+    BOOST_CHECK_EQUAL(checkpoints.rbegin()->first, 201500);
+    BOOST_CHECK_EQUAL(
+        checkpoints.at(186000).GetHex(),
+        "0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129");
+    BOOST_CHECK_EQUAL(
+        checkpoints.at(201500).GetHex(),
+        "3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c");
+    BOOST_CHECK_EQUAL(
+        params->GetConsensus().defaultAssumeValid.GetHex(),
+        "0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129");
+    BOOST_CHECK_EQUAL(
+        params->GetConsensus().nMinimumChainWork.GetHex(),
+        "00000000000000000000000000000000000000000000000000030b4f85e66df7");
+
+    const auto withdrawn_199300 = uint256::FromHex(
+        "ff80e6299692a63345674a23b0638658c737529d12e78fc7f42afb3812afc9eb");
+    const auto withdrawn_199299 = uint256::FromHex(
+        "f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5");
+    BOOST_REQUIRE(withdrawn_199300);
+    BOOST_REQUIRE(withdrawn_199299);
+    BOOST_CHECK(!params->AssumeutxoForBlockhash(*withdrawn_199300));
+    BOOST_CHECK(!params->AssumeutxoForBlockhash(*withdrawn_199299));
+    BOOST_CHECK_EQUAL(params->HighestAssumeutxoHeight(), 201500);
+    const auto au_201500 = params->AssumeutxoForHeight(201500);
+    BOOST_REQUIRE(au_201500);
+    BOOST_CHECK_EQUAL(
+        au_201500->blockhash.GetHex(),
+        checkpoints.at(201500).GetHex());
+
+    constexpr int first_divergent_height{199299};
+    for (int height : params->GetAvailableSnapshotHeights()) {
+        const auto au = params->AssumeutxoForHeight(height);
+        BOOST_REQUIRE(au);
+        const auto ckpt = checkpoints.find(height);
+        if (ckpt != checkpoints.end()) {
+            BOOST_CHECK_EQUAL(au->blockhash.GetHex(), ckpt->second.GetHex());
+        }
+        if (height >= first_divergent_height) {
+            BOOST_REQUIRE_MESSAGE(
+                ckpt != checkpoints.end() && au->blockhash == ckpt->second,
+                "assumeutxo at/after the 199299 majority/withdrawn-0.34.1 split "
+                "must be a matching checkpoint (issue 127)");
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(block_malleation)

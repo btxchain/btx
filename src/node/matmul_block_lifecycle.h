@@ -39,6 +39,17 @@ class MatMulBlockLifecycle
 public:
     using Clock = std::chrono::steady_clock;
 
+    /**
+     * Causal events that may make an inactive retained body immediately
+     * admissible. Each event wakes a retained generation at most once so a
+     * level-triggered peer scan cannot continuously erase a retry cooldown
+     * (mainnet-201633 1Hz re-admission wedge, dev a16476cf).
+     */
+    enum class RetryWakeReason : uint8_t {
+        RECOVERY_ROOT = 0,
+        TRUSTED_AUTHORITY = 1,
+    };
+
     enum class State : uint8_t {
         BODY_RETAINED,
         ADMISSION_PENDING,
@@ -69,6 +80,14 @@ public:
         //! Non-terminal deferrals since this body was last freshly retained.
         //! RefreshRetry increments; TerminalRequeue resets.
         uint32_t deferral_count{0};
+        //! RetryWakeReason bits already consumed by this retained generation.
+        //! Terminal requeue and repeated delivery preserve these bits so a
+        //! level-triggered peer scan wakes each reason at most once.
+        uint8_t retry_wake_mask{0};
+        //! A newly budget-deferred body may bypass its first retry deadline
+        //! when the verifier is otherwise idle. The bypass is consumed by
+        //! NextRetry so idle catch-up cannot defeat every later cooldown.
+        bool idle_retry_bypass_available{false};
     };
 
     struct Token {
@@ -116,9 +135,15 @@ public:
     MatMulBlockLifecycle(size_t max_retained_count,
                          size_t max_retained_bytes,
                          Clock::duration retained_max_age,
-                         Clock::duration async_stale_after)
+                         Clock::duration async_stale_after,
+                         size_t max_retained_count_per_source =
+                             std::numeric_limits<size_t>::max(),
+                         size_t max_retained_bytes_per_source =
+                             std::numeric_limits<size_t>::max())
         : m_max_retained_count{max_retained_count},
           m_max_retained_bytes{max_retained_bytes},
+          m_max_retained_count_per_source{max_retained_count_per_source},
+          m_max_retained_bytes_per_source{max_retained_bytes_per_source},
           m_retained_max_age{retained_max_age},
           m_async_stale_after{async_stale_after}
     {
@@ -166,11 +191,21 @@ public:
             }
             it->second.pending_lease.reset();
             it->second.cancelled.reset();
-            if (it->second.body) {
+            // A block that connected while this replay was in flight
+            // (terminal_on_connect) must never be flipped back to a retryable
+            // body by stale expiry -- that reopens the re-admission the deferred
+            // erase closed. Release its accounting and erase, exactly as the
+            // worker-acknowledged Retry()/Terminal() would.
+            if (it->second.body && !it->second.terminal_on_connect) {
                 it->second.state = State::TRANSIENT_FAILURE;
                 it->second.updated_at = now;
                 ++it;
             } else {
+                if (it->second.body) {
+                    AccountSourceRemove(it->second.body->source_netgroup,
+                                        it->second.body->bytes);
+                    m_retained_bytes -= it->second.body->bytes;
+                }
                 it = m_entries.erase(it);
             }
         }
@@ -185,6 +220,7 @@ public:
                 Clock::time_point now = Clock::now())
     {
         if (!body.block || body.bytes > m_max_retained_bytes) return false;
+        if (body.bytes > m_max_retained_bytes_per_source) return false;
         std::lock_guard<std::mutex> lock(m_mutex);
         PruneExpiredRetained(now);
 
@@ -194,27 +230,111 @@ public:
                 ? existing->second.body->bytes
                 : 0};
         const size_t old_count{old_bytes != 0 ? 1U : 0U};
+        const uint64_t src{body.source_netgroup};
+        const bool replacing_same_source{
+            existing != m_entries.end() && existing->second.body &&
+            existing->second.body->source_netgroup == src};
+        const size_t old_src_count{replacing_same_source ? 1U : 0U};
+        const size_t old_src_bytes{replacing_same_source ? old_bytes : 0U};
+        while (SourceCount(src) - old_src_count + 1 >
+                   m_max_retained_count_per_source ||
+               SourceBytes(src) - old_src_bytes + body.bytes >
+                   m_max_retained_bytes_per_source) {
+            auto victim{OldestEvictableForSource(hash, src)};
+            if (victim == m_entries.end()) return false;
+            RecordEvictionTombstone(victim, now);
+            EraseEntry(victim);
+        }
         while (RetainedCount() - old_count + 1 > m_max_retained_count ||
                m_retained_bytes - old_bytes + body.bytes >
                    m_max_retained_bytes) {
             auto victim{OldestEvictable(hash)};
             if (victim == m_entries.end()) return false;
+            RecordEvictionTombstone(victim, now);
             EraseEntry(victim);
         }
 
         auto [it, inserted] = m_entries.try_emplace(hash);
         Entry& entry{it->second};
-        const auto original_stored_at{
-            entry.body ? entry.body->stored_at : now};
-        if (entry.body) m_retained_bytes -= entry.body->bytes;
+        auto original_stored_at{entry.body ? entry.body->stored_at : now};
+        bool idle_retry_bypass_available{
+            entry.body ? entry.body->idle_retry_bypass_available
+                       : body.idle_retry_bypass_available};
+        auto original_deferral_count{
+            entry.body ? entry.body->deferral_count : body.deferral_count};
+        uint8_t original_retry_wake_mask{
+            entry.body ? entry.body->retry_wake_mask : uint8_t{0}};
+        if (!entry.body) {
+            // Fresh insert. If this hash was recently EVICTED under capacity
+            // pressure, its tombstone carries the original freshness so an
+            // evict+re-deliver cannot refresh the non-refreshing capacity TTL,
+            // reset the deferral count below the TerminalRequeue threshold, or
+            // re-grant a consumed idle bypass (cmpl-netdos F1).
+            if (auto ts = m_eviction_tombstones.find(hash);
+                ts != m_eviction_tombstones.end()) {
+                if (now - ts->second.tombstoned_at <= m_retained_max_age) {
+                    original_stored_at = ts->second.stored_at;
+                    original_deferral_count = ts->second.deferral_count;
+                    idle_retry_bypass_available =
+                        ts->second.idle_retry_bypass_available;
+                    // Extend the non-refreshing protection to the wake mask so
+                    // an evict+re-deliver cannot re-arm a consumed wake either
+                    // (audit F3: symmetric with in-place Retain/TerminalRequeue).
+                    original_retry_wake_mask |= ts->second.retry_wake_mask;
+                }
+                m_eviction_tombstones.erase(ts);
+            }
+        }
+        if (entry.body) {
+            AccountSourceRemove(entry.body->source_netgroup, entry.body->bytes);
+            m_retained_bytes -= entry.body->bytes;
+        }
         // Capacity TTL is non-refreshing for a hash: retries or repeated
-        // deliveries cannot pin retained bytes forever.
+        // deliveries (including evict+re-deliver) cannot pin retained bytes.
         body.stored_at = original_stored_at;
+        body.deferral_count = original_deferral_count;
+        // A repeated delivery keeps every wake bit the retained generation
+        // already consumed, so it cannot re-arm a wake to erase a cooldown.
+        body.retry_wake_mask |= original_retry_wake_mask;
+        // A duplicate delivery for the same hash must not restore a bypass
+        // already consumed by the scheduler.
+        body.idle_retry_bypass_available = idle_retry_bypass_available;
         entry.body = std::move(body);
+        AccountSourceAdd(entry.body->source_netgroup, entry.body->bytes);
         m_retained_bytes += entry.body->bytes;
         if (inserted || !IsActive(entry.state)) {
             entry.state = State::BODY_RETAINED;
             entry.updated_at = now;
+        }
+        return true;
+    }
+
+    /**
+     * Make one retained body immediately retryable for a newly satisfied
+     * causal condition, without counting the wake as another deferral.
+     *
+     * Unlike RefreshRetry(hash, 0), repeated calls for the same reason do not
+     * overwrite a cooldown installed by a failed re-admission. A later,
+     * distinct event (for example trusted authority arriving after recovery
+     * selection) may still wake the body once. This is the edge-triggered
+     * replacement for the level-triggered RefreshRetry(0) peer-scan wakes that
+     * produced the mainnet-201633 1Hz re-admission wedge (dev a16476cf).
+     */
+    bool WakeRetryOnce(const uint256& hash, RetryWakeReason reason,
+                       Clock::time_point now = Clock::now())
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it == m_entries.end() || !it->second.body ||
+            IsActive(it->second.state)) {
+            return false;
+        }
+        const uint8_t bit{static_cast<uint8_t>(
+            uint8_t{1} << static_cast<uint8_t>(reason))};
+        if ((it->second.body->retry_wake_mask & bit) != 0) return false;
+        it->second.body->retry_wake_mask |= bit;
+        if (it->second.body->retry_not_before > now) {
+            it->second.body->retry_not_before = now;
         }
         return true;
     }
@@ -233,15 +353,24 @@ public:
     std::optional<std::pair<uint256, RetainedBody>> NextRetry(
         const uint256& preferred_parent,
         Clock::time_point now = Clock::now(),
-        bool ignore_retry_delay = false)
+        bool allow_idle_retry_bypass = false)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         PruneExpiredRetained(now);
         auto selected{m_entries.end()};
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             const Entry& entry{it->second};
+            // Never re-admit a hash whose block already connected while its
+            // replay was in flight; such an entry is awaiting worker-ack erase.
             if (!entry.body || IsActive(entry.state) ||
-                (!ignore_retry_delay && now < entry.body->retry_not_before)) {
+                entry.terminal_on_connect) {
+                continue;
+            }
+            const bool retry_due{now >= entry.body->retry_not_before};
+            const bool may_bypass{
+                allow_idle_retry_bypass &&
+                entry.body->idle_retry_bypass_available};
+            if (!retry_due && !may_bypass) {
                 continue;
             }
             if (entry.body->block->hashPrevBlock == preferred_parent) {
@@ -254,6 +383,9 @@ public:
             }
         }
         if (selected == m_entries.end()) return std::nullopt;
+        if (now < selected->second.body->retry_not_before) {
+            selected->second.body->idle_retry_bypass_available = false;
+        }
         return std::make_pair(selected->first, *selected->second.body);
     }
 
@@ -264,6 +396,7 @@ public:
         const auto it{m_entries.find(hash)};
         if (it == m_entries.end() || !it->second.body) return false;
         it->second.body->retry_not_before = now + delay;
+        it->second.body->idle_retry_bypass_available = false;
         ++it->second.body->deferral_count;
         return true;
     }
@@ -294,12 +427,20 @@ public:
         RetainedBody body{*it->second.body};
         EraseEntry(it);
         body.deferral_count = 0;
-        body.stored_at = now;
+        // Do NOT reset stored_at: the capacity TTL is non-refreshing for a
+        // hash, matching the same-entry Retain() guarantee. Resetting it here
+        // let a repeatedly-deferred (3+ deferrals -> TerminalRequeue) body keep
+        // renewing its freshness and defeat the 45-min PruneExpiredRetained
+        // backstop, pinning retained bytes and skewing oldest-first eviction
+        // against honest bodies (final-lifecycle audit F1). `body` is a copy of
+        // the existing entry, so it already carries the original stored_at.
         body.retry_not_before = now + delay;
+        body.idle_retry_bypass_available = false;
         auto [nit, inserted] = m_entries.try_emplace(hash);
         (void)inserted;
         Entry& entry{nit->second};
         entry.body = std::move(body);
+        AccountSourceAdd(entry.body->source_netgroup, entry.body->bytes);
         m_retained_bytes += entry.body->bytes;
         entry.state = State::BODY_RETAINED;
         entry.updated_at = now;
@@ -378,11 +519,21 @@ public:
         entry->pending_lease.reset();
         entry->cancelled.reset();
         entry->owned_resources.clear();
-        if (!entry->body) {
+        // The worker has acknowledged (released the lease). If the block
+        // connected while this replay was in flight (terminal_on_connect), do
+        // NOT retain it for retry -- the hash is on the active chain; remove it
+        // and release its retained-body accounting.
+        if (!entry->body || entry->terminal_on_connect) {
+            if (entry->body) {
+                AccountSourceRemove(entry->body->source_netgroup,
+                                    entry->body->bytes);
+                m_retained_bytes -= entry->body->bytes;
+            }
             m_entries.erase(token.hash);
             return true;
         }
         entry->body->retry_not_before = now + delay;
+        entry->body->idle_retry_bypass_available = false;
         entry->state = State::TRANSIENT_FAILURE;
         entry->updated_at = now;
         return true;
@@ -457,6 +608,7 @@ public:
             return true;
         }
         it->second.body->retry_not_before = now + delay;
+        it->second.body->idle_retry_bypass_available = false;
         it->second.state = State::TRANSIENT_FAILURE;
         it->second.updated_at = now;
         return true;
@@ -473,6 +625,20 @@ public:
         return it != m_entries.end() && it->second.body.has_value();
     }
 
+    // True if the retained body for `hash` is the followed tip-child / root
+    // (pin_progress). Such a body is the productive catch-up root: when it
+    // verifies it ConnectTips and is removed, so it can never spin. Callers use
+    // this to retry it on a SHORT cadence instead of the ~60s budget-refill,
+    // so it reclaims the single RC slot as soon as a band body frees it
+    // (catch-up F1: without this a migrated node heals at <=1 block/min).
+    bool IsRetainedPinProgress(const uint256& hash) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        return it != m_entries.end() && it->second.body.has_value() &&
+               it->second.body->pin_progress;
+    }
+
     /** Terminal acceptance/invalidity atomically releases every resource. */
     /** Clear only inactive retained state; never erase a live generation. */
     void TerminalRetained(const uint256& hash)
@@ -482,6 +648,38 @@ public:
         if (it != m_entries.end() && !IsActive(it->second.state)) {
             EraseEntry(it);
         }
+    }
+
+    /**
+     * Active-chain connection is terminal for every lifecycle generation.
+     * Cancel live work and release the retained body so a late callback or
+     * retry scan cannot re-admit an already-connected block.
+     */
+    void TerminalConnected(const uint256& hash)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it == m_entries.end()) return;
+        if (IsActive(it->second.state)) {
+            // DEPLOYMENT-BLOCKER fix (PR #132 review, jarekpiot): an active
+            // entry may have a QUEUED or RUNNING full-body replay. EraseEntry
+            // here would AccountSourceRemove / release the lease while the
+            // worker still owns it -- and a RUNNING full-body replay bypasses
+            // the cancel latch via ProtectsBodyReplay, so it keeps executing
+            // against capacity already reported free. Instead: raise the cancel
+            // latch (a header-only QUEUED job skips on dequeue; a full-body
+            // QUEUED or RUNNING replay is ProtectsBodyReplay, so it runs to
+            // completion), flag terminal-on-connect, and let the
+            // worker-acknowledged Terminal()/Retry() erase it exactly once.
+            // Capacity/resources stay owned until then; the connected hash is
+            // never re-admitted (Retry erases instead of retaining).
+            it->second.terminal_on_connect = true;
+            if (it->second.cancelled) {
+                it->second.cancelled->store(true, std::memory_order_relaxed);
+            }
+            return;
+        }
+        EraseEntry(it);
     }
 
     void Terminal(const Token& token)
@@ -514,6 +712,12 @@ public:
         return m_retained_bytes;
     }
 
+    size_t RetainedCountForSourceForTest(uint64_t netgroup) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return SourceCount(netgroup);
+    }
+
 private:
     struct Entry {
         State state{State::BODY_RETAINED};
@@ -523,6 +727,13 @@ private:
         std::shared_ptr<void> pending_lease;
         std::shared_ptr<std::atomic_bool> cancelled;
         std::vector<std::shared_ptr<void>> owned_resources;
+        //! The block for this hash connected while a full-body replay may still
+        //! be queued/running. We must NOT tear the entry down (that releases a
+        //! lease/capacity the running worker still owns and a running replay
+        //! bypasses the cancel latch via ProtectsBodyReplay); instead terminate
+        //! it at the next worker-acknowledged transition (Terminal/Retry) and
+        //! never re-admit the now-connected hash.
+        bool terminal_on_connect{false};
     };
 
     using Map = std::map<uint256, Entry>;
@@ -563,11 +774,13 @@ private:
         it->second.pending_lease.reset();
         it->second.cancelled.reset();
         it->second.owned_resources.clear();
-        if (it->second.body) {
+        // See ExpireStaleAttempts: a terminal_on_connect entry is erased (with
+        // accounting) rather than flipped to a retryable body.
+        if (it->second.body && !it->second.terminal_on_connect) {
             it->second.state = State::TRANSIENT_FAILURE;
             it->second.updated_at = now;
         } else {
-            m_entries.erase(it);
+            EraseEntry(it);
         }
     }
 
@@ -578,6 +791,15 @@ private:
                 now - it->second.body->stored_at > m_retained_max_age) {
                 auto victim{it++};
                 EraseEntry(victim);
+            } else {
+                ++it;
+            }
+        }
+        // Drop eviction tombstones past their TTL (same age bound as bodies).
+        for (auto it = m_eviction_tombstones.begin();
+             it != m_eviction_tombstones.end();) {
+            if (now - it->second.tombstoned_at > m_retained_max_age) {
+                it = m_eviction_tombstones.erase(it);
             } else {
                 ++it;
             }
@@ -608,12 +830,70 @@ private:
         return oldest;
     }
 
+    Map::iterator OldestEvictableForSource(const uint256& protected_hash,
+                                           uint64_t netgroup)
+    {
+        auto oldest{m_entries.end()};
+        for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
+            if (it->first == protected_hash || !it->second.body ||
+                IsActive(it->second.state) || it->second.body->pin_progress ||
+                it->second.body->source_netgroup != netgroup) {
+                continue;
+            }
+            if (oldest == m_entries.end() ||
+                it->second.body->stored_at < oldest->second.body->stored_at) {
+                oldest = it;
+            }
+        }
+        return oldest;
+    }
+
+    size_t SourceCount(uint64_t netgroup) const
+    {
+        const auto it{m_retained_count_by_source.find(netgroup)};
+        return it == m_retained_count_by_source.end() ? 0 : it->second;
+    }
+
+    size_t SourceBytes(uint64_t netgroup) const
+    {
+        const auto it{m_retained_bytes_by_source.find(netgroup)};
+        return it == m_retained_bytes_by_source.end() ? 0 : it->second;
+    }
+
+    void AccountSourceAdd(uint64_t netgroup, size_t bytes)
+    {
+        m_retained_count_by_source[netgroup] += 1;
+        m_retained_bytes_by_source[netgroup] += bytes;
+    }
+
+    void AccountSourceRemove(uint64_t netgroup, size_t bytes)
+    {
+        auto count_it{m_retained_count_by_source.find(netgroup)};
+        if (count_it != m_retained_count_by_source.end()) {
+            if (count_it->second <= 1) {
+                m_retained_count_by_source.erase(count_it);
+            } else {
+                --count_it->second;
+            }
+        }
+        auto bytes_it{m_retained_bytes_by_source.find(netgroup)};
+        if (bytes_it != m_retained_bytes_by_source.end()) {
+            if (bytes_it->second <= bytes) {
+                m_retained_bytes_by_source.erase(bytes_it);
+            } else {
+                bytes_it->second -= bytes;
+            }
+        }
+    }
+
     void EraseEntry(Map::iterator it)
     {
         if (it->second.cancelled) {
             it->second.cancelled->store(true, std::memory_order_relaxed);
         }
         if (it->second.body) {
+            AccountSourceRemove(it->second.body->source_netgroup,
+                                it->second.body->bytes);
             m_retained_bytes -= it->second.body->bytes;
         }
         m_entries.erase(it);
@@ -621,12 +901,55 @@ private:
 
     const size_t m_max_retained_count;
     const size_t m_max_retained_bytes;
+    const size_t m_max_retained_count_per_source;
+    const size_t m_max_retained_bytes_per_source;
     const Clock::duration m_retained_max_age;
     const Clock::duration m_async_stale_after;
 
     mutable std::mutex m_mutex;
     Map m_entries;
+    // Eviction tombstones (cmpl-netdos F1): when a body is evicted under
+    // CAPACITY pressure (not terminated), its freshness is remembered here so a
+    // re-delivery of the same hash cannot reset stored_at / deferral_count / a
+    // consumed idle bypass and thereby refresh the non-refreshing capacity TTL
+    // (pinning attacker bodies and skewing oldest-first eviction against honest
+    // ones). Bounded: pruned on the same m_retained_max_age as retained bodies
+    // and capped at kMaxEvictionTombstones (oldest dropped).
+    struct EvictionTombstone {
+        Clock::time_point stored_at;
+        uint32_t deferral_count{0};
+        bool idle_retry_bypass_available{false};
+        uint8_t retry_wake_mask{0};
+        Clock::time_point tombstoned_at;
+    };
+    static constexpr size_t kMaxEvictionTombstones{4096};
+    std::map<uint256, EvictionTombstone> m_eviction_tombstones;
+    void RecordEvictionTombstone(Map::iterator victim, Clock::time_point now)
+    {
+        if (victim == m_entries.end() || !victim->second.body) return;
+        if (m_eviction_tombstones.size() >= kMaxEvictionTombstones) {
+            // Drop the oldest tombstone to stay bounded.
+            auto oldest{m_eviction_tombstones.begin()};
+            for (auto it = m_eviction_tombstones.begin();
+                 it != m_eviction_tombstones.end(); ++it) {
+                if (it->second.tombstoned_at < oldest->second.tombstoned_at) {
+                    oldest = it;
+                }
+            }
+            if (oldest != m_eviction_tombstones.end()) {
+                m_eviction_tombstones.erase(oldest);
+            }
+        }
+        m_eviction_tombstones[victim->first] = EvictionTombstone{
+            victim->second.body->stored_at,
+            victim->second.body->deferral_count,
+            victim->second.body->idle_retry_bypass_available,
+            victim->second.body->retry_wake_mask,
+            now};
+    }
     size_t m_retained_bytes{0};
+    std::map<uint64_t, size_t> m_retained_count_by_source;
+    std::map<uint64_t, size_t> m_retained_bytes_by_source;
     uint64_t m_next_generation{0};
     ProgressVector m_progress;
 };

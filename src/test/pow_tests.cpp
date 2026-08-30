@@ -37,6 +37,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -307,6 +308,15 @@ public:
 #endif
     }
 };
+
+bool SkipUnlessMetalMining(const char* why)
+{
+    if (matmul::accelerated::ResolveMiningBackendFromEnvironment().active == matmul::backend::Kind::METAL) {
+        return false;
+    }
+    BOOST_TEST_MESSAGE(std::string("Skipping ") + why + ": Metal backend unavailable");
+    return true;
+}
 
 class ScopedRequireBackendEnv
 {
@@ -2855,41 +2865,17 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_191266->shielded_state_commitment.GetHex(),
         "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
 
-    const auto assumeutxo_199299 = params->AssumeutxoForHeight(199299);
-    BOOST_REQUIRE(assumeutxo_199299.has_value());
-    BOOST_CHECK_EQUAL(assumeutxo_199299->height, 199299);
-    BOOST_CHECK_EQUAL(
-        assumeutxo_199299->hash_serialized.ToString(),
-        "db9e83156602927315d108a1ebce230b30eb78832e69db1947a21f5b5f2b8bf6");
-    BOOST_CHECK_EQUAL(assumeutxo_199299->m_chain_tx_count, 298981U);
-    BOOST_CHECK_EQUAL(
-        assumeutxo_199299->blockhash.GetHex(),
-        "f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5");
-    BOOST_CHECK_EQUAL(
-        assumeutxo_199299->shielded_state_commitment.GetHex(),
-        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
-
-    const auto assumeutxo_199300 = params->AssumeutxoForHeight(199300);
-    BOOST_REQUIRE(assumeutxo_199300.has_value());
-    BOOST_CHECK_EQUAL(assumeutxo_199300->height, 199300);
-    BOOST_CHECK_EQUAL(
-        assumeutxo_199300->hash_serialized.ToString(),
-        "eb73aed769a9ef5b8f6c9cc4002388e49e4818a1e4cc6cd9d87e107aed5a1352");
-    BOOST_CHECK_EQUAL(assumeutxo_199300->m_chain_tx_count, 298984U);
-    BOOST_CHECK_EQUAL(
-        assumeutxo_199300->blockhash.GetHex(),
-        "ff80e6299692a63345674a23b0638658c737529d12e78fc7f42afb3812afc9eb");
-    BOOST_CHECK_EQUAL(
-        assumeutxo_199300->shielded_state_commitment.GetHex(),
-        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+    BOOST_CHECK(!params->AssumeutxoForHeight(199299));
+    BOOST_CHECK(!params->AssumeutxoForHeight(199300));
 
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 27U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 25U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 199300);
-    // Checkpoints may trail assumeutxo (186000 checkpoint vs 199300 snapshot);
-    // keep both anchors consistent with chainparams rather than forcing parity.
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 191266);
+    // Checkpoints may trail assumeutxo (186000 checkpoint vs 191266 snapshot).
+    // An assumeutxo at/after the 199299 split is forbidden without a matching
+    // checkpoint (issue 127).
 }
 
 BOOST_AUTO_TEST_CASE(HasValidProofOfWork_matmul_phase1_checks)
@@ -3771,6 +3757,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batches_for_metal_product_minin
     ScopedBackendEnv backend_env("metal");
     ScopedSolverThreadsEnv solver_threads_env(nullptr);
     ScopedApplePerfLogicalCpuOverrideEnv perf_override_env("10");
+    if (SkipUnlessMetalMining("metal product-mining auto-policy batch test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     // This case exercises the legacy shared-matrix batch policy, not the
@@ -4002,6 +3989,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_defaults_to_single_nonce_batch_for_mainnet_sha
 {
     ScopedBatchSizeEnv batch_size_env(nullptr);
     ScopedBackendEnv backend_env("metal");
+    if (SkipUnlessMetalMining("mainnet-shape Metal default batch test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
@@ -4202,6 +4190,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batch_on_tuned_mainnet_shape)
     ScopedBatchSizeEnv batch_size_env("2");
     ScopedBackendEnv backend_env("metal");
     ScopedSolverThreadsEnv solver_threads_env("8");
+    if (SkipUnlessMetalMining("tuned mainnet-shape Metal batch test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
@@ -4289,6 +4278,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_enables_parallel_solver_when_configured)
     ScopedBatchSizeEnv batch_size_env(nullptr);
     ScopedBackendEnv backend_env("metal");
     ScopedSolverThreadsEnv solver_threads_env("2");
+    if (SkipUnlessMetalMining("Metal parallel-solver config test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
@@ -4324,6 +4314,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_keeps_async_prepare_enabled_for_multi_nonce_ba
 {
     ScopedBatchSizeEnv batch_size_env("4");
     ScopedBackendEnv backend_env("metal");
+    if (SkipUnlessMetalMining("Metal async-prepare multi-nonce batch test")) return;
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
@@ -4369,9 +4360,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_respects_async_prepare_disable_override)
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
-    consensus.nMatMulDimension = 512;
-    consensus.nMatMulTranscriptBlockSize = 16;
-    consensus.nMatMulNoiseRank = 8;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
     CBlockHeader candidate{};

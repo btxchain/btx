@@ -328,6 +328,11 @@ struct StoreStats {
     size_t heard_attestations{0};
     size_t admitted_open{0};
     size_t frozen_open{0};
+    size_t open_signed_heights{0};
+    size_t open_signed_entries{0};
+    size_t refutation_buckets{0};
+    size_t log_leaves{0};
+    size_t window_challenges{0};
 };
 
 /**
@@ -338,11 +343,15 @@ struct StoreStats {
  * substitute for local ExactReplay. Each bucket is keyed by both height and
  * hash, and each configured signer contributes at most one vote.
  *
- * HasQuorum is PinQuorum only (M-of-N of `-matmultrustedpubkey`). That is
- * the sole SkipExactReplay / signed-frontier / trusted-mirror authority.
- * Open attestors may speak and be listed after co-signing a pin-quorum
- * hash; they must not become MatMul PoW for CPU archives or consensus+pin
- * miners. Stolen open keys therefore cannot mint fake work for those nodes.
+ * HasQuorum is PinQuorum only (M-of-N of `-matmultrustedpubkey`).
+ * SkipExactReplay is trusted-mirror AND HasQuorum: pin quorum never
+ * skips ExactReplay on consensus miners, and the pin is not
+ * FindMostWorkChain or getblocktemplate fork choice on consensus.
+ * Signed-frontier / GETDATA preference may follow pin quorum as
+ * telemetry. Open attestors may speak and be listed after co-signing a
+ * pin-quorum hash; they must not become MatMul PoW for CPU archives or
+ * consensus+pin miners. Stolen open keys therefore cannot mint fake
+ * work for those nodes.
  */
 class AttestationStore
 {
@@ -364,6 +373,50 @@ public:
         const uint256& block_hash,
         int32_t block_height,
         ExactReplayAttestation* produced = nullptr);
+
+    /**
+     * This node's own validated BlockDisconnected. If this process SignLocal'd
+     * `disconnected_hash` at `height`, release that mint slot so the node can
+     * re-mint the hash it now follows. Also drops open-directory entries for
+     * that (height, hash) so a reorg is not treated as open-key equivocation.
+     *
+     * Call only from this process's chainstate (DisconnectTip /
+     * BlockDisconnected). Inbound P2P / Add() of a competing hash must never
+     * call this: that is the stolen-WIF jam the mint guard exists to stop.
+     */
+    bool NotifyActiveChainBlockDisconnected(int32_t height,
+                                            const uint256& disconnected_hash);
+
+    /**
+     * Inverse of disconnect: the hash is on the active chain again, so its
+     * pin quorum may occupy the mint slot once more.
+     */
+    void NotifyActiveChainBlockConnected(int32_t height,
+                                         const uint256& connected_hash);
+
+    /**
+     * Operator recovery: erase local mint slots in [from_height, to_height]
+     * inclusive, and the open-directory rows for those heights. Does not
+     * delete stored attestations, does not accept a competing hash, and does
+     * not skip the other_quorum stolen-WIF guard. Returns the number of mint
+     * slots removed.
+     */
+    size_t ClearLocalMintSlots(int32_t from_height, int32_t to_height);
+
+    /** Hash this process SignLocal'd at height, if the mint slot is held. */
+    [[nodiscard]] std::optional<uint256> LocalMintedHash(int32_t height) const;
+
+    /** Heights in [from_height, to_height] that currently hold a mint slot. */
+    [[nodiscard]] std::vector<int32_t> LocalMintedHeights(
+        int32_t from_height, int32_t to_height) const;
+
+    /** True after NotifyActiveChainBlockDisconnected until the hash reconnects. */
+    //! V5/RB-12 durable withdrawal: seed a withdrawn-local-vote tombstone at
+    //! startup so Add() refuses a relayed/reloaded copy of our own abandoned
+    //! signature. Loaded from the durable 'w' records before attestations.
+    void SeedOffActiveChain(int32_t height, const uint256& block_hash);
+    [[nodiscard]] bool IsOffActiveChain(int32_t height,
+                                        const uint256& block_hash) const;
 
     /**
      * Sign an attested-fast-forward UTXO snapshot statement with the optional
@@ -392,6 +445,12 @@ public:
         const uint256& block_hash,
         int32_t block_height) const;
 
+    /**
+     * Store a pin/admitted refutation. `expected_height` must be the
+     * block-index height of `expected_hash`, not a peer-declared value.
+     * VerifyRefutationCrypto rejects a mismatch so a lying statement
+     * cannot occupy an arbitrary map key.
+     */
     [[nodiscard]] AddResult AddRefutation(
         const ExactReplayRefutation& refutation,
         const uint256& expected_hash,
@@ -442,6 +501,32 @@ public:
     [[nodiscard]] size_t MaxAttestations() const
     {
         return m_config.max_attestations;
+    }
+    [[nodiscard]] size_t MaxHeardAttestations() const
+    {
+        return m_config.max_heard_attestations;
+    }
+    [[nodiscard]] size_t MaxAdmittedOpen() const
+    {
+        return m_config.max_admitted_open;
+    }
+    [[nodiscard]] size_t MaxOpenSignedHeights() const
+    {
+        return m_config.max_open_signed_heights;
+    }
+    [[nodiscard]] size_t MaxOpenSignedEntries() const
+    {
+        return m_config.max_open_signed_entries;
+    }
+    [[nodiscard]] size_t MaxFrozenOpen() const { return m_config.max_frozen_open; }
+    [[nodiscard]] size_t MaxRefutations() const
+    {
+        return m_config.max_refutations;
+    }
+    [[nodiscard]] size_t MaxLogLeaves() const { return m_config.max_log_leaves; }
+    [[nodiscard]] size_t MaxWindowChallenges() const
+    {
+        return m_config.max_window_challenges;
     }
     [[nodiscard]] const std::set<CPubKey>& TrustedSigners() const
     {
@@ -541,11 +626,17 @@ private:
         const ExactReplayAttestation& attestation, Clock::time_point now);
     void AppendLogLeafLocked(const uint256& leaf);
     void PruneExpiredLocked(Clock::time_point now);
+    void PruneExpiredDirectoryLocked(Clock::time_point now);
     void PruneOpenDirectoryLocked();
     [[nodiscard]] size_t OpenSignedEntryCountLocked() const;
     void RefreshPinRefutedLocked(const BlockKey& key);
     void CapRefutationsLocked();
     void CapFrozenOpenLocked();
+    void CapOffActiveChainLocked();
+    void ReleaseOpenSignedMatchingHashLocked(int32_t height,
+                                             const uint256& block_hash);
+    [[nodiscard]] bool OccupyingCompetingQuorumLocked(
+        int32_t block_height, const uint256& block_hash) const;
     /**
      * Make room for one additional signature.
      *
@@ -589,7 +680,9 @@ private:
     std::set<CPubKey> m_frozen_open;
     std::deque<CPubKey> m_frozen_open_order;
     std::map<int32_t, std::map<CPubKey, uint256>> m_open_signed_at_height;
+    std::map<int32_t, Clock::time_point> m_open_signed_updated;
     std::map<BlockKey, std::map<CPubKey, ExactReplayRefutation>> m_refutations;
+    std::map<BlockKey, Clock::time_point> m_refutation_updated;
     std::set<BlockKey> m_pin_refuted;
     std::vector<uint256> m_log_leaves;
     std::vector<WindowReplayChallenge> m_window_challenges;
@@ -598,6 +691,12 @@ private:
     bool m_durable_retention{false};
     /** Heights this process SignLocal'd. Relayed copies of local_pk do not count. */
     std::map<int32_t, uint256> m_local_minted_hash_by_height;
+    /**
+     * Hashes this node's own validated reorg disconnected. other_quorum skips
+     * these so a legitimate chain switch can re-mint; inbound MMATTEST cannot
+     * insert here.
+     */
+    std::set<BlockKey> m_off_active_chain;
 };
 
 } // namespace matmul::trusted

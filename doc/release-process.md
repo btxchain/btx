@@ -15,6 +15,16 @@ Release Process
   - unpackaged build tree: `build-*/bin/btxd` (this path is still ELF/Mach-O)
   - published tarball: `libexec/btxd.real` (or pass `bin/btxd` and the script
     follows the wrapper)
+  The same script is invoked automatically by every path that produces a
+  shippable artifact: Guix `contrib/guix/libexec/build.sh` (CPU, CUDA 12/13,
+  and Darwin/Metal trees), `package_release_archive.py` (native
+  `linux-x86_64-cpu` / `linux-x86_64-cuda*` / `macos-arm64-metal`),
+  `collect_release_assets.py`, `cut_release.py`, `cut_local_release.py`, and
+  `publish_github_release.py`. Pass `--archive <tarball>` to unpack and gate
+  the real binary. An unrecognized file is **FAIL**, not a skip — a skipped
+  gate is how issues
+  [#111](https://github.com/btxchain/btx/issues/111) and
+  [#122](https://github.com/btxchain/btx/issues/122) shipped twice.
   Since 0.34.1, `bin/btxd` is a `#!/bin/sh` wrapper. `ldd bin/btxd` and
   `otool -L bin/btxd` return nothing and look like a clean pass while
   meaning nothing at all. Linux `ldd` on `libexec/btxd.real` must show
@@ -23,11 +33,7 @@ Release Process
   dylib is not a shippable public artifact. CMake's configure summary must
   print `ZeroMQ ... ON` and, on macOS, `Libevent linkage ... static:`.
   Do not ship a binary that contains `-zmqpubhashblock` strings without linking
-  libzmq — that is issues
-  [#111](https://github.com/btxchain/btx/issues/111) (v0.33.3, closed by
-  recutting one tarball while CMake still defaulted OFF) and
-  [#122](https://github.com/btxchain/btx/issues/122) (v0.33.4.2 Linux CPU,
-  the identical miss). Default ON plus this check is the durable fix;
+  libzmq. Default ON plus this executed gate is the durable fix;
   recutting one archive was not.
 * Complete the Profile-1 ExactReplay golden corpus and seal described below.
   Any change under `CMakeLists.txt`, `cmake/`, `src/`, or `contrib/matmul-v4/`
@@ -53,6 +59,17 @@ That file is inert manifest bytes (CMake emits a numeric array; C++ parses a
 strict schema), so excluding it is the only way sealing is not a fixed point.
 Any other change in that scope — including a one-line compile fix — moves the
 fingerprint and burns any corpus already recorded against the previous freeze.
+
+**Source-build path.** A tree compiled after `F` without a matching
+seal is not the released binary. The production canary still *runs*
+the ExactGemm CPU-versus-GPU self-qual and, when a golden row exists,
+the production-shape digest check. **Build provenance is advisory.**
+`build_provenance_mismatch` warns and continues; it does not exit and
+it does not skip verification. Mining / `NODE_MATMUL_CONSENSUS` follow
+runtime self-qualification and digest agreement, not the source-tree
+fingerprint. A fork measures its own goldens on hardware it owns; a
+Metal-only (or HIP-only) cohort is valid. `-allowunverifiablematmulconsensus`
+is a deprecated no-op.
 
 CPU ExactReplay is not an independent production golden. The required cohort is
 **CUDA**. Metal and HIP are optional; if supplied they must match exactly.
@@ -357,6 +374,9 @@ false until the corresponding campaign bits are actually set.
     - `python3 test/util/publish_github_release_test.py`
     - `python3 test/util/sign_release_bundle_test.py`
     - `python3 test/util/verify_release_btxd_test.py`
+    - `python3 test/util/package_release_archive_test.py`
+    - `python3 test/util/cut_release_test.py`
+    - `python3 test/util/cut_local_release_test.py`
     - `python3 test/functional/feature_assumeutxo.py --configfile=<build>/test/config.ini --cachedir=<cache-dir>`
     - `python3 test/functional/rpc_btx_difficulty_health.py --configfile=<build>/test/config.ini`
     - targeted restart/snapshot coverage in `test_btx` such as `validation_tests` and `validation_chainstatemanager_tests`

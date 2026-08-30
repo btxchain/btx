@@ -268,17 +268,19 @@ Block fetch stall detected: tip=0 best_header_ahead=2000 peer_best_ahead=2000 in
 ```
 
 `loadtxoutset` cannot break that tie. The AssumeUTXO base header
-(`f12a27d0…` at height 199299) must already be in the index:
+must already be in the index. 0.34.5's compiled pin is 191266
+(`de6e3c9d…`); do not use `f12a27d0…` at 199299 (withdrawn 0.34.1
+branch, issue 127).
 
 ```text
 Unable to load UTXO snapshot: The base block header
-(f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5)
+(<compiled assumeutxo blockhash>)
 must appear in the headers chain.
 ```
 
 0.34 fixes both halves. While the active tip is below
 `max(last checkpoint, highest compiled AssumeUTXO pin)` (mainnet
-186000 / 199299 → 199299), inbound **HEADERS** are accepted from any
+186000 / 191266 → 191266), inbound **HEADERS** are accepted from any
 peer. That is how a fresh node learns the header chain when archives
 serve nothing. **BLOCK / CMPCTBLOCK / BLOCKTXN stay authority-only** —
 header acquisition is not a body-trust decision. The frontier seed

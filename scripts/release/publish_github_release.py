@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import mimetypes
 import os
@@ -255,6 +256,68 @@ def validate_manifest_contract(manifest: dict[str, Any], checksums: dict[str, st
             referenced_assets.add(asset_name)
 
 
+def _load_verify_release_btxd():
+    script = Path(__file__).with_name("verify_release_btxd.py")
+    spec = importlib.util.spec_from_file_location("verify_release_btxd", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_collect_release_assets():
+    cached = getattr(_load_collect_release_assets, "_module", None)
+    if cached is not None:
+        return cached
+    script = Path(__file__).with_name("collect_release_assets.py")
+    spec = importlib.util.spec_from_file_location("collect_release_assets", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses.dataclass reads sys.modules[cls.__module__]; a spec-only
+    # load without this registration raises AttributeError on 3.14.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _load_collect_release_assets._module = module
+    return module
+
+
+def verify_bundle_btxd_archives(bundle_dir: Path, manifest: dict[str, Any]) -> None:
+    """Last line of defense: do not upload a tarball whose btxd was never gated."""
+    collect = _load_collect_release_assets()
+    staged = [
+        ("bundle", path)
+        for path in sorted(bundle_dir.iterdir(), key=lambda item: item.name)
+        if path.is_file()
+    ]
+    # Fail closed on unclassified ship archives even when platform_assets is
+    # empty. Skipping that case is how linux-x86_64-cuda would publish ungated.
+    try:
+        collect.verify_staged_primary_archives(staged)
+    except RuntimeError as exc:
+        if "unclassified shippable archive" in str(exc):
+            raise
+        raise RuntimeError(f"ZMQ/release gate failed: {exc}") from exc
+    platform_assets = manifest.get("platform_assets") or {}
+    if not platform_assets:
+        return
+    module = _load_verify_release_btxd()
+    for platform_id, entry in platform_assets.items():
+        if not isinstance(entry, dict):
+            continue
+        asset_name = entry.get("asset_name")
+        if not isinstance(asset_name, str) or not asset_name:
+            continue
+        archive = bundle_dir / asset_name
+        try:
+            module.verify_archive(archive)
+        except module.VerifyError as exc:
+            raise RuntimeError(
+                f"ZMQ/release gate failed for platform {platform_id} archive {asset_name}: {exc}"
+            ) from exc
+
+
 def normalize_fingerprint(value: str) -> str:
     normalized = "".join(value.split()).upper()
     if not HEX40_RE.fullmatch(normalized):
@@ -443,6 +506,7 @@ def ensure_bundle(bundle_dir: Path) -> tuple[list[Path], dict[str, Any]]:
             raise RuntimeError(
                 f"SHA256SUMS mismatch for {asset_name}: expected {expected_sha256}, got {actual_sha256}"
             )
+    verify_bundle_btxd_archives(bundle_dir, manifest)
     return assets, manifest
 
 

@@ -8,10 +8,12 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace matmul::trusted {
 namespace {
@@ -595,6 +597,16 @@ void AttestationStore::FreezeOpenLocked(const CPubKey& pubkey)
         CapFrozenOpenLocked();
     }
     m_admitted_open.erase(pubkey);
+    for (auto it = m_open_signed_at_height.begin();
+         it != m_open_signed_at_height.end();) {
+        it->second.erase(pubkey);
+        if (it->second.empty()) {
+            m_open_signed_updated.erase(it->first);
+            it = m_open_signed_at_height.erase(it);
+        } else {
+            ++it;
+        }
+    }
     for (auto it = m_buckets.begin(); it != m_buckets.end();) {
         auto att_it{it->second.attestations.find(pubkey)};
         if (att_it == it->second.attestations.end()) {
@@ -671,10 +683,12 @@ void AttestationStore::PruneOpenDirectoryLocked()
 {
     while (m_open_signed_at_height.size() > m_config.max_open_signed_heights &&
            !m_open_signed_at_height.empty()) {
+        m_open_signed_updated.erase(m_open_signed_at_height.begin()->first);
         m_open_signed_at_height.erase(m_open_signed_at_height.begin());
     }
     while (OpenSignedEntryCountLocked() > m_config.max_open_signed_entries &&
            !m_open_signed_at_height.empty()) {
+        m_open_signed_updated.erase(m_open_signed_at_height.begin()->first);
         m_open_signed_at_height.erase(m_open_signed_at_height.begin());
     }
 }
@@ -729,6 +743,7 @@ void AttestationStore::CapRefutationsLocked()
         auto oldest{m_refutations.begin()};
         const BlockKey dropped{oldest->first};
         m_refutations.erase(oldest);
+        m_refutation_updated.erase(dropped);
         m_pin_refuted.erase(dropped);
     }
 }
@@ -771,6 +786,22 @@ AddResult AttestationStore::Add(
 
         const bool pinned{m_trusted_signers.count(attestation.signer) != 0};
 
+        // V5/RB-12 durable withdrawal (adv5): once this node's OWN validated
+        // reorg withdrew its local signature for a hash (recorded in
+        // m_off_active_chain, seeded from the durable tombstone at startup), a
+        // relayed copy of that SAME local-signer vote -- captured from gossip
+        // or reloaded from disk -- must NOT re-enter the live quorum set and
+        // re-arm the dual-quorum same-height mirror freeze a2929379 closed.
+        // Only OUR withdrawn vote is refused; peer copies (other signers) stay
+        // as history. Reported as Duplicate so the inbound MMATTEST relay path
+        // (Accepted-only) does not re-propagate our abandoned vote.
+        if (m_config.local_signer.has_value() &&
+            attestation.signer == m_config.local_signer->GetPubKey() &&
+            m_off_active_chain.count(key) != 0) {
+            ++m_stats.duplicates;
+            return AddResult::Duplicate;
+        }
+
         if (!pinned) {
             if (!m_config.open_attestors) {
                 ++m_stats.rejected;
@@ -794,10 +825,12 @@ AddResult AttestationStore::Add(
                 if (existing_hash != signed_at.end() ||
                     signed_at.size() < m_config.max_open_signers_per_height) {
                     signed_at[attestation.signer] = expected_hash;
+                    m_open_signed_updated[expected_height] = now;
                 }
             } else if (m_config.max_open_signers_per_height > 0) {
                 m_open_signed_at_height[expected_height][attestation.signer] =
                     expected_hash;
+                m_open_signed_updated[expected_height] = now;
             }
             PruneOpenDirectoryLocked();
 
@@ -872,22 +905,20 @@ AddResult AttestationStore::SignLocal(
             ++m_stats.rejected;
             return AddResult::BlocklistedSigner;
         }
-        for (auto it = m_buckets.lower_bound(BlockKey{block_height, uint256{}});
-             it != m_buckets.end() && it->first.height == block_height; ++it) {
-            if (it->first.hash == block_hash) continue;
-            const bool other_quorum{HasQuorumLocked(it->first, it->second)};
-            const auto minted{m_local_minted_hash_by_height.find(block_height)};
-            const bool minted_other_hash{
-                minted != m_local_minted_hash_by_height.end() &&
-                minted->second != block_hash};
-            // Relayed copies of this node's pubkey (stolen-WIF MMATTEST) must
-            // not occupy the mint slot. Only a competing *quorum* or a hash
-            // this process already SignLocal'd refuses. Otherwise one stolen
-            // pin key jams the honest attestor and freezes every M=2 mirror.
-            if (minted_other_hash || other_quorum) {
-                ++m_stats.rejected;
-                return AddResult::HeightOccupied;
-            }
+        const auto minted{m_local_minted_hash_by_height.find(block_height)};
+        const bool minted_other_hash{
+            minted != m_local_minted_hash_by_height.end() &&
+            minted->second != block_hash};
+        // Relayed copies of this node's pubkey (stolen-WIF MMATTEST) must
+        // not occupy the mint slot. Only a competing *on-chain quorum* or a
+        // hash this process already SignLocal'd refuses. Otherwise one stolen
+        // pin key jams the honest attestor and freezes every M=2 mirror.
+        // A hash this node itself disconnected no longer occupies: that is a
+        // local validated reorg, not an inbound competing attestation.
+        if (minted_other_hash ||
+            OccupyingCompetingQuorumLocked(block_height, block_hash)) {
+            ++m_stats.rejected;
+            return AddResult::HeightOccupied;
         }
     }
     ExactReplayStatement statement;
@@ -913,6 +944,167 @@ AddResult AttestationStore::SignLocal(
         *produced = std::move(*attestation);
     }
     return result;
+}
+
+void AttestationStore::CapOffActiveChainLocked()
+{
+    while (m_off_active_chain.size() > m_config.max_blocks &&
+           !m_off_active_chain.empty()) {
+        m_off_active_chain.erase(m_off_active_chain.begin());
+    }
+}
+
+void AttestationStore::ReleaseOpenSignedMatchingHashLocked(
+    int32_t height, const uint256& block_hash)
+{
+    auto height_it{m_open_signed_at_height.find(height)};
+    if (height_it == m_open_signed_at_height.end()) return;
+    auto& signers{height_it->second};
+    for (auto it = signers.begin(); it != signers.end();) {
+        if (it->second == block_hash) {
+            it = signers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (signers.empty()) {
+        m_open_signed_at_height.erase(height_it);
+        m_open_signed_updated.erase(height);
+    }
+}
+
+bool AttestationStore::OccupyingCompetingQuorumLocked(
+    int32_t block_height, const uint256& block_hash) const
+{
+    for (auto it = m_buckets.lower_bound(BlockKey{block_height, uint256{}});
+         it != m_buckets.end() && it->first.height == block_height; ++it) {
+        if (it->first.hash == block_hash) continue;
+        if (m_off_active_chain.count(it->first) != 0) continue;
+        if (HasQuorumLocked(it->first, it->second)) return true;
+    }
+    return false;
+}
+
+bool AttestationStore::NotifyActiveChainBlockDisconnected(
+    int32_t height, const uint256& disconnected_hash)
+{
+    if (height < 0 || disconnected_hash.IsNull()) return false;
+    std::lock_guard lock{m_mutex};
+    m_off_active_chain.insert(BlockKey{height, disconnected_hash});
+    CapOffActiveChainLocked();
+    ReleaseOpenSignedMatchingHashLocked(height, disconnected_hash);
+    const auto minted{m_local_minted_hash_by_height.find(height)};
+    if (minted == m_local_minted_hash_by_height.end() ||
+        minted->second != disconnected_hash) {
+        return false;
+    }
+    m_local_minted_hash_by_height.erase(minted);
+    // V5/RB-12: the mint-slot release alone (RB-7) re-opens SignLocal for the
+    // new hash, but the OLD local signature stayed live in m_buckets and kept
+    // being gossiped / served over GETMMATTEST. A signer flipped 1-6 blocks by
+    // a short reorg then held two live pin signatures at one height; mirrors
+    // that heard both fail-closed on dual-quorum same-height twins and FROZE
+    // (settlement freeze, repeatable with only near-tip hashrate).
+    //
+    // This is the node's OWN validated reorg away from a hash it locally
+    // minted, so it must WITHDRAW its own vote for that abandoned twin: the
+    // signer no longer vouches that hash is canonical. Only the local
+    // signature is removed (peers' copies stay as history); an external
+    // message can never trigger this path (DisconnectTip only). Once the
+    // signer stops serving its abandoned vote the stale quorum decays and the
+    // dual-live-pin freeze does not form.
+    if (m_config.local_signer.has_value()) {
+        const CPubKey local_pk{m_config.local_signer->GetPubKey()};
+        const auto bucket_it{
+            m_buckets.find(BlockKey{height, disconnected_hash})};
+        if (bucket_it != m_buckets.end()) {
+            const auto sig_it{bucket_it->second.attestations.find(local_pk)};
+            if (sig_it != bucket_it->second.attestations.end()) {
+                bucket_it->second.attestations.erase(sig_it);
+                if (m_attestation_count > 0) --m_attestation_count;
+                if (bucket_it->second.attestations.empty()) {
+                    m_buckets.erase(bucket_it);
+                }
+                m_changed.notify_all();
+            }
+        }
+    }
+    return true;
+}
+
+void AttestationStore::SeedOffActiveChain(int32_t height,
+                                          const uint256& block_hash)
+{
+    if (height < 0 || block_hash.IsNull()) return;
+    std::lock_guard lock{m_mutex};
+    m_off_active_chain.insert(BlockKey{height, block_hash});
+    CapOffActiveChainLocked();
+}
+
+void AttestationStore::NotifyActiveChainBlockConnected(
+    int32_t height, const uint256& connected_hash)
+{
+    if (height < 0 || connected_hash.IsNull()) return;
+    std::lock_guard lock{m_mutex};
+    m_off_active_chain.erase(BlockKey{height, connected_hash});
+}
+
+size_t AttestationStore::ClearLocalMintSlots(int32_t from_height,
+                                             int32_t to_height)
+{
+    if (from_height > to_height) return 0;
+    std::lock_guard lock{m_mutex};
+    size_t cleared{0};
+    auto it{m_local_minted_hash_by_height.lower_bound(from_height)};
+    while (it != m_local_minted_hash_by_height.end() &&
+           it->first <= to_height) {
+        m_open_signed_at_height.erase(it->first);
+        m_open_signed_updated.erase(it->first);
+        it = m_local_minted_hash_by_height.erase(it);
+        ++cleared;
+    }
+    // Heights that only had open-directory rows (no local mint) still need
+    // a consistent wipe so an operator can recover an open attestor too.
+    auto open_it{m_open_signed_at_height.lower_bound(from_height)};
+    while (open_it != m_open_signed_at_height.end() &&
+           open_it->first <= to_height) {
+        m_open_signed_updated.erase(open_it->first);
+        open_it = m_open_signed_at_height.erase(open_it);
+    }
+    return cleared;
+}
+
+std::optional<uint256> AttestationStore::LocalMintedHash(int32_t height) const
+{
+    std::lock_guard lock{m_mutex};
+    const auto it{m_local_minted_hash_by_height.find(height)};
+    if (it == m_local_minted_hash_by_height.end() || it->second.IsNull()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+std::vector<int32_t> AttestationStore::LocalMintedHeights(
+    int32_t from_height, int32_t to_height) const
+{
+    std::vector<int32_t> out;
+    if (from_height > to_height) return out;
+    std::lock_guard lock{m_mutex};
+    auto it{m_local_minted_hash_by_height.lower_bound(from_height)};
+    while (it != m_local_minted_hash_by_height.end() &&
+           it->first <= to_height) {
+        out.push_back(it->first);
+        ++it;
+    }
+    return out;
+}
+
+bool AttestationStore::IsOffActiveChain(int32_t height,
+                                        const uint256& block_hash) const
+{
+    if (height < 0 || block_hash.IsNull()) return false;
+    std::lock_guard lock{m_mutex};
+    return m_off_active_chain.count(BlockKey{height, block_hash}) != 0;
 }
 
 std::optional<UtxoSnapshotSignature> AttestationStore::SignUtxoSnapshot(
@@ -1091,14 +1283,50 @@ void AttestationStore::EraseLocked(
 
 void AttestationStore::PruneExpiredLocked(Clock::time_point now)
 {
-    if (m_durable_retention) return;
-    for (auto it = m_buckets.begin(); it != m_buckets.end();) {
-        if (now - it->second.updated < m_config.ttl) {
+    if (!m_durable_retention) {
+        for (auto it = m_buckets.begin(); it != m_buckets.end();) {
+            if (now - it->second.updated < m_config.ttl) {
+                ++it;
+                continue;
+            }
+            auto expired{it++};
+            EraseLocked(expired, true);
+        }
+    }
+    // Open-directory maps are a mem/disk DoS surface, not authority. TTL
+    // them even when pin buckets are durable.
+    PruneExpiredDirectoryLocked(now);
+}
+
+void AttestationStore::PruneExpiredDirectoryLocked(Clock::time_point now)
+{
+    for (auto it = m_heard_updated.begin(); it != m_heard_updated.end();) {
+        if (now - it->second < m_config.ttl) {
             ++it;
             continue;
         }
-        auto expired{it++};
-        EraseLocked(expired, true);
+        m_heard.erase(it->first);
+        it = m_heard_updated.erase(it);
+    }
+    for (auto it = m_open_signed_updated.begin();
+         it != m_open_signed_updated.end();) {
+        if (now - it->second < m_config.ttl) {
+            ++it;
+            continue;
+        }
+        m_open_signed_at_height.erase(it->first);
+        it = m_open_signed_updated.erase(it);
+    }
+    for (auto it = m_refutation_updated.begin();
+         it != m_refutation_updated.end();) {
+        if (now - it->second < m_config.ttl) {
+            ++it;
+            continue;
+        }
+        const BlockKey key{it->first};
+        m_refutations.erase(key);
+        m_pin_refuted.erase(key);
+        it = m_refutation_updated.erase(it);
     }
 }
 
@@ -1228,6 +1456,11 @@ StoreStats AttestationStore::GetStats() const
     stats.heard_attestations = m_heard.size();
     stats.admitted_open = m_admitted_open.size();
     stats.frozen_open = m_frozen_open.size();
+    stats.open_signed_heights = m_open_signed_at_height.size();
+    stats.open_signed_entries = OpenSignedEntryCountLocked();
+    stats.refutation_buckets = m_refutations.size();
+    stats.log_leaves = m_log_leaves.size();
+    stats.window_challenges = m_window_challenges.size();
     return stats;
 }
 
@@ -1514,6 +1747,9 @@ AddResult AttestationStore::AddRefutation(
     }
     {
         std::lock_guard lock{m_mutex};
+        // Directory TTL even on a refute-only flood; pin buckets are not
+        // this path's DoS surface (Add() / PruneExpired handle those).
+        PruneExpiredDirectoryLocked(Clock::now());
         if (IsBlockedLocked(refutation.signer)) {
             ++m_stats.rejected;
             return AddResult::BlocklistedSigner;
@@ -1534,6 +1770,7 @@ AddResult AttestationStore::AddRefutation(
             return AddResult::Duplicate;
         }
         bucket.emplace(refutation.signer, refutation);
+        m_refutation_updated[key] = Clock::now();
         RefreshPinRefutedLocked(key);
         CapRefutationsLocked();
         ++m_stats.accepted;

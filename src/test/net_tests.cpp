@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <addrman.h>
 #include <chainparams.h>
 #include <clientversion.h>
 #include <common/args.h>
@@ -9,12 +10,15 @@
 #include <consensus/consensus.h>
 #include <cstdint>
 #include <crypto/ml_kem.h>
+#include <kernel/chainstatemanager_opts.h>
 #include <net.h>
+#include <net_permissions.h>
 #include <net_processing.h>
 #include <netaddress.h>
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <node/protocol_version.h>
+#include <protocol.h>
 #include <serialize.h>
 #include <span.h>
 #include <streams.h>
@@ -34,6 +38,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <tuple>
 
 using namespace std::literals;
 using namespace util::hex_literals;
@@ -959,6 +964,216 @@ BOOST_AUTO_TEST_CASE(initial_advertise_from_version_message)
     chainman.ResetIbd();
     m_node.args->ForceSetArg("-capturemessages", "0");
     m_node.args->ForceSetArg("-bind", "");
+}
+
+static bool AddrmanHasEndpoint(AddrMan& addrman, const CNetAddr& ip, uint16_t port)
+{
+    const auto addrs = addrman.GetAddr(/*max_addresses=*/0, /*max_pct=*/0, std::nullopt, /*filtered=*/false);
+    return std::any_of(addrs.begin(), addrs.end(), [&](const CAddress& addr) {
+        return static_cast<const CNetAddr&>(addr) == ip && addr.GetPort() == port;
+    });
+}
+
+static std::vector<CAddress> QueuedAddrPayloads(CNode& node)
+{
+    LOCK(node.cs_vSend);
+    std::vector<CAddress> out;
+    auto consume = [&](const std::string& msg_type, const std::vector<unsigned char>& payload) {
+        if (payload.empty()) return;
+        if (msg_type != NetMsgType::ADDR && msg_type != NetMsgType::ADDRV2) return;
+        DataStream stream{payload};
+        std::vector<CAddress> addrs;
+        if (msg_type == NetMsgType::ADDRV2) {
+            stream >> CAddress::V2_NETWORK(addrs);
+        } else {
+            stream >> CAddress::V1_NETWORK(addrs);
+        }
+        out.insert(out.end(), addrs.begin(), addrs.end());
+    };
+    for (const auto& msg : node.vSendMsg) {
+        consume(msg.m_type, msg.data);
+    }
+    // sock=null: PushMessage optimistic-write moves ADDR into V1Transport.
+    // GetBytesToSend is the 24-byte header until MarkBytesSent.
+    auto send = node.m_transport->GetBytesToSend(false);
+    std::vector<unsigned char> payload(std::get<0>(send).begin(), std::get<0>(send).end());
+    std::string transport_type{std::get<2>(send)};
+    if (payload.size() == CMessageHeader::HEADER_SIZE &&
+        (transport_type == NetMsgType::ADDR ||
+         transport_type == NetMsgType::ADDRV2)) {
+        node.m_transport->MarkBytesSent(payload.size());
+        const auto payload_send = node.m_transport->GetBytesToSend(false);
+        payload.assign(std::get<0>(payload_send).begin(), std::get<0>(payload_send).end());
+        transport_type = std::get<2>(payload_send);
+    }
+    consume(transport_type, payload);
+    return out;
+}
+
+BOOST_AUTO_TEST_CASE(discovery_relay_inbound_gossip_uses_listen_port_not_source_port)
+{
+    // RB-15: an inbound handshake must not be recorded or extra-pushed at
+    // the accepted socket's ephemeral SOURCE port. The peer's self-ADDR
+    // listen port is what other nodes must dial.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        m_node.chainman->m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    mode = kernel::MatMulValidationMode::RELAY;
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+
+    BOOST_REQUIRE(m_node.chainman->IsDiscoveryRelay());
+    g_reachable_nets.Add(NET_IPV4);
+
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    PeerManager& peerman{*m_node.peerman};
+
+    const auto listener_ip{LookupHost("1.2.3.4", /*fAllowLookup=*/false)};
+    const auto miner_ip{LookupHost("4.3.2.1", /*fAllowLookup=*/false)};
+    const auto decoy_ip{LookupHost("5.6.7.8", /*fAllowLookup=*/false)};
+    BOOST_REQUIRE(listener_ip.has_value());
+    BOOST_REQUIRE(miner_ip.has_value());
+    BOOST_REQUIRE(decoy_ip.has_value());
+
+    constexpr uint16_t listen_port{19335};
+    constexpr uint16_t source_port{44838};
+    constexpr int32_t recent_height{199400};
+    const ServiceFlags listener_services{
+        ServiceFlags(NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    const ServiceFlags local_services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+
+    CNode miner{/*id=*/20,
+                /*sock=*/nullptr,
+                CAddress{CService{*miner_ip, listen_port}, NODE_NETWORK},
+                /*nKeyedNetGroupIn=*/0,
+                /*nLocalHostNonceIn=*/0,
+                CAddress{},
+                /*addrNameIn=*/"miner-outbound",
+                ConnectionType::OUTBOUND_FULL_RELAY,
+                /*inbound_onion=*/false,
+                /*network_key=*/20};
+    connman.Handshake(miner, /*successfully_connected=*/true, listener_services,
+                      local_services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      recent_height);
+    BOOST_REQUIRE(!miner.fDisconnect);
+    connman.AddTestNode(miner);
+    connman.FlushSendBuffer(miner);
+
+    CNodeOptions inbound_opts;
+    inbound_opts.permission_flags = NetPermissionFlags::Addr;
+    CNode inbound{/*id=*/21,
+                  /*sock=*/nullptr,
+                  CAddress{CService{*listener_ip, source_port}, NODE_NETWORK},
+                  /*nKeyedNetGroupIn=*/0x21,
+                  /*nLocalHostNonceIn=*/0,
+                  CAddress{},
+                  /*addrNameIn=*/"inbound-listener",
+                  ConnectionType::INBOUND,
+                  /*inbound_onion=*/false,
+                  /*network_key=*/21,
+                  std::move(inbound_opts)};
+    connman.Handshake(inbound, /*successfully_connected=*/true, listener_services,
+                      local_services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      recent_height);
+    BOOST_REQUIRE(!inbound.fDisconnect);
+    connman.AddTestNode(inbound);
+    connman.FlushSendBuffer(inbound);
+
+    struct FinalizeNodes {
+        PeerManager& peerman;
+        ConnmanTestMsg& connman;
+        CNode& miner;
+        CNode& inbound;
+        CNode* requester{nullptr};
+        ~FinalizeNodes()
+        {
+            if (requester) {
+                peerman.FinalizeNode(*requester);
+                connman.RemoveTestNode(*requester);
+            }
+            peerman.FinalizeNode(inbound);
+            connman.RemoveTestNode(inbound);
+            peerman.FinalizeNode(miner);
+            connman.RemoveTestNode(miner);
+        }
+    } finalize{peerman, connman, miner, inbound};
+
+    BOOST_CHECK_MESSAGE(
+        !AddrmanHasEndpoint(*m_node.addrman, *listener_ip, source_port),
+        "inbound VERSION must not record the TCP source port");
+    BOOST_CHECK_MESSAGE(
+        !AddrmanHasEndpoint(*m_node.addrman, *listener_ip, listen_port),
+        "listen port is learned from self-ADDR, not VERSION");
+
+    CAddress listen_addr{CService{*listener_ip, listen_port}, listener_services,
+                         Now<NodeSeconds>()};
+    CAddress decoy_addr{CService{*decoy_ip, listen_port}, listener_services,
+                        Now<NodeSeconds>()};
+    inbound.fPauseSend = false;
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        inbound, NetMsg::Make(NetMsgType::ADDR,
+                              CAddress::V1_NETWORK(std::vector<CAddress>{
+                                  listen_addr, decoy_addr}))));
+    inbound.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(inbound);
+
+    BOOST_CHECK_MESSAGE(
+        AddrmanHasEndpoint(*m_node.addrman, *listener_ip, listen_port),
+        "same-IP self-ADDR must persist the advertised listen port");
+    BOOST_CHECK_MESSAGE(
+        !AddrmanHasEndpoint(*m_node.addrman, *listener_ip, source_port),
+        "self-ADDR must not leave the source port in addrman");
+    BOOST_CHECK_MESSAGE(
+        !AddrmanHasEndpoint(*m_node.addrman, *decoy_ip, listen_port),
+        "inbound ADDR gossip of a third-party IP must not be ingested");
+
+    const auto requester_ip{LookupHost("9.9.9.9", /*fAllowLookup=*/false)};
+    BOOST_REQUIRE(requester_ip.has_value());
+
+    CNode requester{/*id=*/22,
+                    /*sock=*/nullptr,
+                    CAddress{CService{*requester_ip, 19444}, NODE_NETWORK},
+                    /*nKeyedNetGroupIn=*/0x22,
+                    /*nLocalHostNonceIn=*/0,
+                    CAddress{},
+                    /*addrNameIn=*/"getaddr-requester",
+                    ConnectionType::INBOUND,
+                    /*inbound_onion=*/false,
+                    /*network_key=*/22};
+    connman.Handshake(requester, /*successfully_connected=*/true, local_services,
+                      local_services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      recent_height);
+    BOOST_REQUIRE(!requester.fDisconnect);
+    connman.AddTestNode(requester);
+    connman.FlushSendBuffer(requester);
+    finalize.requester = &requester;
+
+    requester.fPauseSend = false;
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        requester, NetMsg::Make(NetMsgType::GETADDR)));
+    requester.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(requester);
+
+    const auto gossiped{QueuedAddrPayloads(requester)};
+    const bool pushed_listen{std::any_of(
+        gossiped.begin(), gossiped.end(), [&](const CAddress& addr) {
+            return static_cast<const CNetAddr&>(addr) == *listener_ip &&
+                   addr.GetPort() == listen_port;
+        })};
+    const bool pushed_source{std::any_of(
+        gossiped.begin(), gossiped.end(), [&](const CAddress& addr) {
+            return static_cast<const CNetAddr&>(addr) == *listener_ip &&
+                   addr.GetPort() == source_port;
+        })};
+    BOOST_CHECK_MESSAGE(pushed_listen,
+                        "GETADDR extra-push must include the advertised listen port");
+    BOOST_CHECK_MESSAGE(!pushed_source,
+                        "GETADDR extra-push must never include the TCP source port");
 }
 
 

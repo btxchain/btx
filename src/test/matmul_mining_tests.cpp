@@ -11,11 +11,15 @@
 #include <interfaces/mining.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <key.h>
+#include <matmul/accel_v4.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/pow_v4.h>
 #include <net.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <pow.h>
+#include <primitives/block.h>
 #include <rpc/protocol.h>
 #include <rpc/server.h>
 #include <serialize.h>
@@ -30,10 +34,12 @@
 
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -539,11 +545,132 @@ BOOST_AUTO_TEST_CASE(getmininginfo_reports_matmul_algorithm)
     BOOST_CHECK(backend_runtime.find_value("required_backend_enabled").isBool());
     BOOST_CHECK(backend_runtime.find_value("required_backend_satisfied").isBool());
     BOOST_CHECK(backend_runtime.find_value("metal_fallbacks_to_cpu").isNum());
+    BOOST_CHECK(backend_runtime.find_value("v4_dispatch").isObject());
+    BOOST_CHECK(backend_runtime.find_value("v4_dispatch").get_obj().find_value("requests").isNum());
+    BOOST_CHECK(backend_runtime.find_value("v4_dispatch").get_obj().find_value("metal_ok").isNum());
+    BOOST_CHECK(backend_runtime.find_value("v4_dispatch").get_obj().find_value("cuda_ok").isNum());
 
     const auto time_policy = info.find_value("time_policy").get_obj();
     BOOST_CHECK_EQUAL(time_policy.find_value("height").getInt<int>(), ActiveHeight() + 1);
     BOOST_CHECK(time_policy.find_value("future_mtp_limit_active").isBool());
     BOOST_CHECK(time_policy.find_value("recommended_action").isStr());
+}
+
+BOOST_AUTO_TEST_CASE(getmininginfo_reports_nonzero_matmul_rate_after_generate)
+{
+    (void)CallRPC("generateblock", GenerateBlockParams(/*submit=*/true));
+    const auto info = CallRPC("getmininginfo").get_obj();
+    BOOST_CHECK_GT(info.find_value("matmul_digests_per_second").get_real(), 0.0);
+    BOOST_CHECK_GT(info.find_value("networkhashps").get_real(), 0.0);
+}
+
+BOOST_AUTO_TEST_CASE(getmininginfo_backend_runtime_includes_v4_dispatch_stats)
+{
+    matmul_v4::accel::ResetStats();
+
+    CBlockHeader header{};
+    header.nVersion = 0x20000000;
+    header.nTime = 1'770'000'000;
+    header.nBits = 0x207fffff;
+    header.matmul_dim = 8;
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestDispatched(header, /*n=*/8, /*rounds=*/2, digest, payload));
+
+    const auto info = CallRPC("getmininginfo").get_obj();
+    const auto backend = info.find_value("backend_runtime").get_obj();
+    const auto v4 = backend.find_value("v4_dispatch").get_obj();
+    BOOST_CHECK_GE(v4.find_value("requests").getInt<uint64_t>(), 1U);
+    BOOST_CHECK_GE(backend.find_value("digest_requests").getInt<uint64_t>(), 1U);
+    const uint64_t requested_total =
+        backend.find_value("requested_cpu").getInt<uint64_t>()
+        + backend.find_value("requested_metal").getInt<uint64_t>()
+        + backend.find_value("requested_cuda").getInt<uint64_t>();
+    BOOST_CHECK_GE(requested_total, 1U);
+    // Issue 43: production v4 Metal kernels must move requested_metal / metal_successes,
+    // not only the nested v4_dispatch object.
+    const uint64_t v4_metal_ok =
+        v4.find_value("metal_ok").getInt<uint64_t>() + v4.find_value("metal_batch_ok").getInt<uint64_t>();
+    BOOST_CHECK_GE(backend.find_value("requested_metal").getInt<uint64_t>(), v4_metal_ok);
+    BOOST_CHECK_GE(backend.find_value("metal_successes").getInt<uint64_t>(), v4_metal_ok);
+}
+
+BOOST_AUTO_TEST_CASE(getmatmulchallenge_solve_runtime_reports_v4_cuda_kernel_successes)
+{
+    matmul_v4::accel::ResetStats();
+
+    CBlockHeader header{};
+    header.nVersion = 0x20000000;
+    header.nTime = 1'770'000'000;
+    header.nBits = 0x207fffff;
+    header.matmul_dim = 8;
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestDispatched(header, /*n=*/8, /*rounds=*/2, digest, payload));
+
+    const auto challenge = CallRPC("getmatmulchallenge").get_obj();
+    const auto runtime = challenge.find_value("service_profile").get_obj().find_value("runtime_observability").get_obj();
+    const auto solve = runtime.find_value("solve_runtime").get_obj();
+    const auto backend = runtime.find_value("backend_runtime").get_obj();
+    const auto v4 = backend.find_value("v4_dispatch").get_obj();
+    const uint64_t v4_cuda_ok =
+        v4.find_value("cuda_ok").getInt<uint64_t>() + v4.find_value("cuda_batch_ok").getInt<uint64_t>();
+    BOOST_CHECK(solve.find_value("cuda_kernel_successes").isNum());
+    BOOST_CHECK(solve.find_value("metal_kernel_successes").isNum());
+    BOOST_CHECK_EQUAL(
+        solve.find_value("cuda_kernel_successes").getInt<uint64_t>(),
+        backend.find_value("cuda_successes").getInt<uint64_t>());
+    BOOST_CHECK_GE(backend.find_value("requested_cuda").getInt<uint64_t>(), v4_cuda_ok);
+    BOOST_CHECK_GE(backend.find_value("cuda_successes").getInt<uint64_t>(), v4_cuda_ok);
+    BOOST_CHECK_GE(solve.find_value("cuda_kernel_successes").getInt<uint64_t>(), v4_cuda_ok);
+}
+
+BOOST_AUTO_TEST_CASE(getmininginfo_required_backend_satisfied_false_when_rc_quarantined)
+{
+    class ScopedEnv {
+        std::string m_name;
+        std::optional<std::string> m_previous;
+    public:
+        ScopedEnv(const char* name, const char* value) : m_name(name)
+        {
+            if (const char* prev = std::getenv(name)) {
+                m_previous = std::string{prev};
+            }
+            setenv(name, value, 1);
+        }
+        ~ScopedEnv()
+        {
+            if (m_previous) {
+                setenv(m_name.c_str(), m_previous->c_str(), 1);
+            } else {
+                unsetenv(m_name.c_str());
+            }
+        }
+    };
+
+    matmul::v4::rc::ResetRCExactReplayProviderHealthForTest();
+    // Pin both request and requirement to CPU so a GPU host still starts satisfied.
+    ScopedEnv require_backend("BTX_MATMUL_REQUIRE_BACKEND", "cpu");
+    ScopedEnv mining_backend("BTX_MATMUL_BACKEND", "cpu");
+
+    const auto ok = CallRPC("getmininginfo").get_obj().find_value("backend_runtime").get_obj();
+    BOOST_REQUIRE(ok.find_value("required_backend_enabled").get_bool());
+    BOOST_CHECK(ok.find_value("required_backend_satisfied").get_bool());
+
+    matmul::v4::rc::RCExactReplayProviderHealth quarantined;
+    quarantined.quarantined = true;
+    quarantined.reason = "test_quarantine";
+    matmul::v4::rc::SetRCExactReplayProviderHealthForTest(quarantined);
+
+    const auto bad = CallRPC("getmininginfo").get_obj().find_value("backend_runtime").get_obj();
+    BOOST_CHECK(!bad.find_value("required_backend_satisfied").get_bool());
+    BOOST_CHECK(
+        bad.find_value("backend_requirement_reason").get_str().find("quarantined") !=
+        std::string::npos);
+
+    matmul::v4::rc::ResetRCExactReplayProviderHealthForTest();
+    const auto restored = CallRPC("getmininginfo").get_obj().find_value("backend_runtime").get_obj();
+    BOOST_CHECK(restored.find_value("required_backend_satisfied").get_bool());
 }
 
 BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_and_time_policy)

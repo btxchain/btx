@@ -48,6 +48,17 @@ Ada (4090), Hopper (H100), and B200/B300 are outside the sealed golden
 manifest and cannot self-qualify. Archive / consensus operators on sm_120
 should pin the 13.2 / 13.4 combo before expecting `NODE_MATMUL_CONSENSUS`.
 
+## Building from source (provenance is advisory)
+
+A local compile of a sealed release moves the BUILD_RELEVANT fingerprint.
+That used to fail the canary as `build_provenance_mismatch` and withhold
+validation. 0.34.5 **warns and continues**. Runtime ExactGemmS8S8
+CPU-versus-GPU self-qualification stays fail-closed. When a golden row
+exists, the production-shape digest is still compared. The fingerprint
+is not a correctness property. Reseal only if you want the advisory
+match for your own records. `-allowunverifiablematmulconsensus` is a
+deprecated no-op.
+
 ## Competing-branch / “zombie” ExactReplay
 
 If headers for a better-work chain arrive while the node still holds a local

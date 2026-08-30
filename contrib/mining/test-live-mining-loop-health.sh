@@ -607,7 +607,7 @@ JSON
     ;;
   getpeerinfo)
     cat <<JSON
-[{"inbound":false,"addr":"100.85.221.75:19335","connection_type":"manual","minping":0.001,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"node.btx.tools:19335","connection_type":"manual","minping":0.050,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"221.240.90.124:19335","connection_type":"outbound-full-relay","minping":0.003,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"147.182.192.221:19335","connection_type":"outbound-full-relay","minping":0.108,"synced_headers":100,"synced_blocks":100}]
+[{"inbound":false,"addr":"192.0.2.1:19335","connection_type":"manual","minping":0.001,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"node.btx.tools:19335","connection_type":"manual","minping":0.050,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"192.0.2.21:19335","connection_type":"outbound-full-relay","minping":0.003,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"192.0.2.22:19335","connection_type":"outbound-full-relay","minping":0.108,"synced_headers":100,"synced_blocks":100}]
 JSON
     ;;
   generatetoaddress)
@@ -642,13 +642,13 @@ BTX_MINING_MAX_LOOPS=5 \
   --address-file="${TMPDIR}/address.txt" \
   --sleep=0 >/dev/null 2>&1
 
-test "$(sed -n '1p' "${RESULTS_DIR}/live-peer-cache.txt")" = "221.240.90.124:19335"
-test "$(sed -n '2p' "${RESULTS_DIR}/live-peer-cache.txt")" = "147.182.192.221:19335"
+test "$(sed -n '1p' "${RESULTS_DIR}/live-peer-cache.txt")" = "192.0.2.21:19335"
+test "$(sed -n '2p' "${RESULTS_DIR}/live-peer-cache.txt")" = "192.0.2.22:19335"
 grep -q "peer-bootstrap-refresh reason=insufficient_peer_consensus attempted=4 succeeded=4 failed=0" "${RESULTS_DIR}/live-mining-health.log"
-test "$(sed -n '1p' "${STATE_DIR}/addnode.log")" = "addnode 221.240.90.124:19335 onetry"
-test "$(sed -n '2p' "${STATE_DIR}/addnode.log")" = "addnode 147.182.192.221:19335 onetry"
+test "$(sed -n '1p' "${STATE_DIR}/addnode.log")" = "addnode 192.0.2.21:19335 onetry"
+test "$(sed -n '2p' "${STATE_DIR}/addnode.log")" = "addnode 192.0.2.22:19335 onetry"
 grep -q "addnode node.btx.tools:19335 onetry" "${STATE_DIR}/addnode.log"
-grep -q "addnode 100.85.221.75:19335 onetry" "${STATE_DIR}/addnode.log"
+grep -q "addnode 192.0.2.1:19335 onetry" "${STATE_DIR}/addnode.log"
 
 STATE_DIR="${TMPDIR}/state-peer-topoff"
 RESULTS_DIR="${TMPDIR}/results-peer-topoff"
@@ -678,7 +678,7 @@ JSON
     ;;
   getpeerinfo)
     cat <<JSON
-[{"inbound":false,"addr":"100.85.221.75:19335","connection_type":"manual","minping":0.001,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"100.115.222.45:19335","connection_type":"manual","minping":0.002,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"100.123.243.104:19335","connection_type":"manual","minping":0.003,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"100.127.0.10:19335","connection_type":"manual","minping":0.004,"synced_headers":100,"synced_blocks":100}]
+[{"inbound":false,"addr":"192.0.2.1:19335","connection_type":"manual","minping":0.001,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"192.0.2.2:19335","connection_type":"manual","minping":0.002,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"192.0.2.3:19335","connection_type":"manual","minping":0.003,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"192.0.2.4:19335","connection_type":"manual","minping":0.004,"synced_headers":100,"synced_blocks":100}]
 JSON
     ;;
   generatetoaddress)

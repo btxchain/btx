@@ -40,6 +40,7 @@
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <pow.h>
@@ -100,6 +101,7 @@
 #include <span>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -7068,6 +7070,10 @@ void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationSta
         m_chainman.m_failed_blocks.insert(pindex);
         m_blockman.m_dirty_blockindex.insert(pindex);
         setBlockIndexCandidates.erase(pindex);
+        // Slot-wedge hardening: a ConnectBlock failure on an acquired-tower
+        // body (e.g. during migration) also proves the tower dead; release
+        // its acquisition-escape exemption slot.
+        m_chainman.AcquisitionEscapeNoteBlockFailed(pindex);
         InvalidChainFound(pindex);
     }
 }
@@ -9393,6 +9399,12 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     if (m_chainman.m_options.signals) {
         m_chainman.m_options.signals->BlockDisconnected(pblock, pindexDelete);
     }
+    // Own validated reorg only: release the local mint slot if this process
+    // SignLocal'd the hash that just left the active chain. Must not wait for
+    // the async validation queue — SignAuthoritative of the new tip can run
+    // immediately. Inbound MMATTEST never reaches this path.
+    node::matmul_trusted::NotifyActiveChainBlockDisconnected(
+        pindexDelete->nHeight, pindexDelete->GetBlockHash());
 
     if (m_mempool) {
         // add mempool stats sample
@@ -9552,6 +9564,32 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
             return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
                                ": cadence hold");
         }
+    }
+    // Consensus ENC-DR / RC: ConnectBlock does not ExactReplay. A HAVE_DATA
+    // tip-child persisted without the verified bit must not become the
+    // active tip ([an operator]: every body is fully ExactReplay'd before
+    // ConnectTip). Cannot run CUDA here: mempool is held. AcceptBlock
+    // reverifies unconnected tip-children; ABC retries this candidate.
+    if (pindexNew->nHeight > 0 &&
+        m_chainman.GetMatMulValidationMode() ==
+            kernel::MatMulValidationMode::CONSENSUS &&
+        m_chainman.GetConsensus().fMatMulPOW &&
+        m_chainman.GetConsensus().IsMatMulV4Active(pindexNew->nHeight) &&
+        m_chainman.GetConsensus()
+                .GetMatMulProfileParams(pindexNew->nHeight)
+                .commitment == Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE &&
+        !(pindexNew->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
+        !node::matmul_trusted::SkipExactReplayForGpuAttestation(
+            m_chainman.IndexHasTrustedMatMulAuthority(pindexNew),
+            node::matmul_trusted::IsTrustedMirror()) &&
+        !m_chainman.IsMatMulRecomputeAssumeValidTrusted(
+            pindexNew, pindexNew->nHeight) &&
+        !m_chainman.IsInitialBlockDownload()) {
+        LogInfo("ConnectTip: defer hash=%s height=%d (ExactReplay required "
+                "before activation)\n",
+                pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
+        return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
+                           ": ExactReplay required before ConnectTip");
     }
     const auto connect_t0{SteadyClock::now()};
     const bool covered_fast_path{
@@ -10013,15 +10051,28 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                  m_chain.Tip() != nullptr &&
                  pindexNew->nChainWork >= m_chain.Tip()->nChainWork) ||
                 pindexNew == unique_abandon};
-            if (!authority_escape ||
+            // Deep-fork auto-resolve park-escape (RB-16 migration hand-off):
+            // mirror the TryAddBlockIndexCandidate unpark for a parked
+            // candidate already in the set (unique_abandon insert / unpark
+            // re-add races). Requires the FULL-suffix ExactReplay predicate
+            // on top of every MayAct observation gate; a header-only or
+            // partially verified heavier rewrite still stays parked.
+            const bool deep_fork_escape{
+                !authority_escape &&
+                m_chainman.DeepForkAutoResolveMayUnpark(pindexNew)};
+            if ((!authority_escape && !deep_fork_escape) ||
                 !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
                 skipped_this_call.insert(pindexNew);
                 setBlockIndexCandidates.erase(pindexNew);
                 ++skipped_count;
                 continue;
             }
-            LogWarning("%s: auto-unparked uniquely attested authority branch hash=%s height=%d (park-escape; unattested heavier rewrites stay parked)\n",
-                       __func__, pindexNew->GetBlockHash().ToString(),
+            LogWarning("%s: auto-unparked %s branch hash=%s height=%d (park-escape; unattested heavier rewrites stay parked)\n",
+                       __func__,
+                       deep_fork_escape
+                           ? "fully-ExactReplay-verified deep-fork (deepforkautoresolve)"
+                           : "uniquely attested authority",
+                       pindexNew->GetBlockHash().ToString(),
                        pindexNew->nHeight);
         }
         if (pindexNew != unique_abandon &&
@@ -10208,9 +10259,31 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // same candidate escape PARK; applying hysteresis here first would
             // make the escape unreachable when the branch is only one-work-unit
             // ahead (the normal already-have-data recovery case).
+            // Do not OR in ConsensusMinerMayReorgPastParkForStaleHeavierFork:
+            // GETDATA of a heavier fork (77283c72) must not auto-follow past
+            // park_depth=6 (2026-08-10/11 dump-and-run, 151- and 8-deep).
+            //
+            // RB-14 Part A: a self-signed losing twin pins m_best_header to the
+            // attested loser, so ReceivedBlockTransactions never re-sees the
+            // already-HAVE_DATA winner. Arm from the candidate's own header
+            // work here, still only inside WorkBasedReorgRecoveryMayArm.
+            // Unsigned miners keep hysteresis (do not arm on every HAVE_DATA
+            // shallow fork). Do not call durable HasQuorum from FMWC.
+            if (m_chainman.m_options.matmul_validation_mode ==
+                    kernel::MatMulValidationMode::CONSENSUS &&
+                node::matmul_trusted::HasLocalSigner() &&
+                old_tip != nullptr &&
+                node::matmul_trusted::HasQuorumInMemory(
+                    old_tip->GetBlockHash(), old_tip->nHeight)) {
+                if (!m_chainman.MaybeTrackReorgRecovery(pindexNew)) {
+                    LogError("%s: failed to persist reorg recovery while ranking %s\n",
+                             __func__, pindexNew->GetBlockHash().ToString());
+                }
+            }
             const bool recovery_escape{
                 m_chainman.IsAutomaticReorgRecoveryCandidate(pindexNew) ||
-                m_chainman.IsAttestedAbandonForkCandidate(pindexNew)};
+                m_chainman.IsAttestedAbandonForkCandidate(pindexNew) ||
+                m_chainman.DeepForkAutoResolveMayAct(pindexNew)};
             if (old_tip != nullptr &&
                 fork != nullptr &&
                 fork != old_tip &&
@@ -10418,9 +10491,22 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         const bool warn =
             warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
             reorg_depth > static_cast<int>(warn_depth);
+        // Fetch (GETDATA) of a heavier competing fork is not follow.
+        // recovery_escape stays the attested/automatic shallow-race pair;
+        // a stale tip plus more claimed work must still park at depth > 6.
+        // Deterministic escapes (shallow work-based recovery, attested
+        // abandon) first; then the LOCAL -deepforkautoresolve observation
+        // policy as the SECOND layer for a deep honest fork with no quorum on
+        // either side. Fails safe to park on any ambiguity. Not persisted
+        // anywhere (MaybeTrackReorgRecovery is untouched), so a restart -- when
+        // the memory-only first-seen signals are unknown -- re-parks: today's
+        // behavior verbatim (df-attack R3).
+        const bool deep_fork_auto_resolve{
+            m_chainman.DeepForkAutoResolveMayAct(pindexMostWork)};
         const bool recovery_escape{
             m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
-            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork)};
+            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork) ||
+            deep_fork_auto_resolve};
         const bool park = kernel::DeepReorgShouldPark(
             cm_opts.deep_reorg_action, park_depth, reorg_depth, recovery_escape);
 
@@ -10442,6 +10528,8 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED ? park_depth : 0,
                 pindexOldTip->nHeight, pindexFork->nHeight, pindexMostWork->nHeight,
                 park ? _("Parking the branch and staying on the current chain pending operator action.")
+                     : deep_fork_auto_resolve
+                         ? _("Auto-activating the honest deep-reorg branch (deep-fork auto-resolve): observed live as our tip climbed and sustained, or its entire suffix passed byte-exact MatMul ExactReplay verification, with no quorum on either fork.")
                      : recovery_escape
                          ? _("Activating the uniquely authenticated shallow-race recovery branch.")
                          : _("Following the most-work chain (warn-only)."));
@@ -10643,6 +10731,17 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 }
             } else {
                 connected_this_step = true;
+                // Upstream parity: the just-connected tip may no longer be in
+                // setBlockIndexCandidates -- e.g. a racing operator invalidateblock
+                // erased its branch while the non-blocking validation-interface
+                // drain had cs_main released -- and PruneBlockIndexCandidates
+                // asserts the set is non-empty. Re-add the tip before pruning so
+                // that invariant always holds (matches the park path and the
+                // retryable-error path above). Local bookkeeping only; no
+                // consensus impact.
+                if (m_chain.Tip() != nullptr) {
+                    setBlockIndexCandidates.insert(m_chain.Tip());
+                }
                 PruneBlockIndexCandidates();
                 if (!pindexOldTip || m_chain.Tip()->nChainWork > pindexOldTip->nChainWork) {
                     // We're in a better position than we were. Return temporarily to release the lock.
@@ -10745,7 +10844,11 @@ static void LimitValidationInterfaceQueue(
 //! submitblock, then Shutdown joined those HTTP workers before the durable
 //! chainstate flush).
 template <typename MutexType>
-static void DrainValidationInterfaceQueue(
+// Returns true iff it released chainstate_lock to drain (the caller must then
+// treat any chain state cached across this call -- e.g. a selected most-work
+// target -- as possibly stale, since another thread may have reorged or
+// invalidated it while the lock was down).
+static bool DrainValidationInterfaceQueue(
     ValidationSignals& signals,
     UniqueLock<MutexType>& chainstate_lock,
     const std::function<bool()>& interrupted)
@@ -10753,7 +10856,7 @@ static void DrainValidationInterfaceQueue(
 {
     AssertLockNotHeld(cs_main);
     if (signals.CallbacksPending() <= VALIDATION_INTERFACE_DRAIN_THRESHOLD) {
-        return;
+        return false;
     }
     Assert(chainstate_lock.owns_lock());
     REVERSE_LOCK(chainstate_lock);
@@ -10766,6 +10869,7 @@ static void DrainValidationInterfaceQueue(
                    ValidationQueueSyncResultName(result),
                    signals.CallbacksPending());
     }
+    return true;
 }
 
 bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<const CBlock> pblock)
@@ -10805,10 +10909,18 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
         // ActivateBestChain this may lead to a deadlock! We should
         // probably have a DEBUG_LOCKORDER test for this in the future.
         if (m_chainman.m_options.signals) {
-            DrainValidationInterfaceQueue(
-                *m_chainman.m_options.signals,
-                chainstate_lock,
-                [&] { return bool(m_chainman.m_interrupt); });
+            if (DrainValidationInterfaceQueue(
+                    *m_chainman.m_options.signals,
+                    chainstate_lock,
+                    [&] { return bool(m_chainman.m_interrupt); })) {
+                // We released m_chainstate_mutex to drain, so a concurrent
+                // operator invalidateblock or net-thread reorg may have failed or
+                // erased our cached most-work target. Force a fresh
+                // FindMostWorkChain next iteration instead of connecting a stale
+                // (possibly now-invalidated) branch, which would reconnect a
+                // just-invalidated chain and can empty setBlockIndexCandidates.
+                pindexMostWork = nullptr;
+            }
             if (WITH_LOCK(::cs_main, return m_disabled)) {
                 LogPrintf("m_disabled is set - this chainstate should not be in operation. "
                     "Please report this as a bug. %s\n", CLIENT_BUGREPORT);
@@ -10885,6 +10997,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     if (m_chainman.m_options.signals) {
                         m_chainman.m_options.signals->BlockConnected(chainstate_role, trace.pblock, trace.pindex);
                     }
+                    node::matmul_trusted::NotifyActiveChainBlockConnected(
+                        trace.pindex->nHeight, trace.pindex->GetBlockHash());
                 }
 
                 if (IsRetryableMatMulActivationError(state)) {
@@ -11148,14 +11262,14 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         // and be left unable to start as they have no tip candidates (as there
         // are no blocks that meet the "have data and are not invalid per
         // nStatus" criteria for inclusion in setBlockIndexCandidates).
-        invalid_walk_tip->nStatus |= BLOCK_FAILED_VALID;
+        invalid_walk_tip->nStatus |= BLOCK_FAILED_VALID | BLOCK_MANUALLY_INVALIDATED;
         m_blockman.m_dirty_blockindex.insert(invalid_walk_tip);
         setBlockIndexCandidates.erase(invalid_walk_tip);
         TryAddBlockIndexCandidate(invalid_walk_tip->pprev);
         if (invalid_walk_tip == to_mark_failed->pprev && (to_mark_failed->nStatus & BLOCK_FAILED_VALID)) {
             // We only want to mark the last disconnected block as BLOCK_FAILED_VALID; its children
             // need to be BLOCK_FAILED_CHILD instead.
-            to_mark_failed->nStatus = (to_mark_failed->nStatus ^ BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
+            to_mark_failed->nStatus = (to_mark_failed->nStatus ^ BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD | BLOCK_MANUALLY_INVALIDATED;
             m_blockman.m_dirty_blockindex.insert(to_mark_failed);
         }
 
@@ -11185,7 +11299,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         }
 
         // Mark pindex (or the last disconnected block) as invalid, even when it never was in the main chain
-        to_mark_failed->nStatus |= BLOCK_FAILED_VALID;
+        to_mark_failed->nStatus |= BLOCK_FAILED_VALID | BLOCK_MANUALLY_INVALIDATED;
         m_blockman.m_dirty_blockindex.insert(to_mark_failed);
         setBlockIndexCandidates.erase(to_mark_failed);
         m_chainman.m_failed_blocks.insert(to_mark_failed);
@@ -11239,9 +11353,10 @@ void Chainstate::SetBlockFailureFlags(CBlockIndex* invalid_block)
 {
     AssertLockHeld(cs_main);
 
+    const uint32_t manual{invalid_block->nStatus & BLOCK_MANUALLY_INVALIDATED};
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if (invalid_block != &block_index && block_index.GetAncestor(invalid_block->nHeight) == invalid_block) {
-            block_index.nStatus = (block_index.nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
+            block_index.nStatus = (block_index.nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD | manual;
             m_blockman.m_dirty_blockindex.insert(&block_index);
         }
     }
@@ -11255,7 +11370,7 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
     // Remove the invalidity flag from this block and all its descendants.
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if ((block_index.nStatus & BLOCK_FAILED_MASK) && block_index.GetAncestor(nHeight) == pindex) {
-            block_index.nStatus &= ~BLOCK_FAILED_MASK;
+            block_index.nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_MANUALLY_INVALIDATED);
             m_blockman.m_dirty_blockindex.insert(&block_index);
             if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
                 block_index.HaveNumChainTxs() &&
@@ -11274,7 +11389,7 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
     // Remove the invalidity flag from all ancestors too.
     while (pindex != nullptr) {
         if (pindex->nStatus & BLOCK_FAILED_MASK) {
-            pindex->nStatus &= ~BLOCK_FAILED_MASK;
+            pindex->nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_MANUALLY_INVALIDATED);
             m_blockman.m_dirty_blockindex.insert(pindex);
             m_chainman.m_failed_blocks.erase(pindex);
         }
@@ -11285,6 +11400,17 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
 void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
+    // A BLOCK_FAILED_MASK block is never a connectable candidate and must never
+    // be re-added to setBlockIndexCandidates nor auto-unparked. Without this the
+    // InvalidateBlock cleanup re-scan re-fed an operator-invalidated branch back
+    // in (empty-set PruneBlockIndexCandidates abort enabler), and the deep-fork
+    // auto-resolve unpark below could retire the depth-6 park on a parked+failed
+    // branch (audit gap-hunt F1/F3). reconsiderblock clears the FAILED bits
+    // before re-adding, so legitimate recovery is unaffected. Upstream parity:
+    // the candidate gate excludes failed blocks (IsValid checks FAILED_MASK).
+    if (pindex != nullptr && (pindex->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return;
+    }
     const CBlockIndex* const tip{m_chain.Tip()};
     // Active-chain ancestors are never connectable candidates (strictly less
     // work than tip). Running parked / defer / TrustedMirror / unique-attested
@@ -11295,8 +11421,32 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
         m_chain.Contains(pindex)) {
         return;
     }
-    const bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
+    bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
     const bool defer_losing{m_chainman.ShouldDeferLosingTipExtension(pindex)};
+    // RB-16 migration hand-off (precondition deadlock fix): the park veto
+    // below kept a fully-acquired, fully-ExactReplay-verified heavier fork
+    // out of setBlockIndexCandidates forever, so FindMostWorkChain never
+    // consulted DeepForkAutoResolveMayAct for it and the deep-fork
+    // auto-resolve escape (ActivateBestChainStep) was unreachable (live
+    // rtx6000: tip=199416, verified majority tower 201500 stayed
+    // "valid-headers"). When every -deepforkautoresolve observation gate
+    // holds AND the whole competing suffix is HAVE_DATA +
+    // EXACT_REPLAY_VERIFIED, atomically unpark so the NORMAL
+    // ActivateBestChain/ConnectTip path -- which still refuses unverified
+    // bodies and still runs full UTXO/script ConnectBlock -- can migrate.
+    // Deterministic layers (quorum, attested abandon, shallow recovery,
+    // operator invalidate) keep priority inside MayAct; armed losing-tip
+    // deferral keeps priority here.
+    if (parked && !defer_losing &&
+        m_chainman.DeepForkAutoResolveMayUnpark(pindex) &&
+        m_chainman.UnparkReorgBranchContainingBlock(pindex)) {
+        LogWarning("%s: auto-unparked deep-fork branch hash=%s height=%d "
+                   "(deepforkautoresolve: suffix fully ExactReplay-verified; "
+                   "header-only/partially-verified towers stay parked)\n",
+                   __func__, pindex->GetBlockHash().ToString(),
+                   pindex->nHeight);
+        parked = false;
+    }
     if (parked || defer_losing) {
         if (pindex != nullptr && tip != nullptr && pindex->pprev == tip) {
             // Live 2026-08-16: HEADER_ONLY tip-child re-announces hit this
@@ -11318,10 +11468,15 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     // pick it, hit missing-data, erase, and spin when the net thread
     // re-TryAdds on every header (live miners 2026-08-16). Getdata first;
     // ReceivedBlockTransactions re-adds once HAVE_DATA lands.
+    // A candidate must have BOTH a body and a chain-tx-count: FindMostWorkChain
+    // asserts HaveNumChainTxs() (audit gap-hunt F6 -- a HAVE_DATA block whose
+    // m_chain_tx_count was never set, e.g. a legacy/partial index, would abort
+    // FMWC). ReceivedBlockTransactions sets both together, so this only refuses
+    // genuinely-unconnectable indexes; the snapshot base is exempt.
     if (pindex != tip &&
         pindex != m_chainman.GetSnapshotBaseBlock() &&
-        (pindex->nStatus & BLOCK_HAVE_DATA) == 0 &&
-        !pindex->HaveNumChainTxs()) {
+        ((pindex->nStatus & BLOCK_HAVE_DATA) == 0 ||
+         !pindex->HaveNumChainTxs())) {
         return;
     }
 
@@ -11532,6 +11687,23 @@ int ChainstateManager::GetCadenceHoldAllowedHeight(const CBlockIndex* tip, int64
         return std::numeric_limits<int>::max();
     }
 
+    // Honest catch-up: bodies lag a same-chain HEADER_ONLY suffix of
+    // ≥100. The one-shot anchor cannot fold via Contains(m_best_header)
+    // while those bodies are still missing, so ConnectTip/GETDATA stuck
+    // at arm-tip + burst + 1/90s. Fold the pin (do not return INT_MAX —
+    // burst_max still caps each ABC pass). Competing forks and shorter
+    // dumps still hold. ExactReplay before ConnectTip is unchanged.
+    if (m_cadence_hold_anchor_height.has_value() && m_best_header != nullptr &&
+        m_best_header->nHeight >= tip->nHeight &&
+        m_best_header->GetAncestor(tip->nHeight) == tip &&
+        kernel::CadenceHoldFollowedCatchUpDisarms(
+            /*best_header_extends_tip=*/true,
+            m_best_header->nHeight - tip->nHeight)) {
+        m_cadence_hold_anchor_height.reset();
+        m_cadence_hold_anchor_time.reset();
+        m_cadence_hold_anchor_mono.reset();
+    }
+
     // Fold the anchor once the followed header is on the active chain so
     // the next burst re-arms from the new live tip.
     if (m_cadence_hold_anchor_height.has_value() && m_best_header != nullptr &&
@@ -11612,7 +11784,246 @@ void ChainstateManager::NoteTipConnected(int64_t now)
 {
     AssertLockHeld(::cs_main);
     m_last_tip_connect_time = now;
-    m_last_tip_connect_mono = CadenceHoldMonotonicNowSeconds();
+    const int64_t mono{CadenceHoldMonotonicNowSeconds()};
+    m_last_tip_connect_mono = mono;
+    // RB-16 fix: anti-stale credit must be earned on the BETTER-CHAIN axis,
+    // not by any ConnectTip. A tip that only extends a strictly-lighter
+    // COMPETING fork while a heavier tower is known (m_best_header) keeps
+    // resetting m_last_tip_connect_mono, so the escape valve never fires and
+    // the +72 header-lead cap keeps dropping the majority headers (live
+    // rtx6000: tip 199394->199398 on a minority fork, headers stuck at
+    // 199801, valve log lines=0). Only connects that advance toward / onto
+    // the best-known chain refresh the progress clock; a slowly growing
+    // minority fork lets it age past ACQUISITION_ESCAPE_STALL_SECONDS.
+    const CBlockIndex* const tip{m_active_chainstate != nullptr
+                                     ? m_active_chainstate->m_chain.Tip()
+                                     : nullptr};
+    const CBlockIndex* const best{m_best_header};
+    const bool better_chain_progress{
+        tip == nullptr || best == nullptr ||
+        best->GetAncestor(tip->nHeight) == tip || tip->nChainWork >= best->nChainWork};
+    if (better_chain_progress) {
+        m_last_better_chain_progress_mono = mono;
+    }
+    // RB-16: the tip advanced on the better chain, so the acquisition stall is
+    // over -- release all exempt-tower slots (a migration onto the acquired
+    // chain also lands here). A minority-fork-only connect must NOT clear the
+    // slots: wiping them mid-acquisition re-arms the +72 request cap, and the
+    // tower can never re-register (re-registration needs a past-cap header
+    // that stops arriving once the getheaders chase stops).
+    if (better_chain_progress) {
+        m_acquisition_exempt_towers.clear();
+    }
+}
+
+bool ChainstateManager::AcquisitionTipIsStale() const
+{
+    AssertLockHeld(::cs_main);
+    if (m_active_chainstate == nullptr) return false;
+    // IBD already exempts the header-lead caps and fetches freely.
+    if (IsInitialBlockDownload()) return false;
+    const int64_t now{CadenceHoldMonotonicNowSeconds()};
+    // TEST-ONLY: -acquisitionstallseconds overrides the 600s window so live
+    // convergence tests need not wait 10 minutes per restart. Production leaves
+    // it unset -> ACQUISITION_ESCAPE_STALL_SECONDS.
+    const int64_t stall_seconds{
+        m_options.acquisition_stall_seconds.value_or(ACQUISITION_ESCAPE_STALL_SECONDS)};
+    // RB-16 restart-safety: a node that BOOTED onto a frozen tip and has
+    // connected nothing has no m_last_tip_connect_mono, so the old
+    // `if (!has_value()) return false` made the staleness gate un-trippable and
+    // a restarted stuck node (rtx6000 live: UpdateTip count=0 across the whole
+    // uptime, tip frozen at 199416 below a known 201278 tower) could NEVER
+    // self-rescue -- defeating "automatic on upgrade for ALL users". Capture a
+    // startup baseline lazily and fall back to it whenever a clock is unset, so
+    // the frozen-tip path still trips after the stall window. Downstream
+    // (AcquisitionEscapeActive / MayAcquire) still requires a strictly-heavier
+    // off-active-chain tower, so a frozen node with no heavier tower is "stale"
+    // but does nothing.
+    if (!m_acquisition_stale_baseline_mono.has_value()) {
+        m_acquisition_stale_baseline_mono = now;
+    }
+    // Frozen tip: no successful ConnectTip for the stall window (or, at boot
+    // with nothing connected, no progress since the startup baseline).
+    const int64_t frozen_since{
+        m_last_tip_connect_mono.value_or(*m_acquisition_stale_baseline_mono)};
+    if ((now - frozen_since) >= stall_seconds) return true;
+    // RB-16 fix: the tip IS connecting, but only on a strictly-lighter
+    // COMPETING fork while a heavier tower is known (e.g. a minority fork that
+    // slowly extends: 199394->199398). Those connects reset m_last_tip_connect_
+    // mono, so the frozen path never trips. The node is still ACQUISITION-
+    // stale: no progress toward the known heavier tower for the stall window.
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    const CBlockIndex* const best{m_best_header};
+    if (tip == nullptr || best == nullptr) return false;
+    if (!(best->nChainWork > tip->nChainWork)) return false;
+    if (best->GetAncestor(tip->nHeight) == tip) return false; // best extends tip
+    // Never made better-chain progress (e.g. booted onto the minority fork) or
+    // last made it longer than the stall window ago: acquisition-stale. The
+    // "never" case falls back to the startup baseline so it still requires the
+    // 600s confirmation window rather than arming instantly on a heavier tower
+    // seen at boot (which is cheap to forge at the header layer).
+    const int64_t last_progress{
+        m_last_better_chain_progress_mono.value_or(
+            *m_acquisition_stale_baseline_mono)};
+    return (now - last_progress) >= stall_seconds;
+}
+
+bool ChainstateManager::AcquisitionEscapeActive(const CBlockIndex* candidate) const
+{
+    AssertLockHeld(::cs_main);
+    if (candidate == nullptr || m_active_chainstate == nullptr) return false;
+    if (!AcquisitionTipIsStale()) return false;
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip == nullptr) return false;
+    if (!(candidate->nChainWork > tip->nChainWork)) return false;      // strictly heavier
+    if (candidate->GetAncestor(tip->nHeight) == tip) return false;     // competing, not extending
+    // Bounded exempt lead: a fake tower cannot grow the index unboundedly.
+    if (candidate->nHeight - tip->nHeight > ACQUISITION_ESCAPE_MAX_LEAD) return false;
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(candidate)};
+    if (fork == nullptr) return false;
+    return m_acquisition_exempt_towers.count(fork->GetBlockHash()) != 0;
+}
+
+bool ChainstateManager::AcquisitionEscapeCoversBlock(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr || m_active_chainstate == nullptr) return false;
+    if (m_acquisition_exempt_towers.empty()) return false;
+    if (!AcquisitionTipIsStale()) return false;
+    // A block already on our active chain is not "being acquired".
+    if (m_active_chainstate->m_chain.Contains(index)) return false;
+    // The block is covered if it DESCENDS FROM an exempt tower root (the fork
+    // LCA) and is off the active chain, i.e. it sits on that heavier competing
+    // fork. This holds for every ancestor of the tower tip regardless of the
+    // block's own work, so a low mid-tower body below the minority tip is
+    // covered. (Descendant-of-root, not FindFork(index)==root, is robust to
+    // minority-fork reorgs that would move index's own LCA.)
+    // Slot-wedge hardening: never admit a FAILED body for (re-)ExactReplay.
+    // Parity with the reverify_acquired_fork_body gate in AcceptBlock; a
+    // forged tower's body that already failed must not be able to spend GPU
+    // budget again through any CoversBlock-gated admission path.
+    if (index->nStatus & BLOCK_FAILED_MASK) return false;
+    bool covered{false};
+    for (const auto& entry : m_acquisition_exempt_towers) {
+        const CBlockIndex* const root{m_blockman.LookupBlockIndex(entry.first)};
+        if (root == nullptr) continue;
+        if (index->nHeight >= root->nHeight &&
+            index->GetAncestor(root->nHeight) == root) {
+            covered = true;
+            break;
+        }
+    }
+    // Rate-limited diagnostic so the live node can show why a fetched
+    // acquired-tower body is / is not admitted for ExactReplay.
+    static std::atomic<int64_t> s_last_log{0};
+    const int64_t now_s{GetTime()};
+    if (now_s - s_last_log.load(std::memory_order_relaxed) >= 5) {
+        s_last_log.store(now_s, std::memory_order_relaxed);
+        LogPrintf("acquisition-escape CoversBlock hash=%s height=%d covered=%d "
+                  "towers=%d contains=0 stale=1\n",
+                  index->GetBlockHash().ToString(), index->nHeight,
+                  covered ? 1 : 0,
+                  static_cast<int>(m_acquisition_exempt_towers.size()));
+    }
+    return covered;
+}
+
+void ChainstateManager::AcquisitionEscapeNoteBlockFailed(const CBlockIndex* failed)
+{
+    AssertLockHeld(::cs_main);
+    if (failed == nullptr || m_acquisition_exempt_towers.empty()) return;
+    for (auto it = m_acquisition_exempt_towers.begin();
+         it != m_acquisition_exempt_towers.end();) {
+        const CBlockIndex* const root{m_blockman.LookupBlockIndex(it->first)};
+        if (root != nullptr && failed->nHeight > root->nHeight &&
+            failed->GetAncestor(root->nHeight) == root) {
+            LogPrintf("acquisition-escape: evicting exempt tower fork_root=%s "
+                      "-- covered body %s height=%d FAILED validation (dead "
+                      "tower must not hold an exemption slot)\n",
+                      it->first.ToString(),
+                      failed->GetBlockHash().ToString(), failed->nHeight);
+            it = m_acquisition_exempt_towers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
+    const CBlockIndex* candidate)
+{
+    AssertLockHeld(::cs_main);
+    if (candidate == nullptr || m_active_chainstate == nullptr) return false;
+    if (!AcquisitionTipIsStale()) return false;
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip == nullptr) return false;
+    if (!(candidate->nChainWork > tip->nChainWork)) return false;
+    if (candidate->GetAncestor(tip->nHeight) == tip) return false;
+    // Bounded exempt lead (RB-6-style): do not index a bogus tower without
+    // bound. The clear-on-ConnectTip slides this window as real bodies validate.
+    if (candidate->nHeight - tip->nHeight > ACQUISITION_ESCAPE_MAX_LEAD) return false;
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(candidate)};
+    if (fork == nullptr) return false;
+    // Slot-wedge hardening: refuse to (re-)register a tower whose branch
+    // candidate..fork already carries a FAILED block. Without this a dead
+    // tower evicted by AcquisitionEscapeNoteBlockFailed re-registers on the
+    // next header extending it (a body FAILED in AcceptBlock is not inserted
+    // into m_failed_blocks, so descendant headers are still indexed without
+    // BLOCK_FAILED_CHILD) and, with forged max work, re-wedges the slot
+    // forever. Bounded: one pprev walk candidate->fork per registration
+    // attempt (pointer-chasing only, no hashing).
+    for (const CBlockIndex* walk{candidate};
+         walk != nullptr && walk != fork && walk->nHeight > fork->nHeight;
+         walk = walk->pprev) {
+        if (walk->nStatus & BLOCK_FAILED_MASK) return false;
+    }
+    const uint256 root{fork->GetBlockHash()};
+    // Prune only FAILED / missing tower roots. The root is the fork LCA, which
+    // is ALWAYS on the active chain -- so a Contains() test here erased every
+    // registered root (leaving only the last-registered one), which wiped the
+    // majority tower's root whenever a minor competing fork registered after
+    // it, and CoversBlock then returned false for the majority bodies (live
+    // rtx6000: 36MB fetched, deferred=41, CoversBlock hits=0). Migration off
+    // the tower is handled by the clear-on-better-chain-progress in
+    // NoteTipConnected, not here.
+    for (auto it = m_acquisition_exempt_towers.begin();
+         it != m_acquisition_exempt_towers.end();) {
+        const CBlockIndex* idx{m_blockman.LookupBlockIndex(it->first)};
+        if (idx == nullptr || (idx->nStatus & BLOCK_FAILED_MASK)) {
+            it = m_acquisition_exempt_towers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    auto existing{m_acquisition_exempt_towers.find(root)};
+    if (existing != m_acquisition_exempt_towers.end()) {
+        if (candidate->nChainWork > existing->second) {
+            existing->second = candidate->nChainWork;
+        }
+        return true;
+    }
+    if (m_acquisition_exempt_towers.size() < ACQUISITION_ESCAPE_MAX_TOWERS) {
+        m_acquisition_exempt_towers.emplace(root, candidate->nChainWork);
+        LogPrintf("acquisition-escape: exempting heavier competing tower "
+                  "fork_root=%s from header-lead/last-common caps (tip stale, "
+                  "candidate work > tip); fetch + full ExactReplay to acquire, "
+                  "migration still park/deepforkautoresolve-gated\n",
+                  root.ToString());
+        return true;
+    }
+    // Budget full: evict the lightest tower only if the candidate is heavier,
+    // so the real (heaviest) majority chain always keeps a slot.
+    auto lightest{m_acquisition_exempt_towers.begin()};
+    for (auto it = std::next(m_acquisition_exempt_towers.begin());
+         it != m_acquisition_exempt_towers.end(); ++it) {
+        if (it->second < lightest->second) lightest = it;
+    }
+    if (candidate->nChainWork > lightest->second) {
+        m_acquisition_exempt_towers.erase(lightest);
+        m_acquisition_exempt_towers.emplace(root, candidate->nChainWork);
+        return true;
+    }
+    return false;
 }
 
 void ChainstateManager::ResetCadenceHoldStateForTest()
@@ -11623,6 +12034,7 @@ void ChainstateManager::ResetCadenceHoldStateForTest()
     m_cadence_hold_anchor_mono.reset();
     m_last_tip_connect_time.reset();
     m_last_tip_connect_mono.reset();
+    m_last_better_chain_progress_mono.reset();
     m_cadence_hold_logged_allowed.reset();
 }
 
@@ -11694,6 +12106,17 @@ bool ChainstateManager::UnparkReorgBranchContainingBlock(const CBlockIndex* pind
     }
     for (Chainstate* chainstate : GetAll()) {
         for (auto& [_, block_index] : m_blockman.m_block_index) {
+            // Only blocks on the just-unparked branch (root + descendants) can
+            // have newly become candidates -- the park veto is what had refused
+            // them; every other block's park status is unchanged, so its
+            // candidacy was already evaluated correctly. Re-scanning the whole
+            // ~200k index ran the O(frontier) trusted-mirror gate on every entry
+            // and stalled RPC/net for seconds during the auto-resolve recovery
+            // window (audit gap-hunt F4).
+            if (block_index.nHeight < root->nHeight ||
+                block_index.GetAncestor(root->nHeight) != root) {
+                continue;
+            }
             if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
                 block_index.HaveNumChainTxs()) {
                 chainstate->TryAddBlockIndexCandidate(&block_index);
@@ -11805,6 +12228,14 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
         if (hint.height != out.height || hint.hash.IsNull()) continue;
         const CBlockIndex* const frontier_index{
             m_blockman.LookupBlockIndex(hint.hash)};
+        // Invalidation is the operator's resolution of an ambiguous
+        // dual-attested fork. Keep the durable attestation for audit, but do
+        // not let its failed block index continue to displace the active,
+        // attested sibling in signed-frontier reporting or catch-up policy.
+        if (frontier_index != nullptr &&
+            (frontier_index->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         const bool on_chain{
             tip != nullptr && frontier_index != nullptr &&
             tip->nHeight >= frontier_index->nHeight &&
@@ -11839,10 +12270,17 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
         if (out.hash_known) {
             const CBlockIndex* const frontier_index{
                 m_blockman.LookupBlockIndex(out.hash)};
-            out.on_active_chain =
+            out.on_active_chain = node::matmul_trusted::SignedFrontierIsOnActiveChain(
+                /*has_tip=*/true,
+                frontier_index != nullptr,
+                tip->nHeight,
+                frontier_index != nullptr ? frontier_index->nHeight : out.height,
                 frontier_index != nullptr &&
-                tip->nHeight >= frontier_index->nHeight &&
-                tip->GetAncestor(frontier_index->nHeight) == frontier_index;
+                    tip->nHeight >= frontier_index->nHeight &&
+                    tip->GetAncestor(frontier_index->nHeight) == frontier_index,
+                frontier_index != nullptr &&
+                    frontier_index->nHeight >= tip->nHeight &&
+                    frontier_index->GetAncestor(tip->nHeight) == tip);
         } else if (out.on_chain_attested_height == out.height) {
             // Height-only: cannot prove a fork at equal height.
             out.on_active_chain = true;
@@ -12040,6 +12478,10 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         consider(idx);
     }
 
+    // A quorum-covered tip with no qualifying competing candidate is the
+    // ordinary steady state, not evidence of a same-height twin (00ea04a6).
+    if (competing.empty()) return nullptr;
+
     if (tip_has_quorum) {
         std::vector<const CBlockIndex*> suffix;
         suffix.reserve(competing.size());
@@ -12077,12 +12519,28 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
                 }
             }
             if (frontier_ahead.empty()) {
+                const bool tip_has_direct_quorum{
+                    node::matmul_trusted::HasQuorum(
+                        tip->GetBlockHash(), tip->nHeight)};
+                const CBlockIndex* same_height_quorum_twin{nullptr};
+                for (const CBlockIndex* idx : competing) {
+                    if (idx->nHeight == tip->nHeight &&
+                        node::matmul_trusted::HasQuorum(
+                            idx->GetBlockHash(), idx->nHeight)) {
+                        same_height_quorum_twin = idx;
+                        break;
+                    }
+                }
                 if (node::matmul_trusted::DualQuorumSameHeightTwinsFailClosed(
-                        tip_has_quorum,
-                        /*competing_same_height_has_quorum=*/true,
+                        tip_has_direct_quorum,
+                        same_height_quorum_twin != nullptr,
                         /*signed_frontier_strictly_ahead=*/false)) {
-                    LogWarning("matmul: dual-quorum same-height twins at tip height %d; fail-closed, stranded-twin guard stays armed\n",
-                               tip->nHeight);
+                    LogWarning(
+                        "matmul: dual-quorum same-height twins at tip height %d "
+                        "(active=%s competing=%s); fail-closed, stranded-twin "
+                        "guard stays armed\n",
+                        tip->nHeight, tip->GetBlockHash().ToString(),
+                        same_height_quorum_twin->GetBlockHash().ToString());
                 }
                 return nullptr;
             }
@@ -12171,6 +12629,203 @@ bool ChainstateManager::IsAttestedAbandonForkCandidate(
         return false;
     }
     return candidate == FindUniqueCompetingAttestedIndex();
+}
+
+bool ChainstateManager::DeepForkAutoResolveMayAct(
+    const CBlockIndex* candidate,
+    DeepForkAutoResolveVerdict* verdict) const
+{
+    AssertLockHeld(::cs_main);
+    DeepForkAutoResolveVerdict v;
+    const auto finish = [&](bool acted) {
+        v.acted = acted;
+        // Rate-limited operator diagnostic: whenever a DEEP candidate is
+        // scored (in_scope), show exactly which observation gates hold so a
+        // live node explains why it does or does not migrate. acted=1
+        // verdicts are rare and decisive; always log those.
+        if (v.in_scope && candidate != nullptr) {
+            constexpr int64_t VERDICT_LOG_INTERVAL_S{30};
+            const int64_t log_now_s{GetTime()};
+            if (acted || log_now_s - m_deep_fork_verdict_log_time_s >=
+                             VERDICT_LOG_INTERVAL_S) {
+                m_deep_fork_verdict_log_time_s = log_now_s;
+                const char* const acted_path{
+                    !acted ? "-"
+                           : (v.seen_live && v.sustained ? "seen_live"
+                                                         : "exact_replay")};
+                LogInfo("deepforkautoresolve verdict candidate=%s height=%d "
+                        "reorg_depth=%d enabled=%d in_scope=%d heavier=%d "
+                        "no_deterministic_tiebreak=%d candidate_usable=%d "
+                        "seen_live=%d sustained=%d suffix_exact_replayed=%d "
+                        "acted=%d path=%s\n",
+                        candidate->GetBlockHash().ToString(),
+                        candidate->nHeight, v.reorg_depth, v.enabled,
+                        v.in_scope, v.heavier, v.no_deterministic_tiebreak,
+                        v.candidate_usable, v.seen_live, v.sustained,
+                        v.suffix_exact_replayed, acted, acted_path);
+            }
+        }
+        if (verdict != nullptr) *verdict = v;
+        return acted;
+    };
+    if (candidate == nullptr || m_active_chainstate == nullptr) return finish(false);
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip == nullptr || candidate == tip ||
+        m_active_chainstate->m_chain.Contains(candidate)) {
+        return finish(false);
+    }
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(candidate)};
+    if (fork == nullptr || fork == tip) return finish(false);
+    const int reorg_depth{tip->nHeight - fork->nHeight};
+    v.reorg_depth = reorg_depth;
+
+    const auto profile_settings{
+        kernel::GetReorgProtectionProfileSettings(m_options.reorg_protection_profile)};
+    const uint32_t park_depth{
+        m_options.max_reorg_depth_park.value_or(profile_settings.park_depth)};
+    // Strictly the DEEP complement of the shallow work-based recovery window;
+    // the shallow (<= park_depth) window is owned by MaybeTrackReorgRecovery
+    // and must NOT be touched here.
+    v.enabled = m_options.deep_fork_auto_resolve;
+    v.in_scope = kernel::DeepForkAutoResolveDepthInScope(
+        m_options.deep_fork_auto_resolve, m_options.deep_reorg_action,
+        park_depth, reorg_depth);
+    if (!v.in_scope) return finish(false);
+    // Local policy only follows STRICTLY-heavier work, never equal work.
+    if (!(candidate->nChainWork > tip->nChainWork)) return finish(false);
+    v.heavier = true;
+
+    // Layer 1 (deterministic) stays authoritative: never let observation
+    // override or duplicate a quorum / attested-abandon / shallow-recovery
+    // decision. Observation is only the SECOND layer when neither fork has a
+    // deterministic tiebreak (the 201633 shape: both signers on the loser).
+    if (IsAutomaticReorgRecoveryCandidate(candidate) ||
+        IsAttestedAbandonForkCandidate(candidate) ||
+        node::matmul_trusted::HasQuorum(candidate->GetBlockHash(), candidate->nHeight) ||
+        node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight)) {
+        return finish(false);
+    }
+    v.no_deterministic_tiebreak = true;
+
+    // Candidate must be FULLY validated (bodies present + ExactReplay passed),
+    // mirroring IsAutomaticReorgRecoveryCandidate. Header-only heavier towers
+    // never migrate (dump-and-run protection).
+    if (!(candidate->nStatus & BLOCK_HAVE_DATA) ||
+        !candidate->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+        !candidate->HaveNumChainTxs()) {
+        return finish(false);
+    }
+    v.candidate_usable = true;
+
+    // Signals over the competing suffix (fork+1 .. candidate). ALL must pass
+    // (AND); any unknown fails safe to park.
+    const int32_t slack{m_options.deep_fork_auto_resolve_height_slack};
+    const int64_t now_s{GetTime()};
+    bool seen_live{true};
+    bool have_first_seen{true}; // false if ANY suffix block lacks a first-seen stamp
+    int64_t first_seen_min{std::numeric_limits<int64_t>::max()};
+    int64_t first_seen_max{std::numeric_limits<int64_t>::min()};
+    v.suffix_exact_replayed = true;
+    for (const CBlockIndex* b{candidate}; b != nullptr && b != fork; b = b->pprev) {
+        // Diagnostic + MayUnpark predicate: full-suffix BLOCK_HAVE_DATA +
+        // BLOCK_EXACT_REPLAY_VERIFIED coverage. Does NOT change this
+        // function's own return value.
+        if (!(b->nStatus & BLOCK_HAVE_DATA) ||
+            (b->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0) {
+            v.suffix_exact_replayed = false;
+        }
+        // The whole suffix must be body-present + ExactReplay-valid, not just
+        // the tip -- otherwise a partially-validated dump could pass.
+        if (!(b->nStatus & BLOCK_HAVE_DATA) ||
+            !b->IsValid(BLOCK_VALID_TRANSACTIONS) || !b->HaveNumChainTxs()) {
+            return finish(false);
+        }
+        if (!kernel::DeepForkAutoResolveBlockSeenLive(
+                b->nActiveTipHeightAtFirstSeen, b->nHeight, slack)) {
+            seen_live = false;
+        }
+        if (b->nTimeReceived <= 0) {
+            // Unknown first-seen (disk load / restart / bulk acquisition).
+            // This disqualifies ONLY the observation (seen_live/sustained)
+            // path -- it must NOT short-circuit the whole verdict. The
+            // suffix_exact_replayed path rests on local byte-exact ExactReplay
+            // of every suffix body, not on first-seen timing; a missing stamp
+            // says nothing about it. Returning here was the final deadlock:
+            // every binary upgrade RESTARTS the node, and a stranded node's
+            // re-acquired suffix bodies carry no live receive time, so the
+            // exact-replay migration path (item 7) could never be reached
+            // after a restart -- exactly the rtx6000/macpro2 case it exists
+            // for. Forge-resistance is unaffected: a forged/header-only tower
+            // still lacks BLOCK_EXACT_REPLAY_VERIFIED on some suffix block and
+            // stays parked.
+            seen_live = false;
+            have_first_seen = false;
+        } else {
+            first_seen_min = std::min(first_seen_min, b->nTimeReceived);
+            first_seen_max = std::max(first_seen_max, b->nTimeReceived);
+        }
+    }
+    v.seen_live = seen_live;
+
+    // Only the observation path consumes span/freshness. With any missing
+    // stamp the span is undefined and the fork cannot be called "sustained"
+    // (and seen_live is already false above, so the observation path fails
+    // closed regardless). Guarding the sentinels also avoids now_s - INT64_MIN
+    // overflow.
+    if (have_first_seen && first_seen_max >= first_seen_min) {
+        const int64_t span_s{first_seen_max - first_seen_min};
+        v.sustained = kernel::DeepForkAutoResolveSustained(
+            span_s, now_s - first_seen_max,
+            m_options.deep_fork_auto_resolve_sustain_s,
+            m_options.deep_fork_auto_resolve_freshness_s);
+    } else {
+        v.sustained = false;
+    }
+
+    // FINAL GATE. Two independent sufficient paths, every other gate above
+    // still required:
+    //  - seen_live && sustained: the historical observation score (the fork
+    //    was watched arrive block-by-block as our tip climbed).
+    //  - suffix_exact_replayed: the ENTIRE competing suffix fork+1..candidate
+    //    is BLOCK_HAVE_DATA + BLOCK_EXACT_REPLAY_VERIFIED, i.e. every one of
+    //    its bodies passed the LOCAL byte-exact ENC-DR ExactReplay recompute
+    //    (PersistMatMulExactReplayVerdict is the bit's only setter and only
+    //    fires on local replay success; the trusted-quorum shortcut sets a
+    //    DIFFERENT bit that does not satisfy this predicate).
+    // WHY the substitution is safe: seen_live/sustained is anti-dump-and-run
+    // for HEADER-ONLY / cheap towers, and those still require it -- a
+    // header-only, forged, or partially-verified tower has some suffix block
+    // without the verified bit, so it stays parked. A fully-ExactReplayed
+    // heavier suffix, by contrast, embodies real majority PoW at network
+    // difficulty (forged bodies fail ExactReplay and mark BLOCK_FAILED),
+    // which is exactly the reorg PoW consensus already accepts. Without this
+    // path a bulk-acquiring stranded node deadlocks (live rtx6000+macpro2:
+    // all gates 1 except seen_live=0 sustained=0 -> acted=0 forever, because
+    // a node capped at ~tip+2048 headers can never OBSERVE live progression
+    // past the cap; it cannot migrate without seen_live and cannot see live
+    // without migrating). DeepForkAutoResolveMayUnpark stays stricter-or-
+    // equal: it additionally requires suffix_exact_replayed itself.
+    if (v.seen_live && v.sustained) return finish(true);
+    if (v.suffix_exact_replayed) return finish(true);
+    return finish(false);
+}
+
+bool ChainstateManager::DeepForkAutoResolveMayUnpark(
+    const CBlockIndex* candidate) const
+{
+    AssertLockHeld(::cs_main);
+    DeepForkAutoResolveVerdict v;
+    if (!DeepForkAutoResolveMayAct(candidate, &v)) return false;
+    // STRICTER than MayAct alone: lifting a deep-reorg PARK additionally
+    // requires the ENTIRE competing suffix to carry BLOCK_HAVE_DATA +
+    // BLOCK_EXACT_REPLAY_VERIFIED (the RB-16 acquisition stack's product).
+    // A header-only or partially verified heavier tower can therefore never
+    // lift its own park (depth-6 dump-and-run stays rejected). After the
+    // unpark, migration still runs the NORMAL path: ConnectTip refuses any
+    // body without the verified bit ("ExactReplay required before
+    // ConnectTip") and ConnectBlock runs the full UTXO/script validation; a
+    // ConnectBlock failure marks the branch BLOCK_FAILED as usual.
+    return v.suffix_exact_replayed;
 }
 
 void ChainstateManager::NoteAuthenticatedRecoveryCandidate(CBlockIndex* candidate)
@@ -12367,7 +13022,10 @@ bool ChainstateManager::IndexIsOnSignedFrontierChain(const CBlockIndex* index) c
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         const bool contained{
             tip != nullptr && tip->nHeight >= frontier->nHeight &&
             tip->GetAncestor(frontier->nHeight) == frontier};
@@ -12402,7 +13060,10 @@ bool ChainstateManager::IndexIsCoveredBySignedFrontier(const CBlockIndex* index)
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         if (node::matmul_trusted::TrustedMirrorFrontierCoversBlock(
                 /*frontier_available=*/true, index->nHeight, frontier->nHeight,
                 frontier->GetAncestor(index->nHeight) == index)) {
@@ -12441,7 +13102,10 @@ bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) con
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         if (index->nHeight <= frontier->nHeight) {
             if (frontier->GetAncestor(index->nHeight) == index) return true;
         } else if (index->GetAncestor(frontier->nHeight) == frontier) {
@@ -12516,9 +13180,13 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
         // honest losing-tip extensions while the dump drips.
         {
             const CBlockIndex* claimed{candidate};
+            // Use a taller followed header only when it is on the competing
+            // branch. m_best_header pinned to the attested loser (active
+            // chain) must not hide the winner's own accepted-header work.
             if (m_best_header != nullptr &&
                 m_best_header->nHeight > claimed->nHeight &&
-                m_best_header->GetAncestor(fork->nHeight) == fork) {
+                m_best_header->GetAncestor(fork->nHeight) == fork &&
+                !m_active_chainstate->m_chain.Contains(m_best_header)) {
                 claimed = m_best_header;
             }
             if (CadenceHoldShouldHold(active_tip, claimed, GetTime(), depth,
@@ -12545,13 +13213,16 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
                 node::ReorgRecoveryRecord::Mode::TRUSTED_AUTHORITY);
         } else if (m_options.matmul_validation_mode ==
                    kernel::MatMulValidationMode::CONSENSUS) {
-            // An inferior authenticated side fork must not be able to freeze
-            // honest tip growth. Equal authenticated work is the shallow-race
-            // boundary; greater work is immediately actionable below.
+            // An inferior side fork must not freeze honest tip growth. Rank
+            // strictly-heavier by the candidate's own accepted-header
+            // nChainWork even when overlay pinned m_best_header to a
+            // locally-signed loser. ExactReplay/HAVE_DATA still required
+            // before ConnectTip (IsAutomaticReorgRecoveryCandidate).
             if (!(candidate->nStatus & BLOCK_HAVE_DATA) ||
                 !candidate->IsValid(BLOCK_VALID_TRANSACTIONS) ||
                 !candidate->HaveNumChainTxs() ||
                 !IsBlockAuthenticated(*candidate, GetConsensus()) ||
+                candidate->nChainWork <= active_tip->nChainWork ||
                 candidate->nAuthenticatedChainWork <=
                 active_tip->nAuthenticatedChainWork) {
                 return true;
@@ -12679,6 +13350,12 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
 bool ChainstateManager::NormalizeReorgRecovery(const CBlockIndex* active_tip)
 {
     AssertLockHeld(::cs_main);
+    // Repair any parked reorg root that a runtime reorg has made an ancestor of
+    // the active tip (previously normalized only at startup -- audit gap-hunt
+    // F7): otherwise IsOnParkedReorgBranch(tip) could later refuse the tip as a
+    // candidate. Cheap -- the parked-roots set is small/usually empty, and it is
+    // a no-op unless deep_reorg_action == PARK.
+    NormalizeParkedReorgBranches(active_tip);
     if (!m_reorg_recovery.has_value()) return true;
     const node::ReorgRecoveryRecord& record{*m_reorg_recovery};
     const CBlockIndex* const fork{m_blockman.LookupBlockIndex(record.fork_hash)};
@@ -12833,7 +13510,7 @@ void ChainstateManager::RefreshAuthenticatedChainWork(CBlockIndex& index)
         if (candidate.nStatus & BLOCK_FAILED_MASK) return;
         NoteAuthenticatedRecoveryCandidate(&candidate);
         if (m_best_header == nullptr ||
-            PreferTrustAdjustedHeader(*m_best_header, candidate)) {
+            PreferMostWorkHeader(*m_best_header, candidate)) {
             SetBestHeader(&candidate);
         }
     };
@@ -12894,7 +13571,7 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
             if (candidate.nStatus & BLOCK_FAILED_MASK) return;
             NoteAuthenticatedRecoveryCandidate(&candidate);
             if (m_best_header == nullptr ||
-                PreferTrustAdjustedHeader(*m_best_header, candidate)) {
+                PreferMostWorkHeader(*m_best_header, candidate)) {
                 SetBestHeader(&candidate);
             }
         };
@@ -13662,6 +14339,7 @@ bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* p
     // Behavior must stay bit-identical to the historical in-line predicate: a
     // null pindex_self, unset -assumevalid, or missing best header always mean
     // "not trusted" (=> the recompute runs).
+    if (m_untrusted_epoch_revalidation) return false;
     if (AssumedValidBlock().IsNull() || m_best_header == nullptr || pindex_self == nullptr) return false;
     const auto av_it = m_blockman.m_block_index.find(AssumedValidBlock());
     if (av_it == m_blockman.m_block_index.end()) return false;
@@ -13673,7 +14351,8 @@ bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* p
 }
 
 bool ChainstateManager::PersistMatMulExactReplayVerdict(
-    const uint256& block_hash)
+    const uint256& block_hash,
+    matmul::trusted::ExactReplayAttestation* produced)
 {
     AssertLockHeld(::cs_main);
     CBlockIndex* index{m_blockman.LookupBlockIndex(block_hash)};
@@ -13689,11 +14368,8 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
         ActiveChain().Contains(index)) {
         const auto result{
             node::matmul_trusted::SignAuthoritative(
-                block_hash, index->nHeight)};
-        if (result !=
-                matmul::trusted::AddResult::Accepted &&
-            result !=
-                matmul::trusted::AddResult::Duplicate) {
+                block_hash, index->nHeight, produced)};
+        if (!node::matmul_trusted::SignAuthoritativeServesGetMmAttest(result)) {
             LogWarning(
                 "Unable to create local ExactReplay attestation "
                 "block=%s height=%d result=%s\n",
@@ -14138,6 +14814,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                     nHeight)};
             const bool recompute_assumevalid_trusted =
                 !trusted_profile1 &&
+                !chainman.m_untrusted_epoch_revalidation &&
                 (chainman.IsMatMulRecomputeAssumeValidTrusted(
                     chainman.m_blockman.LookupBlockIndex(block.GetHash()), nHeight) ||
                 // P2P admission may have made the same trust decision under
@@ -14166,6 +14843,15 @@ static bool ContextualCheckBlock(const CBlock& block,
                 bool encdr_ok;
                 bool rc_local_execution_failure{false};
                 std::string rc_execution_detail;
+                // Snapshot cs_main-guarded quorum before any CUDA unlock.
+                // check_rc() may run inside CsMainScopedRelease; LookupBlockIndex
+                // / IndexHasTrustedMatMulAuthority must not (V1/RB-8).
+                const CBlockIndex* const exact_index{
+                    chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+                const bool have_trusted_quorum{
+                    chainman.IndexHasTrustedMatMulAuthority(exact_index) ||
+                    node::matmul_trusted::HasQuorumInMemory(
+                        block.GetHash(), nHeight)};
                 const auto check_rc = [&]() {
                     if (trusted_profile1) {
                         // Never ExactReplay on a trusted Profile-1 mirror.
@@ -14230,11 +14916,13 @@ static bool ContextualCheckBlock(const CBlock& block,
                     }
                     const matmul::v4::rc::ScopedExactReplayCancellation
                         shutdown_cancel{&chainman.m_interrupt.Flag()};
+                    bool unqualified_device_authority{false};
                     const auto outcome{
                         CheckMatMulProofOfWork_RCOutcome(
                             block, consensusParams, nHeight,
                             /*carrier_missing=*/nullptr,
-                            &rc_execution_detail)};
+                            &rc_execution_detail,
+                            &unqualified_device_authority)};
                     rc_local_execution_failure =
                         outcome ==
                             MatMulRCValidationOutcome::
@@ -14244,6 +14932,39 @@ static bool ContextualCheckBlock(const CBlock& block,
                     const bool valid{
                         outcome ==
                         MatMulRCValidationOutcome::VALID};
+                    // V1/RB-8: an UNQUALIFIED device (canary/golden miss +
+                    // -allowunverifiablematmulconsensus) is NOT a consensus
+                    // authority. Its self-consistent GEMM cannot accept a body
+                    // alone -- a wrong-but-deterministic kernel would "verify"
+                    // a forged body matching its own output (split-brain /
+                    // wrong-chain island). Require a trusted attestation quorum
+                    // (follow the pin); if none covers the block, defer/stall
+                    // at the RC boundary rather than self-accept. This is NOT a
+                    // CPU-oracle. It is confined to the opt-in degraded path: a
+                    // self-qualified device (production_eligible) never sets
+                    // unqualified_device_authority, so the full-GPU-speed
+                    // mainline is byte-for-byte unchanged even with a leftover
+                    // flag (rtx6000-class).
+                    // The flag comes from THIS replay's return value, not
+                    // g_last_exact_replay (a concurrent replay can overwrite
+                    // the process-global). Quorum was snapshotted under cs_main
+                    // before CsMainScopedRelease.
+                    if (valid && unqualified_device_authority) {
+                        if (!have_trusted_quorum) {
+                            rc_local_execution_failure = true;
+                            rc_execution_detail =
+                                "unqualified device is not a consensus "
+                                "authority: trusted attestation quorum "
+                                "required (follow the pin)";
+                            return false;
+                        }
+                        if (rc_authority != nullptr) {
+                            *rc_authority =
+                                MatMulRCAuthorityProvenance::
+                                    TRUSTED_SIGNER_QUORUM;
+                        }
+                        return true;
+                    }
                     if (valid && rc_authority != nullptr) {
                         *rc_authority =
                             MatMulRCAuthorityProvenance::
@@ -14259,8 +14980,6 @@ static bool ContextualCheckBlock(const CBlock& block,
                     ConsumeMatMulRCWinnerResealAuthority(
                         block, nHeight, consensusParams,
                         &winner_authority_provider)};
-                const CBlockIndex* exact_index{
-                    chainman.m_blockman.LookupBlockIndex(block.GetHash())};
                 const bool test_hook_forces_release{
                     MatMulExactReplayUnderReleasedCsMainHookInstalled()};
                 if (trusted_profile1 && !test_hook_forces_release) {
@@ -14344,6 +15063,10 @@ static bool ContextualCheckBlock(const CBlock& block,
                     if (const auto fake{
                             RunMatMulExactReplayUnderReleasedCsMainHook()}) {
                         encdr_ok = *fake;
+                        if (encdr_ok && rc_authority != nullptr) {
+                            *rc_authority =
+                                MatMulRCAuthorityProvenance::LOCAL_EXACT_REPLAY;
+                        }
                     } else {
                         if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
                             encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
@@ -14605,7 +15328,42 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                     IndexIsCoveredBySignedFrontier(pindexPrev)};
                 if (kernel::UnauthenticatedHeaderLeadExceeded(
                         tip->nHeight, header_height, extends_tip,
-                        attested_or_frontier, IsInitialBlockDownload())) {
+                        attested_or_frontier, IsInitialBlockDownload(),
+                        kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
+                        // Scope the assumeutxo header-ceiling exemption to a
+                        // node that actually NEEDS it: acquisition-stale (or
+                        // IBD, already exempt above). A healthy connecting
+                        // node below the base must not accept a large
+                        // valid-PoW competing header flood just because it
+                        // sits under the compiled base; a genuinely stranded
+                        // node trips AcquisitionTipIsStale within the stall
+                        // window and keeps the full fast-recovery path to the
+                        // base header + loadtxoutset.
+                        AcquisitionTipIsStale()
+                            ? GetParams().HighestAssumeutxoHeight()
+                            : 0) &&
+                    // RB-16 acquisition escape valve: a STALE tip must be able
+                    // to ACQUIRE a strictly-heavier competing tower's headers
+                    // past the +72 cap so its bodies can be fetched + fully
+                    // ExactReplay-validated; park / deepforkautoresolve then
+                    // decides MIGRATION. Bounded to a few towers; non-stale
+                    // nodes keep the full anti-flood cap.
+                    //
+                    // ...but cap the STORED extent at the header's OWN lead <=
+                    // ACQUISITION_ESCAPE_MAX_LEAD, not the parent's. Exempting
+                    // on the parent (<= MAX_LEAD) let the index grow to
+                    // tip+MAX_LEAD+1, one past what AcquisitionEscapeMayAcquire
+                    // Fork will (re-)register. After a restart before any body
+                    // verified, the memory-only exempt set was gone and
+                    // re-registration at lead MAX_LEAD+1 was refused -> the node
+                    // stranded on the minority fork, inflight=0, unable to
+                    // re-arm its own persisted tower (cmpl-migration F1). Capping
+                    // storage at MAX_LEAD keeps indexed == registerable, so the
+                    // tower re-arms after restart and slides up as the tip
+                    // advances -- auto-recovery, no manual intervention.
+                    (!AcquisitionEscapeMayAcquireHeavierFork(pindexPrev) ||
+                     header_height - tip->nHeight >
+                         ACQUISITION_ESCAPE_MAX_LEAD)) {
                     LogDebug(BCLog::VALIDATION,
                              "skipping unauthenticated header lead %s height=%d tip=%d\n",
                              hash.ToString(), header_height, tip->nHeight);
@@ -14617,15 +15375,25 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     CBlockIndex* const prev_best{m_best_header};
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
+    // Stamp the victim-relative first-seen tip height ONCE, on first index
+    // creation, for the local -deepforkautoresolve policy. Memory-only; never
+    // consensus. Guarded on the -1 default so re-announcements do not reset it.
+    if (pindex != nullptr && pindex->nActiveTipHeightAtFirstSeen < 0) {
+        const CBlockIndex* const active_tip{ActiveChainstate().m_chain.Tip()};
+        pindex->nActiveTipHeightAtFirstSeen =
+            active_tip != nullptr ? active_tip->nHeight : 0;
+    }
     MaybeUpdateBestClaimedHeader(pindex);
 
     // PreferTrustAdjustedHeader's unauth allowance is denominated in the
     // candidate's own nBits. A high-difficulty stale fork (live 1883xx)
     // therefore outranks the ASERT-floor attested suffix, and AddToBlockIndex
-    // writes that into m_best_header. Configured nodes (trusted mirrors and
-    // consensus+pubkey) must not keep that choice: competing better-work
-    // branches are followed only from attestation-authority peers in
-    // net_processing. Blocks still require M-of-N quorum.
+    // writes that into m_best_header. Trusted mirrors must not keep a random
+    // competing promotion (authority peers steer via
+    // PreferTrustedMirrorAuthorityHeader). Consensus miners / GPU authorities
+    // must keep a strictly heavier valid disconnected fork: undoing it here
+    // is what pinned m_best_header to the connected tip after 0.34.4
+    // (jarekpiot: headers==blocks, getchaintips on the heavier tower).
     if (node::matmul_trusted::IsConfigured() && pindex != nullptr) {
         const CBlockIndex* tip{ActiveChain().Tip()};
         if (tip != nullptr) {
@@ -14640,7 +15408,18 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 prev_best != nullptr &&
                 pindex->nHeight > prev_best->nHeight &&
                 pindex->GetAncestor(prev_best->nHeight) == prev_best};
-            if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
+            const bool failed{
+                (pindex->nStatus & BLOCK_FAILED_MASK) != 0 ||
+                !pindex->IsValid(BLOCK_VALID_TREE)};
+            const bool heavier_disconnected{
+                node::matmul_trusted::ConsensusMinerMayFollowHeavierDisconnectedHeader(
+                    node::matmul_trusted::IsTrustedMirror(), extends_tip,
+                    failed, IsOnParkedReorgBranch(pindex),
+                    pindex->nChainWork > tip->nChainWork,
+                    pindex->nHeight >= tip->nHeight)};
+            if (heavier_disconnected) {
+                SetBestHeader(pindex);
+            } else if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
                     .extends_active_tip_chain = extends_tip,
                     .on_parked_reorg_branch = IsOnParkedReorgBranch(pindex),
                     .candidate_height = pindex->nHeight,
@@ -14804,14 +15583,55 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // ConnectTip, so submitblock still returned "duplicate" and ABC
     // never selected the validator-chain child of attested 189685.
     // Re-enter ContextualCheck + (if needed) ReceivedBlockTransactions
-    // for any requested/forced unconnected tip-child.
+    // for any unconnected tip-child that still lacks ExactReplay, even if
+    // the body was first persisted unrequested (ticketless followed
+    // catch-up). Requiring fRequested skipped GPU forever once HAVE_DATA
+    // was set (a live consensus-archive node: digest_requests=0, non-terminal requeue).
+    const bool needs_consensus_exact_replay{
+        (pindex->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+        GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS &&
+        !node::matmul_trusted::SkipExactReplayForGpuAttestation(
+            IndexHasTrustedMatMulAuthority(pindex),
+            node::matmul_trusted::IsTrustedMirror())};
     const bool reverify_tip_child{
-        fAlreadyHave && fRequested &&
+        fAlreadyHave &&
         pindex->pprev != nullptr &&
         pindex->pprev == ActiveTip() &&
         !ActiveChain().Contains(pindex) &&
-        (pindex->nStatus & BLOCK_FAILED_MASK) == 0};
-    if (fAlreadyHave && !reverify_tip_child) return true;
+        (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
+        (fRequested || needs_consensus_exact_replay)};
+    // RB-16 CONVERGENCE: a HAVE_DATA body on a heavier tower under ACQUISITION
+    // escape (stale tip + registered exempt tower) whose parent chain is
+    // already connectable -- parent on the active chain (the fork root) or
+    // itself ExactReplay-verified with data -- must re-enter
+    // ContextualCheckBlock so the acquired tower's verdicts assemble
+    // CONTIGUOUSLY from its fork root. Without this the fAlreadyHave early
+    // return fossilized on-disk mid-tower bodies forever (live rtx6000: tip
+    // 199416, headers 201500, GPU ExactReplaying 199460+ out of order while
+    // 199313..199459 sat HAVE_DATA/unverified -- so no connected heavier
+    // chain ever existed for deepforkautoresolve/ABC to migrate to). The
+    // parent-connectable requirement keeps admission strictly root-first;
+    // CoversBlock keeps it bounded (<=2 towers, 600s stale gate,
+    // ACQUISITION_ESCAPE_MAX_LEAD). Unrequested P2P pushes of such bodies
+    // still bail in the !fRequested anti-DoS block below (nTx!=0 /
+    // less-work), so only local catch-up or requested downloads reach CUDA.
+    const bool reverify_acquired_fork_body{
+        fAlreadyHave &&
+        needs_consensus_exact_replay &&
+        pindex->pprev != nullptr &&
+        !ActiveChain().Contains(pindex) &&
+        (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
+        // Doomed-tower hardening (parity with AcquiredBodyParentConnectable):
+        // a FAILED parent can never ConnectTip, so its child must not
+        // re-enter ContextualCheckBlock ExactReplay.
+        (pindex->pprev->nStatus & BLOCK_FAILED_MASK) == 0 &&
+        (ActiveChain().Contains(pindex->pprev) ||
+         ((pindex->pprev->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+          (pindex->pprev->nStatus & BLOCK_HAVE_DATA) != 0)) &&
+        AcquisitionEscapeCoversBlock(pindex)};
+    const bool reverify_have_data{reverify_tip_child ||
+                                  reverify_acquired_fork_body};
+    if (fAlreadyHave && !reverify_have_data) return true;
     if (!fRequested) {  // If we didn't ask for it:
         // Followed-chain historical holes (active-tip / snapshot-base
         // ancestors) are less-work by construction and may be pruned
@@ -14845,6 +15665,11 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
             pindex->nStatus |= BLOCK_FAILED_VALID;
             m_blockman.m_dirty_blockindex.insert(pindex);
+            // Slot-wedge hardening: a covered acquired-tower body that fails
+            // CheckBlock/ContextualCheckBlock (ExactReplay) proves its tower
+            // dead; release the exemption slot so the honest tower can
+            // register.
+            AcquisitionEscapeNoteBlockFailed(pindex);
         }
         LogError("%s: %s\n", __func__, state.ToString());
         return false;
@@ -14878,13 +15703,13 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // nTx / VALID_TRANSACTIONS may never have been raised. Do not skip
     // ReceivedBlockTransactions in that case — otherwise ABC cannot select it.
     if (pindex->nStatus & BLOCK_HAVE_DATA) {
-        if (reverify_tip_child && pindex->nTx == 0) {
+        if (reverify_have_data && pindex->nTx == 0) {
             const FlatFilePos pos{pindex->GetBlockPos()};
             if (!pos.IsNull()) {
                 ReceivedBlockTransactions(block, pindex, pos);
             }
         }
-        if (reverify_tip_child) {
+        if (reverify_have_data) {
             ActiveChainstate().TryAddBlockIndexCandidate(pindex);
         }
         return true;
@@ -14987,12 +15812,21 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
 
     Chainstate* bg_chain{WITH_LOCK(cs_main, return BackgroundSyncInProgress() ? m_ibd_chainstate.get() : nullptr)};
     BlockValidationState bg_state;
+    bool bg_ok{true};
     if (bg_chain && !bg_chain->ActivateBestChain(bg_state, block)) {
         LogError("%s: [background] ActivateBestChain failed (%s)\n", __func__, bg_state.ToString());
-        return false;
+        bg_ok = false;
      }
 
-    return true;
+    // generate/submitblock never enter ProcessBlockSync. Gossip a locally
+    // signed ExactReplay attestation here so a mined block is published
+    // unsolicited. Reindex/ReplayBlocks do not call ProcessNewBlock, so
+    // they do not mint-and-push every historical height.
+    if (m_options.signals) {
+        m_options.signals->ProcessNewBlockFinished(*block);
+    }
+
+    return bg_ok;
 }
 
 MempoolAcceptResult ChainstateManager::ProcessTransaction(const CTransactionRef& tx, bool test_accept, const ignore_rejects_type& ignore_rejects)
@@ -15691,6 +16525,13 @@ bool ChainstateManager::LoadBlockIndex()
 
         m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
 
+        // 0.34.0–0.34.4 wrote BLOCK_FAILED_* that can hide the canonical
+        // chain. Re-run ContextualCheck* here — ConnectBlock does not —
+        // before this loop seeds m_best_invalid / m_best_header.
+        if (!MaybeClearStaleInvalidMarksForValidationEpoch()) {
+            return false;
+        }
+
         std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndices()};
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
                   CBlockIndexHeightOnlyComparator());
@@ -15703,7 +16544,7 @@ bool ChainstateManager::LoadBlockIndex()
             }
             if (pindex->IsValid(BLOCK_VALID_TREE)) {
                 MaybeUpdateBestClaimedHeader(pindex);
-                if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, *pindex)) {
+                if (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, *pindex)) {
                     SetBestHeader(pindex);
                 }
             }
@@ -16887,12 +17728,11 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     candidate_sets_cleared = false;
 
     // LoadBlockIndex / AddToBlockIndex may have left m_best_header on a
-    // claimed-heaviest 1883xx flood. Configured nodes must chase the snapshot
-    // tip-chain (and any already-known attested suffix) rather than that
-    // flood, or IBD downloads the competing tree after a successful load.
-    if (node::matmul_trusted::IsConfigured()) {
-        RecalculateBestHeader();
-    }
+    // claimed-heaviest 1883xx flood. Recalculate onto the snapshot tip-chain
+    // (and any already-known suffix) rather than that flood. Do not gate on
+    // IsConfigured(): independent validators must be able to lower
+    // m_best_header after loadtxoutset (MendeMatthias).
+    RecalculateBestHeader();
 
     LogPrintf("[snapshot] successfully activated snapshot %s\n", base_blockhash.ToString());
     LogPrintf("[snapshot] (%.2f MB)\n",
@@ -17525,6 +18365,335 @@ void ChainstateManager::AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune(
         "after shielded pool-credit disable height retune");
 }
 
+bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
+{
+    AssertLockHeld(::cs_main);
+    if (!m_blockman.m_block_tree_db) return true;
+
+    bool pending{false};
+    if (!m_blockman.m_block_tree_db->ReadValidationEpochPending(pending)) {
+        LogError("%s: failed to read validation-epoch pending marker\n", __func__);
+        return false;
+    }
+    uint32_t stored{0};
+    const bool have_stored{
+        m_blockman.m_block_tree_db->ReadValidationEpoch(stored)};
+    uint32_t watermark{0};
+    if (!m_blockman.m_block_tree_db->ReadValidationEpochHealWatermark(watermark)) {
+        LogError("%s: failed to read validation-epoch heal watermark\n", __func__);
+        return false;
+    }
+    if (!pending && have_stored && stored >= m_compiled_validation_epoch) {
+        return true;
+    }
+    // pending && stored >= compiled is a crash-resume of THIS compiled
+    // epoch, not "done". Keep pending and skip already-checkpointed
+    // heights (SF-14). A watermark from an older compiled epoch must not
+    // skip re-checks under a newer epoch (assessment MEDIUM-3).
+    const bool resume_this_epoch{
+        pending && have_stored && stored >= m_compiled_validation_epoch};
+    if (!resume_this_epoch) {
+        if (watermark > 0) {
+            LogPrintf("%s: discarding stale heal watermark height=%u "
+                      "(stored_epoch=%u compiled_epoch=%u)\n",
+                      __func__, watermark, stored, m_compiled_validation_epoch);
+            if (!m_blockman.m_block_tree_db->WriteValidationEpochHealWatermark(
+                    std::nullopt)) {
+                LogError("%s: failed to erase stale validation-epoch heal watermark\n",
+                         __func__);
+                return false;
+            }
+            watermark = 0;
+        }
+        if (!m_blockman.m_block_tree_db->WriteValidationEpochPending(true)) {
+            LogError("%s: failed to persist validation-epoch pending marker "
+                     "(stored_epoch=%u compiled_epoch=%u)\n",
+                     __func__, stored, m_compiled_validation_epoch);
+            return false;
+        }
+    }
+    if (resume_this_epoch && watermark > 0) {
+        LogPrintf("%s: resuming validation-epoch heal from height %u "
+                  "(stored_epoch=%u compiled_epoch=%u)\n",
+                  __func__, watermark, stored, m_compiled_validation_epoch);
+    }
+
+    // Walking pprev to genesis per index is O(n*height) and can stall
+    // LoadBlockIndex for tens of minutes on a poisoned archive with
+    // thousands of headers-only tips. Parent-first marking is equivalent
+    // and O(n).
+    std::vector<CBlockIndex*> by_height{m_blockman.GetAllBlockIndices()};
+    std::sort(by_height.begin(), by_height.end(), CBlockIndexHeightOnlyComparator{});
+    std::unordered_set<const CBlockIndex*> manual_lineage;
+    manual_lineage.reserve(by_height.size());
+    for (CBlockIndex* pindex : by_height) {
+        if ((pindex->nStatus & BLOCK_MANUALLY_INVALIDATED) != 0 ||
+            (((pindex->nStatus & BLOCK_FAILED_VALID) != 0) &&
+             ((pindex->nStatus & BLOCK_HAVE_UNDO) != 0)) ||
+            (pindex->pprev != nullptr &&
+             manual_lineage.find(pindex->pprev) != manual_lineage.end())) {
+            manual_lineage.insert(pindex);
+        }
+    }
+    auto has_manual = [&](const CBlockIndex* pindex) {
+        return manual_lineage.find(pindex) != manual_lineage.end();
+    };
+    LogPrintf("%s: validation-epoch scan index_entries=%u manual_lineage=%u "
+              "(stored_epoch=%u compiled_epoch=%u)\n",
+              __func__, static_cast<unsigned>(by_height.size()),
+              static_cast<unsigned>(manual_lineage.size()), stored,
+              m_compiled_validation_epoch);
+    auto more_work = [](const CBlockIndex& current, const CBlockIndex& candidate) {
+        if (current.nChainWork != candidate.nChainWork) {
+            return current.nChainWork < candidate.nChainWork;
+        }
+        if (current.nHeight != candidate.nHeight) {
+            return current.nHeight < candidate.nHeight;
+        }
+        return candidate.GetBlockHash() < current.GetBlockHash();
+    };
+
+    CBlockIndex* best_work{nullptr};
+    for (CBlockIndex* pindex : by_height) {
+        if (has_manual(pindex)) continue;
+        if ((pindex->nStatus & BLOCK_HAVE_DATA) == 0) continue;
+        if ((pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE) continue;
+        if (best_work == nullptr || more_work(*best_work, *pindex)) {
+            best_work = pindex;
+        }
+    }
+
+    std::vector<CBlockIndex*> to_revalidate;
+    uint32_t skipped_manual{0};
+    for (CBlockIndex* pindex : by_height) {
+        CBlockIndex& block_index{*pindex};
+        if ((block_index.nStatus & BLOCK_FAILED_MASK) == 0) continue;
+        if (has_manual(&block_index)) {
+            ++skipped_manual;
+            continue;
+        }
+        if (best_work == nullptr ||
+            best_work->GetAncestor(block_index.nHeight) != &block_index) {
+            continue;
+        }
+        if (block_index.nHeight <= static_cast<int>(watermark)) {
+            continue;
+        }
+        to_revalidate.push_back(&block_index);
+    }
+    m_best_invalid = nullptr;
+    m_invalid_marks_cleared_on_upgrade = 0;
+
+    std::sort(to_revalidate.begin(), to_revalidate.end(),
+              node::CBlockIndexHeightOnlyComparator{});
+
+    auto mark_failed_valid = [&](CBlockIndex* pindex) {
+        pindex->nStatus = (pindex->nStatus & ~BLOCK_FAILED_CHILD) | BLOCK_FAILED_VALID;
+        m_blockman.m_dirty_blockindex.insert(pindex);
+        m_failed_blocks.insert(pindex);
+        if (m_best_invalid == nullptr || pindex->nChainWork > m_best_invalid->nChainWork) {
+            m_best_invalid = pindex;
+        }
+        for (Chainstate* chainstate : GetAll()) {
+            chainstate->setBlockIndexCandidates.erase(pindex);
+        }
+        for (auto& [_, desc] : m_blockman.m_block_index) {
+            if (&desc == pindex) continue;
+            if (desc.GetAncestor(pindex->nHeight) != pindex) continue;
+            desc.nStatus = (desc.nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
+            m_blockman.m_dirty_blockindex.insert(&desc);
+            m_failed_blocks.erase(&desc);
+            for (Chainstate* chainstate : GetAll()) {
+                chainstate->setBlockIndexCandidates.erase(&desc);
+            }
+        }
+    };
+
+    struct UntrustedEpochRevalidation {
+        ChainstateManager& m_chainman;
+        explicit UntrustedEpochRevalidation(ChainstateManager& chainman) : m_chainman(chainman)
+        {
+            m_chainman.m_untrusted_epoch_revalidation = true;
+        }
+        ~UntrustedEpochRevalidation() { m_chainman.m_untrusted_epoch_revalidation = false; }
+    };
+    UntrustedEpochRevalidation untrusted{*this};
+
+    uint32_t remade{0};
+    const size_t batch_n{
+        m_epoch_heal_recheck_batch_for_test > 0 ? m_epoch_heal_recheck_batch_for_test
+                                                : size_t{512}};
+    auto persist_checkpoint = [&](uint32_t wm) -> bool {
+        const std::optional<uint32_t> wm_opt{wm};
+        return m_blockman.WriteBlockIndexDB(m_compiled_validation_epoch,
+                                            /*validation_epoch_pending=*/true,
+                                            &m_parked_reorg_branch_roots,
+                                            &wm_opt);
+    };
+    for (size_t offset = 0; offset < to_revalidate.size();) {
+        if (m_interrupt) return false;
+        const size_t end{std::min(offset + batch_n, to_revalidate.size())};
+        uint32_t batch_last_height{watermark};
+        for (size_t i = offset; i < end; ++i) {
+            CBlockIndex* pindex = to_revalidate[i];
+            pindex->nStatus &= ~BLOCK_FAILED_MASK;
+            m_blockman.m_dirty_blockindex.insert(pindex);
+            m_failed_blocks.erase(pindex);
+            ++m_invalid_marks_cleared_on_upgrade;
+            LogPrintf("%s: clearing failure flags for block %s at height=%d "
+                      "validation-epoch upgrade\n",
+                      __func__, pindex->GetBlockHash().ToString(),
+                      pindex->nHeight);
+            batch_last_height = static_cast<uint32_t>(std::max(pindex->nHeight, 0));
+
+            const CBlockHeader header{pindex->GetBlockHeader()};
+            BlockValidationState header_state;
+            if (!CheckBlockHeader(header, header_state, GetConsensus()) ||
+                (pindex->pprev != nullptr &&
+                 !ContextualCheckBlockHeader(header, header_state, m_blockman, *this,
+                                             pindex->pprev))) {
+                LogWarning("%s: re-marked %s height=%d after header re-check (%s)\n",
+                           __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
+                           header_state.ToString());
+                mark_failed_valid(pindex);
+                ++remade;
+            } else if ((pindex->nStatus & BLOCK_HAVE_DATA) != 0) {
+                // Provider-less / quorum-pending startup is retryable. ConnectTip
+                // already retries ExactReplay; permanently re-poisoning here made
+                // every CPU-only / early-boot heal a one-way trap (SF-11).
+                if (m_active_chainstate == nullptr) {
+                    LogWarning("%s: deferred body re-check for %s height=%d "
+                               "(no chainstate yet); ConnectTip retries\n",
+                               __func__, pindex->GetBlockHash().ToString(),
+                               pindex->nHeight);
+                } else {
+                    CBlock block;
+                    BlockValidationState body_state;
+                    if (ConsumeRetryableMatMulConnectFailureForTest(body_state)) {
+                        LogWarning("%s: deferred body re-check for %s height=%d (%s); "
+                                   "ConnectTip retries\n",
+                                   __func__, pindex->GetBlockHash().ToString(),
+                                   pindex->nHeight, body_state.ToString());
+                    } else if (!ReadShieldedRebuildBlock(*m_active_chainstate, *pindex, block)) {
+                        LogWarning("%s: deferred body re-check for %s height=%d "
+                                   "(body unreadable at startup); ConnectTip retries\n",
+                                   __func__, pindex->GetBlockHash().ToString(),
+                                   pindex->nHeight);
+                    } else if (!CheckBlock(block, body_state, GetConsensus())) {
+                        LogWarning("%s: re-marked %s height=%d after body re-check (%s)\n",
+                                   __func__, pindex->GetBlockHash().ToString(),
+                                   pindex->nHeight, body_state.ToString());
+                        mark_failed_valid(pindex);
+                        ++remade;
+                    } else if (!ContextualCheckBlock(block, body_state, *this, pindex->pprev,
+                                                     /*fCheckPOW=*/true,
+                                                     /*may_release_cs_main=*/true)) {
+                        if (body_state.IsError()) {
+                            LogWarning("%s: deferred body re-check for %s height=%d (%s); "
+                                       "ConnectTip retries\n",
+                                       __func__, pindex->GetBlockHash().ToString(),
+                                       pindex->nHeight, body_state.ToString());
+                        } else {
+                            LogWarning("%s: re-marked %s height=%d after body re-check (%s)\n",
+                                       __func__, pindex->GetBlockHash().ToString(),
+                                       pindex->nHeight, body_state.ToString());
+                            mark_failed_valid(pindex);
+                            ++remade;
+                        }
+                    }
+                }
+            }
+            if (m_interrupt) {
+                if (!persist_checkpoint(batch_last_height)) return false;
+                return false;
+            }
+        }
+        if (!persist_checkpoint(batch_last_height)) return false;
+        watermark = batch_last_height;
+        if (m_epoch_heal_abort_after_checkpoint_for_test) {
+            m_epoch_heal_abort_after_checkpoint_for_test = false;
+            LogWarning("%s: aborting epoch heal after checkpoint height=%u (test)\n",
+                       __func__, watermark);
+            return false;
+        }
+        offset = end;
+    }
+
+    m_failed_blocks.clear();
+    m_best_invalid = nullptr;
+    for (auto& [_, block_index] : m_blockman.m_block_index) {
+        if (block_index.nStatus & BLOCK_FAILED_VALID) {
+            m_failed_blocks.insert(&block_index);
+        }
+        if ((block_index.nStatus & BLOCK_FAILED_MASK) &&
+            (m_best_invalid == nullptr ||
+             block_index.nChainWork > m_best_invalid->nChainWork)) {
+            m_best_invalid = &block_index;
+        }
+    }
+
+    // Depth-6 park is independent of FAILED. Clearing a stale poison mark
+    // must not unpark: UnparkReorgBranchContainingBlock / reorg-recovery
+    // are the only paths that drop a parked root (SF-13).
+    for (const uint256& parked : m_parked_reorg_branch_roots) {
+        LogPrintf("%s: leaving parked reorg branch %s "
+                  "(heal never unparks; operator/reorg-recovery only)\n",
+                  __func__, parked.ToString());
+    }
+
+    if (m_active_chainstate != nullptr &&
+        m_active_chainstate->m_chain.Tip() != nullptr) {
+        for (CBlockIndex* pindex : to_revalidate) {
+            if (pindex->nStatus & BLOCK_FAILED_MASK) continue;
+            if (!pindex->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                !pindex->HaveNumChainTxs()) {
+                continue;
+            }
+            for (Chainstate* chainstate : GetAll()) {
+                chainstate->TryAddBlockIndexCandidate(pindex);
+            }
+        }
+    }
+
+    RecalculateBestHeader();
+
+    if (best_work == nullptr) {
+        bool leftover_failed{false};
+        for (CBlockIndex* pindex : by_height) {
+            if ((pindex->nStatus & BLOCK_FAILED_MASK) == 0) continue;
+            if (has_manual(pindex)) continue;
+            leftover_failed = true;
+            break;
+        }
+        if (leftover_failed) {
+            LogWarning("%s: epoch heal deferred: no data-backed lineage to heal "
+                       "(stored_epoch=%u compiled_epoch=%u)\n",
+                       __func__, stored, m_compiled_validation_epoch);
+            return true;
+        }
+    }
+
+    const std::optional<uint32_t> erase_watermark{std::nullopt};
+    if (!m_blockman.WriteBlockIndexDB(m_compiled_validation_epoch,
+                                      /*validation_epoch_pending=*/false,
+                                      &m_parked_reorg_branch_roots,
+                                      &erase_watermark)) {
+        LogError("%s: failed to persist epoch-%u revalidation "
+                 "(stored_epoch=%u cleared=%u remade=%u)\n",
+                 __func__, m_compiled_validation_epoch, stored,
+                 m_invalid_marks_cleared_on_upgrade, remade);
+        return false;
+    }
+    LogWarning("validation epoch %u -> %u: cleared %u BLOCK_FAILED_* mark(s) "
+               "on the heaviest data-backed lineage, re-checked headers/bodies, "
+               "re-marked %u, unparked 0, left %u operator-invalid; "
+               "ActivateBestChain follows after LoadChainTip\n",
+               stored, m_compiled_validation_epoch,
+               m_invalid_marks_cleared_on_upgrade, remade,
+               skipped_manual);
+    return true;
+}
+
 bool ChainstateManager::MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind kind)
 {
     AssertLockHeld(::cs_main);
@@ -17765,16 +18934,28 @@ std::optional<uint256> ChainstateManager::ComputeClosedShieldedSnapshotStatePin(
 {
     AssertLockHeld(::cs_main);
     // Mainnet freeze pin is the compiled assumeutxo shielded_state_commitment
-    // at nShieldedPoolDisableHeight (94343b76… from 189307 through 199300).
+    // (94343b76… from 189307 through 191266; the withdrawn 199300 pin is gone).
     // Default-node dumps have no live stores; hashing a synthetic empty tree
     // (e802781d…) would disagree with loadtxoutset and with dumps taken while
     // -shieldedstate=1 still had historical LevelDB open.
     const int32_t disable{GetConsensus().nShieldedPoolDisableHeight};
     if (disable != std::numeric_limits<int32_t>::max()) {
-        if (const auto au = GetParams().AssumeutxoForHeight(disable)) {
-            if (!au->shielded_state_commitment.IsNull()) {
-                return au->shielded_state_commitment;
+        auto pin_from_height = [this](int height) -> std::optional<uint256> {
+            if (const auto au = GetParams().AssumeutxoForHeight(height)) {
+                if (!au->shielded_state_commitment.IsNull()) {
+                    return au->shielded_state_commitment;
+                }
             }
+            return std::nullopt;
+        };
+        if (auto pin = pin_from_height(disable)) return pin;
+        // 0.34.5 withdrew the 199300 assumeutxo pin (issue 127: that base
+        // sits on the withdrawn 0.34.1 branch). The closed-pool commitment
+        // is unchanged; use the highest remaining compiled snapshot that
+        // still carries it (191266, 94343b76…).
+        const auto heights = GetParams().GetAvailableSnapshotHeights();
+        for (auto it = heights.rbegin(); it != heights.rend(); ++it) {
+            if (auto pin = pin_from_height(*it)) return pin;
         }
     }
     const shielded::ShieldedMerkleTree empty_tree{
@@ -18568,8 +19749,18 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
     }
 
     m_shielded_account_registry_roots.clear();
+    // Past nShieldedPoolDisableHeight the dumper emits the canonical closed
+    // frozen section: zero live counts, zero recent-output history and zero
+    // account-registry root history (GetShieldedSnapshotSectionHeader returns
+    // a default header and AppendShieldedSnapshotPayload writes no payload).
+    // Mirror that encoding on load: expect an empty window instead of the
+    // SHIELDED_ANCHOR_DEPTH window, which no default node at/after the
+    // disable height can produce.
+    const bool shielded_pool_closed{
+        tip != nullptr && GetConsensus().IsShieldedPoolDisabled(tip->nHeight)};
     if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION) {
-        const size_t expected_recent_history = ExpectedShieldedRecentHistoryCount(tip);
+        const size_t expected_recent_history{
+            shielded_pool_closed ? 0 : ExpectedShieldedRecentHistoryCount(tip)};
         if (header.m_recent_output_counts.size() != expected_recent_history) {
             LogPrintf("LoadShieldedSnapshotSection: v7 account-registry snapshot has %u recent output-count entries, expected %u at height=%d hash=%s\n",
                       static_cast<unsigned int>(header.m_recent_output_counts.size()),
@@ -18581,12 +19772,14 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
                                   static_cast<unsigned int>(expected_recent_history),
                                   tip != nullptr ? tip->nHeight : -1));
         }
-        if (!LoadShieldedAccountRegistryRootWindow(
-                header.m_account_registry_roots,
-                m_shielded_account_registry.Root(),
-                expected_recent_history + 1U,
-                "LoadShieldedSnapshotSection",
-                m_shielded_account_registry_roots)) {
+        if (shielded_pool_closed) {
+            m_shielded_account_registry_roots.clear();
+        } else if (!LoadShieldedAccountRegistryRootWindow(
+                       header.m_account_registry_roots,
+                       m_shielded_account_registry.Root(),
+                       expected_recent_history + 1U,
+                       "LoadShieldedSnapshotSection",
+                       m_shielded_account_registry_roots)) {
             return fail("invalid shielded account-registry root history in snapshot section");
         }
     } else if (m_active_chainstate != nullptr &&
@@ -18595,7 +19788,8 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
             return fail("failed to rebuild shielded account-registry history from local blocks");
         }
     } else if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
-        const size_t expected_recent_history = ExpectedShieldedRecentHistoryCount(tip);
+        const size_t expected_recent_history{
+            shielded_pool_closed ? 0 : ExpectedShieldedRecentHistoryCount(tip)};
         if (header.m_recent_output_counts.size() != expected_recent_history) {
             LogPrintf("LoadShieldedSnapshotSection: v6 account-registry snapshot has %u recent output-count entries, expected %u at height=%d hash=%s\n",
                       static_cast<unsigned int>(header.m_recent_output_counts.size()),
@@ -18607,17 +19801,21 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
                                   static_cast<unsigned int>(expected_recent_history),
                                   tip != nullptr ? tip->nHeight : -1));
         }
-        std::deque<uint256> derived_roots;
-        if (!DeriveShieldedAccountRegistryHistoryFromV6Snapshot(m_shielded_merkle_tree,
-                                                                m_shielded_account_registry,
-                                                                header.m_recent_output_counts,
-                                                                derived_roots)) {
-            LogPrintf("LoadShieldedSnapshotSection: v6 account-registry snapshot lacks enough data to derive recent root history at height=%d hash=%s\n",
-                      tip != nullptr ? tip->nHeight : -1,
-                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-            return fail("shielded v6 snapshot lacks enough data to derive recent account-registry root history");
+        if (shielded_pool_closed) {
+            m_shielded_account_registry_roots.clear();
+        } else {
+            std::deque<uint256> derived_roots;
+            if (!DeriveShieldedAccountRegistryHistoryFromV6Snapshot(m_shielded_merkle_tree,
+                                                                    m_shielded_account_registry,
+                                                                    header.m_recent_output_counts,
+                                                                    derived_roots)) {
+                LogPrintf("LoadShieldedSnapshotSection: v6 account-registry snapshot lacks enough data to derive recent root history at height=%d hash=%s\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                return fail("shielded v6 snapshot lacks enough data to derive recent account-registry root history");
+            }
+            m_shielded_account_registry_roots = std::move(derived_roots);
         }
-        m_shielded_account_registry_roots = std::move(derived_roots);
     } else {
         return fail("legacy shielded snapshot lacks account-registry history and local blocks are unavailable to rebuild it");
     }
@@ -18645,7 +19843,42 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
     }
 
     m_shielded_state_initialized = true;
-    const auto accepted_state_pin = ComputeShieldedSnapshotStatePin();
+    // A snapshot at/after the shielded-pool disable height carries NO live
+    // shielded state (the pool is closed; the #129 loader already validates the
+    // section is the canonical zero-recent-history frozen encoding). Its
+    // consensus pin is the FROZEN closed-section commitment (94343b76...), a
+    // fixed historical value -- NOT the synthetic empty-tree pin (e802781d...)
+    // that hashing the empty loaded live-state produces. The attested-manifest
+    // path already pins via ComputeClosedShieldedSnapshotStatePin(); the loader
+    // was left on the live ComputeShieldedSnapshotStatePin(), so loadtxoutset of
+    // the closed-pool assumeutxo-201500 snapshot was spuriously rejected
+    // ("shielded snapshot state does not match the consensus-pinned
+    // commitment"). Match the loader to the closed pin. Safe: past the disable
+    // height no shielded spend is accepted, so a forged shielded section is
+    // inert (no double-spend) -- the pin is a frozen audit anchor, not a live
+    // double-spend guard, and DS-3 fail-closed still governs the pre-close case.
+    const bool pool_closed_at_snapshot{
+        tip != nullptr &&
+        GetConsensus().IsShieldedPoolDisabled(tip->nHeight) &&
+        !m_options.force_shielded_state};
+    // Because the closed pin (94343b76...) is a compiled consensus constant,
+    // the pin comparison below is state-INDEPENDENT for a closed-pool snapshot:
+    // it can no longer catch a forged section. Enforce the canonical zero-count
+    // frozen encoding here (IsClosedFrozenSection is otherwise only checked on
+    // the dump side) so a forged closed section -- non-zero commitment /
+    // nullifier / balance / registry counts -- is REJECTED, not loaded and
+    // persisted under a "94343b76-verified" provenance pin (snapfix-audit F1).
+    // Combined with the existing empty-recent-output-window check, this makes
+    // the accepted state provably the canonical empty closed state that the
+    // frozen pin anchors. Still fail-closed: no shielded spend is accepted past
+    // the disable height, so this is defense-in-depth, not a theft window.
+    if (pool_closed_at_snapshot && !header.IsClosedFrozenSection()) {
+        return fail("BTX closed-pool shielded snapshot section is not the "
+                    "canonical zero-count frozen encoding (forged section refused)");
+    }
+    const auto accepted_state_pin =
+        pool_closed_at_snapshot ? ComputeClosedShieldedSnapshotStatePin()
+                                : ComputeShieldedSnapshotStatePin();
     if (pin_policy.required_pin.has_value() &&
         (!accepted_state_pin.has_value() ||
          *accepted_state_pin != *pin_policy.required_pin)) {
@@ -19445,21 +20678,18 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         if (try_restore_prepared_transition(*persisted_mutation_marker)) {
             return finish_success();
         }
-        // §11 / production restart tax: a clean stop (or a ConnectBlock that
-        // already PersistShieldedState'd the tip) can leave a stale marker whose
-        // target already matches the active tip AND the durable tip snapshot.
-        // Falling through to rebuild_from_chain then costs ~1–2h of archive IO
-        // even though there is nothing to repair. If the tip-matched snapshot
-        // still carries a verifying full-state pin (and nullifier accumulator),
-        // clear the stale marker and continue into the ordinary restore path.
-        //
-        // Intentionally require pin+accumulator evidence: a LEGACY marker on a
-        // tip-matched snapshot WITHOUT a pin still means "unknown prefix of a
-        // multi-store mutation may have committed" and must fail closed / rebuild
-        // (see chainstatemanager_rejects_stale_legacy_marker_when_pruned).
-        if (tip != nullptr &&
-            persisted_mutation_marker->target_tip_height == tip->nHeight &&
-            persisted_mutation_marker->target_tip_hash == tip->GetBlockHash()) {
+        // Issue #74 / unclean-shutdown restart tax: ConnectBlock writes a
+        // PREPARED marker before PersistShieldedState seals the pin, and a
+        // crash can also leave a LEGACY marker. Falling through to
+        // rebuild_from_chain then replays genesis→tip (minutes on an archive)
+        // even when the durable snapshot is still cryptographically sealed.
+        // If the on-disk pin+accumulator still match the live stores, the
+        // snapshot was not mixed — clear the leftover marker and continue into
+        // the ordinary fast-restore / gap-catch-up path. Marker target may
+        // differ from the active tip (crash during the next ConnectBlock);
+        // gap-only catch-up below repairs that. A missing or mismatched pin
+        // still means the stores may be mixed and must rebuild or fail closed.
+        {
             shielded::ShieldedMerkleTree stale_marker_tree;
             std::vector<uint256> stale_marker_anchor_roots;
             uint256 stale_marker_tip_hash;
@@ -19476,14 +20706,14 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     stale_marker_balance,
                     stale_marker_commitment_digest,
                     stale_marker_registry_snapshot) &&
-                stale_marker_tip_hash == tip->GetBlockHash() &&
-                stale_marker_tip_height == tip->nHeight) {
+                !stale_marker_tip_hash.IsNull() &&
+                stale_marker_tip_height >= 0) {
                 const auto persisted_accumulator =
                     m_shielded_nullifiers->ReadPersistedNullifierAccumulator();
                 const auto persisted_pin =
                     m_shielded_nullifiers->ReadPersistedShieldedStatePin();
                 // Load the frontier into the live managers just long enough to
-                // recompute the pin against the durable tip snapshot. This does
+                // recompute the pin against the durable snapshot. This does
                 // not publish HasShieldedState() until finish_success / restore.
                 // Pin V3 covers unshield velocity, so load it before hashing.
                 m_shielded_merkle_tree = stale_marker_tree;
@@ -19497,28 +20727,29 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                         restored_registry->CanMaterializeAllEntries()) {
                         m_shielded_account_registry = std::move(*restored_registry);
                         const auto current_pin = ComputeShieldedSnapshotStatePin();
-                        const bool tip_matched_credential_ok =
+                        const bool sealed_pin_ok =
                             persisted_accumulator.has_value() &&
                             *persisted_accumulator ==
                                 m_shielded_nullifiers->NullifierAccumulatorDigest() &&
                             persisted_pin.has_value() &&
                             current_pin.has_value() &&
                             *persisted_pin == *current_pin;
-                        // Only PREPARED journals are eligible: a LEGACY marker on a
-                        // tip-matched snapshot still means an unknown multi-store
-                        // mutation prefix and must rebuild / fail closed when pruned.
-                        if (tip_matched_credential_ok &&
-                            persisted_mutation_marker->IsPreparedTransitionJournal() &&
+                        if (sealed_pin_ok &&
                             m_shielded_nullifiers->ClearMutationMarker()) {
                             LogPrintf(
-                                "EnsureShieldedStateInitialized: clearing stale tip-matched "
-                                "PREPARED mutation marker at height=%d hash=%s; durable "
-                                "snapshot already matches the active tip with verifying "
-                                "pin+accumulator (skipping from-genesis rebuild)\n",
-                                tip->nHeight,
-                                tip->GetBlockHash().ToString());
-                            // Drop the temporary live loads; the tip-matched restore
-                            // path below re-reads and validates the same snapshot.
+                                "EnsureShieldedStateInitialized: clearing leftover %s "
+                                "mutation marker after unclean shutdown at marker_height=%d "
+                                "marker_hash=%s persisted_height=%d persisted_hash=%s; "
+                                "sealed pin+accumulator verified (fast-restore, skipping "
+                                "from-genesis rebuild)\n",
+                                persisted_mutation_marker->IsPreparedTransitionJournal()
+                                    ? "PREPARED" : "legacy",
+                                persisted_mutation_marker->target_tip_height,
+                                persisted_mutation_marker->target_tip_hash.ToString(),
+                                stale_marker_tip_height,
+                                stale_marker_tip_hash.ToString());
+                            // Drop the temporary live loads; the restore path
+                            // below re-reads and validates the same snapshot.
                             reset_shielded_state();
                             persisted_mutation_marker.reset();
                         } else {
@@ -19555,7 +20786,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                           tip ? tip->GetBlockHash().ToString() : uint256{}.ToString());
                 return false;
             } else {
-                LogPrintf("EnsureShieldedStateInitialized: found in-flight mutation marker target_height=%d target_hash=%s; rebuilding full shielded state from chain\n",
+                LogPrintf("EnsureShieldedStateInitialized: found in-flight mutation marker target_height=%d target_hash=%s whose sealed pin is missing or does not match the live stores; rebuilding full shielded state from chain\n",
                           persisted_mutation_marker->target_tip_height,
                           persisted_mutation_marker->target_tip_hash.ToString());
                 if (!rebuild_from_chain()) {
@@ -19566,7 +20797,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         }
     }
 
-    LogPrintf("EnsureShieldedStateInitialized: rebuilding from tip height=%d hash=%s retention=%s\n",
+    LogPrintf("EnsureShieldedStateInitialized: loading persisted shielded state at tip height=%d hash=%s retention=%s\n",
               tip ? tip->nHeight : -1,
               tip ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
               m_options.retain_shielded_commitment_index ? "full" : "externalized");
@@ -19679,6 +20910,17 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                           actual_commitment_index_digest->ToString());
                 return false;
             }
+        } else if (tip != nullptr &&
+                   GetConsensus().IsShieldedPoolDisabled(tip->nHeight)) {
+            // Shielding is discontinued at nShieldedPoolDisableHeight. The
+            // commitment-position index is not a consensus input past that
+            // height (spends are invalid), so a digest mismatch must not
+            // force a multi-minute from-genesis index replay on an opt-in
+            // -shieldedstate=1 node. Restore the sealed frontier instead.
+            LogPrintf("EnsureShieldedStateInitialized: skipping commitment-index rebuild at height=%d hash=%s because the shielded pool is closed; restoring the sealed frontier without a from-genesis index replay\n",
+                      persisted_tip_height,
+                      persisted_tip_hash.ToString());
+            restored_index = true;
         } else {
             if (!persisted_commitment_index_digest.has_value()) {
                 LogPrintf("EnsureShieldedStateInitialized: persisted state missing commitment index digest at height=%d hash=%s tree_size=%u root=%s; rebuilding commitment index from chain\n",
@@ -19708,11 +20950,15 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         // position) when the index is absent; it simply cannot itself PRODUCE witnesses until it can
         // rebuild the index from un-pruned blocks.
         const bool commitment_index_present = m_shielded_merkle_tree.HasCommitmentIndex();
+        const bool pool_closed_index_optional =
+            tip != nullptr && GetConsensus().IsShieldedPoolDisabled(tip->nHeight);
         const bool commitment_index_unrebuildable_under_pruning =
             !commitment_index_present &&
             !ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip);
         if (restored_index &&
-            (commitment_index_present || commitment_index_unrebuildable_under_pruning)) {
+            (commitment_index_present ||
+             commitment_index_unrebuildable_under_pruning ||
+             pool_closed_index_optional)) {
             const auto loaded_anchor_roots = m_shielded_anchor_roots;
             const auto loaded_account_registry_roots = persisted_account_registry_roots;
             bool anchor_history_rebuilt{false};
@@ -19937,14 +21183,24 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     }
                 }
             } else {
-                const size_t expected_account_registry_roots =
-                    ExpectedShieldedRecentHistoryCount(tip) + 1U;
-                if (!LoadShieldedAccountRegistryRootWindow(
-                        persisted_account_registry_roots,
-                        m_shielded_account_registry.Root(),
-                        expected_account_registry_roots,
-                        "EnsureShieldedStateInitialized",
-                        m_shielded_account_registry_roots)) {
+                // A closed-frozen snapshot at/after nShieldedPoolDisableHeight
+                // persists an empty account-registry root window; the empty
+                // window is canonical and must not be rejected as incomplete.
+                const bool shielded_pool_closed{
+                    tip != nullptr &&
+                    GetConsensus().IsShieldedPoolDisabled(tip->nHeight)};
+                const size_t expected_account_registry_roots{
+                    shielded_pool_closed
+                        ? 0
+                        : ExpectedShieldedRecentHistoryCount(tip) + 1U};
+                if (shielded_pool_closed) {
+                    m_shielded_account_registry_roots.clear();
+                } else if (!LoadShieldedAccountRegistryRootWindow(
+                               persisted_account_registry_roots,
+                               m_shielded_account_registry.Root(),
+                               expected_account_registry_roots,
+                               "EnsureShieldedStateInitialized",
+                               m_shielded_account_registry_roots)) {
                     LogPrintf("EnsureShieldedStateInitialized: snapshot account-registry history blocks unavailable and persisted root window is incomplete at height=%d hash=%s\n",
                               tip != nullptr ? tip->nHeight : -1,
                               tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
@@ -21079,18 +22335,62 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
     if (tip == nullptr) return;
     if (m_best_header == nullptr) {
         SetBestHeader(tip);
+    }
+    if (m_best_header == nullptr) return;
+
+    // BLOCK_FAILED_MASK covers FAILED_VALID and FAILED_CHILD. Do not call
+    // RecalculateBestHeader from here: that function returns through this
+    // path and would recurse.
+    const bool failed_branch{
+        (m_best_header->nStatus & BLOCK_FAILED_MASK) != 0 ||
+        !m_best_header->IsValid(BLOCK_VALID_TREE)};
+    // Floor only an ancestor of the connected tip (headers-below-blocks).
+    // Never use nHeight < tip alone: that would clamp a heavier competing
+    // fork. Never assign the tip when a higher-work header is already
+    // selected (<node> 0.34.5: 944-deep headers-only suffix).
+    const bool behind_on_active{
+        m_best_header->nHeight <= tip->nHeight &&
+        tip->GetAncestor(m_best_header->nHeight) == m_best_header};
+    if (failed_branch) {
+        SetBestHeader(tip);
+    } else if (behind_on_active && m_best_header != tip &&
+               m_best_header->nChainWork <= tip->nChainWork) {
+        SetBestHeader(tip);
+    }
+
+    // Floor, do not pin. SendMessages calls this every message: a valid
+    // heavier header — competing fork OR same-chain headers-only suffix —
+    // must become m_best_header so GETDATA can sprint. Trusted mirrors stay
+    // on the authority-steered path.
+    if (node::matmul_trusted::IsTrustedMirror()) return;
+    CBlockIndex* claimed{m_best_claimed_header};
+    if (claimed == nullptr) claimed = m_best_header;
+    if (claimed == nullptr || claimed == m_best_header) return;
+    const bool claimed_failed{
+        (claimed->nStatus & BLOCK_FAILED_MASK) != 0 ||
+        !claimed->IsValid(BLOCK_VALID_TREE)};
+    const bool claimed_extends_tip{
+        claimed->nHeight >= tip->nHeight &&
+        claimed->GetAncestor(tip->nHeight) == tip};
+    if (!node::matmul_trusted::ConsensusMinerMayFollowHeavierDisconnectedHeader(
+            /*trusted_mirror=*/false, claimed_extends_tip, claimed_failed,
+            IsOnParkedReorgBranch(claimed),
+            claimed->nChainWork > tip->nChainWork,
+            claimed->nHeight >= tip->nHeight)) {
         return;
     }
-    const bool follows_tip{m_best_header->nHeight >= tip->nHeight &&
-                           m_best_header->GetAncestor(tip->nHeight) == tip};
-    if (!follows_tip && m_best_header->nHeight < tip->nHeight) {
-        SetBestHeader(tip);
+    if (claimed->nChainWork > m_best_header->nChainWork) {
+        SetBestHeader(claimed);
     }
 }
 
 void ChainstateManager::RecalculateBestHeader()
 {
     AssertLockHeld(cs_main);
+    // Callers must invoke this regardless of IsConfigured(). Independent
+    // validators (-matmulvalidation=consensus, no -matmultrustedpubkey)
+    // are the recommended config and have IsConfigured()==false; they still
+    // need the only path that can lower m_best_header (MendeMatthias).
     const CBlockIndex* const active_tip{ActiveChain().Tip()};
     SetBestHeader(ActiveChain().Tip());
     m_best_claimed_header = nullptr;
@@ -21105,10 +22405,10 @@ void ChainstateManager::RecalculateBestHeader()
             }
             if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
             MaybeUpdateBestClaimedHeader(&entry.second);
-            // Authenticated-work selection with a bounded unauth allowance: a short
-            // unverified MatMul suffix may displace a losing tip for chase, but a
-            // forged flood beyond the allowance cannot outrank authenticated work.
-            if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
+            // Download locators must rank by nChainWork. The 6-block unauth
+            // allowance left m_best_header on the connected tip while a
+            // 944-deep more-work headers-only suffix sat in the index.
+            if (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, entry.second)) {
                 SetBestHeader(&entry.second);
             }
         }
@@ -21146,6 +22446,11 @@ void ChainstateManager::RecalculateBestHeader()
     // Competing forks still need current-config in-memory quorum below.
     CBlockIndex* attested_frontier{const_cast<CBlockIndex*>(active_tip)};
     CBlockIndex* authority_best{nullptr};
+    CBlockIndex* shallow_header_work_best{nullptr};
+    const uint32_t park_depth = m_options.max_reorg_depth_park.value_or(
+        kernel::GetReorgProtectionProfileSettings(
+            m_options.reorg_protection_profile)
+            .park_depth);
     for (auto& [_, candidate] : m_blockman.m_block_index) {
         if (m_interrupt) {
             EnsureBestHeaderNotBehindConnectedTip();
@@ -21172,8 +22477,25 @@ void ChainstateManager::RecalculateBestHeader()
         }
         // Pin-steered competing forks may displace m_best_header only on
         // trusted mirrors (CPU archives). Consensus miners advertise the
-        // ExactReplay-valid tip branch (T50).
+        // ExactReplay-valid tip branch (T50), except RB-14 Part A: rank a
+        // strictly-heavier competing SHALLOW fork by its own accepted-header
+        // nChainWork even when overlay would pin to a locally-signed loser.
+        // Deep forks stay ignored here (dump-and-run). ConnectTip still
+        // ExactReplays (IsAutomaticReorgRecoveryCandidate).
         if (!node::matmul_trusted::IsTrustedMirror()) {
+            const CBlockIndex* const fork{ActiveChain().FindFork(&candidate)};
+            const int depth{
+                (fork != nullptr && fork != active_tip)
+                    ? active_tip->nHeight - fork->nHeight
+                    : 0};
+            if (kernel::ShallowHeaderWorkMayLeadAutoRecovery(
+                    depth, park_depth,
+                    candidate.nChainWork > active_tip->nChainWork)) {
+                if (shallow_header_work_best == nullptr ||
+                    PreferMostWorkHeader(*shallow_header_work_best, candidate)) {
+                    shallow_header_work_best = &candidate;
+                }
+            }
             continue;
         }
         if (candidate.nChainWork < active_tip->nChainWork) continue;
@@ -21213,6 +22535,9 @@ void ChainstateManager::RecalculateBestHeader()
             }
         }
         SetBestHeader(followed);
+    }
+    if (shallow_header_work_best != nullptr) {
+        SetBestHeader(shallow_header_work_best);
     }
     if (authority_best != nullptr &&
         node::matmul_trusted::IsTrustedMirror()) {

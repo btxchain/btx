@@ -2029,6 +2029,19 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     }
 }
 
+interfaces::ChainTipStaleness CWallet::GetTipStaleness() const
+{
+    AssertLockHeld(cs_wallet);
+    if (!HaveChain()) return {};
+    return chain().getTipStaleness();
+}
+
+bool CWallet::IsChainStaleBehindBestHeader() const
+{
+    AssertLockHeld(cs_wallet);
+    return GetTipStaleness().is_stale;
+}
+
 void CWallet::PersistReorgSettlementHold()
 {
     AssertLockHeld(cs_wallet);

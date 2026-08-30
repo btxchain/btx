@@ -74,6 +74,14 @@ PLATFORM_CONFIGS = {
         "exe_suffix": "",
     },
 }
+# Operator-facing aliases for the three 0.34.5 ship targets. Same bytes as the
+# canonical ids; extra keys so a cut that says linux-x86_64-cpu /
+# linux-x86_64-cuda / macos-arm64-metal cannot bypass the gate by using a
+# name the packager does not recognize. Bare cuda is the published 0.34 name
+# (no 12/13 suffix); it packs the same tree as cuda12.
+PLATFORM_CONFIGS["linux-x86_64-cpu"] = dict(PLATFORM_CONFIGS["linux-x86_64"])
+PLATFORM_CONFIGS["linux-x86_64-cuda"] = dict(PLATFORM_CONFIGS["linux-x86_64-cuda12"])
+PLATFORM_CONFIGS["macos-arm64-metal"] = dict(PLATFORM_CONFIGS["macos-arm64"])
 SUPPORT_FILES = load_support_files()
 
 
@@ -180,19 +188,25 @@ def ensure_input_file(path: Path, label: str) -> Path:
     return path
 
 
-def verify_shipped_btxd(btxd_path: Path) -> None:
-    """Refuse to package a btxd that advertises ZMQ without linking it.
-
-    The path must be the real ELF/Mach-O (build-tree bin/btxd, or already
-    libexec/btxd.real). A packaged #!/bin/sh wrapper is not a binary; ldd
-    and otool on it pass vacuously.
-    """
+def _load_verify_module():
     script = Path(__file__).with_name("verify_release_btxd.py")
     spec = importlib.util.spec_from_file_location("verify_release_btxd", script)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"unable to load {script}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def verify_shipped_btxd(btxd_path: Path) -> None:
+    """Refuse to package a btxd that advertises ZMQ without linking it.
+
+    The path must be the real ELF/Mach-O/PE (build-tree bin/btxd, or already
+    libexec/btxd.real). A packaged #!/bin/sh wrapper is not a binary; ldd
+    and otool on it pass vacuously. An unrecognized file is FAIL — a skipped
+    gate is how issues 111 and 122 shipped twice.
+    """
+    module = _load_verify_module()
     if module.is_shell_wrapper(btxd_path):
         raise RuntimeError(
             f"{btxd_path}: pass the real ELF/Mach-O (build/bin/btxd or "
@@ -200,25 +214,31 @@ def verify_shipped_btxd(btxd_path: Path) -> None:
         )
     kind = module.classify(btxd_path)
     if kind == "other":
-        # Unit-test stubs are not ELF/Mach-O. Real release binaries must be.
-        return
-    module.verify_binary(btxd_path)
-    module.verify_launch(btxd_path)
+        raise RuntimeError(
+            f"{btxd_path}: not an ELF, Mach-O, or PE binary; refusing to package "
+            "an unrecognized file (a skipped gate is how issues 111 and 122 shipped)"
+        )
+    module.verify_path_for_ship(btxd_path)
 
 
-def verify_shipped_macos_cli(btx_cli_path: Path) -> None:
-    """Refuse Homebrew dylibs in btx-cli (same portability bar as btxd)."""
-    script = Path(__file__).with_name("verify_release_btxd.py")
-    spec = importlib.util.spec_from_file_location("verify_release_btxd", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"unable to load {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+def verify_shipped_cli(btx_cli_path: Path) -> None:
+    """Refuse Homebrew dylibs / untyped files in btx-cli (same bar as btxd)."""
+    module = _load_verify_module()
+    if module.is_shell_wrapper(btx_cli_path):
+        raise RuntimeError(
+            f"{btx_cli_path}: pass the real ELF/Mach-O, not the packaged bin/btx-cli wrapper"
+        )
     kind = module.classify(btx_cli_path)
     if kind == "other":
-        return
-    if kind == "macho":
-        module.verify_binary(btx_cli_path)
+        raise RuntimeError(
+            f"{btx_cli_path}: not an ELF, Mach-O, or PE binary; refusing to package "
+            "an unrecognized file"
+        )
+    module.verify_binary(btx_cli_path)
+
+
+# Back-compat name used by older tests and comments.
+verify_shipped_macos_cli = verify_shipped_cli
 
 
 def resolve_btx_util_path(explicit_path: Path | None, btxd_path: Path, btx_cli_path: Path, exe_suffix: str) -> Path:
@@ -276,7 +296,7 @@ def stage_release_tree(
         ),
     ]
     verify_shipped_btxd(btxd_path)
-    verify_shipped_macos_cli(btx_cli_path)
+    verify_shipped_cli(btx_cli_path)
 
     for source, dest_name in binary_pairs:
         wrapper = wrapper_payload(dest_name.removesuffix(config["exe_suffix"]), platform_id)

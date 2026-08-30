@@ -103,9 +103,10 @@ Notes:
 - For canonical/seed operators use `./contrib/devtools/gen-btx-node-conf.sh archival` (default `prune=0`, scalable bootstrap).
 - Use strict deterministic troubleshooting mode only when needed:
   `./contrib/devtools/gen-btx-node-conf.sh archival strict-connect`.
-- If you control the managed archival fleet (`local` / `fra` / `nyc` / `sfo`),
-  use direct managed peers instead of the public bootstrap set:
-  `./contrib/devtools/gen-btx-node-conf.sh archival managed-direct <local|fra|nyc|sfo>`.
+- If you operate a private archival set, pin those peers instead of the public
+  bootstrap set. `./contrib/devtools/gen-btx-node-conf.sh archival managed-direct`
+  emits RFC 5737 example addresses (`local` / `fra` / `nyc` / `sfo` are slot
+  names); substitute your own.
 
 ## 3. Start and Verify
 
@@ -126,11 +127,10 @@ Expected:
 If you previously used strict deterministic mode (`connect=`), switch back to
 `addnode=` + discovery for better mesh resilience and lower stale/orphan risk.
 
-If you are operating the managed archival fleet, do not use the public
-`node.btx.*` hostnames as fixed manual peers. They are acceptable public
-bootstrap seeds, but the managed fleet should use `managed-direct` so each node
-pins the canonical direct archival peers instead of whatever the public DNS
-records currently resolve to.
+If you operate a private archival set, do not use the public `node.btx.*`
+hostnames as the only fixed manual peers. They are acceptable public bootstrap
+seeds. Use `managed-direct` (with your own addresses substituted for the RFC
+5737 examples) so each node pins the peers you actually control.
 
 Troubleshooting:
 

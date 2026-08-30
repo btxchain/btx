@@ -60,7 +60,7 @@ feeds only a reward lane and an anti-MEV ordering beacon. Therefore every BTX ch
   `src/node/mining_guard.cpp`, surfaced `src/rpc/mining.cpp:4376`.
 
 The deep-reorg alarm reads these (NOT a new surface) and the host health monitor
-(`~/btx-health-monitor.sh`) alerts on `rejected_reorgs>0` or `chain_guard` divergence.
+(`<health-monitor.sh>`) alerts on `rejected_reorgs>0` or `chain_guard` divergence.
 
 ## 4. The fix set (staged)
 

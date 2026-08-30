@@ -199,6 +199,12 @@ struct MatMulLowRankVariableBaseProductDigestDeviceBatchRequest {
 
 MatMulAccelerationProbe ProbeMatMulDigestAcceleration();
 MatMulBufferPoolStats ProbeMatMulBufferPool();
+/** Create digest-pool slots for every selected CUDA device and mark them
+ *  ready. RC ExactReplay uses a separate GEMM workspace; the v3 mining digest
+ *  pool otherwise stays "buffer_pool_uninitialized" until a mining digest
+ *  runs (a live consensus-archive node telemetry). Does not skip ExactReplay and does not
+ *  launch kernels. */
+bool EnsureMatMulBufferPoolReady(std::string& reason);
 MatMulDispatchConfig ProbeMatMulDispatchConfig();
 MatMulKernelProfile ProbeMatMulKernelProfile();
 MatMulProfilingStats ProbeMatMulProfilingStats();

@@ -544,10 +544,9 @@ BOOST_AUTO_TEST_CASE(deferred_cooldown_is_scoped_to_reconnect_resistant_netgroup
 BOOST_AUTO_TEST_CASE(ticketless_followed_chain_persists_or_retains_competing_stays_header_only)
 {
     // Closed livelock: a delivered followed historical hole always persists
-    // (HAVE_DATA, no ExactReplay GPU). A tip-child persists on mirrors/signers
-    // and is retained on independent consensus until ticket/retry. Competing
-    // siblings keep HEADER_ONLY + per-peer cooldown so one netgroup cannot
-    // censor an independent source or steal miner GPU.
+    // (HAVE_DATA). persist_without_gpu=true covers pin-covered mirror hashes
+    // and the unique followed consensus tip-child (catch-up without rcadmit).
+    // Competing siblings keep persist=false so they HEADER_ONLY / retain.
     BOOST_CHECK(
         node::ClassifyTicketlessRCBody(
             /*followed_historical_hole=*/true,

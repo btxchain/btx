@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -113,6 +114,19 @@ bool OracleGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
 {
     out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
     return true;
+}
+
+/** Matches the CPU oracle below production-like intensive dims; diverges when
+ *  inner or cols reach 256. Self-qual toy/medium stay at d_ff=128. */
+bool ScaleSelectiveGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                            uint32_t rows, uint32_t inner, uint32_t cols,
+                            std::vector<int32_t>& out)
+{
+    if (inner >= 256 || cols >= 256) {
+        out.assign(static_cast<size_t>(rows) * cols, 123456789);
+        return true;
+    }
+    return OracleGemmS8S8(L, R, rows, inner, cols, out);
 }
 
 /** Deliberately separate test entry point for the alternate-provider state
@@ -1433,6 +1447,101 @@ BOOST_AUTO_TEST_CASE(rc_strict_resolver_rejects_self_qualified_nonproduction_bac
     rc::ResetRCExactReplayProviderHealthForTest();
 }
 
+BOOST_AUTO_TEST_CASE(rc_allow_unverifiable_catchup_still_exactreplays)
+{
+    // -allowunverifiablematmulconsensus must not skip ExactReplay. A canary
+    // miss used to zero the GEMM, then strict-device failed with
+    // strict_device_no_eligible_provider (a live consensus-archive node: digest_requests=0,
+    // buffer_pool_uninitialized). Catch-up must still replay on the available
+    // GEMM, or on CPU if the device backend was gated empty.
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    CBlockHeader header{MakeRCHeader(0x50524f4447415445)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, params, /*height=*/0);
+
+    lt::ExactGemmBackend exact_backend;
+    exact_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const rc::RCExactReplayAcceleration acceleration{
+        .gemm = exact_backend,
+        .backend = "test:self-qualified",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+
+    rc::SetRCExactReplayAllowUnverifiableCatchUp(true);
+    const auto device_catchup{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            header, params, /*height=*/0, acceleration,
+            /*production_eligible=*/false)};
+    BOOST_REQUIRE(device_catchup.ok);
+    BOOST_CHECK_GT(device_catchup.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(device_catchup.cpu_gemm_calls, 0U);
+    BOOST_CHECK(
+        device_catchup.acceleration_resolution_reason.find(
+            ":unverifiable_catchup_replay") != std::string::npos);
+    // V1/RB-8: the UnverifiableDevice verdict is flagged non-authoritative so
+    // validation requires a trusted attestation quorum before accepting the
+    // body (an unqualified GEMM must not be a consensus authority).
+    BOOST_CHECK(device_catchup.unqualified_device_authority);
+
+    // A self-qualified device (production_eligible) with the SAME leftover
+    // flag takes the Pass path: full GPU speed, never non-authoritative.
+    const auto self_qualified_with_flag{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            header, params, /*height=*/0, acceleration,
+            /*production_eligible=*/true)};
+    BOOST_REQUIRE(self_qualified_with_flag.ok);
+    BOOST_CHECK(!self_qualified_with_flag.unqualified_device_authority);
+
+    const rc::RCExactReplayAcceleration cpu_accel{
+        .gemm = {},
+        .backend = "test:no-device",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto cpu_catchup{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            header, params, /*height=*/0, cpu_accel,
+            /*production_eligible=*/false)};
+    BOOST_REQUIRE(cpu_catchup.ok);
+    BOOST_CHECK_EQUAL(cpu_catchup.device_gemm_calls, 0U);
+    BOOST_CHECK_GT(cpu_catchup.cpu_gemm_calls, 0U);
+    BOOST_CHECK(
+        cpu_catchup.acceleration_resolution_reason.find(
+            ":unverifiable_catchup_cpu") != std::string::npos);
+    BOOST_CHECK_EQUAL(cpu_catchup.acceleration_backend, "cpu_unverifiable_catchup");
+    BOOST_CHECK(!cpu_catchup.require_device);
+    // The explicit CPU-oracle hatch (UnverifiableCpu) IS an independent
+    // validation, so it is authoritative on that opt-in box; only the
+    // untrusted-device GEMM verdict is gated on attestations.
+    BOOST_CHECK(!cpu_catchup.unqualified_device_authority);
+
+    // Header-tower catch-up still rejects a tampered digest. The flag
+    // opts out of device self-qualification, not out of ExactReplay.
+    CBlockHeader tampered{header};
+    tampered.matmul_digest = uint256::ONE;
+    const auto device_reject{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            tampered, params, /*height=*/0, acceleration,
+            /*production_eligible=*/false)};
+    BOOST_CHECK(!device_reject.ok);
+    const auto cpu_reject{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            tampered, params, /*height=*/0, cpu_accel,
+            /*production_eligible=*/false)};
+    BOOST_CHECK(!cpu_reject.ok);
+    BOOST_CHECK(
+        cpu_reject.outcome ==
+        rc::ExactReplayVerifyOutcome::InvalidConsensus);
+
+    rc::ResetRCExactReplayProviderHealthForTest();
+    BOOST_CHECK(!rc::GetRCExactReplayAllowUnverifiableCatchUp());
+}
+
 BOOST_AUTO_TEST_CASE(rc_execution_policy_and_last_replay_telemetry)
 {
     auto& scheduler{rc::GetRCAcceleratorScheduler()};
@@ -1902,6 +2011,201 @@ BOOST_AUTO_TEST_CASE(
     rc::ResetRCExactReplayProviderHealthForTest();
 }
 
+BOOST_AUTO_TEST_CASE(rc_transient_execution_failure_auto_recovers_after_backoff)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    auto header{MakeRCHeader(0x5452414e5349454e)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 honest_digest{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    header.matmul_digest = honest_digest;
+    BOOST_REQUIRE(!honest_digest.IsNull());
+
+    lt::ExactGemmBackend healthy_backend;
+    healthy_backend.gemm_s8s8 = &OracleGemmS8S8;
+    lt::ExactGemmBackend failing_backend;
+    failing_backend.gemm_s8s8 = &DecliningGemmS8S8;
+    const rc::RCExactReplayAcceleration failing{
+        .gemm = failing_backend,
+        .backend = "test:transient-provider",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+
+    // One transient GEMM ExecutionFailure -> quarantined, divergent=false.
+    const auto first{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, failing)};
+    BOOST_CHECK(!first.ok);
+    BOOST_CHECK(first.failure_kind == rc::RCExactReplayFailureKind::ExecutionFailure);
+    BOOST_CHECK(first.provider_quarantined);
+    auto health{rc::GetRCExactReplayProviderHealth()};
+    BOOST_CHECK(health.quarantined);
+    BOOST_CHECK(!health.divergent);
+    BOOST_CHECK_EQUAL(health.quarantine_events, 1U);
+
+    // Immediately after: backoff not due -> provider skipped, block retryable.
+    const rc::RCExactReplayAcceleration healthy{
+        .gemm = healthy_backend,
+        .backend = "test:transient-provider",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto blocked{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, healthy)};
+    BOOST_CHECK(!blocked.ok);
+    BOOST_CHECK(blocked.failure_kind == rc::RCExactReplayFailureKind::ProviderUnavailable);
+
+    // Age the quarantine past the transient backoff (test seam).
+    const int64_t now_seconds{
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()};
+    auto stale{health};
+    stale.quarantined = true;
+    stale.divergent = false;
+    stale.quarantined_at_seconds =
+        now_seconds - 2 * rc::kRCExactReplayTransientQuarantineBackoffSeconds;
+    rc::SetRCExactReplayProviderQuarantineForTest("test:transient-provider", stale);
+
+    // Backoff elapsed: auto un-quarantine; the strict replay is the byte-exact
+    // self-check (zero CPU fallback, digest equality) -> full speed restored.
+    const auto recovered{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, healthy)};
+    BOOST_CHECK(recovered.ok);
+    BOOST_CHECK(recovered.outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK_EQUAL(recovered.digest, honest_digest);
+    BOOST_CHECK_GT(recovered.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(recovered.cpu_gemm_calls, 0U);
+    const auto after{rc::GetRCExactReplayProviderHealth()};
+    BOOST_CHECK(!after.quarantined);
+    BOOST_CHECK(!after.validator_readiness_lost); // readiness auto-restored
+    BOOST_CHECK_GE(after.recovery_self_checks, 1U);
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_divergent_provider_stays_quarantined_until_byte_exact_self_check)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    auto header{MakeRCHeader(0x444956455247454e)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 honest_digest{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    header.matmul_digest = honest_digest;
+    BOOST_REQUIRE(!honest_digest.IsNull());
+    const auto epoch{MakeReplayCapabilityEpoch(params, header.matmul_dim)};
+
+    lt::ExactGemmBackend wrong_backend;
+    wrong_backend.gemm_s8s8 = &WrongGemmS8S8;
+    const auto wrong_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:divergent-a", wrong_backend, epoch)};
+    BOOST_REQUIRE(!wrong_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = wrong_backend,
+        .provider = "test:divergent-a",
+        .capability = wrong_capability,
+    }));
+    lt::ExactGemmBackend healthy_backend;
+    healthy_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const auto healthy_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:divergent-b", healthy_backend, epoch)};
+    BOOST_REQUIRE(!healthy_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = healthy_backend,
+        .provider = "test:divergent-b",
+        .capability = healthy_capability,
+    }));
+    const rc::RCExactReplayAcceleration wrong_primary{
+        .gemm = wrong_backend,
+        .backend = "test:divergent-a",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+
+    // Independent provider reproduces the header: divergence CONFIRMED ->
+    // divergent quarantine (not transient).
+    const auto recovered{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, wrong_primary)};
+    BOOST_CHECK(recovered.ok);
+    BOOST_CHECK_EQUAL(recovered.quarantined_provider, "test:divergent-a");
+    auto health{rc::GetRCExactReplayProviderHealth()};
+    BOOST_CHECK(health.quarantined);
+    BOOST_CHECK(health.divergent);
+    BOOST_CHECK_EQUAL(
+        health.reason, "digest_mismatch_confirmed_by_independent_provider");
+
+    // Even after the divergent backoff elapses, a FAILING re-test keeps the
+    // provider quarantined (only a byte-exact pass clears divergence).
+    const int64_t now_seconds{
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()};
+    auto stale{health};
+    stale.quarantined = true;
+    stale.divergent = true;
+    stale.quarantined_at_seconds =
+        now_seconds - 2 * rc::kRCExactReplayDivergentRecheckBackoffSeconds;
+    rc::SetRCExactReplayProviderQuarantineForTest("test:divergent-a", stale);
+    const auto still_failing{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, wrong_primary)};
+    BOOST_CHECK(!still_failing.ok || still_failing.provider_quarantined);
+    BOOST_CHECK(rc::GetRCExactReplayProviderHealth().quarantined);
+    BOOST_CHECK(rc::GetRCExactReplayProviderHealth().divergent);
+
+    // Independent recovery of the header re-stamps the quarantine. Age it
+    // again so the same provider name can run the byte-exact self-check.
+    const int64_t heal_now_seconds{
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()};
+    auto heal_stale{rc::GetRCExactReplayProviderHealth()};
+    heal_stale.quarantined = true;
+    heal_stale.divergent = true;
+    heal_stale.quarantined_at_seconds =
+        heal_now_seconds - 2 * rc::kRCExactReplayDivergentRecheckBackoffSeconds;
+    rc::SetRCExactReplayProviderQuarantineForTest("test:divergent-a", heal_stale);
+
+    // The SAME aged state with a healthy backend passes byte-exact -> clear.
+    const rc::RCExactReplayAcceleration healthy_primary{
+        .gemm = healthy_backend,
+        .backend = "test:divergent-a",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto healed{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, healthy_primary)};
+    BOOST_CHECK(healed.ok);
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
+    BOOST_CHECK_GE(rc::GetRCExactReplayProviderHealth().recovery_self_checks, 1U);
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_quarantine_backoff_escalates_and_caps)
+{
+    rc::RCExactReplayProviderHealth h;
+    h.quarantined = true;
+    h.divergent = false;
+    h.quarantine_events = 1;
+    BOOST_CHECK_EQUAL(rc::RCExactReplayQuarantineBackoffSeconds(h),
+                      rc::kRCExactReplayTransientQuarantineBackoffSeconds);
+    h.quarantine_events = 2;
+    BOOST_CHECK_EQUAL(rc::RCExactReplayQuarantineBackoffSeconds(h),
+                      2 * rc::kRCExactReplayTransientQuarantineBackoffSeconds);
+    h.quarantine_events = 100;
+    BOOST_CHECK_EQUAL(rc::RCExactReplayQuarantineBackoffSeconds(h),
+                      rc::kRCExactReplayQuarantineBackoffMaxSeconds);
+    h.divergent = true;
+    h.quarantine_events = 1;
+    BOOST_CHECK_EQUAL(rc::RCExactReplayQuarantineBackoffSeconds(h),
+                      rc::kRCExactReplayDivergentRecheckBackoffSeconds);
+}
+
 BOOST_AUTO_TEST_CASE(rc_device_mismatch_auto_fallback_remains_diagnostic_only)
 {
     auto header{MakeRCHeader(0x4350555245545259)};
@@ -2016,6 +2320,17 @@ BOOST_AUTO_TEST_CASE(rc_check_pow_toy_dims_mine_and_wrong_digest)
     header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
     BOOST_CHECK(!header.matmul_digest.IsNull());
     BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
+    {
+        // V1/RB-8: the unqualified flag must come from THIS replay, not
+        // g_last_exact_replay. A leftover true must be overwritten.
+        bool unqualified{true};
+        std::string detail;
+        const auto outcome{CheckMatMulProofOfWork_RCOutcome(
+            header, p, kHeight, /*carrier_missing=*/nullptr, &detail,
+            &unqualified)};
+        BOOST_CHECK(outcome == MatMulRCValidationOutcome::VALID);
+        BOOST_CHECK(!unqualified);
+    }
 
     CBlockHeader bad = header;
     bad.matmul_digest = uint256::ONE;
@@ -2727,6 +3042,63 @@ BOOST_AUTO_TEST_CASE(rc_enqueue_refund_receipt_rolls_source_counters_back_once)
     RefundGlobalMatMulRCBudget(kWorkUnits, charged_at);
 }
 
+BOOST_AUTO_TEST_CASE(rc_tip_child_progress_lane_is_independent_and_scaled)
+{
+    Consensus::Params p;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulRCPeerVerifyBudgetPerMin = 1;
+    constexpr int32_t kHeight{100};
+    BOOST_REQUIRE(p.IsMatMulRCFamilyActive(kHeight));
+    const uint32_t base{
+        EffectiveMatMulRCPeerVerifyBudgetPerMin(p, /*is_ibd=*/false, kHeight)};
+    BOOST_REQUIRE_GT(base, 0U);
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulRCTipChildPeerBudgetPerMin(p, false, kHeight, /*catchup_scale=*/0),
+        base);
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulRCTipChildPeerBudgetPerMin(p, false, kHeight, /*catchup_scale=*/1),
+        base);
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulRCTipChildPeerBudgetPerMin(p, false, kHeight, /*catchup_scale=*/8),
+        base * 8);
+
+    MatMulPeerVerificationBudget address;
+    MatMulPeerVerificationBudget netgroup;
+    const auto now{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        address, netgroup, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/0));
+    BOOST_CHECK_EQUAL(address.expensive_rc_verifications_this_minute, 1U);
+    BOOST_CHECK_EQUAL(address.rc_progress_verifications_this_minute, 0U);
+    // Progress lane is independent: a spent competing window still admits a
+    // followed tip-child charge.
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        address, netgroup, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/1));
+    BOOST_CHECK_EQUAL(address.rc_progress_verifications_this_minute, 1U);
+    BOOST_CHECK(!ConsumeMatMulRCSourceVerifyBudgets(
+        address, netgroup, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/1));
+    BOOST_CHECK_EQUAL(address.rc_progress_verifications_this_minute, 1U);
+    RefundMatMulRCPeerVerifyBudget(address, 1, now);
+    RefundMatMulRCPeerVerifyBudget(netgroup, 1, now);
+    BOOST_CHECK_EQUAL(address.expensive_rc_verifications_this_minute, 0U);
+    BOOST_CHECK_EQUAL(address.rc_progress_verifications_this_minute, 0U);
+
+    MatMulPeerVerificationBudget scaled_addr;
+    MatMulPeerVerificationBudget scaled_net;
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        scaled_addr, scaled_net, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/8));
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        scaled_addr, scaled_net, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight, /*catchup_scale=*/8));
+    BOOST_CHECK_EQUAL(scaled_addr.rc_progress_verifications_this_minute, 2U);
+    BOOST_CHECK_EQUAL(scaled_addr.expensive_rc_verifications_this_minute, 0U);
+}
+
 BOOST_AUTO_TEST_CASE(handoff_peer_budget_miss_restores_ticket_and_refunds_debit)
 {
     Consensus::Params p;
@@ -3138,6 +3510,113 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_device_fault_reseal)
     BOOST_CHECK_EQUAL(failed.acceleration.cpu_calls, 0u);
     BOOST_CHECK_EQUAL(failed.acceleration.cpu_fallbacks, 1u);
     BOOST_CHECK(!failed.acceleration.first_failure.empty());
+}
+
+BOOST_AUTO_TEST_CASE(rc_winner_cpu_oracle_refuses_divergent_device)
+{
+    // ResealRCWinnerStrict is device-vs-device: a consistently wrong kernel
+    // still returns Sealed. Mining must additionally match the CPU oracle.
+    lt::ExactGemmBackend bad;
+    bad.gemm_s8s8 = &WrongGemmS8S8;
+    bad.gemm_s32s8 = &WrongGemmS32S8;
+
+    const auto header = MakeRCHeader(4242);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 cpu = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    const uint256 mined_bad = rc::MineRCEpisode(header, params, 0, nullptr, bad);
+    BOOST_REQUIRE(mined_bad != cpu);
+
+    const auto self_consistent = rc::ResealRCWinnerStrict(
+        header, params, 0, mined_bad, bad, "test_divergent_device");
+    BOOST_CHECK(self_consistent.outcome == rc::RCWinnerResealOutcome::Sealed);
+    BOOST_CHECK(self_consistent.digest == mined_bad);
+
+    const uint256 confirmed_bad = rc::ConfirmRCWinnerCpuOracle(
+        header, params, 0, mined_bad);
+    BOOST_CHECK(confirmed_bad.IsNull());
+
+    const uint256 confirmed_cpu = rc::ConfirmRCWinnerCpuOracle(
+        header, params, 0, cpu);
+    BOOST_CHECK(confirmed_cpu == cpu);
+
+    lt::ExactGemmBackend selective;
+    selective.gemm_s8s8 = &ScaleSelectiveGemmS8S8;
+    const auto selfqual = rc::ProbeRCSelfQual(selective);
+    BOOST_CHECK(selfqual.mining_accelerator_ok);
+
+    auto live_ish = rc::MakeToyRCEpisodeParams();
+    live_ish.d_model = 64;
+    live_ish.d_ff = 256;
+    BOOST_REQUIRE(rc::ValidateRCEpisodeParams(live_ish));
+    const uint256 live_cpu =
+        rc::RecomputeResidentCurriculumReference(header, live_ish, 0);
+    const uint256 live_device =
+        rc::MineRCEpisode(header, live_ish, 0, nullptr, selective);
+    BOOST_CHECK(live_device != live_cpu);
+    BOOST_CHECK(rc::ConfirmRCWinnerCpuOracle(header, live_ish, 0, live_device).IsNull());
+    BOOST_CHECK(rc::ConfirmRCWinnerCpuOracle(header, live_ish, 0, live_cpu) == live_cpu);
+}
+
+BOOST_AUTO_TEST_CASE(rc_mining_refuses_golden_mismatch_admits_missing_row)
+{
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.nMatMulRCProfile = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulV4Dimension = 256;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kParentMtp = 1'700'000'000;
+    BOOST_REQUIRE(p.GetMatMulEncodingProfile(kHeight) ==
+                  Consensus::MatMulEncodingProfile::ENC_RC);
+
+    const auto resolved = matmul_v4::accel::ResolveExactGemmBackendForRC();
+    rc::ResetRCProductionCanaryForTest();
+
+    rc::RCProductionCanaryStatus mismatch;
+    mismatch.provider = resolved.provider;
+    mismatch.exact_manifest_match = true;
+    mismatch.outcome = rc::RCProductionCanaryOutcome::DigestMismatch;
+    mismatch.manifest_entry_id = "unit-test-golden-row";
+    rc::SetRCProductionCanaryStatusForTest(mismatch);
+
+    CBlockHeader refused = MakeRCHeader(7);
+    refused.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    refused.nBits = UintToArith256(p.powLimit).GetCompact();
+    uint64_t mismatch_tries = 8;
+    BOOST_CHECK(!SolveMatMul(refused, p, mismatch_tries, kHeight,
+                             /*abort_flag=*/nullptr,
+                             /*freivalds_payload_out=*/nullptr,
+                             /*share_target_override=*/nullptr, kParentMtp));
+    BOOST_CHECK(refused.matmul_digest.IsNull());
+
+    rc::RCProductionCanaryStatus missing;
+    missing.provider = resolved.provider;
+    missing.exact_manifest_match = false;
+    missing.outcome = rc::RCProductionCanaryOutcome::MissingGolden;
+    missing.passed = true;
+    missing.activation_ready = true;
+    missing.admission_path = rc::RCProductionAdmissionPath::SelfQualification;
+    rc::SetRCProductionCanaryStatusForTest(missing);
+
+    CBlockHeader admitted = MakeRCHeader(9);
+    admitted.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    admitted.nBits = UintToArith256(p.powLimit).GetCompact();
+    uint64_t admit_tries = 32;
+    BOOST_REQUIRE(SolveMatMul(admitted, p, admit_tries, kHeight,
+                              /*abort_flag=*/nullptr,
+                              /*freivalds_payload_out=*/nullptr,
+                              /*share_target_override=*/nullptr, kParentMtp));
+    BOOST_CHECK(!admitted.matmul_digest.IsNull());
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    BOOST_CHECK_EQUAL(
+        admitted.matmul_digest,
+        rc::RecomputeResidentCurriculumReference(admitted, params_rc, kHeight));
+
+    rc::ResetRCProductionCanaryForTest();
 }
 
 BOOST_AUTO_TEST_CASE(rc_stage_h_winner_reseal_honors_miner_cancellation)

@@ -3323,10 +3323,32 @@ MatMulBufferPoolStats ProbeMatMulBufferPool()
         }
     }
     stats.reason = stats.initialized ? "buffer_pool_slots_ready" : "buffer_pool_uninitialized";
-    if (stats.reason.empty()) {
-        stats.reason = stats.initialized ? "buffer_pool_slots_ready" : "buffer_pool_uninitialized";
-    }
     return stats;
+}
+
+bool EnsureMatMulBufferPoolReady(std::string& reason)
+{
+    const auto topology = ProbeCudaTopology();
+    if (!topology.available) {
+        reason = topology.reason.empty() ? "cuda_unavailable" : topology.reason;
+        return false;
+    }
+    if (topology.selected_devices.empty()) {
+        reason = "no_selected_cuda_devices";
+        return false;
+    }
+    for (const auto& device : topology.selected_devices) {
+        auto& context = GetPoolContext(device.device_index);
+        std::lock_guard<std::mutex> lock(context.mutex);
+        if (context.slots.empty()) {
+            reason = "buffer_pool_no_slots";
+            return false;
+        }
+        context.initialized = true;
+        context.reason = "buffer_pool_slots_ready";
+    }
+    reason = "buffer_pool_slots_ready";
+    return true;
 }
 
 MatMulDispatchConfig ProbeMatMulDispatchConfig()

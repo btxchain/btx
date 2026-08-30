@@ -457,6 +457,28 @@ assert_no_dynamic_cuda_runtime_dependencies() {
     fi
 }
 
+assert_shipped_btxd_has_zmq() {
+    local python_bin btxd
+    python_bin="$(command -v python3 || command -v python || true)"
+    if [ -z "$python_bin" ]; then
+        echo "verify_release_btxd: FAIL python3 is required in the Guix environment to gate shipped btxd" >&2
+        exit 1
+    fi
+    if [ -x "${DISTNAME}/libexec/btxd.real" ]; then
+        btxd="${DISTNAME}/libexec/btxd.real"
+    elif [ -x "${DISTNAME}/bin/btxd" ]; then
+        btxd="${DISTNAME}/bin/btxd"
+    elif [ -x "${DISTNAME}/bin/btxd.exe" ]; then
+        btxd="${DISTNAME}/bin/btxd.exe"
+    else
+        echo "verify_release_btxd: FAIL no btxd in ${DISTNAME} (looked at libexec/btxd.real, bin/btxd, bin/btxd.exe)" >&2
+        find "${DISTNAME}" \( -name 'btxd' -o -name 'btxd.real' -o -name 'btxd.exe' \) -print >&2 || true
+        exit 1
+    fi
+    echo "verify_release_btxd: gating ${btxd} (${HOST} flavor=${GUIX_LINUX_FLAVOR:-cpu})"
+    "$python_bin" "${DISTSRC}/scripts/release/verify_release_btxd.py" "$btxd"
+}
+
 CONSENSUS_CONFIGFLAGS="$BASE_CONFIGFLAGS -DBTX_ENABLE_CUDA_EXPERIMENTAL=OFF"
 mkdir -p "$DISTSRC"
 set_cuda_config_for_flavor
@@ -608,6 +630,12 @@ esac
         done < "${DISTSRC}/scripts/release/support_files.txt"
 
         assert_no_dynamic_cuda_runtime_dependencies
+
+        # Fail closed on a btxd that is missing, untyped, or has ZMQ compiled
+        # out. This is the Guix path that produces the tarball users download;
+        # package_release_archive.py is not invoked here. Issues 111 and 122
+        # shipped because this gate was never run on this path.
+        assert_shipped_btxd_has_zmq
 
         # Deterministically produce {non-,}debug binary tarballs ready
         # for release

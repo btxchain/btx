@@ -54,9 +54,14 @@ static constexpr size_t MAX_SHIELDED_TX_RELAY_BYTES_PER_SECOND{500'000};
 static constexpr size_t MAX_SHIELDEDDATA_REQUESTS_PER_SECOND{8};
 
 /** Whether scarce per-peer block-download capacity may be assigned to the
- * assumeutxo background chain. The active snapshot chain must first be out of
- * IBD and within one block of the best known header; the IBD latch alone can
- * clear based on chainwork and tip age while a fresh snapshot is still behind. */
+ * assumeutxo background chain. The active snapshot chain must first be out
+ * of IBD. A height gap vs m_best_header is not a gate: requiring
+ * active_height >= best_header_height - 1 left loadtxoutset nodes with
+ * active 199300 and headers 199303 never assigning background capacity,
+ * so MaybeCompleteSnapshotValidation stayed SKIPPED, IsSnapshotValidated
+ * stayed false, and FindNextBlocks could skip every peer (MendeMatthias,
+ * v0.34.4, no fork, no invalid blocks). Active-chain FindNextBlocks still
+ * runs first and takes inflight budget. */
 constexpr bool ShouldFetchBackgroundSnapshotBlocks(
     bool background_sync,
     bool limited_peer,
@@ -64,8 +69,24 @@ constexpr bool ShouldFetchBackgroundSnapshotBlocks(
     int active_height,
     int best_header_height)
 {
+    (void)active_height;
     return background_sync && !limited_peer && !initial_block_download &&
-        best_header_height >= 0 && active_height >= best_header_height - 1;
+        best_header_height >= 0;
+}
+
+/** Competing BestKnown that does not contain the snapshot base cannot be
+ *  downloaded until background validation finishes (no undo). A peer
+ *  whose BestKnown extends the active tip is serving our snapshot chain
+ *  and must not be skipped — that skip was gate 3 of the closed loop. */
+constexpr bool SnapshotUnvalidatedPeerLacksBase(
+    bool has_snapshot_base,
+    bool snapshot_validated,
+    bool peer_best_contains_snapshot_base,
+    bool peer_best_extends_active_tip)
+{
+    if (!has_snapshot_base || snapshot_validated) return false;
+    if (peer_best_extends_active_tip) return false;
+    return !peer_best_contains_snapshot_base;
 }
 
 /** Whether a connected peer remains eligible for block/header synchronization
@@ -295,10 +316,33 @@ public:
     /** True while a complete body is held for scheduler re-admission. */
     [[nodiscard]] virtual bool HasMatMulRetainedBodyForTest(const uint256& hash) const = 0;
     [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
+    /** Issue #130 regression: retain a MatMul lifecycle body directly, bypassing
+     *  the ExactReplay deferral path so the guard is testable in CUDA-off builds. */
+    virtual void RetainMatMulBodyForTest(
+        const std::shared_ptr<const CBlock>& block) = 0;
+    /** Issue #130 regression: invoke the real BlockConnected callback with a
+     *  chosen block index, to simulate a stale async callback after a reorg. */
+    virtual void SimulateBlockConnectedForTest(
+        const std::shared_ptr<const CBlock>& block,
+        const CBlockIndex* pindex) = 0;
     /** Drive scheduler re-admission of a HAVE_DATA followed tip-child.
      *  Production calls this from CScheduler, never from SendMessages
      *  (g_msgproc_mutex). Tests must not hold that mutex. */
     virtual void RetryMatMulDeferredBodiesForTest() = 0;
+    /** Issue 116: mint via PersistMatMulExactReplayVerdict (header-first /
+     *  historical ExactReplay) and gossip MMATTEST without ProcessBlockSync.
+     *  Only pushes a signature this process just produced. */
+    virtual void PersistExactReplayVerdictAndRelayForTest(const uint256& hash) = 0;
+
+    /** Session-lived: this address already failed a low-work headers
+     *  presync. A reconnect must not reclaim the scarce initial-sync slot
+     *  (MendeMatthias / v0.34.4). */
+    virtual void NoteLowWorkHeadersSyncFailureForTest(const CNetAddr& addr)
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
+    /** Pretend Checkpoints().GetHeight() is this value. Regtest last
+     *  checkpoint is 0, which would otherwise make height preference a
+     *  no-op. Cleared by ResetMatMulVerifyAdmissionForTest. */
+    virtual void SetInitialHeadersSyncAnchorForTest(int32_t height) = 0;
 
     /**
      * Evict extra outbound peers. If we think our tip may be stale, connect to an extra outbound.

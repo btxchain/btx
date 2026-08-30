@@ -49,6 +49,7 @@
 #include <map>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <unordered_map>
 
 namespace kernel {
@@ -61,6 +62,9 @@ static constexpr uint8_t DB_PRUNE_LOCK{'L'};
 static constexpr uint8_t DB_PARKED_REORG_BRANCHES{'g'};
 static constexpr uint8_t DB_REORG_RECOVERY_RECORD{'G'};
 static constexpr uint8_t DB_MATMUL_REPLAY_CONTEXT{'M'};
+static constexpr uint8_t DB_VALIDATION_EPOCH{'e'};
+static constexpr uint8_t DB_VALIDATION_EPOCH_PENDING{'E'};
+static constexpr uint8_t DB_VALIDATION_EPOCH_HEAL_WATERMARK{'W'};
 // Keys used in previous version that might still be found in the DB:
 // BlockTreeDB::DB_TXINDEX_BLOCK{'T'};
 // BlockTreeDB::DB_TXINDEX{'t'}
@@ -97,7 +101,7 @@ bool BlockTreeDB::ReadLastBlockFile(int& nFile)
     return Read(DB_LAST_BLOCK, nFile);
 }
 
-bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const std::optional<uint256>& matmul_replay_context)
+bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const std::optional<uint256>& matmul_replay_context, const std::optional<uint32_t>& validation_epoch, const std::optional<bool>& validation_epoch_pending, const std::set<uint256>* parked_reorg_branches, const std::optional<uint32_t>* validation_epoch_heal_watermark)
 {
     CDBBatch batch(*this);
     for (const auto& [file, info] : fileInfo) {
@@ -113,6 +117,33 @@ bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFi
     }
     if (matmul_replay_context.has_value()) {
         batch.Write(DB_MATMUL_REPLAY_CONTEXT, *matmul_replay_context);
+    }
+    if (validation_epoch.has_value()) {
+        batch.Write(DB_VALIDATION_EPOCH, *validation_epoch);
+    }
+    if (validation_epoch_pending.has_value()) {
+        if (*validation_epoch_pending) {
+            batch.Write(DB_VALIDATION_EPOCH_PENDING, uint8_t{1});
+        } else {
+            batch.Erase(DB_VALIDATION_EPOCH_PENDING);
+        }
+    }
+    if (parked_reorg_branches != nullptr) {
+        if (parked_reorg_branches->empty()) {
+            batch.Erase(DB_PARKED_REORG_BRANCHES);
+        } else {
+            batch.Write(DB_PARKED_REORG_BRANCHES,
+                        std::vector<uint256>{parked_reorg_branches->begin(),
+                                             parked_reorg_branches->end()});
+        }
+    }
+    if (validation_epoch_heal_watermark != nullptr) {
+        if (validation_epoch_heal_watermark->has_value()) {
+            batch.Write(DB_VALIDATION_EPOCH_HEAL_WATERMARK,
+                        validation_epoch_heal_watermark->value());
+        } else {
+            batch.Erase(DB_VALIDATION_EPOCH_HEAL_WATERMARK);
+        }
     }
     return WriteBatch(batch, true);
 }
@@ -191,6 +222,52 @@ bool BlockTreeDB::LoadPruneLocks(std::unordered_map<std::string, node::PruneLock
         lock_info.temporary = false;
     }
 
+    return true;
+}
+
+bool BlockTreeDB::WriteValidationEpoch(uint32_t epoch)
+{
+    return Write(DB_VALIDATION_EPOCH, epoch);
+}
+
+bool BlockTreeDB::ReadValidationEpoch(uint32_t& epoch)
+{
+    return Read(DB_VALIDATION_EPOCH, epoch);
+}
+
+bool BlockTreeDB::WriteValidationEpochPending(bool pending)
+{
+    if (pending) {
+        return Write(DB_VALIDATION_EPOCH_PENDING, uint8_t{1});
+    }
+    return Erase(DB_VALIDATION_EPOCH_PENDING);
+}
+
+bool BlockTreeDB::ReadValidationEpochPending(bool& pending)
+{
+    uint8_t value{0};
+    if (!Read(DB_VALIDATION_EPOCH_PENDING, value)) {
+        pending = false;
+        return true;
+    }
+    pending = value != 0;
+    return true;
+}
+
+bool BlockTreeDB::WriteValidationEpochHealWatermark(std::optional<uint32_t> height)
+{
+    if (!height.has_value()) {
+        return Erase(DB_VALIDATION_EPOCH_HEAL_WATERMARK);
+    }
+    return Write(DB_VALIDATION_EPOCH_HEAL_WATERMARK, *height);
+}
+
+bool BlockTreeDB::ReadValidationEpochHealWatermark(uint32_t& height)
+{
+    if (!Read(DB_VALIDATION_EPOCH_HEAL_WATERMARK, height)) {
+        height = 0;
+        return true;
+    }
     return true;
 }
 
@@ -724,7 +801,7 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // Prefer authenticated work for best-header selection, with a bounded
     // unauth allowance so a short competing headers-only suffix can displace a
     // losing tip for chase (matching net_processing peer decisions).
-    if (best_header == nullptr || PreferTrustAdjustedHeader(*best_header, *pindexNew)) {
+    if (best_header == nullptr || PreferMostWorkHeader(*best_header, *pindexNew)) {
         best_header = pindexNew;
     }
 
@@ -1106,7 +1183,10 @@ void BlockManager::AddUnlinkedBlock(CBlockIndex* block)
     m_blocks_unlinked.emplace(block->pprev, block);
 }
 
-bool BlockManager::WriteBlockIndexDB()
+bool BlockManager::WriteBlockIndexDB(std::optional<uint32_t> validation_epoch,
+                                    std::optional<bool> validation_epoch_pending,
+                                    const std::set<uint256>* parked_reorg_branches,
+                                    const std::optional<uint32_t>* validation_epoch_heal_watermark)
 {
     AssertLockHeld(::cs_main);
     std::vector<std::pair<int, const CBlockFileInfo*>> vFiles;
@@ -1124,7 +1204,9 @@ bool BlockManager::WriteBlockIndexDB()
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
     if (!m_block_tree_db->WriteBatchSync(
             vFiles, max_blockfile, vBlocks, m_prune_locks,
-            m_pending_matmul_replay_context)) {
+            m_pending_matmul_replay_context, validation_epoch,
+            validation_epoch_pending, parked_reorg_branches,
+            validation_epoch_heal_watermark)) {
         return false;
     }
     m_pending_matmul_replay_context.reset();

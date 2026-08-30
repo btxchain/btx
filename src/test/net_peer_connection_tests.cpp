@@ -170,7 +170,7 @@ BOOST_FIXTURE_TEST_CASE(test_addnode_getaddednodeinfo_and_connection_detection, 
     connman->ClearTestNodes();
 }
 
-BOOST_AUTO_TEST_CASE(snapshot_background_download_waits_for_tip_catchup)
+BOOST_AUTO_TEST_CASE(snapshot_background_download_not_gated_on_header_gap)
 {
     BOOST_CHECK(!ShouldFetchBackgroundSnapshotBlocks(
         /*background_sync=*/false, /*limited_peer=*/false,
@@ -184,7 +184,14 @@ BOOST_AUTO_TEST_CASE(snapshot_background_download_waits_for_tip_catchup)
         /*background_sync=*/true, /*limited_peer=*/false,
         /*initial_block_download=*/true, /*active_height=*/200,
         /*best_header_height=*/200));
-    BOOST_CHECK(!ShouldFetchBackgroundSnapshotBlocks(
+    // MendeMatthias / v0.34.4: loadtxoutset tip 199300, headers 199303.
+    // The old active >= best_header-1 gate (199300 >= 199302) starved
+    // background fetch forever. Height gap is not a gate.
+    BOOST_CHECK(ShouldFetchBackgroundSnapshotBlocks(
+        /*background_sync=*/true, /*limited_peer=*/false,
+        /*initial_block_download=*/false, /*active_height=*/199300,
+        /*best_header_height=*/199303));
+    BOOST_CHECK(ShouldFetchBackgroundSnapshotBlocks(
         /*background_sync=*/true, /*limited_peer=*/false,
         /*initial_block_download=*/false, /*active_height=*/150,
         /*best_header_height=*/200));
@@ -196,6 +203,25 @@ BOOST_AUTO_TEST_CASE(snapshot_background_download_waits_for_tip_catchup)
         /*background_sync=*/true, /*limited_peer=*/false,
         /*initial_block_download=*/false, /*active_height=*/200,
         /*best_header_height=*/200));
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_unvalidated_peer_skip_allows_tip_chain)
+{
+    // Competing BestKnown without the snapshot base: still skip.
+    BOOST_CHECK(SnapshotUnvalidatedPeerLacksBase(
+        /*has_snapshot_base=*/true, /*snapshot_validated=*/false,
+        /*peer_best_contains_snapshot_base=*/false,
+        /*peer_best_extends_active_tip=*/false));
+    // Same-chain suffix above the snapshot tip: do not skip (gate 3).
+    BOOST_CHECK(!SnapshotUnvalidatedPeerLacksBase(
+        true, false, /*peer_best_contains_snapshot_base=*/true,
+        /*peer_best_extends_active_tip=*/true));
+    BOOST_CHECK(!SnapshotUnvalidatedPeerLacksBase(
+        true, false, /*contains_base=*/false, /*extends_tip=*/true));
+    BOOST_CHECK(!SnapshotUnvalidatedPeerLacksBase(
+        true, /*snapshot_validated=*/true, false, false));
+    BOOST_CHECK(!SnapshotUnvalidatedPeerLacksBase(
+        /*has_snapshot_base=*/false, false, false, false));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

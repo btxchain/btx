@@ -391,10 +391,39 @@ LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_com
 LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
                                                          const CBlockIndex* tip,
                                                          const CBlockIndex* best_known,
-                                                         const CChain* active_chain)
+                                                         const CChain* active_chain,
+                                                         bool acquisition_escape)
 {
     if (tip == nullptr || in.last_common == nullptr) return in;
     if (in.last_common->nHeight >= tip->nHeight) return in;
+
+    // F3 dropped equal-work EncDr twins so they could not occupy inflight.
+    // A strictly heavier competing fork has its missing root at or below
+    // the connected tip (live 2026-08-28: hole 199304 vs tip 199312, LCA
+    // 199294, claimed work of headers-only 199384 > active 199312). Snapping
+    // last_common onto the active tip drops that hole; FindNextBlocks then
+    // skips every competing hash with height <= tip. Keep ClampLastCommon's
+    // last_common + lowest_missing so GETDATA can start at the fork root —
+    // but only while the LCA is still near the tip. A deep HEADER_ONLY
+    // tower (rtx6000: last_common=199312, tip=199394, Δ=82) must not pin
+    // the walk 82 blocks behind bodies we already have.
+    const bool heavier_competing{
+        best_known != nullptr &&
+        best_known->nChainWork > tip->nChainWork &&
+        best_known->GetAncestor(tip->nHeight) != tip};
+    if (LastCommonKeepHeavierCompetingFork(
+            heavier_competing, tip->nHeight, in.last_common->nHeight)) {
+        return in;
+    }
+    // RB-16 acquisition escape valve: a STALE tip acquiring a strictly-heavier
+    // competing tower must keep last_common + lowest_missing at the fork root
+    // (do NOT snap onto the tip) so FindNextBlocks GETDATAs the heavier fork's
+    // bodies from the LCA up. Without this the deep-tower snap drops
+    // lowest_missing -> no_missing_body -> inflight=0 forever. Fetch only;
+    // ExactReplay before ConnectTip and park/migration gating are unchanged.
+    if (heavier_competing && acquisition_escape) {
+        return in;
+    }
 
     LastCommonRootFirstResult out = in;
     out.last_common = tip;
@@ -406,8 +435,10 @@ LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResu
     }
     out.lowest_missing = FindLowestMissingBody(tip, best_known, active_chain);
     // FindLowestMissingBody LCAs `tip` with `best_known`, so a sibling fork
-    // still yields a hole at or below the connected tip. That is the live
-    // pin; drop it. Keep only descendants of the connected tip.
+    // still yields a hole at or below the connected tip. Equal-work EncDr
+    // twins are the F3 pin: drop those. Short heavier competing forks
+    // already returned above; a deep withdrawn tower's competing hole
+    // is also dropped so the walk starts at the connected tip.
     if (out.lowest_missing != nullptr &&
         out.lowest_missing->GetAncestor(tip->nHeight) != tip) {
         out.lowest_missing = nullptr;

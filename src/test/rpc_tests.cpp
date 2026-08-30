@@ -2,12 +2,15 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <arith_uint256.h>
 #include <base58.h>
 #include <core_io.h>
+#include <hash.h>
 #include <interfaces/chain.h>
 #include <key.h>
 #include <key_io.h>
 #include <node/context.h>
+#include <node/matmul_trusted_attestations.h>
 #include <rpc/blockchain.h>
 #include <rpc/client.h>
 #include <rpc/server.h>
@@ -15,10 +18,13 @@
 #include <rpc/util.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
+#include <uint256.h>
 #include <util/time.h>
+#include <validation.h>
 
 #include <any>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -523,6 +529,16 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_btx_mining_methods)
     BOOST_CHECK(result[0].isArray());
     BOOST_CHECK_EQUAL(result[0][0]["challenge"]["kind"].get_str(), "matmul_service_challenge_v1");
     BOOST_CHECK_EQUAL(result[1].get_bool(), false);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("clearmintedattestation", {"199295"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 1U);
+    BOOST_CHECK_EQUAL(result[0].getInt<int>(), 199295);
+    BOOST_CHECK(result[0].isNum());
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("clearmintedattestation", {"199290", "199295"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 2U);
+    BOOST_CHECK_EQUAL(result[0].getInt<int>(), 199290);
+    BOOST_CHECK_EQUAL(result[1].getInt<int>(), 199295);
 }
 
 BOOST_AUTO_TEST_CASE(rpc_convert_values_bridge_methods)
@@ -844,6 +860,348 @@ BOOST_AUTO_TEST_CASE(rpc_control_method_classifier)
     BOOST_CHECK_EQUAL(*PeekJsonRpcMethod(
                           R"({"params":{"method":"getblockchaininfo"},"method":"stop")"),
                       "stop");
+}
+
+static bool RpcErrorContains(const std::runtime_error& e, std::string_view needle)
+{
+    return std::string_view{e.what()}.find(needle) != std::string_view::npos;
+}
+
+static CKey MakeTestKey()
+{
+    CKey key;
+    key.MakeNewKey(/*fCompressed=*/true);
+    BOOST_REQUIRE(key.IsValid());
+    return key;
+}
+
+BOOST_AUTO_TEST_CASE(clearmintedattestation_rpc_binding)
+{
+    struct Reset {
+        ~Reset() { node::matmul_trusted::ResetForTest(); }
+    } reset;
+
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("clearmintedattestation"),
+        std::runtime_error,
+        [](const std::runtime_error& e) {
+            return RpcErrorContains(e, "not configured");
+        });
+
+    const CKey signer{MakeTestKey()};
+    const CKey other{MakeTestKey()};
+    const uint256 chain{uint256{uint8_t{1}}};
+    const uint256 context{uint256{uint8_t{2}}};
+
+    {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {other.GetPubKey(), signer.GetPubKey()};
+        config.threshold = 1;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/true,
+            /*serve=*/true, std::chrono::milliseconds{10}, error));
+        BOOST_CHECK(!node::matmul_trusted::HasLocalSigner());
+        BOOST_CHECK_EXCEPTION(
+            CallRPC("clearmintedattestation 50"),
+            std::runtime_error,
+            [](const std::runtime_error& e) {
+                return RpcErrorContains(e, "local attestation signer");
+            });
+        node::matmul_trusted::ResetForTest();
+    }
+
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {signer.GetPubKey(), other.GetPubKey()};
+    config.threshold = 2;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{10}, error));
+
+    const uint256 hash_a{(HashWriter{} << uint64_t{1}).GetHash()};
+    const uint256 hash_b{(HashWriter{} << uint64_t{2}).GetHash()};
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash_a, 50) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::LocalMintedHash(50) == hash_a);
+
+    UniValue cleared;
+    BOOST_REQUIRE_NO_THROW(cleared = CallRPC("clearmintedattestation 50"));
+    BOOST_CHECK_EQUAL(cleared["cleared"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(cleared["from_height"].getInt<int>(), 50);
+    BOOST_CHECK_EQUAL(cleared["to_height"].getInt<int>(), 50);
+    BOOST_CHECK(!node::matmul_trusted::LocalMintedHash(50).has_value());
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(hash_b, 50) ==
+                matmul::trusted::AddResult::Accepted);
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash_a, 51) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE_NO_THROW(cleared = CallRPC("clearmintedattestation 50 51"));
+    BOOST_CHECK_EQUAL(cleared["cleared"].getInt<int>(), 2);
+    BOOST_CHECK_EQUAL(cleared["from_height"].getInt<int>(), 50);
+    BOOST_CHECK_EQUAL(cleared["to_height"].getInt<int>(), 51);
+
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("clearmintedattestation 51 50"),
+        std::runtime_error,
+        [](const std::runtime_error& e) {
+            return RpcErrorContains(e, "end_height must be >= height");
+        });
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("clearmintedattestation 0 256"),
+        std::runtime_error,
+        [](const std::runtime_error& e) {
+            return RpcErrorContains(e, "may not exceed 256");
+        });
+    BOOST_REQUIRE_NO_THROW(cleared = CallRPC("clearmintedattestation 0 255"));
+    BOOST_CHECK_EQUAL(cleared["from_height"].getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(cleared["to_height"].getInt<int>(), 255);
+
+    const CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        tip = Assert(m_node.chainman)->ActiveTip();
+        BOOST_REQUIRE(tip);
+    }
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      tip->GetBlockHash(), tip->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE_NO_THROW(cleared = CallRPC("clearmintedattestation"));
+    BOOST_CHECK_EQUAL(cleared["cleared"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(cleared["from_height"].getInt<int>(), tip->nHeight);
+    BOOST_CHECK_EQUAL(cleared["to_height"].getInt<int>(), tip->nHeight);
+    BOOST_CHECK(!node::matmul_trusted::LocalMintedHash(tip->nHeight).has_value());
+}
+
+static bool WarningsMentionStale(const UniValue& warnings)
+{
+    const std::string needle{"is_stale"};
+    if (warnings.isArray()) {
+        for (size_t i = 0; i < warnings.size(); ++i) {
+            if (warnings[i].get_str().find(needle) != std::string::npos) return true;
+            if (warnings[i].get_str().find("stale") != std::string::npos) return true;
+        }
+        return false;
+    }
+    if (warnings.isStr()) {
+        return warnings.get_str().find("stale") != std::string::npos;
+    }
+    return false;
+}
+
+BOOST_AUTO_TEST_CASE(getblockcount_stale_header_tower_does_not_change_numeric)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_best;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_best = chainman.m_best_header;
+    }
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{9}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip;
+    fake.nHeight = tip->nHeight + 20;
+    fake.nChainWork = tip->nChainWork;
+
+    UniValue numeric;
+    UniValue verbose;
+    UniValue info;
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(&fake);
+        numeric = CallRPC("getblockcount");
+        verbose = CallRPC("getblockcount true");
+        info = CallRPC("getblockchaininfo");
+        chainman.SetBestHeader(original_best);
+    }
+
+    BOOST_CHECK(numeric.isNum());
+    BOOST_CHECK_EQUAL(numeric.getInt<int>(), tip->nHeight);
+    BOOST_REQUIRE(verbose.isObject());
+    BOOST_CHECK_EQUAL(verbose["blocks"].getInt<int>(), tip->nHeight);
+    BOOST_CHECK_EQUAL(verbose["behind_best_header"].getInt<int>(), 20);
+    BOOST_CHECK(verbose["is_stale"].get_bool());
+    BOOST_CHECK(!verbose["competing_heavier_header"].get_bool());
+    BOOST_REQUIRE(info.isObject());
+    BOOST_CHECK(info["is_stale"].get_bool());
+    BOOST_CHECK_EQUAL(info["behind_best_header"].getInt<int>(), 20);
+    BOOST_CHECK(WarningsMentionStale(info["warnings"]));
+}
+
+BOOST_AUTO_TEST_CASE(getblockchaininfo_not_stale_for_small_linear_header_gap)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_best;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_best = chainman.m_best_header;
+    }
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{3}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip;
+    fake.nHeight = tip->nHeight + 3;
+    fake.nChainWork = tip->nChainWork;
+
+    UniValue info;
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(&fake);
+        info = CallRPC("getblockchaininfo");
+        chainman.SetBestHeader(original_best);
+    }
+    BOOST_CHECK_EQUAL(info["behind_best_header"].getInt<int>(), 3);
+    BOOST_CHECK(!info["is_stale"].get_bool());
+}
+
+BOOST_AUTO_TEST_CASE(getblockchaininfo_stale_on_competing_heavier_header)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_best;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_best = chainman.m_best_header;
+    }
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{11}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip->pprev;
+    fake.nHeight = tip->nHeight;
+    fake.nChainWork = tip->nChainWork + arith_uint256{1000};
+    // adv5-followup a / V6: is_stale on a heavier COMPETING header requires it
+    // to be REAL (a body we hold, or authenticated work) -- a header-only spam
+    // twin must not flip the settlement-safety signal. Give the fake a body.
+    fake.nStatus = BLOCK_HAVE_DATA;
+
+    UniValue verbose;
+    UniValue info;
+    {
+        LOCK(cs_main);
+        chainman.SetBestHeader(&fake);
+        verbose = CallRPC("getblockcount true");
+        info = CallRPC("getblockchaininfo");
+        chainman.SetBestHeader(original_best);
+    }
+    BOOST_CHECK(verbose["is_stale"].get_bool());
+    BOOST_CHECK(verbose["competing_heavier_header"].get_bool());
+    BOOST_CHECK(info["is_stale"].get_bool());
+    BOOST_CHECK(info["competing_heavier_header"].get_bool());
+    BOOST_CHECK(WarningsMentionStale(info["warnings"]));
+}
+
+static bool WarningsMentionNeedle(const UniValue& warnings, std::string_view needle)
+{
+    if (warnings.isArray()) {
+        for (size_t i = 0; i < warnings.size(); ++i) {
+            if (warnings[i].get_str().find(std::string{needle}) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (warnings.isStr()) {
+        return warnings.get_str().find(std::string{needle}) != std::string::npos;
+    }
+    return false;
+}
+
+BOOST_AUTO_TEST_CASE(getblockchaininfo_better_work_twin_blocked_by_local_commitment)
+{
+    struct Reset {
+        ~Reset() { node::matmul_trusted::ResetForTest(); }
+    } reset;
+
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CBlockIndex* tip;
+    CBlockIndex* original_claimed;
+    {
+        LOCK(cs_main);
+        tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip);
+        original_claimed = chainman.m_best_claimed_header;
+    }
+
+    UniValue idle{CallRPC("getblockchaininfo")};
+    BOOST_CHECK(!idle["better_work_twin_blocked_by_local_commitment"].get_bool());
+
+    const CKey signer{MakeTestKey()};
+    const CKey other{MakeTestKey()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256{uint8_t{1}};
+    config.replay_authority_context = uint256{uint8_t{2}};
+    config.trusted_signers = {signer.GetPubKey(), other.GetPubKey()};
+    config.threshold = 2;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{10}, error));
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      tip->GetBlockHash(), tip->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    CBlockIndex fake;
+    uint256 fake_hash{uint256{uint8_t{12}}};
+    fake.phashBlock = &fake_hash;
+    fake.pprev = tip->pprev;
+    fake.nHeight = tip->nHeight;
+    fake.nChainWork = tip->nChainWork + arith_uint256{1000};
+
+    {
+        LOCK(cs_main);
+        chainman.m_best_claimed_header = &fake;
+    }
+    const UniValue info{CallRPC("getblockchaininfo")};
+    const UniValue mining{CallRPC("getmininginfo")};
+    {
+        LOCK(cs_main);
+        chainman.m_best_claimed_header = original_claimed;
+    }
+
+    BOOST_CHECK(info["better_work_twin_blocked_by_local_commitment"].get_bool());
+    BOOST_REQUIRE(info.exists("better_work_twin_local_commitment"));
+    BOOST_CHECK_EQUAL(
+        info["better_work_twin_local_commitment"]["fork_height"].getInt<int>(),
+        tip->nHeight);
+    BOOST_CHECK_EQUAL(
+        info["better_work_twin_local_commitment"]["local_committed_hash"].get_str(),
+        tip->GetBlockHash().GetHex());
+    BOOST_CHECK_EQUAL(
+        info["better_work_twin_local_commitment"]["better_work_twin_hash"].get_str(),
+        fake_hash.GetHex());
+    BOOST_CHECK(WarningsMentionNeedle(
+        info["warnings"], "better_work_twin_blocked_by_local_commitment"));
+    BOOST_CHECK(mining["better_work_twin_blocked_by_local_commitment"].get_bool());
+    BOOST_CHECK(WarningsMentionNeedle(
+        mining["warnings"], "better_work_twin_blocked_by_local_commitment"));
+    bool saw_observation{false};
+    const UniValue& observations{mining["fork_health"]["observations"]};
+    BOOST_REQUIRE(observations.isArray());
+    for (size_t i = 0; i < observations.size(); ++i) {
+        if (observations[i].get_str() ==
+            "better_work_twin_blocked_by_local_commitment") {
+            saw_observation = true;
+        }
+    }
+    BOOST_CHECK(saw_observation);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

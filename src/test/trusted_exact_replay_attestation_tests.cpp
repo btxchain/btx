@@ -267,6 +267,169 @@ BOOST_AUTO_TEST_CASE(config_validation_and_local_signer)
     BOOST_CHECK_THROW(AttestationStore{bad}, std::invalid_argument);
 }
 
+BOOST_AUTO_TEST_CASE(reorg_releases_mint_slot_inbound_cannot)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x61)};
+    const uint256 hash_a{TestHash(0x62)};
+    const uint256 hash_b{TestHash(0x63)};
+    const uint256 hash_c{TestHash(0x64)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.local_signer = keys[0];
+    config.open_attestors = true;
+    AttestationStore store{config};
+
+    ExactReplayAttestation minted_a;
+    BOOST_REQUIRE(store.SignLocal(hash_a, 20, &minted_a) == AddResult::Accepted);
+    BOOST_CHECK(store.LocalMintedHash(20) == hash_a);
+    BOOST_CHECK(store.SignLocal(hash_b, 20) == AddResult::HeightOccupied);
+
+    // Inbound competing hash (stolen-WIF copy of the local pin key) must not
+    // release the mint slot. Add() is the P2P path.
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_c, 20), keys[0]),
+                          hash_c, 20) == AddResult::Accepted);
+    BOOST_CHECK(store.LocalMintedHash(20) == hash_a);
+    BOOST_CHECK(!store.IsOffActiveChain(20, hash_c));
+    BOOST_CHECK(store.SignLocal(hash_b, 20) == AddResult::HeightOccupied);
+
+    // Disconnecting a hash this node did not mint also must not release.
+    BOOST_CHECK(!store.NotifyActiveChainBlockDisconnected(20, hash_c));
+    BOOST_CHECK(store.LocalMintedHash(20) == hash_a);
+    BOOST_CHECK(store.SignLocal(hash_b, 20) == AddResult::HeightOccupied);
+
+    // Own validated reorg of the minted hash releases the slot.
+    BOOST_CHECK(store.NotifyActiveChainBlockDisconnected(20, hash_a));
+    BOOST_CHECK(!store.LocalMintedHash(20).has_value());
+    BOOST_CHECK(store.IsOffActiveChain(20, hash_a));
+
+    ExactReplayAttestation minted_b;
+    BOOST_CHECK(store.SignLocal(hash_b, 20, &minted_b) == AddResult::Accepted);
+    BOOST_CHECK(store.LocalMintedHash(20) == hash_b);
+    BOOST_CHECK(minted_b.statement.block_hash == hash_b);
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_b, 20).size(), 1);
+    // V5/RB-12: the node's own validated reorg of hash_a withdraws its local
+    // vote for that abandoned twin from the live/gossiped set so it can no
+    // longer hold two live pin signatures at one height (the dual-quorum
+    // mirror freeze). hash_a carried only the local vote here, so its bucket
+    // is now empty; a peer copy would have survived (see
+    // reorg_withdraws_local_vote_but_keeps_peer_copy).
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_a, 20).size(), 0U);
+
+    // Open attestor who signed the disconnected hash can re-sign the new one
+    // without being frozen for equivocation.
+    const auto extra{MakeKeys(1)};
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_a, 21), extra[0]),
+                          hash_a, 21) == AddResult::Heard);
+    store.NotifyActiveChainBlockDisconnected(21, hash_a);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_b, 21), extra[0]),
+                          hash_b, 21) == AddResult::Heard);
+    BOOST_CHECK(!store.IsFrozenOpenSigner(extra[0].GetPubKey()));
+}
+
+BOOST_AUTO_TEST_CASE(reorg_withdraws_local_vote_but_keeps_peer_copy)
+{
+    // V5/RB-12: on the node's OWN validated reorg away from a hash it locally
+    // minted, its local vote is withdrawn from the live/gossiped bucket so the
+    // signer cannot keep a live pin quorum on the abandoned twin (the
+    // dual-quorum same-height mirror freeze). Peer copies survive as history,
+    // but the abandoned-hash quorum decays below threshold.
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x91)};
+    const uint256 hash_a{TestHash(0x92)};
+    const uint256 hash_b{TestHash(0x93)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.local_signer = keys[0];
+    AttestationStore store{config};
+
+    // hash_a reaches pin quorum: local mint (keys[0]) + a peer copy (keys[1]).
+    BOOST_REQUIRE(store.SignLocal(hash_a, 40) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, hash_a, 40), keys[1]),
+                            hash_a, 40) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(hash_a, 40));
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_a, 40).size(), 2U);
+
+    // Own validated reorg of hash_a: local vote withdrawn, peer copy kept,
+    // abandoned-twin quorum decays -> no dual-live-pin freeze can form.
+    BOOST_CHECK(store.NotifyActiveChainBlockDisconnected(40, hash_a));
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_a, 40).size(), 1U);
+    BOOST_CHECK(!store.HasQuorum(hash_a, 40));
+
+    // The mint slot is free for the followed hash; the node holds no live
+    // quorum on the abandoned twin while it attests the new one.
+    BOOST_CHECK(store.SignLocal(hash_b, 40) == AddResult::Accepted);
+    BOOST_CHECK(store.LocalMintedHash(40) == hash_b);
+    BOOST_CHECK(!store.HasQuorum(hash_a, 40));
+
+    // adv5 regression: a RELAYED / RELOADED copy of OUR OWN withdrawn vote for
+    // the abandoned hash must NOT re-enter the live set and re-form quorum
+    // (dual-quorum mirror freeze). Re-injecting keys[0]'s own hash_a statement
+    // is refused as Duplicate; the peer copy stays but quorum does not re-form.
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_a, 40), keys[0]),
+                          hash_a, 40) == AddResult::Duplicate);
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_a, 40).size(), 1U);
+    BOOST_CHECK(!store.HasQuorum(hash_a, 40));
+
+    // Seeding the tombstone (as startup does from durable) keeps the refusal
+    // even if the off-active-chain set had been cleared; a peer copy of ANOTHER
+    // signer is still admissible as history.
+    store.SeedOffActiveChain(40, hash_a);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_a, 40), keys[0]),
+                          hash_a, 40) == AddResult::Duplicate);
+    BOOST_CHECK(!store.HasQuorum(hash_a, 40));
+
+    // Once hash_a re-connects (reorg back), the tombstone clears and our vote
+    // is admissible again.
+    store.NotifyActiveChainBlockConnected(40, hash_a);
+    BOOST_CHECK(!store.IsOffActiveChain(40, hash_a));
+}
+
+BOOST_AUTO_TEST_CASE(competing_quorum_still_occupies_after_reorg_of_other_hash)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x71)};
+    const uint256 hash_a{TestHash(0x72)};
+    const uint256 hash_b{TestHash(0x73)};
+    const uint256 hash_c{TestHash(0x74)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.local_signer = keys[0];
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.SignLocal(hash_a, 30) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, hash_c, 30), keys[0]),
+                            hash_c, 30) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, hash_c, 30), keys[1]),
+                            hash_c, 30) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(hash_c, 30));
+    BOOST_CHECK(store.SignLocal(hash_b, 30) == AddResult::HeightOccupied);
+
+    // Reorging the hash we minted must not drop the competing-quorum guard
+    // on a hash that is still off our chain (stolen-WIF / dual-attest jam).
+    BOOST_CHECK(store.NotifyActiveChainBlockDisconnected(30, hash_a));
+    BOOST_CHECK(!store.LocalMintedHash(30).has_value());
+    BOOST_CHECK(store.SignLocal(hash_b, 30) == AddResult::HeightOccupied);
+}
+
+BOOST_AUTO_TEST_CASE(rpc_clear_local_mint_slots)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x81)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.local_signer = keys[0];
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.SignLocal(TestHash(0x82), 40) == AddResult::Accepted);
+    BOOST_REQUIRE(store.SignLocal(TestHash(0x83), 41) == AddResult::Accepted);
+    BOOST_CHECK(store.SignLocal(TestHash(0x84), 40) == AddResult::HeightOccupied);
+
+    BOOST_CHECK_EQUAL(store.ClearLocalMintSlots(40, 41), 2);
+    BOOST_CHECK(!store.LocalMintedHash(40).has_value());
+    BOOST_CHECK(!store.LocalMintedHash(41).has_value());
+    BOOST_CHECK(store.SignLocal(TestHash(0x84), 40) == AddResult::Accepted);
+    BOOST_CHECK_EQUAL(store.GetAttestations(TestHash(0x84), 40).size(), 1);
+    BOOST_CHECK_EQUAL(store.ClearLocalMintSlots(40, 40), 1);
+    BOOST_CHECK_EQUAL(store.ClearLocalMintSlots(40, 40), 0);
+}
+
 BOOST_AUTO_TEST_CASE(unique_signer_quorum_and_rejections)
 {
     const auto keys{MakeKeys(3)};
@@ -802,6 +965,104 @@ BOOST_AUTO_TEST_CASE(open_signed_entries_capped_at_one_height)
     BOOST_CHECK_LE(store.OpenSignedEntryCount(), 3);
 }
 
+BOOST_AUTO_TEST_CASE(constructor_resolves_open_directory_cap_defaults)
+{
+    const auto pin{MakeKeys(1)};
+    auto config{MakeConfig(TestHash(0xf0), pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    AttestationStore store{config};
+    BOOST_CHECK_EQUAL(store.MaxAdmittedOpen(), DEFAULT_MAX_ADMITTED_OPEN);
+    BOOST_CHECK_EQUAL(store.MaxOpenSignedHeights(),
+                      DEFAULT_MAX_OPEN_SIGNED_HEIGHTS);
+    BOOST_CHECK_EQUAL(store.MaxOpenSignedEntries(),
+                      DEFAULT_MAX_OPEN_SIGNED_ENTRIES);
+    BOOST_CHECK_EQUAL(store.MaxFrozenOpen(), DEFAULT_MAX_FROZEN_OPEN);
+    BOOST_CHECK_EQUAL(store.MaxRefutations(), DEFAULT_MAX_REFUTATIONS);
+    BOOST_CHECK_EQUAL(store.MaxLogLeaves(), DEFAULT_MAX_LOG_LEAVES);
+    BOOST_CHECK_EQUAL(store.MaxWindowChallenges(),
+                      DEFAULT_MAX_WINDOW_CHALLENGES);
+    BOOST_CHECK_EQUAL(store.MaxHeardAttestations(), 4096);
+}
+
+BOOST_AUTO_TEST_CASE(open_directory_ttl_prunes_heard_and_signed_heights)
+{
+    const auto pin{MakeKeys(1)};
+    const auto extra{MakeKeys(1)};
+    const uint256 chain{TestHash(0xf1)};
+    const uint256 block{TestHash(0xf2)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.ttl = 1ms;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, block, 7), pin[0]),
+                            block, 7) == AddResult::Accepted);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 7), extra[0]),
+                          block, 7) == AddResult::Heard);
+    BOOST_CHECK_EQUAL(store.OpenSignedHeightCount(), 1);
+    BOOST_CHECK_EQUAL(store.GetStats().heard_attestations, 1);
+
+    std::this_thread::sleep_for(5ms);
+    store.PruneExpired();
+    BOOST_CHECK_EQUAL(store.OpenSignedHeightCount(), 0);
+    BOOST_CHECK_EQUAL(store.GetStats().heard_attestations, 0);
+    BOOST_CHECK_EQUAL(store.GetStats().open_signed_heights, 0);
+    // Pin authority buckets are not the open-directory DoS surface; they
+    // follow the same TTL unless durable retention is on.
+    BOOST_CHECK_EQUAL(store.GetAttestations(block, 7).size(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(open_directory_ttl_runs_under_durable_retention)
+{
+    const auto pin{MakeKeys(1)};
+    const auto extra{MakeKeys(1)};
+    const uint256 chain{TestHash(0xf3)};
+    const uint256 block{TestHash(0xf4)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.ttl = 1ms;
+    AttestationStore store{config};
+    store.SetDurableRetention(true);
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, block, 8), pin[0]),
+                            block, 8) == AddResult::Accepted);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 8), extra[0]),
+                          block, 8) == AddResult::Heard);
+    std::this_thread::sleep_for(5ms);
+    store.PruneExpired();
+    BOOST_CHECK_EQUAL(store.GetAttestations(block, 8).size(), 1);
+    BOOST_CHECK_EQUAL(store.OpenSignedHeightCount(), 0);
+    BOOST_CHECK_EQUAL(store.GetStats().heard_attestations, 0);
+}
+
+BOOST_AUTO_TEST_CASE(log_leaves_and_window_challenges_are_capped)
+{
+    const auto keys{MakeKeys(1)};
+    const uint256 chain{TestHash(0xf5)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/1)};
+    config.max_log_leaves = 2;
+    config.max_window_challenges = 1;
+    AttestationStore store{config};
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, TestHash(0x01), 1),
+                                     keys[0]),
+                            TestHash(0x01), 1) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, TestHash(0x02), 2),
+                                     keys[0]),
+                            TestHash(0x02), 2) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, TestHash(0x03), 3),
+                                     keys[0]),
+                            TestHash(0x03), 3) == AddResult::Accepted);
+    BOOST_CHECK_EQUAL(store.LogHead().tree_size, 2);
+    BOOST_CHECK(!store.LogInclusionProof(StatementHash(
+                    MakeStatement(chain, TestHash(0x01), 1))).has_value());
+
+    store.ChallengeWindowReplay(8, TestHash(0x0a));
+    store.ChallengeWindowReplay(9, TestHash(0x0b));
+    const auto challenges{store.WindowReplayChallenges()};
+    BOOST_REQUIRE_EQUAL(challenges.size(), 1);
+    BOOST_CHECK_EQUAL(challenges[0].height, 9);
+}
+
 BOOST_AUTO_TEST_CASE(frozen_open_set_is_capped)
 {
     const auto pin{MakeKeys(1)};
@@ -822,6 +1083,43 @@ BOOST_AUTO_TEST_CASE(frozen_open_set_is_capped)
                               b, height) == AddResult::Equivocation);
     }
     BOOST_CHECK_EQUAL(store.FrozenOpenSigners().size(), 2);
+}
+
+BOOST_AUTO_TEST_CASE(refutation_ttl_prunes_buckets)
+{
+    const auto pin{MakeKeys(1)};
+    const uint256 chain{TestHash(0xd5)};
+    const uint256 hash{TestHash(0xd6)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.ttl = 1ms;
+    AttestationStore store{config};
+    auto refute{SignRefutation(MakeStatement(chain, hash, 91), pin[0])};
+    BOOST_REQUIRE(refute.has_value());
+    BOOST_CHECK(store.AddRefutation(*refute, hash, 91) == AddResult::Accepted);
+    BOOST_CHECK_EQUAL(store.GetRefutations(hash, 91).size(), 1);
+    std::this_thread::sleep_for(5ms);
+    store.PruneExpired();
+    BOOST_CHECK(store.GetRefutations(hash, 91).empty());
+    BOOST_CHECK_EQUAL(store.GetStats().refutation_buckets, 0);
+}
+
+BOOST_AUTO_TEST_CASE(refutation_rejects_declared_height_not_in_index)
+{
+    const auto pin{MakeKeys(1)};
+    const uint256 chain{TestHash(0xe1)};
+    const uint256 hash{TestHash(0xe2)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    AttestationStore store{config};
+    auto refute{SignRefutation(MakeStatement(chain, hash, 40), pin[0])};
+    BOOST_REQUIRE(refute.has_value());
+    // Caller supplies a height that is not the statement (and would not be
+    // the block-index height). Must not occupy that map key.
+    BOOST_CHECK(store.AddRefutation(*refute, hash, /*expected_height=*/99) ==
+                AddResult::WrongHeight);
+    BOOST_CHECK(store.GetRefutations(hash, 99).empty());
+    BOOST_CHECK(store.GetRefutations(hash, 40).empty());
+    BOOST_CHECK(store.AddRefutation(*refute, hash, 40) == AddResult::Accepted);
+    BOOST_CHECK_EQUAL(store.GetRefutations(hash, 40).size(), 1);
 }
 
 BOOST_AUTO_TEST_CASE(refutation_map_is_capped)

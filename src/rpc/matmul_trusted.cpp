@@ -177,7 +177,7 @@ RPCHelpMan getmatmultrustedstatus()
                     {
                         {RPCResult::Type::STR_HEX, "hash", "Attested block hash"},
                         {RPCResult::Type::NUM, "height", "Attested block height"},
-                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that block is an ancestor of (or is) the active tip"},
+                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that block is on the same chain as the active tip (ancestor, equal, or descendant / catch-up)"},
                         {RPCResult::Type::BOOL, "active_tip_has_quorum", "Whether the active tip itself currently has quorum"},
                     }},
                 {RPCResult::Type::STR, "warning", ""},
@@ -368,7 +368,7 @@ RPCHelpMan getmatmulattestedtip()
                 {RPCResult::Type::BOOL, "configured", "Whether a trusted-signer set is configured"},
                 {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Attested block hash"},
                 {RPCResult::Type::NUM, "height", /*optional=*/true, "Attested block height"},
-                {RPCResult::Type::BOOL, "on_active_chain", /*optional=*/true, "Whether that HAVE_DATA attested block is an ancestor of (or is) the active tip"},
+                {RPCResult::Type::BOOL, "on_active_chain", /*optional=*/true, "Whether that HAVE_DATA attested block is on the same chain as the active tip (including catch-up)"},
                 {RPCResult::Type::BOOL, "active_tip_has_quorum", /*optional=*/true, "Whether the active tip itself currently has quorum"},
                 {RPCResult::Type::STR_HEX, "active_tip_hash", /*optional=*/true, "Active chain tip hash"},
                 {RPCResult::Type::NUM, "active_tip_height", /*optional=*/true, "Active chain tip height"},
@@ -377,7 +377,7 @@ RPCHelpMan getmatmulattestedtip()
                     {
                         {RPCResult::Type::NUM, "height", "Highest stored quorum height"},
                         {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Hash recorded for that height, if known"},
-                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is an ancestor of (or is) the active tip"},
+                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is on the same chain as the active tip (ancestor, equal, or descendant / catch-up)"},
                         {RPCResult::Type::NUM, "on_chain_attested_height", "Highest quorum ancestor of the active tip, or -1 if none"},
                         {RPCResult::Type::NUM, "blocks_behind", "max(0, height - on_chain_attested_height)"},
                     }},
@@ -685,6 +685,7 @@ RPCHelpMan submitmatmulrefutation()
             const uint256 hash{refutation.statement.block_hash};
             ChainstateManager& chainman{EnsureAnyChainman(request.context)};
             bool known_profile1{false};
+            int32_t index_height{-1};
             {
                 LOCK(cs_main);
                 const CBlockIndex* const index{
@@ -698,9 +699,10 @@ RPCHelpMan submitmatmulrefutation()
                     chainman.GetConsensus()
                         .IsMatMulTrustedReplayAttestationActive(
                             index->nHeight)};
+                if (have_index) index_height = index->nHeight;
                 const bool height_matches{
                     have_index &&
-                    index->nHeight == refutation.statement.block_height};
+                    index_height == refutation.statement.block_height};
                 known_profile1 =
                     node::matmul_trusted::MmAttestRefuteKnownProfile1Block(
                         have_index, failed, profile1, height_matches);
@@ -710,14 +712,14 @@ RPCHelpMan submitmatmulrefutation()
                     RPC_INVALID_ADDRESS_OR_KEY,
                     "Unknown, failed, non-Profile-1, or height-mismatched block");
             }
-            const int32_t height{refutation.statement.block_height};
             const auto add_result{
-                node::matmul_trusted::AddRefutation(refutation, hash, height)};
+                node::matmul_trusted::AddRefutation(
+                    refutation, hash, index_height)};
             UniValue result{UniValue::VOBJ};
             result.pushKV(
                 "result", matmul::trusted::AddResultName(add_result));
             result.pushKV(
-                "quorum", node::matmul_trusted::HasQuorum(hash, height));
+                "quorum", node::matmul_trusted::HasQuorum(hash, index_height));
             return result;
         }};
 }
@@ -1138,6 +1140,115 @@ RPCHelpMan listmatmulattestationblocklist()
         }};
 }
 
+//! Inclusive height span this RPC will clear in one call. The C++ adapter is
+//! unbounded (invalidateblock may release a long suffix); the public RPC is
+//! not, so a mistyped range cannot wipe the whole mint map.
+constexpr int MAX_CLEAR_MINTED_ATTESTATION_RANGE{256};
+
+RPCHelpMan clearmintedattestation()
+{
+    return RPCHelpMan{
+        "clearmintedattestation",
+        "Release this node's local ExactReplay attestation mint slots at the "
+        "active tip, a height, or an inclusive height range so this process "
+        "can SignAuthoritative / serve the hash it now follows.\n"
+        "This only changes what THIS node will re-mint or serve. It does not "
+        "delete stored attestations, does not forge or accept any statement, "
+        "does not reorg, and does not skip the competing-quorum stolen-WIF "
+        "guard. Re-minting still requires a local ExactReplay via the normal "
+        "SignAuthoritative path. Inbound P2P MMATTEST cannot invoke this.\n"
+        "Requires a configured local signer. Archives and graviton mirrors "
+        "must not call this: it is for releasing this signer's HeightOccupied "
+        "record, not a quorum vote.\n"
+        "If this signer is stuck on a losing twin "
+        "(getblockchaininfo.better_work_twin_blocked_by_local_commitment), "
+        "prefer `invalidateblock` of the losing fork-child: disconnect "
+        "auto-releases the minted suffix. Use this RPC only when you intend "
+        "to clear mint slots without invalidating the block.\n",
+        {
+            {"height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED,
+             "First height whose local mint slot should be released. Omit to "
+             "use the active-chain tip height."},
+            {"end_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED,
+             "Inclusive end of the range. Omit to clear only `height`. "
+             "The inclusive span may not exceed 256 heights."},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "cleared",
+                 "Number of distinct heights whose local mint slot was released"},
+                {RPCResult::Type::NUM, "from_height", ""},
+                {RPCResult::Type::NUM, "to_height", ""},
+            }},
+        RPCExamples{
+            HelpExampleCli("clearmintedattestation", "") +
+            HelpExampleCli("clearmintedattestation", "199295") +
+            HelpExampleCli("clearmintedattestation", "199290 199295")},
+        [](const RPCHelpMan& self, const JSONRPCRequest& request) {
+            if (!node::matmul_trusted::IsConfigured()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "MatMul attestation store is not configured");
+            }
+            if (!node::matmul_trusted::HasLocalSigner()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "clearmintedattestation requires a local attestation "
+                    "signer; it only releases this process's mint slots");
+            }
+            const std::optional<int> height_arg{self.MaybeArg<int>("height")};
+            const std::optional<int> end_height_arg{
+                self.MaybeArg<int>("end_height")};
+            int from_height;
+            if (height_arg) {
+                from_height = *height_arg;
+            } else {
+                ChainstateManager& chainman{
+                    EnsureAnyChainman(request.context)};
+                LOCK(cs_main);
+                const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+                if (!tip) {
+                    throw JSONRPCError(
+                        RPC_MISC_ERROR,
+                        "No active chain tip; pass height explicitly");
+                }
+                from_height = tip->nHeight;
+            }
+            const int to_height{end_height_arg.value_or(from_height)};
+            if (from_height < 0 || to_height < 0) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "Height must be non-negative");
+            }
+            if (from_height > to_height) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "end_height must be >= height");
+            }
+            const int64_t span{
+                static_cast<int64_t>(to_height) - from_height + 1};
+            if (span > MAX_CLEAR_MINTED_ATTESTATION_RANGE) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    strprintf(
+                        "Inclusive height range may not exceed %d "
+                        "(got %d). Split the range or use invalidateblock "
+                        "on the losing fork-child to auto-release a suffix.",
+                        MAX_CLEAR_MINTED_ATTESTATION_RANGE,
+                        span));
+            }
+            UniValue out{UniValue::VOBJ};
+            out.pushKV(
+                "cleared",
+                static_cast<uint64_t>(
+                    node::matmul_trusted::ClearMintedAttestations(
+                        from_height, to_height)));
+            out.pushKV("from_height", from_height);
+            out.pushKV("to_height", to_height);
+            return out;
+        }};
+}
+
 } // namespace
 
 void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
@@ -1152,6 +1263,7 @@ void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
         {"mining", &getmatmulattestations},
         {"mining", &submitmatmulattestations},
         {"mining", &submitmatmulrefutation},
+        {"mining", &clearmintedattestation},
     };
     for (const auto& command : commands) {
         table.appendCommand(command.name, &command);

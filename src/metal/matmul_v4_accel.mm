@@ -532,6 +532,22 @@ std::vector<std::string> MatMulV4MetallibCandidatePaths()
     return paths;
 }
 
+std::vector<std::string> MatMulV4Metal4MetallibCandidatePaths()
+{
+    std::vector<std::string> paths;
+    AppendUniquePath(paths, std::getenv("BTX_MATMUL_V4_METAL4_METALLIB_PATH"));
+
+    if (const auto executable_dir = ExecutableDirectory()) {
+        const std::string packaged_path = *executable_dir + "/metal/matmul_v4_accel_kernels_metal4.metallib";
+        AppendUniquePath(paths, packaged_path.c_str());
+    }
+
+#if defined(BTX_MATMUL_V4_METAL4_METALLIB_PATH)
+    AppendUniquePath(paths, BTX_MATMUL_V4_METAL4_METALLIB_PATH);
+#endif
+    return paths;
+}
+
 bool EnvFlagDisabled(const char* name)
 {
     const char* env = std::getenv(name);
@@ -675,12 +691,11 @@ struct MetalV4Context {
 
     void InitTensorPipeline()
     {
-        // The Metal 4 tensor-ops GEMM is always compiled at runtime with an
-        // explicit metal4.0 language version so the precompiled (portable)
-        // metallib never needs a Metal 4 toolchain. On pre-Metal-4 OSes,
-        // toolchains, or devices this compile simply fails and we stay on the
-        // (equally bit-exact) integer-ALU path. BTX_MATMUL_V4_TENSOR_OPS=0
-        // forces the ALU path.
+        // Prefer a build-time Metal 4 metallib so launchd/daemon btxd does
+        // not have to reach MTLCompilerService (issue 51). On pre-Metal-4
+        // OSes the metallib is absent and this compile fails cleanly; we stay
+        // on the (equally bit-exact) integer-ALU path.
+        // BTX_MATMUL_V4_TENSOR_OPS=0 forces the ALU path.
         if (EnvFlagDisabled("BTX_MATMUL_V4_TENSOR_OPS")) {
             tensor_path_reason = "disabled_by_environment";
             return;
@@ -693,10 +708,27 @@ struct MetalV4Context {
         options.languageVersion = static_cast<MTLLanguageVersion>(4 << 16);
 
         NSError* library_error = nil;
-        id<MTLLibrary> tensor_library =
-            [device newLibraryWithSource:[NSString stringWithUTF8String:KERNEL_SOURCE]
-                                 options:options
-                                   error:&library_error];
+        id<MTLLibrary> tensor_library = nil;
+        for (const auto& candidate_path : MatMulV4Metal4MetallibCandidatePaths()) {
+            NSString* precompiled_path = [NSString stringWithUTF8String:candidate_path.c_str()];
+            if (![[NSFileManager defaultManager] fileExistsAtPath:precompiled_path]) {
+                continue;
+            }
+            library_error = nil;
+            tensor_library = [device newLibraryWithURL:[NSURL fileURLWithPath:precompiled_path] error:&library_error];
+            if (tensor_library != nil) {
+                tensor_path_reason = "ok:precompiled_metallib";
+                break;
+            }
+        }
+        if (tensor_library == nil) {
+            library_error = nil;
+            tensor_library =
+                [device newLibraryWithSource:[NSString stringWithUTF8String:KERNEL_SOURCE]
+                                     options:options
+                                       error:&library_error];
+            if (tensor_library != nil) tensor_path_reason = "ok:inline_source_fallback";
+        }
         if (tensor_library == nil) {
             tensor_path_reason = library_error != nil
                 ? std::string{"metal4_compile_failed:"} + [[library_error localizedDescription] UTF8String]
@@ -707,15 +739,29 @@ struct MetalV4Context {
         std::string pipeline_error;
         id<MTLComputePipelineState> pipeline =
             MakePipeline(tensor_library, @"matmul_v4_s8_gemm_s32_tensor", pipeline_error);
+        if (pipeline == nil && tensor_path_reason == "ok:precompiled_metallib") {
+            library_error = nil;
+            tensor_library =
+                [device newLibraryWithSource:[NSString stringWithUTF8String:KERNEL_SOURCE]
+                                     options:options
+                                       error:&library_error];
+            pipeline_error.clear();
+            if (tensor_library != nil) {
+                pipeline = MakePipeline(tensor_library, @"matmul_v4_s8_gemm_s32_tensor", pipeline_error);
+                if (pipeline != nil) tensor_path_reason = "ok:inline_source_fallback";
+            }
+        }
         if (pipeline == nil) {
             // Function absent (BTX_MATMUL_V4_HAVE_TENSOR_OPS not defined by
             // the runtime compiler) or pipeline creation failed on this GPU
             // family: no tensor path on this device.
-            tensor_path_reason = pipeline_error;
+            tensor_path_reason = pipeline_error.empty() && library_error != nil
+                ? std::string{"metal4_compile_failed:"} + [[library_error localizedDescription] UTF8String]
+                : pipeline_error;
             return;
         }
         gemm_tensor_pipeline = pipeline;
-        tensor_path_reason = "ok";
+        if (tensor_path_reason.rfind("ok:", 0) != 0) tensor_path_reason = "ok";
     }
 };
 

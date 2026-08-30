@@ -2,9 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <arith_uint256.h>
 #include <boost/signals2/connection.hpp>
 #include <boost/test/unit_test.hpp>
 
+#include <chain.h>
 #include <chainparams.h>
 #include <common/args.h>
 #include <hash.h>
@@ -30,6 +32,7 @@
 #include <array>
 #include <chrono>
 #include <limits>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -71,14 +74,20 @@ public:
                       CClientUIInterface::MSG_ERROR) {
                       m_last_error = message.original;
                   }
+                  if ((style & CClientUIInterface::MSG_WARNING) ==
+                      CClientUIInterface::MSG_WARNING) {
+                      m_last_warning = message.original;
+                  }
                   return true; // Handled: keep the message off the test log.
               })}
     {
     }
     const std::string& LastError() const { return m_last_error; }
+    const std::string& LastWarning() const { return m_last_warning; }
 
 private:
     std::string m_last_error;
+    std::string m_last_warning;
     boost::signals2::scoped_connection m_connection;
 };
 
@@ -507,9 +516,57 @@ BOOST_AUTO_TEST_CASE(discovery_relay_addr_policy_hides_gpu_attestors)
 
     BOOST_CHECK(HandshakeKeepsDiscoveryPeer(
         /*addr_fetch=*/true, NODE_MATMUL_DISCOVERY));
-    BOOST_CHECK(!HandshakeKeepsDiscoveryPeer(
+    BOOST_CHECK(HandshakeKeepsDiscoveryPeer(
         /*addr_fetch=*/false, NODE_MATMUL_DISCOVERY));
     BOOST_CHECK(!HandshakeKeepsDiscoveryPeer(true, NODE_NETWORK | NODE_WITNESS));
+
+    BOOST_CHECK_EQUAL(RobustConnectedWatermark({}), -1);
+    BOOST_CHECK_EQUAL(RobustConnectedWatermark({199400}), 199400);
+    BOOST_CHECK_EQUAL(RobustConnectedWatermark({199400, 199390}), 199390);
+    BOOST_CHECK_EQUAL(
+        RobustConnectedWatermark({999999, 199400, 199390, 185109}), 199390);
+    BOOST_CHECK_EQUAL(EffectiveIntroductionWatermark(-1, {199400, 199390, 199380}),
+                      199380);
+    BOOST_CHECK_EQUAL(EffectiveIntroductionWatermark(199350, {199400, 199390, 199380}),
+                      199380);
+    BOOST_CHECK(MayAdvertiseConnectedPeer(
+        NODE_NETWORK | NODE_WITNESS, 199400, 199390));
+    BOOST_CHECK(!MayAdvertiseConnectedPeer(
+        NODE_NETWORK | NODE_WITNESS, 185109, 199390));
+    BOOST_CHECK(!MayAdvertiseConnectedPeer(NODE_MATMUL_DISCOVERY, 199400, 199390));
+    BOOST_CHECK(MayRetainInboundHandshake(
+        /*inbound=*/true, /*routable=*/true, NODE_NETWORK | NODE_WITNESS,
+        199400, 199390));
+    BOOST_CHECK(!MayRetainInboundHandshake(
+        /*inbound=*/false, true, NODE_NETWORK | NODE_WITNESS, 199400, 199390));
+    BOOST_CHECK(!MayRetainInboundHandshake(
+        true, /*routable=*/false, NODE_NETWORK | NODE_WITNESS, 199400, 199390));
+
+    // Inbound handshake only marks eligibility. Persist a same-IP listen
+    // announcement, never the TCP source port, never a third-party IP.
+    BOOST_CHECK(MayRetainInboundSelfAnnouncement(
+        /*inbound=*/true, /*retain_eligible=*/true, /*advertised_routable=*/true,
+        /*same_ip=*/true, /*may_advertise_endpoint=*/true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        true, /*retain_eligible=*/false, true, true, true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        /*inbound=*/false, true, true, true, true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        true, true, /*advertised_routable=*/false, true, true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        true, true, true, /*same_ip=*/false, true));
+    BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
+        true, true, true, true, /*may_advertise_endpoint=*/false));
+    // RB-15 (all nodes): drop an inbound peer's self-ADDR on the accepted
+    // SOURCE port; a same-IP self-ADDR on a DIFFERENT (listen) port is kept.
+    using node::discovery_relay::IsInboundSourcePortSelfAnnouncement;
+    BOOST_CHECK(IsInboundSourcePortSelfAnnouncement(
+        /*inbound=*/true, /*same_netaddr=*/true, /*same_port=*/true));
+    BOOST_CHECK(!IsInboundSourcePortSelfAnnouncement(true, true, /*same_port=*/false));
+    BOOST_CHECK(!IsInboundSourcePortSelfAnnouncement(true, /*same_netaddr=*/false, true));
+    BOOST_CHECK(!IsInboundSourcePortSelfAnnouncement(/*inbound=*/false, true, true));
+    BOOST_CHECK(MayPushConnectedPeerSocketAddress(/*inbound=*/false));
+    BOOST_CHECK(!MayPushConnectedPeerSocketAddress(/*inbound=*/true));
 
     BOOST_CHECK(ServicesAreDiscoveryOnly(NODE_MATMUL_DISCOVERY));
     BOOST_CHECK(!ServicesAreDiscoveryOnly(
@@ -557,7 +614,7 @@ BOOST_AUTO_TEST_CASE(discovery_relay_addr_policy_hides_gpu_attestors)
     // (no !IsDiscoveryRelay short-circuit), so hideaddr and
     // CONSENSUS|ARCHIVE endpoints never leave the node.
 
-    BOOST_CHECK(PeerLooksOnRecentNetwork(50, /*archive_reported_height=*/-1));
+    BOOST_CHECK(!PeerLooksOnRecentNetwork(50, /*archive_reported_height=*/-1));
     BOOST_CHECK(!PeerLooksOnRecentNetwork(-1, 50));
     BOOST_CHECK(PeerLooksOnRecentNetwork(100, 100));
     BOOST_CHECK(PeerLooksOnRecentNetwork(100 + RECENT_HEIGHT_LAG, 100));
@@ -1478,6 +1535,58 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*ibd=*/true, /*ahead=*/40, /*signed_frontier_catch_up=*/true));
     BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(
         /*ibd=*/false, /*ahead=*/8, /*signed_frontier_catch_up=*/false));
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/false, /*ahead=*/40, /*signed_frontier_catch_up=*/true,
+        /*stall_headers_ahead=*/2, /*narrow_max_ahead=*/32,
+        /*far_behind_yield=*/200, /*uncapped_ahead=*/1136));
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/false, /*ahead=*/8, /*signed_frontier_catch_up=*/false,
+        2, 32, 200, /*uncapped_ahead=*/200));
+    using node::matmul_trusted::PersistFollowedSuffixBodyWithoutGpu;
+    BOOST_CHECK(PersistFollowedSuffixBodyWithoutGpu(
+        /*trusted_mirror=*/false, /*extends_active_tip=*/true,
+        /*pprev_is_tip=*/false, /*index_height=*/199338, /*tip_height=*/199336));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        false, true, /*pprev_is_tip=*/true, 199337, 199336));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        /*trusted_mirror=*/true, true, false, 199338, 199336));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        false, /*extends_active_tip=*/false, false, 199338, 199336));
+    BOOST_CHECK(PersistFollowedSuffixBodyWithoutGpu(
+        false, true, /*pprev_is_tip=*/true, 199337, 199336, /*far_behind=*/true));
+    BOOST_CHECK(PersistFollowedSuffixBodyWithoutGpu(
+        /*trusted_mirror=*/true, true, false, 199338, 199336, /*far_behind=*/true));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        false, /*extends_active_tip=*/false, false, 199338, 199336,
+        /*far_behind=*/true));
+    // E-7 (adv5): far-behind persist is bounded to the lead window; an
+    // unsolicited body far beyond it is dropped, not disk-filled.
+    BOOST_CHECK(PersistFollowedSuffixBodyWithoutGpu(
+        false, true, false, 199336 + node::matmul_trusted::PERSIST_FOLLOWED_SUFFIX_MAX_LEAD, 199336,
+        /*far_behind=*/true));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        false, true, false,
+        199336 + node::matmul_trusted::PERSIST_FOLLOWED_SUFFIX_MAX_LEAD + 1, 199336,
+        /*far_behind=*/true));
+    using node::matmul_trusted::TicketlessRcBodyMayPersistWithoutGpu;
+    BOOST_CHECK(TicketlessRcBodyMayPersistWithoutGpu(
+        /*trusted_mirror_authority_cover=*/true, /*followed_tip_child=*/false));
+    BOOST_CHECK(TicketlessRcBodyMayPersistWithoutGpu(
+        false, /*followed_tip_child=*/true));
+    BOOST_CHECK(!TicketlessRcBodyMayPersistWithoutGpu(false, false));
+    using node::matmul_trusted::SignedFrontierIsOnActiveChain;
+    BOOST_CHECK(SignedFrontierIsOnActiveChain(
+        true, true, /*tip_height=*/199801, /*frontier_height=*/199801,
+        /*tip_ancestor_at_frontier_is_frontier=*/true,
+        /*frontier_ancestor_at_tip_is_tip=*/true));
+    BOOST_CHECK(SignedFrontierIsOnActiveChain(
+        true, true, /*tip_height=*/199378, /*frontier_height=*/199801,
+        /*tip_ancestor_at_frontier_is_frontier=*/false,
+        /*frontier_ancestor_at_tip_is_tip=*/true));
+    BOOST_CHECK(!SignedFrontierIsOnActiveChain(
+        true, true, 199378, 199801, false, /*frontier_ancestor_at_tip_is_tip=*/false));
+    BOOST_CHECK(!SignedFrontierIsOnActiveChain(
+        true, /*has_frontier=*/false, 199378, 199801, false, false));
     using node::matmul_trusted::PreferSignedFrontierCatchUpBlockPeer;
     BOOST_CHECK(!PreferSignedFrontierCatchUpBlockPeer(
         /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
@@ -1727,7 +1836,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::WeakSubjectivityBootstrapHeight;
     using node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundHeaders;
     using node::matmul_trusted::TrustedMirrorSeedRaisesBestKnown;
-    // Mainnet: checkpoint 186000, AssumeUTXO 199300 → ceiling 199300.
+    // Mainnet: checkpoint 201500, AssumeUTXO 201500 → ceiling 201500.
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 199299), 199299);
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 0), 186000);
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(0, 61010), 61010);
@@ -1735,7 +1844,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         WeakSubjectivityBootstrapHeight(
             Params().Checkpoints().GetHeight(),
             Params().HighestAssumeutxoHeight()),
-        199300);
+        201500);
     // Fresh mirror tip=0 must ingest HEADERS (the 2026-08-26 deadlock).
     BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundHeaders(
         /*ignore_non_authority_block=*/true, /*tip_height=*/0,
@@ -1841,6 +1950,19 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*this_peer_is_gpu_authority=*/false, /*catching_up_behind_frontier=*/true,
         /*this_archive_or_mirror=*/true));
     BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(false, true, true));
+    // Convergence regression (rtx6000 block_recv=0): a self-qualified
+    // CONSENSUS verifier that is behind our tip advertises CONSENSUS without
+    // the ARCHIVE/MIRROR bit (serve=0). Even while WE catch up to the signed
+    // frontier, its block GETDATA must be served (a read), not dropped.
+    BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(
+        /*this_peer_is_gpu_authority=*/false,
+        /*catching_up_behind_frontier=*/true,
+        /*this_archive_or_mirror=*/false,
+        /*this_peer_consensus_catchup=*/true));
+    // Without the catch-up flag the same non-archive peer is still deferred
+    // while we catch up (near-tip miner flood protection is preserved).
+    BOOST_CHECK(!TrustedMirrorMayServeNonAuthorityGetData(
+        false, true, false, /*this_peer_consensus_catchup=*/false));
     using node::matmul_trusted::TrustedMirrorGpuMayServeBlocks;
     BOOST_CHECK(TrustedMirrorGpuMayServeBlocks(
         /*gpu_authority=*/true, /*has_network_service=*/false));
@@ -1850,6 +1972,27 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorGpuMayServeBlocks(
         /*gpu_authority=*/true, /*has_network_service=*/false,
         /*version_handshake_complete=*/false));
+    using node::matmul_trusted::StalledTowerFetchPeerMayServeBodies;
+    // V3/RB-10 + V4/RB-11: only a body-serve-capable peer is a hoist-GETDATA
+    // or tower-seed target. A GPU authority qualifies without NODE_NETWORK; a
+    // NODE_NETWORK peer qualifies; manual/noban override.
+    BOOST_CHECK(StalledTowerFetchPeerMayServeBodies(
+        /*gpu_authority=*/true, /*can_serve_blocks=*/false,
+        /*version_handshake_complete=*/true, /*manual=*/false,
+        /*noban=*/false));
+    BOOST_CHECK(StalledTowerFetchPeerMayServeBodies(
+        false, /*can_serve_blocks=*/true, true, false, false));
+    BOOST_CHECK(StalledTowerFetchPeerMayServeBodies(
+        false, false, true, /*manual=*/true, false));
+    BOOST_CHECK(StalledTowerFetchPeerMayServeBodies(
+        false, false, true, false, /*noban=*/true));
+    // A plain inbound non-block-source advertising height>tip is NOT a target
+    // (the V3/V4 DoS + guard-poison it used to hit).
+    BOOST_CHECK(!StalledTowerFetchPeerMayServeBodies(
+        false, false, true, false, false));
+    // Handshake-incomplete peer is never a target even if it would serve.
+    BOOST_CHECK(!StalledTowerFetchPeerMayServeBodies(
+        true, true, /*version_handshake_complete=*/false, false, false));
     using node::matmul_trusted::TrustedMirrorKeepFetchingCoveredUnconnected;
     BOOST_CHECK(TrustedMirrorKeepFetchingCoveredUnconnected(
         /*signed_frontier_catch_up=*/true,
@@ -2002,6 +2145,17 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         true, true, false, /*this_peer_inbound=*/false, false, true, false));
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         true, true, false, false, /*this_peer_manual=*/true, true, false));
+    // Convergence regression: a behind CONSENSUS verifier (serve=0 GPU
+    // attestor) must NEVER be skipped -- neither while a signer serves
+    // archive GETDATA nor while a trusted mirror catches up -- or it freezes
+    // at block_recv=0. It is not a near-tip miner; serving it is a read.
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/true, /*archive_getdata_pending=*/true, false,
+        true, false, true, /*this_is_archive_serve_target=*/false,
+        /*this_peer_consensus_catchup=*/true));
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
+        true, false, true, false, /*this_peer_consensus_catchup=*/true));
     using node::matmul_trusted::KeepCatchupSourceOnDownloadTimeout;
     BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(
         /*signed_frontier_catch_up=*/true, /*persistent_timeout=*/false,
@@ -2010,6 +2164,70 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(true, true, true));
     BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(false, true, true));
     BOOST_CHECK(!KeepCatchupSourceOnDownloadTimeout(false, true, false));
+    using node::matmul_trusted::CatchUpNeverPunishSlowDelivery;
+    using node::matmul_trusted::CatchUpMayPauseOnSlowDelivery;
+    using node::matmul_trusted::CatchUpMayDisconnectOnSlowDelivery;
+    using node::matmul_trusted::CatchUpInFlightExpireDeadline;
+    BOOST_CHECK(!CatchUpNeverPunishSlowDelivery(/*far_behind=*/false));
+    BOOST_CHECK(CatchUpNeverPunishSlowDelivery(/*far_behind=*/true));
+    BOOST_CHECK(!CatchUpMayPauseOnSlowDelivery(
+        /*far_behind=*/true, /*keep_catchup_source=*/false,
+        /*last_gpu_or_frontier_source=*/false));
+    BOOST_CHECK(CatchUpMayPauseOnSlowDelivery(false, false, false));
+    BOOST_CHECK(!CatchUpMayPauseOnSlowDelivery(false, true, true));
+    BOOST_CHECK(CatchUpMayPauseOnSlowDelivery(false, true, false));
+    BOOST_CHECK(!CatchUpMayPauseOnSlowDelivery(
+        false, false, false, /*peers_downloading_before=*/1));
+    BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
+        /*far_behind=*/true, /*persistent=*/true, /*manual_or_noban=*/false,
+        /*keep_catchup_source=*/false, /*only_eligible_source=*/false));
+    BOOST_CHECK(CatchUpMayDisconnectOnSlowDelivery(
+        false, true, false, false, false));
+    BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
+        false, true, false, false, /*only_eligible_source=*/true));
+    BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
+        false, true, /*manual_or_noban=*/true, false, false));
+    using node::matmul_trusted::CatchUpMayRotateSilentFarBehindOwner;
+    // N5/RB-5: a persistently-silent far-behind owner may be ROTATED (paused,
+    // not disconnected) so 3 colluders cannot pin all owner slots.
+    BOOST_CHECK(CatchUpMayRotateSilentFarBehindOwner(
+        /*far_behind=*/true, /*persistent_silence=*/true,
+        /*manual_or_noban=*/false, /*last_gpu_or_frontier_source=*/false,
+        /*another_eligible_source=*/true));
+    // Not yet persistent -> patience preserved (no rotation).
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        true, /*persistent_silence=*/false, false, false, true));
+    // Never rotate a manual/noban peer, the last GPU/frontier source, or the
+    // only eligible source; never rotate when not far behind.
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        true, true, /*manual_or_noban=*/true, false, true));
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        true, true, false, /*last_gpu_or_frontier_source=*/true, true));
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        true, true, false, false, /*another_eligible_source=*/false));
+    BOOST_CHECK(!CatchUpMayRotateSilentFarBehindOwner(
+        /*far_behind=*/false, true, false, false, true));
+    // Disconnect is still never permitted while far behind (rotation is a
+    // pause only) -- addrman and the 5-minute patience are preserved.
+    BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
+        /*far_behind=*/true, /*persistent=*/true, false, false, false));
+    {
+        const auto spacing{std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::seconds{90})};
+        const auto clamp{std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::seconds{15})};
+        BOOST_CHECK_EQUAL(
+            CatchUpInFlightExpireDeadline(false, spacing, clamp, false).count(),
+            spacing.count());
+        BOOST_CHECK_EQUAL(
+            CatchUpInFlightExpireDeadline(false, spacing, clamp, true).count(),
+            clamp.count());
+        BOOST_CHECK_EQUAL(
+            CatchUpInFlightExpireDeadline(true, spacing, clamp, true).count(),
+            std::chrono::microseconds{
+                node::matmul_trusted::CATCHUP_PEER_SILENCE_TIMEOUT}
+                .count());
+    }
     using node::matmul_trusted::SkipExactReplayForGpuAttestation;
     using node::matmul_trusted::HistoricalExactReplayCoveredByPinQuorum;
     using node::matmul_trusted::SignAuthoritativeServesGetMmAttest;
@@ -2130,6 +2348,87 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         false, /*peer_advertises_consensus=*/false, true, true));
     BOOST_CHECK(!ConsensusMinerMayFetchCompetingShortReorg(
         false, true, /*short_reorg=*/false, true));
+    using node::matmul_trusted::ConsensusMinerMayFetchCompetingHeavierFork;
+    BOOST_CHECK(ConsensusMinerMayFetchCompetingHeavierFork(
+        /*trusted_mirror=*/false, /*extends_tip=*/false,
+        /*peer_work_gt_tip=*/true));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(
+        false, /*extends_tip=*/true, true));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(
+        false, false, /*peer_work_gt_tip=*/false));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(
+        /*trusted_mirror=*/true, false, true));
+    using node::matmul_trusted::ConsensusMinerMayFollowHeavierDisconnectedHeader;
+    BOOST_CHECK(ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        /*trusted_mirror=*/false, /*extends_tip=*/false,
+        /*failed_or_invalid=*/false, /*parked=*/false,
+        /*candidate_work_gt_tip=*/true, /*candidate_height_ge_tip=*/true));
+    BOOST_CHECK(ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, /*extends_tip=*/true, false, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        /*trusted_mirror=*/true, false, false, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, /*failed_or_invalid=*/true, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, false, /*parked=*/true, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, false, false, /*candidate_work_gt_tip=*/false, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, false, false, true, /*candidate_height_ge_tip=*/false));
+    using node::matmul_trusted::HeavierCompetingForkHoleMayExactReplay;
+    BOOST_CHECK(HeavierCompetingForkHoleMayExactReplay(
+        /*may_fetch=*/true, /*is_immediate_fork_child=*/true,
+        /*parent_has_data=*/false));
+    BOOST_CHECK(HeavierCompetingForkHoleMayExactReplay(true, false, true));
+    BOOST_CHECK(!HeavierCompetingForkHoleMayExactReplay(true, false, false));
+    BOOST_CHECK(!HeavierCompetingForkHoleMayExactReplay(false, true, true));
+    using node::matmul_trusted::HeavierHeaderTowerHoleMayGetData;
+    // Fetch is not ExactReplay: extends_tip still GETDATA's the remaining
+    // holes. ConsensusMinerMayFetchCompetingHeavierFork(..., extends_tip)
+    // stays false so GPU replay does not burst the tower.
+    BOOST_CHECK(HeavierHeaderTowerHoleMayGetData(
+        /*trusted_mirror=*/false, /*on_active_chain=*/false, /*failed=*/false,
+        /*tower_contains_index=*/true, /*tower_work_gt_tip=*/true));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        false, false, false, true, /*tower_work_gt_tip=*/false));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        false, /*on_active_chain=*/true, false, true, true));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        false, false, /*failed=*/true, true, true));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        false, false, false, /*tower_contains_index=*/false, true));
+    BOOST_CHECK(!HeavierHeaderTowerHoleMayGetData(
+        /*trusted_mirror=*/true, false, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(
+        false, /*extends_tip=*/true, true));
+    BOOST_CHECK(!HeavierCompetingForkHoleMayExactReplay(
+        /*may_fetch=*/false, /*is_immediate_fork_child=*/true,
+        /*parent_has_data=*/true));
+    using node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork;
+    using node::matmul_trusted::ConsensusMinerTipStaleVsDirectFetchWindow;
+    BOOST_CHECK(ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        /*trusted_mirror=*/false, /*extends_tip=*/false,
+        /*work_gt=*/true, /*tip_stale=*/true));
+    BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        false, false, true, /*tip_stale=*/false));
+    BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        false, /*extends_tip=*/true, true, true));
+    BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        /*trusted_mirror=*/true, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        false, false, /*work_gt=*/false, true));
+    // Predicate true must not be passed as recovery_escape: park still
+    // fires at the measured dump-and-run depths (and at live branchlen 90).
+    BOOST_CHECK(kernel::DeepReorgShouldPark(
+        kernel::DeepReorgAction::PARK, 6, 8, /*recovery_escape=*/false));
+    BOOST_CHECK(kernel::DeepReorgShouldPark(
+        kernel::DeepReorgAction::PARK, 6, 151, false));
+    BOOST_CHECK(kernel::DeepReorgShouldPark(
+        kernel::DeepReorgAction::PARK, 6, 90, false));
+    BOOST_CHECK(ConsensusMinerTipStaleVsDirectFetchWindow(
+        /*tip_time=*/1000, /*now=*/1000 + 20 * 90, /*spacing=*/90));
+    BOOST_CHECK(!ConsensusMinerTipStaleVsDirectFetchWindow(
+        1000, 1000 + 20 * 90 - 1, 90));
     using node::matmul_trusted::ExactReplayGpuThrottleRequiresPin;
     using node::matmul_trusted::ExactReplayAdmissionThrottleApplies;
     using node::matmul_trusted::MatMulSpeculativeRcPendingLimit;
@@ -2431,11 +2730,24 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
         false, /*on_or_extends_active_tip=*/true, 99, 100, kNearTip, false));
     BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
         false, true, 100, 100, kNearTip, false));
-    // Unattested pull-ahead (another twin slot): off the device.
-    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+    // Catch-up above the connected tip (a live consensus-archive node 2026-08-29): unattested
+    // bodies that extend the active chain must occupy ExactReplay. The old
+    // upper bound (index_height <= tip_height) HEADER_ONLY-skipped them
+    // while a competing twin sat on m_best_header.
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
         false, true, 102, 100, kNearTip, false));
-    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
         false, true, 104, 100, kNearTip, false));
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
+        false, true, 199380, 199378, kNearTip, false));
+    // Immediate unattested tip-child stays off this helper (twin storm).
+    // ClaimConfigured / ConsensusMayClaimUnattestedTipChildBody owns it.
+    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+        /*pprev_is_tip=*/true, /*on_or_extends_active_tip=*/true, 101, 100,
+        kNearTip, false));
+    // Competing unattested fork that does not extend the connected tip.
+    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+        false, false, 199382, 199378, kNearTip, false));
     // Competing unattested twin at the same height: off the device.
     BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
         false, false, 191323, 191323, kNearTip, false));
@@ -2556,6 +2868,53 @@ BOOST_AUTO_TEST_CASE(tip_extending_occupancy_cap_blocks_sibling_flood)
         kTipCapacity);
     BOOST_CHECK(decision.allow);
     BOOST_CHECK(!decision.replace_index.has_value());
+}
+
+BOOST_AUTO_TEST_CASE(refutation_index_height_lookup_blocks_poisoned_key)
+{
+    RuntimeReset reset;
+    const CKey pin{NewKey()};
+    const uint256 chain{Hex256('a')};
+    const uint256 hash{Hex256('b')};
+    const uint256 context{Hex256('c')};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {pin.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/false, std::chrono::milliseconds{10}, error));
+
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = chain;
+    statement.block_hash = hash;
+    statement.block_height = 40;
+    statement.replay_authority_context = context;
+    const auto refute{matmul::trusted::SignRefutation(statement, pin)};
+    BOOST_REQUIRE(refute.has_value());
+
+    // Lookup says the header lives at 12. A caller that forwards the
+    // self-declared height 40 must not store under 40.
+    node::matmul_trusted::SetBlockIndexHeightLookup(
+        [hash](const uint256& query) -> std::optional<int32_t> {
+            if (query == hash) return 12;
+            return std::nullopt;
+        });
+    BOOST_CHECK(node::matmul_trusted::AddRefutation(*refute, hash, 40) ==
+                matmul::trusted::AddResult::WrongHeight);
+
+    statement.block_height = 12;
+    const auto honest{matmul::trusted::SignRefutation(statement, pin)};
+    BOOST_REQUIRE(honest.has_value());
+    BOOST_CHECK(node::matmul_trusted::AddRefutation(*honest, hash, 999) ==
+                matmul::trusted::AddResult::Accepted);
+
+    node::matmul_trusted::SetBlockIndexHeightLookup(
+        [](const uint256&) -> std::optional<int32_t> { return std::nullopt; });
+    BOOST_CHECK(node::matmul_trusted::AddRefutation(*honest, hash, 12) ==
+                matmul::trusted::AddResult::WrongHeight);
 }
 
 BOOST_AUTO_TEST_CASE(authority_frontier_tracks_accepted_attestations)
@@ -2986,6 +3345,76 @@ BOOST_AUTO_TEST_CASE(unattestable_reject_counter_is_distinct_not_hot_loop)
     BOOST_CHECK(!AttestationBackoffMapMustEvict(/*map_size=*/10, /*max_size=*/0));
 }
 
+BOOST_AUTO_TEST_CASE(attestation_backoff_ttl_and_newest_victim_bound_the_map)
+{
+    using node::matmul_trusted::AttestationBackoffArmBudgetAllows;
+    using node::matmul_trusted::AttestationBackoffEntryExpired;
+    using node::matmul_trusted::AttestationBackoffPreferNewerVictim;
+    using node::matmul_trusted::EvictNewestAttestationBackoffToCap;
+    using node::matmul_trusted::MATMUL_ATTESTATION_BACKOFF_ARM_MAX;
+    using node::matmul_trusted::PruneExpiredAttestationBackoff;
+
+    BOOST_CHECK(AttestationBackoffEntryExpired(/*now=*/10, /*not_before=*/10));
+    BOOST_CHECK(AttestationBackoffEntryExpired(/*now=*/11, /*not_before=*/10));
+    BOOST_CHECK(!AttestationBackoffEntryExpired(/*now=*/9, /*not_before=*/10));
+
+    BOOST_CHECK(AttestationBackoffPreferNewerVictim(/*candidate=*/5, /*current=*/3));
+    BOOST_CHECK(!AttestationBackoffPreferNewerVictim(/*candidate=*/3, /*current=*/5));
+
+    struct Backoff {
+        std::chrono::steady_clock::time_point not_before{};
+    };
+    const auto t0{std::chrono::steady_clock::time_point{}};
+    const auto HashN = [](uint64_t n) {
+        uint256 h{};
+        h.data()[0] = static_cast<unsigned char>(n);
+        h.data()[1] = static_cast<unsigned char>(n >> 8);
+        h.data()[2] = static_cast<unsigned char>(n >> 16);
+        return h;
+    };
+
+    std::map<uint256, Backoff> ttl;
+    ttl[HashN(1)].not_before = t0 + std::chrono::seconds{1};
+    ttl[HashN(2)].not_before = t0 + std::chrono::seconds{3};
+    PruneExpiredAttestationBackoff(ttl, t0 + std::chrono::seconds{2});
+    BOOST_CHECK_EQUAL(ttl.size(), 1U);
+    BOOST_CHECK(ttl.count(HashN(2)));
+    BOOST_CHECK(!ttl.count(HashN(1)));
+
+    std::map<uint256, Backoff> newest;
+    newest[HashN(0)].not_before = t0 + std::chrono::seconds{1};
+    newest[HashN(1)].not_before = t0 + std::chrono::seconds{2};
+    newest[HashN(2)].not_before = t0 + std::chrono::seconds{3};
+    EvictNewestAttestationBackoffToCap(newest, /*max_size=*/3);
+    BOOST_CHECK_EQUAL(newest.size(), 2U);
+    BOOST_CHECK(newest.count(HashN(0)));
+    BOOST_CHECK(newest.count(HashN(1)));
+    BOOST_CHECK(!newest.count(HashN(2)));
+
+    constexpr size_t cap{32};
+    std::map<uint256, Backoff> flood;
+    for (size_t i = 0; i < cap + 1000; ++i) {
+        PruneExpiredAttestationBackoff(flood, t0);
+        EvictNewestAttestationBackoffToCap(flood, cap);
+        flood[HashN(i)].not_before = t0 + std::chrono::seconds{static_cast<long>(i + 1)};
+    }
+    BOOST_CHECK_LE(flood.size(), cap);
+    BOOST_CHECK(flood.count(HashN(0)));
+    BOOST_CHECK(flood.count(HashN(cap - 2)));
+    BOOST_CHECK(!flood.count(HashN(cap - 1)));
+    BOOST_CHECK(!flood.count(HashN(cap)));
+    BOOST_CHECK(flood.count(HashN(cap + 999)));
+
+    BOOST_CHECK(AttestationBackoffArmBudgetAllows(0, 1000, 0));
+    BOOST_CHECK(AttestationBackoffArmBudgetAllows(0, 1000, 1000));
+    BOOST_CHECK(AttestationBackoffArmBudgetAllows(
+        MATMUL_ATTESTATION_BACKOFF_ARM_MAX - 1, 1000, 1000));
+    BOOST_CHECK(!AttestationBackoffArmBudgetAllows(
+        MATMUL_ATTESTATION_BACKOFF_ARM_MAX, 1000, 1000));
+    BOOST_CHECK(AttestationBackoffArmBudgetAllows(
+        MATMUL_ATTESTATION_BACKOFF_ARM_MAX, 1060, 1000));
+}
+
 BOOST_AUTO_TEST_CASE(attestations_survive_simulated_restart)
 {
     RuntimeReset reset;
@@ -3033,6 +3462,66 @@ BOOST_AUTO_TEST_CASE(attestations_survive_simulated_restart)
         BOOST_CHECK_EQUAL(restored[0].statement.block_height, 42);
         BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 42));
     }
+}
+
+BOOST_AUTO_TEST_CASE(open_archive_records_do_not_seed_signed_frontier)
+{
+    RuntimeReset reset;
+    const CKey pin{NewKey()};
+    const CKey open{NewKey()};
+    const uint256 chain{Hex256('d')};
+    const uint256 context{Hex256('e')};
+    const uint256 pin_block{Hex256('1')};
+    const uint256 open_block{Hex256('2')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_open_archive.dat"};
+
+    constexpr char magic[16] = "BTX_MMATTEST_V1";
+    DataStream encoded;
+    encoded.write(AsBytes(Span{magic, sizeof(magic)}));
+    encoded << uint64_t{2};
+    {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = pin_block;
+        statement.block_height = 10;
+        statement.replay_authority_context = context;
+        const auto attestation{matmul::trusted::SignStatement(statement, pin)};
+        BOOST_REQUIRE(attestation.has_value());
+        encoded << *attestation;
+    }
+    {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = open_block;
+        statement.block_height = 50;
+        statement.replay_authority_context = context;
+        const auto attestation{matmul::trusted::SignStatement(statement, open)};
+        BOOST_REQUIRE(attestation.has_value());
+        encoded << *attestation;
+    }
+    BOOST_REQUIRE(WriteBinaryFile(
+        archive,
+        std::string{reinterpret_cast<const char*>(encoded.data()),
+                    encoded.size()}));
+
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {pin.GetPubKey()};
+    config.threshold = 1;
+    config.open_attestors = true;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/true, std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(pin_block, 10));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(open_block, 50));
+    BOOST_REQUIRE(node::matmul_trusted::HighestAttestedHeight().has_value());
+    BOOST_CHECK_EQUAL(*node::matmul_trusted::HighestAttestedHeight(), 10);
+    BOOST_CHECK(node::matmul_trusted::Get(open_block, 50).empty());
+    BOOST_CHECK(node::matmul_trusted::HeardAttestations().empty());
 }
 
 BOOST_AUTO_TEST_CASE(durable_history_outlives_bounded_hot_cache)
@@ -3407,7 +3896,7 @@ BOOST_AUTO_TEST_CASE(sign_authoritative_height_occupied_after_hot_cache_eviction
                       evict, occupied_height + 1) ==
                   matmul::trusted::AddResult::Accepted);
     BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(first, occupied_height));
-    BOOST_CHECK(!node::matmul_trusted::HasCompetingQuorum(twin, occupied_height));
+    BOOST_CHECK(node::matmul_trusted::HasCompetingQuorum(twin, occupied_height));
     BOOST_CHECK(node::matmul_trusted::HasLocalSignatureAtHeight(
         twin, occupied_height));
     BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(
@@ -3462,13 +3951,128 @@ BOOST_AUTO_TEST_CASE(sign_authoritative_height_occupied_after_durable_reload)
     error.clear();
     BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
     BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(first, 10));
-    BOOST_CHECK(!node::matmul_trusted::HasCompetingQuorum(twin, 10));
+    BOOST_CHECK(node::matmul_trusted::HasCompetingQuorum(twin, 10));
     BOOST_CHECK(node::matmul_trusted::HasLocalSignatureAtHeight(twin, 10));
     BOOST_CHECK(node::matmul_trusted::SignAuthoritative(twin, 10) ==
                 matmul::trusted::AddResult::HeightOccupied);
     const auto same{node::matmul_trusted::SignAuthoritative(first, 10)};
     BOOST_CHECK(same == matmul::trusted::AddResult::Duplicate ||
                 same == matmul::trusted::AddResult::Accepted);
+}
+
+BOOST_AUTO_TEST_CASE(competing_quorum_survives_hint_window_eviction)
+{
+    RuntimeReset reset;
+    const CKey local{NewKey()};
+    const CKey other{NewKey()};
+    const uint256 chain{Hex256('3')};
+    const uint256 context{Hex256('4')};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {local.GetPubKey(), other.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = local;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{10}, error));
+
+    const uint256 occupied{(HashWriter{} << uint64_t{1}).GetHash()};
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = chain;
+    statement.block_hash = occupied;
+    statement.block_height = 1;
+    statement.replay_authority_context = context;
+    const auto foreign{matmul::trusted::SignStatement(statement, other)};
+    BOOST_REQUIRE(foreign.has_value());
+    BOOST_REQUIRE(node::matmul_trusted::Add(*foreign, occupied, 1) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(occupied, 1));
+    BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(
+        (HashWriter{} << uint64_t{0}).GetHash(), 1));
+
+    for (int32_t height = 2; height <= 514; ++height) {
+        const uint256 hash{(HashWriter{} << uint64_t{static_cast<uint64_t>(height)}).GetHash()};
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash, height) ==
+                      matmul::trusted::AddResult::Accepted);
+    }
+    bool height_1_still_hinted{false};
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height == 1) height_1_still_hinted = true;
+    }
+    BOOST_CHECK(!height_1_still_hinted);
+
+    const uint256 twin{(HashWriter{} << uint64_t{999}).GetHash()};
+    BOOST_CHECK(node::matmul_trusted::HasCompetingQuorum(twin, 1));
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(twin, 1) ==
+                matmul::trusted::AddResult::HeightOccupied);
+}
+
+BOOST_AUTO_TEST_CASE(reorg_and_rpc_release_sign_authoritative_mint_slot)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const CKey other{NewKey()};
+    const uint256 chain{Hex256('1')};
+    const uint256 context{Hex256('2')};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {signer.GetPubKey(), other.GetPubKey()};
+    config.threshold = 2;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{10}, error));
+
+    const uint256 hash_a{Hex256('a')};
+    const uint256 hash_b{Hex256('b')};
+    const uint256 hash_c{Hex256('c')};
+    constexpr int32_t height{50};
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash_a, height) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::LocalMintedHash(height) == hash_a);
+    BOOST_CHECK(node::matmul_trusted::HasLocalSignatureAtHeight(hash_b, height));
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(hash_b, height) ==
+                matmul::trusted::AddResult::HeightOccupied);
+
+    matmul::trusted::ExactReplayStatement stolen;
+    stolen.chain_id = chain;
+    stolen.block_hash = hash_c;
+    stolen.block_height = height;
+    stolen.replay_authority_context = context;
+    const auto stolen_att{matmul::trusted::SignStatement(stolen, signer)};
+    BOOST_REQUIRE(stolen_att);
+    BOOST_CHECK(node::matmul_trusted::Add(*stolen_att, hash_c, height) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::LocalMintedHash(height) == hash_a);
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(hash_b, height) ==
+                matmul::trusted::AddResult::HeightOccupied);
+
+    BOOST_CHECK(node::matmul_trusted::NotifyActiveChainBlockDisconnected(
+        height, hash_a));
+    BOOST_CHECK(!node::matmul_trusted::LocalMintedHash(height).has_value());
+    BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(hash_b, height));
+
+    matmul::trusted::ExactReplayAttestation produced;
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
+                    hash_b, height, &produced) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(produced.statement.block_hash == hash_b);
+    BOOST_CHECK_EQUAL(
+        node::matmul_trusted::Get(hash_b, height).size(), 1);
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash_a, height + 1) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK_EQUAL(
+        node::matmul_trusted::ClearMintedAttestations(height + 1, height + 1),
+        1);
+    BOOST_CHECK(!node::matmul_trusted::LocalMintedHash(height + 1).has_value());
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(hash_c, height + 1) ==
+                matmul::trusted::AddResult::Accepted);
 }
 
 BOOST_AUTO_TEST_CASE(blocklist_pin_votes_and_persist_across_restart)
@@ -3614,7 +4218,7 @@ BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_truste
     // Local signing key, serve unset → default 1.
     // Regression: AppInitParameterInteraction used to call CKey::GetPubKey()
     // on this WIF before bitcoind constructed ECC_Context. That null-derefs
-    // secp256k1_context_sign (macpro2 0.34, kernel segfault at 0 in
+    // secp256k1_context_sign (<node> 0.34, kernel segfault at 0 in
     // secp256k1_ec_pubkey_create, ~1.2s after start). Staging must not
     // derive the pubkey; FinalizeConfiguration does that after ECC_Start.
     {
@@ -3666,6 +4270,123 @@ BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_truste
         BOOST_CHECK(node::matmul_trusted::HasLocalSigner());
         BOOST_CHECK(!node::matmul_trusted::ServesAttestations());
     }
+}
+
+BOOST_AUTO_TEST_CASE(matmulattestationserve_without_key_warns_and_starts)
+{
+    // Live footgun: matmulattestationserve=1 with no pin and no WIF used to
+    // InitError, and systemd Restart=always crash-looped the node (653
+    // restarts). Must start, warn, and leave serving disabled.
+    RuntimeReset reset;
+    ArgsManager args;
+    args.ForceSetArg("-matmulvalidation", "consensus");
+    args.ForceSetArg("-matmulattestationserve", "1");
+    InitErrorCapture capture;
+    BOOST_REQUIRE(AppInitParameterInteraction(args));
+    BOOST_CHECK(capture.LastError().empty());
+    BOOST_CHECK(capture.LastWarning().find("matmulattestationserve") !=
+                std::string::npos);
+    BOOST_CHECK(capture.LastWarning().find("disabled") != std::string::npos);
+    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+    BOOST_CHECK(!node::matmul_trusted::HasLocalSigner());
+    BOOST_CHECK(!node::matmul_trusted::ServesAttestations());
+}
+
+BOOST_AUTO_TEST_CASE(better_work_twin_blocked_by_local_commitment_predicate)
+{
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        /*has_local_signer=*/false,
+        /*competing_strictly_heavier=*/true,
+        /*competing_extends_tip=*/false,
+        /*local_mint_equals_active_fork_child=*/true,
+        /*local_mint_differs_from_competing_fork_child=*/true));
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, /*competing_strictly_heavier=*/false, false, true, true));
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, true, /*competing_extends_tip=*/true, true, true));
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, true, false, /*local_mint_equals_active_fork_child=*/false, true));
+    BOOST_CHECK(!node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, true, false, true, /*local_mint_differs_from_competing_fork_child=*/false));
+    BOOST_CHECK(node::matmul_trusted::BetterWorkTwinBlockedByLocalCommitment(
+        true, true, false, true, true));
+}
+
+BOOST_AUTO_TEST_CASE(detect_better_work_twin_blocked_by_local_commitment)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const CKey other{NewKey()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = Hex256('1');
+    config.replay_authority_context = Hex256('2');
+    config.trusted_signers = {signer.GetPubKey(), other.GetPubKey()};
+    config.threshold = 2;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{10}, error));
+
+    CBlockIndex genesis;
+    CBlockIndex lose;
+    CBlockIndex win;
+    CBlockIndex win_tip;
+    uint256 genesis_hash{Hex256('0')};
+    uint256 lose_hash{Hex256('a')};
+    uint256 win_hash{Hex256('b')};
+    uint256 win_tip_hash{Hex256('c')};
+    genesis.phashBlock = &genesis_hash;
+    genesis.nHeight = 0;
+    genesis.nChainWork = arith_uint256{1};
+    lose.phashBlock = &lose_hash;
+    lose.pprev = &genesis;
+    lose.nHeight = 1;
+    lose.nChainWork = arith_uint256{2};
+    win.phashBlock = &win_hash;
+    win.pprev = &genesis;
+    win.nHeight = 1;
+    win.nChainWork = arith_uint256{3};
+    win_tip.phashBlock = &win_tip_hash;
+    win_tip.pprev = &win;
+    win_tip.nHeight = 2;
+    win_tip.nChainWork = arith_uint256{4};
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(lose_hash, 1) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    const auto blocked{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &lose, /*best_header=*/&lose, /*best_claimed_header=*/&win_tip)};
+    BOOST_CHECK(blocked.blocked);
+    BOOST_CHECK_EQUAL(blocked.fork_height, 1);
+    BOOST_CHECK(blocked.local_committed_hash == lose_hash);
+    BOOST_CHECK(blocked.better_work_twin_hash == win_hash);
+    BOOST_CHECK_EQUAL(blocked.better_work_height, 2);
+
+    const auto extending{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &lose, /*best_header=*/&lose, /*best_claimed_header=*/nullptr)};
+    BOOST_CHECK(!extending.blocked);
+
+    CBlockIndex catch_up;
+    uint256 catch_up_hash{Hex256('d')};
+    catch_up.phashBlock = &catch_up_hash;
+    catch_up.pprev = &lose;
+    catch_up.nHeight = 2;
+    catch_up.nChainWork = arith_uint256{5};
+    const auto catch_up_state{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &lose, &catch_up, nullptr)};
+    BOOST_CHECK(!catch_up_state.blocked);
+
+    BOOST_REQUIRE(node::matmul_trusted::ClearMintedAttestations(1, 1) == 1);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(win_hash, 1) ==
+                  matmul::trusted::AddResult::Accepted);
+    const auto minted_winner{
+        node::matmul_trusted::DetectBetterWorkTwinBlockedByLocalCommitment(
+            &lose, &lose, &win_tip)};
+    BOOST_CHECK(!minted_winner.blocked);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

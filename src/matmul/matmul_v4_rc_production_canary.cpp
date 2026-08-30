@@ -19,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <utility>
@@ -55,6 +56,8 @@ namespace {
 
 std::mutex g_production_canary_mutex;
 RCProductionCanaryStatus g_last_production_canary;
+std::mutex g_identity_override_mutex;
+std::optional<RCProductionProviderIdentity> g_identity_override;
 
 struct BackendIdentity {
     std::array<uintptr_t, 10> callbacks{};
@@ -198,9 +201,7 @@ bool GoldenEvidenceIdentityValid(
 
 // A provider family and a device architecture that cannot describe the same
 // hardware are a data-entry error at best. Reject the combination outright so a
-// hand-written manifest entry cannot claim, say, {family:"metal", arch:"sm_120"}
-// and thereby satisfy the two-provider cohort requirement with one vendor's
-// silicon named twice.
+// hand-written manifest entry cannot claim, say, {family:"metal", arch:"sm_120"}.
 bool GoldenArchitectureMatchesFamily(const std::string& family,
                                      const std::string& architecture)
 {
@@ -219,10 +220,9 @@ bool GoldenArchitectureMatchesFamily(const std::string& family,
             architecture.compare(architecture.size() - 6, 6, "_class") == 0 &&
             architecture.front() == 'm';
     }
-    // Unknown families are not eligible for the production cohort. Requiring
-    // CUDA plus Metal is not enough by itself: otherwise an arbitrary third
-    // entry can acquire manifest authority without a defined architecture
-    // binding or a production identity probe.
+    // Unknown families are not eligible for the production cohort: an
+    // arbitrary third entry must not acquire manifest authority without a
+    // defined architecture binding or a production identity probe.
     return false;
 }
 
@@ -436,13 +436,12 @@ std::string ReadPublicSysctlString(const char* name)
 bool RCProductionGoldenManifestCohortValid(
     const std::vector<RCProductionGoldenManifestEntry>& manifest)
 {
-    // This line ships the classes it measured. CUDA is required. Metal (and
-    // HIP) rows are optional: a fork adds them to *its* manifest after it
-    // measures. Requiring Metal here forced either a name-class blessing or a
-    // third-party submission, both of which 0.34 exists to stop.
+    // Any non-empty set of coherent rows is a valid cohort. CUDA is not
+    // required: a Metal-only (or HIP-only) fork must be able to ship a
+    // manifest measured on hardware it actually owns. Rows must still agree
+    // on workload, digest, source_revision, and source_tree_fingerprint.
     if (manifest.empty()) return false;
     const auto& reference{manifest.front()};
-    bool has_cuda{false};
     std::set<std::pair<std::string, std::string>> provider_classes;
     for (const auto& entry : manifest) {
         if (!entry.independently_reproduced || entry.expected_digest.IsNull() ||
@@ -472,9 +471,8 @@ bool RCProductionGoldenManifestCohortValid(
             entry.provider_class.provider_family,
             entry.provider_class.device_architecture)};
         if (!provider_classes.insert(provider_class).second) return false;
-        has_cuda = has_cuda || entry.provider_class.provider_family == "cuda";
     }
-    return has_cuda;
+    return true;
 }
 
 bool RCProductionGoldenManifestMatchesBuild(
@@ -492,6 +490,12 @@ bool RCProductionGoldenManifestMatchesBuild(
 RCProductionProviderIdentity
 ProbeRCProductionProviderIdentity(const std::string& resolved_provider)
 {
+    {
+        std::lock_guard<std::mutex> lock{g_identity_override_mutex};
+        if (g_identity_override.has_value()) {
+            return *g_identity_override;
+        }
+    }
     RCProductionProviderIdentity out;
     out.provider_family = ProviderFamily(resolved_provider);
     if (out.provider_family == "cuda") {
@@ -539,8 +543,8 @@ ProbeRCProductionProviderIdentity(const std::string& resolved_provider)
     // architecture plus driver/runtime ABI
     // fingerprint to this common resolver. They remain usable for experiments
     // and ordinary self-qualification, but cannot become automatic production
-    // providers until that public probe is implemented and a matching manifest
-    // entry is committed.
+    // providers until that public probe is implemented. A matching manifest
+    // row is comparison-only; it is not required for mining admission.
     out.reason = out.provider_family.empty() || out.provider_family == "cpu"
         ? "no_device_provider"
         : "provider_runtime_identity_unavailable";
@@ -570,13 +574,12 @@ RCProductionEpochIdentity MakeRCProductionEpochIdentity(
     return out;
 }
 
-const RCProductionGoldenManifestEntry* FindRCProductionGolden(
+RCProductionGoldenLookup LookupRCProductionGolden(
     const RCProductionProviderIdentity& provider,
     const RCProductionEpochIdentity& epoch,
     const std::vector<RCProductionGoldenManifestEntry>& manifest)
 {
-    if (!RCProductionGoldenManifestCohortValid(manifest)) return nullptr;
-    const RCProductionGoldenManifestEntry* match{nullptr};
+    RCProductionGoldenLookup out;
     for (const auto& entry : manifest) {
         if (!entry.independently_reproduced || entry.expected_digest.IsNull() ||
             entry.id.empty() || !PublicProvenanceValid(entry.public_provenance) ||
@@ -587,11 +590,77 @@ const RCProductionGoldenManifestEntry* FindRCProductionGolden(
             GoldenEpochMatches(epoch, entry.epoch)) {
             // Duplicate authority records are ambiguous even if their digest
             // happens to agree. Require one exact reviewed entry per identity.
-            if (match != nullptr) return nullptr;
-            match = &entry;
+            if (out.status == RCProductionGoldenLookupStatus::Unique) {
+                out.status = RCProductionGoldenLookupStatus::Duplicate;
+                out.entry = nullptr;
+                return out;
+            }
+            out.status = RCProductionGoldenLookupStatus::Unique;
+            out.entry = &entry;
         }
     }
-    return match;
+    return out;
+}
+
+const RCProductionGoldenManifestEntry* FindRCProductionGolden(
+    const RCProductionProviderIdentity& provider,
+    const RCProductionEpochIdentity& epoch,
+    const std::vector<RCProductionGoldenManifestEntry>& manifest)
+{
+    if (!RCProductionGoldenManifestCohortValid(manifest)) return nullptr;
+    const auto lookup{LookupRCProductionGolden(provider, epoch, manifest)};
+    return lookup.status == RCProductionGoldenLookupStatus::Unique
+        ? lookup.entry
+        : nullptr;
+}
+
+RCProductionAdmissionDecision DecideRCProductionMiningAdmission(
+    bool self_qualified,
+    const RCProductionGoldenLookup& lookup,
+    const RCStrictDeviceEpisodeResult* replay)
+{
+    RCProductionAdmissionDecision out;
+    if (!self_qualified) {
+        out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
+        out.reason = "self_qualification_failed";
+        return out;
+    }
+    if (lookup.status == RCProductionGoldenLookupStatus::Duplicate) {
+        out.outcome = RCProductionCanaryOutcome::MissingGolden;
+        out.reason = "duplicate_reviewed_production_golden";
+        return out;
+    }
+    if (lookup.status == RCProductionGoldenLookupStatus::Unique) {
+        if (lookup.entry == nullptr) {
+            out.outcome = RCProductionCanaryOutcome::MissingGolden;
+            out.reason = "reviewed_golden_pointer_null";
+            return out;
+        }
+        out.exact_manifest_match = true;
+        if (replay == nullptr) {
+            out.outcome = RCProductionCanaryOutcome::LocalAcceleratorFailure;
+            out.reason = "reviewed_golden_replay_missing";
+            return out;
+        }
+        out.outcome = EvaluateRCProductionCanaryResult(*lookup.entry, *replay);
+        out.reason = RCProductionCanaryOutcomeName(out.outcome);
+        if (out.outcome == RCProductionCanaryOutcome::Passed) {
+            out.admissible = true;
+            out.passed = true;
+            out.activation_ready = true;
+            out.path = RCProductionAdmissionPath::ReviewedGolden;
+        }
+        return out;
+    }
+    // No matching reviewed row. The byte-exact CPU-versus-GPU self-test is
+    // the mining gate; the manifest is comparison-only when a row exists.
+    out.admissible = true;
+    out.passed = true;
+    out.activation_ready = true;
+    out.path = RCProductionAdmissionPath::SelfQualification;
+    out.outcome = RCProductionCanaryOutcome::MissingGolden;
+    out.reason = "admitted_by_self_qualification";
+    return out;
 }
 
 CBlockHeader MakeRCProductionCanaryHeader(
@@ -718,12 +787,20 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
     }
 
     if (!out.build_provenance_matches) {
-        out.outcome = RCProductionCanaryOutcome::BuildProvenanceMismatch;
-        out.reason = out.build_source_dirty
-            ? "running_binary_built_from_dirty_source"
-            : "production_manifest_does_not_match_running_binary";
-        StoreStatus(out);
-        return out;
+        // Advisory only (0.34.5). A source-tree fingerprint is an authorship
+        // claim about who compiled this binary, not a check that ExactReplay
+        // is byte-identical. Skipping the episode here used to withhold
+        // NODE_MATMUL_CONSENSUS and clear the GEMM backend, so a clone that
+        // self-qualified on its own GPU could not validate. Continue; the
+        // CPU-versus-GPU ExactGemmS8S8 self-qual and the digest check below
+        // remain fail-closed. build_provenance_matches stays false for RPC.
+        LogPrintf(
+            "MatMul RC production canary: build provenance is advisory "
+            "(matches=0 dirty=%d fingerprint=%s). Continuing to runtime "
+            "ExactGemm self-qualification and digest check; this is not a "
+            "startup refusal.\n",
+            out.build_source_dirty ? 1 : 0,
+            out.build_source_tree_fingerprint);
     }
 
     if (!out.provider_identity.complete) {
@@ -732,14 +809,63 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
         StoreStatus(out);
         return out;
     }
-    const auto* golden{FindRCProductionGolden(
+
+    const auto lookup{LookupRCProductionGolden(
         out.provider_identity, out.epoch, manifest)};
-    if (golden == nullptr) {
-        out.outcome = RCProductionCanaryOutcome::MissingGolden;
-        out.reason = "no_exact_reviewed_production_golden";
-        StoreStatus(out);
+    const auto apply_decision =
+        [&](const RCProductionAdmissionDecision& decision) {
+            out.admission_path = decision.path;
+            out.outcome = decision.outcome;
+            out.reason = decision.reason;
+            out.exact_manifest_match = decision.exact_manifest_match;
+            out.passed = decision.passed;
+            out.activation_ready = decision.activation_ready;
+        };
+    const auto finish = [&]() {
+        if (!StoreStatus(out, &backend)) {
+            out.outcome = RCProductionCanaryOutcome::LocalAcceleratorFailure;
+            out.passed = false;
+            out.activation_ready = false;
+            out.admission_path = RCProductionAdmissionPath::None;
+            out.reason = "production_capability_registry_full";
+            StoreStatus(out);
+        }
+        LogPrintf(
+            "MatMul RC production canary: outcome=%s admission=%s provider=%s "
+            "family=%s arch=%s driver=%s runtime=%s epoch_height=%d profile=%u "
+            "transcript=%u matmul_dim=%u manifest=%s wall=%.3fs "
+            "device_macs=%llu cpu_fallbacks=%llu\n",
+            RCProductionCanaryOutcomeName(out.outcome),
+            RCProductionAdmissionPathName(out.admission_path), out.provider,
+            out.provider_identity.provider_family,
+            out.provider_identity.device_architecture,
+            out.provider_identity.driver_identity,
+            out.provider_identity.runtime_identity,
+            out.epoch.activation_height, out.epoch.profile,
+            out.epoch.transcript_version, out.epoch.matmul_dimension,
+            out.manifest_entry_id, out.wall_s,
+            static_cast<unsigned long long>(out.acceleration.device_macs),
+            static_cast<unsigned long long>(out.acceleration.cpu_fallbacks));
+    };
+
+    if (lookup.status != RCProductionGoldenLookupStatus::Unique) {
+        // Absence of a reviewed row is reporting, not a mining refusal.
+        // Duplicate matching rows remain fail-closed. Self-qual already
+        // passed (automatic_policy_eligible) before this point.
+        if (lookup.status == RCProductionGoldenLookupStatus::None &&
+            backend.gemm_s8s8 == nullptr) {
+            out.outcome = RCProductionCanaryOutcome::LocalAcceleratorFailure;
+            out.reason = "self_qualified_backend_missing_gemm";
+            StoreStatus(out);
+            return out;
+        }
+        apply_decision(DecideRCProductionMiningAdmission(
+            /*self_qualified=*/true, lookup, /*replay=*/nullptr));
+        finish();
         return out;
     }
+
+    const auto* golden{lookup.entry};
     out.exact_manifest_match = true;
     out.manifest_entry_id = golden->id;
     out.expected_digest = golden->expected_digest;
@@ -754,33 +880,9 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
         std::chrono::steady_clock::now() - started).count();
     out.observed_digest = replay.digest;
     out.acceleration = replay.acceleration;
-    out.outcome = EvaluateRCProductionCanaryResult(*golden, replay);
-    out.passed = out.outcome == RCProductionCanaryOutcome::Passed;
-    out.activation_ready = out.passed;
-    out.reason = RCProductionCanaryOutcomeName(out.outcome);
-    if (!StoreStatus(out, &backend)) {
-        out.outcome = RCProductionCanaryOutcome::LocalAcceleratorFailure;
-        out.passed = false;
-        out.activation_ready = false;
-        out.reason = "production_capability_registry_full";
-        StoreStatus(out);
-    }
-
-    LogPrintf(
-        "MatMul RC production canary: outcome=%s provider=%s family=%s "
-        "arch=%s driver=%s runtime=%s epoch_height=%d profile=%u "
-        "transcript=%u matmul_dim=%u manifest=%s wall=%.3fs device_macs=%llu "
-        "cpu_fallbacks=%llu\n",
-        RCProductionCanaryOutcomeName(out.outcome), out.provider,
-        out.provider_identity.provider_family,
-        out.provider_identity.device_architecture,
-        out.provider_identity.driver_identity,
-        out.provider_identity.runtime_identity,
-        out.epoch.activation_height, out.epoch.profile,
-        out.epoch.transcript_version, out.epoch.matmul_dimension,
-        out.manifest_entry_id, out.wall_s,
-        static_cast<unsigned long long>(out.acceleration.device_macs),
-        static_cast<unsigned long long>(out.acceleration.cpu_fallbacks));
+    apply_decision(DecideRCProductionMiningAdmission(
+        /*self_qualified=*/true, lookup, &replay));
+    finish();
     return out;
 }
 
@@ -1007,6 +1109,13 @@ RCProductionCanaryStatus GetLastRCProductionCanaryStatus()
     return g_last_production_canary;
 }
 
+bool RCProductionGoldenMismatchBlocksMining(
+    const RCProductionCanaryStatus& status, const std::string& provider)
+{
+    return status.provider == provider && status.exact_manifest_match &&
+           status.outcome == RCProductionCanaryOutcome::DigestMismatch;
+}
+
 const char* RCProductionCanaryOutcomeName(RCProductionCanaryOutcome outcome)
 {
     switch (outcome) {
@@ -1027,9 +1136,33 @@ const char* RCProductionCanaryOutcomeName(RCProductionCanaryOutcome outcome)
     return "unknown";
 }
 
+const char* RCProductionAdmissionPathName(RCProductionAdmissionPath path)
+{
+    switch (path) {
+    case RCProductionAdmissionPath::None: return "none";
+    case RCProductionAdmissionPath::ReviewedGolden: return "reviewed_golden";
+    case RCProductionAdmissionPath::SelfQualification:
+        return "self_qualification";
+    }
+    return "unknown";
+}
+
+void SetRCProductionProviderIdentityOverrideForTest(
+    std::optional<RCProductionProviderIdentity> identity)
+{
+    std::lock_guard<std::mutex> lock{g_identity_override_mutex};
+    g_identity_override = std::move(identity);
+}
+
 void ResetRCProductionCanaryForTest()
 {
     StoreStatus({});
+    SetRCProductionProviderIdentityOverrideForTest(std::nullopt);
+}
+
+void SetRCProductionCanaryStatusForTest(RCProductionCanaryStatus status)
+{
+    StoreStatus(status);
 }
 
 } // namespace matmul::v4::rc
