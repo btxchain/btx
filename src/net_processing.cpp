@@ -3655,12 +3655,22 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
         }
         const int64_t now_count{count_seconds(now_s)};
         // Acquired-frontier grinds are paced by the synchronous GPU replay
-        // itself; the 15s cadence stays for the followed / short-reorg
-        // tip-child re-admissions it was tuned for.
+        // itself. The followed / short-reorg tip-child re-admission keeps the
+        // 15s cadence ONLY while it still needs GPU ExactReplay; once the block
+        // is already ExactReplay-verified (need_exact_replay=false) the
+        // re-admission is just a ConnectTip -- a cheap CPU step -- so pace it at
+        // 1s. Without this, a migrated node whose acquired bodies are all
+        // pre-verified (exact_replay=persisted, have_body=yes) heals at only
+        // ~1 block / 15s while the GPU sits ~90% idle: the CONNECT step, not RC
+        // verification, was the true catch-up bottleneck (this node-wide
+        // timestamp throttles one connect per interval regardless of how many
+        // contiguous verified blocks are ready).
+        const int64_t followed_replay_gap_s{
+            reverify_acquired_frontier ? MATMUL_ACQ_FRONTIER_REPLAY_MIN_GAP_S
+            : (need_exact_replay ? int64_t{15} : int64_t{1})};
         const bool due{
             now_count - m_followed_tip_child_replay_at.load(std::memory_order_relaxed) >=
-            (reverify_acquired_frontier ? MATMUL_ACQ_FRONTIER_REPLAY_MIN_GAP_S
-                                        : int64_t{15})};
+            followed_replay_gap_s};
         if (reverify_header && due) {
             m_followed_tip_child_replay_at.store(now_count, std::memory_order_relaxed);
             LogInfo("Followed HAVE_DATA tip-child still unconnected "
