@@ -1025,6 +1025,17 @@ public:
     }
 
 private:
+    /**
+     * Last shallow-hysteresis episode reported to the operator. Repeated
+     * ActivateBestChain calls may reconsider the same candidate while async
+     * block validation is making progress elsewhere. Keep that polling
+     * idempotent for warning and runtime-stat accounting; a different tip,
+     * candidate, or work margin starts a new episode.
+     */
+    const CBlockIndex* m_last_hysteresis_deferred_tip GUARDED_BY(::cs_main){nullptr};
+    const CBlockIndex* m_last_hysteresis_deferred_candidate GUARDED_BY(::cs_main){nullptr};
+    uint32_t m_last_hysteresis_deferred_work_margin GUARDED_BY(::cs_main){0};
+
     bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
     bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 
