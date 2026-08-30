@@ -526,6 +526,28 @@ BOOST_AUTO_TEST_CASE(terminal_connected_admission_pending_erases_and_blocks_queu
     BOOST_CHECK(!lifecycle.Queue(*token, lease, cancelled, {}, now, terminated));
 }
 
+BOOST_AUTO_TEST_CASE(terminal_connected_admission_pending_no_ack_with_same_hash_worker)
+{
+    // worker_will_ack is hash-keyed: a same-hash header-first worker returns
+    // true even though it does not own this generation's body attempt.
+    // ADMISSION_PENDING (no lease, body attempt not yet handed to the worker)
+    // must be treated as no-ack and cleaned up immediately, never held.
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{BlockWithNonce(27)->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(27, 50, now), now));
+    const auto token{lifecycle.Begin(hash, now)}; // ADMISSION_PENDING
+    BOOST_REQUIRE(token);
+
+    lifecycle.TerminalConnected(hash, /*worker_will_ack=*/true);
+    BOOST_CHECK(!lifecycle.StateForTest(hash));            // erased immediately
+    BOOST_CHECK(!lifecycle.PendingLeaseHeldForTest(hash)); // nothing held
+    // The pending body Queue then fails (entry gone) -> caller rolls back.
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    BOOST_CHECK(!lifecycle.Queue(*token, nullptr, cancelled, {}, now, terminated));
+}
+
 BOOST_AUTO_TEST_CASE(terminal_retry_erases_body_no_readmission)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};

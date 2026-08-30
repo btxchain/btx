@@ -84,6 +84,20 @@ MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
                 it->second->job.retained_body_bytes =
                     std::max(it->second->job.retained_body_bytes,
                              job.retained_body_bytes);
+                // The joined job is now body-holding (ProtectsBodyReplay) and
+                // can only be stopped by terminal cancellation. Carry the
+                // body's terminal signal + acknowledgement onto the pending
+                // job so BlockConnected can still abort it and release the
+                // lease; otherwise the merged job would be protected with no
+                // way to terminate, and its terminal ack would be discarded.
+                if (job.terminal_cancelled) {
+                    it->second->job.terminal_cancelled =
+                        std::move(job.terminal_cancelled);
+                }
+                if (job.on_terminal_cancelled) {
+                    it->second->job.on_terminal_cancelled =
+                        std::move(job.on_terminal_cancelled);
+                }
             }
             if (static_cast<uint8_t>(job.priority) >
                 static_cast<uint8_t>(it->second->job.priority)) {

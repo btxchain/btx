@@ -541,7 +541,18 @@ public:
         if (entry.terminated) {
             entry.terminated->store(true, std::memory_order_relaxed);
         }
-        if (worker_will_ack && IsActive(entry.state)) {
+        // Only a state where the verify worker owns THIS generation's attempt
+        // (and will therefore acknowledge) may hold. ADMISSION_PENDING has no
+        // lease yet and its body attempt has not been handed to the worker, so
+        // a same-hash header-first worker must never be mistaken for an
+        // acknowledger; treat it (and any non-owned state) as no-ack and clean
+        // up now so a TERMINATING hold cannot stick.
+        const bool worker_owns_generation{
+            entry.state == State::QUEUED ||
+            entry.state == State::RUNNING ||
+            entry.state == State::AWAITING_QUORUM ||
+            entry.state == State::COMPLETING};
+        if (worker_will_ack && worker_owns_generation) {
             // Hold the lease + retained resources until the worker's terminal
             // acknowledgement releases them exactly once. Do NOT reset
             // pending_lease / owned_resources here.

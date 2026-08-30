@@ -2773,4 +2773,65 @@ BOOST_AUTO_TEST_CASE(body_job_without_terminal_keeps_verdict)
 }
 
 
+
+// --- PR #132 P1 (review): when a full body joins a header-first pending job it
+// --- becomes body-holding (ProtectsBodyReplay). The body's terminal_cancelled
+// --- and on_terminal_cancelled must transfer onto the joined job so it can
+// --- still be terminally stopped; the returning verdict is then discarded via
+// --- the transferred terminal ack (exactly once), with no completion.
+BOOST_AUTO_TEST_CASE(body_join_transfers_terminal_cancellation_and_discards_verdict)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    std::atomic<int> completions{0};
+    std::atomic<int> terminal_acks{0};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) { return gate.Run(); }};
+
+    const auto block{MakeBlock(150)};
+    auto header{std::make_shared<CBlockHeader>(block->GetBlockHeader())};
+    const uint256 hash{block->GetHash()};
+
+    // Header-first job runs first (carries no terminal machinery).
+    MatMulVerifyWorker::Job header_job{
+        .height = 100,
+        .completion = [&](bool) { ++completions; },
+        .header = header,
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_REQUIRE(worker.Enqueue(header_job) ==
+                  MatMulVerifyWorker::EnqueueResult::Enqueued);
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    // A full body joins, carrying the terminal signal + acknowledgement.
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    MatMulVerifyWorker::Job body_job{
+        .block = block,
+        .height = 100,
+        .completion = [&](bool) { ++completions; },
+        .priority = MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+        .terminal_cancelled = terminated,
+        .on_terminal_cancelled = [&] { ++terminal_acks; },
+    };
+    BOOST_REQUIRE(worker.Enqueue(body_job,
+                                 MatMulVerifyWorker::EnqueueMode::JoinOnly) ==
+                  MatMulVerifyWorker::EnqueueResult::Joined);
+
+    // Now body-holding: ordinary Cancel refused, terminal accepted.
+    BOOST_CHECK(!worker.Cancel(hash));
+    BOOST_CHECK(worker.TerminalCancel(hash));
+    BOOST_CHECK(terminated->load());
+
+    // The returning verdict is discarded via the TRANSFERRED terminal ack
+    // (exactly once); neither the header nor the body completion runs. Without
+    // the transfer, terminal_cancelled would be null on the joined job and the
+    // verdict would be kept instead.
+    gate.Release();
+    BOOST_REQUIRE(WaitFor([&] { return terminal_acks.load() == 1; }));
+    BOOST_CHECK_EQUAL(completions.load(), 0);
+    BOOST_CHECK_EQUAL(terminal_acks.load(), 1);
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()
