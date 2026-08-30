@@ -10731,6 +10731,17 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 }
             } else {
                 connected_this_step = true;
+                // Upstream parity: the just-connected tip may no longer be in
+                // setBlockIndexCandidates -- e.g. a racing operator invalidateblock
+                // erased its branch while the non-blocking validation-interface
+                // drain had cs_main released -- and PruneBlockIndexCandidates
+                // asserts the set is non-empty. Re-add the tip before pruning so
+                // that invariant always holds (matches the park path and the
+                // retryable-error path above). Local bookkeeping only; no
+                // consensus impact.
+                if (m_chain.Tip() != nullptr) {
+                    setBlockIndexCandidates.insert(m_chain.Tip());
+                }
                 PruneBlockIndexCandidates();
                 if (!pindexOldTip || m_chain.Tip()->nChainWork > pindexOldTip->nChainWork) {
                     // We're in a better position than we were. Return temporarily to release the lock.
@@ -10833,7 +10844,11 @@ static void LimitValidationInterfaceQueue(
 //! submitblock, then Shutdown joined those HTTP workers before the durable
 //! chainstate flush).
 template <typename MutexType>
-static void DrainValidationInterfaceQueue(
+// Returns true iff it released chainstate_lock to drain (the caller must then
+// treat any chain state cached across this call -- e.g. a selected most-work
+// target -- as possibly stale, since another thread may have reorged or
+// invalidated it while the lock was down).
+static bool DrainValidationInterfaceQueue(
     ValidationSignals& signals,
     UniqueLock<MutexType>& chainstate_lock,
     const std::function<bool()>& interrupted)
@@ -10841,7 +10856,7 @@ static void DrainValidationInterfaceQueue(
 {
     AssertLockNotHeld(cs_main);
     if (signals.CallbacksPending() <= VALIDATION_INTERFACE_DRAIN_THRESHOLD) {
-        return;
+        return false;
     }
     Assert(chainstate_lock.owns_lock());
     REVERSE_LOCK(chainstate_lock);
@@ -10854,6 +10869,7 @@ static void DrainValidationInterfaceQueue(
                    ValidationQueueSyncResultName(result),
                    signals.CallbacksPending());
     }
+    return true;
 }
 
 bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<const CBlock> pblock)
@@ -10893,10 +10909,18 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
         // ActivateBestChain this may lead to a deadlock! We should
         // probably have a DEBUG_LOCKORDER test for this in the future.
         if (m_chainman.m_options.signals) {
-            DrainValidationInterfaceQueue(
-                *m_chainman.m_options.signals,
-                chainstate_lock,
-                [&] { return bool(m_chainman.m_interrupt); });
+            if (DrainValidationInterfaceQueue(
+                    *m_chainman.m_options.signals,
+                    chainstate_lock,
+                    [&] { return bool(m_chainman.m_interrupt); })) {
+                // We released m_chainstate_mutex to drain, so a concurrent
+                // operator invalidateblock or net-thread reorg may have failed or
+                // erased our cached most-work target. Force a fresh
+                // FindMostWorkChain next iteration instead of connecting a stale
+                // (possibly now-invalidated) branch, which would reconnect a
+                // just-invalidated chain and can empty setBlockIndexCandidates.
+                pindexMostWork = nullptr;
+            }
             if (WITH_LOCK(::cs_main, return m_disabled)) {
                 LogPrintf("m_disabled is set - this chainstate should not be in operation. "
                     "Please report this as a bug. %s\n", CLIENT_BUGREPORT);
