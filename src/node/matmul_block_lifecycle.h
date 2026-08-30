@@ -262,7 +262,7 @@ public:
                        : body.idle_retry_bypass_available};
         auto original_deferral_count{
             entry.body ? entry.body->deferral_count : body.deferral_count};
-        const uint8_t original_retry_wake_mask{
+        uint8_t original_retry_wake_mask{
             entry.body ? entry.body->retry_wake_mask : uint8_t{0}};
         if (!entry.body) {
             // Fresh insert. If this hash was recently EVICTED under capacity
@@ -277,6 +277,10 @@ public:
                     original_deferral_count = ts->second.deferral_count;
                     idle_retry_bypass_available =
                         ts->second.idle_retry_bypass_available;
+                    // Extend the non-refreshing protection to the wake mask so
+                    // an evict+re-deliver cannot re-arm a consumed wake either
+                    // (audit F3: symmetric with in-place Retain/TerminalRequeue).
+                    original_retry_wake_mask |= ts->second.retry_wake_mask;
                 }
                 m_eviction_tombstones.erase(ts);
             }
@@ -915,6 +919,7 @@ private:
         Clock::time_point stored_at;
         uint32_t deferral_count{0};
         bool idle_retry_bypass_available{false};
+        uint8_t retry_wake_mask{0};
         Clock::time_point tombstoned_at;
     };
     static constexpr size_t kMaxEvictionTombstones{4096};
@@ -939,6 +944,7 @@ private:
             victim->second.body->stored_at,
             victim->second.body->deferral_count,
             victim->second.body->idle_retry_bypass_available,
+            victim->second.body->retry_wake_mask,
             now};
     }
     size_t m_retained_bytes{0};
