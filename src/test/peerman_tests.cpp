@@ -4301,12 +4301,32 @@ BOOST_AUTO_TEST_CASE(encdr_pending_cap_retains_followed_chain_body)
     }
 }
 
-BOOST_AUTO_TEST_CASE(rc_pending_cap_still_retains_for_retry)
+BOOST_AUTO_TEST_CASE(rc_pending_cap_release_readmits_without_budget_wait)
 {
-    LOCK(NetEventsInterface::g_msgproc_mutex);
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
 
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ResetGlobalMatMulRCBudgetForTest();
     ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
     PeerManager& peerman = *m_node.peerman;
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        m_node.chainman->m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    peerman.InstallMatMulVerifyOverrideForTest(
+        [](const CBlock&, int32_t, std::optional<int64_t>) { return true; });
+    struct ClearOverride {
+        PeerManager& peerman;
+        ~ClearOverride() { peerman.InstallMatMulVerifyOverrideForTest({}); }
+    } clear_override{peerman};
 
     Consensus::Params& consensus = const_cast<Consensus::Params&>(
         m_node.chainman->GetParams().GetConsensus());
@@ -4426,6 +4446,43 @@ BOOST_AUTO_TEST_CASE(rc_pending_cap_still_retains_for_retry)
         BOOST_CHECK(!HasQueuedMessageType(peer, NetMsgType::GETDATA));
         BOOST_CHECK(!peer.fDisconnect);
     }
+
+    // The retained body's steady-clock fallback is still almost 60 seconds
+    // away. Raising the cap alone must not bypass it. Destruction of a lease
+    // in the same RC pool advances the causal release generation and makes
+    // the next scheduler tick re-admit the body immediately.
+    consensus.nMatMulRCMaxPendingVerifications = 1;
+    BOOST_REQUIRE_EQUAL(MatMulRCWorkUnits(consensus, next_height), 1U);
+    peerman.SimulateMatMulPendingSlotReleaseForTest(/*rc_profile=*/true);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    {
+        REVERSE_LOCK(msgproc_lock);
+        peerman.RetryMatMulDeferredBodiesForTest();
+        BOOST_REQUIRE(PeermanWaitFor([&] {
+            LOCK(::cs_main);
+            const CBlockIndex* const idx{
+                m_node.chainman->m_blockman.LookupBlockIndex(child.GetHash())};
+            return idx != nullptr &&
+                   (idx->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                   (idx->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+                   m_node.chainman->ActiveChain().Contains(idx);
+        }));
+    }
+    BOOST_CHECK(!peerman.HasMatMulRetainedBodyForTest(child.GetHash()));
+    BOOST_CHECK(!peer.fDisconnect);
+
+    CBlockIndex* connected{WITH_LOCK(::cs_main, {
+        return m_node.chainman->m_blockman.LookupBlockIndex(child.GetHash());
+    })};
+    if (connected != nullptr &&
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->ActiveChain().Contains(connected))) {
+        BlockValidationState invalidate_state;
+        (void)m_node.chainman->ActiveChainstate().InvalidateBlock(
+            invalidate_state, connected);
+    }
+    NeutralizeUnconnectedHeaders(*Assert(m_node.chainman));
+    peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
 // v0.34.2 network-wide deadlock (jarekpiot, independently confirmed on

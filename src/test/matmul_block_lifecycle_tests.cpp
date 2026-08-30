@@ -189,6 +189,70 @@ BOOST_AUTO_TEST_CASE(causal_retry_wakes_are_one_shot)
     BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(hash), 2U);
 }
 
+BOOST_AUTO_TEST_CASE(capacity_release_wakes_only_capacity_deferred_tip_child)
+{
+    using RetryCause = node::MatMulBlockLifecycle::RetryCause;
+
+    node::MatMulBlockLifecycle lifecycle{3, 300, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 parent{
+        uint256::FromHex(std::string(63, '0') + "c").value()};
+
+    auto capacity_block{std::make_shared<CBlock>(*BlockWithNonce(12))};
+    capacity_block->hashPrevBlock = parent;
+    const uint256 capacity_hash{
+        uint256::FromHex(std::string(63, '0') + "d").value()};
+    auto capacity_body{Body(12, 50, now + 60s)};
+    capacity_body.block = capacity_block;
+    capacity_body.retry_cause = RetryCause::RC_PENDING_CAPACITY;
+    BOOST_REQUIRE(lifecycle.Retain(
+        capacity_hash, std::move(capacity_body), now));
+
+    auto budget_block{std::make_shared<CBlock>(*BlockWithNonce(13))};
+    budget_block->hashPrevBlock = parent;
+    const uint256 budget_hash{
+        uint256::FromHex(std::string(63, '0') + "e").value()};
+    auto budget_body{Body(13, 50, now + 60s)};
+    budget_body.block = budget_block;
+    budget_body.retry_cause = RetryCause::TIMER_OR_AUTHORITY;
+    BOOST_REQUIRE(lifecycle.Retain(budget_hash, std::move(budget_body), now));
+    BOOST_CHECK_NE(capacity_hash, budget_hash);
+
+    BOOST_CHECK(!lifecycle.NextRetry(parent, now + 1s));
+    // An EncDr release cannot wake an RC-capacity deferral.
+    BOOST_CHECK(!lifecycle.WakeCapacityRetry(
+        parent, /*encdr_capacity_epoch=*/1, /*rc_capacity_epoch=*/0,
+        now + 1s));
+    const auto woken{lifecycle.WakeCapacityRetry(
+        parent, /*encdr_capacity_epoch=*/0, /*rc_capacity_epoch=*/1,
+        now + 1s)};
+    BOOST_REQUIRE(woken);
+    BOOST_CHECK_EQUAL(*woken, capacity_hash);
+    const auto retry{lifecycle.NextRetry(parent, now + 1s)};
+    BOOST_REQUIRE(retry);
+    BOOST_CHECK_EQUAL(retry->first, capacity_hash);
+
+    // A real later slot release is a new edge, not a level-triggered scan.
+    // If another job won capacity, the same body may be woken again without
+    // waiting for its 60-second fallback.
+    BOOST_REQUIRE(lifecycle.RefreshRetry(
+        capacity_hash, 60s, now + 1s,
+        RetryCause::RC_PENDING_CAPACITY, /*capacity_epoch=*/1));
+    BOOST_CHECK(!lifecycle.NextRetry(parent, now + 2s));
+    BOOST_REQUIRE(lifecycle.WakeCapacityRetry(
+        parent, /*encdr_capacity_epoch=*/0, /*rc_capacity_epoch=*/2,
+        now + 2s));
+    BOOST_CHECK(lifecycle.NextRetry(parent, now + 2s));
+
+    // Capacity events never bypass a genuine rate/authority timer.
+    lifecycle.TerminalRetained(capacity_hash);
+    BOOST_CHECK(!lifecycle.WakeCapacityRetry(
+        parent, /*encdr_capacity_epoch=*/1, /*rc_capacity_epoch=*/3,
+        now + 3s));
+    BOOST_CHECK(!lifecycle.NextRetry(parent, now + 3s));
+    BOOST_CHECK(lifecycle.NextRetry(parent, now + 60s));
+}
+
 BOOST_AUTO_TEST_CASE(terminal_requeue_preserves_original_retention_ttl)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};

@@ -49,6 +49,14 @@ public:
         TRUSTED_AUTHORITY = 1,
     };
 
+    /** Why an inactive retained body is waiting. Capacity is event-driven;
+     *  every other reason remains timer/authority driven. */
+    enum class RetryCause : uint8_t {
+        TIMER_OR_AUTHORITY,
+        ENCDR_PENDING_CAPACITY,
+        RC_PENDING_CAPACITY,
+    };
+
     enum class State : uint8_t {
         BODY_RETAINED,
         ADMISSION_PENDING,
@@ -82,6 +90,12 @@ public:
         //! RetryWakeReason bits already consumed by this retained generation.
         //! Terminal requeue and repeated delivery preserve these bits.
         uint8_t retry_wake_mask{0};
+        //! A released pending-work lease may wake only capacity deferrals.
+        //! Rate-budget and authority waits must keep their own cooldowns.
+        RetryCause retry_cause{RetryCause::TIMER_OR_AUTHORITY};
+        //! Release generation observed when the capacity reservation failed.
+        //! A strictly newer generation is the causal wake condition.
+        uint64_t capacity_epoch{0};
     };
 
     struct Token {
@@ -272,15 +286,76 @@ public:
         return std::make_pair(selected->first, *selected->second.body);
     }
 
-    bool RefreshRetry(const uint256& hash, Clock::duration delay,
-                      Clock::time_point now = Clock::now())
+    bool RefreshRetry(
+        const uint256& hash, Clock::duration delay,
+        Clock::time_point now = Clock::now(),
+        std::optional<RetryCause> retry_cause = std::nullopt,
+        std::optional<uint64_t> capacity_epoch = std::nullopt)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto it{m_entries.find(hash)};
         if (it == m_entries.end() || !it->second.body) return false;
         it->second.body->retry_not_before = now + delay;
+        if (retry_cause) it->second.body->retry_cause = *retry_cause;
+        if (capacity_epoch) {
+            it->second.body->capacity_epoch = *capacity_epoch;
+        }
         ++it->second.body->deferral_count;
         return true;
+    }
+
+    /**
+     * Consume one real pending-slot release by waking the retained canonical
+     * child that was deferred specifically for capacity. Unlike peer scans,
+     * release generations are monotonic, so a later release may legitimately
+     * wake the same body again if another job won the slot in between. Keeping
+     * separate EncDr and RC generations prevents one pool from waking work
+     * that is still saturated in the other.
+     */
+    std::optional<uint256> WakeCapacityRetry(
+        const uint256& preferred_parent,
+        uint64_t encdr_capacity_epoch,
+        uint64_t rc_capacity_epoch,
+        Clock::time_point now = Clock::now())
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        PruneExpiredRetained(now);
+        auto selected{m_entries.end()};
+        for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
+            const Entry& entry{it->second};
+            const bool encdr_released{
+                entry.body &&
+                entry.body->retry_cause ==
+                    RetryCause::ENCDR_PENDING_CAPACITY &&
+                entry.body->capacity_epoch < encdr_capacity_epoch};
+            const bool rc_released{
+                entry.body &&
+                entry.body->retry_cause ==
+                    RetryCause::RC_PENDING_CAPACITY &&
+                entry.body->capacity_epoch < rc_capacity_epoch};
+            if (!entry.body || IsActive(entry.state) ||
+                (!encdr_released && !rc_released) ||
+                entry.body->block->hashPrevBlock != preferred_parent) {
+                continue;
+            }
+            if (selected == m_entries.end() ||
+                (entry.body->pin_progress &&
+                 !selected->second.body->pin_progress) ||
+                (entry.body->pin_progress ==
+                     selected->second.body->pin_progress &&
+                 entry.body->stored_at <
+                     selected->second.body->stored_at)) {
+                selected = it;
+            }
+        }
+        if (selected == m_entries.end()) return std::nullopt;
+        selected->second.body->capacity_epoch =
+            selected->second.body->retry_cause ==
+                    RetryCause::RC_PENDING_CAPACITY
+                ? rc_capacity_epoch
+                : encdr_capacity_epoch;
+        selected->second.body->retry_not_before = now;
+        return selected->first;
     }
 
     /**
@@ -327,7 +402,9 @@ public:
      * spin, but requeueing must not pin retained bytes forever.
      */
     bool TerminalRequeue(const uint256& hash, Clock::duration delay,
-                         Clock::time_point now = Clock::now())
+                         Clock::time_point now = Clock::now(),
+                         std::optional<RetryCause> retry_cause = std::nullopt,
+                         std::optional<uint64_t> capacity_epoch = std::nullopt)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto it{m_entries.find(hash)};
@@ -339,6 +416,8 @@ public:
         EraseEntry(it);
         body.deferral_count = 0;
         body.retry_not_before = now + delay;
+        if (retry_cause) body.retry_cause = *retry_cause;
+        if (capacity_epoch) body.capacity_epoch = *capacity_epoch;
         auto [nit, inserted] = m_entries.try_emplace(hash);
         (void)inserted;
         Entry& entry{nit->second};

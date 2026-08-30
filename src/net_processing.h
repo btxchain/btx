@@ -298,6 +298,9 @@ public:
     /** Drop leftover speculative/pending ExactReplay leases between cases that
      *  share one RegTestingSetup. */
     virtual void ResetMatMulVerifyAdmissionForTest() = 0;
+    /** Exercise destruction of one synthetic pending lease so tests can drive
+     *  the production capacity-release wake without sleeping 60 seconds. */
+    virtual void SimulateMatMulPendingSlotReleaseForTest(bool rc_profile) = 0;
     /** True while a complete body is held for scheduler re-admission. */
     [[nodiscard]] virtual bool HasMatMulRetainedBodyForTest(const uint256& hash) const = 0;
     [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
