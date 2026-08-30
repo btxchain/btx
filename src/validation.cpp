@@ -19771,7 +19771,27 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
     }
 
     m_shielded_state_initialized = true;
-    const auto accepted_state_pin = ComputeShieldedSnapshotStatePin();
+    // A snapshot at/after the shielded-pool disable height carries NO live
+    // shielded state (the pool is closed; the #129 loader already validates the
+    // section is the canonical zero-recent-history frozen encoding). Its
+    // consensus pin is the FROZEN closed-section commitment (94343b76...), a
+    // fixed historical value -- NOT the synthetic empty-tree pin (e802781d...)
+    // that hashing the empty loaded live-state produces. The attested-manifest
+    // path already pins via ComputeClosedShieldedSnapshotStatePin(); the loader
+    // was left on the live ComputeShieldedSnapshotStatePin(), so loadtxoutset of
+    // the closed-pool assumeutxo-201500 snapshot was spuriously rejected
+    // ("shielded snapshot state does not match the consensus-pinned
+    // commitment"). Match the loader to the closed pin. Safe: past the disable
+    // height no shielded spend is accepted, so a forged shielded section is
+    // inert (no double-spend) -- the pin is a frozen audit anchor, not a live
+    // double-spend guard, and DS-3 fail-closed still governs the pre-close case.
+    const bool pool_closed_at_snapshot{
+        tip != nullptr &&
+        GetConsensus().IsShieldedPoolDisabled(tip->nHeight) &&
+        !m_options.force_shielded_state};
+    const auto accepted_state_pin =
+        pool_closed_at_snapshot ? ComputeClosedShieldedSnapshotStatePin()
+                                : ComputeShieldedSnapshotStatePin();
     if (pin_policy.required_pin.has_value() &&
         (!accepted_state_pin.has_value() ||
          *accepted_state_pin != *pin_policy.required_pin)) {
