@@ -1205,6 +1205,11 @@ struct CNodeState {
     const CBlockIndex* pindexBestKnownBlock{nullptr};
     //! The hash of the last unknown block this peer has announced.
     uint256 hashLastUnknownBlock{};
+    //! Sticky-probe bound: beyond-best-header getheaders probes sent to this
+    //! peer since it last resolved (unknown hash found, or a new header
+    //! delivered). Past HEADER_SYNC_MAX_UNRESOLVED_BEYOND_PROBES the
+    //! HeaderSyncPeerBeyondBestHeader override disarms for this connection.
+    int m_beyond_best_header_probes{0};
     //! The last full block we both have.
     const CBlockIndex* pindexLastCommonBlock{nullptr};
     //! The best header we have sent our peer.
@@ -2458,6 +2463,15 @@ private:
         //! and retry retained tip-children as requested (ticket_exempt) so
         //! ExactReplay can proceed without discarding the only copy.
         bool retain_as_requested{false};
+        //! RB-16 hardening: this is a FLOATING covered acquired-tower body
+        //! (parent not yet connectable). If the retained-body store cannot
+        //! hold it, drop to HEADER_ONLY instead of the retain_as_requested
+        //! ProcessBlockSync(force) fallback -- that fallback would run a
+        //! synchronous ContextualCheckBlock ExactReplay under cs_main for an
+        //! out-of-order body, the exact device monopoly 72e4d19c removed.
+        //! The root-first frontier getdata re-fetches it once its parent
+        //! verifies.
+        bool retain_floating_no_sync_fallback{false};
         //! Scheduler re-admission delay for RETAIN_FOR_RETRY. Peer-budget
         //! handoff misses wait for the per-minute window; pending-cap misses
         //! wait for the same refill rather than spinning at 1-2Hz.
@@ -3292,6 +3306,12 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
     if (index == nullptr) return false;
     const CBlockIndex* const parent{index->pprev};
     if (parent == nullptr) return false;
+    // Doomed-tower hardening: a parent carrying any FAILED bit can never
+    // ConnectTip, so no descendant is worth GPU ExactReplay budget. Without
+    // this a parent that passed ExactReplay but later FAILED (e.g. at
+    // ConnectBlock) kept its children "connectable" and a doomed tower could
+    // sequentially replay up to ~ACQUISITION_ESCAPE_MAX_LEAD bodies.
+    if ((parent->nStatus & BLOCK_FAILED_MASK) != 0) return false;
     return chainman.ActiveChain().Contains(parent) ||
            ((parent->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
             (parent->nStatus & BLOCK_HAVE_DATA) != 0);
@@ -5262,6 +5282,10 @@ void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
     if (!state->hashLastUnknownBlock.IsNull()) {
         const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(state->hashLastUnknownBlock);
         if (pindex && pindex->nChainWork > 0) {
+            // Sticky-probe bound: the announced unknown block RESOLVED (its
+            // header is now indexed), so the beyond-best-header probe signal
+            // was honest. Re-arm the probe budget.
+            state->m_beyond_best_header_probes = 0;
             if (node::matmul_trusted::IsTrustedMirror()) {
                 const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
                 if (tip != nullptr) {
@@ -9811,6 +9835,12 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom, Peer& peer
     if (received_new_header && last_header.nChainWork > m_chainman.ActiveChain().Tip()->nChainWork) {
         nodestate->m_last_block_announcement = GetTime();
     }
+    // Sticky-probe bound: the peer delivered a header we did not have, so the
+    // beyond-best-header probes are RESOLVING, not sticking. Re-arm the
+    // budget; a liar (garbage INV / forged VERSION height) never earns this.
+    if (received_new_header) {
+        nodestate->m_beyond_best_header_probes = 0;
+    }
 
     // If we're in IBD, we want outbound peers that will serve us a useful
     // chain. Disconnect peers that are on chains with insufficient work.
@@ -12316,8 +12346,20 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                     nCount == m_opts.max_headers_result) {
                     const auto now{NodeClock::now()};
                     const int32_t terminal_height{last_received_header->nHeight};
+                    // Continuation-bypass bound: a genuine continuation of an
+                    // all-known FULL-size batch starts right after the anchor
+                    // we stored, so its terminal advances by the whole batch.
+                    // Requiring that (not merely terminal > anchor) stops a
+                    // peer replaying its own known chain +1 header per batch
+                    // from extracting one bypassed getheaders per batch
+                    // (O(chain height) bypasses per peer). The genuine
+                    // 2000-header suffix deadlock case still works: its first
+                    // batch clears this from the -1 anchor, and a terminal
+                    // sitting AT our best_header keeps the rate-limited
+                    // frontier_retry path below.
                     const bool monotonic{
-                        terminal_height > peer.m_headers_continuation_height};
+                        terminal_height - peer.m_headers_continuation_height >=
+                        static_cast<int32_t>(nCount)};
                     const bool frontier_retry{
                         terminal_height >= best_header_height &&
                         (peer.m_headers_continuation_at ==
@@ -12531,7 +12573,12 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                         attested_or_frontier,
                         m_chainman.IsInitialBlockDownload(),
                         kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
-                        m_chainman.GetParams().HighestAssumeutxoHeight()) &&
+                        // Assumeutxo ceiling only for a node that needs the
+                        // recovery path (acquisition-stale); a healthy node
+                        // keeps the full anti-flood cap below the base.
+                        m_chainman.AcquisitionTipIsStale()
+                            ? m_chainman.GetParams().HighestAssumeutxoHeight()
+                            : 0) &&
                     // RB-16: keep chasing a heavier competing tower's headers
                     // past the +72 cap while our tip is stale (acquisition).
                     !m_chainman.AcquisitionEscapeActive(pindexLast)) {
@@ -12599,7 +12646,12 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 tip->nHeight, pindexLast->nHeight, extends_tip,
                 attested_or_frontier, m_chainman.IsInitialBlockDownload(),
                 kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
-                m_chainman.GetParams().HighestAssumeutxoHeight()) &&
+                // Assumeutxo ceiling only for a node that needs the recovery
+                // path (acquisition-stale); a healthy node keeps the full
+                // anti-flood GETDATA cap below the base.
+                m_chainman.AcquisitionTipIsStale()
+                    ? m_chainman.GetParams().HighestAssumeutxoHeight()
+                    : 0) &&
                 // RB-16: directly fetch a heavier competing tower while the
                 // tip is stale so its bodies can be acquired + ExactReplayed.
                 !m_chainman.AcquisitionEscapeActive(pindexLast);
@@ -13240,7 +13292,22 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 retry_delay);
         }
         if (!retained) {
-            if (matmul_admission.retain_as_requested) {
+            if (matmul_admission.retain_floating_no_sync_fallback) {
+                // RB-16 hardening: retained-store overflow must NOT push a
+                // FLOATING covered acquired-tower body into ProcessBlockSync
+                // (force) -- AcceptBlock's ContextualCheckBlock would run the
+                // ENC-DR ExactReplay SYNCHRONOUSLY under cs_main for an
+                // out-of-order body, the exact monopoly 72e4d19c removed.
+                // Fall through to finalize_header_only(); the root-first
+                // frontier getdata re-fetches this body when its parent
+                // becomes connectable, and the NoteMatMulBudgetDeferred stamp
+                // above holds it off the scheduler meanwhile.
+                LogDebug(BCLog::NET,
+                         "Retained-body store full: HEADER_ONLY-dropping "
+                         "floating acquired-tower body %s from peer=%d "
+                         "(no synchronous replay)\n",
+                         hash.ToString(), node.GetId());
+            } else if (matmul_admission.retain_as_requested) {
                 // Capacity: do not HEADER_ONLY-drop the only followed-chain
                 // copy and then MarkMatMulRCBodyDeferred (the residual
                 // getdata livelock). Persist without ExactReplay GPU.
@@ -13250,8 +13317,9 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 release_verdict_pin();
                 release_assumevalid_trust_pin();
                 return;
+            } else {
+                node.fDisconnect = true;
             }
-            node.fDisconnect = true;
         }
         finalize_header_only();
         release_verdict_pin();
@@ -14066,6 +14134,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                 exact_reference_height)
             : uint32_t{1};
         admission.retain_as_requested = true;
+        admission.retain_floating_no_sync_fallback = true;
         return true;
     }
     if (persist_heavier_competing_fork) {
@@ -20610,7 +20679,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         const bool peer_beyond_best_header{node::HeaderSyncPeerBeyondBestHeader(
             best_header_height_for_probe,
             peer->m_starting_height.load(),
-            /*announced_unknown_block=*/!state.hashLastUnknownBlock.IsNull())};
+            /*announced_unknown_block=*/!state.hashLastUnknownBlock.IsNull(),
+            /*unresolved_probes=*/state.m_beyond_best_header_probes)};
         const bool must_probe{
             node::HeaderSyncMustProbe(
                 tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
@@ -20796,6 +20866,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     MaybeSendGetHeaders(*pto, GetLocator(pindexStart), *peer)) {
                     if (must_probe) {
                         m_best_known_probe_at[pto->GetId()] = current_time;
+                        // Sticky-probe bound: charge the beyond-best budget
+                        // when that override is what armed this probe.
+                        if (peer_beyond_best_header) {
+                            ++state.m_beyond_best_header_probes;
+                        }
                         LogInfo("initial getheaders (%d) to peer=%d (startheight:%d)\n",
                                 pindexStart->nHeight, pto->GetId(),
                                 peer->m_starting_height.load());
@@ -20880,6 +20955,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         log_probe_declined("no_locator_start");
                     } else if (MaybeSendGetHeaders(*pto, GetLocator(start), *peer)) {
                         last_probe = current_time;
+                        // Sticky-probe bound: charge the beyond-best budget
+                        // when that override is what armed this probe.
+                        if (peer_beyond_best_header) {
+                            ++state.m_beyond_best_header_probes;
+                        }
                         LogInfo("best-known probe: getheaders to peer=%d "
                                 "(advertised %d, our tip %d, best_header %d, "
                                 "best_known_extends=%s, beyond_best_header=%s)\n",

@@ -1913,6 +1913,18 @@ public:
     //! deepforkautoresolve-gated; a fake tower's bodies fail ExactReplay.
     [[nodiscard]] bool AcquisitionEscapeCoversBlock(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Slot-wedge hardening: a registered exempt tower whose BODY fails
+    //! validation (BLOCK_FAILED_MASK on any block descending from its root)
+    //! is dead -- its chain can never fully ExactReplay-verify, so it must
+    //! not keep occupying one of the <=2 exemption slots (the root itself is
+    //! the fork LCA on the ACTIVE chain and never carries a FAILED bit, so
+    //! the root-only prune in AcquisitionEscapeMayAcquireHeavierFork cannot
+    //! evict it). Called wherever a block body is marked FAILED; erases every
+    //! tower whose root is an ancestor of `failed` so the honest majority
+    //! tower can register. Never touches consensus state: it only releases a
+    //! local anti-flood cap exemption.
+    void AcquisitionEscapeNoteBlockFailed(const CBlockIndex* failed)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * LOCAL POLICY (-deepforkautoresolve): may this node auto-migrate to a
      * DEEP (> park_depth) strictly-heavier competing fork because network
@@ -1934,9 +1946,12 @@ public:
         bool sustained{false};
         //! Whole competing suffix (fork+1..candidate) carries BLOCK_HAVE_DATA
         //! + BLOCK_EXACT_REPLAY_VERIFIED (the RB-16 acquisition stack's
-        //! product). Informational for MayAct's own return value (unchanged);
-        //! REQUIRED by DeepForkAutoResolveMayUnpark, so only a fully
-        //! ExactReplay-acquired tower may lift its own deep-reorg park.
+        //! product). In MayAct's FINAL gate it substitutes for seen_live &&
+        //! sustained (a fully body-ExactReplayed heavier fork embodies real
+        //! majority PoW; the observation score exists for header-only /
+        //! cheap towers, which still require it). REQUIRED by
+        //! DeepForkAutoResolveMayUnpark, so only a fully ExactReplay-acquired
+        //! tower may lift its own deep-reorg park.
         bool suffix_exact_replayed{false};
         bool acted{false};
         int reorg_depth{0};

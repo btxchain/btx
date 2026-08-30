@@ -259,14 +259,37 @@ inline constexpr int CATCHUP_FAR_BEHIND_YIELD{100};
  * Never gated on preferred-peer count, the nSyncStarted slot, IBD, or
  * MatMul service bits (0.34.1 F1 principle). Callers keep the per-peer
  * BEST_KNOWN_PROBE_INTERVAL pacing and MaybeSendGetHeaders send window.
+ *
+ * STICKY-PROBE bound: both signals are peer-controlled and, for a liar,
+ * never resolve -- one garbage block INV (hashLastUnknownBlock never found)
+ * or an absurd VERSION height made this return true for the CONNECTION
+ * LIFETIME, extracting one bypassed getheaders per BEST_KNOWN_PROBE_INTERVAL
+ * forever. `unresolved_probes` counts probes already sent on this signal
+ * without the peer ever resolving it (counter reset when the unknown hash
+ * resolves or the peer delivers a NEW header); past
+ * HEADER_SYNC_MAX_UNRESOLVED_BEYOND_PROBES the override disarms. An honest
+ * peer resolves on its FIRST reply, so the budget never bites it. VERSION
+ * heights further than HEADER_SYNC_MAX_PLAUSIBLE_VERSION_LEAD above our best
+ * header are forged-by-construction and ignored outright.
  */
+inline constexpr int HEADER_SYNC_MAX_UNRESOLVED_BEYOND_PROBES{8};
+inline constexpr int32_t HEADER_SYNC_MAX_PLAUSIBLE_VERSION_LEAD{4'000'000};
 [[nodiscard]] inline bool HeaderSyncPeerBeyondBestHeader(
     int32_t best_header_height,
     int32_t peer_starting_height,
-    bool announced_unknown_block)
+    bool announced_unknown_block,
+    int unresolved_probes = 0)
 {
+    if (unresolved_probes >= HEADER_SYNC_MAX_UNRESOLVED_BEYOND_PROBES) {
+        return false;
+    }
     if (announced_unknown_block) return true;
     if (peer_starting_height <= 0) return false;
+    if (best_header_height >= 0 &&
+        peer_starting_height - best_header_height >
+            HEADER_SYNC_MAX_PLAUSIBLE_VERSION_LEAD) {
+        return false;
+    }
     return peer_starting_height > best_header_height;
 }
 

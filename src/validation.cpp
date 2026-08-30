@@ -7070,6 +7070,10 @@ void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationSta
         m_chainman.m_failed_blocks.insert(pindex);
         m_blockman.m_dirty_blockindex.insert(pindex);
         setBlockIndexCandidates.erase(pindex);
+        // Slot-wedge hardening: a ConnectBlock failure on an acquired-tower
+        // body (e.g. during migration) also proves the tower dead; release
+        // its acquisition-escape exemption slot.
+        m_chainman.AcquisitionEscapeNoteBlockFailed(pindex);
         InvalidChainFound(pindex);
     }
 }
@@ -10525,7 +10529,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 pindexOldTip->nHeight, pindexFork->nHeight, pindexMostWork->nHeight,
                 park ? _("Parking the branch and staying on the current chain pending operator action.")
                      : deep_fork_auto_resolve
-                         ? _("Auto-activating the observation-scored honest deep-reorg branch (deep-fork auto-resolve): seen live block-by-block as our tip climbed, sustained, and still fresh, with no quorum on either fork.")
+                         ? _("Auto-activating the honest deep-reorg branch (deep-fork auto-resolve): observed live as our tip climbed and sustained, or its entire suffix passed byte-exact MatMul ExactReplay verification, with no quorum on either fork.")
                      : recovery_escape
                          ? _("Activating the uniquely authenticated shallow-race recovery branch.")
                          : _("Following the most-work chain (warn-only)."));
@@ -11854,6 +11858,11 @@ bool ChainstateManager::AcquisitionEscapeCoversBlock(const CBlockIndex* index) c
     // block's own work, so a low mid-tower body below the minority tip is
     // covered. (Descendant-of-root, not FindFork(index)==root, is robust to
     // minority-fork reorgs that would move index's own LCA.)
+    // Slot-wedge hardening: never admit a FAILED body for (re-)ExactReplay.
+    // Parity with the reverify_acquired_fork_body gate in AcceptBlock; a
+    // forged tower's body that already failed must not be able to spend GPU
+    // budget again through any CoversBlock-gated admission path.
+    if (index->nStatus & BLOCK_FAILED_MASK) return false;
     bool covered{false};
     for (const auto& entry : m_acquisition_exempt_towers) {
         const CBlockIndex* const root{m_blockman.LookupBlockIndex(entry.first)};
@@ -11879,6 +11888,27 @@ bool ChainstateManager::AcquisitionEscapeCoversBlock(const CBlockIndex* index) c
     return covered;
 }
 
+void ChainstateManager::AcquisitionEscapeNoteBlockFailed(const CBlockIndex* failed)
+{
+    AssertLockHeld(::cs_main);
+    if (failed == nullptr || m_acquisition_exempt_towers.empty()) return;
+    for (auto it = m_acquisition_exempt_towers.begin();
+         it != m_acquisition_exempt_towers.end();) {
+        const CBlockIndex* const root{m_blockman.LookupBlockIndex(it->first)};
+        if (root != nullptr && failed->nHeight > root->nHeight &&
+            failed->GetAncestor(root->nHeight) == root) {
+            LogPrintf("acquisition-escape: evicting exempt tower fork_root=%s "
+                      "-- covered body %s height=%d FAILED validation (dead "
+                      "tower must not hold an exemption slot)\n",
+                      it->first.ToString(),
+                      failed->GetBlockHash().ToString(), failed->nHeight);
+            it = m_acquisition_exempt_towers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
     const CBlockIndex* candidate)
 {
@@ -11894,6 +11924,19 @@ bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
     if (candidate->nHeight - tip->nHeight > ACQUISITION_ESCAPE_MAX_LEAD) return false;
     const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(candidate)};
     if (fork == nullptr) return false;
+    // Slot-wedge hardening: refuse to (re-)register a tower whose branch
+    // candidate..fork already carries a FAILED block. Without this a dead
+    // tower evicted by AcquisitionEscapeNoteBlockFailed re-registers on the
+    // next header extending it (a body FAILED in AcceptBlock is not inserted
+    // into m_failed_blocks, so descendant headers are still indexed without
+    // BLOCK_FAILED_CHILD) and, with forged max work, re-wedges the slot
+    // forever. Bounded: one pprev walk candidate->fork per registration
+    // attempt (pointer-chasing only, no hashing).
+    for (const CBlockIndex* walk{candidate};
+         walk != nullptr && walk != fork && walk->nHeight > fork->nHeight;
+         walk = walk->pprev) {
+        if (walk->nStatus & BLOCK_FAILED_MASK) return false;
+    }
     const uint256 root{fork->GetBlockHash()};
     // Prune only FAILED / missing tower roots. The root is the fork LCA, which
     // is ALWAYS on the active chain -- so a Contains() test here erased every
@@ -12527,16 +12570,20 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
             if (acted || log_now_s - m_deep_fork_verdict_log_time_s >=
                              VERDICT_LOG_INTERVAL_S) {
                 m_deep_fork_verdict_log_time_s = log_now_s;
+                const char* const acted_path{
+                    !acted ? "-"
+                           : (v.seen_live && v.sustained ? "seen_live"
+                                                         : "exact_replay")};
                 LogInfo("deepforkautoresolve verdict candidate=%s height=%d "
                         "reorg_depth=%d enabled=%d in_scope=%d heavier=%d "
                         "no_deterministic_tiebreak=%d candidate_usable=%d "
                         "seen_live=%d sustained=%d suffix_exact_replayed=%d "
-                        "acted=%d\n",
+                        "acted=%d path=%s\n",
                         candidate->GetBlockHash().ToString(),
                         candidate->nHeight, v.reorg_depth, v.enabled,
                         v.in_scope, v.heavier, v.no_deterministic_tiebreak,
                         v.candidate_usable, v.seen_live, v.sustained,
-                        v.suffix_exact_replayed, acted);
+                        v.suffix_exact_replayed, acted, acted_path);
             }
         }
         if (verdict != nullptr) *verdict = v;
@@ -12624,7 +12671,6 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
         first_seen_max = std::max(first_seen_max, b->nTimeReceived);
     }
     v.seen_live = seen_live;
-    if (!seen_live) return finish(false);
 
     const int64_t span_s{
         first_seen_max >= first_seen_min ? first_seen_max - first_seen_min : -1};
@@ -12632,9 +12678,33 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
         span_s, now_s - first_seen_max,
         m_options.deep_fork_auto_resolve_sustain_s,
         m_options.deep_fork_auto_resolve_freshness_s);
-    if (!v.sustained) return finish(false);
 
-    return finish(true);
+    // FINAL GATE. Two independent sufficient paths, every other gate above
+    // still required:
+    //  - seen_live && sustained: the historical observation score (the fork
+    //    was watched arrive block-by-block as our tip climbed).
+    //  - suffix_exact_replayed: the ENTIRE competing suffix fork+1..candidate
+    //    is BLOCK_HAVE_DATA + BLOCK_EXACT_REPLAY_VERIFIED, i.e. every one of
+    //    its bodies passed the LOCAL byte-exact ENC-DR ExactReplay recompute
+    //    (PersistMatMulExactReplayVerdict is the bit's only setter and only
+    //    fires on local replay success; the trusted-quorum shortcut sets a
+    //    DIFFERENT bit that does not satisfy this predicate).
+    // WHY the substitution is safe: seen_live/sustained is anti-dump-and-run
+    // for HEADER-ONLY / cheap towers, and those still require it -- a
+    // header-only, forged, or partially-verified tower has some suffix block
+    // without the verified bit, so it stays parked. A fully-ExactReplayed
+    // heavier suffix, by contrast, embodies real majority PoW at network
+    // difficulty (forged bodies fail ExactReplay and mark BLOCK_FAILED),
+    // which is exactly the reorg PoW consensus already accepts. Without this
+    // path a bulk-acquiring stranded node deadlocks (live rtx6000+macpro2:
+    // all gates 1 except seen_live=0 sustained=0 -> acted=0 forever, because
+    // a node capped at ~tip+2048 headers can never OBSERVE live progression
+    // past the cap; it cannot migrate without seen_live and cannot see live
+    // without migrating). DeepForkAutoResolveMayUnpark stays stricter-or-
+    // equal: it additionally requires suffix_exact_replayed itself.
+    if (v.seen_live && v.sustained) return finish(true);
+    if (v.suffix_exact_replayed) return finish(true);
+    return finish(false);
 }
 
 bool ChainstateManager::DeepForkAutoResolveMayUnpark(
@@ -15142,7 +15212,18 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                         tip->nHeight, header_height, extends_tip,
                         attested_or_frontier, IsInitialBlockDownload(),
                         kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
-                        GetParams().HighestAssumeutxoHeight()) &&
+                        // Scope the assumeutxo header-ceiling exemption to a
+                        // node that actually NEEDS it: acquisition-stale (or
+                        // IBD, already exempt above). A healthy connecting
+                        // node below the base must not accept a large
+                        // valid-PoW competing header flood just because it
+                        // sits under the compiled base; a genuinely stranded
+                        // node trips AcquisitionTipIsStale within the stall
+                        // window and keeps the full fast-recovery path to the
+                        // base header + loadtxoutset.
+                        AcquisitionTipIsStale()
+                            ? GetParams().HighestAssumeutxoHeight()
+                            : 0) &&
                     // RB-16 acquisition escape valve: a STALE tip must be able
                     // to ACQUIRE a strictly-heavier competing tower's headers
                     // past the +72 cap so its bodies can be fetched + fully
@@ -15407,6 +15488,10 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         pindex->pprev != nullptr &&
         !ActiveChain().Contains(pindex) &&
         (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
+        // Doomed-tower hardening (parity with AcquiredBodyParentConnectable):
+        // a FAILED parent can never ConnectTip, so its child must not
+        // re-enter ContextualCheckBlock ExactReplay.
+        (pindex->pprev->nStatus & BLOCK_FAILED_MASK) == 0 &&
         (ActiveChain().Contains(pindex->pprev) ||
          ((pindex->pprev->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
           (pindex->pprev->nStatus & BLOCK_HAVE_DATA) != 0)) &&
@@ -15447,6 +15532,11 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
             pindex->nStatus |= BLOCK_FAILED_VALID;
             m_blockman.m_dirty_blockindex.insert(pindex);
+            // Slot-wedge hardening: a covered acquired-tower body that fails
+            // CheckBlock/ContextualCheckBlock (ExactReplay) proves its tower
+            // dead; release the exemption slot so the honest tower can
+            // register.
+            AcquisitionEscapeNoteBlockFailed(pindex);
         }
         LogError("%s: %s\n", __func__, state.ToString());
         return false;
