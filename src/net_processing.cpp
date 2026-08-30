@@ -2063,6 +2063,16 @@ private:
     void RetryMatMulDeferredBodies()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !NetEventsInterface::g_msgproc_mutex);
+    /** Break a served-body-tip wedge: when the active-chain tip+1 body has been
+     *  stuck in flight past BLOCK_ROOT_BODY_TIP_STUCK_S, re-request it BY HASH
+     *  from peers advertising past our tip (they may hold the canonical body off
+     *  an advertised competing tower, invisible to the branch-gated selector),
+     *  rotating one peer per call. This is the automatic form of a manual
+     *  getblockfrompeer; getdata is by hash and ExactReplay still gates
+     *  acceptance, so no wrong body can be admitted. Runs from the scheduler
+     *  (holds neither cs_main nor m_peer_mutex on entry). */
+    void AutoFetchStuckTipRoot()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !m_peer_mutex);
     std::atomic<std::chrono::seconds> m_matmul_deferred_retry_at{0s};
     std::atomic<int64_t> m_followed_tip_child_replay_at{0};
     /** Last time we probed a peer with getheaders solely to establish
@@ -2829,6 +2839,12 @@ private:
      *  broken. */
     uint256 m_stuck_root_hash GUARDED_BY(cs_main);
     int64_t m_stuck_root_since_s GUARDED_BY(cs_main){0};
+    //! Active-chain tip+1 whose body is stuck in flight past the served-body-
+    //! tip threshold; the getdata auto-fetch rotation targets exactly this hash.
+    uint256 m_autofetch_root_hash GUARDED_BY(cs_main);
+    //! Peers already tried this rotation for m_autofetch_root_hash (cleared when
+    //! the stuck root changes or the rotation is exhausted).
+    std::set<NodeId> m_autofetch_tried GUARDED_BY(cs_main);
     /** Rate-limit stalled-tower-drive LogInfo (hoisted GETDATA pass). */
     std::chrono::microseconds m_last_stalled_tower_drive GUARDED_BY(cs_main){0us};
     /** Set when last_common sits on HAVE_DATA above the connected tip so
@@ -3458,6 +3474,56 @@ static constexpr int64_t MATMUL_ACQ_FRONTIER_REPLAY_MIN_GAP_S{2};
     // ACQUISITION_ESCAPE_MAX_LEAD-bounded): no tower, no local replay drive.
     if (!chainman.AcquisitionEscapeCoversBlock(lowest)) return nullptr;
     return lowest;
+}
+
+void PeerManagerImpl::AutoFetchStuckTipRoot()
+{
+    if (m_stopping.load(std::memory_order_acquire)) return;
+    uint256 root_hash;
+    const CBlockIndex* root_index{nullptr};
+    int32_t root_height{0};
+    NodeId chosen{-1};
+    size_t candidate_count{0};
+    {
+        LOCK(cs_main);
+        if (m_autofetch_root_hash.IsNull()) return;
+        const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+        root_index = m_chainman.m_blockman.LookupBlockIndex(m_autofetch_root_hash);
+        // Only chase the active-chain tip+1 whose body we still lack; drop the
+        // arm once it connects or is no longer the tip child.
+        if (tip == nullptr || root_index == nullptr ||
+            root_index->pprev != tip ||
+            (root_index->nStatus & BLOCK_HAVE_DATA) != 0) {
+            m_autofetch_root_hash.SetNull();
+            m_autofetch_tried.clear();
+            return;
+        }
+        int best_h{-1};
+        for (const auto& [id, st] : m_node_states) {
+            if (st.m_starting_height <= tip->nHeight) continue;
+            ++candidate_count;
+            if (m_autofetch_tried.find(id) != m_autofetch_tried.end()) continue;
+            if (st.m_starting_height > best_h) {
+                best_h = st.m_starting_height;
+                chosen = id;
+            }
+        }
+        if (chosen < 0) {
+            // Every advertised-past-tip peer tried this pass; cycle next round.
+            m_autofetch_tried.clear();
+            return;
+        }
+        m_autofetch_tried.insert(chosen);
+        root_hash = m_autofetch_root_hash;
+        root_height = root_index->nHeight;
+    }
+    // FetchBlock re-takes cs_main and m_peer_mutex itself; call it unlocked.
+    const std::optional<std::string> err{
+        FetchBlock(chosen, root_hash, root_index)};
+    LogInfo("Auto-fetch served-body-tip wedge: re-requesting tip-critical body "
+            "%s height=%d from peer=%d (rotation over %zu peers past tip)%s%s\n",
+            root_hash.ToString(), root_height, chosen, candidate_count,
+            err ? " -- " : "", err ? err->c_str() : "");
 }
 
 void PeerManagerImpl::RetryMatMulDeferredBodies()
@@ -6028,6 +6094,21 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                         root_first.lowest_missing->GetBlockHash().ToString(),
                         root_first.lowest_missing->nHeight,
                         static_cast<int>(stuck_for_s));
+                // Auto-recovery: if the stuck block is the active-chain tip+1,
+                // arm the getdata rotation so the scheduler re-asks peers that
+                // advertise past our tip -- the peers that actually hold the
+                // body (off an advertised competing tower) are invisible to the
+                // per-peer branch-gated selector, so waiting on the one silent
+                // in-flight owner wedges forever without this.
+                if (root_first.lowest_missing->pprev ==
+                    m_chainman.ActiveChain().Tip()) {
+                    const uint256 stuck_hash{
+                        root_first.lowest_missing->GetBlockHash()};
+                    if (m_autofetch_root_hash != stuck_hash) {
+                        m_autofetch_root_hash = stuck_hash;
+                        m_autofetch_tried.clear();
+                    }
+                }
             }
         }
     }
@@ -8034,6 +8115,9 @@ void PeerManagerImpl::StartScheduledTasks(CScheduler& scheduler)
     // where both global locks are absent, and re-enter ordinary admission plus
     // the asynchronous verify worker. Running it from SendMessages turns one
     // budget retry into a process-wide networking freeze.
+    scheduler.scheduleEvery([this] {
+        AutoFetchStuckTipRoot();
+    }, std::chrono::seconds{20});
     scheduler.scheduleEvery([this] {
         if (m_stopping.load(std::memory_order_acquire)) return;
         RetryMatMulDeferredBodies();
