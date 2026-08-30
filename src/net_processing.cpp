@@ -9613,12 +9613,25 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
     // high-water), so a one-off duplicate is never penalized.
     const bool terminal_advanced{last_header_height > peer.m_dup_header_max_terminal};
     if (terminal_advanced) peer.m_dup_header_max_terminal = last_header_height;
+    // Genuine forward progress (terminal_advanced) or a trusted / in-band-sync
+    // peer CLEARS the accumulating no-progress window.
     if (pfrom.HasPermission(NetPermissionFlags::NoBan) || have_headers_sync ||
-        !replay_batch || near_tip_announcement || terminal_advanced) {
+        terminal_advanced) {
         peer.m_dup_header_window_start = {};
         peer.m_dup_header_bytes = 0;
         peer.m_dup_header_msgs = 0;
         peer.m_dup_header_last_action = "none";
+        return DupHeaderDisposition::None;
+    }
+    // Cheap non-replay traffic (a sub-threshold batch, or a single near-tip
+    // announcement) is not COUNTED toward the disconnect window -- but it must
+    // NOT RESET it either. Resetting here was residual F2: a peer replaying full
+    // all-known 2000-header batches (each an O(2000) CheckHeadersPoW burn on the
+    // shared message thread) could interleave a 1-header message to zero the
+    // counters every round and never earn a disconnect. Return without touching
+    // the window so the interleaved replay batches still accumulate to the cap.
+    if (!replay_batch || near_tip_announcement) {
+        peer.m_dup_header_last_action = "skipped-uncounted";
         return DupHeaderDisposition::None;
     }
     if (peer.m_dup_header_window_start == std::chrono::steady_clock::time_point{} ||
