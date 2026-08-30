@@ -272,6 +272,11 @@ static constexpr auto BLOCK_DOWNLOAD_TIMEOUT_MIN{10s};
 static constexpr double BLOCK_DOWNLOAD_TIMEOUT_MAX_MULT = 3.0;
 /** Minimum interval between root-first download summary LogInfo lines. */
 static constexpr auto BLOCK_ROOT_FIRST_SUMMARY_INTERVAL{30s};
+// If the SAME tip-critical block has been requested this long with no delivery,
+// emit an explicit "at the served body tip" note: no connected peer is serving
+// that body, so the node is waiting on the network (headers may have run ahead
+// onto bodyless competing towers), NOT stalling on RC verification or connect.
+static constexpr int64_t BLOCK_ROOT_BODY_TIP_STUCK_S{120};
 /** After a download timeout where we keep the peer (other download peers exist),
  *  briefly pause new requests to it so FindNextBlocksToDownload prefers another
  *  source for the released hash. */
@@ -2815,6 +2820,15 @@ private:
     std::chrono::microseconds m_last_overdue_expire GUARDED_BY(cs_main){0us};
     /** Rate-limit the production-visible root-first download summary line. */
     std::chrono::microseconds m_last_root_first_summary GUARDED_BY(cs_main){0us};
+    /** Track how long the SAME tip-critical block has been requested without
+     *  arriving, so a node WAITING at the served body tip (no connected peer is
+     *  delivering the next body -- headers may have run ahead onto bodyless
+     *  competing towers) is legible as exactly that, not misread as an RC /
+     *  verify / connect stall. A large stuck_for_s with select=root_in_flight
+     *  and no delivery means the block's BODY is unserved, not that the node is
+     *  broken. */
+    uint256 m_stuck_root_hash GUARDED_BY(cs_main);
+    int64_t m_stuck_root_since_s GUARDED_BY(cs_main){0};
     /** Rate-limit stalled-tower-drive LogInfo (hoisted GETDATA pass). */
     std::chrono::microseconds m_last_stalled_tower_drive GUARDED_BY(cs_main){0us};
     /** Set when last_common sits on HAVE_DATA above the connected tip so
@@ -5965,9 +5979,24 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         if (m_last_root_first_summary.count() == 0 ||
             now_for_diag >= m_last_root_first_summary + BLOCK_ROOT_FIRST_SUMMARY_INTERVAL) {
             m_last_root_first_summary = now_for_diag;
+            // How long has THIS exact tip-critical block been the stuck root?
+            const int64_t now_s{GetTime<std::chrono::seconds>().count()};
+            int64_t stuck_for_s{0};
+            if (root_first.lowest_missing != nullptr) {
+                const uint256 root_hash{
+                    root_first.lowest_missing->GetBlockHash()};
+                if (root_hash != m_stuck_root_hash) {
+                    m_stuck_root_hash = root_hash;
+                    m_stuck_root_since_s = now_s;
+                }
+                stuck_for_s = now_s - m_stuck_root_since_s;
+            } else {
+                m_stuck_root_hash.SetNull();
+                m_stuck_root_since_s = now_s;
+            }
             LogInfo("Block download root-first: peer=%d tip=%d last_common=%d "
                     "lowest_missing=%s missing_height=%d select=%s clamp=%s "
-                    "reason=%s in_flight_global=%d\n",
+                    "reason=%s in_flight_global=%d stuck_for_s=%d\n",
                     peer.m_id, tip_height,
                     state->pindexLastCommonBlock != nullptr
                         ? state->pindexLastCommonBlock->nHeight
@@ -5981,7 +6010,25 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                     select_reason,
                     root_first.clamped ? "yes" : "no",
                     root_first.reason,
-                    blocks_in_flight_global);
+                    blocks_in_flight_global,
+                    static_cast<int>(stuck_for_s));
+            // Name the "at the served body tip" condition explicitly so a node
+            // waiting on the NETWORK (no peer serving the next body; headers may
+            // have run ahead onto bodyless competing towers) is never misread as
+            // an RC-verify / connect / node fault. A tip-critical block stuck in
+            // flight for minutes with no delivery is body-availability, not code.
+            if (stuck_for_s >= BLOCK_ROOT_BODY_TIP_STUCK_S &&
+                root_first.lowest_missing != nullptr) {
+                LogInfo("Convergence note: tip-critical block %s height=%d has "
+                        "been requested for %ds with no delivery -- no connected "
+                        "peer is serving this BODY. The node is at the served "
+                        "body tip (headers ahead may be bodyless competing "
+                        "towers), waiting on the network -- NOT an RC/verify/"
+                        "connect stall or node fault.\n",
+                        root_first.lowest_missing->GetBlockHash().ToString(),
+                        root_first.lowest_missing->nHeight,
+                        static_cast<int>(stuck_for_s));
+            }
         }
     }
 
