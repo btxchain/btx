@@ -17,6 +17,25 @@ Do **not** load assumeutxo-199299 or assumeutxo-199300: those bases
 compiles them. A node that already loaded one must wipe the datadir and
 resync (from genesis or from assumeutxo-201500 on a **new** empty datadir).
 
+Past the shielded-pool close (height **199300**) the 201500 snapshot
+carries the canonical **closed-frozen** shielded section (zero live
+counts). 0.34.5 (`18cc8bd6`, [issue 129](https://github.com/btxchain/btx/issues/129))
+loads that encoding; binaries before `18cc8bd6` rejected the file
+(`expected 100` recent-output entries). Pre-close snapshots are
+unchanged.
+
+Header sync is never capped below a compiled assumeutxo base
+(`4542bcd9`). A node stranded on a minority fork below 201500 can still
+learn the snapshot header and then `loadtxoutset`. The ceiling is the
+compiled `HighestAssumeutxoHeight()`; headers above it keep the
+anti-flood cap. The exemption is for IBD / acquisition-stale tips, not
+for a healthy connecting node.
+
+A node that already has a usable chainstate and has merely fallen behind
+the majority does not need snapshot surgery: 0.34.5 recovers on binary
+upgrade by local ExactReplay. See
+[release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
+
 BTX release snapshots are published as a small bundle:
 
 - `snapshot.dat`: the UTXO snapshot to load

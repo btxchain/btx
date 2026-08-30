@@ -82,7 +82,10 @@ that header gap but compiled-in seeds were disconnected for missing
 `NODE_NETWORK`, and a CPU tarball / source build **exited** instead of
 starting. 0.34.5 is the sealed follow-up: keep discovery relays, answer
 GETADDR, start without a diagnostic flag, fetch a heavier fork without
-following it past park depth 6.
+following it past park depth 6, and — once the entire competing suffix
+is locally ExactReplay-verified — un-park that majority fork with no
+operator action. See
+[release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
 
 Please report bugs using the issue tracker at GitHub, and when you
 have a diagnosis, bring the patch:
@@ -95,7 +98,7 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-Install 0.34.4 (or a later binary). Three different `invalidateblock`
+Install 0.34.5. Three different `invalidateblock`
 situations exist. Same RPC, three outcomes. One of them used to abort
 the node. Do not mix them. **Case A changed:** do not `invalidateblock`
 33c834f8. If you already did, `reconsiderblock` it.
@@ -175,10 +178,16 @@ outcome.
 
 ## After replacing the binary
 
-Shut down cleanly, wait for exit, install a binary that includes this
-competing-fork follow-up (0.34.4 closed the header gap; it did not
-request the heavier 33c834f8 fork). Keep Metal `.metallib` files next
-to `btxd`. Back up wallets and configuration before upgrading.
+Shut down cleanly, wait for exit, install a 0.34.5 binary (this
+convergence stack). 0.34.4 closed the header gap; it did not acquire
+and ExactReplay a parked deep majority fork. Keep Metal `.metallib`
+files next to `btxd`. Back up wallets and configuration before
+upgrading.
+
+A fallen-behind node (inherited datadir, frozen tip, parked deep fork)
+recovers on that upgrade with no `invalidateblock` and no snapshot
+surgery. A datadir that loaded assumeutxo-199299 or assumeutxo-199300
+still needs a wipe (Case B).
 
 **Building 0.34.5 from source is how a fork is supposed to work.**
 Compile, self-qualify ExactGemmS8S8 on *your* GPU (CPU-versus-device
@@ -212,6 +221,23 @@ partitioned the network. `nMatMulStallRecoveryHeight` is `INT_MAX`;
 `num/den` stay `1/1`.
 
 # Notable Changes
+
+## 0.34.5: automatic convergence (this follow-up)
+
+A node that has fallen behind the majority now recovers on binary
+upgrade with no operator action. Header sync continues from the batch
+terminal (`524c9ecb`; fleet freeze at header height 201278). GPU
+ExactReplay budget is spent root-first (`7e5fc248`, `72e4d19c`,
+`2f50a192`). A stale node (default 600s) may acquire at most two
+strictly-heavier competing towers out to tip+2048 (`63cc064a`). A
+parked deep majority fork is un-parked only once every suffix block is
+locally ExactReplay-verified (`a34cf488`, `f4573109`, `7fd6d91c`).
+Depth-6 dump-and-run parking is intact. Header sync is never capped
+below the compiled assumeutxo base (`4542bcd9`). The closed-shielded
+201500 snapshot section loads (`18cc8bd6`, issue 129).
+
+Full write-up, bounds, and audit posture:
+[release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
 
 ## 0.34.5: sealed bootstrap (this release)
 
@@ -786,7 +812,8 @@ Block fetch stall detected: tip=0 best_header_ahead=2000 peer_best_ahead=2000 in
 already be in the index.
 
 0.34 accepts inbound **HEADERS** from any peer while the active tip is
-below `max(last checkpoint, highest AssumeUTXO pin)` (mainnet 199300),
+below `max(last checkpoint, highest AssumeUTXO pin)` (mainnet
+**201500**),
 and the frontier seed only *raises* BestKnown. Bodies stay
 authority-only. You do not need an operator-controlled archive to
 learn the header chain. See
@@ -847,10 +874,14 @@ btx-cli -rpcclienttimeout=0 loadtxoutset btx-assumeutxo-201500.dat
 ```
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Fresh chainstate only.
-Or sync from genesis.
+Or sync from genesis. The closed-shielded 201500 section is loadable
+(`18cc8bd6`, issue 129).
 
 # Included public work
 
+- btxchain/btx #128 — 0.34.5 convergence / self-heal (see
+  [release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md))
+- btxchain/btx #129 — closed-shielded assumeutxo-201500 load
 - btxchain/btx #123 — 0.34 ExactReplay gold standard, discovery relays,
   archive-authority split
 - btxchain/btx #124 — trusted-mirror bootstrap deadlock (HEADERS during

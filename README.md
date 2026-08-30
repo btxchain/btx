@@ -125,6 +125,7 @@ loaded assumeutxo-199300 or assumeutxo-199299 must resync from an empty
 datadir.
 
 - [Release notes](doc/release-notes.md)
+- [0.34.5 convergence notes](doc/release-notes/release-notes-0.34.5.md)
 - [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA, macOS arm64 Metal
 - [AssumeUTXO snapshot 201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500) (`btx-assumeutxo-201500.dat` SHA256 `08c52c8b34e878c4d48546cfec066bc48fceed51d7287b4ff7ec7b5727cf52c7`)
 
@@ -137,6 +138,28 @@ btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Do not mine on parent
 `ff80e629…` — that hash is not on the majority chain.
+
+## Automatic convergence (0.34.5)
+
+A node that has fallen behind the majority — inherited datadir, frozen
+tip, or a parked deep fork — recovers on binary upgrade with no operator
+action, no `invalidateblock`, and no snapshot surgery. Header sync walks
+forward from the batch terminal. GPU ExactReplay budget is spent on the
+lowest unverified body whose parent is connectable. A stale node
+(default 600s) may acquire at most two strictly-heavier competing towers
+out to tip+2048.
+
+Switching onto an acquired deep fork stays gated. A parked deep majority
+fork is un-parked only once its entire suffix is locally
+ExactReplay-verified (`BLOCK_HAVE_DATA` + `BLOCK_EXACT_REPLAY_VERIFIED`,
+a bit set only by a local byte-exact re-execution of the block's MatMul
+PoW). A forged or header-only tower fails that re-execution and stays
+parked. The depth-6 dump-and-run park is intact.
+
+Recovery is permissionless: the node re-derives majority truth by
+re-running the GPU-native proof of work, not by trusting a peer, a
+signed checkpoint, a quorum shortcut, or a CPU oracle. Details:
+[0.34.5 release notes](doc/release-notes/release-notes-0.34.5.md).
 
 ## MatMul v4.7 transition
 
@@ -182,6 +205,7 @@ feature, not a live surface. See [Shielded Pool](#shielded-pool).
 - [0.34.1 is the base reference. This is a handover.](#0341-is-the-base-reference-this-is-a-handover)
 - [Notice to trusted-mirror operators: repoint or move to consensus](#notice-to-trusted-mirror-operators-repoint-or-move-to-consensus)
 - [Current release — v0.34.1](#current-release--v0341)
+- [Automatic convergence (0.34.5)](#automatic-convergence-0345)
 - [GPU-verified network (three-phase)](#gpu-verified-network-three-phase)
 - [Chain Parameters](#chain-parameters)
 - [MatMul Proof of Work](#matmul-proof-of-work)
