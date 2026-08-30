@@ -580,6 +580,13 @@ static constexpr auto MATMUL_ASYNC_VERIFY_STALE_AFTER{10min};
  *  maximum; runtime code shortens it to the actual remaining window whenever a
  *  peer/global RC budget already has a known refill time. */
 static constexpr auto MATMUL_BUDGET_DEFER_COOLDOWN{60s};
+// The followed tip-child / root (pin_progress) retries on this SHORT cadence
+// instead of the ~60s budget-refill, so it reclaims the single serial RC slot
+// within seconds of a band body freeing it. Spin-safe: a pin_progress body is
+// the productive contiguous root -- verifying it ConnectTips and removes it, so
+// it cannot re-defer forever like a floating body (catch-up F1: a migrated node
+// otherwise heals at <=1 block/min while the GPU sits ~50% idle).
+static constexpr auto MATMUL_PIN_PROGRESS_RETRY_DELAY{2s};
 /** Losing-twin fossils must not win NextRetry every cooldown while the
  *  signed frontier is off-chain (live 2026-08-20, 45+ min wedge). */
 static constexpr auto MATMUL_FRONTIER_OFFCHAIN_FOSSIL_RETRY{10min};
@@ -3274,8 +3281,19 @@ void PeerManagerImpl::EraseMatMulDeferredBody(const uint256& hash)
 void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
     const uint256& hash, const char* reason)
 {
-    const auto delay{MatMulBudgetRefillRetryDelay()};
-    if (m_matmul_block_lifecycle.RetainedDeferralCount(hash) + 1 >=
+    // catch-up F1: the followed tip-child / root (pin_progress) is the single
+    // productive block the tip is waiting on. Retry it on a SHORT cadence so it
+    // reclaims the serial RC slot within ~2s of a band body freeing it, rather
+    // than losing the ~1/min race against fresh out-of-order band arrivals.
+    // Spin-safe: verifying it ConnectTips and removes it (it is not a floating
+    // body), and pin_progress entries are eviction-protected, so we also skip
+    // the deferral-count TerminalRequeue that would push it onto the long
+    // budget-refill schedule.
+    const bool pin_progress{m_matmul_block_lifecycle.IsRetainedPinProgress(hash)};
+    const auto delay{pin_progress ? MATMUL_PIN_PROGRESS_RETRY_DELAY
+                                  : MatMulBudgetRefillRetryDelay()};
+    if (!pin_progress &&
+        m_matmul_block_lifecycle.RetainedDeferralCount(hash) + 1 >=
             MATMUL_DEFER_TERMINAL_REQUEUE_AFTER &&
         m_matmul_block_lifecycle.TerminalRequeue(hash, delay)) {
         LogInfo("Requeueing deferred body %s after repeated deferral (%s); "

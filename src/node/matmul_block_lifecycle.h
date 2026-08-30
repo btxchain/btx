@@ -528,6 +528,20 @@ public:
         return it != m_entries.end() && it->second.body.has_value();
     }
 
+    // True if the retained body for `hash` is the followed tip-child / root
+    // (pin_progress). Such a body is the productive catch-up root: when it
+    // verifies it ConnectTips and is removed, so it can never spin. Callers use
+    // this to retry it on a SHORT cadence instead of the ~60s budget-refill,
+    // so it reclaims the single RC slot as soon as a band body frees it
+    // (catch-up F1: without this a migrated node heals at <=1 block/min).
+    bool IsRetainedPinProgress(const uint256& hash) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        return it != m_entries.end() && it->second.body.has_value() &&
+               it->second.body->pin_progress;
+    }
+
     /** Terminal acceptance/invalidity atomically releases every resource. */
     /** Clear only inactive retained state; never erase a live generation. */
     void TerminalRetained(const uint256& hash)
