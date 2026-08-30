@@ -3489,11 +3489,19 @@ void PeerManagerImpl::AutoFetchStuckTipRoot()
         if (m_autofetch_root_hash.IsNull()) return;
         const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
         root_index = m_chainman.m_blockman.LookupBlockIndex(m_autofetch_root_hash);
-        // Only chase the active-chain tip+1 whose body we still lack; drop the
-        // arm once it connects or is no longer the tip child.
+        // Only chase a genuinely-fetchable canonical tip+1 whose body we still
+        // lack. Drop the arm once it connects (HAVE_DATA), is no longer the tip
+        // child, has FAILED ExactReplay (audit F1: otherwise its full body is
+        // re-pulled every tick forever, since a failed block never gains
+        // HAVE_DATA), or is a HEADER_ONLY-suppressed competing sibling the normal
+        // selector already refused (audit F2: m_header_only_competing). Getdata
+        // by hash still means a wrong body cannot be admitted, but re-requesting
+        // an unadmittable root wastes a full-body transfer per rotation cycle.
         if (tip == nullptr || root_index == nullptr ||
             root_index->pprev != tip ||
-            (root_index->nStatus & BLOCK_HAVE_DATA) != 0) {
+            (root_index->nStatus & BLOCK_HAVE_DATA) != 0 ||
+            (root_index->nStatus & BLOCK_FAILED_MASK) != 0 ||
+            m_header_only_competing.count(m_autofetch_root_hash) != 0) {
             m_autofetch_root_hash.SetNull();
             m_autofetch_tried.clear();
             return;
