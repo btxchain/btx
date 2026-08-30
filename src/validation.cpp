@@ -15291,7 +15291,22 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                     // ExactReplay-validated; park / deepforkautoresolve then
                     // decides MIGRATION. Bounded to a few towers; non-stale
                     // nodes keep the full anti-flood cap.
-                    !AcquisitionEscapeMayAcquireHeavierFork(pindexPrev)) {
+                    //
+                    // ...but cap the STORED extent at the header's OWN lead <=
+                    // ACQUISITION_ESCAPE_MAX_LEAD, not the parent's. Exempting
+                    // on the parent (<= MAX_LEAD) let the index grow to
+                    // tip+MAX_LEAD+1, one past what AcquisitionEscapeMayAcquire
+                    // Fork will (re-)register. After a restart before any body
+                    // verified, the memory-only exempt set was gone and
+                    // re-registration at lead MAX_LEAD+1 was refused -> the node
+                    // stranded on the minority fork, inflight=0, unable to
+                    // re-arm its own persisted tower (cmpl-migration F1). Capping
+                    // storage at MAX_LEAD keeps indexed == registerable, so the
+                    // tower re-arms after restart and slides up as the tip
+                    // advances -- auto-recovery, no manual intervention.
+                    (!AcquisitionEscapeMayAcquireHeavierFork(pindexPrev) ||
+                     header_height - tip->nHeight >
+                         ACQUISITION_ESCAPE_MAX_LEAD)) {
                     LogDebug(BCLog::VALIDATION,
                              "skipping unauthenticated header lead %s height=%d tip=%d\n",
                              hash.ToString(), header_height, tip->nHeight);
