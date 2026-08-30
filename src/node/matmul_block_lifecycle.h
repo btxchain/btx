@@ -257,7 +257,8 @@ public:
 
     std::optional<std::pair<uint256, RetainedBody>> NextRetry(
         const uint256& preferred_parent,
-        Clock::time_point now = Clock::now())
+        Clock::time_point now = Clock::now(),
+        bool ignore_retry_delay = false)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         PruneExpiredRetained(now);
@@ -265,7 +266,7 @@ public:
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             const Entry& entry{it->second};
             if (!entry.body || IsActive(entry.state) ||
-                now < entry.body->retry_not_before) {
+                (!ignore_retry_delay && now < entry.body->retry_not_before)) {
                 continue;
             }
             if (entry.body->block->hashPrevBlock == preferred_parent) {
@@ -318,8 +319,7 @@ public:
         RetainedBody body{*it->second.body};
         EraseEntry(it);
         body.deferral_count = 0;
-        // Do NOT reset stored_at: requeueing must not restart the capacity TTL,
-        // or a repeatedly-deferred body pins retained bytes forever (00ea04a6).
+        body.stored_at = now;
         body.retry_not_before = now + delay;
         auto [nit, inserted] = m_entries.try_emplace(hash);
         (void)inserted;
