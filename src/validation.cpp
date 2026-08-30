@@ -11468,10 +11468,15 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     // pick it, hit missing-data, erase, and spin when the net thread
     // re-TryAdds on every header (live miners 2026-08-16). Getdata first;
     // ReceivedBlockTransactions re-adds once HAVE_DATA lands.
+    // A candidate must have BOTH a body and a chain-tx-count: FindMostWorkChain
+    // asserts HaveNumChainTxs() (audit gap-hunt F6 -- a HAVE_DATA block whose
+    // m_chain_tx_count was never set, e.g. a legacy/partial index, would abort
+    // FMWC). ReceivedBlockTransactions sets both together, so this only refuses
+    // genuinely-unconnectable indexes; the snapshot base is exempt.
     if (pindex != tip &&
         pindex != m_chainman.GetSnapshotBaseBlock() &&
-        (pindex->nStatus & BLOCK_HAVE_DATA) == 0 &&
-        !pindex->HaveNumChainTxs()) {
+        ((pindex->nStatus & BLOCK_HAVE_DATA) == 0 ||
+         !pindex->HaveNumChainTxs())) {
         return;
     }
 
@@ -12101,6 +12106,17 @@ bool ChainstateManager::UnparkReorgBranchContainingBlock(const CBlockIndex* pind
     }
     for (Chainstate* chainstate : GetAll()) {
         for (auto& [_, block_index] : m_blockman.m_block_index) {
+            // Only blocks on the just-unparked branch (root + descendants) can
+            // have newly become candidates -- the park veto is what had refused
+            // them; every other block's park status is unchanged, so its
+            // candidacy was already evaluated correctly. Re-scanning the whole
+            // ~200k index ran the O(frontier) trusted-mirror gate on every entry
+            // and stalled RPC/net for seconds during the auto-resolve recovery
+            // window (audit gap-hunt F4).
+            if (block_index.nHeight < root->nHeight ||
+                block_index.GetAncestor(root->nHeight) != root) {
+                continue;
+            }
             if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
                 block_index.HaveNumChainTxs()) {
                 chainstate->TryAddBlockIndexCandidate(&block_index);
@@ -13334,6 +13350,12 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
 bool ChainstateManager::NormalizeReorgRecovery(const CBlockIndex* active_tip)
 {
     AssertLockHeld(::cs_main);
+    // Repair any parked reorg root that a runtime reorg has made an ancestor of
+    // the active tip (previously normalized only at startup -- audit gap-hunt
+    // F7): otherwise IsOnParkedReorgBranch(tip) could later refuse the tip as a
+    // candidate. Cheap -- the parked-roots set is small/usually empty, and it is
+    // a no-op unless deep_reorg_action == PARK.
+    NormalizeParkedReorgBranches(active_tip);
     if (!m_reorg_recovery.has_value()) return true;
     const node::ReorgRecoveryRecord& record{*m_reorg_recovery};
     const CBlockIndex* const fork{m_blockman.LookupBlockIndex(record.fork_hash)};
