@@ -452,7 +452,16 @@ public:
         entry->pending_lease.reset();
         entry->cancelled.reset();
         entry->owned_resources.clear();
-        if (!entry->body) {
+        // The worker has acknowledged (released the lease). If the block
+        // connected while this replay was in flight (terminal_on_connect), do
+        // NOT retain it for retry -- the hash is on the active chain; remove it
+        // and release its retained-body accounting.
+        if (!entry->body || entry->terminal_on_connect) {
+            if (entry->body) {
+                AccountSourceRemove(entry->body->source_netgroup,
+                                    entry->body->bytes);
+                m_retained_bytes -= entry->body->bytes;
+            }
             m_entries.erase(token.hash);
             return true;
         }
@@ -583,7 +592,26 @@ public:
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto it{m_entries.find(hash)};
-        if (it != m_entries.end()) EraseEntry(it);
+        if (it == m_entries.end()) return;
+        if (IsActive(it->second.state)) {
+            // DEPLOYMENT-BLOCKER fix (PR #132 review, jarekpiot): an active
+            // entry may have a QUEUED or RUNNING full-body replay. EraseEntry
+            // here would AccountSourceRemove / release the lease while the
+            // worker still owns it -- and a RUNNING full-body replay bypasses
+            // the cancel latch via ProtectsBodyReplay, so it keeps executing
+            // against capacity already reported free. Instead: raise the cancel
+            // latch (a QUEUED job skips on dequeue; a RUNNING protected job runs
+            // to completion), flag terminal-on-connect, and let the
+            // worker-acknowledged Terminal()/Retry() erase it exactly once.
+            // Capacity/resources stay owned until then; the connected hash is
+            // never re-admitted (Retry erases instead of retaining).
+            it->second.terminal_on_connect = true;
+            if (it->second.cancelled) {
+                it->second.cancelled->store(true, std::memory_order_relaxed);
+            }
+            return;
+        }
+        EraseEntry(it);
     }
 
     void Terminal(const Token& token)
@@ -631,6 +659,13 @@ private:
         std::shared_ptr<void> pending_lease;
         std::shared_ptr<std::atomic_bool> cancelled;
         std::vector<std::shared_ptr<void>> owned_resources;
+        //! The block for this hash connected while a full-body replay may still
+        //! be queued/running. We must NOT tear the entry down (that releases a
+        //! lease/capacity the running worker still owns and a running replay
+        //! bypasses the cancel latch via ProtectsBodyReplay); instead terminate
+        //! it at the next worker-acknowledged transition (Terminal/Retry) and
+        //! never re-admit the now-connected hash.
+        bool terminal_on_connect{false};
     };
 
     using Map = std::map<uint256, Entry>;

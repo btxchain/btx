@@ -231,14 +231,51 @@ BOOST_AUTO_TEST_CASE(connected_block_clears_live_lifecycle_generation)
     BOOST_REQUIRE(lifecycle.Start(*token, now));
 
     lifecycle.TerminalConnected(hash);
-    BOOST_CHECK(cancelled->load());
+    // Deployment-blocker fix (PR #132 review): a RUNNING full-body replay
+    // bypasses the cancel latch (ProtectsBodyReplay) and still owns the lease /
+    // capacity. TerminalConnected must therefore raise the terminal signal but
+    // NOT release capacity/lease -- that stays owned until the worker
+    // acknowledges via Terminal()/Retry(). Otherwise the running replay executes
+    // against capacity already reported free.
+    BOOST_CHECK(cancelled->load());               // terminal signal raised
+    BOOST_CHECK(!weak_lease.expired());           // lease NOT released early
+    BOOST_CHECK(lifecycle.StateForTest(hash).has_value()); // entry retained
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 75U); // capacity owned
+
+    lifecycle.Terminal(*token); // worker acknowledges completion -> now cleared
     BOOST_CHECK(weak_lease.expired());
     BOOST_CHECK(!lifecycle.StateForTest(hash));
     BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
     BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
+}
 
-    lifecycle.Terminal(*token); // late completion is a harmless no-op
+// The connected hash must never be re-admitted: a retryable-failure completion
+// arriving after TerminalConnected ERASES the entry rather than retaining it.
+BOOST_AUTO_TEST_CASE(connected_block_retry_does_not_readmit)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const auto block{BlockWithNonce(15)};
+    const uint256 hash{block->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(15, 75, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    auto lease{std::make_shared<int>(1)};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now));
+    lease.reset();
+    BOOST_REQUIRE(lifecycle.Start(*token, now));
+
+    lifecycle.TerminalConnected(hash);            // block connected mid-replay
+    BOOST_REQUIRE(lifecycle.StateForTest(hash).has_value()); // deferred
+
+    // Worker acknowledges a retryable failure: must ERASE (not retain) -- the
+    // hash is on the active chain, so it must not become a retry candidate.
+    BOOST_CHECK(lifecycle.Retry(*token, 60s, now));
     BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 120s).has_value());
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
 }
 
 BOOST_AUTO_TEST_CASE(async_pending_without_body_does_not_block_download)
