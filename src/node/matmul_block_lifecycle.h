@@ -339,7 +339,13 @@ public:
         RetainedBody body{*it->second.body};
         EraseEntry(it);
         body.deferral_count = 0;
-        body.stored_at = now;
+        // Do NOT reset stored_at: the capacity TTL is non-refreshing for a
+        // hash, matching the same-entry Retain() guarantee. Resetting it here
+        // let a repeatedly-deferred (3+ deferrals -> TerminalRequeue) body keep
+        // renewing its freshness and defeat the 45-min PruneExpiredRetained
+        // backstop, pinning retained bytes and skewing oldest-first eviction
+        // against honest bodies (final-lifecycle audit F1). `body` is a copy of
+        // the existing entry, so it already carries the original stored_at.
         body.retry_not_before = now + delay;
         body.idle_retry_bypass_available = false;
         auto [nit, inserted] = m_entries.try_emplace(hash);
