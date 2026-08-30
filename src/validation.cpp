@@ -12419,6 +12419,10 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         consider(idx);
     }
 
+    // A quorum-covered tip with no qualifying competing candidate is the
+    // ordinary steady state, not evidence of a same-height twin (00ea04a6).
+    if (competing.empty()) return nullptr;
+
     if (tip_has_quorum) {
         std::vector<const CBlockIndex*> suffix;
         suffix.reserve(competing.size());
@@ -12456,12 +12460,28 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
                 }
             }
             if (frontier_ahead.empty()) {
+                const bool tip_has_direct_quorum{
+                    node::matmul_trusted::HasQuorum(
+                        tip->GetBlockHash(), tip->nHeight)};
+                const CBlockIndex* same_height_quorum_twin{nullptr};
+                for (const CBlockIndex* idx : competing) {
+                    if (idx->nHeight == tip->nHeight &&
+                        node::matmul_trusted::HasQuorum(
+                            idx->GetBlockHash(), idx->nHeight)) {
+                        same_height_quorum_twin = idx;
+                        break;
+                    }
+                }
                 if (node::matmul_trusted::DualQuorumSameHeightTwinsFailClosed(
-                        tip_has_quorum,
-                        /*competing_same_height_has_quorum=*/true,
+                        tip_has_direct_quorum,
+                        same_height_quorum_twin != nullptr,
                         /*signed_frontier_strictly_ahead=*/false)) {
-                    LogWarning("matmul: dual-quorum same-height twins at tip height %d; fail-closed, stranded-twin guard stays armed\n",
-                               tip->nHeight);
+                    LogWarning(
+                        "matmul: dual-quorum same-height twins at tip height %d "
+                        "(active=%s competing=%s); fail-closed, stranded-twin "
+                        "guard stays armed\n",
+                        tip->nHeight, tip->GetBlockHash().ToString(),
+                        same_height_quorum_twin->GetBlockHash().ToString());
                 }
                 return nullptr;
             }

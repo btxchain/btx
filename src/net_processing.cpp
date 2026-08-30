@@ -3696,11 +3696,8 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
             wanted = acq->pprev->GetBlockHash();
         }
     }
-    const bool idle_catchup{
-        m_matmul_pending_verifications.load(std::memory_order_relaxed) == 0 &&
-        m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) == 0};
     const auto retry{m_matmul_block_lifecycle.NextRetry(
-        wanted, node::MatMulBlockLifecycle::Clock::now(), idle_catchup)};
+        wanted, node::MatMulBlockLifecycle::Clock::now())};
     if (!retry) return;
     candidate_hash = retry->first;
     candidate = retry->second;
