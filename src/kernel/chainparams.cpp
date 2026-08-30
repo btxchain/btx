@@ -1043,6 +1043,11 @@ public:
                 // tip the network agrees on. Compiled assumeutxo at this
                 // height is allowed only because this checkpoint matches.
                 {201500, uint256{"3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c"}},
+                // 0.34.5 release base. Both controlled nodes agree on this hash;
+                // ~1,555 blocks below the network header tip, far beyond
+                // park_depth 6 -> majority-final. Required so the 203000
+                // assumeutxo base below is allowed (issue 127 rule).
+                {203000, uint256{"89cfe9904a27be73467c25044e3c13d97bae512e02e4172def1a6c29f87999ef"}},
             }
         };
         m_assumeutxo_data = {
@@ -1242,6 +1247,17 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"4743962b836a3ed1e541bb6da747fc28a7d98926b5d6bc8e23928ed3b1981d93"}},
                 .m_chain_tx_count = 301'211,
                 .blockhash = consteval_ctor(uint256{"3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c"}),
+                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+            },
+            {
+                // main assumeutxo snapshot at height 203'000 (0.34.5 release
+                // base). Post-split majority chain both controlled nodes agree
+                // on; checkpointed above. Shielded pool closed at 199300, so the
+                // frozen-section pin matches 201500's.
+                .height = 203'000,
+                .hash_serialized = AssumeutxoHash{uint256{"6754314323ab5575c0069b7973ac11d36fa6dce43c5f451df3808402a7962040"}},
+                .m_chain_tx_count = 302'712,
+                .blockhash = consteval_ctor(uint256{"89cfe9904a27be73467c25044e3c13d97bae512e02e4172def1a6c29f87999ef"}),
                 .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
             },
             // 199299 (f12a27d0) and 199300 (ff80e629) were dumped from the
