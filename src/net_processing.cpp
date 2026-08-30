@@ -6090,6 +6090,19 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         if (const CBlockIndex* const acq_frontier{
                 FindLowestUnverifiedAcquiredBody(m_chainman)};
             acq_frontier != nullptr &&
+            // AUTO-RECOVERY (cmpl-migration F2): only apply the tight root-first
+            // clamp while the frontier body is PRESENT-but-unverified -- that is
+            // the churn 2f50a192 targeted (a body on disk while getdata chased
+            // higher covered bodies). If the frontier body is MISSING, clamping
+            // every escape-active peer to this single global frontier+16 lets
+            // ONE dead / header-only / body-unserved tower (m_best_header) pin
+            // the fetch window and starve every OTHER registered tower, which
+            // can never assemble its full verified suffix and migrate. When the
+            // frontier is missing we widen the window so the missing frontier
+            // AND the other towers' bodies are requested -- the node fetches its
+            // way out instead of waiting for manual intervention. Bounded churn
+            // (retained-store caps); the clamp re-engages once a body lands.
+            (acq_frontier->nStatus & BLOCK_HAVE_DATA) != 0 &&
             acq_frontier->nHeight + ACQUISITION_ESCAPE_FETCH_LOOKAHEAD <
                 nWindowEnd) {
             LogDebug(BCLog::NET,
