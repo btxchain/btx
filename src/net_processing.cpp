@@ -8073,6 +8073,13 @@ void PeerManagerImpl::BlockConnected(
     // helping us do background IBD as having a stale tip.
     m_last_tip_update = GetTime<std::chrono::seconds>();
 
+    // Once a block is active, retained verification state for that hash is
+    // terminal. This also cancels a live generation, preventing a late
+    // callback or idle retry from re-admitting an already-connected body.
+    if (role != ChainstateRole::BACKGROUND) {
+        m_matmul_block_lifecycle.TerminalConnected(pindex->GetBlockHash());
+    }
+
     // In case the dynamic timeout was doubled once or more, reduce it slowly back to
     // its current phase floor.
     const auto phase_floor = MinBlockStallingTimeoutForTip(pindex, m_chainparams.GetConsensus());

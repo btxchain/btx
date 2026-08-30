@@ -510,6 +510,18 @@ public:
         }
     }
 
+    /**
+     * Active-chain connection is terminal for every lifecycle generation.
+     * Cancel live work and release the retained body so a late callback or
+     * retry scan cannot re-admit an already-connected block.
+     */
+    void TerminalConnected(const uint256& hash)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it != m_entries.end()) EraseEntry(it);
+    }
+
     void Terminal(const Token& token)
     {
         std::lock_guard<std::mutex> lock(m_mutex);

@@ -209,6 +209,33 @@ BOOST_AUTO_TEST_CASE(park_releases_cap_and_terminal_frees_bytes)
     BOOST_CHECK_EQUAL(lifecycle.RetainedCountForTest(), 0U);
 }
 
+BOOST_AUTO_TEST_CASE(connected_block_clears_live_lifecycle_generation)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const auto block{BlockWithNonce(14)};
+    const uint256 hash{block->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(14, 75, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    auto lease{std::make_shared<int>(1)};
+    std::weak_ptr<int> weak_lease{lease};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now));
+    lease.reset();
+    BOOST_REQUIRE(lifecycle.Start(*token, now));
+
+    lifecycle.TerminalConnected(hash);
+    BOOST_CHECK(cancelled->load());
+    BOOST_CHECK(weak_lease.expired());
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
+
+    lifecycle.Terminal(*token); // late completion is a harmless no-op
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+}
+
 BOOST_AUTO_TEST_CASE(async_pending_without_body_does_not_block_download)
 {
     // FindNextBlocks invariant: async-pending is a VERIFY state. A marker
