@@ -283,6 +283,40 @@ BOOST_AUTO_TEST_CASE(connected_block_clears_live_lifecycle_generation)
     BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
 }
 
+// A terminal_on_connect entry that goes stale (worker still in flight after the
+// 10-min window) must be ERASED by stale expiry, not flipped to a retryable
+// body -- otherwise NextRetry re-admits an already-connected hash and reopens
+// the lease/capacity double-book the deferred-erase fix closed.
+BOOST_AUTO_TEST_CASE(connected_block_stale_expiry_erases_not_readmits)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const auto block{BlockWithNonce(21)};
+    const uint256 hash{block->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(21, 75, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    auto lease{std::make_shared<int>(1)};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now));
+    lease.reset();
+    BOOST_REQUIRE(lifecycle.Start(*token, now));
+
+    lifecycle.TerminalConnected(hash); // block connected while replay in flight
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 75U); // still owned
+
+    // Worker still has not acknowledged 11 min later: stale expiry fires.
+    const auto later{now + 11min};
+    BOOST_CHECK_EQUAL(lifecycle.ExpireStaleAttempts(later), 1U);
+    // Erased with accounting released -- NOT left as a retryable body.
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForTest(), 0U);
+    BOOST_CHECK_EQUAL(lifecycle.RetainedBytesForTest(), 0U);
+    // And it is never handed back out for re-admission.
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, later).has_value());
+}
+
 // The connected hash must never be re-admitted: a retryable-failure completion
 // arriving after TerminalConnected ERASES the entry rather than retaining it.
 BOOST_AUTO_TEST_CASE(connected_block_retry_does_not_readmit)

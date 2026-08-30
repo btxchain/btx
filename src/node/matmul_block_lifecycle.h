@@ -191,11 +191,21 @@ public:
             }
             it->second.pending_lease.reset();
             it->second.cancelled.reset();
-            if (it->second.body) {
+            // A block that connected while this replay was in flight
+            // (terminal_on_connect) must never be flipped back to a retryable
+            // body by stale expiry -- that reopens the re-admission the deferred
+            // erase closed. Release its accounting and erase, exactly as the
+            // worker-acknowledged Retry()/Terminal() would.
+            if (it->second.body && !it->second.terminal_on_connect) {
                 it->second.state = State::TRANSIENT_FAILURE;
                 it->second.updated_at = now;
                 ++it;
             } else {
+                if (it->second.body) {
+                    AccountSourceRemove(it->second.body->source_netgroup,
+                                        it->second.body->bytes);
+                    m_retained_bytes -= it->second.body->bytes;
+                }
                 it = m_entries.erase(it);
             }
         }
@@ -346,7 +356,10 @@ public:
         auto selected{m_entries.end()};
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             const Entry& entry{it->second};
-            if (!entry.body || IsActive(entry.state)) {
+            // Never re-admit a hash whose block already connected while its
+            // replay was in flight; such an entry is awaiting worker-ack erase.
+            if (!entry.body || IsActive(entry.state) ||
+                entry.terminal_on_connect) {
                 continue;
             }
             const bool retry_due{now >= entry.body->retry_not_before};
@@ -650,8 +663,9 @@ public:
             // worker still owns it -- and a RUNNING full-body replay bypasses
             // the cancel latch via ProtectsBodyReplay, so it keeps executing
             // against capacity already reported free. Instead: raise the cancel
-            // latch (a QUEUED job skips on dequeue; a RUNNING protected job runs
-            // to completion), flag terminal-on-connect, and let the
+            // latch (a header-only QUEUED job skips on dequeue; a full-body
+            // QUEUED or RUNNING replay is ProtectsBodyReplay, so it runs to
+            // completion), flag terminal-on-connect, and let the
             // worker-acknowledged Terminal()/Retry() erase it exactly once.
             // Capacity/resources stay owned until then; the connected hash is
             // never re-admitted (Retry erases instead of retaining).
@@ -756,11 +770,13 @@ private:
         it->second.pending_lease.reset();
         it->second.cancelled.reset();
         it->second.owned_resources.clear();
-        if (it->second.body) {
+        // See ExpireStaleAttempts: a terminal_on_connect entry is erased (with
+        // accounting) rather than flipped to a retryable body.
+        if (it->second.body && !it->second.terminal_on_connect) {
             it->second.state = State::TRANSIENT_FAILURE;
             it->second.updated_at = now;
         } else {
-            m_entries.erase(it);
+            EraseEntry(it);
         }
     }
 
