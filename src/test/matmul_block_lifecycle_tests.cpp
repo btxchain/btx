@@ -120,6 +120,40 @@ BOOST_AUTO_TEST_CASE(retry_cooldown_prevents_header_only_hot_loop)
     BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(wake_retry_once_does_not_erase_cooldown)
+{
+    using Reason = node::MatMulBlockLifecycle::RetryWakeReason;
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "5").value()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(7, 50, now), now));
+
+    // A failed re-admission installs a 60s cooldown.
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 30s).has_value());
+
+    // First causal wake for a reason pulls the retry deadline to now.
+    BOOST_CHECK(lifecycle.WakeRetryOnce(hash, Reason::RECOVERY_ROOT, now + 30s));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 30s).has_value());
+
+    // Re-arm the cooldown as another re-admission would, then hammer the same
+    // reason: it must NOT overwrite the cooldown (the mainnet-201633 wedge).
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now + 30s));
+    for (int i = 0; i < 5; ++i) {
+        BOOST_CHECK(
+            !lifecycle.WakeRetryOnce(hash, Reason::RECOVERY_ROOT, now + 31s + std::chrono::seconds{i}));
+    }
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 60s).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 30s + 60s).has_value());
+
+    // A DISTINCT causal event still wakes the body exactly once.
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now + 30s + 60s));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 30s + 90s).has_value());
+    BOOST_CHECK(lifecycle.WakeRetryOnce(hash, Reason::TRUSTED_AUTHORITY, now + 30s + 90s));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 30s + 90s).has_value());
+}
+
 BOOST_AUTO_TEST_CASE(repeated_deferral_terminal_requeues)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};

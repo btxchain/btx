@@ -6084,12 +6084,17 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             // retry). Re-getdata of this hash cannot connect until the
             // scheduler re-admits. GETMMATTEST the retained hash so
             // quorum can lift ConnectTip without waiting for the 1s retry loop.
-            // Local signers never arm signed-frontier catch-up, so also
-            // RefreshRetry(0) when yielding to the longer attested GPU.
+            // Local signers never arm signed-frontier catch-up, so also wake
+            // the retained body when yielding to the longer attested GPU. Wake
+            // once per selection: a level-triggered RefreshRetry(0) here reset
+            // retry_not_before on every peer scan, erasing the 60s admission
+            // cooldown and livelocking re-admission at 1Hz when admission kept
+            // returning HEADER_ONLY (mainnet-201633 wedge, dev a16476cf).
             if (node::matmul_trusted::AttestorYieldMustReadmitRetainedBody(
                     attestor_yielding, true, catch_up_target)) {
-                (void)m_matmul_block_lifecycle.RefreshRetry(
-                    missing_hash, std::chrono::seconds{0});
+                (void)m_matmul_block_lifecycle.WakeRetryOnce(
+                    missing_hash,
+                    node::MatMulBlockLifecycle::RetryWakeReason::RECOVERY_ROOT);
                 m_need_activate_best_chain = true;
             }
             if (this_peer_frontier_source ||
@@ -11398,13 +11403,15 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         // the same hash after MMATTEST cleared the in-flight map and drain
         // the archive's 16-token burst so the deferred child was rate-limited
         // forever (qualifier linear-chain stall at the next height).
-        // RefreshRetry(0) so a retained body that already has authority is
-        // re-admitted instead of sitting in root_retained_body.
+        // Wake the retained body once when authority is observed, instead of
+        // resetting its cooldown on every GETMMATTEST selection (level-
+        // triggered RefreshRetry(0) here fed the same 1Hz re-admission wedge).
         if (index != nullptr &&
             m_chainman.IndexHasTrustedMatMulAuthority(index)) {
             m_matmul_attestation_requested.erase(hash);
-            (void)m_matmul_block_lifecycle.RefreshRetry(
-                hash, std::chrono::seconds{0});
+            (void)m_matmul_block_lifecycle.WakeRetryOnce(
+                hash,
+                node::MatMulBlockLifecycle::RetryWakeReason::TRUSTED_AUTHORITY);
             return;
         }
         const bool parked{
@@ -19206,8 +19213,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 // Same-netgroup HEADER_ONLY cooldown must not keep the now-
                 // authenticated hash unfetchable after the skip set is cleared.
                 ClearMatMulRCBodyDeferred(hash);
-                (void)m_matmul_block_lifecycle.RefreshRetry(
-                    hash, std::chrono::seconds{0});
+                (void)m_matmul_block_lifecycle.WakeRetryOnce(
+                    hash,
+                    node::MatMulBlockLifecycle::RetryWakeReason::TRUSTED_AUTHORITY);
                 wake_block_fetch = true;
                 // Wake any parked trusted-mirror verify job. Do this outside
                 // cs_main: NotifyQuorumReady only touches the worker mutex.
