@@ -19789,6 +19789,21 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
         tip != nullptr &&
         GetConsensus().IsShieldedPoolDisabled(tip->nHeight) &&
         !m_options.force_shielded_state};
+    // Because the closed pin (94343b76...) is a compiled consensus constant,
+    // the pin comparison below is state-INDEPENDENT for a closed-pool snapshot:
+    // it can no longer catch a forged section. Enforce the canonical zero-count
+    // frozen encoding here (IsClosedFrozenSection is otherwise only checked on
+    // the dump side) so a forged closed section -- non-zero commitment /
+    // nullifier / balance / registry counts -- is REJECTED, not loaded and
+    // persisted under a "94343b76-verified" provenance pin (snapfix-audit F1).
+    // Combined with the existing empty-recent-output-window check, this makes
+    // the accepted state provably the canonical empty closed state that the
+    // frozen pin anchors. Still fail-closed: no shielded spend is accepted past
+    // the disable height, so this is defense-in-depth, not a theft window.
+    if (pool_closed_at_snapshot && !header.IsClosedFrozenSection()) {
+        return fail("BTX closed-pool shielded snapshot section is not the "
+                    "canonical zero-count frozen encoding (forged section refused)");
+    }
     const auto accepted_state_pin =
         pool_closed_at_snapshot ? ComputeClosedShieldedSnapshotStatePin()
                                 : ComputeShieldedSnapshotStatePin();
