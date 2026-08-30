@@ -11400,6 +11400,17 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
 void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
+    // A BLOCK_FAILED_MASK block is never a connectable candidate and must never
+    // be re-added to setBlockIndexCandidates nor auto-unparked. Without this the
+    // InvalidateBlock cleanup re-scan re-fed an operator-invalidated branch back
+    // in (empty-set PruneBlockIndexCandidates abort enabler), and the deep-fork
+    // auto-resolve unpark below could retire the depth-6 park on a parked+failed
+    // branch (audit gap-hunt F1/F3). reconsiderblock clears the FAILED bits
+    // before re-adding, so legitimate recovery is unaffected. Upstream parity:
+    // the candidate gate excludes failed blocks (IsValid checks FAILED_MASK).
+    if (pindex != nullptr && (pindex->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return;
+    }
     const CBlockIndex* const tip{m_chain.Tip()};
     // Active-chain ancestors are never connectable candidates (strictly less
     // work than tip). Running parked / defer / TrustedMirror / unique-attested
