@@ -1108,6 +1108,13 @@ struct Peer {
     uint32_t m_dup_header_msgs GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
     uint64_t m_dup_header_skipped_bytes GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
     std::string m_dup_header_last_action GUARDED_BY(NetEventsInterface::g_msgproc_mutex){"none"};
+    /** Highest batch terminal height seen on the duplicate/no-progress path.
+     *  Legit header-sync continuation advances this (it delivers headers above
+     *  best_header); the Issue #107 re-arm abuse re-sends an all-known batch
+     *  whose terminal is pinned at (or below) our stuck best_header and can
+     *  never advance it. A solicited replay batch that does NOT advance this
+     *  is therefore counted rather than exempted (closes the CPU/log burn). */
+    int m_dup_header_max_terminal GUARDED_BY(NetEventsInterface::g_msgproc_mutex){-1};
 
     /** Protects m_headers_sync **/
     Mutex m_headers_sync_mutex;
@@ -9549,7 +9556,7 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
 }
 
 [[nodiscard]] static DupHeaderDisposition NoteDuplicateHeadersNoProgress(
-    CNode& pfrom, Peer& peer, size_t n_count, bool solicited,
+    CNode& pfrom, Peer& peer, size_t n_count, [[maybe_unused]] bool solicited,
     bool have_headers_sync, int tip_height, int last_header_height)
     EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
 {
@@ -9558,8 +9565,22 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
         n_count == 1 && last_header_height >= 0 && tip_height >= 0 &&
         tip_height - last_header_height <= DUP_HEADER_NEAR_TIP_BLOCKS};
     const bool replay_batch{n_count >= DUP_HEADER_REPLAY_MIN_COUNT};
-    if (pfrom.HasPermission(NetPermissionFlags::NoBan) || solicited ||
-        have_headers_sync || !replay_batch || near_tip_announcement) {
+    // A batch whose terminal rises above every terminal we have seen on this
+    // path made real forward progress: legit header-sync continuation always
+    // does (it delivers headers ABOVE best_header, so this all-known/no-progress
+    // branch only ever sees it as best_header itself climbs). The Issue #107
+    // re-arm abuse, by contrast, re-sends an all-known batch whose terminal is
+    // pinned at (or below) our stuck best_header, so it can never advance this
+    // high-water. We therefore no longer blanket-exempt `solicited`: a solicited
+    // replay batch that does NOT advance the terminal is counted, which is what
+    // closes the continuation CPU/log burn (a solicited peer could otherwise
+    // pump full known 2000-header batches forever without earning a ban). The
+    // first batch at any terminal is still exempt (advances from the prior
+    // high-water), so a one-off duplicate is never penalized.
+    const bool terminal_advanced{last_header_height > peer.m_dup_header_max_terminal};
+    if (terminal_advanced) peer.m_dup_header_max_terminal = last_header_height;
+    if (pfrom.HasPermission(NetPermissionFlags::NoBan) || have_headers_sync ||
+        !replay_batch || near_tip_announcement || terminal_advanced) {
         peer.m_dup_header_window_start = {};
         peer.m_dup_header_bytes = 0;
         peer.m_dup_header_msgs = 0;
