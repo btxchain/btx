@@ -217,6 +217,7 @@ public:
                    m_max_retained_bytes_per_source) {
             auto victim{OldestEvictableForSource(hash, src)};
             if (victim == m_entries.end()) return false;
+            RecordEvictionTombstone(victim, now);
             EraseEntry(victim);
         }
         while (RetainedCount() - old_count + 1 > m_max_retained_count ||
@@ -224,23 +225,43 @@ public:
                    m_max_retained_bytes) {
             auto victim{OldestEvictable(hash)};
             if (victim == m_entries.end()) return false;
+            RecordEvictionTombstone(victim, now);
             EraseEntry(victim);
         }
 
         auto [it, inserted] = m_entries.try_emplace(hash);
         Entry& entry{it->second};
-        const auto original_stored_at{
-            entry.body ? entry.body->stored_at : now};
-        const bool idle_retry_bypass_available{
+        auto original_stored_at{entry.body ? entry.body->stored_at : now};
+        bool idle_retry_bypass_available{
             entry.body ? entry.body->idle_retry_bypass_available
                        : body.idle_retry_bypass_available};
+        auto original_deferral_count{
+            entry.body ? entry.body->deferral_count : body.deferral_count};
+        if (!entry.body) {
+            // Fresh insert. If this hash was recently EVICTED under capacity
+            // pressure, its tombstone carries the original freshness so an
+            // evict+re-deliver cannot refresh the non-refreshing capacity TTL,
+            // reset the deferral count below the TerminalRequeue threshold, or
+            // re-grant a consumed idle bypass (cmpl-netdos F1).
+            if (auto ts = m_eviction_tombstones.find(hash);
+                ts != m_eviction_tombstones.end()) {
+                if (now - ts->second.tombstoned_at <= m_retained_max_age) {
+                    original_stored_at = ts->second.stored_at;
+                    original_deferral_count = ts->second.deferral_count;
+                    idle_retry_bypass_available =
+                        ts->second.idle_retry_bypass_available;
+                }
+                m_eviction_tombstones.erase(ts);
+            }
+        }
         if (entry.body) {
             AccountSourceRemove(entry.body->source_netgroup, entry.body->bytes);
             m_retained_bytes -= entry.body->bytes;
         }
         // Capacity TTL is non-refreshing for a hash: retries or repeated
-        // deliveries cannot pin retained bytes forever.
+        // deliveries (including evict+re-deliver) cannot pin retained bytes.
         body.stored_at = original_stored_at;
+        body.deferral_count = original_deferral_count;
         // A duplicate delivery for the same hash must not restore a bypass
         // already consumed by the scheduler.
         body.idle_retry_bypass_available = idle_retry_bypass_available;
@@ -669,6 +690,15 @@ private:
                 ++it;
             }
         }
+        // Drop eviction tombstones past their TTL (same age bound as bodies).
+        for (auto it = m_eviction_tombstones.begin();
+             it != m_eviction_tombstones.end();) {
+            if (now - it->second.tombstoned_at > m_retained_max_age) {
+                it = m_eviction_tombstones.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 
     size_t RetainedCount() const
@@ -773,6 +803,43 @@ private:
 
     mutable std::mutex m_mutex;
     Map m_entries;
+    // Eviction tombstones (cmpl-netdos F1): when a body is evicted under
+    // CAPACITY pressure (not terminated), its freshness is remembered here so a
+    // re-delivery of the same hash cannot reset stored_at / deferral_count / a
+    // consumed idle bypass and thereby refresh the non-refreshing capacity TTL
+    // (pinning attacker bodies and skewing oldest-first eviction against honest
+    // ones). Bounded: pruned on the same m_retained_max_age as retained bodies
+    // and capped at kMaxEvictionTombstones (oldest dropped).
+    struct EvictionTombstone {
+        Clock::time_point stored_at;
+        uint32_t deferral_count{0};
+        bool idle_retry_bypass_available{false};
+        Clock::time_point tombstoned_at;
+    };
+    static constexpr size_t kMaxEvictionTombstones{4096};
+    std::map<uint256, EvictionTombstone> m_eviction_tombstones;
+    void RecordEvictionTombstone(Map::iterator victim, Clock::time_point now)
+    {
+        if (victim == m_entries.end() || !victim->second.body) return;
+        if (m_eviction_tombstones.size() >= kMaxEvictionTombstones) {
+            // Drop the oldest tombstone to stay bounded.
+            auto oldest{m_eviction_tombstones.begin()};
+            for (auto it = m_eviction_tombstones.begin();
+                 it != m_eviction_tombstones.end(); ++it) {
+                if (it->second.tombstoned_at < oldest->second.tombstoned_at) {
+                    oldest = it;
+                }
+            }
+            if (oldest != m_eviction_tombstones.end()) {
+                m_eviction_tombstones.erase(oldest);
+            }
+        }
+        m_eviction_tombstones[victim->first] = EvictionTombstone{
+            victim->second.body->stored_at,
+            victim->second.body->deferral_count,
+            victim->second.body->idle_retry_bypass_available,
+            now};
+    }
     size_t m_retained_bytes{0};
     std::map<uint64_t, size_t> m_retained_count_by_source;
     std::map<uint64_t, size_t> m_retained_bytes_by_source;

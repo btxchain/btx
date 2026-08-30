@@ -9639,12 +9639,20 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
     // pump full known 2000-header batches forever without earning a ban). The
     // first batch at any terminal is still exempt (advances from the prior
     // high-water), so a one-off duplicate is never penalized.
+    // Only a trusted (NoBan) or in-band low-work-headers-sync peer CLEARS the
+    // accumulating no-progress window. We deliberately do NOT clear it on a
+    // terminal advance: an all-known batch's terminal is bounded by our own
+    // best_header, and clearing on any advance let an attacker interleave a
+    // 1-header "advance" before each full 2000-header all-known batch to zero
+    // the counters and pump CheckHeadersPoW forever (cmpl-netdos F2, the
+    // fe772553 residual). Every all-known replay batch is now counted; an
+    // HONEST peer sends at most ~1-2 such batches per >=30s solicitation cycle,
+    // so the DUP_HEADER_NO_PROGRESS_WINDOW expiry keeps it far under the cap,
+    // while a fast attacker accumulates to the disconnect threshold. The
+    // per-peer high-water is retained only as an operator diagnostic.
     const bool terminal_advanced{last_header_height > peer.m_dup_header_max_terminal};
     if (terminal_advanced) peer.m_dup_header_max_terminal = last_header_height;
-    // Genuine forward progress (terminal_advanced) or a trusted / in-band-sync
-    // peer CLEARS the accumulating no-progress window.
-    if (pfrom.HasPermission(NetPermissionFlags::NoBan) || have_headers_sync ||
-        terminal_advanced) {
+    if (pfrom.HasPermission(NetPermissionFlags::NoBan) || have_headers_sync) {
         peer.m_dup_header_window_start = {};
         peer.m_dup_header_bytes = 0;
         peer.m_dup_header_msgs = 0;
