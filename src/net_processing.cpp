@@ -8101,12 +8101,11 @@ void PeerManagerImpl::BlockConnected(
         // was re-retained for the same hash on the new active chain (cancelling
         // live valid work). Only terminate when the block is still on the active
         // chain at the moment the callback actually runs.
-        bool still_active{false};
-        {
-            LOCK(cs_main);
-            still_active = m_chainman.ActiveChain().Contains(pindex);
-        }
-        if (still_active) {
+        // Keep the membership check and lifecycle erase atomic with respect to
+        // reorg-driven retention for this hash. Otherwise a reorg can occur
+        // after Contains() but before TerminalConnected() and recreate the race.
+        LOCK(cs_main);
+        if (m_chainman.ActiveChain().Contains(pindex)) {
             m_matmul_block_lifecycle.TerminalConnected(pindex->GetBlockHash());
         }
     }
