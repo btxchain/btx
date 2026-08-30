@@ -12643,6 +12643,7 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
     const int32_t slack{m_options.deep_fork_auto_resolve_height_slack};
     const int64_t now_s{GetTime()};
     bool seen_live{true};
+    bool have_first_seen{true}; // false if ANY suffix block lacks a first-seen stamp
     int64_t first_seen_min{std::numeric_limits<int64_t>::max()};
     int64_t first_seen_max{std::numeric_limits<int64_t>::min()};
     v.suffix_exact_replayed = true;
@@ -12664,20 +12665,43 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
                 b->nActiveTipHeightAtFirstSeen, b->nHeight, slack)) {
             seen_live = false;
         }
-        if (b->nTimeReceived <= 0) { // unknown first-seen (disk load / restart)
-            return finish(false);
+        if (b->nTimeReceived <= 0) {
+            // Unknown first-seen (disk load / restart / bulk acquisition).
+            // This disqualifies ONLY the observation (seen_live/sustained)
+            // path -- it must NOT short-circuit the whole verdict. The
+            // suffix_exact_replayed path rests on local byte-exact ExactReplay
+            // of every suffix body, not on first-seen timing; a missing stamp
+            // says nothing about it. Returning here was the final deadlock:
+            // every binary upgrade RESTARTS the node, and a stranded node's
+            // re-acquired suffix bodies carry no live receive time, so the
+            // exact-replay migration path (item 7) could never be reached
+            // after a restart -- exactly the rtx6000/macpro2 case it exists
+            // for. Forge-resistance is unaffected: a forged/header-only tower
+            // still lacks BLOCK_EXACT_REPLAY_VERIFIED on some suffix block and
+            // stays parked.
+            seen_live = false;
+            have_first_seen = false;
+        } else {
+            first_seen_min = std::min(first_seen_min, b->nTimeReceived);
+            first_seen_max = std::max(first_seen_max, b->nTimeReceived);
         }
-        first_seen_min = std::min(first_seen_min, b->nTimeReceived);
-        first_seen_max = std::max(first_seen_max, b->nTimeReceived);
     }
     v.seen_live = seen_live;
 
-    const int64_t span_s{
-        first_seen_max >= first_seen_min ? first_seen_max - first_seen_min : -1};
-    v.sustained = kernel::DeepForkAutoResolveSustained(
-        span_s, now_s - first_seen_max,
-        m_options.deep_fork_auto_resolve_sustain_s,
-        m_options.deep_fork_auto_resolve_freshness_s);
+    // Only the observation path consumes span/freshness. With any missing
+    // stamp the span is undefined and the fork cannot be called "sustained"
+    // (and seen_live is already false above, so the observation path fails
+    // closed regardless). Guarding the sentinels also avoids now_s - INT64_MIN
+    // overflow.
+    if (have_first_seen && first_seen_max >= first_seen_min) {
+        const int64_t span_s{first_seen_max - first_seen_min};
+        v.sustained = kernel::DeepForkAutoResolveSustained(
+            span_s, now_s - first_seen_max,
+            m_options.deep_fork_auto_resolve_sustain_s,
+            m_options.deep_fork_auto_resolve_freshness_s);
+    } else {
+        v.sustained = false;
+    }
 
     // FINAL GATE. Two independent sufficient paths, every other gate above
     // still required:
