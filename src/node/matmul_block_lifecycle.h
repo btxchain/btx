@@ -143,6 +143,7 @@ public:
         entry.updated_at = now;
         entry.pending_lease.reset();
         entry.cancelled = std::make_shared<std::atomic_bool>(false);
+        entry.terminated.reset();
         entry.generation = NextGeneration();
         return Token{hash, entry.generation};
     }
@@ -336,13 +337,15 @@ public:
     bool Queue(const Token& token, std::shared_ptr<void> pending_lease,
                const std::shared_ptr<std::atomic_bool>& cancelled,
                std::vector<std::shared_ptr<void>> owned_resources = {},
-               Clock::time_point now = Clock::now())
+               Clock::time_point now = Clock::now(),
+               const std::shared_ptr<std::atomic_bool>& terminated = {})
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         Entry* entry{Find(token)};
         if (!entry || entry->state != State::ADMISSION_PENDING) return false;
         entry->pending_lease = std::move(pending_lease);
         entry->cancelled = cancelled;
+        entry->terminated = terminated;
         entry->owned_resources = std::move(owned_resources);
         entry->state = State::QUEUED;
         entry->updated_at = now;
@@ -402,9 +405,12 @@ public:
             ++m_progress.verify_completed;
         }
         entry->pending_lease.reset();
+        const bool terminated{
+            entry->terminated &&
+            entry->terminated->load(std::memory_order_relaxed)};
         entry->cancelled.reset();
         entry->owned_resources.clear();
-        if (!entry->body) {
+        if (!entry->body || terminated) {
             m_entries.erase(token.hash);
             return true;
         }
@@ -512,14 +518,36 @@ public:
 
     /**
      * Active-chain connection is terminal for every lifecycle generation.
-     * Cancel live work and release the retained body so a late callback or
-     * retry scan cannot re-admit an already-connected block.
+     * Raise terminal cancellation for the live generation (a body-holding
+     * ExactReplay honours this even though it ignores speculative `cancelled`).
+     *
+     * When a verify worker still owns the attempt (worker_will_ack), the
+     * pending lease and retained resources are HELD here and released only when
+     * the worker acknowledges termination via its terminal callback, so compute
+     * capacity is never released out from under an in-flight replay. When no
+     * worker can acknowledge (no live device work, ADMISSION_PENDING before the
+     * job is enqueued, or the worker already relinquished the job), cleanup
+     * completes immediately so a held (TERMINATING) lease cannot stick.
      */
-    void TerminalConnected(const uint256& hash)
+    void TerminalConnected(const uint256& hash, bool worker_will_ack = false)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto it{m_entries.find(hash)};
-        if (it != m_entries.end()) EraseEntry(it);
+        if (it == m_entries.end()) return;
+        Entry& entry{it->second};
+        if (entry.cancelled) {
+            entry.cancelled->store(true, std::memory_order_relaxed);
+        }
+        if (entry.terminated) {
+            entry.terminated->store(true, std::memory_order_relaxed);
+        }
+        if (worker_will_ack && IsActive(entry.state)) {
+            // Hold the lease + retained resources until the worker's terminal
+            // acknowledgement releases them exactly once. Do NOT reset
+            // pending_lease / owned_resources here.
+            return;
+        }
+        EraseEntry(it);
     }
 
     void Terminal(const Token& token)
@@ -552,6 +580,22 @@ public:
         return m_retained_bytes;
     }
 
+    bool TerminatedFlagSetForTest(const uint256& hash) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        return it != m_entries.end() && it->second.terminated &&
+               it->second.terminated->load(std::memory_order_relaxed);
+    }
+
+    bool PendingLeaseHeldForTest(const uint256& hash) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        return it != m_entries.end() &&
+               static_cast<bool>(it->second.pending_lease);
+    }
+
     size_t RetainedCountForSourceForTest(uint64_t netgroup) const
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -566,6 +610,10 @@ private:
         std::optional<RetainedBody> body;
         std::shared_ptr<void> pending_lease;
         std::shared_ptr<std::atomic_bool> cancelled;
+        //! Terminal (block-connected) cancellation shared with the verify
+        //! worker Job. Distinct from `cancelled` (speculative): a body-holding
+        //! ExactReplay ignores `cancelled` but MUST abort on terminal.
+        std::shared_ptr<std::atomic_bool> terminated;
         std::vector<std::shared_ptr<void>> owned_resources;
     };
 
@@ -712,6 +760,9 @@ private:
     {
         if (it->second.cancelled) {
             it->second.cancelled->store(true, std::memory_order_relaxed);
+        }
+        if (it->second.terminated) {
+            it->second.terminated->store(true, std::memory_order_relaxed);
         }
         if (it->second.body) {
             AccountSourceRemove(it->second.body->source_netgroup,

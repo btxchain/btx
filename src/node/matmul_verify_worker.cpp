@@ -287,6 +287,31 @@ bool MatMulVerifyWorker::CanHandoffAuthenticatedTip(
     return false;
 }
 
+bool MatMulVerifyWorker::TerminalCancel(const uint256& hash)
+{
+    // Terminal (block-connected) cancellation. Unlike Cancel(), this overrides
+    // ProtectsBodyReplay: a body-holding ExactReplay for an already-connected
+    // block MUST stop. It only raises the terminal signal and wakes the loop /
+    // in-flight replay; it performs no waiting and runs no callbacks, so it is
+    // safe under cs_main. The worker thread performs teardown and the terminal
+    // lifecycle acknowledgement; awaiting-quorum jobs are drained by
+    // TakeExpiredAwaitingQuorum once cancelled is raised.
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it{m_pending.find(hash)};
+    if (it == m_pending.end()) return false;
+    const auto pending{it->second};
+    if (pending->job.terminal_cancelled) {
+        pending->job.terminal_cancelled->store(
+            true, std::memory_order_relaxed);
+    }
+    if (pending->job.cancelled) {
+        pending->job.cancelled->store(true, std::memory_order_relaxed);
+    }
+    matmul::v4::rc::GetRCAcceleratorScheduler().NotifyCancellation();
+    m_cv.notify_all();
+    return true;
+}
+
 bool MatMulVerifyWorker::Cancel(const uint256& hash)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -629,10 +654,18 @@ void MatMulVerifyWorker::FinishRetryablePending(
     const std::shared_ptr<Pending>& pending)
 {
     std::vector<std::function<void()>> callbacks;
+    const bool terminal{
+        pending->job.terminal_cancelled &&
+        pending->job.terminal_cancelled->load(std::memory_order_relaxed)};
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        ArmCancelRetryBackoff(pending->job.GetHeader().GetHash());
-        if (pending->job.retryable_failure) {
+        if (!terminal) {
+            ArmCancelRetryBackoff(pending->job.GetHeader().GetHash());
+        }
+        if (terminal && pending->job.on_terminal_cancelled) {
+            callbacks.push_back(
+                std::move(pending->job.on_terminal_cancelled));
+        } else if (pending->job.retryable_failure) {
             callbacks.push_back(std::move(pending->job.retryable_failure));
         }
         std::move(pending->follower_retryable_failures.begin(),
@@ -712,10 +745,16 @@ void MatMulVerifyWorker::WorkerLoop()
         if (job.on_started) job.on_started();
         const auto finish_retryable_without_verdict = [&] {
             std::vector<std::function<void()>> callbacks;
+            const bool terminal{
+                job.terminal_cancelled &&
+                job.terminal_cancelled->load(std::memory_order_relaxed)};
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
-                ArmCancelRetryBackoff(hash);
-                if (job.retryable_failure) {
+                if (!terminal) ArmCancelRetryBackoff(hash);
+                if (terminal && job.on_terminal_cancelled) {
+                    callbacks.push_back(
+                        std::move(job.on_terminal_cancelled));
+                } else if (job.retryable_failure) {
                     callbacks.push_back(
                         std::move(job.retryable_failure));
                 }
@@ -735,8 +774,12 @@ void MatMulVerifyWorker::WorkerLoop()
         bool local_execution_failure{false};
         const bool shutting_down{
             m_shutdown.load(std::memory_order_acquire)};
-        if (job.cancelled->load(std::memory_order_relaxed) &&
-            (!ProtectsBodyReplay(*pending) || shutting_down)) {
+        const bool terminal_now{
+            job.terminal_cancelled &&
+            job.terminal_cancelled->load(std::memory_order_relaxed)};
+        if (terminal_now ||
+            (job.cancelled->load(std::memory_order_relaxed) &&
+             (!ProtectsBodyReplay(*pending) || shutting_down))) {
             finish_retryable_without_verdict();
             continue;
         }
@@ -803,7 +846,9 @@ void MatMulVerifyWorker::WorkerLoop()
                 matmul::v4::rc::GetRCAcceleratorScheduler().Acquire(
                     device_priority,
                     (protect_body_replay && !shutting_down)
-                        ? nullptr
+                        ? (job.terminal_cancelled
+                               ? job.terminal_cancelled.get()
+                               : nullptr)
                         : job.cancelled.get(),
                     strprintf("verify:%s:%d", hash.ToString(),
                               job.height),
@@ -828,8 +873,10 @@ void MatMulVerifyWorker::WorkerLoop()
                 accelerator_lease.QueueWaitSeconds());
         }
         matmul::v4::rc::ScopedExactReplayCancellation cancellation_scope{
-            (protect_body_replay && !shutting_down) ? nullptr
-                                                   : job.cancelled.get()};
+            (protect_body_replay && !shutting_down)
+                ? (job.terminal_cancelled ? job.terminal_cancelled.get()
+                                          : nullptr)
+                : job.cancelled.get()};
         if (verify_override) {
             if (job.block) {
                 ok = verify_override(
@@ -1000,7 +1047,10 @@ void MatMulVerifyWorker::WorkerLoop()
             const auto suppress_verdict{[&] {
                 return local_execution_failure ||
                        (job.cancelled->load(std::memory_order_relaxed) &&
-                        (!ProtectsBodyReplay(*pending) || shutting_down));
+                        (!ProtectsBodyReplay(*pending) || shutting_down)) ||
+                       (job.terminal_cancelled &&
+                        job.terminal_cancelled->load(
+                            std::memory_order_relaxed));
             }};
             if (sf.IsLeader()) {
                 ok = verify_pure();
@@ -1032,22 +1082,31 @@ complete:
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_pending.erase(hash);
+            const bool terminal{
+                job.terminal_cancelled &&
+                job.terminal_cancelled->load(std::memory_order_relaxed)};
             const bool cancelled_header_only{
                 job.cancelled->load(std::memory_order_relaxed) &&
                 (!ProtectsBodyReplay(*pending) ||
-                 (m_shutdown.load(std::memory_order_acquire) && !ok))};
+                 (m_shutdown.load(std::memory_order_acquire) && !ok) ||
+                 terminal)};
             const bool retryable_without_verdict{
                 local_execution_failure || cancelled_header_only};
             if (retryable_without_verdict) {
-                ArmCancelRetryBackoff(hash);
-                if (job.retryable_failure) {
+                if (terminal && job.on_terminal_cancelled) {
                     retryable_failures.push_back(
-                        std::move(job.retryable_failure));
+                        std::move(job.on_terminal_cancelled));
+                } else {
+                    ArmCancelRetryBackoff(hash);
+                    if (job.retryable_failure) {
+                        retryable_failures.push_back(
+                            std::move(job.retryable_failure));
+                    }
+                    std::move(
+                        pending->follower_retryable_failures.begin(),
+                        pending->follower_retryable_failures.end(),
+                        std::back_inserter(retryable_failures));
                 }
-                std::move(
-                    pending->follower_retryable_failures.begin(),
-                    pending->follower_retryable_failures.end(),
-                    std::back_inserter(retryable_failures));
             } else if (!cancelled_header_only) {
                 ClearCancelRetryBackoff(hash);
                 if (job.completion) {

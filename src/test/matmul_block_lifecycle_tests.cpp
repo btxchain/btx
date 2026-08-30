@@ -402,4 +402,182 @@ BOOST_AUTO_TEST_CASE(per_source_caps_cannot_starve_other_netgroup)
     BOOST_CHECK_LE(lifecycle.RetainedCountForTest(), 8U);
 }
 
+// --- PR #132 P1: terminal (block-connected) cancellation holds the admission
+// --- lease until the worker acknowledges, then releases it exactly once with
+// --- no re-admission; preserves the generation-race fix.
+
+namespace {
+//! Model of the RC admission lease/counter (ScopedMatMulPendingVerification):
+//! occupied while a shared_ptr<void> lease is held, released exactly once when
+//! the lifecycle drops it.
+std::shared_ptr<void> MakeCountedLease(std::atomic<int>& counter)
+{
+    counter.fetch_add(1);
+    return std::shared_ptr<void>(reinterpret_cast<void*>(0x1),
+                                 [&counter](void*) { counter.fetch_sub(1); });
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(terminal_connected_holds_running_lease_until_worker_ack)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{BlockWithNonce(21)->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(21, 50, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    std::atomic<int> counter{0};
+    auto lease{MakeCountedLease(counter)};
+    std::weak_ptr<void> weak_lease{lease};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now, terminated));
+    lease.reset(); // only the lifecycle entry holds the lease now
+    BOOST_REQUIRE(lifecycle.Start(*token, now)); // RUNNING
+    BOOST_CHECK_EQUAL(counter.load(), 1);
+    BOOST_CHECK(!weak_lease.expired());
+
+    // Block connects; a worker owns the running replay and will acknowledge.
+    lifecycle.TerminalConnected(hash, /*worker_will_ack=*/true);
+    BOOST_CHECK(terminated->load());   // terminal signal raised
+    BOOST_CHECK(cancelled->load());
+    BOOST_CHECK(lifecycle.PendingLeaseHeldForTest(hash)); // HELD, not released
+    BOOST_CHECK_EQUAL(counter.load(), 1);
+    BOOST_CHECK(!weak_lease.expired());
+    BOOST_CHECK(lifecycle.StateForTest(hash).has_value());
+
+    // Worker acknowledges via the terminal path (lifecycle.Terminal).
+    lifecycle.Terminal(*token);
+    BOOST_CHECK_EQUAL(counter.load(), 0);   // released exactly once
+    BOOST_CHECK(weak_lease.expired());
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash)); // no retained body -> no re-admission
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 20min).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(terminal_connected_holds_queued_lease_until_worker_ack)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{BlockWithNonce(22)->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(22, 50, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    std::atomic<int> counter{0};
+    auto lease{MakeCountedLease(counter)};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now, terminated));
+    lease.reset(); // QUEUED (not started); only the entry holds the lease
+    BOOST_CHECK_EQUAL(counter.load(), 1);
+
+    lifecycle.TerminalConnected(hash, /*worker_will_ack=*/true);
+    BOOST_CHECK(terminated->load());
+    BOOST_CHECK(lifecycle.PendingLeaseHeldForTest(hash)); // held until ack
+    BOOST_CHECK_EQUAL(counter.load(), 1);
+
+    lifecycle.Terminal(*token);
+    BOOST_CHECK_EQUAL(counter.load(), 0);
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+}
+
+BOOST_AUTO_TEST_CASE(terminal_connected_no_worker_ack_releases_immediately)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{BlockWithNonce(23)->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(23, 50, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    std::atomic<int> counter{0};
+    auto lease{MakeCountedLease(counter)};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now, terminated));
+    lease.reset();
+    BOOST_REQUIRE(lifecycle.Start(*token, now));
+    BOOST_CHECK_EQUAL(counter.load(), 1);
+
+    // No worker can acknowledge: cleanup completes immediately (no stick).
+    lifecycle.TerminalConnected(hash, /*worker_will_ack=*/false);
+    BOOST_CHECK(terminated->load());
+    BOOST_CHECK_EQUAL(counter.load(), 0);   // released now, exactly once
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+}
+
+BOOST_AUTO_TEST_CASE(terminal_connected_admission_pending_erases_and_blocks_queue)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{BlockWithNonce(24)->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(24, 50, now), now));
+    const auto token{lifecycle.Begin(hash, now)}; // ADMISSION_PENDING, no lease yet
+    BOOST_REQUIRE(token);
+
+    // No worker job exists yet -> immediate cleanup; the pending Queue then fails.
+    lifecycle.TerminalConnected(hash, /*worker_will_ack=*/false);
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    std::atomic<int> counter{0};
+    auto lease{MakeCountedLease(counter)};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    BOOST_CHECK(!lifecycle.Queue(*token, lease, cancelled, {}, now, terminated));
+}
+
+BOOST_AUTO_TEST_CASE(terminal_retry_erases_body_no_readmission)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{BlockWithNonce(25)->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(25, 50, now), now));
+    const auto token{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token);
+    std::atomic<int> counter{0};
+    auto lease{MakeCountedLease(counter)};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token, lease, cancelled, {}, now, terminated));
+    lease.reset();
+    BOOST_REQUIRE(lifecycle.Start(*token, now));
+
+    lifecycle.TerminalConnected(hash, /*worker_will_ack=*/true); // terminated + held
+    BOOST_CHECK(lifecycle.PendingLeaseHeldForTest(hash));
+
+    // Defense-in-depth: even if the worker acks via the retryable path, a
+    // terminated entry is erased (its body is NOT kept retryable).
+    BOOST_REQUIRE(lifecycle.Retry(*token, 60s, now));
+    BOOST_CHECK_EQUAL(counter.load(), 0);
+    BOOST_CHECK(!lifecycle.StateForTest(hash));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 20min).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(terminal_ack_is_generation_scoped)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{BlockWithNonce(26)->GetHash()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(26, 50, now), now));
+    const auto token1{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token1);
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    BOOST_REQUIRE(lifecycle.Queue(*token1, nullptr, cancelled, {}, now, terminated));
+    BOOST_REQUIRE(lifecycle.Start(*token1, now));
+    lifecycle.TerminalConnected(hash, /*worker_will_ack=*/true);
+    lifecycle.Terminal(*token1); // gen1 acknowledged + erased
+
+    // A reorg re-retains and starts a FRESH generation for the same hash.
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(26, 50, now), now));
+    const auto token2{lifecycle.Begin(hash, now)};
+    BOOST_REQUIRE(token2);
+    BOOST_CHECK(token2->generation != token1->generation);
+
+    // A late/stale acknowledgement for gen1 must NOT erase gen2 (generation-race fix).
+    lifecycle.Terminal(*token1);
+    BOOST_CHECK(lifecycle.StateForTest(hash).has_value());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

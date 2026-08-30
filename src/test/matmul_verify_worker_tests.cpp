@@ -2691,4 +2691,86 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_above_frontier_does_not_consume_park_slot)
     node::matmul_trusted::ResetForTest();
 }
 
+
+// --- PR #132 P1: terminal (block-connected) cancellation overrides
+// --- ProtectsBodyReplay. Ordinary Cancel() refuses a body-holding job;
+// --- TerminalCancel() is accepted and the returning verdict is DISCARDED via
+// --- on_terminal_cancelled (no verdict/completion for the connected block).
+BOOST_AUTO_TEST_CASE(terminal_cancel_overrides_body_replay_and_discards_verdict)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) { return gate.Run(); }};
+
+    std::atomic<int> completions{0};
+    std::atomic<int> terminal_acks{0};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    const auto block{MakeBlock(140)};
+    const uint256 hash{block->GetHash()};
+
+    MatMulVerifyWorker::Job job{
+        .block = block,
+        .height = 100,
+        .parent_median_time_past = std::nullopt,
+        .completion = [&](bool) { ++completions; },
+        .cancelled = cancelled,
+        .terminal_cancelled = terminated,
+        .on_terminal_cancelled = [&] { ++terminal_acks; },
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    // Ordinary Cancel refuses a body-holding (ProtectsBodyReplay) job.
+    BOOST_CHECK(!worker.Cancel(hash));
+    // Terminal cancel is accepted and raises the terminal signal.
+    BOOST_CHECK(worker.TerminalCancel(hash));
+    BOOST_CHECK(terminated->load());
+
+    // Let the now-terminal verify return: its verdict must be DISCARDED.
+    gate.Release();
+    BOOST_REQUIRE(WaitFor([&] { return terminal_acks.load() == 1; }));
+    BOOST_CHECK_EQUAL(completions.load(), 0); // no verdict / completion
+}
+
+// Contrast: without terminal cancellation, a body-holding job keeps its verdict.
+BOOST_AUTO_TEST_CASE(body_job_without_terminal_keeps_verdict)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) { return gate.Run(); }};
+
+    std::atomic<int> completions{0};
+    std::atomic<int> terminal_acks{0};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    auto terminated{std::make_shared<std::atomic_bool>(false)};
+    const auto block{MakeBlock(141)};
+    const uint256 hash{block->GetHash()};
+
+    MatMulVerifyWorker::Job job{
+        .block = block,
+        .height = 100,
+        .parent_median_time_past = std::nullopt,
+        .completion = [&](bool) { ++completions; },
+        .cancelled = cancelled,
+        .terminal_cancelled = terminated,
+        .on_terminal_cancelled = [&] { ++terminal_acks; },
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    // Speculative cancellation alone does NOT abort a body replay.
+    cancelled->store(true, std::memory_order_relaxed);
+    BOOST_CHECK(!worker.Cancel(hash));
+
+    gate.Release();
+    BOOST_REQUIRE(WaitFor([&] { return completions.load() == 1; }));
+    BOOST_CHECK_EQUAL(terminal_acks.load(), 0); // verdict kept, no terminal ack
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

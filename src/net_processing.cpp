@@ -8102,7 +8102,19 @@ void PeerManagerImpl::BlockConnected(
         // after Contains() but before TerminalConnected() and recreate the race.
         LOCK(cs_main);
         if (m_chainman.ActiveChain().Contains(pindex)) {
-            m_matmul_block_lifecycle.TerminalConnected(pindex->GetBlockHash());
+            const uint256 connected_hash{pindex->GetBlockHash()};
+            // Terminal-cancel any in-flight verify worker job so a body-holding
+            // ExactReplay for this now-connected block stops (it ignores
+            // speculative cancellation). TerminalCancel only raises the signal
+            // and wakes the worker -- no waiting or callbacks -- so it is safe
+            // under cs_main. Its result tells the lifecycle whether a worker
+            // will acknowledge (and release the held lease); if none will, the
+            // lifecycle completes cleanup immediately so nothing sticks.
+            const bool worker_will_ack{
+                m_matmul_verify_worker &&
+                m_matmul_verify_worker->TerminalCancel(connected_hash)};
+            m_matmul_block_lifecycle.TerminalConnected(
+                connected_hash, worker_will_ack);
         }
     }
 
@@ -13602,6 +13614,8 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     matmul_admission.lifecycle_token};
                 auto lifecycle_cancelled{
                     std::make_shared<std::atomic_bool>(false)};
+                auto lifecycle_terminated{
+                    std::make_shared<std::atomic_bool>(false)};
                 // Transfer source attribution ownership into the same
                 // generation as the pending slot. Callback captures may use
                 // this object, but they no longer decide its lifetime alone.
@@ -13620,7 +13634,9 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                             ? std::static_pointer_cast<void>(slot)
                             : std::shared_ptr<void>{},
                         lifecycle_cancelled,
-                        std::move(lifecycle_resources))) {
+                        std::move(lifecycle_resources),
+                        std::chrono::steady_clock::now(),
+                        lifecycle_terminated)) {
                     if (handing_off_header) {
                         rollback_handoff_admission();
                     } else {
@@ -13754,6 +13770,25 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     },
                     .priority = priority,
                     .cancelled = lifecycle_cancelled,
+                    .terminal_cancelled = lifecycle_terminated,
+                    .on_terminal_cancelled =
+                    [this, hash, lifecycle_token, source_pin_weak,
+                     post = post_process]() mutable {
+                        // Block connected: TERMINAL acknowledgement. Release
+                        // delivery bookkeeping with a terminal lifecycle erase
+                        // (releases the held pending lease exactly once) -- no
+                        // verdict, retry, cache, completion, or re-admission.
+                        ClearMatMulRCBodyDeferred(hash);
+                        if (post) post();
+                        if (auto source_pin{source_pin_weak.lock()}) {
+                            source_pin->Release();
+                        }
+                        if (lifecycle_token) {
+                            m_matmul_block_lifecycle.Terminal(*lifecycle_token);
+                        } else {
+                            UnmarkMatMulAsyncVerification(hash);
+                        }
+                    },
                     .rc_pending_lease = nullptr,
                     .retained_body_bytes =
                         ::GetSerializeSize(TX_WITH_WITNESS(*block)),

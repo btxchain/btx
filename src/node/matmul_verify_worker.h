@@ -137,6 +137,16 @@ public:
         std::shared_ptr<const CBlockHeader> header;
         Priority priority{Priority::Background};
         std::shared_ptr<std::atomic_bool> cancelled;
+        //! Terminal (block-connected) cancellation, distinct from speculative
+        //! `cancelled`. A body-holding ExactReplay ignores `cancelled` but MUST
+        //! abort on terminal, exactly as it does on global shutdown. Shared
+        //! with the lifecycle entry so BlockConnected can raise it.
+        std::shared_ptr<std::atomic_bool> terminal_cancelled;
+        //! Runs instead of retryable_failure when the attempt is terminated
+        //! because its block connected: a TERMINAL acknowledgement releasing
+        //! delivery bookkeeping with no verdict, retry, cache, completion, or
+        //! re-admission.
+        std::function<void()> on_terminal_cancelled;
         //! One cap-one RC pending-work reservation. Header-first admission
         //! stores it outside `completion` so one bounded equal-priority
         //! handoff can transfer ownership without opening a second slot.
@@ -209,6 +219,15 @@ public:
 
     /** Cancel queued/running speculative work for one header hash. */
     bool Cancel(const uint256& hash);
+
+    //! Terminal (block-connected) cancellation: overrides ProtectsBodyReplay so
+    //! a body-holding ExactReplay for an already-connected block stops. Only
+    //! raises the terminal signal and wakes the loop/replay; runs no callbacks
+    //! and never waits, so it is safe to call while holding cs_main. Returns
+    //! true iff a worker job for the hash exists (and will therefore
+    //! acknowledge, releasing the lifecycle lease); false lets the caller finish
+    //! cleanup so a held (TERMINATING) lease cannot stick without an acknowledger.
+    [[nodiscard]] bool TerminalCancel(const uint256& hash);
 
     /** Cancel every job selected by a tip/reorg-aware predicate. */
     size_t CancelIf(const std::function<bool(const CBlockHeader&, int32_t)>& predicate);
