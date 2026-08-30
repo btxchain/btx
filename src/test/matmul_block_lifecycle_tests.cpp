@@ -151,6 +151,44 @@ BOOST_AUTO_TEST_CASE(idle_scheduler_honors_retry_cooldown)
     BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(causal_retry_wakes_are_one_shot)
+{
+    using RetryWakeReason = node::MatMulBlockLifecycle::RetryWakeReason;
+
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "8").value()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(11, 50, now + 60s), now));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now).has_value());
+
+    // Recovery selection makes the first attempt due without pretending that
+    // another admission deferral occurred.
+    BOOST_REQUIRE(lifecycle.WakeRetryOnce(
+        hash, RetryWakeReason::RECOVERY_ROOT, now + 1s));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s).has_value());
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(hash), 0U);
+
+    // A failed re-admission installs a real cooldown. Repeated peer scans for
+    // the same recovery root must not erase it.
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now + 1s));
+    BOOST_CHECK(!lifecycle.WakeRetryOnce(
+        hash, RetryWakeReason::RECOVERY_ROOT, now + 2s));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 59s).has_value());
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(hash), 1U);
+
+    // A distinct causal transition can wake it once (for example MMATTEST
+    // quorum arriving after the recovery branch was selected).
+    BOOST_REQUIRE(lifecycle.WakeRetryOnce(
+        hash, RetryWakeReason::TRUSTED_AUTHORITY, now + 3s));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 3s).has_value());
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now + 3s));
+    BOOST_CHECK(!lifecycle.WakeRetryOnce(
+        hash, RetryWakeReason::TRUSTED_AUTHORITY, now + 4s));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 4s).has_value());
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(hash), 2U);
+}
+
 BOOST_AUTO_TEST_CASE(terminal_requeue_preserves_original_retention_ttl)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};

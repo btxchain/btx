@@ -39,6 +39,16 @@ class MatMulBlockLifecycle
 public:
     using Clock = std::chrono::steady_clock;
 
+    /**
+     * Causal events that may make an inactive retained body immediately
+     * admissible. Each event wakes a retained generation at most once so a
+     * level-triggered peer scan cannot continuously erase a retry cooldown.
+     */
+    enum class RetryWakeReason : uint8_t {
+        RECOVERY_ROOT = 0,
+        TRUSTED_AUTHORITY = 1,
+    };
+
     enum class State : uint8_t {
         BODY_RETAINED,
         ADMISSION_PENDING,
@@ -69,6 +79,9 @@ public:
         //! Non-terminal deferrals since this body was last freshly retained.
         //! RefreshRetry increments; TerminalRequeue resets.
         uint32_t deferral_count{0};
+        //! RetryWakeReason bits already consumed by this retained generation.
+        //! Terminal requeue and repeated delivery preserve these bits.
+        uint8_t retry_wake_mask{0};
     };
 
     struct Token {
@@ -206,10 +219,13 @@ public:
         Entry& entry{it->second};
         const auto original_stored_at{
             entry.body ? entry.body->stored_at : now};
+        const uint8_t original_retry_wake_mask{
+            entry.body ? entry.body->retry_wake_mask : uint8_t{0}};
         if (entry.body) m_retained_bytes -= entry.body->bytes;
         // Capacity TTL is non-refreshing for a hash: retries or repeated
         // deliveries cannot pin retained bytes forever.
         body.stored_at = original_stored_at;
+        body.retry_wake_mask |= original_retry_wake_mask;
         entry.body = std::move(body);
         m_retained_bytes += entry.body->bytes;
         if (inserted || !IsActive(entry.state)) {
@@ -264,6 +280,34 @@ public:
         if (it == m_entries.end() || !it->second.body) return false;
         it->second.body->retry_not_before = now + delay;
         ++it->second.body->deferral_count;
+        return true;
+    }
+
+    /**
+     * Make one retained body immediately retryable for a newly satisfied
+     * causal condition, without counting the wake as another deferral.
+     *
+     * Unlike RefreshRetry(hash, 0), repeated calls for the same reason do not
+     * overwrite a cooldown installed by a failed re-admission. A later,
+     * distinct event (for example trusted authority arriving after recovery
+     * selection) may still wake the body once.
+     */
+    bool WakeRetryOnce(const uint256& hash, RetryWakeReason reason,
+                       Clock::time_point now = Clock::now())
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it == m_entries.end() || !it->second.body ||
+            IsActive(it->second.state)) {
+            return false;
+        }
+        const uint8_t bit{static_cast<uint8_t>(
+            uint8_t{1} << static_cast<uint8_t>(reason))};
+        if ((it->second.body->retry_wake_mask & bit) != 0) return false;
+        it->second.body->retry_wake_mask |= bit;
+        if (it->second.body->retry_not_before > now) {
+            it->second.body->retry_not_before = now;
+        }
         return true;
     }
 

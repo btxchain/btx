@@ -301,6 +301,10 @@ public:
     /** True while a complete body is held for scheduler re-admission. */
     [[nodiscard]] virtual bool HasMatMulRetainedBodyForTest(const uint256& hash) const = 0;
     [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
+    /** Seed the retained-body scheduler with explicit transport provenance. */
+    virtual bool RetainMatMulDeferredBodyForTest(
+        const std::shared_ptr<const CBlock>& block, const CNode& source,
+        bool force_processing) = 0;
     /** Drive scheduler re-admission of a HAVE_DATA followed tip-child.
      *  Production calls this from CScheduler, never from SendMessages
      *  (g_msgproc_mutex). Tests must not hold that mutex. */

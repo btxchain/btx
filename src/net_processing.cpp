@@ -1318,6 +1318,28 @@ public:
     {
         return HasMatMulRetainedBodyForTest(hash);
     }
+    bool RetainMatMulDeferredBodyForTest(
+        const std::shared_ptr<const CBlock>& block, const CNode& source,
+        bool force_processing) override
+    {
+        if (!block) return false;
+        int32_t reference_height{std::numeric_limits<int32_t>::max()};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* const prev{
+                m_chainman.m_blockman.LookupBlockIndex(block->hashPrevBlock)};
+            if (prev != nullptr) reference_height = prev->nHeight + 1;
+        }
+        const uint32_t work_units{
+            reference_height != std::numeric_limits<int32_t>::max()
+                ? MatMulRCWorkUnits(m_chainparams.GetConsensus(),
+                                    reference_height)
+                : 0};
+        return StoreMatMulDeferredBody(
+            block->GetHash(), block, source, force_processing,
+            /*min_pow_checked=*/true, /*is_ibd=*/true, reference_height,
+            work_units, MATMUL_BUDGET_DEFER_COOLDOWN);
+    }
     void RetryMatMulDeferredBodiesForTest() override
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !NetEventsInterface::g_msgproc_mutex)
     {
@@ -3166,6 +3188,13 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
     const ChainstateManager& chainman)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+[[nodiscard]] static bool IndexIsHeaderOnlyLostTwinPath(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index,
+    const CBlockIndex* competing_best = nullptr)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 void PeerManagerImpl::RetryMatMulDeferredBodies()
 {
     AssertLockNotHeld(cs_main);
@@ -3341,6 +3370,36 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     candidate_hash = retry->first;
     candidate = retry->second;
     if (!candidate.block) return;
+
+    // A complete body can be retained while it is still an unsolicited
+    // sibling, preserving force_processing=false. If headers subsequently
+    // establish that hash as the canonical first hole of a strictly
+    // greater-work local-signer recovery branch, reusing that stale transport
+    // provenance makes admission return HEADER_ONLY forever. Promote only the
+    // already-bounded lost-twin recovery path; arbitrary retained siblings
+    // remain subject to the ordinary unrequested anti-DoS gates.
+    bool force_processing{candidate.force_processing};
+    int32_t promoted_height{-1};
+    if (!force_processing) {
+        LOCK(cs_main);
+        const CBlockIndex* const tip{m_chainman.ActiveTip()};
+        const CBlockIndex* const index{
+            m_chainman.m_blockman.LookupBlockIndex(candidate_hash)};
+        const CNodeState* const source_state{State(candidate.source_peer)};
+        const CBlockIndex* const source_best{
+            source_state != nullptr ? source_state->pindexBestKnownBlock
+                                    : nullptr};
+        if (IndexIsHeaderOnlyLostTwinPath(
+                m_chainman, tip, index, source_best)) {
+            force_processing = true;
+            promoted_height = index->nHeight;
+        }
+    }
+    if (promoted_height >= 0) {
+        LogInfo("Promoting retained MatMul recovery-root body %s height=%d "
+                "to requested processing for ExactReplay\n",
+                candidate_hash.ToString(), promoted_height);
+    }
     if (frontier_off_chain && candidate_hash != fork_child_hash) {
         bool allow{false};
         {
@@ -3378,7 +3437,7 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
             MatMulBlockAdmission admission;
             if (!AdmitMatMulBlockVerification(
                     *source, *candidate.block,
-                    candidate.force_processing,
+                    force_processing,
                     candidate.min_pow_checked,
                     /*requires_expensive_verification=*/true,
                     candidate.is_ibd,
@@ -3404,7 +3463,7 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                 static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::steady_clock::now() - candidate.stored_at).count()));
             ProcessBlock(*source, candidate.block,
-                         candidate.force_processing,
+                         force_processing,
                          candidate.min_pow_checked, std::move(slot),
                          /*post_process=*/nullptr, admission,
                          /*is_retained_retry=*/true);
@@ -3414,7 +3473,7 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
              "Replaying budget-deferred body %s locally (source peer=%d gone)\n",
              candidate_hash.ToString(), candidate.source_peer);
     ProcessBlockSync(candidate.source_peer, /*node=*/nullptr, candidate.block,
-                     candidate.force_processing, candidate.min_pow_checked,
+                     force_processing, candidate.min_pow_checked,
                      /*post_process=*/nullptr);
 }
 
@@ -5163,12 +5222,18 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             // retry). Re-getdata of this hash or its successors cannot connect
             // until the scheduler re-admits. GETMMATTEST the retained hash so
             // quorum can lift ConnectTip without waiting for the 1s retry loop.
-            // Local signers never arm signed-frontier catch-up, so also
-            // RefreshRetry(0) when yielding to the longer attested GPU.
-            if (node::matmul_trusted::AttestorYieldMustReadmitRetainedBody(
-                    attestor_yielding, true, catch_up_target)) {
-                (void)m_matmul_block_lifecycle.RefreshRetry(
-                    missing_hash, std::chrono::seconds{0});
+            // Wake once when this retained hash becomes the selected recovery
+            // root. A level-triggered RefreshRetry(0) here used to overwrite
+            // the 60-second cooldown on every peer scan after re-admission
+            // returned HEADER_ONLY, producing the 1Hz re-admission wedge.
+            const bool recovery_root_selected{
+                local_signer_recovery_root ||
+                node::matmul_trusted::AttestorYieldMustReadmitRetainedBody(
+                    attestor_yielding, true, catch_up_target)};
+            if (recovery_root_selected) {
+                (void)m_matmul_block_lifecycle.WakeRetryOnce(
+                    missing_hash,
+                    node::MatMulBlockLifecycle::RetryWakeReason::RECOVERY_ROOT);
                 m_need_activate_best_chain = true;
             }
             if (this_peer_frontier_source ||
@@ -10355,13 +10420,14 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         // the same hash after MMATTEST cleared the in-flight map and drain
         // the archive's 16-token burst so the deferred child was rate-limited
         // forever (qualifier linear-chain stall at the next height).
-        // RefreshRetry(0) so a retained body that already has authority is
-        // re-admitted instead of sitting in root_retained_body.
+        // Wake a retained body once when authority is observed. Repeated
+        // GETMMATTEST selection must not erase a later admission cooldown.
         if (index != nullptr &&
             m_chainman.IndexHasTrustedMatMulAuthority(index)) {
             m_matmul_attestation_requested.erase(hash);
-            (void)m_matmul_block_lifecycle.RefreshRetry(
-                hash, std::chrono::seconds{0});
+            (void)m_matmul_block_lifecycle.WakeRetryOnce(
+                hash,
+                node::MatMulBlockLifecycle::RetryWakeReason::TRUSTED_AUTHORITY);
             return;
         }
         const bool parked{
@@ -13043,7 +13109,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     if (persist_gpu_body_awaiting_attestation) {
         // Wait for MMATTEST rather than re-admitting this body every 1s
         // (live 2026-08-16: 1Hz "Retaining GPU body" livelock after a
-        // 2s GPU burst). Quorum RefreshRetry(0) re-admits immediately.
+        // 2s GPU burst). A new quorum causally wakes re-admission once.
         admission.retry_delay =
             node::matmul_trusted::GPU_RETAIN_ATTESTATION_RETRY;
         if (!m_matmul_block_lifecycle.HasRetainedBody(block_hash)) {
@@ -17775,8 +17841,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 // Same-netgroup HEADER_ONLY cooldown must not keep the now-
                 // authenticated hash unfetchable after the skip set is cleared.
                 ClearMatMulRCBodyDeferred(hash);
-                (void)m_matmul_block_lifecycle.RefreshRetry(
-                    hash, std::chrono::seconds{0});
+                (void)m_matmul_block_lifecycle.WakeRetryOnce(
+                    hash,
+                    node::MatMulBlockLifecycle::RetryWakeReason::TRUSTED_AUTHORITY);
                 wake_block_fetch = true;
                 // Wake any parked trusted-mirror verify job. Do this outside
                 // cs_main: NotifyQuorumReady only touches the worker mutex.

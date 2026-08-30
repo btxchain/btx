@@ -4786,7 +4786,7 @@ BOOST_AUTO_TEST_CASE(encdr_competing_sibling_does_not_steal_miner_gpu)
 // A lone EncDr sibling with no descendant stays HEADER_ONLY (test above).
 BOOST_AUTO_TEST_CASE(local_signer_fetches_header_only_lost_twin_after_headers_pull_ahead)
 {
-    LOCK(NetEventsInterface::g_msgproc_mutex);
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
 
     node::matmul_trusted::ResetForTest();
     ResetSharedPeermanFixture(m_node);
@@ -4959,6 +4959,49 @@ BOOST_AUTO_TEST_CASE(local_signer_fetches_header_only_lost_twin_after_headers_pu
         WITH_LOCK(::cs_main,
                   return m_node.chainman->ActiveChain().Tip()->GetBlockHash()),
         adopted.GetHash());
+
+    // Live 204325 wedge: the first-hole body was already retained from an
+    // earlier unsolicited delivery with force_processing=false. Once the
+    // competing headers pulled ahead, root-first suppressed GETDATA because
+    // it saw that retained copy, but scheduler re-admission reused the stale
+    // flag and returned HEADER_ONLY forever. Seed that exact provenance and
+    // require automatic ExactReplay/persistence without another BLOCK message.
+    BOOST_REQUIRE(peerman.RetainMatMulDeferredBodyForTest(
+        std::make_shared<const CBlock>(competing), peer,
+        /*force_processing=*/false));
+    BOOST_REQUIRE(peerman.HasMatMulRetainedBodyForTest(competing_hash));
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* const idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(competing_hash)};
+        BOOST_REQUIRE(idx != nullptr);
+        BOOST_CHECK_EQUAL(idx->nStatus & BLOCK_HAVE_DATA, 0);
+    }
+
+    // Multiple level-triggered peer scans may observe root_retained_body, but
+    // the causal wake is one-shot. RetryMatMulDeferredBodies then promotes
+    // only this selected greater-work recovery root to requested processing.
+    for (int i = 0; i < 5; ++i) {
+        BOOST_CHECK(peerman.SendMessages(&peer));
+    }
+    SetMockTime(std::chrono::seconds{parent->GetBlockTime() + 120});
+    {
+        REVERSE_LOCK(msgproc_lock);
+        peerman.RetryMatMulDeferredBodiesForTest();
+        BOOST_REQUIRE(PeermanWaitFor([&] {
+            LOCK(::cs_main);
+            const CBlockIndex* const idx{
+                m_node.chainman->m_blockman.LookupBlockIndex(competing_hash)};
+            return idx != nullptr &&
+                   (idx->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                   (idx->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0;
+        }));
+    }
+    // The equal-work fork child is not yet BLOCK_VALID_SCRIPTS because its
+    // descendant body has not arrived, so lifecycle retention remains until
+    // activation or TTL. The regression invariant here is that the body and
+    // ExactReplay verdict were recognized and persisted without redelivery.
+    BOOST_CHECK(peerman.HasMatMulRetainedBodyForTest(competing_hash));
 
     {
         LOCK(::cs_main);
