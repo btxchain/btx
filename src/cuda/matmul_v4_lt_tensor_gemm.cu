@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -330,6 +331,22 @@ __global__ void TransposeS8_KN_to_NK(const int8_t* __restrict__ B,
     // byte-exact SelfTestImmaOnce gate still governs admission, so it can never
     // enable a non-bit-identical result.
     const bool force_tn{std::getenv("BTX_LT_FORCE_TN") != nullptr};
+    if (force_tn) {
+        // Loud, once: a diagnostic override that forces the pre-Hopper TN
+        // orientation. If TN has no native IMMA algorithm for a shape on this
+        // GPU, the negative result is cached and the whole IMMA lane disables
+        // for the process (CPU/device fallback only) -- so it must never be set
+        // in production, especially on Hopper+/Blackwell (audit F3).
+        static std::once_flag warn_once;
+        std::call_once(warn_once, [] {
+            std::fprintf(stderr,
+                "WARNING: BTX_LT_FORCE_TN is set -- forcing the pre-Hopper "
+                "transposed-B IMMA orientation. Diagnostic/validation use only; "
+                "if this GPU lacks a native TN IMMA algorithm the entire IMMA "
+                "accelerator lane will be DISABLED for this process. Do NOT set "
+                "this in production.\n");
+        });
+    }
     const bool found = force_tn
                            ? search(/*transpose_b=*/true)
                            : (search(/*transpose_b=*/false) ||
