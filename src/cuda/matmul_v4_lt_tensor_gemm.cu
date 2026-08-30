@@ -271,9 +271,14 @@ __global__ void TransposeS8_KN_to_NK(const int8_t* __restrict__ B,
     // algorithm exists for NN -- the pre-Hopper (Ampere/Ada sm_8x) case, where
     // s8 IMMA is only exposed for op(B)=B^T -- retry with B stored transposed
     // (N×K, TRANSB=OP_T) plus a device-side transpose at launch (#131). The
-    // choice is by actual algorithm availability, never a hard arch gate, and
-    // SelfTestImmaOnce still byte-exact-gates admission, so an orientation that
-    // is not bit-identical to ExactGemm is never enabled.
+    // choice is by actual algorithm availability, never a hard arch gate.
+    // SelfTestImmaOnce byte-exact-checks representative small shapes (both
+    // orientations exercise the same IMMA families), but production Rank-1 /
+    // RC-ExactReplay shapes are admitted here on heuristic availability alone --
+    // the ultimate byte-exact gate for those is consensus ExactReplay itself,
+    // which recomputes and rejects any block whose digest a wrong algorithm
+    // would produce (self-policing; a wrong build cannot split consensus, only
+    // fail to sync). See adversarial finding F1.
     auto search = [&](bool transpose_b) -> bool {
         if (plan.b_layout) {
             cublasLtMatrixLayoutDestroy(plan.b_layout);
@@ -383,6 +388,17 @@ __global__ void TransposeS8_KN_to_NK(const int8_t* __restrict__ B,
                        &plan->algo, pool.workspace, pool.workspace_bytes, stream) != CUBLAS_STATUS_SUCCESS) {
         error = "cublasLtMatmul IMMA failed";
         return false;
+    }
+    if (plan->transpose_b) {
+        // dBt is a pool-shared scratch and the pool mutex serializes only the
+        // host-side enqueue, not GPU execution. Wait for this matmul to finish
+        // reading dBt before returning (releasing the pool mutex) so a concurrent
+        // TN call on another stream cannot overwrite the transpose mid-read (F2).
+        // Confined to the pre-Hopper TN fallback; the NN path stays fully async.
+        if (cudaStreamSynchronize(stream) != cudaSuccess) {
+            error = "Bt transpose stream synchronize failed";
+            return false;
+        }
     }
     return true;
 }
