@@ -186,10 +186,11 @@ work statement are preserved across the transition. See the
 [canonical transition roadmap](doc/btx-matmul-v4.7-transition-roadmap.md)
 and [ExactReplay launch-candidate gates](doc/matmul-v4-exact-replay-launch-candidate.md).
 
-While Epoch A still uses ExactReplay as consensus authority, public CPU
-archives follow GPU attestors so the seed layer does not need a GPU on every
-host. Continuing that topology is community-fork work; this repository is the
-0.34.1 reference, not a schedule of further operator releases. Historical
+While Epoch A still uses ExactReplay as consensus authority, a validating
+node runs `-matmulvalidation=consensus` and needs no pin. CPU archives that
+cannot ExactReplay may opt into trusted-mirror with attestors they choose;
+that is community-fork topology, not a shipped signer set. This repository
+is the 0.34.1 reference, not a schedule of further operator releases. Historical
 notes live in
 [doc/btx-gpu-verified-network-transition.md](doc/btx-gpu-verified-network-transition.md).
 
@@ -234,49 +235,60 @@ That three-phase topology is **community-fork work**. This repository is the
 0.34.1 reference, not a schedule of further operator releases.
 
 Profile 1 ExactReplay is the Epoch-A consensus check. It needs a qualified
-GPU. Public IBD/RPC seeds can stay on ordinary VPS hardware only by **trusting
-signed ExactReplay verdicts** from GPU attestors. That is an explicit
-operator-trust topology, not independent validation.
+GPU. The recommended mode is `-matmulvalidation=consensus`: **this node**
+ExactReplays and needs no attestor pin. The network designates no canonical
+ExactReplay attestors.
 
-The project is moving that seed layer to GPU ExactReplay in three releases so
-the public network does not take on unsustainable GPU infra before difficulty,
-peering, and attestor diversity can carry it:
+CPU-only machines that cannot ExactReplay may **opt in** to
+`-matmulvalidation=trusted` and pin attestors they independently trust and
+can reach. Public IBD/RPC seeds can stay on ordinary VPS hardware only
+under that operator-trust topology, not as independent validation.
+Discover reachable attestors/archives via the
+`MATMUL_ATTESTATION_ARCHIVE` / `MATMUL_TRUSTED_MIRROR` service flags.
+Prefer M≥2 independent signers. There is no shipped default pin; following
+a stale unpublished set rejects real attestations as `untrusted-signer`.
 
-1. **Consensus dump floor + CPU seeds still follow one attestor.** Mainnet
-   `nBits` cannot go easier than compact `0x1f0a3d70` from height **191714**
-   (ASERT half-life 14400 at 191715). P2P catch-up is fixed so CPU archives
-   can pull headers and attestations from the GPU. Still 1-of-1.
-2. **Add GPU attestors (M-of-N).** Repeat `-matmultrustedpubkey`, raise
-   `-matmultrustedthreshold`. Archives stay CPU. Independent miners keep
-   talking to seeds. Adding `N` with `M=1` is only availability; `M≥2` is
-   what removes a single key as PoW authority.
+The project is moving the public introduction layer off MatMul authority
+in three releases so the public network does not take on unsustainable GPU
+infra before difficulty, peering, and attestor diversity can carry it:
 
-The live mainnet pin (1-of-2) is published below. GPU attestors and the
-CPU archives that follow them return the same set from
-`getmatmultrustedstatus` / `getfinalityinfo` (`trusted_signer_pubkeys`,
-`threshold`). P2P seed connect does **not** push keys — miners pin this
-set at bootstrap, then confirm it on local RPC after joining
-`node.btx.dev` / `node.btxchain.org` / `node.btx.tools`.
+1. **Consensus dump floor + CPU archives as light clients of a local pin.**
+   Mainnet `nBits` cannot go easier than compact `0x1f0a3d70` from height
+   **191714** (ASERT half-life 14400 at 191715). P2P catch-up is fixed so
+   CPU archives can pull headers and attestations from GPU peers they
+   chose to follow. Still an operator-trust topology, not independent
+   validation. Still 1-of-1 if the operator pins a single key.
+2. **Add GPU attestors you trust (M-of-N).** Repeat `-matmultrustedpubkey`,
+   raise `-matmultrustedthreshold`. Archives that remain CPU stay on
+   `trusted` with **your** keys. Independent miners keep talking to seeds.
+   Adding `N` with `M=1` is only availability; `M≥2` is what removes a
+   single key as PoW authority for that archive.
 
 ```ini
-# Mainnet ExactReplay attestors. Public keys only — never a signer WIF.
-matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
-matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
-matmultrustedthreshold=1
+# Default validating node: ExactReplay, no pin.
+matmulvalidation=consensus
+# Opt-in trusted-mirror (CPU-only). Supply YOUR keys — none ship:
+# matmulvalidation=trusted
+# matmultrustedpubkey=<compressed secp256k1 of an attestor you trust>
+# matmultrustedpubkey=<second independent attestor>
+# matmultrustedthreshold=2
 ```
 
 ```bash
 btx-cli getmatmultrustedstatus
-# configured=true, threshold=1, trusted_signer_pubkeys = the two hex keys above
+# consensus default: configured=false (no pin). That is expected.
+# trusted opt-in: configured=true and trusted_signer_pubkeys = the keys
+# you listed, not a repository-published set.
 ```
 
-A miner that omits this pin cannot see `getmatmulattestedtip` and
-`getblocktemplate` may extend an unattested orphan. Do not load
-`-matmulattestationsignerkeyfile` on a miner.
+A miner that omits a pin still ExactReplays. `getmatmulattestedtip` is
+empty until you pin attestors you can reach; that is telemetry, not
+consensus. Do not load `-matmulattestationsignerkeyfile` on a miner.
 3. **Convert public seeds to discovery relays.** Each public DNS/`addnode`
    host runs `-matmulvalidation=relay`: ADDR only, no pin, no GETMMATTEST,
-   no `NODE_NETWORK`. Archives follow GPU attestors via the pin; GPU
-   attestors stay off DNS (`-discover=0`). See
+   no `NODE_NETWORK`. Archives that opt into trusted-mirror follow GPU
+   attestors they pin locally; GPU attestors stay off DNS (`-discover=0`).
+   See
    [doc/design/0.34-discovery-relay.md](doc/design/0.34-discovery-relay.md).
 
 Full contract, roll order, and what is *not* dropped (Epochs B–D, light
@@ -1181,27 +1193,28 @@ ADDR=$(./build/bin/btx-cli -regtest -rpcwallet=miner getnewaddress)
 # -> 200.00000000 (10 blocks x 20 BTX)
 ```
 
-### Attestor pin (mainnet mining bootstrap)
+### Attestor pin (optional; operator-chosen)
 
-After the node is up and peering with the public seed/archive mesh, treat
-the attestor set as a normal bootstrap check — same class of pin as DNS
-seeds, not a secret:
+The recommended miner config is `-matmulvalidation=consensus` with **no**
+`-matmultrustedpubkey`. This node ExactReplays; the network designates no
+canonical attestors.
+
+If you cannot ExactReplay, or you want `getmatmulattestedtip` telemetry,
+`-matmulvalidation=trusted` / extra `-matmultrustedpubkey` lines are
+**your** pin:
 
 1. Join the published seeds (`dnsseed=1`, `addnode=node.btx.dev:19335`, …).
-2. Have the two `-matmultrustedpubkey` lines and `-matmultrustedthreshold=1`
-   in `btx.conf` (miner fast-start writes them).
-3. Ping local RPC: `getmatmultrustedstatus` must show `configured=true`
-   and the same `trusted_signer_pubkeys` / `threshold` the archives and
-   GPU attestors return. `getfinalityinfo` repeats the pubs.
-4. Then call `getblocktemplate`. A unique attested child of tip means
-   follow `getmatmulattestedtip` instead of grinding an unattested twin.
+   Those hosts are peer introduction, not attestation authority.
+2. Discover reachable attestors/archives via
+   `MATMUL_ATTESTATION_ARCHIVE` / `MATMUL_TRUSTED_MIRROR`, then pin keys
+   you independently trust (prefer M≥2). Fast-start writes no pin unless
+   you pass `--matmul-validation=trusted` and `--matmul-trusted-pubkey`.
+3. Confirm on **local** RPC: `getmatmultrustedstatus` shows the keys you
+   configured. P2P does not push keys. Do not take signer pubs from a
+   random remote RPC.
 
-P2P `addnode` / DNS seeds do not serve RPC. You confirm the pin on **your**
-`btx-cli`, or on an archive/attestor RPC you already control. Do not take
-signer pubs from a random remote RPC.
-
-`contrib/faststart` `--preset miner` writes this pin and checks it after
-RPC is ready. `contrib/devtools/gen-btx-node-conf.sh` writes it too.
+`contrib/faststart` `--preset miner` defaults to `matmulvalidation=consensus`.
+`contrib/devtools/gen-btx-node-conf.sh` does the same.
 
 ### Production Mining (getblocktemplate)
 

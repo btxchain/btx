@@ -35,14 +35,6 @@ GITHUB_API_BASE = "https://api.github.com"
 GITHUB_JSON_ACCEPT = "application/vnd.github+json"
 GITHUB_BINARY_ACCEPT = "application/octet-stream"
 
-# Published mainnet ExactReplay attestors (public keys only). Archives and
-# GPU attestors return this same set from getmatmultrustedstatus.
-MAINNET_ATTESTOR_PUBKEYS = (
-    "03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa",
-    "0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c",
-)
-MAINNET_ATTESTOR_THRESHOLD = 1
-
 PRESET_CONF = {
     "miner": [
         "server=1",
@@ -54,13 +46,8 @@ PRESET_CONF = {
         "addnode=node.btx.dev:19335",
         "addnode=node.btxchain.org:19335",
         "addnode=node.btx.tools:19335",
-        "# Published 1-of-2 attestor pin. Confirm after RPC is up:",
-        "#   btx-cli getmatmultrustedstatus",
-        "# P2P seeds do not push these keys. Do not load a signer WIF.",
-        "matmulvalidation=trusted",
-        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[0]}",
-        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[1]}",
-        f"matmultrustedthreshold={MAINNET_ATTESTOR_THRESHOLD}",
+        "# DNS/addnode is peer introduction, not attestation authority.",
+        "# Do not load a signer WIF on a miner.",
         "prune=4096",
         "blockfilterindex=1",
         "# keep shielded commitment index on disk (faster restart; default).",
@@ -81,10 +68,6 @@ PRESET_CONF = {
         "addnode=node.btx.dev:19335",
         "addnode=node.btxchain.org:19335",
         "addnode=node.btx.tools:19335",
-        "# Same published attestor pin the miner preset uses.",
-        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[0]}",
-        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[1]}",
-        f"matmultrustedthreshold={MAINNET_ATTESTOR_THRESHOLD}",
         "prune=0",
         "txindex=1",
         "blockfilterindex=1",
@@ -247,11 +230,49 @@ def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def consensus_validation_lines(
+    telemetry_pubkeys: list[str] | None = None,
+    telemetry_threshold: int | None = None,
+) -> list[str]:
+    lines = [
+        "# Default: this node ExactReplays. No attestor pin.",
+        "# The network designates no canonical ExactReplay attestors.",
+        "# Trusted-mirror is opt-in: --matmul-validation=trusted plus",
+        "# --matmul-trusted-pubkey for attestors you independently trust",
+        "# (prefer M≥2). Discover reachable attestors/archives via the",
+        "# MATMUL_ATTESTATION_ARCHIVE / MATMUL_TRUSTED_MIRROR service flags.",
+        "matmulvalidation=consensus",
+    ]
+    if telemetry_pubkeys:
+        lines.append("# Optional telemetry pin (ExactReplay is unchanged).")
+        for key in telemetry_pubkeys:
+            lines.append(f"matmultrustedpubkey={key}")
+        if telemetry_threshold is not None:
+            lines.append(f"matmultrustedthreshold={telemetry_threshold}")
+    return lines
+
+
+def trusted_validation_lines(pubkeys: list[str], threshold: int) -> list[str]:
+    lines = [
+        "# Operator-supplied trusted-mirror pin (local trust).",
+        "# The network designates no canonical ExactReplay attestors.",
+        "matmulvalidation=trusted",
+    ]
+    for key in pubkeys:
+        lines.append(f"matmultrustedpubkey={key}")
+    lines.append(f"matmultrustedthreshold={threshold}")
+    return lines
+
+
 def write_preset_conf(
     workdir: Path,
     preset: str,
     chain: str,
     extra_lines: list[str] | None = None,
+    *,
+    matmul_validation: str = "consensus",
+    trusted_pubkeys: list[str] | None = None,
+    trusted_threshold: int | None = None,
 ) -> Path:
     conf_path = workdir / "faststart.conf"
     ensure_parent(conf_path)
@@ -263,6 +284,18 @@ def write_preset_conf(
     if chain != "main":
         lines.append(f"[{chain}]")
     lines.extend(PRESET_CONF[preset])
+    pubkeys = [key.strip() for key in (trusted_pubkeys or []) if key.strip()]
+    if matmul_validation == "trusted":
+        if not pubkeys:
+            raise ValueError(
+                "--matmul-validation=trusted requires at least one "
+                "--matmul-trusted-pubkey (operator-chosen; this script ships "
+                "no attestor set)."
+            )
+        threshold = trusted_threshold if trusted_threshold is not None else (2 if len(pubkeys) >= 2 else 1)
+        lines.extend(trusted_validation_lines(pubkeys, threshold))
+    else:
+        lines.extend(consensus_validation_lines(pubkeys, trusted_threshold))
     if extra_lines:
         lines.extend(extra_lines)
     conf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -317,27 +350,26 @@ def rpc_json(cmd: list[str], method: str, *params: str) -> dict[str, Any]:
     return json.loads(output)
 
 
-def verify_mainnet_attestor_pin(cli_cmd: list[str]) -> None:
-    """Confirm local RPC matches the published archive/attestor key set."""
+def verify_operator_trusted_pin(cli_cmd: list[str], pubkeys: list[str], threshold: int) -> None:
+    """Confirm local RPC matches the operator-supplied pin (not a shipped set)."""
     status = rpc_json(cli_cmd, "getmatmultrustedstatus")
     have = {str(key).lower() for key in status.get("trusted_signer_pubkeys") or []}
-    want = {key.lower() for key in MAINNET_ATTESTOR_PUBKEYS}
+    want = {key.lower() for key in pubkeys}
     if have != want:
         raise RuntimeError(
             "getmatmultrustedstatus.trusted_signer_pubkeys does not match the "
-            f"published mainnet attestor pin {sorted(want)}; got {sorted(have)}. "
-            "P2P seeds do not advertise this set — it is pinned in miner/service "
-            "bootstrap and must match GPU attestors and following archives."
+            f"operator-supplied pin {sorted(want)}; got {sorted(have)}. "
+            "P2P seeds do not advertise keys — trusted-mirror is local trust."
         )
-    threshold = int(status.get("threshold") or 0)
-    if threshold != MAINNET_ATTESTOR_THRESHOLD:
+    have_threshold = int(status.get("threshold") or 0)
+    if have_threshold != threshold:
         raise RuntimeError(
-            "getmatmultrustedstatus.threshold does not match the published "
-            f"mainnet pin {MAINNET_ATTESTOR_THRESHOLD}; got {threshold}."
+            "getmatmultrustedstatus.threshold does not match the operator-supplied "
+            f"pin {threshold}; got {have_threshold}."
         )
     print(
-        "attestor pin ok: configured="
-        f"{status.get('configured')} threshold={threshold} "
+        "operator attestor pin ok: configured="
+        f"{status.get('configured')} threshold={have_threshold} "
         f"pubkeys={len(have)}"
     )
 
@@ -651,6 +683,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional shared file path for MatMul service challenge redemption state",
     )
     parser.add_argument(
+        "--matmul-validation",
+        choices=("consensus", "trusted"),
+        default=os.environ.get("BTX_FASTSTART_MATMUL_VALIDATION", "consensus"),
+        help="MatMul validation policy written into the generated config. "
+        "consensus (default) ExactReplays locally and needs no pin. "
+        "trusted is an opt-in light-client mode that requires "
+        "--matmul-trusted-pubkey (operator-chosen; no shipped set).",
+    )
+    parser.add_argument(
+        "--matmul-trusted-pubkey",
+        action="append",
+        default=None,
+        dest="matmul_trusted_pubkeys",
+        help="Compressed secp256k1 attestor pubkey to pin (repeatable). "
+        "Required with --matmul-validation=trusted. Never a shipped default.",
+    )
+    parser.add_argument(
+        "--matmul-trusted-threshold",
+        type=int,
+        default=None,
+        help="M-of-N threshold for an operator-supplied pin. "
+        "Defaults to min(2, N) when omitted under --matmul-validation=trusted.",
+    )
+    parser.add_argument(
         "--keep-snapshot",
         dest="keep_snapshot",
         action="store_true",
@@ -694,7 +750,19 @@ def main(argv: list[str]) -> int:
         shared_path = Path(args.matmul_service_challenge_file).expanduser().resolve()
         extra_conf.append(f"matmulservicechallengefile={shared_path}")
 
-    conf_path = write_preset_conf(workdir, args.preset, args.chain, extra_conf)
+    operator_pubkeys = args.matmul_trusted_pubkeys or []
+    try:
+        conf_path = write_preset_conf(
+            workdir,
+            args.preset,
+            args.chain,
+            extra_conf,
+            matmul_validation=args.matmul_validation,
+            trusted_pubkeys=operator_pubkeys,
+            trusted_threshold=args.matmul_trusted_threshold,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     snapshot_url, snapshot_sha256, snapshot_name, snapshot_entry = snapshot_from_args(args)
     require_snapshot_sha256(
         snapshot_url,
@@ -719,8 +787,14 @@ def main(argv: list[str]) -> int:
         run_quiet(daemon)
         wait_for_rpc_ready(cli_cmd, args.rpc_wait_secs)
 
-    if args.chain == "main":
-        verify_mainnet_attestor_pin(cli_cmd)
+    if args.chain == "main" and args.matmul_validation == "trusted":
+        pubkeys = [key.strip() for key in operator_pubkeys if key.strip()]
+        threshold = (
+            args.matmul_trusted_threshold
+            if args.matmul_trusted_threshold is not None
+            else (2 if len(pubkeys) >= 2 else 1)
+        )
+        verify_operator_trusted_pin(cli_cmd, pubkeys, threshold)
 
     print(f"downloading snapshot: {snapshot_url}")
     download_snapshot(snapshot_url, snapshot_path, snapshot_sha256)
