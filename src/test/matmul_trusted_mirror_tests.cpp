@@ -2211,6 +2211,31 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     // pause only) -- addrman and the 5-minute patience are preserved.
     BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
         /*far_behind=*/true, /*persistent=*/true, false, false, false));
+
+    // #7 resilience follow-up: a capable signed-frontier source that has been
+    // body-silent past CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE is DEMOTED from the
+    // prefer-gate's capable count so miners may help fill GETDATA. This never
+    // disconnects the source (a separate concern) and only ever relaxes the
+    // gate. The demotion applies only to a peer that is itself a preferred
+    // capable source; a non-capable peer is never "demoted".
+    using node::matmul_trusted::CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE;
+    using node::matmul_trusted::SignedFrontierCapableSourceDemotedForBodySilence;
+    BOOST_CHECK_EQUAL(CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE, 3);
+    // Below threshold: patience preserved, archive still preferred (no demote).
+    BOOST_CHECK(!SignedFrontierCapableSourceDemotedForBodySilence(
+        /*preferred_capable=*/true, /*body_silence_count=*/0));
+    BOOST_CHECK(!SignedFrontierCapableSourceDemotedForBodySilence(true, 1));
+    BOOST_CHECK(!SignedFrontierCapableSourceDemotedForBodySilence(
+        true, CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE - 1));
+    // At/above threshold: demoted so miners can help fill GETDATA.
+    BOOST_CHECK(SignedFrontierCapableSourceDemotedForBodySilence(
+        true, CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE));
+    BOOST_CHECK(SignedFrontierCapableSourceDemotedForBodySilence(
+        true, CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE + 5));
+    // A non-capable / non-preferred peer is never demoted (it was never
+    // counted, so the gate was never relying on it) regardless of its count.
+    BOOST_CHECK(!SignedFrontierCapableSourceDemotedForBodySilence(
+        /*preferred_capable=*/false, /*body_silence_count=*/999));
     {
         const auto spacing{std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::seconds{90})};

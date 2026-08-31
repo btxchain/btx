@@ -1246,6 +1246,13 @@ struct CNodeState {
     //! from this peer. Used to prefer re-request over disconnect, while still
     //! dropping persistently unresponsive peers.
     int m_block_download_timeout_count{0};
+    //! #7 resilience: consecutive stale signed-frontier body re-requests with
+    //! zero delivered body. Unlike m_block_download_timeout_count this keeps
+    //! accumulating for the kept last GPU/frontier source, so a body-silent
+    //! capable archive can be demoted from the prefer-gate's capable count
+    //! (miners may then help) WITHOUT disconnecting it. Reset on any delivered
+    //! body. See CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE.
+    int m_frontier_body_silence_count{0};
     //! Whether we consider this a preferred download peer.
     bool fPreferredDownload{false};
     /** Whether this peer advertised NODE_MATMUL_ATTESTATION_ARCHIVE (trusted
@@ -2726,7 +2733,14 @@ private:
     [[nodiscard]] int CountSignedFrontierBodySources() const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Preferred sources whose best-known header extends the active tip. */
-    [[nodiscard]] int CountCapableSignedFrontierBodySources() const
+    //! Count handshake-complete preferred signed-frontier body sources whose
+    //! BestKnown extends the tip. When exclude_body_silent is true, a source
+    //! that has been body-silent past CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE is
+    //! NOT counted, so the archive-preference gate can fall through to miners
+    //! (the source itself is not disconnected). Default false keeps the full
+    //! count used by the keep/disconnect machinery.
+    [[nodiscard]] int CountCapableSignedFrontierBodySources(
+        bool exclude_body_silent = false) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** addnode/noban GPU attestor, or a peer with a live configured-key MMATTEST. */
     [[nodiscard]] bool PeerIsGpuAuthority(
@@ -4687,6 +4701,22 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
         } else {
             ++state->m_block_download_timeout_count;
         }
+        // #7 resilience: independently of the keep/disconnect counter above
+        // (which force-resets for the kept last source), tally stale body
+        // re-request rounds for a preferred signed-frontier source during
+        // catch-up. `overdue` holds at most one entry per peer per pass, so
+        // this is one bump per re-request round. Once it crosses
+        // CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE the prefer-gate stops counting
+        // this source (miners may help); a delivered body resets it. The peer
+        // is never disconnected on account of this counter.
+        // This is the far-behind reclaim path; the near-tip (gap 2-99) head
+        // timeout in SendMessages owns the same tally for !far_behind, so gate
+        // on far_behind here to keep it one bump per peer per round (no
+        // double-count when both paths reclaim the same peer).
+        if (far_behind && signed_frontier_catch_up &&
+            PeerIsSignedFrontierBodySource(item.nodeid, *state)) {
+            ++state->m_frontier_body_silence_count;
+        }
         const bool persistent{
             state->m_block_download_timeout_count >=
             BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER};
@@ -5843,7 +5873,14 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // already requires handshake-complete + BestKnown extending the tip;
     // SkipNonPreferred still ignores that flag internally — the wrap here
     // is the gate. ExactReplay / ConnectTip are unchanged.
-    const bool any_capable_preferred{CountCapableSignedFrontierBodySources() > 0};
+    // #7 resilience: exclude body-silent-demoted sources here so a connected
+    // archive that has gone silent across CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE
+    // re-request rounds stops forcing prefer_active — the stalled/spread
+    // bypass re-engages and miners help fill GETDATA. The source is not
+    // disconnected (keep/disconnect logic still counts it) and recovers the
+    // moment it delivers a body.
+    const bool any_capable_preferred{
+        CountCapableSignedFrontierBodySources(/*exclude_body_silent=*/true) > 0};
     const bool prefer_active{
         (!stalled_behind_header_tower && !catch_up_spread) || any_capable_preferred};
     if (prefer_active &&
@@ -10749,7 +10786,8 @@ int PeerManagerImpl::CountSignedFrontierBodySources() const
     return n;
 }
 
-int PeerManagerImpl::CountCapableSignedFrontierBodySources() const
+int PeerManagerImpl::CountCapableSignedFrontierBodySources(
+    bool exclude_body_silent) const
 {
     AssertLockHeld(cs_main);
     const CBlockIndex* const tip{m_chainman.ActiveTip()};
@@ -10770,6 +10808,16 @@ int PeerManagerImpl::CountCapableSignedFrontierBodySources() const
                 node::matmul_trusted::SignedFrontierVersionHandshakeComplete(
                     state.m_starting_height),
                 state.m_starting_height)) {
+            // #7 resilience: a capable source that has been body-silent past
+            // the demote threshold is not counted for the prefer-gate, so the
+            // node stops refusing miners and can self-heal. Keep/disconnect
+            // callers pass exclude_body_silent=false and still see it capable.
+            if (exclude_body_silent &&
+                node::matmul_trusted::
+                    SignedFrontierCapableSourceDemotedForBodySilence(
+                        preferred, state.m_frontier_body_silence_count)) {
+                continue;
+            }
             ++n;
         }
     }
@@ -15548,6 +15596,8 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
             LOCK(cs_main);
             if (CNodeState* nodestate = State(pfrom.GetId())) {
                 nodestate->m_block_download_timeout_count = 0;
+                // #7 resilience: a delivered body clears body-silence demotion.
+                nodestate->m_frontier_body_silence_count = 0;
             }
         }
         MaybeRelayProvisionalMatMulRCCompactBlock(
@@ -19918,6 +19968,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             if (useful_owned_delivery) {
                 if (CNodeState* nodestate = State(pfrom.GetId())) {
                     nodestate->m_block_download_timeout_count = 0;
+                    // #7 resilience: a delivered body clears body-silence demotion.
+                    nodestate->m_frontier_body_silence_count = 0;
                 }
             }
             // Check claimed work on this block against our anti-dos thresholds.
@@ -21935,6 +21987,18 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     }
                 }
                 ++state.m_block_download_timeout_count;
+                // #7 resilience (near-tip / !far_behind reclaim path): tally
+                // body-silence for a preferred signed-frontier source so a
+                // body-silent capable archive is demoted from the prefer-gate
+                // here too (the far-behind tally lives in
+                // ReclaimStaleInFlightBlockRequests). One bump per peer-timeout
+                // round; reset on any delivered body. This is the path that
+                // owns the tally for the gap-2-99 wedge, which the far-behind
+                // reclaim never touches. Never disconnects the source.
+                if (IsSignedFrontierBodyCatchUp() &&
+                    PeerIsSignedFrontierBodySource(pto->GetId(), state)) {
+                    ++state.m_frontier_body_silence_count;
+                }
                 // Never disconnect the only download source for slow
                 // delivery — the same rule as far-behind catch-up, applied
                 // to genesis-to-anchor IBD. Fast-phase spacing used to
