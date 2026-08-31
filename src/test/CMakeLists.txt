@@ -12,6 +12,7 @@ add_executable(test_btx
   argsman_tests.cpp
   arith_uint256_tests.cpp
   autoupdate_tests.cpp
+  assumeutxo_capacity_tests.cpp
   banman_tests.cpp
   base32_tests.cpp
   base58_tests.cpp

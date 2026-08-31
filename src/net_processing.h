@@ -12,6 +12,7 @@
 #include <txorphanage.h>
 #include <validationinterface.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -61,7 +62,11 @@ static constexpr size_t MAX_SHIELDEDDATA_REQUESTS_PER_SECOND{8};
  * so MaybeCompleteSnapshotValidation stayed SKIPPED, IsSnapshotValidated
  * stayed false, and FindNextBlocks could skip every peer (MendeMatthias,
  * v0.34.4, no fork, no invalid blocks). Active-chain FindNextBlocks still
- * runs first and takes inflight budget. */
+ * runs first and takes inflight budget.
+ *
+ * active_height is deliberately unused here. The lag is applied only by
+ * BackgroundSnapshotInflightShare / BackgroundSnapshotAdditionalSlots,
+ * which keep a non-zero floor so this gate cannot deadlock again. */
 constexpr bool ShouldFetchBackgroundSnapshotBlocks(
     bool background_sync,
     bool limited_peer,
@@ -72,6 +77,61 @@ constexpr bool ShouldFetchBackgroundSnapshotBlocks(
     (void)active_height;
     return background_sync && !limited_peer && !initial_block_download &&
         best_header_height >= 0;
+}
+
+/** Cap on background (genesis→snapshot-base) inflight slots as a function
+ * of active-tip lag. Never a fetch gate: callers still request background
+ * blocks whenever ShouldFetchBackgroundSnapshotBlocks is true. Floor is 1
+ * while any budget remains so a node at active 199300 / headers 199303
+ * still assigns background capacity. Restricts toward that floor while
+ * the active chain is behind (so the tip cannot starve / go is_stale);
+ * scales up as it catches up. Mining-neutral: height delta only. */
+constexpr int BackgroundSnapshotInflightShare(
+    int inflight_budget,
+    int active_height,
+    int best_header_height)
+{
+    if (inflight_budget <= 0) return 0;
+    const int lag{(active_height >= 0 && best_header_height >= 0 &&
+                   best_header_height > active_height)
+                      ? best_header_height - active_height
+                      : 0};
+    // Never occupy the last slot with historical inflight when the window
+    // is larger than one: a subsequent active-tip announcement must still
+    // find reserved capacity. A 1-slot window still uses the floor of 1
+    // when the active chain has nothing to queue (AdditionalSlots leftover).
+    const int active_reserve{inflight_budget > 1 ? 1 : 0};
+    const int max_bg{inflight_budget - active_reserve};
+    if (lag <= 0) return max_bg > 0 ? max_bg : inflight_budget;
+    if (lag == 1) {
+        const int quarter{inflight_budget / 4};
+        const int share{quarter > 1 ? quarter : 1};
+        return share < max_bg ? share : (max_bg > 0 ? max_bg : share);
+    }
+    return 1;
+}
+
+/** Additional historical GETDATA slots this pass, after active-chain
+ * FindNextBlocksToDownload has already queued `active_queued`. Existing
+ * background inflight (per-peer and global) counts against the share so
+ * a scarce full-NODE_NETWORK peer cannot fill the window with genesis-era
+ * bodies. Returns 0 only when the window is already full or the share is
+ * already occupied — never because of a height gate. */
+constexpr int BackgroundSnapshotAdditionalSlots(
+    int inflight_budget,
+    int active_queued,
+    int existing_peer_background_inflight,
+    int existing_global_background_inflight,
+    int active_height,
+    int best_header_height)
+{
+    if (inflight_budget <= 0) return 0;
+    const int share{BackgroundSnapshotInflightShare(
+        inflight_budget, active_height, best_header_height)};
+    const int leftover{std::max(0, inflight_budget - std::max(0, active_queued))};
+    const int peer_room{std::max(0, share - std::max(0, existing_peer_background_inflight))};
+    const int global_room{std::max(0, share - std::max(0, existing_global_background_inflight))};
+    return std::min(leftover, std::min(peer_room, global_room));
 }
 
 /** Competing BestKnown that does not contain the snapshot base cannot be
@@ -194,6 +254,12 @@ struct PeerManagerInfo {
     //! Recent-network VERSION height watermark on a discovery relay. Raised
     //! by outbound/manual miners, archives, or trusted mirrors. -1 if none.
     int32_t discovery_archive_reported_height{-1};
+};
+
+/** Per-chainstate inflight bodies for getchainstates (issue #133). */
+struct AssumeutxoDownloadStats {
+    int active_blocks_in_flight{0};
+    int background_blocks_in_flight{0};
 };
 
 class PeerManager : public CValidationInterface, public NetEventsInterface
@@ -392,6 +458,9 @@ public:
 
     /** Get number of peers from which we're downloading blocks */
     virtual int GetNumberOfPeersWithValidatedDownloads() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main) = 0;
+
+    /** In-flight GETDATA classified against the assumeutxo snapshot base. */
+    virtual AssumeutxoDownloadStats GetAssumeutxoDownloadStats() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main) = 0;
 };
 
 #endif // BITCOIN_NET_PROCESSING_H

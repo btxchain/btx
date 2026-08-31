@@ -22,6 +22,28 @@ namespace node {
 //! sole double-spend barrier.
 inline constexpr int CHAIN_STALE_BEHIND_HEADERS{6};
 
+//! Bounded resume for assumeutxo background ActivateBestChain after yielding
+//! to a stale / behind active tip (issue #133). Long enough for the active
+//! chain to connect a burst, short enough that background validation cannot
+//! stall forever (the height-gate deadlock).
+inline constexpr int BACKGROUND_ACTIVATION_YIELD_TIMEOUT_SECONDS{8};
+
+/** Skip starting a background ActivateBestChain batch so the active snapshot
+ *  chain can use cs_main. Never a download gate (see
+ *  ShouldFetchBackgroundSnapshotBlocks). Timeout expired forces a resume so
+ *  background still makes forward progress. Do not evaluate this inside
+ *  ActivateBestChain's cs_main connect loop. */
+constexpr bool ShouldYieldBackgroundActivationToActiveTip(
+    bool background_sync,
+    bool active_is_stale,
+    bool active_behind_with_pending_work,
+    bool yield_timeout_expired)
+{
+    if (!background_sync) return false;
+    if (yield_timeout_expired) return false;
+    return active_is_stale || active_behind_with_pending_work;
+}
+
 inline constexpr std::string_view CHAIN_STALE_RPC_WARNING{
     "Active chain tip is stale: this node has validated headers far ahead of connected blocks, or a heavier competing header chain it has not connected. Do not credit deposits from getblockcount or gettransaction confirmations until is_stale is false."};
 

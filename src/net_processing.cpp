@@ -1524,6 +1524,7 @@ public:
     void UpdateLastBlockAnnounceTime(NodeId node, int64_t time_in_seconds) override;
     ServiceFlags GetDesirableServiceFlags(ServiceFlags services) const override;
     int GetNumberOfPeersWithValidatedDownloads() const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    AssumeutxoDownloadStats GetAssumeutxoDownloadStats() const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 private:
     /** Consider evicting an outbound peer based on the amount of time they've been behind our tip */
@@ -2416,6 +2417,9 @@ private:
 
     /** Request blocks for the background chainstate, if one is in use. */
     void TryDownloadingHistoricalBlocks(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, const CBlockIndex* from_tip, const CBlockIndex* target_block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** In-flight GETDATA whose height is strictly below `height` (snapshot base). */
+    int CountInFlightBelowHeight(int height) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /**
     * \brief Find next blocks to download from a peer after a starting block.
@@ -7235,6 +7239,38 @@ int PeerManagerImpl::GetNumberOfPeersWithValidatedDownloads() const
 {
     AssertLockHeld(m_chainman.GetMutex());
     return m_peers_downloading_from;
+}
+
+int PeerManagerImpl::CountInFlightBelowHeight(int height) const
+{
+    AssertLockHeld(::cs_main);
+    if (height < 0) return 0;
+    int n{0};
+    for (const auto& entry : mapBlocksInFlight) {
+        const CBlockIndex* pindex{entry.second.second->pindex};
+        if (pindex && pindex->nHeight < height) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+AssumeutxoDownloadStats PeerManagerImpl::GetAssumeutxoDownloadStats() const
+{
+    AssertLockHeld(m_chainman.GetMutex());
+    AssumeutxoDownloadStats out;
+    const CBlockIndex* const base{m_chainman.GetSnapshotBaseBlock()};
+    const int base_height{base ? base->nHeight : -1};
+    for (const auto& entry : mapBlocksInFlight) {
+        const CBlockIndex* pindex{entry.second.second->pindex};
+        if (!pindex) continue;
+        if (base_height >= 0 && pindex->nHeight < base_height) {
+            ++out.background_blocks_in_flight;
+        } else {
+            ++out.active_blocks_in_flight;
+        }
+    }
+    return out;
 }
 
 bool PeerManagerImpl::GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const
@@ -21967,27 +22003,54 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             FindNextBlocksToDownload(*peer, get_inflight_budget(), vToDownload, staller,
                 /*allow_limited_historical=*/pto->HasPermission(NetPermissionFlags::Download) &&
                     !IsLimitedPeer(*peer));
-            // Defer genesis→snapshot historical downloads while the active
-            // (snapshot) chain is still catching up to network tip. Sharing the
-            // per-peer inflight budget with background IBD starves tip catch-up
-            // when most peers are pruned / scarce block servers. Background
-            // integrity re-validation resumes only once the active chain is
-            // actually near the best known header. IsInitialBlockDownload()
-            // can latch false based on work and tip age before that condition.
+            // Issue #133: keep a non-zero background floor so genesis→snapshot
+            // validation cannot deadlock (the old active>=best_header-1 gate
+            // at 199300/199303), but cap background's share of the inflight
+            // window while the active chain is behind. Active-chain
+            // FindNextBlocksToDownload already ran first.
             if (ShouldFetchBackgroundSnapshotBlocks(
                     m_chainman.BackgroundSyncInProgress(), IsLimitedPeer(*peer),
                     m_chainman.IsInitialBlockDownload(), m_chainman.ActiveHeight(),
                     m_chainman.m_best_header != nullptr
                         ? m_chainman.m_best_header->nHeight
                         : -1)) {
-                // If the background tip is not an ancestor of the snapshot block,
-                // we need to start requesting blocks from their last common ancestor.
-                const CBlockIndex *from_tip = LastCommonAncestor(m_chainman.GetBackgroundSyncTip(), m_chainman.GetSnapshotBaseBlock());
-                TryDownloadingHistoricalBlocks(
-                    *peer,
-                    get_inflight_budget(),
-                    vToDownload, from_tip,
-                    Assert(m_chainman.GetSnapshotBaseBlock()));
+                const int remaining{get_inflight_budget()};
+                const CBlockIndex* const snapshot_base{Assert(m_chainman.GetSnapshotBaseBlock())};
+                const int snapshot_base_height{snapshot_base->nHeight};
+                int existing_peer_bg{0};
+                if (snapshot_base_height >= 0) {
+                    for (const QueuedBlock& queued : state.vBlocksInFlight) {
+                        if (queued.pindex && queued.pindex->nHeight < snapshot_base_height) {
+                            ++existing_peer_bg;
+                        }
+                    }
+                }
+                const int existing_global_bg{CountInFlightBelowHeight(snapshot_base_height)};
+                const int active_height{m_chainman.ActiveHeight()};
+                const int best_header_height{m_chainman.m_best_header != nullptr
+                                                 ? m_chainman.m_best_header->nHeight
+                                                 : -1};
+                const int active_queued{static_cast<int>(std::min(
+                    vToDownload.size(), static_cast<size_t>(std::numeric_limits<int>::max())))};
+                const int bg_slots{BackgroundSnapshotAdditionalSlots(
+                    remaining, active_queued, existing_peer_bg, existing_global_bg,
+                    active_height, best_header_height)};
+                LogDebug(BCLog::NET,
+                         "background snapshot download share peer=%d extra=%d "
+                         "remaining=%d active_queued=%d existing_bg_peer=%d "
+                         "existing_bg_global=%d active_height=%d best_header=%d\n",
+                         pto->GetId(), bg_slots, remaining, active_queued,
+                         existing_peer_bg, existing_global_bg, active_height,
+                         best_header_height);
+                if (bg_slots > 0) {
+                    const CBlockIndex* from_tip = LastCommonAncestor(
+                        m_chainman.GetBackgroundSyncTip(), snapshot_base);
+                    TryDownloadingHistoricalBlocks(
+                        *peer,
+                        static_cast<unsigned int>(active_queued + bg_slots),
+                        vToDownload, from_tip,
+                        snapshot_base);
+                }
             }
             for (const CBlockIndex *pindex : vToDownload) {
                 uint32_t nFetchFlags = GetFetchFlags(*peer);

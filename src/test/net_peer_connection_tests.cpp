@@ -205,6 +205,33 @@ BOOST_AUTO_TEST_CASE(snapshot_background_download_not_gated_on_header_gap)
         /*best_header_height=*/200));
 }
 
+BOOST_AUTO_TEST_CASE(snapshot_background_inflight_share_reserves_active_capacity)
+{
+    // Floor of 1 at the MendeMatthias 199300/199303 gap — not a height gate.
+    BOOST_CHECK_EQUAL(BackgroundSnapshotInflightShare(16, 199300, 199303), 1);
+    BOOST_CHECK_EQUAL(BackgroundSnapshotAdditionalSlots(
+        16, /*active_queued=*/0, /*existing_peer_bg=*/0, /*existing_global_bg=*/0,
+        199300, 199303), 1);
+    BOOST_CHECK_EQUAL(BackgroundSnapshotAdditionalSlots(
+        16, /*active_queued=*/3, 0, 0, 199300, 199303), 1);
+    // Active filled the window this pass: background waits, no height gate.
+    BOOST_CHECK_EQUAL(BackgroundSnapshotAdditionalSlots(
+        16, /*active_queued=*/16, 0, 0, 199300, 199303), 0);
+    // Already at the floor globally: second scarce peer gets nothing extra.
+    BOOST_CHECK_EQUAL(BackgroundSnapshotAdditionalSlots(
+        16, 0, 0, /*existing_global_bg=*/1, 199300, 199303), 0);
+    // Caught up: leftover after the always-reserved active slot.
+    BOOST_CHECK_EQUAL(BackgroundSnapshotInflightShare(16, 200, 200), 15);
+    BOOST_CHECK_EQUAL(BackgroundSnapshotAdditionalSlots(
+        16, /*active_queued=*/0, 0, 0, 200, 200), 15);
+    BOOST_CHECK_EQUAL(BackgroundSnapshotAdditionalSlots(
+        16, /*active_queued=*/4, 0, 0, 200, 200), 12);
+    BOOST_CHECK_EQUAL(BackgroundSnapshotInflightShare(2, 200, 200), 1);
+    // One header of lag: quarter share, at least 1, never the last slot.
+    BOOST_CHECK_EQUAL(BackgroundSnapshotInflightShare(16, 199, 200), 4);
+    BOOST_CHECK_EQUAL(BackgroundSnapshotInflightShare(2, 199, 200), 1);
+}
+
 BOOST_AUTO_TEST_CASE(snapshot_unvalidated_peer_skip_allows_tip_chain)
 {
     // Competing BestKnown without the snapshot base: still skip.

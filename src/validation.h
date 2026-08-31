@@ -1578,6 +1578,12 @@ public:
     //! only; the invalid tower is not stored.
     std::atomic<uint64_t> m_rejected_divergent_pow_headers{0};
     uint256 m_last_rejected_divergent_pow_hash GUARDED_BY(::cs_main){};
+    //! Issue #133: times background ActivateBestChain was skipped so the
+    //! active snapshot tip could use cs_main. Lock-free for getchainstates.
+    std::atomic<uint64_t> m_background_activation_yields{0};
+    //! Monotonic (steady) seconds when the current yield streak started, 0 if not yielding.
+    //! Bounded by BACKGROUND_ACTIVATION_YIELD_TIMEOUT_SECONDS.
+    std::atomic<int64_t> m_background_activation_yield_since{0};
     /**
      * Lock-free publication of the exact height currently owned by
      * m_best_header. Unlike a peer height hint this value is reversible: an
