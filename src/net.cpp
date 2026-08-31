@@ -3553,9 +3553,6 @@ void CConnman::ThreadMessageHandler()
             bool preferred_handshake_pending{false};
             bool archive_getdata_pending{false};
             const bool local_signer{node::matmul_trusted::HasLocalSigner()};
-            const bool trusted_mirror_catch_up{
-                node::matmul_trusted::IsTrustedMirror() &&
-                GetTrustedMirrorCatchUp()};
             for (CNode* p : nodes) {
                 if (p == nullptr || p->fDisconnect) continue;
                 const bool manual_or_outbound{
@@ -3610,7 +3607,6 @@ void CConnman::ThreadMessageHandler()
                 if (node::matmul_trusted::
                         SkipMinerProcessMessagesDuringArchiveGetData(
                             local_signer, archive_getdata_pending,
-                            trusted_mirror_catch_up,
                             pnode->IsInboundConn(), pnode->IsManualConn(),
                             pnode->fSuccessfullyConnected.load(),
                             archive_target,

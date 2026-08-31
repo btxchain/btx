@@ -1136,6 +1136,19 @@ BOOST_FIXTURE_TEST_CASE(chainstate_shallow_reorg_hysteresis_defers_until_work_ma
     BOOST_CHECK_EQUAL(stats.last_deferred_required_work_margin, 2U);
     BOOST_CHECK_EQUAL(stats.rejected_reorgs, 0U);
 
+    // Async block-verification completions can re-enter ActivateBestChain while
+    // the same fork race is unchanged. Re-evaluate the policy, but do not turn
+    // polling frequency into duplicate warnings or deferred-reorg events.
+    BlockValidationState repeated_deferred_state;
+    BOOST_CHECK(chainstate.ActivateBestChain(repeated_deferred_state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_tip_hash);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 1);
+    }
+    stats = ProbeReorgProtectionRuntimeStats();
+    BOOST_CHECK_EQUAL(stats.deferred_reorgs, 1U);
+
     hysteresis_work_margin = 1;
     ResetReorgProtectionRuntimeStats();
     BlockValidationState adopted_state;

@@ -9839,6 +9839,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
     }
     std::vector<CBlockIndex*> hysteresis_deferred_candidates;
     std::set<CBlockIndex*> skipped_this_call;
+    bool saw_hysteresis_deferral{false};
     const auto restore_hysteresis_deferred_candidates = [&]() {
         for (CBlockIndex* candidate : hysteresis_deferred_candidates) {
             setBlockIndexCandidates.insert(candidate);
@@ -10303,25 +10304,52 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                     const arith_uint256 required_work =
                         old_tip->nChainWork + tip_work * hysteresis_work_margin;
                     if (pindexNew->nChainWork < required_work) {
-                        RecordDeferredReorgDepth(
-                            static_cast<uint32_t>(reorg_depth),
-                            hysteresis_work_margin,
-                            old_tip->nHeight,
-                            fork->nHeight,
-                            pindexNew->nHeight);
-                        LogWarning("Shallow reorg hysteresis deferred branch hash=%s depth=%d "
-                                   "candidate_height=%d tip_height=%d required_work_margin=%u\n",
-                                   pindexNew->GetBlockHash().ToString(),
-                                   reorg_depth,
-                                   pindexNew->nHeight,
-                                   old_tip->nHeight,
-                                   hysteresis_work_margin);
+                        // Async ExactReplay completions and retained-body
+                        // processing can call ActivateBestChain many times while
+                        // this exact fork race is unchanged. The policy must be
+                        // reconsidered each time, but warning/stat accounting is
+                        // for the deferral episode, not the polling frequency.
+                        // Only the strongest deferred candidate in this call can
+                        // identify the episode; otherwise two insufficient forks
+                        // would alternate the remembered key and log forever.
+                        if (!saw_hysteresis_deferral) {
+                            saw_hysteresis_deferral = true;
+                            const bool new_episode{
+                                m_last_hysteresis_deferred_tip != old_tip ||
+                                m_last_hysteresis_deferred_candidate != pindexNew ||
+                                m_last_hysteresis_deferred_work_margin !=
+                                    hysteresis_work_margin};
+                            if (new_episode) {
+                                RecordDeferredReorgDepth(
+                                    static_cast<uint32_t>(reorg_depth),
+                                    hysteresis_work_margin,
+                                    old_tip->nHeight,
+                                    fork->nHeight,
+                                    pindexNew->nHeight);
+                                LogWarning("Shallow reorg hysteresis deferred branch hash=%s depth=%d "
+                                           "candidate_height=%d tip_height=%d required_work_margin=%u\n",
+                                           pindexNew->GetBlockHash().ToString(),
+                                           reorg_depth,
+                                           pindexNew->nHeight,
+                                           old_tip->nHeight,
+                                           hysteresis_work_margin);
+                                m_last_hysteresis_deferred_tip = old_tip;
+                                m_last_hysteresis_deferred_candidate = pindexNew;
+                                m_last_hysteresis_deferred_work_margin =
+                                    hysteresis_work_margin;
+                            }
+                        }
                         setBlockIndexCandidates.erase(pindexNew);
                         hysteresis_deferred_candidates.push_back(pindexNew);
                         ++skipped_count;
                         continue;
                     }
                 }
+            }
+            if (pindexNew != m_chain.Tip()) {
+                m_last_hysteresis_deferred_tip = nullptr;
+                m_last_hysteresis_deferred_candidate = nullptr;
+                m_last_hysteresis_deferred_work_margin = 0;
             }
             restore_hysteresis_deferred_candidates();
             return pindexNew;

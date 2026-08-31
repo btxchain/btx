@@ -82,6 +82,9 @@ public:
         Background = 0,
         CompetingBranch = 1,
         AuthenticatedTipChild = 2,
+        //! Unique followed child selected to advance the authenticated tip.
+        //! The accelerator scheduler may immediately preempt CandidateMining.
+        ActiveTipValidation = 3,
     };
 
     enum class EnqueueMode : uint8_t {
@@ -136,6 +139,11 @@ public:
         //! populated.
         std::shared_ptr<const CBlockHeader> header;
         Priority priority{Priority::Background};
+        //! Complete body at the parent-connectable frontier of a bounded
+        //! acquisition-escape tower. It may use the ordinary TipValidation
+        //! device lane even on a configured local signer, where an absent
+        //! attestation must not let mining starve local ExactReplay.
+        bool acquisition_recovery{false};
         std::shared_ptr<std::atomic_bool> cancelled;
         //! One cap-one RC pending-work reservation. Header-first admission
         //! stores it outside `completion` so one bounded equal-priority
@@ -182,8 +190,8 @@ public:
      *  synchronously on the P2P message thread. An authenticated-tip child
      *  preempts lower-priority in-flight speculation so a valid admission
      *  ticket cannot reserve the sole device lane indefinitely. A body-holding
-     *  CompetingBranch / AuthenticatedTipChild already running ExactReplay is
-     *  never preempted by a later header-only AuthenticatedTipChild. Same-hash
+     *  CompetingBranch / tip-child already running ExactReplay is never
+     *  preempted by a later header-only tip-child. Same-hash
      *  re-enqueue after a retryable cancel is Deferred until the worker-local
      *  backoff expires. Threads are started lazily. */
     EnqueueResult Enqueue(

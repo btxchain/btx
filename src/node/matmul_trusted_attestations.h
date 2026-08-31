@@ -2058,16 +2058,19 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     return this_peer_handshake_complete;
 }
 
-/** Do not ProcessMessages non-archive peers while we must serve an
- *  archive or while a trusted mirror is catching up to the GPU frontier.
- *  Must skip outbound miners too: ClassifyMsghandPeer still puts every
- *  outbound in Preferred, and the inbound-only skip left addrman
- *  GETDATA on the signer draining BLOCK under cs_main (live 46s/block
- *  after bd3f6b5f). Handshake and ARCHIVE/MIRROR still run. */
+/** Do not ProcessMessages non-archive peers while a local signer must serve an
+ *  archive. Must skip outbound miners too: ClassifyMsghandPeer still puts every
+ *  outbound in Preferred, and the inbound-only skip left addrman GETDATA on
+ *  the signer draining BLOCK under cs_main (live 46s/block after bd3f6b5f).
+ *
+ *  Do not apply this peer-wide gate to trusted-mirror catch-up. The message
+ *  handler cannot distinguish control traffic, header discovery, or a
+ *  requested body here. Skipping the peer before ProcessMessages strands its
+ *  PING, HEADERS, and BLOCK queue after an authority disconnect and bypasses
+ *  the message-specific authority/admission checks in net_processing. */
 [[nodiscard]] inline bool SkipMinerProcessMessagesDuringArchiveGetData(
     bool local_signer,
     bool archive_getdata_pending,
-    bool trusted_mirror_catch_up,
     bool this_peer_inbound,
     bool this_peer_manual,
     bool this_peer_handshake_complete,
@@ -2091,9 +2094,7 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     // sent.headers==0 for every no-bit / CONSENSUS-only peer). Serving
     // headers is a read; authority rules govern which BODIES we trust,
     // not who may ask us questions.
-    const bool skip_now{(local_signer && archive_getdata_pending) ||
-                        trusted_mirror_catch_up};
-    if (!skip_now) return false;
+    if (!local_signer || !archive_getdata_pending) return false;
     if (this_is_archive_serve_target) return false;
     if (!this_peer_handshake_complete) return false;
     return true;
@@ -2855,9 +2856,10 @@ struct TrustedAttestationAdmitView {
  *
  * Prefer the block that extends the active tip, then blocks above the tip in
  * ascending height (build toward the best header), and never let already-
- * connected / below-tip backfill starve tip advancement. `priority_rank` is the
- * MatMulVerifyWorker::Priority ordinal when applicable (higher is better); use
- * 0 when ranking request slots alone. Lower `sequence` wins ties (FIFO).
+ * connected / below-tip backfill starve tip advancement. `priority_rank` is a
+ * caller-defined productive-work tier (higher is better), such as a
+ * MatMulVerifyWorker::Priority ordinal or TrustedAttestationRequestPriority.
+ * Lower `sequence` wins ties (FIFO).
  */
 struct TrustedWorkRank {
     bool tip_extending{false};
@@ -2866,6 +2868,26 @@ struct TrustedWorkRank {
     int32_t height{0};
     uint64_t sequence{0};
 };
+
+/**
+ * Priority inside the bounded preferred-attestation request set.
+ *
+ * Reorg/sibling discovery is useful, but it must not occupy every preferred
+ * slot ahead of the body that actually advances the selected chain. A body
+ * received from a configured/recently-proven GPU authority or selected as the
+ * followed tip-child is productive recovery work; an otherwise direct
+ * tip-child ranks above deeper short-fork/backfill work.
+ */
+[[nodiscard]] inline uint8_t TrustedAttestationRequestPriority(
+    bool source_is_gpu_authority,
+    bool followed_tip_child,
+    bool direct_tip_child)
+{
+    if (followed_tip_child) return 3;
+    if (source_is_gpu_authority) return 2;
+    if (direct_tip_child) return 1;
+    return 0;
+}
 
 [[nodiscard]] inline bool PreferTrustedWork(const TrustedWorkRank& a,
                                             const TrustedWorkRank& b)

@@ -380,9 +380,13 @@ class MatMulTrustedMirrorFollowForwardTest(BitcoinTestFramework):
         # From here the test only uses read-only RPCs plus P2P connect.
         self.connect_nodes(1, 0)
         self.connect_nodes(1, 2)
+        # Keep this bound below MATMUL_BUDGET_DEFER_COOLDOWN (60s). Recovery
+        # must use the followed-chain progress/capacity wake path; accidentally
+        # putting the productive body on the generic budget timer must fail
+        # this regression instead of merely making it take another minute.
         self.wait_until(
             lambda: mirror.getbestblockhash() == authority_tip,
-            timeout=300,
+            timeout=30,
         )
         final = mirror.getblockchaininfo()
         assert_equal(final["bestblockhash"], authority_tip)

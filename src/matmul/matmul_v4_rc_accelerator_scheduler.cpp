@@ -36,7 +36,8 @@ static_assert(
     RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[0] +
             RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[1] +
             RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[2] +
-            RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[3] ==
+            RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[3] +
+            RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[4] ==
         RCAcceleratorScheduler::MAX_TOTAL_WAITERS,
     "per-lane RC waiter reservations must equal the global bound");
 
@@ -183,16 +184,19 @@ bool RCAcceleratorScheduler::IsFirst(
         }};
     const bool any_starved_mining{std::any_of(
         m_waiters.begin(), m_waiters.end(), mining_starved)};
-    // A starved local mine takes the next free turn ahead of a
-    // TipValidation / Speculative flood. WinnerReseal still outranks.
+    // A starved local mine takes the next free turn ahead of a generic
+    // TipValidation / Speculative flood. WinnerReseal and the unique followed
+    // active-tip child still outrank it.
     if (any_starved_mining && waiter->priority != Priority::WinnerReseal &&
+        waiter->priority != Priority::ActiveTipValidation &&
         !mining_starved(waiter)) {
         return false;
     }
     for (const auto& candidate : m_waiters) {
         if (candidate == waiter) continue;
         if (mining_starved(waiter)) {
-            if (candidate->priority == Priority::WinnerReseal) {
+            if (candidate->priority == Priority::WinnerReseal ||
+                candidate->priority == Priority::ActiveTipValidation) {
                 return false;
             }
             if (candidate->priority == Priority::CandidateMining &&
@@ -256,11 +260,13 @@ bool RCAcceleratorScheduler::MaybePreemptActiveOwner(Priority requester)
         return false;
     }
 
-    // Give CandidateMining a minimum lease quantum so tip validation bursts
-    // cannot abort every nonce attempt after a few milliseconds. Validation
-    // still outranks mining after the quantum; combined authority+miner
-    // remains degraded versus a dedicated miner.
-    if (m_active_priority == Priority::CandidateMining) {
+    // Give CandidateMining a minimum lease quantum so generic tip validation
+    // bursts cannot abort every nonce attempt after a few milliseconds. The
+    // unique followed child of the authenticated active tip bypasses the
+    // quantum: continuing to mine its parent loses useful work and delays
+    // adoption of the block that should become our next tip.
+    if (m_active_priority == Priority::CandidateMining &&
+        requester != Priority::ActiveTipValidation) {
         const auto quantum{CandidateMiningMinLeaseQuantum()};
         const auto held{
             std::chrono::steady_clock::now() - m_active_started};
@@ -370,13 +376,14 @@ RCAcceleratorScheduler::Acquire(
             const bool strictly_lower{
                 static_cast<uint8_t>((*victim)->priority) <
                 static_cast<uint8_t>(priority)};
-            const bool displace_tip_validation_flood{
+            const bool displace_validation_flood{
                 (*victim)->priority == priority &&
-                priority == Priority::TipValidation};
+                (priority == Priority::TipValidation ||
+                 priority == Priority::ActiveTipValidation)};
             const bool mining_steals_tip_flood{
                 priority == Priority::CandidateMining &&
                 (*victim)->priority == Priority::TipValidation};
-            if (strictly_lower || displace_tip_validation_flood ||
+            if (strictly_lower || displace_validation_flood ||
                 mining_steals_tip_flood) {
                 ++m_stats.cancelled_waits;
                 ++m_stats.lanes[LaneIndex((*victim)->priority)]
@@ -698,18 +705,25 @@ RCAcceleratorScheduler::AssessLifecycle(double target_spacing_s) const
         m_stats.lanes[LaneIndex(Priority::WinnerReseal)]};
     const auto& tip{
         m_stats.lanes[LaneIndex(Priority::TipValidation)]};
+    const auto& active_tip{
+        m_stats.lanes[LaneIndex(Priority::ActiveTipValidation)]};
     out.candidate_measured = candidate.completions != 0;
     out.winner_reseal_measured = reseal.completions != 0;
     out.authenticated_relay_measured =
         m_stats.authenticated_relay_samples != 0;
-    out.tip_validation_measured = tip.completions != 0;
+    out.tip_validation_measured =
+        active_tip.completions != 0 || tip.completions != 0;
     out.candidate_s = candidate.last_execution_s;
     out.winner_reseal_s = reseal.last_execution_s;
     out.authenticated_relay_s =
         m_stats.last_authenticated_relay_s;
-    out.tip_validation_s = tip.last_execution_s;
+    out.tip_validation_s = active_tip.completions != 0
+        ? active_tip.last_execution_s
+        : tip.last_execution_s;
     out.queue_wait_s = candidate.last_queue_wait_s +
-        reseal.last_queue_wait_s + tip.last_queue_wait_s;
+        reseal.last_queue_wait_s +
+        (active_tip.completions != 0 ? active_tip.last_queue_wait_s
+                                     : tip.last_queue_wait_s);
     out.complete_lifecycle_s = out.candidate_s +
         out.winner_reseal_s + out.authenticated_relay_s +
         out.tip_validation_s + out.queue_wait_s;
@@ -839,6 +853,8 @@ const char* ToString(RCAcceleratorScheduler::Priority priority)
         return "winner_reseal";
     case RCAcceleratorScheduler::Priority::TipValidation:
         return "tip_validation";
+    case RCAcceleratorScheduler::Priority::ActiveTipValidation:
+        return "active_tip_validation";
     }
     return "unknown";
 }
