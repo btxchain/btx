@@ -12127,9 +12127,13 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             // configured tip child. Only the unique followed successor may
             // interrupt CandidateMining; racing siblings keep the ordinary
             // bounded validation priorities.
-            active_tip_validation = authenticated_tip_child &&
-                IsAuthenticatedChainProgressCandidate(
-                    m_chainman, CBlock{header}, /*requested=*/true);
+            // SCHED-01 hardening (0.34.6 re-audit): the header-first path
+            // has no prechecked body, so it must NOT take the
+            // ActiveTipValidation immediate mining-preempt lane — that lane
+            // is reserved for a prechecked body. A header-only speculation
+            // stays AuthenticatedTipChild, so a header flood cannot grief the
+            // CandidateMining lease. (The body path keeps ActiveTipValidation.)
+            active_tip_validation = false;
         }
     }
     if (skip_exactreplay_gpu) {
