@@ -5796,7 +5796,11 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // fetch pins to one dead-end owner (~1 block/min, live rtx6000). Mirror the
     // SendMessages spread here: when we are behind the followed header tower and
     // THIS peer can serve bodies with spare capacity, bypass the prefer gates so
-    // idle body-serving peers get owners in parallel. Bounded by
+    // idle body-serving peers get owners in parallel — but only when NO capable
+    // preferred source (handshake-complete archive / GPU whose BestKnown
+    // extends tip) is connected. A connected archive must still win GETDATA
+    // over a consensus miner (mirrors filled GETDATA from miners → 15s
+    // timeout → disconnected the only download peer). Bounded by
     // MAX_BLOCKS_IN_TRANSIT_PER_PEER / BLOCK_DOWNLOAD_WINDOW; bodies are
     // self-validating and still fully ExactReplay'd + M-of-N before ConnectTip.
     const bool catch_up_spread{
@@ -5833,16 +5837,23 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             signed_frontier.blocks_behind,
             attestor_park)};
     const bool attestor_yielding{yield_to_this_peer || yield_to_frontier};
-    if (!stalled_behind_header_tower && !catch_up_spread &&
+    // Archive-preference is the default. Bypass it only when we are stalled
+    // or spreading AND no capable preferred source is connected, so a lone
+    // miner can still fill GETDATA (no-archive stall recovery). CountCapable
+    // already requires handshake-complete + BestKnown extending the tip;
+    // SkipNonPreferred still ignores that flag internally — the wrap here
+    // is the gate. ExactReplay / ConnectTip are unchanged.
+    const bool any_capable_preferred{CountCapableSignedFrontierBodySources() > 0};
+    const bool prefer_active{
+        (!stalled_behind_header_tower && !catch_up_spread) || any_capable_preferred};
+    if (prefer_active &&
         node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
-            IsSignedFrontierBodyCatchUp(),
-            this_peer_frontier_source,
-            CountCapableSignedFrontierBodySources() > 0)) {
+            IsSignedFrontierBodyCatchUp(), this_peer_frontier_source,
+            any_capable_preferred)) {
         log_skip("signed_frontier_prefer_archive");
         return;
     }
-    if (!stalled_behind_header_tower && !catch_up_spread &&
-        !PeerMaySignedFrontierCatchUpGetData(peer, *state)) {
+    if (prefer_active && !PeerMaySignedFrontierCatchUpGetData(peer, *state)) {
         log_skip("signed_frontier_not_getdata_source");
         return;
     }
