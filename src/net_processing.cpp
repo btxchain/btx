@@ -1453,6 +1453,10 @@ public:
             m_matmul_verify_worker->InstallVerifyOverrideForTest(std::move(verify));
         }
     }
+    void SetConfiguredClaimedTipChildForTest(const uint256& hash) override
+    {
+        g_configured_claimed_tip_child = hash;
+    }
     void ResetMatMulVerifyAdmissionForTest() override
     {
         m_matmul_rc_speculative_pending.store(0, std::memory_order_relaxed);

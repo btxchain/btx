@@ -379,6 +379,11 @@ public:
     /** Drop leftover speculative/pending ExactReplay leases between cases that
      *  share one RegTestingSetup. */
     virtual void ResetMatMulVerifyAdmissionForTest() = 0;
+    /** Deterministically pin the process-global ExactReplay GPU claim to a
+     *  specific unattested tip-child hash so a test can force which equal-work
+     *  competing twin takes the pending-cap RETAIN path (the twins otherwise
+     *  leave the claim on whichever unique header admitted first). Test-only. */
+    virtual void SetConfiguredClaimedTipChildForTest(const uint256& hash) = 0;
     /** Exercise destruction of one synthetic pending lease so tests can drive
      *  the production capacity-release wake without sleeping 60 seconds. */
     virtual void SimulateMatMulPendingSlotReleaseForTest(bool rc_profile) = 0;

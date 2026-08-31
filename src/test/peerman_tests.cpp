@@ -4572,15 +4572,6 @@ BOOST_AUTO_TEST_CASE(encdr_pending_cap_retains_followed_chain_body)
 
 BOOST_AUTO_TEST_CASE(rc_pending_cap_release_readmits_without_budget_wait)
 {
-    // TEMPORARILY DISABLED — 0.34.6 audit port (V345-LIFE-01 integration test).
-    // Nondeterministic: the sibling body admission takes the pending-cap RETAIN
-    // path or the persist-heavier-competing-fork path depending on the process-
-    // global GPU claim g_configured_claimed_tip_child, which varies with the
-    // random mined hashes (fails ~1/5 runs at the first "Stored budget-deferred
-    // body" assert). LIFE-01's core is covered by the passing
-    // matmul_block_lifecycle unit tests. TODO(0.34.6): make the sibling
-    // deterministically hold the claim, then re-enable.
-    return;
     WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
 
     node::matmul_trusted::ResetForTest();
@@ -4735,6 +4726,12 @@ BOOST_AUTO_TEST_CASE(rc_pending_cap_release_readmits_without_budget_wait)
         BOOST_REQUIRE(!m_node.chainman->IndexIsFollowedTipChild(
             m_node.chainman->ActiveTip(), sibling_index));
     }
+
+    // Deterministically pin the ExactReplay GPU claim to the ticketed sibling
+    // so its capacity-deferred body takes the pending-cap RETAIN path
+    // (MatMulMaySpendExactReplayGpu) on every run, instead of flipping to the
+    // persist-heavier-competing-fork branch when the claim lands on the twin.
+    peerman.SetConfiguredClaimedTipChildForTest(sibling->GetHash());
 
     {
         ASSERT_DEBUG_LOG("Stored budget-deferred body");
