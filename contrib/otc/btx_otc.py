@@ -766,7 +766,13 @@ def swap_hash160_hex(preimage: bytes) -> str:
 def build_swap_claim(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
                      vout: int, preimage: bytes, dest_address: str,
                      fee_sat: int = 20000) -> str:
-    """Buyer claims the settlement vault with the preimage (reveals it on-chain)."""
+    """Build+sign the preimage-revealing claim tx (via buildhtlcclaim) and return hex; does not broadcast.
+
+    WARNING: broadcasting reveals the preimage on-chain. Confirm the HTLC funding
+    output is deeply confirmed and not RBF-replaceable before broadcasting; revealing
+    against unconfirmed or replaceable funding lets the counterparty replace that
+    funding and reuse the now-public preimage to take the other (cross-chain) leg.
+    """
     try:
         res = rpc_wallet("buildhtlcclaim", descriptor_with_checksum,
                          {"txid": txid, "vout": vout}, preimage.hex(),
