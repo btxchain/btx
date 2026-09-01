@@ -19,8 +19,9 @@ evm/WBTXBridge.sol           Model A: federation lock-and-mint, HARDENED — EIP
                              timelock governance; pluggable IAttestationVerifier (+ ECDSAMultisigVerifier
                              v1, upgradeable to a zk verifier).
 evm/WBTXAtomicSwapHTLC.sol   Model B: trustless HTLC, hashlock = RIPEMD160(SHA256(preimage)) (BTX-compatible),
-                             SafeERC20 + balance-delta, squat-proof swap id, reentrancy-guarded.
-test/WBTX.t.sol              Foundry suite (21 tests: replay, EIP-712, threshold, circuit-breaker,
+                             SafeERC20 + exact-amount custody check, squat-proof swap id (requested amount bound),
+                             disjoint claim/refund windows, watchtower-callable refunds, reentrancy-guarded.
+test/WBTX.t.sol              Foundry suite (replay, EIP-712, threshold, circuit-breaker,
                              guardian veto, redeem/refund, granular pause, permit, EIP-3009, compliance
                              hook, backing-relation fuzz, HTLC) — all passing on OZ v5.6.1 / solc 0.8.24.
 btx_wbtx.py                  Python SDK over the BTX node RPCs (descriptors + PSBT)
@@ -67,11 +68,13 @@ identical 20-byte value for the BTX descriptor.
    ```
    - `<H160>` = `RIPEMD160(SHA256(preimage))` (hex, 20 bytes).
    - `<claimer_pk>` = the claimer's ML-DSA/SLH-DSA transaction-signing pubkey.
-   - `<locktime>` = absolute block height/time after which `<sender_pk>` may refund.
+   - `<locktime>` = absolute BTX block height after which `<sender_pk>` may refund.
    Add the checksum with `getdescriptorinfo`, derive with `deriveaddresses`, import with
    `importdescriptors`.
 2. **Fund** the derived address (`sendtoaddress`).
-3. **Claim (recipient)** — use the wallet RPC:
+3. **Safe role ordering (critical):** the BTX funder generates the preimage/hashlock, funds the long BTX
+   leg, then claims the short EVM leg first; this reveals the preimage so the recipient can claim BTX.
+4. **Claim (recipient, on BTX after EVM reveal)** — use the wallet RPC:
    ```
    buildhtlcclaim "<descriptor#cksum>" {"txid":"<txid>","vout":<n>} "<preimage_hex>" "<dest_address>" <fee_sat>
        -> {"hex":"<signed raw tx>", "complete":true}
@@ -80,7 +83,7 @@ identical 20-byte value for the BTX descriptor.
    (the wallet produces a normal P2MR transaction-bound PQ signature and injects the
    32-byte `hash160` preimage), signs, and returns the raw tx. Broadcast
    it with `sendrawtransaction` — the preimage is now on-chain, so the counterparty can claim the EVM leg.
-4. **Refund (sender)** — after `<locktime>`, use the wallet RPC:
+5. **Refund (sender)** — after `<locktime>`, use the wallet RPC:
    ```
    buildhtlcrefund "<descriptor#cksum>" {"txid":"<txid>","vout":<n>} "<dest_address>" <locktime> <fee_sat>
        -> {"hex":"<signed raw tx>", "complete":true}
@@ -93,15 +96,16 @@ graceful `NotImplementedError` on older nodes that lack them); it also automates
 preimage extraction. See the module docstring for an end-to-end example.
 
 ## SECURITY notes (read before using)
-- **Timeout ordering (Model B).** The party who can be left holding nothing must have the *longer*
-  refund timeout. Standard rule: the BTX leg's refund `<locktime>` (the value passed to the descriptor's
-  `refund(...)` leaf and to `buildhtlcrefund`) must be **strictly and safely longer** than the EVM leg's
-  `open(..., timeout)`, so the secret-revealer never loses the race. Pick conservative deltas (account
-  for BTX ~90s blocks and EVM finality); the node/SDK does not police the cross-chain gap — you must.
+- **Timeout ordering (Model B).** The preimage-holder must claim the earlier-expiring leg and fund the
+  later-expiring leg. Keep BTX refund `<locktime>` strictly/safely longer than EVM `open(..., timeout)`,
+  and enforce it with `check_timeout_ordering(...)` before deriving/funding the descriptor.
+- **Swap id + amount integrity (Model B).** `computeId` binds the requested `amount`, and `open()` now
+  enforces `received == amount`; fee-on-transfer / underfunded tokens are rejected with `AmountMismatch`.
 - **Hash-domain agreement.** Both chains MUST use `RIPEMD160(SHA256(preimage))`. A mismatch silently
   breaks atomicity. The contract and SDK enforce this; do not substitute keccak256/sha256-only.
-- **Replay binding (Model A).** The mint statement binds `{evmChainId, bridgeId, btxTxid, vout, to,
-  amountSat}`; an attestation cannot be replayed across chains/bridges/deposits/recipients/amounts.
+- **Replay/finality binding (Model A).** The mint statement binds `{evmChainId, bridgeId, btxTxid, vout,
+  btxBlockHash, btxBlockHeight, attestedHeight, to, amountSat, deadline}`; signatures are chain/bridge/
+  deposit/recipient/amount specific, finality-depth enforceable, and time-bounded.
 - **EVM-leg trust (Model A v1).** `ECDSAMultisigVerifier` is *classical* M-of-N. The authoritative
   security is the PQ attestation on BTX; the BTX lock+refund bounds exposure. Upgrade the verifier to
   the zk-attestation path (architecture §8) to make the EVM leg post-quantum too.
