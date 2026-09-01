@@ -75,6 +75,36 @@ COINBASE_MATURITY = 100
 # binding is a hidden P2MR `commit(sha256(terms))` leaf, not an OP_RETURN output.
 OTC_TAG = b"BTXOTC1"
 
+# Consensus locktime domain split (BIP65 / CheckLockTime): a CLTV value (and a
+# tx nLockTime) BELOW this is a block HEIGHT; AT OR ABOVE it is a Unix TIMESTAMP.
+# The whole OTC escrow is height-denominated (terms.expiry_height, the C5
+# height<expiry check), and a refund leaf must out-live the offer's expiry
+# HEIGHT. A refund_locktime >= this threshold is therefore NOT a "far-future
+# height" — it is a timestamp, and any value just above the threshold is a
+# timestamp already ~10 years in the past, i.e. a CLTV that is spendable NOW.
+# Comparing such a value numerically against a block height (refund_locktime >=
+# expiry_height) is a domain confusion that lets a seller advertise an
+# "unpullable until expiry" bond whose refund is in fact immediately spendable.
+# All escrow/vault locktimes MUST be in the height domain so the numeric
+# comparison against expiry_height is meaningful.
+LOCKTIME_THRESHOLD = 500_000_000
+
+
+def require_block_height_locktime(value: int, field: str) -> int:
+    """Fail closed unless `value` is a CLTV/nLockTime in the BLOCK-HEIGHT domain
+    (0 < value < LOCKTIME_THRESHOLD). Rejects the timestamp domain, which would
+    make a height-vs-locktime comparison meaningless and can encode an
+    immediately-spendable refund. Returns the value for convenient chaining."""
+    if type(value) is not int or isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer block height")
+    if value <= 0 or value >= LOCKTIME_THRESHOLD:
+        raise ValueError(
+            f"{field}={value} is not a block-height locktime: it must satisfy "
+            f"0 < {field} < {LOCKTIME_THRESHOLD} (LOCKTIME_THRESHOLD). A value "
+            f">= the threshold is a Unix-timestamp locktime — comparing it to a "
+            f"block height is a domain confusion and can be spendable immediately.")
+    return value
+
 
 # ============================= terms canonicalization =============================
 
@@ -110,6 +140,9 @@ def validate_terms(terms: dict) -> None:
         raise ValueError("terms.amount_sats must be a positive integer (satoshis)")
     if type(terms["expiry_height"]) is not int or terms["expiry_height"] <= 0:
         raise ValueError("terms.expiry_height must be a positive integer (block height)")
+    # expiry_height is a block height; a value in the timestamp domain would
+    # make the refund_locktime >= expiry_height covering check meaningless.
+    require_block_height_locktime(terms["expiry_height"], "terms.expiry_height")
     if not isinstance(terms["nonce"], str) or not terms["nonce"]:
         raise ValueError("terms.nonce must be a non-empty string")
 
@@ -162,12 +195,14 @@ _TIER_APLUS_UNBOUND_RE = re.compile(
 
 def soft_bond_descriptor(settle_pubkey: str, refund_locktime: int, refund_pubkey: str) -> str:
     """Tier B: seller settles unilaterally pre-expiry; refund leaf after expiry."""
+    require_block_height_locktime(refund_locktime, "refund_locktime")
     return f"mr({settle_pubkey},{{refund({refund_locktime},{refund_pubkey})}})"
 
 
 def venue_bond_descriptor(settle_pubkey: str, venue_pubkey: str,
                           refund_locktime: int, refund_pubkey: str) -> str:
     """Tier A: 2-of-2 seller+venue settlement handoff; seller-only refund after expiry."""
+    require_block_height_locktime(refund_locktime, "refund_locktime")
     return (f"mr(multi_pq(2,{settle_pubkey},{venue_pubkey}),"
             f"{{refund({refund_locktime},{refund_pubkey})}})")
 
@@ -175,6 +210,7 @@ def venue_bond_descriptor(settle_pubkey: str, venue_pubkey: str,
 def ctv_bond_descriptor(ctv_template_hash_hex: str, settle_pubkey: str,
                         refund_locktime: int, refund_pubkey: str) -> str:
     """Tier A+: settlement constrained by covenant to one pre-committed transaction."""
+    require_block_height_locktime(refund_locktime, "refund_locktime")
     if (not isinstance(ctv_template_hash_hex, str) or
             not re.fullmatch(_HASH256, ctv_template_hash_hex)):
         raise ValueError("ctv_template_hash_hex must be 32 bytes of hex")
@@ -206,21 +242,31 @@ def parse_bond_descriptor(descriptor: str) -> BondInfo:
     desc = strip_checksum(descriptor).replace(" ", "")
     m = _TIER_APLUS_RE.match(desc)
     if m:
-        return BondInfo(tier="A+", ctv_hash=m.group(1).lower(), settle_pubkey=m.group(2),
+        return _validated_bond(BondInfo(tier="A+", ctv_hash=m.group(1).lower(), settle_pubkey=m.group(2),
                         refund_locktime=int(m.group(3)), refund_pubkey=m.group(4),
-                        commitment_hash=m.group(5).lower())
+                        commitment_hash=m.group(5).lower()))
     m = _TIER_A_RE.match(desc)
     if m:
-        return BondInfo(tier="A", settle_pubkey=m.group(1), venue_pubkey=m.group(2),
+        return _validated_bond(BondInfo(tier="A", settle_pubkey=m.group(1), venue_pubkey=m.group(2),
                         refund_locktime=int(m.group(3)), refund_pubkey=m.group(4),
-                        commitment_hash=m.group(5).lower())
+                        commitment_hash=m.group(5).lower()))
     m = _TIER_B_RE.match(desc)
     if m:
-        return BondInfo(tier="B", settle_pubkey=m.group(1),
+        return _validated_bond(BondInfo(tier="B", settle_pubkey=m.group(1),
                         refund_locktime=int(m.group(2)), refund_pubkey=m.group(3),
-                        commitment_hash=m.group(4).lower())
+                        commitment_hash=m.group(4).lower()))
     raise ValueError("unrecognized bond descriptor shape (fail-closed); "
                      "expected a terms-bound tier A+/A/B form")
+
+
+def _validated_bond(bond: BondInfo) -> BondInfo:
+    """Fail closed on a parsed bond whose refund locktime is not a block height.
+    A timestamp-domain refund_locktime (>= LOCKTIME_THRESHOLD) would make the
+    downstream `refund_locktime >= expiry_height` covering check meaningless and
+    can be an immediately-spendable early-exit path — exactly the class of
+    hidden early exit parse_bond_descriptor promises to reject."""
+    require_block_height_locktime(bond.refund_locktime, "refund_locktime")
+    return bond
 
 
 def bind_bond_descriptor(descriptor: str, terms: dict) -> str:
@@ -675,6 +721,10 @@ def build_bond_refund(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
 def swap_vault_descriptor(preimage_hash160_hex: str, claimer_pubkey: str, refund_locktime: int,
                           sender_pubkey: str) -> str:
     """Stage-2, two-leaf HTLC settlement vault (identical to the wBTX Model-B leg)."""
+    # Same domain rule as the bond refund: the HTLC refund leaf's locktime must
+    # be a block height so its relation to the offer/expiry is meaningful and it
+    # is not immediately spendable as a past timestamp.
+    require_block_height_locktime(refund_locktime, "refund_locktime")
     return (f"mr(htlc_tx({preimage_hash160_hex},{claimer_pubkey}),"
             f"refund({refund_locktime},{sender_pubkey}))")
 
@@ -763,6 +813,43 @@ def selftest() -> None:
             raise AssertionError(f"must fail closed: {bad[:40]}...")
         except ValueError:
             pass
+    # Locktime domain guard: a refund_locktime in the TIMESTAMP domain
+    # (>= LOCKTIME_THRESHOLD) is a hidden immediately-spendable early exit and
+    # MUST fail closed everywhere — parse, build, and terms validation.
+    ts = LOCKTIME_THRESHOLD              # first timestamp-domain value
+    ts_lock = LOCKTIME_THRESHOLD + 1     # a timestamp ~10 years in the past
+    # Builders reject it.
+    for build in (
+        lambda: soft_bond_descriptor(k1, ts_lock, k2),
+        lambda: venue_bond_descriptor(k1, k3, ts_lock, k2),
+        lambda: ctv_bond_descriptor("11" * 32, k1, ts_lock, k2),
+        lambda: swap_vault_descriptor("ab" * 20, k1, ts_lock, k2),
+    ):
+        try:
+            build()
+            raise AssertionError("timestamp-domain refund_locktime must be rejected at build")
+        except ValueError:
+            pass
+    # The verifier's fail-closed parser rejects a hand-crafted timestamp-domain
+    # bond even though it is numerically >= a (height) expiry.
+    evil_terms = {"version": 1, "amount_sats": 1, "expiry_height": 100, "nonce": "00" * 16}
+    evil_desc = bind_bond_descriptor(f"mr({k1},{{refund({ts_lock},{k2})}})", evil_terms)
+    try:
+        parse_bond_descriptor(evil_desc)
+        raise AssertionError("parse_bond_descriptor must reject a timestamp-domain refund locktime")
+    except ValueError:
+        pass
+    assert ts_lock >= evil_terms["expiry_height"]  # the confusion the numeric check missed
+    # A height-domain bond at exactly the threshold-minus-one still parses.
+    ok_desc = bind_bond_descriptor(f"mr({k1},{{refund({ts - 1},{k2})}})", evil_terms)
+    assert parse_bond_descriptor(ok_desc).refund_locktime == ts - 1
+    # terms.expiry_height in the timestamp domain is rejected.
+    try:
+        validate_terms({"version": 1, "amount_sats": 1, "expiry_height": ts, "nonce": "x"})
+        raise AssertionError("timestamp-domain expiry_height must be rejected")
+    except ValueError:
+        pass
+
     # Amount formatting.
     assert sats_to_btx_str(5_000_000_000_000) == "50000.00000000"
     assert to_sat("50000.00000000") == 5_000_000_000_000
