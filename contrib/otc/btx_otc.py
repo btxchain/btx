@@ -607,8 +607,8 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = RECOMMENDED_MIN_CONF,
                       f"descriptor venue_pubkey={bond.venue_pubkey}; "
                       f"expected={expected_venue_pubkey}")
         elif expected_venue_pubkey is not None:
-            check("venue-key", True,
-                  f"expected_venue_pubkey ignored for tier {bond.tier} (no venue leg)")
+            check("venue-key", False,
+                  f"expected_venue_pubkey pins tier A but bond is tier {bond.tier}")
         if bond.tier == "A+":
             if expected_ctv_template_hash is None:
                 check("ctv-template", False,
@@ -622,9 +622,8 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = RECOMMENDED_MIN_CONF,
                       f"descriptor ctv_template_hash={bond.ctv_hash}; "
                       f"expected={expected_ctv_template_hash}")
         elif expected_ctv_template_hash is not None:
-            check("ctv-template", True,
-                  f"expected_ctv_template_hash ignored for tier {bond.tier} "
-                  f"(no CTV covenant leg)")
+            check("ctv-template", False,
+                  f"expected_ctv_template_hash pins tier A+ but bond is tier {bond.tier}")
     except Exception as e:  # noqa: BLE001
         check("descriptor-shape", False, str(e))
         return OfferVerification(False, tier, address, 0, expiry, checks)
@@ -839,7 +838,14 @@ def check_swap_timeout_asymmetry(btx_refund_height: int, other_leg_deadline_heig
     values are BTX block heights (convert an EVM unix timeout first, e.g.
     current_height + (evm_timeout_unix - now_unix)//block_seconds). This prevents
     claim-one-leg/refund-the-other theft and leaves reorg/censorship margin after
-    a preimage-revealing claim."""
+    a preimage-revealing claim.
+
+    NECESSARY BUT NOT SUFFICIENT: callers MUST also enforce the safe Model-B
+    assignment before funding:
+      - preimage-holder FUNDS the BTX/long leg, and
+      - preimage-holder CLAIMS the shorter/other leg first (the one that expires first).
+    If the preimage-holder instead claims the BTX/long leg, this inequality alone
+    does not prevent claim-one-leg/refund-the-other theft."""
     require_block_height_locktime(btx_refund_height, "btx_refund_height")
     require_block_height_locktime(other_leg_deadline_height, "other_leg_deadline_height")
     if (type(reorg_margin_blocks) is not int or isinstance(reorg_margin_blocks, bool) or
@@ -858,7 +864,12 @@ def check_swap_timeout_asymmetry(btx_refund_height: int, other_leg_deadline_heig
 
 def swap_vault_descriptor(preimage_hash160_hex: str, claimer_pubkey: str, refund_locktime: int,
                           sender_pubkey: str) -> str:
-    """Stage-2, two-leaf HTLC settlement vault (identical to the wBTX Model-B leg)."""
+    """Stage-2, two-leaf HTLC settlement vault (identical to the wBTX Model-B leg).
+
+    Before funding: validate HTLC refund-leaf timeout asymmetry with
+    check_swap_timeout_asymmetry(...) AND ensure preimage assignment follows the
+    safe flow (preimage-holder funds BTX/long leg and claims shorter/other leg first).
+    """
     # Same domain rule as the bond refund: the HTLC refund leaf's locktime must
     # be a block height so its relation to the offer/expiry is meaningful and it
     # is not immediately spendable as a past timestamp.
@@ -886,8 +897,10 @@ def build_swap_claim(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
     against unconfirmed or replaceable funding lets the counterparty replace that
     funding and reuse the now-public preimage to take the other (cross-chain) leg.
     The integrator MUST also validate cross-leg timeout asymmetry with
-    check_swap_timeout_asymmetry(...) before funding, per doc §5 and
-    WBTXAtomicSwapHTLC.sol.
+    check_swap_timeout_asymmetry(...) before funding, and MUST keep the safe flow:
+    preimage-holder funds the BTX/long leg and claims the shorter/other leg first.
+    Timeout ordering without that preimage-role assignment is insufficient, per
+    doc §5 and WBTXAtomicSwapHTLC.sol.
     """
     try:
         res = rpc_wallet("buildhtlcclaim", descriptor_with_checksum,
@@ -1019,6 +1032,32 @@ def selftest() -> None:
     # same offline parameter-validation stage (no node touched before it).
     vrep = verify_offer(None, {"version": 1, "terms": {}}, expected_ctv_template_hash="")
     assert any(c.name == "parameters" and not c.ok for c in vrep.checks)
+    # Pinned tier requirements fail closed when the descriptor is another tier.
+    tier_terms = {"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 100, "nonce": "11" * 16}
+    tier_b_desc = bind_bond_descriptor(soft_bond_descriptor(k1, 900, k2), tier_terms)
+
+    def _tier_selftest_rpc(method: str, *params):
+        if method == "getdescriptorinfo":
+            desc = params[0]
+            return {"checksum": hashlib.sha256(str(desc).encode("ascii")).hexdigest()[:8]}
+        if method == "deriveaddresses":
+            desc_ck = params[0]
+            return [f"btx_test_{hashlib.sha256(str(desc_ck).encode('ascii')).hexdigest()[:16]}"]
+        if method == "getblockcount":
+            return 1
+        raise AssertionError(f"unexpected rpc call in selftest: {method} {params!r}")
+
+    tier_bundle = {
+        "version": 1,
+        "terms": tier_terms,
+        "bond": {"descriptor": tier_b_desc, "tier": "B", "outpoints": []},
+    }
+    vrep = verify_offer(_tier_selftest_rpc, tier_bundle, expected_venue_pubkey=k3)
+    assert any(c.name == "venue-key" and not c.ok and
+               "pins tier A but bond is tier B" in c.detail for c in vrep.checks)
+    vrep = verify_offer(_tier_selftest_rpc, tier_bundle, expected_ctv_template_hash="22" * 32)
+    assert any(c.name == "ctv-template" and not c.ok and
+               "pins tier A+ but bond is tier B" in c.detail for c in vrep.checks)
 
     # Cross-leg timeout asymmetry helper: other+margin must be STRICTLY below BTX.
     check_swap_timeout_asymmetry(btx_refund_height=1000, other_leg_deadline_height=900)
