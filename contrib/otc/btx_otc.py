@@ -50,6 +50,22 @@ Verification NEVER trusts the seller: descriptor shape is checked against a stri
 allow-list (unknown shapes fail closed), outpoints are checked in the UTXO set,
 the descriptor's terms-hash commitment is checked against the vault output, and the
 optional attestation is checked with verifymessage.
+
+Spend-signing & key-reuse safety (audit guidance):
+  * SIGHASH_ALL: every escrow/HTLC spend this SDK helps build must be signed with
+    SIGHASH_ALL. A non-ALL sighash (NONE/SINGLE/ANYONECANPAY) leaves the spend's
+    outputs malleable by a third party — never sign an escrow spend with anything
+    but ALL. (The P2MR script layer permits non-ALL by design; the safety lives
+    in HOW you sign.)
+  * CSFS key/message uniqueness: OP_CHECKSIGFROMSTACK verifies a signature over a
+    witness-supplied message, so a revealed (signature, message/preimage) pair
+    REPLAYS on any output that reuses the same key + message. Prefer the
+    transaction-bound htlc_tx() leaf (which this SDK uses) over a bare csfs()
+    leaf; never reuse a CSFS/oracle key across offers, and bind each CSFS message
+    to a unique per-offer context (the terms hash / nonce already provide this).
+  * Confirmation depth: treat a bond as real supply only at a reorg-safe depth
+    (>= COINBASE_MATURITY here); shallow/RBF-replaceable funding is rejected by
+    verify_offer, but off-chain settlement decisions must respect depth too.
 """
 from __future__ import annotations
 

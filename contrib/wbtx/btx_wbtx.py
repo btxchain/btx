@@ -11,6 +11,21 @@ Hash domain (CRITICAL): BTX P2MR HTLC leaves lock under OP_HASH160 = RIPEMD160(S
 The EVM contract hashes identically (sha256 + ripemd160 precompiles). Always use the SAME 32-byte
 preimage on both chains.
 
+Spend-signing & key-reuse safety (audit guidance):
+  * SIGHASH_ALL: sign every BTX-leg claim/refund with SIGHASH_ALL (the node's
+    buildhtlc{claim,refund} RPCs do). A non-ALL sighash leaves the spend's outputs
+    third-party-malleable. Never parameterize an escrow/HTLC spend to a non-ALL type.
+  * CSFS key/message uniqueness: a revealed (signature, message) pair for a CSFS key
+    replays on any output reusing that key + message. This SDK uses the
+    transaction-bound htlc_tx() leaf (not a bare csfs() leaf) and the federation
+    binds each attestation to a unique operation_id — keep it that way; never reuse
+    a CSFS/oracle key across contexts.
+  * Timeout ordering + flow: check_timeout_ordering() is NECESSARY BUT NOT SUFFICIENT
+    — the preimage-holder must FUND the long (BTX) leg and CLAIM the short (EVM) leg
+    first (the safe Model-B assignment), else the ordering alone does not prevent a
+    claim-one-leg/refund-the-other theft. Validate depth (>= 100) before treating a
+    deposit as final.
+
 The pure helpers (hashing, descriptor construction, address derivation, deposit scan, preimage
 extraction) work against any stock btxd. The funds-critical *spend* builders call the node's
 buildhtlc{claim,refund} wallet RPCs, which encapsulate control-block + preimage +
