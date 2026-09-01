@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {WBTX, IComplianceHook} from "../evm/WBTX.sol";
 import {WBTXBridge, ECDSAMultisigVerifier, IAttestationVerifier} from "../evm/WBTXBridge.sol";
 import {WBTXAtomicSwapHTLC} from "../evm/WBTXAtomicSwapHTLC.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract WBTXTest is Test {
@@ -1145,7 +1146,7 @@ contract HTLCTest is Test {
         bytes20 h = htlc.btxHash160(pre);
         vm.startPrank(alice);
         token.approve(address(htlc), 100e18);
-        bytes32 id = htlc.open(bob, address(token), 100e18, h, uint64(block.timestamp + 1 hours), bytes32("s"));
+        bytes32 id = htlc.open(bob, address(token), 100e18, h, uint64(block.timestamp + 7 hours), bytes32("s"));
         vm.stopPrank();
         vm.prank(bob);
         htlc.claim(id, pre);
@@ -1156,11 +1157,87 @@ contract HTLCTest is Test {
         bytes20 h = bytes20(hex"8739f40ec4dbf569dcb38134c6e7310908566981");
         vm.startPrank(alice);
         token.approve(address(htlc), 100e18);
-        bytes32 id = htlc.open(bob, address(token), 100e18, h, uint64(block.timestamp + 1 hours), bytes32("s"));
+        bytes32 id = htlc.open(bob, address(token), 100e18, h, uint64(block.timestamp + 7 hours), bytes32("s"));
         vm.stopPrank();
-        vm.warp(block.timestamp + 2 hours);
-        vm.prank(alice);
+        vm.warp(block.timestamp + 8 hours);
+        vm.prank(address(0xCA11AB1E));
         htlc.refund(id);
         assertEq(token.balanceOf(alice), 1000e18);
+    }
+
+    function test_ClaimRevertsWhenExpired() public {
+        bytes memory pre = new bytes(32);
+        for (uint i; i < 32; i++) pre[i] = 0x42;
+        bytes20 h = htlc.btxHash160(pre);
+
+        vm.startPrank(alice);
+        token.approve(address(htlc), 100e18);
+        bytes32 id = htlc.open(bob, address(token), 100e18, h, uint64(block.timestamp + 7 hours), bytes32("s-expired"));
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 8 hours);
+        vm.prank(bob);
+        vm.expectRevert(WBTXAtomicSwapHTLC.Expired.selector);
+        htlc.claim(id, pre);
+    }
+
+    function test_RefundAfterTimeoutAllowsThirdParty() public {
+        bytes20 h = bytes20(hex"8739f40ec4dbf569dcb38134c6e7310908566981");
+        vm.startPrank(alice);
+        token.approve(address(htlc), 100e18);
+        bytes32 id = htlc.open(bob, address(token), 100e18, h, uint64(block.timestamp + 7 hours), bytes32("s-watchtower"));
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 8 hours);
+        address watchtower = address(0xC0FFEE);
+        vm.prank(watchtower);
+        htlc.refund(id);
+        assertEq(token.balanceOf(alice), 1000e18);
+        assertEq(token.balanceOf(bob), 0);
+    }
+
+    function test_OpenRevertsOnFeeOnTransferUnderfunding() public {
+        MockFeeOnTransferToken feeToken = new MockFeeOnTransferToken(100); // 1%
+        feeToken.mint(alice, 1000e18);
+
+        bytes memory pre = new bytes(32);
+        for (uint i; i < 32; i++) pre[i] = 0x42;
+        bytes20 h = htlc.btxHash160(pre);
+
+        vm.startPrank(alice);
+        feeToken.approve(address(htlc), 100e18);
+        vm.expectRevert(abi.encodeWithSelector(WBTXAtomicSwapHTLC.AmountMismatch.selector, 100e18, 99e18));
+        htlc.open(bob, address(feeToken), 100e18, h, uint64(block.timestamp + 7 hours), bytes32("s-fee"));
+        vm.stopPrank();
+    }
+}
+
+contract MockFeeOnTransferToken is ERC20 {
+    uint256 public immutable feeBps;
+
+    constructor(uint256 feeBps_) ERC20("Fee Token", "FEE") {
+        feeBps = feeBps_;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        address owner = _msgSender();
+        uint256 fee = (amount * feeBps) / 10_000;
+        uint256 net = amount - fee;
+        _transfer(owner, to, net);
+        if (fee > 0) _transfer(owner, address(0xDEAD), fee);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
+        _spendAllowance(from, _msgSender(), amount);
+        uint256 fee = (amount * feeBps) / 10_000;
+        uint256 net = amount - fee;
+        _transfer(from, to, net);
+        if (fee > 0) _transfer(from, address(0xDEAD), fee);
+        return true;
     }
 }

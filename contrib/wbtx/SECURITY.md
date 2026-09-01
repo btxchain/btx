@@ -82,10 +82,15 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
 - **`rescueERC20`** (SafeERC20) recovers *foreign* tokens mis-sent here; **cannot** touch wBTX. *Class 6.*
 
 ### HTLC (`WBTXAtomicSwapHTLC`)
-- **SafeERC20 + balance-delta accounting** → non-standard (USDT), fee-on-transfer, rebasing tokens
-  cannot break custody/insolvency. *Class 5 (Qubit/Meter).*
+- **SafeERC20 + exact-amount custody enforcement** (`received == requested amount`) rejects
+  fee-on-transfer/underfunded opens, so the swap id's requested amount and custodied amount cannot diverge.
+  *Class 5 (Qubit/Meter).*
 - **In-contract, sender-bound swap id** (`computeId`) → no `id`-squatting front-run. *(HTLC griefing.)*
-- **ReentrancyGuard** + CEI; **timeout sanity bounds** (`MIN/MAX_TIMEOUT`).
+- **Disjoint claim/refund windows:** `claim` is valid only before `timeout`, `refund` at/after `timeout`,
+  eliminating post-timeout dual-spend races.
+- **Watchtower-defensible refunds:** anyone may trigger a timed-out refund, but funds always return to the
+  original sender.
+- **ReentrancyGuard** + CEI; **timeout sanity bounds** (`MIN/MAX_TIMEOUT`, min 6h).
 - **Hash domain** `RIPEMD160(SHA256(preimage))` matches BTX `OP_HASH160` exactly (verified against a
   BTX node: preimage `0x42…42` → `8739f40ec4dbf569dcb38134c6e7310908566981`).
 
@@ -129,8 +134,9 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
   the zk/SPV verifier (architecture §C/§8).
 - **Federation key custody** is the dominant real-world risk (Ronin/Harmony/Multichain were all key
   compromises, not contract bugs). Require independent operators, HSM/threshold custody, and monitoring.
-- **HTLC cross-chain timeout asymmetry** cannot be enforced on-chain — the SDK/integrator MUST set the
-  slower/first leg's timeout strictly longer than the faster/second leg (e.g. BTX 24–48h vs EVM 6–12h).
+- **HTLC cross-chain timeout asymmetry** still cannot be inferred from on-chain state alone, but the SDK
+  now rejects unsafe pairings preflight via `check_timeout_ordering(...)`. Integrators must supply
+  conservative BTX block-time and reorg/stall margins when building descriptors.
 - **Frontend/supply-chain** (BadgerDAO) is out of contract scope — harden CDN/DNS and prefer finite
   approvals/permit.
 

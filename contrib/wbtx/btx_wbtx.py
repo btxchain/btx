@@ -19,24 +19,36 @@ marked NotImplementedError is raised on older nodes that lack the RPCs (graceful
 
 End-to-end swap flow (BTX leg of a trustless BTX<->EVM atomic swap)::
 
-    from btx_wbtx import (new_preimage, btx_hash160_hex, HtlcLeg, add_checksum,
+    from btx_wbtx import (HtlcLeg, add_checksum,
                           swap_address, import_watch, find_deposits, build_claim, build_refund)
 
     # rpc / rpc_wallet are callables: rpc(method, *params) -> parsed JSON (raise on error).
-    secret = new_preimage()                      # 32-byte swap secret (keep private until claim)
-    h160   = btx_hash160_hex(secret)             # == RIPEMD160(SHA256(secret)); use on BOTH chains
+    # SAFE role assignment: the BTX funder generates the secret + hashlock, funds BTX (long leg),
+    # then claims EVM (short leg) first to reveal the preimage. The recipient uses that
+    # revealed preimage to claim BTX before BTX refund height.
+    h160 = hashlock_from_btx_funder              # RIPEMD160(SHA256(preimage)); same on BOTH chains
 
-    leg = HtlcLeg(claimer_pubkey=recipient_pk, sender_pubkey=funder_pk, preimage_hash160_hex=h160,
-                  refund_locktime=btx_refund_height)   # BTX timeout STRICTLY > EVM timeout
+    leg = HtlcLeg(
+        claimer_pubkey=recipient_pk,
+        sender_pubkey=funder_pk,
+        preimage_hash160_hex=h160,
+        refund_locktime=btx_refund_height,       # absolute BTX block height
+        evm_timeout_unix=evm_timeout_unix,
+        now_unix=now_unix,
+        current_btx_height=current_btx_height,
+        block_seconds=worst_case_block_seconds,
+        reorg_margin_blocks=reorg_margin_blocks,
+    )  # descriptor() enforces safe timeout ordering before funds move
     desc = add_checksum(rpc, leg.descriptor())   # mr(htlc_tx(h160,claimer),refund(lt,sender))
     addr = swap_address(rpc, desc)               # the single P2MR lock address
     import_watch(rpc_wallet, desc)               # so the wallet indexes deposits to it
-    # ... funder pays `addr`; counterparty opens the EVM leg under the SAME hashlock h160 ...
+    # ... funder pays `addr`; funder also opens/claims the short EVM leg with the same hashlock ...
 
     dep = find_deposits(rpc_wallet, addr)[0]
-    # Recipient claims, revealing the preimage with a transaction-bound wallet signature:
-    raw = build_claim(rpc_wallet, desc, dep, secret, recipient_dest_addr, fee_sat=1000)
-    rpc("sendrawtransaction", raw)               # preimage now public -> claim the EVM leg
+    # Recipient claims BTX using the preimage that was revealed when the funder claimed EVM:
+    revealed_preimage = secret_from_evm_claim
+    raw = build_claim(rpc_wallet, desc, dep, revealed_preimage, recipient_dest_addr, fee_sat=1000)
+    rpc("sendrawtransaction", raw)
 
     # OR, if the swap is abandoned, the funder refunds after refund_locktime:
     raw = build_refund(rpc_wallet, desc, dep, funder_dest_addr, btx_refund_height, fee_sat=1000)
@@ -45,6 +57,7 @@ End-to-end swap flow (BTX leg of a trustless BTX<->EVM atomic swap)::
 from __future__ import annotations
 import hashlib
 import os
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -70,16 +83,71 @@ def btx_hash160_hex(preimage: bytes) -> str:
 
 # ----------------------------- descriptors -----------------------------
 
+def check_timeout_ordering(
+    btx_refund_height: int,
+    evm_timeout_unix: int,
+    now_unix: int,
+    current_btx_height: int,
+    block_seconds: int,
+    reorg_margin_blocks: int,
+) -> int:
+    """Validate that BTX refund expiry safely out-lives EVM expiry.
+
+    BTX refund locktimes are height-based. Convert the height gap into wall-clock seconds with a
+    pessimistic block interval (`block_seconds`) and require:
+
+      btx_refund_unix > evm_timeout_unix + reorg_margin_blocks * block_seconds
+
+    so the BTX leg keeps a safety margin for reorg/stall risk after the EVM leg expires.
+    Returns the estimated BTX refund unix timestamp when valid; otherwise raises ValueError.
+    """
+    if btx_refund_height <= 0:
+        raise ValueError("btx_refund_height must be a positive absolute BTX block height")
+    if current_btx_height < 0:
+        raise ValueError("current_btx_height must be non-negative")
+    if btx_refund_height <= current_btx_height:
+        raise ValueError("btx_refund_height must be greater than current_btx_height")
+    if evm_timeout_unix <= 0 or now_unix <= 0:
+        raise ValueError("evm_timeout_unix and now_unix must be unix timestamps")
+    if block_seconds <= 0:
+        raise ValueError("block_seconds must be > 0")
+    if reorg_margin_blocks < 0:
+        raise ValueError("reorg_margin_blocks must be >= 0")
+
+    blocks_until_refund = btx_refund_height - current_btx_height
+    btx_refund_unix = now_unix + blocks_until_refund * block_seconds
+    required_min_refund_unix = evm_timeout_unix + reorg_margin_blocks * block_seconds
+    if btx_refund_unix <= required_min_refund_unix:
+        raise ValueError(
+            "Unsafe timeout ordering: BTX refund does not out-live EVM timeout by the required margin "
+            f"(btx_refund_unix={btx_refund_unix}, required>{required_min_refund_unix})"
+        )
+    return btx_refund_unix
+
+
 @dataclass
 class HtlcLeg:
     """Parameters of the BTX HTLC leg of a swap."""
     claimer_pubkey: str    # recipient's ML-DSA hex (or pk_slh(...)): claims with preimage + their sig
     sender_pubkey: str     # funder's ML-DSA hex (or pk_slh(...)): refunds after locktime
     preimage_hash160_hex: str
-    refund_locktime: int   # absolute block height (or unix time) for the refund leaf
+    refund_locktime: int   # absolute BTX block height for the refund leaf
+    evm_timeout_unix: int
+    now_unix: int
+    current_btx_height: int
+    block_seconds: int
+    reorg_margin_blocks: int
 
     def descriptor(self) -> str:
-        """The (checksum-less) mr() descriptor; add a checksum via add_checksum(rpc, ...)."""
+        """The (checksum-less) mr() descriptor; add checksum via add_checksum(rpc, ...)."""
+        check_timeout_ordering(
+            btx_refund_height=self.refund_locktime,
+            evm_timeout_unix=self.evm_timeout_unix,
+            now_unix=self.now_unix,
+            current_btx_height=self.current_btx_height,
+            block_seconds=self.block_seconds,
+            reorg_margin_blocks=self.reorg_margin_blocks,
+        )
         return (f"mr(htlc_tx({self.preimage_hash160_hex},{self.claimer_pubkey}),"
                 f"refund({self.refund_locktime},{self.sender_pubkey}))")
 
@@ -230,6 +298,36 @@ def extract_preimage(rpc: Rpc, claim_txid: str, expected_hash160_hex: str) -> Op
 
 __all__ = [
     "new_preimage", "btx_hash160", "btx_hash160_hex", "HtlcLeg", "add_checksum", "swap_address",
-    "import_watch", "Deposit", "find_deposits", "to_sat", "sat_to_wbtx", "build_claim",
+    "import_watch", "Deposit", "find_deposits", "to_sat", "sat_to_wbtx", "check_timeout_ordering", "build_claim",
     "build_refund", "extract_preimage",
 ]
+
+
+if __name__ == "__main__":
+    now = int(time.time())
+    # Unsafe: BTX timeout is too close to EVM timeout after margin.
+    rejected = False
+    try:
+        check_timeout_ordering(
+            btx_refund_height=1_000_020,
+            evm_timeout_unix=now + 1_700,
+            now_unix=now,
+            current_btx_height=1_000_000,
+            block_seconds=90,
+            reorg_margin_blocks=2,
+        )
+    except ValueError:
+        rejected = True
+    if not rejected:
+        raise SystemExit("self-check failed: unsafe timeout ordering was accepted")
+
+    # Safe: BTX timeout remains well beyond EVM timeout + margin.
+    check_timeout_ordering(
+        btx_refund_height=1_000_200,
+        evm_timeout_unix=now + 1_700,
+        now_unix=now,
+        current_btx_height=1_000_000,
+        block_seconds=90,
+        reorg_margin_blocks=2,
+    )
+    print("timeout ordering self-check OK")
