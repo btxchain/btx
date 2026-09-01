@@ -35,6 +35,9 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     uint256 public immutable bridgeId;
     /// @dev 1 BTX satoshi == SAT_SCALE units of 18-decimal wBTX (the decided standard). Mirrors WBTX.
     uint256 public constant SAT_SCALE = 1e10;
+    /// @dev Code-level minimum finality floor: matches BTX COINBASE_MATURITY (100) and is ~3x the
+    ///      observed 34-block reorg; this is not governance-settable.
+    uint64 public constant MIN_CONFIRMATIONS = 100;
 
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE"); // Timelock
     bytes32 public constant GUARDIAN_ROLE   = keccak256("GUARDIAN_ROLE");   // veto/cancel + pause
@@ -42,7 +45,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     bytes32 public constant FEDERATION_ROLE = keccak256("FEDERATION_ROLE"); // marks redeems fulfilled
 
     bytes32 private constant MINT_TYPEHASH =
-        keccak256("MintAttestation(bytes32 btxTxid,uint32 vout,address to,uint64 amountSat)");
+        keccak256("MintAttestation(uint256 bridgeId,bytes32 btxTxid,uint32 vout,bytes32 btxBlockHash,uint64 btxBlockHeight,uint64 attestedHeight,address to,uint64 amountSat,uint64 deadline)");
 
     IAttestationVerifier public verifier;
     // Granular pause: mint-pause is the critical backing-safety lever; redeem-pause is for BTX-side
@@ -91,6 +94,9 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     error SupplyCapExceeded();
     error NotQueued();
     error TooEarly();
+    error AttestationExpired();
+    error NotAttested();
+    error TooShallow();
     error BadDestination();
     error BelowOneSat();
     error UnknownRedeem();
@@ -141,9 +147,35 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 
     /// @notice EIP-712 typed digest the federation signs. Domain binds {name, version, block.chainid,
     ///         address(this)} (live chainid => no post-fork replay; verifyingContract => no cross-bridge
-    ///         replay). The struct binds the exact deposit, recipient, and amount.
-    function mintDigest(bytes32 btxTxid, uint32 vout, address to, uint64 amountSat) public view returns (bytes32) {
-        return _hashTypedDataV4(keccak256(abi.encode(MINT_TYPEHASH, btxTxid, vout, to, amountSat)));
+    ///         replay). The struct binds bridge identity, exact deposit and BTX finality view, recipient,
+    ///         amount, and attestation expiry.
+    function mintDigest(
+        uint256 bridgeId_,
+        bytes32 btxTxid,
+        uint32 vout,
+        bytes32 btxBlockHash,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        address to,
+        uint64 amountSat,
+        uint64 deadline
+    ) public view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    MINT_TYPEHASH,
+                    bridgeId_,
+                    btxTxid,
+                    vout,
+                    btxBlockHash,
+                    btxBlockHeight,
+                    attestedHeight,
+                    to,
+                    amountSat,
+                    deadline
+                )
+            )
+        );
     }
 
     function depositKey(bytes32 btxTxid, uint32 vout) public pure returns (bytes32) {
@@ -154,15 +186,41 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 
     /// @notice Mint wBTX for an attested BTX lock. Small mints execute immediately; mints above
     ///         `optimisticThresholdSat` are time-queued for guardian review. Idempotent per deposit.
-    function mint(bytes32 btxTxid, uint32 vout, address to, uint64 amountSat, bytes calldata proof)
-        external whenMintNotPaused nonReentrant
-    {
+    function mint(
+        bytes32 btxTxid,
+        uint32 vout,
+        bytes32 btxBlockHash,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        address to,
+        uint64 amountSat,
+        uint64 deadline,
+        bytes calldata proof
+    ) external whenMintNotPaused nonReentrant {
         if (to == address(0)) revert BadDestination();
         if (amountSat == 0) revert BelowOneSat();
+        if (block.timestamp > deadline) revert AttestationExpired();
+        if (attestedHeight < btxBlockHeight) revert NotAttested();
+        if (attestedHeight - btxBlockHeight < MIN_CONFIRMATIONS) revert TooShallow();
         bytes32 dk = depositKey(btxTxid, vout);
         if (minted[dk] || queued[dk].exists) revert AlreadyMinted();
 
-        if (!verifier.verifyMint(mintDigest(btxTxid, vout, to, amountSat), proof)) revert BadAttestation();
+        if (
+            !verifier.verifyMint(
+                mintDigest(
+                    bridgeId,
+                    btxTxid,
+                    vout,
+                    btxBlockHash,
+                    btxBlockHeight,
+                    attestedHeight,
+                    to,
+                    amountSat,
+                    deadline
+                ),
+                proof
+            )
+        ) revert BadAttestation();
 
         _checkAndConsumeLimits(amountSat);
 

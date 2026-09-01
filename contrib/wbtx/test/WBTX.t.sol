@@ -18,6 +18,9 @@ contract WBTXTest is Test {
     address pauser = address(0x9A05E);
     // three federation signers (sorted ascending by address for the proof)
     uint256 pk1 = 0xA11; uint256 pk2 = 0xB22; uint256 pk3 = 0xC33;
+    bytes32 constant DEFAULT_BTX_BLOCK_HASH = keccak256("btx-block");
+    uint64 constant DEFAULT_BTX_BLOCK_HEIGHT = 1_000_000;
+    uint64 constant DEFAULT_ATTESTED_HEIGHT = DEFAULT_BTX_BLOCK_HEIGHT + 150;
 
     function setUp() public {
         address[] memory signers = new address[](3);
@@ -40,8 +43,31 @@ contract WBTXTest is Test {
 
     // --- helpers ---
 
-    function _attest(bytes32 txid, uint32 vout, address to, uint64 amtSat) internal view returns (bytes memory) {
-        bytes32 digest = bridge.mintDigest(txid, vout, to, amtSat);
+    function _futureDeadline() internal view returns (uint64) {
+        return uint64(block.timestamp + 1 days);
+    }
+
+    function _attest(
+        bytes32 txid,
+        uint32 vout,
+        bytes32 btxBlockHash,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        address to,
+        uint64 amtSat,
+        uint64 deadline
+    ) internal view returns (bytes memory) {
+        bytes32 digest = bridge.mintDigest(
+            bridge.bridgeId(),
+            txid,
+            vout,
+            btxBlockHash,
+            btxBlockHeight,
+            attestedHeight,
+            to,
+            amtSat,
+            deadline
+        );
         // sign with pk1 and pk2, then order by recovered address ascending
         (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(pk1, digest);
         (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(pk2, digest);
@@ -57,35 +83,126 @@ contract WBTXTest is Test {
 
     function test_MintHappyPath() public {
         bytes32 txid = keccak256("dep1");
-        bytes memory proof = _attest(txid, 0, address(0xBEEF), 100_000_000); // 1 BTX
-        bridge.mint(txid, 0, address(0xBEEF), 100_000_000, proof);
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 100_000_000, deadline
+        ); // 1 BTX
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 100_000_000, deadline, proof
+        );
         assertEq(wbtx.balanceOf(address(0xBEEF)), 100_000_000 * 1e10);
         assertEq(wbtx.totalSupply(), 1e18);
     }
 
+    function test_Mint_RevertsWhenTooShallow() public {
+        bytes32 txid = keccak256("dep1-shallow");
+        uint64 deadline = _futureDeadline();
+        uint64 shallowAttestedHeight = DEFAULT_BTX_BLOCK_HEIGHT + 99;
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, shallowAttestedHeight, address(0xBEEF), 1_000, deadline
+        );
+        vm.expectRevert(WBTXBridge.TooShallow.selector);
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, shallowAttestedHeight, address(0xBEEF), 1_000, deadline, proof
+        );
+    }
+
+    function test_Mint_RevertsWhenExpired() public {
+        bytes32 txid = keccak256("dep1-expired");
+        uint64 expiredDeadline = uint64(block.timestamp - 1);
+        bytes memory proof = _attest(
+            txid,
+            0,
+            DEFAULT_BTX_BLOCK_HASH,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            address(0xBEEF),
+            1_000,
+            expiredDeadline
+        );
+        vm.expectRevert(WBTXBridge.AttestationExpired.selector);
+        bridge.mint(
+            txid,
+            0,
+            DEFAULT_BTX_BLOCK_HASH,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            address(0xBEEF),
+            1_000,
+            expiredDeadline,
+            proof
+        );
+    }
+
+    function test_Mint_RevertsWhenNotAttested() public {
+        bytes32 txid = keccak256("dep1-not-attested");
+        uint64 deadline = _futureDeadline();
+        uint64 unattestedHeight = DEFAULT_BTX_BLOCK_HEIGHT - 1;
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, unattestedHeight, address(0xBEEF), 1_000, deadline
+        );
+        vm.expectRevert(WBTXBridge.NotAttested.selector);
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, unattestedHeight, address(0xBEEF), 1_000, deadline, proof
+        );
+    }
+
     function test_OutpointReplayRejected() public {
         bytes32 txid = keccak256("dep2");
-        bytes memory proof = _attest(txid, 0, address(0xBEEF), 1_000);
-        bridge.mint(txid, 0, address(0xBEEF), 1_000, proof);
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline
+        );
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline, proof
+        );
         vm.expectRevert(WBTXBridge.AlreadyMinted.selector);
-        bridge.mint(txid, 0, address(0xBEEF), 1_000, proof);
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline, proof
+        );
     }
 
     function test_EIP712Replay_WrongRecipientRejected() public {
         bytes32 txid = keccak256("dep3");
-        bytes memory proof = _attest(txid, 0, address(0xBEEF), 1_000); // signed for 0xBEEF
-        vm.expectRevert(WBTXBridge.BadAttestation.selector);
-        bridge.mint(txid, 0, address(0xDEAD), 1_000, proof);           // try to redirect
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline
+        ); // signed for 0xBEEF
+        vm.expectRevert();
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xDEAD), 1_000, deadline, proof
+        ); // try to redirect
     }
 
     function test_BelowThresholdRejected() public {
         bytes32 txid = keccak256("dep4");
-        bytes32 digest = bridge.mintDigest(txid, 0, address(0xBEEF), 1_000);
+        uint64 deadline = _futureDeadline();
+        bytes32 digest = bridge.mintDigest(
+            bridge.bridgeId(),
+            txid,
+            0,
+            DEFAULT_BTX_BLOCK_HASH,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            address(0xBEEF),
+            1_000,
+            deadline
+        );
         (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(pk1, digest);
         bytes[] memory sigs = new bytes[](1);
         sigs[0] = abi.encodePacked(r1, s1, v1);
         vm.expectRevert(WBTXBridge.BadAttestation.selector);
-        bridge.mint(txid, 0, address(0xBEEF), 1_000, abi.encode(sigs)); // 1-of-3 < threshold 2
+        bridge.mint(
+            txid,
+            0,
+            DEFAULT_BTX_BLOCK_HASH,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            address(0xBEEF),
+            1_000,
+            deadline,
+            abi.encode(sigs)
+        ); // 1-of-3 < threshold 2
     }
 
     // --- circuit breaker + guardian veto ---
@@ -94,17 +211,27 @@ contract WBTXTest is Test {
         vm.prank(gov);
         bridge.setLimits(0, 50_000, 1 days, 0, 0, 7 days); // window cap 50k sat
         bytes32 txid = keccak256("dep5");
-        bytes memory proof = _attest(txid, 0, address(0xBEEF), 60_000);
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 60_000, deadline
+        );
         vm.expectRevert(WBTXBridge.WindowCapExceeded.selector);
-        bridge.mint(txid, 0, address(0xBEEF), 60_000, proof);
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 60_000, deadline, proof
+        );
     }
 
     function test_GuardianVetoFlow() public {
         vm.prank(gov);
         bridge.setLimits(0, 0, 1 days, 100_000, 1 hours, 7 days); // queue mints > 100k sat
         bytes32 txid = keccak256("dep6");
-        bytes memory proof = _attest(txid, 7, address(0xBEEF), 500_000);
-        bridge.mint(txid, 7, address(0xBEEF), 500_000, proof);      // queued, not minted
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 7, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 500_000, deadline
+        );
+        bridge.mint(
+            txid, 7, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 500_000, deadline, proof
+        ); // queued, not minted
         assertEq(wbtx.balanceOf(address(0xBEEF)), 0);
         // too early
         vm.expectRevert(WBTXBridge.TooEarly.selector);
@@ -122,8 +249,13 @@ contract WBTXTest is Test {
         vm.prank(gov);
         bridge.setLimits(0, 0, 1 days, 100_000, 1 hours, 7 days);
         bytes32 txid = keccak256("dep7");
-        bytes memory proof = _attest(txid, 0, address(0xBEEF), 500_000);
-        bridge.mint(txid, 0, address(0xBEEF), 500_000, proof);
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 500_000, deadline
+        );
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 500_000, deadline, proof
+        );
         vm.warp(block.timestamp + 2 hours);
         bridge.executeQueuedMint(txid, 0);
         assertEq(wbtx.balanceOf(address(0xBEEF)), 500_000 * 1e10);
@@ -133,8 +265,13 @@ contract WBTXTest is Test {
 
     function test_RedeemRoundDownAndRefund() public {
         bytes32 txid = keccak256("dep8");
-        bytes memory proof = _attest(txid, 0, address(this), 200_000_000); // mint 2 BTX
-        bridge.mint(txid, 0, address(this), 200_000_000, proof);
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 200_000_000, deadline
+        ); // mint 2 BTX
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 200_000_000, deadline, proof
+        );
         // redeem 1 BTX + 0.5 sat dust -> releases 100000000 sat (rounded down), burns the full amount
         uint256 amt = 100_000_000 * 1e10 + 5e9;
         uint256 id = bridge.redeem(amt, hex"00aabb");
@@ -160,9 +297,14 @@ contract WBTXTest is Test {
         vm.prank(pauser);
         wbtx.pauseIssuance();
         bytes32 txid = keccak256("dep9");
-        bytes memory proof = _attest(txid, 0, address(0xBEEF), 1_000);
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline
+        );
         vm.expectRevert(WBTX.IssuanceIsPaused.selector);
-        bridge.mint(txid, 0, address(0xBEEF), 1_000, proof);
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline, proof
+        );
     }
 
     function test_RescueCannotTouchSelf() public {
@@ -181,12 +323,19 @@ contract WBTXTest is Test {
 
     function test_GranularPause() public {
         bytes32 txid = keccak256("gp");
-        bytes memory proof = _attest(txid, 0, address(this), 1_000);
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 1_000, deadline
+        );
         vm.prank(pauser); bridge.setMintPaused(true);
         vm.expectRevert(WBTXBridge.MintPaused.selector);
-        bridge.mint(txid, 0, address(this), 1_000, proof);          // mint blocked
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 1_000, deadline, proof
+        ); // mint blocked
         vm.prank(pauser); bridge.setMintPaused(false);
-        bridge.mint(txid, 0, address(this), 1_000, proof);          // mint works again
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 1_000, deadline, proof
+        ); // mint works again
         vm.prank(pauser); bridge.setRedeemPaused(true);
         vm.expectRevert(WBTXBridge.RedeemPaused.selector);
         bridge.redeem(1_000 * 1e10, hex"00aa");                     // redeem blocked independently
@@ -196,8 +345,13 @@ contract WBTXTest is Test {
     function testFuzz_BackingRelation(uint64 amountSat) public {
         amountSat = uint64(bound(amountSat, 1, 2_100_000_000_000_000)); // up to 21M BTX in sat
         bytes32 txid = keccak256(abi.encode("fuzz", amountSat));
-        bytes memory proof = _attest(txid, 3, address(0xBEEF), amountSat);
-        bridge.mint(txid, 3, address(0xBEEF), amountSat, proof);
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, 3, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), amountSat, deadline
+        );
+        bridge.mint(
+            txid, 3, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), amountSat, deadline, proof
+        );
         assertEq(wbtx.totalSupply(), uint256(amountSat) * 1e10);
         assertEq(wbtx.balanceOf(address(0xBEEF)), wbtx.totalSupply());
     }

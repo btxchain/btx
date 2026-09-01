@@ -100,8 +100,9 @@ preimage extraction. See the module docstring for an end-to-end example.
   for BTX ~90s blocks and EVM finality); the node/SDK does not police the cross-chain gap — you must.
 - **Hash-domain agreement.** Both chains MUST use `RIPEMD160(SHA256(preimage))`. A mismatch silently
   breaks atomicity. The contract and SDK enforce this; do not substitute keccak256/sha256-only.
-- **Replay binding (Model A).** The mint statement binds `{evmChainId, bridgeId, btxTxid, vout, to,
-  amountSat}`; an attestation cannot be replayed across chains/bridges/deposits/recipients/amounts.
+- **Replay/finality binding (Model A).** The mint statement binds `{evmChainId, bridgeId, btxTxid, vout,
+  btxBlockHash, btxBlockHeight, attestedHeight, to, amountSat, deadline}`; signatures are chain/bridge/
+  deposit/recipient/amount specific, finality-depth enforceable, and time-bounded.
 - **EVM-leg trust (Model A v1).** `ECDSAMultisigVerifier` is *classical* M-of-N. The authoritative
   security is the PQ attestation on BTX; the BTX lock+refund bounds exposure. Upgrade the verifier to
   the zk-attestation path (architecture §8) to make the EVM leg post-quantum too.

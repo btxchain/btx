@@ -33,9 +33,11 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
 ## 2. Defense checklist → where implemented
 
 ### Bridge (`WBTXBridge` + `ECDSAMultisigVerifier`)
-- **EIP-712 typed attestation** with domain `{name,version,block.chainid,address(this)}` → cross-chain,
-  cross-bridge, **post-fork** replay all prevented. (Fixes the latent bug in the v0 draft, which
-  captured `chainid` at construction and would stay replayable on a forked chain.) *Class 2/3.*
+- **EIP-712 typed attestation** with domain `{name,version,block.chainid,address(this)}` and struct
+  `{bridgeId,btxTxid,vout,btxBlockHash,btxBlockHeight,attestedHeight,to,amountSat,deadline}` →
+  cross-chain/cross-bridge replay is prevented, mint statements are time-bounded, and depth is
+  enforceable on-chain via `MIN_CONFIRMATIONS = 100` (code-level floor). (Fixes the latent bug in the v0
+  draft, which captured `chainid` at construction and would stay replayable on a forked chain.) *Class 2/3.*
 - **Outpoint replay guard** `minted[depositKey(txid,vout)]`, set before mint (CEI); `depositKey` uses
   `abi.encode` (collision-safe). One mint per BTX deposit. *Class 3.*
 - **OZ `ECDSA.recover`** in the verifier → rejects high-s malleability, bad `v`, and `ecrecover==0`;
