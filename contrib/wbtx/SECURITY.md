@@ -69,8 +69,11 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
   `receiveWithAuthorization`, `cancelAuthorization`) — gasless approvals AND gasless transfers /
   meta-transactions with random-nonce replay protection (Circle FiatToken pattern). `receiveWith-
   Authorization` is payee-gated (front-run safe).
-- **Role separation** (`MINTER_ROLE`/`BURNER_ROLE` held by the bridge, `PAUSER`/`UNPAUSER` separate,
-  `RESCUER`) via `AccessControlDefaultAdminRules` (2-step + delay). *Class 5.*
+- **Issuance bound to an immutable bridge**: `mint`/`burn`/`mintRefund` revert unless `msg.sender` is the
+  `bridge` set at construction (non-zero enforced) — no `MINTER_ROLE`/`BURNER_ROLE`, so a compromised admin
+  cannot grant issuance to an EOA. `burn`/`burnFrom` spend an ERC-20 allowance, so they cannot confiscate a
+  holder's balance. `PAUSER`/`UNPAUSER` and `RESCUER` remain separate via `AccessControlDefaultAdminRules`
+  (2-step + delay). *Class 5.*
 - **Issuance pause** (mint/burn) — the backing-safety lever — **without** freezing holder transfers
   (deliberate: no censorship lever; see Decisions).
 - **Optional compliance hook** (`IComplianceHook`) — default **OFF** (`address(0)` = neutral); only the

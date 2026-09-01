@@ -47,12 +47,12 @@ contract WBTXTest is Test {
     function setUp() public {
         address[] memory signers = _initialSignersSorted();
         verifier = new ECDSAMultisigVerifier(admin, 0, signers, 2); // 2-of-3
-        wbtx = new WBTX(admin, 0);
+        uint256 deployerNonce = vm.getNonce(address(this));
+        address predictedBridge = vm.computeCreateAddress(address(this), deployerNonce + 1);
+        wbtx = new WBTX(admin, 0, predictedBridge);
         bridge = new WBTXBridge(wbtx, IAttestationVerifier(address(verifier)), 1, admin, 0);
 
         vm.startPrank(admin);
-        wbtx.grantRole(wbtx.MINTER_ROLE(), address(bridge));
-        wbtx.grantRole(wbtx.BURNER_ROLE(), address(bridge));
         wbtx.grantRole(wbtx.PAUSER_ROLE(), pauser);
         wbtx.grantRole(wbtx.UNPAUSER_ROLE(), admin);
         bridge.grantRole(bridge.GOVERNANCE_ROLE(), gov);
@@ -410,12 +410,12 @@ contract WBTXTest is Test {
     function test_Mint_RevertsWhenNotConfigured() public {
         address[] memory signers = _initialSignersSorted();
         ECDSAMultisigVerifier verifier2 = new ECDSAMultisigVerifier(admin, 0, signers, 2);
-        WBTX wbtx2 = new WBTX(admin, 0);
+        uint256 deployerNonce = vm.getNonce(address(this));
+        address predictedBridge2 = vm.computeCreateAddress(address(this), deployerNonce + 1);
+        WBTX wbtx2 = new WBTX(admin, 0, predictedBridge2);
         WBTXBridge bridge2 = new WBTXBridge(wbtx2, IAttestationVerifier(address(verifier2)), 1, admin, 0);
 
         vm.startPrank(admin);
-        wbtx2.grantRole(wbtx2.MINTER_ROLE(), address(bridge2));
-        wbtx2.grantRole(wbtx2.BURNER_ROLE(), address(bridge2));
         bridge2.grantRole(bridge2.GOVERNANCE_ROLE(), gov);
         vm.stopPrank();
 
@@ -448,6 +448,7 @@ contract WBTXTest is Test {
         );
         // redeem 1 BTX + 0.5 sat dust -> releases 100000000 sat (rounded down), burns the full amount
         uint256 amt = 100_000_000 * 1e10 + 5e9;
+        wbtx.approve(address(bridge), amt);
         uint256 id = bridge.redeem(amt, hex"00aabb");
         assertEq(wbtx.totalSupply(), 2e18 - amt);                  // full burn incl dust
         ( , uint64 sat, , , bool fulfilled, ) = bridge.redeems(id);
@@ -463,8 +464,119 @@ contract WBTXTest is Test {
     // --- token roles / rescue / pause ---
 
     function test_OnlyBridgeMints() public {
+        vm.expectRevert(WBTX.NotBridge.selector);
+        wbtx.mint(address(this), 1);
+
+        vm.prank(address(bridge));
+        wbtx.mint(address(this), 1);
+        assertEq(wbtx.balanceOf(address(this)), 1);
+    }
+
+    function test_BurnRequiresAllowance() public {
+        address aliceUser = address(0xA71CE);
+        address bobUser = address(0xB0B1);
+        address spender = address(0xD00D);
+
+        vm.prank(address(bridge));
+        wbtx.mint(aliceUser, 10e18);
+        vm.prank(address(bridge));
+        wbtx.mint(bobUser, 5e18);
+
+        vm.prank(address(bridge));
         vm.expectRevert();
-        wbtx.mint(address(this), 1);                                // not MINTER_ROLE
+        wbtx.burn(aliceUser, 1e18);
+
+        vm.prank(spender);
+        vm.expectRevert();
+        wbtx.burnFrom(aliceUser, 1e18);
+
+        vm.prank(aliceUser);
+        wbtx.approve(address(bridge), 2e18);
+        vm.prank(address(bridge));
+        wbtx.burn(aliceUser, 2e18);
+        assertEq(wbtx.balanceOf(aliceUser), 8e18);
+
+        vm.prank(aliceUser);
+        wbtx.approve(spender, 1e18);
+        vm.prank(spender);
+        wbtx.burnFrom(aliceUser, 1e18);
+        assertEq(wbtx.balanceOf(aliceUser), 7e18);
+
+        vm.prank(address(bridge));
+        vm.expectRevert();
+        wbtx.burn(bobUser, 1e18);
+        assertEq(wbtx.balanceOf(bobUser), 5e18);
+    }
+
+    function test_ComplianceHook_ExcludesIssuance() public {
+        bytes32 txid1 = keccak256("hook-issuance-1");
+        uint64 deadline1 = _futureDeadline();
+        bytes memory proof1 = _attest(
+            txid1, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 2_000, deadline1
+        );
+        bridge.mint(
+            txid1, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 2_000, deadline1, proof1
+        );
+
+        MockRevertingHook badHook = new MockRevertingHook();
+        vm.prank(admin);
+        wbtx.setComplianceHook(badHook);
+
+        wbtx.transfer(address(0xBEEF), 1_000 * 1e10);
+
+        bytes32 txid2 = keccak256("hook-issuance-2");
+        uint64 deadline2 = _futureDeadline();
+        bytes memory proof2 = _attest(
+            txid2, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 1_000, deadline2
+        );
+        bridge.mint(
+            txid2, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 1_000, deadline2, proof2
+        );
+
+        uint256 redeemAmount = 500 * 1e10;
+        wbtx.approve(address(bridge), redeemAmount);
+        uint256 redeemId = bridge.redeem(redeemAmount, hex"00aabb");
+        assertGt(redeemId, 0);
+    }
+
+    function test_ComplianceHook_CannotBrick() public {
+        vm.prank(address(bridge));
+        wbtx.mint(address(this), 5e18);
+
+        MockRevertingHook revertingHook = new MockRevertingHook();
+        vm.prank(admin);
+        wbtx.setComplianceHook(revertingHook);
+        wbtx.transfer(address(0xBEEF), 1e18);
+        assertEq(wbtx.balanceOf(address(0xBEEF)), 1e18);
+
+        MockGasBurningHook gasBurningHook = new MockGasBurningHook();
+        vm.prank(admin);
+        wbtx.setComplianceHook(gasBurningHook);
+        wbtx.transfer(address(0xCAFE), 1e18);
+        assertEq(wbtx.balanceOf(address(0xCAFE)), 1e18);
+    }
+
+    function test_ClearComplianceHook() public {
+        MockRevertingHook badHook = new MockRevertingHook();
+        vm.prank(admin);
+        wbtx.setComplianceHook(badHook);
+        assertTrue(address(wbtx.complianceHook()) != address(0));
+
+        vm.prank(pauser);
+        wbtx.clearComplianceHook();
+        assertEq(address(wbtx.complianceHook()), address(0));
+    }
+
+    function test_MintRefund_WorksWhilePaused() public {
+        vm.prank(pauser);
+        wbtx.pauseIssuance();
+
+        vm.prank(address(bridge));
+        wbtx.mintRefund(address(this), 123);
+        assertEq(wbtx.balanceOf(address(this)), 123);
+
+        vm.expectRevert(WBTX.NotBridge.selector);
+        wbtx.mintRefund(address(this), 1);
     }
 
     function test_IssuancePauseBlocksMint() public {
@@ -616,6 +728,18 @@ contract MockVerifier is IAttestationVerifier {
     }
 }
 
+contract MockRevertingHook is IComplianceHook {
+    function check(address, address, uint256) external pure {
+        revert("hook-revert");
+    }
+}
+
+contract MockGasBurningHook is IComplianceHook {
+    function check(address, address, uint256) external pure {
+        while (true) {}
+    }
+}
+
 contract MockBlockHook is IComplianceHook {
     address public blocked;
     constructor(address b) { blocked = b; }
@@ -633,11 +757,9 @@ contract WBTXTokenTest is Test {
 
     function setUp() public {
         alice = vm.addr(alicePk);
-        wbtx = new WBTX(admin, 0);
-        vm.startPrank(admin);
-        wbtx.grantRole(wbtx.MINTER_ROLE(), admin);
+        wbtx = new WBTX(admin, 0, admin);
+        vm.prank(admin);
         wbtx.mint(alice, 1000e18);
-        vm.stopPrank();
     }
 
     function _digest(bytes32 structHash) internal view returns (bytes32) {
@@ -667,19 +789,18 @@ contract WBTXTokenTest is Test {
         assertEq(wbtx.balanceOf(bob), 5e18);
     }
 
-    function test_ComplianceHookBlocks() public {
+    function test_ComplianceHookFailOpen() public {
         MockBlockHook hook = new MockBlockHook(bob);
         vm.prank(admin);
         wbtx.setComplianceHook(hook);
         vm.prank(alice);
-        vm.expectRevert(bytes("blocked"));
-        wbtx.transfer(bob, 1e18);
-        // removing the hook restores neutrality
-        vm.prank(admin);
-        wbtx.setComplianceHook(IComplianceHook(address(0)));
-        vm.prank(alice);
         wbtx.transfer(bob, 1e18);
         assertEq(wbtx.balanceOf(bob), 1e18);
+        vm.prank(admin);
+        wbtx.setComplianceHook(IComplianceHook(address(0)));
+        vm.prank(admin);
+        vm.expectRevert(WBTX.BadComplianceHook.selector);
+        wbtx.setComplianceHook(IComplianceHook(address(0xBEEF)));
     }
 
     function test_Permit() public {
@@ -702,11 +823,9 @@ contract HTLCTest is Test {
 
     function setUp() public {
         htlc = new WBTXAtomicSwapHTLC();
-        token = new WBTX(admin, 0);
-        vm.startPrank(admin);
-        token.grantRole(token.MINTER_ROLE(), admin);
+        token = new WBTX(admin, 0, admin);
+        vm.prank(admin);
         token.mint(alice, 1000e18);
-        vm.stopPrank();
     }
 
     function test_HashDomainMatchesBTX() public view {

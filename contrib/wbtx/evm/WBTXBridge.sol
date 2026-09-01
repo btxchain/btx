@@ -358,7 +358,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         if (sat > type(uint64).max) revert AmountOverflow(); // defensive truncation guard
         uint64 amountSat = uint64(sat);
 
-        wbtx.burn(msg.sender, amountWbtx);               // burn FULL amount (dust included)
+        wbtx.burnFrom(msg.sender, amountWbtx);           // burn FULL amount (dust included)
         redeemId = ++redeemNonce;
         redeems[redeemId] = Redeem({
             from: msg.sender, amountSat: amountSat, amountWbtx: amountWbtx,
