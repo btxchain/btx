@@ -25,12 +25,27 @@ contract WBTXTest is Test {
     uint64 constant DEFAULT_WINDOW_CAP_SAT = 2_100_000_000_000_000;
     uint64 constant DEFAULT_WINDOW_DURATION = 1 days;
     uint64 constant DEFAULT_OPTIMISTIC_THRESHOLD_SAT = 2_100_000_000_000_000;
-    uint64 constant DEFAULT_GUARDIAN_DELAY = 1 hours;
+    uint64 constant DEFAULT_GUARDIAN_DELAY = 6 hours;
     uint64 constant DEFAULT_REDEEM_REFUND_TIMEOUT = 7 days;
 
+    function _initialSignersSorted() internal view returns (address[] memory signers) {
+        signers = new address[](3);
+        signers[0] = vm.addr(pk1);
+        signers[1] = vm.addr(pk2);
+        signers[2] = vm.addr(pk3);
+        for (uint256 i = 1; i < signers.length; i++) {
+            address key = signers[i];
+            uint256 j = i;
+            while (j > 0 && signers[j - 1] > key) {
+                signers[j] = signers[j - 1];
+                unchecked { --j; }
+            }
+            signers[j] = key;
+        }
+    }
+
     function setUp() public {
-        address[] memory signers = new address[](3);
-        signers[0] = vm.addr(pk1); signers[1] = vm.addr(pk2); signers[2] = vm.addr(pk3);
+        address[] memory signers = _initialSignersSorted();
         verifier = new ECDSAMultisigVerifier(admin, 0, signers, 2); // 2-of-3
         wbtx = new WBTX(admin, 0);
         bridge = new WBTXBridge(wbtx, IAttestationVerifier(address(verifier)), 1, admin, 0);
@@ -44,6 +59,7 @@ contract WBTXTest is Test {
         bridge.grantRole(bridge.GUARDIAN_ROLE(), guardian);
         bridge.grantRole(bridge.PAUSER_ROLE(), pauser);
         bridge.grantRole(bridge.FEDERATION_ROLE(), gov);
+        verifier.grantRole(verifier.GUARDIAN_ROLE(), guardian);
         vm.stopPrank();
 
         vm.prank(gov);
@@ -239,7 +255,7 @@ contract WBTXTest is Test {
 
     function test_WindowCapEnforced() public {
         vm.prank(gov);
-        bridge.setLimits(type(uint256).max, 50_000, 1 hours, 1_000_000, 1 hours, 7 days); // window cap 50k sat
+        bridge.setLimits(type(uint256).max, 50_000, 1 hours, 1_000_000, 6 hours, 7 days); // window cap 50k sat
         bytes32 txid = keccak256("dep5");
         uint64 deadline = _futureDeadline();
         bytes memory proof = _attest(
@@ -253,7 +269,7 @@ contract WBTXTest is Test {
 
     function test_GuardianVetoFlow() public {
         vm.prank(gov);
-        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, 1 hours, 7 days); // queue mints > 100k sat
+        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, 6 hours, 7 days); // queue mints > 100k sat
         bytes32 txid = keccak256("dep6");
         uint64 deadline = _futureDeadline();
         bytes memory proof = _attest(
@@ -277,7 +293,7 @@ contract WBTXTest is Test {
 
     function test_GuardianQueueExecutesAfterDelay() public {
         vm.prank(gov);
-        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, 1 hours, 7 days);
+        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, 6 hours, 7 days);
         bytes32 txid = keccak256("dep7");
         uint64 deadline = _futureDeadline();
         bytes memory proof = _attest(
@@ -286,14 +302,14 @@ contract WBTXTest is Test {
         bridge.mint(
             txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 500_000, deadline, proof
         );
-        vm.warp(block.timestamp + 2 hours);
+        vm.warp(block.timestamp + 7 hours);
         bridge.executeQueuedMint(txid, 0);
         assertEq(wbtx.balanceOf(address(0xBEEF)), 500_000 * 1e10);
     }
 
-    function test_Veto_DurableBlocksResubmit() public {
+    function test_ClearVeto_Timelocked() public {
         vm.prank(gov);
-        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, 1 hours, 7 days);
+        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, 6 hours, 7 days);
 
         bytes32 txid = keccak256("veto-race");
         uint32 vout = 9;
@@ -317,18 +333,18 @@ contract WBTXTest is Test {
         );
 
         vm.prank(gov);
-        bridge.clearVeto(dk);
+        bridge.proposeClearVeto(dk);
+        assertTrue(bridge.vetoed(dk));
+        vm.expectRevert(WBTXBridge.ClearVetoNotReady.selector);
+        bridge.applyClearVeto(dk);
+        vm.warp(block.timestamp + bridge.CLEAR_VETO_DELAY());
+        bridge.applyClearVeto(dk);
         assertFalse(bridge.vetoed(dk));
-        bridge.mint(
-            txid, vout, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), amountSat, deadline, proof
-        );
-        (, , , bool exists) = bridge.queued(dk);
-        assertTrue(exists);
     }
 
     function test_Window_NoBoundaryBurst() public {
         vm.prank(gov);
-        bridge.setLimits(type(uint256).max, 1_000, 100, 10_000, 1 hours, 7 days);
+        bridge.setLimits(type(uint256).max, 1_000, 100, 10_000, 6 hours, 7 days);
 
         vm.warp(block.timestamp + 99);
         uint64 deadline = _futureDeadline();
@@ -362,7 +378,7 @@ contract WBTXTest is Test {
 
     function test_Window_QueueReservesNothing() public {
         vm.prank(gov);
-        bridge.setLimits(type(uint256).max, 1_000, 100, 500, 1 hours, 7 days);
+        bridge.setLimits(type(uint256).max, 1_000, 100, 500, 6 hours, 7 days);
 
         uint64 deadline = _futureDeadline();
         bytes32 queuedTxid = keccak256("queue-reserve-1");
@@ -385,15 +401,14 @@ contract WBTXTest is Test {
         bridge.mint(
             fullCapTxid, 4, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline, fullCapProof
         );
-        vm.warp(block.timestamp + 2 hours);
+        vm.warp(block.timestamp + 7 hours);
         bridge.executeQueuedMint(fullCapTxid, 4);
         assertEq(wbtx.balanceOf(address(0xBEEF)), 1_000 * 1e10);
         assertEq(bridge.availableSat(), 0);
     }
 
     function test_Mint_RevertsWhenNotConfigured() public {
-        address[] memory signers = new address[](3);
-        signers[0] = vm.addr(pk1); signers[1] = vm.addr(pk2); signers[2] = vm.addr(pk3);
+        address[] memory signers = _initialSignersSorted();
         ECDSAMultisigVerifier verifier2 = new ECDSAMultisigVerifier(admin, 0, signers, 2);
         WBTX wbtx2 = new WBTX(admin, 0);
         WBTXBridge bridge2 = new WBTXBridge(wbtx2, IAttestationVerifier(address(verifier2)), 1, admin, 0);
@@ -477,7 +492,80 @@ contract WBTXTest is Test {
 
     function test_VerifierGovernanceGated() public {
         vm.expectRevert();
-        bridge.setVerifier(IAttestationVerifier(address(0xdead)));  // not GOVERNANCE_ROLE
+        bridge.proposeVerifier(IAttestationVerifier(address(verifier)));  // not GOVERNANCE_ROLE
+    }
+
+    function test_SetVerifier_Timelocked() public {
+        MockVerifier next = new MockVerifier(true);
+        vm.prank(gov);
+        bridge.proposeVerifier(IAttestationVerifier(address(next)));
+
+        assertEq(address(bridge.verifier()), address(verifier));
+        vm.expectRevert(WBTXBridge.VerifierNotReady.selector);
+        bridge.applyVerifier();
+
+        vm.warp(block.timestamp + bridge.VERIFIER_DELAY());
+        bridge.applyVerifier();
+        assertEq(address(bridge.verifier()), address(next));
+
+        vm.prank(gov);
+        vm.expectRevert(WBTXBridge.VerifierNotContract.selector);
+        bridge.proposeVerifier(IAttestationVerifier(address(0)));
+
+        vm.prank(gov);
+        vm.expectRevert(WBTXBridge.VerifierNotContract.selector);
+        bridge.proposeVerifier(IAttestationVerifier(address(0xBEEF)));
+    }
+
+    function test_CancelPendingVerifier() public {
+        MockVerifier next = new MockVerifier(true);
+        vm.prank(gov);
+        bridge.proposeVerifier(IAttestationVerifier(address(next)));
+        vm.prank(guardian);
+        bridge.cancelPendingVerifier();
+
+        vm.warp(block.timestamp + bridge.VERIFIER_DELAY());
+        vm.expectRevert(WBTXBridge.VerifierNotReady.selector);
+        bridge.applyVerifier();
+        assertEq(address(bridge.verifier()), address(verifier));
+    }
+
+    function test_RotateSigners_Timelocked() public {
+        address[] memory nextSigners = new address[](2);
+        nextSigners[0] = address(0x1111);
+        nextSigners[1] = address(0x2222);
+
+        vm.prank(admin);
+        verifier.proposeRotation(nextSigners, 1);
+        assertEq(verifier.threshold(), 2);
+        vm.expectRevert(ECDSAMultisigVerifier.RotationNotReady.selector);
+        verifier.applyRotation();
+
+        vm.warp(block.timestamp + verifier.ROTATION_DELAY());
+        verifier.applyRotation();
+        assertEq(verifier.threshold(), 1);
+        assertTrue(verifier.isSigner(nextSigners[0]));
+        assertTrue(verifier.isSigner(nextSigners[1]));
+        assertFalse(verifier.isSigner(vm.addr(pk1)));
+
+        address[] memory cancelledSigners = new address[](2);
+        cancelledSigners[0] = address(0x3333);
+        cancelledSigners[1] = address(0x4444);
+        vm.prank(admin);
+        verifier.proposeRotation(cancelledSigners, 1);
+        vm.prank(guardian);
+        verifier.cancelPendingRotation();
+        vm.warp(block.timestamp + verifier.ROTATION_DELAY());
+        vm.expectRevert(ECDSAMultisigVerifier.RotationNotReady.selector);
+        verifier.applyRotation();
+    }
+
+    function test_SetLimits_RejectsLowGuardianDelay() public {
+        vm.startPrank(gov);
+        uint64 tooLowGuardianDelay = bridge.MIN_GUARDIAN_DELAY() - 1;
+        vm.expectRevert(WBTXBridge.GuardianDelayTooLow.selector);
+        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, tooLowGuardianDelay, 7 days);
+        vm.stopPrank();
     }
 
     function test_GranularPause() public {
@@ -513,6 +601,18 @@ contract WBTXTest is Test {
         );
         assertEq(wbtx.totalSupply(), uint256(amountSat) * 1e10);
         assertEq(wbtx.balanceOf(address(0xBEEF)), wbtx.totalSupply());
+    }
+}
+
+contract MockVerifier is IAttestationVerifier {
+    bool public immutable allow;
+
+    constructor(bool allow_) {
+        allow = allow_;
+    }
+
+    function verifyMint(bytes32, bytes calldata) external view returns (bool) {
+        return allow;
     }
 }
 

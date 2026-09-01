@@ -52,8 +52,13 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
   threshold even with "valid" attestation. *Class 1/2 (tBTC pattern).*
 - **Granular pause** (`PAUSER_ROLE`): independent `mintPaused` (the critical backing-safety lever) and
   `redeemPaused`, so halting minting doesn't trap redemptions and vice versa. **Role separation** via
-  `AccessControlDefaultAdminRules` (2-step admin + enforced delay); `setVerifier`/`setLimits`/
-  `refundRedeem` are `GOVERNANCE_ROLE` (**must be a Timelock owned by a multisig**). *Class 5 (Poly).*
+  `AccessControlDefaultAdminRules` (2-step admin + enforced delay). Trust-anchor changes are
+  timelocked **in-contract**, not by convention: the verifier swap is `proposeVerifier`→`applyVerifier`
+  after `VERIFIER_DELAY` (7 days) with a `GUARDIAN_ROLE` `cancelPendingVerifier`; signer rotation is
+  `proposeRotation`→`applyRotation` after `ROTATION_DELAY` (7 days); a guardian veto is cleared only via
+  `proposeClearVeto`→`applyClearVeto` after `CLEAR_VETO_DELAY` (48h). `setLimits`/`refundRedeem` are
+  `GOVERNANCE_ROLE` and `setLimits` rejects a `guardianDelay` below `MIN_GUARDIAN_DELAY` (6h) or any
+  zero breaker (owner **should** still be a Timelock+multisig). *Class 5 (Poly).*
 - **Redeem safety:** `uint64` truncation guard; auditable `Redeem` records; `fulfillRedeem` (federation
   writes the BTX txid on-chain); `refundRedeem` (governance re-mints to the burner after
   `redeemRefundTimeout` if a redemption can't be honored) → no silently-lost funds. *renBTC/FBTC lesson.*

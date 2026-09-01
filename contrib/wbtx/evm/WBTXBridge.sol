@@ -43,11 +43,19 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     bytes32 public constant GUARDIAN_ROLE   = keccak256("GUARDIAN_ROLE");   // veto/cancel + pause
     bytes32 public constant PAUSER_ROLE     = keccak256("PAUSER_ROLE");
     bytes32 public constant FEDERATION_ROLE = keccak256("FEDERATION_ROLE"); // marks redeems fulfilled
+    /// @dev Trust-anchor change delay (L2BEAT Stage-1 style exit window).
+    uint64 public constant VERIFIER_DELAY = 7 days;
+    /// @dev Shorter delay for clearing a guardian veto on an otherwise honest user deposit.
+    uint64 public constant CLEAR_VETO_DELAY = 48 hours;
+    /// @dev Governance cannot shrink guardian review to near-zero.
+    uint64 public constant MIN_GUARDIAN_DELAY = 6 hours;
 
     bytes32 private constant MINT_TYPEHASH =
         keccak256("MintAttestation(uint256 bridgeId,bytes32 btxTxid,uint32 vout,bytes32 btxBlockHash,uint64 btxBlockHeight,uint64 attestedHeight,address to,uint64 amountSat,uint64 deadline)");
 
     IAttestationVerifier public verifier;
+    IAttestationVerifier public pendingVerifier;
+    uint64 public verifierEta;
     // Granular pause: mint-pause is the critical backing-safety lever; redeem-pause is for BTX-side
     // issues. Keeping them separate avoids halting redemptions when only minting must stop, and vice versa.
     bool public mintPaused;
@@ -69,6 +77,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     mapping(bytes32 => bool) public minted;        // depositKey => minted (authoritative replay guard)
     mapping(bytes32 => QueuedMint) public queued;  // depositKey => pending mint
     mapping(bytes32 => bool) public vetoed;        // depositKey => guardian-vetoed until governance clears
+    mapping(bytes32 => uint64) public clearVetoEta;
 
     // --- redeem lifecycle (auditable + refundable) ---
     struct Redeem { address from; uint64 amountSat; uint256 amountWbtx; uint64 requestedAt; bool fulfilled; bool refunded; }
@@ -83,7 +92,10 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     event RedeemRequested(uint256 indexed redeemId, address indexed from, uint64 amountSat, bytes btxDestination, uint256 amountWbtxBurned);
     event RedeemFulfilled(uint256 indexed redeemId, bytes32 btxTxid);
     event RedeemRefunded(uint256 indexed redeemId, address indexed to, uint256 amountWbtx);
-    event VerifierUpdated(address indexed previous, address indexed current);
+    event VerifierProposed(address indexed pendingVerifier, uint64 verifierEta);
+    event VerifierApplied(address indexed previousVerifier, address indexed currentVerifier);
+    event PendingVerifierCancelled(address indexed by);
+    event ClearVetoProposed(bytes32 indexed depositKey, uint64 executeAfter);
     event MintPausedSet(bool paused, address indexed by);
     event RedeemPausedSet(bool paused, address indexed by);
     event LimitsUpdated(uint256 maxSupplyWbtx, uint64 windowMintCapSat, uint64 windowDuration, uint64 optimisticThresholdSat, uint64 guardianDelay, uint64 redeemRefundTimeout);
@@ -108,6 +120,10 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     error BelowOneSat();
     error UnknownRedeem();
     error RedeemClosed();
+    error VerifierNotContract();
+    error VerifierNotReady();
+    error ClearVetoNotReady();
+    error GuardianDelayTooLow();
 
     modifier whenMintNotPaused() { if (mintPaused) revert MintPaused(); _; }
     modifier whenRedeemNotPaused() { if (redeemPaused) revert RedeemPaused(); _; }
@@ -129,9 +145,27 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 
     // ----------------------------- governance -----------------------------
 
-    function setVerifier(IAttestationVerifier v) external onlyRole(GOVERNANCE_ROLE) {
-        emit VerifierUpdated(address(verifier), address(v));
-        verifier = v;
+    function proposeVerifier(IAttestationVerifier v) external onlyRole(GOVERNANCE_ROLE) {
+        if (address(v) == address(0) || address(v).code.length == 0) revert VerifierNotContract();
+        pendingVerifier = v;
+        verifierEta = uint64(block.timestamp) + VERIFIER_DELAY;
+        emit VerifierProposed(address(v), verifierEta);
+    }
+
+    function applyVerifier() external {
+        if (verifierEta == 0 || block.timestamp < verifierEta) revert VerifierNotReady();
+        address previous = address(verifier);
+        IAttestationVerifier next = pendingVerifier;
+        verifier = next;
+        pendingVerifier = IAttestationVerifier(address(0));
+        verifierEta = 0;
+        emit VerifierApplied(previous, address(next));
+    }
+
+    function cancelPendingVerifier() external onlyRole(GUARDIAN_ROLE) {
+        pendingVerifier = IAttestationVerifier(address(0));
+        verifierEta = 0;
+        emit PendingVerifierCancelled(msg.sender);
     }
 
     function setLimits(
@@ -145,6 +179,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
                 || optimisticThresholdSat_ == 0
                 || guardianDelay_ == 0
         ) revert ZeroBreakerValue();
+        if (guardianDelay_ < MIN_GUARDIAN_DELAY) revert GuardianDelayTooLow();
         if (uint256(windowMintCapSat_) / uint256(windowDuration_) == 0) revert WindowRateZero();
         maxSupplyWbtx = maxSupplyWbtx_;
         windowMintCapSat = windowMintCapSat_;
@@ -273,9 +308,16 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         emit MintCancelled(dk, msg.sender);
     }
 
-    /// @notice Governance-only veto clear.
-    /// @dev MUST be controlled by the governance timelock so veto clears are delayed and reviewable.
-    function clearVeto(bytes32 dk) external onlyRole(GOVERNANCE_ROLE) {
+    /// @notice Governance-only proposal to clear a guardian veto after a short review delay.
+    function proposeClearVeto(bytes32 dk) external onlyRole(GOVERNANCE_ROLE) {
+        clearVetoEta[dk] = uint64(block.timestamp) + CLEAR_VETO_DELAY;
+        emit ClearVetoProposed(dk, clearVetoEta[dk]);
+    }
+
+    function applyClearVeto(bytes32 dk) external {
+        uint64 eta = clearVetoEta[dk];
+        if (eta == 0 || block.timestamp < eta) revert ClearVetoNotReady();
+        delete clearVetoEta[dk];
         vetoed[dk] = false;
         emit VetoCleared(dk, msg.sender);
     }
@@ -362,36 +404,101 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 contract ECDSAMultisigVerifier is IAttestationVerifier, AccessControlDefaultAdminRules {
     using ECDSA for bytes32;
 
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+    uint64 public constant ROTATION_DELAY = 7 days;
+
     address[] private _signers;
+    address[] private _pendingSigners;
     mapping(address => bool) public isSigner;
     uint256 public threshold;
+    uint256 public pendingThreshold;
+    uint64 public rotationEta;
 
     event SignersRotated(address[] signers, uint256 threshold);
+    event RotationProposed(address[] signers, uint256 threshold, uint64 rotationEta);
+    event PendingRotationCancelled(address indexed by);
 
     error BadThreshold();
     error DupOrZeroSigner();
     error TooManySigs();
     error NotOrdered();
+    error SignersNotAscending();
+    error RotationNotReady();
 
     constructor(address admin, uint48 adminDelay, address[] memory signers_, uint256 threshold_)
         AccessControlDefaultAdminRules(adminDelay, admin)
     {
         _rotate(signers_, threshold_);
+        _grantRole(GUARDIAN_ROLE, admin);
     }
 
-    /// @notice Replace the entire signer set + threshold (governance/Timelock only). Clears the prior
-    ///         set first (no stale-signer accumulation — the gap flagged in the v0 reference).
+    /// @notice Legacy name routed through timelocked rotation flow.
     function rotateSigners(address[] calldata signers_, uint256 threshold_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _proposeRotation(signers_, threshold_);
+    }
+
+    /// @notice Propose signer set + threshold replacement, applied after a fixed delay.
+    function proposeRotation(address[] calldata signers_, uint256 threshold_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _proposeRotation(signers_, threshold_);
+    }
+
+    function applyRotation() external {
+        if (rotationEta == 0 || block.timestamp < rotationEta) revert RotationNotReady();
+        uint256 len = _pendingSigners.length;
+        address[] memory signers_ = new address[](len);
+        for (uint256 i = 0; i < len; i++) {
+            signers_[i] = _pendingSigners[i];
+        }
+        uint256 threshold_ = pendingThreshold;
+        delete _pendingSigners;
+        pendingThreshold = 0;
+        rotationEta = 0;
         _rotate(signers_, threshold_);
+    }
+
+    function cancelPendingRotation() external onlyRole(GUARDIAN_ROLE) {
+        delete _pendingSigners;
+        pendingThreshold = 0;
+        rotationEta = 0;
+        emit PendingRotationCancelled(msg.sender);
+    }
+
+    function pendingSigners() external view returns (address[] memory) {
+        return _pendingSigners;
+    }
+
+    function _proposeRotation(address[] calldata signers_, uint256 threshold_) private {
+        _validateRotation(signers_, threshold_);
+        delete _pendingSigners;
+        for (uint256 i = 0; i < signers_.length; i++) {
+            _pendingSigners.push(signers_[i]);
+        }
+        pendingThreshold = threshold_;
+        rotationEta = uint64(block.timestamp) + ROTATION_DELAY;
+        emit RotationProposed(signers_, threshold_, rotationEta);
+    }
+
+    function _validateRotation(address[] calldata signers_, uint256 threshold_) private pure {
+        if (threshold_ == 0 || threshold_ > signers_.length) revert BadThreshold();
+        address prev = address(0);
+        for (uint256 i = 0; i < signers_.length; i++) {
+            address s = signers_[i];
+            if (s == address(0)) revert DupOrZeroSigner();
+            if (s <= prev) revert SignersNotAscending();
+            prev = s;
+        }
     }
 
     function _rotate(address[] memory signers_, uint256 threshold_) private {
         if (threshold_ == 0 || threshold_ > signers_.length) revert BadThreshold();
+        address prev = address(0);
         for (uint256 i = 0; i < _signers.length; i++) { isSigner[_signers[i]] = false; }
         delete _signers;
         for (uint256 i = 0; i < signers_.length; i++) {
             address s = signers_[i];
             if (s == address(0) || isSigner[s]) revert DupOrZeroSigner();
+            if (s <= prev) revert SignersNotAscending();
+            prev = s;
             isSigner[s] = true;
             _signers.push(s);
         }
