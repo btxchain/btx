@@ -478,7 +478,8 @@ class OfferVerification:
 
 def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
                  require_attestation: bool = False,
-                 expected_challenge: Optional[str] = None) -> OfferVerification:
+                 expected_challenge: Optional[str] = None,
+                 expected_venue_pubkey: Optional[str] = None) -> OfferVerification:
     """
     Run the full §4.3 verification against a local node. Returns a report whose
     `ok` is True only if every executed check passed. Trust-minimized: nothing is
@@ -502,6 +503,10 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
     if (expected_challenge is not None and
             (not isinstance(expected_challenge, str) or not expected_challenge)):
         check("parameters", False, "expected_challenge must be a non-empty string")
+        return OfferVerification(False, tier, address, 0, 0, checks)
+    if (expected_venue_pubkey is not None and
+            (not isinstance(expected_venue_pubkey, str) or not expected_venue_pubkey)):
+        check("parameters", False, "expected_venue_pubkey must be a non-empty string")
         return OfferVerification(False, tier, address, 0, 0, checks)
 
     # C1 — terms are well-formed and canonicalizable.
@@ -549,6 +554,26 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
                  f" ctv_template_hash={bond.ctv_hash} terms_match={ctv_terms_ok}")
               + ("" if bond.refund_locktime >= expiry else
                  " (refund unlocks BEFORE offer expiry)"))
+        # Tier A's "the venue can grief but never take" guarantee holds ONLY if
+        # the 2-of-2 venue key is an independent party the buyer trusts. Nothing
+        # on-chain proves that: a seller can set venue_pubkey to a second key it
+        # controls, making the settlement path unilaterally seller-signable so
+        # the seller pulls the bond mid-quote (phantom supply). The buyer must
+        # PIN the venue key. Fail closed for tier A unless it is pinned and matches.
+        if bond.tier == "A":
+            if expected_venue_pubkey is None:
+                check("venue-key", False,
+                      f"tier A bond requires expected_venue_pubkey to prove the venue "
+                      f"is an independent party (descriptor venue_pubkey={bond.venue_pubkey}); "
+                      f"without it the 2-of-2 could be seller+seller and pullable mid-quote")
+            else:
+                venue_ok = (bond.venue_pubkey or "").lower() == expected_venue_pubkey.lower()
+                check("venue-key", venue_ok,
+                      f"descriptor venue_pubkey={bond.venue_pubkey}; "
+                      f"expected={expected_venue_pubkey}")
+        elif expected_venue_pubkey is not None:
+            check("venue-key", True,
+                  f"expected_venue_pubkey ignored for tier {bond.tier} (no venue leg)")
     except Exception as e:  # noqa: BLE001
         check("descriptor-shape", False, str(e))
         return OfferVerification(False, tier, address, 0, expiry, checks)
@@ -850,6 +875,11 @@ def selftest() -> None:
     except ValueError:
         pass
 
+    # Tier-A venue-key pinning: an empty expected_venue_pubkey is rejected in the
+    # offline parameter-validation stage (no node touched before it).
+    vrep = verify_offer(None, {"version": 1, "terms": {}}, expected_venue_pubkey="")
+    assert any(c.name == "parameters" and not c.ok for c in vrep.checks)
+
     # Amount formatting.
     assert sats_to_btx_str(5_000_000_000_000) == "50000.00000000"
     assert to_sat("50000.00000000") == 5_000_000_000_000
@@ -910,6 +940,9 @@ def main(argv=None) -> int:
     sp.add_argument("--require-attestation", action="store_true")
     sp.add_argument("--expected-challenge", default=None,
                     help="fresh buyer/venue challenge that the attestation must match")
+    sp.add_argument("--expected-venue-pubkey", default=None,
+                    help="for tier A: the independent venue's pubkey the 2-of-2 must "
+                         "use; required to trust a tier-A bond (else it fails closed)")
 
     sp = sub.add_parser("watch", help="watch a bundle's bond outpoints until spent/expired")
     sp.add_argument("bundle_json")
@@ -943,7 +976,8 @@ def main(argv=None) -> int:
     if args.cmd == "verify":
         report = verify_offer(rpc, _load_json(args.bundle_json), min_conf=args.min_conf,
                               require_attestation=args.require_attestation,
-                              expected_challenge=args.expected_challenge)
+                              expected_challenge=args.expected_challenge,
+                              expected_venue_pubkey=args.expected_venue_pubkey)
         print(json.dumps(report.as_dict(), indent=2))
         return 0 if report.ok else 1
 
