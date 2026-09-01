@@ -21,6 +21,12 @@ contract WBTXTest is Test {
     bytes32 constant DEFAULT_BTX_BLOCK_HASH = keccak256("btx-block");
     uint64 constant DEFAULT_BTX_BLOCK_HEIGHT = 1_000_000;
     uint64 constant DEFAULT_ATTESTED_HEIGHT = DEFAULT_BTX_BLOCK_HEIGHT + 150;
+    uint256 constant DEFAULT_MAX_SUPPLY_WBTX = type(uint256).max;
+    uint64 constant DEFAULT_WINDOW_CAP_SAT = 2_100_000_000_000_000;
+    uint64 constant DEFAULT_WINDOW_DURATION = 1 days;
+    uint64 constant DEFAULT_OPTIMISTIC_THRESHOLD_SAT = 2_100_000_000_000_000;
+    uint64 constant DEFAULT_GUARDIAN_DELAY = 1 hours;
+    uint64 constant DEFAULT_REDEEM_REFUND_TIMEOUT = 7 days;
 
     function setUp() public {
         address[] memory signers = new address[](3);
@@ -39,6 +45,16 @@ contract WBTXTest is Test {
         bridge.grantRole(bridge.PAUSER_ROLE(), pauser);
         bridge.grantRole(bridge.FEDERATION_ROLE(), gov);
         vm.stopPrank();
+
+        vm.prank(gov);
+        bridge.setLimits(
+            DEFAULT_MAX_SUPPLY_WBTX,
+            DEFAULT_WINDOW_CAP_SAT,
+            DEFAULT_WINDOW_DURATION,
+            DEFAULT_OPTIMISTIC_THRESHOLD_SAT,
+            DEFAULT_GUARDIAN_DELAY,
+            DEFAULT_REDEEM_REFUND_TIMEOUT
+        );
     }
 
     // --- helpers ---
@@ -47,7 +63,8 @@ contract WBTXTest is Test {
         return uint64(block.timestamp + 1 days);
     }
 
-    function _attest(
+    function _attestFor(
+        WBTXBridge targetBridge,
         bytes32 txid,
         uint32 vout,
         bytes32 btxBlockHash,
@@ -57,8 +74,8 @@ contract WBTXTest is Test {
         uint64 amtSat,
         uint64 deadline
     ) internal view returns (bytes memory) {
-        bytes32 digest = bridge.mintDigest(
-            bridge.bridgeId(),
+        bytes32 digest = targetBridge.mintDigest(
+            targetBridge.bridgeId(),
             txid,
             vout,
             btxBlockHash,
@@ -77,6 +94,19 @@ contract WBTXTest is Test {
         if (vm.addr(pk1) < vm.addr(pk2)) { sigs[0] = sigA; sigs[1] = sigB; }
         else { sigs[0] = sigB; sigs[1] = sigA; }
         return abi.encode(sigs);
+    }
+
+    function _attest(
+        bytes32 txid,
+        uint32 vout,
+        bytes32 btxBlockHash,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        address to,
+        uint64 amtSat,
+        uint64 deadline
+    ) internal view returns (bytes memory) {
+        return _attestFor(bridge, txid, vout, btxBlockHash, btxBlockHeight, attestedHeight, to, amtSat, deadline);
     }
 
     // --- mint ---
@@ -209,7 +239,7 @@ contract WBTXTest is Test {
 
     function test_WindowCapEnforced() public {
         vm.prank(gov);
-        bridge.setLimits(0, 50_000, 1 days, 0, 0, 7 days); // window cap 50k sat
+        bridge.setLimits(type(uint256).max, 50_000, 1 hours, 1_000_000, 1 hours, 7 days); // window cap 50k sat
         bytes32 txid = keccak256("dep5");
         uint64 deadline = _futureDeadline();
         bytes memory proof = _attest(
@@ -223,7 +253,7 @@ contract WBTXTest is Test {
 
     function test_GuardianVetoFlow() public {
         vm.prank(gov);
-        bridge.setLimits(0, 0, 1 days, 100_000, 1 hours, 7 days); // queue mints > 100k sat
+        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, 1 hours, 7 days); // queue mints > 100k sat
         bytes32 txid = keccak256("dep6");
         uint64 deadline = _futureDeadline();
         bytes memory proof = _attest(
@@ -247,7 +277,7 @@ contract WBTXTest is Test {
 
     function test_GuardianQueueExecutesAfterDelay() public {
         vm.prank(gov);
-        bridge.setLimits(0, 0, 1 days, 100_000, 1 hours, 7 days);
+        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, 1 hours, 7 days);
         bytes32 txid = keccak256("dep7");
         uint64 deadline = _futureDeadline();
         bytes memory proof = _attest(
@@ -259,6 +289,135 @@ contract WBTXTest is Test {
         vm.warp(block.timestamp + 2 hours);
         bridge.executeQueuedMint(txid, 0);
         assertEq(wbtx.balanceOf(address(0xBEEF)), 500_000 * 1e10);
+    }
+
+    function test_Veto_DurableBlocksResubmit() public {
+        vm.prank(gov);
+        bridge.setLimits(type(uint256).max, 1_000_000, 1 hours, 100_000, 1 hours, 7 days);
+
+        bytes32 txid = keccak256("veto-race");
+        uint32 vout = 9;
+        uint64 amountSat = 500_000;
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attest(
+            txid, vout, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), amountSat, deadline
+        );
+
+        bridge.mint(
+            txid, vout, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), amountSat, deadline, proof
+        );
+        vm.prank(guardian);
+        bridge.cancelQueuedMint(txid, vout);
+
+        bytes32 dk = bridge.depositKey(txid, vout);
+        assertTrue(bridge.vetoed(dk));
+        vm.expectRevert(WBTXBridge.Vetoed.selector);
+        bridge.mint(
+            txid, vout, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), amountSat, deadline, proof
+        );
+
+        vm.prank(gov);
+        bridge.clearVeto(dk);
+        assertFalse(bridge.vetoed(dk));
+        bridge.mint(
+            txid, vout, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), amountSat, deadline, proof
+        );
+        (, , , bool exists) = bridge.queued(dk);
+        assertTrue(exists);
+    }
+
+    function test_Window_NoBoundaryBurst() public {
+        vm.prank(gov);
+        bridge.setLimits(type(uint256).max, 1_000, 100, 10_000, 1 hours, 7 days);
+
+        vm.warp(block.timestamp + 99);
+        uint64 deadline = _futureDeadline();
+
+        bytes32 txid1 = keccak256("boundary-1");
+        bytes memory proof1 = _attest(
+            txid1, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 990, deadline
+        );
+        bridge.mint(
+            txid1, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 990, deadline, proof1
+        );
+
+        vm.warp(block.timestamp + 1);
+        bytes32 txid2 = keccak256("boundary-2");
+        bytes memory proof2 = _attest(
+            txid2, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 20, deadline
+        );
+        bridge.mint(
+            txid2, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 20, deadline, proof2
+        );
+
+        bytes32 txid3 = keccak256("boundary-3");
+        bytes memory proof3 = _attest(
+            txid3, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1, deadline
+        );
+        vm.expectRevert(WBTXBridge.WindowCapExceeded.selector);
+        bridge.mint(
+            txid3, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1, deadline, proof3
+        );
+    }
+
+    function test_Window_QueueReservesNothing() public {
+        vm.prank(gov);
+        bridge.setLimits(type(uint256).max, 1_000, 100, 500, 1 hours, 7 days);
+
+        uint64 deadline = _futureDeadline();
+        bytes32 queuedTxid = keccak256("queue-reserve-1");
+        bytes memory queuedProof = _attest(
+            queuedTxid, 3, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 900, deadline
+        );
+        bridge.mint(
+            queuedTxid, 3, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 900, deadline, queuedProof
+        );
+        assertEq(bridge.availableSat(), 1_000);
+
+        vm.prank(guardian);
+        bridge.cancelQueuedMint(queuedTxid, 3);
+        assertEq(bridge.availableSat(), 1_000);
+
+        bytes32 fullCapTxid = keccak256("queue-reserve-2");
+        bytes memory fullCapProof = _attest(
+            fullCapTxid, 4, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline
+        );
+        bridge.mint(
+            fullCapTxid, 4, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline, fullCapProof
+        );
+        vm.warp(block.timestamp + 2 hours);
+        bridge.executeQueuedMint(fullCapTxid, 4);
+        assertEq(wbtx.balanceOf(address(0xBEEF)), 1_000 * 1e10);
+        assertEq(bridge.availableSat(), 0);
+    }
+
+    function test_Mint_RevertsWhenNotConfigured() public {
+        address[] memory signers = new address[](3);
+        signers[0] = vm.addr(pk1); signers[1] = vm.addr(pk2); signers[2] = vm.addr(pk3);
+        ECDSAMultisigVerifier verifier2 = new ECDSAMultisigVerifier(admin, 0, signers, 2);
+        WBTX wbtx2 = new WBTX(admin, 0);
+        WBTXBridge bridge2 = new WBTXBridge(wbtx2, IAttestationVerifier(address(verifier2)), 1, admin, 0);
+
+        vm.startPrank(admin);
+        wbtx2.grantRole(wbtx2.MINTER_ROLE(), address(bridge2));
+        wbtx2.grantRole(wbtx2.BURNER_ROLE(), address(bridge2));
+        bridge2.grantRole(bridge2.GOVERNANCE_ROLE(), gov);
+        vm.stopPrank();
+
+        bytes32 txid = keccak256("dep-not-configured");
+        uint64 deadline = _futureDeadline();
+        bytes memory proof = _attestFor(
+            bridge2, txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline
+        );
+
+        vm.expectRevert(WBTXBridge.NotConfigured.selector);
+        bridge2.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(0xBEEF), 1_000, deadline, proof
+        );
+
+        vm.prank(gov);
+        vm.expectRevert(WBTXBridge.ZeroBreakerValue.selector);
+        bridge2.setLimits(0, 1, 1, 1, 1, 7 days);
     }
 
     // --- redeem ---

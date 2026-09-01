@@ -52,13 +52,14 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     // issues. Keeping them separate avoids halting redemptions when only minting must stop, and vice versa.
     bool public mintPaused;
     bool public redeemPaused;
+    bool public limitsConfigured;
 
     // --- circuit breaker (Ronin/Harmony lesson: cap blast radius, don't rely on humans noticing) ---
     uint256 public maxSupplyWbtx;          // hard ceiling on circulating wBTX (0 = unlimited)
     uint64  public windowMintCapSat;       // max sat minted per rolling window (0 = unlimited)
     uint64  public windowDuration;         // window length (seconds)
-    uint64  public windowStart;
-    uint64  public windowMintedSat;
+    uint64  public availableSat;
+    uint64  public lastRefill;
 
     // --- guardian veto (tBTC optimistic minting) ---
     uint64  public optimisticThresholdSat; // mints above this are time-queued
@@ -67,6 +68,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     struct QueuedMint { address to; uint64 amountSat; uint64 executeAfter; bool exists; }
     mapping(bytes32 => bool) public minted;        // depositKey => minted (authoritative replay guard)
     mapping(bytes32 => QueuedMint) public queued;  // depositKey => pending mint
+    mapping(bytes32 => bool) public vetoed;        // depositKey => guardian-vetoed until governance clears
 
     // --- redeem lifecycle (auditable + refundable) ---
     struct Redeem { address from; uint64 amountSat; uint256 amountWbtx; uint64 requestedAt; bool fulfilled; bool refunded; }
@@ -77,6 +79,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     event MintExecuted(bytes32 indexed depositKey, bytes32 btxTxid, uint32 vout, address indexed to, uint64 amountSat, uint256 amountWbtx);
     event MintQueued(bytes32 indexed depositKey, address indexed to, uint64 amountSat, uint64 executeAfter);
     event MintCancelled(bytes32 indexed depositKey, address indexed by);
+    event VetoCleared(bytes32 indexed depositKey, address indexed by);
     event RedeemRequested(uint256 indexed redeemId, address indexed from, uint64 amountSat, bytes btxDestination, uint256 amountWbtxBurned);
     event RedeemFulfilled(uint256 indexed redeemId, bytes32 btxTxid);
     event RedeemRefunded(uint256 indexed redeemId, address indexed to, uint256 amountWbtx);
@@ -88,10 +91,14 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     error MintPaused();
     error RedeemPaused();
     error AlreadyMinted();
+    error Vetoed();
     error BadAttestation();
     error AmountOverflow();
     error WindowCapExceeded();
     error SupplyCapExceeded();
+    error NotConfigured();
+    error ZeroBreakerValue();
+    error WindowRateZero();
     error NotQueued();
     error TooEarly();
     error AttestationExpired();
@@ -131,12 +138,23 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         uint256 maxSupplyWbtx_, uint64 windowMintCapSat_, uint64 windowDuration_,
         uint64 optimisticThresholdSat_, uint64 guardianDelay_, uint64 redeemRefundTimeout_
     ) external onlyRole(GOVERNANCE_ROLE) {
+        if (
+            maxSupplyWbtx_ == 0
+                || windowMintCapSat_ == 0
+                || windowDuration_ == 0
+                || optimisticThresholdSat_ == 0
+                || guardianDelay_ == 0
+        ) revert ZeroBreakerValue();
+        if (uint256(windowMintCapSat_) / uint256(windowDuration_) == 0) revert WindowRateZero();
         maxSupplyWbtx = maxSupplyWbtx_;
         windowMintCapSat = windowMintCapSat_;
-        windowDuration = windowDuration_ == 0 ? 1 days : windowDuration_;
+        windowDuration = windowDuration_;
         optimisticThresholdSat = optimisticThresholdSat_;
         guardianDelay = guardianDelay_;
         redeemRefundTimeout = redeemRefundTimeout_;
+        availableSat = windowMintCapSat_;
+        lastRefill = uint64(block.timestamp);
+        limitsConfigured = true;
         emit LimitsUpdated(maxSupplyWbtx_, windowMintCapSat_, windowDuration_, optimisticThresholdSat_, guardianDelay_, redeemRefundTimeout_);
     }
 
@@ -197,6 +215,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         uint64 deadline,
         bytes calldata proof
     ) external whenMintNotPaused nonReentrant {
+        if (!limitsConfigured) revert NotConfigured();
         if (to == address(0)) revert BadDestination();
         if (amountSat == 0) revert BelowOneSat();
         if (block.timestamp > deadline) revert AttestationExpired();
@@ -204,6 +223,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         if (attestedHeight - btxBlockHeight < MIN_CONFIRMATIONS) revert TooShallow();
         bytes32 dk = depositKey(btxTxid, vout);
         if (minted[dk] || queued[dk].exists) revert AlreadyMinted();
+        if (vetoed[dk]) revert Vetoed();
 
         if (
             !verifier.verifyMint(
@@ -221,8 +241,6 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
                 proof
             )
         ) revert BadAttestation();
-
-        _checkAndConsumeLimits(amountSat);
 
         if (optimisticThresholdSat != 0 && amountSat > optimisticThresholdSat && guardianDelay != 0) {
             uint64 executeAfter = uint64(block.timestamp) + guardianDelay;
@@ -245,16 +263,25 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         _doMint(dk, btxTxid, vout, q.to, q.amountSat);
     }
 
-    /// @notice A GUARDIAN cancels a queued (suspicious) mint within the delay window. The deposit can
-    ///         then be re-attested/re-minted only after governance review (the outpoint is freed).
+    /// @notice A GUARDIAN cancels a queued (suspicious) mint within the delay window and durably vetoes
+    ///         the deposit key until governance clears it.
     function cancelQueuedMint(bytes32 btxTxid, uint32 vout) external onlyRole(GUARDIAN_ROLE) {
         bytes32 dk = depositKey(btxTxid, vout);
         if (!queued[dk].exists) revert NotQueued();
         delete queued[dk];
+        vetoed[dk] = true;
         emit MintCancelled(dk, msg.sender);
     }
 
+    /// @notice Governance-only veto clear.
+    /// @dev MUST be controlled by the governance timelock so veto clears are delayed and reviewable.
+    function clearVeto(bytes32 dk) external onlyRole(GOVERNANCE_ROLE) {
+        vetoed[dk] = false;
+        emit VetoCleared(dk, msg.sender);
+    }
+
     function _doMint(bytes32 dk, bytes32 btxTxid, uint32 vout, address to, uint64 amountSat) private {
+        _checkAndConsumeLimits(amountSat);
         uint256 amountWbtx = uint256(amountSat) * SAT_SCALE;
         if (maxSupplyWbtx != 0 && wbtx.totalSupply() + amountWbtx > maxSupplyWbtx) revert SupplyCapExceeded();
         wbtx.mint(to, amountWbtx);
@@ -263,11 +290,15 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 
     function _checkAndConsumeLimits(uint64 amountSat) private {
         if (windowMintCapSat == 0) return;
+        if (uint256(windowMintCapSat) / uint256(windowDuration) == 0) revert WindowRateZero();
         uint64 nowTs = uint64(block.timestamp);
-        if (nowTs >= windowStart + windowDuration) { windowStart = nowTs; windowMintedSat = 0; }
-        // overflow-safe accumulation
-        if (uint256(windowMintedSat) + amountSat > windowMintCapSat) revert WindowCapExceeded();
-        windowMintedSat += amountSat;
+        uint64 elapsed = nowTs - lastRefill;
+        uint256 replenished = uint256(elapsed) * uint256(windowMintCapSat) / uint256(windowDuration);
+        uint256 available = uint256(availableSat) + replenished;
+        if (available > windowMintCapSat) available = windowMintCapSat;
+        if (available < amountSat) revert WindowCapExceeded();
+        availableSat = uint64(available - amountSat);
+        lastRefill = nowTs;
     }
 
     // ----------------------------- redeem -----------------------------
@@ -278,6 +309,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     function redeem(uint256 amountWbtx, bytes calldata btxDestination)
         external whenRedeemNotPaused nonReentrant returns (uint256 redeemId)
     {
+        if (!limitsConfigured) revert NotConfigured();
         if (btxDestination.length == 0 || btxDestination.length > 128) revert BadDestination();
         uint256 sat = amountWbtx / SAT_SCALE;            // round down
         if (sat == 0) revert BelowOneSat();
