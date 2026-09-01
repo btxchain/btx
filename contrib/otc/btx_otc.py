@@ -88,6 +88,9 @@ OTC_TAG = b"BTXOTC1"
 # All escrow/vault locktimes MUST be in the height domain so the numeric
 # comparison against expiry_height is meaningful.
 LOCKTIME_THRESHOLD = 500_000_000
+# Cross-leg HTLC safety margin in BTX blocks. This is materially above the
+# observed ~6-block mainnet reorg depth (~30 minutes at ~90-second blocks).
+SWAP_REORG_MARGIN_BLOCKS = 20
 
 
 def require_block_height_locktime(value: int, field: str) -> int:
@@ -479,7 +482,8 @@ class OfferVerification:
 def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
                  require_attestation: bool = False,
                  expected_challenge: Optional[str] = None,
-                 expected_venue_pubkey: Optional[str] = None) -> OfferVerification:
+                 expected_venue_pubkey: Optional[str] = None,
+                 expected_ctv_template_hash: Optional[str] = None) -> OfferVerification:
     """
     Run the full §4.3 verification against a local node. Returns a report whose
     `ok` is True only if every executed check passed. Trust-minimized: nothing is
@@ -507,6 +511,12 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
     if (expected_venue_pubkey is not None and
             (not isinstance(expected_venue_pubkey, str) or not expected_venue_pubkey)):
         check("parameters", False, "expected_venue_pubkey must be a non-empty string")
+        return OfferVerification(False, tier, address, 0, 0, checks)
+    if (expected_ctv_template_hash is not None and
+            (not isinstance(expected_ctv_template_hash, str) or
+             not re.fullmatch(_HASH256, expected_ctv_template_hash))):
+        check("parameters", False,
+              "expected_ctv_template_hash must be a non-empty 32-byte hex string")
         return OfferVerification(False, tier, address, 0, 0, checks)
 
     # C1 — terms are well-formed and canonicalizable.
@@ -574,6 +584,22 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
         elif expected_venue_pubkey is not None:
             check("venue-key", True,
                   f"expected_venue_pubkey ignored for tier {bond.tier} (no venue leg)")
+        if bond.tier == "A+":
+            if expected_ctv_template_hash is None:
+                check("ctv-template", False,
+                      "tier A+ requires expected_ctv_template_hash (independently "
+                      "derived by the buyer from the agreed settlement outputs) to "
+                      "prove the covenant pays the buyer; the descriptor+terms hash "
+                      "is seller-supplied")
+            else:
+                ctv_ok = bond.ctv_hash.lower() == expected_ctv_template_hash.lower()
+                check("ctv-template", ctv_ok,
+                      f"descriptor ctv_template_hash={bond.ctv_hash}; "
+                      f"expected={expected_ctv_template_hash}")
+        elif expected_ctv_template_hash is not None:
+            check("ctv-template", True,
+                  f"expected_ctv_template_hash ignored for tier {bond.tier} "
+                  f"(no CTV covenant leg)")
     except Exception as e:  # noqa: BLE001
         check("descriptor-shape", False, str(e))
         return OfferVerification(False, tier, address, 0, expiry, checks)
@@ -743,6 +769,30 @@ def build_bond_refund(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
     return res["hex"]
 
 
+def check_swap_timeout_asymmetry(btx_refund_height: int, other_leg_deadline_height: int,
+                                 reorg_margin_blocks: int = SWAP_REORG_MARGIN_BLOCKS) -> None:
+    """Fail closed unless the BTX refund is safely LATER than the other leg deadline:
+    other_leg_deadline_height + reorg_margin_blocks < btx_refund_height. Both
+    values are BTX block heights (convert an EVM unix timeout first, e.g.
+    current_height + (evm_timeout_unix - now_unix)//block_seconds). This prevents
+    claim-one-leg/refund-the-other theft and leaves reorg/censorship margin after
+    a preimage-revealing claim."""
+    require_block_height_locktime(btx_refund_height, "btx_refund_height")
+    require_block_height_locktime(other_leg_deadline_height, "other_leg_deadline_height")
+    if (type(reorg_margin_blocks) is not int or isinstance(reorg_margin_blocks, bool) or
+            reorg_margin_blocks < 1):
+        raise ValueError("reorg_margin_blocks must be an integer >= 1")
+    if other_leg_deadline_height + reorg_margin_blocks >= btx_refund_height:
+        required_min = other_leg_deadline_height + reorg_margin_blocks + 1
+        raise ValueError(
+            "unsafe cross-leg timeout asymmetry: requires "
+            "other_leg_deadline_height + reorg_margin_blocks < btx_refund_height; "
+            f"got btx_refund_height={btx_refund_height}, "
+            f"other_leg_deadline_height={other_leg_deadline_height}, "
+            f"reorg_margin_blocks={reorg_margin_blocks}. "
+            f"Need btx_refund_height >= {required_min}.")
+
+
 def swap_vault_descriptor(preimage_hash160_hex: str, claimer_pubkey: str, refund_locktime: int,
                           sender_pubkey: str) -> str:
     """Stage-2, two-leaf HTLC settlement vault (identical to the wBTX Model-B leg)."""
@@ -772,6 +822,9 @@ def build_swap_claim(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
     output is deeply confirmed and not RBF-replaceable before broadcasting; revealing
     against unconfirmed or replaceable funding lets the counterparty replace that
     funding and reuse the now-public preimage to take the other (cross-chain) leg.
+    The integrator MUST also validate cross-leg timeout asymmetry with
+    check_swap_timeout_asymmetry(...) before funding, per doc §5 and
+    WBTXAtomicSwapHTLC.sol.
     """
     try:
         res = rpc_wallet("buildhtlcclaim", descriptor_with_checksum,
@@ -885,6 +938,24 @@ def selftest() -> None:
     # offline parameter-validation stage (no node touched before it).
     vrep = verify_offer(None, {"version": 1, "terms": {}}, expected_venue_pubkey="")
     assert any(c.name == "parameters" and not c.ok for c in vrep.checks)
+    # Tier-A+ CTV pinning: an empty expected_ctv_template_hash is rejected in the
+    # same offline parameter-validation stage (no node touched before it).
+    vrep = verify_offer(None, {"version": 1, "terms": {}}, expected_ctv_template_hash="")
+    assert any(c.name == "parameters" and not c.ok for c in vrep.checks)
+
+    # Cross-leg timeout asymmetry helper: other+margin must be STRICTLY below BTX.
+    check_swap_timeout_asymmetry(btx_refund_height=1000, other_leg_deadline_height=900)
+    check_swap_timeout_asymmetry(btx_refund_height=921, other_leg_deadline_height=900)
+    try:
+        check_swap_timeout_asymmetry(btx_refund_height=920, other_leg_deadline_height=900)
+        raise AssertionError("boundary case must fail: other+margin must be strictly lower")
+    except ValueError:
+        pass
+    try:
+        check_swap_timeout_asymmetry(btx_refund_height=910, other_leg_deadline_height=900)
+        raise AssertionError("too-tight timeout asymmetry must fail closed")
+    except ValueError:
+        pass
 
     # Amount formatting.
     assert sats_to_btx_str(5_000_000_000_000) == "50000.00000000"
@@ -949,6 +1020,9 @@ def main(argv=None) -> int:
     sp.add_argument("--expected-venue-pubkey", default=None,
                     help="for tier A: the independent venue's pubkey the 2-of-2 must "
                          "use; required to trust a tier-A bond (else it fails closed)")
+    sp.add_argument("--expected-ctv-template-hash", default=None,
+                    help="for tier A+: buyer-derived settlement CTV template hash that "
+                         "must match the descriptor covenant (else it fails closed)")
 
     sp = sub.add_parser("watch", help="watch a bundle's bond outpoints until spent/expired")
     sp.add_argument("bundle_json")
@@ -983,7 +1057,8 @@ def main(argv=None) -> int:
         report = verify_offer(rpc, _load_json(args.bundle_json), min_conf=args.min_conf,
                               require_attestation=args.require_attestation,
                               expected_challenge=args.expected_challenge,
-                              expected_venue_pubkey=args.expected_venue_pubkey)
+                              expected_venue_pubkey=args.expected_venue_pubkey,
+                              expected_ctv_template_hash=args.expected_ctv_template_hash)
         print(json.dumps(report.as_dict(), indent=2))
         return 0 if report.ok else 1
 
@@ -1009,14 +1084,16 @@ def main(argv=None) -> int:
 
 
 __all__ = [
-    "OTC_TAG", "COINBASE_MATURITY", "REQUIRED_TERMS_FIELDS", "validate_terms", "canonical_terms_bytes",
+    "OTC_TAG", "COINBASE_MATURITY", "SWAP_REORG_MARGIN_BLOCKS", "REQUIRED_TERMS_FIELDS",
+    "validate_terms", "canonical_terms_bytes",
     "terms_hash", "terms_hash_hex", "commitment_leaf_expr",
     "attestation_message", "soft_bond_descriptor", "venue_bond_descriptor",
     "ctv_bond_descriptor", "BondInfo", "parse_bond_descriptor", "bind_bond_descriptor", "strip_checksum",
     "add_checksum", "bond_address", "refund_key_address", "ensure_refund_attestation_descriptor",
     "sats_to_btx_str", "to_sat", "create_offer",
     "Check", "OfferVerification", "verify_offer", "watch_offer", "build_bond_refund",
-    "swap_vault_descriptor", "new_preimage", "swap_hash160_hex", "build_swap_claim",
+    "check_swap_timeout_asymmetry", "swap_vault_descriptor", "new_preimage", "swap_hash160_hex",
+    "build_swap_claim",
     "build_swap_refund", "selftest",
 ]
 
