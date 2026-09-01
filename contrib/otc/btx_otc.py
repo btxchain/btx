@@ -70,6 +70,10 @@ Rpc = Callable[..., object]
 
 COIN = 100_000_000
 COINBASE_MATURITY = 100
+RECOMMENDED_MIN_CONF = 20
+# Funding below this floor is practically unspendable with the default helper
+# fee (20_000 sats) once dust and script overhead are accounted for.
+MIN_BOND_SATS = 20_000 + 1_000
 
 # Protocol tag used by off-chain attestations and bundle formats. The on-chain
 # binding is a hidden P2MR `commit(sha256(terms))` leaf, not an OP_RETURN output.
@@ -114,6 +118,15 @@ def require_block_height_locktime(value: int, field: str) -> int:
 REQUIRED_TERMS_FIELDS = ("version", "amount_sats", "expiry_height", "nonce")
 
 
+def _no_dup_pairs(pairs):
+    seen = set()
+    for k, _ in pairs:
+        if k in seen:
+            raise ValueError(f"duplicate key in terms JSON: {k!r}")
+        seen.add(k)
+    return dict(pairs)
+
+
 def _reject_floats(value, path="terms"):
     """Floats are not allowed anywhere in offer terms — they do not canonicalize."""
     if isinstance(value, bool):
@@ -141,6 +154,11 @@ def validate_terms(terms: dict) -> None:
         raise ValueError("terms.version must be integer 1")
     if type(terms["amount_sats"]) is not int or terms["amount_sats"] <= 0:
         raise ValueError("terms.amount_sats must be a positive integer (satoshis)")
+    if terms["amount_sats"] < MIN_BOND_SATS:
+        raise ValueError(
+            f"terms.amount_sats must be >= {MIN_BOND_SATS} sats to cover "
+            "default settlement/refund spend fee and dust margin"
+        )
     if type(terms["expiry_height"]) is not int or terms["expiry_height"] <= 0:
         raise ValueError("terms.expiry_height must be a positive integer (block height)")
     # expiry_height is a block height; a value in the timestamp domain would
@@ -186,14 +204,14 @@ _TIER_B_RE = re.compile(
 _TIER_A_RE = re.compile(
     rf"^mr\(multi_pq\(2,({_KEY}),({_KEY})\),\{{refund\((\d+),({_KEY})\),commit\(({_HASH256})\)\}}\)$")
 _TIER_APLUS_RE = re.compile(
-    rf"^mr\(ctv_multi_pq\(({_HASH256}),1,({_KEY})\),\{{refund\((\d+),({_KEY})\),commit\(({_HASH256})\)\}}\)$")
+    rf"^mr\(ctv_pk\(({_HASH256}),({_KEY})\),\{{refund\((\d+),({_KEY})\),commit\(({_HASH256})\)\}}\)$")
 
 _TIER_B_UNBOUND_RE = re.compile(
     rf"^mr\(({_KEY}),\{{refund\((\d+),({_KEY})\)\}}\)$")
 _TIER_A_UNBOUND_RE = re.compile(
     rf"^mr\(multi_pq\(2,({_KEY}),({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
 _TIER_APLUS_UNBOUND_RE = re.compile(
-    rf"^mr\(ctv_multi_pq\(({_HASH256}),1,({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
+    rf"^mr\(ctv_pk\(({_HASH256}),({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
 
 
 def soft_bond_descriptor(settle_pubkey: str, refund_locktime: int, refund_pubkey: str) -> str:
@@ -217,7 +235,7 @@ def ctv_bond_descriptor(ctv_template_hash_hex: str, settle_pubkey: str,
     if (not isinstance(ctv_template_hash_hex, str) or
             not re.fullmatch(_HASH256, ctv_template_hash_hex)):
         raise ValueError("ctv_template_hash_hex must be 32 bytes of hex")
-    return (f"mr(ctv_multi_pq({ctv_template_hash_hex.lower()},1,{settle_pubkey}),"
+    return (f"mr(ctv_pk({ctv_template_hash_hex.lower()},{settle_pubkey}),"
             f"{{refund({refund_locktime},{refund_pubkey})}})")
 
 
@@ -292,7 +310,7 @@ def bind_bond_descriptor(descriptor: str, terms: dict) -> str:
 
     m = _TIER_APLUS_UNBOUND_RE.match(desc)
     if m:
-        return (f"mr(ctv_multi_pq({m.group(1)},1,{m.group(2)}),"
+        return (f"mr(ctv_pk({m.group(1)},{m.group(2)}),"
                 f"{{refund({m.group(3)},{m.group(4)}),commit({want})}})")
     m = _TIER_A_UNBOUND_RE.match(desc)
     if m:
@@ -479,7 +497,7 @@ class OfferVerification:
         }
 
 
-def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
+def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = RECOMMENDED_MIN_CONF,
                  require_attestation: bool = False,
                  expected_challenge: Optional[str] = None,
                  expected_venue_pubkey: Optional[str] = None,
@@ -504,6 +522,13 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
     if type(min_conf) is not int or min_conf < 0:
         check("parameters", False, "min_conf must be a non-negative integer")
         return OfferVerification(False, tier, address, 0, 0, checks)
+    if min_conf < RECOMMENDED_MIN_CONF:
+        check(
+            "min-conf-advisory",
+            True,
+            f"min_conf={min_conf} is below the recommended reorg-safe depth "
+            f"({RECOMMENDED_MIN_CONF})",
+        )
     if (expected_challenge is not None and
             (not isinstance(expected_challenge, str) or not expected_challenge)):
         check("parameters", False, "expected_challenge must be a non-empty string")
@@ -650,6 +675,44 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
                                  f"not the bond vault {address}") and all_utxos_ok
             continue
         confs = int(utxo.get("confirmations", 0))
+        # RBF only matters while the funding is UNCONFIRMED (it can then be
+        # fee-bump-replaced away after the buyer acts — the real T5 danger). Once
+        # confirmed, BIP125 signaling is moot (a mined tx cannot be replaced; only
+        # a reorg could undo it, which the confirmation-depth / min-conf-advisory
+        # checks cover). So only inspect the raw tx for a 0-conf outpoint — and a
+        # 0-conf tx is in the mempool, where getrawtransaction works WITHOUT
+        # -txindex, preserving the SDK's stock-node ("no txindex needed") promise.
+        if confs == 0:
+            rbf_note = ""
+            try:
+                tx_verbose = rpc("getrawtransaction", op["txid"], True)
+                if not isinstance(tx_verbose, dict):
+                    raise ValueError("getrawtransaction did not return a JSON object")
+                vin = tx_verbose.get("vin")
+                if not isinstance(vin, list):
+                    raise ValueError("getrawtransaction response has no vin array")
+                for i, txin in enumerate(vin):
+                    if not isinstance(txin, dict):
+                        raise ValueError(f"vin[{i}] is not a JSON object")
+                    sequence = txin.get("sequence")
+                    if type(sequence) is not int:
+                        raise ValueError(f"vin[{i}].sequence is missing or not an integer")
+                    if sequence < 0xFFFFFFFE:
+                        rbf_note = " and signals BIP125 replaceability"
+                        break
+            except Exception as e:  # noqa: BLE001
+                rbf_note = f" (BIP125 status undetermined: {e})"
+            all_utxos_ok = check(
+                "rbf-replaceable", False,
+                f"{op['txid']}:{op['vout']} is unconfirmed (0 conf){rbf_note}",
+            ) and all_utxos_ok
+            continue
+        # Confirmed: RBF is moot; do not fetch the raw tx (would need -txindex) and
+        # do not reject on the RBF flag (Core wallets signal RBF by default).
+        all_utxos_ok = check(
+            "rbf-replaceable", True,
+            f"{op['txid']}:{op['vout']} is confirmed (RBF moot post-confirmation)",
+        ) and all_utxos_ok
         if confs < min_conf:
             all_utxos_ok = check("outpoints", False,
                                  f"{op['txid']}:{op['vout']} has {confs} confirmations "
@@ -858,19 +921,32 @@ def build_swap_refund(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
 
 def selftest() -> None:
     """Offline sanity of the pure helpers (no node needed). Raises on failure."""
-    terms = {"version": 1, "amount_sats": 12345, "expiry_height": 100,
+    terms = {"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 100,
              "nonce": "00" * 16, "b": [1, {"a": "x"}]}
     # Canonicalization is order-insensitive and whitespace-free.
-    reordered = json.loads(json.dumps(terms)[::-1][::-1])
+    reordered = json.loads(json.dumps(terms)[::-1][::-1], object_pairs_hook=_no_dup_pairs)
     assert terms_hash(terms) == terms_hash(dict(reversed(list(reordered.items()))))
     assert canonical_terms_bytes(terms) == canonical_terms_bytes(reordered)
+    # Duplicate JSON keys are rejected at parse boundaries.
+    try:
+        json.loads('{"a":1,"a":2}', object_pairs_hook=_no_dup_pairs)
+        raise AssertionError("duplicate object keys must be rejected")
+    except ValueError:
+        pass
     # Floats are rejected.
     try:
-        terms_hash({"version": 1, "amount_sats": 1, "expiry_height": 1,
+        terms_hash({"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 1,
                     "nonce": "00", "price": 1.5})
         raise AssertionError("float in terms must be rejected")
     except ValueError:
         pass
+    # Bond amount floor rejects permanently unclaimable dust-level offers.
+    try:
+        validate_terms({"version": 1, "amount_sats": 1, "expiry_height": 1, "nonce": "x"})
+        raise AssertionError("sub-floor amount_sats must be rejected")
+    except ValueError:
+        pass
+    validate_terms({"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 1, "nonce": "x"})
     assert commitment_leaf_expr(terms) == f"commit({terms_hash_hex(terms)})"
     # Descriptor round-trips for all tiers. create_offer performs this binding
     # automatically before funding; the pure helper is pinned here.
@@ -883,6 +959,7 @@ def selftest() -> None:
     assert (a.tier, a.venue_pubkey, a.refund_locktime) == ("A", k3, 901)
     ap_desc = bind_bond_descriptor(ctv_bond_descriptor("11" * 32, k1, 902, k2), terms)
     ap = parse_bond_descriptor(ap_desc)
+    assert f"ctv_pk({'11' * 32},{k1})" in ap_desc
     assert (ap.tier, ap.ctv_hash, ap.refund_locktime) == ("A+", "11" * 32, 902)
     assert b.commitment_hash == a.commitment_hash == ap.commitment_hash == terms_hash_hex(terms)
     # SLH-DSA key forms parse too.
@@ -916,7 +993,7 @@ def selftest() -> None:
             pass
     # The verifier's fail-closed parser rejects a hand-crafted timestamp-domain
     # bond even though it is numerically >= a (height) expiry.
-    evil_terms = {"version": 1, "amount_sats": 1, "expiry_height": 100, "nonce": "00" * 16}
+    evil_terms = {"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 100, "nonce": "00" * 16}
     evil_desc = bind_bond_descriptor(f"mr({k1},{{refund({ts_lock},{k2})}})", evil_terms)
     try:
         parse_bond_descriptor(evil_desc)
@@ -929,7 +1006,7 @@ def selftest() -> None:
     assert parse_bond_descriptor(ok_desc).refund_locktime == ts - 1
     # terms.expiry_height in the timestamp domain is rejected.
     try:
-        validate_terms({"version": 1, "amount_sats": 1, "expiry_height": ts, "nonce": "x"})
+        validate_terms({"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": ts, "nonce": "x"})
         raise AssertionError("timestamp-domain expiry_height must be rejected")
     except ValueError:
         pass
@@ -984,7 +1061,7 @@ def _make_cli_rpc(cli_cmd: str) -> Rpc:
         if not text:
             return None
         try:
-            return json.loads(text)
+            return json.loads(text, object_pairs_hook=_no_dup_pairs)
         except json.JSONDecodeError:
             return text  # bare-string results (e.g. signmessage)
     return rpc
@@ -992,7 +1069,7 @@ def _make_cli_rpc(cli_cmd: str) -> Rpc:
 
 def _load_json(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return json.load(f, object_pairs_hook=_no_dup_pairs)
 
 
 def main(argv=None) -> int:
@@ -1013,7 +1090,7 @@ def main(argv=None) -> int:
 
     sp = sub.add_parser("verify", help="verify an offer bundle against the node")
     sp.add_argument("bundle_json")
-    sp.add_argument("--min-conf", type=int, default=20)
+    sp.add_argument("--min-conf", type=int, default=RECOMMENDED_MIN_CONF)
     sp.add_argument("--require-attestation", action="store_true")
     sp.add_argument("--expected-challenge", default=None,
                     help="fresh buyer/venue challenge that the attestation must match")
@@ -1084,7 +1161,8 @@ def main(argv=None) -> int:
 
 
 __all__ = [
-    "OTC_TAG", "COINBASE_MATURITY", "SWAP_REORG_MARGIN_BLOCKS", "REQUIRED_TERMS_FIELDS",
+    "OTC_TAG", "COINBASE_MATURITY", "RECOMMENDED_MIN_CONF", "MIN_BOND_SATS",
+    "SWAP_REORG_MARGIN_BLOCKS", "REQUIRED_TERMS_FIELDS",
     "validate_terms", "canonical_terms_bytes",
     "terms_hash", "terms_hash_hex", "commitment_leaf_expr",
     "attestation_message", "soft_bond_descriptor", "venue_bond_descriptor",

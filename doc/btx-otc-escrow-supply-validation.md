@@ -232,7 +232,7 @@ orderbook offer), replace the venue co-sign with CTV and get a fully
 trustless hard bond:
 
 ```
-BOND = mr( ctv_multi_pq(<H_tmpl>, 1, S_settle),   # seller can ONLY spend into the
+BOND = mr( ctv_pk(<H_tmpl>, S_settle),            # seller can ONLY spend into the
            { refund(H_expiry, S_refund),            # pre-committed settlement tx
              commit(offer_terms_hash) } )           # unspendable terms binding
 ```
@@ -293,8 +293,8 @@ arbiter — can send funds anywhere):
 
 ```
 ESCROW = mr( multi_pq(2, K_buyer, S),                      # happy path: both co-sign
-             { { ctv_multi_pq(<H_pay_buyer>,   1, K_arb),  # arbiter: release to buyer
-                 ctv_multi_pq(<H_refund_seller>,1, K_arb) },# arbiter: return to seller
+             { { ctv_pk(<H_pay_buyer>, K_arb),      # arbiter: release to buyer
+                 ctv_pk(<H_refund_seller>, K_arb) },# arbiter: return to seller
                refund(H_deadlock, S) } )                    # nuclear fallback
 ```
 
@@ -311,7 +311,7 @@ ESCROW = mr( multi_pq(2, K_buyer, S),                      # happy path: both co
   `H_deadlock`; an arbiter verdict tx confirmed before `H_deadlock`
   settles the matter since the refund leaf is still time-locked.)
 - Split verdicts (e.g. 70/30) can be added as additional
-  `ctv_multi_pq` leaves for pre-agreed partial-fill templates.
+  `ctv_pk` leaves for pre-agreed partial-fill templates.
 
 ### 5.3 Payment-oracle variant: CSFS "DLC-lite"
 
@@ -550,6 +550,6 @@ btx-cli -rpcwallet=desk buildhtlcrefund "$SWAP#..." '{"txid":"...","vout":0}' \
 | Can it vanish mid-quote? | No (tier A/A+) | No unilateral pre-expiry path in the MAST tree |
 | Is it borrowed for show? | Not while bonded | Timelocked refund leaf ≥ offer expiry |
 | Will settlement actually happen? | Atomic for crypto legs | HTLC leaves + `buildhtlcclaim`/`buildhtlcrefund` |
-| Fiat-leg disputes? | Bounded arbiter, cannot steal | CTV verdict templates (`ctv_multi_pq`) / CSFS oracles |
+| Fiat-leg disputes? | Bounded arbiter, cannot steal | CTV verdict templates (`ctv_pk`) / CSFS oracles |
 | Shielded "trust me" claims? | Counted as zero | No per-account proof exists; pool is sunsetting; exit-then-bond |
 | Consensus changes needed? | **None** | All leaves/opcodes/RPCs are live on `main` today |
