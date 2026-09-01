@@ -55,6 +55,7 @@ End-to-end swap flow (BTX leg of a trustless BTX<->EVM atomic swap)::
     rpc("sendrawtransaction", raw)
 """
 from __future__ import annotations
+from decimal import Decimal, InvalidOperation
 import hashlib
 import os
 import time
@@ -67,6 +68,17 @@ Rpc = Callable[..., object]
 
 # ----------------------------- hashing / preimage -----------------------------
 
+try:
+    hashlib.new("ripemd160", b"")
+
+    def _ripemd160(data: bytes) -> bytes:
+        return hashlib.new("ripemd160", data).digest()
+except ValueError:
+    try:
+        from ._ripemd160 import ripemd160 as _ripemd160
+    except ImportError:
+        from _ripemd160 import ripemd160 as _ripemd160
+
 def new_preimage() -> bytes:
     """A fresh 32-byte swap secret."""
     return os.urandom(32)
@@ -74,7 +86,7 @@ def new_preimage() -> bytes:
 
 def btx_hash160(preimage: bytes) -> bytes:
     """RIPEMD160(SHA256(preimage)) — the 20-byte hashlock used by BOTH chains."""
-    return hashlib.new("ripemd160", hashlib.sha256(preimage).digest()).digest()
+    return _ripemd160(hashlib.sha256(preimage).digest())
 
 
 def btx_hash160_hex(preimage: bytes) -> str:
@@ -180,19 +192,31 @@ class Deposit:
     confirmations: int
 
 
-def find_deposits(rpc_wallet: Rpc, address: str, minconf: int = 0) -> list[Deposit]:
-    """List UTXOs paid to the (imported) HTLC/lock address — for relayers/orchestrators."""
+def find_deposits(rpc_wallet: Rpc, address: str, minconf: int = 100, unsafe: bool = False) -> list[Deposit]:
+    """List UTXOs paid to the HTLC/lock address, enforcing a 100-conf safety floor by default."""
+    if minconf < 100 and not unsafe:
+        raise ValueError("minconf below safety floor (100); pass unsafe=True to override explicitly")
     out = []
     for u in rpc_wallet("listunspent", minconf, 9_999_999, [address]):
-        out.append(Deposit(u["txid"], u["vout"], str(u["amount"]), int(u.get("confirmations", 0))))
+        confirmations = int(u.get("confirmations", 0))
+        if confirmations < minconf:
+            continue
+        out.append(Deposit(u["txid"], u["vout"], str(u["amount"]), confirmations))
     return out
 
 
-def to_sat(amount_btx: str) -> int:
-    """Convert a node decimal-BTX string to int satoshis (8 dp) exactly."""
-    whole, _, frac = amount_btx.partition(".")
-    frac = (frac + "00000000")[:8]
-    return int(whole) * 100_000_000 + int(frac)
+def to_sat(amount_btx: object) -> int:
+    """Convert a BTX amount into satoshis with exact 8-decimal precision."""
+    try:
+        d = Decimal(str(amount_btx))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"not a BTX amount: {amount_btx!r}") from exc
+    if not d.is_finite():
+        raise ValueError(f"not a BTX amount: {amount_btx!r}")
+    scaled = d.scaleb(8)
+    if scaled != scaled.to_integral_value():
+        raise ValueError(f"sub-satoshi precision: {amount_btx!r}")
+    return int(scaled)
 
 
 def sat_to_wbtx(amount_sat: int) -> int:
@@ -331,3 +355,46 @@ if __name__ == "__main__":
         reorg_margin_blocks=2,
     )
     print("timeout ordering self-check OK")
+
+    if to_sat("1e-08") != 1:
+        raise SystemExit("self-check failed: to_sat('1e-08') != 1")
+    if to_sat("0.00000001") != 1:
+        raise SystemExit("self-check failed: to_sat('0.00000001') != 1")
+    if to_sat(Decimal("50000.00000000")) != 5_000_000_000_000:
+        raise SystemExit("self-check failed: to_sat(Decimal('50000.00000000')) mismatch")
+
+    for bad_amount in ("0.000000001", "not-an-amount"):
+        try:
+            to_sat(bad_amount)
+        except ValueError:
+            pass
+        else:
+            raise SystemExit(f"self-check failed: to_sat({bad_amount!r}) should have raised ValueError")
+    print("to_sat self-check OK")
+
+    def _rpc_must_not_be_called(*_args) -> list[dict[str, object]]:
+        raise AssertionError("rpc_wallet should not be called when minconf floor rejects request")
+
+    try:
+        find_deposits(_rpc_must_not_be_called, "btx_guard_test_address", minconf=99, unsafe=False)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("self-check failed: minconf<100 without unsafe=True did not raise")
+
+    def _rpc_mixed_confirmations(method: str, *_params) -> list[dict[str, object]]:
+        if method != "listunspent":
+            raise AssertionError("unexpected RPC method")
+        return [
+            {"txid": "aa" * 32, "vout": 0, "amount": "0.10000000", "confirmations": 99},
+            {"txid": "bb" * 32, "vout": 1, "amount": "0.20000000", "confirmations": 100},
+        ]
+
+    filtered = find_deposits(_rpc_mixed_confirmations, "btx_filter_test_address", minconf=100)
+    if len(filtered) != 1 or filtered[0].txid != "bb" * 32:
+        raise SystemExit("self-check failed: confirmation filtering in find_deposits is incorrect")
+    print("find_deposits self-check OK")
+
+    if btx_hash160(bytes([0x42]) * 32).hex() != "8739f40ec4dbf569dcb38134c6e7310908566981":
+        raise SystemExit("self-check failed: btx_hash160 test vector mismatch")
+    print("btx_hash160 self-check OK")
