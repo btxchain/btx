@@ -12,6 +12,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///      bridge passes the EIP-712 typed digest so the verifier is signature-scheme-agnostic.
 interface IAttestationVerifier {
     function verifyMint(bytes32 digest, bytes calldata proof) external view returns (bool);
+    function verifyFulfill(bytes32 digest, bytes calldata proof) external view returns (bool);
+    function verifyNonRelease(bytes32 digest, bytes calldata proof) external view returns (bool);
 }
 
 /// @title WBTXBridge — federation lock-and-mint bridge (Model A), hardened.
@@ -52,6 +54,14 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 
     bytes32 private constant MINT_TYPEHASH =
         keccak256("MintAttestation(uint256 bridgeId,bytes32 btxTxid,uint32 vout,bytes32 btxBlockHash,uint64 btxBlockHeight,uint64 attestedHeight,address to,uint64 amountSat,uint64 deadline)");
+    bytes32 private constant REDEEM_FULFILL_TYPEHASH =
+        keccak256(
+            "RedeemFulfillment(uint256 bridgeId,uint256 redeemId,bytes32 btxTxid,bytes32 destHash,uint64 amountSat,uint64 btxBlockHeight,uint64 attestedHeight,uint64 deadline)"
+        );
+    bytes32 private constant REDEEM_NONRELEASE_TYPEHASH =
+        keccak256(
+            "RedeemNonRelease(uint256 bridgeId,uint256 redeemId,bytes32 destHash,uint64 amountSat,uint64 asOfBtxHeight,uint64 deadline)"
+        );
 
     IAttestationVerifier public verifier;
     IAttestationVerifier public pendingVerifier;
@@ -80,10 +90,21 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     mapping(bytes32 => uint64) public clearVetoEta;
 
     // --- redeem lifecycle (auditable + refundable) ---
-    struct Redeem { address from; uint64 amountSat; uint256 amountWbtx; uint64 requestedAt; bool fulfilled; bool refunded; }
+    struct Redeem {
+        address from;
+        uint64 amountSat;
+        uint256 amountWbtx;
+        uint64 requestedAt;
+        uint64 fulfilledAt;
+        bytes32 destHash;
+        bytes32 btxTxid;
+        bool fulfilled;
+        bool refunded;
+    }
     uint256 public redeemNonce;
     mapping(uint256 => Redeem) public redeems;
     uint64 public redeemRefundTimeout;     // after this, an unfulfilled redeem may be governance-refunded
+    uint64 public constant FULFILL_REVOKE_WINDOW = 2 days;
 
     event MintExecuted(bytes32 indexed depositKey, bytes32 btxTxid, uint32 vout, address indexed to, uint64 amountSat, uint256 amountWbtx);
     event MintQueued(bytes32 indexed depositKey, address indexed to, uint64 amountSat, uint64 executeAfter);
@@ -91,6 +112,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     event VetoCleared(bytes32 indexed depositKey, address indexed by);
     event RedeemRequested(uint256 indexed redeemId, address indexed from, uint64 amountSat, bytes btxDestination, uint256 amountWbtxBurned);
     event RedeemFulfilled(uint256 indexed redeemId, bytes32 btxTxid);
+    event FulfillmentRevoked(uint256 indexed redeemId, bytes32 btxTxid, address indexed by);
     event RedeemRefunded(uint256 indexed redeemId, address indexed to, uint256 amountWbtx);
     event VerifierProposed(address indexed pendingVerifier, uint64 verifierEta);
     event VerifierApplied(address indexed previousVerifier, address indexed currentVerifier);
@@ -124,6 +146,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     error VerifierNotReady();
     error ClearVetoNotReady();
     error GuardianDelayTooLow();
+    error RevokeWindowElapsed();
 
     modifier whenMintNotPaused() { if (mintPaused) revert MintPaused(); _; }
     modifier whenRedeemNotPaused() { if (redeemPaused) revert RedeemPaused(); _; }
@@ -225,6 +248,56 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
                     attestedHeight,
                     to,
                     amountSat,
+                    deadline
+                )
+            )
+        );
+    }
+
+    function fulfillDigest(
+        uint256 bridgeId_,
+        uint256 redeemId,
+        bytes32 btxTxid,
+        bytes32 destHash,
+        uint64 amountSat,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        uint64 deadline
+    ) public view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    REDEEM_FULFILL_TYPEHASH,
+                    bridgeId_,
+                    redeemId,
+                    btxTxid,
+                    destHash,
+                    amountSat,
+                    btxBlockHeight,
+                    attestedHeight,
+                    deadline
+                )
+            )
+        );
+    }
+
+    function nonReleaseDigest(
+        uint256 bridgeId_,
+        uint256 redeemId,
+        bytes32 destHash,
+        uint64 amountSat,
+        uint64 asOfBtxHeight,
+        uint64 deadline
+    ) public view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    REDEEM_NONRELEASE_TYPEHASH,
+                    bridgeId_,
+                    redeemId,
+                    destHash,
+                    amountSat,
+                    asOfBtxHeight,
                     deadline
                 )
             )
@@ -361,31 +434,107 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         wbtx.burnFrom(msg.sender, amountWbtx);           // burn FULL amount (dust included)
         redeemId = ++redeemNonce;
         redeems[redeemId] = Redeem({
-            from: msg.sender, amountSat: amountSat, amountWbtx: amountWbtx,
-            requestedAt: uint64(block.timestamp), fulfilled: false, refunded: false
+            from: msg.sender,
+            amountSat: amountSat,
+            amountWbtx: amountWbtx,
+            requestedAt: uint64(block.timestamp),
+            fulfilledAt: 0,
+            destHash: keccak256(btxDestination),
+            btxTxid: bytes32(0),
+            fulfilled: false,
+            refunded: false
         });
         emit RedeemRequested(redeemId, msg.sender, amountSat, btxDestination, amountWbtx);
     }
 
     /// @notice The federation records on-chain that a redeem was released on BTX (auditability).
-    function fulfillRedeem(uint256 redeemId, bytes32 btxTxid) external onlyRole(FEDERATION_ROLE) {
+    function fulfillRedeem(
+        uint256 redeemId,
+        bytes32 btxTxid,
+        bytes32 destHash,
+        uint64 amountSat,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        uint64 deadline,
+        bytes calldata proof
+    ) external onlyRole(FEDERATION_ROLE) {
         Redeem storage r = redeems[redeemId];
         if (r.from == address(0)) revert UnknownRedeem();
         if (r.fulfilled || r.refunded) revert RedeemClosed();
+        if (block.timestamp > deadline) revert AttestationExpired();
+        if (attestedHeight < btxBlockHeight) revert NotAttested();
+        if (attestedHeight - btxBlockHeight < MIN_CONFIRMATIONS) revert TooShallow();
+        if (destHash != r.destHash || amountSat != r.amountSat) revert BadAttestation();
+        if (
+            !verifier.verifyFulfill(
+                fulfillDigest(
+                    bridgeId,
+                    redeemId,
+                    btxTxid,
+                    destHash,
+                    amountSat,
+                    btxBlockHeight,
+                    attestedHeight,
+                    deadline
+                ),
+                proof
+            )
+        ) revert BadAttestation();
+
         r.fulfilled = true;
+        r.fulfilledAt = uint64(block.timestamp);
+        r.btxTxid = btxTxid;
         emit RedeemFulfilled(redeemId, btxTxid);
+    }
+
+    function unfulfillRedeem(uint256 redeemId) external onlyRole(GUARDIAN_ROLE) {
+        Redeem storage r = redeems[redeemId];
+        if (r.from == address(0)) revert UnknownRedeem();
+        if (!r.fulfilled || r.refunded) revert RedeemClosed();
+        if (block.timestamp > r.fulfilledAt + FULFILL_REVOKE_WINDOW) revert RevokeWindowElapsed();
+
+        bytes32 releasedTxid = r.btxTxid;
+        r.fulfilled = false;
+        r.fulfilledAt = 0;
+        r.btxTxid = bytes32(0);
+        emit FulfillmentRevoked(redeemId, releasedTxid, msg.sender);
     }
 
     /// @notice If a redeem cannot be honored on BTX (malformed destination, federation failure) and
     ///         the refund timeout has elapsed, governance re-mints wBTX to the original burner so no
     ///         funds are silently lost. (FBTC "safety committee" pattern.)
-    function refundRedeem(uint256 redeemId) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
+    function refundRedeem(
+        uint256 redeemId,
+        uint64 asOfBtxHeight,
+        uint64 deadline,
+        bytes calldata proof
+    ) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
         Redeem storage r = redeems[redeemId];
         if (r.from == address(0)) revert UnknownRedeem();
         if (r.fulfilled || r.refunded) revert RedeemClosed();
         if (block.timestamp < r.requestedAt + redeemRefundTimeout) revert TooEarly();
+        if (block.timestamp > deadline) revert AttestationExpired();
+        if (
+            !verifier.verifyNonRelease(
+                nonReleaseDigest(
+                    bridgeId,
+                    redeemId,
+                    r.destHash,
+                    r.amountSat,
+                    asOfBtxHeight,
+                    deadline
+                ),
+                proof
+            )
+        ) revert BadAttestation();
+
+        _checkAndConsumeLimits(r.amountSat);
+        if (maxSupplyWbtx != 0 && wbtx.totalSupply() + r.amountWbtx > maxSupplyWbtx) revert SupplyCapExceeded();
+
         r.refunded = true;
-        wbtx.mint(r.from, r.amountWbtx);
+        wbtx.mintRefund(r.from, r.amountWbtx);
+        bytes32 refundKey = keccak256(abi.encodePacked("redeem-refund", redeemId));
+        emit MintExecuted(refundKey, bytes32(0), 0, r.from, r.amountSat, r.amountWbtx);
         emit RedeemRefunded(redeemId, r.from, r.amountWbtx);
     }
 }
@@ -509,6 +658,18 @@ contract ECDSAMultisigVerifier is IAttestationVerifier, AccessControlDefaultAdmi
     function signers() external view returns (address[] memory) { return _signers; }
 
     function verifyMint(bytes32 digest, bytes calldata proof) external view returns (bool) {
+        return _verifyDigest(digest, proof);
+    }
+
+    function verifyFulfill(bytes32 digest, bytes calldata proof) external view returns (bool) {
+        return _verifyDigest(digest, proof);
+    }
+
+    function verifyNonRelease(bytes32 digest, bytes calldata proof) external view returns (bool) {
+        return _verifyDigest(digest, proof);
+    }
+
+    function _verifyDigest(bytes32 digest, bytes calldata proof) private view returns (bool) {
         bytes[] memory sigs = abi.decode(proof, (bytes[]));
         if (sigs.length > _signers.length) revert TooManySigs(); // fail fast; bound the loop
         if (sigs.length < threshold) return false;

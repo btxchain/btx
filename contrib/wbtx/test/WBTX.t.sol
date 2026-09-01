@@ -15,6 +15,7 @@ contract WBTXTest is Test {
     address admin = address(0xA11CE);
     address gov   = address(0x60F);     // governance (timelock stand-in)
     address guardian = address(0x6A7D);
+    address federation = address(0xFED);
     address pauser = address(0x9A05E);
     // three federation signers (sorted ascending by address for the proof)
     uint256 pk1 = 0xA11; uint256 pk2 = 0xB22; uint256 pk3 = 0xC33;
@@ -58,7 +59,7 @@ contract WBTXTest is Test {
         bridge.grantRole(bridge.GOVERNANCE_ROLE(), gov);
         bridge.grantRole(bridge.GUARDIAN_ROLE(), guardian);
         bridge.grantRole(bridge.PAUSER_ROLE(), pauser);
-        bridge.grantRole(bridge.FEDERATION_ROLE(), gov);
+        bridge.grantRole(bridge.FEDERATION_ROLE(), federation);
         verifier.grantRole(verifier.GUARDIAN_ROLE(), guardian);
         vm.stopPrank();
 
@@ -77,6 +78,23 @@ contract WBTXTest is Test {
 
     function _futureDeadline() internal view returns (uint64) {
         return uint64(block.timestamp + 1 days);
+    }
+
+    function _proofForDigest(bytes32 digest) internal view returns (bytes memory) {
+        // sign with pk1 and pk2, then order by recovered address ascending
+        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(pk1, digest);
+        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(pk2, digest);
+        bytes memory sigA = abi.encodePacked(r1, s1, v1);
+        bytes memory sigB = abi.encodePacked(r2, s2, v2);
+        bytes[] memory sigs = new bytes[](2);
+        if (vm.addr(pk1) < vm.addr(pk2)) {
+            sigs[0] = sigA;
+            sigs[1] = sigB;
+        } else {
+            sigs[0] = sigB;
+            sigs[1] = sigA;
+        }
+        return abi.encode(sigs);
     }
 
     function _attestFor(
@@ -101,15 +119,7 @@ contract WBTXTest is Test {
             amtSat,
             deadline
         );
-        // sign with pk1 and pk2, then order by recovered address ascending
-        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(pk1, digest);
-        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(pk2, digest);
-        bytes memory sigA = abi.encodePacked(r1, s1, v1);
-        bytes memory sigB = abi.encodePacked(r2, s2, v2);
-        bytes[] memory sigs = new bytes[](2);
-        if (vm.addr(pk1) < vm.addr(pk2)) { sigs[0] = sigA; sigs[1] = sigB; }
-        else { sigs[0] = sigB; sigs[1] = sigA; }
-        return abi.encode(sigs);
+        return _proofForDigest(digest);
     }
 
     function _attest(
@@ -123,6 +133,46 @@ contract WBTXTest is Test {
         uint64 deadline
     ) internal view returns (bytes memory) {
         return _attestFor(bridge, txid, vout, btxBlockHash, btxBlockHeight, attestedHeight, to, amtSat, deadline);
+    }
+
+    function _attestFulfill(
+        uint256 redeemId,
+        bytes32 btxTxid,
+        bytes32 destHash,
+        uint64 amountSat,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        uint64 deadline
+    ) internal view returns (bytes memory) {
+        bytes32 digest = bridge.fulfillDigest(
+            bridge.bridgeId(),
+            redeemId,
+            btxTxid,
+            destHash,
+            amountSat,
+            btxBlockHeight,
+            attestedHeight,
+            deadline
+        );
+        return _proofForDigest(digest);
+    }
+
+    function _attestNonRelease(
+        uint256 redeemId,
+        bytes32 destHash,
+        uint64 amountSat,
+        uint64 asOfBtxHeight,
+        uint64 deadline
+    ) internal view returns (bytes memory) {
+        bytes32 digest = bridge.nonReleaseDigest(
+            bridge.bridgeId(),
+            redeemId,
+            destHash,
+            amountSat,
+            asOfBtxHeight,
+            deadline
+        );
+        return _proofForDigest(digest);
     }
 
     // --- mint ---
@@ -448,17 +498,263 @@ contract WBTXTest is Test {
         );
         // redeem 1 BTX + 0.5 sat dust -> releases 100000000 sat (rounded down), burns the full amount
         uint256 amt = 100_000_000 * 1e10 + 5e9;
+        bytes memory destination = hex"00aabb";
         wbtx.approve(address(bridge), amt);
-        uint256 id = bridge.redeem(amt, hex"00aabb");
+        uint256 id = bridge.redeem(amt, destination);
         assertEq(wbtx.totalSupply(), 2e18 - amt);                  // full burn incl dust
-        ( , uint64 sat, , , bool fulfilled, ) = bridge.redeems(id);
+        (, uint64 sat, , , , bytes32 destHash, , bool fulfilled, ) = bridge.redeems(id);
         assertEq(sat, 100_000_000);                                // rounded down
+        assertEq(destHash, keccak256(destination));
         assertEq(fulfilled, false);
-        // refund after timeout re-mints the burned amount to the burner
+        // refund after timeout needs an attested non-release statement.
         vm.warp(block.timestamp + 8 days);
+        uint64 asOfBtxHeight = DEFAULT_ATTESTED_HEIGHT + 10;
+        uint64 refundDeadline = _futureDeadline();
+        bytes memory nonReleaseProof = _attestNonRelease(id, destHash, sat, asOfBtxHeight, refundDeadline);
         vm.prank(gov);
-        bridge.refundRedeem(id);
+        bridge.refundRedeem(id, asOfBtxHeight, refundDeadline, nonReleaseProof);
         assertEq(wbtx.balanceOf(address(this)), 2e18);             // made whole
+    }
+
+    function test_FulfillRedeem_RequiresAttestationAndDepth() public {
+        bytes32 txid = keccak256("redeem-fulfill-setup");
+        uint64 mintDeadline = _futureDeadline();
+        bytes memory mintProof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 200_000_000, mintDeadline
+        );
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 200_000_000, mintDeadline, mintProof
+        );
+
+        uint256 redeemAmount = 100_000_000 * 1e10;
+        bytes memory destination = hex"1122aabb";
+        wbtx.approve(address(bridge), redeemAmount);
+        uint256 redeemId = bridge.redeem(redeemAmount, destination);
+        (, uint64 amountSat, , , , bytes32 destHash, , , ) = bridge.redeems(redeemId);
+
+        bytes32 btxTxid = keccak256("release-txid-1");
+        uint64 fulfillDeadline = _futureDeadline();
+        uint64 shallowAttestedHeight = DEFAULT_BTX_BLOCK_HEIGHT + 99;
+        bytes memory shallowProof = _attestFulfill(
+            redeemId,
+            btxTxid,
+            destHash,
+            amountSat,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            shallowAttestedHeight,
+            fulfillDeadline
+        );
+        vm.prank(federation);
+        vm.expectRevert(WBTXBridge.TooShallow.selector);
+        bridge.fulfillRedeem(
+            redeemId,
+            btxTxid,
+            destHash,
+            amountSat,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            shallowAttestedHeight,
+            fulfillDeadline,
+            shallowProof
+        );
+
+        bytes memory forgedProof = _attestFulfill(
+            redeemId,
+            keccak256("different-release"),
+            destHash,
+            amountSat,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            fulfillDeadline
+        );
+        vm.prank(federation);
+        vm.expectRevert(WBTXBridge.BadAttestation.selector);
+        bridge.fulfillRedeem(
+            redeemId,
+            btxTxid,
+            destHash,
+            amountSat,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            fulfillDeadline,
+            forgedProof
+        );
+
+        bytes memory validProof = _attestFulfill(
+            redeemId,
+            btxTxid,
+            destHash,
+            amountSat,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            fulfillDeadline
+        );
+        vm.prank(federation);
+        bridge.fulfillRedeem(
+            redeemId,
+            btxTxid,
+            destHash,
+            amountSat,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            fulfillDeadline,
+            validProof
+        );
+        (, , , , uint64 fulfilledAt, , bytes32 storedTxid, bool fulfilled, ) = bridge.redeems(redeemId);
+        assertTrue(fulfilled);
+        assertGt(fulfilledAt, 0);
+        assertEq(storedTxid, btxTxid);
+    }
+
+    function test_UnfulfillRedeem_ReopensRefund() public {
+        bytes32 txid = keccak256("redeem-unfulfill-setup");
+        uint64 mintDeadline = _futureDeadline();
+        bytes memory mintProof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 100_000_000, mintDeadline
+        );
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 100_000_000, mintDeadline, mintProof
+        );
+
+        uint256 redeemAmount = 100_000_000 * 1e10;
+        bytes memory destination = hex"99aabb";
+        wbtx.approve(address(bridge), redeemAmount);
+        uint256 redeemId = bridge.redeem(redeemAmount, destination);
+        (, uint64 amountSat, , , , bytes32 destHash, , , ) = bridge.redeems(redeemId);
+
+        bytes32 releaseTxid = keccak256("release-txid-2");
+        uint64 fulfillDeadline = _futureDeadline();
+        bytes memory fulfillProof = _attestFulfill(
+            redeemId,
+            releaseTxid,
+            destHash,
+            amountSat,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            fulfillDeadline
+        );
+        vm.prank(federation);
+        bridge.fulfillRedeem(
+            redeemId,
+            releaseTxid,
+            destHash,
+            amountSat,
+            DEFAULT_BTX_BLOCK_HEIGHT,
+            DEFAULT_ATTESTED_HEIGHT,
+            fulfillDeadline,
+            fulfillProof
+        );
+
+        vm.prank(guardian);
+        bridge.unfulfillRedeem(redeemId);
+        (, , , , uint64 fulfilledAt, , bytes32 storedTxid, bool fulfilled, ) = bridge.redeems(redeemId);
+        assertFalse(fulfilled);
+        assertEq(fulfilledAt, 0);
+        assertEq(storedTxid, bytes32(0));
+
+        vm.warp(block.timestamp + 8 days);
+        uint64 asOfBtxHeight = DEFAULT_ATTESTED_HEIGHT + 20;
+        uint64 refundDeadline = _futureDeadline();
+        bytes memory nonReleaseProof = _attestNonRelease(redeemId, destHash, amountSat, asOfBtxHeight, refundDeadline);
+        vm.prank(gov);
+        bridge.refundRedeem(redeemId, asOfBtxHeight, refundDeadline, nonReleaseProof);
+        assertEq(wbtx.balanceOf(address(this)), redeemAmount);
+    }
+
+    function test_RefundRedeem_RequiresNonReleaseAttestation() public {
+        bytes32 txid = keccak256("redeem-non-release-required");
+        uint64 mintDeadline = _futureDeadline();
+        bytes memory mintProof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 100_000_000, mintDeadline
+        );
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 100_000_000, mintDeadline, mintProof
+        );
+
+        uint256 redeemAmount = 10_000 * 1e10;
+        bytes memory destination = hex"44aabb";
+        wbtx.approve(address(bridge), redeemAmount);
+        uint256 redeemId = bridge.redeem(redeemAmount, destination);
+        (, uint64 amountSat, , , , bytes32 destHash, , , ) = bridge.redeems(redeemId);
+
+        vm.warp(block.timestamp + 8 days);
+        uint64 asOfBtxHeight = DEFAULT_ATTESTED_HEIGHT + 5;
+        uint64 refundDeadline = _futureDeadline();
+        bytes memory forgedProof = _attestNonRelease(redeemId, destHash, amountSat, asOfBtxHeight + 1, refundDeadline);
+
+        vm.prank(gov);
+        vm.expectRevert(WBTXBridge.BadAttestation.selector);
+        bridge.refundRedeem(redeemId, asOfBtxHeight, refundDeadline, forgedProof);
+    }
+
+    function test_RefundRedeem_RoutesThroughSupplyCap() public {
+        bytes32 txid = keccak256("redeem-refund-cap-setup");
+        uint64 mintDeadline = _futureDeadline();
+        bytes memory mintProof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 100_000, mintDeadline
+        );
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 100_000, mintDeadline, mintProof
+        );
+
+        uint256 redeemAmount = 100_000 * 1e10;
+        bytes memory destination = hex"55aabb";
+        wbtx.approve(address(bridge), redeemAmount);
+        uint256 redeemId = bridge.redeem(redeemAmount, destination);
+        (, uint64 amountSat, , , , bytes32 destHash, , , ) = bridge.redeems(redeemId);
+        vm.warp(block.timestamp + 8 days);
+
+        uint64 asOfBtxHeight = DEFAULT_ATTESTED_HEIGHT + 7;
+        uint64 refundDeadline = _futureDeadline();
+        bytes memory nonReleaseProof = _attestNonRelease(redeemId, destHash, amountSat, asOfBtxHeight, refundDeadline);
+
+        vm.prank(gov);
+        bridge.setLimits(type(uint256).max, amountSat - 1, 1 days, 1_000_000, DEFAULT_GUARDIAN_DELAY, 7 days);
+        vm.prank(gov);
+        vm.expectRevert(WBTXBridge.WindowCapExceeded.selector);
+        bridge.refundRedeem(redeemId, asOfBtxHeight, refundDeadline, nonReleaseProof);
+
+        vm.prank(gov);
+        bridge.setLimits(redeemAmount - 1, amountSat, 1 days, 1_000_000, DEFAULT_GUARDIAN_DELAY, 7 days);
+        vm.prank(gov);
+        vm.expectRevert(WBTXBridge.SupplyCapExceeded.selector);
+        bridge.refundRedeem(redeemId, asOfBtxHeight, refundDeadline, nonReleaseProof);
+
+        vm.prank(gov);
+        bridge.setLimits(redeemAmount, amountSat, 1 days, 1_000_000, DEFAULT_GUARDIAN_DELAY, 7 days);
+        bytes32 refundKey = keccak256(abi.encodePacked("redeem-refund", redeemId));
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit WBTXBridge.MintExecuted(refundKey, bytes32(0), 0, address(this), amountSat, redeemAmount);
+        vm.prank(gov);
+        bridge.refundRedeem(redeemId, asOfBtxHeight, refundDeadline, nonReleaseProof);
+        assertEq(wbtx.balanceOf(address(this)), redeemAmount);
+    }
+
+    function test_RefundRedeem_WorksWhileIssuancePaused() public {
+        bytes32 txid = keccak256("redeem-refund-paused");
+        uint64 mintDeadline = _futureDeadline();
+        bytes memory mintProof = _attest(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 100_000_000, mintDeadline
+        );
+        bridge.mint(
+            txid, 0, DEFAULT_BTX_BLOCK_HASH, DEFAULT_BTX_BLOCK_HEIGHT, DEFAULT_ATTESTED_HEIGHT, address(this), 100_000_000, mintDeadline, mintProof
+        );
+
+        uint256 redeemAmount = 25_000_000 * 1e10;
+        bytes memory destination = hex"66aabb";
+        wbtx.approve(address(bridge), redeemAmount);
+        uint256 redeemId = bridge.redeem(redeemAmount, destination);
+        (, uint64 amountSat, , , , bytes32 destHash, , , ) = bridge.redeems(redeemId);
+        vm.warp(block.timestamp + 8 days);
+
+        vm.prank(pauser);
+        wbtx.pauseIssuance();
+
+        uint64 asOfBtxHeight = DEFAULT_ATTESTED_HEIGHT + 11;
+        uint64 refundDeadline = _futureDeadline();
+        bytes memory nonReleaseProof = _attestNonRelease(redeemId, destHash, amountSat, asOfBtxHeight, refundDeadline);
+        vm.prank(gov);
+        bridge.refundRedeem(redeemId, asOfBtxHeight, refundDeadline, nonReleaseProof);
+        assertEq(wbtx.balanceOf(address(this)), 100_000_000 * 1e10);
     }
 
     // --- token roles / rescue / pause ---
@@ -724,6 +1020,14 @@ contract MockVerifier is IAttestationVerifier {
     }
 
     function verifyMint(bytes32, bytes calldata) external view returns (bool) {
+        return allow;
+    }
+
+    function verifyFulfill(bytes32, bytes calldata) external view returns (bool) {
+        return allow;
+    }
+
+    function verifyNonRelease(bytes32, bytes calldata) external view returns (bool) {
         return allow;
     }
 }
