@@ -12,6 +12,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///      bridge passes the EIP-712 typed digest so the verifier is signature-scheme-agnostic.
 interface IAttestationVerifier {
     function verifyMint(bytes32 digest, bytes calldata proof) external view returns (bool);
+    function verifyFulfill(bytes32 digest, bytes calldata proof) external view returns (bool);
+    function verifyNonRelease(bytes32 digest, bytes calldata proof) external view returns (bool);
 }
 
 /// @title WBTXBridge — federation lock-and-mint bridge (Model A), hardened.
@@ -35,27 +37,49 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     uint256 public immutable bridgeId;
     /// @dev 1 BTX satoshi == SAT_SCALE units of 18-decimal wBTX (the decided standard). Mirrors WBTX.
     uint256 public constant SAT_SCALE = 1e10;
+    /// @dev Code-level minimum finality floor: matches BTX COINBASE_MATURITY (100) and is ~3x the
+    ///      observed 34-block reorg; this is not governance-settable.
+    uint64 public constant MIN_CONFIRMATIONS = 100;
 
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE"); // Timelock
     bytes32 public constant GUARDIAN_ROLE   = keccak256("GUARDIAN_ROLE");   // veto/cancel + pause
     bytes32 public constant PAUSER_ROLE     = keccak256("PAUSER_ROLE");
     bytes32 public constant FEDERATION_ROLE = keccak256("FEDERATION_ROLE"); // marks redeems fulfilled
+    /// @dev Trust-anchor change delay (L2BEAT Stage-1 style exit window).
+    uint64 public constant VERIFIER_DELAY = 7 days;
+    /// @dev Shorter delay for clearing a guardian veto on an otherwise honest user deposit.
+    uint64 public constant CLEAR_VETO_DELAY = 48 hours;
+    /// @dev Governance cannot shrink guardian review to near-zero.
+    uint64 public constant MIN_GUARDIAN_DELAY = 6 hours;
+    uint64 public constant MIN_ADMIN_DELAY = 1 days;
+    uint64 public constant MIN_REDEEM_REFUND_TIMEOUT = 1 days;
 
     bytes32 private constant MINT_TYPEHASH =
-        keccak256("MintAttestation(bytes32 btxTxid,uint32 vout,address to,uint64 amountSat)");
+        keccak256("MintAttestation(uint256 bridgeId,bytes32 btxTxid,uint32 vout,bytes32 btxBlockHash,uint64 btxBlockHeight,uint64 attestedHeight,address to,uint64 amountSat,uint64 deadline)");
+    bytes32 private constant REDEEM_FULFILL_TYPEHASH =
+        keccak256(
+            "RedeemFulfillment(uint256 bridgeId,uint256 redeemId,bytes32 btxTxid,bytes32 destHash,uint64 amountSat,uint64 btxBlockHeight,uint64 attestedHeight,uint64 deadline)"
+        );
+    bytes32 private constant REDEEM_NONRELEASE_TYPEHASH =
+        keccak256(
+            "RedeemNonRelease(uint256 bridgeId,uint256 redeemId,bytes32 destHash,uint64 amountSat,uint64 asOfBtxHeight,uint64 deadline)"
+        );
 
     IAttestationVerifier public verifier;
+    IAttestationVerifier public pendingVerifier;
+    uint64 public verifierEta;
     // Granular pause: mint-pause is the critical backing-safety lever; redeem-pause is for BTX-side
     // issues. Keeping them separate avoids halting redemptions when only minting must stop, and vice versa.
     bool public mintPaused;
     bool public redeemPaused;
+    bool public limitsConfigured;
 
     // --- circuit breaker (Ronin/Harmony lesson: cap blast radius, don't rely on humans noticing) ---
     uint256 public maxSupplyWbtx;          // hard ceiling on circulating wBTX (0 = unlimited)
     uint64  public windowMintCapSat;       // max sat minted per rolling window (0 = unlimited)
     uint64  public windowDuration;         // window length (seconds)
-    uint64  public windowStart;
-    uint64  public windowMintedSat;
+    uint64  public availableSat;
+    uint64  public lastRefill;
 
     // --- guardian veto (tBTC optimistic minting) ---
     uint64  public optimisticThresholdSat; // mints above this are time-queued
@@ -64,20 +88,39 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     struct QueuedMint { address to; uint64 amountSat; uint64 executeAfter; bool exists; }
     mapping(bytes32 => bool) public minted;        // depositKey => minted (authoritative replay guard)
     mapping(bytes32 => QueuedMint) public queued;  // depositKey => pending mint
+    mapping(bytes32 => bool) public vetoed;        // depositKey => guardian-vetoed until governance clears
+    mapping(bytes32 => uint64) public clearVetoEta;
 
     // --- redeem lifecycle (auditable + refundable) ---
-    struct Redeem { address from; uint64 amountSat; uint256 amountWbtx; uint64 requestedAt; bool fulfilled; bool refunded; }
+    struct Redeem {
+        address from;
+        uint64 amountSat;
+        uint256 amountWbtx;
+        uint64 requestedAt;
+        uint64 fulfilledAt;
+        bytes32 destHash;
+        bytes32 btxTxid;
+        bool fulfilled;
+        bool refunded;
+    }
     uint256 public redeemNonce;
     mapping(uint256 => Redeem) public redeems;
+    mapping(uint256 => bool) public fulfillmentRevoked;
     uint64 public redeemRefundTimeout;     // after this, an unfulfilled redeem may be governance-refunded
+    uint64 public constant FULFILL_REVOKE_WINDOW = 2 days;
 
     event MintExecuted(bytes32 indexed depositKey, bytes32 btxTxid, uint32 vout, address indexed to, uint64 amountSat, uint256 amountWbtx);
     event MintQueued(bytes32 indexed depositKey, address indexed to, uint64 amountSat, uint64 executeAfter);
     event MintCancelled(bytes32 indexed depositKey, address indexed by);
+    event VetoCleared(bytes32 indexed depositKey, address indexed by);
     event RedeemRequested(uint256 indexed redeemId, address indexed from, uint64 amountSat, bytes btxDestination, uint256 amountWbtxBurned);
     event RedeemFulfilled(uint256 indexed redeemId, bytes32 btxTxid);
+    event FulfillmentRevoked(uint256 indexed redeemId, bytes32 btxTxid, address indexed by);
     event RedeemRefunded(uint256 indexed redeemId, address indexed to, uint256 amountWbtx);
-    event VerifierUpdated(address indexed previous, address indexed current);
+    event VerifierProposed(address indexed pendingVerifier, uint64 verifierEta);
+    event VerifierApplied(address indexed previousVerifier, address indexed currentVerifier);
+    event PendingVerifierCancelled(address indexed by);
+    event ClearVetoProposed(bytes32 indexed depositKey, uint64 executeAfter);
     event MintPausedSet(bool paused, address indexed by);
     event RedeemPausedSet(bool paused, address indexed by);
     event LimitsUpdated(uint256 maxSupplyWbtx, uint64 windowMintCapSat, uint64 windowDuration, uint64 optimisticThresholdSat, uint64 guardianDelay, uint64 redeemRefundTimeout);
@@ -85,16 +128,34 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     error MintPaused();
     error RedeemPaused();
     error AlreadyMinted();
+    error Vetoed();
     error BadAttestation();
     error AmountOverflow();
     error WindowCapExceeded();
     error SupplyCapExceeded();
+    error NotConfigured();
+    error ZeroBreakerValue();
+    error WindowRateZero();
     error NotQueued();
     error TooEarly();
+    error AttestationExpired();
+    error NotAttested();
+    error TooShallow();
     error BadDestination();
     error BelowOneSat();
+    error BadWBTX();
     error UnknownRedeem();
     error RedeemClosed();
+    error BridgeBindingMismatch();
+    error AdminDelayTooLow();
+    error VerifierNotContract();
+    error VerifierNotReady();
+    error ClearVetoNotReady();
+    error GuardianDelayTooLow();
+    error ThresholdAboveWindowCap();
+    error RedeemRefundTimeoutTooLow();
+    error RevokeWindowElapsed();
+    error FulfillmentPermanentlyRevoked();
 
     modifier whenMintNotPaused() { if (mintPaused) revert MintPaused(); _; }
     modifier whenRedeemNotPaused() { if (redeemPaused) revert RedeemPaused(); _; }
@@ -106,6 +167,10 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         address admin,          // Timelock-owned multisig
         uint48  adminDelay
     ) EIP712("WBTXBridge", "1") AccessControlDefaultAdminRules(adminDelay, admin) {
+        if (address(wbtx_) == address(0) || address(wbtx_).code.length == 0) revert BadWBTX();
+        if (address(verifier_) == address(0) || address(verifier_).code.length == 0) revert VerifierNotContract();
+        if (wbtx_.bridge() != address(this)) revert BridgeBindingMismatch();
+        if (uint64(adminDelay) < MIN_ADMIN_DELAY) revert AdminDelayTooLow();
         wbtx = wbtx_;
         verifier = verifier_;
         bridgeId = bridgeId_;
@@ -116,34 +181,165 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 
     // ----------------------------- governance -----------------------------
 
-    function setVerifier(IAttestationVerifier v) external onlyRole(GOVERNANCE_ROLE) {
-        emit VerifierUpdated(address(verifier), address(v));
-        verifier = v;
+    function proposeVerifier(IAttestationVerifier v) external onlyRole(GOVERNANCE_ROLE) {
+        if (address(v) == address(0) || address(v).code.length == 0) revert VerifierNotContract();
+        pendingVerifier = v;
+        verifierEta = uint64(block.timestamp) + VERIFIER_DELAY;
+        emit VerifierProposed(address(v), verifierEta);
+    }
+
+    function applyVerifier() external {
+        if (verifierEta == 0 || block.timestamp < verifierEta) revert VerifierNotReady();
+        address previous = address(verifier);
+        IAttestationVerifier next = pendingVerifier;
+        verifier = next;
+        pendingVerifier = IAttestationVerifier(address(0));
+        verifierEta = 0;
+        emit VerifierApplied(previous, address(next));
+    }
+
+    function cancelPendingVerifier() external onlyRole(GUARDIAN_ROLE) {
+        pendingVerifier = IAttestationVerifier(address(0));
+        verifierEta = 0;
+        emit PendingVerifierCancelled(msg.sender);
     }
 
     function setLimits(
         uint256 maxSupplyWbtx_, uint64 windowMintCapSat_, uint64 windowDuration_,
         uint64 optimisticThresholdSat_, uint64 guardianDelay_, uint64 redeemRefundTimeout_
     ) external onlyRole(GOVERNANCE_ROLE) {
+        if (
+            maxSupplyWbtx_ == 0
+                || windowMintCapSat_ == 0
+                || windowDuration_ == 0
+                || optimisticThresholdSat_ == 0
+                || guardianDelay_ == 0
+        ) revert ZeroBreakerValue();
+        if (guardianDelay_ < MIN_GUARDIAN_DELAY) revert GuardianDelayTooLow();
+        if (optimisticThresholdSat_ > windowMintCapSat_) revert ThresholdAboveWindowCap();
+        if (redeemRefundTimeout_ < MIN_REDEEM_REFUND_TIMEOUT) revert RedeemRefundTimeoutTooLow();
+        if (uint256(windowMintCapSat_) / uint256(windowDuration_) == 0) revert WindowRateZero();
+
+        uint64 nowTs = uint64(block.timestamp);
+        if (!limitsConfigured) {
+            availableSat = windowMintCapSat_;
+        } else {
+            uint64 elapsed = nowTs - lastRefill;
+            uint256 replenished = uint256(elapsed) * uint256(windowMintCapSat) / uint256(windowDuration);
+            uint256 available = uint256(availableSat) + replenished;
+            if (available > windowMintCapSat) available = windowMintCapSat;
+            if (available > windowMintCapSat_) available = windowMintCapSat_;
+            availableSat = uint64(available);
+        }
+
         maxSupplyWbtx = maxSupplyWbtx_;
         windowMintCapSat = windowMintCapSat_;
-        windowDuration = windowDuration_ == 0 ? 1 days : windowDuration_;
+        windowDuration = windowDuration_;
         optimisticThresholdSat = optimisticThresholdSat_;
         guardianDelay = guardianDelay_;
         redeemRefundTimeout = redeemRefundTimeout_;
+        lastRefill = nowTs;
+        limitsConfigured = true;
         emit LimitsUpdated(maxSupplyWbtx_, windowMintCapSat_, windowDuration_, optimisticThresholdSat_, guardianDelay_, redeemRefundTimeout_);
     }
 
-    function setMintPaused(bool p) external onlyRole(PAUSER_ROLE) { mintPaused = p; emit MintPausedSet(p, msg.sender); }
-    function setRedeemPaused(bool p) external onlyRole(PAUSER_ROLE) { redeemPaused = p; emit RedeemPausedSet(p, msg.sender); }
+    function setMintPaused(bool p) external {
+        if (p) _checkRole(PAUSER_ROLE, msg.sender);
+        else _checkRole(GOVERNANCE_ROLE, msg.sender);
+        mintPaused = p;
+        emit MintPausedSet(p, msg.sender);
+    }
+
+    function setRedeemPaused(bool p) external {
+        if (p) _checkRole(PAUSER_ROLE, msg.sender);
+        else _checkRole(GOVERNANCE_ROLE, msg.sender);
+        redeemPaused = p;
+        emit RedeemPausedSet(p, msg.sender);
+    }
 
     // ----------------------------- attestation -----------------------------
 
     /// @notice EIP-712 typed digest the federation signs. Domain binds {name, version, block.chainid,
     ///         address(this)} (live chainid => no post-fork replay; verifyingContract => no cross-bridge
-    ///         replay). The struct binds the exact deposit, recipient, and amount.
-    function mintDigest(bytes32 btxTxid, uint32 vout, address to, uint64 amountSat) public view returns (bytes32) {
-        return _hashTypedDataV4(keccak256(abi.encode(MINT_TYPEHASH, btxTxid, vout, to, amountSat)));
+    ///         replay). The struct binds bridge identity, exact deposit and BTX finality view, recipient,
+    ///         amount, and attestation expiry.
+    function mintDigest(
+        uint256 bridgeId_,
+        bytes32 btxTxid,
+        uint32 vout,
+        bytes32 btxBlockHash,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        address to,
+        uint64 amountSat,
+        uint64 deadline
+    ) public view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    MINT_TYPEHASH,
+                    bridgeId_,
+                    btxTxid,
+                    vout,
+                    btxBlockHash,
+                    btxBlockHeight,
+                    attestedHeight,
+                    to,
+                    amountSat,
+                    deadline
+                )
+            )
+        );
+    }
+
+    function fulfillDigest(
+        uint256 bridgeId_,
+        uint256 redeemId,
+        bytes32 btxTxid,
+        bytes32 destHash,
+        uint64 amountSat,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        uint64 deadline
+    ) public view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    REDEEM_FULFILL_TYPEHASH,
+                    bridgeId_,
+                    redeemId,
+                    btxTxid,
+                    destHash,
+                    amountSat,
+                    btxBlockHeight,
+                    attestedHeight,
+                    deadline
+                )
+            )
+        );
+    }
+
+    function nonReleaseDigest(
+        uint256 bridgeId_,
+        uint256 redeemId,
+        bytes32 destHash,
+        uint64 amountSat,
+        uint64 asOfBtxHeight,
+        uint64 deadline
+    ) public view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    REDEEM_NONRELEASE_TYPEHASH,
+                    bridgeId_,
+                    redeemId,
+                    destHash,
+                    amountSat,
+                    asOfBtxHeight,
+                    deadline
+                )
+            )
+        );
     }
 
     function depositKey(bytes32 btxTxid, uint32 vout) public pure returns (bytes32) {
@@ -154,17 +350,43 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 
     /// @notice Mint wBTX for an attested BTX lock. Small mints execute immediately; mints above
     ///         `optimisticThresholdSat` are time-queued for guardian review. Idempotent per deposit.
-    function mint(bytes32 btxTxid, uint32 vout, address to, uint64 amountSat, bytes calldata proof)
-        external whenMintNotPaused nonReentrant
-    {
+    function mint(
+        bytes32 btxTxid,
+        uint32 vout,
+        bytes32 btxBlockHash,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        address to,
+        uint64 amountSat,
+        uint64 deadline,
+        bytes calldata proof
+    ) external whenMintNotPaused nonReentrant {
+        if (!limitsConfigured) revert NotConfigured();
         if (to == address(0)) revert BadDestination();
         if (amountSat == 0) revert BelowOneSat();
+        if (block.timestamp > deadline) revert AttestationExpired();
+        if (attestedHeight < btxBlockHeight) revert NotAttested();
+        if (attestedHeight - btxBlockHeight < MIN_CONFIRMATIONS) revert TooShallow();
         bytes32 dk = depositKey(btxTxid, vout);
         if (minted[dk] || queued[dk].exists) revert AlreadyMinted();
+        if (vetoed[dk]) revert Vetoed();
 
-        if (!verifier.verifyMint(mintDigest(btxTxid, vout, to, amountSat), proof)) revert BadAttestation();
-
-        _checkAndConsumeLimits(amountSat);
+        if (
+            !verifier.verifyMint(
+                mintDigest(
+                    bridgeId,
+                    btxTxid,
+                    vout,
+                    btxBlockHash,
+                    btxBlockHeight,
+                    attestedHeight,
+                    to,
+                    amountSat,
+                    deadline
+                ),
+                proof
+            )
+        ) revert BadAttestation();
 
         if (optimisticThresholdSat != 0 && amountSat > optimisticThresholdSat && guardianDelay != 0) {
             uint64 executeAfter = uint64(block.timestamp) + guardianDelay;
@@ -187,16 +409,32 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         _doMint(dk, btxTxid, vout, q.to, q.amountSat);
     }
 
-    /// @notice A GUARDIAN cancels a queued (suspicious) mint within the delay window. The deposit can
-    ///         then be re-attested/re-minted only after governance review (the outpoint is freed).
+    /// @notice A GUARDIAN cancels a queued (suspicious) mint within the delay window and durably vetoes
+    ///         the deposit key until governance clears it.
     function cancelQueuedMint(bytes32 btxTxid, uint32 vout) external onlyRole(GUARDIAN_ROLE) {
         bytes32 dk = depositKey(btxTxid, vout);
         if (!queued[dk].exists) revert NotQueued();
         delete queued[dk];
+        vetoed[dk] = true;
         emit MintCancelled(dk, msg.sender);
     }
 
+    /// @notice Governance-only proposal to clear a guardian veto after a short review delay.
+    function proposeClearVeto(bytes32 dk) external onlyRole(GOVERNANCE_ROLE) {
+        clearVetoEta[dk] = uint64(block.timestamp) + CLEAR_VETO_DELAY;
+        emit ClearVetoProposed(dk, clearVetoEta[dk]);
+    }
+
+    function applyClearVeto(bytes32 dk) external {
+        uint64 eta = clearVetoEta[dk];
+        if (eta == 0 || block.timestamp < eta) revert ClearVetoNotReady();
+        delete clearVetoEta[dk];
+        vetoed[dk] = false;
+        emit VetoCleared(dk, msg.sender);
+    }
+
     function _doMint(bytes32 dk, bytes32 btxTxid, uint32 vout, address to, uint64 amountSat) private {
+        _checkAndConsumeLimits(amountSat);
         uint256 amountWbtx = uint256(amountSat) * SAT_SCALE;
         if (maxSupplyWbtx != 0 && wbtx.totalSupply() + amountWbtx > maxSupplyWbtx) revert SupplyCapExceeded();
         wbtx.mint(to, amountWbtx);
@@ -205,11 +443,15 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 
     function _checkAndConsumeLimits(uint64 amountSat) private {
         if (windowMintCapSat == 0) return;
+        if (uint256(windowMintCapSat) / uint256(windowDuration) == 0) revert WindowRateZero();
         uint64 nowTs = uint64(block.timestamp);
-        if (nowTs >= windowStart + windowDuration) { windowStart = nowTs; windowMintedSat = 0; }
-        // overflow-safe accumulation
-        if (uint256(windowMintedSat) + amountSat > windowMintCapSat) revert WindowCapExceeded();
-        windowMintedSat += amountSat;
+        uint64 elapsed = nowTs - lastRefill;
+        uint256 replenished = uint256(elapsed) * uint256(windowMintCapSat) / uint256(windowDuration);
+        uint256 available = uint256(availableSat) + replenished;
+        if (available > windowMintCapSat) available = windowMintCapSat;
+        if (available < amountSat) revert WindowCapExceeded();
+        availableSat = uint64(available - amountSat);
+        lastRefill = nowTs;
     }
 
     // ----------------------------- redeem -----------------------------
@@ -220,40 +462,125 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     function redeem(uint256 amountWbtx, bytes calldata btxDestination)
         external whenRedeemNotPaused nonReentrant returns (uint256 redeemId)
     {
+        if (!limitsConfigured) revert NotConfigured();
         if (btxDestination.length == 0 || btxDestination.length > 128) revert BadDestination();
         uint256 sat = amountWbtx / SAT_SCALE;            // round down
         if (sat == 0) revert BelowOneSat();
         if (sat > type(uint64).max) revert AmountOverflow(); // defensive truncation guard
         uint64 amountSat = uint64(sat);
 
-        wbtx.burn(msg.sender, amountWbtx);               // burn FULL amount (dust included)
+        wbtx.burnFrom(msg.sender, amountWbtx);           // burn FULL amount (dust included)
         redeemId = ++redeemNonce;
         redeems[redeemId] = Redeem({
-            from: msg.sender, amountSat: amountSat, amountWbtx: amountWbtx,
-            requestedAt: uint64(block.timestamp), fulfilled: false, refunded: false
+            from: msg.sender,
+            amountSat: amountSat,
+            amountWbtx: amountWbtx,
+            requestedAt: uint64(block.timestamp),
+            fulfilledAt: 0,
+            destHash: keccak256(btxDestination),
+            btxTxid: bytes32(0),
+            fulfilled: false,
+            refunded: false
         });
         emit RedeemRequested(redeemId, msg.sender, amountSat, btxDestination, amountWbtx);
     }
 
     /// @notice The federation records on-chain that a redeem was released on BTX (auditability).
-    function fulfillRedeem(uint256 redeemId, bytes32 btxTxid) external onlyRole(FEDERATION_ROLE) {
+    function fulfillRedeem(
+        uint256 redeemId,
+        bytes32 btxTxid,
+        bytes32 destHash,
+        uint64 amountSat,
+        uint64 btxBlockHeight,
+        uint64 attestedHeight,
+        uint64 deadline,
+        bytes calldata proof
+    ) external onlyRole(FEDERATION_ROLE) {
         Redeem storage r = redeems[redeemId];
         if (r.from == address(0)) revert UnknownRedeem();
         if (r.fulfilled || r.refunded) revert RedeemClosed();
+        if (fulfillmentRevoked[redeemId]) revert FulfillmentPermanentlyRevoked();
+        if (btxTxid == bytes32(0)) revert BadAttestation();
+        if (block.timestamp > deadline) revert AttestationExpired();
+        if (attestedHeight < btxBlockHeight) revert NotAttested();
+        if (attestedHeight - btxBlockHeight < MIN_CONFIRMATIONS) revert TooShallow();
+        if (destHash != r.destHash || amountSat != r.amountSat) revert BadAttestation();
+        if (
+            !verifier.verifyFulfill(
+                fulfillDigest(
+                    bridgeId,
+                    redeemId,
+                    btxTxid,
+                    destHash,
+                    amountSat,
+                    btxBlockHeight,
+                    attestedHeight,
+                    deadline
+                ),
+                proof
+            )
+        ) revert BadAttestation();
+
         r.fulfilled = true;
+        r.fulfilledAt = uint64(block.timestamp);
+        r.btxTxid = btxTxid;
         emit RedeemFulfilled(redeemId, btxTxid);
+    }
+
+    function unfulfillRedeem(uint256 redeemId) external onlyRole(GUARDIAN_ROLE) {
+        Redeem storage r = redeems[redeemId];
+        if (r.from == address(0)) revert UnknownRedeem();
+        if (!r.fulfilled || r.refunded) revert RedeemClosed();
+        if (block.timestamp > r.fulfilledAt + FULFILL_REVOKE_WINDOW) revert RevokeWindowElapsed();
+
+        bytes32 releasedTxid = r.btxTxid;
+        fulfillmentRevoked[redeemId] = true;
+        r.fulfilled = false;
+        r.fulfilledAt = 0;
+        r.btxTxid = bytes32(0);
+        emit FulfillmentRevoked(redeemId, releasedTxid, msg.sender);
     }
 
     /// @notice If a redeem cannot be honored on BTX (malformed destination, federation failure) and
     ///         the refund timeout has elapsed, governance re-mints wBTX to the original burner so no
     ///         funds are silently lost. (FBTC "safety committee" pattern.)
-    function refundRedeem(uint256 redeemId) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
+    function refundRedeem(
+        uint256 redeemId,
+        uint64 asOfBtxHeight,
+        uint64 deadline,
+        bytes calldata proof
+    ) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
         Redeem storage r = redeems[redeemId];
         if (r.from == address(0)) revert UnknownRedeem();
-        if (r.fulfilled || r.refunded) revert RedeemClosed();
+        if (r.refunded) revert RedeemClosed();
         if (block.timestamp < r.requestedAt + redeemRefundTimeout) revert TooEarly();
+        if (block.timestamp > deadline) revert AttestationExpired();
+        if (
+            !verifier.verifyNonRelease(
+                nonReleaseDigest(
+                    bridgeId,
+                    redeemId,
+                    r.destHash,
+                    r.amountSat,
+                    asOfBtxHeight,
+                    deadline
+                ),
+                proof
+            )
+        ) revert BadAttestation();
+
+        if (r.fulfilled) {
+            r.fulfilled = false;
+            r.fulfilledAt = 0;
+            r.btxTxid = bytes32(0);
+        }
+        _checkAndConsumeLimits(r.amountSat);
+        if (maxSupplyWbtx != 0 && wbtx.totalSupply() + r.amountWbtx > maxSupplyWbtx) revert SupplyCapExceeded();
+
         r.refunded = true;
-        wbtx.mint(r.from, r.amountWbtx);
+        wbtx.mintRefund(r.from, r.amountWbtx);
+        bytes32 refundKey = keccak256(abi.encodePacked("redeem-refund", redeemId));
+        emit MintExecuted(refundKey, bytes32(0), 0, r.from, r.amountSat, r.amountWbtx);
         emit RedeemRefunded(redeemId, r.from, r.amountWbtx);
     }
 }
@@ -272,36 +599,101 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
 contract ECDSAMultisigVerifier is IAttestationVerifier, AccessControlDefaultAdminRules {
     using ECDSA for bytes32;
 
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+    uint64 public constant ROTATION_DELAY = 7 days;
+
     address[] private _signers;
+    address[] private _pendingSigners;
     mapping(address => bool) public isSigner;
     uint256 public threshold;
+    uint256 public pendingThreshold;
+    uint64 public rotationEta;
 
     event SignersRotated(address[] signers, uint256 threshold);
+    event RotationProposed(address[] signers, uint256 threshold, uint64 rotationEta);
+    event PendingRotationCancelled(address indexed by);
 
     error BadThreshold();
     error DupOrZeroSigner();
     error TooManySigs();
     error NotOrdered();
+    error SignersNotAscending();
+    error RotationNotReady();
 
     constructor(address admin, uint48 adminDelay, address[] memory signers_, uint256 threshold_)
         AccessControlDefaultAdminRules(adminDelay, admin)
     {
         _rotate(signers_, threshold_);
+        _grantRole(GUARDIAN_ROLE, admin);
     }
 
-    /// @notice Replace the entire signer set + threshold (governance/Timelock only). Clears the prior
-    ///         set first (no stale-signer accumulation — the gap flagged in the v0 reference).
+    /// @notice Legacy name routed through timelocked rotation flow.
     function rotateSigners(address[] calldata signers_, uint256 threshold_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _proposeRotation(signers_, threshold_);
+    }
+
+    /// @notice Propose signer set + threshold replacement, applied after a fixed delay.
+    function proposeRotation(address[] calldata signers_, uint256 threshold_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _proposeRotation(signers_, threshold_);
+    }
+
+    function applyRotation() external {
+        if (rotationEta == 0 || block.timestamp < rotationEta) revert RotationNotReady();
+        uint256 len = _pendingSigners.length;
+        address[] memory signers_ = new address[](len);
+        for (uint256 i = 0; i < len; i++) {
+            signers_[i] = _pendingSigners[i];
+        }
+        uint256 threshold_ = pendingThreshold;
+        delete _pendingSigners;
+        pendingThreshold = 0;
+        rotationEta = 0;
         _rotate(signers_, threshold_);
+    }
+
+    function cancelPendingRotation() external onlyRole(GUARDIAN_ROLE) {
+        delete _pendingSigners;
+        pendingThreshold = 0;
+        rotationEta = 0;
+        emit PendingRotationCancelled(msg.sender);
+    }
+
+    function pendingSigners() external view returns (address[] memory) {
+        return _pendingSigners;
+    }
+
+    function _proposeRotation(address[] calldata signers_, uint256 threshold_) private {
+        _validateRotation(signers_, threshold_);
+        delete _pendingSigners;
+        for (uint256 i = 0; i < signers_.length; i++) {
+            _pendingSigners.push(signers_[i]);
+        }
+        pendingThreshold = threshold_;
+        rotationEta = uint64(block.timestamp) + ROTATION_DELAY;
+        emit RotationProposed(signers_, threshold_, rotationEta);
+    }
+
+    function _validateRotation(address[] calldata signers_, uint256 threshold_) private pure {
+        if (threshold_ == 0 || threshold_ > signers_.length) revert BadThreshold();
+        address prev = address(0);
+        for (uint256 i = 0; i < signers_.length; i++) {
+            address s = signers_[i];
+            if (s == address(0)) revert DupOrZeroSigner();
+            if (s <= prev) revert SignersNotAscending();
+            prev = s;
+        }
     }
 
     function _rotate(address[] memory signers_, uint256 threshold_) private {
         if (threshold_ == 0 || threshold_ > signers_.length) revert BadThreshold();
+        address prev = address(0);
         for (uint256 i = 0; i < _signers.length; i++) { isSigner[_signers[i]] = false; }
         delete _signers;
         for (uint256 i = 0; i < signers_.length; i++) {
             address s = signers_[i];
             if (s == address(0) || isSigner[s]) revert DupOrZeroSigner();
+            if (s <= prev) revert SignersNotAscending();
+            prev = s;
             isSigner[s] = true;
             _signers.push(s);
         }
@@ -312,6 +704,18 @@ contract ECDSAMultisigVerifier is IAttestationVerifier, AccessControlDefaultAdmi
     function signers() external view returns (address[] memory) { return _signers; }
 
     function verifyMint(bytes32 digest, bytes calldata proof) external view returns (bool) {
+        return _verifyDigest(digest, proof);
+    }
+
+    function verifyFulfill(bytes32 digest, bytes calldata proof) external view returns (bool) {
+        return _verifyDigest(digest, proof);
+    }
+
+    function verifyNonRelease(bytes32 digest, bytes calldata proof) external view returns (bool) {
+        return _verifyDigest(digest, proof);
+    }
+
+    function _verifyDigest(bytes32 digest, bytes calldata proof) private view returns (bool) {
         bytes[] memory sigs = abi.decode(proof, (bytes[]));
         if (sigs.length > _signers.length) revert TooManySigs(); // fail fast; bound the loop
         if (sigs.length < threshold) return false;

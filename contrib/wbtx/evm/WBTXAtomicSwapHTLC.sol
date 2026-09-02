@@ -37,7 +37,7 @@ contract WBTXAtomicSwapHTLC is ReentrancyGuard {
     }
 
     /// @dev Sanity bounds (NOT the cross-chain asymmetry rule). Tune per deployment.
-    uint64 public constant MIN_TIMEOUT = 30 minutes;
+    uint64 public constant MIN_TIMEOUT = 6 hours;
     uint64 public constant MAX_TIMEOUT = 30 days;
 
     mapping(bytes32 => Swap) public swaps;
@@ -53,9 +53,10 @@ contract WBTXAtomicSwapHTLC is ReentrancyGuard {
     error BadTimeout();
     error NotOpen();
     error BadPreimage();
+    error Expired();
     error TooEarly();
-    error NotSender();
     error NoValueReceived();
+    error AmountMismatch(uint256 requested, uint256 received);
 
     /// @dev BTX-compatible hashlock: RIPEMD160(SHA256(preimage)) (precompiles 0x02 then 0x03).
     function btxHash160(bytes calldata preimage) public pure returns (bytes20) {
@@ -84,12 +85,13 @@ contract WBTXAtomicSwapHTLC is ReentrancyGuard {
         id = computeId(recipient, token, amount, hashlock, timeout, salt);
         if (swaps[id].state != State.INVALID) revert IdExists();
 
-        // Balance-delta accounting: custody EXACTLY what arrived (fee-on-transfer/rebasing safe).
+        // Balance-delta accounting: reject fee-on-transfer underfunding and custody only exact swaps.
         IERC20 t = IERC20(token);
         uint256 before = t.balanceOf(address(this));
         t.safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = t.balanceOf(address(this)) - before;
         if (received == 0) revert NoValueReceived();
+        if (received != amount) revert AmountMismatch(amount, received);
 
         swaps[id] = Swap({
             token: token, sender: msg.sender, recipient: recipient, amount: received,
@@ -102,17 +104,17 @@ contract WBTXAtomicSwapHTLC is ReentrancyGuard {
     function claim(bytes32 id, bytes calldata preimage) external nonReentrant {
         Swap storage s = swaps[id];
         if (s.state != State.OPEN) revert NotOpen();
+        if (block.timestamp >= s.timeout) revert Expired();
         if (btxHash160(preimage) != s.hashlock) revert BadPreimage();
         s.state = State.CLAIMED;                              // effects before interaction
         IERC20(s.token).safeTransfer(s.recipient, s.amount);
         emit Claimed(id, preimage);
     }
 
-    /// @notice Refund to the sender at/after timeout if unclaimed.
+    /// @notice Refund to the sender at/after timeout if unclaimed (callable by anyone).
     function refund(bytes32 id) external nonReentrant {
         Swap storage s = swaps[id];
         if (s.state != State.OPEN) revert NotOpen();
-        if (msg.sender != s.sender) revert NotSender();
         if (block.timestamp < s.timeout) revert TooEarly();
         s.state = State.REFUNDED;
         IERC20(s.token).safeTransfer(s.sender, s.amount);

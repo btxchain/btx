@@ -4,6 +4,7 @@
 
 #include <hash.h>
 #include <pqkey.h>
+#include <primitives/transaction.h>
 #include <script/interpreter.h>
 #include <script/pqm.h>
 #include <script/script_error.h>
@@ -11,6 +12,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <limits>
 #include <vector>
 
 namespace {
@@ -201,6 +203,29 @@ BOOST_AUTO_TEST_CASE(refund_before_timeout_fails)
     const P2MRTemplateChecker checker{/*locktime_ok=*/false};
     BOOST_CHECK(!EvalP2MRScript(script, stack, checker, execdata, serror));
     BOOST_CHECK_EQUAL(serror, SCRIPT_ERR_UNSATISFIED_LOCKTIME);
+}
+
+BOOST_AUTO_TEST_CASE(csv_multisig_rejects_non_bip68_sequence_bits)
+{
+    // csv_multi_pq requires >=2 pubkeys; threshold-1 of a 2-key set is the
+    // smallest valid BuildP2MRCSVMultisigScript input.
+    const std::vector<unsigned char> pk1(MLDSA44_PUBKEY_SIZE, 0x12);
+    const std::vector<unsigned char> pk2(MLDSA44_PUBKEY_SIZE, 0x13);
+    const std::vector<std::pair<PQAlgorithm, std::vector<unsigned char>>> keys{
+        {PQAlgorithm::ML_DSA_44, pk1},
+        {PQAlgorithm::ML_DSA_44, pk2},
+    };
+    const auto build = [&](int64_t sequence) {
+        return BuildP2MRCSVMultisigScript(sequence, /*threshold=*/1, keys);
+    };
+
+    BOOST_CHECK(!build(144).empty());
+    BOOST_CHECK(!build(144 | CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG).empty());
+    BOOST_CHECK(build(100000).empty());
+    BOOST_CHECK(build(int64_t{1} << 16).empty());
+    BOOST_CHECK(build(static_cast<int64_t>(CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG)).empty());
+    BOOST_CHECK(build(0).empty());
+    BOOST_CHECK(build(static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1).empty());
 }
 
 BOOST_AUTO_TEST_CASE(two_leaf_merkle_htlc)
