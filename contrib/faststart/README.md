@@ -85,18 +85,32 @@ miningchainguard=1
 miningminoutboundpeers=0
 miningminsyncedoutboundpeers=0
 miningmaxheaderlag=8
-# Published 1-of-2 attestor pin (same set archives/attestors return
-# from getmatmultrustedstatus). P2P seeds do not push these keys.
-matmulvalidation=trusted
-matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
-matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
-matmultrustedthreshold=1
+# Default: this node ExactReplays. No attestor pin.
+# The network designates no canonical ExactReplay attestors.
+matmulvalidation=consensus
 ```
 
-After the daemon is up and peering with the public seeds, confirm the pin
-on local RPC (`getmatmultrustedstatus` → `trusted_signer_pubkeys` and
-`threshold`). That is the mining-bootstrap check; do not scrape signer
+DNS/`addnode` is peer introduction, not attestation authority. After the
+daemon is up, `getmatmultrustedstatus` on this default shows
+`configured=false`. That is expected. There is no shipped attestor set.
+
+Trusted-mirror is an explicit opt-in for machines that cannot ExactReplay.
+Pass `--matmul-validation=trusted` and repeat `--matmul-trusted-pubkey`
+for attestors you independently trust and can reach (prefer M≥2). Discover
+reachable attestors/archives via the `MATMUL_ATTESTATION_ARCHIVE` /
+`MATMUL_TRUSTED_MIRROR` service flags. Confirm on **local** RPC that
+`trusted_signer_pubkeys` matches the keys you listed. Do not scrape signer
 pubs from a random remote RPC. Do not load a signer WIF on a miner.
+
+```bash
+contrib/faststart/miner-faststart.sh \
+  --datadir="$HOME/.btx" \
+  --chain=main \
+  --matmul-validation=trusted \
+  --matmul-trusted-pubkey=<compressed-secp256k1-you-trust> \
+  --matmul-trusted-pubkey=<second-independent-attestor> \
+  --matmul-trusted-threshold=2
+```
 
 Use DNS names rather than hard-coded peer IP addresses in configs and runbooks.
 Peer IPs can change or disappear; DNS bootstrap names can be updated without

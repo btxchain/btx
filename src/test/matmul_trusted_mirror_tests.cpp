@@ -1836,7 +1836,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::WeakSubjectivityBootstrapHeight;
     using node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundHeaders;
     using node::matmul_trusted::TrustedMirrorSeedRaisesBestKnown;
-    // Mainnet: checkpoint 201500, AssumeUTXO 201500 → ceiling 201500.
+    // Mainnet: checkpoint 203000, AssumeUTXO 203000 → ceiling 203000.
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 199299), 199299);
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 0), 186000);
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(0, 61010), 61010);
@@ -1844,7 +1844,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         WeakSubjectivityBootstrapHeight(
             Params().Checkpoints().GetHeight(),
             Params().HighestAssumeutxoHeight()),
-        201500);
+        203000);
     // Fresh mirror tip=0 must ingest HEADERS (the 2026-08-26 deadlock).
     BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundHeaders(
         /*ignore_non_authority_block=*/true, /*tip_height=*/0,
@@ -2113,48 +2113,48 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::SkipMinerProcessMessagesDuringArchiveGetData;
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         /*local_signer=*/true, /*archive_getdata_pending=*/true,
-        /*trusted_mirror_catch_up=*/false,
         /*this_peer_inbound=*/true, /*this_peer_manual=*/false,
         /*this_peer_handshake_complete=*/true,
         /*this_is_archive_serve_target=*/false));
     // Miner GETDATA must still be skipped (live 45s/block hole).
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
-        true, true, false, true, false, true,
+        true, true, true, false, true,
         /*this_is_archive_serve_target=*/false));
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        true, true, false, true, false, true,
+        true, true, true, false, true,
         /*this_is_archive_serve_target=*/true));
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        true, true, false, true, false,
+        true, true, true, false,
         /*this_peer_handshake_complete=*/false, false));
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        /*local_signer=*/false, true, /*trusted_mirror_catch_up=*/false,
+        /*local_signer=*/false, true,
         true, false, true, false));
-    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
-        /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
-        true, false, true, false));
+    // Trusted-mirror catch-up is enforced by message-specific authority and
+    // admission gates, never by dropping the peer's whole process queue.
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/false, false, true, false, true, false));
     // A signer with NO archive GETDATA pending must NOT skip: the
     // unconditional form starved every non-ARCHIVE/MIRROR peer of all
     // message processing (0 header bytes served to consensus peers,
     // measured live 2026-08-27).
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        true, /*archive_getdata_pending=*/false, false, true, false, true,
+        true, /*archive_getdata_pending=*/false, true, false, true,
         false));
     // Outbound miners are Preferred in msghand order; they must still skip.
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
-        true, true, false, /*this_peer_inbound=*/false, false, true, false));
+        true, true, /*this_peer_inbound=*/false, false, true, false));
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
-        true, true, false, false, /*this_peer_manual=*/true, true, false));
+        true, true, false, /*this_peer_manual=*/true, true, false));
     // Convergence regression: a behind CONSENSUS verifier (serve=0 GPU
-    // attestor) must NEVER be skipped -- neither while a signer serves
-    // archive GETDATA nor while a trusted mirror catches up -- or it freezes
-    // at block_recv=0. It is not a near-tip miner; serving it is a read.
+    // attestor) must NEVER be skipped while a signer serves archive GETDATA,
+    // or it freezes at block_recv=0. It is not a near-tip miner; serving it is
+    // a read. Trusted-mirror catch-up no longer has a peer-wide skip at all.
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        /*local_signer=*/true, /*archive_getdata_pending=*/true, false,
+        /*local_signer=*/true, /*archive_getdata_pending=*/true,
         true, false, true, /*this_is_archive_serve_target=*/false,
         /*this_peer_consensus_catchup=*/true));
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
+        /*local_signer=*/false, false,
         true, false, true, false, /*this_peer_consensus_catchup=*/true));
     using node::matmul_trusted::KeepCatchupSourceOnDownloadTimeout;
     BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(
@@ -2211,6 +2211,31 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     // pause only) -- addrman and the 5-minute patience are preserved.
     BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
         /*far_behind=*/true, /*persistent=*/true, false, false, false));
+
+    // #7 resilience follow-up: a capable signed-frontier source that has been
+    // body-silent past CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE is DEMOTED from the
+    // prefer-gate's capable count so miners may help fill GETDATA. This never
+    // disconnects the source (a separate concern) and only ever relaxes the
+    // gate. The demotion applies only to a peer that is itself a preferred
+    // capable source; a non-capable peer is never "demoted".
+    using node::matmul_trusted::CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE;
+    using node::matmul_trusted::SignedFrontierCapableSourceDemotedForBodySilence;
+    BOOST_CHECK_EQUAL(CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE, 3);
+    // Below threshold: patience preserved, archive still preferred (no demote).
+    BOOST_CHECK(!SignedFrontierCapableSourceDemotedForBodySilence(
+        /*preferred_capable=*/true, /*body_silence_count=*/0));
+    BOOST_CHECK(!SignedFrontierCapableSourceDemotedForBodySilence(true, 1));
+    BOOST_CHECK(!SignedFrontierCapableSourceDemotedForBodySilence(
+        true, CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE - 1));
+    // At/above threshold: demoted so miners can help fill GETDATA.
+    BOOST_CHECK(SignedFrontierCapableSourceDemotedForBodySilence(
+        true, CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE));
+    BOOST_CHECK(SignedFrontierCapableSourceDemotedForBodySilence(
+        true, CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE + 5));
+    // A non-capable / non-preferred peer is never demoted (it was never
+    // counted, so the gate was never relying on it) regardless of its count.
+    BOOST_CHECK(!SignedFrontierCapableSourceDemotedForBodySilence(
+        /*preferred_capable=*/false, /*body_silence_count=*/999));
     {
         const auto spacing{std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::seconds{90})};
@@ -2836,7 +2861,23 @@ BOOST_AUTO_TEST_CASE(tip_extending_occupancy_cap_blocks_sibling_flood)
 {
     using node::matmul_trusted::EvaluateTipExtendingCapacity;
     using node::matmul_trusted::MakeTrustedWorkRank;
+    using node::matmul_trusted::TrustedAttestationRequestPriority;
     using node::matmul_trusted::TrustedWorkRank;
+
+    BOOST_CHECK_EQUAL(TrustedAttestationRequestPriority(
+                          /*source_is_gpu_authority=*/false,
+                          /*followed_tip_child=*/false,
+                          /*direct_tip_child=*/false),
+                      0);
+    BOOST_CHECK_EQUAL(TrustedAttestationRequestPriority(
+                          false, false, /*direct_tip_child=*/true),
+                      1);
+    BOOST_CHECK_EQUAL(TrustedAttestationRequestPriority(
+                          false, /*followed_tip_child=*/true, true),
+                      3);
+    BOOST_CHECK_EQUAL(TrustedAttestationRequestPriority(
+                          /*source_is_gpu_authority=*/true, false, false),
+                      2);
 
     constexpr size_t kTipCapacity{8};
     std::vector<TrustedWorkRank> occupants;
@@ -2853,10 +2894,13 @@ BOOST_AUTO_TEST_CASE(tip_extending_occupancy_cap_blocks_sibling_flood)
     BOOST_CHECK(!decision.allow);
     BOOST_CHECK(!decision.replace_index.has_value());
 
-    // Capacity replacement is permitted only for a strictly better-ranked
-    // request; total tip-extending occupancy remains bounded at eight.
+    // Productive chain progress displaces sibling/reorg discovery immediately;
+    // it must not wait for the 60-second request TTL. Total preferred-request
+    // occupancy remains bounded at eight.
     decision = EvaluateTipExtendingCapacity(
-        MakeTrustedWorkRank(true, 101, 100, /*priority_rank=*/1, 9),
+        MakeTrustedWorkRank(
+            true, 101, 100,
+            TrustedAttestationRequestPriority(false, true, true), 9),
         occupants, kTipCapacity);
     BOOST_REQUIRE(decision.allow);
     BOOST_REQUIRE(decision.replace_index.has_value());

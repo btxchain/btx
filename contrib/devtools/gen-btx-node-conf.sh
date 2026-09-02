@@ -84,27 +84,29 @@ if [[ "${PROFILE}" == "discovery" ]]; then
   cat <<'EOF'
 
 # 0.34 public discovery relay: ADDR introduction only. Not MatMul
-# authority, not a chain-tip oracle, not GETMMATTEST. Archives follow
-# GPU attestors via the pin; this host only points at other nodes.
-# Do not put GPU attestor IPs in addnode/DNS. See
-# doc/design/0.34-discovery-relay.md.
+# authority, not a chain-tip oracle, not GETMMATTEST. Archives that
+# opt into trusted-mirror follow attestors they pin locally; this host
+# only points at other nodes. Do not put GPU attestor IPs in
+# addnode/DNS. See doc/design/0.34-discovery-relay.md.
 matmulvalidation=relay
 disablewallet=1
 EOF
 else
   cat <<'EOF'
 
-# Published mainnet ExactReplay attestors (public keys only).
-# GPU attestors and following archives return this from
-# getmatmultrustedstatus / getfinalityinfo after you join the seed mesh.
-# P2P addnode/DNS does not push keys. Do not load a signer WIF here.
-# Live pin is 1-of-2 (telemetry on consensus miners). 0.34 trusted mainnet
-# archives refuse M<2 unless -allowsinglekeytrustedmirror=1; raise this to 2
-# only after both attestors sign every height. See
-# doc/design/0.34-operator-safeguards.md.
-matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
-matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
-matmultrustedthreshold=1
+# Default: this node ExactReplays. No attestor pin.
+# The network designates no canonical ExactReplay attestors.
+# Trust is local and operator-chosen. Trusted-mirror is an explicit
+# opt-in for machines that cannot ExactReplay:
+#   matmulvalidation=trusted
+#   matmultrustedpubkey=<compressed secp256k1 of an attestor you trust>
+#   matmultrustedthreshold=2
+# Discover reachable attestors/archives via MATMUL_ATTESTATION_ARCHIVE
+# / MATMUL_TRUSTED_MIRROR. Prefer M≥2 independent signers. P2P
+# addnode/DNS does not push keys. Do not load a signer WIF here.
+# Mainnet trusted-mode refuses M<2 unless -allowsinglekeytrustedmirror=1.
+# See doc/design/0.34-operator-safeguards.md.
+matmulvalidation=consensus
 EOF
 fi
 

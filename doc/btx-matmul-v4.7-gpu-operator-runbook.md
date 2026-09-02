@@ -13,6 +13,7 @@ Canonical transition and activation policy:
 
 Public CPU seeds following GPU attestors, then M-of-N attestors, then GPU
 full nodes: [`btx-gpu-verified-network-transition.md`](btx-gpu-verified-network-transition.md).
+The recommended default remains `-matmulvalidation=consensus` (no pin).
 
 ## Roles and policy
 
@@ -76,71 +77,88 @@ matmulrcexecution=strict-device
 
 Public archival seeds are enough for functional participation. Do **not**
 require a direct signer `addnode`. After the 0.33.3 network-stability work,
-those archives persist tip-child bodies before quorum, `getdata`-serve them
-to the signer, cache-and-forward `MMATTEST`, and answer `GETMMATTEST` from
+archives persist tip-child bodies before quorum, `getdata`-serve them
+to GPU attestors, cache-and-forward `MMATTEST`, and answer `GETMMATTEST` from
 that cache. Keep `blocksonly=0` so the seeds actually see your blocks.
 
 Seed list: [`btx-public-node-bootstrap.md`](btx-public-node-bootstrap.md).
 
 ## Mining on the attested chain
 
-Canonical blocks are those the configured signer set attests. A heavier
-unattested fork is an orphan once the signer stays on the other branch. Hashrate
-wins races; it does not raise the canonical block rate above the signer's
-ExactReplay + attestation throughput (today often ~1 block / 1–2 minutes with a
-single signer). 1-of-1 is a single point of failure; M-of-N is the production
-shape when independent signers exist.
+Default validating miners run `-matmulvalidation=consensus` and ExactReplay
+locally. They need no attestor pin. The network designates no canonical
+signers.
 
-### Submit/mining node config (none of these is optional)
+If you pin attestors (optional telemetry, or a CPU trusted-mirror), blocks
+those configured keys attest are the tip that tooling will follow. A heavier
+unattested fork is an orphan once those attestors stay on the other branch.
+Hashrate wins races; it does not raise the attested-tip rate above the
+ExactReplay + attestation throughput of the signers *you* pin (often ~1
+block / 1–2 minutes with a single signer). 1-of-1 is a single point of
+failure for that local pin; M-of-N is the production shape when you can
+reach independent signers.
+
+### Submit/mining node config
+
+Required:
 
 ```text
 blocksonly=0
 matmulvalidation=consensus
-matmultrustedpubkey=<signer compressed pubkey>
-matmultrustedthreshold=1
+```
+
+Optional telemetry pin (ExactReplay is unchanged). Supply keys **you**
+trust — none ship:
+
+```text
+matmultrustedpubkey=<compressed secp256k1 of an attestor you trust>
+matmultrustedthreshold=2
 ```
 
 - `-blocksonly=0`: a mining/submit node must relay aggressively. With
-  `-blocksonly=1` winning blocks often never reach the signer (signer tip stuck
-  at yours minus one) and every win orphans.
+  `-blocksonly=1` winning blocks often never reach attestors you follow
+  (their tip stuck at yours minus one) and every win orphans.
 - `-matmultrustedpubkey` + `-matmultrustedthreshold`: a plain consensus node
   reports `getmatmultrustedstatus.configured=false` and stores zero
-  attestations, so tooling cannot see the attested tip. Adding the signer key
-  does **not** skip ExactReplay; it only lets the node track `MMATTEST` and
-  follow/recover onto the attested chain. A self-run bridge/archive signing
-  key as the only `-matmultrustedpubkey` follows that key's chain. An
-  unusually high local win rate (near-consecutive blocks) is a mining-alone
-  symptom: check `getmininginfo.chain_guard.island_suspect` and
-  `getfinalityinfo.warnings`.
-- Pool: build only on `getmatmulattestedtip` (or
+  attestations, so tooling cannot see an attested tip. Adding keys you
+  chose does **not** skip ExactReplay; it only lets the node track
+  `MMATTEST` and follow/recover onto that attested chain. A self-run
+  bridge/archive signing key as the only `-matmultrustedpubkey` follows
+  that key's chain. An unusually high local win rate (near-consecutive
+  blocks) is a mining-alone symptom: check
+  `getmininginfo.chain_guard.island_suspect` and `getfinalityinfo.warnings`.
+- Pool: if you configured a pin, build only on `getmatmulattestedtip` (or
   `getmatmultrustedstatus.attested_tip`). If `on_active_chain` is false, the
   node is on a competing unattested fork and will auto-reorg; do not stack
   unattested candidates. Win → wait for attestation; lose → abandon.
+  Without a pin, mine on the ExactReplay-valid tip.
 - Public archival `addnode` seeds are enough for participation. Do **not**
   require a direct signer peer: archives persist tip-child bodies before
-  quorum, `getdata`-serve them to the signer, cache-and-forward `MMATTEST`,
-  and answer `GETMMATTEST` from that cache. Keep `blocksonly=0` so those
-  seeds actually see your blocks.
+  quorum, `getdata`-serve them to GPU attestors, cache-and-forward
+  `MMATTEST`, and answer `GETMMATTEST` from that cache. Keep `blocksonly=0`
+  so those seeds actually see your blocks.
 - `NODE_MATMUL_ATTESTATION_ARCHIVE` is not a signer locator. Competing-tree
-  nodes advertise that bit too. Follow `getmatmulattestedtip` with
-  `on_active_chain=true`, not a peer's service flags.
+  nodes advertise that bit too. If you pinned attestors, follow
+  `getmatmulattestedtip` with `on_active_chain=true`, not a peer's service
+  flags.
 - `loadtxoutsetattested`: the snapshot base header must be known. A competing
   most-work headers-only tree (the 1883xx flood) does **not** block the load
   and is not a reason to `invalidateblock` or `connect=`-restrict. Do not
   `preciousblock` that tree.
 - `-matmulvalidation=trusted` only connects past the snapshot when archives
-  can answer `GETMMATTEST` for the canonical suffix. Until the public seed
-  fleet is on this head, use `consensus` (ExactReplay) for that climb;
-  `trusted` after the seeds are upgraded.
+  you follow can answer `GETMMATTEST` for the attested suffix. Prefer
+  `consensus` (ExactReplay) for that climb; `trusted` is an opt-in after
+  you have pinned attestors you can reach.
 
-`getmatmulattestedtip` is the continuous attested-tip surface. On a quiet
-linear chain the signer typically attests ~1 behind the active tip, so `hash`
-may lag `getbestblockhash` by one block. `hash` / `on_active_chain` only see
-HAVE_DATA on **this** chain: a stranded fork still reports
-`on_active_chain=true` there. Use `getblockchaininfo.matmul_signed_frontier`
-(`blocks_behind`, `on_active_chain`) — also on `getmatmulattestedtip.signed_frontier`
-and every `UpdateTip` line as `signed_frontier=` / `behind=`. A large
-`blocks_behind` with `on_active_chain=false` is a fork, not a paused signer.
+`getmatmulattestedtip` is the continuous attested-tip surface (empty unless
+you pinned keys). On a quiet linear chain an attestor you follow typically
+attests ~1 behind the active tip, so `hash` may lag `getbestblockhash` by
+one block. `hash` / `on_active_chain` only see HAVE_DATA on **this** chain:
+a stranded fork still reports `on_active_chain=true` there. Use
+`getblockchaininfo.matmul_signed_frontier` (`blocks_behind`,
+`on_active_chain`) — also on `getmatmulattestedtip.signed_frontier` and every
+`UpdateTip` line as `signed_frontier=` / `behind=`. A large `blocks_behind`
+with `on_active_chain=false` is a fork, not a paused signer.
 `getmatmulattestations <hash>` still only lists retained signatures for that
 hash.
 

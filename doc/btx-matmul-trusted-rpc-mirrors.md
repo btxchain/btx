@@ -3,9 +3,10 @@
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
-CPU archives following GPU attestors are Phases 1–2 of the operator path to a
-fully GPU-verified seed layer. Phase 3 drops trusted-mode on those hosts once
-they ExactReplay locally. See
+CPU archives that follow GPU attestors they pin locally are Phases 1–2
+of an operator path to GPU-verified validation. Phase 3 drops trusted-mode
+on those hosts once they ExactReplay locally. The recommended default is
+`-matmulvalidation=consensus` (no pin). See
 [`btx-gpu-verified-network-transition.md`](btx-gpu-verified-network-transition.md).
 
 ## Purpose and trust boundary
@@ -95,16 +96,19 @@ peer because only the signature and local admission rules matter.
 
 Operators should compare `attestation_version` and
 `replay_authority_context` from `getmatmultrustedstatus` across every archive
-and mirror before admitting traffic. A mismatch is a configuration/release
-error and the affected mirror will reject those attestations.
+and mirror they chose to follow before admitting traffic. A mismatch is a
+configuration/release error and the affected mirror will reject those
+attestations.
 
-The live mainnet attestor pin (public keys, threshold 1) is published in
-the repository README and written by miner/archive bootstrap
-(`contrib/faststart`, `gen-btx-node-conf.sh`). `getmatmultrustedstatus`
-and `getfinalityinfo` on GPU attestors and following archives return
-`trusted_signer_pubkeys` / `threshold` for that same set. P2P seed
-connect does not advertise keys; miners pin them locally and confirm on
-RPC after joining the seed mesh. Do not load a signer WIF on a miner.
+There is no shipped mainnet attestor pin. README / fast-start /
+`gen-btx-node-conf.sh` default to `-matmulvalidation=consensus` with no
+keys. Trusted-mirror is an explicit opt-in: the operator supplies
+`-matmultrustedpubkey` for attestors they independently trust and can
+reach (prefer M≥2). Discover reachable attestors/archives via the
+`MATMUL_ATTESTATION_ARCHIVE` / `MATMUL_TRUSTED_MIRROR` service flags.
+`getmatmultrustedstatus` and `getfinalityinfo` report *your* pin.
+P2P seed connect does not advertise keys. Do not load a signer WIF on
+a miner.
 
 ## Roles and service capabilities
 

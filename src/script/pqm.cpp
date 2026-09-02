@@ -282,6 +282,10 @@ std::vector<unsigned char> BuildP2MRCSVMultisigScript(
 {
     if (sequence < 1 || sequence > std::numeric_limits<int32_t>::max()) return {};
     if ((static_cast<uint32_t>(sequence) & CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0) return {};
+    // BIP68 consensus only interprets TYPE_FLAG | MASK; all other bits are ignored.
+    // Reject extra bits so the encoded relative delay equals the caller's value
+    // (e.g. 100000 would otherwise enforce 100000 & MASK == 34464).
+    if ((static_cast<uint32_t>(sequence) & ~(CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | CTxIn::SEQUENCE_LOCKTIME_MASK)) != 0) return {};
 
     CScript prefix;
     prefix << sequence << OP_CHECKSEQUENCEVERIFY << OP_DROP;

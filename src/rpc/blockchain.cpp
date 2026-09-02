@@ -5273,6 +5273,9 @@ const std::vector<RPCResult> RPCHelpForChainstate{
     {RPCResult::Type::NUM, "coins_db_cache_bytes", "size of the coinsdb cache"},
     {RPCResult::Type::NUM, "coins_tip_cache_bytes", "size of the coinstip cache"},
     {RPCResult::Type::BOOL, "validated", "whether the chainstate is fully validated. True if all blocks in the chainstate were validated, false if the chain is based on a snapshot and the snapshot has not yet been validated."},
+    {RPCResult::Type::NUM, "blocks_in_flight", "GETDATA bodies currently in flight for this chainstate"},
+    {RPCResult::Type::NUM, "admission_queue_depth", "number of setBlockIndexCandidates entries (admissible HAVE_DATA not yet the tip)"},
+    {RPCResult::Type::NUM, "background_activation_yields", "times background ActivateBestChain was skipped for the active tip (zero on the snapshot chainstate)"},
 };
 
 static RPCHelpMan getchainstates()
@@ -5284,6 +5287,7 @@ return RPCHelpMan{
         RPCResult{
             RPCResult::Type::OBJ, "", "", {
                 {RPCResult::Type::NUM, "headers", "the number of headers seen so far"},
+                {RPCResult::Type::NUM, "background_activation_yields", "times background ActivateBestChain was skipped so the active snapshot tip could use cs_main"},
                 {RPCResult::Type::ARR, "chainstates", "list of the chainstates ordered by work, with the most-work (active) chainstate last", {{RPCResult::Type::OBJ, "", "", RPCHelpForChainstate},}},
             }
         },
@@ -5296,9 +5300,18 @@ return RPCHelpMan{
     LOCK(cs_main);
     UniValue obj(UniValue::VOBJ);
 
-    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    node::NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
 
-    auto make_chain_data = [&](const Chainstate& cs, bool validated) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+    AssumeutxoDownloadStats download_stats;
+    if (node.peerman) {
+        download_stats = node.peerman->GetAssumeutxoDownloadStats();
+    }
+    const uint64_t background_yields{
+        chainman.m_background_activation_yields.load(std::memory_order_relaxed)};
+
+    auto make_chain_data = [&](const Chainstate& cs, bool validated, bool is_background)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         AssertLockHeld(::cs_main);
         UniValue data(UniValue::VOBJ);
         if (!cs.m_chain.Tip()) {
@@ -5319,15 +5332,25 @@ return RPCHelpMan{
             data.pushKV("snapshot_blockhash", cs.m_from_snapshot_blockhash->ToString());
         }
         data.pushKV("validated", validated);
+        data.pushKV("blocks_in_flight",
+                    is_background ? download_stats.background_blocks_in_flight
+                                  : download_stats.active_blocks_in_flight);
+        data.pushKV("admission_queue_depth", static_cast<int>(cs.setBlockIndexCandidates.size()));
+        data.pushKV("background_activation_yields",
+                    static_cast<int64_t>(is_background ? background_yields : 0));
         return data;
     };
 
     obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    obj.pushKV("background_activation_yields", static_cast<int64_t>(background_yields));
 
     const auto& chainstates = chainman.GetAll();
     UniValue obj_chainstates{UniValue::VARR};
     for (Chainstate* cs : chainstates) {
-      obj_chainstates.push_back(make_chain_data(*cs, !cs->m_from_snapshot_blockhash || chainstates.size() == 1));
+      const bool is_background{
+          chainstates.size() > 1 && !cs->m_from_snapshot_blockhash.has_value()};
+      obj_chainstates.push_back(make_chain_data(
+          *cs, !cs->m_from_snapshot_blockhash || chainstates.size() == 1, is_background));
     }
     obj.pushKV("chainstates", std::move(obj_chainstates));
     return obj;

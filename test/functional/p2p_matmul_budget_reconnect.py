@@ -5,7 +5,7 @@
 """Ensure MatMul header processing survives peer reconnects."""
 
 from test_framework.messages import CBlockHeader, from_hex, msg_headers
-from test_framework.p2p import P2PInterface, p2p_lock
+from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 
@@ -19,15 +19,26 @@ class BTXMatMulBudgetReconnectTest(BitcoinTestFramework):
             ["-test=matmulstrict", "-test=matmuldgw", "-debug=net", "-disablewallet=1"],
         ]
 
+    def setup_network(self):
+        self.setup_nodes()
+        # The reconnect assertions use synthetic P2P peers below. Keep setup
+        # disconnected so its shared prefix cannot depend on strict-connect
+        # relay direction or the getheaders response window.
+
     def run_test(self):
         node0, node1 = self.nodes
 
         # Anchor both nodes to the same initial chain so incoming headers start
         # after the fast-phase boundary (height >= 2) and use the normal budget.
-        self.generate(node0, 3)
+        self.generate(node0, 3, sync_fun=self.no_op)
+        for height in range(1, 4):
+            assert_equal(
+                node1.submitblock(node0.getblock(node0.getblockhash(height), 0)),
+                None,
+            )
+        assert_equal(node1.getbestblockhash(), node0.getbestblockhash())
 
         # Keep node1 out of IBD so the normal (small) per-minute budget applies.
-        self.disconnect_nodes(0, 1)
         self.generate(node1, 20, sync_fun=self.no_op)
         assert_equal(node1.getblockchaininfo()["initialblockdownload"], False)
 
@@ -59,13 +70,11 @@ class BTXMatMulBudgetReconnectTest(BitcoinTestFramework):
             check_connected=False,
         )
         assert attacker.is_connected
-        with p2p_lock:
-            getdata = attacker.last_message.get("getdata")
-            assert getdata is not None
-            requested_hashes = [inv.hash for inv in getdata.inv]
-        expected_hashes = {header.rehash() for header in headers[10:]}
-        assert any(block_hash in expected_hashes for block_hash in requested_hashes)
 
+        # This is a 20-block-deep alternate branch. v0.34.5 deliberately does
+        # not direct-fetch a large reorg from an unsolicited HEADERS message;
+        # body acquisition is covered by the convergence tests. This test's
+        # contract is that header processing survives the reconnect.
         headers_only_tip = next(tip for tip in node1.getchaintips() if tip["hash"] == node0.getblockhash(43))
         assert_equal(headers_only_tip["height"], 43)
         assert_equal(headers_only_tip["status"], "headers-only")

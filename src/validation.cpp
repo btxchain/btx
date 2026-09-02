@@ -31,6 +31,7 @@
 #include <logging.h>
 #include <logging/timer.h>
 #include <node/blockstorage.h>
+#include <node/chain_staleness.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/utxo_snapshot.h>
 #include <policy/coin_age_priority.h>
@@ -9838,6 +9839,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
     }
     std::vector<CBlockIndex*> hysteresis_deferred_candidates;
     std::set<CBlockIndex*> skipped_this_call;
+    bool saw_hysteresis_deferral{false};
     const auto restore_hysteresis_deferred_candidates = [&]() {
         for (CBlockIndex* candidate : hysteresis_deferred_candidates) {
             setBlockIndexCandidates.insert(candidate);
@@ -10302,25 +10304,52 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                     const arith_uint256 required_work =
                         old_tip->nChainWork + tip_work * hysteresis_work_margin;
                     if (pindexNew->nChainWork < required_work) {
-                        RecordDeferredReorgDepth(
-                            static_cast<uint32_t>(reorg_depth),
-                            hysteresis_work_margin,
-                            old_tip->nHeight,
-                            fork->nHeight,
-                            pindexNew->nHeight);
-                        LogWarning("Shallow reorg hysteresis deferred branch hash=%s depth=%d "
-                                   "candidate_height=%d tip_height=%d required_work_margin=%u\n",
-                                   pindexNew->GetBlockHash().ToString(),
-                                   reorg_depth,
-                                   pindexNew->nHeight,
-                                   old_tip->nHeight,
-                                   hysteresis_work_margin);
+                        // Async ExactReplay completions and retained-body
+                        // processing can call ActivateBestChain many times while
+                        // this exact fork race is unchanged. The policy must be
+                        // reconsidered each time, but warning/stat accounting is
+                        // for the deferral episode, not the polling frequency.
+                        // Only the strongest deferred candidate in this call can
+                        // identify the episode; otherwise two insufficient forks
+                        // would alternate the remembered key and log forever.
+                        if (!saw_hysteresis_deferral) {
+                            saw_hysteresis_deferral = true;
+                            const bool new_episode{
+                                m_last_hysteresis_deferred_tip != old_tip ||
+                                m_last_hysteresis_deferred_candidate != pindexNew ||
+                                m_last_hysteresis_deferred_work_margin !=
+                                    hysteresis_work_margin};
+                            if (new_episode) {
+                                RecordDeferredReorgDepth(
+                                    static_cast<uint32_t>(reorg_depth),
+                                    hysteresis_work_margin,
+                                    old_tip->nHeight,
+                                    fork->nHeight,
+                                    pindexNew->nHeight);
+                                LogWarning("Shallow reorg hysteresis deferred branch hash=%s depth=%d "
+                                           "candidate_height=%d tip_height=%d required_work_margin=%u\n",
+                                           pindexNew->GetBlockHash().ToString(),
+                                           reorg_depth,
+                                           pindexNew->nHeight,
+                                           old_tip->nHeight,
+                                           hysteresis_work_margin);
+                                m_last_hysteresis_deferred_tip = old_tip;
+                                m_last_hysteresis_deferred_candidate = pindexNew;
+                                m_last_hysteresis_deferred_work_margin =
+                                    hysteresis_work_margin;
+                            }
+                        }
                         setBlockIndexCandidates.erase(pindexNew);
                         hysteresis_deferred_candidates.push_back(pindexNew);
                         ++skipped_count;
                         continue;
                     }
                 }
+            }
+            if (pindexNew != m_chain.Tip()) {
+                m_last_hysteresis_deferred_tip = nullptr;
+                m_last_hysteresis_deferred_candidate = nullptr;
+                m_last_hysteresis_deferred_work_margin = 0;
             }
             restore_hysteresis_deferred_candidates();
             return pindexNew;
@@ -15810,13 +15839,77 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         return false;
     }
 
-    Chainstate* bg_chain{WITH_LOCK(cs_main, return BackgroundSyncInProgress() ? m_ibd_chainstate.get() : nullptr)};
+    // Issue #133: skip starting a background ABC batch while the active
+    // snapshot chain is stale or has admissible work pending. Decide here,
+    // outside ActivateBestChain's cs_main connect loop (deadlock hazard at
+    // MaybeCompleteSnapshotValidation, ~11024/11102). Do not interrupt an
+    // in-flight connect: m_chainstate_mutex still serializes a batch that
+    // already started.
+    Chainstate* bg_chain{nullptr};
+    bool yield_background{false};
+    bool log_yield{false};
+    int yield_log_active_height{-1};
+    int yield_log_best_header{-1};
+    {
+        LOCK(cs_main);
+        if (BackgroundSyncInProgress() && m_ibd_chainstate) {
+            bg_chain = m_ibd_chainstate.get();
+            const auto stale{node::ComputeChainTipStaleness(ActiveTip(), m_best_header)};
+            bool pending{false};
+            if (const CBlockIndex* tip{ActiveTip()}) {
+                if (m_best_header && m_best_header != tip &&
+                    (m_best_header->nStatus & BLOCK_HAVE_DATA) &&
+                    m_best_header->nChainWork > tip->nChainWork) {
+                    pending = true;
+                }
+                if (!pending) {
+                    for (CBlockIndex* pindex : ActiveChainstate().setBlockIndexCandidates) {
+                        if (pindex && pindex->nHeight > tip->nHeight &&
+                            (pindex->nStatus & BLOCK_HAVE_DATA)) {
+                            pending = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            const int64_t now{TicksSinceEpoch<std::chrono::seconds>(MockableSteadyClock::now())};
+            const int64_t yield_since{
+                m_background_activation_yield_since.load(std::memory_order_relaxed)};
+            const bool timeout_expired{
+                yield_since != 0 &&
+                now >= yield_since + node::BACKGROUND_ACTIVATION_YIELD_TIMEOUT_SECONDS};
+            yield_background = node::ShouldYieldBackgroundActivationToActiveTip(
+                /*background_sync=*/true,
+                stale.is_stale,
+                stale.behind_best_header > 0 && pending,
+                timeout_expired);
+            if (yield_background) {
+                if (yield_since == 0) {
+                    m_background_activation_yield_since.store(now, std::memory_order_relaxed);
+                    log_yield = true;
+                    yield_log_active_height = ActiveHeight();
+                    yield_log_best_header = m_best_header ? m_best_header->nHeight : -1;
+                }
+                m_background_activation_yields.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                m_background_activation_yield_since.store(0, std::memory_order_relaxed);
+            }
+        }
+    }
     BlockValidationState bg_state;
     bool bg_ok{true};
-    if (bg_chain && !bg_chain->ActivateBestChain(bg_state, block)) {
+    if (bg_chain && yield_background) {
+        if (log_yield) {
+            LogDebug(BCLog::VALIDATION,
+                     "background activation yielded to active tip yields=%d "
+                     "active_height=%d best_header=%d\n",
+                     static_cast<int>(m_background_activation_yields.load(std::memory_order_relaxed)),
+                     yield_log_active_height, yield_log_best_header);
+        }
+    } else if (bg_chain && !bg_chain->ActivateBestChain(bg_state, block)) {
         LogError("%s: [background] ActivateBestChain failed (%s)\n", __func__, bg_state.ToString());
         bg_ok = false;
-     }
+    }
 
     // generate/submitblock never enter ProcessBlockSync. Gossip a locally
     // signed ExactReplay attestation here so a mined block is published

@@ -50,13 +50,31 @@ Verification NEVER trusts the seller: descriptor shape is checked against a stri
 allow-list (unknown shapes fail closed), outpoints are checked in the UTXO set,
 the descriptor's terms-hash commitment is checked against the vault output, and the
 optional attestation is checked with verifymessage.
+
+Spend-signing & key-reuse safety (audit guidance):
+  * SIGHASH_ALL: every escrow/HTLC spend this SDK helps build must be signed with
+    SIGHASH_ALL. A non-ALL sighash (NONE/SINGLE/ANYONECANPAY) leaves the spend's
+    outputs malleable by a third party — never sign an escrow spend with anything
+    but ALL. (The P2MR script layer permits non-ALL by design; the safety lives
+    in HOW you sign.)
+  * CSFS key/message uniqueness: OP_CHECKSIGFROMSTACK verifies a signature over a
+    witness-supplied message, so a revealed (signature, message/preimage) pair
+    REPLAYS on any output that reuses the same key + message. Prefer the
+    transaction-bound htlc_tx() leaf (which this SDK uses) over a bare csfs()
+    leaf; never reuse a CSFS/oracle key across offers, and bind each CSFS message
+    to a unique per-offer context (the terms hash / nonce already provide this).
+  * Confirmation depth: treat a bond as real supply only at a reorg-safe depth
+    (>= COINBASE_MATURITY here); shallow/RBF-replaceable funding is rejected by
+    verify_offer, but off-chain settlement decisions must respect depth too.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
+from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -68,17 +86,81 @@ from typing import Callable, Optional
 
 Rpc = Callable[..., object]
 
+try:
+    hashlib.new("ripemd160", b"")
+
+    def _ripemd160(data: bytes) -> bytes:
+        return hashlib.new("ripemd160", data).digest()
+except ValueError:
+    try:
+        from contrib.wbtx._ripemd160 import ripemd160 as _ripemd160
+    except ImportError:
+        _fallback = Path(__file__).resolve().parents[1] / "wbtx" / "_ripemd160.py"
+        spec = importlib.util.spec_from_file_location("btx_wbtx_ripemd160", _fallback)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"unable to load RIPEMD160 fallback from {_fallback}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _ripemd160 = module.ripemd160
+
 COIN = 100_000_000
 COINBASE_MATURITY = 100
+RECOMMENDED_MIN_CONF = 20
+MAX_VERIFY_OUTPOINTS = 1000
+# Funding below this floor is practically unspendable with the default helper
+# fee (20_000 sats) once dust and script overhead are accounted for.
+MIN_BOND_SATS = 20_000 + 1_000
 
 # Protocol tag used by off-chain attestations and bundle formats. The on-chain
 # binding is a hidden P2MR `commit(sha256(terms))` leaf, not an OP_RETURN output.
 OTC_TAG = b"BTXOTC1"
 
+# Consensus locktime domain split (BIP65 / CheckLockTime): a CLTV value (and a
+# tx nLockTime) BELOW this is a block HEIGHT; AT OR ABOVE it is a Unix TIMESTAMP.
+# The whole OTC escrow is height-denominated (terms.expiry_height, the C5
+# height<expiry check), and a refund leaf must out-live the offer's expiry
+# HEIGHT. A refund_locktime >= this threshold is therefore NOT a "far-future
+# height" — it is a timestamp, and any value just above the threshold is a
+# timestamp already ~10 years in the past, i.e. a CLTV that is spendable NOW.
+# Comparing such a value numerically against a block height (refund_locktime >=
+# expiry_height) is a domain confusion that lets a seller advertise an
+# "unpullable until expiry" bond whose refund is in fact immediately spendable.
+# All escrow/vault locktimes MUST be in the height domain so the numeric
+# comparison against expiry_height is meaningful.
+LOCKTIME_THRESHOLD = 500_000_000
+# Cross-leg HTLC safety margin in BTX blocks. This is materially above the
+# observed ~6-block mainnet reorg depth (~30 minutes at ~90-second blocks).
+SWAP_REORG_MARGIN_BLOCKS = 20
+
+
+def require_block_height_locktime(value: int, field: str) -> int:
+    """Fail closed unless `value` is a CLTV/nLockTime in the BLOCK-HEIGHT domain
+    (0 < value < LOCKTIME_THRESHOLD). Rejects the timestamp domain, which would
+    make a height-vs-locktime comparison meaningless and can encode an
+    immediately-spendable refund. Returns the value for convenient chaining."""
+    if type(value) is not int or isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer block height")
+    if value <= 0 or value >= LOCKTIME_THRESHOLD:
+        raise ValueError(
+            f"{field}={value} is not a block-height locktime: it must satisfy "
+            f"0 < {field} < {LOCKTIME_THRESHOLD} (LOCKTIME_THRESHOLD). A value "
+            f">= the threshold is a Unix-timestamp locktime — comparing it to a "
+            f"block height is a domain confusion and can be spendable immediately.")
+    return value
+
 
 # ============================= terms canonicalization =============================
 
 REQUIRED_TERMS_FIELDS = ("version", "amount_sats", "expiry_height", "nonce")
+
+
+def _no_dup_pairs(pairs):
+    seen = set()
+    for k, _ in pairs:
+        if k in seen:
+            raise ValueError(f"duplicate key in terms JSON: {k!r}")
+        seen.add(k)
+    return dict(pairs)
 
 
 def _reject_floats(value, path="terms"):
@@ -108,8 +190,16 @@ def validate_terms(terms: dict) -> None:
         raise ValueError("terms.version must be integer 1")
     if type(terms["amount_sats"]) is not int or terms["amount_sats"] <= 0:
         raise ValueError("terms.amount_sats must be a positive integer (satoshis)")
+    if terms["amount_sats"] < MIN_BOND_SATS:
+        raise ValueError(
+            f"terms.amount_sats must be >= {MIN_BOND_SATS} sats to cover "
+            "default settlement/refund spend fee and dust margin"
+        )
     if type(terms["expiry_height"]) is not int or terms["expiry_height"] <= 0:
         raise ValueError("terms.expiry_height must be a positive integer (block height)")
+    # expiry_height is a block height; a value in the timestamp domain would
+    # make the refund_locktime >= expiry_height covering check meaningless.
+    require_block_height_locktime(terms["expiry_height"], "terms.expiry_height")
     if not isinstance(terms["nonce"], str) or not terms["nonce"]:
         raise ValueError("terms.nonce must be a non-empty string")
 
@@ -150,24 +240,26 @@ _TIER_B_RE = re.compile(
 _TIER_A_RE = re.compile(
     rf"^mr\(multi_pq\(2,({_KEY}),({_KEY})\),\{{refund\((\d+),({_KEY})\),commit\(({_HASH256})\)\}}\)$")
 _TIER_APLUS_RE = re.compile(
-    rf"^mr\(ctv_multi_pq\(({_HASH256}),1,({_KEY})\),\{{refund\((\d+),({_KEY})\),commit\(({_HASH256})\)\}}\)$")
+    rf"^mr\(ctv_pk\(({_HASH256}),({_KEY})\),\{{refund\((\d+),({_KEY})\),commit\(({_HASH256})\)\}}\)$")
 
 _TIER_B_UNBOUND_RE = re.compile(
     rf"^mr\(({_KEY}),\{{refund\((\d+),({_KEY})\)\}}\)$")
 _TIER_A_UNBOUND_RE = re.compile(
     rf"^mr\(multi_pq\(2,({_KEY}),({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
 _TIER_APLUS_UNBOUND_RE = re.compile(
-    rf"^mr\(ctv_multi_pq\(({_HASH256}),1,({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
+    rf"^mr\(ctv_pk\(({_HASH256}),({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
 
 
 def soft_bond_descriptor(settle_pubkey: str, refund_locktime: int, refund_pubkey: str) -> str:
     """Tier B: seller settles unilaterally pre-expiry; refund leaf after expiry."""
+    require_block_height_locktime(refund_locktime, "refund_locktime")
     return f"mr({settle_pubkey},{{refund({refund_locktime},{refund_pubkey})}})"
 
 
 def venue_bond_descriptor(settle_pubkey: str, venue_pubkey: str,
                           refund_locktime: int, refund_pubkey: str) -> str:
     """Tier A: 2-of-2 seller+venue settlement handoff; seller-only refund after expiry."""
+    require_block_height_locktime(refund_locktime, "refund_locktime")
     return (f"mr(multi_pq(2,{settle_pubkey},{venue_pubkey}),"
             f"{{refund({refund_locktime},{refund_pubkey})}})")
 
@@ -175,10 +267,11 @@ def venue_bond_descriptor(settle_pubkey: str, venue_pubkey: str,
 def ctv_bond_descriptor(ctv_template_hash_hex: str, settle_pubkey: str,
                         refund_locktime: int, refund_pubkey: str) -> str:
     """Tier A+: settlement constrained by covenant to one pre-committed transaction."""
+    require_block_height_locktime(refund_locktime, "refund_locktime")
     if (not isinstance(ctv_template_hash_hex, str) or
             not re.fullmatch(_HASH256, ctv_template_hash_hex)):
         raise ValueError("ctv_template_hash_hex must be 32 bytes of hex")
-    return (f"mr(ctv_multi_pq({ctv_template_hash_hex.lower()},1,{settle_pubkey}),"
+    return (f"mr(ctv_pk({ctv_template_hash_hex.lower()},{settle_pubkey}),"
             f"{{refund({refund_locktime},{refund_pubkey})}})")
 
 
@@ -206,21 +299,39 @@ def parse_bond_descriptor(descriptor: str) -> BondInfo:
     desc = strip_checksum(descriptor).replace(" ", "")
     m = _TIER_APLUS_RE.match(desc)
     if m:
-        return BondInfo(tier="A+", ctv_hash=m.group(1).lower(), settle_pubkey=m.group(2),
+        return _validated_bond(BondInfo(tier="A+", ctv_hash=m.group(1).lower(), settle_pubkey=m.group(2),
                         refund_locktime=int(m.group(3)), refund_pubkey=m.group(4),
-                        commitment_hash=m.group(5).lower())
+                        commitment_hash=m.group(5).lower()))
     m = _TIER_A_RE.match(desc)
     if m:
-        return BondInfo(tier="A", settle_pubkey=m.group(1), venue_pubkey=m.group(2),
+        return _validated_bond(BondInfo(tier="A", settle_pubkey=m.group(1), venue_pubkey=m.group(2),
                         refund_locktime=int(m.group(3)), refund_pubkey=m.group(4),
-                        commitment_hash=m.group(5).lower())
+                        commitment_hash=m.group(5).lower()))
     m = _TIER_B_RE.match(desc)
     if m:
-        return BondInfo(tier="B", settle_pubkey=m.group(1),
+        return _validated_bond(BondInfo(tier="B", settle_pubkey=m.group(1),
                         refund_locktime=int(m.group(2)), refund_pubkey=m.group(3),
-                        commitment_hash=m.group(4).lower())
+                        commitment_hash=m.group(4).lower()))
     raise ValueError("unrecognized bond descriptor shape (fail-closed); "
                      "expected a terms-bound tier A+/A/B form")
+
+
+def _validated_bond(bond: BondInfo) -> BondInfo:
+    """Fail closed on a parsed bond whose refund locktime is not a block height.
+    A timestamp-domain refund_locktime (>= LOCKTIME_THRESHOLD) would make the
+    downstream `refund_locktime >= expiry_height` covering check meaningless and
+    can be an immediately-spendable early-exit path — exactly the class of
+    hidden early exit parse_bond_descriptor promises to reject."""
+    require_block_height_locktime(bond.refund_locktime, "refund_locktime")
+    if bond.tier == "A":
+        settle_key = (bond.settle_pubkey or "").lower()
+        venue_key = (bond.venue_pubkey or "").lower()
+        if settle_key == venue_key:
+            raise ValueError(
+                "tier A descriptor has duplicate multi_pq keys "
+                "(settle_pubkey == venue_pubkey): this collapses 2-of-2 to one key"
+            )
+    return bond
 
 
 def bind_bond_descriptor(descriptor: str, terms: dict) -> str:
@@ -243,7 +354,7 @@ def bind_bond_descriptor(descriptor: str, terms: dict) -> str:
 
     m = _TIER_APLUS_UNBOUND_RE.match(desc)
     if m:
-        return (f"mr(ctv_multi_pq({m.group(1)},1,{m.group(2)}),"
+        return (f"mr(ctv_pk({m.group(1)},{m.group(2)}),"
                 f"{{refund({m.group(3)},{m.group(4)}),commit({want})}})")
     m = _TIER_A_UNBOUND_RE.match(desc)
     if m:
@@ -430,9 +541,11 @@ class OfferVerification:
         }
 
 
-def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
+def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = RECOMMENDED_MIN_CONF,
                  require_attestation: bool = False,
-                 expected_challenge: Optional[str] = None) -> OfferVerification:
+                 expected_challenge: Optional[str] = None,
+                 expected_venue_pubkey: Optional[str] = None,
+                 expected_ctv_template_hash: Optional[str] = None) -> OfferVerification:
     """
     Run the full §4.3 verification against a local node. Returns a report whose
     `ok` is True only if every executed check passed. Trust-minimized: nothing is
@@ -453,9 +566,26 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
     if type(min_conf) is not int or min_conf < 0:
         check("parameters", False, "min_conf must be a non-negative integer")
         return OfferVerification(False, tier, address, 0, 0, checks)
+    if min_conf < RECOMMENDED_MIN_CONF:
+        check(
+            "min-conf-advisory",
+            True,
+            f"min_conf={min_conf} is below the recommended reorg-safe depth "
+            f"({RECOMMENDED_MIN_CONF})",
+        )
     if (expected_challenge is not None and
             (not isinstance(expected_challenge, str) or not expected_challenge)):
         check("parameters", False, "expected_challenge must be a non-empty string")
+        return OfferVerification(False, tier, address, 0, 0, checks)
+    if (expected_venue_pubkey is not None and
+            (not isinstance(expected_venue_pubkey, str) or not expected_venue_pubkey)):
+        check("parameters", False, "expected_venue_pubkey must be a non-empty string")
+        return OfferVerification(False, tier, address, 0, 0, checks)
+    if (expected_ctv_template_hash is not None and
+            (not isinstance(expected_ctv_template_hash, str) or
+             not re.fullmatch(_HASH256, expected_ctv_template_hash))):
+        check("parameters", False,
+              "expected_ctv_template_hash must be a non-empty 32-byte hex string")
         return OfferVerification(False, tier, address, 0, 0, checks)
 
     # C1 — terms are well-formed and canonicalizable.
@@ -503,6 +633,41 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
                  f" ctv_template_hash={bond.ctv_hash} terms_match={ctv_terms_ok}")
               + ("" if bond.refund_locktime >= expiry else
                  " (refund unlocks BEFORE offer expiry)"))
+        # Tier A's "the venue can grief but never take" guarantee holds ONLY if
+        # the 2-of-2 venue key is an independent party the buyer trusts. Nothing
+        # on-chain proves that: a seller can set venue_pubkey to a second key it
+        # controls, making the settlement path unilaterally seller-signable so
+        # the seller pulls the bond mid-quote (phantom supply). The buyer must
+        # PIN the venue key. Fail closed for tier A unless it is pinned and matches.
+        if bond.tier == "A":
+            if expected_venue_pubkey is None:
+                check("venue-key", False,
+                      f"tier A bond requires expected_venue_pubkey to prove the venue "
+                      f"is an independent party (descriptor venue_pubkey={bond.venue_pubkey}); "
+                      f"without it the 2-of-2 could be seller+seller and pullable mid-quote")
+            else:
+                venue_ok = (bond.venue_pubkey or "").lower() == expected_venue_pubkey.lower()
+                check("venue-key", venue_ok,
+                      f"descriptor venue_pubkey={bond.venue_pubkey}; "
+                      f"expected={expected_venue_pubkey}")
+        elif expected_venue_pubkey is not None:
+            check("venue-key", False,
+                  f"expected_venue_pubkey pins tier A but bond is tier {bond.tier}")
+        if bond.tier == "A+":
+            if expected_ctv_template_hash is None:
+                check("ctv-template", False,
+                      "tier A+ requires expected_ctv_template_hash (independently "
+                      "derived by the buyer from the agreed settlement outputs) to "
+                      "prove the covenant pays the buyer; the descriptor+terms hash "
+                      "is seller-supplied")
+            else:
+                ctv_ok = bond.ctv_hash.lower() == expected_ctv_template_hash.lower()
+                check("ctv-template", ctv_ok,
+                      f"descriptor ctv_template_hash={bond.ctv_hash}; "
+                      f"expected={expected_ctv_template_hash}")
+        elif expected_ctv_template_hash is not None:
+            check("ctv-template", False,
+                  f"expected_ctv_template_hash pins tier A+ but bond is tier {bond.tier}")
     except Exception as e:  # noqa: BLE001
         check("descriptor-shape", False, str(e))
         return OfferVerification(False, tier, address, 0, expiry, checks)
@@ -511,6 +676,13 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
     outpoints = bundle["bond"].get("outpoints", [])
     if not isinstance(outpoints, list):
         check("outpoints", False, "bond.outpoints must be a JSON array")
+        return OfferVerification(False, tier, address, 0, expiry, checks)
+    if len(outpoints) > MAX_VERIFY_OUTPOINTS:
+        check(
+            "outpoints",
+            False,
+            f"bond.outpoints has {len(outpoints)} entries; max allowed is {MAX_VERIFY_OUTPOINTS}",
+        )
         return OfferVerification(False, tier, address, 0, expiry, checks)
     seen = set()
     all_utxos_ok = len(outpoints) > 0
@@ -553,6 +725,44 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
                                  f"not the bond vault {address}") and all_utxos_ok
             continue
         confs = int(utxo.get("confirmations", 0))
+        # RBF only matters while the funding is UNCONFIRMED (it can then be
+        # fee-bump-replaced away after the buyer acts — the real T5 danger). Once
+        # confirmed, BIP125 signaling is moot (a mined tx cannot be replaced; only
+        # a reorg could undo it, which the confirmation-depth / min-conf-advisory
+        # checks cover). So only inspect the raw tx for a 0-conf outpoint — and a
+        # 0-conf tx is in the mempool, where getrawtransaction works WITHOUT
+        # -txindex, preserving the SDK's stock-node ("no txindex needed") promise.
+        if confs == 0:
+            rbf_note = ""
+            try:
+                tx_verbose = rpc("getrawtransaction", op["txid"], True)
+                if not isinstance(tx_verbose, dict):
+                    raise ValueError("getrawtransaction did not return a JSON object")
+                vin = tx_verbose.get("vin")
+                if not isinstance(vin, list):
+                    raise ValueError("getrawtransaction response has no vin array")
+                for i, txin in enumerate(vin):
+                    if not isinstance(txin, dict):
+                        raise ValueError(f"vin[{i}] is not a JSON object")
+                    sequence = txin.get("sequence")
+                    if type(sequence) is not int:
+                        raise ValueError(f"vin[{i}].sequence is missing or not an integer")
+                    if sequence < 0xFFFFFFFE:
+                        rbf_note = " and signals BIP125 replaceability"
+                        break
+            except Exception as e:  # noqa: BLE001
+                rbf_note = f" (BIP125 status undetermined: {e})"
+            all_utxos_ok = check(
+                "rbf-replaceable", False,
+                f"{op['txid']}:{op['vout']} is unconfirmed (0 conf){rbf_note}",
+            ) and all_utxos_ok
+            continue
+        # Confirmed: RBF is moot; do not fetch the raw tx (would need -txindex) and
+        # do not reject on the RBF flag (Core wallets signal RBF by default).
+        all_utxos_ok = check(
+            "rbf-replaceable", True,
+            f"{op['txid']}:{op['vout']} is confirmed (RBF moot post-confirmation)",
+        ) and all_utxos_ok
         if confs < min_conf:
             all_utxos_ok = check("outpoints", False,
                                  f"{op['txid']}:{op['vout']} has {confs} confirmations "
@@ -672,9 +882,49 @@ def build_bond_refund(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
     return res["hex"]
 
 
+def check_swap_timeout_asymmetry(btx_refund_height: int, other_leg_deadline_height: int,
+                                 reorg_margin_blocks: int = SWAP_REORG_MARGIN_BLOCKS) -> None:
+    """Fail closed unless the BTX refund is safely LATER than the other leg deadline:
+    other_leg_deadline_height + reorg_margin_blocks < btx_refund_height. Both
+    values are BTX block heights (convert an EVM unix timeout first, e.g.
+    current_height + (evm_timeout_unix - now_unix)//block_seconds). This prevents
+    claim-one-leg/refund-the-other theft and leaves reorg/censorship margin after
+    a preimage-revealing claim.
+
+    NECESSARY BUT NOT SUFFICIENT: callers MUST also enforce the safe Model-B
+    assignment before funding:
+      - preimage-holder FUNDS the BTX/long leg, and
+      - preimage-holder CLAIMS the shorter/other leg first (the one that expires first).
+    If the preimage-holder instead claims the BTX/long leg, this inequality alone
+    does not prevent claim-one-leg/refund-the-other theft."""
+    require_block_height_locktime(btx_refund_height, "btx_refund_height")
+    require_block_height_locktime(other_leg_deadline_height, "other_leg_deadline_height")
+    if (type(reorg_margin_blocks) is not int or isinstance(reorg_margin_blocks, bool) or
+            reorg_margin_blocks < 1):
+        raise ValueError("reorg_margin_blocks must be an integer >= 1")
+    if other_leg_deadline_height + reorg_margin_blocks >= btx_refund_height:
+        required_min = other_leg_deadline_height + reorg_margin_blocks + 1
+        raise ValueError(
+            "unsafe cross-leg timeout asymmetry: requires "
+            "other_leg_deadline_height + reorg_margin_blocks < btx_refund_height; "
+            f"got btx_refund_height={btx_refund_height}, "
+            f"other_leg_deadline_height={other_leg_deadline_height}, "
+            f"reorg_margin_blocks={reorg_margin_blocks}. "
+            f"Need btx_refund_height >= {required_min}.")
+
+
 def swap_vault_descriptor(preimage_hash160_hex: str, claimer_pubkey: str, refund_locktime: int,
                           sender_pubkey: str) -> str:
-    """Stage-2, two-leaf HTLC settlement vault (identical to the wBTX Model-B leg)."""
+    """Stage-2, two-leaf HTLC settlement vault (identical to the wBTX Model-B leg).
+
+    Before funding: validate HTLC refund-leaf timeout asymmetry with
+    check_swap_timeout_asymmetry(...) AND ensure preimage assignment follows the
+    safe flow (preimage-holder funds BTX/long leg and claims shorter/other leg first).
+    """
+    # Same domain rule as the bond refund: the HTLC refund leaf's locktime must
+    # be a block height so its relation to the offer/expiry is meaningful and it
+    # is not immediately spendable as a past timestamp.
+    require_block_height_locktime(refund_locktime, "refund_locktime")
     return (f"mr(htlc_tx({preimage_hash160_hex},{claimer_pubkey}),"
             f"refund({refund_locktime},{sender_pubkey}))")
 
@@ -685,13 +935,24 @@ def new_preimage() -> bytes:
 
 def swap_hash160_hex(preimage: bytes) -> str:
     """RIPEMD160(SHA256(preimage)) — same hashlock domain as the EVM HTLC contract."""
-    return hashlib.new("ripemd160", hashlib.sha256(preimage).digest()).hexdigest()
+    return _ripemd160(hashlib.sha256(preimage).digest()).hex()
 
 
 def build_swap_claim(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
                      vout: int, preimage: bytes, dest_address: str,
                      fee_sat: int = 20000) -> str:
-    """Buyer claims the settlement vault with the preimage (reveals it on-chain)."""
+    """Build+sign the preimage-revealing claim tx (via buildhtlcclaim) and return hex; does not broadcast.
+
+    WARNING: broadcasting reveals the preimage on-chain. Confirm the HTLC funding
+    output is deeply confirmed and not RBF-replaceable before broadcasting; revealing
+    against unconfirmed or replaceable funding lets the counterparty replace that
+    funding and reuse the now-public preimage to take the other (cross-chain) leg.
+    The integrator MUST also validate cross-leg timeout asymmetry with
+    check_swap_timeout_asymmetry(...) before funding, and MUST keep the safe flow:
+    preimage-holder funds the BTX/long leg and claims the shorter/other leg first.
+    Timeout ordering without that preimage-role assignment is insufficient, per
+    doc §5 and WBTXAtomicSwapHTLC.sol.
+    """
     try:
         res = rpc_wallet("buildhtlcclaim", descriptor_with_checksum,
                          {"txid": txid, "vout": vout}, preimage.hex(),
@@ -724,19 +985,32 @@ def build_swap_refund(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
 
 def selftest() -> None:
     """Offline sanity of the pure helpers (no node needed). Raises on failure."""
-    terms = {"version": 1, "amount_sats": 12345, "expiry_height": 100,
+    terms = {"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 100,
              "nonce": "00" * 16, "b": [1, {"a": "x"}]}
     # Canonicalization is order-insensitive and whitespace-free.
-    reordered = json.loads(json.dumps(terms)[::-1][::-1])
+    reordered = json.loads(json.dumps(terms)[::-1][::-1], object_pairs_hook=_no_dup_pairs)
     assert terms_hash(terms) == terms_hash(dict(reversed(list(reordered.items()))))
     assert canonical_terms_bytes(terms) == canonical_terms_bytes(reordered)
+    # Duplicate JSON keys are rejected at parse boundaries.
+    try:
+        json.loads('{"a":1,"a":2}', object_pairs_hook=_no_dup_pairs)
+        raise AssertionError("duplicate object keys must be rejected")
+    except ValueError:
+        pass
     # Floats are rejected.
     try:
-        terms_hash({"version": 1, "amount_sats": 1, "expiry_height": 1,
+        terms_hash({"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 1,
                     "nonce": "00", "price": 1.5})
         raise AssertionError("float in terms must be rejected")
     except ValueError:
         pass
+    # Bond amount floor rejects permanently unclaimable dust-level offers.
+    try:
+        validate_terms({"version": 1, "amount_sats": 1, "expiry_height": 1, "nonce": "x"})
+        raise AssertionError("sub-floor amount_sats must be rejected")
+    except ValueError:
+        pass
+    validate_terms({"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 1, "nonce": "x"})
     assert commitment_leaf_expr(terms) == f"commit({terms_hash_hex(terms)})"
     # Descriptor round-trips for all tiers. create_offer performs this binding
     # automatically before funding; the pure helper is pinned here.
@@ -747,8 +1021,15 @@ def selftest() -> None:
     a_desc = bind_bond_descriptor(venue_bond_descriptor(k1, k3, 901, k2), terms)
     a = parse_bond_descriptor(a_desc)
     assert (a.tier, a.venue_pubkey, a.refund_locktime) == ("A", k3, 901)
+    # Tier A duplicate multi_pq keys are rejected (must remain independent 2-of-2).
+    try:
+        parse_bond_descriptor(bind_bond_descriptor(venue_bond_descriptor(k1, k1, 901, k2), terms))
+        raise AssertionError("tier A duplicate settle/venue keys must be rejected")
+    except ValueError:
+        pass
     ap_desc = bind_bond_descriptor(ctv_bond_descriptor("11" * 32, k1, 902, k2), terms)
     ap = parse_bond_descriptor(ap_desc)
+    assert f"ctv_pk({'11' * 32},{k1})" in ap_desc
     assert (ap.tier, ap.ctv_hash, ap.refund_locktime) == ("A+", "11" * 32, 902)
     assert b.commitment_hash == a.commitment_hash == ap.commitment_hash == terms_hash_hex(terms)
     # SLH-DSA key forms parse too.
@@ -763,6 +1044,107 @@ def selftest() -> None:
             raise AssertionError(f"must fail closed: {bad[:40]}...")
         except ValueError:
             pass
+    # Locktime domain guard: a refund_locktime in the TIMESTAMP domain
+    # (>= LOCKTIME_THRESHOLD) is a hidden immediately-spendable early exit and
+    # MUST fail closed everywhere — parse, build, and terms validation.
+    ts = LOCKTIME_THRESHOLD              # first timestamp-domain value
+    ts_lock = LOCKTIME_THRESHOLD + 1     # a timestamp ~10 years in the past
+    # Builders reject it.
+    for build in (
+        lambda: soft_bond_descriptor(k1, ts_lock, k2),
+        lambda: venue_bond_descriptor(k1, k3, ts_lock, k2),
+        lambda: ctv_bond_descriptor("11" * 32, k1, ts_lock, k2),
+        lambda: swap_vault_descriptor("ab" * 20, k1, ts_lock, k2),
+    ):
+        try:
+            build()
+            raise AssertionError("timestamp-domain refund_locktime must be rejected at build")
+        except ValueError:
+            pass
+    # The verifier's fail-closed parser rejects a hand-crafted timestamp-domain
+    # bond even though it is numerically >= a (height) expiry.
+    evil_terms = {"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 100, "nonce": "00" * 16}
+    evil_desc = bind_bond_descriptor(f"mr({k1},{{refund({ts_lock},{k2})}})", evil_terms)
+    try:
+        parse_bond_descriptor(evil_desc)
+        raise AssertionError("parse_bond_descriptor must reject a timestamp-domain refund locktime")
+    except ValueError:
+        pass
+    assert ts_lock >= evil_terms["expiry_height"]  # the confusion the numeric check missed
+    # A height-domain bond at exactly the threshold-minus-one still parses.
+    ok_desc = bind_bond_descriptor(f"mr({k1},{{refund({ts - 1},{k2})}})", evil_terms)
+    assert parse_bond_descriptor(ok_desc).refund_locktime == ts - 1
+    # terms.expiry_height in the timestamp domain is rejected.
+    try:
+        validate_terms({"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": ts, "nonce": "x"})
+        raise AssertionError("timestamp-domain expiry_height must be rejected")
+    except ValueError:
+        pass
+
+    # Tier-A venue-key pinning: an empty expected_venue_pubkey is rejected in the
+    # offline parameter-validation stage (no node touched before it).
+    vrep = verify_offer(None, {"version": 1, "terms": {}}, expected_venue_pubkey="")
+    assert any(c.name == "parameters" and not c.ok for c in vrep.checks)
+    # Tier-A+ CTV pinning: an empty expected_ctv_template_hash is rejected in the
+    # same offline parameter-validation stage (no node touched before it).
+    vrep = verify_offer(None, {"version": 1, "terms": {}}, expected_ctv_template_hash="")
+    assert any(c.name == "parameters" and not c.ok for c in vrep.checks)
+    # Pinned tier requirements fail closed when the descriptor is another tier.
+    tier_terms = {"version": 1, "amount_sats": MIN_BOND_SATS, "expiry_height": 100, "nonce": "11" * 16}
+    tier_b_desc = bind_bond_descriptor(soft_bond_descriptor(k1, 900, k2), tier_terms)
+
+    def _tier_selftest_rpc(method: str, *params):
+        if method == "getdescriptorinfo":
+            desc = params[0]
+            return {"checksum": hashlib.sha256(str(desc).encode("ascii")).hexdigest()[:8]}
+        if method == "deriveaddresses":
+            desc_ck = params[0]
+            return [f"btx_test_{hashlib.sha256(str(desc_ck).encode('ascii')).hexdigest()[:16]}"]
+        if method == "getblockcount":
+            return 1
+        raise AssertionError(f"unexpected rpc call in selftest: {method} {params!r}")
+
+    tier_bundle = {
+        "version": 1,
+        "terms": tier_terms,
+        "bond": {"descriptor": tier_b_desc, "tier": "B", "outpoints": []},
+    }
+    vrep = verify_offer(_tier_selftest_rpc, tier_bundle, expected_venue_pubkey=k3)
+    assert any(c.name == "venue-key" and not c.ok and
+               "pins tier A but bond is tier B" in c.detail for c in vrep.checks)
+    vrep = verify_offer(_tier_selftest_rpc, tier_bundle, expected_ctv_template_hash="22" * 32)
+    assert any(c.name == "ctv-template" and not c.ok and
+               "pins tier A+ but bond is tier B" in c.detail for c in vrep.checks)
+    # Outpoint bundles above the hard cap are rejected before per-outpoint RPC churn.
+    oversized_bundle = {
+        "version": 1,
+        "terms": tier_terms,
+        "bond": {
+            "descriptor": tier_b_desc,
+            "tier": "B",
+            "outpoints": [{"txid": "11" * 32, "vout": i} for i in range(MAX_VERIFY_OUTPOINTS + 1)],
+        },
+    }
+    vrep = verify_offer(_tier_selftest_rpc, oversized_bundle)
+    assert any(c.name == "outpoints" and not c.ok and
+               "max allowed" in c.detail for c in vrep.checks)
+
+    # Cross-leg timeout asymmetry helper: other+margin must be STRICTLY below BTX.
+    check_swap_timeout_asymmetry(btx_refund_height=1000, other_leg_deadline_height=900)
+    check_swap_timeout_asymmetry(btx_refund_height=921, other_leg_deadline_height=900)
+    try:
+        check_swap_timeout_asymmetry(btx_refund_height=920, other_leg_deadline_height=900)
+        raise AssertionError("boundary case must fail: other+margin must be strictly lower")
+    except ValueError:
+        pass
+    try:
+        check_swap_timeout_asymmetry(btx_refund_height=910, other_leg_deadline_height=900)
+        raise AssertionError("too-tight timeout asymmetry must fail closed")
+    except ValueError:
+        pass
+    # swap_hash160 fallback path uses same test vector as wBTX helper.
+    assert swap_hash160_hex(bytes([0x42]) * 32) == "8739f40ec4dbf569dcb38134c6e7310908566981"
+
     # Amount formatting.
     assert sats_to_btx_str(5_000_000_000_000) == "50000.00000000"
     assert to_sat("50000.00000000") == 5_000_000_000_000
@@ -790,7 +1172,7 @@ def _make_cli_rpc(cli_cmd: str) -> Rpc:
         if not text:
             return None
         try:
-            return json.loads(text)
+            return json.loads(text, object_pairs_hook=_no_dup_pairs)
         except json.JSONDecodeError:
             return text  # bare-string results (e.g. signmessage)
     return rpc
@@ -798,7 +1180,7 @@ def _make_cli_rpc(cli_cmd: str) -> Rpc:
 
 def _load_json(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return json.load(f, object_pairs_hook=_no_dup_pairs)
 
 
 def main(argv=None) -> int:
@@ -819,10 +1201,16 @@ def main(argv=None) -> int:
 
     sp = sub.add_parser("verify", help="verify an offer bundle against the node")
     sp.add_argument("bundle_json")
-    sp.add_argument("--min-conf", type=int, default=20)
+    sp.add_argument("--min-conf", type=int, default=RECOMMENDED_MIN_CONF)
     sp.add_argument("--require-attestation", action="store_true")
     sp.add_argument("--expected-challenge", default=None,
                     help="fresh buyer/venue challenge that the attestation must match")
+    sp.add_argument("--expected-venue-pubkey", default=None,
+                    help="for tier A: the independent venue's pubkey the 2-of-2 must "
+                         "use; required to trust a tier-A bond (else it fails closed)")
+    sp.add_argument("--expected-ctv-template-hash", default=None,
+                    help="for tier A+: buyer-derived settlement CTV template hash that "
+                         "must match the descriptor covenant (else it fails closed)")
 
     sp = sub.add_parser("watch", help="watch a bundle's bond outpoints until spent/expired")
     sp.add_argument("bundle_json")
@@ -856,7 +1244,9 @@ def main(argv=None) -> int:
     if args.cmd == "verify":
         report = verify_offer(rpc, _load_json(args.bundle_json), min_conf=args.min_conf,
                               require_attestation=args.require_attestation,
-                              expected_challenge=args.expected_challenge)
+                              expected_challenge=args.expected_challenge,
+                              expected_venue_pubkey=args.expected_venue_pubkey,
+                              expected_ctv_template_hash=args.expected_ctv_template_hash)
         print(json.dumps(report.as_dict(), indent=2))
         return 0 if report.ok else 1
 
@@ -882,14 +1272,17 @@ def main(argv=None) -> int:
 
 
 __all__ = [
-    "OTC_TAG", "COINBASE_MATURITY", "REQUIRED_TERMS_FIELDS", "validate_terms", "canonical_terms_bytes",
+    "OTC_TAG", "COINBASE_MATURITY", "RECOMMENDED_MIN_CONF", "MIN_BOND_SATS",
+    "SWAP_REORG_MARGIN_BLOCKS", "REQUIRED_TERMS_FIELDS",
+    "validate_terms", "canonical_terms_bytes",
     "terms_hash", "terms_hash_hex", "commitment_leaf_expr",
     "attestation_message", "soft_bond_descriptor", "venue_bond_descriptor",
     "ctv_bond_descriptor", "BondInfo", "parse_bond_descriptor", "bind_bond_descriptor", "strip_checksum",
     "add_checksum", "bond_address", "refund_key_address", "ensure_refund_attestation_descriptor",
     "sats_to_btx_str", "to_sat", "create_offer",
     "Check", "OfferVerification", "verify_offer", "watch_offer", "build_bond_refund",
-    "swap_vault_descriptor", "new_preimage", "swap_hash160_hex", "build_swap_claim",
+    "check_swap_timeout_asymmetry", "swap_vault_descriptor", "new_preimage", "swap_hash160_hex",
+    "build_swap_claim",
     "build_swap_refund", "selftest",
 ]
 

@@ -160,4 +160,20 @@ BOOST_AUTO_TEST_CASE(honest_far_behind_extending_catchup_stays_stale)
     BOOST_CHECK(stale.is_stale);
 }
 
+BOOST_AUTO_TEST_CASE(background_activation_yield_preserves_both_invariants)
+{
+    BOOST_CHECK(!node::ShouldYieldBackgroundActivationToActiveTip(
+        /*background_sync=*/false, /*active_is_stale=*/true,
+        /*pending=*/true, /*timeout_expired=*/false));
+    BOOST_CHECK(node::ShouldYieldBackgroundActivationToActiveTip(
+        true, /*active_is_stale=*/true, false, /*timeout_expired=*/false));
+    BOOST_CHECK(node::ShouldYieldBackgroundActivationToActiveTip(
+        true, false, /*pending=*/true, false));
+    BOOST_CHECK(!node::ShouldYieldBackgroundActivationToActiveTip(
+        true, true, true, /*timeout_expired=*/true));
+    BOOST_CHECK(!node::ShouldYieldBackgroundActivationToActiveTip(
+        true, false, false, false));
+    BOOST_CHECK_EQUAL(node::BACKGROUND_ACTIVATION_YIELD_TIMEOUT_SECONDS, 8);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

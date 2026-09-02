@@ -66,21 +66,26 @@ addnode=node.btx.tools:19335
 addnode=146.190.179.86:19335
 addnode=164.90.246.229:19335
 
-# Published mainnet ExactReplay attestors (public keys only).
-# Same set GPU attestors and following archives return from
-# getmatmultrustedstatus / getfinalityinfo. P2P seeds do not push keys.
-matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
-matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
-matmultrustedthreshold=1
+# Default: this node ExactReplays. No attestor pin.
+# The network designates no canonical ExactReplay attestors.
+# Trust is local and operator-chosen. Trusted-mirror
+# (matmulvalidation=trusted) is an explicit opt-in for machines that
+# cannot ExactReplay: supply YOUR own matmultrustedpubkey lines (prefer
+# M≥2 independent signers you can reach). Discover reachable
+# attestors/archives via the MATMUL_ATTESTATION_ARCHIVE /
+# MATMUL_TRUSTED_MIRROR service flags. P2P seeds do not push keys.
+matmulvalidation=consensus
 ```
 
 Notes:
 
 - `19335` is the BTX mainnet P2P port.
 - `19334` is the BTX mainnet default RPC port.
-- After `btxd` is up, `btx-cli getmatmultrustedstatus` must show
-  `configured=true` and the two pubkeys above. That is the mining/archive
-  bootstrap pin (same RPC GPU attestors and following archives serve).
+- After `btxd` is up, `btx-cli getmatmultrustedstatus` on this default
+  config shows `configured=false` (no pin). That is expected. There is
+  no shipped attestor set. If you opted into `matmulvalidation=trusted`,
+  confirm `trusted_signer_pubkeys` matches the keys *you* listed, not a
+  repository-published list.
 - `addnode=` introduces peers while preserving broader discovery. In 0.34
   those hosts are discovery relays (`-matmulvalidation=relay`), not MatMul
   authority. Do not treat `getbestblockhash` on a public seed as the chain.
@@ -193,13 +198,16 @@ miner/pool coinbase destination to the same multisig-derived payout address.
 
 A mining/submit node must also:
 
-- run `-blocksonly=0` (otherwise winning blocks often never reach the signer);
-- set `-matmultrustedpubkey=<signer>` and `-matmultrustedthreshold` even in
-  `-matmulvalidation=consensus` so `getmatmulattestedtip` is populated
-  (ExactReplay is unchanged);
-- build templates on that attested tip and never stack unattested candidates.
+- run `-blocksonly=0` (otherwise winning blocks often never reach attestors
+  you chose to follow);
+- keep `-matmulvalidation=consensus` (this node ExactReplays; no pin
+  required). Optionally pin attestors you independently trust so
+  `getmatmulattestedtip` is populated — ExactReplay is unchanged; the
+  network designates no canonical signers;
+- if you use that optional telemetry pin, build templates on the attested
+  tip you configured and never stack unattested candidates.
 
 See [`btx-matmul-v4.7-gpu-operator-runbook.md`](btx-matmul-v4.7-gpu-operator-runbook.md)
-section "Mining on the attested chain". Canonical rate is gated by the signer's
-ExactReplay/attestation throughput, not by hashrate. 1-of-1 is a single point
-of failure.
+section "Mining on the attested chain". Attested-tip tooling is gated by
+the ExactReplay/attestation throughput of the signers *you* pin, not by
+hashrate. 1-of-1 is a single point of failure for that local pin.

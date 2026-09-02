@@ -9,7 +9,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
-/// @dev Optional, governance-installed transfer-compliance hook. Reverts to block a transfer/mint/burn.
+/// @dev Optional, governance-installed transfer-compliance hook for holder transfers.
 ///      Unset by default (the token is credibly neutral); only a Timelock can install one.
 interface IComplianceHook {
     function check(address from, address to, uint256 amount) external view;
@@ -42,11 +42,12 @@ contract WBTX is ERC20, ERC20Permit, AccessControlDefaultAdminRules {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
 
-    bytes32 public constant MINTER_ROLE   = keccak256("MINTER_ROLE");
-    bytes32 public constant BURNER_ROLE   = keccak256("BURNER_ROLE");
     bytes32 public constant PAUSER_ROLE   = keccak256("PAUSER_ROLE");   // fast, low-trust trigger
     bytes32 public constant UNPAUSER_ROLE = keccak256("UNPAUSER_ROLE"); // separate / higher-trust
     bytes32 public constant RESCUER_ROLE  = keccak256("RESCUER_ROLE");
+    uint256 public constant HOOK_GAS_CAP  = 100_000;
+
+    address public immutable bridge;
 
     // EIP-3009 typehashes (Circle FiatToken).
     bytes32 public constant TRANSFER_WITH_AUTHORIZATION_TYPEHASH =
@@ -79,14 +80,23 @@ contract WBTX is ERC20, ERC20Permit, AccessControlDefaultAdminRules {
     error AuthExpired();
     error AuthUsedOrCanceled();
     error CallerMustBePayee();
+    error NotBridge();
+    error BadComplianceHook();
 
     /// @param admin      DEFAULT_ADMIN (use a Timelock owned by a multisig). 2-step + `adminDelay`.
     /// @param adminDelay enforced delay (seconds) on DEFAULT_ADMIN transfer (e.g. 2 days).
-    constructor(address admin, uint48 adminDelay)
+    /// @param bridge_    immutable bridge authority for issuance primitives.
+    constructor(address admin, uint48 adminDelay, address bridge_)
         ERC20("Wrapped BTX", "wBTX")
         ERC20Permit("Wrapped BTX")
         AccessControlDefaultAdminRules(adminDelay, admin)
-    {}
+    {
+        // The bridge is the sole issuance authority and is immutable, so a zero
+        // or wrong address here would permanently brick mint/burn/mintRefund with
+        // no recovery. Fail closed at deploy.
+        if (bridge_ == address(0)) revert NotBridge();
+        bridge = bridge_;
+    }
 
     function decimals() public pure override returns (uint8) { return 18; }
 
@@ -94,11 +104,27 @@ contract WBTX is ERC20, ERC20Permit, AccessControlDefaultAdminRules {
 
     modifier whenIssuanceNotPaused() { if (issuancePaused) revert IssuanceIsPaused(); _; }
 
-    function mint(address to, uint256 value) external onlyRole(MINTER_ROLE) whenIssuanceNotPaused {
+    function mint(address to, uint256 value) external whenIssuanceNotPaused {
+        if (msg.sender != bridge) revert NotBridge();
         _mint(to, value);
     }
-    function burn(address from, uint256 value) external onlyRole(BURNER_ROLE) whenIssuanceNotPaused {
+
+    function burn(address from, uint256 value) external whenIssuanceNotPaused {
+        if (msg.sender != bridge) revert NotBridge();
+        _spendAllowance(from, msg.sender, value);
         _burn(from, value);
+    }
+
+    function burnFrom(address from, uint256 value) external whenIssuanceNotPaused {
+        _spendAllowance(from, msg.sender, value);
+        _burn(from, value);
+    }
+
+    /// @notice Pause-independent redemption-refund issuance path. Used so emergency issuance pauses
+    ///         cannot strand already-burned redeems awaiting governance refund.
+    function mintRefund(address to, uint256 value) external {
+        if (msg.sender != bridge) revert NotBridge();
+        _mint(to, value);
     }
 
     // ---- pause (asymmetric trust: fast to pause, slow to unpause) ----
@@ -108,15 +134,25 @@ contract WBTX is ERC20, ERC20Permit, AccessControlDefaultAdminRules {
 
     // ---- optional compliance hook (default OFF) ----
 
-    function setComplianceHook(IComplianceHook hook) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        complianceHook = hook;
-        emit ComplianceHookUpdated(address(hook));
+    function setComplianceHook(IComplianceHook newHook) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        address hookAddress = address(newHook);
+        if (hookAddress != address(0) && hookAddress.code.length == 0) revert BadComplianceHook();
+        complianceHook = newHook;
+        emit ComplianceHookUpdated(hookAddress);
     }
 
-    /// @dev Single transfer/mint/burn chokepoint; consults the compliance hook iff one is installed.
+    function clearComplianceHook() external onlyRole(PAUSER_ROLE) {
+        complianceHook = IComplianceHook(address(0));
+        emit ComplianceHookUpdated(address(0));
+    }
+
+    /// @dev Single transfer/mint/burn chokepoint. Hook applies to holder transfers only and fail-opens
+    ///      on hook faults so neither issuance nor transfers can be bricked by a bad hook contract.
     function _update(address from, address to, uint256 value) internal override {
         IComplianceHook hook = complianceHook;
-        if (address(hook) != address(0)) hook.check(from, to, value);
+        if (from != address(0) && to != address(0) && address(hook) != address(0)) {
+            try hook.check{gas: HOOK_GAS_CAP}(from, to, value) { } catch { }
+        }
         super._update(from, to, value);
     }
 

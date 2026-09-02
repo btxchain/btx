@@ -47,6 +47,10 @@ public:
         CandidateMining = 1,
         WinnerReseal = 2,
         TipValidation = 3,
+        /** Unique followed child of the authenticated active tip. Unlike
+         *  generic TipValidation, this lane immediately yields an active
+         *  CandidateMining lease so the node can adopt the next block. */
+        ActiveTipValidation = 4,
     };
 
     /**
@@ -55,18 +59,20 @@ public:
      * or winner reseal. The sum is also the process-wide waiter bound. One
      * active owner is tracked separately.
      */
-    static constexpr std::array<uint64_t, 4> MAX_WAITERS_PER_LANE{
-        2, 2, 2, 2};
-    static constexpr uint64_t MAX_TOTAL_WAITERS{8};
+    static constexpr std::array<uint64_t, 5> MAX_WAITERS_PER_LANE{
+        2, 2, 2, 2, 1};
+    static constexpr uint64_t MAX_TOTAL_WAITERS{9};
     static constexpr std::chrono::milliseconds DEFAULT_MAX_QUEUE_WAIT{
         std::chrono::seconds{90}};
 
     /**
-     * Minimum hold time before TipValidation / WinnerReseal may preempt an
-     * active CandidateMining lease. Validation still outranks mining overall;
-     * this only stops zero-progress thrashing on combined authority+miner
-     * nodes (HANDOVER item 7). Override with BTX_RC_CANDIDATE_MINING_LEASE_MS
-     * (0 disables the quantum). Default covers roughly one Profile-1 episode.
+     * Minimum hold time before generic TipValidation / WinnerReseal may
+     * preempt an active CandidateMining lease. ActiveTipValidation bypasses
+     * the hold because mining the followed child's parent is already stale.
+     * This otherwise stops zero-progress thrashing on combined
+     * authority+miner nodes (HANDOVER item 7). Override with
+     * BTX_RC_CANDIDATE_MINING_LEASE_MS (0 disables the quantum). Default
+     * covers roughly one Profile-1 episode.
      */
     static constexpr std::chrono::milliseconds
         DEFAULT_CANDIDATE_MINING_MIN_LEASE{
@@ -78,8 +84,8 @@ public:
      * The min-lease quantum only protects an already-active mining
      * lease; under a sibling storm mining never becomes active and
      * submitblock dies at the 90s waiter deadline (-25 "accelerator
-     * scheduler queue"). WinnerReseal still outranks. Override with
-     * BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS (0 disables).
+     * scheduler queue"). WinnerReseal and ActiveTipValidation still outrank.
+     * Override with BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS (0 disables).
      */
     static constexpr std::chrono::milliseconds
         DEFAULT_CANDIDATE_MINING_ANTI_STARVE{
@@ -121,7 +127,7 @@ public:
         uint64_t queue_depth{0};
         uint64_t queue_high_water{0};
         uint64_t queue_limit{MAX_TOTAL_WAITERS};
-        std::array<uint64_t, 4> lane_queue_limits{
+        std::array<uint64_t, 5> lane_queue_limits{
             MAX_WAITERS_PER_LANE};
         bool active{false};
         Priority active_priority{Priority::SpeculativeValidation};
@@ -140,7 +146,7 @@ public:
         uint64_t workspace_high_water_bytes{0};
         uint64_t workspace_telemetry_samples{0};
         uint64_t workspace_allocation_failures{0};
-        std::array<LaneStats, 4> lanes{};
+        std::array<LaneStats, 5> lanes{};
         uint64_t authenticated_relay_samples{0};
         double last_authenticated_relay_s{0};
         double max_authenticated_relay_s{0};

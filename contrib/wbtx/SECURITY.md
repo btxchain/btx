@@ -33,9 +33,11 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
 ## 2. Defense checklist → where implemented
 
 ### Bridge (`WBTXBridge` + `ECDSAMultisigVerifier`)
-- **EIP-712 typed attestation** with domain `{name,version,block.chainid,address(this)}` → cross-chain,
-  cross-bridge, **post-fork** replay all prevented. (Fixes the latent bug in the v0 draft, which
-  captured `chainid` at construction and would stay replayable on a forked chain.) *Class 2/3.*
+- **EIP-712 typed attestation** with domain `{name,version,block.chainid,address(this)}` and struct
+  `{bridgeId,btxTxid,vout,btxBlockHash,btxBlockHeight,attestedHeight,to,amountSat,deadline}` →
+  cross-chain/cross-bridge replay is prevented, mint statements are time-bounded, and depth is
+  enforceable on-chain via `MIN_CONFIRMATIONS = 100` (code-level floor). (Fixes the latent bug in the v0
+  draft, which captured `chainid` at construction and would stay replayable on a forked chain.) *Class 2/3.*
 - **Outpoint replay guard** `minted[depositKey(txid,vout)]`, set before mint (CEI); `depositKey` uses
   `abi.encode` (collision-safe). One mint per BTX deposit. *Class 3.*
 - **OZ `ECDSA.recover`** in the verifier → rejects high-s malleability, bad `v`, and `ecrecover==0`;
@@ -48,10 +50,17 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
 - **Guardian veto / optimistic minting:** mints above `optimisticThresholdSat` are time-queued
   (`guardianDelay`); a `GUARDIAN_ROLE` can `cancelQueuedMint` within the window. Bounds a compromised
   threshold even with "valid" attestation. *Class 1/2 (tBTC pattern).*
-- **Granular pause** (`PAUSER_ROLE`): independent `mintPaused` (the critical backing-safety lever) and
-  `redeemPaused`, so halting minting doesn't trap redemptions and vice versa. **Role separation** via
-  `AccessControlDefaultAdminRules` (2-step admin + enforced delay); `setVerifier`/`setLimits`/
-  `refundRedeem` are `GOVERNANCE_ROLE` (**must be a Timelock owned by a multisig**). *Class 5 (Poly).*
+- **Granular pause** (asymmetric trust): independent `mintPaused` (the critical backing-safety lever) and
+  `redeemPaused`, so halting minting doesn't trap redemptions and vice versa. **Pausing is `PAUSER_ROLE`
+  (fast, low trust); unpausing requires `GOVERNANCE_ROLE`** — a low-trust key can trip a breaker but cannot
+  lift it. **Role separation** via
+  `AccessControlDefaultAdminRules` (2-step admin + enforced delay). Trust-anchor changes are
+  timelocked **in-contract**, not by convention: the verifier swap is `proposeVerifier`→`applyVerifier`
+  after `VERIFIER_DELAY` (7 days) with a `GUARDIAN_ROLE` `cancelPendingVerifier`; signer rotation is
+  `proposeRotation`→`applyRotation` after `ROTATION_DELAY` (7 days); a guardian veto is cleared only via
+  `proposeClearVeto`→`applyClearVeto` after `CLEAR_VETO_DELAY` (48h). `setLimits`/`refundRedeem` are
+  `GOVERNANCE_ROLE` and `setLimits` rejects a `guardianDelay` below `MIN_GUARDIAN_DELAY` (6h) or any
+  zero breaker (owner **should** still be a Timelock+multisig). *Class 5 (Poly).*
 - **Redeem safety:** `uint64` truncation guard; auditable `Redeem` records; `fulfillRedeem` (federation
   writes the BTX txid on-chain); `refundRedeem` (governance re-mints to the burner after
   `redeemRefundTimeout` if a redemption can't be honored) → no silently-lost funds. *renBTC/FBTC lesson.*
@@ -62,8 +71,11 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
   `receiveWithAuthorization`, `cancelAuthorization`) — gasless approvals AND gasless transfers /
   meta-transactions with random-nonce replay protection (Circle FiatToken pattern). `receiveWith-
   Authorization` is payee-gated (front-run safe).
-- **Role separation** (`MINTER_ROLE`/`BURNER_ROLE` held by the bridge, `PAUSER`/`UNPAUSER` separate,
-  `RESCUER`) via `AccessControlDefaultAdminRules` (2-step + delay). *Class 5.*
+- **Issuance bound to an immutable bridge**: `mint`/`burn`/`mintRefund` revert unless `msg.sender` is the
+  `bridge` set at construction (non-zero enforced) — no `MINTER_ROLE`/`BURNER_ROLE`, so a compromised admin
+  cannot grant issuance to an EOA. `burn`/`burnFrom` spend an ERC-20 allowance, so they cannot confiscate a
+  holder's balance. `PAUSER`/`UNPAUSER` and `RESCUER` remain separate via `AccessControlDefaultAdminRules`
+  (2-step + delay). *Class 5.*
 - **Issuance pause** (mint/burn) — the backing-safety lever — **without** freezing holder transfers
   (deliberate: no censorship lever; see Decisions).
 - **Optional compliance hook** (`IComplianceHook`) — default **OFF** (`address(0)` = neutral); only the
@@ -72,10 +84,15 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
 - **`rescueERC20`** (SafeERC20) recovers *foreign* tokens mis-sent here; **cannot** touch wBTX. *Class 6.*
 
 ### HTLC (`WBTXAtomicSwapHTLC`)
-- **SafeERC20 + balance-delta accounting** → non-standard (USDT), fee-on-transfer, rebasing tokens
-  cannot break custody/insolvency. *Class 5 (Qubit/Meter).*
+- **SafeERC20 + exact-amount custody enforcement** (`received == requested amount`) rejects
+  fee-on-transfer/underfunded opens, so the swap id's requested amount and custodied amount cannot diverge.
+  *Class 5 (Qubit/Meter).*
 - **In-contract, sender-bound swap id** (`computeId`) → no `id`-squatting front-run. *(HTLC griefing.)*
-- **ReentrancyGuard** + CEI; **timeout sanity bounds** (`MIN/MAX_TIMEOUT`).
+- **Disjoint claim/refund windows:** `claim` is valid only before `timeout`, `refund` at/after `timeout`,
+  eliminating post-timeout dual-spend races.
+- **Watchtower-defensible refunds:** anyone may trigger a timed-out refund, but funds always return to the
+  original sender.
+- **ReentrancyGuard** + CEI; **timeout sanity bounds** (`MIN/MAX_TIMEOUT`, min 6h).
 - **Hash domain** `RIPEMD160(SHA256(preimage))` matches BTX `OP_HASH160` exactly (verified against a
   BTX node: preimage `0x42…42` → `8739f40ec4dbf569dcb38134c6e7310908566981`).
 
@@ -119,8 +136,9 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
   the zk/SPV verifier (architecture §C/§8).
 - **Federation key custody** is the dominant real-world risk (Ronin/Harmony/Multichain were all key
   compromises, not contract bugs). Require independent operators, HSM/threshold custody, and monitoring.
-- **HTLC cross-chain timeout asymmetry** cannot be enforced on-chain — the SDK/integrator MUST set the
-  slower/first leg's timeout strictly longer than the faster/second leg (e.g. BTX 24–48h vs EVM 6–12h).
+- **HTLC cross-chain timeout asymmetry** still cannot be inferred from on-chain state alone, but the SDK
+  now rejects unsafe pairings preflight via `check_timeout_ordering(...)`. Integrators must supply
+  conservative BTX block-time and reorg/stall margins when building descriptors.
 - **Frontend/supply-chain** (BadgerDAO) is out of contract scope — harden CDN/DNS and prefer finite
   approvals/permit.
 

@@ -78,7 +78,8 @@ honored, `refundRedeem(redeemId)` (governance, after `redeemRefundTimeout`) re-m
 silently-lost funds.
 
 **Controls.** `GOVERNANCE_ROLE` (a Timelock) sets the verifier, limits, and refunds; `GUARDIAN_ROLE`
-cancels suspicious queued mints; `PAUSER_ROLE` toggles `mintPaused`/`redeemPaused` independently;
+cancels suspicious queued mints; pausing `mintPaused`/`redeemPaused` is `PAUSER_ROLE` (fast, low trust)
+but UNpausing requires `GOVERNANCE_ROLE` (asymmetric trust — a low-trust key cannot lift a breaker);
 `FEDERATION_ROLE` marks redeems fulfilled. All external state-changers are `nonReentrant`.
 
 ### 2.3 The verifier — `ECDSAMultisigVerifier` (v1) and the zk path

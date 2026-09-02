@@ -2019,6 +2019,367 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    rc_accelerator_scheduler_active_tip_bypasses_mining_min_lease)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "6000");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_LEASE_MS", "6000", 1);
+#endif
+    struct LeaseEnvGuard {
+        ~LeaseEnvGuard()
+        {
+#ifdef WIN32
+            _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "");
+#else
+            unsetenv("BTX_RC_CANDIDATE_MINING_LEASE_MS");
+#endif
+        }
+    } lease_env;
+
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+    std::atomic_bool candidate_cancelled{false};
+    auto candidate{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &candidate_cancelled,
+        "candidate-active-tip")};
+    BOOST_REQUIRE(candidate);
+
+    std::atomic_bool active_tip_cancelled{false};
+    std::atomic_bool active_tip_acquired{false};
+    std::thread active_tip{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::ActiveTipValidation,
+            &active_tip_cancelled, "followed-active-tip-child")};
+        active_tip_acquired.store(
+            static_cast<bool>(lease), std::memory_order_relaxed);
+    }};
+
+    BOOST_REQUIRE(WaitFor([&] {
+        return candidate_cancelled.load(std::memory_order_relaxed);
+    }));
+    BOOST_CHECK_EQUAL(scheduler.GetStats().preemption_deferred, 0U);
+    BOOST_CHECK_GE(scheduler.GetStats().preemption_requests, 1U);
+
+    candidate = {};
+    active_tip.join();
+    BOOST_CHECK(active_tip_acquired.load(std::memory_order_relaxed));
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_accelerator_scheduler_active_tip_outranks_starved_mining)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS", "100");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS", "100", 1);
+#endif
+    struct AntiStarveEnvGuard {
+        ~AntiStarveEnvGuard()
+        {
+#ifdef WIN32
+            _putenv_s("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS", "");
+#else
+            unsetenv("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS");
+#endif
+        }
+    } anti_starve_env;
+
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &owner_cancelled,
+        "generic-tip-owner")};
+    BOOST_REQUIRE(owner);
+
+    std::mutex order_mutex;
+    std::vector<Scheduler::Priority> order;
+    std::atomic_bool mining_cancelled{false};
+    std::thread mining{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::CandidateMining, &mining_cancelled,
+            "starved-candidate", nullptr, std::chrono::seconds{30})};
+        if (lease) {
+            std::lock_guard<std::mutex> lock{order_mutex};
+            order.push_back(Scheduler::Priority::CandidateMining);
+        }
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds{150});
+
+    std::atomic_bool active_tip_cancelled{false};
+    std::thread active_tip{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::ActiveTipValidation,
+            &active_tip_cancelled, "followed-active-tip-child", nullptr,
+            std::chrono::seconds{30})};
+        if (lease) {
+            std::lock_guard<std::mutex> lock{order_mutex};
+            order.push_back(Scheduler::Priority::ActiveTipValidation);
+        }
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 2; }));
+
+    owner = {};
+    active_tip.join();
+    mining.join();
+    BOOST_REQUIRE_EQUAL(order.size(), 2U);
+    BOOST_CHECK(order[0] == Scheduler::Priority::ActiveTipValidation);
+    BOOST_CHECK(order[1] == Scheduler::Priority::CandidateMining);
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_worker_configured_active_tip_preempts_candidate_without_quorum)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    node::matmul_trusted::ResetForTest();
+
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{50}, error));
+    struct RuntimeGuard {
+        ~RuntimeGuard()
+        {
+            node::matmul_trusted::ResetForTest();
+#ifdef WIN32
+            _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "");
+#else
+            unsetenv("BTX_RC_CANDIDATE_MINING_LEASE_MS");
+#endif
+        }
+    } runtime_guard;
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "6000");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_LEASE_MS", "6000", 1);
+#endif
+
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+    std::atomic_bool candidate_cancelled{false};
+    auto candidate{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &candidate_cancelled,
+        "configured-candidate")};
+    BOOST_REQUIRE(candidate);
+
+    Consensus::Params params{MakeProfile1ActiveParams()};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    const uint256 tip_hash{uint256::ONE};
+    worker.SetActiveTip(tip_hash, /*tip_height=*/99);
+    uint256 claim;
+    claim.data()[0] = 0x7c;
+    auto header{std::make_shared<CBlockHeader>(
+        MakeProfile1Header(0x41544950, claim))};
+    header->hashPrevBlock = tip_hash;
+    const uint256 hash{header->GetHash()};
+    std::atomic<int> retryable_cleanups{0};
+    MatMulVerifyWorker::Job job{
+        .height = 100,
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .header = std::move(header),
+        .priority = MatMulVerifyWorker::Priority::ActiveTipValidation,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+
+    BOOST_REQUIRE(WaitFor([&] {
+        return candidate_cancelled.load(std::memory_order_relaxed) &&
+               scheduler.GetStats().queue_depth == 1;
+    }));
+    const auto stats{scheduler.GetStats()};
+    BOOST_CHECK_EQUAL(stats.preemption_deferred, 0U);
+    BOOST_CHECK_EQUAL(
+        stats.lanes[static_cast<size_t>(
+            Scheduler::Priority::ActiveTipValidation)].requests,
+        1U);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(hash, 100));
+
+    BOOST_REQUIRE(worker.Cancel(hash));
+    BOOST_REQUIRE(WaitFor(
+        [&] { return retryable_cleanups.load() == 1; }));
+    candidate = {};
+    worker.Stop();
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_worker_stale_active_tip_priority_does_not_preempt_candidate)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    node::matmul_trusted::ResetForTest();
+
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'b')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{50}, error));
+    struct RuntimeGuard {
+        ~RuntimeGuard() { node::matmul_trusted::ResetForTest(); }
+    } runtime_guard;
+
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+    std::atomic_bool candidate_cancelled{false};
+    auto candidate{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &candidate_cancelled,
+        "configured-candidate-stale")};
+    BOOST_REQUIRE(candidate);
+
+    Consensus::Params params{MakeProfile1ActiveParams()};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    worker.SetActiveTip(uint256::ONE, /*tip_height=*/99);
+    uint256 claim;
+    claim.data()[0] = 0x7d;
+    auto header{std::make_shared<CBlockHeader>(
+        MakeProfile1Header(0x53414c45, claim))};
+    header->hashPrevBlock = uint256::ZERO;
+    const uint256 hash{header->GetHash()};
+    std::atomic<int> retryable_cleanups{0};
+    MatMulVerifyWorker::Job job{
+        .height = 100,
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .header = std::move(header),
+        .priority = MatMulVerifyWorker::Priority::ActiveTipValidation,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    const auto stats{scheduler.GetStats()};
+    BOOST_CHECK(!candidate_cancelled.load(std::memory_order_relaxed));
+    BOOST_CHECK_EQUAL(
+        stats.lanes[static_cast<size_t>(
+            Scheduler::Priority::ActiveTipValidation)].requests,
+        0U);
+    BOOST_CHECK_EQUAL(
+        stats.lanes[static_cast<size_t>(
+            Scheduler::Priority::SpeculativeValidation)].requests,
+        1U);
+
+    BOOST_REQUIRE(worker.Cancel(hash));
+    BOOST_REQUIRE(WaitFor(
+        [&] { return retryable_cleanups.load() == 1; }));
+    candidate = {};
+    worker.Stop();
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_worker_configured_acquisition_recovery_preempts_candidate_without_quorum)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    node::matmul_trusted::ResetForTest();
+
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'c')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{50}, error));
+    struct RuntimeGuard {
+        ~RuntimeGuard()
+        {
+            node::matmul_trusted::ResetForTest();
+#ifdef WIN32
+            _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "");
+#else
+            unsetenv("BTX_RC_CANDIDATE_MINING_LEASE_MS");
+#endif
+        }
+    } runtime_guard;
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0", 1);
+#endif
+
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+    std::atomic_bool candidate_cancelled{false};
+    auto candidate{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &candidate_cancelled,
+        "configured-candidate-acquisition")};
+    BOOST_REQUIRE(candidate);
+
+    Consensus::Params params{MakeProfile1ActiveParams()};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    worker.SetActiveTip(uint256::ONE, /*tip_height=*/99);
+    auto block{std::make_shared<CBlock>(*MakeBlock(12))};
+    block->hashPrevBlock = uint256::ZERO;
+    const uint256 hash{block->GetHash()};
+    std::atomic<int> retryable_cleanups{0};
+    MatMulVerifyWorker::Job job{
+        .block = block,
+        .height = 100,
+        .parent_median_time_past = 1,
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .acquisition_recovery = true,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+
+    BOOST_REQUIRE(WaitFor([&] {
+        return candidate_cancelled.load(std::memory_order_relaxed) &&
+               scheduler.GetStats().queue_depth == 1;
+    }));
+    const auto stats{scheduler.GetStats()};
+    BOOST_CHECK_EQUAL(
+        stats.lanes[static_cast<size_t>(
+            Scheduler::Priority::TipValidation)].requests,
+        1U);
+    BOOST_CHECK_EQUAL(
+        stats.lanes[static_cast<size_t>(
+            Scheduler::Priority::SpeculativeValidation)].requests,
+        0U);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(hash, 100));
+
+    // Body-holding recovery is deliberately non-cancellable during ordinary
+    // operation. Release the synthetic mining owner, then Stop supplies the
+    // shutdown cancellation as the recovery waiter acquires the device.
+    candidate = {};
+    worker.Stop();
+    BOOST_CHECK_EQUAL(retryable_cleanups.load(), 1);
+}
+
+BOOST_AUTO_TEST_CASE(
     rc_authenticated_relay_observation_is_staged_and_one_shot)
 {
     auto& scheduler{
@@ -2123,7 +2484,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(tip_waiter_acquired.load(std::memory_order_relaxed));
 
     auto stats{scheduler.GetStats()};
-    BOOST_CHECK_EQUAL(stats.queue_limit, 8U);
+    BOOST_CHECK_EQUAL(stats.queue_limit, 9U);
     BOOST_CHECK_EQUAL(stats.queue_rejections, 1U);
     BOOST_CHECK_EQUAL(
         stats.lanes[static_cast<size_t>(

@@ -22,7 +22,9 @@ Related:
 Profile 1 ExactReplay is intentionally expensive. A production validator needs
 a qualified GPU. Public headers, IBD, and RPC can run on ordinary VPS hardware
 if those machines **do not** ExactReplay and instead follow signed verdicts
-from GPU attestors (`-matmulvalidation=trusted` plus `-matmultrustedpubkey`).
+from GPU attestors they independently trust (`-matmulvalidation=trusted`
+plus operator-supplied `-matmultrustedpubkey`). The network designates no
+canonical attestors.
 
 That topology is a **stopgap**, not the destination. A trusted mirror is not an
 independently validating full node: compromise of `M` attestation keys can make
@@ -31,9 +33,10 @@ that operator's mirrors accept false MatMul work. Independent
 authority.
 
 The destination is: every node that claims to be a full node ExactReplays on a
-GPU. CPU boxes remain light clients, wallets, or explorers. Attestation becomes
-optional for machines that cannot replay, not the source of truth for the
-public seed layer.
+GPU (`-matmulvalidation=consensus`, no pin). CPU boxes remain light clients,
+wallets, or explorers. Attestation becomes optional for machines that cannot
+replay, with keys the operator chooses — not a shipped signer set, and not
+the source of truth for the public seed layer.
 
 Doing that in one step would mean putting a qualified GPU on every archive
 before difficulty, peering, and attestor diversity are in place. The three
@@ -43,10 +46,11 @@ This is **GPU-centric full validation**, not “every laptop is a consensus
 node.” The hardware floor for a validating full node is a GPU that can
 ExactReplay, the same way Bitcoin full nodes need disk and CPU.
 
-## Phase 1 — consensus floor + CPU seeds still follow one attestor
+## Phase 1 — consensus floor + CPU archives as light clients of a local pin
 
-**Goal:** stop easy-ASERT dump inflation and keep public CPU seeds able to
-follow the attested chain. Still 1-of-1 GPU attestation.
+**Goal:** stop easy-ASERT dump inflation and keep public CPU archives able to
+follow an attested chain they chose. A single-key pin is still 1-of-1 for
+that operator.
 
 **Consensus (this release):**
 
@@ -91,14 +95,15 @@ the old `nBits` is invalid on the new rule.
 **Not in this phase:** extra GPUs, raising `M`, turning archives into GPU
 boxes, or dropping `-matmultrustedpubkey` on the seed layer.
 
-## Phase 2 — add GPU attestors (M-of-N), archives stay CPU
+## Phase 2 — add GPU attestors you trust (M-of-N), archives stay CPU
 
 **Goal:** remove the single-key / single-feeder failure without buying a GPU
 for every seed.
 
 The protocol already supports this:
 
-- Repeat `-matmultrustedpubkey=<hex>` for distinct compressed secp256k1 keys.
+- Repeat `-matmultrustedpubkey=<hex>` for distinct compressed secp256k1 keys
+  **you** chose. There is no shipped default set.
 - `-matmultrustedthreshold=M` with `1 <= M <= N`.
 - Mainnet 1-of-1 starts with a warning: that one key is the node's MatMul
   proof-of-work authority.
@@ -108,29 +113,29 @@ How to add a GPU:
 1. New attestor: `-matmulvalidation=consensus`, its own key, ExactReplay,
    sign. Prefer it **not** also be the public miner (twin-quorum risk).
 2. Every trusted seed (and any node that uses trusted pubkeys) lists every
-   attestor key and the same `M`. Compare `replay_authority_context` across
-   the fleet before admitting traffic.
-3. Seeds `addnode` every attestor so `GETHEADERS` / `GETMMATTEST` are not
-   pinned to one host.
+   attestor key it trusts and the same `M`. Compare `replay_authority_context`
+   across the fleet before admitting traffic.
+3. Seeds `addnode` every attestor they follow so `GETHEADERS` / `GETMMATTEST`
+   are not pinned to one host.
 4. Public miners keep talking to seeds, not to the GPUs.
 
-Sequence: stay 1-of-1 through Phase 1, add GPU #2 still at `M=1` (availability),
-then GPU #3 and **`M=2`**. Adding `N` with `M=1` only creates more machines
-that can each freeze or bless a hash alone. Diversifying means `N` grows and
-`M` stays a majority (2-of-3, then 3-of-5). Do not use N-of-N: one down box
-halts the chain.
+Sequence: stay 1-of-1 through Phase 1 if that is what you pinned, add GPU #2
+still at `M=1` (availability), then GPU #3 and **`M=2`**. Adding `N` with
+`M=1` only creates more machines that can each freeze or bless a hash alone.
+Diversifying means `N` grows and `M` stays a majority (2-of-3, then 3-of-5).
+Do not use N-of-N: one down box stalls **your** archive.
 
 Never put ExactReplay or attestor keys on the CPU archives. Never share one
 signing key across boxes (that is still 1-of-1).
 
-This is a **federated attestor set**, not “anyone with a GPU is a signer.”
-Admission of new keys is an operator process until there is a real key
-ceremony.
+This is a **local federated pin**, not “anyone with a GPU is a signer” and
+not a project-blessed set. Admission of new keys is each operator’s process.
 
 ## Phase 3 — Public seeds become discovery relays; GPU full nodes stay off DNS
 
 **Goal:** the public DNS/`addnode` layer stops being MatMul authority.
-Archives follow GPU attestors via the pin. Permissionless miners ExactReplay.
+Archives that opt into trusted-mirror follow GPU attestors they pin locally.
+Permissionless miners ExactReplay (`-matmulvalidation=consensus`, no pin).
 Public introduction hosts only point at other nodes.
 
 Putting a GPU on every public seed would keep those IPs as chain oracles and
@@ -180,7 +185,8 @@ See [`design/0.34-discovery-relay.md`](design/0.34-discovery-relay.md).
 
 | Role | Phase 1 | Phase 2 | Phase 3 |
 |---|---|---|---|
-| Public seed | CPU, `trusted`, follow M-of-N (today 1-of-1) | CPU, `trusted`, follow M-of-N with `M≥2` | GPU, `consensus`, local ExactReplay |
-| GPU attestor | 1 key, ExactReplay, sign, ignore inbound lottery | N keys, raise `M` | Optional / light-client attestations only |
-| Independent miner | GPU, `consensus`, GBT from seeds | same | same |
+| Public seed / DNS | ADDR introduction (later `relay`); not MatMul authority | same | `-matmulvalidation=relay`, no pin |
+| GPU validator / miner | `consensus`, ExactReplay, no shipped pin | same | same |
+| GPU attestor (operator-run) | ExactReplay, sign, ignore inbound lottery; never a public seed | N keys the operator trusts, raise `M` | Optional / light-client attestations only |
+| CPU archive (opt-in) | `trusted` + **operator-chosen** pin | `trusted`, M≥2 of keys you trust | honestly named light client, or GPU `consensus` |
 | Wallet / explorer | headers / RPC | same | same, or optional attestations |
