@@ -71,8 +71,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
+from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -84,9 +86,27 @@ from typing import Callable, Optional
 
 Rpc = Callable[..., object]
 
+try:
+    hashlib.new("ripemd160", b"")
+
+    def _ripemd160(data: bytes) -> bytes:
+        return hashlib.new("ripemd160", data).digest()
+except ValueError:
+    try:
+        from contrib.wbtx._ripemd160 import ripemd160 as _ripemd160
+    except ImportError:
+        _fallback = Path(__file__).resolve().parents[1] / "wbtx" / "_ripemd160.py"
+        spec = importlib.util.spec_from_file_location("btx_wbtx_ripemd160", _fallback)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"unable to load RIPEMD160 fallback from {_fallback}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _ripemd160 = module.ripemd160
+
 COIN = 100_000_000
 COINBASE_MATURITY = 100
 RECOMMENDED_MIN_CONF = 20
+MAX_VERIFY_OUTPOINTS = 1000
 # Funding below this floor is practically unspendable with the default helper
 # fee (20_000 sats) once dust and script overhead are accounted for.
 MIN_BOND_SATS = 20_000 + 1_000
@@ -303,6 +323,14 @@ def _validated_bond(bond: BondInfo) -> BondInfo:
     can be an immediately-spendable early-exit path — exactly the class of
     hidden early exit parse_bond_descriptor promises to reject."""
     require_block_height_locktime(bond.refund_locktime, "refund_locktime")
+    if bond.tier == "A":
+        settle_key = (bond.settle_pubkey or "").lower()
+        venue_key = (bond.venue_pubkey or "").lower()
+        if settle_key == venue_key:
+            raise ValueError(
+                "tier A descriptor has duplicate multi_pq keys "
+                "(settle_pubkey == venue_pubkey): this collapses 2-of-2 to one key"
+            )
     return bond
 
 
@@ -649,6 +677,13 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = RECOMMENDED_MIN_CONF,
     if not isinstance(outpoints, list):
         check("outpoints", False, "bond.outpoints must be a JSON array")
         return OfferVerification(False, tier, address, 0, expiry, checks)
+    if len(outpoints) > MAX_VERIFY_OUTPOINTS:
+        check(
+            "outpoints",
+            False,
+            f"bond.outpoints has {len(outpoints)} entries; max allowed is {MAX_VERIFY_OUTPOINTS}",
+        )
+        return OfferVerification(False, tier, address, 0, expiry, checks)
     seen = set()
     all_utxos_ok = len(outpoints) > 0
     if not outpoints:
@@ -900,7 +935,7 @@ def new_preimage() -> bytes:
 
 def swap_hash160_hex(preimage: bytes) -> str:
     """RIPEMD160(SHA256(preimage)) — same hashlock domain as the EVM HTLC contract."""
-    return hashlib.new("ripemd160", hashlib.sha256(preimage).digest()).hexdigest()
+    return _ripemd160(hashlib.sha256(preimage).digest()).hex()
 
 
 def build_swap_claim(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
@@ -986,6 +1021,12 @@ def selftest() -> None:
     a_desc = bind_bond_descriptor(venue_bond_descriptor(k1, k3, 901, k2), terms)
     a = parse_bond_descriptor(a_desc)
     assert (a.tier, a.venue_pubkey, a.refund_locktime) == ("A", k3, 901)
+    # Tier A duplicate multi_pq keys are rejected (must remain independent 2-of-2).
+    try:
+        parse_bond_descriptor(bind_bond_descriptor(venue_bond_descriptor(k1, k1, 901, k2), terms))
+        raise AssertionError("tier A duplicate settle/venue keys must be rejected")
+    except ValueError:
+        pass
     ap_desc = bind_bond_descriptor(ctv_bond_descriptor("11" * 32, k1, 902, k2), terms)
     ap = parse_bond_descriptor(ap_desc)
     assert f"ctv_pk({'11' * 32},{k1})" in ap_desc
@@ -1074,6 +1115,19 @@ def selftest() -> None:
     vrep = verify_offer(_tier_selftest_rpc, tier_bundle, expected_ctv_template_hash="22" * 32)
     assert any(c.name == "ctv-template" and not c.ok and
                "pins tier A+ but bond is tier B" in c.detail for c in vrep.checks)
+    # Outpoint bundles above the hard cap are rejected before per-outpoint RPC churn.
+    oversized_bundle = {
+        "version": 1,
+        "terms": tier_terms,
+        "bond": {
+            "descriptor": tier_b_desc,
+            "tier": "B",
+            "outpoints": [{"txid": "11" * 32, "vout": i} for i in range(MAX_VERIFY_OUTPOINTS + 1)],
+        },
+    }
+    vrep = verify_offer(_tier_selftest_rpc, oversized_bundle)
+    assert any(c.name == "outpoints" and not c.ok and
+               "max allowed" in c.detail for c in vrep.checks)
 
     # Cross-leg timeout asymmetry helper: other+margin must be STRICTLY below BTX.
     check_swap_timeout_asymmetry(btx_refund_height=1000, other_leg_deadline_height=900)
@@ -1088,6 +1142,8 @@ def selftest() -> None:
         raise AssertionError("too-tight timeout asymmetry must fail closed")
     except ValueError:
         pass
+    # swap_hash160 fallback path uses same test vector as wBTX helper.
+    assert swap_hash160_hex(bytes([0x42]) * 32) == "8739f40ec4dbf569dcb38134c6e7310908566981"
 
     # Amount formatting.
     assert sats_to_btx_str(5_000_000_000_000) == "50000.00000000"

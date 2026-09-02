@@ -51,12 +51,20 @@ End-to-end swap flow (BTX leg of a trustless BTX<->EVM atomic swap)::
         evm_timeout_unix=evm_timeout_unix,
         now_unix=now_unix,
         current_btx_height=current_btx_height,
-        block_seconds=worst_case_block_seconds,
+        min_block_seconds=fastest_plausible_block_seconds,
         reorg_margin_blocks=reorg_margin_blocks,
-    )  # descriptor() enforces safe timeout ordering before funds move
+    )  # descriptor() performs a static ordering check
     desc = add_checksum(rpc, leg.descriptor())   # mr(htlc_tx(h160,claimer),refund(lt,sender))
     addr = swap_address(rpc, desc)               # the single P2MR lock address
     import_watch(rpc_wallet, desc)               # so the wallet indexes deposits to it
+    # REQUIRED right before funding broadcast: re-check against the live tip height/time.
+    assert_timeout_ordering_at_tip(
+        rpc,
+        btx_refund_height=btx_refund_height,
+        evm_timeout_unix=evm_timeout_unix,
+        min_block_seconds=fastest_plausible_block_seconds,
+        reorg_margin_blocks=reorg_margin_blocks,
+    )
     # ... funder pays `addr`; funder also opens/claims the short EVM leg with the same hashlock ...
 
     dep = find_deposits(rpc_wallet, addr)[0]
@@ -109,23 +117,32 @@ def btx_hash160_hex(preimage: bytes) -> str:
 
 
 # ----------------------------- descriptors -----------------------------
+# `min_block_seconds` is the FASTEST plausible BTX block interval, used to bound the
+# EARLIEST wall-clock time the BTX refund height becomes spendable. It must not exceed
+# the chain's block target (nPowTargetSpacing = 90s): a larger value over-estimates
+# time-to-refund and would false-accept an unsafe cross-leg config. Cap it at the
+# target so "fastest plausible" can never be claimed slower than target.
+BTX_TARGET_BLOCK_SECONDS = 90
+MAX_REASONABLE_MIN_BLOCK_SECONDS = BTX_TARGET_BLOCK_SECONDS
 
 def check_timeout_ordering(
     btx_refund_height: int,
     evm_timeout_unix: int,
     now_unix: int,
     current_btx_height: int,
-    block_seconds: int,
+    min_block_seconds: int,
     reorg_margin_blocks: int,
 ) -> int:
     """Validate that BTX refund expiry safely out-lives EVM expiry.
 
-    BTX refund locktimes are height-based. Convert the height gap into wall-clock seconds with a
-    pessimistic block interval (`block_seconds`) and require:
+    BTX refund locktimes are height-based. Convert the height gap into wall-clock seconds with the
+    FASTEST plausible BTX block interval (`min_block_seconds`) and require:
 
-      btx_refund_unix > evm_timeout_unix + reorg_margin_blocks * block_seconds
+      btx_refund_unix > evm_timeout_unix + reorg_margin_blocks * min_block_seconds
 
-    so the BTX leg keeps a safety margin for reorg/stall risk after the EVM leg expires.
+    Using the fastest plausible interval is required for safety: if difficulty drops and blocks
+    arrive faster, the BTX refund is reachable sooner in wall-clock time.
+    A too-large interval can falsely accept unsafe cross-leg configs.
     Returns the estimated BTX refund unix timestamp when valid; otherwise raises ValueError.
     """
     if btx_refund_height <= 0:
@@ -136,20 +153,63 @@ def check_timeout_ordering(
         raise ValueError("btx_refund_height must be greater than current_btx_height")
     if evm_timeout_unix <= 0 or now_unix <= 0:
         raise ValueError("evm_timeout_unix and now_unix must be unix timestamps")
-    if block_seconds <= 0:
-        raise ValueError("block_seconds must be > 0")
+    if type(min_block_seconds) is not int or isinstance(min_block_seconds, bool):
+        raise ValueError("min_block_seconds must be an integer number of seconds")
+    if min_block_seconds <= 0:
+        raise ValueError("min_block_seconds must be > 0")
+    if min_block_seconds > MAX_REASONABLE_MIN_BLOCK_SECONDS:
+        raise ValueError(
+            f"min_block_seconds={min_block_seconds} is implausibly large; use the FASTEST plausible "
+            "BTX block interval so timeout ordering is checked against earliest refund arrival "
+            f"(must be <= {MAX_REASONABLE_MIN_BLOCK_SECONDS})"
+        )
     if reorg_margin_blocks < 0:
         raise ValueError("reorg_margin_blocks must be >= 0")
 
     blocks_until_refund = btx_refund_height - current_btx_height
-    btx_refund_unix = now_unix + blocks_until_refund * block_seconds
-    required_min_refund_unix = evm_timeout_unix + reorg_margin_blocks * block_seconds
+    btx_refund_unix = now_unix + blocks_until_refund * min_block_seconds
+    required_min_refund_unix = evm_timeout_unix + reorg_margin_blocks * min_block_seconds
     if btx_refund_unix <= required_min_refund_unix:
         raise ValueError(
             "Unsafe timeout ordering: BTX refund does not out-live EVM timeout by the required margin "
             f"(btx_refund_unix={btx_refund_unix}, required>{required_min_refund_unix})"
         )
     return btx_refund_unix
+
+
+def assert_timeout_ordering_at_tip(
+    rpc: Rpc,
+    btx_refund_height: int,
+    evm_timeout_unix: int,
+    min_block_seconds: int,
+    reorg_margin_blocks: int,
+) -> int:
+    """Re-run timeout ordering against the live tip immediately before funding.
+
+    This check is REQUIRED right before broadcasting funding for the BTX leg; descriptor-time
+    checks alone can go stale while heights/timestamps advance. Uses live tip height and tip block
+    time from the connected node and raises ValueError on unsafe ordering.
+    """
+    tip_height = rpc("getblockcount")
+    if type(tip_height) is not int or tip_height < 0:
+        raise ValueError(f"getblockcount returned invalid height: {tip_height!r}")
+    tip_hash = rpc("getblockhash", tip_height)
+    if not isinstance(tip_hash, str) or not tip_hash:
+        raise ValueError(f"getblockhash returned invalid hash for height {tip_height}: {tip_hash!r}")
+    tip_header = rpc("getblockheader", tip_hash)
+    if not isinstance(tip_header, dict):
+        raise ValueError(f"getblockheader returned invalid payload for {tip_hash}: {tip_header!r}")
+    tip_time = tip_header.get("time")
+    if type(tip_time) is not int or tip_time <= 0:
+        raise ValueError(f"getblockheader({tip_hash}) missing valid 'time': {tip_time!r}")
+    return check_timeout_ordering(
+        btx_refund_height=btx_refund_height,
+        evm_timeout_unix=evm_timeout_unix,
+        now_unix=tip_time,
+        current_btx_height=tip_height,
+        min_block_seconds=min_block_seconds,
+        reorg_margin_blocks=reorg_margin_blocks,
+    )
 
 
 @dataclass
@@ -162,17 +222,21 @@ class HtlcLeg:
     evm_timeout_unix: int
     now_unix: int
     current_btx_height: int
-    block_seconds: int
+    min_block_seconds: int
     reorg_margin_blocks: int
 
     def descriptor(self) -> str:
-        """The (checksum-less) mr() descriptor; add checksum via add_checksum(rpc, ...)."""
+        """The (checksum-less) mr() descriptor; add checksum via add_checksum(rpc, ...).
+
+        This runs the static timeout check. Before moving funds, callers MUST re-run
+        assert_timeout_ordering_at_tip(...) against the live tip.
+        """
         check_timeout_ordering(
             btx_refund_height=self.refund_locktime,
             evm_timeout_unix=self.evm_timeout_unix,
             now_unix=self.now_unix,
             current_btx_height=self.current_btx_height,
-            block_seconds=self.block_seconds,
+            min_block_seconds=self.min_block_seconds,
             reorg_margin_blocks=self.reorg_margin_blocks,
         )
         return (f"mr(htlc_tx({self.preimage_hash160_hex},{self.claimer_pubkey}),"
@@ -260,6 +324,9 @@ def build_claim(rpc_wallet: Rpc, descriptor_with_checksum: str, deposit: Deposit
     """
     Build+sign the HTLC CLAIM (recipient) spending `deposit` to `dest_address`, revealing `preimage`.
 
+    Pre-funding requirement: the integration must have called
+    assert_timeout_ordering_at_tip(...) immediately before broadcasting HTLC funding.
+
     Calls the node wallet RPC
         buildhtlcclaim "<desc#cksum>" {"txid","vout"} "<preimage_hex>" "<dest_address>" <fee_sat>
     which performs the audited control-block + preimage witness assembly and transaction signing.
@@ -290,6 +357,9 @@ def build_refund(rpc_wallet: Rpc, descriptor_with_checksum: str, deposit: Deposi
                  dest_address: str, locktime: int, fee_sat: int = 1000) -> str:
     """
     Build+sign the HTLC REFUND (sender) reclaiming `deposit` to `dest_address` after `locktime`.
+
+    Pre-funding requirement: the integration must have called
+    assert_timeout_ordering_at_tip(...) immediately before broadcasting HTLC funding.
 
     Calls the node wallet RPC
         buildhtlcrefund "<desc#cksum>" {"txid","vout"} "<dest_address>" <locktime> <fee_sat>
@@ -337,8 +407,8 @@ def extract_preimage(rpc: Rpc, claim_txid: str, expected_hash160_hex: str) -> Op
 
 __all__ = [
     "new_preimage", "btx_hash160", "btx_hash160_hex", "HtlcLeg", "add_checksum", "swap_address",
-    "import_watch", "Deposit", "find_deposits", "to_sat", "sat_to_wbtx", "check_timeout_ordering", "build_claim",
-    "build_refund", "extract_preimage",
+    "import_watch", "Deposit", "find_deposits", "to_sat", "sat_to_wbtx", "check_timeout_ordering",
+    "assert_timeout_ordering_at_tip", "build_claim", "build_refund", "extract_preimage",
 ]
 
 
@@ -352,7 +422,7 @@ if __name__ == "__main__":
             evm_timeout_unix=now + 1_700,
             now_unix=now,
             current_btx_height=1_000_000,
-            block_seconds=90,
+            min_block_seconds=90,
             reorg_margin_blocks=2,
         )
     except ValueError:
@@ -366,7 +436,7 @@ if __name__ == "__main__":
         evm_timeout_unix=now + 1_700,
         now_unix=now,
         current_btx_height=1_000_000,
-        block_seconds=90,
+        min_block_seconds=90,
         reorg_margin_blocks=2,
     )
     print("timeout ordering self-check OK")

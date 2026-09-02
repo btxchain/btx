@@ -51,6 +51,8 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     uint64 public constant CLEAR_VETO_DELAY = 48 hours;
     /// @dev Governance cannot shrink guardian review to near-zero.
     uint64 public constant MIN_GUARDIAN_DELAY = 6 hours;
+    uint64 public constant MIN_ADMIN_DELAY = 1 days;
+    uint64 public constant MIN_REDEEM_REFUND_TIMEOUT = 1 days;
 
     bytes32 private constant MINT_TYPEHASH =
         keccak256("MintAttestation(uint256 bridgeId,bytes32 btxTxid,uint32 vout,bytes32 btxBlockHash,uint64 btxBlockHeight,uint64 attestedHeight,address to,uint64 amountSat,uint64 deadline)");
@@ -103,6 +105,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     }
     uint256 public redeemNonce;
     mapping(uint256 => Redeem) public redeems;
+    mapping(uint256 => bool) public fulfillmentRevoked;
     uint64 public redeemRefundTimeout;     // after this, an unfulfilled redeem may be governance-refunded
     uint64 public constant FULFILL_REVOKE_WINDOW = 2 days;
 
@@ -140,13 +143,19 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     error TooShallow();
     error BadDestination();
     error BelowOneSat();
+    error BadWBTX();
     error UnknownRedeem();
     error RedeemClosed();
+    error BridgeBindingMismatch();
+    error AdminDelayTooLow();
     error VerifierNotContract();
     error VerifierNotReady();
     error ClearVetoNotReady();
     error GuardianDelayTooLow();
+    error ThresholdAboveWindowCap();
+    error RedeemRefundTimeoutTooLow();
     error RevokeWindowElapsed();
+    error FulfillmentPermanentlyRevoked();
 
     modifier whenMintNotPaused() { if (mintPaused) revert MintPaused(); _; }
     modifier whenRedeemNotPaused() { if (redeemPaused) revert RedeemPaused(); _; }
@@ -158,6 +167,10 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         address admin,          // Timelock-owned multisig
         uint48  adminDelay
     ) EIP712("WBTXBridge", "1") AccessControlDefaultAdminRules(adminDelay, admin) {
+        if (address(wbtx_) == address(0) || address(wbtx_).code.length == 0) revert BadWBTX();
+        if (address(verifier_) == address(0) || address(verifier_).code.length == 0) revert VerifierNotContract();
+        if (wbtx_.bridge() != address(this)) revert BridgeBindingMismatch();
+        if (uint64(adminDelay) < MIN_ADMIN_DELAY) revert AdminDelayTooLow();
         wbtx = wbtx_;
         verifier = verifier_;
         bridgeId = bridgeId_;
@@ -203,21 +216,46 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
                 || guardianDelay_ == 0
         ) revert ZeroBreakerValue();
         if (guardianDelay_ < MIN_GUARDIAN_DELAY) revert GuardianDelayTooLow();
+        if (optimisticThresholdSat_ > windowMintCapSat_) revert ThresholdAboveWindowCap();
+        if (redeemRefundTimeout_ < MIN_REDEEM_REFUND_TIMEOUT) revert RedeemRefundTimeoutTooLow();
         if (uint256(windowMintCapSat_) / uint256(windowDuration_) == 0) revert WindowRateZero();
+
+        uint64 nowTs = uint64(block.timestamp);
+        if (!limitsConfigured) {
+            availableSat = windowMintCapSat_;
+        } else {
+            uint64 elapsed = nowTs - lastRefill;
+            uint256 replenished = uint256(elapsed) * uint256(windowMintCapSat) / uint256(windowDuration);
+            uint256 available = uint256(availableSat) + replenished;
+            if (available > windowMintCapSat) available = windowMintCapSat;
+            if (available > windowMintCapSat_) available = windowMintCapSat_;
+            availableSat = uint64(available);
+        }
+
         maxSupplyWbtx = maxSupplyWbtx_;
         windowMintCapSat = windowMintCapSat_;
         windowDuration = windowDuration_;
         optimisticThresholdSat = optimisticThresholdSat_;
         guardianDelay = guardianDelay_;
         redeemRefundTimeout = redeemRefundTimeout_;
-        availableSat = windowMintCapSat_;
-        lastRefill = uint64(block.timestamp);
+        lastRefill = nowTs;
         limitsConfigured = true;
         emit LimitsUpdated(maxSupplyWbtx_, windowMintCapSat_, windowDuration_, optimisticThresholdSat_, guardianDelay_, redeemRefundTimeout_);
     }
 
-    function setMintPaused(bool p) external onlyRole(PAUSER_ROLE) { mintPaused = p; emit MintPausedSet(p, msg.sender); }
-    function setRedeemPaused(bool p) external onlyRole(PAUSER_ROLE) { redeemPaused = p; emit RedeemPausedSet(p, msg.sender); }
+    function setMintPaused(bool p) external {
+        if (p) _checkRole(PAUSER_ROLE, msg.sender);
+        else _checkRole(GOVERNANCE_ROLE, msg.sender);
+        mintPaused = p;
+        emit MintPausedSet(p, msg.sender);
+    }
+
+    function setRedeemPaused(bool p) external {
+        if (p) _checkRole(PAUSER_ROLE, msg.sender);
+        else _checkRole(GOVERNANCE_ROLE, msg.sender);
+        redeemPaused = p;
+        emit RedeemPausedSet(p, msg.sender);
+    }
 
     // ----------------------------- attestation -----------------------------
 
@@ -461,6 +499,8 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         Redeem storage r = redeems[redeemId];
         if (r.from == address(0)) revert UnknownRedeem();
         if (r.fulfilled || r.refunded) revert RedeemClosed();
+        if (fulfillmentRevoked[redeemId]) revert FulfillmentPermanentlyRevoked();
+        if (btxTxid == bytes32(0)) revert BadAttestation();
         if (block.timestamp > deadline) revert AttestationExpired();
         if (attestedHeight < btxBlockHeight) revert NotAttested();
         if (attestedHeight - btxBlockHeight < MIN_CONFIRMATIONS) revert TooShallow();
@@ -494,6 +534,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
         if (block.timestamp > r.fulfilledAt + FULFILL_REVOKE_WINDOW) revert RevokeWindowElapsed();
 
         bytes32 releasedTxid = r.btxTxid;
+        fulfillmentRevoked[redeemId] = true;
         r.fulfilled = false;
         r.fulfilledAt = 0;
         r.btxTxid = bytes32(0);
@@ -511,7 +552,7 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
     ) external onlyRole(GOVERNANCE_ROLE) nonReentrant {
         Redeem storage r = redeems[redeemId];
         if (r.from == address(0)) revert UnknownRedeem();
-        if (r.fulfilled || r.refunded) revert RedeemClosed();
+        if (r.refunded) revert RedeemClosed();
         if (block.timestamp < r.requestedAt + redeemRefundTimeout) revert TooEarly();
         if (block.timestamp > deadline) revert AttestationExpired();
         if (
@@ -528,6 +569,11 @@ contract WBTXBridge is EIP712, AccessControlDefaultAdminRules, ReentrancyGuard {
             )
         ) revert BadAttestation();
 
+        if (r.fulfilled) {
+            r.fulfilled = false;
+            r.fulfilledAt = 0;
+            r.btxTxid = bytes32(0);
+        }
         _checkAndConsumeLimits(r.amountSat);
         if (maxSupplyWbtx != 0 && wbtx.totalSupply() + r.amountWbtx > maxSupplyWbtx) revert SupplyCapExceeded();
 

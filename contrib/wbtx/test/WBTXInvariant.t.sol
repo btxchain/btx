@@ -278,12 +278,12 @@ contract WBTXInvariantHandler is Test {
     }
 
     function setMintPaused(bool paused) external {
-        vm.prank(pauser);
+        vm.prank(paused ? pauser : gov);
         bridge.setMintPaused(paused);
     }
 
     function setRedeemPaused(bool paused) external {
-        vm.prank(pauser);
+        vm.prank(paused ? pauser : gov);
         bridge.setRedeemPaused(paused);
     }
 
@@ -519,6 +519,7 @@ contract WBTXInvariantTest is Test {
     uint64 internal constant OPTIMISTIC_THRESHOLD_SAT = 1_000_000;
     uint64 internal constant GUARDIAN_DELAY = 6 hours;
     uint64 internal constant REDEEM_REFUND_TIMEOUT = 7 days;
+    uint48 internal constant BRIDGE_ADMIN_DELAY = 1 days;
 
     /// forge-config: default.invariant.runs = 256
     /// forge-config: default.invariant.depth = 32
@@ -530,7 +531,7 @@ contract WBTXInvariantTest is Test {
         uint256 deployerNonce = vm.getNonce(address(this));
         address predictedBridge = vm.computeCreateAddress(address(this), deployerNonce + 1);
         wbtx = new WBTX(ADMIN, 0, predictedBridge);
-        bridge = new WBTXBridge(wbtx, IAttestationVerifier(address(verifier)), 1, ADMIN, 0);
+        bridge = new WBTXBridge(wbtx, IAttestationVerifier(address(verifier)), 1, ADMIN, BRIDGE_ADMIN_DELAY);
 
         vm.startPrank(ADMIN);
         wbtx.grantRole(wbtx.PAUSER_ROLE(), PAUSER);

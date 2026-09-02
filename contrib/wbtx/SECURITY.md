@@ -50,8 +50,10 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
 - **Guardian veto / optimistic minting:** mints above `optimisticThresholdSat` are time-queued
   (`guardianDelay`); a `GUARDIAN_ROLE` can `cancelQueuedMint` within the window. Bounds a compromised
   threshold even with "valid" attestation. *Class 1/2 (tBTC pattern).*
-- **Granular pause** (`PAUSER_ROLE`): independent `mintPaused` (the critical backing-safety lever) and
-  `redeemPaused`, so halting minting doesn't trap redemptions and vice versa. **Role separation** via
+- **Granular pause** (asymmetric trust): independent `mintPaused` (the critical backing-safety lever) and
+  `redeemPaused`, so halting minting doesn't trap redemptions and vice versa. **Pausing is `PAUSER_ROLE`
+  (fast, low trust); unpausing requires `GOVERNANCE_ROLE`** — a low-trust key can trip a breaker but cannot
+  lift it. **Role separation** via
   `AccessControlDefaultAdminRules` (2-step admin + enforced delay). Trust-anchor changes are
   timelocked **in-contract**, not by convention: the verifier swap is `proposeVerifier`→`applyVerifier`
   after `VERIFIER_DELAY` (7 days) with a `GUARDIAN_ROLE` `cancelPendingVerifier`; signer rotation is
