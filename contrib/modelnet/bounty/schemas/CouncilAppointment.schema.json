@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:CouncilAppointment:1",
+  "title": "CouncilAppointment",
+  "description": "Proposed strict shape contract. Semantic authorization and provenance checks remain mandatory.",
+  "type": "object",
+  "properties": {
+    "terms_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "evaluator_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "EVALUATE",
+          "POLICY_APPROVE",
+          "TX_SIGN"
+        ]
+      },
+      "maxItems": 3
+    },
+    "conflict_statement": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "accepted": {
+      "const": true
+    },
+    "expires_at_ms": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    }
+  },
+  "required": [
+    "terms_id",
+    "evaluator_identity",
+    "scope",
+    "conflict_statement",
+    "accepted",
+    "expires_at_ms"
+  ],
+  "additionalProperties": false
+}

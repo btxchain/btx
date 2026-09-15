@@ -15,6 +15,17 @@ Note: some template filenames in `contrib/init` still use legacy
     contrib/init/bitcoind.conf:       Upstart service configuration file
     contrib/init/bitcoind.init:       CentOS compatible SysV style init script
 
+Native Model Network helper (separate process)
+----------------------------------------------
+
+`btx-modeld` is **not** started by `btxd` or the stock `bitcoind.service`
+templates. Run it as its own service or foreground process. If the helper exits,
+model RPCs fail closed; **monetary `btxd` must keep running**.
+
+Example unit (adjust paths): [contrib/modelnet/btx-modeld.service.example](../contrib/modelnet/btx-modeld.service.example).
+Bridge settings for `btxd`: [share/examples/modelnet.conf.example](../share/examples/modelnet.conf.example)
+and [btx-conf.md](btx-conf.md#native-model-network-btxd-bridge).
+
 Service User
 ---------------------------------
 

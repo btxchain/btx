@@ -79,6 +79,9 @@ Q_SIGNALS:
     // Fired when a valid payment request is received
     void receivedPaymentRequest(SendCoinsRecipient);
 
+    // btx:// resource URIs. Never a SendCoinsRecipient (V11-URI-13).
+    void receivedModelResource(const QString& uri);
+
     // Fired when a message should be reported to the user
     void message(const QString &title, const QString &message, unsigned int style);
 

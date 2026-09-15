@@ -41,6 +41,7 @@ class WalletModel;
 class HelpMessageDialog;
 class ModalOverlay;
 class MempoolStats;
+class ModelNetPage;
 enum class SynchronizationState;
 
 namespace interfaces {
@@ -53,6 +54,7 @@ QT_BEGIN_NAMESPACE
 class QAction;
 class QComboBox;
 class QDateTime;
+class QDockWidget;
 class QProgressBar;
 class QProgressDialog;
 class QWinTaskbarButton;
@@ -137,6 +139,7 @@ private:
     QToolBar* appToolBar = nullptr;
     QAction* overviewAction = nullptr;
     QAction* m_action_pairing = nullptr;
+    QAction* m_models_action = nullptr;
     QAction* historyAction = nullptr;
     QAction* quitAction = nullptr;
     QAction* sendCoinsAction = nullptr;
@@ -179,6 +182,8 @@ private:
     GuiNetWatch* NetWatch = nullptr;
     RPCConsole* rpcConsole = nullptr;
     HelpMessageDialog* helpMessageDialog = nullptr;
+    ModelNetPage* m_model_net_page = nullptr;
+    QDockWidget* m_models_dock = nullptr;
 #ifdef BITCOIN_QT_WIN_TASKBAR
     QWinTaskbarButton* m_taskbar_button = nullptr;
 #endif
@@ -322,6 +327,10 @@ public Q_SLOTS:
     void showHelpMessageClicked();
     /** Show mempool stats window */
     void showMempoolStatsWindow();
+    /** Show Models dock (Models / Downloads / Shared / Collections / Preservation / Peers / Identity) */
+    void gotoModelsPage();
+    /** Open a btx:// resource on the Models page. Never spends. */
+    void handleModelResource(const QString& uri);
 
     /** Show window if hidden, unminimize when minimized, rise when obscured or show if hidden and fToggleHidden is true */
     void showNormalIfMinimized() { showNormalIfMinimized(false); }

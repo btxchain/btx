@@ -5,6 +5,8 @@
 
 #include <net_processing.h>
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <addrman.h>
 #include <banman.h>
 #include <blockencodings.h>
@@ -37,6 +39,10 @@
 #include <node/txdownloadman.h>
 #include <node/txreconciliation.h>
 #include <node/warnings.h>
+#ifdef ENABLE_MODELNET
+#include <modelnet/bridge.h>
+#include <modelnet/protocol.h>
+#endif
 #include <policy/fees.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
@@ -18966,6 +18972,65 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         m_attested_snapshot_p2p.DeliverChunk(pfrom.GetId(),
                                                           std::move(msg));
         return;
+    }
+
+    // Model introduction is a bounded public-hint channel only. It must
+    // never hold cs_main, fill monetary AddrMan, or stall validation.
+    if (msg_type == NetMsgType::SENDMODELS || msg_type == NetMsgType::GETMDPEERS ||
+        msg_type == NetMsgType::MDPEERS) {
+#ifdef ENABLE_MODELNET
+        if (vRecv.size() > 4096) {
+            Misbehaving(*peer, "model hint oversized");
+            return;
+        }
+        if (msg_type == NetMsgType::SENDMODELS) {
+            if (vRecv.size() != modelnet::SENDMODELS_BYTES) {
+                Misbehaving(*peer, "sendmodels size");
+                return;
+            }
+            modelnet::SendModels msg;
+            std::string err;
+            std::vector<unsigned char> bytes(vRecv.size());
+            if (vRecv.size()) {
+                std::memcpy(bytes.data(), vRecv.data(), vRecv.size());
+            }
+            if (!modelnet::ParseSendModels(bytes, msg, err)) {
+                LogDebug(BCLog::MODELNET, "sendmodels ignored from peer=%d: %s\n", pfrom.GetId(), err);
+                return;
+            }
+            LogDebug(BCLog::MODELNET, "sendmodels v%u roles=%u from peer=%d (hint only)\n",
+                     msg.version, msg.role_mask, pfrom.GetId());
+            return;
+        }
+        if (msg_type == NetMsgType::GETMDPEERS) {
+            if (vRecv.size() != 17) {
+                Misbehaving(*peer, "getmdpeers size");
+                return;
+            }
+            modelnet::GetMdPeers req;
+            std::string err;
+            std::vector<unsigned char> bytes(vRecv.size());
+            if (vRecv.size()) std::memcpy(bytes.data(), vRecv.data(), vRecv.size());
+            if (!modelnet::ParseGetMdPeers(bytes, req, err)) {
+                LogDebug(BCLog::MODELNET, "getmdpeers ignored from peer=%d: %s\n", pfrom.GetId(), err);
+                return;
+            }
+            // CPU helper answers over PQ1. Monetary P2P does not serialize
+            // artifact catalogs into AddrMan.
+            return;
+        }
+        if (msg_type == NetMsgType::MDPEERS) {
+            modelnet::BoundedModelHint hint;
+            hint.from_addr = pfrom.addr.ToStringAddrPort();
+            if (!modelnet::GetModelBridge().TryEnqueuePublicHint(std::move(hint))) {
+                LogDebug(BCLog::MODELNET, "dropping model hint from peer=%d (queue full)\n", pfrom.GetId());
+            }
+            return;
+        }
+#else
+        LogDebug(BCLog::NET, "Ignoring %s from peer=%d (modelnet disabled)\n", msg_type, pfrom.GetId());
+        return;
+#endif
     }
 
     if (msg_type == NetMsgType::GETMMATTEST) {

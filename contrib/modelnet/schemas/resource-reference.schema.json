@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BTX compact resource URI",
+  "type": "string",
+  "pattern": "^btx://[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{85}$",
+  "description": "Shape only. Require Bech32m checksum, supported header, zero padding, type/domain and resolved-object validation."
+}

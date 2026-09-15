@@ -83,6 +83,13 @@ PLATFORM_CONFIGS["linux-x86_64-cpu"] = dict(PLATFORM_CONFIGS["linux-x86_64"])
 PLATFORM_CONFIGS["linux-x86_64-cuda"] = dict(PLATFORM_CONFIGS["linux-x86_64-cuda12"])
 PLATFORM_CONFIGS["macos-arm64-metal"] = dict(PLATFORM_CONFIGS["macos-arm64"])
 SUPPORT_FILES = load_support_files()
+# Packaged next to btxd when present (0.34.7 Native Model Network + Metal probe).
+OPTIONAL_SIBLING_BINARIES = (
+    "btx-modeld",
+    "btx-modelcheck",
+    "btx-open",
+    "btx-matmul-backend-info",
+)
 
 
 def source_date_epoch() -> int:
@@ -171,6 +178,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--matmul-metallib", help="Optional precompiled MatMul Metal library for macOS archives.")
     parser.add_argument("--oracle-metallib", help="Optional precompiled oracle Metal library for macOS archives.")
     parser.add_argument(
+        "--metal-lib-dir",
+        help="Directory of precompiled *.metallib files copied to libexec/metal/ on macOS archives.",
+    )
+    parser.add_argument(
         "--source-root",
         default=str(ROOT),
         help="Repository root used to source helper scripts and docs (default: repo root).",
@@ -241,6 +252,37 @@ def verify_shipped_cli(btx_cli_path: Path) -> None:
 verify_shipped_macos_cli = verify_shipped_cli
 
 
+def verify_shipped_helper(path: Path) -> None:
+    """Portability gate for helpers (modeld, modelcheck, backend-info).
+
+    These binaries are not btxd: they must not load Homebrew dylibs, but they
+    do not carry the ENABLE_ZMQ help text. verify_shipped_cli would demand
+    ZMQ on any name that is not btx-cli.
+    """
+    module = _load_verify_module()
+    if module.is_shell_wrapper(path):
+        raise RuntimeError(
+            f"{path}: pass the real ELF/Mach-O, not a packaged bin/ wrapper"
+        )
+    kind = module.classify(path)
+    if kind == "other":
+        raise RuntimeError(
+            f"{path}: not an ELF, Mach-O, or PE binary; refusing to package "
+            "an unrecognized helper"
+        )
+    if kind == "macho":
+        module.verify_macos_portable(path)
+
+
+def resolve_optional_sibling_binaries(btxd_path: Path, exe_suffix: str) -> list[tuple[Path, str]]:
+    found: list[tuple[Path, str]] = []
+    for name in OPTIONAL_SIBLING_BINARIES:
+        candidate = btxd_path.parent / f"{name}{exe_suffix}"
+        if candidate.is_file():
+            found.append((candidate, f"{name}{exe_suffix}"))
+    return found
+
+
 def resolve_btx_util_path(explicit_path: Path | None, btxd_path: Path, btx_cli_path: Path, exe_suffix: str) -> Path:
     if explicit_path is not None:
         return ensure_input_file(explicit_path, "btx-util binary")
@@ -276,6 +318,7 @@ def stage_release_tree(
     btx_util_path: Path | None,
     matmul_metallib_path: Path | None,
     oracle_metallib_path: Path | None,
+    metal_lib_dir: Path | None,
     source_root: Path,
     temp_root: Path,
 ) -> tuple[Path, list[str]]:
@@ -294,9 +337,12 @@ def stage_release_tree(
             resolve_btx_util_path(btx_util_path, btxd_path, btx_cli_path, config["exe_suffix"]),
             f"btx-util{config['exe_suffix']}",
         ),
+        *resolve_optional_sibling_binaries(btxd_path, config["exe_suffix"]),
     ]
     verify_shipped_btxd(btxd_path)
     verify_shipped_cli(btx_cli_path)
+    for helper_path, _helper_name in binary_pairs[3:]:
+        verify_shipped_helper(helper_path)
 
     for source, dest_name in binary_pairs:
         wrapper = wrapper_payload(dest_name.removesuffix(config["exe_suffix"]), platform_id)
@@ -318,14 +364,18 @@ def stage_release_tree(
         included.append(str(destination.relative_to(release_root)))
 
     if platform_id.startswith("macos-"):
-        metallib_inputs = [
-            (matmul_metallib_path, "matmul_accel_kernels.metallib"),
-            (oracle_metallib_path, "oracle_accel_kernels.metallib"),
-        ]
+        metallib_by_name: dict[str, Path] = {}
+        if metal_lib_dir is not None:
+            if not metal_lib_dir.is_dir():
+                raise FileNotFoundError(f"Missing Metal library directory: {metal_lib_dir}")
+            for source in sorted(metal_lib_dir.glob("*.metallib")):
+                metallib_by_name[source.name] = source
+        if matmul_metallib_path is not None:
+            metallib_by_name["matmul_accel_kernels.metallib"] = matmul_metallib_path
+        if oracle_metallib_path is not None:
+            metallib_by_name["oracle_accel_kernels.metallib"] = oracle_metallib_path
         metal_dir = libexec_dir / "metal"
-        for source_path, dest_name in metallib_inputs:
-            if source_path is None:
-                continue
+        for dest_name, source_path in sorted(metallib_by_name.items()):
             source = ensure_input_file(source_path, dest_name)
             metal_dir.mkdir(parents=True, exist_ok=True)
             destination = metal_dir / dest_name
@@ -406,6 +456,7 @@ def main(argv: list[str]) -> int:
             btx_util_path=Path(args.btx_util).expanduser().resolve() if args.btx_util else None,
             matmul_metallib_path=Path(args.matmul_metallib).expanduser().resolve() if args.matmul_metallib else None,
             oracle_metallib_path=Path(args.oracle_metallib).expanduser().resolve() if args.oracle_metallib else None,
+            metal_lib_dir=Path(args.metal_lib_dir).expanduser().resolve() if args.metal_lib_dir else None,
             source_root=source_root,
             temp_root=temp_root,
         )

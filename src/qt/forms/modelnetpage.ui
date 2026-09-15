@@ -1,0 +1,418 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>ModelNetPage</class>
+ <widget class="QWidget" name="ModelNetPage">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>640</width>
+    <height>480</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Models</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QLabel" name="resourceGovernorStatusLabel">
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+     <property name="textInteractionFlags">
+      <set>Qt::TextSelectableByMouse</set>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="consentLabel">
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+     <property name="textInteractionFlags">
+      <set>Qt::TextSelectableByMouse</set>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="noteLabel">
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+     <property name="text">
+      <string>This page inspects local model policy. It does not spend BTX, open the wallet, run inference, or fetch models on first run. Mutating operations use the same restricted local methods as the CLI (btx-cli getmodel, importmodel, seedmodel, …).</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="uriRowWidget">
+     <layout class="QHBoxLayout" name="uriRow">
+     <item>
+      <widget class="QLabel" name="uriDisplayLabel">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="textInteractionFlags">
+        <set>Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard</set>
+       </property>
+       <property name="toolTip">
+        <string>Short display of the opened btx:// URI. Copy (button or Ctrl+C) puts the full canonical URI on the clipboard.</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="copyUriButton">
+       <property name="text">
+        <string>Copy URI</string>
+       </property>
+       <property name="toolTip">
+        <string>Copy the full canonical btx:// URI, not the short display.</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <spacer name="uriRowSpacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+    </layout>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="horizontalLayoutRefresh">
+     <item>
+      <widget class="QPushButton" name="refreshButton">
+       <property name="text">
+        <string>Refresh</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <spacer name="horizontalSpacerRefresh">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QTabWidget" name="tabWidget">
+     <property name="currentIndex">
+      <number>0</number>
+     </property>
+     <widget class="QWidget" name="tabModels">
+      <attribute name="title">
+       <string>Models</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutModels">
+       <item>
+        <widget class="QTabWidget" name="modelsScopeTabWidget">
+         <property name="currentIndex">
+          <number>0</number>
+         </property>
+         <widget class="QWidget" name="tabScopeNetwork">
+          <attribute name="title">
+           <string>Latest</string>
+          </attribute>
+         </widget>
+         <widget class="QWidget" name="tabScopeNew">
+          <attribute name="title">
+           <string>Nearly Funded</string>
+          </attribute>
+         </widget>
+         <widget class="QWidget" name="tabScopeAvailable">
+          <attribute name="title">
+           <string>Available</string>
+          </attribute>
+         </widget>
+         <widget class="QWidget" name="tabScopeRare">
+          <attribute name="title">
+           <string>Rare</string>
+          </attribute>
+         </widget>
+         <widget class="QWidget" name="tabScopeJustReleased">
+          <attribute name="title">
+           <string>Just Released</string>
+          </attribute>
+         </widget>
+         <widget class="QWidget" name="tabScopeLocal">
+          <attribute name="title">
+           <string>Local</string>
+          </attribute>
+         </widget>
+         <widget class="QWidget" name="tabScopeReleases">
+          <attribute name="title">
+           <string>Releases</string>
+          </attribute>
+         </widget>
+         <widget class="QWidget" name="tabScopePublishers">
+          <attribute name="title">
+           <string>Publishers</string>
+          </attribute>
+         </widget>
+         <widget class="QWidget" name="tabScopeCollections">
+          <attribute name="title">
+           <string>Collections</string>
+          </attribute>
+         </widget>
+         <widget class="QWidget" name="tabScopeBounties">
+          <attribute name="title">
+           <string>Bounties</string>
+          </attribute>
+         </widget>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="searchRowLayout">
+         <item>
+          <widget class="QLineEdit" name="searchLineEdit">
+           <property name="placeholderText">
+            <string>Search open models by name or what they do...</string>
+           </property>
+           <property name="clearButtonEnabled">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="searchButton">
+           <property name="text">
+            <string>Search</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="filterRowLayout">
+         <item>
+          <widget class="QLabel" name="sortLabel">
+           <property name="text">
+            <string>Sort</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="sortCombo"/>
+         </item>
+         <item>
+          <widget class="QLabel" name="formatLabel">
+           <property name="text">
+            <string>Format</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="formatCombo"/>
+         </item>
+         <item>
+          <spacer name="filterRowSpacer">
+           <property name="orientation">
+            <enum>Qt::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QLabel" name="searchCoverageLabel">
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+         <property name="text">
+          <string>Search to discover models. Coverage is always incomplete until you run Search.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QListWidget" name="resultsList">
+         <property name="alternatingRowColors">
+          <bool>true</bool>
+         </property>
+         <property name="selectionMode">
+          <enum>QAbstractItemView::SingleSelection</enum>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPlainTextEdit" name="modelsOutput">
+         <property name="maximumSize">
+          <size>
+           <width>16777215</width>
+           <height>140</height>
+          </size>
+         </property>
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+         <property name="placeholderText">
+          <string>Detail / RPC status (getmodel plan on Download click only).</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="tabPublish">
+      <attribute name="title">
+       <string>Publish</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutPublish">
+       <item>
+        <widget class="QLabel" name="publishNoteLabel">
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+         <property name="text">
+          <string>Creator publish uses publishmodelsearchrecord (same name as btx-cli). It signs searchable metadata only. It does not spend BTX, upload weights, or start inference. automatic_spend_atoms stays 0.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="publishRowLayout">
+         <item>
+          <widget class="QLineEdit" name="publishModelIdEdit">
+           <property name="placeholderText">
+            <string>model_id hex or btx:// URI</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="publishDisplayNameEdit">
+           <property name="placeholderText">
+            <string>Display name</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="publishButton">
+           <property name="text">
+            <string>Publish search record</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QPlainTextEdit" name="publishOutput">
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+         <property name="placeholderText">
+          <string>publishmodelsearchrecord result</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="tabDownloads">
+      <attribute name="title">
+       <string>Downloads</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutDownloads">
+       <item>
+        <widget class="QPlainTextEdit" name="downloadsOutput">
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="tabShared">
+      <attribute name="title">
+       <string>Shared Models</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutShared">
+       <item>
+        <widget class="QPlainTextEdit" name="sharedOutput">
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="tabCollections">
+      <attribute name="title">
+       <string>Collections</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutCollections">
+       <item>
+        <widget class="QPlainTextEdit" name="collectionsOutput">
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="tabPreservation">
+      <attribute name="title">
+       <string>Preservation</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutPreservation">
+       <item>
+        <widget class="QPlainTextEdit" name="preservationOutput">
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="tabPeers">
+      <attribute name="title">
+       <string>Peers</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutPeers">
+       <item>
+        <widget class="QPlainTextEdit" name="peersOutput">
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="tabIdentity">
+      <attribute name="title">
+       <string>Identity</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutIdentity">
+       <item>
+        <widget class="QPlainTextEdit" name="identityOutput">
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

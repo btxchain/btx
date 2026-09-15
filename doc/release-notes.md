@@ -87,6 +87,11 @@ is locally ExactReplay-verified — un-park that majority fork with no
 operator action. See
 [release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
 
+**0.34.7 (RC)** adds the isolated Native Model Network model plane
+(`btx-modeld`); it is **not** a monetary seal and does not change ExactReplay
+consensus when the helper is absent. See
+[release-notes-0.34.7.md](release-notes/release-notes-0.34.7.md).
+
 Please report bugs using the issue tracker at GitHub, and when you
 have a diagnosis, bring the patch:
 

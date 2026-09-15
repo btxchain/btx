@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:SignedEnvelope:1",
+  "title": "SignedEnvelope",
+  "type": "object",
+  "properties": {
+    "envelope_version": {
+      "const": 1
+    },
+    "record_type": {
+      "enum": [
+        "BountyTerms",
+        "EvaluationSpec",
+        "FundingRound",
+        "Submission",
+        "EvaluationReport",
+        "AwardProposal",
+        "ModelSearchRecordV2",
+        "CouncilAppointment",
+        "SubmissionCommitment",
+        "AcceptanceCertificate",
+        "Challenge",
+        "AwardPolicyApproval"
+      ]
+    },
+    "network_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signer_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "public_key_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]+$",
+      "minLength": 2624,
+      "maxLength": 2624
+    },
+    "delegation_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "payload": {
+      "type": "object"
+    },
+    "signature_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]+$",
+      "minLength": 4840,
+      "maxLength": 4840
+    }
+  },
+  "required": [
+    "envelope_version",
+    "record_type",
+    "network_id",
+    "signer_id",
+    "public_key_hex",
+    "delegation_id",
+    "payload",
+    "signature_hex"
+  ],
+  "additionalProperties": false
+}

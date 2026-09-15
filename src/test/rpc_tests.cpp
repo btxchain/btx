@@ -618,6 +618,16 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_bridge_methods)
     BOOST_CHECK_EQUAL(named_result["options"]["force"].get_bool(), true);
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_values_modelnet_methods)
+{
+    BOOST_CHECK_NO_THROW(RPCConvertValues("getmodel", {"btx://x", "{\"mode\":\"plan\",\"retrieval_policy\":\"FREE_ONLY\"}"}));
+    BOOST_CHECK(RPCConvertValues("getmodel", {"btx://x", "{\"mode\":\"plan\"}"})[1].isObject());
+    BOOST_CHECK(RPCConvertValues("preparemodelfunding", {"{\"amount_atoms\":1}"})[0].isObject());
+    BOOST_CHECK(RPCConvertValues("setmodelpolicy", {"{\"preserve_rare\":false}"})[0].isObject());
+    BOOST_CHECK(RPCConvertValues("importmodelcontacts", {"[\"127.0.0.1:8443\"]"})[0].isArray());
+    BOOST_CHECK(RPCConvertValues("removemodelrule", {"3"})[0].isNum());
+}
+
 BOOST_AUTO_TEST_CASE(rpc_getblockstats_calculate_percentiles_by_weight)
 {
     int64_t total_weight = 200;

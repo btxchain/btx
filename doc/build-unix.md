@@ -64,6 +64,27 @@ If CUDA runtime probing succeeds, the output will report:
 For current CUDA runtime defaults, pool behavior, and optimization notes, see
 `btx-cuda-matmul-optimization-notes-2026-04-13.md`.
 
+## Optional: Native Model Network (`WITH_MODELNET`)
+
+The Native Model Network builds `btx-modeld`, `btx-modelcheck`, and `btx-open`
+alongside `btxd`. It is **on by default** (`-DWITH_MODELNET=ON`). A monetary-only
+tree disables it with `-DWITH_MODELNET=OFF`.
+
+PQ1 transport in the helper requires **OpenSSL 3.5+** with **ML-KEM-768** and
+**ML-DSA-44** (`openssl list -kem-algorithms` / `list -signature-algorithms`).
+System OpenSSL **3.0.x** cannot host the helper TLS identity; use bundled libs,
+set `BTX_OPENSSL` to an OpenSSL 3.5 binary, or launch via
+[contrib/modelnet/run-modeld.sh](../contrib/modelnet/run-modeld.sh).
+
+Example researcher build (no GUI):
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DBUILD_BENCH=OFF
+cmake --build build --target btx-modeld btx-modelcheck btx-open
+```
+
+Architecture, economics, and RPC semantics: [modelnet/README.md](modelnet/README.md).
+
 ## Tuning the Metal MatMul accelerator (`BTX_MATMUL_*` environment variables)
 
 On Apple Silicon, the MatMul mining / accelerated-solve paths are tuned by

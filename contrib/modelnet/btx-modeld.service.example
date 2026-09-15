@@ -1,0 +1,27 @@
+# Example systemd unit for btx-modeld (NOT installed by default).
+# btxd and btx-modeld are separate services: stopping or crashing this unit
+# must not stop monetary btxd.
+#
+# Adjust User, paths, and helper flags for your host. See doc/init.md and
+# share/examples/modelnet.conf.example.
+
+[Unit]
+Description=BTX Native Model Network helper (btx-modeld)
+After=network.target
+
+[Service]
+Type=simple
+User=btx
+ExecStart=/usr/local/bin/btx-modeld \
+  -modeldir=/var/lib/btxd/modelnet \
+  -modelstorage=0 \
+  -modelseed=auto \
+  -modeltransport=pq1 \
+  -modelrpcsocket=/var/lib/btxd/modelnet/modeld.sock
+# quota 0: no payload (DoS bound). After a positive -modelstorage, seed=auto
+# re-advertises intentional downloads. Unsolicited fetch: -modelpreserverare.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

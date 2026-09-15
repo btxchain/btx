@@ -1,0 +1,101 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ext_version",
+    "network",
+    "signer_role",
+    "signer_id",
+    "sequence",
+    "issued_at",
+    "expires_at",
+    "transfer_id",
+    "buyer_id",
+    "model_id",
+    "artifact_id",
+    "file_index",
+    "first_piece",
+    "piece_count",
+    "maximum_bytes",
+    "grant_nonce",
+    "queue_class"
+  ],
+  "properties": {
+    "ext_version": {
+      "const": 257
+    },
+    "network": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signer_role": {
+      "const": 0
+    },
+    "signer_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "issued_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "transfer_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "buyer_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "model_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "file_index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "first_piece": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "piece_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "maximum_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "grant_nonce": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "queue_class": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BTX Model Network v1.1 FreeGrant body"
+}

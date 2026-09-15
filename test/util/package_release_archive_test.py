@@ -54,6 +54,7 @@ class PackageReleaseArchiveTest(unittest.TestCase):
         self.module.verify_shipped_btxd = lambda path: None
         self.module.verify_shipped_cli = lambda path: None
         self.module.verify_shipped_macos_cli = lambda path: None
+        self.module.verify_shipped_helper = lambda path: None
 
     def test_linux_archive_includes_binaries_and_helpers(self):
         self._stub_ship_gate()
@@ -158,6 +159,7 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                     btx_util_path=None,
                     matmul_metallib_path=None,
                     oracle_metallib_path=None,
+                    metal_lib_dir=None,
                     source_root=source_root,
                     temp_root=root / "temp",
                 )
@@ -233,6 +235,55 @@ class PackageReleaseArchiveTest(unittest.TestCase):
             self.module.archive_filename("0.34.5", "linux-x86_64-cuda", None),
             self.module.archive_filename("0.34.5", "linux-x86_64-cuda12", None),
         )
+
+    def test_macos_metal_archive_includes_modelnet_helpers_and_metallibs(self):
+        self._stub_ship_gate()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source_root = self._build_source_root(root)
+            btxd, btx_cli = self._write_binaries(root)
+            (root / "btx-modeld").write_text("modeld\n", encoding="utf-8")
+            (root / "btx-modelcheck").write_text("modelcheck\n", encoding="utf-8")
+            (root / "btx-open").write_text("open\n", encoding="utf-8")
+            (root / "btx-matmul-backend-info").write_text("backend\n", encoding="utf-8")
+            metal_dir = root / "metallibs"
+            metal_dir.mkdir()
+            (metal_dir / "matmul_accel_kernels.metallib").write_bytes(b"metal")
+            (metal_dir / "matmul_v4_rc_rowleaf_gpu_kernels.metallib").write_bytes(b"rowleaf")
+            output_dir = root / "out"
+
+            exit_code = self.module.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--version",
+                    "0.34.7",
+                    "--platform-id",
+                    "macos-arm64-metal",
+                    "--btxd",
+                    str(btxd),
+                    "--btx-cli",
+                    str(btx_cli),
+                    "--metal-lib-dir",
+                    str(metal_dir),
+                    "--source-root",
+                    str(source_root),
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            archive_path = output_dir / "btx-0.34.7-arm64-apple-darwin.tar.gz"
+            self.assertTrue(archive_path.is_file())
+            with tarfile.open(archive_path, "r:gz") as archive:
+                names = set(archive.getnames())
+            self.assertIn("btx-0.34.7/libexec/btx-modeld.real", names)
+            self.assertIn("btx-0.34.7/bin/btx-modeld", names)
+            self.assertIn("btx-0.34.7/libexec/btx-open.real", names)
+            self.assertIn("btx-0.34.7/libexec/btx-matmul-backend-info.real", names)
+            self.assertIn("btx-0.34.7/libexec/metal/matmul_accel_kernels.metallib", names)
+            self.assertIn(
+                "btx-0.34.7/libexec/metal/matmul_v4_rc_rowleaf_gpu_kernels.metallib", names
+            )
 
     def test_verify_shipped_btxd_refuses_unrecognized_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:

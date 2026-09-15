@@ -7,6 +7,10 @@ Report BTX security issues to the BTX Development Team at `team@btx.dev`.
 
 Use these files in the following order:
 
+Native Model Network isolation (separate helper process, no consensus coupling):
+[../modelnet/isolation.md](../modelnet/isolation.md) and
+[../modelnet/pq-transport.md](../modelnet/pq-transport.md).
+
 1. [current-status.md](current-status.md)
    - Current security status for the active codebase and hardening branch.
 2. [hardfork-61000.md](hardfork-61000.md)

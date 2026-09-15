@@ -1,0 +1,6 @@
+digraph G {graph[rankdir=LR,bgcolor="white",pad="0.25",nodesep="0.4",ranksep="0.5"];node[shape=box,style="rounded,filled",fillcolor="#EFF4F8",color="#507085",fontname="DejaVu Sans",fontsize=11];edge[color="#507085",fontname="DejaVu Sans",fontsize=9];n[label="Capability need
+No model ID yet"];b[label="Searchable bounty
+Terms + evaluator policy"];f[label="Authorized funding
+Confirmed lots"];s[label="Candidate + reports
+Accepted award"];m[label="Public model
+Search + local use"];n->b;b->f;f->s;s->m;m->n[label="next capability gap",constraint=false];}

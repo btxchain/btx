@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:AgentMandate:1",
+  "title": "AgentMandate",
+  "description": "Proposed implementation contract. JSON schema validates shape; semantic authorization, deadlines, arithmetic, signatures and actual script compatibility are additional required checks.",
+  "type": "object",
+  "properties": {
+    "mandate_version": {
+      "const": 1
+    },
+    "owner_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "agent_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "network_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "allowed_terms_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{96}$"
+      },
+      "maxItems": 64
+    },
+    "allowed_actions": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "FUND",
+          "CLAIM",
+          "REFUND"
+        ]
+      },
+      "maxItems": 3
+    },
+    "total_principal_limit_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "per_action_principal_limit_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "total_fee_limit_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "outstanding_exposure_limit_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "refund_key_policy": {
+      "const": "OWNER_CONTROLLED_ONLY"
+    },
+    "expires_at_ms": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "revocation_counter": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "max_concurrent_reservations": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32
+    }
+  },
+  "required": [
+    "mandate_version",
+    "owner_identity",
+    "agent_identity",
+    "network_id",
+    "allowed_terms_ids",
+    "allowed_actions",
+    "total_principal_limit_atoms",
+    "per_action_principal_limit_atoms",
+    "total_fee_limit_atoms",
+    "outstanding_exposure_limit_atoms",
+    "refund_key_policy",
+    "expires_at_ms",
+    "revocation_counter",
+    "max_concurrent_reservations"
+  ],
+  "additionalProperties": false
+}

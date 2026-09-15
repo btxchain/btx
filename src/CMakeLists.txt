@@ -909,6 +909,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   policy/feerate.cpp
   policy/policy.cpp
   pow.cpp
+  node/resource_governor.cpp
   protocol.cpp
   psbt.cpp
   rpc/rawtransaction_util.cpp
@@ -1814,6 +1815,40 @@ set(BTX_NODE_ARCHIVES
   ${BTX_BASE_ARCHIVES}
 )
 
+if(WITH_MODELNET)
+  find_package(OpenSSL REQUIRED)
+  if(OPENSSL_VERSION VERSION_LESS 3.5)
+    message(FATAL_ERROR
+      "WITH_MODELNET requires OpenSSL 3.5+ with ML-KEM-768 / ML-DSA-44 "
+      "(found ${OPENSSL_VERSION}). Set OPENSSL_ROOT_DIR to an OpenSSL 3.5+ "
+      "prefix (Homebrew: brew install openssl@3).")
+  endif()
+  if(APPLE)
+    set(_btx_ssl_loc "")
+    get_target_property(_btx_ssl_loc OpenSSL::SSL IMPORTED_LOCATION)
+    if(NOT _btx_ssl_loc)
+      get_target_property(_btx_ssl_loc OpenSSL::SSL IMPORTED_LOCATION_RELEASE)
+    endif()
+    if(_btx_ssl_loc AND _btx_ssl_loc MATCHES "\\.(dylib|so)([0-9.]*)$")
+      message(FATAL_ERROR
+        "WITH_MODELNET on macOS resolved shared OpenSSL (${_btx_ssl_loc}). "
+        "A Homebrew libssl.dylib load command fails on a Mac without that keg. "
+        "Pass -DOPENSSL_USE_STATIC_LIBS=ON and OPENSSL_ROOT_DIR pointing at "
+        "libssl.a (Homebrew: brew install openssl@3).")
+    endif()
+    message(STATUS "OpenSSL (macOS static): ${_btx_ssl_loc}")
+  endif()
+  set(OPENSSL_VERSION "${OPENSSL_VERSION}" PARENT_SCOPE)
+  if(TARGET OpenSSL::SSL)
+    set_property(TARGET OpenSSL::SSL PROPERTY IMPORTED_GLOBAL TRUE)
+  endif()
+  if(TARGET OpenSSL::Crypto)
+    set_property(TARGET OpenSSL::Crypto PROPERTY IMPORTED_GLOBAL TRUE)
+  endif()
+  add_subdirectory(modelnet)
+  list(APPEND BTX_NODE_ARCHIVES bitcoin_modelnet)
+endif()
+
 set(BTX_WALLET_ARCHIVES
   bitcoin_wallet
   ${BTX_BASE_ARCHIVES}
@@ -1935,6 +1970,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   rpc/matmul_trusted.cpp
   rpc/net.cpp
   rpc/node.cpp
+  rpc/resource_governor.cpp
   rpc/output_script.cpp
   rpc/rawtransaction.cpp
   rpc/server.cpp
@@ -1973,6 +2009,11 @@ target_link_libraries(bitcoin_node
     $<TARGET_NAME_IF_EXISTS:MiniUPnPc::MiniUPnPc>
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
 )
+
+if(WITH_MODELNET)
+  target_sources(bitcoin_node PRIVATE rpc/modelnet.cpp)
+  target_link_libraries(bitcoin_node PRIVATE bitcoin_modelnet)
+endif()
 
 
 # BTX daemon executable.

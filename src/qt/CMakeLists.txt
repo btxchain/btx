@@ -213,6 +213,8 @@ add_library(bitcoinqt STATIC EXCLUDE_FROM_ALL
   initexecutor.h
   intro.cpp
   intro.h
+  modelnetpage.cpp
+  modelnetpage.h
   $<$<PLATFORM_ID:Darwin>:macdockiconhandler.h>
   $<$<PLATFORM_ID:Darwin>:macdockiconhandler.mm>
   $<$<PLATFORM_ID:Darwin>:macnotificationhandler.h>
@@ -288,6 +290,9 @@ target_link_libraries(bitcoinqt
     $<$<PLATFORM_ID:Darwin>:-framework\ AppKit>
     $<$<CXX_COMPILER_ID:MSVC>:shlwapi>
 )
+if(WITH_MODELNET)
+  target_link_libraries(bitcoinqt PRIVATE bitcoin_modelnet)
+endif()
 
 if(ENABLE_WALLET)
   target_sources(bitcoinqt

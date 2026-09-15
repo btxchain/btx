@@ -73,6 +73,7 @@ Subdirectory       | File(s)               | Description
 `./`               | `settings.json`       | Read-write settings set through GUI or RPC interfaces, augmenting manual settings from [btx.conf](btx-conf.md). File is created automatically if read-write settings storage is not disabled with `-nosettings` option. Path can be specified with `-settings` option
 `./`               | `.cookie`             | Session RPC authentication cookie; if used, created at start and deleted on shutdown; can be specified by `-rpccookiefile` option
 `./`               | `.lock`               | Data directory lock file
+`modelnet/`        | `catalog/`, `pieces/`, `modeld.sock`, `tls/` | Native Model Network helper state when `-modelrpcsocket` is under the datadir (default). Written by **`btx-modeld`**, not by monetary sync. Never place `wallet.dat`, `chainstate/`, or block files here. See [modelnet/architecture.md](modelnet/architecture.md).
 
 ## Multi-wallet environment
 

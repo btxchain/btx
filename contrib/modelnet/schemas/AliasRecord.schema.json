@@ -1,0 +1,72 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ext_version",
+    "network",
+    "signer_role",
+    "signer_id",
+    "sequence",
+    "issued_at",
+    "expires_at",
+    "slug",
+    "active",
+    "target_kind",
+    "target_id",
+    "previous_record_id"
+  ],
+  "properties": {
+    "ext_version": {
+      "const": 257
+    },
+    "network": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signer_role": {
+      "const": 1
+    },
+    "signer_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "issued_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "slug": {
+      "type": "string",
+      "maxLength": 32,
+      "description": "Canonical encoder also enforces the UTF-8 BYTE cap and rejects NUL."
+    },
+    "active": {
+      "type": "boolean"
+    },
+    "target_kind": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "target_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "previous_record_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BTX Model Network v1.1 AliasRecord body"
+}

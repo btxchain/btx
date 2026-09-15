@@ -1,0 +1,33 @@
+# Native Model Network — example btxd bridge settings (0.34.7)
+#
+# Copy into your datadir and include from btx.conf, e.g.:
+#   includeconf=modelnet.conf
+#
+# btxd never starts btx-modeld. Run the helper separately; if it dies,
+# model RPCs fail closed and monetary consensus continues.
+#
+# Product contract: inference is local after acquire; automatic spend default 0;
+# FREE_ONLY never becomes paid because a timer expired. Not a remote inference
+# marketplace.
+
+# Enable model RPC proxy through btxd (default off for fresh installs).
+# modelnet=1
+
+# Unix JSON-RPC socket (default: <datadir>/modelnet/modeld.sock)
+# modelrpcsocket=
+
+# Optional introduction hints (require modelnet=1; not monetary AddrMan):
+# modelrelay=1
+# modelhost=1
+
+# --- btx-modeld (separate process; paste into a systemd unit or shell) ---
+# build/bin/btx-modeld \
+#   -modeldir=<datadir>/modelnet \
+#   -modelstorage=80GiB \
+#   -modelseed=auto \
+#   -modeltransport=pq1 \
+#   -modelrpcsocket=<datadir>/modelnet/modeld.sock \
+#   -modelpeer=<host:port>   # optional; repeatable; not monetary addnode
+#   # -modelpreserverare     # optional unsolicited rare fetch into spare quota
+#
+# On OpenSSL 3.0.x hosts, use contrib/modelnet/run-modeld.sh and/or BTX_OPENSSL.

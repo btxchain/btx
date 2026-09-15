@@ -14,6 +14,7 @@
 #include <qt/guiutil.h>
 #include <qt/mempoolstats.h>
 #include <qt/modaloverlay.h>
+#include <qt/modelnetpage.h>
 #include <qt/netwatch.h>
 #include <qt/networkstyle.h>
 #include <qt/notificator.h>
@@ -56,6 +57,7 @@
 #include <QComboBox>
 #include <QCursor>
 #include <QDateTime>
+#include <QDockWidget>
 #include <QDragEnterEvent>
 #include <QInputDialog>
 #include <QKeySequence>
@@ -113,6 +115,13 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
 
     rpcConsole = new RPCConsole(node, _platformStyle, nullptr);
     helpMessageDialog = new HelpMessageDialog(this, false);
+
+    m_model_net_page = new ModelNetPage(this);
+    m_models_dock = new QDockWidget(tr("Models"), this);
+    m_models_dock->setObjectName("ModelsDock");
+    m_models_dock->setWidget(m_model_net_page);
+    m_models_dock->setAllowedAreas(Qt::AllDockWidgetAreas);
+    addDockWidget(Qt::RightDockWidgetArea, m_models_dock);
 #ifdef ENABLE_WALLET
     if(enableWallet)
     {
@@ -296,6 +305,13 @@ void BitcoinGUI::createActions()
     m_action_pairing->setShortcut(QKeySequence(QStringLiteral("Alt+5")));
     tabGroup->addAction(m_action_pairing);
 
+    m_models_action = new QAction(platformStyle->SingleColorIcon(":/icons/synced"), tr("&Models"), this);
+    m_models_action->setStatusTip(tr("Model Network: Models, Downloads, Shared Models, Collections, Preservation, Peers, Identity"));
+    m_models_action->setToolTip(m_models_action->statusTip());
+    m_models_action->setCheckable(true);
+    m_models_action->setChecked(true);
+    m_models_action->setShortcut(QKeySequence(QStringLiteral("Alt+6")));
+
 #ifdef ENABLE_WALLET
     // These showNormalIfMinimized are needed because Send Coins and Receive Coins
     // can be triggered from the tray menu, and need to show the GUI to be useful.
@@ -310,6 +326,12 @@ void BitcoinGUI::createActions()
     connect(m_action_pairing, &QAction::triggered, this, [this]{ showNormalIfMinimized(); });
     connect(m_action_pairing, &QAction::triggered, this, &BitcoinGUI::gotoPairingPage);
 #endif // ENABLE_WALLET
+
+    connect(m_models_action, &QAction::triggered, this, [this]{ showNormalIfMinimized(); });
+    connect(m_models_action, &QAction::toggled, this, &BitcoinGUI::gotoModelsPage);
+    if (m_models_dock) {
+        connect(m_models_dock, &QDockWidget::visibilityChanged, m_models_action, &QAction::setChecked);
+    }
 
     quitAction = new QAction(tr("E&xit"), this);
     quitAction->setStatusTip(tr("Quit application"));
@@ -605,6 +627,7 @@ void BitcoinGUI::createMenuBar()
     }
 
     window_menu->addSeparator();
+    window_menu->addAction(m_models_action);
     window_menu->addAction(m_show_netwatch_action);
     window_menu->addAction(showMempoolStatsAction);
 
@@ -646,6 +669,7 @@ void BitcoinGUI::createToolBars()
         toolbar->addAction(receiveCoinsAction);
         toolbar->addAction(historyAction);
         toolbar->addAction(m_action_pairing);
+        toolbar->addAction(m_models_action);
         overviewAction->setChecked(true);
 
 #ifdef ENABLE_WALLET
@@ -667,6 +691,12 @@ void BitcoinGUI::createToolBars()
         m_wallet_selector_label_action->setVisible(false);
         m_wallet_selector_action->setVisible(false);
 #endif
+    } else if (m_models_action) {
+        QToolBar *toolbar = addToolBar(tr("Tabs toolbar"));
+        appToolBar = toolbar;
+        toolbar->setMovable(false);
+        toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        toolbar->addAction(m_models_action);
     }
 }
 
@@ -705,6 +735,10 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
 
         rpcConsole->setClientModel(_clientModel, tip_info->block_height, tip_info->block_time, tip_info->verification_progress);
 
+        if (m_model_net_page) {
+            m_model_net_page->setClientModel(_clientModel);
+        }
+
         updateProxyIcon();
 
 #ifdef ENABLE_WALLET
@@ -737,6 +771,9 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
             NetWatch->setClientModel(nullptr);
         }
         rpcConsole->setClientModel(nullptr);
+        if (m_model_net_page) {
+            m_model_net_page->setClientModel(nullptr);
+        }
 #ifdef ENABLE_WALLET
         if (walletFrame)
         {
@@ -1035,6 +1072,25 @@ void BitcoinGUI::showMempoolStatsWindow()
     mempoolStats->show();
     mempoolStats->raise();
     mempoolStats->activateWindow();
+}
+
+void BitcoinGUI::gotoModelsPage()
+{
+    if (!m_models_dock) return;
+    if (m_models_action && m_models_action->isChecked()) {
+        m_models_dock->show();
+        m_models_dock->raise();
+        if (m_model_net_page) m_model_net_page->refresh();
+    } else {
+        m_models_dock->hide();
+    }
+}
+
+void BitcoinGUI::handleModelResource(const QString& uri)
+{
+    if (m_models_action) m_models_action->setChecked(true);
+    gotoModelsPage();
+    if (m_model_net_page) m_model_net_page->showOpenedUri(uri);
 }
 
 #ifdef ENABLE_WALLET
@@ -1484,7 +1540,12 @@ void BitcoinGUI::dropEvent(QDropEvent *event)
     {
         for (const QUrl &uri : event->mimeData()->urls())
         {
-            Q_EMIT receivedURI(uri.toString());
+            const QString s = uri.toString();
+            if (s.startsWith(QLatin1String("btx:"), Qt::CaseInsensitive)) {
+                handleModelResource(s);
+                continue;
+            }
+            Q_EMIT receivedURI(s);
         }
     }
     event->acceptProposedAction();

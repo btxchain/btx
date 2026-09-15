@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:BountyEconomy:1",
+  "title": "BountyEconomy",
+  "description": "Proposed strict shape contract. Semantic authorization and provenance checks remain mandatory.",
+  "type": "object",
+  "properties": {
+    "bounty_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "target_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$"
+    },
+    "pledged_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$"
+    },
+    "pending_funding_atoms": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "confirmed_eligible_principal_atoms": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "active_escrow_principal_atoms": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "staged_release_principal_atoms": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "awarded_principal_atoms": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "refunded_principal_atoms": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "execution_reserve_atoms": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "remaining_target_atoms": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "funding_progress_known": {
+      "type": "boolean"
+    },
+    "funded_basis_points": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fundable_now": {
+      "type": "boolean"
+    },
+    "chain_context": {
+      "type": "object",
+      "properties": {
+        "network_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "authority": {
+          "enum": [
+            "LOCAL_VALIDATED_CHAIN",
+            "REMOTE_OBSERVATION",
+            "UNKNOWN"
+          ]
+        },
+        "tip_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tip_height": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 499999999
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at_ms": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "index_complete": {
+          "type": "boolean"
+        },
+        "minimum_confirmations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "observer_identity": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "network_id",
+        "authority",
+        "tip_hash",
+        "tip_height",
+        "observed_at_ms",
+        "index_complete",
+        "minimum_confirmations",
+        "observer_identity"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "bounty_id",
+    "target_atoms",
+    "pledged_atoms",
+    "pending_funding_atoms",
+    "confirmed_eligible_principal_atoms",
+    "active_escrow_principal_atoms",
+    "staged_release_principal_atoms",
+    "awarded_principal_atoms",
+    "refunded_principal_atoms",
+    "execution_reserve_atoms",
+    "remaining_target_atoms",
+    "funding_progress_known",
+    "funded_basis_points",
+    "fundable_now",
+    "chain_context"
+  ],
+  "additionalProperties": false
+}

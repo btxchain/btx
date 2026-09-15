@@ -59,6 +59,15 @@ or
 build/bin/test_btx -l all -t getarg_tests
 ```
 
+### Native Model Network
+
+When `-DWITH_MODELNET=ON`:
+
+```bash
+build/bin/test_btx --run_test=modelnet_tests
+python3 contrib/modelnet/two_helper_retrieve.py build/bin
+```
+
 or to run only the doubledash test in `getarg_tests`
 
 ```bash

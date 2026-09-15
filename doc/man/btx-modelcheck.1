@@ -1,0 +1,15 @@
+.TH BTX-MODELCHECK 1 "September 2026" "BTX 0.34.7" "User Commands"
+.SH NAME
+btx-modelcheck \- static model qualification
+.SH SYNOPSIS
+.B btx-modelcheck
+.I file
+.SH DESCRIPTION
+Header-only SafeTensors/GGUF structure check. Does not load the whole file
+into RAM, does not execute pickle/.pt/Python/.so, and does not launch CUDA.
+.PP
+A STRUCTURE_VERIFIED result is not a claim of usefulness, safety, or
+alignment.
+.SH SEE ALSO
+.BR btx-modeld (1),
+.I doc/modelnet/README.md

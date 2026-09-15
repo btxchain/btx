@@ -132,14 +132,18 @@ cmake -S . -B build-metal -G Ninja \
   -DCMAKE_PREFIX_PATH=/opt/homebrew \
   -DWITH_ZMQ=ON \
   -DBTX_ENABLE_METAL=ON \
-  -DBUILD_GUI=OFF -DBUILD_BENCH=OFF
+  -DWITH_MODELNET=ON \
+  -DBUILD_GUI=ON -DWITH_QT_VERSION=6 \
+  -DBUILD_BENCH=OFF
 ```
 
 Without `PKG_CONFIG_PATH` and `CMAKE_PREFIX_PATH`, CMake reports ZeroMQ
 missing even when `brew install zeromq` succeeded. Prefer static `libzmq.a`
 (CMake already does this on Apple) so the shipped `btxd` has **no Homebrew
-zmq dylib**. Libevent and libomp must be static too (`libevent_core.a`,
-`libomp.a`) — a dylib under `/opt/homebrew` will not launch on a clean Mac.
+zmq dylib**. Libevent, libomp, and OpenSSL must be static too
+(`libevent_core.a`, `libomp.a`, `libssl.a`) — a dylib under `/opt/homebrew`
+will not launch on a clean Mac. `WITH_MODELNET` is ON by default and
+auto-selects Homebrew `openssl@3` with `-DOPENSSL_USE_STATIC_LIBS=ON`.
 Verify the **real binary**. Since 0.34.1, packaged `bin/btxd` is a
 `#!/bin/sh` wrapper; `otool -L bin/btxd` / `ldd bin/btxd` are vacuous.
 
@@ -149,9 +153,22 @@ Build tree (unpackaged, still ELF/Mach-O):
 otool -L build-metal/bin/btxd | grep homebrew   # must print nothing
 otool -L build-metal/bin/btx-cli | grep homebrew
 otool -L build-metal/bin/btxd | grep -i zmq     # must print nothing (static)
+otool -L build-metal/bin/btxd | grep -i ssl      # must print nothing (static)
 strings build-metal/bin/btxd | grep -F 'Enable publish hash block'
 python3 scripts/release/verify_release_btxd.py \
   build-metal/bin/btxd build-metal/bin/btx-cli
+./build-metal/bin/btx-matmul-backend-info --backend metal
+```
+
+Package the Metal archive with every precompiled `.metallib` next to
+`libexec/btxd.real` so a machine without the build tree does not fall back to
+`MTLCompilerService`:
+
+```bash
+python3 scripts/release/package_release_archive.py \
+  --output-dir dist --version 0.34.7 --platform-id macos-arm64-metal \
+  --btxd build-metal/bin/btxd --btx-cli build-metal/bin/btx-cli \
+  --metal-lib-dir build-metal/src
 ```
 
 Published tarball (wrapper in `bin/`, real binary in `libexec/`):

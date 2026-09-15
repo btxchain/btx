@@ -48,7 +48,7 @@ See [dependencies.md](dependencies.md) for a complete overview.
 To install, run the following from your terminal:
 
 ``` bash
-brew install cmake boost pkgconf libevent
+brew install cmake boost pkgconf libevent openssl@3
 ```
 
 ### 4. Clone Bitcoin repository
@@ -141,14 +141,53 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig"
 cmake -B build -DCMAKE_PREFIX_PATH=/opt/homebrew -DWITH_ZMQ=ON
 ```
 
-CMake prefers static `libzmq.a`, `libevent_*.a`, and `libomp.a` on macOS so
-the tarball has no Homebrew load commands. After linking,
+CMake prefers static `libzmq.a`, `libevent_*.a`, `libomp.a`, and (when
+`WITH_MODELNET=ON`) `libssl.a` / `libcrypto.a` on macOS so the tarball has
+no Homebrew load commands. After linking,
 `otool -L build/bin/btxd` and `otool -L build/bin/btx-cli` must not list
-`/opt/homebrew`, must not list `libzmq` as a dylib, and
+`/opt/homebrew`, must not list `libzmq` or `libssl` as a dylib, and
 `python3 scripts/release/verify_release_btxd.py build/bin/btxd build/bin/btx-cli`
 must pass. `strings build/bin/btxd` must contain `Enable publish hash block`
 — `-zmqpubhashblock` in the binary without that help text is the 0.33.4.2
 silent-publish failure.
+
+### Apple Silicon Metal Release (`macos-arm64-metal`)
+
+ExactReplay, mining, and Native Model Network on Apple Silicon need a
+**Metal** `btxd` plus OpenSSL 3.5+ for PQ1. Install:
+
+``` bash
+brew install cmake ninja pkgconf boost libevent zeromq libomp openssl@3 qt qrencode
+```
+
+Configure a Release tree (keep `-j1` or `-j2` if another `btxd` is already
+using the GPU):
+
+``` bash
+export PATH="/opt/homebrew/bin:/usr/bin:$PATH"
+export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig"
+cmake -S . -B build-metal -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/opt/homebrew \
+  -DWITH_ZMQ=ON \
+  -DBTX_ENABLE_METAL=ON \
+  -DWITH_MODELNET=ON \
+  -DBUILD_GUI=ON -DWITH_QT_VERSION=6 \
+  -DBUILD_BENCH=OFF
+cmake --build build-metal --target btxd btx-cli btx-util btx-modeld \
+  btx-modelcheck btx-open btx-matmul-backend-info btx-qt test_btx -j2
+```
+
+CMake precompiles `.metallib` kernels (including Metal 4 TensorOps when
+`xcrun metal -std=metal4.0` works) so launchd `btxd` does not need
+`MTLCompilerService`. Packaged archives copy those libraries to
+`libexec/metal/` beside `btxd.real`. Stage-3 row-leaf and Fp3 LDE loaders
+look there before falling back to inline source.
+
+Apple's `/usr/bin/openssl` is LibreSSL and cannot mint ML-DSA-44
+certificates. Native Model Network uses Homebrew `openssl@3` (or
+`BTX_OPENSSL`) for those files. `otool -L` on `btxd` / `btx-modeld` still
+must not list a Homebrew `libssl` dylib — the library is statically linked.
 
 For more information on ZMQ, see: [zmq.md](zmq.md)
 

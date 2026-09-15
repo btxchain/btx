@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:RecoveryManifest:1",
+  "title": "RecoveryManifest",
+  "description": "Proposed strict shape contract. Semantic authorization and provenance checks remain mandatory.",
+  "type": "object",
+  "properties": {
+    "manifest_version": {
+      "const": 1
+    },
+    "network_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bounty_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "terms_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "lot_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "outpoint": {
+      "type": "object",
+      "properties": {
+        "txid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "vout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "required": [
+        "txid",
+        "vout"
+      ],
+      "additionalProperties": false
+    },
+    "refund_key_reference": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "refund_height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 499999999
+    },
+    "complete_tree_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]+$",
+      "maxLength": 65536
+    },
+    "refund_control_data_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]*$",
+      "maxLength": 8192
+    },
+    "staged_from_lot_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "value_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$"
+    },
+    "requires_external_private_key": {
+      "const": true
+    }
+  },
+  "required": [
+    "manifest_version",
+    "network_id",
+    "bounty_id",
+    "terms_id",
+    "lot_id",
+    "outpoint",
+    "refund_key_reference",
+    "refund_height",
+    "complete_tree_hex",
+    "refund_control_data_hex",
+    "staged_from_lot_id",
+    "value_atoms",
+    "requires_external_private_key"
+  ],
+  "additionalProperties": false
+}

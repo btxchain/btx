@@ -50,6 +50,10 @@ target_link_libraries(bitcoin_wallet
     Boost::headers
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
 )
+if(WITH_MODELNET)
+  target_sources(bitcoin_wallet PRIVATE model_payment.cpp model_funding.cpp bounty_funding.cpp)
+  target_link_libraries(bitcoin_wallet PRIVATE bitcoin_modelnet)
+endif()
 
 if(NOT USE_SQLITE AND NOT USE_BDB)
   message(FATAL_ERROR "Wallet functionality requested but no BDB or SQLite support available.")

@@ -19,11 +19,21 @@
 #include <util/fs_helpers.h>
 #include <validation.h>
 
+#include <QCheckBox>
+#include <QCoreApplication>
+#include <QDebug>
+#include <QDir>
 #include <QFileDialog>
-#include <QSettings>
+#include <QFileInfo>
 #include <QMessageBox>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QSettings>
+#include <QStandardPaths>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 /* Check free space asynchronously to prevent hanging the UI thread.
 
@@ -159,6 +169,33 @@ Intro::Intro(QWidget *parent, int64_t blockchain_size_gb, int64_t chain_state_si
     ui->lblPruneSuffix->setToolTip(ui->prune->toolTip());
     UpdatePruneLabels(ui->prune->checkState() == Qt::Checked);
 
+    ui->modelStorageSpin->setRange(0, 1048576);
+    ui->modelStorageSpin->setValue(500);
+    ui->modelStorageUnit->setCurrentIndex(1); // GiB
+    ui->modelNetParticipate->setChecked(true);
+    ui->modelStorageAuto->setChecked(true);
+    ui->modelDemandSeed->setChecked(true);
+    ui->modelResourceGovernor->setChecked(true);
+    ui->modelMiningIdle->setChecked(false);
+    ui->modelPreserveRare->setChecked(false);
+    ui->lblResourceMode->setText(tr("Resource mode: Automatic"));
+    ui->installOsHandler->setChecked(true);
+    ui->installOsHandlerSystem->setChecked(false);
+#if defined(Q_OS_LINUX)
+    ui->installOsHandlerSystem->setEnabled(ui->installOsHandler->isChecked());
+    connect(ui->installOsHandler, &QCheckBox::toggled, this, [this](bool on) {
+        ui->installOsHandlerSystem->setEnabled(on);
+        if (!on) ui->installOsHandlerSystem->setChecked(false);
+    });
+    connect(ui->modelResourceGovernor, &QCheckBox::toggled, this, [this](bool on) {
+        ui->lblResourceMode->setText(on ? tr("Resource mode: Automatic") : tr("Resource mode: Off"));
+    });
+#else
+    ui->installOsHandler->setVisible(false);
+    ui->installOsHandlerSystem->setVisible(false);
+    ui->installOsHandler->setChecked(false);
+#endif
+
 #if (QT_VERSION >= QT_VERSION_CHECK(6, 7, 0))
     connect(ui->prune, &QCheckBox::checkStateChanged, [this](const Qt::CheckState prune_state) {
 #else
@@ -255,6 +292,161 @@ QString Intro::getAssumeValid() const
         return QStringLiteral("0");
     }
     return ui->assumevalidBlock->text();
+}
+
+uint64_t Intro::getModelStorageBytes() const
+{
+    const uint64_t n = static_cast<uint64_t>(std::max(0, ui->modelStorageSpin->value()));
+    uint64_t mul = 1024ULL * 1024ULL * 1024ULL;
+    switch (ui->modelStorageUnit->currentIndex()) {
+    case 0: mul = 1024ULL * 1024ULL; break;
+    case 1: mul = 1024ULL * 1024ULL * 1024ULL; break;
+    case 2: mul = 1024ULL * 1024ULL * 1024ULL * 1024ULL; break;
+    default: break;
+    }
+    if (n != 0 && n > std::numeric_limits<uint64_t>::max() / mul) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return n * mul;
+}
+
+QString Intro::getModelStorageArg() const
+{
+    if (ui->modelStorageAuto->isChecked()) return QStringLiteral("auto");
+    const int n = std::max(0, ui->modelStorageSpin->value());
+    if (n == 0) return QStringLiteral("0");
+    static const char* units[] = {"MiB", "GiB", "TiB"};
+    const int idx = std::clamp(ui->modelStorageUnit->currentIndex(), 0, 2);
+    return QString::number(n) + QLatin1String(units[idx]);
+}
+
+bool Intro::getModelNetParticipateChecked() const
+{
+    return ui->modelNetParticipate->isChecked();
+}
+
+bool Intro::getModelStorageAutoChecked() const
+{
+    return ui->modelStorageAuto->isChecked();
+}
+
+bool Intro::getDemandSeedChecked() const
+{
+    return ui->modelDemandSeed->isChecked();
+}
+
+bool Intro::getSpareResourcesChecked() const
+{
+    return ui->modelResourceGovernor->isChecked();
+}
+
+bool Intro::getMiningIdleChecked() const
+{
+    return ui->modelMiningIdle->isChecked();
+}
+
+bool Intro::getPreserveRareChecked() const
+{
+    return ui->modelPreserveRare->isChecked();
+}
+
+bool Intro::getInstallOsHandlerChecked() const
+{
+    return ui->installOsHandler->isChecked();
+}
+
+bool Intro::getInstallOsHandlerSystemChecked() const
+{
+    return ui->installOsHandler->isChecked() && ui->installOsHandlerSystem->isChecked();
+}
+
+#if defined(Q_OS_LINUX)
+namespace {
+QString FindBtxOpenBinary()
+{
+    const QByteArray env = qgetenv("BTX_OPEN");
+    if (!env.isEmpty()) {
+        return QString::fromLocal8Bit(env);
+    }
+    const QString sibling = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("btx-open"));
+    if (QFileInfo(sibling).isExecutable()) {
+        return sibling;
+    }
+    return QStandardPaths::findExecutable(QStringLiteral("btx-open"));
+}
+
+QString FindInstallOsHandlerScript()
+{
+    const QByteArray env = qgetenv("BTX_INSTALL_OS_HANDLER");
+    if (!env.isEmpty()) {
+        return QString::fromLocal8Bit(env);
+    }
+    QDir dir(QCoreApplication::applicationDirPath());
+    for (int i = 0; i < 8; ++i) {
+        const QString cand = dir.filePath(QStringLiteral("contrib/modelnet/install-os-handler.sh"));
+        if (QFileInfo::exists(cand)) {
+            return cand;
+        }
+        const QString beside = dir.filePath(QStringLiteral("install-os-handler.sh"));
+        if (QFileInfo::exists(beside)) {
+            return beside;
+        }
+        if (!dir.cdUp()) {
+            break;
+        }
+    }
+    return {};
+}
+} // namespace
+#endif // Q_OS_LINUX
+
+bool Intro::installOsHandler() const
+{
+#if !defined(Q_OS_LINUX)
+    return true;
+#else
+    const QString script = FindInstallOsHandlerScript();
+    if (script.isEmpty()) {
+        qWarning() << "install-os-handler.sh not found";
+        return false;
+    }
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString btx_open = FindBtxOpenBinary();
+    if (!btx_open.isEmpty() && QFileInfo(btx_open).isAbsolute()) {
+        env.insert(QStringLiteral("BTX_OPEN"), btx_open);
+    }
+    QStringList args;
+    if (getInstallOsHandlerSystemChecked()) {
+        env.insert(QStringLiteral("INSTALL_SYSTEM"), QStringLiteral("1"));
+        args << QStringLiteral("--system");
+    } else {
+        env.insert(QStringLiteral("INSTALL_SYSTEM"), QStringLiteral("0"));
+    }
+    QProcess proc;
+    proc.setProgram(script);
+    proc.setArguments(args);
+    proc.setProcessEnvironment(env);
+    proc.setProcessChannelMode(QProcess::MergedChannels);
+    proc.start();
+    if (!proc.waitForStarted()) {
+        qWarning() << "install-os-handler.sh failed to start:" << script;
+        return false;
+    }
+    // Block until pkexec/sudo/xdg-mime returns. Never QProcess::kill() (SIGKILL);
+    // QProcess's destructor SIGKILLs a still-running child, so wait it out.
+    if (!proc.waitForFinished(-1)) {
+        proc.terminate();
+        (void)proc.waitForFinished(-1);
+        qWarning() << "install-os-handler.sh did not finish";
+        return false;
+    }
+    const QByteArray out = proc.readAll();
+    if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0) {
+        qWarning() << "install-os-handler.sh failed:" << proc.exitCode() << out;
+        return false;
+    }
+    return true;
+#endif
 }
 
 bool Intro::showIfNeeded(std::unique_ptr<Intro>& intro)

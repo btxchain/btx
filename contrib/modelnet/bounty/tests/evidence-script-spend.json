@@ -1,0 +1,112 @@
+{
+  "rows": [
+    {
+      "test_id": "BOUNTY-SCRIPT-005",
+      "status": "PASS",
+      "source_sha": "b188cc034f90e8abab5001fe3c29aa90ac01c3fc",
+      "command": "test_btx --run_test=modelnet_bounty_script_spend_tests,modelnet_bounty_tests",
+      "environment": "isolated-regtest TMPDIR=/tmp build-gcc13 Release GCC13 BUILD_GUI=OFF CLIENT_VERSION_IS_RELEASE=false",
+      "evidence_path": "contrib/modelnet/bounty/tests/evidence-script-spend.log",
+      "evidence_sha256": "57a13b6ed3a2bdc8c4e6c3590a329c5ee415db672f1774549bfed47086f2ca6a",
+      "executed_at_utc": "2026-09-15T18:23:55Z",
+      "reviewer": "local-reconcile",
+      "notes": "Award CLTV: EvalScript fails SCRIPT_ERR_UNSATISFIED_LOCKTIME when CheckLockTime is false; at award height 3-of-3 dummy-size sigs evaluate to 1."
+    },
+    {
+      "test_id": "BOUNTY-SCRIPT-006",
+      "status": "PASS",
+      "source_sha": "b188cc034f90e8abab5001fe3c29aa90ac01c3fc",
+      "command": "test_btx --run_test=modelnet_bounty_script_spend_tests,modelnet_bounty_tests",
+      "environment": "isolated-regtest TMPDIR=/tmp build-gcc13 Release GCC13 BUILD_GUI=OFF CLIENT_VERSION_IS_RELEASE=false",
+      "evidence_path": "contrib/modelnet/bounty/tests/evidence-script-spend.log",
+      "evidence_sha256": "57a13b6ed3a2bdc8c4e6c3590a329c5ee415db672f1774549bfed47086f2ca6a",
+      "executed_at_utc": "2026-09-15T18:23:55Z",
+      "reviewer": "local-reconcile",
+      "notes": "Refund CLTV: before maturity SCRIPT_ERR_UNSATISFIED_LOCKTIME; at maturity refund leaf evaluates to 1."
+    },
+    {
+      "test_id": "BOUNTY-SCRIPT-007",
+      "status": "PASS",
+      "source_sha": "b188cc034f90e8abab5001fe3c29aa90ac01c3fc",
+      "command": "test_btx --run_test=modelnet_bounty_script_spend_tests,modelnet_bounty_tests",
+      "environment": "isolated-regtest TMPDIR=/tmp build-gcc13 Release GCC13 BUILD_GUI=OFF CLIENT_VERSION_IS_RELEASE=false",
+      "evidence_path": "contrib/modelnet/bounty/tests/evidence-script-spend.log",
+      "evidence_sha256": "57a13b6ed3a2bdc8c4e6c3590a329c5ee415db672f1774549bfed47086f2ca6a",
+      "executed_at_utc": "2026-09-15T18:23:55Z",
+      "reviewer": "local-reconcile",
+      "notes": "Post-refund height: refund leaf still evaluates to 1; 2-of-3 award leaf evaluates to 0 via OP_NUMEQUAL (cleanstack would fail the spend)."
+    },
+    {
+      "test_id": "BOUNTY-SCRIPT-011",
+      "status": "PASS",
+      "source_sha": "b188cc034f90e8abab5001fe3c29aa90ac01c3fc",
+      "command": "test_btx --run_test=modelnet_bounty_script_spend_tests,modelnet_bounty_tests",
+      "environment": "isolated-regtest TMPDIR=/tmp build-gcc13 Release GCC13 BUILD_GUI=OFF CLIENT_VERSION_IS_RELEASE=false",
+      "evidence_path": "contrib/modelnet/bounty/tests/evidence-script-spend.log",
+      "evidence_sha256": "57a13b6ed3a2bdc8c4e6c3590a329c5ee415db672f1774549bfed47086f2ca6a",
+      "executed_at_utc": "2026-09-15T18:23:55Z",
+      "reviewer": "local-reconcile",
+      "notes": "InspectBountyTransaction reports sighash ALL; SignBountyTransaction calls wallet.SignTransaction(..., SIGHASH_ALL). ANYONECANPAY is not ALL."
+    },
+    {
+      "test_id": "BOUNTY-SCRIPT-019",
+      "status": "PASS",
+      "source_sha": "b188cc034f90e8abab5001fe3c29aa90ac01c3fc",
+      "command": "test_btx --run_test=modelnet_bounty_script_spend_tests,modelnet_bounty_tests",
+      "environment": "isolated-regtest TMPDIR=/tmp build-gcc13 Release GCC13 BUILD_GUI=OFF CLIENT_VERSION_IS_RELEASE=false",
+      "evidence_path": "contrib/modelnet/bounty/tests/evidence-script-spend.log",
+      "evidence_sha256": "57a13b6ed3a2bdc8c4e6c3590a329c5ee415db672f1774549bfed47086f2ca6a",
+      "executed_at_utc": "2026-09-15T18:23:55Z",
+      "reviewer": "local-reconcile",
+      "notes": "Staged HTLC: wrong preimage SCRIPT_ERR_EQUALVERIFY; correct preimage + dummy-size ML-DSA sig evaluates to 1."
+    },
+    {
+      "test_id": "BOUNTY-SCRIPT-020",
+      "status": "PASS",
+      "source_sha": "b188cc034f90e8abab5001fe3c29aa90ac01c3fc",
+      "command": "test_btx --run_test=modelnet_bounty_script_spend_tests,modelnet_bounty_tests",
+      "environment": "isolated-regtest TMPDIR=/tmp build-gcc13 Release GCC13 BUILD_GUI=OFF CLIENT_VERSION_IS_RELEASE=false",
+      "evidence_path": "contrib/modelnet/bounty/tests/evidence-script-spend.log",
+      "evidence_sha256": "57a13b6ed3a2bdc8c4e6c3590a329c5ee415db672f1774549bfed47086f2ca6a",
+      "executed_at_utc": "2026-09-15T18:23:55Z",
+      "reviewer": "local-reconcile",
+      "notes": "PrepareEvaluation/RunEvaluationJob pass does not change InspectBountyTransaction monetary result (escrow still present)."
+    },
+    {
+      "test_id": "BOUNTY-WALLET-002",
+      "status": "PASS",
+      "source_sha": "b188cc034f90e8abab5001fe3c29aa90ac01c3fc",
+      "command": "test_btx --run_test=modelnet_bounty_script_spend_tests,modelnet_bounty_tests",
+      "environment": "isolated-regtest TMPDIR=/tmp build-gcc13 Release GCC13 BUILD_GUI=OFF CLIENT_VERSION_IS_RELEASE=false",
+      "evidence_path": "contrib/modelnet/bounty/tests/evidence-script-spend.log",
+      "evidence_sha256": "57a13b6ed3a2bdc8c4e6c3590a329c5ee415db672f1774549bfed47086f2ca6a",
+      "executed_at_utc": "2026-09-15T18:23:55Z",
+      "reviewer": "local-reconcile",
+      "notes": "InspectBountyTransaction fail-closed after refund_key substitution (mutated/missing)."
+    },
+    {
+      "test_id": "BOUNTY-WALLET-004",
+      "status": "PASS",
+      "source_sha": "b188cc034f90e8abab5001fe3c29aa90ac01c3fc",
+      "command": "test_btx --run_test=modelnet_bounty_script_spend_tests,modelnet_bounty_tests",
+      "environment": "isolated-regtest TMPDIR=/tmp build-gcc13 Release GCC13 BUILD_GUI=OFF CLIENT_VERSION_IS_RELEASE=false",
+      "evidence_path": "contrib/modelnet/bounty/tests/evidence-script-spend.log",
+      "evidence_sha256": "57a13b6ed3a2bdc8c4e6c3590a329c5ee415db672f1774549bfed47086f2ca6a",
+      "executed_at_utc": "2026-09-15T18:23:55Z",
+      "reviewer": "local-reconcile",
+      "notes": "Inspect flags unauthorized_extra_output when a third vout is present."
+    },
+    {
+      "test_id": "BOUNTY-WALLET-005",
+      "status": "PASS",
+      "source_sha": "b188cc034f90e8abab5001fe3c29aa90ac01c3fc",
+      "command": "test_btx --run_test=modelnet_bounty_script_spend_tests,modelnet_bounty_tests",
+      "environment": "isolated-regtest TMPDIR=/tmp build-gcc13 Release GCC13 BUILD_GUI=OFF CLIENT_VERSION_IS_RELEASE=false",
+      "evidence_path": "contrib/modelnet/bounty/tests/evidence-script-spend.log",
+      "evidence_sha256": "57a13b6ed3a2bdc8c4e6c3590a329c5ee415db672f1774549bfed47086f2ca6a",
+      "executed_at_utc": "2026-09-15T18:23:55Z",
+      "reviewer": "local-reconcile",
+      "notes": "fee_atoms > fee_reserve_atoms is the same pre-CreateTransaction stop as PrepareBountyFunding."
+    }
+  ]
+}

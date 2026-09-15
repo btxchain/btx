@@ -97,6 +97,7 @@ namespace BCLog {
         MINING      = (CategoryMask{1} << 29),
         DANDELION    = (CategoryMask{1} << 30),
         AUTOUPDATE   = (CategoryMask{1} << 31),
+        MODELNET     = (CategoryMask{1} << 32),
         ALL         = ~NONE,
     };
     enum class Level {

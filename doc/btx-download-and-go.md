@@ -4,7 +4,7 @@
 > [0.34.5 convergence notes](release-notes/release-notes-0.34.5.md).
 > Epoch A is live at height 185000. EncDr stall recovery at 199299 is
 > withdrawn. Fast-start snapshot:
-> [assumeutxo-201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500)
+> [assumeutxo-219000](https://github.com/btxchain/btx/releases/tag/assumeutxo-219000)
 > (closed-shielded section is loadable as of `18cc8bd6` / issue 129).
 > Do not load assumeutxo-199299 / assumeutxo-199300 (withdrawn 0.34.1 branch,
 > [issue 127](https://github.com/btxchain/btx/issues/127)); those datadirs
@@ -24,6 +24,11 @@ Throughout this guide, the intended operator surface is a
 fast-start validating node: a normal validating BTX node that boots from a
 published rollback snapshot instead of waiting for a full historical sync
 before becoming useful.
+
+Optional Native Model Network acquire (`btx-modeld`, `btx://` URIs) is **not**
+required to run a validating node, is **not** an inference endpoint, and does
+not replace IBD or MatMul admission RPCs. Inference stays local after acquire.
+See [modelnet/README.md](modelnet/README.md).
 
 For a detailed from-scratch mining-node procedure using generic `/var/btx/`
 paths, see [BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.md).

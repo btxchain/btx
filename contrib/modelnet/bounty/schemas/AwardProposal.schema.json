@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:AwardProposal:1",
+  "title": "AwardProposal",
+  "description": "Proposed implementation contract. JSON schema validates shape; semantic authorization, deadlines, arithmetic, signatures and actual script compatibility are additional required checks.",
+  "type": "object",
+  "properties": {
+    "bounty_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "terms_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "submission_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "acceptance_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "lot_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{96}$"
+      },
+      "maxItems": 16
+    },
+    "mode": {
+      "enum": [
+        "PUBLIC_PAYOUT",
+        "STAGED_RELEASE"
+      ]
+    },
+    "transaction_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "winner_script_commitment": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "principal_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "fee_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "refund_lineage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lot_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "new_output_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "refund_public_key_hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]+$",
+            "minLength": 2624,
+            "maxLength": 2624
+          },
+          "refund_height": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 499999999
+          }
+        },
+        "required": [
+          "lot_id",
+          "new_output_index",
+          "refund_public_key_hex",
+          "refund_height"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 16
+    },
+    "report_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{96}$"
+      },
+      "maxItems": 8
+    },
+    "sighash_mode": {
+      "const": "ALL"
+    }
+  },
+  "required": [
+    "bounty_id",
+    "terms_id",
+    "submission_id",
+    "acceptance_id",
+    "lot_ids",
+    "mode",
+    "transaction_digest",
+    "winner_script_commitment",
+    "principal_atoms",
+    "fee_atoms",
+    "refund_lineage",
+    "report_ids",
+    "sighash_mode"
+  ],
+  "additionalProperties": false
+}

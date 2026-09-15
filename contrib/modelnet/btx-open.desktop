@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=BTX Open
+Comment=Bounded BTX resource URI preview (no inference, wallet, or download)
+Exec=btx-open %u
+Type=Application
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/btx;
+Categories=Network;

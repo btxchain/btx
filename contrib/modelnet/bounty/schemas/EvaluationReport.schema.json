@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:EvaluationReport:1",
+  "title": "EvaluationReport",
+  "description": "Proposed implementation contract. JSON schema validates shape; semantic authorization, deadlines, arithmetic, signatures and actual script compatibility are additional required checks.",
+  "type": "object",
+  "properties": {
+    "bounty_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "submission_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "model_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "evaluation_spec_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "evaluator_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "harness_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "environment_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "evidence_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "task_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "maxItems": 128
+    },
+    "scores": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "metric": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "value_decimal": {
+            "type": "string",
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+          },
+          "samples": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          }
+        },
+        "required": [
+          "metric",
+          "value_decimal",
+          "samples"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 128
+    },
+    "verdict": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "INCONCLUSIVE",
+        "NONCONFORMING",
+        "RESOURCE_LIMIT"
+      ]
+    },
+    "deviations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 1024
+      },
+      "maxItems": 16
+    },
+    "started_at_ms": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "finished_at_ms": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    }
+  },
+  "required": [
+    "bounty_id",
+    "submission_id",
+    "model_id",
+    "evaluation_spec_id",
+    "evaluator_identity",
+    "harness_digest",
+    "environment_digest",
+    "evidence_digest",
+    "task_ids",
+    "scores",
+    "verdict",
+    "deviations",
+    "started_at_ms",
+    "finished_at_ms"
+  ],
+  "additionalProperties": false
+}

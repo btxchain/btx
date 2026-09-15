@@ -40,3 +40,9 @@ Bitcoin Core requires one of the following compilers.
 | [SQLite](../depends/packages/sqlite.mk) (wallet) | [link](https://sqlite.org) | [3.38.5](https://github.com/bitcoin/bitcoin/pull/25378) | [3.7.17](https://github.com/bitcoin/bitcoin/pull/19077) | No |
 | Python (scripts, tests) | [link](https://www.python.org) | N/A | [3.10](https://github.com/bitcoin/bitcoin/pull/30527) | No |
 | [systemtap](../depends/packages/systemtap.mk) ([tracing](tracing.md)) | [link](https://sourceware.org/systemtap/) | [4.8](https://github.com/bitcoin/bitcoin/pull/26945)| N/A | No |
+| [OpenSSL](https://www.openssl.org/) (Native Model Network, `-DWITH_MODELNET=ON`) | [link](https://github.com/openssl/openssl/releases) | 3.5+ for PQ1 helper | [3.5](https://github.com/openssl/openssl) with ML-KEM-768 and ML-DSA-44 | Yes (helper TLS / PQ1) |
+
+When `-DWITH_MODELNET=OFF`, the OpenSSL requirement for model networking does
+not apply. System OpenSSL 3.0.x cannot host `btx-modeld`; use bundled libs,
+`BTX_OPENSSL`, or [contrib/modelnet/run-modeld.sh](../contrib/modelnet/run-modeld.sh).
+See [modelnet/pq-transport.md](modelnet/pq-transport.md).

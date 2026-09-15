@@ -1,0 +1,168 @@
+{
+  "scope": "JSON Schema meta-validation and example/negative SHAPE checks only. No cryptographic signatures, URI checksum validation or production BTX tests.",
+  "schema_files": 10,
+  "checks_run": 40,
+  "checks_passed": 40,
+  "checks": [
+    {
+      "name": "schema_meta:AliasRecord.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "schema_meta:Collection.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "schema_meta:FreeGrant.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "schema_meta:IdentityCard.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "schema_meta:PolicyBundle.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "schema_meta:PreservationCircle.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "schema_meta:Revocation.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "schema_meta:ServiceDelegation.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "schema_meta:ServiceReceipt.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "schema_meta:resource-reference.schema.json",
+      "result": "PASS"
+    },
+    {
+      "name": "record_example:IdentityCard",
+      "result": "PASS"
+    },
+    {
+      "name": "record_unknown_field_rejected:IdentityCard",
+      "result": "PASS"
+    },
+    {
+      "name": "record_example:ServiceDelegation",
+      "result": "PASS"
+    },
+    {
+      "name": "record_unknown_field_rejected:ServiceDelegation",
+      "result": "PASS"
+    },
+    {
+      "name": "record_example:Revocation",
+      "result": "PASS"
+    },
+    {
+      "name": "record_unknown_field_rejected:Revocation",
+      "result": "PASS"
+    },
+    {
+      "name": "record_example:Collection",
+      "result": "PASS"
+    },
+    {
+      "name": "record_unknown_field_rejected:Collection",
+      "result": "PASS"
+    },
+    {
+      "name": "record_example:AliasRecord",
+      "result": "PASS"
+    },
+    {
+      "name": "record_unknown_field_rejected:AliasRecord",
+      "result": "PASS"
+    },
+    {
+      "name": "record_example:PolicyBundle",
+      "result": "PASS"
+    },
+    {
+      "name": "record_unknown_field_rejected:PolicyBundle",
+      "result": "PASS"
+    },
+    {
+      "name": "record_example:PreservationCircle",
+      "result": "PASS"
+    },
+    {
+      "name": "record_unknown_field_rejected:PreservationCircle",
+      "result": "PASS"
+    },
+    {
+      "name": "record_example:FreeGrant",
+      "result": "PASS"
+    },
+    {
+      "name": "record_unknown_field_rejected:FreeGrant",
+      "result": "PASS"
+    },
+    {
+      "name": "record_example:ServiceReceipt",
+      "result": "PASS"
+    },
+    {
+      "name": "record_unknown_field_rejected:ServiceReceipt",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape:MODEL",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape:ARTIFACT",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape:COLLECTION",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape:IDENTITY",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape:RELEASE",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape:POLICY_BUNDLE",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape:CIRCLE",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape:ALIAS",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape:PROVIDER",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape_rejected:short",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape_rejected:path",
+      "result": "PASS"
+    },
+    {
+      "name": "uri_shape_rejected:bad_scheme",
+      "result": "PASS"
+    }
+  ]
+}

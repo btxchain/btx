@@ -7,17 +7,17 @@ For notes on the design of Assumeutxo, please refer to [the design doc](/doc/des
 
 ## Loading a snapshot
 
-The current `main` pin is height **201500**. Download
-[assumeutxo-201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500)
-(`btx-assumeutxo-201500.dat` SHA256 `08c52c8b34e878c4d48546cfec066bc48fceed51d7287b4ff7ec7b5727cf52c7`).
+The current `main` pin is height **219000**. Download
+[assumeutxo-219000](https://github.com/btxchain/btx/releases/tag/assumeutxo-219000)
+(`btx-assumeutxo-219000.dat` SHA256 `78acb7dd7eeec2a17909c6c5f7e12ffa9b4ad2ffcbd9eb464421dcd960868e7b`).
 Use `loadtxoutset` on a fresh chainstate. Do not use `loadtxoutsetattested`.
 Do **not** load assumeutxo-199299 or assumeutxo-199300: those bases
 (`f12a27d0…` / `ff80e629…`) sit on the withdrawn 0.34.1 branch
 ([issue 127](https://github.com/btxchain/btx/issues/127)). 0.34.5 no longer
 compiles them. A node that already loaded one must wipe the datadir and
-resync (from genesis or from assumeutxo-201500 on a **new** empty datadir).
+resync (from genesis or from assumeutxo-219000 / 201500 on a **new** empty datadir).
 
-Past the shielded-pool close (height **199300**) the 201500 snapshot
+Past the shielded-pool close (height **199300**) the 219000 snapshot
 carries the canonical **closed-frozen** shielded section (zero live
 counts). 0.34.5 (`18cc8bd6`, [issue 129](https://github.com/btxchain/btx/issues/129))
 loads that encoding; binaries before `18cc8bd6` rejected the file
@@ -25,7 +25,7 @@ loads that encoding; binaries before `18cc8bd6` rejected the file
 unchanged.
 
 Header sync is never capped below a compiled assumeutxo base
-(`4542bcd9`). A node stranded on a minority fork below 201500 can still
+(`4542bcd9`). A node stranded on a minority fork below 219000 can still
 learn the snapshot header and then `loadtxoutset`. The ceiling is the
 compiled `HighestAssumeutxoHeight()`; headers above it keep the
 anti-flood cap. The exemption is for IBD / acquisition-stale tips, not

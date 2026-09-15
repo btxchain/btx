@@ -85,3 +85,8 @@ scratchpad-*.md
 *.zip
 *.dmg
 *.7z
+
+# Local 0.34.7 operator scratch (never commit)
+/e2e-scratch/
+.0347-*.local.*
+

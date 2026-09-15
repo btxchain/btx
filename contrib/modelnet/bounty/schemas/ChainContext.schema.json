@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:ChainContext:1",
+  "title": "ChainContext",
+  "description": "Proposed strict shape contract. Semantic authorization and provenance checks remain mandatory.",
+  "type": "object",
+  "properties": {
+    "network_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "authority": {
+      "enum": [
+        "LOCAL_VALIDATED_CHAIN",
+        "REMOTE_OBSERVATION",
+        "UNKNOWN"
+      ]
+    },
+    "tip_hash": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tip_height": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 499999999
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "observed_at_ms": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "index_complete": {
+      "type": "boolean"
+    },
+    "minimum_confirmations": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    },
+    "observer_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "network_id",
+    "authority",
+    "tip_hash",
+    "tip_height",
+    "observed_at_ms",
+    "index_complete",
+    "minimum_confirmations",
+    "observer_identity"
+  ],
+  "additionalProperties": false
+}

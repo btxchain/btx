@@ -16,6 +16,18 @@ interfaces.
 The util tests are run as part of `ctest` invocation. The fuzz tests, functional
 tests and lint scripts can be run as explained in the sections below.
 
+## Native Model Network (0.34.7)
+
+When built with `-DWITH_MODELNET=ON` (default):
+
+```bash
+build/bin/test_btx --run_test=modelnet_tests
+python3 contrib/modelnet/two_helper_retrieve.py build/bin
+```
+
+Unit coverage lives under [/src/test/modelnet_tests.cpp](/src/test/modelnet_tests.cpp).
+See [doc/modelnet/researcher-quickstart.md](/doc/modelnet/researcher-quickstart.md).
+
 # Running tests locally
 
 Before tests can be run locally, Bitcoin Core must be built.  See the [building instructions](/doc#building) for help.

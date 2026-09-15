@@ -1,0 +1,6 @@
+digraph G { graph[rankdir=LR,bgcolor="white",pad="0.25",nodesep="0.45",ranksep="0.6"];node[shape=box,style="rounded,filled",fillcolor="#EFF4F8",color="#507085",fontname="DejaVu Sans",fontsize=11,margin="0.14"];edge[color="#507085",fontname="DejaVu Sans",fontsize=9]; a[label="Signed terms +
+exact candidate"]; e[label="Isolated evaluators
+Tests + evidence"]; c[label="Fixed bounty council
+Policy decision"]; w[label="Monetary signer
+Exact transaction review",fillcolor="#DCEBE7"]; chain[label="BTX chain
+Script conditions + UTXOs",fillcolor="#DCEBE7"]; a->e;e->c[label="reports, not spend keys"];c->w[label="approval ≠ signature"];w->chain[label="actual PQ signatures"]; }

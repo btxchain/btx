@@ -204,6 +204,7 @@ static const std::map<std::string, BCLog::LogFlags, std::less<>> LOG_CATEGORIES_
     {"mining", BCLog::MINING},
     {"dandelion", BCLog::DANDELION},
     {"autoupdate", BCLog::AUTOUPDATE},
+    {"modelnet", BCLog::MODELNET},
 };
 
 static const std::unordered_map<BCLog::LogFlags, std::string> LOG_CATEGORIES_BY_FLAG{

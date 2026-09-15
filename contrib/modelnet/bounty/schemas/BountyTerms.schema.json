@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:BountyTerms:1",
+  "title": "BountyTerms",
+  "description": "Proposed implementation contract. JSON schema validates shape; semantic authorization, deadlines, arithmetic, signatures and actual script compatibility are additional required checks.",
+  "type": "object",
+  "properties": {
+    "terms_version": {
+      "const": 1
+    },
+    "network_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "requester_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 64
+      },
+      "maxItems": 64
+    },
+    "deliverable_classes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "BASE_MODEL",
+          "FINETUNE",
+          "ADAPTATION",
+          "QUANTIZATION",
+          "OPTIMIZED_VARIANT"
+        ]
+      },
+      "maxItems": 5
+    },
+    "evaluation_spec_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "submission_mode": {
+      "enum": [
+        "PUBLIC",
+        "SEALED_REVIEW_TRUSTED"
+      ]
+    },
+    "payout_authority": {
+      "enum": [
+        "FIXED_COUNCIL",
+        "CONTRIBUTOR_NOMINATED_FIXED_COUNCIL",
+        "REQUESTER_APPROVAL_ESCROW"
+      ]
+    },
+    "council": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "identity_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "public_key_hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]+$",
+            "minLength": 2624,
+            "maxLength": 2624
+          }
+        },
+        "required": [
+          "identity_id",
+          "public_key_hex"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 8
+    },
+    "threshold": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "nomination_min_bps": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "target_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "max_lots_per_round": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16
+    },
+    "funding_close_height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 499999999
+    },
+    "submission_close_height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 499999999
+    },
+    "evaluation_close_height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 499999999
+    },
+    "earliest_award_height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 499999999
+    },
+    "last_safe_award_height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 499999999
+    },
+    "refund_height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 499999999
+    },
+    "minimum_confirmations": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    },
+    "claim_margin_blocks": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "challenge_policy": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "selection_rule": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "license_statement": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "max_model_bytes": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18})$"
+    },
+    "fee_policy": {
+      "type": "object",
+      "properties": {
+        "max_round_fee_atoms": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$",
+          "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+        },
+        "max_award_fee_atoms": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,15})$",
+          "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+        },
+        "reserve_allocation": {
+          "enum": [
+            "FROZEN_PER_LOT",
+            "PRO_RATA_FROZEN"
+          ]
+        }
+      },
+      "required": [
+        "max_round_fee_atoms",
+        "max_award_fee_atoms",
+        "reserve_allocation"
+      ],
+      "additionalProperties": false
+    },
+    "sealed_confidentiality_disclosure": {
+      "type": "string",
+      "maxLength": 1024
+    }
+  },
+  "required": [
+    "terms_version",
+    "network_id",
+    "requester_identity",
+    "title",
+    "description",
+    "tags",
+    "deliverable_classes",
+    "evaluation_spec_id",
+    "submission_mode",
+    "payout_authority",
+    "council",
+    "threshold",
+    "nomination_min_bps",
+    "target_atoms",
+    "max_lots_per_round",
+    "funding_close_height",
+    "submission_close_height",
+    "evaluation_close_height",
+    "earliest_award_height",
+    "last_safe_award_height",
+    "refund_height",
+    "minimum_confirmations",
+    "claim_margin_blocks",
+    "challenge_policy",
+    "selection_rule",
+    "license_statement",
+    "max_model_bytes",
+    "fee_policy",
+    "sealed_confidentiality_disclosure"
+  ],
+  "additionalProperties": false
+}

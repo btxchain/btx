@@ -640,6 +640,12 @@ and its `cs_KeyStore` lock for example).
 Threads
 -------
 
+**Native Model Network:** `btx-modeld` is a **separate process**, not a
+`btxd` worker thread. Model RPC handling in `btxd` forwards over a unix
+socket and must not block `cs_main` or validation. If the helper is absent,
+model calls fail closed; chain progress continues. See
+[modelnet/isolation.md](modelnet/isolation.md).
+
 - [Main thread (`bitcoind`)](https://doxygen.bitcoincore.org/bitcoind_8cpp.html#a0ddf1224851353fc92bfbff6f499fa97)
   : Started from `main()` in `bitcoind.cpp`. Responsible for starting up and
   shutting down the application.

@@ -112,6 +112,8 @@ static std::string serviceFlagToStr(size_t bit)
     case NODE_MATMUL_ATTESTATION_ARCHIVE: return "MATMUL_ATTESTATION_ARCHIVE";
     case NODE_ATTESTED_UTXO_SNAPSHOT: return "ATTESTED_UTXO_SNAPSHOT";
     case NODE_MATMUL_DISCOVERY: return "MATMUL_DISCOVERY";
+    case NODE_MODEL_RELAY: return "MODEL_RELAY";
+    case NODE_MODEL_HOST: return "MODEL_HOST";
     // Not using default, so we get warned when a case is missing
     }
 

@@ -1,0 +1,44 @@
+{
+  "notice": "Illustrative read-only response; identifiers are placeholders, not deployed bounty or transaction references.",
+  "schema_version": 1,
+  "kind": "BOUNTY",
+  "bounty_id": "abababababababababababababababababababababababababababababababababababababababababababababababab",
+  "model_id": null,
+  "title": "Japanese repository-maintenance model",
+  "description": "A locally runnable model for repository analysis and tool-use workflows.",
+  "metadata_authority": "SIGNED_PUBLICATION_REQUIRES_VERIFICATION",
+  "coordination_state": "OPEN",
+  "council": {
+    "threshold": 5,
+    "size": 7,
+    "trust_label": "COUNCIL_APPROVAL_ESCROW"
+  },
+  "economics": {
+    "target_atoms": "50000000000",
+    "pledged_atoms": "4000000000",
+    "confirmed_eligible_principal_atoms": "37100000000",
+    "remaining_target_atoms": "12900000000",
+    "funded_basis_points": 7420,
+    "funding_progress_known": true,
+    "authority": "LOCAL_VALIDATED_CHAIN",
+    "tip_hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+  },
+  "actions": [
+    {
+      "action": "VIEW_TERMS",
+      "requires_wallet": false
+    },
+    {
+      "action": "PREPARE_FUNDING",
+      "requires_wallet": true,
+      "requires_authorization": true
+    }
+  ],
+  "availability": {
+    "state": "NOT_YET_CREATED",
+    "providers_observed": null
+  },
+  "coverage": {
+    "global_complete": false
+  }
+}

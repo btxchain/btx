@@ -46,6 +46,10 @@
 #include <qt/walletmodel.h>
 #include <wallet/types.h>
 #endif // ENABLE_WALLET
+#ifdef ENABLE_MODELNET
+#include <modelnet/firstrun.h>
+#include <util/time.h>
+#endif // ENABLE_MODELNET
 
 #include <boost/signals2/connection.hpp>
 #include <chrono>
@@ -430,6 +434,7 @@ void BitcoinApplication::initializeResult(bool success, interfaces::BlockAndHead
         // bitcoin: URIs or payment requests:
         if (paymentServer) {
             connect(paymentServer, &PaymentServer::receivedPaymentRequest, window, &BitcoinGUI::handlePaymentRequest);
+            connect(paymentServer, &PaymentServer::receivedModelResource, window, &BitcoinGUI::handleModelResource);
             connect(window, &BitcoinGUI::receivedURI, paymentServer, &PaymentServer::handleURIOrFile);
             connect(paymentServer, &PaymentServer::message, [this](const QString& title, const QString& message, unsigned int style) {
                 window->message(title, message, style);
@@ -691,6 +696,38 @@ int GuiMain(int argc, char* argv[])
         // Store intro dialog settings other than datadir (network specific)
         app.InitPruneSetting(intro->getPruneMiB());
         gArgs.ForceSetArg("-assumevalid", intro->getAssumeValid().toStdString());
+#ifdef ENABLE_MODELNET
+        gArgs.ForceSetArg("-modelnet", intro->getModelNetParticipateChecked() ? "1" : "0");
+        gArgs.ForceSetArg("-modelstorage", intro->getModelStorageArg().toStdString());
+        if (intro->getDemandSeedChecked()) {
+            gArgs.ForceSetArg("-modelseed", "auto");
+        } else {
+            gArgs.ForceSetArg("-modelseed", "off");
+        }
+        if (intro->getPreserveRareChecked()) {
+            gArgs.ForceSetArg("-modelpreserverare", "1");
+        }
+        gArgs.ForceSetArg("-resourcegovernor", intro->getSpareResourcesChecked() ? "auto" : "off");
+        gArgs.ForceSetArg("-automining", intro->getMiningIdleChecked() ? "1" : "0");
+        {
+            modelnet::FirstRunConsent consent;
+            consent.storage_bytes = intro->getModelStorageAutoChecked() ? 0 : intro->getModelStorageBytes();
+            consent.storage_mode = intro->getModelStorageAutoChecked() ? modelnet::StorageMode::AUTO :
+                (consent.storage_bytes == 0 ? modelnet::StorageMode::DISABLED : modelnet::StorageMode::FIXED);
+            consent.seed = intro->getDemandSeedChecked() ? modelnet::SeedMode::AUTO : modelnet::SeedMode::OFF;
+            consent.preserve_rare = intro->getPreserveRareChecked();
+            consent.resource_governor_auto = intro->getSpareResourcesChecked();
+            consent.mining_idle = intro->getMiningIdleChecked();
+            consent.consented_unix = GetTime();
+            std::string consent_err;
+            const fs::path consent_path = modelnet::FirstRunConsentPath(gArgs.GetDataDirNet());
+            (void)modelnet::SaveFirstRunConsent(consent_path, consent, consent_err);
+            if (intro->getInstallOsHandlerChecked()) {
+                // User-local without sudo; --system only if the system-wide box is checked.
+                (void)intro->installOsHandler();
+            }
+        }
+#endif // ENABLE_MODELNET
     }
 
     try

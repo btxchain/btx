@@ -189,6 +189,12 @@ void PaymentServer::handleURIOrFile(const QString& s)
         return;
     }
 
+    // V11-URI-13: a model resource URI must never enter DecodeDestination / Send Coins.
+    if (s.startsWith(QLatin1String("btx:"), Qt::CaseInsensitive)) {
+        Q_EMIT receivedModelResource(s);
+        return;
+    }
+
     if (s.startsWith("bitcoin://", Qt::CaseInsensitive))
     {
         Q_EMIT message(tr("URI handling"), tr("'bitcoin://' is not a valid URI. Use 'bitcoin:' instead."),

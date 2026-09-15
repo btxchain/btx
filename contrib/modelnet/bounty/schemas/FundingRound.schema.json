@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:FundingRound:1",
+  "title": "FundingRound",
+  "description": "Proposed implementation contract. JSON schema validates shape; semantic authorization, deadlines, arithmetic, signatures and actual script compatibility are additional required checks. Immutable frozen round core; excludes its own derived round_id, derived lot_ids, outpoints and mutable status. Lot IDs derive from final round ID and contribution ordinal.",
+  "type": "object",
+  "properties": {
+    "terms_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "council": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "identity_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "public_key_hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]+$",
+            "minLength": 2624,
+            "maxLength": 2624
+          },
+          "appointment_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          }
+        },
+        "required": [
+          "identity_id",
+          "public_key_hex",
+          "appointment_id"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 8
+    },
+    "threshold": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "frozen_principal_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "unsigned_transaction_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "funding_close_height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 499999999
+    },
+    "sighash_mode": {
+      "const": "ALL"
+    },
+    "contributions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "terms_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "contributor_identity": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "principal_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,15})$",
+            "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+          },
+          "fee_reserve_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,15})$",
+            "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+          },
+          "refund_public_key_hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]+$",
+            "minLength": 2624,
+            "maxLength": 2624
+          },
+          "refund_script_commitment": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "escrow_tree_commitment": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "refund_height": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 499999999
+          },
+          "lot_nonce": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "funding_output_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "required": [
+          "terms_id",
+          "contributor_identity",
+          "principal_atoms",
+          "fee_reserve_atoms",
+          "refund_public_key_hex",
+          "refund_script_commitment",
+          "escrow_tree_commitment",
+          "refund_height",
+          "lot_nonce",
+          "funding_output_index"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 16
+    }
+  },
+  "required": [
+    "terms_id",
+    "council",
+    "threshold",
+    "frozen_principal_atoms",
+    "unsigned_transaction_digest",
+    "funding_close_height",
+    "sighash_mode",
+    "contributions"
+  ],
+  "additionalProperties": false
+}

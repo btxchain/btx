@@ -1048,6 +1048,12 @@ public:
                 // park_depth 6 -> majority-final. Required so the 203000
                 // assumeutxo base below is allowed (issue 127 rule).
                 {203000, uint256{"89cfe9904a27be73467c25044e3c13d97bae512e02e4172def1a6c29f87999ef"}},
+                // 0.34.7 release base. Height 219000 is ~1,580 blocks below the
+                // network tip (>> park_depth 6), so it is not a tip-subject-to-fork
+                // pin. Independent synced nodes agree on this hash. Compiled
+                // assumeutxo at this height is allowed only because this
+                // checkpoint matches (issue 127).
+                {219000, uint256{"dc51220bc7e5db96e29df9d817ae6179245d33eb8adcaaff765cfec83fdb87c3"}},
             }
         };
         m_assumeutxo_data = {
@@ -1258,6 +1264,16 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"6754314323ab5575c0069b7973ac11d36fa6dce43c5f451df3808402a7962040"}},
                 .m_chain_tx_count = 302'712,
                 .blockhash = consteval_ctor(uint256{"89cfe9904a27be73467c25044e3c13d97bae512e02e4172def1a6c29f87999ef"}),
+                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+            },
+            {
+                // main assumeutxo snapshot at height 219'000 (0.34.7 release
+                // base). Checkpointed above. Shielded pool closed at 199300, so the
+                // frozen-section pin matches 201500/203000.
+                .height = 219'000,
+                .hash_serialized = AssumeutxoHash{uint256{"3c065aabb529eaab5646825927d9f20a91426dc7e83b4890b575324f5bfccc99"}},
+                .m_chain_tx_count = 320'540,
+                .blockhash = consteval_ctor(uint256{"dc51220bc7e5db96e29df9d817ae6179245d33eb8adcaaff765cfec83fdb87c3"}),
                 .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
             },
             // 199299 (f12a27d0) and 199300 (ff80e629) were dumped from the

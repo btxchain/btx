@@ -1,0 +1,85 @@
+"use strict";
+// Read-only bounty list client: GET /api/v1/bounties and /api/v1/bounties/<id> only.
+let pending, nextCursor = null, currentPath = "/api/v1/bounties", currentQuery = {};
+const el = (id) => document.getElementById(id);
+function item(tag, text) {
+  const n = document.createElement(tag);
+  n.textContent = text;
+  return n;
+}
+function render(x) {
+  const a = document.createElement("article");
+  a.append(item("h2", x.title || x.name || "Untitled object"));
+  a.append(item("p", x.description || ""));
+  const e = x.economics || {};
+  a.append(
+    item(
+      "p",
+      `Confirmed: ${e.confirmed_eligible_principal_atoms ?? "unknown"} atoms; remaining: ${e.remaining_target_atoms ?? "unknown"} atoms`,
+    ),
+  );
+  a.append(
+    item(
+      "small",
+      `${x.kind || "BOUNTY"} · ${x.coordination_state || "unknown"} · ${e.authority || "unverified observation"}`,
+    ),
+  );
+  a.append(item("code", x.uri || x.bounty_id || ""));
+  const id = x.bounty_id;
+  if (id && /^[0-9a-f]{96}$/.test(id)) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Open detail";
+    btn.onclick = () => loadDetail(id);
+    a.append(btn);
+  }
+  el("results").append(a);
+}
+async function load(path, query, append = false) {
+  if (pending) pending.abort();
+  pending = new AbortController();
+  currentPath = path;
+  currentQuery = query;
+  el("status").textContent = "Querying current network view…";
+  if (!append) el("results").replaceChildren();
+  try {
+    const qs = new URLSearchParams();
+    Object.entries(query).forEach(([k, v]) => {
+      if (v !== null && v !== undefined) qs.set(k, String(v));
+    });
+    const url = qs.toString() ? path + "?" + qs : path;
+    const r = await fetch(url, {
+      signal: pending.signal,
+      credentials: "omit",
+      headers: { Accept: "application/json" },
+    });
+    if (!r.ok) throw Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (Array.isArray(data.items)) {
+      data.items.forEach(render);
+      nextCursor = data.next_cursor || null;
+      el("more").hidden = !nextCursor;
+      el("status").textContent = `${data.items.length} results on this page; coverage is an observed network view.`;
+      return;
+    }
+    render(data);
+    nextCursor = null;
+    el("more").hidden = true;
+    el("status").textContent = "Detail loaded; coverage is an observed network view.";
+  } catch (e) {
+    el("status").textContent = e.name === "AbortError" ? "Cancelled." : String(e.message);
+  }
+}
+function loadDetail(bountyId) {
+  load(`/api/v1/bounties/${bountyId}`, {});
+}
+el("search").onsubmit = (e) => {
+  e.preventDefault();
+  load("/api/v1/bounties", { q: el("query").value, scope: "NETWORK", limit: 25 });
+};
+el("cancel").onclick = () => pending?.abort();
+el("new").onclick = () =>
+  load("/api/v1/bounties", { mode: "NEW", scope: "NETWORK", limit: 25 });
+el("near").onclick = () =>
+  load("/api/v1/bounties", { mode: "NEARLY_FUNDED", scope: "NETWORK", limit: 25 });
+el("more").onclick = () => load(currentPath, { ...currentQuery, cursor: nextCursor }, true);

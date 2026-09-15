@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:SubmissionCommitment:1",
+  "title": "SubmissionCommitment",
+  "description": "Proposed strict shape contract. Semantic authorization and provenance checks remain mandatory.",
+  "type": "object",
+  "properties": {
+    "bounty_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "terms_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "creator_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "submission_commitment": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "payout_key_commitment": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "committed_at_ms": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    }
+  },
+  "required": [
+    "bounty_id",
+    "terms_id",
+    "creator_identity",
+    "submission_commitment",
+    "payout_key_commitment",
+    "committed_at_ms"
+  ],
+  "additionalProperties": false
+}

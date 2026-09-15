@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:AcceptanceCertificate:1",
+  "title": "AcceptanceCertificate",
+  "description": "Proposed strict shape contract. Semantic authorization and provenance checks remain mandatory.",
+  "type": "object",
+  "properties": {
+    "bounty_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "terms_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "submission_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "model_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "evaluation_spec_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "eligible_report_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{96}$"
+      },
+      "maxItems": 8
+    },
+    "aggregation_rule": {
+      "enum": [
+        "PER_REPORT_ALL_THRESHOLDS",
+        "MEDIAN_CONFORMING_REPORTS"
+      ]
+    },
+    "conforming_report_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8
+    },
+    "passing_report_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8
+    },
+    "selection_rule_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "challenge_resolution_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{96}$"
+      },
+      "maxItems": 32
+    },
+    "decision": {
+      "enum": [
+        "ACCEPT",
+        "REJECT",
+        "RERUN"
+      ]
+    },
+    "policy_review_finished_at_ms": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    }
+  },
+  "required": [
+    "bounty_id",
+    "terms_id",
+    "submission_id",
+    "model_id",
+    "evaluation_spec_id",
+    "eligible_report_ids",
+    "aggregation_rule",
+    "conforming_report_count",
+    "passing_report_count",
+    "selection_rule_id",
+    "challenge_resolution_ids",
+    "decision",
+    "policy_review_finished_at_ms"
+  ],
+  "additionalProperties": false
+}

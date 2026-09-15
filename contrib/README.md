@@ -31,6 +31,12 @@ Bonded OTC offer tooling: create, verify, and watch offers whose quoted supply
 is provably locked on-chain and bound to a single offer, plus HTLC settlement
 helpers. See doc/btx-otc-escrow-supply-validation.md for the design.
 
+### [Native Model Network](/contrib/modelnet) ###
+Reference codecs, JSON schemas, PQ1 retrieve smokes, and `run-modeld.sh` for
+hosts whose system OpenSSL cannot host ML-KEM-768 / ML-DSA-44. A BTX node
+already has compute; this tree is not a remote inference service. Operator
+docs: [doc/modelnet/README.md](../doc/modelnet/README.md).
+
 Build Tools and Keys
 ---------------------
 

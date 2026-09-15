@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:Submission:1",
+  "title": "Submission",
+  "description": "Proposed implementation contract. JSON schema validates shape; semantic authorization, deadlines, arithmetic, signatures and actual script compatibility are additional required checks.",
+  "type": "object",
+  "properties": {
+    "bounty_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "terms_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "creator_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "model_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "evaluation_spec_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "payout_public_key_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]+$",
+      "minLength": 2624,
+      "maxLength": 2624
+    },
+    "mode": {
+      "enum": [
+        "PUBLIC",
+        "SEALED_REVIEW_TRUSTED"
+      ]
+    },
+    "ciphertext_artifact_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "release_hash_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "encryption_context_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "license_statement": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "provenance_statement": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "commitment_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "bounty_id",
+    "terms_id",
+    "creator_identity",
+    "model_id",
+    "artifact_id",
+    "evaluation_spec_id",
+    "payout_public_key_hex",
+    "mode",
+    "ciphertext_artifact_id",
+    "release_hash_sha256",
+    "encryption_context_id",
+    "license_statement",
+    "provenance_statement",
+    "commitment_id"
+  ],
+  "additionalProperties": false
+}

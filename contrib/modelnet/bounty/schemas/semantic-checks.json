@@ -1,0 +1,19 @@
+{
+  "required_checks": [
+    "Validate schema selected by record_type; unknown fields rejected",
+    "Derive signer id from actual key using existing BTX ResearchIdentityId",
+    "Verify signature over full canonical body and network/domain",
+    "Verify issuer/delegation authorization before update or tombstone",
+    "Validate exact URI-to-kind/digest binding",
+    "MoneyRange and checked intermediate arithmetic",
+    "Strict timeline ordering and minimum margins",
+    "Council size/threshold/unique keys/current script policy",
+    "Fixed roster and principal-derived eligibility at funding transaction",
+    "Own refund key and exact complete P2MR script tree",
+    "SIGHASH_ALL exact transaction and authorized beneficiary/fees",
+    "Sealed fields required iff sealed; never public secret in metadata",
+    "No remote authority flags treated as local verified/confirmed",
+    "Evaluation environment/task coverage and aggregation rules",
+    "Idempotency, authorization reservations and revocation before side effects"
+  ]
+}

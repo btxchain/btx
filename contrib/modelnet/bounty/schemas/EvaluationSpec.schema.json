@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:EvaluationSpec:1",
+  "title": "EvaluationSpec",
+  "description": "Proposed implementation contract. JSON schema validates shape; semantic authorization, deadlines, arithmetic, signatures and actual script compatibility are additional required checks.",
+  "type": "object",
+  "properties": {
+    "spec_version": {
+      "const": 1
+    },
+    "profile": {
+      "enum": [
+        "EXACT_CHECKS",
+        "REPRODUCIBLE_BENCHMARK",
+        "STATISTICAL_BENCHMARK",
+        "REVIEWED_RESEARCH"
+      ]
+    },
+    "harness_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "harness_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "environment_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "task_bundle_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "task_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "maxItems": 128
+    },
+    "thresholds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "metric": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "operator": {
+            "enum": [
+              "GE",
+              "LE",
+              "EQ"
+            ]
+          },
+          "value_decimal": {
+            "type": "string",
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+          },
+          "tolerance_decimal": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+          }
+        },
+        "required": [
+          "metric",
+          "operator",
+          "value_decimal",
+          "tolerance_decimal"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 128
+    },
+    "seeds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]*)$"
+      },
+      "maxItems": 64
+    },
+    "samples": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "hidden_test_commitment": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "aggregation_rule": {
+      "enum": [
+        "PER_REPORT_ALL_THRESHOLDS",
+        "MEDIAN_CONFORMING_REPORTS"
+      ]
+    },
+    "max_runtime_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 604800
+    },
+    "max_memory_bytes": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "max_disk_bytes": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "description": "BTX atoms, additionally MoneyRange <= 2100000000000000 in semantic validation."
+    },
+    "network_policy": {
+      "enum": [
+        "OFF",
+        "EXPLICIT_ALLOWLIST"
+      ]
+    },
+    "unsafe_code_allowed": {
+      "const": false
+    },
+    "aggregation_parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minimum_conforming_reports": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "minimum_passing_reports": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "missing_metric_policy": {
+          "const": "FAIL_REPORT"
+        },
+        "confidence_method": {
+          "enum": [
+            "NONE",
+            "WILSON_FIXED",
+            "PRECOMMITTED_BOOTSTRAP"
+          ]
+        },
+        "confidence_level_decimal": {
+          "type": "string",
+          "pattern": "^0\\.[0-9]+$"
+        },
+        "minimum_samples_per_task": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      },
+      "required": [
+        "minimum_conforming_reports",
+        "minimum_passing_reports",
+        "missing_metric_policy",
+        "confidence_method",
+        "confidence_level_decimal",
+        "minimum_samples_per_task"
+      ]
+    }
+  },
+  "required": [
+    "spec_version",
+    "profile",
+    "harness_id",
+    "harness_digest",
+    "environment_digest",
+    "task_bundle_digest",
+    "task_ids",
+    "thresholds",
+    "seeds",
+    "samples",
+    "hidden_test_commitment",
+    "aggregation_rule",
+    "max_runtime_seconds",
+    "max_memory_bytes",
+    "max_disk_bytes",
+    "network_policy",
+    "unsafe_code_allowed",
+    "aggregation_parameters"
+  ],
+  "additionalProperties": false
+}

@@ -64,6 +64,7 @@ add_executable(test_btx
   key_io_tests.cpp
   key_tests.cpp
   logging_tests.cpp
+  resource_governor_tests.cpp
   mempool_tests.cpp
   merkle_tests.cpp
   merkleblock_tests.cpp
@@ -542,6 +543,49 @@ target_include_directories(test_btx PRIVATE
 target_compile_definitions(test_btx PRIVATE
   BTX_REFERENCE_TEST_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/test/reference/shielded_test_vectors.json\"
 )
+if(WITH_MODELNET)
+  target_sources(test_btx PRIVATE
+    modelnet_tests.cpp
+    modelnet_v11_negative_tests.cpp
+    modelnet_funding_tests.cpp
+    modelnet_bridge_tests.cpp
+    modelnet_cuda_qual_tests.cpp
+    modelnet_planner_tests.cpp
+    modelnet_firstrun_tests.cpp
+    modelnet_free_remaining_tests.cpp
+    modelnet_v11_remaining_tests.cpp
+    modelnet_mig_doc_tests.cpp
+    modelnet_uri_resolve_tests.cpp
+    modelnet_ds_remaining_tests.cpp
+    modelnet_resolve_bounds_tests.cpp
+    modelnet_iso_isolation_tests.cpp
+    modelnet_pay_pool_tests.cpp
+    modelnet_b0_disc_store_tests.cpp
+    modelnet_b0_remaining_tests.cpp
+    modelnet_b0_pq_rest_tests.cpp
+    modelnet_hosting_tests.cpp
+    modelnet_swarm_tests.cpp
+    modelnet_conn_tests.cpp
+    modelnet_search_tests.cpp
+    modelnet_bounty_tests.cpp
+    modelnet_bounty_script_spend_tests.cpp
+    modelnet_economy_tests.cpp
+    modelnet_feed_tests.cpp
+    modelnet_release_directory_tests.cpp
+    modelnet_search_economy_tests.cpp
+  )
+  target_compile_definitions(test_btx PRIVATE
+    MODELNET_V11_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/modelnet_v11_vectors.json\"
+    MODELNET_B0_CODEC_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/modelnet_b0_codec_vectors.json\"
+    MODELNET_BTX_OPEN_PATH=\"${CMAKE_BINARY_DIR}/bin/btx-open\"
+    MODELNET_BOUNTY_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/bounty/reference/golden-vectors.json\"
+    MODELNET_MODELD_PATH=\"${CMAKE_BINARY_DIR}/bin/btx-modeld\"
+  )
+  set(_modelnet_b0_spec "/home/administrator/Documents/btx-0.34.7-spec-ref/BTX_0.34.7_Model_Network_v1.1/baseline/BTX_0.34.7_PQ_Native_Model_Network_Specification.md")
+  if(EXISTS "${_modelnet_b0_spec}")
+    target_compile_definitions(test_btx PRIVATE MODELNET_B0_SPEC_PATH=\"${_modelnet_b0_spec}\")
+  endif()
+endif()
 
 target_link_libraries(test_btx
   core_interface
@@ -549,6 +593,9 @@ target_link_libraries(test_btx
   Boost::headers
   libevent::extra
 )
+if(WITH_MODELNET)
+  target_link_libraries(test_btx OpenSSL::SSL OpenSSL::Crypto)
+endif()
 if(UNIX AND NOT APPLE)
   if(TARGET bitcoin_wallet)
     target_link_btx_linux_archive_group(test_btx

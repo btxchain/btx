@@ -1,0 +1,8 @@
+digraph G {graph[rankdir=LR,bgcolor="white",pad="0.25",nodesep="0.5",ranksep="0.55"];node[shape=box,style="rounded,filled",fillcolor="#EFF4F8",color="#507085",fontname="DejaVu Sans",fontsize=11,margin="0.13"];edge[color="#507085",fontname="DejaVu Sans",fontsize=9]; d[label="Contributor lots
+Own refund keys"]; q[label="Council acceptance
+Exact reviewed award"]; p[label="Public model
+Direct winner payment",fillcolor="#DCEBE7"]; s[label="Sealed model
+Stage per-lot SHA256 HTLCs"]; k[label="Creator claims
+Secret disclosed"]; m[label="Exact public model
+Verify + seed",fillcolor="#DCEBE7"]; r[label="Unspent matured lot
+Contributor refund",fillcolor="#FFF2DD"];d->q;q->p;p->m;q->s;s->k;k->m;d->r[label="no successful award"];s->r[label="no claim; same deadline"]; }

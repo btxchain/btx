@@ -90,3 +90,34 @@ To use the generated configuration file, copy the example file into your data di
 # example copy command for linux user
 cp share/examples/btx.conf ~/.btx
 ```
+
+## Native Model Network (`btxd` bridge)
+
+Model-plane options are optional for consensus. A validating node does not
+need them. Packaged `btxd` **does** start `btx-modeld` by default
+(`modelnet=1`). Disable with `modelnet=0`. If the helper dies, model RPCs
+fail closed and the chain continues. Set `modelrpcsocket=` to attach to an
+already-running helper instead of spawning.
+
+Copy and edit the dedicated example (not the generated `share/examples/btx.conf`):
+
+```
+cp share/examples/modelnet.conf.example ~/.btx/modelnet.conf
+# optional: includeconf=modelnet.conf
+```
+
+| Option | Role |
+|---|---|
+| `modelnet=1` | Enable the model network. Packaged default **on**. `modelnet=0` disables the helper. |
+| `modelrpcsocket=<path>` | Unix socket for helper JSON-RPC (default `<datadir>/modelnet/modeld.sock`). If set, `btxd` does not spawn or kill that helper. |
+| `modelrelay=1` | CPU-only model discovery relay hint; default on with `modelnet`. Not monetary AddrMan. |
+| `modelhost=1` | Advertise a public model-serving hint only after proven reachability. Default **off**. |
+| `modelstorage=auto` | Packaged default AUTO budget. `0` = no payload. Explicit sizes are FIXED. |
+| `resourcegovernor=auto` | Local spare-capacity policy. Never consensus, never auto-spend. |
+| `automining=0` | Idle-schedule mining only after mining is already enabled. Default off. |
+
+Helper-only flags (`modeldir`, `modelstorage`/`modelcache`, `modelseed`,
+`modelpreserverare`, `modelbind`, `modeltransport=pq1`,
+`modeltlscert`, `modeltlskey`, …) belong on the **`btx-modeld`** command line.
+See [share/examples/modelnet.conf.example](../share/examples/modelnet.conf.example)
+and [modelnet/architecture.md](modelnet/architecture.md).

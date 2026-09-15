@@ -1,0 +1,76 @@
+.TH BTX-MODELD 1 "September 2026" "BTX 0.34.7" "User Commands"
+.SH NAME
+btx-modeld \- BTX Native Model Network helper
+.SH SYNOPSIS
+.B btx-modeld
+[\fIoptions\fR]
+.SH DESCRIPTION
+Isolated helper for the BTX Native Model Network. A BTX node already has
+compute; this process acquires and optionally seeds models. Inference is
+local after acquisition. This is not a remote inference marketplace and has
+no monetary consensus authority.
+.PP
+If this process exits, monetary BTX continues independently.
+.SH OPTIONS
+.TP
+.B \-decode=\fIuri\fR
+Decode a
+.B btx://
+resource and exit.
+.TP
+.B \-modeldir=\fIdir\fR
+Catalog and piece store (never wallet or chainstate).
+.TP
+.B \-modelstorage=\fIsize\fR
+Payload quota (bytes or
+.BR 80GiB ).
+Default 0: no payload, no seeding, no preserve-rare.
+.TP
+.B \-modelcache=\fIsize\fR
+Alias of
+.BR \-modelstorage .
+.TP
+.B \-modelseed=\fIauto|manual|off\fR
+Demand-seed policy. Default
+.B auto
+once storage is allocated: an intentional import or retrieve is re-advertised.
+.TP
+.B \-modelseedupondownload=\fI0|1\fR
+Alias of
+.B \-modelseed
+(1 = auto, 0 = off).
+.TP
+.B \-modelpreserverare
+Opt-in fetch of qualified under-replicated models into spare quota.
+.TP
+.B \-modeluploadlimit=\fIbps\fR
+Aggregate serving cap in bytes/s. 0 means existing connection ceilings only.
+.TP
+.B \-modelbind=\fIip:port\fR
+PQ1 TLS listen address. Empty means unix RPC only.
+.TP
+.B \-modelrpcsocket=\fIpath\fR
+Unix JSON-RPC socket.
+.TP
+.B \-modeltransport=pq1
+Only accepted value; anything else fail-closes.
+.TP
+.B \-modelfollowpeers=\fI0|1\fR
+Follow FREE catalogs of \-modelpeer / addmodelnode / PEX contacts into spare quota (default 1).
+.TP
+.B \-modelpeer=\fIhost:port\fR
+Model-plane bootstrap contact (repeatable). Not monetary addnode.
+.TP
+.B \-modelseednode=\fIhost:port\fR
+Alias of \-modelpeer.
+.TP
+.B \-modelhost
+Serve seeded artifacts over PQ1.
+.TP
+.B \-modelrelay
+CPU-only discovery relay (no GPU, no wallet).
+.SH SEE ALSO
+.BR btx-modelcheck (1),
+.BR btx-open (1),
+.BR btxd (1),
+.I doc/modelnet/README.md

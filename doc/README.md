@@ -6,6 +6,10 @@ Current BTX architecture/readiness source of truth
 Use these docs first when you need the live post-`61000` hardening status,
 security closeout, or future-upgrade boundary:
 
+- [Native Model Network (0.34.7)](modelnet/README.md) — isolated model plane:
+  local inference after acquire (not a remote inference marketplace);
+  `btx-modeld` helper + optional `btxd` introduction bridge; monetary
+  consensus unchanged when the helper is absent.
 - [MatMul v4.7 Consensus Transition Roadmap](btx-matmul-v4.7-transition-roadmap.md)
 - [GPU-verified full nodes: three-phase transition](btx-gpu-verified-network-transition.md)
 - [0.34 open attestor framework (local design study)](design/0.34-open-attestor-framework.md)
@@ -50,6 +54,7 @@ service-profile, or release-publication workflow:
 - [Linux Release Build Variants](linux-release-builds.md)
 - [Assumeutxo Usage](assumeutxo.md)
 - [0.34.5 release notes — automatic convergence / self-heal](release-notes/release-notes-0.34.5.md)
+- [0.34.7 release notes — Native Model Network (draft / RC)](release-notes/release-notes-0.34.7.md)
 - [BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.md)
 - [BTX GitHub Release Automation](btx-github-release-automation.md)
 - [Release Process](release-process.md)
@@ -143,6 +148,7 @@ This repo's [root README](/README.md) contains relevant information on the devel
 * Discuss project-specific development in the repo issue tracker and adjacent maintainer channels used for BTX release and operator work.
 
 ### Miscellaneous
+- [Native Model Network (0.34.7)](modelnet/README.md)
 - [BTX Shielded Production Status](btx-shielded-production-status-2026-03-20.md)
 - [BTX SMILE v2 Genesis-Reset Readiness Tracker](btx-smile-v2-genesis-readiness-tracker-2026-03-20.md)
 - [BTX SMILE v2 Future-Proofed Settlement TDD](btx-smile-v2-future-proofed-settlement-tdd-2026-03-23.md)

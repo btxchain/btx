@@ -53,6 +53,17 @@ To run:
 
 - (Deprecated) Used to process BIP21 payment URI requests. Also handles URI-based application switching (e.g. when following a bitcoin:... link from a browser).
 
+#### Native Model Network URIs (`btx://…`)
+
+`PaymentServer::handleURIOrFile` intercepts `btx:` **before**
+`parseBitcoinURI` / `DecodeDestination` and emits `receivedModelResource`.
+`BitcoinGUI::handleModelResource` opens the Models page (`showOpenedUri`).
+The Models page shows a **short display**; Copy / Ctrl+C puts the **full**
+canonical URI on the clipboard (V11-URI-14).
+Drop events with `btx:` take the same path. Opening a URI **never** runs
+inference, never starts mining, never opens the spending wallet, and never
+uploads payload bytes. See [doc/modelnet/howto.md](/doc/modelnet/howto.md).
+
 #### walletview.(h/cpp)
 
 - Represents the view to a single wallet.

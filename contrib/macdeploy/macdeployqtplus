@@ -91,10 +91,46 @@ class FrameworkInfo(object):
             raise RuntimeError(f"Line could not be parsed: {line}")
         
         path = m.group(1)
+        original_path = path
+
+        # Homebrew Qt frameworks are commonly recorded as @rpath
+        # dependencies. Resolve those references before copyFramework()
+        # tries to copy the source directory. Keep installName unchanged:
+        # install_name_tool must rewrite the dependency in the binary, while
+        # sourceFilePath/frameworkPath must point at the real Qt installation.
+        if path.startswith("@rpath/"):
+            dependency = path[len("@rpath/"):]
+            dependency_name = dependency.split("/", 1)[0]
+            qtdir = os.getenv("QTDIR", "")
+            roots = []
+            if qtdir:
+                roots.extend([os.path.join(qtdir, "lib"), qtdir])
+            roots.extend([
+                "/opt/homebrew/opt/qtbase/lib",
+                "/opt/homebrew/opt/qt/lib",
+                "/opt/homebrew/opt/qt6/lib",
+                "/opt/homebrew/opt/qt@6/lib",
+                "/opt/homebrew/lib",
+                "/usr/local/opt/qtbase/lib",
+                "/usr/local/opt/qt/lib",
+                "/usr/local/lib",
+            ])
+            if dependency_name.startswith("Qt") and dependency_name.endswith(".framework"):
+                for root in roots:
+                    framework_root = os.path.join(root, dependency_name)
+                    if os.path.isdir(framework_root):
+                        path = os.path.join(root, dependency)
+                        break
+            else:
+                for root in roots:
+                    candidate = os.path.join(root, dependency)
+                    if os.path.isfile(candidate):
+                        path = candidate
+                        break
         
         info = cls()
         info.sourceFilePath = path
-        info.installName = path
+        info.installName = original_path
         
         if path.endswith(".dylib"):
             dirname, filename = os.path.split(path)
@@ -107,7 +143,7 @@ class FrameworkInfo(object):
             info.binaryPath = path
             info.version = "-"
             
-            info.installName = path
+            info.installName = original_path
             info.deployedInstallName = f"@executable_path/../Frameworks/{info.binaryName}"
             info.sourceFilePath = path
             info.destinationDirectory = cls.bundleFrameworkDirectory

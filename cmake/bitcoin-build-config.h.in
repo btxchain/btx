@@ -55,6 +55,9 @@
 /* Define to 1 to enable wallet functions. */
 #cmakedefine ENABLE_WALLET 1
 
+/* Define to 1 to enable the Native Model Network (btx-modeld). */
+#cmakedefine ENABLE_MODELNET 1
+
 /* Define this symbol to build code that uses x86 SHA-NI intrinsics */
 #cmakedefine ENABLE_X86_SHANI 1
 

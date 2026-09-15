@@ -391,6 +391,20 @@ inline constexpr const char* GETUTXOCHUNK{"getutxochunk"};
  * Payload: block_hash, chunk_index, chunk_hash, data.
  */
 inline constexpr const char* UTXOCHUNK{"utxochunk"};
+/**
+ * 0.34.7 model introduction: negotiate public hint capability. 18 bytes.
+ * Not a block inventory type. Only after both peers send sendmodels.
+ */
+inline constexpr const char* SENDMODELS{"sendmodels"};
+/**
+ * Request up to 16 public model endpoint hints. 17 bytes.
+ */
+inline constexpr const char* GETMDPEERS{"getmdpeers"};
+/**
+ * Bounded public model endpoint hints. Max 4 KiB / 16 hints.
+ * Hints are not certificates and are not stored in monetary AddrMan.
+ */
+inline constexpr const char* MDPEERS{"mdpeers"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -450,6 +464,9 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::UTXOMANIFEST,
     NetMsgType::GETUTXOCHUNK,
     NetMsgType::UTXOCHUNK,
+    NetMsgType::SENDMODELS,
+    NetMsgType::GETMDPEERS,
+    NetMsgType::MDPEERS,
 })};
 
 /** nServices flags */
@@ -527,6 +544,13 @@ enum ServiceFlags : uint64_t {
     // advertise this instead of NODE_MATMUL_CONSENSUS / TRUSTED_MIRROR /
     // ATTESTATION_ARCHIVE so they stop being chain oracles.
     NODE_MATMUL_DISCOVERY = (1ULL << 33),
+
+    // 0.34.7 model-plane advertisements. Introduction hints only: never
+    // MatMul authority, not a chain source, and not added to monetary
+    // desirable-service / DNS seed masks. AddrMan must not store artifact
+    // metadata because of these bits.
+    NODE_MODEL_RELAY = (1ULL << 34),
+    NODE_MODEL_HOST = (1ULL << 35),
 };
 
 /**

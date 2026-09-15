@@ -8,6 +8,10 @@ reduced-data transaction constraints (BIP 110-style) from genesis, and
 implements **Dandelion++ transaction relay** (BIP 156) for network-layer
 anonymity.
 
+A BTX node already has compute. The 0.34.7 Native Model Network delivers
+**models and optional payment** to that node. Inference is **local after
+acquisition**. BTX is not a remote inference marketplace.
+
 A **shielded transaction pool** with lattice-based confidential transactions
 operated from genesis and was **closed at height 199300**. The remaining
 shielded balance is treated as burned. Nodes past that height do not maintain
@@ -18,9 +22,13 @@ infrastructure, and test suites.
 
 ## 0.34.1 is the base reference. This is a handover.
 
-**v0.34.1 is the base reference implementation.** Further enhancements,
-features, and releases are expected to come from **community forks and
-modifications, not from this repository.** That is a handover, not a roadmap.
+**v0.34.1 is the base reference implementation.** Further monetary-consensus
+enhancements, features, and releases are expected to come from **community
+forks and modifications, not from this repository.** That is a handover, not
+a roadmap. The 0.34.7 Native Model Network is an **isolated in-tree plane**
+on the 0.34.6 monetary baseline: it does not change ExactReplay, issuance, or
+fork choice, and it does not revoke this handover. See
+[Native Model Network (0.34.7)](#native-model-network-0347).
 
 The two documents that make the handover real, rather than a slogan:
 
@@ -118,7 +126,7 @@ written when the tag is sealed (see
 **v0.34** (seal `dc46dee2`, freeze `ecfaa6c9`). Epoch A Profile 1 ExactReplay
 is live on mainnet at height **185000**. EncDr stall recovery at height
 **199299** is withdrawn. The shielded pool is closed at height
-**199300**. The compiled assumeutxo pin is height **201500** (the 199299 and
+**199300**. The compiled assumeutxo pin is height **219000** (the 199299 and
 199300 pins were on the withdrawn 0.34.1 branch and are removed; see
 [#127](https://github.com/btxchain/btx/issues/127)). Nodes that already
 loaded assumeutxo-199300 or assumeutxo-199299 must resync from an empty
@@ -126,7 +134,9 @@ datadir.
 
 - [Release notes](doc/release-notes.md)
 - [0.34.5 convergence notes](doc/release-notes/release-notes-0.34.5.md)
+- [0.34.7 Native Model Network](doc/release-notes/release-notes-0.34.7.md)
 - [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA, macOS arm64 Metal
+- [AssumeUTXO snapshot 219000](https://github.com/btxchain/btx/releases/tag/assumeutxo-219000) (`btx-assumeutxo-219000.dat` SHA256 `78acb7dd7eeec2a17909c6c5f7e12ffa9b4ad2ffcbd9eb464421dcd960868e7b`)
 - [AssumeUTXO snapshot 201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500) (`btx-assumeutxo-201500.dat` SHA256 `08c52c8b34e878c4d48546cfec066bc48fceed51d7287b4ff7ec7b5727cf52c7`)
 
 Catch-up on a **fresh** chainstate (`loadtxoutset` of assumeutxo-199300 /
@@ -210,6 +220,7 @@ feature, not a live surface. See [Shielded Pool](#shielded-pool).
 - [GPU-verified network (three-phase)](#gpu-verified-network-three-phase)
 - [Chain Parameters](#chain-parameters)
 - [MatMul Proof of Work](#matmul-proof-of-work)
+- [Native Model Network (0.34.7)](#native-model-network-0347)
 - [Post-Quantum Cryptography](#post-quantum-cryptography)
 - [Shielded Pool](#shielded-pool)
 - [Dandelion++ Transaction Relay](#dandelion-transaction-relay)
@@ -343,9 +354,11 @@ MatMul PoW is an AI-infrastructure-friendly proof of work based on the paper
 
 Instead of brute-force hashing, miners perform matrix multiplications over a
 Mersenne prime field (q = 2^31 - 1). The core work unit — large dense matrix
-multiplication — is the same operation that dominates GPU and TPU workloads for
-AI/ML training and inference, making the mining hardware directly reusable for
-productive computation.
+multiplication — is the same operation that dominates GPU workloads for
+training and **local** inference. That is why a BTX node already has
+compute. The 0.34.7 Native Model Network then **delivers models and
+optional payment** to that node. BTX does not sell remote inference and
+does not expose an inference endpoint.
 
 > **MatMul v4.7 Resident Curriculum — Epoch A is live at height 185000.**
 > The implementation preserves the 182-byte digest-only header and a
@@ -494,6 +507,133 @@ Total serialized header: ~182 bytes.
 
 For the full MatMul PoW specification, see
 [doc/btx-matmul-pow-spec.md](doc/btx-matmul-pow-spec.md).
+
+---
+
+## Native Model Network (0.34.7)
+
+**BTX is a decentralized open-model network.**
+
+Search for models by name or **what they do**. Discover new releases from
+the network. Download public models from independent peers. See models
+that are still being funded for release. Contribute BTX to buy an
+unreleased model into the public commons. Once released, run it locally
+and help preserve it.
+
+### Open Model Network
+
+BTX 0.34.7 lets users discover, fund, retrieve, verify, preserve and locally
+run open AI models.
+
+- **PUBLIC** — download now
+- **FUNDING** — contribute BTX to buy the model into the open commons
+- **JUST RELEASED** — retrieve the model from the swarm
+
+Search:
+
+```
+"qwen coder"
+"coding agent"
+"Japanese legal model"
+```
+
+Browse: newest models, active release campaigns, nearly funded, recently
+unlocked.
+
+Inference is **local**. Model search is **decentralized**. Peer counts are
+**observed network views**, not a global census. No central account or email
+is required. Automatic spend remains **zero**.
+
+The desktop Models page provides the same search / feed / funding
+experience without a terminal. Agents use structured RPC
+(`searchmodels` → `getmodeleconomyentry` → download or
+`preparefundmodelrelease`). They do not scrape terminals and they do not
+spend unless the wallet is explicitly authorized.
+
+#### For users
+
+Search by name, alias, description, use case, family, architecture, tags,
+or language. See observed providers, availability, public/release state, and
+funding progress. Then download, fund, keep, or seed.
+
+Network search queries may be visible to peers you query. Use
+`scope: LOCAL` to keep the query on this node.
+
+#### For model creators
+
+Import a model, publish signed metadata, and make it public immediately —
+or encrypt, create a SHA-256 `KEY_RELEASE_ONLY` campaign, let the network
+discover it, take community funding, reveal the committed secret to claim,
+and the model becomes a public `btx://` resource.
+
+Build the model. Set the release target. Let the network buy it into the
+open commons.
+
+#### For AI agents
+
+`searchmodels` → `getmodeleconomyentry` → if `downloadable_now` then
+`getmodel`; elif `fundable_now` then prepare funding (wallet must sign);
+else monitor `getmodelfeed` / `getmodelfeedsequence`. No email. No
+autonomous spend.
+
+Example:
+
+```bash
+btx-cli searchmodels '{"text":"coding agent","scope":"NETWORK"}'
+```
+
+Results may be public (providers observed, high availability, Download) or
+fundable (release campaign · 371/500 BTX confirmed · 129 remaining). The
+desktop client shows the same cards.
+
+- Isolated helper `btx-modeld` (strict PQ1 or fail closed). Monetary
+  `btxd` stays up if the helper dies.
+- Default automatic spend is **zero**. `FREE_ONLY` never becomes paid
+  because a timer expired.
+- Model ACL, seeding, and relays never write BanMan, AddrMan, or fork
+  choice.
+- Remote/paid inference is **off the roadmap**.
+
+Operator and researcher docs: [doc/modelnet/README.md](doc/modelnet/README.md),
+[doc/modelnet/model-economy.md](doc/modelnet/model-economy.md),
+[doc/modelnet/feed.md](doc/modelnet/feed.md).
+Draft notes: [doc/release-notes/release-notes-0.34.7.md](doc/release-notes/release-notes-0.34.7.md).
+This plane does not authorize a `CLIENT_VERSION` bump by itself.
+
+### Model bounties (demand-side)
+
+Release campaigns start from an **already identified** encrypted model and fund
+disclosure of its release key. **Model bounties** are the opposite offer: a
+requester publishes a capability need, fixed evaluation policy, council roster,
+and refund timeline **before** any winning `model_id` exists. Contributors
+inspect immutable signed terms, then fund **their own** escrow lots through the
+wallet. Creators submit candidates; installed evaluators run the stated profiles;
+council policy approvers accept an exact candidate; council transaction signers
+may authorize an award transaction. There is **no** chain opcode that
+automatically pays a winner — settlement is ordinary BTX spends from the
+frozen script trees.
+
+Trust label (terms and economy views):
+`COUNCIL_CUSTODIAL_AUTHORITY_WITH_INDIVIDUAL_REFUND_PATHS`. Benchmarks and
+reports evaluate models under stated conditions; they are **not** consensus
+oracles. The council M-of-N controls the award branch and could collude or fail
+to act. Each funding lot still carries the contributor’s **own** refund key on
+a CLTV branch after the disclosed height if that output remains unspent; refund
+does not require the council, the helper, or any indexer to cooperate. A
+competing award or claim branch may still race the same UTXO.
+
+Escrow reuses existing P2MR templates only — no new opcode:
+
+- Contributor lot: `mr(cltv_multi_pq(locktime,m,keys…),refund(height,refund_key))`
+- Staged winner payout: `mr(htlc_sha256(hash,claimant),refund(height,original_refund_key))`
+
+`CLIENT_VERSION_IS_RELEASE` remains **false** in this tree; bounty RPCs and
+schemas are proposed contracts until mandatory gates have executed evidence.
+See [doc/bounties.md](doc/bounties.md) and [doc/bounty-rpc.md](doc/bounty-rpc.md).
+
+Agents default to read-only discovery (`searchbounties`, `getbounty`,
+`getbountyeconomy`). Funding, evaluation execution, and signing require explicit
+user approval or a finite mandate ([AGENTS.md](AGENTS.md)).
 
 ---
 
@@ -865,6 +1005,7 @@ branch, use the files in `contrib/prebuilt/windows/`.
 | `BUILD_BENCH` | OFF | Build benchmark binary |
 | `ENABLE_WALLET` | ON | Enable wallet support |
 | `WITH_SQLITE` | auto | SQLite wallet backend |
+| `WITH_MODELNET` | ON | Native Model Network (`btx-modeld`, `btx-modelcheck`, `btx-open`). Needs OpenSSL 3.5+ with ML-KEM-768 / ML-DSA-44 for the helper. Monetary-only: `-DWITH_MODELNET=OFF`. |
 
 ### Platform-Specific Guides
 
@@ -888,8 +1029,8 @@ historical sync finishes.
 
 Fast-start support in the current tree:
 
-- `main`: supported; compiled assumeutxo heights through **201500**
-  (`3dd0fa67…`). Load `https://github.com/btxchain/btx/releases/download/assumeutxo-201500/btx-assumeutxo-201500.dat`
+- `main`: supported; compiled assumeutxo heights through **219000**
+  (`dc51220b…`). Load `https://github.com/btxchain/btx/releases/download/assumeutxo-219000/btx-assumeutxo-219000.dat`
   with `loadtxoutset` on a fresh chainstate. Do **not** load
   assumeutxo-199300 (`ff80e629…`) or assumeutxo-199299 (`f12a27d0…`);
   those bases are on the withdrawn 0.34.1 branch and 0.34.5 rejects them.

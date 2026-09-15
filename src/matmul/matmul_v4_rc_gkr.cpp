@@ -7,6 +7,7 @@
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <logging.h>
+#include <node/resource_governor.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_lt.h>
@@ -5656,6 +5657,11 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
     const arith_uint256* target,
     uint32_t profile)
 {
+    node::GlobalResourceGovernor().BeginValidationWork();
+    struct ValidationGovEnd {
+        ~ValidationGovEnd() { node::GlobalResourceGovernor().EndValidationWork(); }
+    } validation_gov_end;
+
     const RCExactReplayExecutionPolicy policy{
         GetRCExactReplayExecutionPolicy()};
 

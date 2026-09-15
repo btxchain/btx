@@ -102,4 +102,11 @@ void URITests::uriTests()
     QVERIFY(rv.address == QString("175tWpb8K1S7NmH4Zx6rewF9WQrcZv245W"));
     QVERIFY(rv.amount == 10000000000LL);
     QVERIFY(rv.label == QString("%3F"));
+
+    // V11-URI-13: model resources are not payment URIs.
+    const QString model_uri(
+        "btx://pqc0whmrlv2emtc8eknxja6l6ffdj5mta0nj9msfsdkrz6qg0de448gm0a3kcctd92p9ekje2c97wd5glyrdl");
+    QVERIFY(!GUIUtil::parseBitcoinURI(model_uri, &rv));
+    uri.setUrl(model_uri);
+    QVERIFY(!GUIUtil::parseBitcoinURI(uri, &rv));
 }

@@ -6,6 +6,12 @@ CUDA mining. The CUDA archives are prepackaged release builds: users do not need
 to install the CUDA Toolkit on the target machine, but they do need a compatible
 NVIDIA driver and a supported NVIDIA GPU.
 
+CUDA mining archives are **unrelated** to Native Model Network remote inference:
+there is no inference endpoint in those bundles. When `-DWITH_MODELNET=ON`, the
+`btx-modeld` helper needs a host **OpenSSL 3.5+** with ML-KEM-768 / ML-DSA-44
+(or bundled OpenSSL via `contrib/modelnet/run-modeld.sh`). MatMul CUDA backends
+and PQ1 model transport are separate subsystems.
+
 ## Release asset matrix
 
 | Platform id | Archive suffix | Build flavor | CUDA runtime |

@@ -20,9 +20,13 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <limits.h>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <string>
+#include <vector>
+#include <mach-o/dyld.h>
 
 namespace {
 
@@ -78,6 +82,47 @@ id<MTLComputePipelineState> MakePipeline(id<MTLDevice> device,
     return pipeline;
 }
 
+void AppendUniquePath(std::vector<std::string>& paths, const char* path)
+{
+    if (path == nullptr || path[0] == '\0') return;
+    if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
+        paths.emplace_back(path);
+    }
+}
+
+std::optional<std::string> ExecutableDirectory()
+{
+    uint32_t size = PATH_MAX;
+    std::vector<char> buffer(size);
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        buffer.resize(size);
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+            return std::nullopt;
+        }
+    }
+    char resolved[PATH_MAX];
+    const char* executable_path = realpath(buffer.data(), resolved) != nullptr ? resolved : buffer.data();
+    std::string path{executable_path};
+    const auto separator = path.find_last_of('/');
+    if (separator == std::string::npos) {
+        return std::nullopt;
+    }
+    return path.substr(0, separator);
+}
+
+std::vector<std::string> RowLeafMetallibCandidatePaths()
+{
+    std::vector<std::string> paths;
+    AppendUniquePath(paths, std::getenv("BTX_RC_ROWLEAF_METALLIB_PATH"));
+    if (const auto executable_dir = ExecutableDirectory()) {
+        AppendUniquePath(paths, (*executable_dir + "/metal/matmul_v4_rc_rowleaf_gpu_kernels.metallib").c_str());
+    }
+#if defined(BTX_RC_ROWLEAF_METALLIB_PATH)
+    AppendUniquePath(paths, BTX_RC_ROWLEAF_METALLIB_PATH);
+#endif
+    return paths;
+}
+
 struct MetalRowLeafRuntime {
     id<MTLDevice> device{nil};
     id<MTLCommandQueue> queue{nil};
@@ -106,15 +151,19 @@ struct MetalRowLeafRuntime {
 
             id<MTLLibrary> library = nil;
             NSError* library_error = nil;
-#if defined(BTX_RC_ROWLEAF_METALLIB_PATH)
-            NSString* path =
-                [NSString stringWithUTF8String:BTX_RC_ROWLEAF_METALLIB_PATH];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            for (const auto& candidate : RowLeafMetallibCandidatePaths()) {
+                NSString* path = [NSString stringWithUTF8String:candidate.c_str()];
+                if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                    continue;
+                }
+                library_error = nil;
                 library = [device
                     newLibraryWithURL:[NSURL fileURLWithPath:path]
                                 error:&library_error];
+                if (library != nil) {
+                    break;
+                }
             }
-#endif
             if (library == nil) {
                 library_error = nil;
                 library = [device

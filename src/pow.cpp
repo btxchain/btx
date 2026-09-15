@@ -8,6 +8,7 @@
 #include <arith_uint256.h>
 #include <threadsafety.h>
 #include <chain.h>
+#include <node/resource_governor.h>
 #include <crypto/kawpow.h>
 #include <cuda/cuda_context.h>
 #include <cuda/oracle_accel.h>
@@ -7685,6 +7686,18 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                     block, params_rc, block_height,
                     nullptr, resolved_rc.backend);
             } else {
+                node::GlobalResourceGovernor().SetMiningConsent(true);
+                if (!node::GlobalResourceGovernor().MiningAllowed()) {
+                    LogPrintf(
+                        "SolveMatMulV4RC: candidate mining deferred by resource-governor "
+                        "reason=%s intensity=%d\n",
+                        node::PauseReasonName(node::GlobalResourceGovernor().MiningPauseReason()),
+                        node::GlobalResourceGovernor().MiningIntensity());
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() - start);
+                    return false;
+                }
                 std::atomic_bool accelerator_preempted{false};
                 auto accelerator_lease{
                     matmul::v4::rc::GetRCAcceleratorScheduler().Acquire(

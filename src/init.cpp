@@ -76,6 +76,7 @@
 #include <node/miner.h>
 #include <node/peerman_args.h>
 #include <node/protocol_version.h>
+#include <node/resource_governor.h>
 #include <policy/feerate.h>
 #include <policy/fees.h>
 #include <policy/fees_args.h>
@@ -116,6 +117,11 @@
 #include <validationinterface.h>
 #include <walletinitinterface.h>
 #include <uint256.h>
+
+#ifdef ENABLE_MODELNET
+#include <modelnet/policy.h>
+#include <modelnet/supervisor.h>
+#endif
 
 #include <algorithm>
 #include <condition_variable>
@@ -258,6 +264,9 @@ static bool IsDangerousNoBanWhitelistRange(const NetWhitelistPermissions& subnet
 }
 
 static std::optional<util::SignalInterrupt> g_shutdown;
+#ifdef ENABLE_MODELNET
+static std::unique_ptr<modelnet::HelperSupervisor> g_model_helper;
+#endif
 
 void InitContext(NodeContext& node)
 {
@@ -349,6 +358,15 @@ void Shutdown(NodeContext& node)
     if (!lock_shutdown) return;
     LogPrintf("%s: In progress...\n", __func__);
     Assert(node.args);
+
+#ifdef ENABLE_MODELNET
+    if (g_model_helper) {
+        LogPrintf("Shutdown: stopping owned btx-modeld helper\n");
+        g_model_helper->Stop();
+        modelnet::SetManagedSupervisor(nullptr);
+        g_model_helper.reset();
+    }
+#endif
 
     /// Note: Shutdown() must be able to handle cases in which initialization failed part of the way,
     /// for example if the data directory was found to be locked.
@@ -607,6 +625,33 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
 #endif
     argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip script verification for their transactions while still checking other consensus rules (0 to verify all, default: %s, testnet3: %s, testnet4: %s, signet: %s, shieldedv2dev: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnet4ChainParams->GetConsensus().defaultAssumeValid.GetHex(), signetChainParams->GetConsensus().defaultAssumeValid.GetHex(), shieldedv2devChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), trusted, relay, economic, or spv. trusted performs ordinary block/body/script validation but replaces local Profile-1 ExactReplay with an explicitly configured M-of-N signed archive-validator quorum; it is an operator-trusted mirror, not an independently validating full node. relay is the 0.34 public discovery node: ADDR only, not MatMul authority, not a chain-tip oracle, and it never requests or serves GETMMATTEST. Mainnet allows consensus, trusted, and relay. Economic/SPV still skip MatMul authority and remain forbidden on mainnet.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+#ifdef ENABLE_MODELNET
+    argsman.AddArg("-modelnet", "Enable the Native Model Network (default: 1 when compiled WITH_MODELNET). btxd starts a supervised btx-modeld helper. Model failure never stops monetary consensus. Disable with -modelnet=0 / -nomodelnet.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelnetrequired", "Fail btxd startup if the model helper cannot initialize (default: 0). Leave off so money keeps working when the helper is missing.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelrelay", "Advertise NODE_MODEL_RELAY as an unauthenticated discovery hint (default: 1 when -modelnet). Never MatMul authority, never a chain source, never a wallet. Artifact endpoints are not inserted into monetary AddrMan.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelhost", "Advertise NODE_MODEL_HOST only after proven reachability (default: 0). Do not set this merely because the helper is running.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelrpcsocket=<path>", "Unix socket for btx-modeld JSON-RPC (default: <datadir>/modelnet/modeld.sock). If set explicitly, btxd connects and does not spawn or kill that helper. Otherwise btxd owns a child btx-modeld.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modeld=<path>", "Path to packaged btx-modeld. Alias of -modelhelper. Default: next to the running btxd / libexec/btx-modeld. A missing explicit path does not spawn a substitute.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelhelper=<path>", "Path to packaged btx-modeld. Default: next to the running btxd / libexec/btx-modeld.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modeldir=<dir>", "Isolated model store (default: <datadir>/modelnet). Never wallet/chainstate.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelbind=<ip:port>", "PQ1 listen address passed to the owned helper (default: 0.0.0.0:29447). Empty/0/off = unix RPC only. Does not advertise NODE_MODEL_HOST.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelstorage=<size>", "Model payload budget: auto (packaged default), 0, or 80GiB. AUTO sizes against the model-store filesystem.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelstorageautocap=<size>", "AUTO hard cap (default: 512GiB).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelfreespacereserve=<size>", "AUTO free-space reserve override (default: max(32GiB, 10% of filesystem capacity)).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelseed=auto|manual|off", "Demand-seed after intentional import/getmodel (default: auto).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelpreserverare", "Fetch qualified under-replicated public models into spare quota (default: 0).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelfollowpeers", "Follow FREE models announced by -modelpeer / addmodelnode / PEX catalog contacts into spare quota (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelpeer=<host:port>", "Model-plane bootstrap contact passed to the owned helper (repeatable). Alias: -modelseednode.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelseednode=<host:port>", "Alias of -modelpeer.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modeluploadlimit=<bps>", "Aggregate model upload cap. auto = governor ceiling. 0 = connection ceilings only.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+#endif
+    argsman.AddArg("-resourcegovernor=<mode>", "Local resource governor: auto, performance, balanced, eco, manual, or off (default: auto). Never consensus.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-automining", "When mining is enabled, only run it while the governor reports spare accelerator capacity (default: 0). Does not enable mining by itself except together with -gen or an explicit miner.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-miningmaxintensity=<percent>", "Governor mining intensity cap 0-100 (default: 100).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-backgroundonbattery", "Allow background mining/preservation on battery (default: 0).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-backgroundonmetered", "Allow background seeding/preservation on metered networks (default: 0).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-governoridleseconds=<n>", "Seconds of low GPU utilization before opportunistic mining resumes (default: 30).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-governorcooldownseconds=<n>", "Seconds after a mining pause before resume is considered (default: 10).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-discoveryrelayhideaddr=<ip>", "Do not learn, GETADDR, or getnodeaddresses this IP. Repeatable. Use on discovery relays and trusted archives to hide GPU attestor addresses that advertise CONSENSUS without ARCHIVE (serve=0). Relays InitError if -addnode/-connect/-seednode targets a hidden address.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: strict-device on a chain with a finite RC activation height, auto-fallback while RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowunverifiablematmulconsensus", "Allow consensus-mode catch-up ExactReplay when the local device did not self-qualify (startup canary / production goldens miss). Startup still warns and withholds NODE_MATMUL_CONSENSUS. Mining stays fail-closed. Catch-up still fully ExactReplays every body before ConnectTip, on the available CUDA/Metal GEMM if present, otherwise on CPU. Without this flag a canary miss zeros the GEMM and digest_requests stays 0 (a live consensus-archive node: buffer_pool_uninitialized). Do not treat this as skipping ExactReplay.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -2632,7 +2677,9 @@ static bool InitializeMatMulRCReadinessPostDaemon(
         static_cast<uint64_t>(NODE_MATMUL_TRUSTED_MIRROR) |
         static_cast<uint64_t>(NODE_MATMUL_ECONOMIC) |
         static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE) |
-        static_cast<uint64_t>(NODE_MATMUL_DISCOVERY);
+        static_cast<uint64_t>(NODE_MATMUL_DISCOVERY) |
+        static_cast<uint64_t>(NODE_MODEL_RELAY) |
+        static_cast<uint64_t>(NODE_MODEL_HOST);
     uint64_t services{static_cast<uint64_t>(g_local_services) & ~clear_mask};
     if (matmul_validation_mode == "consensus") {
         if (rc_strict_device_ready) {
@@ -2672,6 +2719,17 @@ static bool InitializeMatMulRCReadinessPostDaemon(
             services |= static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE);
         }
     }
+#ifdef ENABLE_MODELNET
+    // Unauthenticated introduction hints only. Never seed-mask, AddrMan
+    // artifact metadata, MatMul authority, or a chain source. HOST is never
+    // implied merely because the helper is running.
+    if (args.GetBoolArg("-modelnet", true) && args.GetBoolArg("-modelrelay", true)) {
+        services |= static_cast<uint64_t>(NODE_MODEL_RELAY);
+    }
+    if (args.GetBoolArg("-modelnet", true) && args.GetBoolArg("-modelhost", false)) {
+        services |= static_cast<uint64_t>(NODE_MODEL_HOST);
+    }
+#endif
     g_local_services = static_cast<ServiceFlags>(services);
     return true;
 }
@@ -2790,6 +2848,49 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             }
         }
     }, std::chrono::minutes{5});
+
+    {
+        node::GovernorMode gm = node::GovernorMode::AUTO;
+        (void)node::ParseGovernorMode(args.GetArg("-resourcegovernor", "auto"), gm);
+        auto& gov = node::GlobalResourceGovernor();
+        gov.SetMode(gm);
+        gov.SetAutoSchedule(args.GetBoolArg("-automining", false));
+        gov.SetMiningConsent(args.GetBoolArg("-gen", false) || args.GetBoolArg("-automining", false));
+        node::GovernorPolicy pol = gov.Policy();
+        pol.battery_background_allowed = args.GetBoolArg("-backgroundonbattery", false);
+        pol.preserve_on_battery = args.GetBoolArg("-backgroundonbattery", false);
+        pol.background_on_metered = args.GetBoolArg("-backgroundonmetered", false);
+        if (args.IsArgSet("-miningmaxintensity")) {
+            pol.mining_max_intensity = static_cast<int>(args.GetIntArg("-miningmaxintensity", 100));
+        }
+        if (args.IsArgSet("-governoridleseconds")) {
+            pol.idle_resume_seconds = static_cast<int>(args.GetIntArg("-governoridleseconds", 30));
+        }
+        if (args.IsArgSet("-governorcooldownseconds")) {
+            pol.cooldown_seconds = static_cast<int>(args.GetIntArg("-governorcooldownseconds", 10));
+        }
+        const std::string uplim = args.GetArg("-modeluploadlimit", "auto");
+        if (uplim != "auto" && !uplim.empty()) {
+#ifdef ENABLE_MODELNET
+            uint64_t bps = 0;
+            std::string uerr;
+            if (modelnet::ParseModelBytes(uplim, bps, uerr) && bps > 0) {
+                pol.upload_auto = false;
+                pol.upload_max_bps = static_cast<int64_t>(bps);
+            }
+#endif
+        }
+        gov.SetPolicy(pol);
+        const fs::path permit_dir = args.GetDataDirNet() / "modelnet";
+        fs::create_directories(permit_dir);
+        const fs::path permit = permit_dir / "governor-permit.json";
+        scheduler.scheduleEvery([permit] {
+            auto& g = node::GlobalResourceGovernor();
+            g.Observe(node::SampleHostSignals(),
+                      TicksSinceEpoch<std::chrono::milliseconds>(NodeClock::now()));
+            (void)g.WritePermitFile(fs::PathToString(permit));
+        }, std::chrono::seconds{2});
+    }
 
     if (args.GetBoolArg("-logratelimit", BCLog::DEFAULT_LOGRATELIMIT)) {
         LogInstance().SetRateLimiting(BCLog::LogRateLimiter::Create(
@@ -3978,6 +4079,85 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             SyncCoinsTipAfterChainSync(node);
         }, SYNC_CHECK_INTERVAL);
     }
+
+#ifdef ENABLE_MODELNET
+    if (args.GetBoolArg("-modelnet", true)) {
+        modelnet::HelperLaunchConfig hcfg;
+        hcfg.required = args.GetBoolArg("-modelnetrequired", false);
+        hcfg.external_socket = args.IsArgSet("-modelrpcsocket");
+        const std::string modeldir_arg = args.GetArg("-modeldir", "");
+        hcfg.modeldir = modeldir_arg.empty() ? (args.GetDataDirNet() / "modelnet") : fs::PathFromString(modeldir_arg);
+        if (hcfg.external_socket) {
+            hcfg.rpc_socket = fs::PathFromString(args.GetArg("-modelrpcsocket", ""));
+        } else {
+            hcfg.rpc_socket = args.GetDataDirNet() / "modelnet" / "modeld.sock";
+        }
+        hcfg.storage_arg = args.GetArg("-modelstorage", "auto");
+        hcfg.seed = args.GetArg("-modelseed", "auto");
+        hcfg.preserve_rare = args.GetBoolArg("-modelpreserverare", false);
+        hcfg.follow_peers = args.GetBoolArg("-modelfollowpeers", true);
+        hcfg.peers = args.GetArgs("-modelpeer");
+        {
+            const auto aliases = args.GetArgs("-modelseednode");
+            hcfg.peers.insert(hcfg.peers.end(), aliases.begin(), aliases.end());
+        }
+        {
+            std::string err;
+            uint64_t cap = 0, reserve = 0;
+            if (args.IsArgSet("-modelstorageautocap") && modelnet::ParseModelBytes(args.GetArg("-modelstorageautocap", ""), cap, err)) {
+                hcfg.auto_cap_bytes = cap;
+            }
+            if (args.IsArgSet("-modelfreespacereserve") && modelnet::ParseModelBytes(args.GetArg("-modelfreespacereserve", ""), reserve, err)) {
+                hcfg.reserve_bytes = reserve;
+            }
+        }
+        {
+            std::string err;
+            uint64_t bps = 0;
+            if (args.IsArgSet("-modeluploadlimit") && modelnet::ParseModelBytes(args.GetArg("-modeluploadlimit", "0"), bps, err)) {
+                hcfg.upload_bps = bps;
+            }
+        }
+        const std::string modeld_arg = args.IsArgSet("-modelhelper") ? args.GetArg("-modelhelper", "") :
+                                       (args.IsArgSet("-modeld") ? args.GetArg("-modeld", "") : "");
+        if (args.IsArgSet("-modelhelper") || args.IsArgSet("-modeld")) {
+            hcfg.helper_exe = fs::PathFromString(modeld_arg);
+            if (hcfg.helper_exe.empty() || !fs::exists(hcfg.helper_exe)) {
+                hcfg.helper_exe.clear();
+                hcfg.helper_explicitly_missing = true;
+                LogPrintf("model helper: -modeld/-modelhelper path does not exist; not spawning a substitute\n");
+            }
+        } else {
+            hcfg.helper_exe = modelnet::FindPackagedModeld({});
+        }
+        if (args.IsArgSet("-modelbind")) {
+            hcfg.bind = args.GetArg("-modelbind", "");
+            if (hcfg.bind == "0" || hcfg.bind == "off" || hcfg.bind == "none") hcfg.bind.clear();
+        } else {
+            hcfg.bind = "0.0.0.0:29447";
+        }
+        LogPrintf("model helper exe=%s socket=%s storage=%s bind=%s missing=%d\n",
+                  fs::PathToString(hcfg.helper_exe),
+                  fs::PathToString(hcfg.rpc_socket),
+                  hcfg.storage_arg,
+                  hcfg.bind,
+                  hcfg.helper_explicitly_missing ? 1 : 0);
+        g_model_helper = std::make_unique<modelnet::HelperSupervisor>(hcfg, [&node] {
+            return ShutdownRequested(node);
+        });
+        modelnet::SetManagedSupervisor(g_model_helper.get());
+        std::string helper_err;
+        if (!g_model_helper->Start(helper_err)) {
+            LogPrintf("model helper required but failed: %s\n", helper_err);
+            return InitError(strprintf(_("Model network required (-modelnetrequired) but helper failed: %s"), helper_err));
+        }
+        if (!helper_err.empty()) {
+            LogPrintf("model helper: %s (monetary node continues)\n", helper_err);
+        }
+    } else {
+        LogPrintf("model network disabled (-modelnet=0); monetary node continues\n");
+    }
+#endif
 
     return true;
 }

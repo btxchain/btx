@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:spec:0347:bounty:AwardPolicyApproval:1",
+  "title": "AwardPolicyApproval",
+  "description": "Proposed strict shape contract. Semantic authorization and provenance checks remain mandatory.",
+  "type": "object",
+  "properties": {
+    "award_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "terms_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "submission_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "transaction_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "council_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "decision": {
+      "enum": [
+        "APPROVE",
+        "REJECT"
+      ]
+    },
+    "acceptance_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 1024
+    }
+  },
+  "required": [
+    "award_id",
+    "terms_id",
+    "submission_id",
+    "transaction_digest",
+    "council_identity",
+    "decision",
+    "acceptance_id",
+    "reason"
+  ],
+  "additionalProperties": false
+}

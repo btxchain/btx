@@ -1,0 +1,825 @@
+{
+  "schema_version": 1,
+  "status": "PROPOSED_CONTRACTS_NOT_IMPLEMENTATION_CLAIM",
+  "compatibility": "Extend existing handlers and reuse monetary builders; final registered names must match documented inventory.",
+  "rpcs": [
+    {
+      "name": "searchbounties",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "query": "Structured query: text, object kinds, filters, scope, sort, page limit, opaque cursor. No global-completeness claim."
+      },
+      "result": "BountyResultPage",
+      "notes": "Network work is bounded and cancellable. LOCAL scope must send no network requests."
+    },
+    {
+      "name": "getmodelbounties",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "query": "Structured query: text, object kinds, filters, scope, sort, page limit, opaque cursor. No global-completeness claim."
+      },
+      "result": "BountyResultPage",
+      "notes": "Network work is bounded and cancellable. LOCAL scope must send no network requests."
+    },
+    {
+      "name": "getmodelfeed",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "query": "Structured query: text, object kinds, filters, scope, sort, page limit, opaque cursor. No global-completeness claim."
+      },
+      "result": "FeedPage",
+      "notes": "Network work is bounded and cancellable. LOCAL scope must send no network requests."
+    },
+    {
+      "name": "gettrendingmodels",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "query": "Structured query: text, object kinds, filters, scope, sort, page limit, opaque cursor. No global-completeness claim."
+      },
+      "result": "DiscoveryResultPage",
+      "notes": "Network work is bounded and cancellable. LOCAL scope must send no network requests."
+    },
+    {
+      "name": "getbounty",
+      "role": "READER",
+      "plane": "MODEL+READ_ONLY_CHAIN",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "ref": "Typed URI or explicit kind/id reference; never auto-interpret as payment destination."
+      },
+      "result": "BountyEntry",
+      "notes": "Unknown chain facts are null/UNKNOWN; no wallet-specific data on public interface."
+    },
+    {
+      "name": "getbountyeconomy",
+      "role": "READER",
+      "plane": "MODEL+READ_ONLY_CHAIN",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "ref": "Typed URI or explicit kind/id reference; never auto-interpret as payment destination."
+      },
+      "result": "BountyEconomy",
+      "notes": "Unknown chain facts are null/UNKNOWN; no wallet-specific data on public interface."
+    },
+    {
+      "name": "getbountyterms",
+      "role": "READER",
+      "plane": "MODEL+READ_ONLY_CHAIN",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "ref": "Typed URI or explicit kind/id reference; never auto-interpret as payment destination."
+      },
+      "result": "SignedBountyTerms",
+      "notes": "Unknown chain facts are null/UNKNOWN; no wallet-specific data on public interface."
+    },
+    {
+      "name": "getmodeleconomyentry",
+      "role": "READER",
+      "plane": "MODEL+READ_ONLY_CHAIN",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "ref": "Typed URI or explicit kind/id reference; never auto-interpret as payment destination."
+      },
+      "result": "ModelEconomyEntry",
+      "notes": "Unknown chain facts are null/UNKNOWN; no wallet-specific data on public interface."
+    },
+    {
+      "name": "getmodeldirectoryentry",
+      "role": "READER",
+      "plane": "MODEL+READ_ONLY_CHAIN",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "ref": "Typed URI or explicit kind/id reference; never auto-interpret as payment destination."
+      },
+      "result": "ModelDirectoryEntry",
+      "notes": "Unknown chain facts are null/UNKNOWN; no wallet-specific data on public interface."
+    },
+    {
+      "name": "getbountycapabilities",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {},
+      "result": "CapabilityObject",
+      "notes": "Return supported record/schema/script/evaluation profiles and implementation version; do not advertise unexecuted features."
+    },
+    {
+      "name": "createbountydraft",
+      "role": "REQUESTER_DRAFTER",
+      "plane": "MODEL",
+      "side_effect": "LOCAL_WRITE",
+      "idempotency_required": true,
+      "arguments": {
+        "terms": "BountyTerms payload",
+        "idempotency_key": "caller-scoped unique string"
+      },
+      "result": "DraftResult",
+      "notes": "Local only; no publication or deposit."
+    },
+    {
+      "name": "validatebountyterms",
+      "role": "REQUESTER_DRAFTER",
+      "plane": "MODEL+READ_ONLY_CHAIN",
+      "side_effect": "LOCAL_READ",
+      "idempotency_required": false,
+      "arguments": {
+        "terms": "BountyTerms payload"
+      },
+      "result": "ValidationReport",
+      "notes": "Checks timeline, bounds, capability and script profile; does not validate future quality."
+    },
+    {
+      "name": "publishbounty",
+      "role": "REQUESTER_DRAFTER",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "draft_id": "local draft id",
+        "expected_terms_id": "digest of user-reviewed immutable terms",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "PublicationResult",
+      "notes": "Signs exact terms with research key; no wallet spend. Validates current public-record capability."
+    },
+    {
+      "name": "revisebounty",
+      "role": "REQUESTER_DRAFTER",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "bounty_id": "old bounty id",
+        "terms": "new full terms",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "PublicationResult",
+      "notes": "Creates a distinct bounty/terms id; old deposits never migrate implicitly."
+    },
+    {
+      "name": "nominatebountyevaluator",
+      "role": "CONTRIBUTOR_SIGNER",
+      "plane": "MODEL",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "bounty_id": "id",
+        "nominee_identity": "PQ identity",
+        "nominee_key": "full PQ key or authenticated reference",
+        "pledge_ref": "nonbinding nomination basis",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "NominationResult",
+      "notes": "No seat or spending authority yet; eligibility validated at frozen funding transaction."
+    },
+    {
+      "name": "acceptbountyappointment",
+      "role": "EVALUATOR_REPORT_SIGNER",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "terms_id": "immutable id",
+        "appointment": "scope/conflicts/deadlines/roster acceptance",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SignedAppointment",
+      "notes": "Does not authorize spending or establish independent identity."
+    },
+    {
+      "name": "listbountyevaluators",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "bounty_id": "id",
+        "cursor": "optional",
+        "limit": "1..100"
+      },
+      "result": "EvaluatorPage",
+      "notes": ""
+    },
+    {
+      "name": "pledgebounty",
+      "role": "REQUESTER_DRAFTER",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "bounty_id": "id",
+        "principal_atoms": "decimal string",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SignedPledge",
+      "notes": "Nonbinding; must never be presented as confirmed funding."
+    },
+    {
+      "name": "withdrawbountypledge",
+      "role": "REQUESTER_DRAFTER",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "pledge_id": "id",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "PledgeResult",
+      "notes": "Withdraws a pledge, not money already deposited."
+    },
+    {
+      "name": "freezebountyfundinground",
+      "role": "REQUESTER_DRAFTER",
+      "plane": "MODEL",
+      "side_effect": "LOCAL_WRITE",
+      "idempotency_required": true,
+      "arguments": {
+        "terms_id": "id",
+        "round": "complete proposed contributors, council and funding transaction",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "FrozenRound",
+      "notes": "No output mutation after signatures. Nomination percentages derive from exact principal outputs."
+    },
+    {
+      "name": "preparebountyfunding",
+      "role": "CONTRIBUTOR_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "PREPARE",
+      "idempotency_required": true,
+      "arguments": {
+        "round_id": "id",
+        "lot_id": "own lot id",
+        "principal_atoms": "exact user-selected decimal amount",
+        "fee_reserve_atoms": "approved ceiling",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "FundingPlan",
+      "notes": "Derive own refund key; validate full tree, all outputs, fee allocation, ownership and authorization."
+    },
+    {
+      "name": "inspectbountytransaction",
+      "role": "CONTRIBUTOR_SIGNER|COUNCIL_TX_SIGNER|RECOVERY_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "LOCAL_READ",
+      "idempotency_required": false,
+      "arguments": {
+        "proposal_id": "known proposal or plan",
+        "transaction": "PSBT/raw tx in existing BTX-supported format"
+      },
+      "result": "TransactionInspection",
+      "notes": "No signing. Returns full authorized/unauthorized diff, scripts, fee and spend branches."
+    },
+    {
+      "name": "signbountyfunding",
+      "role": "CONTRIBUTOR_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "SIGN",
+      "idempotency_required": true,
+      "arguments": {
+        "plan_id": "id",
+        "expected_transaction_id": "exact inspected transaction fingerprint",
+        "authorization_ref": "approval or finite mandate",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "PartiallySignedTransaction",
+      "notes": "Existing supported SIGHASH_ALL only; no implicit ANYONECANPAY."
+    },
+    {
+      "name": "submitbountyfunding",
+      "role": "CONTRIBUTOR_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "BROADCAST",
+      "idempotency_required": true,
+      "arguments": {
+        "plan_id": "id",
+        "signed_transaction": "supported serialized transaction",
+        "authorization_ref": "approved policy scope",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "BroadcastResult",
+      "notes": "Live revalidation; duplicate retries return same outcome."
+    },
+    {
+      "name": "getbountyfunding",
+      "role": "READER",
+      "plane": "READ_ONLY_CHAIN",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "bounty_id": "id",
+        "round_id": "optional",
+        "cursor": "optional",
+        "limit": "1..100"
+      },
+      "result": "FundingPage",
+      "notes": "Public outpoints and attributed chain completeness. Private ownership requires separate authorized context."
+    },
+    {
+      "name": "exportbountyrecovery",
+      "role": "RECOVERY_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "LOCAL_READ",
+      "idempotency_required": false,
+      "arguments": {
+        "bounty_id": "id",
+        "lot_ids": "owned lots"
+      },
+      "result": "RecoveryManifest",
+      "notes": "No seed/private keys; includes complete scripts, control data and lineage."
+    },
+    {
+      "name": "commitbountysubmission",
+      "role": "CREATOR",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "bounty_id": "id",
+        "commitment": "salted submission commitment",
+        "payout_binding": "authenticated payout key/script reference",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SubmissionCommitment",
+      "notes": "An artifact digest is not an originality/ownership proof."
+    },
+    {
+      "name": "revealbountysubmission",
+      "role": "CREATOR",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "commitment_id": "id",
+        "submission": "Submission payload",
+        "nonce_ref": "authorized local secret reference or explicit value",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SignedSubmission",
+      "notes": "Must match commitment. Public model ID, ciphertext/secret hash when sealed."
+    },
+    {
+      "name": "getbountysubmission",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "submission_id": "id"
+      },
+      "result": "SubmissionEntry",
+      "notes": ""
+    },
+    {
+      "name": "listbountysubmissions",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "bounty_id": "id",
+        "cursor": "optional",
+        "limit": "1..100"
+      },
+      "result": "SubmissionPage",
+      "notes": ""
+    },
+    {
+      "name": "withdrawbountysubmission",
+      "role": "CREATOR",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "submission_id": "id",
+        "reason": "inert text",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SubmissionUpdate",
+      "notes": "Cannot erase already public bytes or rewrite a settled award."
+    },
+    {
+      "name": "preparebountyevaluation",
+      "role": "EVALUATOR_RUNNER",
+      "plane": "EVALUATION",
+      "side_effect": "PREPARE",
+      "idempotency_required": true,
+      "arguments": {
+        "submission_id": "id",
+        "profile_id": "installed approved harness profile",
+        "resources": "bounded device/time/memory/disk request",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "EvaluationPlan",
+      "notes": "No execution yet; refuse unknown or unsafe harness capability."
+    },
+    {
+      "name": "runbountyevaluation",
+      "role": "EVALUATOR_RUNNER",
+      "plane": "EVALUATION",
+      "side_effect": "EXECUTE",
+      "idempotency_required": true,
+      "arguments": {
+        "plan_id": "id",
+        "execution_approval_ref": "explicit local approval",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "EvaluationJob",
+      "notes": "Asynchronous isolated process. No wallet/signing keys or arbitrary network."
+    },
+    {
+      "name": "getbountyevaluationjob",
+      "role": "EVALUATOR_RUNNER",
+      "plane": "EVALUATION",
+      "side_effect": "LOCAL_READ",
+      "idempotency_required": false,
+      "arguments": {
+        "job_id": "id"
+      },
+      "result": "EvaluationJobStatus",
+      "notes": ""
+    },
+    {
+      "name": "cancelbountyevaluation",
+      "role": "EVALUATOR_RUNNER",
+      "plane": "EVALUATION",
+      "side_effect": "LOCAL_WRITE",
+      "idempotency_required": true,
+      "arguments": {
+        "job_id": "id",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "EvaluationJobStatus",
+      "notes": "Must cancel actual worker and descendants, not only change JSON state."
+    },
+    {
+      "name": "publishbountyevaluation",
+      "role": "EVALUATOR_REPORT_SIGNER",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "job_id": "locally verified execution evidence",
+        "report": "EvaluationReport payload",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SignedEvaluationReport",
+      "notes": "Result signature is not an award transaction signature."
+    },
+    {
+      "name": "listbountyevaluations",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "submission_id": "id",
+        "cursor": "optional",
+        "limit": "1..100"
+      },
+      "result": "EvaluationPage",
+      "notes": ""
+    },
+    {
+      "name": "createbountychallenge",
+      "role": "CREATOR|CONTRIBUTOR_SIGNER|EVALUATOR_REPORT_SIGNER",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "bounty_id": "id",
+        "submission_id": "id",
+        "challenge": "bounded typed evidence/claim",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SignedChallenge",
+      "notes": ""
+    },
+    {
+      "name": "listbountychallenges",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "bounty_id": "id",
+        "cursor": "optional",
+        "limit": "1..100"
+      },
+      "result": "ChallengePage",
+      "notes": ""
+    },
+    {
+      "name": "resolvebountychallenge",
+      "role": "COUNCIL_POLICY_APPROVER",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "challenge_id": "id",
+        "resolution": "precommitted-policy result/evidence",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "ChallengeResolution",
+      "notes": "Cannot revoke a released transaction signature or confirmed payment."
+    },
+    {
+      "name": "proposebountyaward",
+      "role": "COUNCIL_POLICY_APPROVER",
+      "plane": "WALLET+MODEL",
+      "side_effect": "PREPARE",
+      "idempotency_required": true,
+      "arguments": {
+        "bounty_id": "id",
+        "submission_id": "id",
+        "acceptance_id": "id",
+        "lot_ids": "exact covered lots",
+        "mode": "PUBLIC_PAYOUT or STAGED_RELEASE",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "AwardProposal",
+      "notes": "Complete transaction binding; no payment yet."
+    },
+    {
+      "name": "inspectbountyaward",
+      "role": "COUNCIL_TX_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "LOCAL_READ",
+      "idempotency_required": false,
+      "arguments": {
+        "award_id": "id"
+      },
+      "result": "AwardInspection",
+      "notes": "Recompute inputs, principal, reserves, output keys, exact tree, fees and deadlines."
+    },
+    {
+      "name": "approvebountyaward",
+      "role": "COUNCIL_POLICY_APPROVER",
+      "plane": "MODEL_SIGNER",
+      "side_effect": "PUBLICATION",
+      "idempotency_required": true,
+      "arguments": {
+        "award_id": "id",
+        "decision": "APPROVE or REJECT",
+        "evidence_ids": "exact reports/challenge resolutions",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SignedPolicyApproval",
+      "notes": "Explicitly not a transaction signature."
+    },
+    {
+      "name": "signbountyaward",
+      "role": "COUNCIL_TX_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "SIGN",
+      "idempotency_required": true,
+      "arguments": {
+        "award_id": "id",
+        "expected_transaction_id": "exact fingerprint",
+        "authorization_ref": "council signer approval",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "CouncilTransactionSignature",
+      "notes": "Refuse before challenge/deadline/approval gates; fixed key order, actual threshold witness policy."
+    },
+    {
+      "name": "submitbountyaward",
+      "role": "COUNCIL_TX_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "BROADCAST",
+      "idempotency_required": true,
+      "arguments": {
+        "award_id": "id",
+        "signed_transaction": "actual fully signed transaction",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "BroadcastResult",
+      "notes": "No atomicity claim across separate transactions/rounds."
+    },
+    {
+      "name": "getbountyaward",
+      "role": "READER",
+      "plane": "MODEL+READ_ONLY_CHAIN",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "award_id": "id"
+      },
+      "result": "AwardEntry",
+      "notes": ""
+    },
+    {
+      "name": "preparebountyclaim",
+      "role": "CREATOR",
+      "plane": "WALLET",
+      "side_effect": "PREPARE",
+      "idempotency_required": true,
+      "arguments": {
+        "lot_ids": "staged winner outputs",
+        "secret_ref": "claim only: restricted local preimage handle",
+        "fee_ceiling_atoms": "decimal maximum",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SpendPlan",
+      "notes": "Revalidate current chain, branch, maturity, own keys and fee policy; do not log preimages."
+    },
+    {
+      "name": "signbountyclaim",
+      "role": "CREATOR",
+      "plane": "WALLET",
+      "side_effect": "SIGN",
+      "idempotency_required": true,
+      "arguments": {
+        "plan_id": "id",
+        "expected_transaction_id": "exact fingerprint",
+        "authorization_ref": "explicit approval/mandate",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SignedSpend",
+      "notes": "Signature release is a consequential action; no read API may call it."
+    },
+    {
+      "name": "submitbountyclaim",
+      "role": "CREATOR",
+      "plane": "WALLET",
+      "side_effect": "BROADCAST",
+      "idempotency_required": true,
+      "arguments": {
+        "plan_id": "id",
+        "signed_transaction": "actual transaction",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "BroadcastResult",
+      "notes": "Timelock is earliest spend; show any conflicting transaction."
+    },
+    {
+      "name": "preparebountyrefund",
+      "role": "RECOVERY_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "PREPARE",
+      "idempotency_required": true,
+      "arguments": {
+        "lot_ids": "contributor-owned outputs",
+        "secret_ref": "claim only: restricted local preimage handle",
+        "fee_ceiling_atoms": "decimal maximum",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SpendPlan",
+      "notes": "Revalidate current chain, branch, maturity, own keys and fee policy; do not log preimages."
+    },
+    {
+      "name": "signbountyrefund",
+      "role": "RECOVERY_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "SIGN",
+      "idempotency_required": true,
+      "arguments": {
+        "plan_id": "id",
+        "expected_transaction_id": "exact fingerprint",
+        "authorization_ref": "explicit approval/mandate",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SignedSpend",
+      "notes": "Signature release is a consequential action; no read API may call it."
+    },
+    {
+      "name": "submitbountyrefund",
+      "role": "RECOVERY_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "BROADCAST",
+      "idempotency_required": true,
+      "arguments": {
+        "plan_id": "id",
+        "signed_transaction": "actual transaction",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "BroadcastResult",
+      "notes": "Timelock is earliest spend; show any conflicting transaction."
+    },
+    {
+      "name": "getbountyevents",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "READ",
+      "idempotency_required": false,
+      "arguments": {
+        "bounty_id": "optional",
+        "cursor": "opaque snapshot/change cursor",
+        "limit": "1..100"
+      },
+      "result": "BountyEventPage",
+      "notes": "Node-local cursor, epoch/gap detection, explicit event authority."
+    },
+    {
+      "name": "watchbounty",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "LOCAL_WRITE",
+      "idempotency_required": true,
+      "arguments": {
+        "bounty_id": "id",
+        "policy": "local polling/notification filter only",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "WatchResult",
+      "notes": "Watching does not download, evaluate or spend."
+    },
+    {
+      "name": "unwatchbounty",
+      "role": "READER",
+      "plane": "MODEL",
+      "side_effect": "LOCAL_WRITE",
+      "idempotency_required": true,
+      "arguments": {
+        "watch_id": "id",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "WatchResult",
+      "notes": ""
+    },
+    {
+      "name": "getagentmandate",
+      "role": "OPERATOR",
+      "plane": "WALLET",
+      "side_effect": "LOCAL_READ",
+      "idempotency_required": false,
+      "arguments": {
+        "mandate_id": "id"
+      },
+      "result": "MandateView",
+      "notes": "Authenticated owner-only; no public explorer access."
+    },
+    {
+      "name": "createagentmandate",
+      "role": "OPERATOR",
+      "plane": "WALLET",
+      "side_effect": "AUTHORIZE",
+      "idempotency_required": true,
+      "arguments": {
+        "mandate": "AgentMandate payload",
+        "owner_approval_ref": "explicit secure approval",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "MandateView",
+      "notes": "No unbounded/all-recipient mandate by default."
+    },
+    {
+      "name": "revokeagentmandate",
+      "role": "OPERATOR",
+      "plane": "WALLET",
+      "side_effect": "AUTHORIZE",
+      "idempotency_required": true,
+      "arguments": {
+        "mandate_id": "id",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "MandateView",
+      "notes": "Blocks new signatures, not already released signatures/broadcasts."
+    },
+    {
+      "name": "getagentactivity",
+      "role": "OPERATOR",
+      "plane": "WALLET",
+      "side_effect": "LOCAL_READ",
+      "idempotency_required": false,
+      "arguments": {
+        "mandate_id": "optional owned id",
+        "cursor": "opaque",
+        "limit": "1..100"
+      },
+      "result": "AgentActivityPage",
+      "notes": "Redacted local audit data, never central telemetry."
+    },
+    {
+      "name": "importbountyrecovery",
+      "role": "RECOVERY_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "LOCAL_WRITE",
+      "idempotency_required": true,
+      "arguments": {
+        "manifest": "bounded RecoveryManifest object, not an arbitrary host path",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "RecoveryImportResult",
+      "notes": "Revalidates network, scripts and outpoint lineage; no automatic broadcast."
+    }
+  ]
+}
