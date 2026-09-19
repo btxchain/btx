@@ -1,0 +1,211 @@
+catalogue_id,title,boost_case,file,suite,registered_in_cmake,status,notes
+CR12-NEUTRAL-01,No brand dispatch,cr12_neutral_01,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEUTRAL-02,Fresh entrant,cr12_neutral_02,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEUTRAL-03,No default financial host,cr12_neutral_03,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEUTRAL-04,Functional profiles only,cr12_neutral_04,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEUTRAL-05,Reference tenant neutrality,cr12_neutral_05,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEUTRAL-06,Attribution survives,cr12_neutral_06,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEUTRAL-07,No package authority,cr12_neutral_07,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEUTRAL-08,White-label parity,cr12_neutral_08,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEUTRAL-09,No global registry requirement,cr12_neutral_09,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEUTRAL-10,Renaming invariance,cr12_neutral_10,src/test/modelnet_cr12_neutral_tests.cpp,modelnet_cr12_neutral_tests,yes,MAPPED,
+CR12-NEGOTIATE-01,Extension parent binding,cr12_negotiate_01,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-NEGOTIATE-02,Old routes preserved,cr12_negotiate_02,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-NEGOTIATE-03,Unknown critical type,cr12_negotiate_03,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-NEGOTIATE-04,Domain separation,cr12_negotiate_04,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-NEGOTIATE-05,Canonical vectors,cr12_negotiate_05,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-NEGOTIATE-06,Expired extension,cr12_negotiate_06,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-NEGOTIATE-07,Old server behavior,cr12_negotiate_07,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-NEGOTIATE-08,No Core version change,cr12_negotiate_08,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-NEGOTIATE-09,Sequence rollback,cr12_negotiate_09,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-NEGOTIATE-10,Key rotation,cr12_negotiate_10,src/test/modelnet_cr12_negotiate_tests.cpp,modelnet_cr12_negotiate_tests,yes,MAPPED,
+CR12-ROLE-01,Analytics-only service,cr12_role_01,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-ROLE-02,Discovery-only service,cr12_role_02,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-ROLE-03,Role effect match,cr12_role_03,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-ROLE-04,Missing production route,cr12_role_04,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-ROLE-05,Unsupported network,cr12_role_05,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-ROLE-06,Disabled adapter,cr12_role_06,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-ROLE-07,Conformance specificity,cr12_role_07,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-ROLE-08,Specialist composition,cr12_role_08,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-ROLE-09,Effect dependency,cr12_role_09,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-ROLE-10,No brand priority,cr12_role_10,src/test/modelnet_cr12_role_tests.cpp,modelnet_cr12_role_tests,yes,MAPPED,
+CR12-BIND-01,Owner acceptance,cr12_bind_01,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-BIND-02,Wrong entity,cr12_bind_02,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-BIND-03,Least effects,cr12_bind_03,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-BIND-04,Audience isolation,cr12_bind_04,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-BIND-05,Revocation,cr12_bind_05,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-BIND-06,Recovery after revoke,cr12_bind_06,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-BIND-07,Provider substitution,cr12_bind_07,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-BIND-08,Expiry during read,cr12_bind_08,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-BIND-09,Concurrent updates,cr12_bind_09,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-BIND-10,No secret export,cr12_bind_10,src/test/modelnet_cr12_bind_tests.cpp,modelnet_cr12_bind_tests,yes,MAPPED,
+CR12-ASSET-01,Namespaced identity,cr12_asset_01,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-ASSET-02,Identifier collision,cr12_asset_02,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-ASSET-03,Native network binding,cr12_asset_03,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-ASSET-04,No synthetic security,cr12_asset_04,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-ASSET-05,Rights issuer,cr12_asset_05,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-ASSET-06,Transfer restriction,cr12_asset_06,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-ASSET-07,Public sponsorship,cr12_asset_07,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-ASSET-08,Entity relationship,cr12_asset_08,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-ASSET-09,Expired rights,cr12_asset_09,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-ASSET-10,Native funds unchanged,cr12_asset_10,src/test/modelnet_cr12_asset_tests.cpp,modelnet_cr12_asset_tests,yes,MAPPED,
+CR12-POSITION-01,Exact replay,cr12_position_01,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-POSITION-02,Conflicting sequence,cr12_position_02,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-POSITION-03,Effective-time cutoff,cr12_position_03,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-POSITION-04,Recorded-time cutoff,cr12_position_04,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-POSITION-05,Closed position,cr12_position_05,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-POSITION-06,Sequence gap,cr12_position_06,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-POSITION-07,Atomic batch,cr12_position_07,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-POSITION-08,Source precedence,cr12_position_08,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-POSITION-09,Omnibus attribution,cr12_position_09,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-POSITION-10,Generation reset,cr12_position_10,src/test/modelnet_cr12_position_tests.cpp,modelnet_cr12_position_tests,yes,MAPPED,
+CR12-VALUE-01,Known zero,cr12_value_01,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-VALUE-02,Missing value,cr12_value_02,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-VALUE-03,Stale mark,cr12_value_03,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-VALUE-04,Purpose separation,cr12_value_04,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-VALUE-05,Position value once,cr12_value_05,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-VALUE-06,FX mapping,cr12_value_06,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-VALUE-07,Exact rounding,cr12_value_07,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-VALUE-08,Nonfinite inputs,cr12_value_08,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-VALUE-09,Late price correction,cr12_value_09,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-VALUE-10,No execution price leak,cr12_value_10,src/test/modelnet_cr12_value_tests.cpp,modelnet_cr12_value_tests,yes,MAPPED,
+CR12-METRIC-01,AUM mandate,cr12_metric_01,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-METRIC-02,AUC custody,cr12_metric_02,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-METRIC-03,AUA administration,cr12_metric_03,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-METRIC-04,Nonfinancial exclusion,cr12_metric_04,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-METRIC-05,Replica count,cr12_metric_05,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-METRIC-06,Overlap metrics,cr12_metric_06,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-METRIC-07,Cost basis,cr12_metric_07,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-METRIC-08,Empty complete book,cr12_metric_08,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-METRIC-09,Unavailable source,cr12_metric_09,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-METRIC-10,New assets bridge,cr12_metric_10,src/test/modelnet_cr12_metric_tests.cpp,modelnet_cr12_metric_tests,yes,MAPPED,
+CR12-EXPOSURE-01,Direct vs lookthrough,cr12_exposure_01,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-EXPOSURE-02,Cycle detection,cr12_exposure_02,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-EXPOSURE-03,Depth ceiling,cr12_exposure_03,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-EXPOSURE-04,Weight overflow,cr12_exposure_04,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-EXPOSURE-05,Unknown residual,cr12_exposure_05,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-EXPOSURE-06,Operational edge,cr12_exposure_06,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-EXPOSURE-07,Negative or nonfinite weight,cr12_exposure_07,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-EXPOSURE-08,Per-source duplicates,cr12_exposure_08,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-EXPOSURE-09,Graph budget,cr12_exposure_09,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-EXPOSURE-10,Rights dependency,cr12_exposure_10,src/test/modelnet_cr12_exposure_tests.cpp,modelnet_cr12_exposure_tests,yes,MAPPED,
+CR12-PROJECTION-01,Snapshot vector,cr12_projection_01,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-PROJECTION-02,Concurrent ingestion,cr12_projection_02,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-PROJECTION-03,Cross-tenant cursor,cr12_projection_03,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-PROJECTION-04,Changed filter cursor,cr12_projection_04,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-PROJECTION-05,Historical reproducibility,cr12_projection_05,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-PROJECTION-06,Source outage,cr12_projection_06,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-PROJECTION-07,Large book,cr12_projection_07,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-PROJECTION-08,No financial mutation,cr12_projection_08,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-PROJECTION-09,Private inventory,cr12_projection_09,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-PROJECTION-10,Policy revision,cr12_projection_10,src/test/modelnet_cr12_projection_tests.cpp,modelnet_cr12_projection_tests,yes,MAPPED,
+CR12-IMPORT-01,Exact chunk,cr12_import_01,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-IMPORT-02,Corrupt chunk,cr12_import_02,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-IMPORT-03,Tenant-owned handle,cr12_import_03,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-IMPORT-04,Duplicate chunks,cr12_import_04,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-IMPORT-05,Row count mismatch,cr12_import_05,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-IMPORT-06,Mapping change,cr12_import_06,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-IMPORT-07,Atomic publication,cr12_import_07,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-IMPORT-08,Idempotent commit,cr12_import_08,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-IMPORT-09,Formula-safe CSV,cr12_import_09,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-IMPORT-10,No money import,cr12_import_10,src/test/modelnet_cr12_import_tests.cpp,modelnet_cr12_import_tests,yes,MAPPED,
+CR12-INSTRUCTION-01,Draft only,cr12_instruction_01,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-INSTRUCTION-02,Entity mismatch,cr12_instruction_02,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-INSTRUCTION-03,Stale projection,cr12_instruction_03,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-INSTRUCTION-04,Changed instruction,cr12_instruction_04,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-INSTRUCTION-05,Equivalent retry,cr12_instruction_05,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-INSTRUCTION-06,Existing approval,cr12_instruction_06,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-INSTRUCTION-07,No scope escalation,cr12_instruction_07,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-INSTRUCTION-08,Desktop context,cr12_instruction_08,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-INSTRUCTION-09,No remote inference,cr12_instruction_09,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-INSTRUCTION-10,Provider finance ownership,cr12_instruction_10,src/test/modelnet_cr12_instruction_tests.cpp,modelnet_cr12_instruction_tests,yes,MAPPED,
+CR12-SECURITY-01,Real signature,cr12_security_01,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-SECURITY-02,Wrong key role,cr12_security_02,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-SECURITY-03,Sender constraints,cr12_security_03,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-SECURITY-04,Duplicate JSON fields,cr12_security_04,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-SECURITY-05,SSRF origin,cr12_security_05,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-SECURITY-06,No token passthrough,cr12_security_06,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-SECURITY-07,Injection text,cr12_security_07,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-SECURITY-08,Body ceiling,cr12_security_08,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-SECURITY-09,Replay binding,cr12_security_09,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-SECURITY-10,Secret sentinel,cr12_security_10,src/test/modelnet_cr12_security_tests.cpp,modelnet_cr12_security_tests,yes,MAPPED,
+CR12-UX-01,Neutral enrollment,cr12_ux_01,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-UX-02,Entity clarity,cr12_ux_02,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-UX-03,Metric definition,cr12_ux_03,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-UX-04,Partial view,cr12_ux_04,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-UX-05,Keyboard-only flow,cr12_ux_05,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-UX-06,Screen-reader status,cr12_ux_06,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-UX-07,Financial vs local,cr12_ux_07,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-UX-08,Export preview,cr12_ux_08,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-UX-09,Desktop view safety,cr12_ux_09,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-UX-10,Provider exit,cr12_ux_10,src/test/modelnet_cr12_ux_tests.cpp,modelnet_cr12_ux_tests,yes,MAPPED,
+CR12-RECOVERY-01,Staging crash,cr12_recovery_01,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-RECOVERY-02,Job cancellation,cr12_recovery_02,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-RECOVERY-03,Cancel after commit,cr12_recovery_03,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-RECOVERY-04,Database failover,cr12_recovery_04,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-RECOVERY-05,Stale source recovery,cr12_recovery_05,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-RECOVERY-06,Provider root compromise,cr12_recovery_06,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-RECOVERY-07,Open funding on rollback,cr12_recovery_07,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-RECOVERY-08,Mapping rollback,cr12_recovery_08,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-RECOVERY-09,Large export pressure,cr12_recovery_09,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-RECOVERY-10,Cross-provider uncertainty,cr12_recovery_10,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,MAPPED,
+CR12-COMPAT-01,Base signatures,cr12_compat_01,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+CR12-COMPAT-02,Base operation map,cr12_compat_02,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+CR12-COMPAT-03,No duplicate engine,cr12_compat_03,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+CR12-COMPAT-04,Consensus isolation,cr12_compat_04,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+CR12-COMPAT-05,Old client,cr12_compat_05,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+CR12-COMPAT-06,Feature disabled,cr12_compat_06,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+CR12-COMPAT-07,Real local handoff,cr12_compat_07,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+CR12-COMPAT-08,Native funding lifecycle,cr12_compat_08,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+CR12-COMPAT-09,Two-provider institutional roundtrip,cr12_compat_09,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+CR12-COMPAT-10,Independent closeout,cr12_compat_10,src/test/modelnet_cr12_compat_tests.cpp,modelnet_cr12_compat_tests,yes,MAPPED,
+,,cr12_desktop_01_example_is_inspect,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_desktop_02_no_localhost_execute,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_desktop_03_no_secrets_in_payload,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_desktop_04_draft_maps_to_prepare,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_desktop_05_source_has_no_http,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_desktop_06_rejects_token,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_desktop_07_rejects_execute_purpose,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_desktop_08_engine_instruction_stays_draft,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_desktop_09_custom_namespace_not_fdc3_standard,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_desktop_10_no_wallet_path,src/test/modelnet_cr12_desktop_tests.cpp,modelnet_cr12_desktop_tests,yes,UNCATALOGUED_NATIVE,desktop family; not a CR12-* catalogue id
+,,cr12_gap_persist_reopen_maps,src/test/modelnet_cr12_gapfill_tests.cpp,modelnet_cr12_gapfill_tests,no,UNCATALOGUED_NATIVE,exclusive gapfill TU; not in CMake; not a CR12-* catalogue id
+,,cr12_gap_get_positions_as_of_required,src/test/modelnet_cr12_gapfill_tests.cpp,modelnet_cr12_gapfill_tests,no,UNCATALOGUED_NATIVE,exclusive gapfill TU; not in CMake; not a CR12-* catalogue id
+,,cr12_gap_projection_create_returns_job,src/test/modelnet_cr12_gapfill_tests.cpp,modelnet_cr12_gapfill_tests,no,UNCATALOGUED_NATIVE,exclusive gapfill TU; not in CMake; not a CR12-* catalogue id
+,,cr12_gap_binding_revoked_blocks_new_record,src/test/modelnet_cr12_gapfill_tests.cpp,modelnet_cr12_gapfill_tests,no,UNCATALOGUED_NATIVE,exclusive gapfill TU; not in CMake; not a CR12-* catalogue id
+,,cr12_gap_inbound_signed_observation_mldsa,src/test/modelnet_cr12_gapfill_tests.cpp,modelnet_cr12_gapfill_tests,no,UNCATALOGUED_NATIVE,exclusive gapfill TU; not in CMake; not a CR12-* catalogue id
+,,cr12_gap_package_type_names,src/test/modelnet_cr12_gapfill_tests.cpp,modelnet_cr12_gapfill_tests,no,UNCATALOGUED_NATIVE,exclusive gapfill TU; not in CMake; not a CR12-* catalogue id
+,,cr12_gap_stage_declared_chunk_digest,src/test/modelnet_cr12_gapfill_tests.cpp,modelnet_cr12_gapfill_tests,no,UNCATALOGUED_NATIVE,exclusive gapfill TU; not in CMake; not a CR12-* catalogue id
+,,cr12_gap_export_chunk_digest_roundtrip,src/test/modelnet_cr12_gapfill_tests.cpp,modelnet_cr12_gapfill_tests,no,UNCATALOGUED_NATIVE,exclusive gapfill TU; not in CMake; not a CR12-* catalogue id
+,,cr12_gap_spec_error_codes_exist,src/test/modelnet_cr12_gapfill_tests.cpp,modelnet_cr12_gapfill_tests,no,UNCATALOGUED_NATIVE,exclusive gapfill TU; not in CMake; not a CR12-* catalogue id
+,,cr12_j01_new_entrant_without_bespoke_code,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j02_split_service_customer,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j03_institutional_custody_statement,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j04_managed_reserve_mandate,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j05_business_treasury_capital_loop,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j06_family_group_segregation,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j07_whole_portfolio_fund_view,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j08_late_source_correction,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j09_unknown_value_under_outage,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j10_native_research_commitment,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j11_public_release_to_cognitive_holding,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j12_signed_export_and_hostile_import,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j13_desktop_analyst_journey,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j14_portfolio_technology_business,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j15_reserve_and_operational_shocks,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j16_concurrency_and_idempotency,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j17_scale_and_cancellation,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j18_provider_exit_with_pending_capital,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j19_migration_and_rollback,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_j20_neutral_commercial_demonstration,src/test/modelnet_cr12_journey_tests.cpp,modelnet_cr12_journey_tests,yes,UNCATALOGUED_NATIVE,journey J-series; not a CR12-* catalogue id
+,,cr12_recovery_11_persist_roundtrip,src/test/modelnet_cr12_recovery_tests.cpp,modelnet_cr12_recovery_tests,yes,UNCATALOGUED_NATIVE,extra recovery case beyond CR12-RECOVERY-01..10
+,,cr12_sdk_01_spawn_body_id,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id
+,,cr12_sdk_02_refuse_export_secrets,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id
+,,cr12_sdk_03_refuse_execute_from_analytics,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id
+,,cr12_sdk_04_typed_paths_no_rpc,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id
+,,cr12_sdk_05_automatic_spend_atoms_zero,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id
+,,cr12_sdk_06_catalog_forty_three,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id
+,,cr12_sdk_07_export_manifest_has_no_secrets,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id
+,,cr12_sdk_08_https_default,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id
+,,cr12_sdk_09_import_not_custody,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id
+,,cr12_sdk_10_no_brand_dispatch,src/test/modelnet_cr12_sdk_tests.cpp,modelnet_cr12_sdk_tests,yes,UNCATALOGUED_NATIVE,sdk family; not a CR12-* catalogue id

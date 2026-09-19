@@ -5,6 +5,7 @@
 
 #include <base58.h>
 #include <chain.h>
+#include <chainparams.h>
 #include <coins.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
@@ -667,6 +668,10 @@ static RPCHelpMan decodescript()
     const TxoutType which_type{Solver(script, solutions_data)};
 
     const bool can_wrap{[&] {
+        if (Params().GetConsensus().fEnforceP2MROnlyOutputs) {
+            // Decode-only: do not suggest P2SH / witness-v0 wraps the chain rejects.
+            return false;
+        }
         switch (which_type) {
         case TxoutType::MULTISIG:
         case TxoutType::NONSTANDARD:
@@ -857,14 +862,14 @@ static RPCHelpMan combinerawtransaction()
     };
 }
 
+static constexpr auto SIGNRAWTRANSACTIONWITHKEY_DISABLED_ERROR =
+    "BTX PQ policy: signrawtransactionwithkey is disabled (legacy ECDSA); use wallet signrawtransactionwithwallet with a P2MR address";
+
 static RPCHelpMan signrawtransactionwithkey()
 {
     return RPCHelpMan{"signrawtransactionwithkey",
-                "\nSign inputs for raw transaction (serialized, hex-encoded).\n"
-                "The second argument is an array of base58-encoded private\n"
-                "keys that will be the only keys used to sign the transaction.\n"
-                "The third optional argument (may be null) is an array of previous transaction outputs that\n"
-                "this transaction depends on but may not yet be in the block chain.\n",
+                "Sign inputs for raw transaction (serialized, hex-encoded).\n"
+                "Disabled on BTX by post-quantum policy. Use wallet signrawtransactionwithwallet with a P2MR address.\n",
                 {
                     {"hexstring", RPCArg::Type::STR, RPCArg::Optional::NO, "The transaction hex string"},
                     {"privkeys", RPCArg::Type::ARR, RPCArg::Optional::NO, "The base58-encoded private keys for signing",
@@ -924,42 +929,9 @@ static RPCHelpMan signrawtransactionwithkey()
                     HelpExampleCli("signrawtransactionwithkey", "\"myhex\" \"[\\\"key1\\\",\\\"key2\\\"]\"")
             + HelpExampleRpc("signrawtransactionwithkey", "\"myhex\", [\"key1\",\"key2\"]")
                 },
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan&, const JSONRPCRequest&) -> UniValue
 {
-    CMutableTransaction mtx;
-    if (!DecodeHexTx(mtx, request.params[0].get_str())) {
-        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed. Make sure the tx has at least one input.");
-    }
-
-    FlatSigningProvider keystore;
-    const UniValue& keys = request.params[1].get_array();
-    for (unsigned int idx = 0; idx < keys.size(); ++idx) {
-        UniValue k = keys[idx];
-        CKey key = DecodeSecret(k.get_str());
-        if (!key.IsValid()) {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
-        }
-
-        CPubKey pubkey = key.GetPubKey();
-        CKeyID key_id = pubkey.GetID();
-        keystore.pubkeys.emplace(key_id, pubkey);
-        keystore.keys.emplace(key_id, key);
-    }
-
-    // Fetch previous transactions (inputs):
-    std::map<COutPoint, Coin> coins;
-    for (const CTxIn& txin : mtx.vin) {
-        coins[txin.prevout]; // Create empty map entry keyed by prevout.
-    }
-    NodeContext& node = EnsureAnyNodeContext(request.context);
-    FindCoins(node, coins);
-
-    // Parse the prevtxs array
-    ParsePrevouts(request.params[2], &keystore, coins);
-
-    UniValue result(UniValue::VOBJ);
-    SignTransaction(mtx, &keystore, coins, request.params[3], result);
-    return result;
+    throw JSONRPCError(RPC_INVALID_PARAMETER, SIGNRAWTRANSACTIONWITHKEY_DISABLED_ERROR);
 },
     };
 }

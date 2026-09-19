@@ -11,6 +11,7 @@
 #include <wallet/walletdb.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -21,17 +22,39 @@ namespace wallet {
 static const std::string DUMP_MAGIC = "BITCOIN_CORE_WALLET_DUMP";
 uint32_t DUMP_VERSION = 1;
 
+static bool RejectUnsafeDumpfilePath(const std::string& dump_filename, bilingual_str& error)
+{
+    if (dump_filename.empty()) {
+        error = _("Error: Dumpfile path must not be empty.");
+        return true;
+    }
+    for (const unsigned char c : dump_filename) {
+        if (c < 0x20 || c == 0x7f) {
+            error = _("Error: Dumpfile path must not contain control characters.");
+            return true;
+        }
+    }
+    const fs::path path = fs::PathFromString(dump_filename);
+    for (const auto& component : path) {
+        if (component == "..") {
+            error = _("Error: Dumpfile path must not contain parent-directory components.");
+            return true;
+        }
+    }
+    return false;
+}
+
 bool DumpWallet(WalletDatabase& db, bilingual_str& error, const std::string& dump_filename)
 {
+    if (RejectUnsafeDumpfilePath(dump_filename, error)) return false;
     fs::path path = fs::PathFromString(dump_filename);
     path = fs::absolute(path);
     if (fs::exists(path)) {
         error = strprintf(_("File %s already exists. If you are sure this is what you want, move it out of the way first."), fs::PathToString(path));
         return false;
     }
-    std::ofstream dump_file;
-    dump_file.open(path);
-    if (dump_file.fail()) {
+    FILE* dump_fp = fsbridge::fopen(path, "wbx");
+    if (!dump_fp) {
         error = strprintf(_("Unable to open %s for writing"), fs::PathToString(path));
         return false;
     }
@@ -50,8 +73,7 @@ bool DumpWallet(WalletDatabase& db, bilingual_str& error, const std::string& dum
         throw_error(strprintf(_("Unable to write complete dump file %s."), fs::PathToString(path)));
     };
     auto write = [&](const std::string& line) {
-        dump_file.write(line.data(), line.size());
-        if (dump_file.fail()) {
+        if (!line.empty() && std::fwrite(line.data(), 1, line.size(), dump_fp) != line.size()) {
             throw_write_error();
         }
     };
@@ -99,12 +121,18 @@ bool DumpWallet(WalletDatabase& db, bilingual_str& error, const std::string& dum
         // Write the hash
         line = strprintf("checksum,%s\n", HexStr(hasher.GetHash()));
         write(line);
-        dump_file.close();
-        if (dump_file.fail()) throw_write_error();
+        if (std::fclose(dump_fp) != 0) {
+            dump_fp = nullptr;
+            throw_write_error();
+        }
+        dump_fp = nullptr;
     } catch (const DumpWalletError& e) {
         error = e.message;
         // Remove the dumpfile on failure
-        dump_file.close();
+        if (dump_fp) {
+            std::fclose(dump_fp);
+            dump_fp = nullptr;
+        }
         fs::remove(path);
         return false;
     }
@@ -130,6 +158,7 @@ bool CreateFromDump(const ArgsManager& args, const std::string& name, const fs::
         error = _("No dump file provided. To use createfromdump, -dumpfile=<filename> must be provided.");
         return false;
     }
+    if (RejectUnsafeDumpfilePath(dump_filename, error)) return false;
 
     fs::path dump_path = fs::PathFromString(dump_filename);
     dump_path = fs::absolute(dump_path);
@@ -161,7 +190,7 @@ bool CreateFromDump(const ArgsManager& args, const std::string& name, const fs::
         return false;
     }
     if (ver != DUMP_VERSION) {
-        error = strprintf(_("Error: Dumpfile version is not supported. This version of bitcoin-wallet only supports version 1 dumpfiles. Got dumpfile with version %s"), version_value);
+        error = strprintf(_("Error: Dumpfile version is not supported. This version of btx-wallet only supports version 1 dumpfiles. Got dumpfile with version %s"), version_value);
         dump_file.close();
         return false;
     }

@@ -12,9 +12,11 @@
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
 
+#include <addresstype.h>
 #include <interfaces/node.h>
 #include <key_io.h>
 #include <policy/policy.h>
+#include <script/sign.h>
 #include <wallet/coincontrol.h>
 #include <wallet/coinselection.h>
 #include <wallet/wallet.h>
@@ -415,18 +417,22 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
         std::vector<unsigned char> witnessprogram;
         if (out.txout.scriptPubKey.IsWitnessProgram(witnessversion, witnessprogram))
         {
-            // add input skeleton bytes (outpoint, scriptSig size, nSequence)
-            nBytesInputs += (32 + 4 + 1 + 4);
-
-            if (witnessversion == 0) { // P2WPKH
-                // 1 WU (witness item count) + 72 WU (ECDSA signature with len byte) + 34 WU (pubkey with len byte)
-                nBytesInputs += 107 / WITNESS_SCALE_FACTOR;
-            } else if (witnessversion == 1) { // P2TR key-path spend
-                // 1 WU (witness item count) + 65 WU (Schnorr signature with len byte)
-                nBytesInputs += 66 / WITNESS_SCALE_FACTOR;
+            if (witnessversion >= 2) {
+                // P2MR (witness v2) is the address type BTX issues. Full input
+                // weight already includes outpoint, empty scriptSig, nSequence,
+                // and the PQ witness. Do not add the 41-byte skeleton again.
+                nBytesInputs += GetVirtualTransactionSize(GetMaximumStandardP2MRInputWeight(), 0, 0);
             } else {
-                // not supported, should be unreachable
-                throw std::runtime_error("Trying to spend future segwit version script");
+                // add input skeleton bytes (outpoint, scriptSig size, nSequence)
+                nBytesInputs += (32 + 4 + 1 + 4);
+
+                if (witnessversion == 0) { // historical P2WPKH
+                    // 1 WU (witness item count) + 72 WU (ECDSA signature with len byte) + 34 WU (pubkey with len byte)
+                    nBytesInputs += 107 / WITNESS_SCALE_FACTOR;
+                } else { // historical P2TR key-path spend
+                    // 1 WU (witness item count) + 65 WU (Schnorr signature with len byte)
+                    nBytesInputs += 66 / WITNESS_SCALE_FACTOR;
+                }
             }
             fWitness = true;
         }
@@ -452,7 +458,7 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
         if (fWitness)
         {
             // there is some fudging in these numbers related to the actual virtual transaction size calculation that will keep this estimate from being exact.
-            // usually, the result will be an overestimate within a couple of satoshis so that the confirmation dialog ends up displaying a slightly smaller fee.
+            // usually, the result will be an overestimate within a couple of atoms so that the confirmation dialog ends up displaying a slightly smaller fee.
             // also, the witness stack size value is a variable sized integer. usually, the number of stack items will be well under the single byte var int limit.
             nBytes += 2; // account for the serialized marker and flag bytes
             nBytes += nQuantity; // account for the witness byte that holds the number of stack items for each input.
@@ -473,8 +479,8 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
                 nChange -= nPayFee;
 
             if (nChange > 0) {
-                // Assumes a p2pkh script size
-                CTxOut txout(nChange, CScript() << std::vector<unsigned char>(24, 0));
+                // Assumes a P2MR (witness v2) script size — the type BTX change uses.
+                CTxOut txout(nChange, GetScriptForDestination(WitnessV2P2MR()));
                 // Never create dust outputs; if we would, just add the dust to the fee.
                 if (IsDust(txout, model->node().getDustRelayFee()))
                 {
@@ -528,10 +534,10 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
             l8->setText(ASYMP_UTF8 + l8->text());
     }
 
-    // how many satoshis the estimated fee can vary per byte we guess wrong
+    // how many atoms the estimated fee can vary per byte we guess wrong
     double dFeeVary = (nBytes != 0) ? (double)nPayFee / nBytes : 0;
 
-    QString toolTip4 = tr("Can vary +/- %1 satoshi(s) per input.").arg(dFeeVary);
+    QString toolTip4 = tr("Can vary +/- %1 atom(s) per input. Size assumes a P2MR spend.").arg(dFeeVary);
 
     l3->setToolTip(toolTip4);
     l4->setToolTip(toolTip4);
@@ -627,7 +633,7 @@ void CoinControlDialog::updateView()
             {
                 sAddress = QString::fromStdString(EncodeDestination(outputAddress));
 
-                // if listMode or change => show bitcoin address. In tree mode, address is not shown again for direct wallet address outputs
+                // if listMode or change => show BTX address. In tree mode, address is not shown again for direct wallet address outputs
                 if (!treeMode || (!(sAddress == sWalletAddress)))
                     itemOutput->setText(COLUMN_ADDRESS, sAddress);
             }

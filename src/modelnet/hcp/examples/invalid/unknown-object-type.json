@@ -1,0 +1,32 @@
+{
+  "object_type": "ExecuteLocalShell",
+  "body": {
+    "version": 1,
+    "provider_id": "provider-demo",
+    "network": {
+      "environment": "REGTEST",
+      "genesis_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "offer_id": "offer-demo",
+    "issued_at_ms": "1790000000000",
+    "expires_at_ms": "1790000600000",
+    "package": {
+      "package_core_id": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+      "file_sha384": "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
+      "recipe_id": "333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
+      "download_url": "https://exchange.example/btx/hcp/v1/packages/111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "capability_labels": [
+      "document.classification"
+    ],
+    "evidence_refs": [],
+    "availability_scope": "LOCAL_OBSERVATION",
+    "observed_provider_count": null,
+    "economic_status": "PUBLIC",
+    "economy_ref": null,
+    "sponsored": false
+  },
+  "body_id": "e758c20ee5a4032e511f18a2dbfb7729f65f65627d3c75e6b922f46ac30543de5a48f7ebb99b83a23db2cf0695135bb8",
+  "signer_key_id": "unsigned-demo",
+  "signature": null
+}

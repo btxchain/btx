@@ -5,8 +5,16 @@
 export LC_ALL=C
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BIN="${BIN_DIR:-$ROOT/build-gcc13/bin}"
+if [[ -n "${BIN:-}" && -d "${BIN}" && -x "${BIN}/btxd" ]]; then
+  :
+elif [[ -n "${BIN_DIR:-}" && -d "${BIN_DIR}" && -x "${BIN_DIR}/btxd" ]]; then
+  BIN="$BIN_DIR"
+else
+  BIN="$ROOT/build-gcc13/bin"
+fi
 export MODELD="${MODELD:-$BIN/btx-modeld}"
+[[ -x "$BIN/btxd" ]] || { echo "e2e-parallel-a: missing $BIN/btxd" >&2; exit 1; }
+[[ -x "$BIN/btx-cli" ]] || { echo "e2e-parallel-a: missing $BIN/btx-cli" >&2; exit 1; }
 LOG="$ROOT/e2e-scratch/parallel-logs"
 rm -rf "$LOG"; mkdir -p "$LOG"
 

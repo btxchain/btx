@@ -334,8 +334,15 @@ static void http_request_cb(struct evhttp_request* req, void* arg)
     if (i != iend) {
         std::unique_ptr<HTTPWorkItem> item(new HTTPWorkItem(std::move(hreq), path, i->handler));
         WorkQueue<HTTPClosure>* queue{g_work_queue.get()};
-        if (g_control_work_queue &&
-            item->req->GetRequestMethod() == HTTPRequest::POST) {
+        // Only JSON-RPC (authenticated POST to / or /wallet/) may use the
+        // reserved lane. REST is unauthenticated; a body that happens to look
+        // like {"method":"stop"} must not steal httpworker.ctrl, and a missing
+        // Authorization header must not occupy that worker before 401.
+        const bool json_rpc_endpoint{
+            (i->prefix == "/" && i->exactMatch) || i->prefix == "/wallet/"};
+        if (g_control_work_queue && json_rpc_endpoint &&
+            item->req->GetRequestMethod() == HTTPRequest::POST &&
+            item->req->GetHeader("authorization").first) {
             const std::string peek{item->req->PeekBody(4096)};
             if (const auto method{PeekJsonRpcMethod(peek)};
                 method && IsRpcControlMethod(*method)) {
@@ -787,6 +794,11 @@ void HTTPRequest::WriteHeader(const std::string& hdr, const std::string& value)
 {
     struct evkeyvalq* headers = evhttp_request_get_output_headers(req);
     assert(headers);
+    if (hdr.find_first_of("\r\n") != std::string::npos ||
+        value.find_first_of("\r\n") != std::string::npos) {
+        LogPrintf("ERROR: refusing HTTP header containing CR/LF\n");
+        return;
+    }
     evhttp_add_header(headers, hdr.c_str(), value.c_str());
 }
 

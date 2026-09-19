@@ -47,6 +47,7 @@ void DummyWalletInit::AddWalletOptions(ArgsManager& argsman) const
         "-walletdir=<dir>",
         "-walletimplicitsegwit",
         "-walletnotify=<cmd>",
+        "-walletdepositnotify=<cmd>",
         "-walletrbf",
         "-dblogsize=<n>",
         "-flushwallet",

@@ -10,7 +10,6 @@
 #include <crypto/sha256.h>
 #include <logging.h>
 #include <pqkey.h>
-#include <pubkey.h>
 #include <random.h>
 #include <tinyformat.h>
 #include <univalue.h>
@@ -115,7 +114,17 @@ bool PortValid(std::string_view port)
     return ec == std::errc{} && ptr == port.data() + port.size() && parsed != 0;
 }
 
-std::optional<std::tuple<int, int, int>> ParseVersionTriple(std::string_view raw)
+// A parsed manifest/build version: the numeric triple plus an optional release-candidate
+// number. rc == 0 marks a final release; rc > 0 means a prerelease (-rcN / rcN), which ranks
+// BELOW the matching final release.
+struct AutoUpdateVersion {
+    int major{0};
+    int minor{0};
+    int build{0};
+    int rc{0};
+};
+
+std::optional<AutoUpdateVersion> ParseAutoUpdateVersion(std::string_view raw)
 {
     std::string value = TrimAscii(raw);
     if (!value.empty() && (value.front() == 'v' || value.front() == 'V')) value.erase(value.begin());
@@ -137,11 +146,68 @@ std::optional<std::tuple<int, int, int>> ParseVersionTriple(std::string_view raw
         }
     }
 
-    if (pos < value.size()) {
-        const char suffix = value[pos];
-        if (suffix != '-' && suffix != '+' && !std::isalpha(static_cast<unsigned char>(suffix))) return std::nullopt;
+    AutoUpdateVersion version;
+    version.major = parts[0];
+    version.minor = parts[1];
+    version.build = parts[2];
+
+    if (pos >= value.size()) return version;
+
+    const char marker = value[pos];
+    if (marker != '-' && marker != '+' && !std::isalpha(static_cast<unsigned char>(marker))) return std::nullopt;
+
+    // Build metadata ("+...") never changes ordering: still a final release.
+    if (marker == '+') return version;
+
+    std::string_view suffix{value.data() + pos, value.size() - pos};
+    if (suffix.front() == '-') suffix.remove_prefix(1);
+
+    const auto lower = [](char ch) { return static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); };
+
+    // Recognized release candidate: "rcN", case-insensitive, with or without the leading '-'.
+    if (suffix.size() >= 2 && lower(suffix[0]) == 'r' && lower(suffix[1]) == 'c') {
+        suffix.remove_prefix(2);
+        // "rc" with no candidate number is malformed; fail closed (compare as not-newer).
+        if (suffix.empty()) return std::nullopt;
+        int rc{0};
+        const auto [ptr, ec] = std::from_chars(suffix.data(), suffix.data() + suffix.size(), rc);
+        if (ec != std::errc{} || ptr != suffix.data() + suffix.size() || rc <= 0) return std::nullopt;
+        version.rc = rc;
+        return version;
     }
-    return std::make_tuple(parts[0], parts[1], parts[2]);
+
+    // Any other prerelease tag (e.g. "-beta1") is not a final release. We cannot order
+    // arbitrary tags, so rank them equivalent to rc1: they never outrank a final release of
+    // the same triple and are never adopted by a node that is already on a final build.
+    version.rc = 1;
+    return version;
+}
+
+// Order two parsed versions. Returns 1 when `remote` is strictly newer than `local`, -1 when
+// older, 0 when equal. A final release (rc == 0) outranks any rcN of the same triple, and a
+// node on a final build never adopts a prerelease even when the remote triple is higher.
+int CompareAutoUpdateVersions(const AutoUpdateVersion& local, const AutoUpdateVersion& remote)
+{
+    const bool remote_newer_triple =
+        std::tie(remote.major, remote.minor, remote.build) >
+        std::tie(local.major, local.minor, local.build);
+    const bool remote_older_triple =
+        std::tie(remote.major, remote.minor, remote.build) <
+        std::tie(local.major, local.minor, local.build);
+
+    if (remote_newer_triple) {
+        // Do not replace a final release with a prerelease, even a later triple.
+        if (local.rc == 0 && remote.rc > 0) return -1;
+        return 1;
+    }
+    if (remote_older_triple) return -1;
+
+    // Same major.minor.build: final (0) > rcN, and a higher rcN is newer.
+    if (local.rc == 0 && remote.rc == 0) return 0;
+    if (local.rc == 0) return -1;
+    if (remote.rc == 0) return 1;
+    if (remote.rc != local.rc) return remote.rc > local.rc ? 1 : -1;
+    return 0;
 }
 
 std::optional<std::string> FindStringValue(const UniValue& object, std::string_view key)
@@ -213,13 +279,32 @@ std::optional<AutoUpdateManifest> ParseManifest(const std::vector<unsigned char>
     return manifest;
 }
 
+bool BodyIsAllHexText(const std::vector<unsigned char>& body)
+{
+    if (body.empty() || (body.size() % 2) != 0) return false;
+    return std::all_of(body.begin(), body.end(), [](unsigned char ch) {
+        return std::isxdigit(ch);
+    });
+}
+
+bool BodyLooksBinary(const std::vector<unsigned char>& body)
+{
+    return std::any_of(body.begin(), body.end(), [](unsigned char ch) {
+        return ch < 0x09 || (ch > 0x0d && ch < 0x20) || ch > 0x7e;
+    });
+}
+
 std::optional<std::vector<unsigned char>> DecodeSignatureBody(const std::vector<unsigned char>& body)
 {
     if (body.empty()) return std::nullopt;
 
-    // DER signatures commonly start with ASN.1 SEQUENCE (0x30). Treat binary
-    // DER as authoritative before attempting text encodings.
-    if (body.front() == 0x30) return body;
+    // Hex text (including encodings that start with ASCII '0' == 0x30) must be
+    // decoded as hex. Treating those bytes as raw DER used to skip hex decode.
+    if (BodyIsAllHexText(body)) {
+        auto parsed = TryParseHex<unsigned char>(std::string{body.begin(), body.end()});
+        if (parsed && !parsed->empty()) return *parsed;
+        return std::nullopt;
+    }
 
     const std::string text = TrimAscii(std::string_view{reinterpret_cast<const char*>(body.data()), body.size()});
     if (text.empty()) return std::nullopt;
@@ -233,7 +318,9 @@ std::optional<std::vector<unsigned char>> DecodeSignatureBody(const std::vector<
         if (!decoded->empty()) return *decoded;
     }
 
-    return std::vector<unsigned char>{text.begin(), text.end()};
+    // Keep raw binary PQ signatures. Do not accept leftover printable garbage.
+    if (BodyLooksBinary(body)) return body;
+    return std::nullopt;
 }
 
 std::string SHA256Hex(const std::vector<unsigned char>& bytes)
@@ -280,9 +367,26 @@ std::string UrlEncodeQueryValue(std::string_view value)
     return out;
 }
 
-std::string LocalClientVersion()
+// This tree's build config exports the version triple and the full CLIENT_VERSION_STRING but
+// not the numeric CLIENT_VERSION_RC. CMake appends "rcN" to CLIENT_VERSION_STRING when
+// CLIENT_VERSION_RC > 0 (see the top-level CMakeLists.txt), so recover N from that string; a
+// final build has no suffix. Use the macro directly when a build exports it.
+int LocalClientVersionRc()
 {
-    return strprintf("%d.%d.%d", CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD);
+#ifdef CLIENT_VERSION_RC
+    return CLIENT_VERSION_RC;
+#else
+    const std::string_view version{CLIENT_VERSION_STRING};
+    const size_t marker = version.rfind("rc");
+    if (marker == std::string_view::npos || marker == 0) return 0;
+    if (!std::isdigit(static_cast<unsigned char>(version[marker - 1]))) return 0;
+    const std::string_view digits = version.substr(marker + 2);
+    if (digits.empty()) return 0;
+    int rc{0};
+    const auto [ptr, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), rc);
+    if (ec != std::errc{} || ptr != digits.data() + digits.size() || rc <= 0) return 0;
+    return rc;
+#endif
 }
 
 std::string HostPlatform()
@@ -383,14 +487,24 @@ import base64
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 url = sys.argv[1]
 max_bytes = int(sys.argv[2])
 timeout = float(sys.argv[3])
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirects disabled", headers, fp)
+
 try:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("https", "http"):
+        raise RuntimeError("unsupported url scheme")
     request = urllib.request.Request(url, headers={"User-Agent": "BTX-AutoUpdate/0.32"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(NoRedirect)
+    with opener.open(request, timeout=timeout) as response:
         body = response.read(max_bytes + 1)
         if len(body) > max_bytes:
             raise RuntimeError("response too large")
@@ -468,27 +582,6 @@ private:
     std::string m_python_command;
 };
 
-class Secp256k1AutoUpdateSignatureVerifier final : public AutoUpdateSignatureVerifier
-{
-public:
-    bool Verify(std::string_view pubkey_hex,
-                const std::vector<unsigned char>& message,
-                const std::vector<unsigned char>& signature) override
-    {
-        const auto pubkey_bytes = TryParseHex<unsigned char>(pubkey_hex);
-        if (!pubkey_bytes || pubkey_bytes->empty()) return false;
-        const CPubKey pubkey{*pubkey_bytes};
-        if (!pubkey.IsFullyValid()) return false;
-
-        uint256 digest;
-        CSHA256().Write(message.data(), message.size()).Finalize(digest.begin());
-        return pubkey.Verify(digest, signature);
-    }
-};
-
-// Post-quantum manifest-signature verifier (ML-DSA-44 / SLH-DSA-128s). The release
-// signature is over SHA256(manifest_body), matching the classical path, but the key
-// and signature are the configured PQ scheme so the update channel is quantum-safe.
 class PQAutoUpdateSignatureVerifier final : public AutoUpdateSignatureVerifier
 {
 public:
@@ -762,9 +855,29 @@ AutoUpdateStatus SilentStatusForVerifierFailure(bool missing_signature)
 
 } // namespace
 
+std::string LocalClientVersion()
+{
+    std::string version = strprintf("%d.%d.%d", CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD);
+    if (const int rc = LocalClientVersionRc(); rc > 0) {
+        version += strprintf("rc%d", rc);
+    }
+    return version;
+}
+
+static bool Ipv6LiteralCharAllowed(char ch)
+{
+    return std::isxdigit(static_cast<unsigned char>(ch)) || ch == ':' || ch == '.' || ch == '%';
+}
+
 std::optional<AutoUpdateUrl> ParseAutoUpdateUrl(std::string_view raw_url)
 {
     const std::string url = TrimAscii(raw_url);
+    if (url.empty()) return std::nullopt;
+    if (std::any_of(url.begin(), url.end(), [](unsigned char ch) {
+            return ch < 0x20 || ch == 0x7f;
+        })) {
+        return std::nullopt;
+    }
     const size_t scheme_sep = url.find("://");
     if (scheme_sep == std::string::npos || scheme_sep == 0) return std::nullopt;
 
@@ -783,6 +896,9 @@ std::optional<AutoUpdateUrl> ParseAutoUpdateUrl(std::string_view raw_url)
         const size_t close = authority.find(']');
         if (close == std::string::npos) return std::nullopt;
         host = authority.substr(1, close - 1);
+        // RFC 3986 IP-literals are IPv6 (must contain ':'), not DNS names in brackets.
+        if (host.find(':') == std::string::npos) return std::nullopt;
+        if (!std::all_of(host.begin(), host.end(), Ipv6LiteralCharAllowed)) return std::nullopt;
         if (close + 1 < authority.size()) {
             if (authority[close + 1] != ':') return std::nullopt;
             port = authority.substr(close + 2);
@@ -817,14 +933,21 @@ bool AutoUpdateUrlMatchesTrustedOrigin(std::string_view url, std::string_view tr
            parsed_url->port == parsed_origin->port;
 }
 
+int CompareAutoUpdateVersionStrings(std::string_view local_version, std::string_view remote_version)
+{
+    const auto local = ParseAutoUpdateVersion(local_version);
+    const auto remote = ParseAutoUpdateVersion(remote_version);
+    // Unparseable input is not an update: fail closed as not-newer.
+    if (!local || !remote) return 0;
+    return CompareAutoUpdateVersions(*local, *remote);
+}
+
 int CompareAutoUpdateVersion(std::string_view remote_version)
 {
-    const auto remote = ParseVersionTriple(remote_version);
+    const auto remote = ParseAutoUpdateVersion(remote_version);
     if (!remote) return 0;
-    const auto local = std::make_tuple(CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD);
-    if (*remote > local) return 1;
-    if (*remote < local) return -1;
-    return 0;
+    const AutoUpdateVersion local{CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD, LocalClientVersionRc()};
+    return CompareAutoUpdateVersions(local, *remote);
 }
 
 int AutoUpdateRolloutCohort(const AutoUpdateConfig& config)
@@ -1145,7 +1268,7 @@ std::unique_ptr<AutoUpdateManager> MakeAutoUpdateManager(const ArgsManager& args
     config.release_pubkey_algo = args.GetArg("-autoupdatepubkeyalgo", std::string{DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO});
     auto verifier = MakeAutoUpdateSignatureVerifier(config.release_pubkey_algo);
     if (!verifier) {
-        LogPrintf("Auto-update disabled: unknown release signature scheme \"%s\" (expected ml-dsa-44, slh-dsa-128s, or secp256k1)\n",
+        LogPrintf("Auto-update disabled: unknown release signature scheme \"%s\" (expected ml-dsa-44 or slh-dsa-128s)\n",
                   config.release_pubkey_algo);
         return nullptr;
     }
@@ -1177,10 +1300,6 @@ std::unique_ptr<AutoUpdateSignatureVerifier> MakeAutoUpdateSignatureVerifier(std
     if (const auto pq_algo = AutoUpdatePQAlgoFromName(algo)) {
         return std::make_unique<PQAutoUpdateSignatureVerifier>(*pq_algo);
     }
-    const std::string lower = ToLowerAscii(std::string{algo});
-    if (lower == "secp256k1" || lower == "ecdsa") {
-        return std::make_unique<Secp256k1AutoUpdateSignatureVerifier>();
-    }
     return nullptr;
 }
 
@@ -1188,10 +1307,6 @@ std::optional<size_t> AutoUpdateReleasePubkeyHexLength(std::string_view algo)
 {
     if (const auto pq_algo = AutoUpdatePQAlgoFromName(algo)) {
         return GetPQPubKeySize(*pq_algo) * 2;
-    }
-    const std::string lower = ToLowerAscii(std::string{algo});
-    if (lower == "secp256k1" || lower == "ecdsa") {
-        return size_t{CPubKey::COMPRESSED_SIZE} * 2;
     }
     return std::nullopt;
 }

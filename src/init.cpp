@@ -120,6 +120,7 @@
 
 #ifdef ENABLE_MODELNET
 #include <modelnet/policy.h>
+#include <modelnet/profile.h>
 #include <modelnet/supervisor.h>
 #endif
 
@@ -366,6 +367,7 @@ void Shutdown(NodeContext& node)
         modelnet::SetManagedSupervisor(nullptr);
         g_model_helper.reset();
     }
+    modelnet::SetModelHostServiceBitHook(nullptr);
 #endif
 
     /// Note: Shutdown() must be able to handle cases in which initialization failed part of the way,
@@ -629,7 +631,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-modelnet", "Enable the Native Model Network (default: 1 when compiled WITH_MODELNET). btxd starts a supervised btx-modeld helper. Model failure never stops monetary consensus. Disable with -modelnet=0 / -nomodelnet.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelnetrequired", "Fail btxd startup if the model helper cannot initialize (default: 0). Leave off so money keeps working when the helper is missing.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelrelay", "Advertise NODE_MODEL_RELAY as an unauthenticated discovery hint (default: 1 when -modelnet). Never MatMul authority, never a chain source, never a wallet. Artifact endpoints are not inserted into monetary AddrMan.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-modelhost", "Advertise NODE_MODEL_HOST only after proven reachability (default: 0). Do not set this merely because the helper is running.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelhost=auto|1|0|true|false", "Serve seeded artifacts. auto (and explicit 1/true) wait for proven reachability before NODE_MODEL_HOST. Never advertised merely because the helper is running. Default: 0.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelprofile=personal|infrastructure|mirror|custom", "Operator config preset for storage/seed/follow/preserve/relay/index/host-auto. Ordinary args only; no monetary, search, consensus, or bounty privilege. Persisted under modeldir/operator_profile.json.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelrpcsocket=<path>", "Unix socket for btx-modeld JSON-RPC (default: <datadir>/modelnet/modeld.sock). If set explicitly, btxd connects and does not spawn or kill that helper. Otherwise btxd owns a child btx-modeld.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modeld=<path>", "Path to packaged btx-modeld. Alias of -modelhelper. Default: next to the running btxd / libexec/btx-modeld. A missing explicit path does not spawn a substitute.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelhelper=<path>", "Path to packaged btx-modeld. Default: next to the running btxd / libexec/btx-modeld.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -644,8 +647,9 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-modelpeer=<host:port>", "Model-plane bootstrap contact passed to the owned helper (repeatable). Alias: -modelseednode.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelseednode=<host:port>", "Alias of -modelpeer.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modeluploadlimit=<bps>", "Aggregate model upload cap. auto = governor ceiling. 0 = connection ceilings only.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelwatch=<dir>", "Auto-host GGUF/SafeTensors dropped in this directory (watch-folder analog). Empty = off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
-    argsman.AddArg("-resourcegovernor=<mode>", "Local resource governor: auto, performance, balanced, eco, manual, or off (default: auto). Never consensus.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-resourcegovernor=<mode>", "Local resource governor: auto, performance, balanced, eco, manual, or off to deny all governed work including mining (default: auto). There is no ungoverned mining mode. Never consensus.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-automining", "When mining is enabled, only run it while the governor reports spare accelerator capacity (default: 0). Does not enable mining by itself except together with -gen or an explicit miner.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-miningmaxintensity=<percent>", "Governor mining intensity cap 0-100 (default: 100).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-backgroundonbattery", "Allow background mining/preservation on battery (default: 0).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -754,7 +758,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-autoupdatemanifesturl=<url>", strprintf("Signed auto-update manifest URL (default: %s)", node::DEFAULT_AUTOUPDATE_MANIFEST_URL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatetrustedorigin=<origin>", strprintf("Trusted auto-update origin. Manifest, signature, and installer URLs must all stay on this origin (default: %s)", node::DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatepubkey=<hex>", "Release public key (hex) for version.txt signatures, in the scheme set by -autoupdatepubkeyalgo. Set to 0 to make auto-update inert.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-autoupdatepubkeyalgo=<scheme>", strprintf("Release signature scheme: ml-dsa-44, slh-dsa-128s, or secp256k1. The post-quantum schemes keep the update channel quantum-safe (default: %s).", node::DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatepubkeyalgo=<scheme>", strprintf("Release signature scheme: ml-dsa-44 or slh-dsa-128s (default: %s). Classical secp256k1 is not accepted.", node::DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdateinterval=<n>", strprintf("Seconds between auto-update checks (default: %d)", node::DEFAULT_AUTOUPDATE_INTERVAL_SECONDS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdateinitialdelay=<n>", strprintf("Seconds to wait after startup before the first auto-update check (default: %d)", node::DEFAULT_AUTOUPDATE_INITIAL_DELAY_SECONDS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdateinitialjitter=<n>", strprintf("Maximum extra random seconds added to the startup auto-update check, to prevent fleet stampedes without delaying urgent releases by a full poll interval (default: %d)", node::DEFAULT_AUTOUPDATE_INITIAL_JITTER_SECONDS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1047,7 +1051,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-rpcdoccheck", strprintf("Throw a non-fatal error at runtime if the documentation for an RPC is incorrect (default: %u)", DEFAULT_RPC_DOC_CHECK), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-rpccookiefile=<loc>", "Location of the auth cookie. Relative paths will be prefixed by a net-specific datadir location. (default: data dir)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-rpccookieperms=<readable-by>", strprintf("Set permissions on the RPC auth cookie file so that it is readable by [owner|group|all] (default: owner [via umask 0077])"), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
-    argsman.AddArg("-rpcpassword=<pw>", "Password for JSON-RPC connections", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
+    argsman.AddArg("-rpcpassword=<pw>", "Password for JSON-RPC connections. UNSAFE on the command line; process listings leak it. Prefer cookie authentication or hashed -rpcauth.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
     argsman.AddArg("-rpcport=<port>", strprintf("Listen for JSON-RPC connections on <port> (default: %u, testnet3: %u, testnet4: %u, signet: %u, regtest: %u, shieldedv2dev: %u)", defaultBaseParams->RPCPort(), testnetBaseParams->RPCPort(), testnet4BaseParams->RPCPort(), signetBaseParams->RPCPort(), regtestBaseParams->RPCPort(), shieldedv2devBaseParams->RPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-rpcservertimeout=<n>", strprintf("Timeout during HTTP requests (default: %d)", DEFAULT_HTTP_SERVER_TIMEOUT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-rpcthreads=<n>", strprintf("Set the number of threads to service RPC calls (default: %d). stop/uptime/getrpcinfo/help/getmemoryinfo run on one extra dedicated control thread so they complete if the ordinary workers are blocked.", DEFAULT_HTTP_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
@@ -1473,7 +1477,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         const std::string release_pubkey_algo = args.GetArg("-autoupdatepubkeyalgo", std::string{node::DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO});
         const auto release_pubkey_hex_len = node::AutoUpdateReleasePubkeyHexLength(release_pubkey_algo);
         if (!release_pubkey_hex_len) {
-            return InitError(_("-autoupdatepubkeyalgo must be one of ml-dsa-44, slh-dsa-128s, or secp256k1."));
+            return InitError(_("-autoupdatepubkeyalgo must be ml-dsa-44 or slh-dsa-128s."));
         }
         if (!release_pubkey.empty() && release_pubkey != "0" && (release_pubkey.size() != *release_pubkey_hex_len || !IsHex(release_pubkey))) {
             return InitError(strprintf(_("-autoupdatepubkey must be a %s public key hex string (%d hex characters), or 0 to make auto-update inert."), release_pubkey_algo, *release_pubkey_hex_len));
@@ -1481,6 +1485,14 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         if (args.GetArg("-autoupdatepython", "python3").empty()) {
             return InitError(_("-autoupdatepython must not be empty."));
         }
+    }
+
+    bool rpcpassword_on_cmdline{false};
+    args.LockSettings([&](const common::Settings& settings) {
+        rpcpassword_on_cmdline = settings.command_line_options.count("rpcpassword") > 0;
+    });
+    if (rpcpassword_on_cmdline) {
+        InitWarning(_("-rpcpassword was given on the command line, which leaks the RPC password through process listings. Use cookie authentication, hashed -rpcauth, or put rpcpassword in the configuration file with restricted permissions."));
     }
 
     if (!fs::is_directory(args.GetBlocksDirPath())) {
@@ -2721,13 +2733,15 @@ static bool InitializeMatMulRCReadinessPostDaemon(
     }
 #ifdef ENABLE_MODELNET
     // Unauthenticated introduction hints only. Never seed-mask, AddrMan
-    // artifact metadata, MatMul authority, or a chain source. HOST is never
-    // implied merely because the helper is running.
+    // artifact metadata, MatMul authority, or a chain source.
+    // INFRA-04: never OR NODE_MODEL_HOST here. GetBoolArg("-modelhost") cannot
+    // represent auto (InterpretBool("auto") is 0; a later bool-true reading
+    // would advertise before proven reachability). Explicit -modelhost=1 also
+    // waits until the helper reports advertised_host. Supervisor polls
+    // getmodelnetworkinfo and calls SetNodeModelHostAdvertised → CConnman
+    // AddLocalServices / RemoveLocalServices.
     if (args.GetBoolArg("-modelnet", true) && args.GetBoolArg("-modelrelay", true)) {
         services |= static_cast<uint64_t>(NODE_MODEL_RELAY);
-    }
-    if (args.GetBoolArg("-modelnet", true) && args.GetBoolArg("-modelhost", false)) {
-        services |= static_cast<uint64_t>(NODE_MODEL_HOST);
     }
 #endif
     g_local_services = static_cast<ServiceFlags>(services);
@@ -2852,6 +2866,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     {
         node::GovernorMode gm = node::GovernorMode::AUTO;
         (void)node::ParseGovernorMode(args.GetArg("-resourcegovernor", "auto"), gm);
+        if (gm == node::GovernorMode::OFF &&
+            (args.GetBoolArg("-gen", false) || args.GetBoolArg("-automining", false))) {
+            InitWarning(_("-resourcegovernor=off denies all governed work including mining; there is no ungoverned mining mode. Mining requested by -gen or -automining will be deferred."));
+        }
         auto& gov = node::GlobalResourceGovernor();
         gov.SetMode(gm);
         gov.SetAutoSchedule(args.GetBoolArg("-automining", false));
@@ -2881,7 +2899,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 #endif
         }
         gov.SetPolicy(pol);
-        const fs::path permit_dir = args.GetDataDirNet() / "modelnet";
+        const std::string modeldir_arg_early = args.GetArg("-modeldir", "");
+        const fs::path permit_dir = modeldir_arg_early.empty() ? (args.GetDataDirNet() / "modelnet")
+                                                               : fs::PathFromString(modeldir_arg_early);
         fs::create_directories(permit_dir);
         const fs::path permit = permit_dir / "governor-permit.json";
         scheduler.scheduleEvery([permit] {
@@ -4118,6 +4138,53 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 hcfg.upload_bps = bps;
             }
         }
+        hcfg.watch_dir = args.GetArg("-modelwatch", "");
+        hcfg.relay = args.GetBoolArg("-modelrelay", true);
+        {
+            modelnet::HostMode parsed_host = modelnet::HostMode::OFF;
+            if (args.IsArgNegated("-modelhost")) {
+                parsed_host = modelnet::HostMode::OFF;
+            } else if (args.IsArgSet("-modelhost")) {
+                if (!modelnet::ParseHostMode(args.GetArg("-modelhost", "0"), parsed_host)) {
+                    return InitError(_("Invalid -modelhost (allowed: auto, 1, 0, true, false). auto is not a boolean; do not use GetBoolArg."));
+                }
+            }
+            hcfg.host_mode = parsed_host;
+        }
+        {
+            modelnet::ProfileOverrides ov;
+            if (args.IsArgSet("-modelrelay")) ov.relay = hcfg.relay;
+            if (args.IsArgSet("-modelhost") || args.IsArgNegated("-modelhost")) ov.host_mode = hcfg.host_mode;
+            if (args.IsArgSet("-modelstorage")) ov.storage_arg = hcfg.storage_arg;
+            if (args.IsArgSet("-modelstorageautocap") && hcfg.auto_cap_bytes > 0) ov.auto_cap_bytes = hcfg.auto_cap_bytes;
+            if (args.IsArgSet("-modeluploadlimit") && hcfg.upload_bps > 0) ov.upload_bps = hcfg.upload_bps;
+            if (args.IsArgSet("-modelfollowpeers")) ov.follow_peers = hcfg.follow_peers;
+            if (args.IsArgSet("-modelpreserverare")) ov.preserve_rare = hcfg.preserve_rare;
+            if (args.IsArgSet("-modelseed")) ov.seed = hcfg.seed;
+
+            modelnet::OperatorProfile prof = modelnet::OperatorProfile::CUSTOM;
+            modelnet::ProfilePolicy policy;
+            std::string profile_err;
+            const auto profile_path = modelnet::OperatorProfilePath(hcfg.modeldir);
+            bool apply_profile = modelnet::LoadOperatorProfile(profile_path, prof, policy, profile_err);
+            if (apply_profile) {
+                policy = modelnet::ApplyProfileOverrides(policy, ov);
+            }
+            if (args.IsArgSet("-modelprofile")) {
+                if (!modelnet::ParseOperatorProfile(args.GetArg("-modelprofile", "custom"), prof)) {
+                    return InitError(_("Invalid -modelprofile (allowed: personal, infrastructure, mirror, custom)"));
+                }
+                policy = modelnet::ResolveProfile(prof, ov);
+                apply_profile = true;
+                std::string serr;
+                if (!modelnet::SaveOperatorProfile(profile_path, prof, policy, serr)) {
+                    LogPrintf("model profile: failed to persist %s (%s)\n", fs::PathToString(profile_path), serr);
+                }
+            }
+            if (apply_profile) {
+                modelnet::ApplyProfileToLaunchConfig(policy, hcfg);
+            }
+        }
         const std::string modeld_arg = args.IsArgSet("-modelhelper") ? args.GetArg("-modelhelper", "") :
                                        (args.IsArgSet("-modeld") ? args.GetArg("-modeld", "") : "");
         if (args.IsArgSet("-modelhelper") || args.IsArgSet("-modeld")) {
@@ -4136,12 +4203,29 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         } else {
             hcfg.bind = "0.0.0.0:29447";
         }
-        LogPrintf("model helper exe=%s socket=%s storage=%s bind=%s missing=%d\n",
+        LogPrintf("model helper exe=%s socket=%s storage=%s bind=%s host=%s relay=%d missing=%d\n",
                   fs::PathToString(hcfg.helper_exe),
                   fs::PathToString(hcfg.rpc_socket),
                   hcfg.storage_arg,
                   hcfg.bind,
+                  modelnet::HostModeName(hcfg.host_mode),
+                  hcfg.relay ? 1 : 0,
                   hcfg.helper_explicitly_missing ? 1 : 0);
+        modelnet::SetModelHostServiceBitHook([&node](bool on) {
+            if (!node.connman) return;
+            if (on) {
+                node.connman->AddLocalServices(NODE_MODEL_HOST);
+            } else {
+                node.connman->RemoveLocalServices(NODE_MODEL_HOST);
+            }
+        });
+        if (node.connman) {
+            if (hcfg.relay) {
+                node.connman->AddLocalServices(NODE_MODEL_RELAY);
+            } else {
+                node.connman->RemoveLocalServices(NODE_MODEL_RELAY);
+            }
+        }
         g_model_helper = std::make_unique<modelnet::HelperSupervisor>(hcfg, [&node] {
             return ShutdownRequested(node);
         });

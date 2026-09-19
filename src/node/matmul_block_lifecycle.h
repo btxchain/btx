@@ -48,6 +48,10 @@ public:
     enum class RetryWakeReason : uint8_t {
         RECOVERY_ROOT = 0,
         TRUSTED_AUTHORITY = 1,
+        //! Parent ExactReplay-verified off the active chain. BlockConnected
+        //! does not fire for that parent, so a retained child would otherwise
+        //! wait for an unrelated HEADERS message (issue #146).
+        VERIFIED_FORK_PARENT = 2,
     };
 
     /** Why an inactive retained body is waiting. Capacity is event-driven;
@@ -716,6 +720,19 @@ public:
         const auto it{m_entries.find(hash)};
         return it != m_entries.end() && it->second.body.has_value() &&
                it->second.body->pin_progress;
+    }
+
+    /** Eviction pin for a retained next-hole that is about to be woken
+     *  (#146). OldestEvictable already skips pin_progress; this is the
+     *  setter so a sibling-body flood cannot drop the child between the
+     *  off-chain parent verdict and ordinary re-admission. */
+    bool PinRetainedProgress(const uint256& hash)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it == m_entries.end() || !it->second.body) return false;
+        it->second.body->pin_progress = true;
+        return true;
     }
 
     /** Terminal acceptance/invalidity atomically releases every resource. */

@@ -25,6 +25,67 @@
     </widget>
    </item>
    <item>
+    <widget class="QLabel" name="doctorStatusLabel">
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+     <property name="textInteractionFlags">
+      <set>Qt::TextSelectableByMouse</set>
+     </property>
+     <property name="toolTip">
+      <string>First-run doctor from getsetupstatus (fallback checkmodelsetup / getmodelnetworkinfo). showmodel (share + local + aliases) and unhostmodel (unpin+unseed) are RPC analogs of ollama show/rm; this page does not call them or getmodel automatically. Never spends. automatic_spend_atoms stays 0.</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="dev348ProfileCloudLabel">
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+     <property name="textInteractionFlags">
+      <set>Qt::TextSelectableByMouse</set>
+     </property>
+     <property name="text">
+      <string>0.34.8-dev (not a shipping tag). Operator profile and optional cloud backing. Secrets are never shown. automatic_spend_atoms stays 0.</string>
+     </property>
+     <property name="toolTip">
+      <string>0.34.8-dev panel: getmodelprofile + getcloudstorageinfo when present. Missing RPCs fail closed. Never displays secrets. Does not call FormatResourceGovernorStatus. Cloud backing is optional. Filesystem watch folder is not a publisher watch.</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="dev348WatchesLabel">
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+     <property name="textInteractionFlags">
+      <set>Qt::TextSelectableByMouse</set>
+     </property>
+     <property name="text">
+      <string>0.34.8-dev (not a shipping tag). Network watches from listmodelwatches. Filesystem -modelwatch / getmodelwatchstatus is not listmodelwatches. Filesystem drop folder is not a publisher watch. PREPARE_FUNDING is unsigned. automatic_spend_atoms stays 0.</string>
+     </property>
+     <property name="toolTip">
+      <string>0.34.8-dev (not a shipping tag). listmodelwatches publisher/collection/query/model watches (watch_id, kind/target, action). Not getmodelwatchstatus / -modelwatch / scanmodelwatch. Missing RPC fails closed. Never displays secrets, credential_ref values, query strings, or presigned URLs. PREPARE_FUNDING is unsigned. automatic_spend_atoms stays 0. This page does not auto-getmodel, spend, or call wallet RPCs.</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="dev348ActivityLabel">
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+     <property name="textInteractionFlags">
+      <set>Qt::TextSelectableByMouse</set>
+     </property>
+     <property name="text">
+      <string>0.34.8-dev (not a shipping tag). Activity snippet from getmodeleventsequence + last page of getmodelevents. Untrusted event text is not a command, path, RPC, or mandate. automatic_spend_atoms stays 0.</string>
+     </property>
+     <property name="toolTip">
+      <string>0.34.8-dev (not a shipping tag). getmodeleventsequence plus last page of getmodelevents (object_id, event_type only). Missing RPC fails closed; never waitformodelevent. Untrusted event text is not a command, path, RPC, or mandate. Never displays secrets, credential_ref values, query strings, or presigned URLs. automatic_spend_atoms stays 0. This page does not auto-getmodel, spend, or call wallet RPCs.</string>
+     </property>
+    </widget>
+   </item>
+   <item>
     <widget class="QLabel" name="consentLabel">
      <property name="wordWrap">
       <bool>true</bool>
@@ -284,7 +345,112 @@
           <bool>true</bool>
          </property>
          <property name="text">
-          <string>Creator publish uses publishmodelsearchrecord (same name as btx-cli). It signs searchable metadata only. It does not spend BTX, upload weights, or start inference. automatic_spend_atoms stays 0.</string>
+          <string>Import a local GGUF or SafeTensors path to pin, seed, and sign a search card automatically. Publish signs metadata only. A research identity is created on first use. This does not spend BTX, upload weights, or start inference. automatic_spend_atoms stays 0.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="watchFolderHintLabel">
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+         <property name="textInteractionFlags">
+          <set>Qt::TextSelectableByMouse</set>
+         </property>
+         <property name="text">
+          <string>Watch folder: start btxd with -modelwatch=&lt;dir&gt; to auto-host new GGUF or SafeTensors files (scanmodelwatch). This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.</string>
+         </property>
+         <property name="toolTip">
+          <string>Watch-folder analog of a torrent client. The helper auto-hosts new files; this GUI never calls getmodel on its own.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="importRowLayout">
+         <item>
+          <widget class="QLineEdit" name="importPathEdit">
+           <property name="placeholderText">
+            <string>Local file or directory to import</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="importBrowseButton">
+           <property name="text">
+            <string>Browse…</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="importButton">
+           <property name="text">
+            <string>Import and publish</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QWidget" name="importShareRowWidget">
+         <layout class="QHBoxLayout" name="importShareRow">
+         <item>
+          <widget class="QLabel" name="importShareLabel">
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+           <property name="text">
+            <string/>
+           </property>
+           <property name="textInteractionFlags">
+            <set>Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard</set>
+           </property>
+           <property name="toolTip">
+            <string>share.copy_text from import/host. If the share or transfer JSON includes percent or bytes_per_sec, those rates appear on this line. Copy URI puts the canonical btx:// URI on the clipboard. This is not a payment and does not spend.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="importCopyUriButton">
+           <property name="text">
+            <string>Copy URI</string>
+           </property>
+           <property name="toolTip">
+            <string>Copy the share btx:// URI. This is not a payment and does not spend.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="importShareRowSpacer">
+           <property name="orientation">
+            <enum>Qt::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="importAliasHintLabel">
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+         <property name="visible">
+          <bool>false</bool>
+         </property>
+         <property name="text">
+          <string>After copy_text, optionally setmodelalias so showmodel and getmodel can use an Ollama-style name. unhostmodel unpins and unseeds in one call. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.</string>
+         </property>
+         <property name="textInteractionFlags">
+          <set>Qt::TextSelectableByMouse</set>
+         </property>
+         <property name="toolTip">
+          <string>Alias is optional metadata (setmodelalias / removemodelalias). showmodel inspects; unhostmodel stops seeding. This page never auto-getmodel or spends.</string>
          </property>
         </widget>
        </item>
@@ -312,6 +478,38 @@
           </widget>
          </item>
         </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="publishMetaRowLayout">
+         <item>
+          <widget class="QLineEdit" name="publishFamilyEdit">
+           <property name="placeholderText">
+            <string>family (qwen3, glm, …)</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="publishFormatEdit">
+           <property name="placeholderText">
+            <string>format (gguf, safetensors)</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="publishTagsEdit">
+           <property name="placeholderText">
+            <string>tags, comma-separated</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QLineEdit" name="publishDescriptionEdit">
+         <property name="placeholderText">
+          <string>Short description (no HTML)</string>
+         </property>
+        </widget>
        </item>
        <item>
         <widget class="QPlainTextEdit" name="publishOutput">
@@ -402,6 +600,150 @@
       <layout class="QVBoxLayout" name="verticalLayoutIdentity">
        <item>
         <widget class="QPlainTextEdit" name="identityOutput">
+         <property name="readOnly">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="tabCapabilities">
+      <attribute name="title">
+       <string>Capabilities</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutCapabilities">
+       <item>
+        <widget class="QLabel" name="capabilityStatusLabel">
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+         <property name="text">
+          <string>Local capability plane. Prepare/Use, Prefetch, Sleep, Release, Wake, Update, Switch, Events, TTC, and Runtime caps are owner-local. Never spends. automatic_spend_atoms stays 0. Public HTTP is 405. CUDA/ROCm/Metal/NIXL/CXL absence is NOT_RUN, not a stub PASS. remap_only is not Wake success. Smoke blocked is not 100% ready.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="capabilityButtonRow">
+         <item>
+          <widget class="QPushButton" name="capabilityEnsureButton">
+           <property name="text">
+            <string>Prepare / Use</string>
+           </property>
+           <property name="toolTip">
+            <string>planbtxcapability + ensurebtxcapability. Owner-local. No public HTTP. No wallet spend.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="capabilityPrefetchButton">
+           <property name="text">
+            <string>Prefetch</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="capabilitySleepButton">
+           <property name="text">
+            <string>Sleep</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="capabilityReleaseButton">
+           <property name="text">
+            <string>Release</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="capabilityButtonRow2">
+         <item>
+          <widget class="QPushButton" name="capabilityWakeButton">
+           <property name="text">
+            <string>Wake</string>
+           </property>
+           <property name="toolTip">
+            <string>wakebtxcapability. Rebuilds discarded KV. remap_only is never success. Owner-local. No public HTTP. automatic_spend_atoms stays 0.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="capabilityUpdateButton">
+           <property name="text">
+            <string>Update</string>
+           </property>
+           <property name="toolTip">
+            <string>planbtxcapabilityupdate. Preview beside the active generation. Smoke blocked is not 100% ready. Owner-local. No public HTTP. automatic_spend_atoms stays 0.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="capabilitySwitchButton">
+           <property name="text">
+            <string>Switch</string>
+           </property>
+           <property name="toolTip">
+            <string>switchbtxcapability. Atomic handle switch after tested readiness. Owner-local. No public HTTP. automatic_spend_atoms stays 0.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="capabilityEventsButton">
+           <property name="text">
+            <string>Events</string>
+           </property>
+           <property name="toolTip">
+            <string>getbtxcapabilityevents. Owner-local lifecycle events. No public HTTP. automatic_spend_atoms stays 0.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="capabilityTtcButton">
+           <property name="text">
+            <string>TTC</string>
+           </property>
+           <property name="toolTip">
+            <string>getbtxttctrace. Critical-path TTC, not occupancy sum. Smoke blocked is not 100% ready. Owner-local. No public HTTP.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="capabilityRuntimeCapsButton">
+           <property name="text">
+            <string>Runtime caps</string>
+           </property>
+           <property name="toolTip">
+            <string>getbtxruntimecapabilities. Absent hardware is NOT_RUN, never a stub PASS. Owner-local. No public HTTP. automatic_spend_atoms stays 0.</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="capabilityIdRow">
+         <item>
+          <widget class="QLineEdit" name="capabilityLeaseEdit">
+           <property name="placeholderText">
+            <string>lease or job id (Wake/TTC) / old lock (Update/Switch)</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="capabilityNewLockEdit">
+           <property name="placeholderText">
+            <string>new lock (Switch)</string>
+           </property>
+           <property name="toolTip">
+            <string>New lock id for switchbtxcapability. Update may fill proposed_lock here. Never a wallet path.</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QPlainTextEdit" name="capabilityOutput">
          <property name="readOnly">
           <bool>true</bool>
          </property>

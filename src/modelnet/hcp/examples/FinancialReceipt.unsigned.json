@@ -1,0 +1,37 @@
+{
+  "object_type": "FinancialReceipt",
+  "body": {
+    "version": 1,
+    "provider_id": "provider-demo",
+    "account_ref": "account-demo",
+    "network": {
+      "environment": "REGTEST",
+      "genesis_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "receipt_id": "receipt-demo",
+    "receipt_sequence": "1",
+    "supersedes": null,
+    "intent_id": "intent-demo",
+    "intent_body_id": "5942840ef7be78bc74f2e71fe283476f8253d0bcbc54cbaf9c819109c66c4e65ef126758e86ba18ee62d0a9e0dc3ba7c",
+    "action": "FUND_RELEASE",
+    "terms_id": "555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+    "quote_id": "quote-demo",
+    "amounts": {
+      "principal_atoms": "1000",
+      "network_fee_cap_atoms": "30",
+      "service_fee_atoms": "20",
+      "tax_atoms": "0",
+      "max_total_debit_atoms": "1050"
+    },
+    "actual_network_fee_atoms": null,
+    "state": "PREPARED",
+    "evidence_basis": "CEX_LEDGER",
+    "custody_mode": "CUSTODIAL",
+    "refund_controller": "CEX_CUSTODIAL_KEY",
+    "native_observation": null,
+    "observed_at_ms": "1790000000000"
+  },
+  "body_id": "54f693348605755f4c7e034570066504e2bb8cdc743f31307eb003ad71b2ce70ef3dcdfd97d394509fa250ffa56eb10d",
+  "signer_key_id": "unsigned-demo",
+  "signature": null
+}

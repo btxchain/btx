@@ -1,0 +1,10 @@
+{
+  "id": "negative-public-child",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "public_bip32_child_derivation": false,
+  "error": "PUBLIC_CHILD_UNSUPPORTED",
+  "path": "m/87h/0h/0h/0/0",
+  "algorithm": "ML-DSA-44",
+  "note": "SignerProvider::DerivePublicKey must return false with PUBLIC_CHILD_UNSUPPORTED for ML-DSA-44. Watch-only deposit addresses come from importdepositpool or signer-exported pubkeys, never a fake BIP32 xpub."
+}

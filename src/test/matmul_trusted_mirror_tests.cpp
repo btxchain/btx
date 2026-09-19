@@ -1501,6 +1501,36 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*trusted_mirror=*/true, /*configured=*/true,
         /*blocks_behind=*/0, /*followed_ahead=*/36,
         /*stall_headers_ahead=*/2, /*frontier_available=*/true));
+    using node::matmul_trusted::GetMmAttestRequestTtl;
+    using node::matmul_trusted::GETMMATTEST_CATCHUP_REQUEST_TTL;
+    using node::matmul_trusted::GETMMATTEST_REQUEST_TTL;
+    // #154: consensus catch-up with a local body uses the short occupancy
+    // TTL. signed_frontier_catch_up stays false for consensus (above).
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(
+            /*consensus_mode=*/true, /*trusted_mirror=*/false,
+            /*headers_ahead=*/5113, /*body_local=*/true)
+            .count(),
+        GETMMATTEST_CATCHUP_REQUEST_TTL.count());
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(true, false, /*headers_ahead=*/1,
+                              /*body_local=*/true)
+            .count(),
+        GETMMATTEST_REQUEST_TTL.count());
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(true, false, /*headers_ahead=*/40,
+                              /*body_local=*/false)
+            .count(),
+        GETMMATTEST_REQUEST_TTL.count());
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(/*consensus_mode=*/false,
+                              /*trusted_mirror=*/true,
+                              /*headers_ahead=*/40, /*body_local=*/true)
+            .count(),
+        GETMMATTEST_REQUEST_TTL.count());
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(true, false, 0, true).count(),
+        GETMMATTEST_REQUEST_TTL.count());
     using node::matmul_trusted::CappedFollowedCatchUpAhead;
     // Live signer 2026-08-16: 13 unattested HEADER_ONLY children of the
     // attested tip must not look like a 13-block catch-up hole.
@@ -1994,7 +2024,8 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!StalledTowerFetchPeerMayServeBodies(
         true, true, /*version_handshake_complete=*/false, false, false));
     using node::matmul_trusted::PeerCountsAsAlternativeBodyDownloadSource;
-    // Header-only NODE_NETWORK is not a replacement body source.
+    // Header-only NODE_NETWORK is not a replacement for disconnect /
+    // only-source protection: proven body delivery is required.
     BOOST_CHECK(!PeerCountsAsAlternativeBodyDownloadSource(
         /*may_serve_bodies=*/true, /*signed_frontier_catch_up=*/false,
         /*signed_frontier_body_source=*/false, /*has_served_block=*/false));
@@ -2007,6 +2038,19 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*signed_frontier_body_source=*/false, true));
     BOOST_CHECK(PeerCountsAsAlternativeBodyDownloadSource(
         true, true, /*signed_frontier_body_source=*/true, true));
+    // Pause / 15s fail-over: a body-capable advertiser is enough on
+    // unsigned catch-up so a silent first GETDATA owner yields before
+    // anyone has delivered a body (issue #163 follow-on).
+    BOOST_CHECK(PeerCountsAsAlternativeBodyDownloadSource(
+        true, false, false, /*has_served_block=*/false,
+        /*require_served_block=*/false));
+    BOOST_CHECK(!PeerCountsAsAlternativeBodyDownloadSource(
+        true, /*signed_frontier_catch_up=*/true,
+        /*signed_frontier_body_source=*/false, false,
+        /*require_served_block=*/false));
+    BOOST_CHECK(PeerCountsAsAlternativeBodyDownloadSource(
+        true, true, /*signed_frontier_body_source=*/true, false,
+        /*require_served_block=*/false));
     using node::matmul_trusted::TrustedMirrorKeepFetchingCoveredUnconnected;
     BOOST_CHECK(TrustedMirrorKeepFetchingCoveredUnconnected(
         /*signed_frontier_catch_up=*/true,

@@ -197,21 +197,9 @@ static const QLatin1String fontchoice_str_best_system{"best_system"};
 static const QString fontchoice_str_custom_prefix{QStringLiteral("custom, ")};
 
 static const std::map<OutputType, std::pair<const char*, const char*>> UntranslatedOutputTypeDescriptions{
-    {OutputType::LEGACY, {
-        QT_TRANSLATE_NOOP("Output type name", "Base58 (Legacy)"),
-        QT_TRANSLATE_NOOP("Output type description", "Widest compatibility and best for health of the Bitcoin network, but may result in higher fees later. Recommended."),
-    }},
-    {OutputType::P2SH_SEGWIT, {
-        QT_TRANSLATE_NOOP("Output type name", "Base58 (P2SH Segwit)"),
-        QT_TRANSLATE_NOOP("Output type description", "Compatible with most older wallets, and may result in lower fees than Legacy."),
-    }},
-    {OutputType::BECH32, {
-        QT_TRANSLATE_NOOP("Output type name", "Native Segwit (Bech32)"),
-        QT_TRANSLATE_NOOP("Output type description", "Lower fees than Base58, but some old wallets don't support it."),
-    }},
-    {OutputType::BECH32M, {
-        QT_TRANSLATE_NOOP("Output type name", "Taproot (Bech32m)"),
-        QT_TRANSLATE_NOOP("Output type description", "Lowest fees, but wallet support is still limited."),
+    {OutputType::P2MR, {
+        QT_TRANSLATE_NOOP("Output type name", "P2MR (post-quantum)"),
+        QT_TRANSLATE_NOOP("Output type description", "ML-DSA-44 / SLH-DSA witness v2. The only address type BTX issues."),
     }},
 };
 
@@ -559,7 +547,7 @@ void OptionsModel::SetPruneTargetMiB(int prune_target_mib)
     m_prune_forced_by_gui = true;
 
     // Update settings.json if value configured in intro screen is different
-    // from saved value. Avoid writing settings.json if bitcoin.conf value
+    // from saved value. Avoid writing settings.json if btx.conf value
     // doesn't need to be overridden.
     if (cur_value.write() != new_value.write()) {
         // Call UpdateRwSetting() instead of setOption() to avoid setting
@@ -946,6 +934,9 @@ bool OptionsModel::setOption(OptionID option, const QVariant& value, const std::
         const std::string newvalue_str = value.toString().toStdString();
         const OutputType oldvalue = ParseOutputType(gArgs.GetArg("-addresstype", "")).value_or(wallet::DEFAULT_ADDRESS_TYPE);
         const OutputType newvalue = ParseOutputType(newvalue_str).value_or(oldvalue);
+        if (newvalue != OutputType::P2MR) {
+            break;
+        }
         if (newvalue != oldvalue) {
             gArgs.ModifyRWConfigFile("addresstype", newvalue_str);
             gArgs.ForceSetArg("-addresstype", newvalue_str);

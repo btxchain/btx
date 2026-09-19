@@ -23,7 +23,7 @@ public:
     virtual State validate(QString &input, int &pos) const override;
 };
 
-/** Bitcoin address widget validator, checks for a valid bitcoin address.
+/** BTX address widget validator, checks for a valid BTX address.
  */
 class BitcoinAddressCheckValidator : public BitcoinAddressEntryValidator
 {

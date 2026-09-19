@@ -1,0 +1,19 @@
+{
+  "core": {
+    "version": 1,
+    "network": "REGTEST",
+    "package_type": "MODEL",
+    "label": "Synthetic unsigned model fixture",
+    "resources": [
+      {
+        "kind": "MODEL",
+        "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "size_bytes": "4096"
+      }
+    ],
+    "economy_refs": [],
+    "source_hints": []
+  },
+  "observations": [],
+  "signatures": []
+}

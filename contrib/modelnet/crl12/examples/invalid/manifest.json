@@ -1,0 +1,62 @@
+[
+  {
+    "file": "unknown-brand-role.json",
+    "type": "ProviderRoleManifestV1_2",
+    "expected": "enum"
+  },
+  {
+    "file": "unknown-field.json",
+    "type": "ServiceBindingV1_2",
+    "expected": "additionalProperties"
+  },
+  {
+    "file": "float-quantity.json",
+    "type": "PositionObservationV1_2",
+    "expected": "type"
+  },
+  {
+    "file": "leading-zero.json",
+    "type": "PositionObservationV1_2",
+    "expected": "pattern"
+  },
+  {
+    "file": "wrong-schema-revision.json",
+    "type": "PortfolioInstructionV1_2",
+    "expected": "const"
+  },
+  {
+    "file": "arbitrary-execution.json",
+    "type": "PortfolioInstructionV1_2",
+    "expected": "enum"
+  },
+  {
+    "file": "invalid-digest.json",
+    "type": "InstitutionalAssetRecordV1_2",
+    "expected": "pattern"
+  },
+  {
+    "file": "money-exponent.json",
+    "type": "ValuationObservationV1_2",
+    "expected": "maximum"
+  },
+  {
+    "file": "negative-zero-amount.json",
+    "type": "ValuationObservationV1_2",
+    "expected": "pattern"
+  },
+  {
+    "file": "fabricated-global-score.json",
+    "type": "MetricDefinitionV1_2",
+    "expected": "enum"
+  },
+  {
+    "file": "unbounded-coverage.json",
+    "type": "ExposureLinkV1_2",
+    "expected": "maximum"
+  },
+  {
+    "file": "private-shell-handoff.json",
+    "type": "ServiceBindingV1_2",
+    "expected": "additionalProperties"
+  }
+]

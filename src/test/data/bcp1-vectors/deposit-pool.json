@@ -1,0 +1,23 @@
+{
+  "id": "bcp1-deposit-pool-v1",
+  "synthetic": true,
+  "warning": "TEST KEY MATERIAL ONLY. Addresses and pubkeys are filled by native tests from derivation.json.",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "note": "Watch-only importdepositpool entries. branch 0 = deposit. No private keys, seeds, or xprv.",
+  "entries": [
+    {
+      "index": 0,
+      "branch": 0,
+      "path": "m/87h/0h/0h/0/0",
+      "algo": "ML-DSA-44",
+      "label": "deposit/0"
+    },
+    {
+      "index": 1,
+      "branch": 0,
+      "path": "m/87h/0h/0h/0/1",
+      "algo": "ML-DSA-44",
+      "label": "deposit/1"
+    }
+  ]
+}

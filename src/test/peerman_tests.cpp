@@ -4686,7 +4686,8 @@ BOOST_AUTO_TEST_CASE(encdr_pending_cap_retains_followed_chain_body)
     BOOST_CHECK_EQUAL(indexed->nStatus & BLOCK_HAVE_DATA, 0);
 
     // Skip-fetch: the retained body must not produce an unbounded getdata
-    // storm while the cap stays exhausted.
+    // storm while the cap stays exhausted. Issue #163: idle catch-up must
+    // not re-GETDATA a hash the deferred/retained store already holds.
     connman.FlushSendBuffer(peer);
     for (int i = 0; i < 5; ++i) {
         BOOST_CHECK(peerman.SendMessages(&peer));
@@ -4986,6 +4987,8 @@ BOOST_AUTO_TEST_CASE(linear_tip_child_replays_when_authenticated_work_lags)
     ActivateRcAtTip(consensus, *tip);
     // Production deadlock: one-job pending cap. Unthrottle the 1/min
     // rate windows so a budget miss cannot masquerade as the lane bug.
+    // Issue #163: mainnet stays at nMatMulRCMaxPendingVerifications{1};
+    // this test forces that same cap (regtest defaults to uint32 max).
     consensus.nMatMulRCMaxPendingVerifications = 1;
     consensus.nMatMulRCPeerVerifyBudgetPerMin = 16;
     consensus.nMatMulRCGlobalVerifyBudgetPerMin = 16;

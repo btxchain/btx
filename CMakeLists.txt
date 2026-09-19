@@ -5,6 +5,12 @@
 # Ubuntu 22.04 LTS Jammy Jellyfish, https://wiki.ubuntu.com/Releases, EOSS in June 2027:
 #  - CMake 3.22.1, https://packages.ubuntu.com/jammy/cmake
 #
+# That is the *source-build* baseline (GCC 11.1+; see README "Building from
+# Source"). The published *-x86_64-linux-gnu*.tar.gz archives for v0.34.8-rc1
+# are linked against GLIBC_2.38 / GLIBCXX_3.4.32 and need Ubuntu 24.04 or
+# Debian 13; Ubuntu 22.04 and Debian 12 cannot load them. See
+# doc/linux-release-builds.md (issue 169).
+#
 # Centos Stream 9, https://www.centos.org/cl-vs-cs/#end-of-life, EOL in May 2027:
 #  - CMake 3.26.5, https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/Packages/
 cmake_minimum_required(VERSION 3.22)
@@ -29,9 +35,9 @@ get_directory_property(precious_variables CACHE_VARIABLES)
 set(CLIENT_NAME "BTX")
 set(CLIENT_VERSION_MAJOR 0)
 set(CLIENT_VERSION_MINOR 34)
-set(CLIENT_VERSION_BUILD 7)
-set(CLIENT_VERSION_RC 0)
-set(CLIENT_VERSION_IS_RELEASE "true")
+set(CLIENT_VERSION_BUILD 8)
+set(CLIENT_VERSION_RC 3)
+set(CLIENT_VERSION_IS_RELEASE "false")
 set(COPYRIGHT_YEAR "2026")
 
 set(CLIENT_VERSION_SUFFIX "")

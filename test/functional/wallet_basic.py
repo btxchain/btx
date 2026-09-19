@@ -67,14 +67,10 @@ class WalletTest(BitcoinTestFramework):
         self.nodes[1].sendtoaddress(addr, 10)
         self.sync_mempools(self.nodes[0:2])
 
-        self.log.info("Test 'importaddress' on a blank, private keys disabled, wallet with no descriptors support")
+        self.log.info("Test 'importaddress' refuses secp ingest and keeps P2MR watch-only")
         self.nodes[0].createwallet(wallet_name="watch-only-legacy", disable_private_keys=False, descriptors=False, blank=True)
         wallet_watch_only = self.nodes[0].get_wallet_rpc("watch-only-legacy")
-        wallet_watch_only.importaddress(addr)
-        assert_equal(wallet_watch_only.getaddressinfo(addr)['ismine'], False)
-        assert_equal(wallet_watch_only.getaddressinfo(addr)['iswatchonly'], True)
-        assert_equal(wallet_watch_only.getaddressinfo(addr)['solvable'], False)
-        assert_equal(wallet_watch_only.getbalances()["watchonly"]['untrusted_pending'], 10)
+        assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", wallet_watch_only.importaddress, "mpLQjfK79b7CCV4VMJWEWAj5Mpx8Up5zxB")
         self.nodes[0].unloadwallet("watch-only-legacy")
 
     def run_test(self):
@@ -458,12 +454,12 @@ class WalletTest(BitcoinTestFramework):
 
         if not self.options.descriptors:
 
-            # This will raise an exception for the invalid private key format
-            assert_raises_rpc_error(-5, "Invalid private key encoding", self.nodes[0].importprivkey, "invalid")
+            # This will raise for classical WIF ingest on BTX
+            assert_raises_rpc_error(-8, "importprivkey is disabled", self.nodes[0].importprivkey, "invalid")
 
-            # This will raise an exception for importing an address with the PS2H flag
-            temp_address = self.nodes[1].getnewaddress("", "p2sh-segwit")
-            assert_raises_rpc_error(-5, "Cannot use the p2sh flag with an address - use a script instead", self.nodes[0].importaddress, temp_address, "label", False, True)
+            # This will raise for secp ingest, including p2sh-flagged addresses
+            temp_address = self.nodes[1].getnewaddress()
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", self.nodes[0].importaddress, "mpLQjfK79b7CCV4VMJWEWAj5Mpx8Up5zxB", "label", False, True)
 
             # This will raise an exception for attempting to dump the private key of an address you do not own
             assert_raises_rpc_error(-3, "Address does not refer to a key", self.nodes[0].dumpprivkey, temp_address)
@@ -477,17 +473,15 @@ class WalletTest(BitcoinTestFramework):
             # This will raise an exception for importing an invalid address
             assert_raises_rpc_error(-5, "Invalid Bitcoin address or script", self.nodes[0].importaddress, "invalid")
 
-            # This will raise an exception for attempting to import a pubkey that isn't in hex
-            assert_raises_rpc_error(-5, 'Pubkey "not hex" must be a hex string', self.nodes[0].importpubkey, "not hex")
-
-            # This will raise exceptions for importing a pubkeys with invalid length / invalid coordinates
+            # This will raise for classical secp pubkey ingest
+            assert_raises_rpc_error(-8, "importpubkey is disabled", self.nodes[0].importpubkey, "not hex")
             too_short_pubkey = "5361746f736869204e616b616d6f746f"
-            assert_raises_rpc_error(-5, f'Pubkey "{too_short_pubkey}" must have a length of either 33 or 65 bytes', self.nodes[0].importpubkey, too_short_pubkey)
+            assert_raises_rpc_error(-8, "importpubkey is disabled", self.nodes[0].importpubkey, too_short_pubkey)
             not_on_curve_pubkey = bytes([4] + [0]*64).hex()  # pubkey with coordinates (0,0) is not on curve
-            assert_raises_rpc_error(-5, f'Pubkey "{not_on_curve_pubkey}" must be cryptographically valid', self.nodes[0].importpubkey, not_on_curve_pubkey)
+            assert_raises_rpc_error(-8, "importpubkey is disabled", self.nodes[0].importpubkey, not_on_curve_pubkey)
 
-            # Bech32m addresses cannot be imported into a legacy wallet
-            assert_raises_rpc_error(-5, "Bech32m addresses cannot be imported into legacy wallets", self.nodes[0].importaddress, "bcrt1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqc8gma6")
+            # Taproot/Bech32m is classical secp, not P2MR
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", self.nodes[0].importaddress, "bcrt1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqc8gma6")
 
             # Import address and private key to check correct behavior of spendable unspents
             # 1. Send some coins to generate new UTXO
@@ -555,25 +549,10 @@ class WalletTest(BitcoinTestFramework):
                 assert_raises_rpc_error(-8, 'Invalid estimate_mode parameter, must be one of: "unset", "economical", "conservative"',
                     self.nodes[2].sendtoaddress, address=address, amount=1, conf_target=target, estimate_mode=mode)
 
-            # 2. Import address from node2 to node1
-            self.nodes[1].importaddress(address_to_import)
-
-            # 3. Validate that the imported address is watch-only on node1
-            assert self.nodes[1].getaddressinfo(address_to_import)["iswatchonly"]
-
-            # 4. Check that the unspents after import are not spendable
-            assert_array_result(self.nodes[1].listunspent(),
-                                {"address": address_to_import},
-                                {"spendable": False})
-
-            # 5. Import private key of the previously imported address on node1
+            # 2. Classical address/WIF ingest is disabled
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", self.nodes[1].importaddress, address_to_import)
             priv_key = self.nodes[2].dumpprivkey(address_to_import)
-            self.nodes[1].importprivkey(priv_key)
-
-            # 6. Check that the unspents are now spendable on node1
-            assert_array_result(self.nodes[1].listunspent(),
-                                {"address": address_to_import},
-                                {"spendable": True})
+            assert_raises_rpc_error(-8, "importprivkey is disabled", self.nodes[1].importprivkey, priv_key)
 
         # Test importaddress on a blank, private keys disabled, legacy wallet with no descriptors support
         self.test_legacy_importaddress()

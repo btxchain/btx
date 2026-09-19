@@ -1,0 +1,1057 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LocalCapabilityGrant",
+  "$defs": {
+    "ResourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "MODEL",
+            "ARTIFACT",
+            "ADAPTER",
+            "TOKENIZER",
+            "PROJECTOR",
+            "RUNTIME_REPRESENTATION",
+            "EVIDENCE"
+          ]
+        },
+        "digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        }
+      },
+      "required": [
+        "kind",
+        "digest48"
+      ]
+    },
+    "MemoryLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host_physical_bytes": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "host_pinned_bytes": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "device_bytes": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_.:-]{1,96}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 20
+          },
+          "maxProperties": 1024
+        },
+        "speculative_bytes": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "max_sessions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      },
+      "required": [
+        "host_physical_bytes",
+        "host_pinned_bytes",
+        "device_bytes",
+        "speculative_bytes",
+        "max_sessions"
+      ]
+    },
+    "RuntimeFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runtime_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "build_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "adapter_abi": {
+          "const": "btx-runtime/1"
+        },
+        "backend": {
+          "enum": [
+            "CPU",
+            "CUDA",
+            "ROCM",
+            "METAL"
+          ]
+        },
+        "device_arch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "driver_abi": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "layout_digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "geometry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tp": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            },
+            "pp": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            },
+            "ep": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            }
+          },
+          "required": [
+            "tp",
+            "pp",
+            "ep"
+          ]
+        }
+      },
+      "required": [
+        "runtime_id",
+        "build_sha256",
+        "adapter_abi",
+        "backend",
+        "device_arch",
+        "driver_abi",
+        "layout_digest48",
+        "geometry"
+      ]
+    },
+    "RecipeComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "resource": {
+          "$ref": "#/$defs/ResourceRef"
+        },
+        "role": {
+          "enum": [
+            "BASE",
+            "ADAPTER",
+            "TOKENIZER",
+            "PROJECTOR",
+            "AUXILIARY"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "base_binding": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "resource",
+        "role",
+        "required",
+        "base_binding"
+      ]
+    },
+    "CapabilityRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "recipe_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "recipe_kind": {
+          "enum": [
+            "FULL_MODEL",
+            "BASE_WITH_ADAPTERS",
+            "PIPELINE",
+            "EXPERT_RESIDENT_MODEL"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecipeComponent"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        },
+        "runtime_profiles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "readiness_contract": {
+          "enum": [
+            "FULL_REQUIRED_SET",
+            "VERIFIED_DEMAND_PAGING"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "version",
+        "recipe_id",
+        "recipe_kind",
+        "capabilities",
+        "components",
+        "runtime_profiles",
+        "readiness_contract",
+        "evidence_refs"
+      ]
+    },
+    "LocalCapabilityGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "caller_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "allowed_recipe_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "allowed_effects": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "ACQUIRE",
+              "MATERIALIZE",
+              "LOAD",
+              "WARM",
+              "RUN_SMOKE",
+              "PREFETCH",
+              "SLEEP",
+              "WAKE",
+              "RELEASE"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "memory": {
+          "$ref": "#/$defs/MemoryLimits"
+        },
+        "network_byte_ceiling": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "external_origins": {
+          "type": "boolean"
+        },
+        "private_fabric": {
+          "type": "boolean"
+        },
+        "private_state": {
+          "enum": [
+            "DISABLED",
+            "LOCAL",
+            "ORGANIZATION"
+          ]
+        },
+        "expires_at_ms": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "revocation_counter": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "wallet_spend_atoms": {
+          "const": "0"
+        }
+      },
+      "required": [
+        "version",
+        "grant_id",
+        "caller_id",
+        "allowed_recipe_ids",
+        "allowed_effects",
+        "memory",
+        "network_byte_ceiling",
+        "external_origins",
+        "private_fabric",
+        "private_state",
+        "expires_at_ms",
+        "revocation_counter",
+        "wallet_spend_atoms"
+      ]
+    },
+    "CapabilityPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "plan_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "plan_digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "recipe_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "lock_digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeFingerprint"
+        },
+        "readiness_target": {
+          "enum": [
+            "VERIFIED_FILES",
+            "RUNTIME_LOADED",
+            "RUNTIME_READY",
+            "FIRST_USEFUL_RESULT"
+          ]
+        },
+        "required_effects": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "peak_reservation": {
+          "$ref": "#/$defs/MemoryLimits"
+        },
+        "missing_bytes": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "estimated_ttc_ms": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "lower": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "maxLength": 20
+            },
+            "upper": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "maxLength": 20
+            },
+            "sample_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "basis": {
+              "enum": [
+                "MEASURED",
+                "CALIBRATED_ESTIMATE",
+                "ARITHMETIC_LOWER_BOUND",
+                "UNKNOWN"
+              ]
+            }
+          },
+          "required": [
+            "lower",
+            "upper",
+            "sample_count",
+            "basis"
+          ]
+        },
+        "source_policy": {
+          "enum": [
+            "NATIVE_ONLY",
+            "EXTERNAL_ALLOWED",
+            "OFFLINE"
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "plan_id",
+        "plan_digest48",
+        "recipe_id",
+        "lock_digest48",
+        "runtime",
+        "readiness_target",
+        "required_effects",
+        "peak_reservation",
+        "missing_bytes",
+        "estimated_ttc_ms",
+        "source_policy"
+      ]
+    },
+    "CapabilityLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "package_core_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "recipe": {
+          "$ref": "#/$defs/CapabilityRecipe"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeFingerprint"
+        },
+        "policy_profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "required_features": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "version",
+        "package_core_id",
+        "recipe",
+        "runtime",
+        "policy_profile",
+        "required_features"
+      ]
+    },
+    "TensorRangeMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "manifest_digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "parser_profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "file_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1023
+              },
+              "tensor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              },
+              "offset": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "maxLength": 20
+              },
+              "length": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "maxLength": 20
+              },
+              "dtype": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              },
+              "shape": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "maxLength": 20
+                },
+                "minItems": 0,
+                "maxItems": 16
+              },
+              "piece_first": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "maxLength": 20
+              },
+              "piece_last": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "maxLength": 20
+              },
+              "expert_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "file_index",
+              "tensor",
+              "offset",
+              "length",
+              "dtype",
+              "shape",
+              "piece_first",
+              "piece_last",
+              "expert_id"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 1000000
+        }
+      },
+      "required": [
+        "version",
+        "manifest_digest48",
+        "parser_profile",
+        "entries"
+      ]
+    },
+    "LeaseRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "recipe_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "scope": {
+          "enum": [
+            "LOCAL_USER",
+            "ORGANIZATION"
+          ]
+        },
+        "state": {
+          "enum": [
+            "RESERVED",
+            "ALLOCATED",
+            "POPULATING",
+            "VERIFIED",
+            "ACTIVE",
+            "RETIRING",
+            "QUIESCENT",
+            "RELEASED",
+            "QUARANTINED"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "LOAD",
+            "EXECUTE",
+            "TRANSFER",
+            "PREFETCH",
+            "COMPILE",
+            "PRIVATE_STATE"
+          ]
+        },
+        "bytes_reserved": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "logical_refs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "physical_pending": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "expires_at_ms": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        }
+      },
+      "required": [
+        "version",
+        "lease_id",
+        "generation",
+        "recipe_id",
+        "scope",
+        "state",
+        "kind",
+        "bytes_reserved",
+        "logical_refs",
+        "physical_pending",
+        "expires_at_ms"
+      ]
+    },
+    "PrefetchHint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "recipe_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "probability_ppm": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "deadline_ms": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "max_speculative_bytes": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "desired_tier": {
+          "enum": [
+            "LOCAL_FILE",
+            "HOST_PAGEABLE",
+            "HOST_PINNED",
+            "DEVICE",
+            "CXL_NUMA"
+          ]
+        },
+        "grant_ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "required": [
+        "version",
+        "recipe_ids",
+        "probability_ppm",
+        "deadline_ms",
+        "max_speculative_bytes",
+        "desired_tier",
+        "grant_ref"
+      ]
+    },
+    "RuntimeRepresentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "source_recipe_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "representation_digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "tensor_manifest_digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeFingerprint"
+        },
+        "scope": {
+          "enum": [
+            "LOCAL_USER",
+            "ORGANIZATION"
+          ]
+        },
+        "verification_method": {
+          "enum": [
+            "LOCAL_BUILD",
+            "EXACT_RECOMPUTE",
+            "TRUSTED_BUILD_ATTESTATION"
+          ]
+        },
+        "builder_policy_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        }
+      },
+      "required": [
+        "version",
+        "source_recipe_id",
+        "representation_digest48",
+        "tensor_manifest_digest48",
+        "runtime",
+        "scope",
+        "verification_method",
+        "builder_policy_ref"
+      ]
+    },
+    "PrivatePrefixDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "scope": {
+          "enum": [
+            "LOCAL_USER",
+            "ORGANIZATION"
+          ]
+        },
+        "tenant_key_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "keyed_prefix_digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "recipe_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "runtime_fingerprint_digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "configuration_digest48": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "token_count": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "complete_layers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "expected_layers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "expires_at_ms": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        },
+        "persistent_encrypted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "version",
+        "scope",
+        "tenant_key_id",
+        "keyed_prefix_digest48",
+        "recipe_id",
+        "runtime_fingerprint_digest48",
+        "configuration_digest48",
+        "token_count",
+        "complete_layers",
+        "expected_layers",
+        "expires_at_ms",
+        "persistent_encrypted"
+      ]
+    },
+    "ReadyReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "job_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "recipe_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "readiness_target": {
+          "enum": [
+            "VERIFIED_FILES",
+            "RUNTIME_LOADED",
+            "RUNTIME_READY",
+            "FIRST_USEFUL_RESULT"
+          ]
+        },
+        "achieved": {
+          "type": "boolean"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeFingerprint"
+        },
+        "smoke": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "performed": {
+              "type": "boolean"
+            },
+            "passed": {
+              "type": "boolean"
+            },
+            "profile_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            }
+          },
+          "required": [
+            "performed",
+            "passed",
+            "profile_ref"
+          ]
+        },
+        "trace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "expires_at_ms": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 20
+        }
+      },
+      "required": [
+        "version",
+        "job_id",
+        "lease_id",
+        "generation",
+        "recipe_id",
+        "readiness_target",
+        "achieved",
+        "runtime",
+        "smoke",
+        "trace_id",
+        "expires_at_ms"
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "grant_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "caller_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "allowed_recipe_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{96}$"
+      },
+      "minItems": 1,
+      "maxItems": 64
+    },
+    "allowed_effects": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "ACQUIRE",
+          "MATERIALIZE",
+          "LOAD",
+          "WARM",
+          "RUN_SMOKE",
+          "PREFETCH",
+          "SLEEP",
+          "WAKE",
+          "RELEASE"
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 16
+    },
+    "memory": {
+      "$ref": "#/$defs/MemoryLimits"
+    },
+    "network_byte_ceiling": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "maxLength": 20
+    },
+    "external_origins": {
+      "type": "boolean"
+    },
+    "private_fabric": {
+      "type": "boolean"
+    },
+    "private_state": {
+      "enum": [
+        "DISABLED",
+        "LOCAL",
+        "ORGANIZATION"
+      ]
+    },
+    "expires_at_ms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "maxLength": 20
+    },
+    "revocation_counter": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "maxLength": 20
+    },
+    "wallet_spend_atoms": {
+      "const": "0"
+    }
+  },
+  "required": [
+    "version",
+    "grant_id",
+    "caller_id",
+    "allowed_recipe_ids",
+    "allowed_effects",
+    "memory",
+    "network_byte_ceiling",
+    "external_origins",
+    "private_fabric",
+    "private_state",
+    "expires_at_ms",
+    "revocation_counter",
+    "wallet_spend_atoms"
+  ]
+}

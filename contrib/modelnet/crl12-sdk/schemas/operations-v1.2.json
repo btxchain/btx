@@ -1,0 +1,437 @@
+{
+  "revision": "1.2",
+  "new_operations": 43,
+  "preserved_contract_operations": 84,
+  "operations": [
+    {
+      "operation_id": "getLayerExtension",
+      "method": "GET",
+      "path": "/btx/hcp/v1/extensions/cognitive-reserve/v1.2",
+      "scope": "catalog:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "LayerExtensionProfileV1_2Envelope",
+      "detail": "Read the pinned extension. No support inferred from a provider name."
+    },
+    {
+      "operation_id": "publishProviderRoles",
+      "method": "POST",
+      "path": "/btx/hcp/v1/layer/roles",
+      "scope": "layer:admin",
+      "effect": "RECORD",
+      "request_schema": "ProviderRoleManifestV1_2",
+      "response_schema": "ProviderRoleManifestV1_2Envelope",
+      "detail": "Provider administration only; endpoints must map to registered supported operations."
+    },
+    {
+      "operation_id": "getProviderRoles",
+      "method": "GET",
+      "path": "/btx/hcp/v1/layer/roles/{id}",
+      "scope": "catalog:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ProviderRoleManifestV1_2Envelope",
+      "detail": "Read exact signed role manifest by ID; expired claims remain inspectable, not usable for new effects."
+    },
+    {
+      "operation_id": "listProviderRoles",
+      "method": "GET",
+      "path": "/btx/hcp/v1/layer/roles",
+      "scope": "catalog:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "Page",
+      "detail": "Local configured directory view only; no canonical global provider registry."
+    },
+    {
+      "operation_id": "createServiceBinding",
+      "method": "POST",
+      "path": "/btx/hcp/v1/layer/bindings",
+      "scope": "bindings:admin",
+      "effect": "BIND",
+      "request_schema": "ServiceBindingV1_2",
+      "response_schema": "ServiceBindingV1_2Envelope",
+      "detail": "Propose or activate only after owner policy, remote identity and allowed role/effects agree."
+    },
+    {
+      "operation_id": "getServiceBinding",
+      "method": "GET",
+      "path": "/btx/hcp/v1/layer/bindings/{id}",
+      "scope": "bindings:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ServiceBindingV1_2Envelope",
+      "detail": "Return caller-scoped binding, without credentials."
+    },
+    {
+      "operation_id": "listServiceBindings",
+      "method": "GET",
+      "path": "/btx/hcp/v1/layer/bindings",
+      "scope": "bindings:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "Page",
+      "detail": "Snapshot-bound listing of the entity bindings."
+    },
+    {
+      "operation_id": "revokeServiceBinding",
+      "method": "POST",
+      "path": "/btx/hcp/v1/layer/bindings/{id}/revoke",
+      "scope": "bindings:admin",
+      "effect": "BIND",
+      "request_schema": "BindingRevokeRequest",
+      "response_schema": "ServiceBindingV1_2Envelope",
+      "detail": "Stop new effects; retain reconciliation access to already accepted financial actions."
+    },
+    {
+      "operation_id": "validateAdapterCapabilities",
+      "method": "POST",
+      "path": "/btx/hcp/v1/layer/adapters/validate",
+      "scope": "layer:admin",
+      "effect": "RECORD",
+      "request_schema": "AdapterValidateRequest",
+      "response_schema": "Job",
+      "detail": "Bounded test job; requires configured test environment and never probes arbitrary URLs."
+    },
+    {
+      "operation_id": "getAdapterCapabilityReport",
+      "method": "GET",
+      "path": "/btx/hcp/v1/layer/adapters/{id}",
+      "scope": "bindings:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "AdapterCapabilityManifestV1_2Envelope",
+      "detail": "Actual supported interface and evidence, not a brand-to-feature mapping."
+    },
+    {
+      "operation_id": "registerInstitutionalAsset",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/assets",
+      "scope": "assets:write",
+      "effect": "RECORD",
+      "request_schema": "InstitutionalAssetRecordV1_2",
+      "response_schema": "InstitutionalAssetRecordV1_2Envelope",
+      "detail": "Register namespaced identity; collisions open a break rather than merging."
+    },
+    {
+      "operation_id": "getInstitutionalAsset",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/assets/{id}",
+      "scope": "assets:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "InstitutionalAssetRecordV1_2Envelope",
+      "detail": "Scoped exact asset; a record does not establish title or a tradable instrument."
+    },
+    {
+      "operation_id": "listInstitutionalAssets",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/assets",
+      "scope": "assets:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "Page",
+      "detail": "List supported financial and operational categories separately."
+    },
+    {
+      "operation_id": "recordAssetRights",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/assets/{id}/rights",
+      "scope": "assets:write",
+      "effect": "RECORD",
+      "request_schema": "RightsStatementV1_2",
+      "response_schema": "RightsStatementV1_2Envelope",
+      "detail": "Rights assertion bound to issuer and evidence; no change to native ownership."
+    },
+    {
+      "operation_id": "ingestPositionBatch",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/positions/batches",
+      "scope": "positions:write",
+      "effect": "RECORD",
+      "request_schema": "PositionBatchRequest",
+      "response_schema": "Job",
+      "detail": "Validate entire bounded batch and source sequence; atomically stage/apply observations."
+    },
+    {
+      "operation_id": "getPositionObservation",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/positions/{id}",
+      "scope": "positions:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "PositionObservationV1_2Envelope",
+      "detail": "Return effective/recorded times, source authority and supersession."
+    },
+    {
+      "operation_id": "getPositionSnapshot",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/positions",
+      "scope": "positions:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "Page",
+      "detail": "Requires as_of and observed_cutoff; continuation pinned to both."
+    },
+    {
+      "operation_id": "recordValuationObservation",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/valuations",
+      "scope": "valuations:write",
+      "effect": "RECORD",
+      "request_schema": "ValuationObservationV1_2",
+      "response_schema": "ValuationObservationV1_2Envelope",
+      "detail": "A source mark is distinct from accepted accounting/metric policy."
+    },
+    {
+      "operation_id": "getValuationObservation",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/valuations/{id}",
+      "scope": "valuations:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ValuationObservationV1_2Envelope",
+      "detail": "Preserve stale/unavailable state; no zero substitution."
+    },
+    {
+      "operation_id": "recordExposureLinks",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/exposures",
+      "scope": "exposures:write",
+      "effect": "RECORD",
+      "request_schema": "ExposureLinkV1_2",
+      "response_schema": "ExposureLinkV1_2Envelope",
+      "detail": "Typed financial lookthrough or operational dependencies; bounded graph validation."
+    },
+    {
+      "operation_id": "listExposureLinks",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/exposures",
+      "scope": "exposures:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "Page",
+      "detail": "Snapshot-filtered graph edges; financial and operational views stay distinct."
+    },
+    {
+      "operation_id": "defineInstitutionalMetric",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/metrics",
+      "scope": "metrics:admin",
+      "effect": "RECORD",
+      "request_schema": "MetricDefinitionV1_2",
+      "response_schema": "MetricDefinitionV1_2Envelope",
+      "detail": "Versioned policy configuration, not arbitrary formula code."
+    },
+    {
+      "operation_id": "listInstitutionalMetrics",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/metrics",
+      "scope": "metrics:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "Page",
+      "detail": "Display definitions, roles and eligibility beside each reported total."
+    },
+    {
+      "operation_id": "createPortfolioProjection",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/projections",
+      "scope": "projections:create",
+      "effect": "RECORD",
+      "request_schema": "ProjectionRequest",
+      "response_schema": "Job",
+      "detail": "Asynchronous consistent snapshot; unresolved inputs produce partial/unavailable metrics."
+    },
+    {
+      "operation_id": "getPortfolioProjection",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/projections/{id}",
+      "scope": "projections:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "PortfolioProjectionV1_2Envelope",
+      "detail": "Separate financial totals, commitments and operational capability inventory."
+    },
+    {
+      "operation_id": "createInstitutionalExport",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/exports",
+      "scope": "exports:create",
+      "effect": "EXPORT",
+      "request_schema": "ExportRequest",
+      "response_schema": "Job",
+      "detail": "Build redacted snapshot package under exact mapping and policy."
+    },
+    {
+      "operation_id": "getInstitutionalExport",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/exports/{id}",
+      "scope": "exports:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ExportManifestV1_2Envelope",
+      "detail": "Manifest only; original financial and package envelopes remain exact."
+    },
+    {
+      "operation_id": "downloadInstitutionalExportChunk",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/exports/{id}/chunks/{chunk_id}",
+      "scope": "exports:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "BINARY",
+      "detail": "Authenticated chunk fetch; tenant-bound endpoint, no public bearer URL."
+    },
+    {
+      "operation_id": "validateInstitutionalImport",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/imports/validate",
+      "scope": "imports:write",
+      "effect": "RECORD",
+      "request_schema": "ImportValidateRequest",
+      "response_schema": "Job",
+      "detail": "Staged chunks, exact digests and mapping checks. No automatic ledger or financial action."
+    },
+    {
+      "operation_id": "commitInstitutionalImport",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/imports/{id}/commit",
+      "scope": "imports:write",
+      "effect": "RECORD",
+      "request_schema": "ImportCommitRequest",
+      "response_schema": "InteroperabilityReceiptV1_2Envelope",
+      "detail": "CAS over manifest and validation; publish read projection only, no custody mutation."
+    },
+    {
+      "operation_id": "getInstitutionalImport",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/imports/{id}",
+      "scope": "imports:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "InteroperabilityReceiptV1_2Envelope",
+      "detail": "Replayed identical import returns the same outcome."
+    },
+    {
+      "operation_id": "listReconciliationBreaks",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/breaks",
+      "scope": "reconciliation:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "Page",
+      "detail": "Prioritize by affected metric, scope and age; hidden error is not an empty position."
+    },
+    {
+      "operation_id": "getReconciliationBreak",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/breaks/{id}",
+      "scope": "reconciliation:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ReconciliationBreakV1_2Envelope",
+      "detail": "Source comparison, responsibility and evidence without secret material."
+    },
+    {
+      "operation_id": "resolveReconciliationBreak",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/breaks/{id}/resolve",
+      "scope": "reconciliation:write",
+      "effect": "RECORD",
+      "request_schema": "ResolveBreakRequest",
+      "response_schema": "ReconciliationBreakV1_2Envelope",
+      "detail": "Resolve by accepted new evidence; never overwrite the native ledger to clear the UI."
+    },
+    {
+      "operation_id": "preparePortfolioInstruction",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/instructions",
+      "scope": "capital:prepare",
+      "effect": "PLAN",
+      "request_schema": "InstructionRequest",
+      "response_schema": "PortfolioInstructionV1_2Envelope",
+      "detail": "Read portfolio intent into a bounded proposal, not a financial instruction already approved."
+    },
+    {
+      "operation_id": "getPortfolioInstruction",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/instructions/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "PortfolioInstructionV1_2Envelope",
+      "detail": "Immutable request and provenance; no token forwarding."
+    },
+    {
+      "operation_id": "translatePortfolioInstruction",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/instructions/{id}/translate",
+      "scope": "capital:prepare",
+      "effect": "TRANSLATE_TO_DRAFT",
+      "request_schema": "IdRequest",
+      "response_schema": "InteroperabilityReceiptV1_2Envelope",
+      "detail": "Create existing v1.1 CapitalPlan/AllocationPlan drafts; execution stays on executeAllocation after ordinary approvals."
+    },
+    {
+      "operation_id": "runInstitutionalScenario",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/scenarios",
+      "scope": "scenarios:create",
+      "effect": "RECORD",
+      "request_schema": "ScenarioRequest",
+      "response_schema": "Job",
+      "detail": "Deterministic bounded shocks, not unstated forecast or statistical VaR."
+    },
+    {
+      "operation_id": "getInstitutionalScenario",
+      "method": "GET",
+      "path": "/btx/hcp/v1/institutional/scenarios/{id}",
+      "scope": "scenarios:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ScenarioResultV1_2Envelope",
+      "detail": "Return financial change separately from operational impacts and unpriced exposures."
+    },
+    {
+      "operation_id": "getLayerConformance",
+      "method": "GET",
+      "path": "/btx/hcp/v1/layer/conformance/{id}",
+      "scope": "catalog:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ConformanceStatementV1_2Envelope",
+      "detail": "Per-role test scope and issuer; self-attestation is not centrally granted certification."
+    },
+    {
+      "operation_id": "getLayerJob",
+      "method": "GET",
+      "path": "/btx/hcp/v1/layer/jobs/{id}",
+      "scope": "jobs:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "Job",
+      "detail": "Owner-scoped durable job status; result_ref points to the typed resource getter. No poll URL from untrusted metadata."
+    },
+    {
+      "operation_id": "cancelLayerJob",
+      "method": "POST",
+      "path": "/btx/hcp/v1/layer/jobs/{id}/cancel",
+      "scope": "jobs:cancel",
+      "effect": "RECORD",
+      "request_schema": "IdRequest",
+      "response_schema": "Job",
+      "detail": "Cancel bounded projection/import/scenario work before commit or return the already committed result; no finance cancellation implied."
+    },
+    {
+      "operation_id": "stageInstitutionalImportChunk",
+      "method": "POST",
+      "path": "/btx/hcp/v1/institutional/imports/chunks",
+      "scope": "imports:write",
+      "effect": "RECORD",
+      "request_schema": "BINARY",
+      "response_schema": "StagedChunk",
+      "detail": "Stream an authenticated quota-bounded chunk, verify its declared hash, and return a tenant-owned opaque staged handle."
+    }
+  ]
+}

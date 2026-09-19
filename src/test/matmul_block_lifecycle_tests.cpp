@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <node/matmul_block_lifecycle.h>
+#include <node/matmul_verified_fork_parent.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -152,6 +153,15 @@ BOOST_AUTO_TEST_CASE(wake_retry_once_does_not_erase_cooldown)
     BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 30s + 90s).has_value());
     BOOST_CHECK(lifecycle.WakeRetryOnce(hash, Reason::TRUSTED_AUTHORITY, now + 30s + 90s));
     BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 30s + 90s).has_value());
+
+    // #146: off-chain ExactReplay parent is a third, independent reason.
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now + 30s + 90s));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 30s + 120s).has_value());
+    BOOST_CHECK(lifecycle.WakeRetryOnce(
+        hash, Reason::VERIFIED_FORK_PARENT, now + 30s + 120s));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 30s + 120s).has_value());
+    BOOST_CHECK(!lifecycle.WakeRetryOnce(
+        hash, Reason::VERIFIED_FORK_PARENT, now + 30s + 121s));
 }
 
 BOOST_AUTO_TEST_CASE(repeated_deferral_terminal_requeues)
@@ -574,6 +584,116 @@ BOOST_AUTO_TEST_CASE(per_source_caps_cannot_starve_other_netgroup)
     BOOST_CHECK(lifecycle.HasRetainedBody(attacker[4]));
     BOOST_CHECK(lifecycle.HasRetainedBody(attacker[5]));
     BOOST_CHECK_LE(lifecycle.RetainedCountForTest(), 8U);
+}
+
+BOOST_AUTO_TEST_CASE(verified_fork_parent_wake_gates)
+{
+    using node::AncestorPrefixExactReplayReady;
+    using node::AncestorPrefixStep;
+    using node::ShouldWakeRetainedChildForVerifiedForkParent;
+    using node::VerifiedForkParentWakeView;
+
+    const VerifiedForkParentWakeView allow{
+        .consensus_mode = true,
+        .strictly_heavier_competing = true,
+        .next_needed_is_priority = true,
+        .parent_off_active_chain = true,
+        .ancestor_prefix_ready = true,
+        .best_header_failed = false,
+        .branch_parked = false,
+        .processed_root_parked = false,
+    };
+    BOOST_CHECK(ShouldWakeRetainedChildForVerifiedForkParent(allow));
+
+    auto deny{allow};
+    deny.consensus_mode = false;
+    BOOST_CHECK(!ShouldWakeRetainedChildForVerifiedForkParent(deny));
+    deny = allow;
+    deny.strictly_heavier_competing = false;
+    BOOST_CHECK(!ShouldWakeRetainedChildForVerifiedForkParent(deny));
+    deny = allow;
+    deny.next_needed_is_priority = false;
+    BOOST_CHECK(!ShouldWakeRetainedChildForVerifiedForkParent(deny));
+    deny = allow;
+    deny.parent_off_active_chain = false;
+    BOOST_CHECK(!ShouldWakeRetainedChildForVerifiedForkParent(deny));
+    deny = allow;
+    deny.ancestor_prefix_ready = false;
+    BOOST_CHECK(!ShouldWakeRetainedChildForVerifiedForkParent(deny));
+    deny = allow;
+    deny.best_header_failed = true;
+    BOOST_CHECK(!ShouldWakeRetainedChildForVerifiedForkParent(deny));
+    deny = allow;
+    deny.branch_parked = true;
+    BOOST_CHECK(!ShouldWakeRetainedChildForVerifiedForkParent(deny));
+    deny = allow;
+    deny.processed_root_parked = true;
+    BOOST_CHECK(!ShouldWakeRetainedChildForVerifiedForkParent(deny));
+
+    const AncestorPrefixStep parent_then_fork[]{
+        {.on_active_chain = false,
+         .have_data = true,
+         .exact_replay = true,
+         .failed = false},
+        {.on_active_chain = true,
+         .have_data = true,
+         .exact_replay = true,
+         .failed = false},
+    };
+    BOOST_CHECK(AncestorPrefixExactReplayReady(parent_then_fork, 2));
+
+    AncestorPrefixStep missing_replay[]{
+        {.on_active_chain = false,
+         .have_data = true,
+         .exact_replay = false,
+         .failed = false},
+        {.on_active_chain = true,
+         .have_data = true,
+         .exact_replay = true,
+         .failed = false},
+    };
+    BOOST_CHECK(!AncestorPrefixExactReplayReady(missing_replay, 2));
+
+    AncestorPrefixStep failed_parent[]{
+        {.on_active_chain = false,
+         .have_data = true,
+         .exact_replay = true,
+         .failed = true},
+        {.on_active_chain = true,
+         .have_data = true,
+         .exact_replay = true,
+         .failed = false},
+    };
+    BOOST_CHECK(!AncestorPrefixExactReplayReady(failed_parent, 2));
+
+    AncestorPrefixStep parent_on_chain[]{
+        {.on_active_chain = true,
+         .have_data = true,
+         .exact_replay = true,
+         .failed = false},
+    };
+    BOOST_CHECK(!AncestorPrefixExactReplayReady(parent_on_chain, 1));
+    BOOST_CHECK(!AncestorPrefixExactReplayReady(nullptr, 0));
+}
+
+BOOST_AUTO_TEST_CASE(verified_fork_parent_pin_survives_eviction_pressure)
+{
+    node::MatMulBlockLifecycle lifecycle{2, 200, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 child{
+        uint256::FromHex(std::string(63, '0') + "a").value()};
+    const uint256 other{
+        uint256::FromHex(std::string(63, '0') + "b").value()};
+    const uint256 flood{
+        uint256::FromHex(std::string(63, '0') + "c").value()};
+    BOOST_REQUIRE(lifecycle.Retain(child, Body(10, 50, now), now));
+    BOOST_REQUIRE(lifecycle.Retain(other, Body(11, 50, now + 1s), now + 1s));
+    BOOST_REQUIRE(lifecycle.PinRetainedProgress(child));
+    BOOST_CHECK(lifecycle.IsRetainedPinProgress(child));
+    BOOST_REQUIRE(lifecycle.Retain(flood, Body(12, 50, now + 2s), now + 2s));
+    BOOST_CHECK(lifecycle.HasRetainedBody(child));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(other));
+    BOOST_CHECK(lifecycle.HasRetainedBody(flood));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -6,6 +6,7 @@
 
 #include <logging.h>
 #include <modelnet/helper.h>
+#include <modelnet/profile.h>
 #include <univalue.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
@@ -15,6 +16,7 @@
 #include <csignal>
 #include <cstring>
 #include <filesystem>
+#include <stdexcept>
 #include <system_error>
 #include <thread>
 
@@ -122,7 +124,43 @@ std::vector<std::string> BuildHelperArgv(const HelperLaunchConfig& cfg)
     if (cfg.auto_cap_bytes > 0) argv.push_back("-modelstorageautocap=" + std::to_string(cfg.auto_cap_bytes));
     if (cfg.reserve_bytes > 0) argv.push_back("-modelfreespacereserve=" + std::to_string(cfg.reserve_bytes));
     if (cfg.upload_bps > 0) argv.push_back("-modeluploadlimit=" + std::to_string(cfg.upload_bps));
+    if (!cfg.watch_dir.empty()) argv.push_back("-modelwatch=" + cfg.watch_dir);
+    if (cfg.relay) argv.push_back("-modelrelay");
+    if (cfg.host_mode == HostMode::AUTO) argv.push_back("-modelhost=auto");
+    else if (cfg.host_mode == HostMode::ON) argv.push_back("-modelhost=1");
     return argv;
+}
+
+void ApplyProfileToLaunchConfig(const ProfilePolicy& policy, HelperLaunchConfig& cfg)
+{
+    cfg.relay = policy.relay;
+    cfg.index = policy.index;
+    cfg.host_mode = policy.host_mode;
+    if (!policy.storage_arg.empty()) cfg.storage_arg = policy.storage_arg;
+    cfg.auto_cap_bytes = policy.auto_cap_bytes;
+    cfg.upload_bps = policy.upload_bps;
+    cfg.follow_peers = policy.follow_peers;
+    cfg.preserve_rare = policy.preserve_rare;
+    if (!policy.seed.empty()) cfg.seed = policy.seed;
+}
+
+void ApplyHelperNetworkInfo(HelperStatus& st, const UniValue& result)
+{
+    try {
+        if (result.exists("advertised_host")) {
+            const UniValue& v = result["advertised_host"];
+            if (v.isBool()) st.advertised_host = v.get_bool();
+            else if (v.isNum()) st.advertised_host = v.getInt<int>() != 0;
+        }
+        if (result.exists("public_host_reachable")) {
+            const UniValue& v = result["public_host_reachable"];
+            if (v.isBool()) st.public_host_reachable = v.get_bool();
+            else if (v.isNum()) st.public_host_reachable = v.getInt<int>() != 0;
+        }
+    } catch (const std::exception&) {
+        st.advertised_host = false;
+        st.public_host_reachable = false;
+    }
 }
 
 bool ArgvContainsWalletMaterial(const std::vector<std::string>& argv)
@@ -194,6 +232,37 @@ HelperStatus HelperSupervisor::Snapshot() const
 {
     std::lock_guard<std::mutex> lock(m_mu);
     return m_st;
+}
+
+void HelperSupervisor::ClearHostBit()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        m_st.advertised_host = false;
+        m_st.public_host_reachable = false;
+    }
+    SetNodeModelHostAdvertised(false);
+}
+
+void HelperSupervisor::PollAndSyncHostBit()
+{
+    UniValue result;
+    std::string err;
+    UniValue params(UniValue::VARR);
+    HelperStatus info;
+    const bool ok = CallUnixRpc(m_cfg.rpc_socket, "getmodelnetworkinfo", params, result, err);
+    if (ok) ApplyHelperNetworkInfo(info, result);
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        if (ok) {
+            m_st.advertised_host = info.advertised_host;
+            m_st.public_host_reachable = info.public_host_reachable;
+        } else {
+            m_st.advertised_host = false;
+            m_st.public_host_reachable = false;
+        }
+    }
+    SetNodeModelHostAdvertised(ok && info.advertised_host);
 }
 
 bool HelperSupervisor::WaitReady(int timeout_ms, std::string& err)
@@ -316,18 +385,26 @@ void HelperSupervisor::RequestStopOwned()
 void HelperSupervisor::Loop()
 {
     int fails = 0;
+    int poll_div = 0;
     while (!m_stop.load()) {
         if (m_shutdown && m_shutdown()) break;
         if (m_cfg.external_socket) {
             std::string err;
-            const bool ok = SocketReady(m_cfg.rpc_socket, err);
+            UniValue result;
+            UniValue params(UniValue::VARR);
+            const bool ok = CallUnixRpc(m_cfg.rpc_socket, "getmodelnetworkinfo", params, result, err);
+            HelperStatus info;
+            if (ok) ApplyHelperNetworkInfo(info, result);
             {
                 std::lock_guard<std::mutex> lock(m_mu);
                 m_st.managed_by_btxd = false;
                 m_st.pid = -1;
                 m_st.state = ok ? HelperState::READY : HelperState::DEGRADED;
                 m_st.error = ok ? std::string{} : err;
+                m_st.advertised_host = ok && info.advertised_host;
+                m_st.public_host_reachable = ok && info.public_host_reachable;
             }
+            SetNodeModelHostAdvertised(ok && info.advertised_host);
             for (int i = 0; i < 20 && !m_stop.load(); ++i) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
@@ -344,15 +421,22 @@ void HelperSupervisor::Loop()
             int status = 0;
             const pid_t w = waitpid(pid, &status, WNOHANG);
             if (w == pid) {
-                std::lock_guard<std::mutex> lock(m_mu);
-                if (m_pid == pid) {
-                    m_pid = -1;
-                    m_st.pid = -1;
-                    m_st.state = HelperState::FAILED_RETRYING;
-                    ++m_st.restart_count;
-                    m_st.error = "helper exited";
+                bool died = false;
+                {
+                    std::lock_guard<std::mutex> lock(m_mu);
+                    if (m_pid == pid) {
+                        m_pid = -1;
+                        m_st.pid = -1;
+                        m_st.state = HelperState::FAILED_RETRYING;
+                        ++m_st.restart_count;
+                        m_st.error = "helper exited";
+                        m_st.advertised_host = false;
+                        m_st.public_host_reachable = false;
+                        died = true;
+                    }
+                    fails = m_st.restart_count;
                 }
-                fails = m_st.restart_count;
+                if (died) SetNodeModelHostAdvertised(false);
             }
         }
 #endif
@@ -364,20 +448,28 @@ void HelperSupervisor::Loop()
                          !m_cfg.helper_explicitly_missing;
         }
         if (m_cfg.helper_explicitly_missing || m_cfg.helper_exe.empty()) {
-            std::lock_guard<std::mutex> lock(m_mu);
-            m_st.state = HelperState::FAILED_RETRYING;
-            m_st.managed_by_btxd = true;
-            if (m_st.error.empty()) m_st.error = "btx-modeld not found next to btxd";
+            {
+                std::lock_guard<std::mutex> lock(m_mu);
+                m_st.state = HelperState::FAILED_RETRYING;
+                m_st.managed_by_btxd = true;
+                if (m_st.error.empty()) m_st.error = "btx-modeld not found next to btxd";
+                m_st.advertised_host = false;
+                m_st.public_host_reachable = false;
+            }
+            SetNodeModelHostAdvertised(false);
         } else if (need_spawn && !m_stop.load()) {
             std::string sock_err;
             if (SocketReady(m_cfg.rpc_socket, sock_err)) {
                 // START-15: a live socket means an already-running helper. Do not
                 // spawn a duplicate. Do not SIGTERM it on our shutdown (unmanaged).
-                std::lock_guard<std::mutex> lock(m_mu);
-                m_st.state = HelperState::READY;
-                m_st.managed_by_btxd = false;
-                m_st.error.clear();
-                fails = 0;
+                {
+                    std::lock_guard<std::mutex> lock(m_mu);
+                    m_st.state = HelperState::READY;
+                    m_st.managed_by_btxd = false;
+                    m_st.error.clear();
+                    fails = 0;
+                }
+                PollAndSyncHostBit();
             } else {
                 std::string err;
                 bool spawned = false;
@@ -393,18 +485,27 @@ void HelperSupervisor::Loop()
                 if (spawned) {
                     std::string ready_err;
                     if (WaitReady(15000, ready_err)) {
-                        std::lock_guard<std::mutex> lock(m_mu);
-                        m_st.state = HelperState::READY;
-                        m_st.error.clear();
-                        fails = 0;
+                        {
+                            std::lock_guard<std::mutex> lock(m_mu);
+                            m_st.state = HelperState::READY;
+                            m_st.error.clear();
+                            fails = 0;
+                        }
+                        PollAndSyncHostBit();
                     } else {
                         LogPrintf("model helper: started but RPC not ready (%s); monetary node continues\n", ready_err);
-                        std::lock_guard<std::mutex> lock(m_mu);
-                        m_st.state = HelperState::DEGRADED;
-                        m_st.error = ready_err;
+                        {
+                            std::lock_guard<std::mutex> lock(m_mu);
+                            m_st.state = HelperState::DEGRADED;
+                            m_st.error = ready_err;
+                            m_st.advertised_host = false;
+                            m_st.public_host_reachable = false;
+                        }
+                        SetNodeModelHostAdvertised(false);
                     }
                 } else {
                     LogPrintf("model helper: spawn failed (%s); monetary node continues\n", err);
+                    SetNodeModelHostAdvertised(false);
                     const int wait_ms = NextBackoffMs(fails, static_cast<uint32_t>(fails + 1) * 1103515245u + 12345u);
                     ++fails;
                     for (int slept = 0; slept < wait_ms && !m_stop.load(); slept += 100) {
@@ -412,6 +513,16 @@ void HelperSupervisor::Loop()
                     }
                     continue;
                 }
+            }
+        } else if (!m_stop.load()) {
+            if (++poll_div >= 5) {
+                poll_div = 0;
+                HelperState st = HelperState::DISABLED;
+                {
+                    std::lock_guard<std::mutex> lock(m_mu);
+                    st = m_st.state;
+                }
+                if (st == HelperState::READY) PollAndSyncHostBit();
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -465,6 +576,7 @@ void HelperSupervisor::Stop()
         m_st.state = HelperState::DISABLED;
         m_st.enabled = false;
     }
+    ClearHostBit();
 }
 
 } // namespace modelnet

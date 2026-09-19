@@ -375,7 +375,8 @@ void TestGUI(interfaces::Node& node, const std::shared_ptr<CWallet>& wallet)
             QCOMPARE(receiveRequestDialog->QObject::findChild<QLabel*>("payment_header")->text(), QString("Payment information"));
             QCOMPARE(receiveRequestDialog->QObject::findChild<QLabel*>("uri_tag")->text(), QString("URI:"));
             QString uri = receiveRequestDialog->QObject::findChild<QLabel*>("uri_content")->text();
-            QCOMPARE(uri.count("bitcoin:"), 2);
+            QCOMPARE(uri.count("btx:"), 2);
+            QCOMPARE(uri.count("bitcoin:"), 0);
             QCOMPARE(receiveRequestDialog->QObject::findChild<QLabel*>("address_tag")->text(), QString("Address:"));
             QVERIFY(address.isEmpty());
             address = receiveRequestDialog->QObject::findChild<QLabel*>("address_content")->text();
@@ -449,8 +450,9 @@ void TestGUIWatchOnly(interfaces::Node& node, TestChain100Setup& test)
     CompareBalance(walletModel, walletModel.wallet().getBalances().watch_only_balance,
                    sendCoinsDialog.findChild<QLabel*>("labelBalance"));
 
-    // Set change address
-    sendCoinsDialog.getCoinControl()->destChange = GetDestinationForKey(test.coinbaseKey.GetPubKey(), OutputType::LEGACY);
+    // Change is a new P2MR address unless the user picks one. Do not pin a
+    // leftover legacy secp change destination.
+    sendCoinsDialog.getCoinControl()->destChange = CNoDestination();
 
     // Time to reject "save" PSBT dialog ('SendCoins' locks the main thread until the dialog receives the event).
     QTimer timer;

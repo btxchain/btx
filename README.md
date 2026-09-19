@@ -35,6 +35,9 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
+This working tree is **0.34.8rc3** (`CLIENT_VERSION_RC=3`, `CLIENT_VERSION_IS_RELEASE=false`).
+The last released client remains **v0.34.7**. Merge to main still requires operator go-ahead.
+
 ## Start here
 
 This README is the **human** front door. It is not the agent operations
@@ -81,9 +84,10 @@ manual and not the long essay.
 
 ## Current release — v0.34.7
 
-**v0.34.7** is the shipping tag of this tree. `CLIENT_VERSION` is **0.34.7**
-with `CLIENT_VERSION_IS_RELEASE=true`. Seal and freeze hashes are written
-when the tag is sealed (see
+**This tree is 0.34.8rc3** (`CLIENT_VERSION_RC=3`, `CLIENT_VERSION_IS_RELEASE=false`).
+It is the merge-ready RC for 0.34.8. The last released client remains **v0.34.7**
+(`CLIENT_VERSION_IS_RELEASE=true` on that tag). Seal and freeze hashes are
+written when a tag is sealed (see
 [doc/release-process.md](doc/release-process.md)). The previous monetary
 tag is **v0.34** (seal `dc46dee2`, freeze `ecfaa6c9`). Epoch A Profile 1
 ExactReplay is live on mainnet at height **185000**. EncDr stall recovery
@@ -131,7 +135,19 @@ Use `loadtxoutset`, not `loadtxoutsetattested`. Do not mine on parent
 3. **Run** `btxd`. Daemon config: [Running a Node](#running-a-node).
    Operator walkthrough: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
 4. **Models** (optional): isolated helper `btx-modeld`. Start with
-   [doc/modelnet/README.md](doc/modelnet/README.md).
+   [doc/modelnet/README.md](doc/modelnet/README.md). Host, seed, search,
+   share, watch folder, and doctor:
+   [doc/modelnet/first-run.md](doc/modelnet/first-run.md)
+   (**0.34.8-dev**, `CLIENT_VERSION_IS_RELEASE=false`; **v0.34.7** remains
+   the last shipping tag). CLI wrapper:
+   [contrib/modelnet/btx-model](contrib/modelnet/btx-model)
+   (people: stderr hints; agents: `--json`). Optional cloud / follow / events
+   / profile **fail closed** if the helper lacks the method — not a PASS:
+   [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md).
+   Filesystem `-modelwatch` is not a publisher watch.
+   0.34.8-dev workflow: local or planned HF/torrent import → local or
+   `setcloudstorage` (R2 AUTO = SOURCE_FILES) → VerifiedManifest →
+   `exportmodellink` / `.btxbundle`. Integrity ≠ authorship. No auto-spend.
 
 Ordinary free model retrieval does not require buying BTX.
 
@@ -228,9 +244,22 @@ desktop client shows the same cards.
 - Remote/paid inference is **off the roadmap**.
 
 Operator and researcher docs: [doc/modelnet/README.md](doc/modelnet/README.md),
+[doc/modelnet/first-run.md](doc/modelnet/first-run.md),
 [doc/modelnet/model-economy.md](doc/modelnet/model-economy.md),
 [doc/modelnet/feed.md](doc/modelnet/feed.md).
-Release notes: [doc/release-notes/release-notes-0.34.7.md](doc/release-notes/release-notes-0.34.7.md).
+People vs agents: [HUMANS.md](HUMANS.md) / [AGENTS.md](AGENTS.md).
+0.34.8-dev optional cloud/events/watches (RPCs exist; `IS_RELEASE=false`;
+fail closed if an older helper lacks the method; live R2 WAN is
+**HONEST_NOT_RUN**):
+[doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md),
+[doc/modelnet/watches.md](doc/modelnet/watches.md).
+Release notes: [doc/release-notes/release-notes-0.34.7.md](doc/release-notes/release-notes-0.34.7.md)
+(shipping tag). 0.34.8-dev first-run notes:
+[doc/release-notes/release-notes-0.34.8.md](doc/release-notes/release-notes-0.34.8.md)
+(`CLIENT_VERSION_IS_RELEASE=false`; not a shipping tag).
+Hosted Control Plane / walletless discovery (0.34.8-dev,
+`IS_RELEASE=false`; not a live CEX IdP): [doc/hosted/README.md](doc/hosted/README.md),
+[doc/modelnet/hcp/](doc/modelnet/hcp/).
 
 ### Model bounties (demand-side)
 
@@ -259,9 +288,10 @@ Escrow reuses existing P2MR templates only — no new opcode:
 - Contributor lot: `mr(cltv_multi_pq(locktime,m,keys…),refund(height,refund_key))`
 - Staged winner payout: `mr(htlc_sha256(hash,claimant),refund(height,original_refund_key))`
 
-This tree ships **v0.34.7** with `CLIENT_VERSION_IS_RELEASE=true`. Bounty
-coordination runs on the isolated helper; the wallet still signs every
-spend. See [doc/bounties.md](doc/bounties.md) and
+This tree is **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). Bounty
+coordination shipped in **v0.34.7** and continues here on the isolated
+helper; the wallet still signs every spend. See
+[doc/bounties.md](doc/bounties.md) and
 [doc/bounty-rpc.md](doc/bounty-rpc.md).
 
 Agents default to read-only discovery (`searchbounties`, `getbounty`,
@@ -277,8 +307,9 @@ enhancements are expected to come from **community forks and modifications,
 not from a continuing operator release schedule on this line.** That is a
 handover, not a roadmap.
 
-**v0.34.7** is the shipping tag of this tree
-(`CLIENT_VERSION_IS_RELEASE=true`). The Native Model Network is an
+**v0.34.7** remains the last shipping tag
+(`CLIENT_VERSION_IS_RELEASE=true` on that tag). This tree is **0.34.8-dev**
+(`CLIENT_VERSION_IS_RELEASE=false`). The Native Model Network is an
 **isolated in-tree plane** on the 0.34.6 monetary baseline: it does not
 change ExactReplay, issuance, or fork choice, and it does not revoke this
 handover. See [Native Model Network (0.34.7)](#native-model-network-0347).
@@ -422,7 +453,8 @@ While Epoch A still uses ExactReplay as consensus authority, a validating
 node runs `-matmulvalidation=consensus` and needs no pin. CPU archives that
 cannot ExactReplay may opt into trusted-mirror with attestors they choose;
 that is community-fork topology, not a shipped signer set. The 0.34.1
-monetary handover still applies; this tree ships **v0.34.7**. Historical
+monetary handover still applies; this tree is **0.34.8-dev** (last shipping
+tag **v0.34.7**). Historical
 notes live in
 [doc/btx-gpu-verified-network-transition.md](doc/btx-gpu-verified-network-transition.md).
 
@@ -438,7 +470,8 @@ feature, not a live surface. See [Shielded Pool](#shielded-pool).
 ## GPU-verified network (three-phase)
 
 That three-phase topology is **community-fork work**. The 0.34.1 monetary
-handover still applies; this tree's shipping tag is **v0.34.7**.
+handover still applies; this tree is **0.34.8-dev** (last shipping tag
+**v0.34.7**).
 
 Profile 1 ExactReplay is the Epoch-A consensus check. It needs a qualified
 GPU. The recommended mode is `-matmulvalidation=consensus`: **this node**
@@ -1009,16 +1042,43 @@ delegation closes. `SIGHASH_ANYPREVOUT` (APO) is not implemented.
 Optional: SQLite 3.7.17+ (descriptor wallets), Qt 5.11+/6.2+ (GUI),
 ZeroMQ 4.0+ (notifications).
 
+The source-build baseline is Ubuntu 22.04 LTS (glibc 2.35) with GCC 11.1+.
+The prebuilt Linux archives do **not** share that floor: the
+`*-x86_64-linux-gnu*.tar.gz` assets published for v0.34.8-rc1 are linked
+against `GLIBC_2.38` and `GLIBCXX_3.4.32`, so they load on Ubuntu 24.04 and
+Debian 13 but not on Ubuntu 22.04 or Debian 12. The `GLIBCXX_*` / `CXXABI_*`
+libstdc++ nodes are a separate requirement from the libc node, and `ldd`
+showing no missing `.so` names covers neither. Build from source on the older
+LTS, or see [doc/linux-release-builds.md](doc/linux-release-builds.md) and
+[doc/btx-download-and-go.md](doc/btx-download-and-go.md).
+
 ### Linux (Ubuntu/Debian)
+
+The commands below are the supported source-build path on Ubuntu 22.04/Debian
+12; they do not make the prebuilt archives load there.
+
+`python3-zmq` is the Python test helper. The C++ library for `-DWITH_ZMQ=ON`
+(the CMake default) is `libzmq3-dev`.
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential cmake pkg-config \
-  libboost-dev libevent-dev libsqlite3-dev python3 python3-zmq
+  libboost-dev libevent-dev libsqlite3-dev \
+  libzmq3-dev libssl-dev python3 python3-zmq
 
-cmake -B build
+cmake -B build -DBUILD_GUI=OFF -DWITH_MODELNET=OFF
 cmake --build build -j$(nproc)
 ```
+
+`WITH_MODELNET=ON` (the CMake default) needs OpenSSL **3.5+** with
+**ML-KEM-768** and **ML-DSA-44**. Ubuntu 22.04 and 24.04 apt ship OpenSSL
+**3.0.x** (`libssl-dev`); that cannot host the helper, and Homebrew
+`openssl@3` is not a Linux prefix. Either build OpenSSL 3.5 into a prefix
+and pass `-DOPENSSL_ROOT_DIR=/path/to/openssl-3.5` together with
+`-DOPENSSL_SSL_LIBRARY=.../libssl.so` and
+`-DOPENSSL_CRYPTO_LIBRARY=.../libcrypto.so` so CMake does not mix 3.5
+headers with the distro 3.0 libs, or keep `-DWITH_MODELNET=OFF` for a
+monetary-only tree. See [doc/build-unix.md](doc/build-unix.md).
 
 ### macOS
 
@@ -1067,7 +1127,7 @@ branch, use the files in `contrib/prebuilt/windows/`.
 |---|---|---|
 | `BUILD_DAEMON` | ON | Build `btxd` |
 | `BUILD_CLI` | ON | Build `btx-cli` |
-| `BUILD_GUI` | OFF | Build `btx-qt` (requires Qt) |
+| `BUILD_GUI` | OFF | Build `btx-qt` (default off). Linux: `qt6-base-dev qt6-tools-dev` and `-DWITH_QT_VERSION=6`. |
 | `BUILD_WALLET_TOOL` | auto | Build `btx-wallet` |
 | `BUILD_TESTS` | ON | Build unit test suite |
 | `BUILD_BENCH` | OFF | Build benchmark binary |
@@ -1745,8 +1805,8 @@ The RPC surface also supports:
 
 ## Contributing
 
-**v0.34.7 is the shipping tag of this tree**
-(`CLIENT_VERSION_IS_RELEASE=true`). The **0.34.1 monetary handover** still
+**This tree is 0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). The last
+shipping tag remains **v0.34.7**. The **0.34.1 monetary handover** still
 stands: further monetary-consensus work is expected from community forks,
 not from a continuing operator release schedule on this line. The Native
 Model Network is an isolated in-tree plane on the 0.34.6 monetary baseline;

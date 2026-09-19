@@ -115,15 +115,10 @@ class WalletTest(BitcoinTestFramework):
 
     def run_test(self):
         if not self.options.descriptors:
-            # Tests legacy watchonly behavior which is not present (and does not need to be tested) in descriptor wallets
-            self.nodes[0].importaddress(ADDRESS_WATCHONLY)
-            # Check that nodes don't own any UTXOs
+            # Tests that secp watch-only ingest is refused
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", self.nodes[0].importaddress, ADDRESS_WATCHONLY)
             assert_equal(len(self.nodes[0].listunspent()), 0)
             assert_equal(len(self.nodes[1].listunspent()), 0)
-
-            self.log.info("Check that only node 0 is watching an address")
-            assert 'watchonly' in self.nodes[0].getbalances()
-            assert 'watchonly' not in self.nodes[1].getbalances()
 
         self.log.info("Mining blocks ...")
         self.generate(self.nodes[0], 1)
@@ -138,20 +133,16 @@ class WalletTest(BitcoinTestFramework):
 
         self.generatetoaddress(self.nodes[1], COINBASE_MATURITY + 1, ADDRESS_WATCHONLY)
 
-        # Verify listunspent returns all immature coinbases if 'include_immature_coinbase' is set
-        # For now, only the legacy wallet will see the coinbases going to the imported 'ADDRESS_WATCHONLY'
-        assert_equal(len(self.nodes[0].listunspent(query_options={'include_immature_coinbase': False})), 1 if self.options.descriptors else 2)
-        assert_equal(len(self.nodes[0].listunspent(query_options={'include_immature_coinbase': True})), 1 if self.options.descriptors else COINBASE_MATURITY + 2)
+        # Watch-only secp ingest is refused, so both wallet types only see their own coinbase.
+        assert_equal(len(self.nodes[0].listunspent(query_options={'include_immature_coinbase': False})), 1)
+        assert_equal(len(self.nodes[0].listunspent(query_options={'include_immature_coinbase': True})), 1)
 
         if not self.options.descriptors:
-            # Tests legacy watchonly behavior which is not present (and does not need to be tested) in descriptor wallets
             assert_equal(self.nodes[0].getbalances()['mine']['trusted'], coinbase_reward)
             assert_equal(self.nodes[0].getwalletinfo()['balance'], coinbase_reward)
             assert_equal(self.nodes[1].getbalances()['mine']['trusted'], coinbase_reward)
-
-            assert_equal(self.nodes[0].getbalances()['watchonly']['immature'], coinbase_reward * COINBASE_MATURITY)
+            assert 'watchonly' not in self.nodes[0].getbalances()
             assert 'watchonly' not in self.nodes[1].getbalances()
-
             assert_equal(self.nodes[0].getbalance(), coinbase_reward)
             assert_equal(self.nodes[1].getbalance(), coinbase_reward)
 
@@ -338,24 +329,17 @@ class WalletTest(BitcoinTestFramework):
         assert_equal(self.nodes[0].getbalances()['mine']['trusted'], total_amount + 1)  # The reorg recovered our fee of 1 coin
 
         if not self.options.descriptors:
-            self.log.info('Check if mempool is taken into account after import*')
+            self.log.info('Check that importaddress/importprivkey refuse classical ingest')
             address = self.nodes[0].getnewaddress()
             privkey = self.nodes[0].dumpprivkey(address)
             self.nodes[0].sendtoaddress(address, 0.1)
             self.nodes[0].unloadwallet('')
-            # check importaddress on fresh wallet
             self.nodes[0].createwallet('w1', False, True)
-            self.nodes[0].importaddress(address)
-            assert_equal(self.nodes[0].getbalances()['mine']['untrusted_pending'], 0)
-            assert_equal(self.nodes[0].getbalances()['watchonly']['untrusted_pending'], Decimal('0.1'))
-            self.nodes[0].importprivkey(privkey)
-            assert_equal(self.nodes[0].getbalances()['mine']['untrusted_pending'], Decimal('0.1'))
-            assert_equal(self.nodes[0].getbalances()['watchonly']['untrusted_pending'], 0)
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", self.nodes[0].importaddress, address)
+            assert_raises_rpc_error(-8, "importprivkey is disabled", self.nodes[0].importprivkey, privkey)
             self.nodes[0].unloadwallet('w1')
-            # check importprivkey on fresh wallet
             self.nodes[0].createwallet('w2', False, True)
-            self.nodes[0].importprivkey(privkey)
-            assert_equal(self.nodes[0].getbalances()['mine']['untrusted_pending'], Decimal('0.1'))
+            assert_raises_rpc_error(-8, "importprivkey is disabled", self.nodes[0].importprivkey, privkey)
 
 
         # Tests the lastprocessedblock JSON object in getbalances, getwalletinfo

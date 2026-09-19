@@ -181,15 +181,76 @@ BOOST_AUTO_TEST_CASE(gov_pol_09_fixed_operator_limits_override_auto)
     BOOST_CHECK_EQUAL(g.BackgroundUploadLimitBps(), 12345);
 }
 
+BOOST_AUTO_TEST_CASE(gov_pol_09b_operator_cap_does_not_bypass_metered_or_battery)
+{
+    ResourceGovernor g;
+    GovernorPolicy p;
+    p.upload_auto = false;
+    p.upload_max_bps = 128 * 1024 * 1024;
+    g.SetPolicy(p);
+
+    SystemSignals metered = QuietDesktop();
+    metered.metered = true;
+    g.Observe(metered, 0);
+    BOOST_CHECK_EQUAL(g.BackgroundUploadLimitBps(), 0);
+    BOOST_CHECK(!g.Permit(GovernorJob::MODEL_SEED).allowed);
+    BOOST_CHECK_EQUAL(g.Permit(GovernorJob::MODEL_SEED).reason, PauseReason::METERED_NETWORK);
+
+    SystemSignals battery = QuietDesktop();
+    battery.on_ac = false;
+    battery.battery_percent = 40;
+    g.Observe(battery, 1000);
+    BOOST_CHECK_LE(g.BackgroundUploadLimitBps(), p.background_upload_floor_bps);
+    BOOST_CHECK_LT(g.BackgroundUploadLimitBps(), p.upload_max_bps);
+}
+
 BOOST_AUTO_TEST_CASE(gov_pol_10_off_prevents_optional_background)
 {
     ResourceGovernor g;
     g.SetMiningConsent(true);
     IdleFor(g, QuietDesktop(), 0, 30);
     g.SetMode(GovernorMode::OFF);
+    // OFF denies mining; it is not an ungoverned mining mode.
     BOOST_CHECK(!g.MiningAllowed());
     BOOST_CHECK(!g.Permit(GovernorJob::MODEL_SEED).allowed);
     BOOST_CHECK(!g.Permit(GovernorJob::PRESERVATION).allowed);
+}
+
+BOOST_AUTO_TEST_CASE(gov_off_denies_mining_not_ungoverned_mode)
+{
+    // -resourcegovernor=off means "permit nothing", including mining, even
+    // with mining consent and an idle GPU. There is no ungoverned mining mode.
+    ResourceGovernor g;
+    g.SetMiningConsent(true);
+    IdleFor(g, QuietDesktop(), 0, 30);
+    BOOST_CHECK(g.MiningAllowed());
+    g.SetMode(GovernorMode::OFF);
+    BOOST_CHECK(!g.MiningAllowed());
+    BOOST_CHECK(!g.Permit(GovernorJob::MINING).allowed);
+    BOOST_CHECK_EQUAL(g.Permit(GovernorJob::MINING).reason, PauseReason::USER_DISABLED);
+}
+
+BOOST_AUTO_TEST_CASE(gov_unarmed_auto_schedule_does_not_fail_open)
+{
+    ResourceGovernor g;
+    g.SetAutoSchedule(true);
+    g.SetMiningConsent(true);
+    BOOST_CHECK(!g.MiningAllowed());
+    BOOST_CHECK(!g.Permit(GovernorJob::MINING).allowed);
+    BOOST_CHECK_EQUAL(g.Permit(GovernorJob::MINING).reason, PauseReason::GOVERNOR_COOLDOWN);
+    g.SetMode(GovernorMode::OFF);
+    BOOST_CHECK(!g.MiningAllowed());
+}
+
+BOOST_AUTO_TEST_CASE(gov_unarmed_manual_consent_preserves_existing_miner)
+{
+    ResourceGovernor g;
+    g.SetAutoSchedule(false);
+    g.SetMiningConsent(true);
+    BOOST_CHECK(g.MiningAllowed());
+    g.SetMode(GovernorMode::OFF);
+    BOOST_CHECK(!g.MiningAllowed());
+    BOOST_CHECK(!g.Permit(GovernorJob::MINING).allowed);
 }
 
 BOOST_AUTO_TEST_CASE(gov_hys_01_short_spike_does_not_flap)
@@ -639,6 +700,7 @@ BOOST_AUTO_TEST_CASE(gov_mode_parse_and_rpc_shape)
     GovernorMode m;
     BOOST_CHECK(ParseGovernorMode("auto", m) && m == GovernorMode::AUTO);
     BOOST_CHECK(ParseGovernorMode("ECO", m) && m == GovernorMode::ECO);
+    BOOST_CHECK(ParseGovernorMode("off", m) && m == GovernorMode::OFF);
     BOOST_CHECK(!ParseGovernorMode("warp", m));
     ResourceGovernor g;
     g.SetMiningConsent(true);

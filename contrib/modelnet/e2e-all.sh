@@ -7,12 +7,20 @@
 export LC_ALL=C
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BIN="${BIN_DIR:-$ROOT/build-gcc13/bin}"
-export MODELD="${MODELD:-$BIN/btx-modeld}"
-
 die() { printf 'E2E_ALL FAIL: %s\n' "$*" >&2; exit 1; }
 step() { printf '\n== %s ==\n' "$*"; }
+# Inherited BIN may be a binary (btx-hcpd). Only honor a directory that contains btxd.
+if [[ -n "${BIN:-}" && -d "${BIN}" && -x "${BIN}/btxd" ]]; then
+  :
+elif [[ -n "${BIN_DIR:-}" && -d "${BIN_DIR}" && -x "${BIN_DIR}/btxd" ]]; then
+  BIN="$BIN_DIR"
+else
+  BIN="$ROOT/build-gcc13/bin"
+fi
+export MODELD="${MODELD:-$BIN/btx-modeld}"
 
+[[ -x "$BIN/btxd" ]] || die "missing $BIN/btxd"
+[[ -x "$BIN/btx-cli" ]] || die "missing $BIN/btx-cli"
 [[ -x "$BIN/btx-modeld" ]] || die "missing $BIN/btx-modeld"
 [[ -x "$BIN/test_btx" ]] || die "missing $BIN/test_btx"
 

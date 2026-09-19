@@ -48,6 +48,12 @@ bool ParseP2MRAnyPubkeyPush(
     Span<const unsigned char>& pubkey,
     size_t& consumed);
 
+/** First CHECKSIG (not CHECKSIGADD) pubkey in a P2MR leaf. */
+bool ExtractP2MRChecksigPubkey(
+    Span<const unsigned char> script,
+    PQAlgorithm& algo,
+    std::vector<unsigned char>& pubkey);
+
 opcodetype GetP2MRChecksigOpcode(PQAlgorithm algo);
 opcodetype GetP2MRChecksigAddOpcode(PQAlgorithm algo);
 bool DecodeP2MRChecksigOpcode(opcodetype opcode, PQAlgorithm& algo, bool& is_checksigadd);

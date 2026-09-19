@@ -1,0 +1,9 @@
+{
+  "id": "negative-wrong-prevout",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "base": "unsigned-package.json",
+  "mutation": "replace_input_txid",
+  "wrong_txid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "note": "Package must fail closed when the prevout txid does not match the unsigned transaction input / digest binding."
+}

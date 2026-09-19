@@ -1,0 +1,20 @@
+{
+  "policy_id": "policy-demo",
+  "revision": "1",
+  "allowed_actions": [
+    "FUND_RELEASE"
+  ],
+  "allowed_terms_ids": [
+    "555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555"
+  ],
+  "allowed_publishers": [],
+  "per_action_principal_atoms": "5000",
+  "lifetime_principal_atoms": "10000",
+  "lifetime_fee_atoms": "1000",
+  "outstanding_exposure_atoms": "12000",
+  "max_actions": 20,
+  "max_concurrent": 4,
+  "expires_at_ms": "1790000600000",
+  "revoked": false,
+  "refund_replenishes_lifetime": false
+}

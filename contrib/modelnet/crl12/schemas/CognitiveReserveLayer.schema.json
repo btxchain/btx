@@ -1,0 +1,2743 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:crl:1.2:objects",
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "Digest48": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "Digest32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "UInt": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,76})$"
+    },
+    "SInt": {
+      "type": "string",
+      "pattern": "^(0|-?[1-9][0-9]{0,76})$"
+    },
+    "Text": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "Role": {
+      "type": "string",
+      "enum": [
+        "DISCOVERY",
+        "CUSTODY",
+        "EXECUTION",
+        "FUNDING",
+        "TREASURY",
+        "DEVICE_HANDOFF",
+        "ASSET_SERVICING",
+        "PORTFOLIO_ANALYTICS",
+        "FIAT_RAIL"
+      ]
+    },
+    "AssetKind": {
+      "type": "string",
+      "enum": [
+        "NATIVE_RESERVE",
+        "FINANCIAL_INSTRUMENT",
+        "CONTRACT_RIGHT",
+        "CAPABILITY_RESOURCE",
+        "RESEARCH_COMMITMENT"
+      ]
+    },
+    "Effect": {
+      "type": "string",
+      "enum": [
+        "READ",
+        "RECORD",
+        "BIND",
+        "EXPORT",
+        "PLAN",
+        "TRANSLATE_TO_DRAFT",
+        "DRAFT_OR_POLICY",
+        "POLICY",
+        "AUTHORIZE",
+        "EXECUTE_APPROVED",
+        "CANCEL_SAFE_ONLY",
+        "MEMBERSHIP_ONLY",
+        "REFERRAL_ONLY",
+        "REPORT",
+        "PREPARE",
+        "SUBMIT",
+        "CANCEL"
+      ]
+    },
+    "Quantity": {
+      "type": "object",
+      "properties": {
+        "coefficient": {
+          "$ref": "#/$defs/SInt"
+        },
+        "scale": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18
+        }
+      },
+      "required": [
+        "coefficient",
+        "scale"
+      ],
+      "additionalProperties": false
+    },
+    "Money": {
+      "type": "object",
+      "properties": {
+        "currency": {
+          "$ref": "#/$defs/Id"
+        },
+        "exponent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18
+        },
+        "minor": {
+          "$ref": "#/$defs/SInt"
+        }
+      },
+      "required": [
+        "currency",
+        "exponent",
+        "minor"
+      ],
+      "additionalProperties": false
+    },
+    "ExactRef": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "$ref": "#/$defs/Id"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        }
+      },
+      "required": [
+        "object_type",
+        "body_id"
+      ],
+      "additionalProperties": false
+    },
+    "Identifier": {
+      "type": "object",
+      "properties": {
+        "namespace": {
+          "$ref": "#/$defs/Id"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "authority_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "namespace",
+        "value",
+        "authority_ref"
+      ],
+      "additionalProperties": false
+    },
+    "Endpoint": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "relative_path": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9/{}._-]{1,200}$"
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        }
+      },
+      "required": [
+        "operation_id",
+        "relative_path",
+        "effect"
+      ],
+      "additionalProperties": false
+    },
+    "Scope": {
+      "type": "object",
+      "properties": {
+        "tenant_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "portfolio_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "legal_entity_id",
+        "portfolio_id"
+      ],
+      "additionalProperties": false
+    },
+    "Watermark": {
+      "type": "object",
+      "properties": {
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "generation": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/UInt"
+        },
+        "effective_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "provider_id",
+        "stream_id",
+        "generation",
+        "sequence",
+        "effective_at"
+      ],
+      "additionalProperties": false
+    },
+    "Link": {
+      "type": "object",
+      "properties": {
+        "target_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "relationship": {
+          "type": "string",
+          "enum": [
+            "FINANCIAL_LOOKTHROUGH",
+            "CAPABILITY_DEPENDENCY",
+            "RIGHTS_DEPENDENCY"
+          ]
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Quantity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "target_ref",
+        "relationship",
+        "weight"
+      ],
+      "additionalProperties": false
+    },
+    "Chunk": {
+      "type": "object",
+      "properties": {
+        "chunk_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "byte_length": {
+          "$ref": "#/$defs/UInt"
+        },
+        "row_count": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "chunk_id",
+        "digest",
+        "byte_length",
+        "row_count"
+      ],
+      "additionalProperties": false
+    },
+    "Shock": {
+      "type": "object",
+      "properties": {
+        "factor": {
+          "type": "string",
+          "enum": [
+            "RESERVE_PRICE",
+            "FX_PRICE",
+            "PROVIDER_OUTAGE",
+            "CAPABILITY_RETIREMENT",
+            "COST_MULTIPLIER",
+            "LOAD_DELAY_MS"
+          ]
+        },
+        "target_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "value": {
+          "$ref": "#/$defs/Quantity"
+        },
+        "unit": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "factor",
+        "target_ref",
+        "value",
+        "unit"
+      ],
+      "additionalProperties": false
+    },
+    "MetricResult": {
+      "type": "object",
+      "properties": {
+        "metric_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UInt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "COMPLETE",
+            "PARTIAL",
+            "UNAVAILABLE"
+          ]
+        },
+        "eligible_count": {
+          "$ref": "#/$defs/UInt"
+        },
+        "unpriced_count": {
+          "$ref": "#/$defs/UInt"
+        },
+        "excluded_count": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "metric_ref",
+        "value",
+        "count",
+        "status",
+        "eligible_count",
+        "unpriced_count",
+        "excluded_count"
+      ],
+      "additionalProperties": false
+    },
+    "Error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/Id"
+        },
+        "stage": {
+          "$ref": "#/$defs/Id"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_action": {
+          "$ref": "#/$defs/Text"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "retryable",
+        "correlation_id",
+        "next_action"
+      ],
+      "additionalProperties": false
+    },
+    "LayerExtensionProfileV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "extension_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "parent_profile_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "base_extension_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "schema_digest": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "operations_digest": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "supported_features": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "maxItems": 64
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "extension_id",
+        "parent_profile_ref",
+        "base_extension_ref",
+        "schema_digest",
+        "operations_digest",
+        "supported_features",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "LayerExtensionProfileV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "LayerExtensionProfileV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/LayerExtensionProfileV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ProviderRoleManifestV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "manifest_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "profile_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Role"
+          },
+          "maxItems": 9
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Endpoint"
+          },
+          "maxItems": 128
+        },
+        "network_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Digest32"
+          },
+          "maxItems": 16
+        },
+        "conformance_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 32
+        },
+        "sequence": {
+          "$ref": "#/$defs/UInt"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "manifest_id",
+        "profile_ref",
+        "roles",
+        "endpoints",
+        "network_refs",
+        "conformance_refs",
+        "sequence",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "ProviderRoleManifestV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ProviderRoleManifestV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/ProviderRoleManifestV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ServiceBindingV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "binding_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "remote_profile_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "remote_role_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "permitted_effects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Effect"
+          },
+          "maxItems": 17
+        },
+        "owner_policy_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "PROPOSED",
+            "ACTIVE",
+            "REVOKED"
+          ]
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "binding_id",
+        "scope",
+        "role",
+        "remote_profile_ref",
+        "remote_role_ref",
+        "permitted_effects",
+        "owner_policy_ref",
+        "generation",
+        "status",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "ServiceBindingV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ServiceBindingV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/ServiceBindingV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "AdapterCapabilityManifestV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "adapter_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "interface_name": {
+          "$ref": "#/$defs/Id"
+        },
+        "interface_revision": {
+          "$ref": "#/$defs/Id"
+        },
+        "schema_digest": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "maxItems": 128
+        },
+        "support": {
+          "type": "string",
+          "enum": [
+            "IMPLEMENTED",
+            "DISABLED",
+            "UNAVAILABLE"
+          ]
+        },
+        "ambiguity_contract_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "adapter_id",
+        "interface_name",
+        "interface_revision",
+        "schema_digest",
+        "operations",
+        "support",
+        "ambiguity_contract_ref",
+        "evidence_refs"
+      ],
+      "additionalProperties": false
+    },
+    "AdapterCapabilityManifestV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "AdapterCapabilityManifestV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/AdapterCapabilityManifestV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "InstitutionalAssetRecordV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "asset_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "asset_kind": {
+          "$ref": "#/$defs/AssetKind"
+        },
+        "identifiers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Identifier"
+          },
+          "maxItems": 32
+        },
+        "native_resource_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 256
+        },
+        "rights_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quantity_unit": {
+          "$ref": "#/$defs/Id"
+        },
+        "financial_status": {
+          "type": "string",
+          "enum": [
+            "FINANCIAL",
+            "NONFINANCIAL",
+            "UNDETERMINED"
+          ]
+        },
+        "record_authority_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "effective_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "asset_id",
+        "asset_kind",
+        "identifiers",
+        "native_resource_refs",
+        "rights_ref",
+        "quantity_unit",
+        "financial_status",
+        "record_authority_ref",
+        "effective_at",
+        "generation"
+      ],
+      "additionalProperties": false
+    },
+    "InstitutionalAssetRecordV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "InstitutionalAssetRecordV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/InstitutionalAssetRecordV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "RightsStatementV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "rights_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "asset_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "holder_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "rights_kind": {
+          "type": "string",
+          "enum": [
+            "PUBLIC_USE",
+            "LICENSE",
+            "OWNERSHIP",
+            "CONTRACT_CLAIM",
+            "FUND_SHARE",
+            "SPONSOR_COMMITMENT"
+          ]
+        },
+        "transferability": {
+          "type": "string",
+          "enum": [
+            "PERMITTED_BY_TERMS",
+            "PROHIBITED",
+            "UNDETERMINED"
+          ]
+        },
+        "contract_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest48"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "issuer_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "valid_from": {
+          "$ref": "#/$defs/UInt"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UInt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "rights_id",
+        "asset_ref",
+        "holder_entity_id",
+        "rights_kind",
+        "transferability",
+        "contract_digest",
+        "issuer_ref",
+        "valid_from",
+        "valid_until"
+      ],
+      "additionalProperties": false
+    },
+    "RightsStatementV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "RightsStatementV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/RightsStatementV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "PositionObservationV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "observation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "asset_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "economic_position_key": {
+          "$ref": "#/$defs/Id"
+        },
+        "custodian_position_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "quantity": {
+          "$ref": "#/$defs/Quantity"
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "DIRECT",
+            "LOOKTHROUGH",
+            "OPERATIONAL"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "OPEN",
+            "CLOSED",
+            "DISPUTED"
+          ]
+        },
+        "authority_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "effective_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "recorded_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "sequence": {
+          "$ref": "#/$defs/UInt"
+        },
+        "supersedes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "observation_id",
+        "scope",
+        "asset_ref",
+        "economic_position_key",
+        "custodian_position_ref",
+        "quantity",
+        "view",
+        "status",
+        "authority_ref",
+        "effective_at",
+        "recorded_at",
+        "sequence",
+        "supersedes"
+      ],
+      "additionalProperties": false
+    },
+    "PositionObservationV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "PositionObservationV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/PositionObservationV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ValuationObservationV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "valuation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "asset_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "position_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "purpose": {
+          "type": "string",
+          "enum": [
+            "MARKET_VALUE",
+            "COST_BASIS",
+            "REPLACEMENT_SCENARIO",
+            "UTILITY"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "CURRENT",
+            "STALE",
+            "UNAVAILABLE"
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "valuation_policy_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 64
+        },
+        "effective_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "recorded_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "valid_until": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "valuation_id",
+        "asset_ref",
+        "position_ref",
+        "purpose",
+        "status",
+        "value",
+        "valuation_policy_ref",
+        "evidence_refs",
+        "effective_at",
+        "recorded_at",
+        "valid_until"
+      ],
+      "additionalProperties": false
+    },
+    "ValuationObservationV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ValuationObservationV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/ValuationObservationV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ExposureLinkV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "link_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Link"
+          },
+          "maxItems": 256
+        },
+        "financial_leverage_policy_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "coverage_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "link_id",
+        "scope",
+        "source_ref",
+        "links",
+        "financial_leverage_policy_ref",
+        "effective_at",
+        "coverage_bps"
+      ],
+      "additionalProperties": false
+    },
+    "ExposureLinkV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ExposureLinkV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/ExposureLinkV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "PortfolioProjectionV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "projection_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "as_of": {
+          "$ref": "#/$defs/UInt"
+        },
+        "observed_cutoff": {
+          "$ref": "#/$defs/UInt"
+        },
+        "watermarks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Watermark"
+          },
+          "maxItems": 32
+        },
+        "metric_results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MetricResult"
+          },
+          "maxItems": 32
+        },
+        "position_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 1000
+        },
+        "operational_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 1000
+        },
+        "reconciliation_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 1000
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "projection_id",
+        "scope",
+        "as_of",
+        "observed_cutoff",
+        "watermarks",
+        "metric_results",
+        "position_refs",
+        "operational_refs",
+        "reconciliation_refs",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
+    "PortfolioProjectionV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "PortfolioProjectionV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/PortfolioProjectionV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "MetricDefinitionV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "metric_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "metric_kind": {
+          "type": "string",
+          "enum": [
+            "AUM",
+            "AUC",
+            "AUA",
+            "PLATFORM_ASSETS",
+            "FINANCIAL_NAV",
+            "CAPABILITY_COUNT",
+            "ACTUAL_COST",
+            "SCENARIO_VALUE"
+          ]
+        },
+        "scope_role": {
+          "type": "string",
+          "enum": [
+            "MANAGER",
+            "CUSTODIAN",
+            "ADMINISTRATOR",
+            "PLATFORM",
+            "OWNER",
+            "OPERATOR"
+          ]
+        },
+        "inclusion_kinds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AssetKind"
+          },
+          "maxItems": 5
+        },
+        "basis": {
+          "type": "string",
+          "enum": [
+            "DIRECT_ONLY",
+            "LOOKTHROUGH_ONLY",
+            "OPERATIONAL_ONLY"
+          ]
+        },
+        "valuation_purpose": {
+          "type": "string",
+          "enum": [
+            "MARKET_VALUE",
+            "COST_BASIS",
+            "NONE",
+            "REPLACEMENT_SCENARIO"
+          ]
+        },
+        "mandate_required": {
+          "type": "boolean"
+        },
+        "policy_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "metric_id",
+        "metric_kind",
+        "scope_role",
+        "inclusion_kinds",
+        "basis",
+        "valuation_purpose",
+        "mandate_required",
+        "policy_ref",
+        "generation"
+      ],
+      "additionalProperties": false
+    },
+    "MetricDefinitionV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "MetricDefinitionV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/MetricDefinitionV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ExportManifestV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "export_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "projection_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "JSONL",
+            "CSV",
+            "DESKTOP_CONTEXT"
+          ]
+        },
+        "mapping_digest": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "chunks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Chunk"
+          },
+          "maxItems": 2048
+        },
+        "total_rows": {
+          "$ref": "#/$defs/UInt"
+        },
+        "privacy_policy_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "export_id",
+        "scope",
+        "projection_ref",
+        "format",
+        "mapping_digest",
+        "chunks",
+        "total_rows",
+        "privacy_policy_ref",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "ExportManifestV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ExportManifestV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/ExportManifestV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "PortfolioInstructionV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "instruction_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "source_projection_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "source_system_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "requested_action": {
+          "type": "string",
+          "enum": [
+            "DRAFT_RESERVE_ALLOCATION",
+            "DRAFT_RESEARCH_COMMITMENT",
+            "DRAFT_CAPABILITY_ACQUISITION",
+            "DRAFT_PRODUCT_REFERRAL"
+          ]
+        },
+        "objective": {
+          "$ref": "#/$defs/Text"
+        },
+        "maximum_exposure": {
+          "$ref": "#/$defs/Money"
+        },
+        "target_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 32
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "instruction_id",
+        "scope",
+        "source_projection_ref",
+        "source_system_id",
+        "requested_action",
+        "objective",
+        "maximum_exposure",
+        "target_refs",
+        "client_operation_id",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "PortfolioInstructionV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "PortfolioInstructionV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/PortfolioInstructionV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "InteroperabilityReceiptV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ACCEPTED",
+            "VALIDATED",
+            "APPLIED",
+            "REJECTED",
+            "RECONCILIATION_REQUIRED"
+          ]
+        },
+        "result_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 256
+        },
+        "original_provider_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "sequence": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "receipt_id",
+        "scope",
+        "operation_id",
+        "request_body_id",
+        "state",
+        "result_refs",
+        "original_provider_ref",
+        "sequence"
+      ],
+      "additionalProperties": false
+    },
+    "InteroperabilityReceiptV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "InteroperabilityReceiptV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/InteroperabilityReceiptV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ScenarioDefinitionV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "scenario_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "projection_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "shocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Shock"
+          },
+          "maxItems": 64
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "DETERMINISTIC_SHOCK_V1"
+          ]
+        },
+        "assumption_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 64
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "scenario_id",
+        "scope",
+        "projection_ref",
+        "shocks",
+        "method",
+        "assumption_refs",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "ScenarioDefinitionV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ScenarioDefinitionV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/ScenarioDefinitionV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ScenarioResultV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "result_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scenario_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "financial_change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unpriced_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 256
+        },
+        "operational_impacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target_ref": {
+                "$ref": "#/$defs/ExactRef"
+              },
+              "impact": {
+                "$ref": "#/$defs/Id"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Quantity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unit": {
+                "$ref": "#/$defs/Id"
+              }
+            },
+            "required": [
+              "target_ref",
+              "impact",
+              "value",
+              "unit"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 256
+        },
+        "source_coverage_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "calculation_version": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "result_id",
+        "scope",
+        "scenario_ref",
+        "financial_change",
+        "unpriced_refs",
+        "operational_impacts",
+        "source_coverage_bps",
+        "calculation_version"
+      ],
+      "additionalProperties": false
+    },
+    "ScenarioResultV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ScenarioResultV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/ScenarioResultV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ConformanceStatementV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "statement_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "role_manifest_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "candidate_fingerprint": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "test_manifest_digest": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "evidence_level": {
+          "type": "string",
+          "enum": [
+            "REFERENCE",
+            "NATIVE_UNIT",
+            "PROCESS_E2E",
+            "NATIVE_CHAIN",
+            "OPERATOR_PILOT"
+          ]
+        },
+        "passed_case_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "maxItems": 512
+        },
+        "unrun_case_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "maxItems": 512
+        },
+        "issuer_class": {
+          "type": "string",
+          "enum": [
+            "SELF_ATTESTED",
+            "INDEPENDENT_REVIEW"
+          ]
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "statement_id",
+        "role_manifest_ref",
+        "candidate_fingerprint",
+        "test_manifest_digest",
+        "evidence_level",
+        "passed_case_ids",
+        "unrun_case_ids",
+        "issuer_class",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "ConformanceStatementV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ConformanceStatementV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/ConformanceStatementV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ReconciliationBreakV1_2": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.2"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "break_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "DUPLICATE_CLAIM",
+            "QUANTITY_MISMATCH",
+            "PRICE_MISSING",
+            "RIGHTS_UNKNOWN",
+            "STALE_SOURCE",
+            "IDENTIFIER_COLLISION",
+            "SEQUENCE_GAP"
+          ]
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 32
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "OPEN",
+            "ACKNOWLEDGED",
+            "RESOLVED_BY_EVIDENCE"
+          ]
+        },
+        "assigned_role": {
+          "$ref": "#/$defs/Id"
+        },
+        "resolution_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 32
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "break_id",
+        "scope",
+        "kind",
+        "source_refs",
+        "state",
+        "assigned_role",
+        "resolution_refs",
+        "generation"
+      ],
+      "additionalProperties": false
+    },
+    "ReconciliationBreakV1_2Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ReconciliationBreakV1_2"
+        },
+        "body": {
+          "$ref": "#/$defs/ReconciliationBreakV1_2"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "IdRequest": {
+      "type": "object",
+      "properties": {
+        "expected_body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "expected_body_id",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "BindingRevokeRequest": {
+      "type": "object",
+      "properties": {
+        "expected_body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "expected_generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "expected_body_id",
+        "expected_generation",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "RecordRequest": {
+      "type": "object",
+      "properties": {
+        "statement": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/LayerExtensionProfileV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/ProviderRoleManifestV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/ServiceBindingV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/AdapterCapabilityManifestV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/InstitutionalAssetRecordV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/RightsStatementV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/PositionObservationV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/ValuationObservationV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/ExposureLinkV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/PortfolioProjectionV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/MetricDefinitionV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/ExportManifestV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/PortfolioInstructionV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/InteroperabilityReceiptV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/ScenarioDefinitionV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/ScenarioResultV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/ConformanceStatementV1_2Envelope"
+            },
+            {
+              "$ref": "#/$defs/ReconciliationBreakV1_2Envelope"
+            }
+          ]
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "statement",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "AdapterValidateRequest": {
+      "type": "object",
+      "properties": {
+        "adapter_manifest_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "required_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "maxItems": 128
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "adapter_manifest_ref",
+        "required_operations",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "PositionBatchRequest": {
+      "type": "object",
+      "properties": {
+        "source_binding_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "batch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "previous_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Watermark"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "statements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PositionObservationV1_2Envelope"
+          },
+          "maxItems": 1000
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "source_binding_ref",
+        "batch_id",
+        "previous_watermark",
+        "statements",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "ProjectionRequest": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "as_of": {
+          "$ref": "#/$defs/UInt"
+        },
+        "observed_cutoff": {
+          "$ref": "#/$defs/UInt"
+        },
+        "metric_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 32
+        },
+        "source_binding_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 32
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "scope",
+        "as_of",
+        "observed_cutoff",
+        "metric_refs",
+        "source_binding_refs",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "ExportRequest": {
+      "type": "object",
+      "properties": {
+        "projection_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "JSONL",
+            "CSV",
+            "DESKTOP_CONTEXT"
+          ]
+        },
+        "mapping_digest": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "privacy_policy_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "projection_ref",
+        "format",
+        "mapping_digest",
+        "privacy_policy_ref",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "ImportValidateRequest": {
+      "type": "object",
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/ExportManifestV1_2Envelope"
+        },
+        "staged_chunk_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "maxItems": 2048
+        },
+        "source_binding_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "manifest",
+        "staged_chunk_ids",
+        "source_binding_ref",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "ImportCommitRequest": {
+      "type": "object",
+      "properties": {
+        "validation_receipt_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "manifest_body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "expected_mapping_digest": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "validation_receipt_ref",
+        "manifest_body_id",
+        "expected_mapping_digest",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "ResolveBreakRequest": {
+      "type": "object",
+      "properties": {
+        "expected_generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 32
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "expected_generation",
+        "evidence_refs",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "InstructionRequest": {
+      "type": "object",
+      "properties": {
+        "instruction": {
+          "$ref": "#/$defs/PortfolioInstructionV1_2"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "instruction",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "ScenarioRequest": {
+      "type": "object",
+      "properties": {
+        "scenario": {
+          "$ref": "#/$defs/ScenarioDefinitionV1_2"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "scenario",
+        "client_operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "StagedChunk": {
+      "type": "object",
+      "properties": {
+        "staged_chunk_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "byte_length": {
+          "$ref": "#/$defs/UInt"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "staged_chunk_id",
+        "digest",
+        "byte_length",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "Job": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "QUEUED",
+            "RUNNING",
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELED"
+          ]
+        },
+        "result_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status_path": {
+          "$ref": "#/$defs/Text"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_disposition": {
+          "type": "string",
+          "enum": [
+            "NOT_REQUESTED",
+            "CANCEL_REQUESTED",
+            "QUIESCENT",
+            "ALREADY_COMMITTED"
+          ]
+        }
+      },
+      "required": [
+        "job_id",
+        "state",
+        "result_ref",
+        "status_path",
+        "error",
+        "cancel_disposition"
+      ],
+      "additionalProperties": false
+    },
+    "Page": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExactRef"
+          },
+          "maxItems": 1000
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot_ref": {
+          "$ref": "#/$defs/ExactRef"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor",
+        "snapshot_ref"
+      ],
+      "additionalProperties": false
+    },
+    "Status": {
+      "type": "object",
+      "properties": {
+        "receipt_ref": {
+          "$ref": "#/$defs/ExactRef"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ACCEPTED",
+            "VALIDATED",
+            "APPLIED",
+            "REJECTED",
+            "RECONCILIATION_REQUIRED"
+          ]
+        }
+      },
+      "required": [
+        "receipt_ref",
+        "state"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "btx.cognitiveReserve.v1_2",
+  "id": {"btxAsset": "asset-demo-a"},
+  "name": "Synthetic reserve position",
+  "btx": {
+    "purpose": "INSPECT",
+    "provider_ref": "provider-a",
+    "projection_ref": "projection-demo-a",
+    "asset_ref": "asset-demo-a"
+  }
+}

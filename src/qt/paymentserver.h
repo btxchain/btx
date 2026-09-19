@@ -5,8 +5,8 @@
 #ifndef BITCOIN_QT_PAYMENTSERVER_H
 #define BITCOIN_QT_PAYMENTSERVER_H
 
-// This class handles payment requests from clicking on
-// bitcoin: URIs
+// This class handles payment requests from clicking on btx:<addr> BIP21 URIs.
+// btx:// is a model resource, not a payment. bitcoin: is rejected.
 //
 // This is somewhat tricky, because we have to deal with
 // the situation where the user clicks on a link during
@@ -50,7 +50,8 @@ class QLocalServer;
 class QUrl;
 QT_END_NAMESPACE
 
-extern const QString BITCOIN_IPC_PREFIX;
+extern const QString BTX_IPC_PREFIX;
+// COORDINATOR LOCK: do not re-export BITCOIN_IPC_PREFIX. bitcoin: is not a BTX URI.
 
 class PaymentServer : public QObject
 {

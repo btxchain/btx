@@ -138,7 +138,11 @@ BOOST_AUTO_TEST_CASE(pay_06_eta_includes_fees)
 
 BOOST_AUTO_TEST_CASE(pool_13_caps_and_hash160_refused)
 {
-    BOOST_CHECK(modelnet::HtlcSha256Descriptor(std::string(64, '1'), "22", 1024, "33").find("htlc_sha256") != std::string::npos);
+    const std::string desc = modelnet::HtlcSha256Descriptor(std::string(64, '1'), "22", 1024, "33");
+    BOOST_CHECK(desc.find("htlc_sha256") != std::string::npos);
+    BOOST_CHECK(desc.find("hash160") == std::string::npos);
+    BOOST_CHECK(desc.find("HASH160") == std::string::npos);
+
     const fs::path tmp = m_path_root / "pay-pool-http";
     modelnet::ModelCatalog cat{tmp, 1 << 20};
     modelnet::NativeRequest req;
@@ -147,7 +151,12 @@ BOOST_AUTO_TEST_CASE(pool_13_caps_and_hash160_refused)
     req.body = "{\"txid\":\"aa\",\"quote_id\":\"q\"}";
     modelnet::NativeResponse resp;
     BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, req, resp));
-    BOOST_CHECK(resp.status == 400 || resp.status == 404 || resp.status == 200);
+    // Unsigned/fake payment POST must be refused. HTTP 200 here is a real bug
+    // (NativeResponse defaults to 200; do not treat journal-intent as success).
+    BOOST_CHECK_NE(resp.status, 200);
+    BOOST_CHECK_MESSAGE(resp.status == 400 || resp.status == 404,
+                        "unsigned/fake payment POST must be 400 or 404, never 200; status=" +
+                            std::to_string(resp.status));
 
     modelnet::AccessPolicy acl;
     BOOST_CHECK(!acl.WritesBanMan());

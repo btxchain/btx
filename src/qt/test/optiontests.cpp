@@ -146,9 +146,11 @@ void OptionTests::displayUnitLabels()
 {
     QCOMPARE(BitcoinUnits::longName(BitcoinUnit::BTC), QString("BTX"));
     QCOMPARE(BitcoinUnits::longName(BitcoinUnit::mBTC), QString("mBTX"));
-    QCOMPARE(BitcoinUnits::longName(BitcoinUnit::uBTC), QString::fromUtf8("µBTX (bits)"));
+    QCOMPARE(BitcoinUnits::longName(BitcoinUnit::uBTC), QString::fromUtf8("µBTX"));
     QCOMPARE(BitcoinUnits::shortName(BitcoinUnit::BTC), QString("BTX"));
     QCOMPARE(BitcoinUnits::shortName(BitcoinUnit::mBTC), QString("mBTX"));
+    QCOMPARE(BitcoinUnits::shortName(BitcoinUnit::SAT), QString("atom"));
+    QCOMPARE(BitcoinUnits::longName(BitcoinUnit::SAT), QString("atom"));
     QCOMPARE(BitcoinUnits::description(BitcoinUnit::BTC), QString("BTX (decimal)"));
     QCOMPARE(BitcoinUnits::formatWithUnit(BitcoinUnit::BTC, COIN, false, BitcoinUnits::SeparatorStyle::NEVER), QString("1.00000000 BTX"));
 }

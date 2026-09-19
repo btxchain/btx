@@ -24,7 +24,7 @@ BOOST_AUTO_TEST_CASE(iso_01_every_native_http_path_requires_pq1)
     BOOST_CHECK(modelnet::NativeHttpRequiresVerifiedPq1());
     const auto paths = modelnet::AdvertisedNativeHttpPaths();
     BOOST_REQUIRE(!paths.empty());
-    bool saw_hello = false, saw_grant = false, saw_receipts = false, saw_query = false;
+    bool saw_hello = false, saw_grant = false, saw_receipts = false, saw_query = false, saw_files = false;
     for (const auto& p : paths) {
         BOOST_CHECK(p.find("/hello") != std::string::npos ||
                     p.find("/query") != std::string::npos ||
@@ -33,17 +33,20 @@ BOOST_AUTO_TEST_CASE(iso_01_every_native_http_path_requires_pq1)
                     p.find("/availability") != std::string::npos ||
                     p.find("/quotes") != std::string::npos ||
                     p.find("/transfers") != std::string::npos ||
+                    p.find("/files") != std::string::npos ||
                     p.find("/releases") != std::string::npos ||
                     p.find("/ext/") != std::string::npos);
         if (p.find("/hello") != std::string::npos) saw_hello = true;
         if (p.find("/ext/free/grant") != std::string::npos) saw_grant = true;
         if (p.find("/ext/receipts") != std::string::npos) saw_receipts = true;
         if (p.find("/query") != std::string::npos) saw_query = true;
+        if (p.find("/files") != std::string::npos) saw_files = true;
     }
     BOOST_CHECK(saw_hello);
     BOOST_CHECK(saw_grant);
     BOOST_CHECK(saw_receipts);
     BOOST_CHECK(saw_query);
+    BOOST_CHECK(saw_files);
 
     const fs::path tmp = m_path_root / "iso01-http";
     modelnet::ModelCatalog cat{tmp, 1 << 20};

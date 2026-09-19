@@ -288,8 +288,11 @@ BOOST_AUTO_TEST_CASE(swarm_ps_01_verified_piece_without_index)
     uint64_t file_size = 0;
     BOOST_REQUIRE(cat.GetVerifiedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size, err));
     modelnet::ModelCatalog cat2{tmp / "dst", 8 << 20};
-    BOOST_REQUIRE(cat2.PutFetchedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size,
-                                     imported.core.files[0].pieces_root, err));
+    UniValue man;
+    BOOST_REQUIRE(cat.GetManifest(imported.model_id, man, err));
+    BOOST_REQUIRE_MESSAGE(cat2.InstallFromManifest(man, err, /*complete=*/false), err);
+    BOOST_REQUIRE_MESSAGE(cat2.PutFetchedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size,
+                                     imported.core.files[0].pieces_root, err), err);
     std::vector<unsigned char> again;
     std::vector<modelnet::Digest48> proof2;
     uint64_t fs2 = 0;

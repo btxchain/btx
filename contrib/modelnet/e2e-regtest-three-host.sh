@@ -37,6 +37,11 @@ THIRD_BTXD="${THIRD_BTXD:-\$HOME/.local/opt/btx-0.34.7-rc/bin/btxd}"
 THIRD_CLI="${THIRD_CLI:-${THIRD_BTXD%/*}/btx-cli}"
 THIRD_MODELD="${THIRD_MODELD:-${THIRD_BTXD%/*}/btx-modeld}"
 THIRD_LD_LIBRARY_PATH="${THIRD_LD_LIBRARY_PATH:-}"
+# Dedicated ports: never share 18443/18444 with the lab /var/lib/btxd node.
+SEEDER_P2P="${SEEDER_P2P:-38244}"
+SEEDER_RPC="${SEEDER_RPC:-38243}"
+THIRD_P2P="${THIRD_P2P:-38344}"
+THIRD_RPC="${THIRD_RPC:-38343}"
 PROD_SEEDER="${SEEDER_PROD_PIDS:?set SEEDER_PROD_PIDS}"
 PROD_FETCHER="${FETCHER_PROD_PIDS:?set FETCHER_PROD_PIDS}"
 PROD_THIRD="${THIRD_PROD_PIDS:-}"
@@ -166,7 +171,7 @@ rm -rf "\$DIR"
 mkdir -p "\$DIR/btxd" "\$DIR/modeld" "\$DIR/src"
 python3 -c "import struct; from pathlib import Path; Path('\$DIR/src/model.safetensors').write_bytes(struct.pack('<Q', 2)+b'{}')"
 nohup "\$BTXD" -regtest -datadir="\$DIR/btxd" -server \\
-  -listen=0 -port=18444 -rpcport=18443 -rpcuser=regtest -rpcpassword=regtest \\
+  -listen=0 -port=${SEEDER_P2P} -rpcport=${SEEDER_RPC} -rpcuser=regtest -rpcpassword=regtest \\
   -fallbackfee=0.0002 -disablewallet \\
   -regtestmatmulbindingheight=2147483647 \\
   -regtestmatmulproductdigestheight=2147483647 \\
@@ -224,7 +229,7 @@ rm -rf "\$DIR"
 mkdir -p "\$DIR/btxd" "\$DIR/modeld"
 # Portable btxd flags (older Darwin trees may not know -regtestmatmul*).
 nohup "\$BTXD" -regtest -datadir="\$DIR/btxd" -server \\
-  -listen=0 -port=18464 -rpcport=18463 -rpcuser=regtest -rpcpassword=regtest \\
+  -listen=0 -port=${THIRD_P2P} -rpcport=${THIRD_RPC} -rpcuser=regtest -rpcpassword=regtest \\
   -fallbackfee=0.0002 -disablewallet \\
   >"\$DIR/btxd.log" 2>&1 &
 echo \$! > "\$DIR/btxd.pid"

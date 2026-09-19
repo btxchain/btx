@@ -9,6 +9,10 @@
 // cmake/bitcoin-build-config.h.in uses `#cmakedefine ENABLE_MODELNET 1`, so an
 // OFF configure leaves ENABLE_MODELNET unset (cmake writes `/* #undef ... */`).
 // Include this header only from contrib/modelnet/check-with-modelnet-off.sh.
+//
+// WITH_MODELNET=OFF must not compile or link src/modelnet/*.cpp except this
+// header. Monetary consensus (pow, validation, chainparams) must not include
+// live modelnet headers when ENABLE_MODELNET is unset.
 
 #ifdef ENABLE_MODELNET
 #error "src/modelnet/disabled_stub.h is for WITH_MODELNET=OFF (ENABLE_MODELNET unset)"

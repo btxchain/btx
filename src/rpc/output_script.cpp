@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <chainparams.h>
 #include <key_io.h>
 #include <outputtype.h>
 #include <pubkey.h>
@@ -29,6 +30,18 @@
 
 static constexpr auto LEGACY_MULTISIG_DISABLED_ERROR =
     "BTX PQ policy: legacy multisig RPCs are disabled; use P2MR descriptors";
+static constexpr auto NON_P2MR_DESCRIPTOR_POLICY_ERROR =
+    "BTX PQ policy: only P2MR descriptors (mr()/pqhd) are accepted on this chain";
+
+static void EnsureDescriptorsProduceP2MROutputs(const std::vector<std::unique_ptr<Descriptor>>& descs)
+{
+    if (!Params().GetConsensus().fEnforceP2MROnlyOutputs) return;
+    for (const auto& desc : descs) {
+        if (!desc || desc->GetOutputType() != OutputType::P2MR) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, NON_P2MR_DESCRIPTOR_POLICY_ERROR);
+        }
+    }
+}
 
 struct PQMultisigKey {
     PQAlgorithm algo;
@@ -286,7 +299,7 @@ static RPCHelpMan createmultisig()
 
 static RPCHelpMan getdescriptorinfo()
 {
-    const std::string EXAMPLE_DESCRIPTOR = "wpkh([d34db33f/84h/0h/0h]0279be667ef9dcbbac55a06295Ce870b07029Bfcdb2dce28d959f2815b16f81798)";
+    const std::string EXAMPLE_DESCRIPTOR = AddChecksum("mr(pqhd(d34db33f/0h/0h/0/*),pk_slh(pqhd(d34db33f/0h/0h/0/*)))");
 
     return RPCHelpMan{"getdescriptorinfo",
         {"\nAnalyses a descriptor.\n"},
@@ -339,6 +352,7 @@ static RPCHelpMan getdescriptorinfo()
             if (descs.empty()) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, error);
             }
+            EnsureDescriptorsProduceP2MROutputs(descs);
 
             UniValue result(UniValue::VOBJ);
             result.pushKV("descriptor", descs.at(0)->ToString());
@@ -403,19 +417,23 @@ static UniValue DeriveAddresses(const Descriptor* desc, int64_t range_begin, int
 
 static RPCHelpMan deriveaddresses()
 {
-    const std::string EXAMPLE_DESCRIPTOR = "wpkh([d34db33f/84h/0h/0h]xpub6DJ2dNUysrn5Vt36jH2KLBT2i1auw1tTSSomg8PhqNiUtx8QX2SvC9nrHu81fT41fvDUnhMjEzQgXnQjKEu3oaqMSzhSrHMxyyoEAmUHQbY/0/*)#cjjspncu";
+    const std::string EXAMPLE_DESCRIPTOR = AddChecksum(
+        "mr(pqhd(0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20/0h/0h/0/*),"
+        "pk_slh(pqhd(0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20/0h/0h/0/*)))");
 
     return RPCHelpMan{"deriveaddresses",
         {"\nDerives one or more addresses corresponding to an output descriptor.\n"
          "Examples of output descriptors are:\n"
-         "    pkh(<pubkey>)                                     P2PKH outputs for the given pubkey\n"
-         "    wpkh(<pubkey>)                                    Native segwit P2PKH outputs for the given pubkey\n"
-         "    sh(multi(<n>,<pubkey>,<pubkey>,...))              P2SH-multisig outputs for the given threshold and pubkeys\n"
+         "    addr(<p2mr>)                                      P2MR outputs for the given witness v2 address\n"
+         "    mr(<mldsa-pubkey>)                                Single-leaf P2MR for an ML-DSA-44 pubkey\n"
+         "    mr(<mldsa-pubkey>,pk_slh(<slhdsa-pubkey>))        Two-leaf P2MR (ML-DSA + SLH-DSA backup)\n"
+         "    mr(pqhd(<seed-or-fp>/0h/0h/0/*),pk_slh(pqhd(<seed-or-fp>/0h/0h/0/*)))\n"
+         "                                                      Ranged P2MR from a PQ HD seed or fingerprint\n"
+         "    mr(multi_pq(<n>,<pubkey>,<pubkey>,...))           P2MR PQ-multisig outputs\n"
          "    raw(<hex script>)                                 Outputs whose output script equals the specified hex-encoded bytes\n"
-         "    tr(<pubkey>,multi_a(<n>,<pubkey>,<pubkey>,...))   P2TR-multisig outputs for the given threshold and pubkeys\n"
-         "\nIn the above, <pubkey> either refers to a fixed public key in hexadecimal notation, or to an xpub/xprv optionally followed by one\n"
-         "or more path elements separated by \"/\", where \"h\" represents a hardened child key.\n"
-         "For more information on output descriptors, see the documentation in the doc/descriptors.md file.\n"},
+         "\nIn the above, <mldsa-pubkey> and <slhdsa-pubkey> are hex-encoded PQ public keys.\n"
+         "pqhd() takes a 32-byte hex seed or 4-byte fingerprint, then coin_typeh/accounth/change/*.\n"
+         "Ranged mr() derivation requires the seed. For more information, see doc/descriptors.md.\n"},
         {
             {"descriptor", RPCArg::Type::STR, RPCArg::Optional::NO, "The descriptor."},
             {"range", RPCArg::Type::RANGE, RPCArg::Optional::OMITTED, "If a ranged descriptor is used, this specifies the end or the range (in [begin,end] notation) to derive."},
@@ -447,11 +465,11 @@ static RPCHelpMan deriveaddresses()
             },
         },
         RPCExamples{
-            "First three native segwit receive addresses:\n" +
+            "First three P2MR receive addresses:\n" +
             HelpExampleCli("deriveaddresses", "\"" + EXAMPLE_DESCRIPTOR + "\" \"[0,2]\"") +
             HelpExampleRpc("deriveaddresses", "\"" + EXAMPLE_DESCRIPTOR + "\", \"[0,2]\"") +
-            "Derive the PKH address from a WIF, which has a built-in checksum:\n" +
-            HelpExampleCli("deriveaddresses", "\"pkh(cPsQTSmMZ8e3AEUWGjS73f5R364yJxH6RxcgnwbHjbKbFPUP2Dtu)\" null '{\"require_checksum\": false}'")
+            "Derive the P2MR address from an addr() descriptor, which has a built-in Bech32m checksum:\n" +
+            HelpExampleCli("deriveaddresses", "\"addr(" + EXAMPLE_ADDRESS[0] + ")\" null '{\"require_checksum\": false}'")
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
@@ -489,6 +507,7 @@ static RPCHelpMan deriveaddresses()
             if (descs.empty()) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, error);
             }
+            EnsureDescriptorsProduceP2MROutputs(descs);
             auto& desc = descs.at(0);
             if (!desc->IsRange() && !request.params[1].isNull()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Range should not be specified for an un-ranged descriptor");

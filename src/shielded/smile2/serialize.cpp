@@ -65,6 +65,11 @@ size_t ComputeLiveCtAuxMsgCount(size_t num_inputs, size_t num_outputs, bool with
 
 size_t ComputeLiveCtRetainedAuxMsgCount(size_t num_inputs, size_t num_outputs)
 {
+    // Live codec: selector/amount t_msg rows are NOT retained on-wire. They
+    // travel as post-challenge residues (CollectSerializedOmittedAux*). Decode
+    // reconstructs t_msg slots from those residues; VerifyCT must still check
+    // the reconstructed commitments. Returning a non-zero count here would
+    // change the proof wire layout (consensus). This is not a skip of verify.
     (void)num_inputs;
     (void)num_outputs;
     return 0;
@@ -247,6 +252,24 @@ uint8_t ComputeBitsNeededForCenteredRange(int64_t max_abs)
     uint8_t bits_needed = 1;
     while ((1ULL << bits_needed) < range) bits_needed++;
     return bits_needed;
+}
+
+bool CenteredExactPaddingClear(const uint8_t* packed, size_t total_bytes, size_t total_bits)
+{
+    if (total_bytes == 0) return total_bits == 0;
+    const size_t used_in_last = total_bits % 8;
+    if (used_in_last == 0) return true;
+    const uint8_t last = packed[total_bytes - 1];
+    const uint8_t pad_mask = static_cast<uint8_t>(0xFFu << used_in_last);
+    return (last & pad_mask) == 0;
+}
+
+bool DecodeCenteredOffset(uint32_t encoded, int64_t offset, int64_t& centered)
+{
+    const uint64_t max_encoded = 2ull * static_cast<uint64_t>(offset);
+    if (static_cast<uint64_t>(encoded) > max_encoded) return false;
+    centered = static_cast<int64_t>(encoded) - offset;
+    return true;
 }
 
 int64_t ComputeCenteredMaxAbs(const SmilePoly& p)
@@ -547,6 +570,7 @@ bool DeserializeCenteredPolyExact(const uint8_t*& ptr, const uint8_t* end, Smile
     if (ptr >= end) return false;
     const uint8_t bits_needed = *ptr++;
     if (bits_needed == 0 || bits_needed > 32) return false;
+    if (bits_needed != ComputeBitsNeededForCenteredRange(offset)) return false;
 
     const size_t total_bits = POLY_DEGREE * bits_needed;
     const size_t total_bytes = (total_bits + 7) / 8;
@@ -556,10 +580,13 @@ bool DeserializeCenteredPolyExact(const uint8_t*& ptr, const uint8_t* end, Smile
     for (size_t i = 0; i < POLY_DEGREE; ++i) {
         uint32_t encoded;
         if (!br.Read(bits_needed, encoded)) return false;
-        const int64_t centered = static_cast<int64_t>(encoded) - offset;
+        int64_t centered = 0;
+        if (!DecodeCenteredOffset(encoded, offset, centered)) return false;
         p.coeffs[i] = mod_q(centered);
     }
+    if (!CenteredExactPaddingClear(ptr, total_bytes, total_bits)) return false;
     ptr += total_bytes;
+    if (ComputeCenteredMaxAbs(p) != offset) return false;
     return true;
 }
 
@@ -599,6 +626,7 @@ bool DeserializeCenteredPolyVecFixed(const uint8_t*& ptr,
     if (ptr >= end) return false;
     const uint8_t bits_needed = *ptr++;
     if (bits_needed == 0 || bits_needed > 32) return false;
+    if (bits_needed != ComputeBitsNeededForCenteredRange(offset)) return false;
 
     const size_t total_bits = count * POLY_DEGREE * bits_needed;
     const size_t total_bytes = (total_bits + 7) / 8;
@@ -609,11 +637,14 @@ bool DeserializeCenteredPolyVecFixed(const uint8_t*& ptr,
         for (size_t coeff = 0; coeff < POLY_DEGREE; ++coeff) {
             uint32_t encoded;
             if (!br.Read(bits_needed, encoded)) return false;
-            const int64_t centered = static_cast<int64_t>(encoded) - offset;
+            int64_t centered = 0;
+            if (!DecodeCenteredOffset(encoded, offset, centered)) return false;
             v[poly].coeffs[coeff] = mod_q(centered);
         }
     }
+    if (!CenteredExactPaddingClear(ptr, total_bytes, total_bits)) return false;
     ptr += total_bytes;
+    if (ComputeCenteredMaxAbs(v) != offset) return false;
     return true;
 }
 
@@ -661,6 +692,11 @@ bool DeserializeGaussianVec(const uint8_t*& ptr, const uint8_t* end, size_t coun
     if (ptr >= end) return false;
     uint8_t bits_needed = *ptr++;
     if (bits_needed > 32 || bits_needed == 0) return false;
+    // Encoded values must still sit in [0, 2*offset] (DecodeCenteredOffset) and
+    // leftover padding bits must be clear. bits_needed is not pinned to
+    // ComputeBitsNeededForCenteredRange: historical Gaussian payloads may have
+    // used a wider field; tightening that would be a consensus fork. Extra
+    // high bits cannot smuggle a wrap because out-of-range encoded is rejected.
 
     size_t total_bits = count * POLY_DEGREE * bits_needed;
     size_t total_bytes = (total_bits + 7) / 8;
@@ -671,10 +707,12 @@ bool DeserializeGaussianVec(const uint8_t*& ptr, const uint8_t* end, size_t coun
         for (size_t i = 0; i < POLY_DEGREE; ++i) {
             uint32_t encoded;
             if (!br.Read(bits_needed, encoded)) return false;
-            int64_t centered = static_cast<int64_t>(encoded) - offset;
+            int64_t centered = 0;
+            if (!DecodeCenteredOffset(encoded, offset, centered)) return false;
             z[p].coeffs[i] = mod_q(centered);
         }
     }
+    if (!CenteredExactPaddingClear(ptr, total_bytes, total_bits)) return false;
     ptr += total_bytes;
     return true;
 }

@@ -4,9 +4,11 @@
 
 #include <bitcoin-build-config.h>
 #include <modelnet/bounty.h>
+#include <modelnet/catalog.h>
 #include <primitives/transaction.h>
 #include <modelnet/canonical_codec.h>
 #include <modelnet/crypto.h>
+#include <modelnet/helper.h>
 #include <modelnet/http_bridge.h>
 #include <modelnet/identity.h>
 #include <modelnet/resource_uri.h>
@@ -28,6 +30,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -112,6 +115,61 @@ std::vector<unsigned char> Pattern(size_t n, unsigned char seed)
     std::vector<unsigned char> v(n);
     for (size_t i = 0; i < n; ++i) v[i] = static_cast<unsigned char>(seed + i);
     return v;
+}
+
+UniValue HelperRpc(const std::string& method, const UniValue& params = UniValue(UniValue::VARR))
+{
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("method", method);
+    req.pushKV("params", params);
+    return req;
+}
+
+void AssertSpendZeroIfPresent(const UniValue& o)
+{
+    if (!o.exists("automatic_spend_atoms")) return;
+    const UniValue& s = o["automatic_spend_atoms"];
+    if (s.isNum()) BOOST_CHECK_EQUAL(s.getInt<int64_t>(), 0);
+    else if (s.isStr()) BOOST_CHECK_EQUAL(s.get_str(), "0");
+    else BOOST_CHECK_MESSAGE(false, "automatic_spend_atoms present but not 0");
+}
+
+void AssertNotConsensusUnsigned(const UniValue& o)
+{
+    BOOST_CHECK(!o.exists("wallet_signed") || !o["wallet_signed"].get_bool());
+    BOOST_CHECK(!o.exists("consensus") || !o["consensus"].get_bool());
+    BOOST_CHECK(!o.exists("wallet") || !o["wallet"].get_bool());
+    if (o.exists("completeness") && o["completeness"].isStr()) {
+        BOOST_CHECK_EQUAL(o["completeness"].get_str(), "local_watch_only");
+    }
+}
+
+void AssertNoBountySecrets(const UniValue& v)
+{
+    if (v.isObject()) {
+        for (const std::string& k : v.getKeys()) {
+            BOOST_CHECK_MESSAGE(k != "seed" && k != "mnemonic" && k != "private_key" && k != "sk" &&
+                                    k != "sk_hex" && k != "wallet_passphrase",
+                                "secret field in JSON: " + k);
+            if (k == "wallet_seed" || k == "private_keys" || k == "secrets") {
+                if (v[k].isBool()) BOOST_CHECK(!v[k].get_bool());
+            }
+            AssertNoBountySecrets(v[k]);
+        }
+    } else if (v.isArray()) {
+        for (const auto& e : v.getValues()) AssertNoBountySecrets(e);
+    }
+}
+
+bool FactsHaveOutpoint(const UniValue& o, const std::string& outpoint)
+{
+    if (!o.exists("facts") || !o["facts"].isArray()) return false;
+    for (const auto& f : o["facts"].getValues()) {
+        if (f.isObject() && f.exists("outpoint") && f["outpoint"].isStr() && f["outpoint"].get_str() == outpoint) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -268,7 +326,8 @@ BOOST_AUTO_TEST_CASE(bounty_auth_001_to_030)
     params.push_back(terms);
     UniValue result;
     std::string code;
-    BOOST_CHECK(!store.Dispatch("createbountydraft", params, result, code, err) || !err.empty() || true);
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", params, result, code, err));
+    BOOST_CHECK(result.exists("draft_id"));
     // createbountydraft does not check identity match; publish does
     UniValue ok_params(UniValue::VARR);
     UniValue good = DefaultTerms(ZeroNet());
@@ -682,6 +741,21 @@ BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
 
     std::string derr;
     BOOST_CHECK_EQUAL(DedupePrincipal({{"aa:0", 10}, {"aa:0", 10}}, derr), 10);
+    derr.clear();
+    BOOST_CHECK_EQUAL(DedupePrincipal({{"aa:0", MAX_MONEY_ATOMS}, {"bb:0", 1}}, derr), -1);
+    BOOST_CHECK(derr.find("MoneyRange") != std::string::npos);
+
+    UniValue wide_bps = FundingView("2100000000000000", "0", UniValue("1000000000000000"));
+    BOOST_CHECK(wide_bps["funding_progress_known"].get_bool());
+    BOOST_CHECK_EQUAL(wide_bps["funded_bps"].getInt<int64_t>(), 4761);
+    BOOST_CHECK(EligibleBps("1000000000000000", "2100000000000000", 4761, err));
+    BOOST_CHECK(!EligibleBps("1000000000000000", "2100000000000000", 4762, err));
+
+    UniValue bad_conf = FundingView("100", "1", UniValue("01"));
+    BOOST_CHECK(!bad_conf["funding_progress_known"].get_bool());
+    BOOST_CHECK(bad_conf["funded_bps"].isNull());
+    UniValue over_conf = FundingView("100", "1", UniValue("21000000000000001"));
+    BOOST_CHECK(!over_conf["funding_progress_known"].get_bool());
 
     BountyChainIndex chain;
     BountyChainFact f;
@@ -699,6 +773,57 @@ BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
     UniValue rec = chain.ExportRecovery("b1", {"l1"});
     BOOST_CHECK(rec.exists("lots"));
     BOOST_CHECK(!rec["private_keys"].get_bool());
+
+    BountyChainIndex sat;
+    BountyChainFact big;
+    big.outpoint = "big:0";
+    big.bounty_id = "sum";
+    big.amount_atoms = MAX_MONEY_ATOMS;
+    sat.Observe(big);
+    BountyChainFact big2 = big;
+    big2.outpoint = "big:1";
+    sat.Observe(big2);
+    BOOST_CHECK_EQUAL(sat.ConfirmedAtoms("sum"), MAX_MONEY_ATOMS);
+
+    BountyChainFact junk;
+    junk.outpoint = "junk:0";
+    junk.bounty_id = "junk";
+    junk.amount_atoms = std::numeric_limits<int64_t>::max();
+    BountyChainIndex skip;
+    skip.Observe(junk);
+    BOOST_CHECK_EQUAL(skip.ConfirmedAtoms("junk"), 0);
+
+    UniValue man(UniValue::VOBJ);
+    UniValue lots(UniValue::VARR);
+    UniValue lbad(UniValue::VOBJ);
+    lbad.pushKV("outpoint", "imp:0");
+    lbad.pushKV("amount_atoms", "21000000000000001");
+    lots.push_back(lbad);
+    man.pushKV("bounty_id", "imp");
+    man.pushKV("lots", lots);
+    std::string ierr;
+    BountyChainIndex imported;
+    BOOST_CHECK(!imported.ImportManifest(man, ierr));
+    BOOST_CHECK(imported.Get("imp:0") == nullptr);
+    BOOST_CHECK_EQUAL(imported.ConfirmedAtoms("imp"), 0);
+
+    UniValue man2(UniValue::VOBJ);
+    UniValue lots2(UniValue::VARR);
+    UniValue l1(UniValue::VOBJ);
+    l1.pushKV("outpoint", "imp:1");
+    l1.pushKV("amount_atoms", std::to_string(MAX_MONEY_ATOMS));
+    UniValue l2(UniValue::VOBJ);
+    l2.pushKV("outpoint", "imp:2");
+    l2.pushKV("amount_atoms", "1");
+    lots2.push_back(l1);
+    lots2.push_back(l2);
+    man2.pushKV("bounty_id", "imp");
+    man2.pushKV("lots", lots2);
+    ierr.clear();
+    BOOST_CHECK(!imported.ImportManifest(man2, ierr));
+    BOOST_CHECK(ierr.find("MoneyRange") != std::string::npos);
+    BOOST_CHECK(imported.Get("imp:1") == nullptr);
+    BOOST_CHECK(imported.Get("imp:2") == nullptr);
 
     UniValue spec(UniValue::VOBJ);
     spec.pushKV("profile_id", "EXACT_CHECKS");
@@ -760,6 +885,89 @@ BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
     BOOST_CHECK(budget.Used() <= 100);
     budget.Revoke();
     BOOST_CHECK(!budget.Reserve("k5", 10, err));
+}
+
+BOOST_AUTO_TEST_CASE(bounty_observe_amount_atoms_fail_closed)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-observe-amount-atoms-fail-closed";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+
+    auto observe = [&](const std::string& outpoint, const UniValue& amount, const std::string& bounty_id = "obs") {
+        UniValue params(UniValue::VARR);
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("outpoint", outpoint);
+        o.pushKV("bounty_id", bounty_id);
+        o.pushKV("lot_id", "lot");
+        o.pushKV("amount_atoms", amount);
+        o.pushKV("confirmations", 1);
+        o.pushKV("height", 10);
+        params.push_back(o);
+        result.clear();
+        code.clear();
+        err.clear();
+        return store.Dispatch("observebountychain", params, result, code, err);
+    };
+
+    BOOST_CHECK(!observe("badstr:0", UniValue("01")));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!FactsHaveOutpoint(result, "badstr:0"));
+
+    BOOST_CHECK(!observe("neg:0", UniValue(static_cast<int64_t>(-1))));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!FactsHaveOutpoint(result, "neg:0"));
+
+    BOOST_CHECK(!observe("overstr:0", UniValue("21000000000000001")));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!FactsHaveOutpoint(result, "overstr:0"));
+
+    BOOST_CHECK(!observe("overint:0", UniValue(std::numeric_limits<int64_t>::max())));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!FactsHaveOutpoint(result, "overint:0"));
+
+    BOOST_REQUIRE(observe("ok:0", UniValue("100")));
+    BOOST_CHECK(FactsHaveOutpoint(result, "ok:0"));
+    BOOST_CHECK(!FactsHaveOutpoint(result, "badstr:0"));
+    BOOST_CHECK(!FactsHaveOutpoint(result, "neg:0"));
+    BOOST_CHECK(!FactsHaveOutpoint(result, "overstr:0"));
+    BOOST_CHECK(!FactsHaveOutpoint(result, "overint:0"));
+    AssertSpendZeroIfPresent(result);
+
+    BOOST_REQUIRE(observe("okint:0", UniValue(static_cast<int64_t>(50))));
+    BOOST_CHECK(FactsHaveOutpoint(result, "okint:0"));
+
+    BOOST_REQUIRE(observe("max:0", UniValue(std::to_string(MAX_MONEY_ATOMS)), "cap"));
+    BOOST_CHECK(!observe("max:1", UniValue("1"), "cap"));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(err.find("MoneyRange") != std::string::npos);
+    BOOST_REQUIRE(observe("max:0", UniValue(std::to_string(MAX_MONEY_ATOMS)), "cap"));
+    BOOST_CHECK(FactsHaveOutpoint(result, "max:0"));
+    BOOST_CHECK(!FactsHaveOutpoint(result, "max:1"));
+
+    UniValue imp(UniValue::VARR);
+    UniValue man(UniValue::VOBJ);
+    UniValue lots(UniValue::VARR);
+    UniValue lot(UniValue::VOBJ);
+    lot.pushKV("outpoint", "impbad:0");
+    lot.pushKV("amount_atoms", "01");
+    lots.push_back(lot);
+    man.pushKV("bounty_id", "obs");
+    man.pushKV("lots", lots);
+    UniValue wrap(UniValue::VOBJ);
+    wrap.pushKV("manifest", man);
+    imp.push_back(wrap);
+    result.clear();
+    code.clear();
+    err.clear();
+    BOOST_CHECK(!store.Dispatch("importbountyrecovery", imp, result, code, err));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE(observe("ok:0", UniValue("100")));
+    BOOST_CHECK(!FactsHaveOutpoint(result, "impbad:0"));
+    AssertSpendZeroIfPresent(result);
 }
 
 BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
@@ -1130,12 +1338,20 @@ BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
     BOOST_CHECK_EQUAL(br.http_status, 403);
     BOOST_REQUIRE(HandleBridgeRequest("GET", "/createagentmandate", "", br));
     BOOST_CHECK_EQUAL(br.http_status, 403);
+    BOOST_REQUIRE(HandleBridgeRequest("GET", "/createbountydraft", "", br));
+    BOOST_CHECK_EQUAL(br.http_status, 403);
+    BOOST_REQUIRE(HandleBridgeRequest("GET", "/updatebountydraft", "", br));
+    BOOST_CHECK_EQUAL(br.http_status, 403);
+    BOOST_REQUIRE(HandleBridgeRequest("GET", "/listbountydrafts", "", br));
+    BOOST_CHECK_EQUAL(br.http_status, 403);
+    BOOST_REQUIRE(HandleBridgeRequest("GET", "/validatebountyterms", "", br));
+    BOOST_CHECK_EQUAL(br.http_status, 403);
     BOOST_REQUIRE(HandleBridgeRequest("POST", "/rpc", "{\"method\":\"createagentmandate\"}", br));
     BOOST_CHECK(br.http_status == 405 || br.http_status == 403);
 
     const std::vector<std::string> helper = {
         "searchbounties", "getmodelbounties", "getbounty", "getbountyeconomy", "getbountyterms",
-        "getbountycapabilities", "createbountydraft", "validatebountyterms", "publishbounty", "revisebounty",
+        "getbountycapabilities", "createbountydraft", "listbountydrafts", "getbountydraft", "updatebountydraft", "deletebountydraft", "validatebountyterms", "publishbounty", "revisebounty",
         "nominatebountyevaluator", "acceptbountyappointment", "listbountyevaluators", "pledgebounty",
         "withdrawbountypledge", "freezebountyfundinground", "getbountyfunding", "exportbountyrecovery",
         "commitbountysubmission", "revealbountysubmission", "getbountysubmission", "listbountysubmissions",
@@ -1151,6 +1367,158 @@ BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
     BOOST_CHECK(!IsBountyHelperMethod("submitbountyfunding"));
     BOOST_CHECK(!IsBountyHelperMethod("preparebountyclaim"));
     BOOST_CHECK(!IsBountyHelperMethod("preparebountyrefund"));
+}
+
+BOOST_AUTO_TEST_CASE(incomplete_bounty_draft_cannot_publish)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-publish-gate";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+
+    // Gitcoin-comparable: an incomplete draft may be saved locally...
+    UniValue terms(UniValue::VOBJ);
+    terms.pushKV("title", "incomplete draft stays unpublished");
+    UniValue cp(UniValue::VARR);
+    cp.push_back(terms);
+    UniValue result;
+    std::string code, err;
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", cp, result, code, err));
+    BOOST_CHECK(!result["recipe_complete"].get_bool());
+    BOOST_REQUIRE(result["missing_fields"].isArray());
+    const size_t missing_before = result["missing_fields"].size();
+    BOOST_REQUIRE_GE(missing_before, 1U);
+    const std::string draft_id = result["draft_id"].get_str();
+
+    // ...but publish must fail closed while the checklist is incomplete.
+    UniValue pub(UniValue::VARR);
+    UniValue pobj(UniValue::VOBJ);
+    pobj.pushKV("draft_id", draft_id);
+    pub.push_back(pobj);
+    result.clear();
+    code.clear();
+    err.clear();
+    BOOST_CHECK(!store.Dispatch("publishbounty", pub, result, code, err));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!err.empty());
+
+    // The draft is untouched, still incomplete, and nothing was published.
+    UniValue gp(UniValue::VARR);
+    gp.push_back(draft_id);
+    BOOST_REQUIRE(store.Dispatch("getbountydraft", gp, result, code, err));
+    BOOST_CHECK(!result["recipe_complete"].get_bool());
+    BOOST_CHECK_EQUAL(result["missing_fields"].size(), missing_before);
+    BOOST_CHECK_EQUAL(result["next_actions"][0].get_str().empty(), false);
+}
+
+BOOST_AUTO_TEST_CASE(helper_observebountychain_reorg_recovery_unsigned)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "helper-observebountychain-reorg-recovery-unsigned";
+    ModelCatalog cat{dir, 1 << 20};
+
+    UniValue result;
+    std::string code, err;
+    const std::string bounty_id = "helper-observebountychain-reorg-recovery-unsigned";
+    const std::string outpoint = "c0ffeehelperobserve:0";
+
+    BOOST_REQUIRE(IsBountyHelperMethod("createbountydraft"));
+    UniValue terms(UniValue::VOBJ);
+    terms.pushKV("title", "helper observe/reorg recovery stays unsigned");
+    UniValue draftp(UniValue::VARR);
+    draftp.push_back(terms);
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperRpc("createbountydraft", draftp), result, code, err), err);
+    BOOST_CHECK(result["local_only"].get_bool());
+    BOOST_CHECK(!result["recipe_complete"].get_bool());
+    BOOST_CHECK(!result["published"].get_bool());
+    AssertSpendZeroIfPresent(result);
+    AssertNotConsensusUnsigned(result);
+
+    BOOST_REQUIRE(IsBountyHelperMethod("observebountychain"));
+    UniValue obs(UniValue::VARR);
+    UniValue of(UniValue::VOBJ);
+    of.pushKV("outpoint", outpoint);
+    of.pushKV("bounty_id", bounty_id);
+    of.pushKV("lot_id", "helper-lot");
+    of.pushKV("amount_atoms", "100");
+    of.pushKV("confirmations", 1);
+    of.pushKV("height", 10);
+    obs.push_back(of);
+    result.clear();
+    code.clear();
+    err.clear();
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperRpc("observebountychain", obs), result, code, err), err);
+    BOOST_CHECK(FactsHaveOutpoint(result, outpoint));
+    AssertSpendZeroIfPresent(result);
+    AssertNotConsensusUnsigned(result);
+
+    UniValue exported;
+    if (IsBountyHelperMethod("exportbountyrecovery")) {
+        UniValue exp(UniValue::VARR);
+        UniValue eo(UniValue::VOBJ);
+        eo.pushKV("bounty_id", bounty_id);
+        exp.push_back(eo);
+        result.clear();
+        code.clear();
+        err.clear();
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperRpc("exportbountyrecovery", exp), result, code, err), err);
+        AssertNoBountySecrets(result);
+        if (result.exists("wallet_seed")) BOOST_CHECK(!result["wallet_seed"].get_bool());
+        if (result.exists("private_keys")) BOOST_CHECK(!result["private_keys"].get_bool());
+        if (result.exists("secrets")) BOOST_CHECK(!result["secrets"].get_bool());
+        AssertSpendZeroIfPresent(result);
+        AssertNotConsensusUnsigned(result);
+        exported = result;
+    }
+
+    BOOST_REQUIRE(IsBountyHelperMethod("reorgbountychain"));
+    UniValue rp(UniValue::VARR);
+    UniValue ro(UniValue::VOBJ);
+    ro.pushKV("bounty_id", bounty_id);
+    rp.push_back(ro);
+    result.clear();
+    code.clear();
+    err.clear();
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperRpc("reorgbountychain", rp), result, code, err), err);
+    if (result.exists("reorg")) BOOST_CHECK(result["reorg"].get_bool());
+    if (result.exists("silent_delete")) BOOST_CHECK(!result["silent_delete"].get_bool());
+    if (result.exists("event") && result["event"].isObject() && result["event"].exists("payload") &&
+        result["event"]["payload"].isObject() && result["event"]["payload"].exists("silent_delete")) {
+        BOOST_CHECK(!result["event"]["payload"]["silent_delete"].get_bool());
+    }
+    BOOST_CHECK(!FactsHaveOutpoint(result, outpoint));
+    AssertSpendZeroIfPresent(result);
+    AssertNotConsensusUnsigned(result);
+
+    if (IsBountyHelperMethod("importbountyrecovery")) {
+        UniValue man = exported;
+        if (!man.isObject() || !man.exists("lots")) {
+            man.setObject();
+            UniValue lots(UniValue::VARR);
+            UniValue l1(UniValue::VOBJ);
+            l1.pushKV("outpoint", outpoint);
+            l1.pushKV("lot_id", "helper-lot");
+            l1.pushKV("amount_atoms", "100");
+            lots.push_back(l1);
+            man.pushKV("lots", lots);
+            man.pushKV("bounty_id", bounty_id);
+        }
+        UniValue imp(UniValue::VARR);
+        UniValue imo(UniValue::VOBJ);
+        imo.pushKV("manifest", man);
+        imp.push_back(imo);
+        result.clear();
+        code.clear();
+        err.clear();
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperRpc("importbountyrecovery", imp), result, code, err), err);
+        AssertNoBountySecrets(result);
+        if (result.exists("wallet_seed")) BOOST_CHECK(!result["wallet_seed"].get_bool());
+        if (result.exists("private_keys")) BOOST_CHECK(!result["private_keys"].get_bool());
+        if (result.exists("broadcast")) BOOST_CHECK(!result["broadcast"].get_bool());
+        AssertSpendZeroIfPresent(result);
+        AssertNotConsensusUnsigned(result);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

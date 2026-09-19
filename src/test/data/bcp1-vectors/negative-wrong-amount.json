@@ -1,0 +1,9 @@
+{
+  "id": "negative-wrong-amount",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "base": "unsigned-package.json",
+  "mutation": "replace_amount_atoms",
+  "wrong_amount_atoms": 124000000,
+  "note": "P2MR digest commits to the prevout amount. A mutated amount_atoms must not validate or finalize."
+}

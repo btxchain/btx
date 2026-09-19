@@ -1,0 +1,52 @@
+{
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "format": "BTXPSBT",
+  "version": 1,
+  "generator": "BCP/1 native vectors (synthetic keys only)",
+  "warning": "TEST KEY MATERIAL ONLY. Not a production seed, attestor key, or live wallet.",
+  "chain": "BTX",
+  "algorithm": "ML-DSA-44",
+  "public_bip32_child_derivation": false,
+  "public_child_error": "PUBLIC_CHILD_UNSUPPORTED",
+  "automatic_spend_atoms": 0,
+  "p2mr_leaf_version": 194,
+  "sizes": {
+    "mldsa44_pubkey_bytes": 1312,
+    "mldsa44_secret_key_bytes": 2560,
+    "mldsa44_signature_bytes": 2420
+  },
+  "derivation": {
+    "purpose": 87,
+    "coin_type_main": 0,
+    "coin_type_test": 1,
+    "account": 0,
+    "branch_deposit": 0,
+    "branch_change": 1,
+    "index": 0,
+    "path_deposit_main": "m/87h/0h/0h/0/0",
+    "path_change_main": "m/87h/0h/0h/1/0",
+    "path_deposit_test": "m/87h/1h/0h/0/0",
+    "path_change_test": "m/87h/1h/0h/1/0"
+  },
+  "files": {
+    "derivation": "derivation.json",
+    "unsigned_package": "unsigned-package.json",
+    "deposit_pool": "deposit-pool.json",
+    "negative_corrupt_signature": "negative-corrupt-signature.json",
+    "negative_wrong_prevout": "negative-wrong-prevout.json",
+    "negative_wrong_amount": "negative-wrong-amount.json",
+    "negative_missing_amount": "negative-missing-amount.json",
+    "negative_wrong_network": "negative-wrong-network.json",
+    "negative_public_child": "negative-public-child.json",
+    "signed_tx": "signed-tx.json",
+    "negative_duplicate_input": "negative-duplicate-input.json",
+    "p2mr_script": "p2mr-script.json",
+    "signing_digest": "signing-digest.json",
+    "mldsa_signature": "mldsa-signature.json",
+    "txid_inclusion": "txid-inclusion.json",
+    "negative_noncanonical": "negative-noncanonical.json",
+    "negative_spent_input": "negative-spent-input.json",
+    "negative_invalid_p2mr_branch": "negative-invalid-p2mr-branch.json",
+    "negative_wrong_change": "negative-wrong-change.json"
+  }
+}

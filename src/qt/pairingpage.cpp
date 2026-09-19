@@ -65,7 +65,7 @@ void PairingPage::refresh()
     if (m_client_model && m_client_model->getTorInfo(onion)) {
         m_onion_address->setText(onion);
         m_onion_address->setEnabled(true);
-        QString uri = QString("bitcoin-p2p://") + onion;
+        QString uri = QString("btx-p2p://") + onion;
         m_qrcode->setQR(uri);
         m_qrcode->setVisible(true);
     } else {

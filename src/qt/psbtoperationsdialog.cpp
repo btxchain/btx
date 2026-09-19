@@ -5,6 +5,7 @@
 #include <qt/psbtoperationsdialog.h>
 
 #include <chainparams.h>
+#include <addresstype.h>
 #include <common/messages.h>
 #include <core_io.h>
 #include <interfaces/node.h>
@@ -175,7 +176,7 @@ void PSBTOperationsDialog::saveTransaction() {
     QString filename = GUIUtil::getSaveFileName(this,
         tr("Save Transaction Data"), filename_suggestion,
         //: Expanded name of the binary PSBT file format. See: BIP 174.
-        tr("Partially Signed Transaction (Binary)") + QLatin1String(" (*.psbt)"), &selected_filter);
+        tr("Partially Signed BTX Transaction (Binary)") + QLatin1String(" (*.psbt)"), &selected_filter);
     if (filename.isEmpty()) {
         return;
     }
@@ -205,6 +206,9 @@ QString PSBTOperationsDialog::renderTransaction(const PartiallySignedTransaction
             .arg(QString::fromStdString(EncodeDestination(address))));
         // Check if the address is one of ours
         if (m_wallet_model != nullptr && m_wallet_model->wallet().txoutIsMine(out)) tx_description.append(" (" + tr("own address") + ")");
+        if (!std::holds_alternative<WitnessV2P2MR>(address) && !std::holds_alternative<CNoDestination>(address)) {
+            tx_description.append(" (" + tr("not a P2MR address") + ")");
+        }
         tx_description.append("<br>");
     }
 

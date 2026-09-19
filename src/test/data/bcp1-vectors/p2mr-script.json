@@ -1,0 +1,55 @@
+{
+  "id": "p2mr-script",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "format": "BTXPSBT",
+  "synthetic": true,
+  "warning": "TEST KEY MATERIAL ONLY. Native tests fill pubkey, leaf_script, merkle_root, leaf_hash, and script_pubkey from derivation.json. Never a production key.",
+  "note": "Witness v2 P2MR output: OP_2 + 32-byte program (merkle root). Single-leaf control_block is leaf_version 0xc2 with no sibling nodes. Canonical witness is [signature, leaf_script, control_block].",
+  "witness_version": 2,
+  "program_size": 32,
+  "script_pubkey_size": 34,
+  "script_pubkey_encoding": "OP_2 <32-byte merkle root>",
+  "leaf_version": 194,
+  "leaf_version_hex": "c2",
+  "algorithm": "ML-DSA-44",
+  "pubkey_size": 1312,
+  "signature_size": 2420,
+  "script_pubkey": "",
+  "program": "",
+  "merkle_root": "",
+  "leaf_script": "",
+  "leaf_hash": "",
+  "pubkey": "",
+  "control_block": "c2",
+  "p2mr": {
+    "merkle_root": "",
+    "leaf_script": "",
+    "leaf_version": 194,
+    "leaf_hash": "",
+    "control_block": "c2"
+  },
+  "inputs": [
+    {
+      "index": 0,
+      "txid": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "vout": 0,
+      "amount_atoms": 125000000,
+      "script_pubkey": "",
+      "p2mr": {
+        "merkle_root": "",
+        "leaf_script": "",
+        "leaf_version": 194,
+        "leaf_hash": "",
+        "control_block": "c2"
+      },
+      "path": "m/87h/0h/0h/0/0",
+      "pubkeys": [
+        {
+          "algo": "ML-DSA-44",
+          "pubkey": ""
+        }
+      ]
+    }
+  ],
+  "public_bip32_child_derivation": false
+}

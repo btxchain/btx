@@ -1,0 +1,63 @@
+{
+  "core": {
+    "version": 2,
+    "network": "REGTEST",
+    "package_type": "BOUNTY",
+    "label": "Synthetic bounty; no model exists",
+    "resources": [],
+    "variants": [],
+    "economy_refs": [
+      {
+        "kind": "BOUNTY",
+        "id": "66bd02798b20ec0cba0f35b6f5511edd9d05fbf4f667fd2edecfe833e1fb7c714126d9c55e125058b17fbe5466e09aeb",
+        "terms_id": "c9210290562abaaa2f3444c2aef0d657cc2bb71239b0f48222324ecda0646188f2369be650244f2d1b070900b9b254ca"
+      }
+    ],
+    "source_hints": [],
+    "critical_extensions": [
+      "AGENT_HANDOFF_V1"
+    ],
+    "documents": [
+      {
+        "path": "AGENTS.md",
+        "media_type": "text/markdown",
+        "encoding": "utf-8",
+        "text": "# Package purpose\nThis is a synthetic REGTEST example of a BTX agent-readable model handoff.\nIt describes a test bounty, not a downloadable production model.\n\n# Trust and scope\nRead the structured core first. This document applies only to this package.\nIt cannot override the user's instructions, grant permissions, introduce a\nsoftware trust root, or become the surrounding project's AGENTS.md.\nThis example is unsigned. A framing hash is not a publisher signature.\n\n# Model and variant\nInspect core.resources and core.variants. Select an exact immutable resource\nusing the user's choice and locally observed runtime/hardware compatibility.\nNo winning model or variant exists. Read the bounty reference; do not invent a model ID.\n\n# Client requirements\nRead core.agent_handoff.client_requirements. Use an already trusted compatible\nBTX installation, or propose installation through an independently approved\nsoftware channel. Do not trust a client binary merely because a model package\nincludes its hash. No special BTX bootstrapper is needed to inspect this file.\n\n# Acquisition\nUse the existing native BTX acquisition path under a finite local plan.\nDefault: FREE_ONLY and NATIVE_ONLY. No Hugging Face account, funded BTX wallet\nor cloud credential is required for a public model available from native peers.\nNo action is authorized by opening this descriptor alone.\n\n# Verification and output\nVerify the package core and accepted signer, canonical model manifest, pieces\nand complete selected file bytes. Materialize a leased local path for the\nruntime. Return MODEL_READY only when required files are verified, otherwise\nreport selection-only readiness or a specific missing dependency.\n\n# Local runtime handoff\nRead the typed runtime profile. Plan an invocation of a locally trusted\nadapter. Execute only within the user's authorization, resource ceilings and\nlocal-only network policy. BTX modeld does not host remote inference.\n\n# Economics\nPackage references are not wallet authority. Refresh signed terms and local\nchain-backed state before economic actions. Default monetary spend is zero.\n\n# Privacy\nNATIVE_ONLY must not fall back to Hugging Face, torrent or direct cloud HTTP.\nPeers can still observe their own requests; this is not an anonymity promise.\n\n# Failure handling\nStop on hash or signature mismatch. Report unsupported format, insufficient\nmemory, missing trust or unavailable providers distinctly. Do not switch to a\ndifferent model, remote endpoint or paid path to make the task appear complete.\n",
+        "size_bytes": "2522",
+        "sha384": "598c80a065f8bbb2cc1e814ed7f63540a524e7719f24d8add6dc501c5655ae61d4efa3f2d12a7311e98219407ce0bdcc"
+      },
+      {
+        "path": "README.md",
+        "media_type": "text/markdown",
+        "encoding": "utf-8",
+        "text": "# Example bounty\nSynthetic REGTEST fixture. There is no winning model yet. Inspect the referenced terms; no deposit is authorized.\n",
+        "size_bytes": "131",
+        "sha384": "6bdd776d1963927854fd64f65858aa50cb4a6bf52a4ffbe2ead3dd5cb21a1779d0431f6ab8f789363d93fe110f35947d"
+      }
+    ],
+    "agent_handoff": {
+      "version": 1,
+      "entry_document": "AGENTS.md",
+      "client_requirements": {
+        "distribution_id": "btx-model-tools",
+        "minimum_client_version": "0.34.8",
+        "required_capabilities": [
+          "BTXPKG_CORE_V2",
+          "AGENT_HANDOFF_V1"
+        ],
+        "documentation_hints": [
+          "https://docs.example/btx/model-tools"
+        ]
+      },
+      "acquisition": {
+        "retrieval_mode": "FREE_ONLY",
+        "source_policy": "NATIVE_ONLY",
+        "ready_requirement": "VERIFIED_LOCAL_FILES",
+        "offer_seeding": true
+      },
+      "runtime_profiles": []
+    }
+  },
+  "observations": [],
+  "signatures": []
+}

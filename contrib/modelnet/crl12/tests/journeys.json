@@ -1,0 +1,142 @@
+[
+  {
+    "id": "J01",
+    "title": "New entrant without bespoke code",
+    "steps": "Deploy two providers with generated identities. Publish roles, enroll one customer, discover a public capability and prepare it locally.",
+    "acceptance": "No brand branch, funded wallet or central provider registry is needed. Retain manifests, server logs and real local-runtime output.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J02",
+    "title": "Split-service customer",
+    "steps": "Bind discovery A, custody B and analytics C for one entity. Read a reserve, prepare a capability plan and export its result.",
+    "acceptance": "Audience-specific tokens, exact role checks and no cross-provider financial replay. Capture sanitized network boundaries.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J03",
+    "title": "Institutional custody statement",
+    "steps": "Ingest a source statement, its duplicate in another feed and a declared authoritative mapping.",
+    "acceptance": "AUC counts one beneficial position; backing assets and liabilities do not create duplicate customer wealth.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J04",
+    "title": "Managed reserve mandate",
+    "steps": "Add an actual test mandate to selected financial positions while leaving other holdings unmanaged.",
+    "acceptance": "AUM changes only for mandated holdings; AUC and technology coverage stay separate.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J05",
+    "title": "Business treasury capital loop",
+    "steps": "Use an existing v1.1 workload comparison to create a reserve allocation. Bring it through the new portfolio instruction interface.",
+    "acceptance": "Translation drafts, existing committee approves, existing HCP executes, local BTX prepares; no second engine.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J06",
+    "title": "Family group segregation",
+    "steps": "Load company, trust and personal books under read-only group access. Adviser prepares a draft for one entity.",
+    "acceptance": "Principal/entity approval required; no pooling or implicit cross-entity transfers.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J07",
+    "title": "Whole-portfolio fund view",
+    "steps": "Represent a real-form synthetic fund interest with partially known underlying reserve exposure.",
+    "acceptance": "Direct NAV counts parent once; look-through substitutes children with explicit residual coverage.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J08",
+    "title": "Late source correction",
+    "steps": "Create month-end report, then ingest a later correction effective at month end.",
+    "acceptance": "Earlier observation cutoff reproduces old report; new cutoff produces a linked corrected version.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J09",
+    "title": "Unknown value under outage",
+    "steps": "Remove one price and one required source while other data remains current.",
+    "acceptance": "Report partial/unavailable facts instead of zero; no execution authority follows from estimate.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J10",
+    "title": "Native research commitment",
+    "steps": "Translate a portfolio research instruction into v1.1 allocation, authorize and use real isolated native funding.",
+    "acceptance": "Ledger/chain/commitment reconcile; a later refund follows original terms and original provider.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J11",
+    "title": "Public release to cognitive holding",
+    "steps": "Fund an actual isolated release fixture, obtain disclosed bytes and prepare a supported local runtime.",
+    "acceptance": "Financial receipt, right/use record, exact recipe and readiness remain separate.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J12",
+    "title": "Signed export and hostile import",
+    "steps": "Export a snapshot to JSONL/CSV, tamper with one chunk, then import the intact set into a second provider.",
+    "acceptance": "Tampered input rejected, valid import atomically published, original signatures and tenant scope preserved.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J13",
+    "title": "Desktop analyst journey",
+    "steps": "Select an asset context in a generic institutional desktop fixture and open its reserve/capability view.",
+    "acceptance": "Context can read or prepare an explicit draft; no token, trade or runtime execution is embedded.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J14",
+    "title": "Portfolio technology business",
+    "steps": "Import several client books for analytics without any management mandate.",
+    "acceptance": "Coverage and client-specific metrics are reportable; technology vendor AUM is not invented.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J15",
+    "title": "Reserve and operational shocks",
+    "steps": "Apply a reserve-price shock and an independent provider-outage shock to a frozen projection.",
+    "acceptance": "Financial change and operational impacts have distinct units and methodology; local acquired capability survives gateway loss.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J16",
+    "title": "Concurrency and idempotency",
+    "steps": "Many agents retry the same instruction while admins revise role/policy state.",
+    "acceptance": "One exact draft per business operation; changed requests conflict; stale authority does not execute.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J17",
+    "title": "Scale and cancellation",
+    "steps": "Run the declared 100k-row process workload and separately the 10m-row institutional lab, with slow readers and cancellation.",
+    "acceptance": "Correct row counts, bounded memory/disk and measured throughput; unsupported large lab remains explicit.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J18",
+    "title": "Provider exit with pending capital",
+    "steps": "Revoke discovery/analytics and move portable records while a native financial child is uncertain.",
+    "acceptance": "Local use and new read discovery work; original provider reconciles financial child, no duplicated spend.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J19",
+    "title": "Migration and rollback",
+    "steps": "Migrate actual v1.1 fixtures, accept v1.2 import/position records, then disable new v1.2 effects.",
+    "acceptance": "Old contracts/financial recovery and read evidence survive; no Core v4, native ledger or consensus change.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "J20",
+    "title": "Neutral commercial demonstration",
+    "steps": "Demonstrate the same reserve/portfolio/capability workflow for a full venue, a specialist analytics provider and a greenfield entrant.",
+    "acceptance": "Same schemas and conformance; fee bases and new external assets are factual and distinct, not inferred from downloads.",
+    "status": "NOT_RUN"
+  }
+]

@@ -1,0 +1,27 @@
+[
+  {
+    "path": "compatibility/hcp1/schemas/HCPObjects.schema.json",
+    "sha256": "04c27408745fe41602d1f1dfde0eea65aaa04d4ec8017b6830fc3908fd2ef4fb",
+    "bytes": 47329
+  },
+  {
+    "path": "compatibility/hcp1/schemas/openapi.yaml",
+    "sha256": "80ce81430e0b70c4b11ff871456d9926dca69ad8242421fcb0570e691a80652e",
+    "bytes": 81418
+  },
+  {
+    "path": "compatibility/hcp1/schemas/rpc-catalog.json",
+    "sha256": "e7ba2850eed8e6cacdc791c12ac21dc9daeabe5ff66644c441c5389b0e21e8f7",
+    "bytes": 9290
+  },
+  {
+    "path": "compatibility/hcp1/tests/native-acceptance.csv",
+    "sha256": "e6a0b41e76f0cf8bcacdf6336394fe7f3134c272d56f143c54cb36d733735116",
+    "bytes": 35468
+  },
+  {
+    "path": "compatibility/hcp1/reference/contracts.py",
+    "sha256": "60fe58c80c93d0a90316e4b830446ac4cc8900a19cd24bafb5c091a82446f09e",
+    "bytes": 4825
+  }
+]

@@ -337,8 +337,11 @@ BOOST_AUTO_TEST_CASE(store_01_multi_source_resume)
 
     {
         modelnet::ModelCatalog buyer{tmp / "buyer", 1 << 20};
-        BOOST_REQUIRE(buyer.PutFetchedPiece(imported.artifact_id, 0, 0, from_a, proof_a, size_a,
-                                            imported.core.files[0].pieces_root, err));
+        UniValue man;
+        BOOST_REQUIRE(host_a.GetManifest(imported.model_id, man, err));
+        BOOST_REQUIRE_MESSAGE(buyer.InstallFromManifest(man, err, /*complete=*/false), err);
+        BOOST_REQUIRE_MESSAGE(buyer.PutFetchedPiece(imported.artifact_id, 0, 0, from_a, proof_a, size_a,
+                                            imported.core.files[0].pieces_root, err), err);
         modelnet::PieceIndex idx;
         BOOST_REQUIRE(host_a.Store().LoadPieceIndex(imported.artifact_id, 0, idx, err));
         BOOST_REQUIRE(buyer.Store().SavePieceIndex(imported.artifact_id, 0, idx, err));

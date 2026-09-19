@@ -7,11 +7,14 @@
 #include <modelnet/crypto.h>
 #include <modelnet/piece_ranges.h>
 #include <modelnet/resource_uri.h>
+#include <modelnet/verified_manifest.h>
+#include <modelnet/hello_caps.h>
 #include <crypto/sha384.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <fstream>
 #include <random>
@@ -100,6 +103,17 @@ bool AdmissionImpliesStructureVerified(AdmissionLevel a)
 
 } // namespace
 
+namespace {
+std::atomic<bool> g_adv_cloud{false};
+std::atomic<bool> g_adv_direct{false};
+} // namespace
+
+void SetAdvertisedCloudCaps(bool cloud_attached, bool direct_cloud_seed)
+{
+    g_adv_cloud.store(cloud_attached);
+    g_adv_direct.store(direct_cloud_seed);
+}
+
 bool GuessFileRole(const std::string& relpath, FileRole& role)
 {
     bool skip = false;
@@ -114,6 +128,19 @@ UniValue CapabilitiesObject()
     c.pushKV("protocol", 2);
     c.pushKV("uri", true);
     c.pushKV("importmodel", true);
+    c.pushKV("hostmodel", true);
+    c.pushKV("checkmodelsetup", true);
+    c.pushKV("previewmodelimport", true);
+    c.pushKV("getmodelsharecard", true);
+    c.pushKV("getmodeltransfers", true);
+    c.pushKV("setmodelalias", true);
+    c.pushKV("scanmodelwatch", true);
+    c.pushKV("getmodelwatchstatus", true);
+    c.pushKV("showmodel", true);
+    c.pushKV("exportmodellink", true);
+    c.pushKV("unhostmodel", true);
+    c.pushKV("removemodelalias", true);
+    c.pushKV("openmodelshare", true);
     c.pushKV("seedmodel", true);
     c.pushKV("listmodels", true);
     c.pushKV("getmodelmanifest", true);
@@ -135,6 +162,24 @@ UniValue CapabilitiesObject()
     c.pushKV("searchmodels", true);
     c.pushKV("decentralized_search", true);
     c.pushKV("automatic_spend_atoms", 0);
+    c.pushKV("full_file_stream_v1", true);
+    c.pushKV("subpiece_v1", true);
+    c.pushKV("package_v1", true);
+    c.pushKV("erasure_preservation_v1", true);
+    c.pushKV("query_summary_v1", true);
+    c.pushKV("index_reconcile_v1", true);
+    c.pushKV("metadata_gossip_v1", true);
+    c.pushKV("origin_offer_v1", true);
+    c.pushKV("lan_discovery_v1", true);
+    c.pushKV("selective_files_v1", true);
+    c.pushKV("capabilities", HelloCapabilityArray());
+    c.pushKV("quic", false);
+    c.pushKV("utp", "NONSHIPPING");
+    c.pushKV("btx_torrentd_process", false);
+    c.pushKV("cloud_attached_storage", g_adv_cloud.load());
+    c.pushKV("direct_cloud_seed", g_adv_direct.load());
+    c.pushKV("model_event_journal", true);
+    c.pushKV("subscription_mandate", true);
     c.pushKV("demand_seed_default", true);
     c.pushKV("preserve_rare", true);
     c.pushKV("follow_configured_peers_default", true);
@@ -149,6 +194,7 @@ UniValue CapabilitiesObject()
              "POST /hello", "POST /query", "POST /records/get", "POST /records/announce",
              "GET /manifests/{id}", "POST /availability", "POST /quotes",
              "POST /transfers/{id}/payment", "GET /transfers/{id}/pieces/{file}/{piece}",
+             "GET /files/{artifact}/{file}",
              "POST /releases/{id}/pledges", "POST /releases/{id}/rounds", "POST /releases/{id}/signatures",
              "POST /ext/caps", "POST /ext/resolve", "POST /ext/objects/get", "POST /ext/objects/announce",
              "POST /ext/free/grant", "POST /ext/receipts",
@@ -672,6 +718,8 @@ UniValue ModelCatalog::FileAvailabilityJson(const Digest48& artifact, const Mode
         one.pushKV("complete", complete);
         one.pushKV("piece_count", static_cast<int>(have.size()));
         one.pushKV("pieces_total", static_cast<int>(n));
+        one.pushKV("piece_size", static_cast<int64_t>(PIECE_SIZE));
+        one.pushKV("hash_alg", "sha384");
         files.push_back(one);
         ++fi;
     }
@@ -765,6 +813,9 @@ bool ModelCatalog::GetManifest(const Digest48& id, UniValue& out, std::string& e
     UniValue files(UniValue::VARR);
     for (const auto& f : e.core.files) files.push_back(CoreFileJson(f));
     out.pushKV("files", files);
+    out.pushKV("file_count", static_cast<int>(e.core.files.size()));
+    out.pushKV("piece_size", static_cast<int64_t>(PIECE_SIZE));
+    out.pushKV("hash_alg", "sha384");
     out.pushKV("seeded", e.seeded);
     out.pushKV("admission", AdmissionLevelName(e.admission));
     out.pushKV("bytes_verified", e.bytes_verified || AdmissionImpliesBytesVerified(e.admission));
@@ -808,6 +859,43 @@ bool ModelCatalog::FindExact(ResourceKind kind, const Digest48& digest, CatalogE
             return true;
         }
     }
+    return false;
+}
+
+bool ModelCatalog::MarkIncomplete(const Digest48& model_or_artifact, bool incomplete, std::string& err)
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    for (auto& m : m_models) {
+        if (!(m.model_id == model_or_artifact || m.artifact_id == model_or_artifact)) continue;
+        m.incomplete = incomplete;
+        if (incomplete) {
+            m.bytes_verified = false;
+            m.admission = AdmissionLevel::FETCHING;
+            m.completed_at = 0;
+        }
+        return PersistLocked(err);
+    }
+    err = "unknown model";
+    return false;
+}
+
+bool ModelCatalog::NoteUsefulBytes(const Digest48& model_or_artifact, int64_t served_delta, int64_t received_delta, std::string& err)
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    for (auto& m : m_models) {
+        if (!(m.model_id == model_or_artifact || m.artifact_id == model_or_artifact)) continue;
+        const int64_t now = GetTime();
+        if (served_delta > 0) {
+            m.useful_bytes_served += served_delta;
+            m.last_served_at = now;
+        }
+        if (received_delta > 0) {
+            m.useful_bytes_received += received_delta;
+            m.last_access_at = now;
+        }
+        return PersistLocked(err);
+    }
+    err = "unknown model";
     return false;
 }
 
@@ -905,8 +993,10 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
     }
     {
         std::lock_guard<std::mutex> lock(m_mu);
+        bool found = false;
         for (const auto& m : m_models) {
             if (!(m.artifact_id == artifact)) continue;
+            found = true;
             if (file_index >= m.core.files.size()) {
                 err = "wrong file index";
                 return false;
@@ -920,6 +1010,10 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
                 return false;
             }
             break;
+        }
+        if (!found) {
+            err = "unknown artifact";
+            return false;
         }
     }
     const Digest48 leaf = ChunkLeaf(piece_index, bytes);
@@ -938,6 +1032,7 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
                 if (!m.seeding_started_at) m.seeding_started_at = GetTime();
             }
             m.last_access_at = GetTime();
+            m.useful_bytes_received += static_cast<int64_t>(bytes.size());
             break;
         }
         PersistLocked(err);
@@ -990,30 +1085,15 @@ bool ModelCatalog::VerifyFileDigest(const Digest48& artifact, uint32_t file_inde
 
 bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& err, bool complete)
 {
+    VerifiedManifest vm;
+    if (!VerifyManifestAgainstRequest(manifest, vm, err)) return false;
     std::lock_guard<std::mutex> lock(m_mu);
     CatalogEntry e;
-    if (!Digest48::FromHex(manifest["model_id"].get_str(), e.model_id, err)) return false;
-    if (!Digest48::FromHex(manifest["artifact_id"].get_str(), e.artifact_id, err)) return false;
+    e.model_id = vm.model_id;
+    e.artifact_id = vm.artifact_id;
     e.label = "retrieved";
-    e.core.version = 2;
-    e.core.format_profile = static_cast<uint16_t>(manifest["format_profile"].getInt<int>());
-    e.core.execution_profile = static_cast<uint16_t>(manifest["execution_profile"].getInt<int>());
-    for (const auto& f : manifest["files"].getValues()) {
-        CoreFile cf;
-        cf.path = f["path"].get_str();
-        if (!FileRoleFromName(f["role"].get_str(), cf.role)) {
-            err = "role";
-            return false;
-        }
-        cf.size = f["size"].getInt<uint64_t>();
-        if (!Digest48::FromHex(f["sha384"].get_str(), cf.sha384, err)) return false;
-        if (!Digest48::FromHex(f["pieces_root"].get_str(), cf.pieces_root, err)) return false;
-        e.core.files.push_back(cf);
-    }
-    e.artifact.version = 2;
-    e.artifact.codec = 1;
-    e.artifact.model_id = e.model_id;
-    e.artifact.files = e.core.files;
+    e.core = std::move(vm.core);
+    e.artifact = std::move(vm.artifact);
     if (complete) {
         e.admission = AdmissionLevel::BYTES_VERIFIED;
         e.bytes_verified = true;

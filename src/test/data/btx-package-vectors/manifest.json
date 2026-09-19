@@ -1,0 +1,159 @@
+{
+  "generator": "audit/r7-packages.md (lane R7)",
+  "uri_digest_rule": "sha384(b'BTX-R7-VECTOR/' + KIND)",
+  "magnet_analog_key_order": [
+    "schema_version",
+    "kind",
+    "uri",
+    "copy_text",
+    "family",
+    "format",
+    "quantization",
+    "signed"
+  ],
+  "valid": {
+    "MODEL.btx": {
+      "codec": "MAGNET_ANALOG_JSON",
+      "kind": "MODEL",
+      "resource_kind_byte": 0,
+      "uri": "btx://pqmtd78qmyk4f954vk4yksyyxkr0syfs298run4fzfk2s2a8yj6cqdesfqewgksq2xau5x0k3garxs6krxr5f",
+      "expect": "ParseMagnetAnalog OK; DecodeResource(uri) OK; PublicExportObjectAllowed OK; re-encode is byte-identical"
+    },
+    "MODEL.btxbundle": {
+      "codec": "BUNDLE_WRITE",
+      "expect": "DecodeBtxBundle OK; DecodePublicBtxBundle OK; DecodeBtxPackage fails NONCANONICAL_PAYLOAD (no core)",
+      "frame_sha384": "ed86a3e3bab410b2794b1ea639c59ca71dd393054f063958babcc0e391e3c20f54cacab04574535609947080663b2ca0"
+    },
+    "COLLECTION.btx": {
+      "codec": "MAGNET_ANALOG_JSON",
+      "kind": "COLLECTION",
+      "resource_kind_byte": 2,
+      "uri": "btx://pzzmyz558pj3aftrk2udjmgxy0hakgx8t6f0k6ea0ks53mctrjddv6afe2zkqgx9qwnk5p3nxlltv3wm4up53",
+      "expect": "ParseMagnetAnalog OK; DecodeResource(uri) OK; PublicExportObjectAllowed OK; re-encode is byte-identical"
+    },
+    "COLLECTION.btxbundle": {
+      "codec": "BUNDLE_WRITE",
+      "expect": "DecodeBtxBundle OK; DecodePublicBtxBundle OK; DecodeBtxPackage fails NONCANONICAL_PAYLOAD (no core)",
+      "frame_sha384": "33fa8c51d611676a53486f7935e3fc309b0ec32a3fcd9ab30951a3af2a00d5f30da2debc954e5e890f0f108ea282e416"
+    },
+    "RELEASE.btx": {
+      "codec": "MAGNET_ANALOG_JSON",
+      "kind": "RELEASE",
+      "resource_kind_byte": 4,
+      "uri": "btx://pyp9r7j5vft5ucggjaq36xp8fzh9352gteja23z3an2mvvmkt4nlt7ppa8eva0strcw3xwml3095l46p34hhs",
+      "expect": "ParseMagnetAnalog OK; DecodeResource(uri) OK; PublicExportObjectAllowed OK; re-encode is byte-identical"
+    },
+    "RELEASE.btxbundle": {
+      "codec": "BUNDLE_WRITE",
+      "expect": "DecodeBtxBundle OK; DecodePublicBtxBundle OK; DecodeBtxPackage fails NONCANONICAL_PAYLOAD (no core)",
+      "frame_sha384": "36d09cb98635d9292ac6a6217508e9b60f3774afaa8141039f03432ae3832a2a298d6517d53de2d5d341a61c6774b092"
+    },
+    "BOUNTY.btx": {
+      "codec": "MAGNET_ANALOG_JSON",
+      "kind": "BOUNTY",
+      "resource_kind_byte": 9,
+      "uri": "btx://pfk5gc4g6s99n4esa4tkg8ewmu5nwyqdphscxee35zdyeda2jhx4a3muz0kdaytzclrxq4wayv59kf5p2ygys",
+      "expect": "ParseMagnetAnalog OK; DecodeResource(uri) OK; PublicExportObjectAllowed OK; re-encode is byte-identical"
+    },
+    "BOUNTY.btxbundle": {
+      "codec": "BUNDLE_WRITE",
+      "expect": "DecodeBtxBundle OK; DecodePublicBtxBundle OK; DecodeBtxPackage fails NONCANONICAL_PAYLOAD (no core)",
+      "frame_sha384": "5e556432d087b78df11a820e0cf40b45415fbadb3a9f301263975b345aa0e36c1568f309d9c6424fb037db35a75baeec"
+    },
+    "MODEL_FAMILY.btx": {
+      "codec": "MAGNET_ANALOG_JSON",
+      "kind": "MODEL_FAMILY",
+      "resource_kind_byte": 2,
+      "uri": "btx://pzxsv02jv540unc3w7j4qmwtq97umz6z8rtv2jy49yyx78gphsa7k8xegzmpr8ppvxgjanuvl5nx6mufffwsa",
+      "expect": "ParseMagnetAnalog OK; DecodeResource(uri) OK; PublicExportObjectAllowed OK; re-encode is byte-identical"
+    },
+    "MODEL_FAMILY.btxbundle": {
+      "codec": "BUNDLE_WRITE",
+      "expect": "DecodeBtxBundle OK; DecodePublicBtxBundle OK; DecodeBtxPackage fails NONCANONICAL_PAYLOAD (no core)",
+      "frame_sha384": "a51a6813a497c1711e45bfef584f73f605ce3a3324f3650e7ce0a8dc3e5bcd194d5792aef9beaeb8538d197c8903455d"
+    }
+  },
+  "invalid": {
+    "dup-key-shadowed-float.btxbundle": {
+      "expect_reject": true,
+      "note": "RejectFloats() must reject the shadowed 1.5. Today DecodeBtxBundle ACCEPTS this because getKeys() yields 'n' twice but v['n'] resolves to the first value."
+    },
+    "dup-key-shadowed-secret.btxbundle": {
+      "expect_reject": true,
+      "note": "ScanPublic()/PublicExportObjectAllowed() must reject the shadowed api_key. Today the second 'a' subtree is never visited, so the secret survives export/import."
+    },
+    "dup-key-toplevel-secret.btxbundle": {
+      "expect_reject": true,
+      "note": "Control for the two above: a duplicated FORBIDDEN key name is still caught, because the key-name test runs per getKeys() entry."
+    },
+    "int-overflow-core-version.btx": {
+      "expect_reject": true,
+      "note": "btx-open must report an error. Today (*core)['version'].getInt<int>() throws std::runtime_error after the isNum() guard and the process aborts (SIGABRT)."
+    },
+    "int-overflow-auto-spend.btx": {
+      "expect_reject": true,
+      "note": "EncodeMagnetAnalog() must return false ('spend mandate forbidden'). Today getInt<int64_t>() throws instead of refusing, so the no-auto-spend guard raises rather than rejecting."
+    },
+    "non-btx-uri.btx": {
+      "expect_reject": true,
+      "note": "EncodeMagnetAnalog() must refuse a non-btx:// uri. Today it accepts any non-empty string; ValidateResources() enforces the btx:// prefix but the magnet-analog path does not."
+    },
+    "dn-in-uri.btx": {
+      "expect_reject": true,
+      "note": "EncodeMagnetAnalog()/ParseMagnetAnalog() must refuse dn= in the uri query. Enforced today by UriQueryHasDn()."
+    },
+    "nonzero-auto-spend.btx": {
+      "expect_reject": true,
+      "note": "EncodeMagnetAnalog() must refuse a nonzero spend mandate. Enforced today."
+    },
+    "unknown-schema-version.btx": {
+      "expect_reject": true,
+      "note": "ParseMagnetAnalog() must refuse an unknown schema_version. Today it only checks that the field exists and silently rewrites it to 2."
+    },
+    "control-chars-in-copy-text.btx": {
+      "expect_reject": true,
+      "note": "copy_text must pass a SafeText()-style control/bidi filter before it is echoed to a terminal or UI. Today it is copied verbatim and uncapped."
+    },
+    "presigned-url.btx": {
+      "expect_reject": true,
+      "note": "LintPackagePortable() rejects this. EncodeMagnetAnalog() does not call it, so the export path alone does not stop an embedded presigned capability."
+    },
+    "stale-percent-funded-no-state.json": {
+      "expect_reject": true,
+      "note": "Cached observation with a funding number but no 'state' field. Used as cached_observation with an empty local_chain (offline): EvaluatePackageRewardPreview() reports cached_stale=false today."
+    },
+    "cross-unit-amount-match.json": {
+      "expect_reject": true,
+      "note": "AmountMismatch() compares percent_funded against confirmed_funded_atoms, so 50 percent and 50 atoms compare equal and the cache is reported fresh."
+    },
+    "frame-trailing-bytes.btxbundle": {
+      "expect_reject": true,
+      "note": "Trailing bytes. Rejected today."
+    },
+    "frame-nonzero-flags.btxbundle": {
+      "expect_reject": true,
+      "note": "Nonzero flags. Rejected today."
+    },
+    "frame-declared-len-max.btxbundle": {
+      "expect_reject": true,
+      "note": "declared payload_len = 2^64-1. Rejected today, but btx-open surfaces the BUNDLE_WRITE message 'flags/size/trailing' instead of PACKAGE_TOO_LARGE."
+    },
+    "frame-bad-digest.btxbundle": {
+      "expect_reject": true,
+      "note": "Payload digest mismatch. Rejected today."
+    },
+    "frame-wrong-magic.bin": {
+      "expect_reject": true,
+      "note": "Bad magic. Rejected today."
+    },
+    "frame-truncated.bin": {
+      "expect_reject": true,
+      "note": "Header shorter than 68 bytes. Rejected today."
+    }
+  },
+  "codec_divergence": {
+    "note": "Same logical package, two byte strings, both accepted under the one BTXPKG\\x00\\x01 magic. package_core_id is identical; the frame sha384 is not. Identify packages by package_core_id, never by file hash.",
+    "bundle-write-order.btxbundle": "501ab1b65f128fc997b3613e9071d5e740e3fd8973fd258204299cfd151db8566a1a09f6de03fea0edde3627bc70cee8",
+    "pjson1-sorted-order.btxbundle": "8ec59b8a4b876e0c3976b30c8762f07c4e75440c82b3c9b06a3b358991f2ea532f1db6902ec7fda627ab459c6819a9b4"
+  }
+}

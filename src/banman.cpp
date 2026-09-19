@@ -11,6 +11,7 @@
 #include <node/interface_ui.h>
 #include <scheduler.h>
 #include <sync.h>
+#include <util/overflow.h>
 #include <util/time.h>
 #include <util/translation.h>
 
@@ -187,7 +188,10 @@ void BanMan::Ban(const CSubNet& sub_net, int64_t ban_time_offset, bool since_uni
         normalized_ban_time_offset = m_default_ban_time;
         normalized_since_unix_epoch = false;
     }
-    ban_entry.nBanUntil = (normalized_since_unix_epoch ? 0 : GetTime()) + normalized_ban_time_offset;
+    // Saturate: GetTime() + a large RPC bantime is signed overflow (UB) and
+    // wrapping nBanUntil negative makes IsBanned fail open until SweepBanned.
+    const int64_t ban_base{normalized_since_unix_epoch ? 0 : GetTime()};
+    ban_entry.nBanUntil = SaturatingAdd(ban_base, normalized_ban_time_offset);
 
     {
         LOCK(m_banned_mutex);

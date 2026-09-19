@@ -189,7 +189,7 @@ static std::string DummyAddress(const CChainParams &params)
     std::string addr;
     switch (params.GetChainType()) {
     case ChainType::MAIN:
-        addr = "bc1p35yvjel7srp783ztf8v6jdra7dhfzk5jaun8xz2qp6ws7z80n4tq2jku9f";
+        addr = "btx1p35yvjel7srp783ztf8v6jdra7dhfzk5jaun8xz2qp6ws7z80n4tq2jku9f";
         break;
     case ChainType::SIGNET:
     case ChainType::TESTNET:
@@ -218,7 +218,7 @@ void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent)
     widget->setFont(fixedPitchFont());
     // We don't want translators to use own addresses in translations
     // and this is the only place, where this address is supplied.
-    widget->setPlaceholderText(QObject::tr("Enter a Bitcoin address (e.g. %1)").arg(
+    widget->setPlaceholderText(QObject::tr("Enter a BTX address (e.g. %1)").arg(
         QString::fromStdString(DummyAddress(Params()))));
     widget->setValidator(new BitcoinAddressEntryValidator(parent));
     widget->setCheckValidator(new BitcoinAddressCheckValidator(parent));
@@ -256,7 +256,7 @@ qint64 URIParseAmount(std::string amount_str, bool * const ok)
     if (exponent > 0) {
         amount_str.append(exponent, '0');
     } else if (exponent < 0) {
-        // Sub-satoshi amount? Truncate
+        // Sub-atom amount? Truncate
         amount_str = amount_str.substr(0, amount_str.size() + exponent);
     }
     return QString::fromStdString(amount_str).toLongLong(ok, is_hex ? 0x10 : 10);
@@ -264,9 +264,20 @@ qint64 URIParseAmount(std::string amount_str, bool * const ok)
 
 bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
 {
-    // return if URI is not valid or is no bitcoin: URI
-    if(!uri.isValid() || uri.scheme() != QString("bitcoin"))
+    // COORDINATOR LOCK: bitcoin: / bitcoin:// MUST return false.
+    // Do not restore leftover Bitcoin Core BIP21 parse. Do not export
+    // BITCOIN_IPC_PREFIX. Payment is btx:<addr> only. btx:// is a model
+    // resource (V11-URI-13), never a payment destination.
+    // Tests: src/qt/test/uritests.cpp (QVERIFY(!parse) for bitcoin:).
+    if (!uri.isValid()) return false;
+    const QString scheme = uri.scheme();
+    if (scheme.compare(QLatin1String("btx"), Qt::CaseInsensitive) != 0) {
         return false;
+    }
+    // Hierarchical scheme://… (host/authority) is not BIP21.
+    if (!uri.host().isEmpty() || !uri.authority().isEmpty()) {
+        return false;
+    }
 
     SendCoinsRecipient rv;
     rv.address = uri.path();
@@ -320,6 +331,12 @@ bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
 
 bool parseBitcoinURI(QString uri, SendCoinsRecipient *out)
 {
+    uri = uri.trimmed();
+    // Model identity is btx://… . Bitcoin URIs are not supported.
+    if (uri.startsWith(QLatin1String("btx://"), Qt::CaseInsensitive) ||
+        uri.startsWith(QLatin1String("bitcoin:"), Qt::CaseInsensitive)) {
+        return false;
+    }
     QUrl uriInstance(uri);
     return parseBitcoinURI(uriInstance, out);
 }
@@ -328,7 +345,7 @@ QString formatBitcoinURI(const SendCoinsRecipient &info)
 {
     bool bech_32 = info.address.startsWith(QString::fromStdString(Params().Bech32HRP() + "1"));
 
-    QString ret = QString("bitcoin:%1").arg(bech_32 ? info.address.toUpper() : info.address);
+    QString ret = QString("btx:%1").arg(bech_32 ? info.address.toUpper() : info.address);
     int paramCount = 0;
 
     if (info.amount)
@@ -570,7 +587,7 @@ bool openBitcoinConf()
 
     configFile.close();
 
-    /* Open bitcoin.conf with the associated application */
+    /* Open btx.conf with the associated application */
     bool res = QDesktopServices::openUrl(QUrl::fromLocalFile(PathToQString(pathConfig)));
 #ifdef Q_OS_MACOS
     // Workaround for macOS-specific behavior; see #15409.
@@ -748,15 +765,15 @@ fs::path static StartupShortcutPath()
 {
     ChainType chain = gArgs.GetChainType();
     if (chain == ChainType::MAIN)
-        return GetSpecialFolderPath(CSIDL_STARTUP) / "Bitcoin.lnk";
+        return GetSpecialFolderPath(CSIDL_STARTUP) / "BTX.lnk";
     if (chain == ChainType::TESTNET) // Remove this special case when testnet CBaseChainParams::DataDir() is incremented to "testnet4"
-        return GetSpecialFolderPath(CSIDL_STARTUP) / "Bitcoin (testnet).lnk";
-    return GetSpecialFolderPath(CSIDL_STARTUP) / fs::u8path(strprintf("Bitcoin (%s).lnk", ChainTypeToString(chain)));
+        return GetSpecialFolderPath(CSIDL_STARTUP) / "BTX (testnet).lnk";
+    return GetSpecialFolderPath(CSIDL_STARTUP) / fs::u8path(strprintf("BTX (%s).lnk", ChainTypeToString(chain)));
 }
 
 bool GetStartOnSystemStartup()
 {
-    // check for Bitcoin*.lnk
+    // check for BTX*.lnk
     return fs::exists(StartupShortcutPath());
 }
 
@@ -831,8 +848,8 @@ fs::path static GetAutostartFilePath()
 {
     ChainType chain = gArgs.GetChainType();
     if (chain == ChainType::MAIN)
-        return GetAutostartDir() / "bitcoin.desktop";
-    return GetAutostartDir() / fs::u8path(strprintf("bitcoin-%s.desktop", ChainTypeToString(chain)));
+        return GetAutostartDir() / "btx.desktop";
+    return GetAutostartDir() / fs::u8path(strprintf("btx-%s.desktop", ChainTypeToString(chain)));
 }
 
 bool GetStartOnSystemStartup()
@@ -884,13 +901,13 @@ bool SetStartOnSystemStartup(bool fAutoStart)
         if (!optionFile.good())
             return false;
         ChainType chain = gArgs.GetChainType();
-        // Write a bitcoin.desktop file to the autostart directory:
+        // Write a btx.desktop file to the autostart directory:
         optionFile << "[Desktop Entry]\n";
         optionFile << "Type=Application\n";
         if (chain == ChainType::MAIN)
-            optionFile << "Name=Bitcoin\n";
+            optionFile << "Name=BTX\n";
         else
-            optionFile << strprintf("Name=Bitcoin (%s)\n", ChainTypeToString(chain));
+            optionFile << strprintf("Name=BTX (%s)\n", ChainTypeToString(chain));
         optionFile << "Exec=" << pszExePath << strprintf(" -min -chain=%s\n", ChainTypeToString(chain));
         optionFile << "Terminal=false\n";
         optionFile << "Hidden=false\n";

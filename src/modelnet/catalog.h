@@ -97,6 +97,9 @@ public:
     bool Find(const Digest48& model_or_artifact, CatalogEntry& out) const;
     /** Typed lookup: MODEL matches model_id only, ARTIFACT matches artifact_id only. */
     bool FindExact(ResourceKind kind, const Digest48& digest, CatalogEntry& out) const;
+    /** Mark FETCHING so getmodel will TryHydrateFromCloud. Does not rewrite identity. */
+    bool MarkIncomplete(const Digest48& model_or_artifact, bool incomplete, std::string& err);
+    bool NoteUsefulBytes(const Digest48& model_or_artifact, int64_t served_delta, int64_t received_delta, std::string& err);
     bool InstallFromManifest(const UniValue& manifest, std::string& err, bool complete = true);
     bool VerifyFileDigest(const Digest48& artifact, uint32_t file_index, const Digest48& expected, std::string& err);
     bool GetVerifiedPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
@@ -117,6 +120,7 @@ bool ImportRegularFile(ModelStore& store, const Digest48& staging_artifact, uint
                        QualReport* qual, std::string& err);
 
 UniValue CapabilitiesObject();
+void SetAdvertisedCloudCaps(bool cloud_attached, bool direct_cloud_seed);
 
 } // namespace modelnet
 

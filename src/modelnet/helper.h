@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,6 +36,17 @@ struct NativeResponse {
     bool splice_tcp{false};
     std::string splice_host;
     uint16_t splice_port{0};
+    /**
+     * Serve GET /files without buffering the whole object in RAM.
+     * FormatHttpResponse emits headers + Content-Length=stream_file_size and
+     * omits the body; HandlePq1Fd then writes verified pieces in order.
+     * HandleNativeRequest still fills body for files ≤ 64 MiB (unit tests).
+     */
+    bool stream_verified_file{false};
+    Digest48 stream_artifact{};
+    uint32_t stream_file_index{0};
+    uint32_t stream_n_pieces{0};
+    uint64_t stream_file_size{0};
 };
 
 struct HelperConfig {
@@ -48,7 +60,10 @@ struct HelperConfig {
     fs::path tls_cert;
     fs::path tls_key;
     bool relay{false};
+    /** Operator wants hosting when proven (explicit 1/true or auto). */
     bool host{false};
+    /** -modelhost=auto: wait for reachability; still never advertise merely because the helper started. */
+    bool host_auto{false};
     bool public_host_reachable{false};
     std::string seed{"auto"};
     bool preserve_rare{false};
@@ -56,6 +71,8 @@ struct HelperConfig {
     bool allow_encrypted{false};
     uint64_t upload_bps{0};
     std::vector<std::string> peers;
+    /** qBittorrent-style drop folder; empty = off. */
+    fs::path watch_dir;
 };
 
 bool ParseHttpRequest(const std::string& raw, NativeRequest& req, std::string& err);
@@ -70,12 +87,33 @@ std::vector<std::string> AdvertisedNativeHttpPaths();
 
 bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& result, std::string& err_code, std::string& err, std::atomic<bool>* stop = nullptr);
 
+bool IsNetwork02HelperMethod(const std::string& method);
+bool DispatchNetwork02Rpc(ModelCatalog& cat, const std::string& method, const UniValue& params, UniValue& result,
+                         std::string& err_code, std::string& err);
+/** Caller-scoped idempotency_key gate for NETWORK-02 costly writes. `once` is the mutation. */
+bool WithNetwork02Idempotency(const std::string& method, const UniValue& params, UniValue& result,
+                              std::string& err_code, std::string& err, const std::function<bool()>& once);
+/** Catalog names that reuse private methods. alias_of is empty when method is canonical. */
+std::string ResolveHelperMethodAlias(const std::string& method, std::string& alias_of);
+
+/** Canonical upload path: UploadSchedulerDrr slots. Identity is the authenticated grant key. */
+bool TryAdmitModelUpload(const std::string& identity, const std::string& netgroup, uint64_t bytes,
+                         uint64_t& request_id, std::string& err);
+void ReleaseModelUpload(uint64_t request_id);
+
 bool EnsureMlDsaTlsFiles(const fs::path& cert, const fs::path& key, std::string& err);
 bool LoadPq1Identity(Pq1Context& pq, const fs::path& modeldir, std::string& err);
 
 int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop = nullptr);
 
 bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err);
+
+/** Ordinary unix RPC replies: 120s. Long methods (import/host/get/wait/scan) keep 24h. */
+int UnixRpcReplyTimeoutMs(const std::string& method);
+
+/** Public unix methods must not echo private local state (AHP-PRIV-08). */
+bool HelperUnixMethodIsPublicSurface(const std::string& method);
+bool JsonLeaksPrivateLocalState(const UniValue& v);
 
 /** Filled by RetrieveFreeFromPeer; atomics so getmodeljob can read a running job. */
 struct RetrieveProgress {

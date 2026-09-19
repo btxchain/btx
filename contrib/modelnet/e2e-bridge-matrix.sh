@@ -23,7 +23,7 @@ python3 "$BRIDGE" --host 0.0.0.0 --port "$PORT" >"$SCRATCH/refuse.log" 2>&1
 rc=$?
 set -e
 [[ "$rc" -ne 0 ]] || die "0.0.0.0 default must be refused"
-grep -qi 'refus' "$SCRATCH/refuse.log" || grep -qi '0.0.0.0' "$SCRATCH/refuse.log" || true
+grep -qi 'refus' "$SCRATCH/refuse.log" || grep -qi '0.0.0.0' "$SCRATCH/refuse.log" || die "0.0.0.0 refusal log missing diagnostic"
 export BTX_BRIDGE_PUBLIC_DOWNLOAD=1
 export BTX_BRIDGE_VERIFIED_DIR="$SCRATCH/verified"
 python3 "$BRIDGE" --host 127.0.0.1 --port "$PORT" >"$SCRATCH/bridge.log" 2>&1 &
@@ -35,7 +35,7 @@ for i in $(seq 1 50); do
 done
 H="$(curl -sf --max-time 2 "http://127.0.0.1:${PORT}/health")"
 echo "$H" | grep -q 'pq_end_to_end' || die "health"
-echo "$H" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("pq_end_to_end") is False, d; assert d.get("native_fallback") in (False, None) or True'
+echo "$H" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("pq_end_to_end") is False, d; assert d.get("native_fallback") in (False, None), d'
 echo "BRIDGE-03 health pq_end_to_end=false (browser edge; native stays PQ1)"
 
 OPEN="$(curl -sf --max-time 2 "http://127.0.0.1:${PORT}/open?uri=${URI}&format=html")"

@@ -1,0 +1,12 @@
+{
+  "id": "negative-wrong-change",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "base": "unsigned-package.json",
+  "mutation": "replace_change_script_pubkey",
+  "declared_change_path": "m/87h/0h/0h/1/0",
+  "declared_change_branch": 1,
+  "declared_change_index": 0,
+  "wrong_script_pubkey": "5220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "note": "Change output scriptPubKey must match the witness v2 P2MR address derived from the declared change path (branch 1, index 0). Native tests fill the correct change script from derivation.json and substitute this 32-byte program. A mismatch must not finalize."
+}

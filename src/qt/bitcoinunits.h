@@ -27,7 +27,7 @@
 #define THIN_SP_UTF8 REAL_THIN_SP_UTF8
 #define THIN_SP_HTML HTML_HACK_SP
 
-/** Bitcoin unit definitions. Encapsulates parsing and formatting
+/** BTX unit definitions. Encapsulates parsing and formatting
    and serves as list model for drop-down selection boxes.
 */
 class BitcoinUnits: public QAbstractListModel
@@ -37,8 +37,8 @@ class BitcoinUnits: public QAbstractListModel
 public:
     explicit BitcoinUnits(QObject *parent);
 
-    /** Bitcoin units.
-      @note Source: https://en.bitcoin.it/wiki/Units . Please add only sensible ones
+    /** BTX units. Enum identifiers (BTC/mBTC/…) are serialization keys and must not be renamed.
+      @note Decimal scale source: https://en.bitcoin.it/wiki/Units . Please add only sensible ones
      */
     enum class Unit {
         BTC,
@@ -74,7 +74,7 @@ public:
     static QString shortName(Unit unit);
     //! Longer description
     static QString description(Unit unit);
-    //! Number of Satoshis (1e-8) per unit
+    //! Number of atoms (1e-8 BTX) per unit
     static qint64 factor(Unit unit);
     //! Number of fractional places
     static int decimals(Unit unit);
@@ -84,7 +84,7 @@ public:
     static Unit numsys(Unit unit);
     //! Number of digits total in maximum value
     static qint64 max_digits(Unit unit);
-    //! "Single step" amount, in satoshis
+    //! "Single step" amount, in atoms
     static qint64 singlestep(Unit unit);
     //! Format as string
     static QString format(Unit unit, const CAmount& amount, bool plussign = false, SeparatorStyle separators = SeparatorStyle::STANDARD, bool justify = false);
@@ -118,7 +118,7 @@ public:
         return text;
     }
 
-    //! Return maximum number of base units (Satoshis)
+    //! Return maximum number of base units (atoms)
     static CAmount maxMoney();
 
 private:

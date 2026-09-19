@@ -96,7 +96,7 @@ BitcoinAddressCheckValidator::BitcoinAddressCheckValidator(QObject *parent) :
 
 QValidator::State BitcoinAddressCheckValidator::validate(QString &input, std::vector<int>&error_locations) const
 {
-    // Validate the passed Bitcoin address
+    // Validate the passed BTX address
     std::string error_msg;
     CTxDestination dest = DecodeDestination(input.toStdString(), error_msg, &error_locations);
     if (IsValidDestination(dest)) {

@@ -1,0 +1,86 @@
+{
+  "case_count": 160,
+  "families": {
+    "NEUTRAL": {
+      "sections": "1, 3, 18",
+      "environment": "source/config audit and two generic providers",
+      "cases": 10
+    },
+    "NEGOTIATE": {
+      "sections": "4, 16",
+      "environment": "real native codec, versioned registry and signatures",
+      "cases": 10
+    },
+    "ROLE": {
+      "sections": "3, 11",
+      "environment": "registered service routes and real dependency probes",
+      "cases": 10
+    },
+    "BIND": {
+      "sections": "3, 14",
+      "environment": "authenticated multi-tenant service binding integration",
+      "cases": 10
+    },
+    "ASSET": {
+      "sections": "5, 7",
+      "environment": "asset master and rights adapters with native record verification",
+      "cases": 10
+    },
+    "POSITION": {
+      "sections": "6",
+      "environment": "durable batch ingestion and bitemporal source selection",
+      "cases": 10
+    },
+    "VALUE": {
+      "sections": "7",
+      "environment": "valuation adapter and exact decimal calculations",
+      "cases": 10
+    },
+    "METRIC": {
+      "sections": "7, 8",
+      "environment": "metric policy and whole-portfolio aggregate tests",
+      "cases": 10
+    },
+    "EXPOSURE": {
+      "sections": "7, 13",
+      "environment": "bounded financial and operational graphs",
+      "cases": 10
+    },
+    "PROJECTION": {
+      "sections": "8, 15",
+      "environment": "database snapshot, paging and report services",
+      "cases": 10
+    },
+    "IMPORT": {
+      "sections": "10, 15",
+      "environment": "authenticated binary staging, persistence and signed manifests",
+      "cases": 10
+    },
+    "INSTRUCTION": {
+      "sections": "9, 12",
+      "environment": "portfolio bridge into actual v1.1 drafting routes",
+      "cases": 10
+    },
+    "SECURITY": {
+      "sections": "4, 14",
+      "environment": "native signature/authentication and hostile integration tests",
+      "cases": 10
+    },
+    "UX": {
+      "sections": "17, 12",
+      "environment": "real browser and accessibility harness",
+      "cases": 10
+    },
+    "RECOVERY": {
+      "sections": "10, 15, 18",
+      "environment": "multi-process restart, failover and migration lab",
+      "cases": 10
+    },
+    "COMPAT": {
+      "sections": "2, 4, 18, 19",
+      "environment": "combined build, regression suite and independent reviews",
+      "cases": 10
+    }
+  },
+  "journeys": 20
+}

@@ -1,0 +1,182 @@
+[
+  {
+    "method": "resolvebtxcapability",
+    "effect": "RESOLVE",
+    "authority": "NONE",
+    "input": "Bounded query or exact recipe plus constraints",
+    "output": "Candidate set with evidence and reasons",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "planbtxcapability",
+    "effect": "PLAN",
+    "authority": "NONE",
+    "input": "Candidate/lock/policy",
+    "output": "CapabilityPlan",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "ensurebtxcapability",
+    "effect": "EXECUTE",
+    "authority": "FINITE_LOCAL_GRANT",
+    "input": "Plan ID + expected digest + grant + idempotency",
+    "output": "Job and generation-bound lease",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "getbtxcapability",
+    "effect": "READ",
+    "authority": "OWNER",
+    "input": "Job/lease/generation",
+    "output": "State and readiness",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "cancelbtxcapability",
+    "effect": "CANCEL",
+    "authority": "OWNER",
+    "input": "Job/generation",
+    "output": "Physical cleanup disposition",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "releasebtxcapability",
+    "effect": "RELEASE",
+    "authority": "OWNER",
+    "input": "Lease/generation",
+    "output": "Reference release and fence state",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "prefetchbtxcapability",
+    "effect": "PREFETCH",
+    "authority": "FINITE_LOCAL_GRANT",
+    "input": "PrefetchHint",
+    "output": "Bounded speculative job",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "sleepbtxcapability",
+    "effect": "SLEEP",
+    "authority": "FINITE_LOCAL_GRANT",
+    "input": "Lease and preservation policy",
+    "output": "Lifecycle receipt",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "wakebtxcapability",
+    "effect": "WAKE",
+    "authority": "FINITE_LOCAL_GRANT",
+    "input": "Lease and grant",
+    "output": "Revalidated readiness job",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "getbtxresidency",
+    "effect": "READ",
+    "authority": "OWNER",
+    "input": "Authorized scope",
+    "output": "No-pointer residency facts",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "inspectbtxtensormap",
+    "effect": "READ",
+    "authority": "OWNER",
+    "input": "Exact manifest and parser profile",
+    "output": "Bounded TensorRangeMap",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "exportbtxlock",
+    "effect": "EXPORT",
+    "authority": "OWNER",
+    "input": "Exact lock",
+    "output": "Canonical bytes",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "importbtxlock",
+    "effect": "LOCAL_WRITE",
+    "authority": "OWNER",
+    "input": "Lock + digest",
+    "output": "Validated locked configuration",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "planbtxcapabilityupdate",
+    "effect": "PLAN",
+    "authority": "OWNER",
+    "input": "Active lock and candidate",
+    "output": "Switch proposal",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "switchbtxcapability",
+    "effect": "SWITCH",
+    "authority": "FINITE_LOCAL_GRANT",
+    "input": "Approved switch transaction",
+    "output": "Atomic generation receipt",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "getbtxcapabilityevents",
+    "effect": "READ",
+    "authority": "OWNER",
+    "input": "Cursor and bound",
+    "output": "Owner-local lifecycle events",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "getbtxruntimecapabilities",
+    "effect": "READ",
+    "authority": "OWNER",
+    "input": "None",
+    "output": "Actual supported/runtime-tested features",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  },
+  {
+    "method": "getbtxttctrace",
+    "effect": "READ",
+    "authority": "OWNER",
+    "input": "Authorized trace ID",
+    "output": "Stage DAG and measurements",
+    "process": "LOCAL_CAPABILITY_SERVICE",
+    "public_http_allowed": false,
+    "implementation_status": "IMPLEMENTED_LAB"
+  }
+]

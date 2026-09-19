@@ -1,0 +1,34 @@
+{
+  "id": "negative-noncanonical",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "base": "unsigned-package.json",
+  "note": "BCP/1 custody packages use SIGHASH_DEFAULT (0), equivalent to ALL. ANYONECANPAY and other non-DEFAULT sighash types must not finalize. Canonical P2MR witness is exactly [signature, leaf_script, control_block]; an extra witness item must fail closed (VerifyScript / CLEANSTACK / finalizeexternalsign).",
+  "canonical_witness": ["signature", "leaf_script", "control_block"],
+  "cases": [
+    {
+      "mutation": "sighash_anyonecanpay",
+      "sighash": "ANYONECANPAY",
+      "sighash_byte": 128,
+      "note": "SIGHASH_ANYONECANPAY (0x80) is not SIGHASH_DEFAULT. Custody packages reject ANYONECANPAY."
+    },
+    {
+      "mutation": "sighash_all_anyonecanpay",
+      "sighash": "ALL|ANYONECANPAY",
+      "sighash_byte": 129,
+      "note": "0x81 is a defined Schnorr hashtype but not DEFAULT. PackageReadyToBroadcast / finalizeexternalsign must reject it."
+    },
+    {
+      "mutation": "non_default_sighash",
+      "sighash": "NONE",
+      "sighash_byte": 2,
+      "note": "Any non-DEFAULT sighash (NONE, SINGLE, or ANYONECANPAY combinations) must not finalize a BCP/1 package."
+    },
+    {
+      "mutation": "extra_witness_item",
+      "extra_item": "00",
+      "witness": ["00", "signature", "leaf_script", "control_block"],
+      "note": "An extra witness stack item besides [signature, leaf_script, control_block] is non-canonical and must be rejected."
+    }
+  ]
+}

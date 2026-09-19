@@ -554,6 +554,34 @@ BOOST_AUTO_TEST_CASE(getmininginfo_reports_matmul_algorithm)
     BOOST_CHECK_EQUAL(time_policy.find_value("height").getInt<int>(), ActiveHeight() + 1);
     BOOST_CHECK(time_policy.find_value("future_mtp_limit_active").isBool());
     BOOST_CHECK(time_policy.find_value("recommended_action").isStr());
+
+    const auto first_run = info.find_value("first_run").get_obj();
+    BOOST_CHECK(first_run.find_value("version").isStr());
+    BOOST_CHECK(!first_run.find_value("version").get_str().empty());
+    BOOST_CHECK_GE(first_run.find_value("uptime_s").getInt<int64_t>(), 0);
+    BOOST_CHECK(first_run.find_value("network_active").isBool());
+    BOOST_CHECK(first_run.find_value("mining_guard_enabled").isBool());
+    BOOST_CHECK(first_run.find_value("min_peers").isNum());
+    BOOST_CHECK(first_run.find_value("has_warnings").isBool());
+    BOOST_CHECK(first_run.find_value("warnings_count").isNum());
+    BOOST_CHECK_EQUAL(first_run.find_value("automatic_spend_atoms").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(first_run.find_value("difficulty").get_real(), info.find_value("difficulty").get_real());
+    BOOST_CHECK_GE(first_run.find_value("tip_age_s").getInt<int64_t>(), 0);
+    BOOST_CHECK(first_run.find_value("connections_total").isNum() || first_run.find_value("connections_total").isNull());
+    BOOST_CHECK(first_run.find_value("connections_out").isNum() || first_run.find_value("connections_out").isNull());
+    BOOST_CHECK(first_run.find_value("ibd_kind").isStr());
+    BOOST_CHECK(first_run.find_value("template_issuable").isBool());
+    BOOST_CHECK(first_run.find_value("challenge_issuable").isBool());
+    BOOST_CHECK_EQUAL(first_run.find_value("challenge_rpc").get_str(), "getmatmulchallenge");
+    BOOST_CHECK_EQUAL(first_run.find_value("peer_count_kind").get_str(), "chain_guard_outbound_sample");
+    BOOST_CHECK(first_run.find_value("is_stale").isBool());
+    if (first_run.exists("connections")) {
+        BOOST_CHECK(first_run.find_value("connections").get_obj().find_value("total").isNum());
+    }
+    if (info.exists("matmul_digests_per_second")) {
+        BOOST_CHECK_EQUAL(first_run.find_value("matmul_digests_per_second").get_real(),
+                          info.find_value("matmul_digests_per_second").get_real());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(getmininginfo_reports_nonzero_matmul_rate_after_generate)
@@ -2759,10 +2787,19 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_refuses_attested_tip_with_attested_have_da
 
     CKey signer;
     signer.MakeNewKey(/*fCompressed=*/true);
+    // Second pin member: the stranded child's attestation below must come
+    // from a signer that is NOT this node's local signer (see the note at
+    // the child attestation). Live 2026-08-15 the mirror held the remote
+    // signer's vote for the unconnected child.
+    CKey peer;
+    peer.MakeNewKey(/*fCompressed=*/true);
+    const uint256 chain_id{uint256::ONE};
+    const uint256 replay_authority_context{
+        uint256::FromHex(std::string(64, 'e')).value()};
     matmul::trusted::StoreConfig config;
-    config.chain_id = uint256::ONE;
-    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
-    config.trusted_signers = {signer.GetPubKey()};
+    config.chain_id = chain_id;
+    config.replay_authority_context = replay_authority_context;
+    config.trusted_signers = {signer.GetPubKey(), peer.GetPubKey()};
     config.threshold = 1;
     config.local_signer = signer;
     std::string error;
@@ -2785,9 +2822,37 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_refuses_attested_tip_with_attested_have_da
         LOCK(::cs_main);
         chainstate.ResetBlockFailureFlags(child);
     }
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
-                      child->GetBlockHash(), child->nHeight) ==
+    // Issue #162: the local signer CANNOT attest this child. Configure()
+    // ran before InvalidateBlock() above, so DisconnectTip recorded the
+    // V5/RB-12 withdrawal tombstone {(height, hash)} in
+    // AttestationStore::m_off_active_chain. SignAuthoritative of a hash
+    // this node itself disconnected then early-returns
+    // AddResult::Duplicate from AttestationStore::Add() and deliberately
+    // does NOT store the vote; that Duplicate is the withdrawn-vote
+    // refusal, not the "already stored" Duplicate at
+    // trusted_exact_replay_attestation.cpp:937. Relaxing the assert to
+    // `Accepted || Duplicate` would therefore leave the child with no
+    // authority at all, FindUniqueCompetingAttestedIndex null and GBT
+    // correctly extending the active tip. Assert the refusal, then attest
+    // the child from the other pin member, which is the shape the guard
+    // exists for (unique attested HAVE_DATA child of the attested tip).
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
+                    child->GetBlockHash(), child->nHeight) ==
+                matmul::trusted::AddResult::Duplicate);
+    matmul::trusted::ExactReplayStatement child_statement;
+    child_statement.chain_id = chain_id;
+    child_statement.block_hash = child->GetBlockHash();
+    child_statement.block_height = child->nHeight;
+    child_statement.replay_authority_context = replay_authority_context;
+    const auto child_attestation{
+        matmul::trusted::SignStatement(child_statement, peer)};
+    BOOST_REQUIRE(child_attestation.has_value());
+    BOOST_REQUIRE(node::matmul_trusted::Add(
+                      *child_attestation, child->GetBlockHash(),
+                      child->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorum(child->GetBlockHash(),
+                                                  child->nHeight));
 
     consensus.nMatMulV4Height = parent_height;
     consensus.nMatMulRCHeight = parent_height;

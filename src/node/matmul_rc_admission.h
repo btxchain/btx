@@ -101,6 +101,10 @@ public:
         size_t max_unknown_candidates_per_hash{2};
         /** Reconnect-resistant unknown-ticket submission rate per netgroup. */
         size_t max_unknown_submissions_per_netgroup{8};
+        /** Hard cap on distinct netgroups in the rate-history map. Erase/Consume
+         *  must not refund rate, but cycling unique netgroups through the
+         *  bounded quarantine must not grow history without limit. */
+        size_t max_unknown_submission_netgroups{256};
         std::chrono::seconds unknown_submission_window{60};
         std::chrono::seconds ttl{180};
     };
@@ -287,6 +291,14 @@ public:
     [[nodiscard]] bool Contains(
         const uint256& block_hash,
         uint64_t keyed_netgroup,
+        std::chrono::steady_clock::time_point now);
+    /** True when any netgroup still has an unexpired cooldown for this hash.
+     *  Idle catch-up / convergence must not re-GETDATA or claim "nobody is
+     *  serving this BODY" while Mark() already holds it. Per-peer GETDATA
+     *  skip stays netgroup-keyed (Contains(hash, netgroup)) so an independent
+     *  source remains eligible. */
+    [[nodiscard]] bool ContainsHash(
+        const uint256& block_hash,
         std::chrono::steady_clock::time_point now);
     /** Erase every peer's cooldown for this hash (admission succeeded or
      *  validation reached a terminal verdict, so no source needs holding off). */

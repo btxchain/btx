@@ -41,6 +41,9 @@ Hash32 Sha256(Span<const unsigned char> data);
 /** BTXENC2 envelope: magic "BTXENC2\\0" || nonce24 || XChaCha20-Poly1305(ct||tag).
  *  Key is HKDF-SHA384(secret32, info="BTX/ReleaseCipher/v1")[:32]. Never stores the secret. */
 bool LooksLikeBtxEnc2(Span<const unsigned char> bytes);
+/** WrapBtxEnc2 still takes a full plaintext span; callers must refuse larger objects. */
+inline constexpr uint64_t RELEASE_WRAP_MAX_BYTES = 64ull * 1024 * 1024;
+inline bool ReleaseWrapAllowed(uint64_t plaintext_bytes) { return plaintext_bytes <= RELEASE_WRAP_MAX_BYTES; }
 bool WrapBtxEnc2(Span<const unsigned char> secret32, Span<const unsigned char> plaintext,
                  std::vector<unsigned char>& wrapped, std::string& err);
 bool UnwrapBtxEnc2(Span<const unsigned char> secret32, Span<const unsigned char> wrapped,

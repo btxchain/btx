@@ -31,7 +31,7 @@ class Init;
 } // namespace interfaces
 
 
-/** Main Bitcoin application object */
+/** Main BTX application object */
 class BitcoinApplication: public QApplication
 {
     Q_OBJECT

@@ -7,6 +7,7 @@
 
 #include <chainparamsbase.h>
 #include <common/settings.h>
+#include <kernel/messagestartchars.h>
 #include <logging.h>
 #include <sync.h>
 #include <tinyformat.h>
@@ -34,9 +35,11 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <variant>
+#include <vector>
 
 const char * const BITCOIN_CONF_FILENAME = "btx.conf";
 const char * const BITCOIN_SETTINGS_FILENAME = "settings.json";
@@ -772,36 +775,155 @@ bool HasTestOption(const ArgsManager& args, const std::string& test_option)
     });
 }
 
+#ifndef WIN32
+static fs::path GetHomeDir()
+{
+    const char* pszHome = getenv("HOME");
+    if (pszHome == nullptr || strlen(pszHome) == 0) {
+        return fs::path("/");
+    }
+    return fs::path(pszHome);
+}
+#endif
+
+static fs::path GetExclusiveDefaultDataDir()
+{
+    // Exclusive BTX defaults. New installs must not write into Bitcoin Core's datadir.
+#ifdef WIN32
+    return GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / "BTX";
+#elif defined(__APPLE__)
+    return GetHomeDir() / "Library/Application Support/BTX";
+#else
+    return GetHomeDir() / ".btx";
+#endif
+}
+
+static std::vector<fs::path> GetLegacyBitcoinDataDirs()
+{
+#ifdef WIN32
+    return {
+        GetSpecialFolderPath(CSIDL_APPDATA) / "Bitcoin",
+        GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / "Bitcoin",
+    };
+#elif defined(__APPLE__)
+    return {GetHomeDir() / "Library/Application Support/Bitcoin"};
+#else
+    return {GetHomeDir() / ".bitcoin"};
+#endif
+}
+
+static bool ChunkLooksLikeBtxLog(std::string_view chunk)
+{
+    // Existing BTX nodes log "BTX version …" via LogPackageVersion (CLIENT_NAME).
+    // Issue #177 also names "BTX daemon" as an explicit marker.
+    return chunk.find("BTX daemon") != std::string_view::npos ||
+           chunk.find("BTX version") != std::string_view::npos;
+}
+
+static bool DebugLogLooksLikeBtx(const fs::path& path)
+{
+    std::ifstream in{path, std::ios::binary};
+    if (!in) return false;
+
+    constexpr size_t window = 65536;
+    std::string buf(window, '\0');
+    in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+    buf.resize(static_cast<size_t>(std::max<std::streamsize>(0, in.gcount())));
+    if (ChunkLooksLikeBtxLog(buf)) return true;
+
+    in.clear();
+    in.seekg(0, std::ios::end);
+    const auto size = in.tellg();
+    if (size > static_cast<std::streamoff>(window)) {
+        in.seekg(-static_cast<std::streamoff>(window), std::ios::end);
+        buf.assign(window, '\0');
+        in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+        buf.resize(static_cast<size_t>(std::max<std::streamsize>(0, in.gcount())));
+        if (ChunkLooksLikeBtxLog(buf)) return true;
+    }
+    return false;
+}
+
+static std::optional<MessageStartChars> ReadBlkMagic(const fs::path& blk)
+{
+    std::ifstream in{blk, std::ios::binary};
+    if (!in) return std::nullopt;
+    MessageStartChars magic{};
+    in.read(reinterpret_cast<char*>(magic.data()), static_cast<std::streamsize>(magic.size()));
+    if (in.gcount() != static_cast<std::streamsize>(magic.size())) return std::nullopt;
+    return magic;
+}
+
+static bool IsDistinctiveBtxMessageStart(const MessageStartChars& magic)
+{
+    // Hardcoded pchMessageStart copies from kernel/chainparams.cpp (Main,
+    // TestNet, ShieldedV2Dev). bitcoin-cli links bitcoin_common without the
+    // shielded/consensus objects CChainParams::Main() would pull in.
+    // testnet4/regtest/signet magics can collide with Bitcoin Core, so they
+    // are not used as the sole proof that a datadir belongs to BTX.
+    static const std::vector<MessageStartChars> magics{
+        MessageStartChars{0xb7, 0x54, 0x58, 0x01},
+        MessageStartChars{0xb7, 0x54, 0x58, 0x02},
+        MessageStartChars{0xe2, 0xb7, 0xda, 0x7a},
+    };
+    for (const auto& btx_magic : magics) {
+        if (magic == btx_magic) return true;
+    }
+    return false;
+}
+
+static bool LooksLikeBtxDataDir(const fs::path& dir)
+{
+    if (!fs::is_directory(dir)) return false;
+
+    // Bitcoin Core mainnet magic (0xf9beb4d9). If the root blocks file is Core's
+    // chain, do not reuse this path — new installs must use the exclusive BTX dir.
+    constexpr MessageStartChars bitcoin_core_mainnet{0xf9, 0xbe, 0xb4, 0xd9};
+    if (const auto root_magic = ReadBlkMagic(dir / "blocks" / "blk00000.dat")) {
+        if (*root_magic == bitcoin_core_mainnet) return false;
+        if (IsDistinctiveBtxMessageStart(*root_magic)) return true;
+    }
+
+    // BTX-only config filename. Bitcoin Core writes bitcoin.conf, never btx.conf.
+    if (fs::exists(dir / BITCOIN_CONF_FILENAME)) return true;
+
+    const fs::path net_dirs[] = {
+        fs::path{},
+        fs::path{"testnet3"},
+        fs::path{"testnet4"},
+        fs::path{"signet"},
+        fs::path{"regtest"},
+        fs::path{"shieldedv2dev"},
+    };
+    for (const auto& net : net_dirs) {
+        const fs::path netdir = net.empty() ? dir : dir / net;
+        if (DebugLogLooksLikeBtx(netdir / DEFAULT_DEBUGLOGFILE)) return true;
+        if (net.empty()) continue; // root blocks already inspected
+        if (const auto magic = ReadBlkMagic(netdir / "blocks" / "blk00000.dat")) {
+            if (IsDistinctiveBtxMessageStart(*magic)) return true;
+        }
+    }
+    return false;
+}
+
 fs::path GetDefaultDataDir()
 {
-    // Windows:
-    //   old: C:\Users\Username\AppData\Roaming\Bitcoin
-    //   new: C:\Users\Username\AppData\Local\Bitcoin
-    // macOS: ~/Library/Application Support/Bitcoin
-    // Unix-like: ~/.bitcoin
-#ifdef WIN32
-    // Windows
-    // Check for existence of datadir in old location and keep it there
-    fs::path legacy_path = GetSpecialFolderPath(CSIDL_APPDATA) / "Bitcoin";
-    if (fs::exists(legacy_path)) return legacy_path;
-
-    // Otherwise, fresh installs can start in the new, "proper" location
-    return GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / "Bitcoin";
-#else
-    fs::path pathRet;
-    char* pszHome = getenv("HOME");
-    if (pszHome == nullptr || strlen(pszHome) == 0)
-        pathRet = fs::path("/");
-    else
-        pathRet = fs::path(pszHome);
-#ifdef __APPLE__
-    // macOS
-    return pathRet / "Library/Application Support/Bitcoin";
-#else
-    // Unix-like
-    return pathRet / ".bitcoin";
-#endif
-#endif
+    // Exclusive BTX defaults:
+    //   Windows: %LOCALAPPDATA%\BTX
+    //   macOS:   ~/Library/Application Support/BTX
+    //   Unix:    ~/.btx
+    // Fallback: if the exclusive path does not exist and a legacy Bitcoin Core
+    // path exists, reuse it only when it already looks like a BTX datadir.
+    const fs::path exclusive = GetExclusiveDefaultDataDir();
+    if (fs::exists(exclusive)) {
+        return exclusive;
+    }
+    for (const auto& legacy : GetLegacyBitcoinDataDirs()) {
+        if (fs::exists(legacy) && LooksLikeBtxDataDir(legacy)) {
+            return legacy;
+        }
+    }
+    return exclusive;
 }
 
 bool CheckDataDirOption(const ArgsManager& args)

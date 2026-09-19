@@ -1,0 +1,8 @@
+{
+  "submission_mode": "PUBLIC",
+  "payout_authority": "COUNCIL",
+  "max_lots_per_round": 1,
+  "fee_policy": "reserve",
+  "challenge_policy": "typed",
+  "selection_rule": "council"
+}

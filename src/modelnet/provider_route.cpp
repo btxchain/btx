@@ -42,7 +42,14 @@ int BucketIndex(const Digest48& self, const Digest48& other)
 {
     for (size_t i = 0; i < Digest48::SIZE; ++i) {
         const unsigned char x = self.data[i] ^ other.data[i];
-        if (x != 0) return static_cast<int>(i);
+        if (x == 0) continue;
+        int bit = 0;
+        unsigned char mask = 0x80;
+        while ((x & mask) == 0 && mask != 0) {
+            mask >>= 1;
+            ++bit;
+        }
+        return static_cast<int>(i * 8 + static_cast<size_t>(bit));
     }
     return 0;
 }
@@ -59,6 +66,11 @@ bool XorCloser(const Digest48& target, const RouteContact& a, const RouteContact
 }
 
 } // namespace
+
+int RoutingBucketIndex(const Digest48& self, const Digest48& other)
+{
+    return BucketIndex(self, other);
+}
 
 std::vector<unsigned char> ProviderRecordPreimage(const ProviderRecord& r)
 {
@@ -194,7 +206,7 @@ bool RoutingTable::Insert(const RouteContact& c, std::string& err)
         err = "endpoint";
         return false;
     }
-    const int b = BucketIndex(m_self, c.id);
+    const int b = RoutingBucketIndex(m_self, c.id);
     auto& bucket = m_buckets[static_cast<size_t>(b) % m_buckets.size()];
     for (auto& prev : bucket) {
         if (prev.id == c.id) {

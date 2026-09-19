@@ -48,7 +48,11 @@ class SimulateTxTest(BitcoinTestFramework):
         address2 = w1.getnewaddress()
 
         # Add address1 as watch-only to w2
-        w2.importpubkey(pubkey=w1.getaddressinfo(address1)["pubkey"])
+        if self.options.descriptors:
+            w2.importpubkey(pubkey=w1.getaddressinfo(address1)["pubkey"])
+        else:
+            assert_raises_rpc_error(-8, "importpubkey is disabled", w2.importpubkey, w1.getaddressinfo(address1)["pubkey"])
+            return
 
         tx1 = node.createrawtransaction([], [{address1: 5.0}])
         tx2 = node.createrawtransaction([], [{address2: 10.0}])

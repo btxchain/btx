@@ -34,6 +34,9 @@ from test_framework.util import (
 # the live method; extra aliases are tried only on "method not found".
 RPC_NAMES = {
     "getmodelnetworkinfo": ("getmodelnetworkinfo",),
+    "checkmodelsetup": ("checkmodelsetup",),
+    "listmodelidentities": ("listmodelidentities",),
+    "createmodelidentity": ("createmodelidentity",),
     "importmodel": ("importmodel",),
     "listmodels": ("listmodels",),
     "seedmodel": ("seedmodel",),
@@ -53,6 +56,10 @@ RPC_NAMES = {
     "unsubscribemodelpolicy": ("unsubscribemodelpolicy",),
     "setmodelrule": ("setmodelrule",),
     "listbanned": ("listbanned",),
+    "hcphealth": ("hcphealth",),
+    "gethcpreadiness": ("gethcpreadiness",),
+    "sethcpreporting": ("sethcpreporting",),
+    "importhcpstate": ("importhcpstate",),
 }
 
 # MatMul-off heights from wallet_modelnet_funding.py. Not used unless a
@@ -329,6 +336,30 @@ class ModelNetHelperTest(BitcoinTestFramework):
         if prop.get("seed_upon_download_opt_in"):
             raise AssertionError(f"seed_upon_download still opt-in: {prop}")
 
+        doctor = self._rpc(node, "checkmodelsetup")
+        if not isinstance(doctor, dict):
+            raise AssertionError(f"checkmodelsetup expected object: {doctor}")
+        spend = doctor.get("automatic_spend_atoms", 0)
+        if spend not in (0, "0"):
+            raise AssertionError(f"checkmodelsetup spend: {doctor}")
+        if doctor.get("identity_ready") is not True:
+            raise AssertionError(f"checkmodelsetup identity_ready: {doctor}")
+        listed_ids = self._rpc(node, "listmodelidentities")
+        if not isinstance(listed_ids, dict):
+            raise AssertionError(f"listmodelidentities expected object: {listed_ids}")
+        if listed_ids.get("wallet_backed") is True:
+            raise AssertionError(f"listmodelidentities must not be wallet-backed: {listed_ids}")
+        created_id = self._rpc(node, "createmodelidentity")
+        if not isinstance(created_id, dict):
+            raise AssertionError(f"createmodelidentity expected object: {created_id}")
+        if created_id.get("wallet_backed") is True or created_id.get("contains_wallet_material") is True:
+            raise AssertionError(f"createmodelidentity must not be a wallet key: {created_id}")
+        if created_id.get("class") not in (None, "RESEARCH_PUBLISHER"):
+            raise AssertionError(f"createmodelidentity class: {created_id}")
+        spend = created_id.get("automatic_spend_atoms", 0)
+        if spend not in (0, "0", None):
+            raise AssertionError(f"createmodelidentity spend: {created_id}")
+
         st_path = Path(self.options.tmpdir) / "import" / "model.safetensors"
         write_minimal_safetensors(st_path)
         self.log.info("importmodel %s", st_path)
@@ -363,6 +394,28 @@ class ModelNetHelperTest(BitcoinTestFramework):
         spend = self._automatic_spend(policy)
         if int(spend) != 0:
             raise AssertionError(f"getmodelpolicy automatic_spend must be 0: {policy}")
+
+        hcp_health = self._rpc(node, "hcphealth")
+        if not isinstance(hcp_health, dict):
+            raise AssertionError(f"hcphealth expected object: {hcp_health}")
+        hcp_spend = hcp_health.get("automatic_spend_atoms", 0)
+        if hcp_spend not in (0, "0"):
+            raise AssertionError(f"hcphealth spend: {hcp_health}")
+        ready = self._rpc(node, "gethcpreadiness")
+        if not isinstance(ready, dict):
+            raise AssertionError(f"gethcpreadiness expected object: {ready}")
+        if ready.get("automatic_spend_atoms", 0) not in (0, "0"):
+            raise AssertionError(f"gethcpreadiness spend: {ready}")
+        try:
+            node.sethcpreporting({"secret": "BTX_TEST_SECRET_SENTINEL"})
+            raise AssertionError("sethcpreporting must refuse secrets")
+        except JSONRPCException as exc:
+            self.log.info("sethcpreporting refused: %s", exc)
+        try:
+            node.importhcpstate({"secret": "BTX_TEST_SECRET_SENTINEL"})
+            raise AssertionError("importhcpstate must refuse secrets")
+        except JSONRPCException as exc:
+            self.log.info("importhcpstate refused: %s", exc)
 
         model_id = imported.get("model_id")
         artifact_id = imported.get("artifact_id")

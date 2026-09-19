@@ -17,6 +17,7 @@
 #include <random.h>
 #include <key_io.h>
 #include <merkleblock.h>
+#include <outputtype.h>
 #include <rpc/util.h>
 #include <script/descriptor.h>
 #include <script/script.h>
@@ -37,6 +38,7 @@
 #include <wallet/receive.h>
 #include <wallet/crypter.h>
 #include <wallet/rpc/util.h>
+#include <wallet/bcp1_watchonly.h>
 #include <wallet/shielded_wallet.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -65,6 +67,34 @@ static const std::string WALLET_PASSPHRASE_NOT_INCLUDED_WARNING{
 
 static const std::string WALLET_ARCHIVE_RESTORE_PASSPHRASE_WARNING{
     "The archive passphrase only decrypted the backup bundle. This restored encrypted wallet still requires its original wallet passphrase before funds can be spent."};
+
+static constexpr auto IMPORTPRIVKEY_DISABLED_ERROR =
+    "BTX PQ policy: importprivkey is disabled (legacy ECDSA); use importdescriptors with P2MR";
+static constexpr auto IMPORTPUBKEY_DISABLED_ERROR =
+    "BTX PQ policy: importpubkey is disabled (legacy secp256k1); use importdescriptors with P2MR";
+static constexpr auto IMPORTADDRESS_SECP_DISABLED_ERROR =
+    "BTX PQ policy: importaddress is disabled for secp256k1; use importdescriptors with P2MR";
+static constexpr auto IMPORTWALLET_DISABLED_ERROR =
+    "BTX PQ policy: importwallet is disabled (legacy WIF); use importdescriptors with P2MR";
+static constexpr auto IMPORTMULTI_DISABLED_ERROR =
+    "BTX PQ policy: importmulti is disabled (legacy WIF); use importdescriptors with P2MR";
+static constexpr auto IMPORTDESCRIPTORS_NON_P2MR_ERROR =
+    "BTX PQ policy: only P2MR descriptors (mr()/pqhd) are accepted on this chain";
+
+static bool DescriptorProducesP2MROutput(const Descriptor& desc)
+{
+    return desc.GetOutputType() == OutputType::P2MR;
+}
+
+static void EnsureImportedDescriptorsAreP2MR(const std::vector<std::unique_ptr<Descriptor>>& descs)
+{
+    if (!Params().GetConsensus().fEnforceP2MROnlyOutputs) return;
+    for (const auto& desc : descs) {
+        if (!desc || !DescriptorProducesP2MROutput(*desc)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, IMPORTDESCRIPTORS_NON_P2MR_ERROR);
+        }
+    }
+}
 
 std::string static EncodeDumpString(const std::string &str) {
     std::stringstream ret;
@@ -155,6 +185,69 @@ static void SetOwnerOnlyPermissions(const fs::path& path, const bool is_director
     (void)is_directory;
 #endif
 }
+
+static void EnsureSafeRpcFilesystemPath(const std::string& dest, const char* what)
+{
+    if (dest.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must not be empty", what));
+    }
+    for (const unsigned char c : dest) {
+        if (c < 0x20 || c == 0x7f) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must not contain control characters", what));
+        }
+    }
+    const fs::path path = fs::u8path(dest);
+    for (const auto& component : path) {
+        if (component == "..") {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must not contain parent-directory components", what));
+        }
+    }
+}
+
+class ExclusiveTextFile
+{
+    FILE* m_fp{nullptr};
+
+public:
+    explicit ExclusiveTextFile(const fs::path& path)
+    {
+        m_fp = fsbridge::fopen(path, "wbx");
+    }
+    ExclusiveTextFile(const ExclusiveTextFile&) = delete;
+    ExclusiveTextFile& operator=(const ExclusiveTextFile&) = delete;
+    ~ExclusiveTextFile()
+    {
+        close();
+    }
+    bool is_open() const { return m_fp != nullptr; }
+    ExclusiveTextFile& operator<<(const std::string& s)
+    {
+        if (m_fp && !s.empty()) {
+            if (std::fwrite(s.data(), 1, s.size(), m_fp) != s.size()) {
+                std::fclose(m_fp);
+                m_fp = nullptr;
+            }
+        }
+        return *this;
+    }
+    ExclusiveTextFile& operator<<(const char* s)
+    {
+        if (m_fp && s != nullptr) {
+            if (std::fputs(s, m_fp) == EOF) {
+                std::fclose(m_fp);
+                m_fp = nullptr;
+            }
+        }
+        return *this;
+    }
+    void close()
+    {
+        if (m_fp) {
+            std::fclose(m_fp);
+            m_fp = nullptr;
+        }
+    }
+};
 
 static void EnsureFreshDirectory(const fs::path& path)
 {
@@ -1705,7 +1798,9 @@ RPCHelpMan exportwalletbundle()
 
     wallet.BlockUntilSyncedToCurrentChain();
 
+    EnsureSafeRpcFilesystemPath(request.params[0].get_str(), "exportwalletbundle destination");
     const fs::path bundle_path = fs::u8path(request.params[0].get_str());
+    EnsureFreshFileDestination(bundle_path);
     const std::optional<std::string> wallet_passphrase = request.params[1].isNull() ? std::nullopt : std::optional<std::string>{request.params[1].get_str()};
     const int64_t birthday = request.params[2].isNull() ?
         std::max<int64_t>(1, wallet.GetOldestKeyPoolTime().value_or(1)) :
@@ -1795,14 +1890,8 @@ static void ValidateWalletBundleArchiveMetadata(const WalletBundleArchivePayload
 RPCHelpMan importprivkey()
 {
     return RPCHelpMan{"importprivkey",
-                "\nAdds a private key (as returned by dumpprivkey) to your wallet. Requires a new wallet backup.\n"
-                "Hint: use importmulti to import more than one private key.\n"
-            "\nNote: This call can take over an hour to complete if rescan is true, during that time, other rpc calls\n"
-            "may report that the imported key exists but related transactions are still missing, leading to temporarily incorrect/bogus balances and unspent outputs until rescan completes.\n"
-            "The rescan parameter can be set to false if the key was never used to create transactions. If it is set to false,\n"
-            "but the key was used to create transactions, rescanblockchain needs to be called with the appropriate block range.\n"
-            "Note: Use \"getwalletinfo\" to query the scanning progress.\n"
-            "Note: This command is only compatible with legacy wallets. Use \"importdescriptors\" with \"combo(X)\" for descriptor wallets.\n",
+                "Adds a private key (as returned by dumpprivkey) to your wallet.\n"
+                "Disabled on BTX by post-quantum policy. Use importdescriptors with P2MR.\n",
                 {
                     {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "The private key (see dumpprivkey)"},
                     {"label", RPCArg::Type::STR, RPCArg::DefaultHint{"current label if address exists, otherwise \"\""}, "An optional label"},
@@ -1821,76 +1910,9 @@ RPCHelpMan importprivkey()
             "\nAs a JSON-RPC call\n"
             + HelpExampleRpc("importprivkey", "\"mykey\", \"testing\", false")
                 },
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan&, const JSONRPCRequest&) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
-    if (!pwallet) return UniValue::VNULL;
-
-    if (pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Cannot import private keys to a wallet with private keys disabled");
-    }
-
-    EnsureLegacyScriptPubKeyMan(*pwallet, true);
-
-    WalletRescanReserver reserver(*pwallet);
-    bool fRescan = true;
-    {
-        LOCK(pwallet->cs_wallet);
-
-        EnsureWalletIsUnlocked(*pwallet);
-
-        std::string strSecret = request.params[0].get_str();
-        const std::string strLabel{LabelFromValue(request.params[1])};
-
-        // Whether to perform rescan after import
-        if (!request.params[2].isNull())
-            fRescan = request.params[2].get_bool();
-
-        if (fRescan && pwallet->chain().havePruned()) {
-            // Exit early and print an error.
-            // If a block is pruned after this check, we will import the key(s),
-            // but fail the rescan with a generic error.
-            throw JSONRPCError(RPC_WALLET_ERROR, "Rescan is disabled when blocks are pruned");
-        }
-
-        if (fRescan && !reserver.reserve()) {
-            throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning. Abort existing rescan or wait.");
-        }
-
-        CKey key = DecodeSecret(strSecret);
-        if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key encoding");
-
-        CPubKey pubkey = key.GetPubKey();
-        CHECK_NONFATAL(key.VerifyPubKey(pubkey));
-        CKeyID vchAddress = pubkey.GetID();
-        {
-            pwallet->MarkDirty();
-
-            // We don't know which corresponding address will be used;
-            // label all new addresses, and label existing addresses if a
-            // label was passed.
-            for (const auto& dest : GetAllDestinationsForKey(pubkey)) {
-                if (!request.params[1].isNull() || !pwallet->FindAddressBookEntry(dest)) {
-                    pwallet->SetAddressBook(dest, strLabel, AddressPurpose::RECEIVE);
-                }
-            }
-
-            // Use timestamp of 1 to scan the whole chain
-            if (!pwallet->ImportPrivKeys({{vchAddress, key}}, 1)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Error adding key to wallet");
-            }
-
-            // Add the wpkh script for this key if possible
-            if (pubkey.IsCompressed()) {
-                pwallet->ImportScripts({GetScriptForDestination(WitnessV0KeyHash(vchAddress))}, /*timestamp=*/0);
-            }
-        }
-    }
-    if (fRescan) {
-        RescanWallet(*pwallet, reserver);
-    }
-
-    return UniValue::VNULL;
+    throw JSONRPCError(RPC_INVALID_PARAMETER, IMPORTPRIVKEY_DISABLED_ERROR);
 },
     };
 }
@@ -1931,6 +1953,27 @@ RPCHelpMan importaddress()
 {
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
+
+    const std::string& address_or_script = request.params[0].get_str();
+    const CTxDestination dest_probe = DecodeDestination(address_or_script);
+    if (IsValidDestination(dest_probe)) {
+        if (!std::holds_alternative<WitnessV2P2MR>(dest_probe)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, IMPORTADDRESS_SECP_DISABLED_ERROR);
+        }
+    } else if (IsHex(address_or_script)) {
+        const std::vector<unsigned char> data(ParseHex(address_or_script));
+        const CScript script(data.begin(), data.end());
+        int witness_version{-1};
+        std::vector<unsigned char> witness_program;
+        const bool is_p2mr = script.IsWitnessProgram(witness_version, witness_program) &&
+                             witness_version == 2 && witness_program.size() == 32;
+        const bool fP2SH_probe = !request.params[3].isNull() && request.params[3].get_bool();
+        if (fP2SH_probe || !is_p2mr) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, IMPORTADDRESS_SECP_DISABLED_ERROR);
+        }
+    } else {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid BTX address or script");
+    }
 
     // Use legacy spkm only if the wallet does not support descriptors.
     bool use_legacy = !pwallet->IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS);
@@ -2128,14 +2171,8 @@ RPCHelpMan removeprunedfunds()
 RPCHelpMan importpubkey()
 {
     return RPCHelpMan{"importpubkey",
-                "\nAdds a public key (in hex) that can be watched as if it were in your wallet but cannot be used to spend. Requires a new wallet backup.\n"
-                "Hint: use importmulti to import more than one public key.\n"
-            "\nNote: This call can take over an hour to complete if rescan is true, during that time, other rpc calls\n"
-            "may report that the imported pubkey exists but related transactions are still missing, leading to temporarily incorrect/bogus balances and unspent outputs until rescan completes.\n"
-            "The rescan parameter can be set to false if the key was never used to create transactions. If it is set to false,\n"
-            "but the key was used to create transactions, rescanblockchain needs to be called with the appropriate block range.\n"
-            "Note: Use \"getwalletinfo\" to query the scanning progress.\n"
-            "Note: This command is only compatible with legacy wallets. Use \"importdescriptors\" with \"combo(X)\" for descriptor wallets.\n",
+                "Adds a public key (in hex) that can be watched as if it were in your wallet but cannot be used to spend.\n"
+                "Disabled on BTX by post-quantum policy. Use importdescriptors with P2MR.\n",
                 {
                     {"pubkey", RPCArg::Type::STR, RPCArg::Optional::NO, "The hex-encoded public key"},
                     {"label", RPCArg::Type::STR, RPCArg::Default{""}, "An optional label"},
@@ -2150,55 +2187,9 @@ RPCHelpMan importpubkey()
             "\nAs a JSON-RPC call\n"
             + HelpExampleRpc("importpubkey", "\"mypubkey\", \"testing\", false")
                 },
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan&, const JSONRPCRequest&) -> UniValue
 {
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
-    if (!pwallet) return UniValue::VNULL;
-
-    EnsureLegacyScriptPubKeyMan(*pwallet, true);
-
-    const std::string strLabel{LabelFromValue(request.params[1])};
-
-    // Whether to perform rescan after import
-    bool fRescan = true;
-    if (!request.params[2].isNull())
-        fRescan = request.params[2].get_bool();
-
-    if (fRescan && pwallet->chain().havePruned()) {
-        // Exit early and print an error.
-        // If a block is pruned after this check, we will import the key(s),
-        // but fail the rescan with a generic error.
-        throw JSONRPCError(RPC_WALLET_ERROR, "Rescan is disabled when blocks are pruned");
-    }
-
-    WalletRescanReserver reserver(*pwallet);
-    if (fRescan && !reserver.reserve()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning. Abort existing rescan or wait.");
-    }
-
-    CPubKey pubKey = HexToPubKey(request.params[0].get_str());
-
-    {
-        LOCK(pwallet->cs_wallet);
-
-        std::set<CScript> script_pub_keys;
-        for (const auto& dest : GetAllDestinationsForKey(pubKey)) {
-            script_pub_keys.insert(GetScriptForDestination(dest));
-        }
-
-        pwallet->MarkDirty();
-
-        pwallet->ImportScriptPubKeys(strLabel, script_pub_keys, /*have_solving_data=*/true, /*apply_label=*/true, /*timestamp=*/1);
-
-        pwallet->ImportPubKeys({{pubKey.GetID(), false}}, {{pubKey.GetID(), pubKey}} , /*key_origins=*/{}, /*add_keypool=*/false, /*timestamp=*/1);
-    }
-    if (fRescan)
-    {
-        RescanWallet(*pwallet, reserver);
-        pwallet->ResubmitWalletTransactions(/*relay=*/false, /*force=*/true);
-    }
-
-    return UniValue::VNULL;
+    throw JSONRPCError(RPC_INVALID_PARAMETER, IMPORTPUBKEY_DISABLED_ERROR);
 },
     };
 }
@@ -2207,9 +2198,8 @@ RPCHelpMan importpubkey()
 RPCHelpMan importwallet()
 {
     return RPCHelpMan{"importwallet",
-                "\nImports keys from a wallet dump file (see dumpwallet). Requires a new wallet backup to include imported keys.\n"
-                "Note: Blockchain and Mempool will be rescanned after a successful import. Use \"getwalletinfo\" to query the scanning progress.\n"
-                "Note: This command is only compatible with legacy wallets.\n",
+                "Imports keys from a wallet dump file (see dumpwallet).\n"
+                "Disabled on BTX by post-quantum policy. Use importdescriptors with P2MR.\n",
                 {
                     {"filename", RPCArg::Type::STR, RPCArg::Optional::NO, "The wallet file"},
                 },
@@ -2222,134 +2212,9 @@ RPCHelpMan importwallet()
             "\nImport using the json rpc call\n"
             + HelpExampleRpc("importwallet", "\"test\"")
                 },
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan&, const JSONRPCRequest&) -> UniValue
 {
-    EnsureNotWalletRestricted(request);
-
-    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
-    if (!pwallet) return UniValue::VNULL;
-
-    EnsureLegacyScriptPubKeyMan(*pwallet, true);
-
-    WalletRescanReserver reserver(*pwallet);
-    if (!reserver.reserve()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning. Abort existing rescan or wait.");
-    }
-
-    int64_t nTimeBegin = 0;
-    bool fGood = true;
-    {
-        LOCK(pwallet->cs_wallet);
-
-        EnsureWalletIsUnlocked(*pwallet);
-
-        std::ifstream file;
-        file.open(fs::u8path(request.params[0].get_str()), std::ios::in | std::ios::ate);
-        if (!file.is_open()) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot open wallet dump file");
-        }
-        CHECK_NONFATAL(pwallet->chain().findBlock(pwallet->GetLastBlockHash(), FoundBlock().time(nTimeBegin)));
-
-        int64_t nFilesize = std::max((int64_t)1, (int64_t)file.tellg());
-        file.seekg(0, file.beg);
-
-        // Use uiInterface.ShowProgress instead of pwallet.ShowProgress because pwallet.ShowProgress has a cancel button tied to AbortRescan which
-        // we don't want for this progress bar showing the import progress. uiInterface.ShowProgress does not have a cancel button.
-        pwallet->chain().showProgress(strprintf("%s %s", pwallet->GetDisplayName(), _("Importing…")), 0, false); // show progress dialog in GUI
-        std::vector<std::tuple<CKey, int64_t, bool, std::string>> keys;
-        std::vector<std::pair<CScript, int64_t>> scripts;
-        while (file.good()) {
-            pwallet->chain().showProgress("", std::max(1, std::min(50, (int)(((double)file.tellg() / (double)nFilesize) * 100))), false);
-            std::string line;
-            std::getline(file, line);
-            if (line.empty() || line[0] == '#')
-                continue;
-
-            std::vector<std::string> vstr = SplitString(line, ' ');
-            if (vstr.size() < 2)
-                continue;
-            CKey key = DecodeSecret(vstr[0]);
-            if (key.IsValid()) {
-                int64_t nTime{ParseISO8601DateTime(vstr[1]).value_or(0)};
-                std::string strLabel;
-                bool fLabel = true;
-                for (unsigned int nStr = 2; nStr < vstr.size(); nStr++) {
-                    if (vstr[nStr].front() == '#')
-                        break;
-                    if (vstr[nStr] == "change=1")
-                        fLabel = false;
-                    if (vstr[nStr] == "reserve=1")
-                        fLabel = false;
-                    if (vstr[nStr].substr(0,6) == "label=") {
-                        strLabel = DecodeDumpString(vstr[nStr].substr(6));
-                        fLabel = true;
-                    }
-                }
-                nTimeBegin = std::min(nTimeBegin, nTime);
-                keys.emplace_back(key, nTime, fLabel, strLabel);
-            } else if(IsHex(vstr[0])) {
-                std::vector<unsigned char> vData(ParseHex(vstr[0]));
-                CScript script = CScript(vData.begin(), vData.end());
-                int64_t birth_time{ParseISO8601DateTime(vstr[1]).value_or(0)};
-                if (birth_time > 0) nTimeBegin = std::min(nTimeBegin, birth_time);
-                scripts.emplace_back(script, birth_time);
-            }
-        }
-        file.close();
-        EnsureBlockDataFromTime(*pwallet, nTimeBegin);
-        // We now know whether we are importing private keys, so we can error if private keys are disabled
-        if (keys.size() > 0 && pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
-            pwallet->chain().showProgress("", 100, false); // hide progress dialog in GUI
-            throw JSONRPCError(RPC_WALLET_ERROR, "Importing wallets is disabled when private keys are disabled");
-        }
-        double total = (double)(keys.size() + scripts.size());
-        double progress = 0;
-        for (const auto& key_tuple : keys) {
-            pwallet->chain().showProgress("", std::max(50, std::min(75, (int)((progress / total) * 100) + 50)), false);
-            const CKey& key = std::get<0>(key_tuple);
-            int64_t time = std::get<1>(key_tuple);
-            bool has_label = std::get<2>(key_tuple);
-            std::string label = std::get<3>(key_tuple);
-
-            CPubKey pubkey = key.GetPubKey();
-            CHECK_NONFATAL(key.VerifyPubKey(pubkey));
-            CKeyID keyid = pubkey.GetID();
-
-            pwallet->WalletLogPrintf("Importing %s...\n", EncodeDestination(PKHash(keyid)));
-
-            if (!pwallet->ImportPrivKeys({{keyid, key}}, time)) {
-                pwallet->WalletLogPrintf("Error importing key for %s\n", EncodeDestination(PKHash(keyid)));
-                fGood = false;
-                continue;
-            }
-
-            if (has_label)
-                pwallet->SetAddressBook(PKHash(keyid), label, AddressPurpose::RECEIVE);
-            progress++;
-        }
-        for (const auto& script_pair : scripts) {
-            pwallet->chain().showProgress("", std::max(50, std::min(75, (int)((progress / total) * 100) + 50)), false);
-            const CScript& script = script_pair.first;
-            int64_t time = script_pair.second;
-
-            if (!pwallet->ImportScripts({script}, time)) {
-                pwallet->WalletLogPrintf("Error importing script %s\n", HexStr(script));
-                fGood = false;
-                continue;
-            }
-
-            progress++;
-        }
-        pwallet->chain().showProgress("", 100, false); // hide progress dialog in GUI
-    }
-    pwallet->chain().showProgress("", 100, false); // hide progress dialog in GUI
-    RescanWallet(*pwallet, reserver, nTimeBegin, /*update=*/false);
-    pwallet->MarkDirty();
-
-    if (!fGood)
-        throw JSONRPCError(RPC_WALLET_ERROR, "Error adding some keys/scripts to wallet");
-
-    return UniValue::VNULL;
+    throw JSONRPCError(RPC_INVALID_PARAMETER, IMPORTWALLET_DISABLED_ERROR);
 },
     };
 }
@@ -2375,6 +2240,14 @@ RPCHelpMan dumpprivkey()
 {
     const std::shared_ptr<const CWallet> pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
+
+    bilingual_str refuse_err;
+    if (RefusePrivateSign(*pwallet, refuse_err)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, refuse_err.original);
+    }
+    if (pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
+    }
 
     const LegacyScriptPubKeyMan& spk_man = EnsureConstLegacyScriptPubKeyMan(*pwallet);
 
@@ -2403,7 +2276,7 @@ RPCHelpMan dumpprivkey()
 RPCHelpMan dumpmasterprivkey()
 {
     return RPCHelpMan{"dumpmasterprivkey",
-                "Reveals the current master private key.\n",
+                "Reveals the current HD master private key. Requires an unlocked wallet.\n",
                 {},
                 RPCResult{
                     RPCResult::Type::STR, "key", "The HD master private key"
@@ -2416,6 +2289,14 @@ RPCHelpMan dumpmasterprivkey()
     std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
     if (!wallet) return NullUniValue;
     const CWallet* const pwallet = wallet.get();
+
+    bilingual_str refuse_err;
+    if (RefusePrivateSign(*pwallet, refuse_err)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, refuse_err.original);
+    }
+    if (pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
+    }
 
     LegacyScriptPubKeyMan& spk_man = EnsureLegacyScriptPubKeyMan(*wallet);
 
@@ -2451,7 +2332,7 @@ RPCHelpMan dumpwallet()
                 "only backing up the seed itself, and must be backed up too (e.g. ensure you back up the whole dumpfile).\n"
                 "Note: This command is only compatible with legacy wallets.\n",
                 {
-                    {"filename", RPCArg::Type::STR, RPCArg::Optional::NO, "The filename with path (absolute path recommended)"},
+                    {"filename", RPCArg::Type::STR, RPCArg::Optional::NO, "The filename with path (absolute path recommended). Created exclusively; the path must not already exist."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -2470,6 +2351,14 @@ RPCHelpMan dumpwallet()
     const std::shared_ptr<const CWallet> pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
 
+    bilingual_str dump_refuse;
+    if (RefusePrivateSign(*pwallet, dump_refuse)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, dump_refuse.original);
+    }
+    if (pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
+    }
+
     const CWallet& wallet = *pwallet;
     const LegacyScriptPubKeyMan& spk_man = EnsureConstLegacyScriptPubKeyMan(wallet);
 
@@ -2481,7 +2370,9 @@ RPCHelpMan dumpwallet()
 
     EnsureWalletIsUnlocked(wallet);
 
-    fs::path filepath = fs::u8path(request.params[0].get_str());
+    const std::string dest = request.params[0].get_str();
+    EnsureSafeRpcFilesystemPath(dest, "dumpwallet destination");
+    fs::path filepath = fs::u8path(dest);
     filepath = fs::absolute(filepath);
 
     /* Prevent arbitrary files from being overwritten. There have been reports
@@ -2493,8 +2384,7 @@ RPCHelpMan dumpwallet()
         throw JSONRPCError(RPC_INVALID_PARAMETER, filepath.utf8string() + " already exists. If you are sure this is what you want, move it out of the way first");
     }
 
-    std::ofstream file;
-    file.open(filepath);
+    ExclusiveTextFile file{filepath};
     if (!file.is_open())
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot open wallet dump file");
 
@@ -2587,7 +2477,11 @@ RPCHelpMan dumpwallet()
     }
     file << "\n";
     file << "# End of dump\n";
+    if (!file.is_open()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to write wallet dump file");
+    }
     file.close();
+    SetOwnerOnlyPermissions(filepath, /*is_directory=*/false);
 
     UniValue reply(UniValue::VOBJ);
     reply.pushKV("filename", filepath.utf8string());
@@ -3037,7 +2931,8 @@ RPCHelpMan importmulti()
             "The rescan parameter can be set to false if the key was never used to create transactions. If it is set to false,\n"
             "but the key was used to create transactions, rescanblockchain needs to be called with the appropriate block range.\n"
             "Note: Use \"getwalletinfo\" to query the scanning progress.\n"
-            "Note: This command is only compatible with legacy wallets. Use \"importdescriptors\" for descriptor wallets.\n",
+            "Note: This command is only compatible with legacy wallets. Use \"importdescriptors\" for descriptor wallets.\n"
+            "On P2MR-only chains this command is disabled (legacy WIF/script import). Use importdescriptors with P2MR.\n",
                 {
                     {"requests", RPCArg::Type::ARR, RPCArg::Optional::NO, "Data to be imported",
                         {
@@ -3110,6 +3005,10 @@ RPCHelpMan importmulti()
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(mainRequest);
     if (!pwallet) return UniValue::VNULL;
     CWallet& wallet{*pwallet};
+
+    if (Params().GetConsensus().fEnforceP2MROnlyOutputs) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, IMPORTMULTI_DISABLED_ERROR);
+    }
 
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
@@ -3257,6 +3156,7 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
         if (parsed_descs.empty()) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, error);
         }
+        EnsureImportedDescriptorsAreP2MR(parsed_descs);
         for (const auto& pq_seed : pq_master_seeds) {
             const Span<const unsigned char> seed_span{pq_seed};
             const auto fingerprint = PQSeedFingerprint(seed_span);
@@ -3516,6 +3416,7 @@ RPCHelpMan importdescriptors()
 {
     return RPCHelpMan{"importdescriptors",
                 "\nImport descriptors. This will trigger a rescan of the blockchain based on the earliest timestamp of all descriptors being imported. Requires a new wallet backup.\n"
+            "On P2MR-only chains, only descriptors that produce P2MR outputs (mr()/pqhd) are accepted; pkh/wpkh/tr/pk are rejected without importing.\n"
             "When importing descriptors with multipath key expressions, if the multipath specifier contains exactly two elements, the descriptor produced from the second elements will be imported as an internal descriptor.\n"
             "\nNote: This call can take over an hour to complete if using an early timestamp; during that time, other rpc calls\n"
             "may report that the imported keys, addresses or scripts exist but related transactions are still missing.\n"
@@ -3836,6 +3737,7 @@ RPCHelpMan restorewalletbundle()
 
     WalletContext& context = EnsureWalletContext(request.context);
     const std::string wallet_name = request.params[0].get_str();
+    EnsureSafeRpcFilesystemPath(request.params[1].get_str(), "restorewalletbundle bundle_file");
     BtxWalletBundle bundle = ReadBtxWalletBundleFile(fs::u8path(request.params[1].get_str()));
     const std::optional<bool> load_on_start = request.params[2].isNull()
         ? std::nullopt
@@ -3886,9 +3788,10 @@ RPCHelpMan restorewalletbundle()
 RPCHelpMan backupwallet()
 {
     return RPCHelpMan{"backupwallet",
-                "\nSafely copies the current wallet file to the specified destination, which can either be a directory or a path with a filename.\n",
+                "\nSafely copies the current wallet file to the specified destination, which can either be a directory or a path with a filename.\n"
+                "Does not overwrite an existing destination file.\n",
                 {
-                    {"destination", RPCArg::Type::STR, RPCArg::Optional::NO, "The destination directory or file"},
+                    {"destination", RPCArg::Type::STR, RPCArg::Optional::NO, "The destination directory or file. An existing file is refused; an existing directory receives a new wallet file inside it."},
                 },
                 RPCResult{RPCResult::Type::NONE, "", ""},
                 RPCExamples{
@@ -3909,6 +3812,11 @@ RPCHelpMan backupwallet()
     LOCK(pwallet->cs_wallet);
 
     std::string strDest = request.params[0].get_str();
+    EnsureSafeRpcFilesystemPath(strDest, "backupwallet destination");
+    const fs::path dest_path = fs::u8path(strDest);
+    if (fs::exists(dest_path) && !fs::is_directory(dest_path)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, dest_path.utf8string() + " already exists. If you are sure this is what you want, move it out of the way first");
+    }
     if (!pwallet->BackupWallet(strDest)) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: Wallet backup failed!");
     }
@@ -3962,6 +3870,7 @@ RPCHelpMan backupwalletbundle()
     const std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
     if (!wallet) return UniValue::VNULL;
 
+    EnsureSafeRpcFilesystemPath(request.params[0].get_str(), "backupwalletbundle destination");
     const fs::path bundle_dir = fs::u8path(request.params[0].get_str());
     const std::optional<std::string> wallet_passphrase = request.params[1].isNull()
         ? std::nullopt
@@ -4037,6 +3946,7 @@ RPCHelpMan backupwalletbundlearchive()
     const std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
     if (!wallet) return UniValue::VNULL;
 
+    EnsureSafeRpcFilesystemPath(request.params[0].get_str(), "backupwalletbundlearchive destination");
     const fs::path archive_path = fs::u8path(request.params[0].get_str());
     const std::string archive_passphrase = request.params[1].get_str();
     const std::optional<std::string> wallet_passphrase = request.params[2].isNull()
@@ -4136,6 +4046,7 @@ RPCHelpMan restorewalletbundlearchive()
     EnsureNotWalletRestricted(request);
 
     WalletContext& context = EnsureWalletContext(request.context);
+    EnsureSafeRpcFilesystemPath(request.params[1].get_str(), "restorewalletbundlearchive archive_file");
     const fs::path archive_file = fs::u8path(request.params[1].get_str());
     const std::string archive_passphrase = request.params[2].get_str();
     const std::string wallet_name = request.params[0].get_str();

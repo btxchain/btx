@@ -16,6 +16,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <string>
 #include <vector>
 
 namespace modelnet {
@@ -172,6 +173,21 @@ std::vector<std::string> TokenizeSearch(const std::string& in)
     }
     if (!cur.empty() && t.size() < SEARCH_TERMS_MAX) t.push_back(cur);
     return t;
+}
+
+bool SearchRecordHasAuthoredMetadata(const ModelSearchRecord& r)
+{
+    if (r.signed_ok) return true;
+    if (!r.release_id.empty()) return true;
+    if (!r.family.empty() || !r.architecture.empty() || !r.format.empty() ||
+        !r.quantization.empty() || !r.short_description.empty() ||
+        !r.publisher_display_name.empty()) {
+        return true;
+    }
+    if (!r.tags.empty() || !r.aliases.empty() || !r.languages.empty() || !r.modalities.empty()) {
+        return true;
+    }
+    return r.parameter_count > 0;
 }
 
 bool ValidateSearchRecord(const ModelSearchRecord& r, std::string& err)
@@ -542,6 +558,9 @@ bool ParseSearchQuery(const UniValue& o, SearchQuery& q, std::string& err)
         FS("object_kind", q.filters.object_kind);
         if (f.exists("min_size_bytes")) q.filters.min_size_bytes = f["min_size_bytes"].getInt<int64_t>();
         if (f.exists("max_size_bytes")) q.filters.max_size_bytes = f["max_size_bytes"].getInt<int64_t>();
+        if (f.exists("min_parameters")) q.filters.min_parameters = f["min_parameters"].getInt<int64_t>();
+        if (f.exists("max_parameters")) q.filters.max_parameters = f["max_parameters"].getInt<int64_t>();
+        if (f.exists("license") && f["license"].isStr()) q.filters.license = f["license"].get_str();
         if (f.exists("public_only")) q.filters.public_only = f["public_only"].get_bool();
         if (f.exists("min_provider_count")) q.filters.min_provider_count = f["min_provider_count"].getInt<int>();
         if (f.exists("pinned")) q.filters.pinned = f["pinned"].get_bool();
@@ -601,6 +620,10 @@ UniValue AppliedFiltersJson(const SearchFilters& f)
     if (!f.quantization.empty()) add("quantization");
     if (f.min_size_bytes >= 0) add("min_size_bytes");
     if (f.max_size_bytes >= 0) add("max_size_bytes");
+    if (f.min_parameters >= 0) add("min_parameters");
+    if (f.max_parameters >= 0) add("max_parameters");
+    if (!f.license.empty()) add("license");
+    if (f.locally_verified) add("locally_verified");
     return a;
 }
 
@@ -821,6 +844,24 @@ UniValue SearchResultCard(const SearchHit& h)
     for (const auto& p : h.provenance) prov.push_back(p);
     se.pushKV("provenance", prov);
     o.pushKV("search", se);
+    UniValue share(UniValue::VOBJ);
+    share.pushKV("uri", h.rec.btx_uri);
+    std::string copy = h.rec.btx_uri;
+    if (!h.rec.family.empty()) copy += " family=" + h.rec.family;
+    if (!h.rec.format.empty()) copy += " format=" + h.rec.format;
+    if (!h.rec.quantization.empty()) copy += " quant=" + h.rec.quantization;
+    share.pushKV("copy_text", copy);
+    share.pushKV("family", h.rec.family);
+    share.pushKV("format", h.rec.format);
+    share.pushKV("quantization", h.rec.quantization);
+    share.pushKV("signed", h.rec.signed_ok);
+    o.pushKV("share", share);
+    UniValue actions(UniValue::VARR);
+    actions.push_back("getmodelsharecard");
+    actions.push_back("getmodel FREE_ONLY");
+    actions.push_back("showmodel");
+    actions.push_back("automatic_spend_atoms stays 0");
+    o.pushKV("next_actions", actions);
     return o;
 }
 
@@ -909,6 +950,21 @@ const ModelSearchRecord* SearchIndex::Get(const Digest48& model_id) const
     return &it->second;
 }
 
+const ModelSearchRecord* SearchIndex::FindByAlias(const std::string& alias) const
+{
+    if (alias.empty()) return nullptr;
+    const std::string needle = ToLower(alias);
+    const ModelSearchRecord* ci = nullptr;
+    for (const auto& kv : m_by_model) {
+        if (kv.second.tombstone) continue;
+        for (const auto& a : kv.second.aliases) {
+            if (a == alias) return &kv.second;
+            if (!ci && ToLower(a) == needle) ci = &kv.second;
+        }
+    }
+    return ci;
+}
+
 std::vector<ModelSearchRecord> SearchIndex::List(int64_t updated_after, const std::string& cursor, int limit) const
 {
     std::vector<ModelSearchRecord> out;
@@ -949,6 +1005,13 @@ std::vector<SearchHit> SearchIndex::Search(const SearchQuery& q, int64_t now_ms)
             NormalizeSearchText(r.quantization) != NormalizeSearchText(q.filters.quantization)) continue;
         if (q.filters.min_size_bytes >= 0 && static_cast<int64_t>(r.size_bytes) < q.filters.min_size_bytes) continue;
         if (q.filters.max_size_bytes >= 0 && static_cast<int64_t>(r.size_bytes) > q.filters.max_size_bytes) continue;
+        if (q.filters.min_parameters >= 0 && r.parameter_count < q.filters.min_parameters) continue;
+        if (q.filters.max_parameters >= 0 && (r.parameter_count <= 0 || r.parameter_count > q.filters.max_parameters)) continue;
+        if (q.filters.locally_verified && !r.signed_ok) continue;
+        if (!q.filters.license.empty()) {
+            const std::string tagged = std::string("license:") + q.filters.license;
+            if (!FieldHas(r.tags, q.filters.license) && !FieldHas(r.tags, tagged)) continue;
+        }
         if (!q.filters.language.empty()) {
             bool ok = false;
             for (const auto& l : q.filters.language) {
@@ -1092,6 +1155,15 @@ bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
     }
     if (o.exists("sequence")) m_seq = std::max(m_seq, static_cast<uint64_t>(o["sequence"].getInt<int64_t>()));
     return true;
+}
+
+void SearchIndex::Clear()
+{
+    m_by_model.clear();
+    m_hidden.clear();
+    m_muted_publishers.clear();
+    m_pub_window.clear();
+    m_seq = 0;
 }
 
 std::vector<ModelSearchRecord> SearchIndex::All() const

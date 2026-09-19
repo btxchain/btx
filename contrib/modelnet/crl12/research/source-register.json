@@ -1,0 +1,227 @@
+[
+  {
+    "id": "M01",
+    "title": "Worldwide AI spending forecast, September 2026",
+    "publisher": "Gartner",
+    "url": "https://www.gartner.com/en/newsroom/press-releases/2026-09-16-gartner-forecasts-worldwide-ai-spending-to-grow-49-point-5-percent-in-2026",
+    "date": "2026-09-16",
+    "reviewed": "2026-09-17",
+    "observation": "Forecast: 2026 total $2,670,460m; infrastructure $1,484,397m; 2027 total $3,637,292m. Search retrieval supplied primary-source text; direct open returned a cache miss. Figures are forecast market context, not BTX-addressable revenues."
+  },
+  {
+    "id": "M02",
+    "title": "The cost of compute: a $7 trillion race to scale data centers",
+    "publisher": "McKinsey",
+    "url": "https://www.mckinsey.com/industries/technology-media-and-telecommunications/our-insights/the-cost-of-compute-a-7-trillion-dollar-race-to-scale-data-centers",
+    "date": "2025-04-28",
+    "reviewed": "2026-09-17",
+    "observation": "$5.2tn AI-related and $1.5tn traditional data-center capital expenditure through 2030 in the central scenario. Cumulative investment, not annual spending; do not add to M01."
+  },
+  {
+    "id": "M03",
+    "title": "2025 AI Index Report",
+    "publisher": "Stanford HAI",
+    "url": "https://hai.stanford.edu/ai-index/2025-ai-index-report",
+    "date": "2025",
+    "reviewed": "2026-09-17",
+    "observation": "Documents falling costs at fixed capability levels; the report discusses a greater than 280-fold fall in GPT-3.5-level inference cost between November 2022 and October 2024. Historical observation, not a BTX benchmark or 2030 forecast."
+  },
+  {
+    "id": "M04",
+    "title": "Instinct MI400 series product specifications",
+    "publisher": "AMD",
+    "url": "https://www.amd.com/en/products/accelerators/instinct/mi400.html",
+    "date": "accessed 2026-09-17",
+    "reviewed": "2026-09-17",
+    "observation": "MI455X page lists up to 432 GB HBM4, 23.3 TB/s peak theoretical memory bandwidth and 3.6 TB/s scale-up bandwidth. Vendor specifications; no end-to-end application speedup inferred."
+  },
+  {
+    "id": "M05",
+    "title": "Vera Rubin ramps into full production",
+    "publisher": "NVIDIA",
+    "url": "https://nvidianews.nvidia.com/news/vera-rubin-full-production-agentic-ai-factory",
+    "date": "2026-05-31",
+    "reviewed": "2026-09-17",
+    "observation": "Vendor announcement reports 10x agent throughput at scale versus its previous platform. Used only as directional evidence of integrated hardware progress."
+  },
+  {
+    "id": "M06",
+    "title": "Second-quarter 2026 earnings announcement",
+    "publisher": "Coinbase",
+    "url": "https://investor.coinbase.com/news/news-details/2026/Coinbase-Q2-Earnings-Everything-Exchange-Drives-3rd-Consecutive-Quarter-of-Record-Crypto-Trading-Volume-Market-Share-Revenue-Diversification-and-Resilience/default.aspx",
+    "date": "2026-08",
+    "reviewed": "2026-09-17",
+    "observation": "Public institutional digital-asset venue analogue. Company report: subscription/services $555m and 48% of net revenue. Case A uses a hypothetical business, not a claim of BTX integration."
+  },
+  {
+    "id": "M07",
+    "title": "AI Agent Skills Hub expansion",
+    "publisher": "Binance",
+    "url": "https://www.binance.com/en/support/announcement/detail/c582a7a577904965af5d140b015e9a2c",
+    "date": "2026-04-02",
+    "reviewed": "2026-09-17",
+    "observation": "13 additional skills spanning trading, payments and institutional functions. Case B borrows the business model of modular agent access, not any proprietary API implementation."
+  },
+  {
+    "id": "M08",
+    "title": "Capital Connect institutional programme",
+    "publisher": "Binance",
+    "url": "https://www.binance.com/en/support/announcement/detail/35509d42de1645c097371c651936f78e",
+    "date": "2026-04-09",
+    "reviewed": "2026-09-17",
+    "observation": "Describes institutional investors, professional trading teams and portfolio accounts. No endorsement or available BTX custody is implied."
+  },
+  {
+    "id": "M09",
+    "title": "2025 full-year financial highlights",
+    "publisher": "Kraken / Payward",
+    "url": "https://blog.kraken.com/news/kraken-2025-financials",
+    "date": "2026-02-03",
+    "reviewed": "2026-09-17",
+    "observation": "2025 company disclosure: $48.2bn assets on platform, 5.7m funded accounts, $2.2bn adjusted revenue; 47% trading and 53% asset-based/other revenue. Shared-infrastructure, custody and wholesale analogue for Case C."
+  },
+  {
+    "id": "M10",
+    "title": "Annual Report 2025",
+    "publisher": "Revolut",
+    "url": "https://www.revolut.com/annual-report-2025/",
+    "date": "2026",
+    "reviewed": "2026-09-17",
+    "observation": "Business-account, FX and treasury distribution analogue for Case D. Use business model; hypothetical case numbers are separate."
+  },
+  {
+    "id": "M11",
+    "title": "Second-quarter 2026 results",
+    "publisher": "Robinhood",
+    "url": "https://investors.robinhood.com/news-releases/news-release-details/robinhood-reports-second-quarter-2026-results",
+    "date": "2026-07-29",
+    "reviewed": "2026-09-17",
+    "observation": "Reports $369bn Total Platform Assets; defines that measure separately from AUC. Describes advisor and agentic-account expansion. Case E is hypothetical."
+  },
+  {
+    "id": "M12",
+    "title": "Second-quarter 2026 results",
+    "publisher": "BlackRock",
+    "url": "https://www.blackrock.com/corporate/newsroom/media/press-releases/blackrock-reports-second-quarter-2026",
+    "date": "2026-07-15",
+    "reviewed": "2026-09-17",
+    "observation": "Reports $15.3tn AUM and 13% growth in technology services/subscriptions. AUM belongs to the asset manager; it is not the assets processed by its technology customers."
+  },
+  {
+    "id": "M13",
+    "title": "Whole Portfolio product overview",
+    "publisher": "BlackRock / Aladdin",
+    "url": "https://www.blackrock.com/aladdin/platforms/products/whole-portfolio",
+    "date": "accessed 2026-09-17",
+    "reviewed": "2026-09-17",
+    "observation": "Public/private portfolio views, integrated investment book, exposure, performance and risk. Case F and the institutional guide propose a neutral integration model; there is no proprietary integration or native product-support claim."
+  },
+  {
+    "id": "M14",
+    "title": "Studio API solutions",
+    "publisher": "BlackRock / Aladdin",
+    "url": "https://www.blackrock.com/aladdin/platforms/products/apis",
+    "date": "accessed 2026-09-17",
+    "reviewed": "2026-09-17",
+    "observation": "Official overview describes read/write access and operational services including trades, orders and compliance. Detailed customer API contracts are not publicly supplied; this package invents no proprietary endpoint."
+  },
+  {
+    "id": "M15",
+    "title": "Studio and data-cloud overview",
+    "publisher": "BlackRock / Aladdin",
+    "url": "https://www.blackrock.com/aladdin/platforms/products/aladdin-studio",
+    "date": "accessed 2026-09-17",
+    "reviewed": "2026-09-17",
+    "observation": "API-first platform and integration of platform and non-platform data. Supports generic adapter and data-warehouse architectural analysis."
+  },
+  {
+    "id": "M16",
+    "title": "x402 introduction",
+    "publisher": "x402",
+    "url": "https://docs.x402.org/introduction",
+    "date": "accessed 2026-09-17",
+    "reviewed": "2026-09-17",
+    "observation": "HTTP payment protocol for automated access to APIs/content. Payment rails can pay for more than operating consumption; BTX differentiates the managed object and lifecycle rather than claiming only it can transfer capital."
+  },
+  {
+    "id": "T01",
+    "title": "FAPI 2.0 Security Profile",
+    "publisher": "OpenID Foundation",
+    "url": "https://openid.net/specs/fapi-security-profile-2_0-final.html",
+    "date": "final edition, reviewed 2026-09-17",
+    "reviewed": "2026-09-17",
+    "observation": "Retain HCP authentication choices and sender constraints. No custom identity stack."
+  },
+  {
+    "id": "T02",
+    "title": "OAuth 2.0 security best current practice, RFC 9700",
+    "publisher": "IETF",
+    "url": "https://www.rfc-editor.org/rfc/rfc9700.html",
+    "date": "2025-01",
+    "reviewed": "2026-09-17",
+    "observation": "Authorization security baseline for provider-bound tokens."
+  },
+  {
+    "id": "T03",
+    "title": "OAuth DPoP, RFC 9449",
+    "publisher": "IETF",
+    "url": "https://www.rfc-editor.org/rfc/rfc9449.html",
+    "date": "2023-09",
+    "reviewed": "2026-09-17",
+    "observation": "Sender-binding precedent, not approval of an arbitrary business request body."
+  },
+  {
+    "id": "T04",
+    "title": "OAuth Rich Authorization Requests, RFC 9396",
+    "publisher": "IETF",
+    "url": "https://www.rfc-editor.org/rfc/rfc9396.html",
+    "date": "2023-05",
+    "reviewed": "2026-09-17",
+    "observation": "Structured authorization; retain exact HCP intent and capital-plan digest checks."
+  },
+  {
+    "id": "T05",
+    "title": "FDC3 Context Data 2.2",
+    "publisher": "FINOS",
+    "url": "https://fdc3.finos.org/docs/context/spec",
+    "date": "2.2",
+    "reviewed": "2026-09-17",
+    "observation": "Desktop context interoperability, private type namespaces and identifier conventions. BTX contexts are custom, not new official FDC3 standard types."
+  },
+  {
+    "id": "T06",
+    "title": "FDC3 2.2 standard",
+    "publisher": "FINOS",
+    "url": "https://fdc3.finos.org/docs/fdc3-standard",
+    "date": "2025-04",
+    "reviewed": "2026-09-17",
+    "observation": "Desktop interoperation consists of intents, context, API, directory and agent bridging. Adapters do not gain financial authorization merely by receiving context."
+  },
+  {
+    "id": "T07",
+    "title": "Level 2 LEI data: who owns whom",
+    "publisher": "GLEIF",
+    "url": "https://www.gleif.org/en/lei-data/access-and-use-lei-data/level-2-data-who-owns-whom",
+    "date": "accessed 2026-09-17",
+    "reviewed": "2026-09-17",
+    "observation": "Direct and ultimate accounting-consolidating parents. An LEI relationship is reference data, not authority to debit an entity or proof of every beneficial owner."
+  },
+  {
+    "id": "T08",
+    "title": "IAS 38 Intangible Assets overview",
+    "publisher": "IFRS Foundation",
+    "url": "https://www.ifrs.org/issued-standards/list-of-standards/ias-38-intangible-assets/",
+    "date": "accessed 2026-09-17",
+    "reviewed": "2026-09-17",
+    "observation": "Accounting mapping requires actual rights and recognition rules; operational usefulness is not automatic financial NAV."
+  },
+  {
+    "id": "T09",
+    "title": "WCAG 2.2",
+    "publisher": "W3C",
+    "url": "https://www.w3.org/TR/WCAG22/",
+    "date": "2.2",
+    "reviewed": "2026-09-17",
+    "observation": "Keyboard, focus, error and accessible-status behavior. Implementation must pass browser accessibility checks."
+  }
+]

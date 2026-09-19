@@ -54,7 +54,7 @@
       <string>org.btxchain.BTXPayment</string>
       <key>CFBundleURLSchemes</key>
       <array>
-        <string>bitcoin</string>
+        <string>btx</string>
       </array>
     </dict>
   </array>

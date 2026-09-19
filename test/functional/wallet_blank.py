@@ -11,6 +11,7 @@ from test_framework.address import (
 )
 from test_framework.util import (
     assert_equal,
+    assert_raises_rpc_error,
 )
 from test_framework.wallet_util import generate_keypair
 
@@ -28,19 +29,24 @@ class WalletBlankTest(BitcoinTestFramework):
     def test_importaddress(self):
         if self.options.descriptors:
             return
-        self.log.info("Test that importaddress unsets the blank flag")
+        self.log.info("Test that importaddress refuses secp256k1 ingest")
         self.nodes[0].createwallet(wallet_name="iaddr", disable_private_keys=True, blank=True)
         wallet = self.nodes[0].get_wallet_rpc("iaddr")
         info = wallet.getwalletinfo()
         assert_equal(info["descriptors"], False)
         assert_equal(info["blank"], True)
-        wallet.importaddress(ADDRESS_BCRT1_UNSPENDABLE)
-        assert_equal(wallet.getwalletinfo()["blank"], False)
+        assert_raises_rpc_error(
+            -8,
+            "importaddress is disabled for secp256k1",
+            wallet.importaddress,
+            ADDRESS_BCRT1_UNSPENDABLE,
+        )
+        assert_equal(wallet.getwalletinfo()["blank"], True)
 
     def test_importpubkey(self):
         if self.options.descriptors:
             return
-        self.log.info("Test that importpubkey unsets the blank flag")
+        self.log.info("Test that importpubkey is disabled (legacy secp256k1)")
         for i, comp in enumerate([True, False]):
             self.nodes[0].createwallet(wallet_name=f"ipub{i}", disable_private_keys=True, blank=True)
             wallet = self.nodes[0].get_wallet_rpc(f"ipub{i}")
@@ -49,13 +55,18 @@ class WalletBlankTest(BitcoinTestFramework):
             assert_equal(info["blank"], True)
 
             _, pubkey = generate_keypair(compressed=comp)
-            wallet.importpubkey(pubkey.hex())
-            assert_equal(wallet.getwalletinfo()["blank"], False)
+            assert_raises_rpc_error(
+                -8,
+                "importpubkey is disabled",
+                wallet.importpubkey,
+                pubkey.hex(),
+            )
+            assert_equal(wallet.getwalletinfo()["blank"], True)
 
     def test_importprivkey(self):
         if self.options.descriptors:
             return
-        self.log.info("Test that importprivkey unsets the blank flag")
+        self.log.info("Test that importprivkey is disabled (legacy ECDSA)")
         for i, comp in enumerate([True, False]):
             self.nodes[0].createwallet(wallet_name=f"ipriv{i}", blank=True)
             wallet = self.nodes[0].get_wallet_rpc(f"ipriv{i}")
@@ -64,8 +75,13 @@ class WalletBlankTest(BitcoinTestFramework):
             assert_equal(info["blank"], True)
 
             wif, _ = generate_keypair(compressed=comp, wif=True)
-            wallet.importprivkey(wif)
-            assert_equal(wallet.getwalletinfo()["blank"], False)
+            assert_raises_rpc_error(
+                -8,
+                "importprivkey is disabled",
+                wallet.importprivkey,
+                wif,
+            )
+            assert_equal(wallet.getwalletinfo()["blank"], True)
 
     def test_importmulti(self):
         if self.options.descriptors:
@@ -100,20 +116,14 @@ class WalletBlankTest(BitcoinTestFramework):
     def test_importwallet(self):
         if self.options.descriptors:
             return
-        self.log.info("Test that importwallet unsets the blank flag")
-        def_wallet = self.nodes[0].get_wallet_rpc(self.default_wallet_name)
-
+        self.log.info("Test that importwallet is disabled (legacy WIF)")
         self.nodes[0].createwallet(wallet_name="iwallet", blank=True)
         wallet = self.nodes[0].get_wallet_rpc("iwallet")
         info = wallet.getwalletinfo()
         assert_equal(info["descriptors"], False)
         assert_equal(info["blank"], True)
-
-        wallet_dump_path = self.nodes[0].datadir_path / "wallet.dump"
-        def_wallet.dumpwallet(wallet_dump_path)
-
-        wallet.importwallet(wallet_dump_path)
-        assert_equal(wallet.getwalletinfo()["blank"], False)
+        assert_raises_rpc_error(-8, "importwallet is disabled", wallet.importwallet, "wallet.dump")
+        assert_equal(wallet.getwalletinfo()["blank"], True)
 
     def test_encrypt_legacy(self):
         if self.options.descriptors:

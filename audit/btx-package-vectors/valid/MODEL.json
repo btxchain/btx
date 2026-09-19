@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "kind": "MODEL",
+  "uri": "btx://model/abababababababababababababababababababababababab",
+  "copy_text": "demo model",
+  "preview_first": true,
+  "automatic_spend_atoms": 0
+}

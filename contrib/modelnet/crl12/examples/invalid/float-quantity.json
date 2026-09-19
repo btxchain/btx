@@ -1,0 +1,31 @@
+{
+  "schema_revision": "1.2",
+  "provider_id": "provider-a",
+  "created_at": "1789603200",
+  "observation_id": "observation-id-demo",
+  "scope": {
+    "tenant_id": "tenant-a",
+    "legal_entity_id": "entity-a",
+    "portfolio_id": "portfolio-a"
+  },
+  "asset_ref": {
+    "object_type": "ProviderProfile",
+    "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "economic_position_key": "economic-position-key-demo",
+  "custodian_position_ref": "custodian-position-ref-demo",
+  "quantity": {
+    "coefficient": 1.2,
+    "scale": 8
+  },
+  "view": "DIRECT",
+  "status": "OPEN",
+  "authority_ref": {
+    "object_type": "ProviderProfile",
+    "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "effective_at": "1789603200",
+  "recorded_at": "1789603200",
+  "sequence": "1",
+  "supersedes": null
+}

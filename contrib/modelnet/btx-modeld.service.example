@@ -12,6 +12,8 @@ After=network.target
 [Service]
 Type=simple
 User=btx
+# Model payloads/sockets are private to the operator: no group/other access.
+UMask=0077
 ExecStart=/usr/local/bin/btx-modeld \
   -modeldir=/var/lib/btxd/modelnet \
   -modelstorage=0 \

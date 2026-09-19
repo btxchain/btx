@@ -1,0 +1,2806 @@
+openapi: 3.1.0
+info:
+  title: BTX Hosted Control Plane
+  version: 1.0.0-proposed
+  description: HCP/1 proposed contract. Not a deployed service. All financial examples
+    synthetic. OAuth endpoints must come from independently accepted provider metadata.
+servers:
+- url: https://exchange.example/btx/hcp/v1
+  description: Documentation-only placeholder
+paths:
+  /profile:
+    get:
+      operationId: getProviderProfile
+      summary: getProviderProfile
+      x-btx-profile: DISCOVERY
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security: []
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderProfileEnvelope'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /capabilities/search:
+    post:
+      operationId: searchCapabilities
+      summary: searchCapabilities
+      x-btx-profile: DISCOVERY
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - catalog:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchRequest'
+  /packages/{package_core_id}:
+    get:
+      operationId: getPackage
+      summary: getPackage
+      x-btx-profile: DISCOVERY
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - packages:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Exact bounded BTXPKG1 bytes; hash and native signature
+                  verified independently.
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: package_core_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+  /economy/{target_id}:
+    get:
+      operationId: getEconomy
+      summary: getEconomy
+      x-btx-profile: DISCOVERY
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - catalog:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EconomyView'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: target_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+  /handoffs:
+    post:
+      operationId: createHandoff
+      summary: createHandoff
+      x-btx-profile: HANDOFF
+      x-btx-effect: PROPOSE_LOCAL
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - handoffs:create
+      responses:
+        '201':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityHandoffEnvelope'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateHandoffRequest'
+  /handoffs/{handoff_id}:
+    get:
+      operationId: getHandoff
+      summary: getHandoff
+      x-btx-profile: HANDOFF
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - handoffs:create
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityHandoffEnvelope'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: handoff_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+  /devices/enroll:
+    post:
+      operationId: enrollDevice
+      summary: enrollDevice
+      x-btx-profile: HANDOFF
+      x-btx-effect: PAIR
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - devices:enroll
+      responses:
+        '201':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceView'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollRequest'
+  /devices/{device_id}/confirm:
+    post:
+      operationId: confirmDevice
+      summary: confirmDevice
+      x-btx-profile: HANDOFF
+      x-btx-effect: PAIR
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - devices:enroll
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceView'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: device_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmDeviceRequest'
+  /devices/{device_id}/revoke:
+    post:
+      operationId: revokeDevice
+      summary: revokeDevice
+      x-btx-profile: HANDOFF
+      x-btx-effect: REVOKE
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - devices:enroll
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceView'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: device_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmptyRequest'
+  /devices/{device_id}/handoffs:
+    get:
+      operationId: getDeviceHandoffs
+      summary: getDeviceHandoffs
+      x-btx-profile: HANDOFF
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - events:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdList'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: device_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: cursor
+        in: query
+        schema:
+          type: string
+          maxLength: 2048
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+  /devices/{device_id}/reports:
+    post:
+      operationId: reportReadiness
+      summary: reportReadiness
+      x-btx-profile: FLEET
+      x-btx-effect: REPORT
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - devices:report
+      responses:
+        '202':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: device_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocalReadinessReportEnvelope'
+  /treasury/balances:
+    get:
+      operationId: getBalances
+      summary: getBalances
+      x-btx-profile: CUSTODY
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - account:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BalanceView'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /finance/quotes:
+    post:
+      operationId: createFundingQuote
+      summary: createFundingQuote
+      x-btx-profile: FUNDING
+      x-btx-effect: PREPARE
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - quotes:create
+      responses:
+        '201':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FundingQuoteEnvelope'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteRequest'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /finance/intents:
+    post:
+      operationId: createFinanceIntent
+      summary: createFinanceIntent
+      x-btx-profile: FUNDING
+      x-btx-effect: PREPARE
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - intents:create
+      responses:
+        '201':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinanceIntentEnvelope'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateIntentRequest'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /finance/intents/{intent_id}:
+    get:
+      operationId: getFinanceIntent
+      summary: getFinanceIntent
+      x-btx-profile: FUNDING
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - account:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: intent_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /finance/intents/{intent_id}/authorize:
+    post:
+      operationId: authorizeFinanceIntent
+      summary: authorizeFinanceIntent
+      x-btx-profile: FUNDING
+      x-btx-effect: AUTHORIZE
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - intents:authorize
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: intent_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizeRequest'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /finance/intents/{intent_id}/submit:
+    post:
+      operationId: submitFinanceIntent
+      summary: submitFinanceIntent
+      x-btx-profile: FUNDING
+      x-btx-effect: SUBMIT
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - intents:submit
+      responses:
+        '202':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: intent_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedBodyRequest'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /finance/intents/{intent_id}/cancel:
+    post:
+      operationId: cancelFinanceIntent
+      summary: cancelFinanceIntent
+      x-btx-profile: FUNDING
+      x-btx-effect: CANCEL
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - intents:cancel
+      responses:
+        '202':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: intent_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedBodyRequest'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /finance/intents/{intent_id}/receipts:
+    get:
+      operationId: getFinanceReceipts
+      summary: getFinanceReceipts
+      x-btx-profile: FUNDING
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - account:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdList'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: intent_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: cursor
+        in: query
+        schema:
+          type: string
+          maxLength: 2048
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /finance/receipts/{receipt_id}:
+    get:
+      operationId: getFinanceReceipt
+      summary: getFinanceReceipt
+      x-btx-profile: FUNDING
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - account:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinancialReceiptEnvelope'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: receipt_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /policies:
+    post:
+      operationId: createAccountPolicy
+      summary: createAccountPolicy
+      x-btx-profile: FUNDING
+      x-btx-effect: POLICY
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - policies:admin
+      responses:
+        '201':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostedAccountPolicy'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HostedAccountPolicy'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /policies/{policy_id}:
+    get:
+      operationId: getAccountPolicy
+      summary: getAccountPolicy
+      x-btx-profile: FUNDING
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - account:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostedAccountPolicy'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: policy_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /policies/{policy_id}/revoke:
+    post:
+      operationId: revokeAccountPolicy
+      summary: revokeAccountPolicy
+      x-btx-profile: FUNDING
+      x-btx-effect: REVOKE
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - policies:admin
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostedAccountPolicy'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: policy_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmptyRequest'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /subscriptions:
+    post:
+      operationId: createSubscription
+      summary: createSubscription
+      x-btx-profile: FLEET
+      x-btx-effect: POLICY
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - subscriptions:write
+      responses:
+        '201':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionRequest'
+  /subscriptions/{subscription_id}/revoke:
+    post:
+      operationId: revokeSubscription
+      summary: revokeSubscription
+      x-btx-profile: FLEET
+      x-btx-effect: REVOKE
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - subscriptions:write
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: subscription_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmptyRequest'
+  /events:
+    get:
+      operationId: getEvents
+      summary: getEvents
+      x-btx-profile: HANDOFF
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - events:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventPage'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: cursor
+        in: query
+        schema:
+          type: string
+          maxLength: 2048
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+  /events/stream:
+    get:
+      operationId: streamEvents
+      summary: streamEvents
+      x-btx-profile: HANDOFF
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - events:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /exports:
+    post:
+      operationId: createExport
+      summary: createExport
+      x-btx-profile: HANDOFF
+      x-btx-effect: EXPORT
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - exports:create
+      responses:
+        '202':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportManifest'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportRequest'
+  /exports/{export_id}:
+    get:
+      operationId: getExport
+      summary: getExport
+      x-btx-profile: HANDOFF
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - exports:create
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportManifest'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: export_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+  /research/drafts:
+    post:
+      operationId: createResearchDraft
+      summary: createResearchDraft
+      x-btx-profile: FUNDING
+      x-btx-effect: PREPARE
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - research:publish
+      responses:
+        '201':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResearchRequest'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /research/drafts/{draft_id}/validate:
+    post:
+      operationId: validateResearchDraft
+      summary: validateResearchDraft
+      x-btx-profile: FUNDING
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - research:publish
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: draft_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmptyRequest'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /research/drafts/{draft_id}/publish:
+    post:
+      operationId: publishResearchDraft
+      summary: publishResearchDraft
+      x-btx-profile: FUNDING
+      x-btx-effect: PUBLISH
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - research:publish
+      responses:
+        '202':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: draft_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedBodyRequest'
+      x-sender-constraint: Financial token MUST be DPoP- or mTLS-bound; validate at
+        gateway.
+  /research/submissions/{submission_id}:
+    get:
+      operationId: getResearchSubmission
+      summary: getResearchSubmission
+      x-btx-profile: DISCOVERY
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - catalog:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: submission_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+  /operations/{operation_id}:
+    get:
+      operationId: getOperation
+      summary: getOperation
+      x-btx-profile: HANDOFF
+      x-btx-effect: READ
+      description: Account/tenant inferred from verified caller, never a caller-selected
+        account. Financial authorization binds exact digest and policy revision. HTTP
+        202 is not native settlement.
+      security:
+      - oauth:
+        - account:read
+      responses:
+        '200':
+          description: Attributable result; asynchronous states remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        default:
+          description: Structured denial, conflict, rate limit or dependency failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: operation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+components:
+  schemas:
+    Digest48:
+      type: string
+      pattern: ^[0-9a-f]{96}$
+    Digest32:
+      type: string
+      pattern: ^[0-9a-f]{64}$
+    UIntString:
+      type: string
+      pattern: ^(0|[1-9][0-9]{0,19})$
+    Id:
+      type: string
+      pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+    HttpsUrl:
+      type: string
+      pattern: ^https://[^\s]+$
+      maxLength: 2048
+    Network:
+      type: object
+      additionalProperties: false
+      properties:
+        environment:
+          type: string
+          enum:
+          - MAINNET
+          - TESTNET
+          - REGTEST
+        genesis_hash:
+          $ref: '#/components/schemas/Digest32'
+      required:
+      - environment
+      - genesis_hash
+    Effects:
+      type: array
+      items:
+        type: string
+        enum:
+        - INSPECT
+        - FETCH_METADATA
+        - ACQUIRE_MODEL
+        - SEED_MODEL
+        - INSTALL_CLIENT
+        - PLAN_LOCAL_RUN
+        - EXECUTE_LOCAL_RUN
+        - REPORT_READINESS
+      maxItems: 16
+      minItems: 0
+    Readiness:
+      type: string
+      enum:
+      - VERIFIED_FILES
+      - RUNTIME_LOADED
+      - RUNTIME_READY
+      - FIRST_USEFUL_RESULT
+    FinancialState:
+      type: string
+      enum:
+      - PREPARED
+      - AUTHORIZED
+      - RESERVED
+      - SIGNING
+      - SIGNED
+      - BROADCAST_UNKNOWN
+      - BROADCAST
+      - CONFIRMED
+      - NATIVE_OUTCOME_OBSERVED
+      - SETTLED
+      - EXPIRED
+      - CANCELED
+      - REJECTED
+      - RECONCILIATION_REQUIRED
+      - CONFIRMATION_REVERTED
+      - REFUND_ELIGIBLE
+      - REFUND_SUBMITTED
+      - REFUNDED
+    Action:
+      type: string
+      enum:
+      - FUND_RELEASE
+      - FUND_BOUNTY
+      - CLAIM
+      - REFUND
+      - CONVERT
+      - WITHDRAW
+    Amounts:
+      type: object
+      additionalProperties: false
+      properties:
+        principal_atoms:
+          $ref: '#/components/schemas/UIntString'
+        network_fee_cap_atoms:
+          $ref: '#/components/schemas/UIntString'
+        service_fee_atoms:
+          $ref: '#/components/schemas/UIntString'
+        tax_atoms:
+          $ref: '#/components/schemas/UIntString'
+        max_total_debit_atoms:
+          $ref: '#/components/schemas/UIntString'
+      required:
+      - principal_atoms
+      - network_fee_cap_atoms
+      - service_fee_atoms
+      - tax_atoms
+      - max_total_debit_atoms
+    SourceHint:
+      type: object
+      additionalProperties: false
+      properties:
+        provider_key_id:
+          $ref: '#/components/schemas/Id'
+        endpoint:
+          type: string
+          minLength: 1
+          maxLength: 512
+        kind:
+          type: string
+          enum:
+          - NATIVE_PROVIDER
+          - NATIVE_ROUTER
+      required:
+      - provider_key_id
+      - endpoint
+      - kind
+    PackageRef:
+      type: object
+      additionalProperties: false
+      properties:
+        package_core_id:
+          $ref: '#/components/schemas/Digest48'
+        file_sha384:
+          $ref: '#/components/schemas/Digest48'
+        recipe_id:
+          $ref: '#/components/schemas/Digest48'
+        download_url:
+          $ref: '#/components/schemas/HttpsUrl'
+      required:
+      - package_core_id
+      - file_sha384
+      - recipe_id
+      - download_url
+    ProviderProfile:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          const: 1
+        provider_id:
+          $ref: '#/components/schemas/Id'
+        profile_sequence:
+          $ref: '#/components/schemas/UIntString'
+        issued_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        expires_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        origin:
+          $ref: '#/components/schemas/HttpsUrl'
+        api_base:
+          $ref: '#/components/schemas/HttpsUrl'
+        network:
+          $ref: '#/components/schemas/Network'
+        supported_profiles:
+          type: array
+          items:
+            type: string
+            enum:
+            - DISCOVERY
+            - HANDOFF
+            - CUSTODY
+            - FUNDING
+            - FLEET
+          maxItems: 5
+          minItems: 1
+        package_core_versions:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 255
+          maxItems: 16
+          minItems: 1
+        keyset_url:
+          $ref: '#/components/schemas/HttpsUrl'
+        oauth_metadata_url:
+          $ref: '#/components/schemas/HttpsUrl'
+        custody_modes:
+          type: array
+          items:
+            type: string
+            enum:
+            - DISCOVERY_ONLY
+            - CUSTODIAL
+            - SELF_CUSTODY
+          maxItems: 3
+          minItems: 1
+        financial_observation_modes:
+          type: array
+          items:
+            type: string
+            enum:
+            - HOSTED_ATTESTED
+            - INDEPENDENT_VERIFIER
+          maxItems: 2
+          minItems: 0
+        max_body_bytes:
+          $ref: '#/components/schemas/UIntString'
+        max_page_size:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        privacy_url:
+          $ref: '#/components/schemas/HttpsUrl'
+        export_supported:
+          type: boolean
+      required:
+      - version
+      - provider_id
+      - profile_sequence
+      - issued_at_ms
+      - expires_at_ms
+      - origin
+      - api_base
+      - network
+      - supported_profiles
+      - package_core_versions
+      - keyset_url
+      - oauth_metadata_url
+      - custody_modes
+      - financial_observation_modes
+      - max_body_bytes
+      - max_page_size
+      - privacy_url
+      - export_supported
+    CapabilityOffer:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          const: 1
+        provider_id:
+          $ref: '#/components/schemas/Id'
+        network:
+          $ref: '#/components/schemas/Network'
+        offer_id:
+          $ref: '#/components/schemas/Id'
+        issued_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        expires_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        package:
+          $ref: '#/components/schemas/PackageRef'
+        capability_labels:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 160
+          maxItems: 64
+          minItems: 0
+        evidence_refs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Digest48'
+          maxItems: 32
+          minItems: 0
+        availability_scope:
+          type: string
+          enum:
+          - LOCAL_OBSERVATION
+          - DECLARED_PROVIDER_VIEW
+        observed_provider_count:
+          anyOf:
+          - type: integer
+            minimum: 0
+          - type: 'null'
+        economic_status:
+          type: string
+          enum:
+          - PUBLIC
+          - RELEASE_PENDING
+          - BOUNTY
+          - UNKNOWN
+        economy_ref:
+          anyOf:
+          - $ref: '#/components/schemas/Digest48'
+          - type: 'null'
+        sponsored:
+          type: boolean
+      required:
+      - version
+      - provider_id
+      - network
+      - offer_id
+      - issued_at_ms
+      - expires_at_ms
+      - package
+      - capability_labels
+      - evidence_refs
+      - availability_scope
+      - observed_provider_count
+      - economic_status
+      - economy_ref
+      - sponsored
+    FundingQuote:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          const: 1
+        provider_id:
+          $ref: '#/components/schemas/Id'
+        account_ref:
+          $ref: '#/components/schemas/Id'
+        network:
+          $ref: '#/components/schemas/Network'
+        quote_id:
+          $ref: '#/components/schemas/Id'
+        quote_kind:
+          type: string
+          enum:
+          - FIRM
+          - INDICATIVE
+        action:
+          $ref: '#/components/schemas/NativeEconomicAction'
+        target_object_id:
+          $ref: '#/components/schemas/Digest48'
+        terms_id:
+          $ref: '#/components/schemas/Digest48'
+        native_template_id:
+          $ref: '#/components/schemas/Digest48'
+        round_id:
+          anyOf:
+          - $ref: '#/components/schemas/Digest48'
+          - type: 'null'
+        lot_id:
+          anyOf:
+          - $ref: '#/components/schemas/Digest48'
+          - type: 'null'
+        amounts:
+          $ref: '#/components/schemas/Amounts'
+        refund_controller:
+          type: string
+          enum:
+          - CUSTOMER_KEY
+          - CEX_CUSTODIAL_KEY
+        required_confirmations:
+          type: integer
+          minimum: 0
+          maximum: 100000
+        issued_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        expires_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        conversion_quote_ref:
+          anyOf:
+          - $ref: '#/components/schemas/Id'
+          - type: 'null'
+        conversion_quote:
+          anyOf:
+          - $ref: '#/components/schemas/ConversionQuote'
+          - type: 'null'
+      required:
+      - version
+      - provider_id
+      - account_ref
+      - network
+      - quote_id
+      - quote_kind
+      - action
+      - target_object_id
+      - terms_id
+      - native_template_id
+      - round_id
+      - lot_id
+      - amounts
+      - refund_controller
+      - required_confirmations
+      - issued_at_ms
+      - expires_at_ms
+      - conversion_quote_ref
+      - conversion_quote
+    FinanceIntent:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          const: 1
+        provider_id:
+          $ref: '#/components/schemas/Id'
+        account_ref:
+          $ref: '#/components/schemas/Id'
+        actor_ref:
+          $ref: '#/components/schemas/Id'
+        network:
+          $ref: '#/components/schemas/Network'
+        intent_id:
+          $ref: '#/components/schemas/Id'
+        client_operation_id:
+          $ref: '#/components/schemas/Id'
+        quote_id:
+          $ref: '#/components/schemas/Id'
+        quote_body_id:
+          $ref: '#/components/schemas/Digest48'
+        action:
+          $ref: '#/components/schemas/NativeEconomicAction'
+        terms_id:
+          $ref: '#/components/schemas/Digest48'
+        native_template_id:
+          $ref: '#/components/schemas/Digest48'
+        amounts:
+          $ref: '#/components/schemas/Amounts'
+        policy_id:
+          $ref: '#/components/schemas/Id'
+        policy_revision:
+          $ref: '#/components/schemas/UIntString'
+        refund_controller:
+          type: string
+          enum:
+          - CUSTOMER_KEY
+          - CEX_CUSTODIAL_KEY
+        expires_at_ms:
+          $ref: '#/components/schemas/UIntString'
+      required:
+      - version
+      - provider_id
+      - account_ref
+      - actor_ref
+      - network
+      - intent_id
+      - client_operation_id
+      - quote_id
+      - quote_body_id
+      - action
+      - terms_id
+      - native_template_id
+      - amounts
+      - policy_id
+      - policy_revision
+      - refund_controller
+      - expires_at_ms
+    NativeObservation:
+      type: object
+      additionalProperties: false
+      properties:
+        transaction_id:
+          anyOf:
+          - $ref: '#/components/schemas/Digest32'
+          - type: 'null'
+        output_index:
+          anyOf:
+          - type: integer
+            minimum: 0
+            maximum: 4294967295
+          - type: 'null'
+        block_hash:
+          anyOf:
+          - $ref: '#/components/schemas/Digest32'
+          - type: 'null'
+        block_height:
+          anyOf:
+          - $ref: '#/components/schemas/UIntString'
+          - type: 'null'
+        confirmations:
+          anyOf:
+          - $ref: '#/components/schemas/UIntString'
+          - type: 'null'
+        observed_at_ms:
+          $ref: '#/components/schemas/UIntString'
+      required:
+      - transaction_id
+      - output_index
+      - block_hash
+      - block_height
+      - confirmations
+      - observed_at_ms
+    FinancialReceipt:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          const: 1
+        provider_id:
+          $ref: '#/components/schemas/Id'
+        account_ref:
+          $ref: '#/components/schemas/Id'
+        network:
+          $ref: '#/components/schemas/Network'
+        receipt_id:
+          $ref: '#/components/schemas/Id'
+        receipt_sequence:
+          $ref: '#/components/schemas/UIntString'
+        supersedes:
+          anyOf:
+          - $ref: '#/components/schemas/Digest48'
+          - type: 'null'
+        intent_id:
+          $ref: '#/components/schemas/Id'
+        intent_body_id:
+          $ref: '#/components/schemas/Digest48'
+        action:
+          $ref: '#/components/schemas/NativeEconomicAction'
+        terms_id:
+          $ref: '#/components/schemas/Digest48'
+        quote_id:
+          $ref: '#/components/schemas/Id'
+        amounts:
+          $ref: '#/components/schemas/Amounts'
+        actual_network_fee_atoms:
+          anyOf:
+          - $ref: '#/components/schemas/UIntString'
+          - type: 'null'
+        state:
+          $ref: '#/components/schemas/FinancialState'
+        evidence_basis:
+          type: string
+          enum:
+          - CEX_LEDGER
+          - NATIVE_NODE_OBSERVED
+          - EXTERNAL_VERIFIER_OBSERVED
+        custody_mode:
+          type: string
+          enum:
+          - CUSTODIAL
+          - SELF_CUSTODY
+        refund_controller:
+          type: string
+          enum:
+          - CUSTOMER_KEY
+          - CEX_CUSTODIAL_KEY
+        native_observation:
+          anyOf:
+          - $ref: '#/components/schemas/NativeObservation'
+          - type: 'null'
+        observed_at_ms:
+          $ref: '#/components/schemas/UIntString'
+      required:
+      - version
+      - provider_id
+      - account_ref
+      - network
+      - receipt_id
+      - receipt_sequence
+      - supersedes
+      - intent_id
+      - intent_body_id
+      - action
+      - terms_id
+      - quote_id
+      - amounts
+      - actual_network_fee_atoms
+      - state
+      - evidence_basis
+      - custody_mode
+      - refund_controller
+      - native_observation
+      - observed_at_ms
+      allOf:
+      - if:
+          properties:
+            state:
+              enum:
+              - CONFIRMED
+              - NATIVE_OUTCOME_OBSERVED
+              - SETTLED
+              - REFUNDED
+        then:
+          properties:
+            evidence_basis:
+              enum:
+              - NATIVE_NODE_OBSERVED
+              - EXTERNAL_VERIFIER_OBSERVED
+            native_observation:
+              type: object
+              properties:
+                transaction_id:
+                  $ref: '#/components/schemas/Digest32'
+                block_hash:
+                  $ref: '#/components/schemas/Digest32'
+                block_height:
+                  $ref: '#/components/schemas/UIntString'
+                confirmations:
+                  $ref: '#/components/schemas/UIntString'
+              required:
+              - transaction_id
+              - block_hash
+              - block_height
+              - confirmations
+    CapabilityHandoff:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          const: 1
+        provider_id:
+          $ref: '#/components/schemas/Id'
+        account_ref:
+          $ref: '#/components/schemas/Id'
+        device_id:
+          $ref: '#/components/schemas/Id'
+        network:
+          $ref: '#/components/schemas/Network'
+        handoff_id:
+          $ref: '#/components/schemas/Id'
+        client_operation_id:
+          $ref: '#/components/schemas/Id'
+        request_nonce:
+          type: string
+          minLength: 1
+          maxLength: 128
+        issued_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        expires_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        package:
+          $ref: '#/components/schemas/PackageRef'
+        readiness_target:
+          $ref: '#/components/schemas/Readiness'
+        requested_effects:
+          $ref: '#/components/schemas/Effects'
+        source_hints:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceHint'
+          maxItems: 16
+          minItems: 0
+        receipt_ref:
+          anyOf:
+          - $ref: '#/components/schemas/Digest48'
+          - type: 'null'
+        reporting_requested:
+          type: boolean
+      required:
+      - version
+      - provider_id
+      - account_ref
+      - device_id
+      - network
+      - handoff_id
+      - client_operation_id
+      - request_nonce
+      - issued_at_ms
+      - expires_at_ms
+      - package
+      - readiness_target
+      - requested_effects
+      - source_hints
+      - receipt_ref
+      - reporting_requested
+    LocalReadinessReport:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          const: 1
+        provider_id:
+          $ref: '#/components/schemas/Id'
+        account_ref:
+          $ref: '#/components/schemas/Id'
+        device_id:
+          $ref: '#/components/schemas/Id'
+        handoff_id:
+          $ref: '#/components/schemas/Id'
+        package_core_id:
+          $ref: '#/components/schemas/Digest48'
+        recipe_id:
+          $ref: '#/components/schemas/Digest48'
+        generation_ref:
+          $ref: '#/components/schemas/Id'
+        state:
+          type: string
+          enum:
+          - ACCEPTED
+          - PREPARING
+          - READY
+          - FAILED
+          - RETIRED
+        readiness_target:
+          $ref: '#/components/schemas/Readiness'
+        error_code:
+          anyOf:
+          - $ref: '#/components/schemas/Id'
+          - type: 'null'
+        observed_at_ms:
+          $ref: '#/components/schemas/UIntString'
+      required:
+      - version
+      - provider_id
+      - account_ref
+      - device_id
+      - handoff_id
+      - package_core_id
+      - recipe_id
+      - generation_ref
+      - state
+      - readiness_target
+      - error_code
+      - observed_at_ms
+    HostedAccountPolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        policy_id:
+          $ref: '#/components/schemas/Id'
+        revision:
+          $ref: '#/components/schemas/UIntString'
+        allowed_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Action'
+          maxItems: 6
+          minItems: 1
+        allowed_terms_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/Digest48'
+          maxItems: 256
+          minItems: 0
+        allowed_publishers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Id'
+          maxItems: 32
+          minItems: 0
+        per_action_principal_atoms:
+          $ref: '#/components/schemas/UIntString'
+        lifetime_principal_atoms:
+          $ref: '#/components/schemas/UIntString'
+        lifetime_fee_atoms:
+          $ref: '#/components/schemas/UIntString'
+        outstanding_exposure_atoms:
+          $ref: '#/components/schemas/UIntString'
+        max_actions:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+        max_concurrent:
+          type: integer
+          minimum: 1
+          maximum: 128
+        expires_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        revoked:
+          type: boolean
+        refund_replenishes_lifetime:
+          const: false
+      required:
+      - policy_id
+      - revision
+      - allowed_actions
+      - allowed_terms_ids
+      - allowed_publishers
+      - per_action_principal_atoms
+      - lifetime_principal_atoms
+      - lifetime_fee_atoms
+      - outstanding_exposure_atoms
+      - max_actions
+      - max_concurrent
+      - expires_at_ms
+      - revoked
+      - refund_replenishes_lifetime
+      anyOf:
+      - properties:
+          allowed_terms_ids:
+            minItems: 1
+      - properties:
+          allowed_publishers:
+            minItems: 1
+    Error:
+      type: object
+      additionalProperties: false
+      properties:
+        code:
+          $ref: '#/components/schemas/Id'
+        stage:
+          $ref: '#/components/schemas/Id'
+        retryable:
+          type: boolean
+        correlation_id:
+          $ref: '#/components/schemas/Id'
+        next_action:
+          $ref: '#/components/schemas/Id'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      required:
+      - code
+      - stage
+      - retryable
+      - correlation_id
+      - next_action
+      - message
+    OperationStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        operation_id:
+          $ref: '#/components/schemas/Id'
+        state:
+          $ref: '#/components/schemas/Id'
+        body_id:
+          $ref: '#/components/schemas/Digest48'
+        updated_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        result_ref:
+          anyOf:
+          - $ref: '#/components/schemas/Id'
+          - type: 'null'
+        error:
+          anyOf:
+          - $ref: '#/components/schemas/Error'
+          - type: 'null'
+      required:
+      - operation_id
+      - state
+      - body_id
+      - updated_at_ms
+      - result_ref
+      - error
+    Event:
+      type: object
+      additionalProperties: false
+      properties:
+        event_id:
+          $ref: '#/components/schemas/Id'
+        stream_generation:
+          $ref: '#/components/schemas/Id'
+        sequence:
+          $ref: '#/components/schemas/UIntString'
+        account_ref:
+          $ref: '#/components/schemas/Id'
+        object_ref:
+          $ref: '#/components/schemas/Id'
+        event_type:
+          $ref: '#/components/schemas/Id'
+        observed_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        body_ref:
+          anyOf:
+          - $ref: '#/components/schemas/Digest48'
+          - type: 'null'
+      required:
+      - event_id
+      - stream_generation
+      - sequence
+      - account_ref
+      - object_ref
+      - event_type
+      - observed_at_ms
+      - body_ref
+    BalanceView:
+      type: object
+      additionalProperties: false
+      properties:
+        asset:
+          const: BTX
+        available_atoms:
+          $ref: '#/components/schemas/UIntString'
+        held_atoms:
+          $ref: '#/components/schemas/UIntString'
+        committed_atoms:
+          $ref: '#/components/schemas/UIntString'
+        observed_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        evidence_basis:
+          const: CEX_LEDGER
+      required:
+      - asset
+      - available_atoms
+      - held_atoms
+      - committed_atoms
+      - observed_at_ms
+      - evidence_basis
+    ExportManifest:
+      type: object
+      additionalProperties: false
+      properties:
+        export_id:
+          $ref: '#/components/schemas/Id'
+        state:
+          type: string
+          enum:
+          - PREPARING
+          - READY
+          - FAILED
+        files:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              path:
+                type: string
+                minLength: 1
+                maxLength: 240
+              sha384:
+                $ref: '#/components/schemas/Digest48'
+              bytes:
+                $ref: '#/components/schemas/UIntString'
+            required:
+            - path
+            - sha384
+            - bytes
+          maxItems: 4096
+          minItems: 0
+        custody_obligations_included:
+          type: boolean
+      required:
+      - export_id
+      - state
+      - files
+      - custody_obligations_included
+    ProviderProfileEnvelope:
+      type: object
+      additionalProperties: false
+      properties:
+        object_type:
+          const: ProviderProfile
+        body:
+          $ref: '#/components/schemas/ProviderProfile'
+        body_id:
+          $ref: '#/components/schemas/Digest48'
+        signer_key_id:
+          $ref: '#/components/schemas/Id'
+        signature:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{4840}$
+          - type: 'null'
+      required:
+      - object_type
+      - body
+      - body_id
+      - signer_key_id
+      - signature
+    CapabilityOfferEnvelope:
+      type: object
+      additionalProperties: false
+      properties:
+        object_type:
+          const: CapabilityOffer
+        body:
+          $ref: '#/components/schemas/CapabilityOffer'
+        body_id:
+          $ref: '#/components/schemas/Digest48'
+        signer_key_id:
+          $ref: '#/components/schemas/Id'
+        signature:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{4840}$
+          - type: 'null'
+      required:
+      - object_type
+      - body
+      - body_id
+      - signer_key_id
+      - signature
+    FundingQuoteEnvelope:
+      type: object
+      additionalProperties: false
+      properties:
+        object_type:
+          const: FundingQuote
+        body:
+          $ref: '#/components/schemas/FundingQuote'
+        body_id:
+          $ref: '#/components/schemas/Digest48'
+        signer_key_id:
+          $ref: '#/components/schemas/Id'
+        signature:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{4840}$
+          - type: 'null'
+      required:
+      - object_type
+      - body
+      - body_id
+      - signer_key_id
+      - signature
+    FinanceIntentEnvelope:
+      type: object
+      additionalProperties: false
+      properties:
+        object_type:
+          const: FinanceIntent
+        body:
+          $ref: '#/components/schemas/FinanceIntent'
+        body_id:
+          $ref: '#/components/schemas/Digest48'
+        signer_key_id:
+          $ref: '#/components/schemas/Id'
+        signature:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{4840}$
+          - type: 'null'
+      required:
+      - object_type
+      - body
+      - body_id
+      - signer_key_id
+      - signature
+    FinancialReceiptEnvelope:
+      type: object
+      additionalProperties: false
+      properties:
+        object_type:
+          const: FinancialReceipt
+        body:
+          $ref: '#/components/schemas/FinancialReceipt'
+        body_id:
+          $ref: '#/components/schemas/Digest48'
+        signer_key_id:
+          $ref: '#/components/schemas/Id'
+        signature:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{4840}$
+          - type: 'null'
+      required:
+      - object_type
+      - body
+      - body_id
+      - signer_key_id
+      - signature
+    CapabilityHandoffEnvelope:
+      type: object
+      additionalProperties: false
+      properties:
+        object_type:
+          const: CapabilityHandoff
+        body:
+          $ref: '#/components/schemas/CapabilityHandoff'
+        body_id:
+          $ref: '#/components/schemas/Digest48'
+        signer_key_id:
+          $ref: '#/components/schemas/Id'
+        signature:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{4840}$
+          - type: 'null'
+      required:
+      - object_type
+      - body
+      - body_id
+      - signer_key_id
+      - signature
+    LocalReadinessReportEnvelope:
+      type: object
+      additionalProperties: false
+      properties:
+        object_type:
+          const: LocalReadinessReport
+        body:
+          $ref: '#/components/schemas/LocalReadinessReport'
+        body_id:
+          $ref: '#/components/schemas/Digest48'
+        signer_key_id:
+          $ref: '#/components/schemas/Id'
+        signature:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{4840}$
+          - type: 'null'
+      required:
+      - object_type
+      - body
+      - body_id
+      - signer_key_id
+      - signature
+    SearchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        cursor:
+          anyOf:
+          - type: string
+            minLength: 1
+            maxLength: 2048
+          - type: 'null'
+        capability_labels:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 160
+          maxItems: 32
+          minItems: 0
+      required:
+      - query
+      - limit
+    CreateHandoffRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        client_operation_id:
+          $ref: '#/components/schemas/Id'
+        device_id:
+          $ref: '#/components/schemas/Id'
+        package_core_id:
+          $ref: '#/components/schemas/Digest48'
+        recipe_id:
+          $ref: '#/components/schemas/Digest48'
+        request_nonce:
+          type: string
+          minLength: 1
+          maxLength: 128
+        readiness_target:
+          $ref: '#/components/schemas/Readiness'
+      required:
+      - client_operation_id
+      - device_id
+      - package_core_id
+      - recipe_id
+      - request_nonce
+      - readiness_target
+    QuoteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        action:
+          $ref: '#/components/schemas/NativeEconomicAction'
+        target_object_id:
+          $ref: '#/components/schemas/Digest48'
+        terms_id:
+          $ref: '#/components/schemas/Digest48'
+        principal_atoms:
+          $ref: '#/components/schemas/UIntString'
+        max_network_fee_atoms:
+          $ref: '#/components/schemas/UIntString'
+        custody_mode:
+          type: string
+          enum:
+          - CUSTODIAL
+          - SELF_CUSTODY
+      required:
+      - action
+      - target_object_id
+      - terms_id
+      - principal_atoms
+      - max_network_fee_atoms
+      - custody_mode
+    CreateIntentRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        client_operation_id:
+          $ref: '#/components/schemas/Id'
+        quote_id:
+          $ref: '#/components/schemas/Id'
+        expected_quote_id:
+          $ref: '#/components/schemas/Digest48'
+      required:
+      - client_operation_id
+      - quote_id
+      - expected_quote_id
+    AuthorizeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_body_id:
+          $ref: '#/components/schemas/Digest48'
+        policy_id:
+          $ref: '#/components/schemas/Id'
+        policy_revision:
+          $ref: '#/components/schemas/UIntString'
+      required:
+      - expected_body_id
+      - policy_id
+      - policy_revision
+    ExpectedBodyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_body_id:
+          $ref: '#/components/schemas/Digest48'
+      required:
+      - expected_body_id
+    EnrollRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        client_operation_id:
+          $ref: '#/components/schemas/Id'
+        device_id:
+          $ref: '#/components/schemas/Id'
+        device_public_key_ref:
+          $ref: '#/components/schemas/Id'
+        challenge:
+          type: string
+          minLength: 1
+          maxLength: 128
+      required:
+      - client_operation_id
+      - device_id
+      - device_public_key_ref
+      - challenge
+    ConfirmDeviceRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        challenge:
+          type: string
+          minLength: 1
+          maxLength: 128
+        expected_device_key_id:
+          $ref: '#/components/schemas/Id'
+      required:
+      - challenge
+      - expected_device_key_id
+    SubscriptionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        client_operation_id:
+          $ref: '#/components/schemas/Id'
+        policy_id:
+          $ref: '#/components/schemas/Id'
+        publisher_id:
+          $ref: '#/components/schemas/Id'
+        object_kinds:
+          type: array
+          items:
+            type: string
+            enum:
+            - RELEASE
+            - BOUNTY
+          maxItems: 2
+          minItems: 1
+        event_action:
+          type: string
+          enum:
+          - NOTIFY
+          - PREPARE_FUNDING
+          - FUND_UNDER_POLICY
+      required:
+      - client_operation_id
+      - policy_id
+      - publisher_id
+      - object_kinds
+      - event_action
+    ExportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        client_operation_id:
+          $ref: '#/components/schemas/Id'
+        include:
+          type: array
+          items:
+            type: string
+            enum:
+            - PACKAGES
+            - LOCKS
+            - INTENTS
+            - RECEIPTS
+            - POLICIES
+            - CUSTODY_OBLIGATIONS
+          maxItems: 6
+          minItems: 1
+      required:
+      - client_operation_id
+      - include
+    ResearchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        client_operation_id:
+          $ref: '#/components/schemas/Id'
+        kind:
+          type: string
+          enum:
+          - BOUNTY_DRAFT
+          - BOUNTY_SUBMISSION
+        canonical_record_ref:
+          $ref: '#/components/schemas/Digest48'
+      required:
+      - client_operation_id
+      - kind
+      - canonical_record_ref
+    EmptyRequest:
+      type: object
+      additionalProperties: false
+      properties: {}
+      required: []
+    SearchResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CapabilityOfferEnvelope'
+          maxItems: 100
+          minItems: 0
+        next_cursor:
+          anyOf:
+          - type: string
+            minLength: 1
+            maxLength: 2048
+          - type: 'null'
+        coverage:
+          const: PROVIDER_OBSERVATION
+      required:
+      - items
+      - next_cursor
+      - coverage
+    EventPage:
+      type: object
+      additionalProperties: false
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+          maxItems: 100
+          minItems: 0
+        next_cursor:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        more:
+          type: boolean
+      required:
+      - events
+      - next_cursor
+      - more
+    IdList:
+      type: object
+      additionalProperties: false
+      properties:
+        ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/Id'
+          maxItems: 100
+          minItems: 0
+        next_cursor:
+          anyOf:
+          - type: string
+            minLength: 1
+            maxLength: 2048
+          - type: 'null'
+      required:
+      - ids
+      - next_cursor
+    EconomyView:
+      type: object
+      additionalProperties: false
+      properties:
+        target_id:
+          $ref: '#/components/schemas/Digest48'
+        terms_id:
+          anyOf:
+          - $ref: '#/components/schemas/Digest48'
+          - type: 'null'
+        status:
+          $ref: '#/components/schemas/Id'
+        funded_atoms:
+          anyOf:
+          - $ref: '#/components/schemas/UIntString'
+          - type: 'null'
+        evidence_basis:
+          type: string
+          enum:
+          - UNKNOWN
+          - NATIVE_NODE_OBSERVED
+          - DECLARED_RECORD
+        observed_at_ms:
+          $ref: '#/components/schemas/UIntString'
+      required:
+      - target_id
+      - terms_id
+      - status
+      - funded_atoms
+      - evidence_basis
+      - observed_at_ms
+    DeviceView:
+      type: object
+      additionalProperties: false
+      properties:
+        device_id:
+          $ref: '#/components/schemas/Id'
+        status:
+          type: string
+          enum:
+          - PENDING
+          - PAIRED
+          - REVOKED
+        account_ref:
+          $ref: '#/components/schemas/Id'
+        device_key_id:
+          $ref: '#/components/schemas/Id'
+      required:
+      - device_id
+      - status
+      - account_ref
+      - device_key_id
+    NativeEconomicAction:
+      type: string
+      enum:
+      - FUND_RELEASE
+      - FUND_BOUNTY
+      - CLAIM
+      - REFUND
+    ConversionQuote:
+      type: object
+      additionalProperties: false
+      properties:
+        venue_quote_ref:
+          $ref: '#/components/schemas/Id'
+        source_asset:
+          type: string
+          pattern: ^[A-Z0-9._-]{2,16}$
+        source_amount_minor:
+          $ref: '#/components/schemas/UIntString'
+        source_exponent:
+          type: integer
+          minimum: 0
+          maximum: 18
+        target_btx_atoms:
+          $ref: '#/components/schemas/UIntString'
+        max_slippage_bps:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        expires_at_ms:
+          $ref: '#/components/schemas/UIntString'
+        reverse_conversion_authorized:
+          const: false
+      required:
+      - venue_quote_ref
+      - source_asset
+      - source_amount_minor
+      - source_exponent
+      - target_btx_atoms
+      - max_slippage_bps
+      - expires_at_ms
+      - reverse_conversion_authorized
+  securitySchemes:
+    oauth:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://exchange.example/oauth/authorize
+          tokenUrl: https://exchange.example/oauth/token
+          scopes:
+            catalog:read: Required minimum scope; exact object/policy authorization
+              still applies.
+            packages:read: Required minimum scope; exact object/policy authorization
+              still applies.
+            handoffs:create: Required minimum scope; exact object/policy authorization
+              still applies.
+            devices:enroll: Required minimum scope; exact object/policy authorization
+              still applies.
+            events:read: Required minimum scope; exact object/policy authorization
+              still applies.
+            devices:report: Required minimum scope; exact object/policy authorization
+              still applies.
+            account:read: Required minimum scope; exact object/policy authorization
+              still applies.
+            quotes:create: Required minimum scope; exact object/policy authorization
+              still applies.
+            intents:create: Required minimum scope; exact object/policy authorization
+              still applies.
+            intents:authorize: Required minimum scope; exact object/policy authorization
+              still applies.
+            intents:submit: Required minimum scope; exact object/policy authorization
+              still applies.
+            intents:cancel: Required minimum scope; exact object/policy authorization
+              still applies.
+            policies:admin: Required minimum scope; exact object/policy authorization
+              still applies.
+            subscriptions:write: Required minimum scope; exact object/policy authorization
+              still applies.
+            exports:create: Required minimum scope; exact object/policy authorization
+              still applies.
+            research:publish: Required minimum scope; exact object/policy authorization
+              still applies.

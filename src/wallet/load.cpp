@@ -13,6 +13,7 @@
 #include <util/fs.h>
 #include <util/string.h>
 #include <util/translation.h>
+#include <wallet/bcp1_watchonly.h>
 #include <wallet/context.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
@@ -164,6 +165,20 @@ bool LoadWallets(WalletContext& context)
                     continue;
                 } else {
                     return false;
+                }
+            }
+
+            // -exchange-watchonly must be enforced for the startup / LoadWallets
+            // path too, not just the loadwallet / createwallet RPCs. Refuse and
+            // unload rather than leaving a keyed wallet loaded on a BCP/1 node.
+            if (context.args) {
+                bilingual_str watch_err;
+                if (!EnsureExchangeWatchOnly(*pwallet, *context.args, watch_err)) {
+                    if (HandleWalletLoadError(chain, name, watch_err)) {
+                        continue;
+                    } else {
+                        return false;
+                    }
                 }
             }
 

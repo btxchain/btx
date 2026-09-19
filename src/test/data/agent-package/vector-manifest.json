@@ -1,0 +1,42 @@
+[
+  {
+    "name": "model-agent",
+    "core_id": "73e72380ef4959614ec34e0796a12d59bf4abf483c044b55b66c167d6bb6670db8ec3dd7d26d0e455a072288606e7b58",
+    "file_sha384": "d95a34a07da2eff5350d2a75bec65e5e9039dc51769743e88c08c880fc46002358acdbce950af783f8fa5dd3220e135a",
+    "bytes": 5643,
+    "signature_status": "UNSIGNED",
+    "network": "REGTEST"
+  },
+  {
+    "name": "variant-agent",
+    "core_id": "1f9259522825e432a925b4adf2843cd4f56f9e4325c53e43a28c6e0394360a88b12d86b780083e15d44b33d8cf404ccb",
+    "file_sha384": "c2b18fe18056e7c7f9d56a929605a7989aaafc99d26848cb44751fc4bf1416c70bda45e4af6602bf17687068d18ced40",
+    "bytes": 6040,
+    "signature_status": "UNSIGNED",
+    "network": "REGTEST"
+  },
+  {
+    "name": "release-agent",
+    "core_id": "76ff0d62ee14293e0ded0261eda7eca5c7fc49b29566c16c0c9f124de1cdbe2d5f62dced02dda5acab293581c71e5ff9",
+    "file_sha384": "2283391205b8e1b5bd617d0d104927ac475a282e9c7f95563e8803492870d44ca7c4d1714c9cf5b53ef9f287813c1fb1",
+    "bytes": 6078,
+    "signature_status": "UNSIGNED",
+    "network": "REGTEST"
+  },
+  {
+    "name": "bounty-agent",
+    "core_id": "9ef9d6110b38e2b29413e96d90ca08fe4b48fe186a124d75364813423e81003053108133e24dedd852270818a0f0da29",
+    "file_sha384": "5fe65af3e23ef58dc311c5043e5d89a59f8acf6f3dd79ab2543858be37ed26dbf80ace6dcc6aa1c412078198c1b3d552",
+    "bytes": 4122,
+    "signature_status": "UNSIGNED",
+    "network": "REGTEST"
+  },
+  {
+    "name": "collection-agent",
+    "core_id": "f5bd8d6e38a32f499a75e7115b472117dedf01c566d10a12df7de0cda307991d808ebd8dee011e0b5283735a040c7e63",
+    "file_sha384": "5d8132e1ede58ecd265f2c2bb15f54580ec5ff54fffcc3d0cb2928528e9e14c8bad2daf9e0a290c566786cb0ced9505e",
+    "bytes": 5651,
+    "signature_status": "UNSIGNED",
+    "network": "REGTEST"
+  }
+]

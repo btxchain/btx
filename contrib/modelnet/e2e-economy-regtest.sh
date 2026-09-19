@@ -4,20 +4,30 @@
 set -euo pipefail
 export LC_ALL=C
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BIN="${BIN:-$ROOT/build-gcc13/bin}"
+if [[ -n "${BIN:-}" && -d "${BIN}" && -x "${BIN}/btxd" ]]; then
+  :
+else
+  BIN="$ROOT/build-gcc13/bin"
+fi
 WORKDIR="${WORKDIR:-/tmp/btx-econ-regtest-$$}"
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR/node"
 BTXD="$BIN/btxd"
 CLI="$BIN/btx-cli"
 MODELD="$BIN/btx-modeld"
-test -x "$BTXD" && test -x "$CLI" && test -x "$MODELD"
+[[ -x "$BTXD" ]] || { echo "e2e-economy-regtest: missing executable $BTXD (BIN=$BIN)" >&2; exit 1; }
+[[ -x "$CLI" ]] || { echo "e2e-economy-regtest: missing executable $CLI (BIN=$BIN)" >&2; exit 1; }
+[[ -x "$MODELD" ]] || { echo "e2e-economy-regtest: missing executable $MODELD (BIN=$BIN)" >&2; exit 1; }
+# Dedicated ports: never share 18443/18444 with the lab /var/lib/btxd node.
+PORT=37744
+RPC=37743
 DATADIR="$WORKDIR/node"
+CLIW=("$CLI" -regtest -datadir="$DATADIR" -rpcport="$RPC" -rpcuser=u -rpcpassword=p)
 PID=""
 cleanup() {
   local rc=$?
   if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then
-    "$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p stop >/dev/null 2>&1 || true
+    "${CLIW[@]}" stop >/dev/null 2>&1 || true
     for i in $(seq 1 40); do
       kill -0 "$PID" 2>/dev/null || break
       sleep 0.1
@@ -33,6 +43,7 @@ cleanup() {
 trap cleanup EXIT
 
 "$BTXD" -regtest -datadir="$DATADIR" -listen=0 -server=1 \
+  -port="$PORT" -rpcport="$RPC" \
   -rpcuser=u -rpcpassword=p -fallbackfee=0.0001 \
   -modelhelper="$MODELD" -modelstorage=8MiB \
   -autoshieldcoinbase=0 \
@@ -45,18 +56,18 @@ trap cleanup EXIT
 PID=$!
 ok=0
 for i in $(seq 1 80); do
-  if "$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p getblockchaininfo >/dev/null 2>&1; then
+  if "${CLIW[@]}" getblockchaininfo >/dev/null 2>&1; then
     ok=1
     break
   fi
   sleep 0.25
 done
 test "$ok" = 1
-info="$("$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p getmodelnetworkinfo)"
+info="$("${CLIW[@]}" getmodelnetworkinfo)"
 echo "$info" | python3 -c 'import json,sys; j=json.load(sys.stdin); assert j.get("automatic_spend_atoms",1)==0'
 ready=0
 for i in $(seq 1 40); do
-  info="$("$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p getmodelnetworkinfo)"
+  info="$("${CLIW[@]}" getmodelnetworkinfo)"
   if echo "$info" | grep -q '"helper_ready": true'; then ready=1; break; fi
   sleep 0.25
 done
@@ -64,11 +75,11 @@ test "$ready" = 1
 
 MID="$(python3 -c 'print("a1"+"00"*47)')"
 test "${#MID}" = 96
-"$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p publishmodelsearchrecord \
+"${CLIW[@]}" publishmodelsearchrecord \
   "$MID" \
   '{"type":"btx-model-search-v1","canonical_name":"RegtestA17","display_name":"RegtestA17","short_description":"A specialized model for coding agents and repository tool use.","expires_at":0}'
 
-sm="$("$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p searchmodels '{"text":"coding agent","scope":"LOCAL"}')"
+sm="$("${CLIW[@]}" searchmodels '{"text":"coding agent","scope":"LOCAL"}')"
 echo "$sm" | python3 -c 'import json,sys
 j=json.load(sys.stdin)
 assert j.get("automatic_spend_atoms",1)==0
@@ -76,31 +87,31 @@ names=[h.get("name") for h in (j.get("results") or [])]
 assert "RegtestA17" in names, names
 assert any(h.get("result_type")=="PUBLIC_MODEL" for h in (j.get("results") or [])), j
 '
-feed="$("$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p getmodelfeed '{"scope":"LOCAL","mode":"NEWEST","limit":20}')"
+feed="$("${CLIW[@]}" getmodelfeed '{"scope":"LOCAL","mode":"NEWEST","limit":20}')"
 echo "$feed" | python3 -c 'import json,sys
 j=json.load(sys.stdin)
 assert j.get("coverage",{}).get("global_complete") is not True
 assert j.get("automatic_spend_atoms",1)==0
 assert j.get("feed_sequence",0)>=1
 '
-econ="$("$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p getmodeleconomyentry "$MID")"
+econ="$("${CLIW[@]}" getmodeleconomyentry "$MID")"
 echo "$econ" | python3 -c 'import json,sys
 j=json.load(sys.stdin)
 assert j.get("schema_version")==3
 assert (j.get("lifecycle") or {}).get("state") or j.get("lifecycle_state")
 assert j.get("automatic_spend_atoms")==0
 '
-"$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p getblockchaininfo >/dev/null
+"${CLIW[@]}" getblockchaininfo >/dev/null
 
-CLIW=("$CLI" -regtest -datadir="$DATADIR" -rpcuser=u -rpcpassword=p)
 "${CLIW[@]}" createwallet w >/dev/null
 ADDR="$("${CLIW[@]}" -rpcwallet=w getnewaddress)"
 "${CLIW[@]}" generatetoaddress 101 "$ADDR" >/dev/null
-python3 - "$DATADIR" "$WORKDIR" "$CLI" <<'PY'
+python3 - "$DATADIR" "$WORKDIR" "$CLI" "$RPC" <<'PY'
 import json, os, socket, struct, subprocess, sys, time
 from pathlib import Path
 datadir, workdir, cli = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-cliw = [cli, "-regtest", f"-datadir={datadir}", "-rpcuser=u", "-rpcpassword=p", "-rpcwallet=w"]
+rpcport = sys.argv[4]
+cliw = [cli, "-regtest", f"-datadir={datadir}", "-rpcuser=u", "-rpcpassword=p", f"-rpcport={rpcport}", "-rpcwallet=w"]
 
 def cli(*args):
     out = subprocess.check_output([*cliw, *args], text=True)

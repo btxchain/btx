@@ -4,8 +4,6 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <common/signmessage.h>
-#include <key.h>
-#include <key_io.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <rpc/server.h>
@@ -30,11 +28,11 @@ static RPCHelpMan verifymessage()
             "\nUnlock the wallet for 30 seconds\n"
             + HelpExampleCli("walletpassphrase", "\"mypassphrase\" 30") +
             "\nCreate the signature\n"
-            + HelpExampleCli("signmessage", "\"1D1ZrZNe3JUo7ZycKEYQQiQAWd9y54F4XX\" \"my message\"") +
+            + HelpExampleCli("signmessage", "\"" + EXAMPLE_ADDRESS[0] + "\" \"my message\"") +
             "\nVerify the signature\n"
-            + HelpExampleCli("verifymessage", "\"1D1ZrZNe3JUo7ZycKEYQQiQAWd9y54F4XX\" \"signature\" \"my message\"") +
+            + HelpExampleCli("verifymessage", "\"" + EXAMPLE_ADDRESS[0] + "\" \"signature\" \"my message\"") +
             "\nAs a JSON-RPC call\n"
-            + HelpExampleRpc("verifymessage", "\"1D1ZrZNe3JUo7ZycKEYQQiQAWd9y54F4XX\", \"signature\", \"my message\"")
+            + HelpExampleRpc("verifymessage", "\"" + EXAMPLE_ADDRESS[0] + "\", \"signature\", \"my message\"")
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
@@ -68,7 +66,8 @@ static RPCHelpMan verifymessage()
 static RPCHelpMan signmessagewithprivkey()
 {
     return RPCHelpMan{"signmessagewithprivkey",
-        "\nSign a message with the private key of an address\n",
+        "Sign a message with a WIF private key.\n"
+        "Disabled on BTX by post-quantum policy. Use wallet signmessage with a P2MR address.\n",
         {
             {"privkey", RPCArg::Type::STR, RPCArg::Optional::NO, "The private key to sign the message with."},
             {"message", RPCArg::Type::STR, RPCArg::Optional::NO, "The message to create a signature of."},
@@ -80,27 +79,14 @@ static RPCHelpMan signmessagewithprivkey()
             "\nCreate the signature\n"
             + HelpExampleCli("signmessagewithprivkey", "\"privkey\" \"my message\"") +
             "\nVerify the signature\n"
-            + HelpExampleCli("verifymessage", "\"1D1ZrZNe3JUo7ZycKEYQQiQAWd9y54F4XX\" \"signature\" \"my message\"") +
+            + HelpExampleCli("verifymessage", "\"" + EXAMPLE_ADDRESS[0] + "\" \"signature\" \"my message\"") +
             "\nAs a JSON-RPC call\n"
             + HelpExampleRpc("signmessagewithprivkey", "\"privkey\", \"my message\"")
         },
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        [&](const RPCHelpMan&, const JSONRPCRequest&) -> UniValue
         {
-            std::string strPrivkey = request.params[0].get_str();
-            std::string strMessage = request.params[1].get_str();
-
-            CKey key = DecodeSecret(strPrivkey);
-            if (!key.IsValid()) {
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid private key");
-            }
-
-            std::string signature;
-
-            if (!MessageSign(key, strMessage, signature)) {
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Sign failed");
-            }
-
-            return signature;
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "BTX PQ policy: signmessagewithprivkey is disabled (legacy ECDSA); use wallet signmessage with a P2MR address");
         },
     };
 }

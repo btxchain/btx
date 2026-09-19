@@ -31,18 +31,29 @@ OpenURIDialog::~OpenURIDialog()
 
 QString OpenURIDialog::getURI()
 {
-    return ui->uriEdit->text();
+    return ui->uriEdit->text().trimmed();
 }
 
 void OpenURIDialog::accept()
 {
     SendCoinsRecipient rcp;
-    if (GUIUtil::parseBitcoinURI(getURI(), &rcp)) {
-        /* Only accept value URIs */
+    const QString uri = getURI();
+    // Model identity first: btx://… must not be treated as BIP21 payment.
+    if (uri.startsWith(QStringLiteral("btx://"), Qt::CaseInsensitive) ||
+        uri.endsWith(QStringLiteral(".btx"), Qt::CaseInsensitive) ||
+        uri.endsWith(QStringLiteral(".btxlink"), Qt::CaseInsensitive)) {
         QDialog::accept();
-    } else {
-        ui->uriEdit->setValid(false);
+        return;
     }
+    if (uri.startsWith(QStringLiteral("bitcoin:"), Qt::CaseInsensitive)) {
+        ui->uriEdit->setValid(false);
+        return;
+    }
+    if (GUIUtil::parseBitcoinURI(uri, &rcp)) {
+        QDialog::accept();
+        return;
+    }
+    ui->uriEdit->setValid(false);
 }
 
 void OpenURIDialog::changeEvent(QEvent* e)

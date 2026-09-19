@@ -80,6 +80,7 @@ std::string OpensslBin()
     if (const char* e = std::getenv("BTX_OPENSSL")) return e;
     static const std::string cached = [] {
         const char* cands[] = {
+            "/opt/openssl-3.5.8/bin/openssl",
             "/opt/homebrew/opt/openssl@3/bin/openssl",
             "/opt/homebrew/opt/openssl/bin/openssl",
             "/usr/local/opt/openssl@3/bin/openssl",

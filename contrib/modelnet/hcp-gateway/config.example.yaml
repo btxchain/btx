@@ -1,0 +1,49 @@
+# Design template only. No production gateway binary is included in this kit.
+# btx-hcpd does not load this file; lab processes take CLI flags (see DEMO.md).
+#
+# Two independent loopback instances (isolated REGTEST):
+#   walletless:  -walletless -instance=hcp-a -bind=127.0.0.1:18780 -datadir=<a>
+#   finance lab: -finance=1  -instance=hcp-b -bind=127.0.0.1:18781 -datadir=<b>
+# Put preset flags (-walletless / -finance=1) before -datadir and -instance.
+# This file keeps finance.enabled false. automatic_spend_atoms stays '0'.
+environment: REGTEST
+simulation_only: true
+bind: 127.0.0.1:18780
+instance_id: hcp-a
+provider:
+  id: provider-demo
+  origin: https://exchange.example
+  api_base: https://exchange.example/btx/hcp/v1
+  enabled_profiles: [DISCOVERY, HANDOFF]
+  profile_key_ref: null           # provision through independent enrollment
+identity:
+  issuer_metadata_url: null       # established CEX IDP, never model-supplied
+  financial_sender_constraint: REQUIRED_DPOP_OR_MTLS
+  access_token_log_redaction: true
+native:
+  expected_genesis_hash: null     # must be pinned from actual supported test network
+  model_rpc_socket: null
+  chain_observer_socket: null
+  custody_executor_socket: null
+  generic_rpc_passthrough: false
+finance:
+  enabled: false
+  custody_backend: DISABLED
+  automatic_spend_atoms: '0'
+  unknown_result_policy: RETAIN_HOLD_AND_RECONCILE
+  cross_provider_financial_retry: false
+local_client:
+  start_wallet: false
+  start_mining: false
+  require_full_chain_for_public_acquisition: false
+  local_grant_ref: null
+  expose_runtime_to_gateway: false
+  reporting: OFF
+limits:
+  max_body_bytes: 1048576
+  max_catalog_page: 100
+  max_handoff_source_hints: 16
+  max_native_executor_concurrency: 4
+exports:
+  include_secrets: false
+  include_custody_obligations: true

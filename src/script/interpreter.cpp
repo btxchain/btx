@@ -2518,7 +2518,13 @@ size_t static WitnessSigOps(int witversion, const std::vector<unsigned char>& wi
     }
 
     if (witversion == 2 && witprogram.size() == WITNESS_V2_P2MR_SIZE && witness.stack.size() >= 2) {
-        const auto& leaf_script_bytes = witness.stack[witness.stack.size() - 2];
+        // Same stack layout as VerifyWitnessProgram: optional 0x50 annex, then
+        // control block, then leaf script. Counting stack[size-2] while an
+        // annex is present hashes the control block and zero-rates the leaf
+        // (MAX_BLOCK_SIGOPS_COST bypass for a consensus-valid annex).
+        const auto& stack = witness.stack;
+        const bool have_annex = stack.size() >= 3 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG;
+        const auto& leaf_script_bytes = stack[stack.size() - (have_annex ? 3 : 2)];
         CScript leaf_script(leaf_script_bytes.begin(), leaf_script_bytes.end());
 
         size_t n_sigops{0};

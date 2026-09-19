@@ -20,9 +20,10 @@
 #     nvcc -gencode flags instead. Never put 100a/120a into BTX_CUDA_ARCHITECTURES.
 #   * The tcgen05 MMA body is gated by __CUDA_ARCH_SPECIFIC__==1000 in
 #     matmul_v4_rc_mx_ozaki_native.cu (plain sm_100 / sm_120 compile it OUT).
-#   * BTX_CUDA_SM100_NATIVE is OFF by default. When ON, a REAL configure-time
-#     probe must assemble the tcgen05 block-scale snippet under sm_100a or the
-#     build FATAL_ERRORs (no silent success). Even with the object linked, the
+#   * BTX_CUDA_SM100_NATIVE is OFF by default (not inferred from a CUDA 12.8+
+#     toolkit). When ON, a REAL configure-time probe must assemble the tcgen05
+#     block-scale snippet under sm_100a or the option is auto-disabled (no
+#     silent success / no object linked). Even with the object linked, the
 #     runtime backend stays fail-closed until the bit-exact self-qual suite
 #     passes on real B200 silicon (SelectedBackend==SM100_MMA).
 #
@@ -51,11 +52,13 @@ set(BTX_CUDA_SM100A_GENCODE_COMPILE_OPTION
 set(BTX_CUDA_SM100A_NATIVE_TU "cuda/matmul_v4_rc_mx_ozaki_native_sm100.cu"
     CACHE INTERNAL "Dedicated sm_100a native MXFP4 marker TU (Agent A)")
 
-# Configure-time probe: compile a tiny TU that requires the tcgen05 block-scaled
-# MMA pipeline under sm_100a gencode. Sets OUT_VAR TRUE/FALSE; on failure stores
-# BTX_CUDA_SM100_PROBE_LOG in the parent scope. This REPLACES the old fail-closed
-# stub: a real sm_100a toolkit now qualifies the packaging, while any other
-# toolkit fails loudly (fail-closed) with the assembler log.
+# Configure-time probe (invoked only when BTX_CUDA_SM100_NATIVE=ON): compile a
+# tiny TU that requires the tcgen05 block-scaled MMA pipeline under sm_100a
+# gencode. Sets OUT_VAR TRUE/FALSE; on failure stores BTX_CUDA_SM100_PROBE_LOG
+# in the parent scope. A toolkit that cannot assemble auto-disables the option
+# (fail-closed, no object linked). A passing probe only means this NVCC can
+# assemble compute_100a — it is not hardware evidence and does not flip the
+# option on by itself.
 function(btx_cuda_probe_sm100_native OUT_VAR)
   if(NOT CMAKE_CUDA_COMPILER)
     set(${OUT_VAR} FALSE PARENT_SCOPE)

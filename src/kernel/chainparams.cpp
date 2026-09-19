@@ -952,10 +952,11 @@ public:
         pchMessageStart[3] = 0x01;
         nDefaultPort = 19335;
         nPruneAfterHeight = 100000;
-        // Measured from the 2026-08-01 mainnet archive near height 176'600:
-        // ~117 GB of blocks plus chain/shielded state, rounded up so users see
-        // a conservative disk estimate before sync begins.
-        m_assumed_blockchain_size = 120;
+        // First-run disk estimate (intro wizard / pruning auto-tick). Live
+        // mainnet around height ~223k is about 8 GB of blocks; 20 GB leaves
+        // growth headroom without treating a BTX node like a 120 GB Bitcoin
+        // archive (which auto-ticked prune below ~131 GB free).
+        m_assumed_blockchain_size = 20;
         m_assumed_chain_state_size = 1;
 
         genesis = CreateBTXGenesisBlock(

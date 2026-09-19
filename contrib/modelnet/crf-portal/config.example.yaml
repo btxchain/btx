@@ -1,0 +1,77 @@
+# Cognitive Reserve v1.1 portal template. Not a gateway binary.
+# CR11 is a negotiated extension of the EXISTING btx-hcpd (HCP/1+CR11).
+# Enable it with -finance=1 on that same process. Do not compile, ship, or
+# launch a second daemon. btx-hcpd does not load this file.
+#
+# Required lab topology (isolated REGTEST, loopback only):
+#   two independently configured btx-hcpd instances + one local client.
+#   walletless:  btx-hcpd -walletless -instance=hcp-a -bind=127.0.0.1:18780
+#                /reserve/* and /capital/* → HTTP 403 PROFILE_UNSUPPORTED
+#   finance/CR11: btx-hcpd -finance=1  -instance=hcp-b -bind=127.0.0.1:18781
+#                same binary; extension on; unauth still 401 UNAUTHENTICATED
+#   local client: btx-hosted walletless (no HTTP bind; not a wallet)
+#
+# Put -walletless / -finance=1 before -datadir and -instance.
+# Never bind 0.0.0.0, LAN, or a public interface. automatic_spend_atoms stays 0.
+# The static portal (index.html + portal.js) wires /reserve and /capital on
+# the same origin as btx-hcpd. Family view is not debit authority.
+# No custody keys. No token-in-URI. Live fetch must target 127.0.0.1 only;
+# CORS on the daemon is absent, so a real browser pass stays NOT_RUN.
+#
+# Template only; identities below are examples, not live CEX credentials.
+
+profile: COGNITIVE_RESERVE_V1_1
+base_protocol: HCP/1
+api_base: /btx/hcp/v1
+provider_origin: https://exchange.example
+lab:
+  required_topology: two-instances-plus-local-client
+  loopback_only: true
+  gateway_binary: btx-hcpd
+  second_gateway_binary: false
+  walletless:
+    bind: 127.0.0.1:18780
+    flags: -walletless
+    instance: hcp-a
+    cognitive_reserve: false
+    reserve_and_capital: PROFILE_UNSUPPORTED
+  finance_cr11:
+    bind: 127.0.0.1:18781
+    flags: -finance=1
+    instance: hcp-b
+    cognitive_reserve: true
+    note: existing-btx-hcpd-HCP/1+CR11
+  local_client:
+    binary: btx-hosted
+    command: walletless
+    http_bind: none
+identity:
+  issuer: https://identity.example
+  confidential_profile: FAPI2
+  public_client_profile: AUTH_CODE_PKCE_SENDER_BOUND
+  secret_reference: os-secret-store:cex-cr11
+limits:
+  body_bytes: 1048576
+  allocation_legs: 32
+  dependency_depth: 16
+  recipe_candidates: 64
+  resources: 256
+  page_default: 100
+  page_max: 1000
+reserve:
+  replenishment_default: SUGGEST
+  refund_restores_lifetime_authority: false
+  walletless_error: PROFILE_UNSUPPORTED
+capital:
+  walletless_error: PROFILE_UNSUPPORTED
+local:
+  reporting_default: OFF
+  monetary_node_required_for_public_acquisition: false
+  runtime_authority: LOCAL_GRANT_ONLY
+finance:
+  executor: existing-hcp-native-executor
+  ledger: existing-cex-ledger-adapter
+  enabled_by: -finance=1
+  unknown_result_action: RETAIN_HOLD_AND_RECONCILE
+  cross_provider_automatic_retry: false
+  automatic_spend_atoms: '0'

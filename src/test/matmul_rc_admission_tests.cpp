@@ -102,15 +102,35 @@ BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_non_refreshing_and_expires)
 
     BOOST_CHECK(cooldowns.Mark(hash, /*keyed_netgroup=*/1, start));
     BOOST_CHECK(cooldowns.Contains(hash, /*keyed_netgroup=*/1, start + std::chrono::seconds{59}));
+    BOOST_CHECK(cooldowns.ContainsHash(hash, start + std::chrono::seconds{59}));
 
     // A malicious duplicate immediately before expiry cannot extend the
     // process-wide suppression window for an honest source.
     BOOST_CHECK(!cooldowns.Mark(hash, /*keyed_netgroup=*/1, start + std::chrono::seconds{59}));
     BOOST_CHECK(!cooldowns.Contains(hash, /*keyed_netgroup=*/1, start + std::chrono::seconds{60}));
+    BOOST_CHECK(!cooldowns.ContainsHash(hash, start + std::chrono::seconds{60}));
     BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{60}), 0U);
 
     // Once expired, the same hash may acquire one fresh bounded cooldown.
     BOOST_CHECK(cooldowns.Mark(hash, /*keyed_netgroup=*/1, start + std::chrono::seconds{60}));
+    // Hash-level hold is true for any netgroup; a different netgroup does not
+    // see the per-peer Contains() cooldown (independent source stays eligible).
+    BOOST_CHECK(cooldowns.ContainsHash(hash, start + std::chrono::seconds{60}));
+    BOOST_CHECK(!cooldowns.Contains(hash, /*keyed_netgroup=*/2, start + std::chrono::seconds{60}));
+}
+
+BOOST_AUTO_TEST_CASE(deferred_body_hash_probe_does_not_imply_per_peer_skip)
+{
+    // ContainsHash is the idle/convergence probe. FindNextBlocks per-peer
+    // GETDATA must keep using Contains(hash, netgroup) so an independent
+    // source stays eligible while one netgroup is in cooldown.
+    node::RCDeferredBodyCooldowns cooldowns;
+    const uint256 hash{uint256::ONE};
+    const auto start{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(cooldowns.Mark(hash, /*keyed_netgroup=*/11, start));
+    BOOST_CHECK(cooldowns.ContainsHash(hash, start));
+    BOOST_CHECK(cooldowns.Contains(hash, /*keyed_netgroup=*/11, start));
+    BOOST_CHECK(!cooldowns.Contains(hash, /*keyed_netgroup=*/22, start));
 }
 
 BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_bounded_and_explicitly_clearable)
@@ -637,6 +657,38 @@ BOOST_AUTO_TEST_CASE(rate_limited_is_a_refusal_to_store_not_an_invalid_ticket)
     // Memory stays bounded by the store itself, which is why the caller can
     // safely drop instead of disconnecting.
     BOOST_CHECK_LE(store.UnknownSize(), cfg.max_unknown_entries);
+}
+
+BOOST_AUTO_TEST_CASE(unknown_submission_history_stays_bounded_across_erase_cycles)
+{
+    // GlobalQuota is checked before creating rate state, but Erase/Consume
+    // frees quarantine slots without refunding history. Unique netgroups
+    // cycling through those slots must not grow the history map without a cap.
+    node::RCAdmissionStore store{{
+        .max_unknown_entries = 2,
+        .max_unknown_entries_per_netgroup = 2,
+        .max_unknown_candidates_per_hash = 2,
+        .max_unknown_submissions_per_netgroup = 8,
+        .max_unknown_submission_netgroups = 4,
+        .unknown_submission_window = std::chrono::seconds{60},
+        .ttl = std::chrono::seconds{180},
+    }};
+    const auto now{std::chrono::steady_clock::now()};
+    for (uint64_t group = 1; group <= 4; ++group) {
+        node::RCAdmissionTicket ticket{};
+        ticket.block_hash = ArithToUint256(arith_uint256{group});
+        BOOST_REQUIRE(
+            store.Remember(ticket, group, now) ==
+            node::RCAdmissionStore::RememberResult::Stored);
+        store.Erase(ticket.block_hash);
+        BOOST_CHECK_EQUAL(store.UnknownSize(), 0U);
+    }
+    node::RCAdmissionTicket overflow{};
+    overflow.block_hash = ArithToUint256(arith_uint256{99});
+    BOOST_CHECK(
+        store.Remember(overflow, /*keyed_netgroup=*/99, now) ==
+        node::RCAdmissionStore::RememberResult::RateLimited);
+    BOOST_CHECK_EQUAL(store.UnknownSize(), 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

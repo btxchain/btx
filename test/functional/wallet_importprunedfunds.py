@@ -41,7 +41,11 @@ class ImportPrunedFundsTest(BitcoinTestFramework):
         # privkey
         address3_privkey, address3_pubkey = generate_keypair(wif=True)
         address3 = key_to_p2wpkh(address3_pubkey)
-        self.nodes[0].importprivkey(address3_privkey)
+        if self.options.descriptors:
+            self.nodes[0].importprivkey(address3_privkey)
+        else:
+            assert_raises_rpc_error(-8, "importprivkey is disabled", self.nodes[0].importprivkey, address3_privkey)
+            return
 
         # Check only one address
         address_info = self.nodes[0].getaddressinfo(address1)

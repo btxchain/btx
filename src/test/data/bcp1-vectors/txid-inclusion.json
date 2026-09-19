@@ -1,0 +1,25 @@
+{
+  "id": "txid-inclusion",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "format": "BTXPSBT",
+  "synthetic": true,
+  "warning": "TEST KEY MATERIAL ONLY. txid/wtxid hex are filled by native tests from the unsigned/signed transaction built from derivation.json.",
+  "note": "txid = SHA256d of TX_NO_WITNESS_WITH_SHIELDED (witness excluded, shielded bundle included if present). wtxid = SHA256d of TX_WITH_WITNESS. P2MR signatures live in the witness, so attaching or replacing an ML-DSA-44 signature does not change txid. Block inclusion is a node/regtest concern, not a static vector.",
+  "txid_hash": "SHA256d",
+  "txid_serialization": "TX_NO_WITNESS_WITH_SHIELDED",
+  "wtxid_hash": "SHA256d",
+  "wtxid_serialization": "TX_WITH_WITNESS",
+  "p2mr_signatures_in_witness": true,
+  "txid_stable_across_witness": true,
+  "block_inclusion": "node/regtest",
+  "txid": "",
+  "wtxid": "",
+  "lifecycle": [
+    "unsigned tx (empty scriptSig, empty witness) has txid == wtxid when no shielded bundle",
+    "attach P2MR witness [signature, leaf_script, control_block]",
+    "txid unchanged",
+    "wtxid changes",
+    "block inclusion is a node/regtest concern, not a static vector"
+  ],
+  "public_bip32_child_derivation": false
+}

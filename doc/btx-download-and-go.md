@@ -1,8 +1,11 @@
 # BTX Download-and-Go Guide
 
-> **Current line:** **v0.34.7**. See
-> [0.34.7 release notes](release-notes/release-notes-0.34.7.md) and
-> [release notes](release-notes.md). Historical 0.34.5 convergence notes:
+> **Current line:** **v0.34.8-rc3** (prerelease). See
+> [0.34.8 release notes](release-notes/release-notes-0.34.8.md) and
+> [release notes](release-notes.md). The GitHub tag that resolves is
+> [`v0.34.8-rc3`](https://github.com/btxchain/btx/releases/tag/v0.34.8-rc3);
+> `refs/tags/v0.34.7` is not published — do not pass `--release-tag v0.34.7`.
+> Historical 0.34.5 convergence notes:
 > [release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
 > Epoch A is live at height 185000. EncDr stall recovery at 199299 is
 > withdrawn. Fast-start snapshot:
@@ -44,12 +47,13 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.7 \
+  --release-tag v0.34.8-rc3 \
   --preset miner \
   --datadir="$HOME/.btx"
 ```
 
-The GitHub tag `v0.34.7` is published with the 0.34.7 release.
+The GitHub tag `v0.34.8-rc3` is the live prerelease. `v0.34.7` is not a
+published tag. Historical `v0.34.8-rc2` and `v0.34.8-rc1` remain on GitHub and are superseded.
 
 Add `--start-mining` when the same command should also provision the mining
 wallet/address and start the bundled live-mining supervisor after the verified
@@ -58,7 +62,7 @@ fast-start bootstrap succeeds:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.7 \
+  --release-tag v0.34.8-rc3 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --start-mining
@@ -98,7 +102,7 @@ progress on stderr and prints a clean JSON summary on stdout:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.7 \
+  --release-tag v0.34.8-rc3 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"
@@ -112,6 +116,51 @@ When `--preset miner` is used, that summary also includes
 `start_live_mining_command`, `stop_live_mining_command`, and
 `mining_results_dir` so an unattended installer can immediately hand off to the
 local mining supervisor without guessing paths.
+
+### Linux userspace (glibc / libstdc++)
+
+The published `*-x86_64-linux-gnu*.tar.gz` archives for v0.34.8-rc1 are linked
+against **GLIBC_2.38** and **GLIBCXX_3.4.32**. They load on Ubuntu 24.04
+(glibc 2.39) and Debian 13. They do **not** load on Debian 12 (2.36) or
+Ubuntu 22.04 (2.35). `ldd` reporting no missing `.so` names is not enough:
+libc and libstdc++ are present on those LTS hosts, the version nodes are not,
+and libc plus libstdc++ are two separate version-node sets to check. In the
+published archive, issue 169 reports `btx-cli` at `GLIBC_2.34` rather than
+`2.38`, so the `btx-cli` libc floor differs from `btxd`'s.
+
+Source builds from this tree still target the Ubuntu 22.04 / GCC 11.1+
+baseline. The version-node check is in the `bin/btxd` / `bin/btx-modeld`
+wrapper that `scripts/release/package_release_archive.py` generates for
+archives cut from this tree: it compares `objdump -T` (or `readelf -V`)
+GLIBC/GLIBCXX symbols against `getconf GNU_LIBC_VERSION` and the host
+`libstdc++.so.6`, then exits 127 naming the required version. The wrapper in
+the **already-published** v0.34.8-rc1 archive predates that check and only
+runs the `ldd` soname preflight, so on 22.04 it execs `libexec/btxd.real` and
+the raw loader error (`version 'GLIBC_2.38' not found`) is what you see. Its
+apt hint also prints the Ubuntu 24.04 package spelling (`libevent-2.1-7t64`);
+on 22.04 the libevent names have no `t64` suffix (`libevent-2.1-7`).
+
+This RC does not ship a glibc-2.35 tarball. Building from source on the LTS
+host is the supported path. An unprivileged workaround proven on Debian 12
+(no rebuild, no root), using Debian 13 `libc6` / `libstdc++6` / `libgcc-s1`
+extracted into a private prefix:
+
+```bash
+# Example debs that have been shown to work: libc6 2.41-12+deb13u4,
+# libstdc++6 14.2.0-19, libgcc-s1 14.2.0-19. Do not apt-install trixie
+# packages onto a bookworm or jammy system.
+mkdir -p "$HOME/btxglibc"
+dpkg-deb -x libc6_*.deb "$HOME/btxglibc"
+dpkg-deb -x libstdc++6_*.deb "$HOME/btxglibc"
+dpkg-deb -x libgcc-s1_*.deb "$HOME/btxglibc"
+export BTX_GLIBC_PREFIX="$HOME/btxglibc"
+./bin/btxd --version
+./bin/btx-modeld --version
+```
+
+That is a lab/agent sideload, not "download and go". `bin/btxd` honors
+`BTX_GLIBC_PREFIX` by exec'ing that prefix's `ld-linux-x86-64.so.2` with
+`--library-path`.
 
 If you prefer to run the bootstrap steps yourself:
 

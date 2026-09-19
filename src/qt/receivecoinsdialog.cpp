@@ -101,12 +101,8 @@ void ReceiveCoinsDialog::setModel(WalletModel *_model)
             ui->addressType->setItemData(index, tooltip, Qt::ToolTipRole);
             if (model->wallet().getDefaultAddressType() == type) ui->addressType->setCurrentIndex(index);
         };
-        add_address_type(OutputType::LEGACY);
-        add_address_type(OutputType::P2SH_SEGWIT);
-        add_address_type(OutputType::BECH32);
-        if (model->wallet().taprootEnabled()) {
-            add_address_type(OutputType::BECH32M);
-        }
+        add_address_type(OutputType::P2MR);
+        ui->addressType->setToolTip(tr("BTX issues post-quantum P2MR addresses only. Legacy, bech32, and taproot types are not offered."));
 
         connect(_model->getOptionsModel(), &OptionsModel::addresstypeChanged, [this](const OutputType type) {
             const int index = ui->addressType->findData((int) type);

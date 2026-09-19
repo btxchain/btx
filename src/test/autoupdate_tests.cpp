@@ -7,7 +7,6 @@
 #include <clientversion.h>
 #include <crypto/hex_base.h>
 #include <crypto/sha256.h>
-#include <key.h>
 #include <pqkey.h>
 #include <test/util/setup_common.h>
 #include <tinyformat.h>
@@ -148,7 +147,7 @@ struct Harness {
 
     void AddSignature(std::string sig_url = "http://updates.test/version.txt.sig")
     {
-        fetcher.replies[std::move(sig_url)] = {.body = Bytes("signature")};
+        fetcher.replies[std::move(sig_url)] = {.body = {0x01, 0x02, 0x03, 0xff}};
     }
 
     void AddScript(std::string script_url = "http://updates.test/install.sh")
@@ -182,10 +181,86 @@ BOOST_AUTO_TEST_CASE(url_origin_matching_is_strict)
 
 BOOST_AUTO_TEST_CASE(version_comparison_uses_client_version)
 {
+    const std::string local = node::LocalClientVersion();
+    const std::string local_triple = strprintf("%d.%d.%d", CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD);
+
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("99.0.0"), 1);
-    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion(strprintf("%d.%d.%d", CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD)), 0);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion(local), 0);
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("v0.32.8"), -1);
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("not-a-version"), 0);
+
+    if (local == local_triple) {
+        // Final build: a candidate of the same triple, and a prerelease of a higher triple, are
+        // both never auto-installed.
+        BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion(local_triple + "-rc1"), -1);
+        BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("99.0.0-rc1"), -1);
+    } else {
+        // Release-candidate build: the matching final release is strictly newer.
+        BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion(local_triple), 1);
+        BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("99.0.0-rc1"), 1);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(local_client_version_reports_release_candidate)
+{
+    const std::string local = node::LocalClientVersion();
+    const std::string triple = strprintf("%d.%d.%d", CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD);
+    const std::string build_string{CLIENT_VERSION_STRING};
+    const size_t rc_marker = build_string.rfind("rc");
+
+    if (rc_marker == std::string::npos) {
+        // Final build: no rc suffix at all.
+        BOOST_CHECK_EQUAL(local, triple);
+    } else {
+        // Release candidate: the version carries the rcN marker baked into CLIENT_VERSION_STRING.
+        BOOST_CHECK_EQUAL(local, triple + build_string.substr(rc_marker));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(version_comparison_orders_release_candidates)
+{
+    // A final release outranks any release candidate of the same triple; rcN is accepted with or
+    // without the separating dash and case-insensitively.
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8-rc1", "0.34.8"), 1);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8rc1", "0.34.8"), 1);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "0.34.8-rc1"), -1);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "0.34.8"), 0);
+
+    // The same candidate is not newer.
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8-rc1", "0.34.8-rc1"), 0);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8rc1", "0.34.8-RC1"), 0);
+
+    // Later candidates outrank earlier ones.
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8-rc1", "0.34.8-rc2"), 1);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8-rc2", "0.34.8-rc1"), -1);
+
+    // A higher triple still wins across candidates.
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8-rc1", "0.34.9-rc1"), 1);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "0.34.9"), 1);
+
+    // A final node never adopts a prerelease, even with a higher triple.
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "0.34.9-rc1"), -1);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "99.0.0-rc1"), -1);
+    // Unrecognized prerelease tags rank as prereleases too.
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "0.34.9-beta1"), -1);
+    // Build metadata does not turn a release into a prerelease.
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "0.34.8+build5"), 0);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "0.34.9+build5"), 1);
+
+    // The v prefix is accepted; malformed versions and bare "rc" fail closed as not-newer.
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("v0.34.8", "0.34.9"), 1);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "0.34.8rc"), 0);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersionStrings("0.34.8", "not-a-version"), 0);
+}
+
+BOOST_AUTO_TEST_CASE(current_build_version_is_not_newer)
+{
+    Harness h;
+    h.AddManifest(node::LocalClientVersion());
+    h.AddSignature();
+    const auto result = h.Run();
+    BOOST_CHECK(result.status == node::AutoUpdateStatus::NOT_NEWER);
+    BOOST_CHECK_EQUAL(h.runner.calls, 0);
 }
 
 BOOST_AUTO_TEST_CASE(disabled_skips_network_and_runner)
@@ -294,7 +369,7 @@ BOOST_AUTO_TEST_CASE(telemetry_query_is_appended_to_update_fetches)
     h.fetcher.replies[node::AutoUpdateTrackedUrl(h.config.manifest_url, h.config)] = {
         .body = Bytes(Manifest("99.0.0", script_url, sig_url, h.script_hash)),
     };
-    h.fetcher.replies[node::AutoUpdateTrackedUrl(sig_url, h.config)] = {.body = Bytes("signature")};
+    h.fetcher.replies[node::AutoUpdateTrackedUrl(sig_url, h.config)] = {.body = {0x01, 0x02, 0x03, 0xff}};
     h.fetcher.replies[node::AutoUpdateTrackedUrl(script_url, h.config)] = {.body = h.script};
 
     const auto result = h.Run();
@@ -386,25 +461,32 @@ BOOST_AUTO_TEST_CASE(rollout_cohort_is_stable_bounded_and_overridable)
 
 BOOST_AUTO_TEST_CASE(real_signature_path_accepts_supported_encodings_and_rejects_tamper)
 {
-    CKey signing_key;
-    signing_key.MakeNewKey(/*fCompressed=*/true);
+    CPQKey signing_key;
+    signing_key.MakeNewKey(PQAlgorithm::ML_DSA_44);
+    BOOST_REQUIRE(signing_key.IsValid());
+    const std::vector<unsigned char> pubkey = signing_key.GetPubKey();
+
+    const auto sign_manifest = [&](const std::vector<unsigned char>& manifest_body) {
+        uint256 digest;
+        CSHA256().Write(manifest_body.data(), manifest_body.size()).Finalize(digest.begin());
+        std::vector<unsigned char> sig;
+        BOOST_REQUIRE(signing_key.Sign(digest, sig, /*slhdsa_fips205=*/true));
+        return sig;
+    };
 
     auto run_with_signature_body = [&](std::vector<unsigned char> signature_body) {
         Harness h;
-        h.config.release_pubkey = HexStr(signing_key.GetPubKey());
+        h.config.release_pubkey = HexStr(pubkey);
+        h.config.release_pubkey_algo = "ml-dsa-44";
         h.AddManifest();
         h.AddScript();
 
-        uint256 digest;
         const auto& manifest_body = h.fetcher.replies[h.config.manifest_url].body;
-        CSHA256().Write(manifest_body.data(), manifest_body.size()).Finalize(digest.begin());
-        std::vector<unsigned char> signature;
-        BOOST_REQUIRE(signing_key.Sign(digest, signature));
-
-        if (signature_body.empty()) signature_body = signature;
+        if (signature_body.empty()) signature_body = sign_manifest(manifest_body);
         h.fetcher.replies["http://updates.test/version.txt.sig"] = {.body = std::move(signature_body)};
 
-        auto verifier = node::MakeAutoUpdateSignatureVerifier("secp256k1");
+        auto verifier = node::MakeAutoUpdateSignatureVerifier("ml-dsa-44");
+        BOOST_REQUIRE(verifier != nullptr);
         const auto result = h.RunWith(*verifier);
         BOOST_CHECK(result.status == node::AutoUpdateStatus::LAUNCHED);
         BOOST_CHECK_EQUAL(h.runner.calls, 1);
@@ -414,53 +496,39 @@ BOOST_AUTO_TEST_CASE(real_signature_path_accepts_supported_encodings_and_rejects
 
     {
         Harness h;
-        h.config.release_pubkey = HexStr(signing_key.GetPubKey());
+        h.config.release_pubkey = HexStr(pubkey);
+        h.config.release_pubkey_algo = "ml-dsa-44";
         h.AddManifest();
         h.AddScript();
-
-        uint256 digest;
         const auto& manifest_body = h.fetcher.replies[h.config.manifest_url].body;
-        CSHA256().Write(manifest_body.data(), manifest_body.size()).Finalize(digest.begin());
-        std::vector<unsigned char> signature;
-        BOOST_REQUIRE(signing_key.Sign(digest, signature));
-
-        h.fetcher.replies["http://updates.test/version.txt.sig"] = {.body = Bytes(HexStr(signature))};
-        auto verifier = node::MakeAutoUpdateSignatureVerifier("secp256k1");
+        h.fetcher.replies["http://updates.test/version.txt.sig"] = {.body = Bytes(HexStr(sign_manifest(manifest_body)))};
+        auto verifier = node::MakeAutoUpdateSignatureVerifier("ml-dsa-44");
         BOOST_CHECK(h.RunWith(*verifier).status == node::AutoUpdateStatus::LAUNCHED);
     }
 
     {
         Harness h;
-        h.config.release_pubkey = HexStr(signing_key.GetPubKey());
+        h.config.release_pubkey = HexStr(pubkey);
+        h.config.release_pubkey_algo = "ml-dsa-44";
         h.AddManifest();
         h.AddScript();
-
-        uint256 digest;
         const auto& manifest_body = h.fetcher.replies[h.config.manifest_url].body;
-        CSHA256().Write(manifest_body.data(), manifest_body.size()).Finalize(digest.begin());
-        std::vector<unsigned char> signature;
-        BOOST_REQUIRE(signing_key.Sign(digest, signature));
-
-        h.fetcher.replies["http://updates.test/version.txt.sig"] = {.body = Bytes(EncodeBase64(signature))};
-        auto verifier = node::MakeAutoUpdateSignatureVerifier("secp256k1");
+        h.fetcher.replies["http://updates.test/version.txt.sig"] = {.body = Bytes(EncodeBase64(sign_manifest(manifest_body)))};
+        auto verifier = node::MakeAutoUpdateSignatureVerifier("ml-dsa-44");
         BOOST_CHECK(h.RunWith(*verifier).status == node::AutoUpdateStatus::LAUNCHED);
     }
 
     {
         Harness h;
-        h.config.release_pubkey = HexStr(signing_key.GetPubKey());
+        h.config.release_pubkey = HexStr(pubkey);
+        h.config.release_pubkey_algo = "ml-dsa-44";
         h.AddManifest();
         h.AddScript();
-
-        uint256 digest;
         auto& manifest_body = h.fetcher.replies[h.config.manifest_url].body;
-        CSHA256().Write(manifest_body.data(), manifest_body.size()).Finalize(digest.begin());
-        std::vector<unsigned char> signature;
-        BOOST_REQUIRE(signing_key.Sign(digest, signature));
+        auto signature = sign_manifest(manifest_body);
         manifest_body.push_back(' ');
-
         h.fetcher.replies["http://updates.test/version.txt.sig"] = {.body = signature};
-        auto verifier = node::MakeAutoUpdateSignatureVerifier("secp256k1");
+        auto verifier = node::MakeAutoUpdateSignatureVerifier("ml-dsa-44");
         BOOST_CHECK(h.RunWith(*verifier).status == node::AutoUpdateStatus::BAD_SIGNATURE);
         BOOST_CHECK_EQUAL(h.runner.calls, 0);
     }
@@ -512,19 +580,10 @@ BOOST_AUTO_TEST_CASE(pq_ml_dsa_signature_path_launches_and_rejects_tamper)
         BOOST_CHECK_EQUAL(h.runner.calls, 0);
     }
 
-    // A classical secp256k1 signature must NOT verify under the PQ scheme (and vice versa),
-    // and an unknown scheme yields no verifier.
-    {
-        Harness h;
-        h.config.release_pubkey = HexStr(pubkey);
-        h.AddManifest();
-        h.AddScript();
-        const auto& manifest_body = h.fetcher.replies[h.config.manifest_url].body;
-        h.fetcher.replies["http://updates.test/version.txt.sig"] = {.body = sign_manifest(manifest_body)};
-        auto classical = node::MakeAutoUpdateSignatureVerifier("secp256k1");
-        BOOST_REQUIRE(classical != nullptr);
-        BOOST_CHECK(h.RunWith(*classical).status == node::AutoUpdateStatus::BAD_SIGNATURE);
-    }
+    // Classical secp256k1 is not a release-signature scheme. A PQ verifier must
+    // also refuse to treat a compact-ECDSA-shaped blob as valid.
+    BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("secp256k1") == nullptr);
+    BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("ecdsa") == nullptr);
     BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("not-a-scheme") == nullptr);
 }
 

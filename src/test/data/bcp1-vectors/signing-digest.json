@@ -1,0 +1,56 @@
+{
+  "id": "signing-digest",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "format": "BTXPSBT",
+  "synthetic": true,
+  "warning": "TEST KEY MATERIAL ONLY. Digest hex is filled by native tests from derivation.json (SignatureHashSchnorr, SigVersion::P2MR). Never a production key.",
+  "base": "unsigned-package.json",
+  "note": "Canonical BCP/1 signing digest. FillCanonicalDigests / IndependentP2MRSighash: ComputeP2MRLeafHash(P2MR_LEAF_VERSION, leaf_script) into ScriptExecutionData.m_tapleaf_hash, then SignatureHashSchnorr with SIGHASH_DEFAULT and SigVersion::P2MR (epoch 2). DEFAULT is equivalent to ALL. Empty digest hex is filled by tests.",
+  "construction": [
+    "ComputeP2MRLeafHash(leaf_version 194 / 0xc2, leaf_script)",
+    "SignatureHashSchnorr(sighash, execdata, tx, in_pos, SIGHASH_DEFAULT, SigVersion::P2MR, txdata)",
+    "epoch 2"
+  ],
+  "sigversion": "P2MR",
+  "epoch": 2,
+  "sighash": "DEFAULT",
+  "sighash_byte": 0,
+  "digest": "",
+  "digests": [
+    {
+      "index": 0,
+      "sighash": "DEFAULT",
+      "digest": ""
+    }
+  ],
+  "inputs": [
+    {
+      "index": 0,
+      "txid": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "vout": 0,
+      "prevout": {
+        "txid": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "vout": 0
+      },
+      "amount_atoms": 125000000,
+      "script_pubkey": "",
+      "p2mr": {
+        "merkle_root": "",
+        "leaf_script": "",
+        "leaf_version": 194,
+        "leaf_hash": "",
+        "control_block": "c2"
+      },
+      "path": "m/87h/0h/0h/0/0",
+      "pubkeys": [
+        {
+          "algo": "ML-DSA-44",
+          "pubkey": ""
+        }
+      ],
+      "sighash": "DEFAULT",
+      "digest": ""
+    }
+  ],
+  "public_bip32_child_derivation": false
+}

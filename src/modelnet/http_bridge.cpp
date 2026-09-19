@@ -220,6 +220,11 @@ bool WalletLikePath(const std::string& path)
     if (p.find("revokeagentmandate") != std::string::npos) return true;
     if (p.find("getagentmandate") != std::string::npos) return true;
     if (p.find("reservemandate") != std::string::npos) return true;
+    if (p.find("createsubscriptionmandate") != std::string::npos) return true;
+    if (p.find("revokesubscriptionmandate") != std::string::npos) return true;
+    if (p.find("getsubscriptionmandate") != std::string::npos) return true;
+    if (p.find("getsubscriptionactivity") != std::string::npos) return true;
+    if (p.find("reservesubscriptionmandate") != std::string::npos) return true;
     if (p.find("observebountychain") != std::string::npos) return true;
     if (p.find("reorgbountychain") != std::string::npos) return true;
     if (p.find("bountyevaluation") != std::string::npos) return true;
@@ -227,6 +232,11 @@ bool WalletLikePath(const std::string& path)
     if (p.find("approvebounty") != std::string::npos) return true;
     if (p.find("importbounty") != std::string::npos) return true;
     if (p.find("createbountydraft") != std::string::npos) return true;
+    if (p.find("listbountydrafts") != std::string::npos) return true;
+    if (p.find("getbountydraft") != std::string::npos) return true;
+    if (p.find("updatebountydraft") != std::string::npos) return true;
+    if (p.find("deletebountydraft") != std::string::npos) return true;
+    if (p.find("validatebountyterms") != std::string::npos) return true;
     if (p.find("publishbounty") != std::string::npos) return true;
     size_t i = 0;
     while (i < p.size()) {
@@ -261,6 +271,11 @@ bool MethodLooksWallet(const std::string& method)
     if (m.find("revokeagentmandate") != std::string::npos) return true;
     if (m.find("getagentmandate") != std::string::npos) return true;
     if (m.find("reservemandate") != std::string::npos) return true;
+    if (m.find("createsubscriptionmandate") != std::string::npos) return true;
+    if (m.find("revokesubscriptionmandate") != std::string::npos) return true;
+    if (m.find("getsubscriptionmandate") != std::string::npos) return true;
+    if (m.find("getsubscriptionactivity") != std::string::npos) return true;
+    if (m.find("reservesubscriptionmandate") != std::string::npos) return true;
     if (m.find("observebountychain") != std::string::npos) return true;
     if (m.find("reorgbountychain") != std::string::npos) return true;
     if (m.find("bountyevaluation") != std::string::npos) return true;
@@ -268,6 +283,11 @@ bool MethodLooksWallet(const std::string& method)
     if (m.find("approvebounty") != std::string::npos) return true;
     if (m.find("importbountyrecovery") != std::string::npos) return true;
     if (m.find("createbountydraft") != std::string::npos) return true;
+    if (m.find("listbountydrafts") != std::string::npos) return true;
+    if (m.find("getbountydraft") != std::string::npos) return true;
+    if (m.find("updatebountydraft") != std::string::npos) return true;
+    if (m.find("deletebountydraft") != std::string::npos) return true;
+    if (m.find("validatebountyterms") != std::string::npos) return true;
     if (m.find("publishbounty") != std::string::npos) return true;
     return false;
 }

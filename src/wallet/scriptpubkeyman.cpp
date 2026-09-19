@@ -330,6 +330,9 @@ void ExtractP2MRLeafPQPubkeys(Span<const unsigned char> script, std::set<std::ve
 SigningResult ScriptPubKeyMan::SignMessageBIP322(MessageSignatureFormat format, const SigningProvider* keystore, const std::string& message, const CTxDestination& address, std::string& str_sig) const
 {
     assert(format != MessageSignatureFormat::LEGACY);
+    if (!std::holds_alternative<WitnessV2P2MR>(address)) {
+        return SigningResult::SIGNING_FAILED;
+    }
 
     MessageVerificationResult result; // unused
     auto txs = BIP322Txs::Create(address, message, result);
@@ -349,9 +352,10 @@ SigningResult ScriptPubKeyMan::SignMessageBIP322(MessageSignatureFormat format, 
         return SigningResult::SIGNING_FAILED;
     }
 
-    // We force the format to FULL, if this turned out to be a legacy format (p2pkh) signature
-    if (to_sign.vin[0].scriptSig.size() > 0 || to_sign.vin[0].scriptWitness.IsNull()) {
-        format = MessageSignatureFormat::FULL;
+    // P2MR BIP-322 signatures are witness-only. A scriptSig is the classical
+    // P2PKH path and must not be emitted.
+    if (!to_sign.vin[0].scriptSig.empty() || to_sign.vin[0].scriptWitness.IsNull()) {
+        return SigningResult::SIGNING_FAILED;
     }
 
     DataStream ds;
@@ -794,25 +798,12 @@ bool LegacyScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const std::
 
 SigningResult LegacyScriptPubKeyMan::SignMessage(const MessageSignatureFormat format, const std::string& message, const CTxDestination& address, std::string& str_sig) const
 {
-    if (format != MessageSignatureFormat::LEGACY) {
-        return SignMessageBIP322(format, this, message, address, str_sig);
+    // BTX is post-quantum: compact ECDSA (CKey::SignCompact / MessageSign) is
+    // disabled. BIP-322 is allowed only for P2MR (ML-DSA/SLH-DSA).
+    if (format == MessageSignatureFormat::LEGACY || !std::holds_alternative<WitnessV2P2MR>(address)) {
+        return SigningResult::SIGNING_FAILED;
     }
-
-    const PKHash* pkhash = std::get_if<PKHash>(&address);
-    if (!pkhash) {
-        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
-    }
-
-    CKey key;
-    if (!GetKey(ToKeyID(*pkhash), key)) {
-        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
-    }
-
-    if (MessageSign(key, message, str_sig)) {
-        return SigningResult::OK;
-    }
-
-    return SigningResult::SIGNING_FAILED;
+    return SignMessageBIP322(format, this, message, address, str_sig);
 }
 
 std::optional<PSBTError> LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205) const
@@ -2895,30 +2886,18 @@ bool DescriptorScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const s
 
 SigningResult DescriptorScriptPubKeyMan::SignMessage(const MessageSignatureFormat format, const std::string& message, const CTxDestination& address, std::string& str_sig) const
 {
+    // BTX is post-quantum: compact ECDSA (CKey::SignCompact / MessageSign) is
+    // disabled. BIP-322 is allowed only for P2MR (ML-DSA/SLH-DSA).
+    if (format == MessageSignatureFormat::LEGACY || !std::holds_alternative<WitnessV2P2MR>(address)) {
+        return SigningResult::SIGNING_FAILED;
+    }
+
     std::unique_ptr<FlatSigningProvider> keys = GetSigningProvider(GetScriptForDestination(address), true);
     if (!keys) {
         return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
     }
 
-    if (format != MessageSignatureFormat::LEGACY) {
-        return SignMessageBIP322(format, keys.get(), message, address, str_sig);
-    }
-
-    const PKHash* pkhash = std::get_if<PKHash>(&address);
-    if (!pkhash) {
-        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
-    }
-
-    CKey key;
-    if (!keys->GetKey(ToKeyID(*pkhash), key)) {
-        return SigningResult::PRIVATE_KEY_NOT_AVAILABLE;
-    }
-
-    if (!MessageSign(key, message, str_sig)) {
-        return SigningResult::SIGNING_FAILED;
-    }
-
-    return SigningResult::OK;
+    return SignMessageBIP322(format, keys.get(), message, address, str_sig);
 }
 
 std::optional<PSBTError> DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205) const

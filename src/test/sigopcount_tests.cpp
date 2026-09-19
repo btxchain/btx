@@ -254,10 +254,16 @@ BOOST_AUTO_TEST_CASE(GetTxSigOpCost)
         scriptWitness.stack.emplace_back(std::vector<unsigned char>{P2MR_LEAF_VERSION});
 
         BuildTxs(spendingTx, coins, creationTx, scriptPubKey, CScript{}, scriptWitness);
-        assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) ==
-               VALIDATION_WEIGHT_PER_MLDSA_SIGOP +
-                   VALIDATION_WEIGHT_PER_MLDSA_MULTISIG_SIGOP +
-                   VALIDATION_WEIGHT_PER_SLHDSA_MULTISIG_SIGOP);
+        const int64_t p2mr_sigops =
+            VALIDATION_WEIGHT_PER_MLDSA_SIGOP +
+            VALIDATION_WEIGHT_PER_MLDSA_MULTISIG_SIGOP +
+            VALIDATION_WEIGHT_PER_SLHDSA_MULTISIG_SIGOP;
+        assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) == p2mr_sigops);
+
+        // Annex is consensus-valid; sigops must still come from the leaf, not the control block.
+        scriptWitness.stack.emplace_back(std::vector<unsigned char>{ANNEX_TAG, 0x00});
+        BuildTxs(spendingTx, coins, creationTx, scriptPubKey, CScript{}, scriptWitness);
+        assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) == p2mr_sigops);
     }
 }
 

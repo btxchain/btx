@@ -8,6 +8,8 @@ namespace modelnet {
 
 bool ModelBridge::TryEnqueuePublicHint(BoundedModelHint hint)
 {
+    std::string err;
+    if (!PublicHintWellFormed(hint.hint, hint.from_addr, err)) return false;
     std::lock_guard<std::mutex> lock(m_mu);
     if (m_hints.size() >= MAX_HINTS) return false;
     m_hints.push(std::move(hint));

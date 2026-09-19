@@ -98,7 +98,7 @@ BOOST_AUTO_TEST_CASE(wire_01_08_sendmodels_and_getmdpeers)
     BOOST_REQUIRE(modelnet::SerializeSendModels(old, oldwire, err));
     BOOST_CHECK(!modelnet::ParseSendModels(oldwire, parsed, err));
 
-    std::vector<unsigned char> gp(17, 0);
+    std::vector<unsigned char> gp(modelnet::GETMDPEERS_BYTES, 0);
     gp[16] = 8;
     modelnet::GetMdPeers gout;
     BOOST_REQUIRE(modelnet::ParseGetMdPeers(gp, gout, err));
@@ -110,6 +110,97 @@ BOOST_AUTO_TEST_CASE(wire_01_08_sendmodels_and_getmdpeers)
     std::vector<unsigned char> compact;
     BOOST_REQUIRE(modelnet::EncodeCompactSizeModel(16, compact, err));
     BOOST_CHECK(!compact.empty());
+}
+
+BOOST_AUTO_TEST_CASE(issue_173_version_mismatch_not_misbehave)
+{
+    // Fail-closed-but-not-eclipse: other MODEL_PROTOCOL_VERSION is IGNORE
+    // even when the byte length changed. Same-version wrong size is MISBEHAVE.
+    modelnet::SendModels msg;
+    msg.version = modelnet::MODEL_PROTOCOL_VERSION;
+    std::vector<unsigned char> v2;
+    std::string err;
+    BOOST_REQUIRE(modelnet::SerializeSendModels(msg, v2, err));
+    BOOST_CHECK(modelnet::ClassifySendModelsWire(v2) == modelnet::HintWireDisposition::ACCEPT);
+
+    std::vector<unsigned char> v3_same = v2;
+    WriteLE16(v3_same.data(), 3);
+    BOOST_CHECK(modelnet::ClassifySendModelsWire(v3_same) == modelnet::HintWireDisposition::IGNORE);
+
+    std::vector<unsigned char> v3_longer(19, 0);
+    WriteLE16(v3_longer.data(), 3);
+    BOOST_CHECK(modelnet::ClassifySendModelsWire(v3_longer) == modelnet::HintWireDisposition::IGNORE);
+
+    std::vector<unsigned char> v2_longer(19, 0);
+    WriteLE16(v2_longer.data(), modelnet::MODEL_PROTOCOL_VERSION);
+    BOOST_CHECK(modelnet::ClassifySendModelsWire(v2_longer) == modelnet::HintWireDisposition::MISBEHAVE);
+
+    std::vector<unsigned char> too_short(1, 0);
+    BOOST_CHECK(modelnet::ClassifySendModelsWire(too_short) == modelnet::HintWireDisposition::MISBEHAVE);
+    BOOST_CHECK(modelnet::ClassifySendModelsWire({}) == modelnet::HintWireDisposition::MISBEHAVE);
+
+    std::vector<unsigned char> gp(modelnet::GETMDPEERS_BYTES, 0);
+    gp[16] = 8;
+    BOOST_CHECK(modelnet::ClassifyGetMdPeersWire(gp) == modelnet::HintWireDisposition::ACCEPT);
+    std::vector<unsigned char> gp_grown(18, 0);
+    BOOST_CHECK(modelnet::ClassifyGetMdPeersWire(gp_grown) == modelnet::HintWireDisposition::IGNORE);
+    std::vector<unsigned char> gp_short(16, 0);
+    BOOST_CHECK(modelnet::ClassifyGetMdPeersWire(gp_short) == modelnet::HintWireDisposition::IGNORE);
+
+    BOOST_CHECK(modelnet::ClassifyMdPeersWire({}) == modelnet::HintWireDisposition::ACCEPT);
+    std::vector<unsigned char> md_v3(8, 0);
+    WriteLE16(md_v3.data(), 3);
+    BOOST_CHECK(modelnet::ClassifyMdPeersWire(md_v3) == modelnet::HintWireDisposition::IGNORE);
+    std::vector<unsigned char> md_one(1, 0);
+    BOOST_CHECK(modelnet::ClassifyMdPeersWire(md_one) == modelnet::HintWireDisposition::MISBEHAVE);
+    std::vector<unsigned char> md_huge(modelnet::MAX_MDPEERS_BYTES + 1, 0);
+    BOOST_CHECK(modelnet::ClassifyMdPeersWire(md_huge) == modelnet::HintWireDisposition::MISBEHAVE);
+}
+
+BOOST_AUTO_TEST_CASE(mdpeers_parse_fail_closed)
+{
+    std::string err;
+    std::vector<modelnet::PublicEndpointHint> parsed;
+
+    BOOST_REQUIRE(modelnet::ParseMdPeers({}, parsed, err));
+    BOOST_CHECK(parsed.empty());
+
+    modelnet::PublicEndpointHint ep;
+    ep.addr_kind = modelnet::HINT_ADDR_IPV4;
+    ep.addr = {192, 0, 2, 10};
+    ep.port = 29447;
+    std::vector<unsigned char> wire;
+    BOOST_REQUIRE(modelnet::SerializeMdPeers({ep}, wire, err));
+    BOOST_CHECK(modelnet::ClassifyMdPeersWire(wire) == modelnet::HintWireDisposition::ACCEPT);
+    BOOST_REQUIRE(modelnet::ParseMdPeers(wire, parsed, err));
+    BOOST_REQUIRE_EQUAL(parsed.size(), 1U);
+    BOOST_CHECK_EQUAL(parsed[0].port, 29447);
+    BOOST_CHECK_EQUAL(parsed[0].addr_kind, modelnet::HINT_ADDR_IPV4);
+
+    std::vector<unsigned char> trunc = wire;
+    trunc.resize(3); // version + count=1, no body
+    BOOST_CHECK(modelnet::ClassifyMdPeersWire(trunc) == modelnet::HintWireDisposition::ACCEPT);
+    BOOST_CHECK(!modelnet::ParseMdPeers(trunc, parsed, err));
+
+    modelnet::PublicEndpointHint bad_kind;
+    bad_kind.addr_kind = 99;
+    bad_kind.addr = {1, 2, 3, 4};
+    bad_kind.port = 1;
+    BOOST_CHECK(!modelnet::PublicEndpointHintWellFormed(bad_kind, err));
+    BOOST_CHECK(!modelnet::SerializeMdPeers({bad_kind}, wire, err));
+
+    modelnet::PublicEndpointHint no_port;
+    no_port.addr_kind = modelnet::HINT_ADDR_IPV4;
+    no_port.addr = {192, 0, 2, 11};
+    no_port.port = 0;
+    BOOST_CHECK(!modelnet::PublicEndpointHintWellFormed(no_port, err));
+
+    std::string herr;
+    BOOST_CHECK(!modelnet::PublicHintWellFormed({}, "", herr));
+    BOOST_CHECK(modelnet::PublicHintWellFormed({}, "192.0.2.1:1", herr));
+    BOOST_CHECK(modelnet::PublicHintWellFormed(ep, "", herr));
+    BOOST_CHECK(modelnet::PublicHintWellFormed(ep, "192.0.2.1:1", herr));
+    BOOST_CHECK(modelnet::PublicHintWellFormed(ep, "198.51.100.1:1", herr));
 }
 
 BOOST_AUTO_TEST_CASE(disc_01_08_cpu_router_hidden_stale_sybil_fresh)

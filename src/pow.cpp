@@ -3195,17 +3195,14 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
     //   the new half-life applies prospectively instead of retroactively.
     const MatMulAsertHalfLifeInfo half_life_info = ResolveMatMulAsertHalfLifeInfo(pindexLast, params);
     const int32_t anchor_height = half_life_info.current_anchor_height;
-    // AUDIT D1 note (deliberate fail-OPEN, considered): an unresolvable ASERT anchor
-    // is a structural index breach, not a config breach -- unreachable on a valid
-    // full index (anchor_height is validated and always <= pindexLast->nHeight with
-    // its ancestor present). Unlike the config-validity fail-closed above, these two
-    // guards are also reachable from header-sync synthetic-window difficulty replay
-    // (MatMulRequiredSyntheticFloor keeps only a sparse anchor-ward window), where
-    // the lenient powLimit is retained on purpose: flipping it to the hardest target
-    // would change header-sync abort behaviour on min-difficulty networks. Left
-    // fail-open pending a dedicated header-sync-replay analysis (round-2 review, LOW).
+    // AUDIT D1 / P1.1: an unresolvable ASERT anchor is a structural index
+    // breach. Both the height-range check and a missing ancestor fail CLOSED
+    // to the hardest representable target. Header-sync synthetic windows that
+    // cannot name a real ancestor must not ease difficulty to powLimit.
     if (anchor_height < 0 || pindexLast->nHeight < anchor_height) {
-        return pow_limit.GetCompact();
+        // Same class of structural breach as a missing ancestor below: fail
+        // CLOSED to the hardest target. Returning powLimit here was fail-OPEN.
+        return MatMulAsertFailClosedBits();
     }
     const CBlockIndex* anchor = pindexLast->GetAncestor(anchor_height);
     if (anchor == nullptr) {

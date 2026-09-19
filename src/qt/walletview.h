@@ -53,7 +53,7 @@ private:
     ClientModel* clientModel{nullptr};
 
     //!
-    //! The wallet model represents a bitcoin wallet, and offers access to
+    //! The wallet model represents a BTX wallet, and offers access to
     //! the list of transactions, address book and sending functionality.
     //!
     WalletModel* const walletModel;

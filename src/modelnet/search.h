@@ -121,6 +121,9 @@ struct SearchFilters {
     std::string quantization;
     int64_t min_size_bytes{-1};
     int64_t max_size_bytes{-1};
+    int64_t min_parameters{-1};
+    int64_t max_parameters{-1};
+    std::string license;
     std::vector<std::string> language;
     std::vector<std::string> tags;
     bool public_only{false};
@@ -245,6 +248,8 @@ bool ParseSearchSort(const std::string& s, SearchSort& out);
 std::string NormalizeSearchText(const std::string& in);
 std::vector<std::string> TokenizeSearch(const std::string& in);
 bool ValidateSearchRecord(const ModelSearchRecord& r, std::string& err);
+/** True when a record carries publisher-authored fields, not just a catalog filename stub. */
+bool SearchRecordHasAuthoredMetadata(const ModelSearchRecord& r);
 std::vector<unsigned char> SearchRecordPreimageV1(const ModelSearchRecord& r);
 std::vector<unsigned char> SearchRecordPreimageV2(const ModelSearchRecord& r);
 std::vector<unsigned char> SearchRecordPreimage(const ModelSearchRecord& r);
@@ -282,6 +287,7 @@ public:
     bool Put(const ModelSearchRecord& r, int64_t now_ms, std::string& err);
     bool Tombstone(const Digest48& model_id, uint64_t seq, int64_t now_ms, std::string& err);
     const ModelSearchRecord* Get(const Digest48& model_id) const;
+    const ModelSearchRecord* FindByAlias(const std::string& alias) const;
     std::vector<ModelSearchRecord> List(int64_t updated_after, const std::string& cursor, int limit) const;
     std::vector<SearchHit> Search(const SearchQuery& q, int64_t now_ms) const;
     void Hide(const Digest48& model_id, bool on);
@@ -299,6 +305,8 @@ public:
     bool Load(const fs::path& path, int64_t now_ms, std::string& err);
     std::vector<ModelSearchRecord> All() const;
     void SetCap(size_t cap) { m_cap = cap; }
+    /** Drop records for a new helper dir. Index peers are kept. */
+    void Clear();
 };
 
 struct QueryDedupe {

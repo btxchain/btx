@@ -3,18 +3,30 @@
 # Isolated datadirs. Never production btxd.
 set -euo pipefail
 ROOT="${ROOT:-/home/administrator/btx-0.34.7-private}"
-BIN="${BIN:-$ROOT/build-gcc13/bin}"
+if [[ -n "${BIN:-}" && -d "${BIN}" && -x "${BIN}/btxd" ]]; then
+  :
+else
+  BIN="$ROOT/build-gcc13/bin"
+fi
 WORKDIR="${WORKDIR:-$ROOT/tmp-e2e-abc}"
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
 BTXD="$BIN/btxd"
 CLI="$BIN/btx-cli"
 MODELD="$BIN/btx-modeld"
-test -x "$BTXD" && test -x "$CLI" && test -x "$MODELD"
+[[ -x "$BTXD" ]] || { echo "e2e-hosting-abc: missing executable $BTXD (BIN=$BIN)" >&2; exit 1; }
+[[ -x "$CLI" ]] || { echo "e2e-hosting-abc: missing executable $CLI (BIN=$BIN)" >&2; exit 1; }
+[[ -x "$MODELD" ]] || { echo "e2e-hosting-abc: missing executable $MODELD (BIN=$BIN)" >&2; exit 1; }
+# Dedicated ports: never share 18443/18444 with the lab /var/lib/btxd node.
+PORT=37844
+RPC=37843
+cli() {
+  "$CLI" -regtest -datadir="$WORKDIR/c" -rpcport="$RPC" -rpcuser=u -rpcpassword=p "$@"
+}
 PA="" PB="" PC=""
 cleanup() {
   if [[ -n "${PC:-}" ]]; then
-    "$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p stop >/dev/null 2>&1 || true
+    cli stop >/dev/null 2>&1 || true
     sleep 0.5
     kill -TERM "$PC" 2>/dev/null || true
   fi
@@ -79,12 +91,12 @@ PY
 
 URI="$(cat "$WORKDIR/uri.txt")"
 # C: stock btxd, no model flags except isolated regtest
-"$BTXD" -regtest -datadir="$WORKDIR/c" -listen=0 -server=1 -rpcuser=u -rpcpassword=p \
-  -daemon=0 >"$WORKDIR/c-btxd.log" 2>&1 &
+"$BTXD" -regtest -datadir="$WORKDIR/c" -listen=0 -server=1 -port="$PORT" -rpcport="$RPC" \
+  -rpcuser=u -rpcpassword=p -daemon=0 >"$WORKDIR/c-btxd.log" 2>&1 &
 PC=$!
 ok=0
 for i in $(seq 1 80); do
-  if "$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p getblockchaininfo >/dev/null 2>&1; then
+  if cli getblockchaininfo >/dev/null 2>&1; then
     ok=1; break
   fi
   sleep 0.25
@@ -92,7 +104,7 @@ done
 test "$ok" = 1
 ready=0
 for i in $(seq 1 80); do
-  cinfo="$("$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p getmodelnetworkinfo)"
+  cinfo="$(cli getmodelnetworkinfo)"
   echo "$cinfo" | grep -q '"helper_state": "READY"' && ready=1 && break
   sleep 0.25
 done
@@ -101,16 +113,16 @@ echo "$cinfo"
 echo "$cinfo" | grep -q '"helper_managed_by_btxd": true'
 echo "$cinfo" | grep -q '"storage_mode": "AUTO"'
 echo "$cinfo" | grep -q '"automatic_spend_atoms": 0'
-"$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p addmodelnode "127.0.0.1:${PORTA}" >/dev/null
-"$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p addmodelnode "127.0.0.1:${PORTB}" >/dev/null
-got="$("$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p getmodel "$URI" FREE_ONLY)"
+cli addmodelnode "127.0.0.1:${PORTA}" >/dev/null
+cli addmodelnode "127.0.0.1:${PORTB}" >/dev/null
+got="$(cli getmodel "$URI" FREE_ONLY)"
 echo "$got"
-python3 - "$got" "$CLI" "$WORKDIR/c" "$URI" <<'PY'
+python3 - "$got" "$CLI" "$WORKDIR/c" "$URI" "$RPC" <<'PY'
 import json,sys,subprocess,time
 got=json.loads(sys.argv[1])
-cli, datadir, uri = sys.argv[2], sys.argv[3], sys.argv[4]
+cli, datadir, uri, rpcport = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 def rpc(*args):
-    out=subprocess.check_output([cli,"-regtest","-datadir="+datadir,"-rpcuser=u","-rpcpassword=p",*args], text=True)
+    out=subprocess.check_output([cli,"-regtest","-datadir="+datadir,"-rpcport="+rpcport,"-rpcuser=u","-rpcpassword=p",*args], text=True)
     return json.loads(out)
 if got.get("job_id"):
     for _ in range(60):
@@ -136,24 +148,24 @@ assert int(listed.get("local_count") or 0)>=1, listed
 rpc("pinmodel", uri)
 print("pin ok")
 PY
-"$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p stop >/dev/null
+cli stop >/dev/null
 sleep 2
 PC=""
-"$BTXD" -regtest -datadir="$WORKDIR/c" -listen=0 -server=1 -rpcuser=u -rpcpassword=p \
-  -daemon=0 >"$WORKDIR/c-btxd-2.log" 2>&1 &
+"$BTXD" -regtest -datadir="$WORKDIR/c" -listen=0 -server=1 -port="$PORT" -rpcport="$RPC" \
+  -rpcuser=u -rpcpassword=p -daemon=0 >"$WORKDIR/c-btxd-2.log" 2>&1 &
 PC=$!
 ok=0
 for i in $(seq 1 80); do
-  if "$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p getblockchaininfo >/dev/null 2>&1; then
+  if cli getblockchaininfo >/dev/null 2>&1; then
     ok=1; break
   fi
   sleep 0.25
 done
 test "$ok" = 1
-listed="$("$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p listmodels)"
+listed="$(cli listmodels)"
 echo "$listed"
 echo "$listed" | grep -q '"pinned": true'
-"$CLI" -regtest -datadir="$WORKDIR/c" -rpcuser=u -rpcpassword=p stop >/dev/null
+cli stop >/dev/null
 sleep 1
 PC=""
 echo "e2e-hosting-abc: PASS"

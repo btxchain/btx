@@ -1,0 +1,29 @@
+{
+  "schema_revision": "1.2",
+  "provider_id": "provider-a",
+  "created_at": "1789603200",
+  "asset_id": "asset-id-demo",
+  "asset_kind": "NATIVE_RESERVE",
+  "identifiers": [
+    {
+      "namespace": "namespace-demo",
+      "value": "value-demo",
+      "authority_ref": null
+    }
+  ],
+  "native_resource_refs": [
+    {
+      "object_type": "ProviderProfile",
+      "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "rights_ref": null,
+  "quantity_unit": "BTX_ATOM",
+  "financial_status": "FINANCIAL",
+  "record_authority_ref": {
+    "object_type": "ProviderProfile",
+    "body_id": "not-a-digest"
+  },
+  "effective_at": "1789603200",
+  "generation": "1"
+}

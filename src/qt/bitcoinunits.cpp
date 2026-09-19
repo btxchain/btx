@@ -40,8 +40,8 @@ QString BitcoinUnits::longName(Unit unit)
     switch (unit) {
     case Unit::BTC: return QString("BTX");
     case Unit::mBTC: return QString("mBTX");
-    case Unit::uBTC: return QString::fromUtf8("µBTX (bits)");
-    case Unit::SAT: return QString("Satoshi (sat)");
+    case Unit::uBTC: return QString::fromUtf8("µBTX");
+    case Unit::SAT: return QString("atom");
     case Unit::bTBC: return QString::fromUtf8("ᵇTBC");
     case Unit::sTBC: return QString::fromUtf8("ˢTBC");
     case Unit::TBC: return QString("TBC");
@@ -54,8 +54,8 @@ QString BitcoinUnits::shortName(Unit unit)
     switch (unit) {
     case Unit::BTC: return longName(unit);
     case Unit::mBTC: return longName(unit);
-    case Unit::uBTC: return QString("bits");
-    case Unit::SAT: return QString("sat");
+    case Unit::uBTC: return QString::fromUtf8("µBTX");
+    case Unit::SAT: return QString("atom");
     case Unit::bTBC: return QString::fromUtf8("ᵇTBC");
     case Unit::sTBC: return QString::fromUtf8("ˢTBC");
     case Unit::TBC: return QString("TBC");
@@ -68,11 +68,11 @@ QString BitcoinUnits::description(Unit unit)
     switch (unit) {
     case Unit::BTC: return QString("BTX (decimal)");
     case Unit::mBTC: return QString("Milli-BTX (1 / 1" THIN_SP_UTF8 "000)");
-    case Unit::uBTC: return QString("Micro-BTX (bits) (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
-    case Unit::SAT: return QString("Satoshi (sat) (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
-    case Unit::bTBC: return QString("Bong-Bitcoins (1,0000 tonal)");
-    case Unit::sTBC: return QString("San-Bitcoins (100 tonal)");
-    case Unit::TBC: return QString("Bitcoins (tonal)");
+    case Unit::uBTC: return QString("Micro-BTX (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    case Unit::SAT: return QString("atom (1 / 100" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    case Unit::bTBC: return QString("Bong-BTX (1,0000 tonal)");
+    case Unit::sTBC: return QString("San-BTX (100 tonal)");
+    case Unit::TBC: return QString("BTX (tonal)");
     } // no default case, so the compiler can warn about missing cases
     assert(false);
 }

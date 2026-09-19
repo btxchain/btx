@@ -1,0 +1,21 @@
+{
+  "id": "negative-invalid-p2mr-branch",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "base": "unsigned-package.json",
+  "note": "control[0] & P2MR_LEAF_MASK must be P2MR_LEAF_VERSION (194 / 0xc2). VerifyP2MRCommitment must bind the control block to the 32-byte witness v2 program. Native tests fill the committed leaf/program from derivation.json, then apply one of these mutations.",
+  "cases": [
+    {
+      "mutation": "wrong_leaf_version",
+      "wrong_leaf_version": 192,
+      "wrong_leaf_version_hex": "c0",
+      "wrong_control_block": "c0",
+      "note": "0xc0 is TAPROOT_LEAF_TAPSCRIPT, not P2MR_LEAF_VERSION. Interpreter returns SCRIPT_ERR_P2MR_WRONG_LEAF_VERSION."
+    },
+    {
+      "mutation": "control_block_not_committed",
+      "wrong_control_block": "c2ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "note": "Leaf version 0xc2 with a sibling hash that does not reproduce the 32-byte program. VerifyP2MRCommitment fails (SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH)."
+    }
+  ]
+}

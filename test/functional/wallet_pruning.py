@@ -131,22 +131,8 @@ class WalletPruningTest(BitcoinTestFramework):
 
         recent_birthheight = self.dump_birthheight(recent_dump)
         self.nodes[1].getblock(self.nodes[1].getblockhash(recent_birthheight))
-        self.nodes[1].importwallet(recent_dump)
-        assert self.nodes[1].getaddressinfo(recent_key.p2pkh_addr)["ismine"]
-
-        old_birthheight = self.dump_birthheight(old_dump)
-        assert_raises_rpc_error(
-            -1,
-            "Block not available (pruned data)",
-            self.nodes[1].getblock,
-            self.nodes[1].getblockhash(old_birthheight),
-        )
-        assert_raises_rpc_error(
-            -4,
-            "Pruned blocks",
-            self.nodes[1].importwallet,
-            old_dump,
-        )
+        assert_raises_rpc_error(-8, "importwallet is disabled", self.nodes[1].importwallet, recent_dump)
+        assert_raises_rpc_error(-8, "importwallet is disabled", self.nodes[1].importwallet, old_dump)
 
 
 if __name__ == '__main__':

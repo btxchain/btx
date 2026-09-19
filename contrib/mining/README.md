@@ -118,7 +118,7 @@ command:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.7 \
+  --release-tag v0.34.8-rc3 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --start-mining
@@ -139,7 +139,7 @@ For scripts that need to inspect or modify the generated handoff instead, omit
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.7 \
+  --release-tag v0.34.8-rc3 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

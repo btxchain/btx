@@ -10,7 +10,7 @@
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
 
-#include <common/signmessage.h> // For MessageSign(), MessageVerify()
+#include <common/signmessage.h> // For MessageVerify()
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 #include <key_io.h>
 #include <wallet/wallet.h>
@@ -107,7 +107,8 @@ void SignVerifyMessageDialog::on_addressBookButton_SM_clicked()
 {
     if (model && model->getAddressTableModel())
     {
-        model->refresh(/*pk_hash_only=*/true);
+        // Do not refresh(pk_hash_only=true): that selects classical P2PKH
+        // addresses. P2MR (and any other wallet address) must remain visible.
         AddressBookPage dlg(platformStyle, AddressBookPage::ForSelection, AddressBookPage::ReceivingTab, this);
         dlg.setModel(model->getAddressTableModel());
         if (dlg.exec())
@@ -136,10 +137,10 @@ void SignVerifyMessageDialog::on_signMessageButton_SM_clicked()
         ui->statusLabel_SM->setText(tr("The entered address is invalid.") + QString(" ") + tr("Please check the address and try again."));
         return;
     }
-    MessageSignatureFormat sig_format{MessageSignatureFormat::LEGACY};
-    const PKHash* pkhash = std::get_if<PKHash>(&destination);
-    if (!pkhash) {
-        sig_format = MessageSignatureFormat::SIMPLE;
+    if (!std::holds_alternative<WitnessV2P2MR>(destination)) {
+        ui->statusLabel_SM->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(m_theme_colors->warning.name()));
+        ui->statusLabel_SM->setText(tr("The entered address is not a P2MR address.") + QString(" ") + tr("BTX only signs messages with post-quantum P2MR addresses; legacy P2PKH/P2WPKH is disabled."));
+        return;
     }
 
     WalletModel::UnlockContext ctx(model->requestUnlock());
@@ -152,7 +153,7 @@ void SignVerifyMessageDialog::on_signMessageButton_SM_clicked()
 
     const std::string& message = ui->messageIn_SM->document()->toPlainText().toStdString();
     std::string signature;
-    SigningResult res = model->wallet().signMessage(sig_format, message, destination, signature);
+    SigningResult res = model->wallet().signMessage(MessageSignatureFormat::SIMPLE, message, destination, signature);
 
     QString error;
     switch (res) {

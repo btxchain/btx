@@ -22,7 +22,7 @@ namespace modelnet {
 constexpr int64_t PROVIDER_TTL_MS = 60 * 60 * 1000;
 constexpr size_t PROVIDER_MAX_ENDPOINTS = 8;
 constexpr size_t PROVIDER_MAX_RANGES = 32;
-constexpr size_t ROUTE_BUCKETS = 48;
+constexpr size_t ROUTE_BUCKETS = Digest48::SIZE * 8; // 384 bit-prefix buckets, not 48 byte buckets
 constexpr size_t ROUTE_K = 8;
 constexpr int ROUTE_NETGROUP_CAP = 2;
 constexpr int LOOKUP_MAX_QUERIES = 16;
@@ -71,6 +71,9 @@ public:
     UniValue StatusJson() const;
     std::vector<RouteContact> PersistSubset() const;
 };
+
+/** Leading XOR bit (0 = MSB of byte 0). Distinct from first differing byte. */
+int RoutingBucketIndex(const Digest48& self, const Digest48& other);
 
 class ProviderCache {
     std::map<std::string, std::vector<ProviderRecord>> m_by_resource;

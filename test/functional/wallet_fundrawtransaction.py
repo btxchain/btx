@@ -446,7 +446,10 @@ class RawTransactionsTest(BitcoinTestFramework):
         watchonly_address = self.nodes[0].getnewaddress()
         watchonly_pubkey = self.nodes[0].getaddressinfo(watchonly_address)["pubkey"]
         self.watchonly_amount = Decimal(200)
-        wwatch.importpubkey(watchonly_pubkey, "", True)
+        if self.options.descriptors:
+            wwatch.importpubkey(watchonly_pubkey, "", True)
+        else:
+            assert_raises_rpc_error(-8, "importpubkey is disabled", wwatch.importpubkey, watchonly_pubkey, "", True)
         self.watchonly_utxo = self.create_outpoints(self.nodes[0], outputs=[{watchonly_address: self.watchonly_amount}])[0]
 
         # Lock UTXO so nodes[0] doesn't accidentally spend it
@@ -873,7 +876,7 @@ class RawTransactionsTest(BitcoinTestFramework):
             ]
         )['address']
         if not self.options.descriptors:
-            wmulti.importaddress(mSigObj)
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", wmulti.importaddress, mSigObj)
 
         # Send 1.2 BTC to msig addr.
         self.nodes[0].sendtoaddress(mSigObj, 1.2)

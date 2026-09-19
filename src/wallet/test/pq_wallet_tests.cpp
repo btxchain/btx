@@ -12,6 +12,9 @@
 #include <outputtype.h>
 #include <pqkey.h>
 #include <psbt.h>
+#include <rpc/request.h>
+#include <rpc/server.h>
+#include <rpc/util.h>
 #include <script/descriptor.h>
 #include <script/interpreter.h>
 #include <script/pqm.h>
@@ -19,10 +22,15 @@
 #include <script/sign.h>
 #include <script/solver.h>
 #include <shielded/smile2/ct_proof.h>
+#include <sync.h>
 #include <test/util/shielded_v2_egress_fixture.h>
 #include <test/util/setup_common.h>
 #include <tinyformat.h>
+#include <univalue.h>
+#include <uint256.h>
 #include <util/strencodings.h>
+#include <wallet/context.h>
+#include <wallet/rpc/wallet.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/coincontrol.h>
@@ -37,8 +45,12 @@
 #include <cstdlib>
 #include <map>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace wallet {
+RPCHelpMan gethdkeys();
+UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys = {}) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 namespace {
 
 static constexpr int64_t P2MR_TEST_RANGE_END{2};
@@ -122,14 +134,30 @@ std::shared_ptr<CWallet> CreateP2MRDescriptorWalletFromStrings(const WalletTesti
     return wallet;
 }
 
-std::shared_ptr<CWallet> CreateP2MRDescriptorWallet(const WalletTestingSetup& setup)
+std::shared_ptr<CWallet> CreateP2MRDescriptorWallet(const WalletTestingSetup& setup, bool include_internal = true)
 {
     const auto seed = MakePQSeed(0x01);
     WalletDescriptor receive = MakeRangedDescriptor(seed, /*internal=*/false);
-    WalletDescriptor change = MakeRangedDescriptor(seed, /*internal=*/true);
     std::string receive_desc_priv;
-    std::string change_desc_priv;
     BOOST_REQUIRE(receive.descriptor->ToPrivateString(DUMMY_SIGNING_PROVIDER, receive_desc_priv));
+    if (!include_internal) {
+        auto wallet = std::make_shared<CWallet>(setup.m_node.chain.get(), "", CreateMockableWalletDatabase());
+        LOCK(wallet->cs_wallet);
+        wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet->m_keypool_size = P2MR_TEST_RANGE_END;
+
+        FlatSigningProvider receive_keys;
+        std::string receive_error;
+        auto receive_parsed = Parse(receive_desc_priv, receive_keys, receive_error, /*require_checksum=*/true);
+        BOOST_REQUIRE_MESSAGE(!receive_parsed.empty(), "receive descriptor parse failed: " + receive_error);
+        WalletDescriptor receive_desc{std::move(receive_parsed[0]), static_cast<uint64_t>(GetTime()), /*range_start=*/0, /*range_end=*/P2MR_TEST_RANGE_END, /*next_index=*/0};
+        ScriptPubKeyMan* receive_spkm = wallet->AddWalletDescriptor(receive_desc, receive_keys, "", /*internal=*/false);
+        BOOST_REQUIRE(receive_spkm);
+        wallet->AddActiveScriptPubKeyMan(receive_spkm->GetID(), OutputType::P2MR, /*internal=*/false);
+        return wallet;
+    }
+    WalletDescriptor change = MakeRangedDescriptor(seed, /*internal=*/true);
+    std::string change_desc_priv;
     BOOST_REQUIRE(change.descriptor->ToPrivateString(DUMMY_SIGNING_PROVIDER, change_desc_priv));
     return CreateP2MRDescriptorWalletFromStrings(
         setup,
@@ -1097,10 +1125,22 @@ BOOST_AUTO_TEST_CASE(pq_native_generate_descriptor)
     BOOST_CHECK(desc_str.find("pqhd(") != std::string::npos);
     BOOST_CHECK(desc_str.find("mr(") != std::string::npos);
     BOOST_CHECK(desc_str.find("pk_slh(") != std::string::npos);
+    BOOST_CHECK(desc_str.find("pqhd([") != std::string::npos);
+    BOOST_CHECK(desc_str.find("87h") != std::string::npos);
+
+    const std::string compat_str = w_desc.descriptor->ToString(/*compat_format=*/true);
+    BOOST_CHECK(compat_str.find("pqhd(") != std::string::npos);
+    BOOST_CHECK(compat_str.find("pqhd([") == std::string::npos);
 
     // Seed must NOT appear in public form
     std::string seed_hex = HexStr(pq_seed);
     BOOST_CHECK(desc_str.find(seed_hex) == std::string::npos);
+
+    FlatSigningProvider roundtrip_keys;
+    std::string roundtrip_error;
+    auto roundtrip = Parse(desc_str, roundtrip_keys, roundtrip_error, /*require_checksum=*/true);
+    BOOST_REQUIRE_MESSAGE(!roundtrip.empty(), "public pqhd origin form failed to re-parse: " + roundtrip_error);
+    BOOST_CHECK_EQUAL(roundtrip[0]->ToString(), desc_str);
 
     // Internal descriptor should be different
     auto w_desc_int = GeneratePQWalletDescriptor(pq_seed, /*internal=*/true);
@@ -1535,6 +1575,145 @@ BOOST_AUTO_TEST_CASE(extract_all_pq_seeds_deduplicates_by_fingerprint)
     // Same seed used for all 3 keys → should be deduplicated to 1 entry.
     BOOST_CHECK_EQUAL(all_seeds.size(), 1U);
     BOOST_CHECK(all_seeds[0].second == seed);
+}
+
+JSONRPCRequest WalletRpc(WalletContext& context, UniValue params = UniValue(UniValue::VARR))
+{
+    JSONRPCRequest req;
+    req.context = &context;
+    req.m_wallet_restriction = "";
+    req.params = std::move(params);
+    return req;
+}
+
+UniValue CallWalletCommand(const std::string& name, const JSONRPCRequest& req)
+{
+    for (const CRPCCommand& cmd : GetWalletRPCCommands()) {
+        if (cmd.name == name) {
+            UniValue result;
+            BOOST_REQUIRE(cmd.actor(req, result, /*last_handler=*/true));
+            return result;
+        }
+    }
+    BOOST_FAIL("wallet RPC " + name + " is not registered");
+    return UniValue::VNULL;
+}
+
+BOOST_AUTO_TEST_CASE(gethdkeys_and_createwalletdescriptor_p2mr)
+{
+    const std::shared_ptr<CWallet> wallet = CreateP2MRDescriptorWallet(*this, /*include_internal=*/false);
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    AddWallet(context, wallet);
+
+    const UniValue keys = gethdkeys().HandleRequest(WalletRpc(context));
+    BOOST_REQUIRE(keys.isArray());
+    BOOST_REQUIRE_MESSAGE(keys.size() >= 1, "fresh P2MR wallet gethdkeys must not be empty");
+    BOOST_CHECK(keys[0].exists("fingerprint"));
+    BOOST_CHECK(keys[0].exists("pq_seed_id"));
+    BOOST_CHECK(!keys[0].exists("xpub"));
+    BOOST_CHECK_EQUAL(keys[0]["fingerprint"].get_str().size(), 8U);
+    BOOST_CHECK_EQUAL(keys[0]["pq_seed_id"].get_str(), "pqhd/" + keys[0]["fingerprint"].get_str());
+    BOOST_CHECK(keys[0]["has_private"].get_bool());
+    BOOST_REQUIRE(keys[0]["descriptors"].isArray());
+    BOOST_CHECK_GE(keys[0]["descriptors"].size(), 1U);
+
+    UniValue params(UniValue::VARR);
+    params.push_back("p2mr");
+    UniValue options(UniValue::VOBJ);
+    options.pushKV("internal", true);
+    options.pushKV("hdkey", keys[0]["pq_seed_id"].get_str());
+    params.push_back(options);
+
+    const UniValue created = CallWalletCommand("createwalletdescriptor", WalletRpc(context, params));
+    BOOST_REQUIRE(created.exists("descs"));
+    BOOST_REQUIRE(created["descs"].isArray());
+    BOOST_REQUIRE_EQUAL(created["descs"].size(), 1U);
+    BOOST_CHECK(created["descs"][0].get_str().find("pqhd(") != std::string::npos);
+    BOOST_CHECK(created["descs"][0].get_str().find("pqhd([") != std::string::npos);
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_CHECK(wallet->GetScriptPubKeyMan(OutputType::P2MR, /*internal=*/true) != nullptr);
+    }
+
+    bool already_exists{false};
+    try {
+        UniValue again_params(UniValue::VARR);
+        again_params.push_back("p2mr");
+        UniValue again_opts(UniValue::VOBJ);
+        again_opts.pushKV("hdkey", keys[0]["fingerprint"].get_str());
+        again_params.push_back(again_opts);
+        CallWalletCommand("createwalletdescriptor", WalletRpc(context, again_params));
+    } catch (const UniValue& err) {
+        already_exists = err.write().find("Descriptor already exists") != std::string::npos;
+    }
+    BOOST_CHECK_MESSAGE(already_exists, "createwalletdescriptor must accept the gethdkeys fingerprint after the descriptor exists");
+
+    RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
+}
+
+BOOST_AUTO_TEST_CASE(importdescriptors_rejects_wpkh_on_enforcing_chain)
+{
+    BOOST_REQUIRE(Params().GetConsensus().fEnforceP2MROnlyOutputs);
+
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    {
+        LOCK(wallet->cs_wallet);
+        wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+
+        const auto expect_pq_reject = [&](const std::string& desc) {
+            UniValue data(UniValue::VOBJ);
+            data.pushKV("desc", AddChecksum(desc));
+            const UniValue result = ProcessDescriptorImport(*wallet, data, /*timestamp=*/1);
+            BOOST_CHECK_MESSAGE(!result["success"].get_bool(), "expected fail-closed import for " + desc);
+            BOOST_REQUIRE(result.exists("error"));
+            const std::string message = result["error"]["message"].get_str();
+            BOOST_CHECK_MESSAGE(message.find("BTX PQ policy") != std::string::npos, message);
+            BOOST_CHECK_MESSAGE(message.find("P2MR") != std::string::npos, message);
+            BOOST_CHECK(!result.exists("warnings"));
+        };
+
+        expect_pq_reject("wpkh(02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9)");
+        expect_pq_reject("pkh(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5)");
+        expect_pq_reject("sh(wpkh(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556))");
+        expect_pq_reject("pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+        expect_pq_reject("tr(50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0)");
+
+        BOOST_CHECK(wallet->GetScriptPubKeyMan(OutputType::BECH32, /*internal=*/false) == nullptr);
+        BOOST_CHECK(wallet->GetScriptPubKeyMan(OutputType::LEGACY, /*internal=*/false) == nullptr);
+        BOOST_CHECK(wallet->GetScriptPubKeyMan(OutputType::BECH32M, /*internal=*/false) == nullptr);
+
+        UniValue p2mr_addr(UniValue::VOBJ);
+        p2mr_addr.pushKV("desc", AddChecksum("addr(" + EncodeDestination(WitnessV2P2MR{uint256{1}}) + ")"));
+        const UniValue p2mr_result = ProcessDescriptorImport(*wallet, p2mr_addr, /*timestamp=*/1);
+        BOOST_CHECK(p2mr_result["success"].get_bool());
+    }
+
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    AddWallet(context, wallet);
+
+    UniValue import_req(UniValue::VOBJ);
+    import_req.pushKV("scriptPubKey", "76a914011111111111111111111111111111111111111188ac");
+    import_req.pushKV("timestamp", "now");
+    UniValue requests(UniValue::VARR);
+    requests.push_back(import_req);
+    UniValue params(UniValue::VARR);
+    params.push_back(requests);
+
+    bool importmulti_rejected{false};
+    try {
+        CallWalletCommand("importmulti", WalletRpc(context, params));
+    } catch (const UniValue& err) {
+        const std::string message = err["message"].get_str();
+        importmulti_rejected = message.find("BTX PQ policy") != std::string::npos &&
+                               message.find("importmulti is disabled") != std::string::npos;
+    }
+    BOOST_CHECK(importmulti_rejected);
+
+    RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -32,7 +32,9 @@ from test_framework.script import (
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
+    assert_raises_rpc_error,
 )
+from test_framework.wallet import MiniWallet, MiniWalletMode
 
 class MempoolWtxidTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -60,8 +62,17 @@ class MempoolWtxidTest(BitcoinTestFramework):
         parent.rehash()
 
         privkeys = [node.get_deterministic_priv_key().key]
-        raw_parent = node.signrawtransactionwithkey(hexstring=parent.serialize().hex(), privkeys=privkeys)['hex']
-        parent_txid = node.sendrawtransaction(hexstring=raw_parent, maxfeerate=0)
+        assert_raises_rpc_error(
+            -8,
+            "signrawtransactionwithkey is disabled",
+            node.signrawtransactionwithkey,
+            hexstring=parent.serialize().hex(),
+            privkeys=privkeys,
+        )
+        wallet = MiniWallet(node, mode=MiniWalletMode.RAW_P2PKH)
+        self.generate(wallet, 1)
+        funded = wallet.send_to(from_node=node, scriptPubKey=script_pubkey, amount=int(9.99998 * COIN))
+        parent_txid = funded["txid"]
         self.generate(node, 1)
 
         peer_wtxid_relay = node.add_p2p_connection(P2PTxInvStore())

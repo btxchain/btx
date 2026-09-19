@@ -1,0 +1,140 @@
+requirement_id,native_symbol,test_id,boost_case,source_file,evidence_tier,live_gap
+HCP/1 envelope,HcpBodyId/HcpSign/HcpVerify,HCP-FRM-01,hcp_frm_01_canonical_statement_round_trip,src/test/modelnet_hcp_frm_tests.cpp,NATIVE_UNIT,
+BTX-PJSON1,DecodePjson1,HCP-FRM-02,hcp_frm_02_parser_differential_rejection,src/test/modelnet_hcp_frm_tests.cpp,NATIVE_UNIT,third-parser process NOT_RUN
+Domain separation,HcpDomain,HCP-FRM-03,hcp_frm_03_domain_separation,src/test/modelnet_hcp_frm_tests.cpp,NATIVE_UNIT,
+No auto-enroll,PreviewProvider,HCP-FRM-04,hcp_frm_04_unknown_provider_self_signature,src/test/modelnet_hcp_frm_tests.cpp,NATIVE_UNIT,
+Key rotation,RotateOperationalKey,HCP-FRM-05,hcp_frm_05_operational_key_rotation,src/test/modelnet_hcp_frm_tests.cpp,NATIVE_UNIT,
+Origin rebinding,FetchUrl,HCP-FRM-06,hcp_frm_06_origin_rebinding,src/test/modelnet_hcp_frm_tests.cpp,NATIVE_UNIT,live HTTP redirect NOT_RUN
+Body bounds,max_body_bytes,HCP-FRM-07,hcp_frm_07_size_and_structural_bounds,src/test/modelnet_hcp_frm_tests.cpp,NATIVE_UNIT,
+Role separation,HcpVerify,HCP-FRM-08,hcp_frm_08_role_separation_across_signatures,src/test/modelnet_hcp_frm_tests.cpp,NATIVE_UNIT,
+PKCE,LabAuthorize/LabToken,HCP-AUTH-01,hcp_auth_01_authorization_code_pkce,src/test/modelnet_hcp_auth_tests.cpp,OAUTH_LAB,live CEX IdP NOT_RUN
+DPoP,LabDpop,HCP-AUTH-02,hcp_auth_02_sender_constrained_token_theft,src/test/modelnet_hcp_auth_tests.cpp,OAUTH_LAB,live CEX IdP NOT_RUN
+Audience,LabToken audience,HCP-AUTH-03,hcp_auth_03_audience_enforcement,src/test/modelnet_hcp_auth_tests.cpp,OAUTH_LAB,live CEX IdP NOT_RUN
+Scope,Handle 401,HCP-AUTH-04,hcp_auth_04_scope_escalation,src/test/modelnet_hcp_auth_tests.cpp,OAUTH_LAB,live CEX IdP NOT_RUN
+Tenant isolation,404 no leak,HCP-AUTH-05,hcp_auth_05_tenant_object_isolation,src/test/modelnet_hcp_auth_tests.cpp,OAUTH_LAB,live CEX IdP NOT_RUN
+DPoP not approval,INTENT_DIGEST,HCP-AUTH-06,hcp_auth_06_dpop_is_not_body_approval,src/test/modelnet_hcp_auth_tests.cpp,OAUTH_LAB,live CEX IdP NOT_RUN
+Revoke refresh,LabRevokeRefresh,HCP-AUTH-07,hcp_auth_07_refresh_and_revocation,src/test/modelnet_hcp_auth_tests.cpp,OAUTH_LAB,live CEX IdP NOT_RUN
+Secret sweep,ExportPublic,HCP-AUTH-08,hcp_auth_08_secret_leakage_sweep,src/test/modelnet_hcp_auth_tests.cpp,NATIVE_UNIT,
+Local grant required,AcceptHandoff,HCP-GRANT-01,hcp_grant_01_handoff_without_local_grant,src/test/modelnet_hcp_grant_tests.cpp,NATIVE_UNIT,
+Finite first-use,EnsureLocal,HCP-GRANT-02,hcp_grant_02_finite_first_use_convenience,src/test/modelnet_hcp_grant_tests.cpp,NATIVE_UNIT,
+Hosted policy != grant,HCP_ERR_POLICY_FINANCE,HCP-GRANT-03,hcp_grant_03_financial_policy_cannot_launch,src/test/modelnet_hcp_grant_tests.cpp,NATIVE_UNIT,
+Grant cannot spend,local_grant_id,HCP-GRANT-04,hcp_grant_04_local_grant_cannot_spend,src/test/modelnet_hcp_grant_tests.cpp,NATIVE_UNIT,live ledger NOT_RUN
+Revocation race,RevokeLocalGrant,HCP-GRANT-05,hcp_grant_05_revocation_race,src/test/modelnet_hcp_grant_tests.cpp,NATIVE_UNIT,concurrent workers NOT_RUN
+Resource ceilings,EnsureLocal,HCP-GRANT-06,hcp_grant_06_resource_ceilings,src/test/modelnet_hcp_grant_tests.cpp,NATIVE_UNIT,dual-job host ceiling NOT_RUN
+Future issuer scope,SignAsProvider publisher-q,HCP-GRANT-07,hcp_grant_07_future_issuer_scope,src/test/modelnet_hcp_grant_tests.cpp,NATIVE_UNIT,
+Deadline does not relax,PlanLocal,HCP-GRANT-08,hcp_grant_08_deadline_does_not_relax_policy,src/test/modelnet_hcp_grant_tests.cpp,NATIVE_UNIT,
+Exact package preservation,GET /packages,HCP-DISC-01,hcp_disc_01_exact_package_preservation,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Curation versus truth,PutOffer sponsored,HCP-DISC-02,hcp_disc_02_curation_versus_truth,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+No invented capacity,unknown stays unknown,HCP-DISC-03,hcp_disc_03_no_invented_capacity,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Catalogue caching isolation,no-store private,HCP-DISC-04,hcp_disc_04_catalogue_caching_isolation,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,shared HTTP cache NOT_RUN
+Bounded NL input,query as data,HCP-DISC-05,hcp_disc_05_bounded_natural_language_input,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Economic freshness,dated observation,HCP-DISC-06,hcp_disc_06_economic_freshness,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,live chain economy NOT_RUN
+Capability equivalence,recipe contract,HCP-DISC-07,hcp_disc_07_capability_equivalence_guard,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Independent provider alternative,SwitchProvider,HCP-DISC-08,hcp_disc_08_independent_provider_alternative,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,live provider B NOT_RUN
+Device and nonce binding,AcceptHandoff,HCP-HAND-01,hcp_hand_01_device_and_nonce_binding,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Expiry and clock,clock fixtures,HCP-HAND-02,hcp_hand_02_expiry_and_clock_policy,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Package substitution,PACKAGE_MISMATCH,HCP-HAND-03,hcp_hand_03_package_substitution,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Durable duplicate handoff,idempotent AcceptHandoff,HCP-HAND-04,hcp_hand_04_durable_duplicate_handoff,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,client restart process NOT_RUN
+Malicious instruction fields,FORBIDDEN_FIELD,HCP-HAND-05,hcp_hand_05_malicious_instruction_fields,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Free path,walletless AcceptHandoff,HCP-HAND-06,hcp_hand_06_free_path,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Optional reporting,SetReporting,HCP-HAND-07,hcp_hand_07_optional_reporting,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Provider disconnect,DisconnectProvider,HCP-HAND-08,hcp_hand_08_provider_disconnect,src/test/modelnet_hcp_disc_hand_tests.cpp,NATIVE_UNIT,
+Resident base reuse,PlanLocal PutResidentBase,HCP-LOCAL-01,hcp_local_01_resident_base_reuse,src/test/modelnet_hcp_local_tests.cpp,NATIVE_UNIT,real LAN bytes NOT_RUN
+Faster path not fixed rank,PlanLocal LAN,HCP-LOCAL-02,hcp_local_02_faster_path_not_fixed_rank,src/test/modelnet_hcp_local_tests.cpp,NATIVE_UNIT,
+Runtime trust,HCP_ERR_SOFTWARE_TRUST,HCP-LOCAL-03,hcp_local_03_runtime_trust,src/test/modelnet_hcp_local_tests.cpp,NATIVE_UNIT,
+Sparse missing extent,UNVERIFIED_RANGE,HCP-LOCAL-04,hcp_local_04_sparse_missing_extent,src/test/modelnet_hcp_local_tests.cpp,NATIVE_UNIT,
+Readiness distinction,runtime_ready false,HCP-LOCAL-05,hcp_local_05_readiness_distinction,src/test/modelnet_hcp_local_tests.cpp,NATIVE_UNIT,
+Cancel under DMA,LEASE_FENCE FenceDma,HCP-LOCAL-06,hcp_local_06_cancel_under_dma,src/test/modelnet_hcp_local_tests.cpp,NATIVE_UNIT,live CUDA DMA NOT_RUN
+Private state containment,ExportPublic,HCP-LOCAL-07,hcp_local_07_private_state_containment,src/test/modelnet_hcp_local_tests.cpp,NATIVE_UNIT,
+No remote inference,remote_inference false,HCP-LOCAL-08,hcp_local_08_no_remote_inference_shortcut,src/test/modelnet_hcp_local_tests.cpp,NATIVE_UNIT,
+Native key capability,HCP_CUSTODY_EVM_GENERIC,HCP-CUST-01,hcp_cust_01_native_key_capability,src/test/modelnet_hcp_cust_intent_tests.cpp,CUSTODY_LAB,live HSM NOT_RUN
+Frozen script validation,submit terms mismatch,HCP-CUST-02,hcp_cust_02_frozen_script_validation,src/test/modelnet_hcp_cust_intent_tests.cpp,CUSTODY_LAB,live HSM NOT_RUN
+Customer lot attribution,AttributeOutput,HCP-CUST-03,hcp_cust_03_customer_lot_attribution,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,
+No synthetic council seats,Statements,HCP-CUST-04,hcp_cust_04_no_synthetic_council_seats,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,
+Signer timeout ambiguity,ForceBroadcastUnknown,HCP-CUST-05,hcp_cust_05_signer_timeout_ambiguity,src/test/modelnet_hcp_cust_intent_tests.cpp,CUSTODY_LAB,live HSM NOT_RUN
+Recovery drill,Persist/Restore,HCP-CUST-06,hcp_cust_06_recovery_drill,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,live HSM backup NOT_RUN
+Watch-only export honesty,ExportPublic self_custody,HCP-CUST-07,hcp_cust_07_watch_only_export_honesty,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,
+Signer network isolation,/rpc 404 HCP_ERR_GENERIC_RPC,HCP-CUST-08,hcp_cust_08_signer_network_isolation,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,
+Idempotent creation,client_operation_id,HCP-INTENT-01,hcp_intent_01_idempotent_creation,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,multi-replica DB NOT_RUN
+Authorization binds intent,expected digest,HCP-INTENT-02,hcp_intent_02_authorization_binds_intent,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,
+Expired quote,QUOTE_EXPIRED,HCP-INTENT-03,hcp_intent_03_expired_quote,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,
+Terms change,TERMS_CHANGED,HCP-INTENT-04,hcp_intent_04_terms_change,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,
+Crash before broadcast,signed bytes persist,HCP-INTENT-05,hcp_intent_05_crash_before_broadcast,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,process kill NOT_RUN
+Crash after broadcast,BROADCAST_UNKNOWN,HCP-INTENT-06,hcp_intent_06_crash_after_broadcast,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,replica restart NOT_RUN
+Cancel boundary,cancel unsigned vs unknown,HCP-INTENT-07,hcp_intent_07_cancel_boundary,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,
+Conversion partial success,CompleteConversion,HCP-INTENT-08,hcp_intent_08_conversion_partial_success,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,live conversion NOT_RUN
+Concurrent funds reservation,threaded Handle,HCP-LEDGER-01,hcp_ledger_01_concurrent_funds_reservation,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,partner ledger NOT_RUN
+Principal versus fees,principal_in_native_sum,HCP-LEDGER-02,hcp_ledger_02_principal_versus_fees,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,partner ledger NOT_RUN
+Lifetime limit,lifetime_principal_atoms,HCP-LEDGER-03,hcp_ledger_03_lifetime_limit,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,
+Overlapping batch outputs,AttributeOutput,HCP-LEDGER-04,hcp_ledger_04_overlapping_batch_outputs,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,
+Native money bounds,MoneyRange,HCP-LEDGER-05,hcp_ledger_05_native_money_bounds,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,
+Fee change,fee cap,HCP-LEDGER-06,hcp_ledger_06_fee_change,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,
+Reservation persistence,persist hold,HCP-LEDGER-07,hcp_ledger_07_reservation_persistence,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,crash-restore DB NOT_RUN
+Statements,Statements,HCP-LEDGER-08,hcp_ledger_08_statements,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,
+202 is not settlement,HTTP 202 funded false,HCP-CHAIN-01,hcp_chain_01_202_is_not_settlement,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,
+Confirmation policy,SetNativeConfirmations,HCP-CHAIN-02,hcp_chain_02_confirmation_policy,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,regtest observer process NOT_RUN
+Reorg correction,InjectReorg,HCP-CHAIN-03,hcp_chain_03_reorg_correction,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,controllable reorg network NOT_RUN
+Disclosed secret survives reorg,DiscloseSecret,HCP-CHAIN-04,hcp_chain_04_disclosed_secret_survives_reorg,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,
+Observer outage,SetObserverAvailable,HCP-CHAIN-05,hcp_chain_05_observer_outage,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,
+Verifier disagreement,HOSTED_ATTESTED,HCP-CHAIN-06,hcp_chain_06_verifier_disagreement,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,independent verifier process NOT_RUN
+Refund conditions,SetRefundHeight,HCP-CHAIN-07,hcp_chain_07_refund_conditions,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,native refund tx NOT_RUN
+Receipt authority label,ReceiptAuthorityLabel,HCP-CHAIN-08,hcp_chain_08_receipt_authority_label,src/test/modelnet_hcp_ledger_chain_tests.cpp,NATIVE_UNIT,
+At-least-once duplicate,DeliverEventDuplicates,HCP-EVENT-01,hcp_event_01_at_least_once_duplicate,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,SSE client restart NOT_RUN
+Cursor retention,HCP_ERR_CURSOR_TOO_OLD,HCP-EVENT-02,hcp_event_02_cursor_retention,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,
+Account cursor binding,account_ref,HCP-EVENT-03,hcp_event_03_account_cursor_binding,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,
+Future subscription race,business key,HCP-EVENT-04,hcp_event_04_future_subscription_race,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,many workers NOT_RUN
+Catalogue restore,RestoreCatalogueIndex,HCP-EVENT-05,hcp_event_05_catalogue_restore,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,
+Outbox crash,CrashOutbox RecoverOutbox,HCP-EVENT-06,hcp_event_06_outbox_crash,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,process crash NOT_RUN
+Webhook SSRF,WEBHOOK_SSRF,HCP-EVENT-07,hcp_event_07_webhook_ssrf,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,DNS rebinding NOT_RUN
+Revoked subscription,revoke,HCP-EVENT-08,hcp_event_08_revoked_subscription,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,
+Pair exact device,POST /devices/enroll,HCP-FLEET-01,hcp_fleet_01_pair_exact_device,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,real browser NOT_RUN
+No ambient localhost API,no ambient privileged route,HCP-FLEET-02,hcp_fleet_02_no_ambient_localhost_api,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,malicious web page NOT_RUN
+Outbound-only handoff,outbound session,HCP-FLEET-03,hcp_fleet_03_outbound_only_handoff,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,NAT device NOT_RUN
+Device revocation,revokeDevice,HCP-FLEET-04,hcp_fleet_04_device_revocation,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,
+Cross-device replay,device/nonce,HCP-FLEET-05,hcp_fleet_05_cross_device_replay,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,
+Coarse progress,reportReadiness,HCP-FLEET-06,hcp_fleet_06_coarse_progress,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,portal UI NOT_RUN
+CEX cannot administer local grant,hosted credential insufficient,HCP-FLEET-07,hcp_fleet_07_cex_cannot_administer_local_grant,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,
+Mixed platform fleet,two recipes,HCP-FLEET-08,hcp_fleet_08_mixed_platform_fleet,src/test/modelnet_hcp_event_fleet_tests.cpp,NATIVE_UNIT,two real OSes NOT_RUN
+Prompts stay local,TrafficCapture,HCP-PRIV-01,hcp_priv_01_prompts_stay_local,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,NIC packet capture NOT_RUN
+Inventory off by default,inventory_reported,HCP-PRIV-02,hcp_priv_02_inventory_off_by_default,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Private URL redaction,ExportPublic,HCP-PRIV-03,hcp_priv_03_private_url_redaction,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Tenant analytics,cross_tenant,HCP-PRIV-04,hcp_priv_04_tenant_analytics,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Required versus optional records,SetReporting false,HCP-PRIV-05,hcp_priv_05_required_versus_optional_records,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Read token in runtime,ChildRuntimeEnv,HCP-PRIV-06,hcp_priv_06_read_token_in_runtime,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,loader worker FDs NOT_RUN
+Native-only acquisition,ORIGIN_DENIED,HCP-PRIV-07,hcp_priv_07_native_only_acquisition,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+No inference billing,automatic_spend_atoms=0,HCP-PRIV-08,hcp_priv_08_no_inference_billing,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Discovery switch,SwitchProvider,HCP-PORT-01,hcp_port_01_discovery_switch,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Uncertain finance across providers,no finance replay,HCP-PORT-02,hcp_port_02_uncertain_finance_across_providers,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Free use after exit,DisconnectProvider,HCP-PORT-03,hcp_port_03_free_use_after_exit,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Custody exit statement,ExportPublic,HCP-PORT-04,hcp_port_04_custody_exit_statement,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Schema evolution,fail closed,HCP-PORT-05,hcp_port_05_schema_evolution,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Migration interruption,Persist/Restore,HCP-PORT-06,hcp_port_06_migration_interruption,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,mid-write crash NOT_RUN
+Independent SDK parity,body_id,HCP-PORT-07,hcp_port_07_independent_sdk_parity,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,combined py/ts/native job NOT_RUN
+No native core rewrite,DecodeBtxPackage,HCP-PORT-08,hcp_port_08_no_native_core_rewrite,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Public bridge isolation,HandleBridgeRequest 405,HCP-OPS-01,hcp_ops_01_public_bridge_isolation,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,live explorer NOT_RUN
+Money-only regression,FormatFullVersion 0.34.8,HCP-OPS-02,hcp_ops_02_money_only_regression,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,WITH_MODELNET=OFF second tree NOT_RUN
+Replica fencing,SetExecutorOwner HCP_ERR_FENCED,HCP-OPS-03,hcp_ops_03_replica_fencing,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,two executor processes NOT_RUN
+Scale within limits,HCP_MAX_BODY_BYTES 413,HCP-OPS-04,hcp_ops_04_scale_within_limits,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,load test NOT_RUN
+No production side effects,GoLiveManifest,HCP-OPS-05,hcp_ops_05_no_production_side_effects,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,must not touch production btxd
+Provider compromise drill,RotateOperationalKey,HCP-OPS-06,hcp_ops_06_provider_compromise_drill,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Claimed profile evidence,proven.FUNDING false,HCP-OPS-07,hcp_ops_07_claimed_profile_evidence,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+34 REST ops,HcpEngine::Handle,HCP-OPS-08,hcp_ops_08_full_audit_closure,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,live IdP/HSM/CUDA remain NOT_RUN
+automatic_spend_atoms=0,HcpConfig,HCP-OPS-08,hcp_ops_08_full_audit_closure,src/test/modelnet_hcp_priv_port_ops_tests.cpp,NATIVE_UNIT,
+Walletless preset,HcpWalletlessPreset,J01,hcp_j01_free_hosted_discovery,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,
+Locality wins,PlanLocal,J02,hcp_j02_locality_wins,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,live CUDA NOT_RUN
+Release funding lab,Token authorize/submit 202,J03,hcp_j03_release_funding,src/test/modelnet_hcp_journey_tests.cpp,OAUTH_LAB,live IdP/HSM/native tx NOT_RUN
+Conversion partial success,CompleteConversion,J04,hcp_j04_conversion_partial_success,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,live conversion NOT_RUN
+Unknown broadcast,ForceBroadcastUnknown,J05,hcp_j05_unknown_broadcast,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,
+No award and refund,SetRefundHeight,J06,hcp_j06_no_award_and_refund,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,custodial refund NOT_RUN
+Subscription under concurrency,DeliverEventDuplicates,J07,hcp_j07_subscription_under_concurrency,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,
+Malicious provider,FORBIDDEN_FIELD,J08,hcp_j08_malicious_provider,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,
+Provider exit,SwitchProvider,J09,hcp_j09_provider_exit,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,
+Custody failure drill,Persist/Restore,J10,hcp_j10_custody_failure_drill,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,live HSM NOT_RUN
+Fleet browser journey,enroll/confirm/revoke,J11,hcp_j11_fleet_browser_journey,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,real browser NOT_RUN
+Privacy and service independence,DisconnectProvider,J12,hcp_j12_privacy_and_service_independence,src/test/modelnet_hcp_journey_tests.cpp,NATIVE_UNIT,NIC capture NOT_RUN
+Two gateways,btx-hcpd x2,feature_modelnet_hcp.py,n/a,test/functional/feature_modelnet_hcp.py,PROCESS_E2E,script not executed this session; not live CEX
+J01 process slice,GET /profile + search,J01,n/a,test/functional/feature_modelnet_hcp.py,PROCESS_E2E,script not executed this session
+J03 unauth fail-closed,POST /finance/quotes,J03,n/a,test/functional/feature_modelnet_hcp_journeys.py,PROCESS_E2E,not live funding
+J09/J12 second origin,two loopback profiles,J09,n/a,test/functional/feature_modelnet_hcp_journeys.py,PROCESS_E2E,not live providers
+J11 walletless finance disabled,POST /finance/intents A,J11,n/a,test/functional/feature_modelnet_hcp_journeys.py,PROCESS_E2E,not a real browser
+No generic RPC,/rpc 404,HCP-CUST-08,hcp_cust_08_signer_network_isolation,src/test/modelnet_hcp_cust_intent_tests.cpp,NATIVE_UNIT,

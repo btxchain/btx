@@ -1,0 +1,9 @@
+{
+  "id": "negative-wrong-network",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "base": "unsigned-package.json",
+  "mutation": "replace_network",
+  "wrong_network": "signet",
+  "note": "A BTXPSBT whose network does not match the node's ChainType must not finalize."
+}

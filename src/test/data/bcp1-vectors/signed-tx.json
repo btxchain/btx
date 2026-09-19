@@ -1,0 +1,18 @@
+{
+  "id": "signed-tx-live",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "format": "BTXPSBT",
+  "synthetic": true,
+  "warning": "TEST KEY MATERIAL ONLY. Live ML-DSA-44 signatures are generated in src/wallet/test/bcp1_tests.cpp from derivation.json. Static 2420-byte blobs are not stored here.",
+  "lifecycle": [
+    "private/public key pair from pq::DerivePQKeyFromBIP39 (seed-hardened m/87h)",
+    "P2MR script + merkle root address",
+    "unsigned tx",
+    "canonical P2MR digest (SignatureHashSchnorr, SigVersion::P2MR)",
+    "ML-DSA-44 signature",
+    "fully signed witness [signature, leaf, control]",
+    "txid of the signed transaction",
+    "block inclusion is a node/regtest concern, not a static vector"
+  ],
+  "public_bip32_child_derivation": false
+}

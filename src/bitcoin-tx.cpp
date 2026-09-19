@@ -17,8 +17,6 @@
 #include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
-#include <script/sign.h>
-#include <script/signingprovider.h>
 #include <univalue.h>
 #include <util/exception.h>
 #include <util/fs.h>
@@ -72,11 +70,7 @@ static void SetupBitcoinTxArgs(ArgsManager &argsman)
     argsman.AddArg("replaceable(=N)", "Sets Replace-By-Fee (RBF) opt-in sequence number for input N. "
         "If N is not provided, the command attempts to opt-in all available inputs for RBF. "
         "If the transaction has no inputs, this option is ignored.", ArgsManager::ALLOW_ANY, OptionsCategory::COMMANDS);
-    argsman.AddArg("sign=SIGHASH-FLAGS", "Add zero or more signatures to transaction. "
-        "This command requires JSON registers:"
-        "prevtxs=JSON object, "
-        "privatekeys=JSON object. "
-        "See signrawtransactionwithkey docs for format of sighash flags, JSON objects.", ArgsManager::ALLOW_ANY, OptionsCategory::COMMANDS);
+    argsman.AddArg("sign=SIGHASH-FLAGS", "Disabled on BTX by post-quantum policy. WIF/ECDSA signing is refused; use wallet P2MR signing.", ArgsManager::ALLOW_ANY, OptionsCategory::COMMANDS);
 
     argsman.AddArg("load=NAME:FILENAME", "Load JSON file FILENAME into register NAME", ArgsManager::ALLOW_ANY, OptionsCategory::REGISTER_COMMANDS);
     argsman.AddArg("set=NAME:JSON-STRING", "Set register NAME to given JSON-STRING", ArgsManager::ALLOW_ANY, OptionsCategory::REGISTER_COMMANDS);
@@ -530,174 +524,9 @@ static void MutateTxDelOutput(CMutableTransaction& tx, const std::string& strOut
     tx.vout.erase(tx.vout.begin() + outIdx);
 }
 
-static const unsigned int N_SIGHASH_OPTS = 7;
-static const struct {
-    const char *flagStr;
-    int flags;
-} sighashOptions[N_SIGHASH_OPTS] = {
-    {"DEFAULT", SIGHASH_DEFAULT},
-    {"ALL", SIGHASH_ALL},
-    {"NONE", SIGHASH_NONE},
-    {"SINGLE", SIGHASH_SINGLE},
-    {"ALL|ANYONECANPAY", SIGHASH_ALL|SIGHASH_ANYONECANPAY},
-    {"NONE|ANYONECANPAY", SIGHASH_NONE|SIGHASH_ANYONECANPAY},
-    {"SINGLE|ANYONECANPAY", SIGHASH_SINGLE|SIGHASH_ANYONECANPAY},
-};
-
-static bool findSighashFlags(int& flags, const std::string& flagStr)
+static void MutateTxSign(CMutableTransaction&, const std::string&)
 {
-    flags = 0;
-
-    for (unsigned int i = 0; i < N_SIGHASH_OPTS; i++) {
-        if (flagStr == sighashOptions[i].flagStr) {
-            flags = sighashOptions[i].flags;
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static CAmount AmountFromValue(const UniValue& value)
-{
-    if (!value.isNum() && !value.isStr())
-        throw std::runtime_error("Amount is not a number or string");
-    CAmount amount;
-    if (!ParseFixedPoint(value.getValStr(), 8, &amount))
-        throw std::runtime_error("Invalid amount");
-    if (!MoneyRange(amount))
-        throw std::runtime_error("Amount out of range");
-    return amount;
-}
-
-static std::vector<unsigned char> ParseHexUV(const UniValue& v, const std::string& strName)
-{
-    std::string strHex;
-    if (v.isStr())
-        strHex = v.getValStr();
-    if (!IsHex(strHex))
-        throw std::runtime_error(strName + " must be hexadecimal string (not '" + strHex + "')");
-    return ParseHex(strHex);
-}
-
-static void MutateTxSign(CMutableTransaction& tx, const std::string& flagStr)
-{
-    int nHashType = SIGHASH_ALL;
-
-    if (flagStr.size() > 0)
-        if (!findSighashFlags(nHashType, flagStr))
-            throw std::runtime_error("unknown sighash flag/sign option");
-
-    // mergedTx will end up with all the signatures; it
-    // starts as a clone of the raw tx:
-    CMutableTransaction mergedTx{tx};
-    const CMutableTransaction txv{tx};
-    CCoinsView viewDummy;
-    CCoinsViewCache view(&viewDummy);
-
-    if (!registers.count("privatekeys"))
-        throw std::runtime_error("privatekeys register variable must be set.");
-    FillableSigningProvider tempKeystore;
-    UniValue keysObj = registers["privatekeys"];
-
-    for (unsigned int kidx = 0; kidx < keysObj.size(); kidx++) {
-        if (!keysObj[kidx].isStr())
-            throw std::runtime_error("privatekey not a std::string");
-        CKey key = DecodeSecret(keysObj[kidx].getValStr());
-        if (!key.IsValid()) {
-            throw std::runtime_error("privatekey not valid");
-        }
-        tempKeystore.AddKey(key);
-    }
-
-    // Add previous txouts given in the RPC call:
-    if (!registers.count("prevtxs"))
-        throw std::runtime_error("prevtxs register variable must be set.");
-    UniValue prevtxsObj = registers["prevtxs"];
-    {
-        for (unsigned int previdx = 0; previdx < prevtxsObj.size(); previdx++) {
-            const UniValue& prevOut = prevtxsObj[previdx];
-            if (!prevOut.isObject())
-                throw std::runtime_error("expected prevtxs internal object");
-
-            std::map<std::string, UniValue::VType> types = {
-                {"txid", UniValue::VSTR},
-                {"vout", UniValue::VNUM},
-                {"scriptPubKey", UniValue::VSTR},
-            };
-            if (!prevOut.checkObject(types))
-                throw std::runtime_error("prevtxs internal object typecheck fail");
-
-            auto txid{Txid::FromHex(prevOut["txid"].get_str())};
-            if (!txid) {
-                throw std::runtime_error("txid must be hexadecimal string (not '" + prevOut["txid"].get_str() + "')");
-            }
-
-            const int nOut = prevOut["vout"].getInt<int>();
-            if (nOut < 0)
-                throw std::runtime_error("vout cannot be negative");
-
-            COutPoint out(*txid, nOut);
-            std::vector<unsigned char> pkData(ParseHexUV(prevOut["scriptPubKey"], "scriptPubKey"));
-            CScript scriptPubKey(pkData.begin(), pkData.end());
-
-            {
-                const Coin& coin = view.AccessCoin(out);
-                if (!coin.IsSpent() && coin.out.scriptPubKey != scriptPubKey) {
-                    std::string err("Previous output scriptPubKey mismatch:\n");
-                    err = err + ScriptToAsmStr(coin.out.scriptPubKey) + "\nvs:\n"+
-                        ScriptToAsmStr(scriptPubKey);
-                    throw std::runtime_error(err);
-                }
-                Coin newcoin;
-                newcoin.out.scriptPubKey = scriptPubKey;
-                newcoin.out.nValue = MAX_MONEY;
-                if (prevOut.exists("amount")) {
-                    newcoin.out.nValue = AmountFromValue(prevOut["amount"]);
-                }
-                newcoin.nHeight = 1;
-                view.AddCoin(out, std::move(newcoin), true);
-            }
-
-            // if redeemScript given and private keys given,
-            // add redeemScript to the tempKeystore so it can be signed:
-            if ((scriptPubKey.IsPayToScriptHash() || scriptPubKey.IsPayToWitnessScriptHash()) &&
-                prevOut.exists("redeemScript")) {
-                UniValue v = prevOut["redeemScript"];
-                std::vector<unsigned char> rsData(ParseHexUV(v, "redeemScript"));
-                CScript redeemScript(rsData.begin(), rsData.end());
-                tempKeystore.AddCScript(redeemScript);
-            }
-        }
-    }
-
-    const FillableSigningProvider& keystore = tempKeystore;
-
-    bool fHashSingle = ((nHashType & ~SIGHASH_ANYONECANPAY) == SIGHASH_SINGLE);
-
-    // Sign what we can:
-    for (unsigned int i = 0; i < mergedTx.vin.size(); i++) {
-        CTxIn& txin = mergedTx.vin[i];
-        const Coin& coin = view.AccessCoin(txin.prevout);
-        if (coin.IsSpent()) {
-            continue;
-        }
-        const CScript& prevPubKey = coin.out.scriptPubKey;
-        const CAmount& amount = coin.out.nValue;
-
-        SignatureData sigdata = DataFromTransaction(mergedTx, i, coin.out);
-        // Only sign SIGHASH_SINGLE if there's a corresponding output:
-        if (!fHashSingle || (i < mergedTx.vout.size()))
-            ProduceSignature(keystore, MutableTransactionSignatureCreator(mergedTx, i, amount, nHashType), prevPubKey, sigdata);
-
-        if (amount == MAX_MONEY && !sigdata.scriptWitness.IsNull()) {
-            throw std::runtime_error(strprintf("Missing amount for CTxOut with scriptPubKey=%s", HexStr(prevPubKey)));
-        }
-
-        UpdateInput(txin, sigdata);
-    }
-
-    tx = mergedTx;
+    throw std::runtime_error("BTX PQ policy: bitcoin-tx sign is disabled (legacy ECDSA); use wallet P2MR signing");
 }
 
 static void MutateTx(CMutableTransaction& tx, const std::string& command,

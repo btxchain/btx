@@ -89,4 +89,7 @@ scratchpad-*.md
 # Local 0.34.7 operator scratch (never commit)
 /e2e-scratch/
 .0347-*.local.*
+.0348-*.local
+.0348-*.local.*
+.0348-*.local/
 

@@ -97,17 +97,6 @@ static constexpr std::chrono::seconds MAX_UPLOAD_TIMEFRAME{60 * 60 * 24};
 // A random time period (0 to 1 seconds) is added to feeler connections to prevent synchronization.
 static constexpr auto FEELER_SLEEP_WINDOW{1s};
 
-/** Soft-prefer addrman peers advertising any of these bits when we currently
- *  have zero such outbounds. Not a required set: GetDesirableServiceFlags
- *  stays NODE_NETWORK|NODE_WITNESS (MatMul VERSION bits are unverified). */
-static constexpr ServiceFlags MATMUL_PREFERRED_OUTBOUND_SERVICES{ServiceFlags(
-    NODE_MATMUL_TRUSTED_MIRROR | NODE_MATMUL_ATTESTATION_ARCHIVE |
-    NODE_MATMUL_CONSENSUS)};
-/** Bounded retries of otherwise-valid NODE_NETWORK addresses while looking
- *  for a MatMul-capable outbound. After this many tries, accept any valid
- *  peer so self-heal / DNS still works. Feelers are not filtered. */
-static constexpr int MATMUL_OUTBOUND_PREFERENCE_TRIES = 50;
-
 /** Frequency to attempt extra connections to reachable networks we're not connected to yet **/
 static constexpr auto EXTRA_NETWORK_PEER_INTERVAL{5min};
 
@@ -2198,6 +2187,14 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
             if (stale_services) pnode->fDisconnect = true;
         }
     }
+    // Re-check after insert so setban's Ban()+DisconnectNode cannot miss a
+    // peer that was not yet in m_nodes. Do not call IsBanned while holding
+    // m_nodes_mutex (Ban() is m_banned_mutex then DisconnectNode/m_nodes).
+    if (m_banman &&
+        !NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) &&
+        m_banman->IsBanned(addr)) {
+        DisconnectNode(pnode->GetId());
+    }
     LogDebug(BCLog::NET, "connection from %s accepted\n", addr.ToStringAddrPort());
     TRACEPOINT(net, inbound_connection,
         pnode->GetId(),
@@ -3051,7 +3048,6 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
         int nOutboundBlockRelay = 0;
         int outbound_privacy_network_peers = 0;
         std::set<std::vector<unsigned char>> outbound_ipv46_peer_netgroups;
-        bool have_matmul_outbound = false;
 
         {
             LOCK(m_nodes_mutex);
@@ -3073,9 +3069,6 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
                     case ConnectionType::MANUAL:
                     case ConnectionType::OUTBOUND_FULL_RELAY:
                     case ConnectionType::BLOCK_RELAY:
-                        if ((pnode->addr.nServices & MATMUL_PREFERRED_OUTBOUND_SERVICES) != 0) {
-                            have_matmul_outbound = true;
-                        }
                         const CAddress address{pnode->addr};
                         if (address.IsTor() || address.IsI2P() || address.IsCJDNS()) {
                             // Since our addrman-groups for these networks are
@@ -3276,16 +3269,6 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
                               preferred_net.has_value() ? "network-specific " : "",
                               ConnectionTypeAsString(conn_type), GetNetworkName(addr.GetNetwork()),
                               fLogIPs ? strprintf(": %s", addr.ToStringAddrPort()) : "");
-                continue;
-            }
-
-            // Soft-prefer MatMul-capable peers when none of our persistent
-            // outbounds advertise those bits. Skip non-preferred addresses a
-            // bounded number of times, then accept any valid NODE_NETWORK
-            // peer. Feelers and anchors keep existing selection.
-            if (!fFeeler && !anchor && !have_matmul_outbound &&
-                nTries < MATMUL_OUTBOUND_PREFERENCE_TRIES &&
-                (addr.nServices & MATMUL_PREFERRED_OUTBOUND_SERVICES) == 0) {
                 continue;
             }
 
@@ -3496,6 +3479,13 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
                 ++m_network_conn_counts[pnode->addr.GetNetwork()];
             }
         }
+    }
+    // Automatic outbounds are checked before TCP connect; re-check after
+    // insert so Ban()+DisconnectNode cannot miss the new node. Manual/addnode
+    // (pszDest) keeps the operator override. Do not hold m_nodes_mutex here.
+    if (!pszDest && m_banman && !pnode->HasPermission(NetPermissionFlags::NoBan) &&
+        (m_banman->IsBanned(pnode->addr) || m_banman->IsDiscouraged(pnode->addr))) {
+        DisconnectNode(pnode->GetId());
     }
     if (manual_connection) ClearManualConnectionInProgress(*manual_connection);
 
@@ -4198,6 +4188,19 @@ std::vector<CAddress> CConnman::GetAddresses(CNode& requestor, size_t max_addres
     CachedAddrResponse& cache_entry = r.first->second;
     if (cache_entry.m_cache_entry_expiration < current_time) { // If emplace() added new one it has expiration 0.
         cache_entry.m_addrs_response_cache = GetAddresses(max_addresses, max_pct, /*network=*/std::nullopt);
+        // P2P GETADDR is untrusted. net_processing only applies
+        // MayAdvertiseEndpoint when *this* node is a discovery relay or
+        // trusted mirror, so an unprivileged node would otherwise gossip
+        // serving-GPU-attestor endpoints (CONSENSUS|ARCHIVE) and operator
+        // -hidden addrs. Filter here so every GETADDR cache is clean.
+        cache_entry.m_addrs_response_cache.erase(
+            std::remove_if(cache_entry.m_addrs_response_cache.begin(),
+                           cache_entry.m_addrs_response_cache.end(),
+                           [](const CAddress& addr) {
+                               return !node::discovery_relay::MayAdvertiseEndpoint(
+                                   static_cast<uint64_t>(addr.nServices), addr);
+                           }),
+            cache_entry.m_addrs_response_cache.end());
         // Choosing a proper cache lifetime is a trade-off between the privacy leak minimization
         // and the usefulness of ADDR responses to honest users.
         //

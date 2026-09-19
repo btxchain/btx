@@ -16,4 +16,4 @@ issuance, BanMan, or AddrMan.
 Do not compile (`cmake`, `ninja`, `cmake --build`) unless the operator asked.
 Do not commit or push unless asked. Default posture is read-only.
 
-`CLIENT_VERSION_IS_RELEASE` is **true** for 0.34.7. Full agent rules: AGENTS.md.
+`CLIENT_VERSION_IS_RELEASE` is **false** for **0.34.8rc3**. Full agent rules: AGENTS.md.

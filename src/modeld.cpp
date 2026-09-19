@@ -5,11 +5,16 @@
 #include <modelnet/auto_storage.h>
 #include <modelnet/helper.h>
 #include <modelnet/policy.h>
+#include <modelnet/profile.h>
 #include <modelnet/resource_uri.h>
 #include <modelnet/transport_pq.h>
 #include <util/translation.h>
 
 #include <openssl/crypto.h>
+
+#ifndef WIN32
+#include <sys/stat.h>
+#endif
 
 #include <atomic>
 #include <csignal>
@@ -29,7 +34,7 @@ static void OnSignal(int)
 static void Usage()
 {
     std::cerr <<
-        "btx-modeld — BTX Native Model Network helper (0.34.7)\n"
+        "btx-modeld — BTX Native Model Network helper (0.34.8-dev)\n"
         "\n"
         "Inference is local after a model is acquired. This process is not a remote\n"
         "inference marketplace and has no monetary consensus authority.\n"
@@ -53,6 +58,7 @@ static void Usage()
         "  -modelpreserverare     fetch qualified under-replicated models into spare quota\n"
         "  -modelfollowpeers=0|1  follow FREE catalogs of -modelpeer / PEX contacts (default 1)\n"
         "  -modeluploadlimit=<bps>  aggregate serving cap (0 = connection ceilings only)\n"
+        "  -modelwatch=<dir>    auto-host GGUF/SafeTensors dropped in this directory\n"
         "  -modelallowencrypted   allow preserve-rare of unqualified ciphertext\n"
         "  -modelbind=<ip:port>  PQ1 TLS listen address (empty = unix RPC only)\n"
         "  -modelrpcsocket=<path> unix JSON-RPC socket\n"
@@ -62,13 +68,21 @@ static void Usage()
         "  -modelpeer=<host:port>  model-plane bootstrap contact (repeatable)\n"
         "  -modelseednode=<host:port>  alias of -modelpeer\n"
         "  -modelrelay            CPU-only discovery relay (no GPU, no wallet)\n"
-        "  -modelhost             serve seeded artifacts over PQ1\n"
+        "  -modelhost=auto|1|0   serve seeded artifacts over PQ1 when proven\n"
+        "                        (auto: wait for reachability; 1/true same wait;\n"
+        "                        never advertise merely because the helper started)\n"
         "  -version              print helper and OpenSSL versions and exit\n"
         "  -help                 print this message\n";
 }
 
 int main(int argc, char* argv[])
 {
+    // Model payloads, catalog state, and helper RPC sockets are private to the
+    // operator. Restrict file modes at process start (browser umask defaults
+    // like 0022 would expose written files to other local users).
+#ifndef WIN32
+    umask(0077);
+#endif
     modelnet::HelperConfig cfg;
     std::string decode;
     std::string transport = "pq1";
@@ -84,12 +98,24 @@ int main(int argc, char* argv[])
             return 0;
         }
         if (a == "-version" || a == "--version") {
-            std::cout << "btx-modeld 0.34.7\n" << OpenSSL_version(OPENSSL_VERSION) << "\n";
+            std::cout << "btx-modeld 0.34.8-dev\n" << OpenSSL_version(OPENSSL_VERSION) << "\n";
             return 0;
         }
         if (a == "-modelrelay") cfg.relay = true;
-        else if (a == "-modelhost") cfg.host = true;
-        else if (a == "-modelpreserverare") cfg.preserve_rare = true;
+        else if (a == "-modelhost") {
+            cfg.host = true;
+            cfg.host_auto = false;
+        } else if (a.rfind("-modelhost=", 0) == 0) {
+            const std::string v = a.substr(std::string("-modelhost=").size());
+            modelnet::HostMode mode = modelnet::HostMode::ON;
+            if (!v.empty() && !modelnet::ParseHostMode(v, mode)) {
+                std::cerr << "invalid -modelhost (allowed: auto, 1, 0, true, false)\n";
+                return 1;
+            }
+            if (v.empty()) mode = modelnet::HostMode::ON;
+            cfg.host = modelnet::HostModeWantsHosting(mode);
+            cfg.host_auto = mode == modelnet::HostMode::AUTO;
+        } else if (a == "-modelpreserverare") cfg.preserve_rare = true;
         else if (a == "-modelfollowpeers") cfg.follow_peers = true;
         else if (a == "-modelallowencrypted") cfg.allow_encrypted = true;
         else if (a.rfind("-decode=", 0) == 0) decode = a.substr(8);
@@ -144,7 +170,11 @@ int main(int argc, char* argv[])
         else if (auto v = take("-modeltlscert"); !v.empty()) cfg.tls_cert = v.c_str();
         else if (auto v = take("-modeltlskey"); !v.empty()) cfg.tls_key = v.c_str();
         else if (auto v = take("-modelpeer"); !v.empty()) cfg.peers.push_back(v);
-        else {
+        else if (auto v = take("-modelwatch"); !v.empty()) cfg.watch_dir = v.c_str();
+        else if (a.rfind("-modelindex", 0) == 0) {
+            std::cerr << "A2: -modelindex is not a helper argument; use addmodelindex RPC\n";
+            return 1;
+        } else {
             std::cerr << "unknown argument: " << a << "\n";
             Usage();
             return 1;

@@ -1,12 +1,22 @@
-# BTX Native Model Network (0.34.7)
+# BTX Native Model Network (0.34.8-dev)
 
-**Status:** **0.34.7 release.** This is the shipped Native Model Network, not a
-draft RC and not a document awaiting merge.
+**Status:** **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). This tree is
+not a shipping tag. The last shipping tag is **v0.34.7**. The Native Model
+Network shipped in 0.34.7; this index covers that plane plus 0.34.8-dev
+surfaces.
 
 **Readers:** people start at [HUMANS.md](../../HUMANS.md). Autonomous agents
 start at [AGENTS.md](../../AGENTS.md). The strategic essay is
 [btx-decentralized-frontier-ai-lab.md](../design/btx-decentralized-frontier-ai-lab.md).
 This README is the in-tree operator index for the model plane.
+
+**Dual door:** people start at [HUMANS.md](../../HUMANS.md) (desktop +
+how-to). Agents start at [AGENTS.md](../../AGENTS.md) (`btx-model --json`).
+The files are complementary, not duplicates.
+
+> BTX pieces are the unit of verification and swarm exchange. They do not
+> have to be the unit of cloud storage. A hyperscale origin should bootstrap
+> decentralization, not impose its billing model on the swarm.
 
 **A BTX node already has compute. BTX gives it models and money.**
 
@@ -94,6 +104,15 @@ See [propagation.md](propagation.md).
 - `btx-modelcheck` — header-only SafeTensors/GGUF structure check. Never
   executes pickle, `.pt`, Python, `.so`, or CUDA kernels.
 - `btx-open` — preview-only URI dispatcher (exactly one argument, no shell).
+
+**0.34.8-dev Hosted Control Plane** (`IS_RELEASE=false`; code is in this
+tree): `btx-hcpd` is a loopback
+gateway with **34 typed REST operations** and **no** `/rpc` passthrough.
+`btx-hosted` is the walletless discovery preset (`automatic_spend_atoms=0`).
+OAuth is never in `btxd`. There is no public HTTP capability API on `btxd` or
+`btx-modeld`. Spec, strategy, integration guide, and acceptance catalogue:
+[hcp/](hcp/). People/operator index: [../hosted/README.md](../hosted/README.md).
+In-process OAUTH_LAB is not a live CEX IdP. QUIC remains NONSHIPPING.
 
 Build with `-DWITH_MODELNET=ON` (default). A monetary-only binary uses
 `-DWITH_MODELNET=OFF`. That OFF tree is money only: no `bitcoin_modelnet`
@@ -195,6 +214,21 @@ In-tree capability bits are not CSV PASS and not a B0 rewrite. The bar is
 | [cuda-not-run.md](cuda-not-run.md) | Isolated CUDA worker; default runtime check is NOT_RUN_CUDA_ISOLATION |
 | [examples.md](examples.md) | DOC-01 executable CLI examples |
 | [recovery.md](recovery.md) | DOC-03 helper / campaign / HTLC recovery |
+| [first-run.md](first-run.md) | Host / seed / search / share / watch folder / doctor (0.34.8-dev) |
+| [agent-recipes.md](agent-recipes.md) | Agent door (never spend, never inference) |
+| [storage-backends.md](storage-backends.md) | 0.34.8-dev: piece vs cloud object; MinIO/cloud RPCs exist; R2 AUTO; `IS_RELEASE=false`; live R2 WAN **HONEST_NOT_RUN** |
+| [cloud-seeding.md](cloud-seeding.md) | 0.34.8-dev: origin as bootstrap, not billing model; fail closed |
+| [events.md](events.md) | 0.34.8-dev local event journal |
+| [watches.md](watches.md) | Filesystem `-modelwatch` vs publisher watch |
+| [mirroring.md](mirroring.md) | Profiles + keep/follow; no auto-spend |
+| [hcp/](hcp/) | **0.34.8-dev HCP/1** (`IS_RELEASE=false`): hosted control plane |
+| [crf/](crf/) | **0.34.8-dev Cognitive Reserve v1.1** (negotiated HCP/1 extension; not a fifth plane) |
+| [hcp/01_CEX_2030s_Strategy.md](hcp/01_CEX_2030s_Strategy.md) | Strategy paper (not a shipping claim) |
+| [hcp/01_CEX_2030s_Strategy.md](hcp/01_CEX_2030s_Strategy.md) | Strategy paper (not a shipping claim) |
+| [hcp/02_Hosted_Control_Plane_Implementation_Spec.md](hcp/02_Hosted_Control_Plane_Implementation_Spec.md) | Normative HCP/1 spec (BTX-HCP-001) |
+| [hcp/03_CEX_Integration_Guide.md](hcp/03_CEX_Integration_Guide.md) | Partner/operator integration guide |
+| [hcp/ACCEPTANCE_TESTS.md](hcp/ACCEPTANCE_TESTS.md) | 120 native cases + J01–J12 catalogue |
+| [../hosted/README.md](../hosted/README.md) | Hosted-plane operator index + evidence pointers |
 
 Reference codecs and schema checks: [contrib/modelnet/](../../contrib/modelnet/README.md).
 `contrib/modelnet/validate-doc-examples.sh` runs the examples. Dependency pin:

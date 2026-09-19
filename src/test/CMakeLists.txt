@@ -564,15 +564,131 @@ if(WITH_MODELNET)
     modelnet_b0_remaining_tests.cpp
     modelnet_b0_pq_rest_tests.cpp
     modelnet_hosting_tests.cpp
+    modelnet_infra_tests.cpp
     modelnet_swarm_tests.cpp
     modelnet_conn_tests.cpp
     modelnet_search_tests.cpp
+    modelnet_first_run_tests.cpp
+    modelnet_file_stream_tests.cpp
+    modelnet_store2_tests.cpp
+    modelnet_cloud_tests.cpp
     modelnet_bounty_tests.cpp
+    modelnet_submandate_tests.cpp
     modelnet_bounty_script_spend_tests.cpp
     modelnet_economy_tests.cpp
     modelnet_feed_tests.cpp
     modelnet_release_directory_tests.cpp
     modelnet_search_economy_tests.cpp
+    modelnet_event_tests.cpp
+    modelnet_watch_tests.cpp
+    modelnet_network02_tests.cpp
+    modelnet_network02_gh_tests.cpp
+    modelnet_network02_ef_tests.cpp
+    modelnet_network02_import_tests.cpp
+    modelnet_network02_audit_tests.cpp
+    modelnet_convergence_tests.cpp
+    modelnet_gap_store_tests.cpp
+    modelnet_gap_erasure_tests.cpp
+    modelnet_ahp_frm_tests.cpp
+    modelnet_ahp_doc_tests.cpp
+    modelnet_ahp_auth_tests.cpp
+    modelnet_ahp_ins_tests.cpp
+    modelnet_ahp_var_tests.cpp
+    modelnet_ahp_acq_plan_tests.cpp
+    modelnet_ahp_acq_exec_tests.cpp
+    modelnet_ahp_run_tests.cpp
+    modelnet_ahp_eco_tests.cpp
+    modelnet_ahp_priv_tests.cpp
+    modelnet_ahp_chan_tests.cpp
+    modelnet_ahp_comp_tests.cpp
+    modelnet_ahp_comp04_tests.cpp
+    modelnet_ahp_priv08_tests.cpp
+    modelnet_ahp_api_tests.cpp
+    modelnet_ahp_journey_tests.cpp
+    modelnet_network02_remain_tests.cpp
+    modelnet_ahp_j05_iso_tests.cpp
+    modelnet_n02_journey2_iso_tests.cpp
+    modelnet_erasure_io_tests.cpp
+    modelnet_scale_sparse_tests.cpp
+    modelnet_jit_tests.cpp
+    modelnet_jit_mat_tests.cpp
+    modelnet_jit_run_tests.cpp
+    modelnet_jit_lora_tests.cpp
+    modelnet_jit_prefetch_tests.cpp
+    modelnet_jit_ensure_tests.cpp
+    modelnet_jit_peer_tests.cpp
+    modelnet_jit_moe_tests.cpp
+    modelnet_jit_journey_tests.cpp
+    modelnet_jit_safety_tests.cpp
+    modelnet_unique_todo_tests.cpp
+    modelnet_hcp_frm_tests.cpp
+    modelnet_hcp_auth_tests.cpp
+    modelnet_hcp_grant_tests.cpp
+    modelnet_hcp_disc_hand_tests.cpp
+    modelnet_hcp_local_tests.cpp
+    modelnet_hcp_cust_intent_tests.cpp
+    modelnet_hcp_ledger_chain_tests.cpp
+    modelnet_hcp_event_fleet_tests.cpp
+    modelnet_hcp_priv_port_ops_tests.cpp
+    modelnet_hcp_journey_tests.cpp
+    modelnet_hcp_gap_tests.cpp
+    modelnet_cr11_comp_tests.cpp
+    modelnet_cr11_entity_tests.cpp
+    modelnet_cr11_reserve_tests.cpp
+    modelnet_cr11_value_tests.cpp
+    modelnet_cr11_tco_tests.cpp
+    modelnet_cr11_approve_tests.cpp
+    modelnet_cr11_plan_tests.cpp
+    modelnet_cr11_ledger_tests.cpp
+    modelnet_cr11_program_tests.cpp
+    modelnet_cr11_hold_tests.cpp
+    modelnet_cr11_product_tests.cpp
+    modelnet_cr11_report_tests.cpp
+    modelnet_cr11_local_tests.cpp
+    modelnet_cr11_auth_tests.cpp
+    modelnet_cr11_priv_tests.cpp
+    modelnet_cr11_ux_tests.cpp
+    modelnet_cr11_scale_tests.cpp
+    modelnet_cr11_port_tests.cpp
+    modelnet_cr11_integrate_tests.cpp
+    modelnet_cr11_journey_tests.cpp
+    modelnet_cr11_getid_tests.cpp
+    modelnet_cr12_neutral_tests.cpp
+    modelnet_cr12_negotiate_tests.cpp
+    modelnet_cr12_role_tests.cpp
+    modelnet_cr12_bind_tests.cpp
+    modelnet_cr12_asset_tests.cpp
+    modelnet_cr12_position_tests.cpp
+    modelnet_cr12_value_tests.cpp
+    modelnet_cr12_metric_tests.cpp
+    modelnet_cr12_exposure_tests.cpp
+    modelnet_cr12_projection_tests.cpp
+    modelnet_cr12_import_tests.cpp
+    modelnet_cr12_instruction_tests.cpp
+    modelnet_cr12_security_tests.cpp
+    modelnet_cr12_ux_tests.cpp
+    modelnet_cr12_recovery_tests.cpp
+    modelnet_cr12_compat_tests.cpp
+    modelnet_cr12_journey_tests.cpp
+    modelnet_cr12_sdk_tests.cpp
+    modelnet_cr12_desktop_tests.cpp
+    modelnet_cr12_gapfill_tests.cpp
+    modelnet_cr12_pr157_review_tests.cpp
+    modelnet_vstar_regression_tests.cpp
+    modelnet_sentinel_secret_tests.cpp
+    modelnet_r1_swarm_tests.cpp
+    modelnet_gap_hunt_tests.cpp
+    modelnet_upload_scale_tests.cpp
+    modelnet_r4_route_tests.cpp
+    modelnet_r5_gossip_tests.cpp
+    modelnet_r6_erasure_tests.cpp
+    modelnet_r7_package_tests.cpp
+    modelnet_r10_security_tests.cpp
+    modelnet_r2_storage_tests.cpp
+    modelnet_r3_import_tests.cpp
+    modelnet_r8_mandate_tests.cpp
+    modelnet_healer_negcache_tests.cpp
+    hcp_remaining_gap_tests.cpp
   )
   target_compile_definitions(test_btx PRIVATE
     MODELNET_V11_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/modelnet_v11_vectors.json\"
@@ -580,7 +696,16 @@ if(WITH_MODELNET)
     MODELNET_BTX_OPEN_PATH=\"${CMAKE_BINARY_DIR}/bin/btx-open\"
     MODELNET_BOUNTY_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/bounty/reference/golden-vectors.json\"
     MODELNET_MODELD_PATH=\"${CMAKE_BINARY_DIR}/bin/btx-modeld\"
+    MODELNET_BTXD_PATH=\"${CMAKE_BINARY_DIR}/bin/btxd\"
+    MODELNET_AHP_FIXTURE_DIR=\"${PROJECT_SOURCE_DIR}/src/test/data/agent-package\"
+    MODELNET_BTX_PACKAGE_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/btx-package-vectors\"
+    MODELNET_HCP_PORTAL_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/hcp-portal/index.html\"
+    MODELNET_CRL12_PORTAL_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/crl12-portal/index.html\"
+    MODELNET_CRL12_SCHEMA_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/crl12/schemas/CognitiveReserveLayer.schema.json\"
+    MODELNET_CRL12_OPERATIONS_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/crl12/schemas/operations-v1.2.json\"
   )
+  set_property(SOURCE modelnet_ahp_comp_tests.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+    "MODELNET_OFF_CHECK_SCRIPT=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/check-with-modelnet-off.sh\"")
   set(_modelnet_b0_spec "/home/administrator/Documents/btx-0.34.7-spec-ref/BTX_0.34.7_Model_Network_v1.1/baseline/BTX_0.34.7_PQ_Native_Model_Network_Specification.md")
   if(EXISTS "${_modelnet_b0_spec}")
     target_compile_definitions(test_btx PRIVATE MODELNET_B0_SPEC_PATH=\"${_modelnet_b0_spec}\")
