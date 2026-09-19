@@ -7,6 +7,7 @@
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
+#include <tinyformat.h>
 
 #include <atomic>
 #include <chrono>
@@ -280,6 +281,131 @@ BOOST_AUTO_TEST_CASE(capacity_release_wakes_only_capacity_deferred_tip_child)
         now + 3s));
     BOOST_CHECK(!lifecycle.NextRetry(parent, now + 3s));
     BOOST_CHECK(lifecycle.NextRetry(parent, now + 60s));
+}
+
+BOOST_AUTO_TEST_CASE(capacity_deferred_bodies_below_lists_lowest_first_and_wake_now_is_uncounted)
+{
+    using RetryCause = node::MatMulBlockLifecycle::RetryCause;
+
+    node::MatMulBlockLifecycle lifecycle{4, 400, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+
+    // Nothing retained: nothing below any height.
+    BOOST_CHECK(lifecycle.CapacityDeferredBodiesBelow(1000).empty());
+
+    // GetHash() excludes nNonce on this chain, so distinct helper blocks
+    // share one hash; key the store by explicit hashes instead.
+    auto retain = [&](uint32_t nonce, int32_t height, RetryCause cause) {
+        auto body{Body(nonce, 50, now + 60s)};
+        body.reference_height = height;
+        body.retry_cause = cause;
+        const uint256 hash{uint256::FromHex(
+            std::string(60, '0') + strprintf("%04x", nonce)).value()};
+        BOOST_REQUIRE(lifecycle.Retain(hash, std::move(body), now));
+        return hash;
+    };
+    const uint256 h_105{retain(31, 105, RetryCause::RC_PENDING_CAPACITY)};
+    const uint256 h_101{retain(32, 101, RetryCause::RC_PENDING_CAPACITY)};
+    const uint256 h_103{retain(33, 103, RetryCause::TIMER_OR_AUTHORITY)};
+
+    // Below 110: the two capacity-deferred bodies, lowest first; the body
+    // waiting on a timer or authority is not the device's business.
+    const auto below_110{lifecycle.CapacityDeferredBodiesBelow(110)};
+    BOOST_REQUIRE_EQUAL(below_110.size(), 2U);
+    BOOST_CHECK(below_110[0].first == h_101);
+    BOOST_CHECK_EQUAL(below_110[0].second, 101);
+    BOOST_CHECK(below_110[1].first == h_105);
+    // Strictly below: a body at the asking height is not its own ancestor.
+    BOOST_REQUIRE_EQUAL(lifecycle.CapacityDeferredBodiesBelow(105).size(), 1U);
+    BOOST_CHECK(lifecycle.CapacityDeferredBodiesBelow(101).empty());
+
+    // WakeNow pulls the retry forward without counting a deferral, so the
+    // repeated wakes a busy admission path issues cannot push the body onto
+    // the TerminalRequeue schedule.
+    BOOST_REQUIRE(lifecycle.WakeNow(h_101, now + 1s));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(h_101), 0U);
+    BOOST_REQUIRE(lifecycle.WakeNow(h_101, now + 2s));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(h_101), 0U);
+
+    // A running body is no longer waiting, so it is not listed and cannot be
+    // woken; a body that left the store neither.
+    const auto token{lifecycle.Begin(h_101, now + 3s)};
+    BOOST_REQUIRE(token);
+    BOOST_CHECK_EQUAL(lifecycle.CapacityDeferredBodiesBelow(110).size(), 1U);
+    BOOST_CHECK(!lifecycle.WakeNow(h_101, now + 3s));
+    lifecycle.Terminal(*token);
+    lifecycle.TerminalRetained(h_101);
+    lifecycle.TerminalRetained(h_105);
+    BOOST_CHECK(lifecycle.CapacityDeferredBodiesBelow(110).empty());
+    BOOST_CHECK(!lifecycle.WakeNow(h_105, now + 4s));
+    (void)h_103;
+}
+
+BOOST_AUTO_TEST_CASE(per_source_eviction_leaves_a_recent_tombstone)
+{
+    // Per-source cap of 1: the second body from the same netgroup evicts the
+    // first, silently from the store's point of view; the tombstone is what
+    // the fetch side consults so it does not ask for the evicted body again
+    // and evict the second one to take it.
+    node::MatMulBlockLifecycle lifecycle{8, 800, 10min, 10min,
+                                         /*max_retained_count_per_source=*/1};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 first{uint256::FromHex(std::string(63, '0') + "d").value()};
+    const uint256 second{uint256::FromHex(std::string(63, '0') + "e").value()};
+    BOOST_REQUIRE(lifecycle.Retain(first, Body(41, 50, now + 60s, /*source_netgroup=*/7), now));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForTest(), 1U);
+    BOOST_CHECK(!lifecycle.WasEvictedRecently(first, 60s, now));
+    BOOST_REQUIRE(lifecycle.Retain(second, Body(42, 50, now + 60s, /*source_netgroup=*/7), now + 1s));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedCountForTest(), 1U);
+    BOOST_CHECK(!lifecycle.HasRetainedBody(first));
+    BOOST_CHECK(lifecycle.HasRetainedBody(second));
+    BOOST_CHECK(lifecycle.WasEvictedRecently(first, 60s, now + 1s));
+    BOOST_CHECK(lifecycle.WasEvictedRecently(first, 60s, now + 61s));
+    BOOST_CHECK(!lifecycle.WasEvictedRecently(first, 60s, now + 62s));
+    BOOST_CHECK(!lifecycle.WasEvictedRecently(second, 60s, now + 1s));
+    // Re-delivery consumes the tombstone.
+    BOOST_REQUIRE(lifecycle.Retain(first, Body(41, 50, now + 60s, /*source_netgroup=*/9), now + 2s));
+    BOOST_CHECK(!lifecycle.WasEvictedRecently(first, 60s, now + 2s));
+}
+
+BOOST_AUTO_TEST_CASE(capacity_evicts_the_farthest_body_first)
+{
+    // Three bodies, cap 3, retained oldest-lowest first as a catching-up
+    // node does. A fourth from the same source must push out the FARTHEST
+    // body, not the oldest: the lowest one is the next block the chain can
+    // connect and the verifier's next job.
+    node::MatMulBlockLifecycle lifecycle{3, 300, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    auto retain = [&](char suffix, int32_t height, std::chrono::seconds age) {
+        auto body{Body(50, 50, now + 60s, /*source_netgroup=*/5)};
+        body.reference_height = height;
+        const uint256 hash{uint256::FromHex(std::string(63, '0') + suffix).value()};
+        BOOST_REQUIRE(lifecycle.Retain(hash, std::move(body), now - age));
+        return hash;
+    };
+    const uint256 low{retain('1', 101, 30s)};
+    const uint256 mid{retain('2', 105, 20s)};
+    const uint256 far{retain('3', 140, 10s)};
+    const uint256 next{retain('4', 103, 0s)};
+    BOOST_CHECK(lifecycle.HasRetainedBody(low));
+    BOOST_CHECK(lifecycle.HasRetainedBody(mid));
+    BOOST_CHECK(lifecycle.HasRetainedBody(next));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(far));
+    // Equal heights fall back to oldest first.
+    const uint256 twin{retain('5', 105, 0s)};
+    BOOST_CHECK(lifecycle.HasRetainedBody(twin));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(mid));
+    BOOST_CHECK(lifecycle.HasRetainedBody(low));
+    // A progress body is never the victim, however far it is.
+    auto pinned{Body(51, 50, now + 60s, /*source_netgroup=*/5)};
+    pinned.reference_height = 200;
+    pinned.pin_progress = true;
+    const uint256 pin{uint256::FromHex(std::string(63, '0') + "6").value()};
+    BOOST_REQUIRE(lifecycle.Retain(pin, std::move(pinned), now));
+    BOOST_CHECK(lifecycle.HasRetainedBody(pin));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(twin));
+    BOOST_CHECK(lifecycle.HasRetainedBody(low));
 }
 
 BOOST_AUTO_TEST_CASE(capacity_does_not_evict_active_generation)

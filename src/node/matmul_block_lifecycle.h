@@ -8,6 +8,7 @@
 #include <netaddress.h>
 #include <primitives/block.h>
 #include <uint256.h>
+#include <logging.h>
 
 #include <algorithm>
 #include <atomic>
@@ -449,8 +450,16 @@ public:
                 selected = it;
                 break;
             }
+            // The pinned progress body (followed tip-child / root-first
+            // first hole) outranks a floating band body even when the band
+            // body has waited longer, because only the progress body can
+            // move the tip. Same tie-break WakeCapacityRetry uses.
             if (selected == m_entries.end() ||
-                entry.body->stored_at < selected->second.body->stored_at) {
+                (entry.body->pin_progress &&
+                 !selected->second.body->pin_progress) ||
+                (entry.body->pin_progress ==
+                     selected->second.body->pin_progress &&
+                 entry.body->stored_at < selected->second.body->stored_at)) {
                 selected = it;
             }
         }
@@ -708,6 +717,73 @@ public:
         return it != m_entries.end() && it->second.body.has_value();
     }
 
+    /**
+     * True when `hash` was capacity-evicted from the retained store within
+     * `within`. Retain() evicts a source's body to admit its newest once that
+     * source is at its per-netgroup cap, so a catching-up node holding more
+     * wanted bodies from one peer than the cap becomes a ring: the evicted
+     * hash is no longer retained, the download walk asks for it again, the
+     * redelivery evicts the next one. Fetch consults this so a body the store
+     * just threw out is not asked for again immediately.
+     */
+    bool WasEvictedRecently(const uint256& hash, Clock::duration within,
+                            Clock::time_point now = Clock::now()) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_eviction_tombstones.find(hash)};
+        return it != m_eviction_tombstones.end() &&
+               now - it->second.tombstoned_at <= within;
+    }
+
+    /**
+     * Inactive retained bodies that were refused for RC pending capacity and
+     * whose reference height is strictly below `height`, lowest first. The
+     * caller decides, under cs_main, whether one of them is an unverified
+     * ancestor of the block asking for the job; the store itself knows no
+     * chain topology.
+     */
+    std::vector<std::pair<uint256, int32_t>> CapacityDeferredBodiesBelow(
+        int32_t height) const
+    {
+        std::vector<std::pair<uint256, int32_t>> out;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const auto& item : m_entries) {
+            const Entry& entry{item.second};
+            if (!entry.body || IsActive(entry.state) ||
+                entry.terminal_on_connect) {
+                continue;
+            }
+            if (entry.body->retry_cause != RetryCause::RC_PENDING_CAPACITY) {
+                continue;
+            }
+            if (entry.body->reference_height >= height) continue;
+            out.emplace_back(item.first, entry.body->reference_height);
+        }
+        std::sort(out.begin(), out.end(),
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
+        return out;
+    }
+
+    /**
+     * Make one inactive retained body retryable now. Unlike RefreshRetry this
+     * counts no deferral and, unlike WakeRetryOnce, may repeat: it is the
+     * admission path handing the freed job to the block the chain is waiting
+     * on, and the scheduler picks it up on its next tick.
+     */
+    bool WakeNow(const uint256& hash, Clock::time_point now = Clock::now())
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it == m_entries.end() || !it->second.body ||
+            IsActive(it->second.state) || it->second.terminal_on_connect) {
+            return false;
+        }
+        if (it->second.body->retry_not_before > now) {
+            it->second.body->retry_not_before = now;
+        }
+        return true;
+    }
+
     // True if the retained body for `hash` is the followed tip-child / root
     // (pin_progress). Such a body is the productive catch-up root: when it
     // verifies it ConnectTips and is removed, so it can never spin. Callers use
@@ -910,38 +986,54 @@ private:
                              });
     }
 
+    // Eviction order: the body FARTHEST above the tip goes first, ties by
+    // age. The store is the verifier's work queue on a catching-up node, and
+    // the next block the chain can connect is the lowest one held. Oldest
+    // first evicted exactly those: near-tip bodies are requested first, so
+    // they were the oldest, and every far-ahead delivery from the same peer
+    // pushed one out (live 2026-09-18: a node with every other GPU episode on
+    // a block 50 to 390 above its tip while tip+2 was re-requested 3 times a
+    // second). Progress bodies stay protected as before.
+    static bool EvictsBefore(const RetainedBody& a, const RetainedBody& b)
+    {
+        if (a.reference_height != b.reference_height) {
+            return a.reference_height > b.reference_height;
+        }
+        return a.stored_at < b.stored_at;
+    }
+
     Map::iterator OldestEvictable(const uint256& protected_hash)
     {
-        auto oldest{m_entries.end()};
+        auto victim{m_entries.end()};
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             if (it->first == protected_hash || !it->second.body ||
                 IsActive(it->second.state) || it->second.body->pin_progress) {
                 continue;
             }
-            if (oldest == m_entries.end() ||
-                it->second.body->stored_at < oldest->second.body->stored_at) {
-                oldest = it;
+            if (victim == m_entries.end() ||
+                EvictsBefore(*it->second.body, *victim->second.body)) {
+                victim = it;
             }
         }
-        return oldest;
+        return victim;
     }
 
     Map::iterator OldestEvictableForSource(const uint256& protected_hash,
                                            uint64_t netgroup)
     {
-        auto oldest{m_entries.end()};
+        auto victim{m_entries.end()};
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             if (it->first == protected_hash || !it->second.body ||
                 IsActive(it->second.state) || it->second.body->pin_progress ||
                 it->second.body->source_netgroup != netgroup) {
                 continue;
             }
-            if (oldest == m_entries.end() ||
-                it->second.body->stored_at < oldest->second.body->stored_at) {
-                oldest = it;
+            if (victim == m_entries.end() ||
+                EvictsBefore(*it->second.body, *victim->second.body)) {
+                victim = it;
             }
         }
-        return oldest;
+        return victim;
     }
 
     size_t SourceCount(uint64_t netgroup) const
@@ -1042,6 +1134,15 @@ private:
             victim->second.body->idle_retry_bypass_available,
             victim->second.body->retry_wake_mask,
             now};
+        // Eviction used to be silent; a node re-requesting an evicted body
+        // 1,500 times in ten minutes was invisible in its own log.
+        LogDebug(BCLog::NET,
+                 "Evicting retained MatMul body %s from netgroup %llu under "
+                 "capacity pressure (%u held)\n",
+                 victim->first.ToString(),
+                 static_cast<unsigned long long>(
+                     victim->second.body->source_netgroup),
+                 static_cast<unsigned>(RetainedCount()));
     }
     size_t m_retained_bytes{0};
     std::map<uint64_t, size_t> m_retained_count_by_source;
