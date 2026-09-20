@@ -1906,7 +1906,6 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             g_swarm.pex_accepted.store(g_swarm.pex.Stats().accepted);
             g_swarm.providers_known = static_cast<int>(g_swarm.pex.Recent(now).size());
         }
-        for (const auto& h : accepted) cat.AddPeer(h.endpoint);
         UniValue o(UniValue::VOBJ);
         o.pushKV("schema_version", 2);
         o.pushKV("accepted", static_cast<int>(accepted.size()));
@@ -3746,6 +3745,17 @@ static void RefreshLocalPex(ModelCatalog& cat)
         h.expiry_ms = now + PEX_DEFAULT_TTL_MS;
         g_swarm.pex.NoteLocal(h);
         if (++n >= static_cast<int>(PEX_MAX_RECORDS_PER_MESSAGE)) break;
+    }
+}
+
+/** TTL'd gossip only. Never persist these into catalog.Peers() (operator -modelpeer / addmodelnode). */
+void AppendPexGossipEndpoints(std::vector<std::string>& dest, const std::string& self)
+{
+    const int64_t now = ConnNowMs();
+    std::lock_guard<std::mutex> lock(g_swarm.pex_mu);
+    for (const auto& h : g_swarm.pex.Recent(now)) {
+        if (h.endpoint.empty() || h.endpoint == self) continue;
+        if (std::find(dest.begin(), dest.end(), h.endpoint) == dest.end()) dest.push_back(h.endpoint);
     }
 }
 
@@ -6680,11 +6690,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     }
     if (method == "addmodelnode") {
         const std::string peer = Arg(0).get_str();
-        cat.AddPeer(peer);
         result.setObject();
         result.pushKV("schema_version", 2);
-        result.pushKV("ok", true);
-        result.pushKV("added", peer);
+        const bool added = cat.AddPeer(peer);
+        result.pushKV("ok", added);
+        if (added) result.pushKV("added", peer);
+        else {
+            result.pushKV("added", false);
+            result.pushKV("reason", peer.empty() ? "empty endpoint" : "peer list full");
+        }
         result.pushKV("automatic_spend_atoms", 0);
         result.pushKV("note", "model-plane contact; not AddrMan; not monetary addnode");
         return true;
@@ -7343,6 +7357,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result = rules;
         result.pushKV("schema_version", 2);
         result.pushKV("affects_banman", false);
+        result.pushKV("enforced", false);
+        result.pushKV("note", "acl.json is not consulted; pin safety publishers or reportmodelmalicious");
         return true;
     }
     if (method == "joinmodelcircle" || method == "leavemodelcircle" || method == "subscribemodelcollection" ||
@@ -8058,7 +8074,6 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                 std::string ierr;
                 std::lock_guard<std::mutex> lock(g_swarm.pex_mu);
                 (void)g_swarm.pex.Ingest(host + ":" + std::to_string(port), pexj, now, acc, ierr);
-                for (const auto& h : acc) cat.AddPeer(h.endpoint);
             }
         }
     }
@@ -8069,6 +8084,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
         for (const auto& p : cat.Peers()) {
             if (p != self && std::find(extras.begin(), extras.end(), p) == extras.end()) extras.push_back(p);
         }
+        AppendPexGossipEndpoints(extras, self);
     }
 
     std::vector<std::pair<std::string, std::string>> grant_headers;
@@ -9238,6 +9254,7 @@ static void RefreshAutoStorage(HelperConfig& cfg, ModelCatalog* cat)
 
 static void GossipPexOnSession(Pq1Session& sess, ModelCatalog& cat, const std::string& endpoint)
 {
+    (void)cat;
     NativeRequest pexreq;
     NativeResponse pexresp;
     pexreq.method = "POST";
@@ -9260,9 +9277,6 @@ static void GossipPexOnSession(Pq1Session& sess, ModelCatalog& cat, const std::s
         g_swarm.pex_received.store(g_swarm.pex.Stats().received);
         g_swarm.pex_accepted.store(g_swarm.pex.Stats().accepted);
         g_swarm.providers_known = static_cast<int>(g_swarm.pex.Recent(now).size());
-    }
-    for (const auto& h : acc) {
-        if (!h.endpoint.empty()) cat.AddPeer(h.endpoint);
     }
 }
 
@@ -9296,7 +9310,8 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
         }
     }
     std::map<std::string, PreserveCandidate> seen;
-    const std::vector<std::string> peers = cat.Peers();
+    std::vector<std::string> peers = cat.Peers();
+    AppendPexGossipEndpoints(peers, /*self=*/{});
     if (peers.empty()) return;
     static std::atomic<size_t> peer_cursor{0};
     const size_t n = peers.size();

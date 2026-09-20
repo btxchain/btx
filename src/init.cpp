@@ -643,7 +643,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-modelfreespacereserve=<size>", "AUTO free-space reserve override (default: max(32GiB, 10% of filesystem capacity)).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelseed=auto|manual|off", "Demand-seed after intentional import/getmodel (default: auto).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelpreserverare", "Fetch qualified under-replicated public models into spare quota (default: 0).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-modelfollowpeers", "Follow FREE models announced by -modelpeer / addmodelnode / PEX catalog contacts into spare quota (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelfollowpeers", "Follow FREE models announced by -modelpeer / addmodelnode / TTL'd PEX into spare quota (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelpeer=<host:port>", "Model-plane bootstrap contact passed to the owned helper (repeatable). Alias: -modelseednode.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelseednode=<host:port>", "Alias of -modelpeer.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modeluploadlimit=<bps>", "Aggregate model upload cap. auto = governor ceiling. 0 = connection ceilings only.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);

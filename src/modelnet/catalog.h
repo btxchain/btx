@@ -108,7 +108,8 @@ public:
     bool PutFetchedPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
                           Span<const unsigned char> bytes, const std::vector<Digest48>& proof,
                           uint64_t file_size, const Digest48& pieces_root, std::string& err);
-    void AddPeer(const std::string& endpoint);
+    /** Operator / -modelpeer contacts only. Unauthenticated PEX must not call this. */
+    bool AddPeer(const std::string& endpoint);
     std::vector<std::string> Peers() const;
     uint64_t QuotaBytes() const { return m_store.QuotaBytes(); }
     uint64_t UsedBytes() const { return m_store.UsedBytes(); }

@@ -904,7 +904,7 @@ static RPCHelpMan getmodelpolicy()
 {
     return ProxyOrLocal("getmodelpolicy",
                         "Local free-first and propagation policy. Automatic spend default is 0.\n"
-                        "Demand-seed is the default once a storage budget is allocated. Catalog contacts (-modelpeer, addmodelnode, PEX) are followed by default. Arbitrary advertised models are not fetched; preserve_rare remains opt-in.\n",
+                        "Demand-seed is the default once a storage budget is allocated. Catalog contacts (-modelpeer, addmodelnode) are followed by default. PEX hints stay TTL'd. Arbitrary advertised models are not fetched; preserve_rare remains opt-in.\n",
                         {});
 }
 

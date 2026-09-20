@@ -600,10 +600,34 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
         return false;
     }
     std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+    bool has_weights = false;
+    for (const auto& file : files) {
+        const auto lower = ToLower(file.second);
+        if (lower.ends_with(".gguf") || lower.ends_with(".safetensors")) {
+            has_weights = true;
+            break;
+        }
+    }
+    if (!has_weights) {
+        err = "no weight files";
+        return false;
+    }
 
     std::ostringstream nonce;
     nonce << std::hex << std::random_device{}() << std::random_device{}();
     const Digest48 staging = StagingId(nonce.str());
+    bool commit_staging = false;
+    struct StagingCleanup {
+        ModelStore& store;
+        Digest48 id;
+        bool& commit;
+        ~StagingCleanup()
+        {
+            if (commit) return;
+            std::string ignored;
+            (void)store.RemoveArtifact(id, ignored);
+        }
+    } cleanup{m_store, staging, commit_staging};
 
     std::vector<CoreFile> cores;
     bool saw_st = false, saw_gguf = false;
@@ -642,6 +666,7 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     if (!EncodeArtifactCore(ac, aenc, err)) return false;
     const Digest48 artifact_id = ArtifactCoreId(aenc);
     if (!m_store.RenameArtifact(staging, artifact_id, err)) return false;
+    commit_staging = true;
     DropPieceTreeCache(staging);
 
     out = {};
@@ -1095,15 +1120,16 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
     return true;
 }
 
-void ModelCatalog::AddPeer(const std::string& endpoint)
+bool ModelCatalog::AddPeer(const std::string& endpoint)
 {
+    if (endpoint.empty()) return false;
     std::lock_guard<std::mutex> lock(m_mu);
-    if (m_peers.size() >= 64) return;
-    if (std::find(m_peers.begin(), m_peers.end(), endpoint) == m_peers.end()) {
-        m_peers.push_back(endpoint);
-        std::string err;
-        PersistLocked(err);
-    }
+    if (std::find(m_peers.begin(), m_peers.end(), endpoint) != m_peers.end()) return true;
+    if (m_peers.size() >= 64) return false;
+    m_peers.push_back(endpoint);
+    std::string err;
+    PersistLocked(err);
+    return true;
 }
 
 std::vector<std::string> ModelCatalog::Peers() const

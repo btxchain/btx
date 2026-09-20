@@ -262,4 +262,69 @@ BOOST_AUTO_TEST_CASE(fetching_does_not_demand_seed_or_advertise)
     BOOST_CHECK_EQUAL(body["local"]["models"].size(), 0);
 }
 
+BOOST_AUTO_TEST_CASE(import_requires_weights_and_cleans_failed_staging)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-import";
+    modelnet::ModelCatalog cat{tmp / "cat", 1 << 20};
+    const fs::path json_only = tmp / "json-only";
+    fs::create_directories(json_only);
+    {
+        std::ofstream out(json_only / "vocab.json");
+        out << "{\"a\":1}\n";
+    }
+    modelnet::CatalogEntry imported;
+    std::string err;
+    BOOST_CHECK(!cat.ImportPath(fs::PathToString(json_only), true, imported, err));
+    BOOST_CHECK(err.find("weight") != std::string::npos);
+
+    const fs::path mixed = tmp / "mixed";
+    fs::create_directories(mixed);
+    std::vector<unsigned char> st(10, 0);
+    WriteLE64(st.data(), 2);
+    st[8] = '{';
+    st[9] = '}';
+    {
+        std::ofstream out(mixed / "a.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    {
+        std::ofstream out(mixed / "z.txt", std::ios::binary);
+        out << "#!/bin/sh\n";
+    }
+    BOOST_CHECK(!cat.ImportPath(fs::PathToString(mixed), true, imported, err));
+    const fs::path arts = cat.Store().Root() / "artifacts";
+    size_t leftover = 0;
+    if (fs::exists(arts)) {
+        for (const auto& ent : fs::directory_iterator(arts)) {
+            if (ent.is_directory()) ++leftover;
+        }
+    }
+    BOOST_CHECK_EQUAL(leftover, 0);
+    BOOST_CHECK_EQUAL(cat.UsedBytes(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(addpeer_cap_is_visible)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-peers";
+    modelnet::ModelCatalog cat{tmp / "cat", 1 << 20};
+    for (int i = 0; i < 64; ++i) {
+        BOOST_REQUIRE(cat.AddPeer("192.0.2." + std::to_string(i) + ":29447"));
+    }
+    BOOST_CHECK(!cat.AddPeer("198.51.100.1:29447"));
+    BOOST_CHECK_EQUAL(cat.Peers().size(), 64);
+
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("method", "addmodelnode");
+    UniValue params(UniValue::VARR);
+    params.push_back("203.0.113.9:29447");
+    req.pushKV("params", params);
+    UniValue result;
+    std::string code, rpc_err;
+    BOOST_REQUIRE(modelnet::DispatchHelperRpc(cat, req, result, code, rpc_err, nullptr));
+    BOOST_CHECK(result["ok"].isFalse());
+    BOOST_CHECK(result["added"].isFalse());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
