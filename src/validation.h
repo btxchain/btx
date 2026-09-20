@@ -1880,9 +1880,11 @@ public:
      * Unique competing attested HAVE_DATA tip to adopt.
      *
      * When the active tip has no quorum: abandon a lost race (equal-work
-     * attested sibling) or a heavier unattested fork. Empty if the only
-     * attested index is on the active chain (pending-attestation extension
-     * — do not disconnect it) or if two incomparable attested branches exist.
+     * attested sibling) or follow a more-work attested fork. Only trusted
+     * mirrors may return a candidate with less work than the active tip.
+     * Empty if the only attested index is on the active chain (a pending
+     * attestation extension — do not disconnect it) or if two incomparable
+     * attested branches remain eligible.
      *
      * When the active tip already has quorum: still return a unique
      * competing attested HAVE_DATA short-reorg fork-child (every frontier
