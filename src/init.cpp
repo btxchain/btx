@@ -659,7 +659,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-discoveryrelayhideaddr=<ip>", "Do not learn, GETADDR, or getnodeaddresses this IP. Repeatable. Use on discovery relays and trusted archives to hide GPU attestor addresses that advertise CONSENSUS without ARCHIVE (serve=0). Relays InitError if -addnode/-connect/-seednode targets a hidden address.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: strict-device on a chain with a finite RC activation height, auto-fallback while RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowunverifiablematmulconsensus", "Allow consensus-mode catch-up ExactReplay when the local device did not self-qualify (startup canary / production goldens miss). Startup still warns and withholds NODE_MATMUL_CONSENSUS. Mining stays fail-closed. Catch-up still fully ExactReplays every body before ConnectTip, on the available CUDA/Metal GEMM if present, otherwise on CPU. Without this flag a canary miss zeros the GEMM and digest_requests stays 0 (a live consensus-archive node: buffer_pool_uninitialized). Do not treat this as skipping ExactReplay.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted. Mainnet trusted mirrors require at least 2 independent signers and M=2 (a 1-of-1 quorum is ExactReplay skip authority). Pass -allowsinglekeytrustedmirror=1 only as an explicit transition override.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted unless -matmultrustedpqpubkey is set. Mainnet trusted mirrors require at least 2 independent signers and M=2 (a 1-of-1 quorum is ExactReplay skip authority). Pass -allowsinglekeytrustedmirror=1 only as an explicit transition override. ML-DSA-44 pin members from -matmultrustedpqpubkey count toward N independently.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmultrustedpqpubkey=<hex>", "ML-DSA-44 (1312-byte) public key trusted to attest successful Profile-1 ExactReplay. Repeat for additional independent pin members; each must be distinct. Counted in N alongside -matmultrustedpubkey. Does not change consensus ExactReplay: only trusted mirrors skip GPU on pin quorum. Empty keeps the live secp pin.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1). On mainnet with -matmulvalidation=trusted, M<2 or N<2 is refused: above the Profile-1 activation height the quorum replaces the MatMul proof-of-work check, so a 1-of-1 quorum makes one key the node's sole proof-of-work authority. Override with -allowsinglekeytrustedmirror=1. On -matmulvalidation=consensus the pin is telemetry and never skips ExactReplay. Configure 2 independent signers with M=2.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowsinglekeytrustedmirror", "Allow a mainnet trusted mirror to start with N<2 or M<2 (default: 0). That topology is a single stolen WIF hijacking ExactReplay skip. Transition override only; logged and alarming. Consensus+pin is never refused for 1-of-1 (the pin is telemetry).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationblocklist=<hex>", "Compressed secp256k1 public key whose ExactReplay attestations are never counted, even if the key is also in -matmultrustedpubkey. Repeat for multiple keys. Manual emergency hijack control only; never auto-populated from peer counts or open-attestor majority. Starting or adding a block that leaves fewer than -matmultrustedthreshold unblocked pin members is refused (fail-closed). Runtime adds persist; unblocking a persisted key requires editing the durable record. Restart without this flag unblocks config-only keys.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -667,6 +668,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-matmulopenthreshold=<n>", "Directory open-quorum signal: distinct pinned-or-admitted unfrozen keys (default: max(M, 2)). Reported by getmatmulattestors; never replaces -matmultrustedthreshold and never skips ExactReplay.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedwaitms=<n>", "Maximum time a trusted-mirror block may remain parked awaiting an M-of-N attestation quorum before the attempt is left retryable (non-punitive), in milliseconds (default: 60000, maximum: 600000). Does not block the verify worker: many blocks may await quorum concurrently.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationsignerkeyfile=<file>", "Archive-validator file containing exactly one WIF signing key. Relative paths resolve under the network datadir. The corresponding public key is added to the configured signer set. Protect this file as an online validation key.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulattestationsignerpqfile=<file>", "Archive-validator file containing an ML-DSA-44 ExactReplay signing key: two hex lines (1312-byte public key, then 2560-byte secret key), or one hex line of public||secret (3872 bytes). Relative paths resolve under the network datadir. The public key is added to the PQ pin when it is not already listed. Protect this file as an online validation key.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationsignerkey=<wif>", "UNSAFE/deprecated convenience form for the archive-validator WIF key; command lines may leak through process listings. Prefer -matmulattestationsignerkeyfile.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationserve", "Serve GETMMATTEST from the local attestation store (default: 1 when a local signing key is configured or when -matmulvalidation=trusted, otherwise 0). Trusted mirrors cache-and-forward signatures they have already accepted; they never SignAuthoritative. A local signer serves the live tip window to any peer. Archive / trusted-mirror catch-up peers may also receive cached or SignAuthoritative signatures for the active chain inside a short catch-up window; IBD historical scans stay ignored so they cannot saturate the signer uplink. Consensus signers may set this to 0 to isolate signing from public GETMMATTEST fan-in; newly signed attestations are still pushed to connected peers. Aggressive GETMMATTEST / MMATTEST (rate-limit exhaustion or historical scans of a signer) is penalized: the peer is disconnected and banned for 24h. When no signature is cached, a serving consensus signer with a local ExactReplay-success bit may regenerate its own statement; otherwise a rate-limited background ExactReplay may be queued for canonical Profile-1 blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulservicechallengefile=<file>", "Path to the persistent MatMul service challenge registry. Relative paths are resolved under the network datadir. Point multiple service nodes at the same shared file to let getmatmulservicechallenge issuance and redeemmatmulserviceproof redemption work across the cluster. (default: <netdir>/matmul_service_challenges.dat)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
@@ -1562,6 +1564,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     const auto trusted_key_args{args.GetArgs("-matmultrustedpubkey")};
     const auto signer_keyfile{
         args.GetPathArg("-matmulattestationsignerkeyfile", {})};
+    const auto pq_signer_keyfile{
+        args.GetPathArg("-matmulattestationsignerpqfile", {})};
     const std::string inline_signer{
         args.GetArg("-matmulattestationsignerkey", "")};
     if (!signer_keyfile.empty() && !inline_signer.empty()) {
@@ -1592,6 +1596,25 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                 encoded));
         }
         trusted_signers.push_back(pubkey);
+    }
+
+    const auto trusted_pq_args{args.GetArgs("-matmultrustedpqpubkey")};
+    std::vector<std::vector<unsigned char>> trusted_pq_signers;
+    trusted_pq_signers.reserve(trusted_pq_args.size() + 1);
+    for (const auto& encoded : trusted_pq_args) {
+        const auto pubkey{ParseHex(encoded)};
+        if (pubkey.size() != matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK) {
+            return InitError(strprintf(
+                _("Invalid ML-DSA-44 public key in -matmultrustedpqpubkey (need %u bytes): %s"),
+                matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK, encoded));
+        }
+        if (std::find(trusted_pq_signers.begin(), trusted_pq_signers.end(),
+                      pubkey) != trusted_pq_signers.end()) {
+            return InitError(strprintf(
+                _("Duplicate -matmultrustedpqpubkey: %s. Every trusted PQ signer must be a distinct key; a repeated key raises N without adding an independent attestation authority."),
+                encoded));
+        }
+        trusted_pq_signers.push_back(pubkey);
     }
 
     const auto blocklist_args{args.GetArgs("-matmulattestationblocklist")};
@@ -1634,7 +1657,61 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         signer_text = inline_signer;
         InitWarning(_("-matmulattestationsignerkey exposes an online signing key through process/config surfaces; use a permission-restricted -matmulattestationsignerkeyfile."));
     }
-    const bool has_local_attestation_signer{!signer_text.empty()};
+
+    std::vector<unsigned char> local_pq_pk;
+    std::vector<unsigned char> local_pq_sk;
+    if (!pq_signer_keyfile.empty()) {
+        const fs::path path{AbsPathForConfigVal(args, pq_signer_keyfile)};
+        std::ifstream stream{path};
+        std::string line1;
+        std::string line2;
+        if (!stream.is_open() || !std::getline(stream, line1)) {
+            return InitError(strprintf(
+                _("Cannot read MatMul attestation PQ signing key file %s"),
+                fs::PathToString(path)));
+        }
+        std::getline(stream, line2);
+        std::string extra;
+        if (std::getline(stream, extra) && !util::TrimString(extra).empty()) {
+            memory_cleanse(line1.data(), line1.size());
+            memory_cleanse(line2.data(), line2.size());
+            return InitError(_("-matmulattestationsignerpqfile must contain one or two hex lines (pk then sk, or pk||sk)."));
+        }
+        line1 = util::TrimString(line1);
+        line2 = util::TrimString(line2);
+        std::vector<unsigned char> first{ParseHex(line1)};
+        memory_cleanse(line1.data(), line1.size());
+        if (!line2.empty()) {
+            local_pq_pk = std::move(first);
+            local_pq_sk = ParseHex(line2);
+            memory_cleanse(line2.data(), line2.size());
+        } else {
+            memory_cleanse(line2.data(), line2.size());
+            constexpr size_t concat_size{
+                matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK +
+                matmul::trusted::EXACT_REPLAY_ML_DSA_44_SK};
+            if (first.size() != concat_size) {
+                memory_cleanse(first.data(), first.size());
+                return InitError(_("-matmulattestationsignerpqfile hex must be pk then sk (two lines) or concatenated pk||sk."));
+            }
+            local_pq_pk.assign(first.begin(),
+                               first.begin() +
+                                   matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK);
+            local_pq_sk.assign(first.begin() +
+                                   matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK,
+                               first.end());
+            memory_cleanse(first.data(), first.size());
+        }
+        if (local_pq_pk.size() != matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK ||
+            local_pq_sk.size() != matmul::trusted::EXACT_REPLAY_ML_DSA_44_SK) {
+            memory_cleanse(local_pq_sk.data(), local_pq_sk.size());
+            return InitError(_("-matmulattestationsignerpqfile must contain an ML-DSA-44 public key (1312 bytes) and secret key (2560 bytes)."));
+        }
+    }
+    const bool has_local_secp_signer{!signer_text.empty()};
+    const bool has_local_pq_signer{!local_pq_sk.empty()};
+    const bool has_local_attestation_signer{has_local_secp_signer ||
+                                           has_local_pq_signer};
 
     const int64_t trusted_threshold{
         args.GetIntArg("-matmultrustedthreshold", 1)};
@@ -1651,7 +1728,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                             trusted_mirror_mode))};
     if (matmul_validation_mode != "consensus" &&
         has_local_attestation_signer) {
-        return InitError(_("Only an independent MatMul consensus validator can load an attestation signing key; remove -matmulattestationsignerkeyfile/-matmulattestationsignerkey from non-consensus nodes."));
+        return InitError(_("Only an independent MatMul consensus validator can load an attestation signing key; remove -matmulattestationsignerkeyfile/-matmulattestationsignerkey/-matmulattestationsignerpqfile from non-consensus nodes."));
     }
     if (serve_attestations &&
         matmul_validation_mode != "consensus" &&
@@ -1659,7 +1736,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         return InitError(_("Only a MatMul consensus validator or trusted mirror can serve attestations. Set -matmulattestationserve=0 on discovery-relay, economic, and SPV nodes."));
     }
     if (matmul_validation_mode == "relay" &&
-        (!trusted_signers.empty() || has_local_attestation_signer ||
+        (!trusted_signers.empty() || !trusted_pq_signers.empty() ||
+         has_local_attestation_signer ||
          serve_attestations || !attestation_blocklist.empty() ||
          open_attestors)) {
         return InitError(_("Discovery relay mode (-matmulvalidation=relay) is not MatMul authority and must not load a pin, signing key, GETMMATTEST serve, attestation blocklist, or open attestors. Archives follow GPU attestors via the pin; this node only introduces peers. Remove those flags or run -matmulvalidation=trusted / consensus."));
@@ -1668,28 +1746,33 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     // InitError. systemd Restart=always then crash-loops the node (live:
     // 653 restarts). Keep fail-closed on serving; do not refuse start.
     if (serve_attestations && trusted_signers.empty() &&
-        !has_local_attestation_signer) {
-        InitWarning(_("Ignoring -matmulattestationserve=1: serving GETMMATTEST requires at least one -matmultrustedpubkey or a local signer key. Continuing as a normal node with attestation serving disabled."));
+        trusted_pq_signers.empty() && !has_local_attestation_signer) {
+        InitWarning(_("Ignoring -matmulattestationserve=1: serving GETMMATTEST requires at least one -matmultrustedpubkey/-matmultrustedpqpubkey or a local signer key. Continuing as a normal node with attestation serving disabled."));
         serve_attestations = false;
     }
     const bool attestation_config_requested{
         trusted_mirror_mode || !trusted_signers.empty() ||
+        !trusted_pq_signers.empty() ||
         has_local_attestation_signer ||
         serve_attestations ||
         !attestation_blocklist.empty()};
     if (attestation_config_requested) {
-        if (trusted_signers.empty() &&
+        if (trusted_signers.empty() && trusted_pq_signers.empty() &&
             !has_local_attestation_signer) {
-            return InitError(_("Trusted MatMul attestation operation requires at least one -matmultrustedpubkey or a local signer key."));
+            return InitError(_("Trusted MatMul attestation operation requires at least one -matmultrustedpubkey/-matmultrustedpqpubkey or a local signer key."));
         }
+        const bool secp_seeds_pin{
+            has_local_secp_signer &&
+            (!open_attestors || trusted_signers.empty() ||
+             trusted_signers.size() < static_cast<size_t>(trusted_threshold))};
+        const bool pq_already_pinned{
+            has_local_pq_signer &&
+            std::find(trusted_pq_signers.begin(), trusted_pq_signers.end(),
+                      local_pq_pk) != trusted_pq_signers.end()};
+        const bool pq_seeds_pin{has_local_pq_signer && !pq_already_pinned};
         const size_t preliminary_signer_capacity{
-            trusted_signers.size() +
-            ((has_local_attestation_signer &&
-              (!open_attestors || trusted_signers.empty() ||
-               trusted_signers.size() <
-                   static_cast<size_t>(trusted_threshold)))
-                 ? 1
-                 : 0)};
+            trusted_signers.size() + trusted_pq_signers.size() +
+            (secp_seeds_pin ? 1 : 0) + (pq_seeds_pin ? 1 : 0)};
         if (trusted_threshold < 1 ||
             static_cast<size_t>(trusted_threshold) >
                 preliminary_signer_capacity) {
@@ -1703,14 +1786,14 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                 ++unblocked_pin_members;
             }
         }
-        if (!trusted_signers.empty() &&
-            unblocked_pin_members < static_cast<size_t>(trusted_threshold)) {
+        unblocked_pin_members += trusted_pq_signers.size() +
+                                 (pq_seeds_pin ? 1 : 0);
+        if (unblocked_pin_members < static_cast<size_t>(trusted_threshold)) {
             return InitError(strprintf(
                 _("-matmulattestationblocklist leaves %u unblocked pin member(s), below -matmultrustedthreshold=%d. Fail-closed: add another independent signer or remove a blocked key before start."),
                 unblocked_pin_members, trusted_threshold));
         }
-        if (!trusted_signers.empty() &&
-            unblocked_pin_members == static_cast<size_t>(trusted_threshold) &&
+        if (unblocked_pin_members == static_cast<size_t>(trusted_threshold) &&
             chainparams.GetChainType() == ChainType::MAIN) {
             InitWarning(strprintf(
                 _("This node has no spare unblocked MatMul pin member (%u unblocked signer(s), threshold %d). Blocking one more pin key would stall Profile-1 tips. Configure an extra independent signer."),
@@ -1741,20 +1824,20 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         if (node::matmul_trusted::MainnetTrustedMirrorRefusesSingleKey(
                 trusted_mirror_mode,
                 chainparams.GetChainType() == ChainType::MAIN,
-                trusted_signers.size(),
+                preliminary_signer_capacity,
                 trusted_threshold,
                 allow_single_key_trusted_mirror)) {
             return InitError(strprintf(
-                _("Mainnet trusted MatMul mirrors require at least 2 independent signers and -matmultrustedthreshold=2 (%u signer(s), threshold %d). A 1-of-1 quorum replaces ExactReplay with one key: anyone who steals that WIF can make this node accept MatMul-invalid blocks. Configure a second independent signer, or pass -allowsinglekeytrustedmirror=1 only as an explicit transition override. -matmulvalidation=consensus validates MatMul independently instead."),
-                trusted_signers.size(), trusted_threshold));
+                _("Mainnet trusted MatMul mirrors require at least 2 independent signers and -matmultrustedthreshold=2 (%u signer(s), threshold %d). A 1-of-1 quorum replaces ExactReplay with one key: anyone who steals that WIF can make this node accept MatMul-invalid blocks. Configure a second independent signer (secp or ML-DSA-44), or pass -allowsinglekeytrustedmirror=1 only as an explicit transition override. -matmulvalidation=consensus validates MatMul independently instead."),
+                preliminary_signer_capacity, trusted_threshold));
         }
         if (trusted_mirror_mode &&
             chainparams.GetChainType() == ChainType::MAIN &&
             allow_single_key_trusted_mirror &&
-            (trusted_signers.size() < 2 || trusted_threshold < 2)) {
+            (preliminary_signer_capacity < 2 || trusted_threshold < 2)) {
             InitWarning(strprintf(
                 _("This node is a single-key trusted MatMul mirror on mainnet (%u signer(s), threshold %d) started only because -allowsinglekeytrustedmirror=1. Above the Profile-1 activation height the attestation quorum REPLACES ExactReplay. Anyone who steals that key can make this node accept MatMul-invalid blocks. Configure a second independent signer with -matmultrustedthreshold=2 and drop the override."),
-                trusted_signers.size(), trusted_threshold));
+                preliminary_signer_capacity, trusted_threshold));
         }
         if (!trusted_mirror_mode &&
             chainparams.GetChainType() == ChainType::MAIN &&
@@ -1776,6 +1859,14 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         config.replay_authority_context =
             node::ComputeMatMulReplayAuthorityContext(chainparams);
         config.trusted_signers = trusted_signers;
+        if (pq_seeds_pin) {
+            trusted_pq_signers.push_back(local_pq_pk);
+        }
+        config.trusted_pq_signers = std::move(trusted_pq_signers);
+        if (has_local_pq_signer) {
+            config.local_pq_pk = std::move(local_pq_pk);
+            config.local_pq_sk = std::move(local_pq_sk);
+        }
         config.threshold = static_cast<size_t>(trusted_threshold);
         config.blocklist = attestation_blocklist;
         config.open_attestors = open_attestors;
@@ -1786,7 +1877,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         std::string configure_error;
         if (!node::matmul_trusted::StageConfiguration(
                 std::move(config),
-                has_local_attestation_signer
+                has_local_secp_signer
                     ? std::optional<std::string>{
                           std::move(signer_text)}
                     : std::nullopt,
@@ -1801,7 +1892,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     } else {
         node::matmul_trusted::Reset();
         if (matmul_validation_mode == "consensus") {
-            LogInfo("This consensus node has no -matmultrustedpubkey. getmatmultrustedstatus reports configured=false and getmatmulattestedtip is empty, so the node cannot see or follow the attested tip. Mining/submit nodes should set -matmultrustedpubkey to the signer key(s) and -matmultrustedthreshold (ExactReplay is unchanged).\n");
+            LogInfo("This consensus node has no -matmultrustedpubkey/-matmultrustedpqpubkey. getmatmultrustedstatus reports configured=false and getmatmulattestedtip is empty, so the node cannot see or follow the attested tip. Mining/submit nodes should set -matmultrustedpubkey or -matmultrustedpqpubkey to the signer key(s) and -matmultrustedthreshold (ExactReplay is unchanged).\n");
         }
     }
     if (trusted_mirror_mode) {

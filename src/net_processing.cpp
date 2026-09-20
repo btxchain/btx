@@ -178,6 +178,8 @@ static constexpr auto MATMUL_SKETCH_SERVE_DEDUP_WINDOW{10min};
 /** Signed trusted-attestation relay is intentionally small and bounded. */
 static constexpr uint64_t MATMUL_ATTESTATIONS_PER_MESSAGE{16};
 static constexpr size_t MATMUL_ATTESTATION_MESSAGE_MAX_BYTES{16 * 1024};
+static constexpr uint64_t MATMUL_PQ_ATTESTATIONS_PER_MESSAGE{4};
+static constexpr size_t MATMUL_PQ_ATTESTATION_MESSAGE_MAX_BYTES{20 * 1024};
 static constexpr double MATMUL_ATTESTATION_REQUEST_BURST{
     node::matmul_trusted::GETMMATTEST_LIVE_REQUEST_BURST};
 static constexpr double MATMUL_ATTESTATION_HISTORICAL_REQUEST_BURST{
@@ -2697,6 +2699,9 @@ private:
      *  inbound peer attestations. */
     void RelayLocalExactReplayAttestation(
         matmul::trusted::ExactReplayAttestation produced)
+        LOCKS_EXCLUDED(cs_main);
+    void RelayLocalExactReplayPqAttestation(
+        matmul::trusted::ExactReplayPqAttestation produced)
         LOCKS_EXCLUDED(cs_main);
     /** If this process ExactReplay-verified `hash` on the active chain and
      *  has a local signer, SignAuthoritative and RelayLocalExactReplayAttestation.
@@ -12289,6 +12294,9 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
             return;
         }
         MakeAndPushMessage(*target, NetMsgType::GETMMATTEST, hash);
+        if (!node::matmul_trusted::TrustedPqSigners().empty()) {
+            MakeAndPushMessage(*target, NetMsgType::GETMMATPQ, hash);
+        }
         asked_now.insert(id);
         asked_preferred_round = true;
     };
@@ -15686,10 +15694,13 @@ void PeerManagerImpl::MaybeRelayLocalExactReplayAttestation(const uint256& hash)
         return;
     }
     matmul::trusted::ExactReplayAttestation produced;
+    matmul::trusted::ExactReplayPqAttestation produced_pq;
     const auto result{
-        node::matmul_trusted::SignAuthoritative(hash, exact_height, &produced)};
+        node::matmul_trusted::SignAuthoritative(hash, exact_height, &produced,
+                                                &produced_pq)};
     if (node::matmul_trusted::SignAuthoritativeServesGetMmAttest(result)) {
         RelayLocalExactReplayAttestation(std::move(produced));
+        RelayLocalExactReplayPqAttestation(std::move(produced_pq));
     } else {
         LogWarning(
             "Failed to create MatMul ExactReplay "
@@ -15714,6 +15725,36 @@ void PeerManagerImpl::RelayLocalExactReplayAttestation(
     m_connman.ForEachNode([&](CNode* target) {
         if (target->GetCommonVersion() >= MATMUL_ATTESTATION_VERSION) {
             MakeAndPushMessage(*target, NetMsgType::MMATTEST, message);
+        }
+    });
+    auto pq{node::matmul_trusted::GetPq(message.front().statement.block_hash,
+                                        message.front().statement.block_height)};
+    if (!pq.empty()) {
+        if (pq.size() > MATMUL_PQ_ATTESTATIONS_PER_MESSAGE) {
+            pq.resize(MATMUL_PQ_ATTESTATIONS_PER_MESSAGE);
+        }
+        m_connman.ForEachNode([&](CNode* target) {
+            if (target->GetCommonVersion() >= MATMUL_ATTESTATION_VERSION) {
+                MakeAndPushMessage(*target, NetMsgType::MMATTESTPQ, pq);
+            }
+        });
+    }
+}
+
+void PeerManagerImpl::RelayLocalExactReplayPqAttestation(
+    matmul::trusted::ExactReplayPqAttestation produced)
+{
+    AssertLockNotHeld(cs_main);
+    if (produced.signature.empty() ||
+        produced.signer.size() !=
+            matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK) {
+        return;
+    }
+    std::vector<matmul::trusted::ExactReplayPqAttestation> message{
+        std::move(produced)};
+    m_connman.ForEachNode([&](CNode* target) {
+        if (target->GetCommonVersion() >= MATMUL_ATTESTATION_VERSION) {
+            MakeAndPushMessage(*target, NetMsgType::MMATTESTPQ, message);
         }
     });
 }
@@ -17078,7 +17119,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         return;
     }
-    if (msg_type == NetMsgType::GETMMATTEST &&
+    if ((msg_type == NetMsgType::GETMMATTEST ||
+         msg_type == NetMsgType::GETMMATPQ) &&
         m_signed_frontier_catch_up.load(std::memory_order_relaxed) &&
         !this_gpu &&
         !pfrom.m_consensus_catchup_serve.load(std::memory_order_relaxed)) {
@@ -19473,7 +19515,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 #endif
     }
 
-    if (msg_type == NetMsgType::GETMMATTEST) {
+    if (msg_type == NetMsgType::GETMMATTEST ||
+        msg_type == NetMsgType::GETMMATPQ) {
         if (pfrom.GetCommonVersion() < MATMUL_ATTESTATION_VERSION) {
             pfrom.fDisconnect = true;
             return;
@@ -19681,10 +19724,29 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     reason, block_hash, height, pfrom.GetId());
             };
 
+        auto push_mmattestpq =
+            [&](std::vector<matmul::trusted::ExactReplayPqAttestation>
+                    attestations,
+                const char* reason) {
+                if (attestations.size() > MATMUL_PQ_ATTESTATIONS_PER_MESSAGE) {
+                    attestations.resize(MATMUL_PQ_ATTESTATIONS_PER_MESSAGE);
+                }
+                if (attestations.empty()) return;
+                MakeAndPushMessage(
+                    pfrom, NetMsgType::MMATTESTPQ, attestations);
+                peer->m_matmul_protocol_ignored = 0;
+                MaybeLogAttestationServe(reason, block_hash, height,
+                                         pfrom.GetId());
+            };
+
         const char* serve_reason{"cached"};
         auto existing{node::matmul_trusted::Get(block_hash, height)};
-        if (!existing.empty()) {
-            push_mmattest(std::move(existing), serve_reason);
+        auto existing_pq{node::matmul_trusted::GetPq(block_hash, height)};
+        if (!existing.empty() || !existing_pq.empty()) {
+            if (!existing.empty()) {
+                push_mmattest(std::move(existing), serve_reason);
+            }
+            push_mmattestpq(std::move(existing_pq), serve_reason);
             return;
         }
         const bool catchup_regen{
@@ -19818,6 +19880,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         push_mmattest(
             node::matmul_trusted::Get(block_hash, height), serve_reason);
+        push_mmattestpq(
+            node::matmul_trusted::GetPq(block_hash, height), serve_reason);
         return;
     }
 
@@ -20183,6 +20247,219 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             });
             m_connman.ForEachNode([&](CNode* target) {
                 if (!serving_peer(target)) push(target);
+            });
+        }
+        return;
+    }
+
+    if (msg_type == NetMsgType::MMATTESTPQ) {
+        if (pfrom.GetCommonVersion() < MATMUL_ATTESTATION_VERSION) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        if (vRecv.size() > MATMUL_PQ_ATTESTATION_MESSAGE_MAX_BYTES) {
+            Misbehaving(
+                *peer,
+                strprintf("mmattestpq payload=%u exceeds bound", vRecv.size()));
+            return;
+        }
+        const uint64_t count{ReadCompactSize(vRecv)};
+        if (count == 0 || count > MATMUL_PQ_ATTESTATIONS_PER_MESSAGE) {
+            Misbehaving(
+                *peer,
+                strprintf("mmattestpq count=%u exceeds bound", count));
+            return;
+        }
+        const auto now{GetTime<std::chrono::microseconds>()};
+        if (peer->m_matmul_attestation_last_refill != 0us) {
+            const auto elapsed{now - peer->m_matmul_attestation_last_refill};
+            const double refill{
+                static_cast<double>(elapsed.count()) /
+                static_cast<double>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        MATMUL_ATTESTATION_TOKEN_REFILL)
+                        .count())};
+            peer->m_matmul_attestation_inbound_tokens = std::min(
+                MATMUL_ATTESTATION_INBOUND_BURST,
+                peer->m_matmul_attestation_inbound_tokens + refill);
+        }
+        peer->m_matmul_attestation_last_refill = now;
+        if (peer->m_matmul_attestation_inbound_tokens <
+            static_cast<double>(count)) {
+            LogDebug(BCLog::NET,
+                     "Ignoring rate-limited mmattestpq count=%u peer=%d\n",
+                     count, pfrom.GetId());
+            peer->m_matmul_protocol_ignored += 1;
+            if (node::matmul_trusted::AggressiveGetMmAttestShouldBan(
+                    peer->m_matmul_protocol_ignored)) {
+                BanHammeringPeer(pfrom, *peer, "aggressive mmattestpq");
+            }
+            return;
+        }
+        peer->m_matmul_attestation_inbound_tokens -= static_cast<double>(count);
+        if (!ConsumeMatMulAttestationVerifyBudget(
+                pfrom.nKeyedNetGroup, count, now)) {
+            LogDebug(BCLog::NET,
+                     "Ignoring mmattestpq over source verify budget count=%u "
+                     "peer=%d netgroup=%u\n",
+                     count, pfrom.GetId(), pfrom.nKeyedNetGroup);
+            peer->m_matmul_protocol_ignored += 1;
+            if (node::matmul_trusted::AggressiveGetMmAttestShouldBan(
+                    peer->m_matmul_protocol_ignored)) {
+                BanHammeringPeer(pfrom, *peer, "aggressive mmattestpq");
+            }
+            return;
+        }
+        peer->m_matmul_protocol_ignored = 0;
+
+        std::vector<matmul::trusted::ExactReplayPqAttestation> received;
+        received.reserve(count);
+        for (uint64_t i{0}; i < count; ++i) {
+            received.emplace_back();
+            try {
+                vRecv >> received.back();
+            } catch (const std::ios_base::failure&) {
+                Misbehaving(*peer, "mmattestpq deserialize");
+                return;
+            }
+        }
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, "mmattestpq trailing data");
+            return;
+        }
+
+        std::vector<matmul::trusted::ExactReplayPqAttestation> relay;
+        bool wake_block_fetch{false};
+        for (const auto& attestation : received) {
+            const uint256 hash{attestation.statement.block_hash};
+            int32_t expected_height{-1};
+            bool known_profile1{false};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* index{
+                    m_chainman.m_blockman.LookupBlockIndex(hash)};
+                if (index != nullptr &&
+                    !(index->nStatus & BLOCK_FAILED_MASK)) {
+                    expected_height = index->nHeight;
+                    known_profile1 =
+                        m_chainparams.GetConsensus()
+                            .IsMatMulTrustedReplayAttestationActive(
+                                expected_height);
+                }
+            }
+            if (!known_profile1) {
+                const bool header_unknown{WITH_LOCK(
+                    cs_main,
+                    return m_chainman.m_blockman.LookupBlockIndex(hash) ==
+                           nullptr)};
+                if (header_unknown && node::matmul_trusted::IsConfigured()) {
+                    const auto chain_id{node::matmul_trusted::ChainId()};
+                    const auto authority{
+                        node::matmul_trusted::ReplayAuthorityContext()};
+                    if (chain_id && authority) {
+                        const auto crypto{
+                            matmul::trusted::VerifyAttestationPqCrypto(
+                                attestation, *chain_id, *authority, hash,
+                                attestation.statement.block_height)};
+                        const bool authority_signer{
+                            crypto == matmul::trusted::VerifyResult::Valid &&
+                            node::matmul_trusted::IsAuthorityPqSigner(
+                                attestation.signer)};
+                        if (authority_signer) {
+                            CBlockLocator locator;
+                            {
+                                LOCK(cs_main);
+                                if (const CBlockIndex* start{
+                                        HeaderSyncLocatorIndex(m_chainman)}) {
+                                    locator = GetLocator(start);
+                                }
+                            }
+                            if (!locator.vHave.empty()) {
+                                MaybeSendGetHeaders(pfrom, locator, *peer);
+                            }
+                            continue;
+                        }
+                    }
+                }
+                continue;
+            }
+            const auto result{node::matmul_trusted::AddPq(
+                attestation, hash, expected_height)};
+            if (node::matmul_trusted::ShouldAdvanceBestKnownFromMmAttest(
+                    known_profile1, /*header_failed=*/false, result) &&
+                !m_chainman.IsDiscoveryRelay()) {
+                LOCK(cs_main);
+                const CBlockIndex* const avail{
+                    m_chainman.m_blockman.LookupBlockIndex(hash)};
+                const bool header_failed{
+                    avail != nullptr &&
+                    (avail->nStatus & BLOCK_FAILED_MASK) != 0};
+                if (!header_failed && State(pfrom.GetId()) != nullptr) {
+                    UpdateBlockAvailability(pfrom.GetId(), hash);
+                }
+                wake_block_fetch = !header_failed;
+            }
+            if (result == matmul::trusted::AddResult::Accepted) {
+                relay.push_back(attestation);
+                wake_block_fetch = true;
+                {
+                    LOCK(cs_main);
+                    m_matmul_attestation_backoff.erase(hash);
+                    if (node::matmul_trusted::HasQuorum(hash,
+                                                        expected_height)) {
+                        node::matmul_trusted::NoteAuthorityPeerTipHint(
+                            expected_height, hash);
+                    }
+                }
+            } else if (result != matmul::trusted::AddResult::Duplicate) {
+                LogDebug(BCLog::NET,
+                         "Rejected mmattestpq block=%s peer=%d result=%s\n",
+                         hash.ToString(), pfrom.GetId(),
+                         matmul::trusted::AddResultName(result));
+            }
+            if (node::matmul_trusted::HasQuorum(hash, expected_height)) {
+                {
+                    LOCK(cs_main);
+                    m_matmul_attestation_requested.erase(hash);
+                    m_header_only_competing.erase(hash);
+                    m_header_only_followed_skip.erase(hash);
+                    m_need_activate_best_chain = true;
+                    if (const CBlockIndex* index{
+                            m_chainman.m_blockman.LookupBlockIndex(hash)};
+                        index != nullptr) {
+                        (void)m_chainman.MaybeTrackReorgRecovery(index);
+                    }
+                    m_chainman.NotifySignedFrontierStatus();
+                }
+                ClearMatMulRCBodyDeferred(hash);
+                (void)m_matmul_block_lifecycle.WakeRetryOnce(
+                    hash,
+                    node::MatMulBlockLifecycle::RetryWakeReason::
+                        TRUSTED_AUTHORITY);
+                wake_block_fetch = true;
+                if (m_matmul_verify_worker) {
+                    m_matmul_verify_worker->NotifyQuorumReady(hash);
+                }
+            }
+        }
+        if (wake_block_fetch) {
+            m_connman.WakeMessageHandler();
+        }
+        if (!relay.empty() &&
+            !ConsumeMatMulAttestationInboundBudget(
+                pfrom.nKeyedNetGroup, relay.size(), now)) {
+            return;
+        }
+        if (!relay.empty()) {
+            size_t relayed{0};
+            m_connman.ForEachNode([&](CNode* target) {
+                if (relayed >= MATMUL_ATTESTATION_RELAY_PEERS ||
+                    target->GetId() == pfrom.GetId() ||
+                    target->GetCommonVersion() < MATMUL_ATTESTATION_VERSION) {
+                    return;
+                }
+                MakeAndPushMessage(*target, NetMsgType::MMATTESTPQ, relay);
+                ++relayed;
             });
         }
         return;

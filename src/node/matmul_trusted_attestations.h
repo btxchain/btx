@@ -59,6 +59,7 @@ void ResetForTest();
 [[nodiscard]] bool IsTrustedMirror();
 [[nodiscard]] bool ServesAttestations();
 [[nodiscard]] bool HasLocalSigner();
+[[nodiscard]] bool HasLocalPqSigner();
 /** Default for -matmulattestationserve. A plain consensus node (no local
  *  signing key, not -matmulvalidation=trusted) must not answer GETMMATTEST;
  *  that is the live isolation default so public fan-in cannot serialize
@@ -71,11 +72,13 @@ void ResetForTest();
 [[nodiscard]] std::chrono::milliseconds WaitTimeout();
 [[nodiscard]] size_t Threshold();
 [[nodiscard]] std::vector<CPubKey> TrustedSigners();
+[[nodiscard]] std::vector<std::vector<unsigned char>> TrustedPqSigners();
 [[nodiscard]] bool OpenAttestorsEnabled();
 [[nodiscard]] size_t OpenThreshold();
 [[nodiscard]] std::vector<CPubKey> AdmittedOpenSigners();
 [[nodiscard]] std::vector<CPubKey> FrozenOpenSigners();
 [[nodiscard]] bool IsAuthoritySigner(const CPubKey& pubkey);
+[[nodiscard]] bool IsAuthorityPqSigner(const std::vector<unsigned char>& pubkey);
 [[nodiscard]] bool IsBlocked(const CPubKey& pubkey);
 [[nodiscard]] std::vector<CPubKey> BlockedSigners();
 [[nodiscard]] std::vector<CPubKey> ConfigBlockedSigners();
@@ -107,10 +110,15 @@ void SetBlockIndexHeightLookup(BlockIndexHeightLookup lookup);
     const matmul::trusted::ExactReplayAttestation& attestation,
     const uint256& expected_hash,
     int32_t expected_height);
+[[nodiscard]] matmul::trusted::AddResult AddPq(
+    const matmul::trusted::ExactReplayPqAttestation& attestation,
+    const uint256& expected_hash,
+    int32_t expected_height);
 [[nodiscard]] matmul::trusted::AddResult SignAuthoritative(
     const uint256& block_hash,
     int32_t block_height,
-    matmul::trusted::ExactReplayAttestation* produced = nullptr);
+    matmul::trusted::ExactReplayAttestation* produced = nullptr,
+    matmul::trusted::ExactReplayPqAttestation* produced_pq = nullptr);
 /**
  * This node's own validated BlockDisconnected. Releases the local mint slot
  * when the minted hash left the active chain, so SignAuthoritative can
@@ -208,6 +216,8 @@ VerifyUtxoSnapshotManifest(
     const std::function<bool()>& cancelled,
     std::vector<matmul::trusted::ExactReplayAttestation>* quorum = nullptr);
 [[nodiscard]] std::vector<matmul::trusted::ExactReplayAttestation> Get(
+    const uint256& block_hash, int32_t block_height);
+[[nodiscard]] std::vector<matmul::trusted::ExactReplayPqAttestation> GetPq(
     const uint256& block_hash, int32_t block_height);
 [[nodiscard]] matmul::trusted::StoreStats Stats();
 
