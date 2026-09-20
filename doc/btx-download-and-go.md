@@ -1,13 +1,13 @@
 # BTX Download-and-Go Guide
 
-> **Current line:** **v0.34.8-rc3** (prerelease). See
+> **Current line:** **v0.34.8-rc4** (prerelease). See
 > [0.34.8 release notes](release-notes/release-notes-0.34.8.md) and
 > [release notes](release-notes.md). The GitHub tag that resolves is
-> [`v0.34.8-rc3`](https://github.com/btxchain/btx/releases/tag/v0.34.8-rc3);
+> [`v0.34.8-rc4`](https://github.com/btxchain/btx/releases/tag/v0.34.8-rc4);
 > `refs/tags/v0.34.7` is not published — do not pass `--release-tag v0.34.7`.
 > **Installer:** `contrib/faststart/btx-agent-setup.py` is for **signed final
 > releases** that publish `btx-release-manifest.json` and `SHA256SUMS.asc`.
-> `--release-tag v0.34.8-rc3` 404s on that manifest. For this prerelease,
+> `--release-tag v0.34.8-rc4` 404s on that manifest. For this prerelease,
 > unpack the GitHub archive directly (below).
 > Historical 0.34.5 convergence notes:
 > [release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
@@ -44,11 +44,11 @@ paths, see [BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.m
 
 ## 1. Fast-sync with Assumeutxo
 
-### Prerelease / rc tags (including v0.34.8-rc3): unpack the GitHub archive
+### Prerelease / rc tags (including v0.34.8-rc4): unpack the GitHub archive
 
-`python3 contrib/faststart/btx-agent-setup.py --release-tag v0.34.8-rc3`
+`python3 contrib/faststart/btx-agent-setup.py --release-tag v0.34.8-rc4`
 exits with HTTP 404 fetching
-`https://github.com/btxchain/btx/releases/download/v0.34.8-rc3/btx-release-manifest.json`.
+`https://github.com/btxchain/btx/releases/download/v0.34.8-rc4/btx-release-manifest.json`.
 That tag publishes the tarballs and an unsigned `SHA256SUMS`; it does **not**
 publish `btx-release-manifest.json` or `SHA256SUMS.asc`. `--allow-unsigned-release`
 does not help: the installer still needs the manifest. Unpack the archive:
@@ -57,13 +57,13 @@ does not help: the installer still needs the manifest. Unpack the archive:
 # CPU-only. The cuda12 tarball on this tag is Blackwell-only
 # (sm_100a / sm_120 / sm_120a SASS, sm_120 PTX); do not use it on
 # Ampere / Ada / Hopper. See linux-release-builds.md.
-curl -fsSL -O https://github.com/btxchain/btx/releases/download/v0.34.8-rc3/btx-0.34.8-rc3-x86_64-linux-gnu.tar.gz
-curl -fsSL -O https://github.com/btxchain/btx/releases/download/v0.34.8-rc3/SHA256SUMS
+curl -fsSL -O https://github.com/btxchain/btx/releases/download/v0.34.8-rc4/btx-0.34.8-rc3-x86_64-linux-gnu.tar.gz
+curl -fsSL -O https://github.com/btxchain/btx/releases/download/v0.34.8-rc4/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
 tar xzf btx-0.34.8-rc3-x86_64-linux-gnu.tar.gz
 ```
 
-The GitHub tag `v0.34.8-rc3` is the live prerelease. `v0.34.7` is not a
+The GitHub tag `v0.34.8-rc4` is the live prerelease. `v0.34.7` is not a
 published tag. Historical `v0.34.8-rc2` and `v0.34.8-rc1` remain on GitHub and are superseded.
 
 Continue from the datadir / snapshot steps below using the unpacked `bin/`.
@@ -122,7 +122,7 @@ GPU hardware and target-host NVIDIA driver requirements. The published
 `linux-x86_64-cuda12` archive is Blackwell-only (`sm_100a` / `sm_120` /
 `sm_120a`); do not pass `--platform linux-x86_64-cuda12` for Ampere, Ada,
 Hopper, or RTX 4090. On a signed final that publishes a matching CUDA 13
-asset, `--platform linux-x86_64-cuda13` selects that fatbin. v0.34.8-rc3 did
+asset, `--platform linux-x86_64-cuda13` selects that fatbin. v0.34.8-rc4 did
 not publish `cuda13` and has no installer manifest.
 For private GitHub releases, set `BTX_GITHUB_TOKEN`, `GITHUB_TOKEN`, or
 `GH_TOKEN` before running the installer so it can authenticate the manifest and

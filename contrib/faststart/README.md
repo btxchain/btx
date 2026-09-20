@@ -1,8 +1,8 @@
 # BTX Fast-Start Validating Nodes
 
 Fast-start changes sync mechanics, not consensus activation or verification
-authority. Current downloadable prerelease is **v0.34.8-rc3**
-(`--release-tag v0.34.8-rc3`; `v0.34.7` is not a published GitHub tag).
+authority. Current downloadable prerelease is **v0.34.8-rc4**
+(`--release-tag v0.34.8-rc4`; `v0.34.7` is not a published GitHub tag).
 Epoch A (height 185000) is live, and the compiled assumeutxo pin is height
 **219000**. A near-tip claimed block
 still requires Profile 1 ExactReplay even when historical state was bootstrapped
@@ -169,12 +169,12 @@ One-shot install + bootstrap
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.8-rc3 \
+  --release-tag v0.34.8-rc4 \
   --preset service \
   --datadir="$HOME/.btx-service"
 ```
 
-The GitHub tag `v0.34.8-rc3` is the live prerelease. `v0.34.7` is not a
+The GitHub tag `v0.34.8-rc4` is the live prerelease. `v0.34.7` is not a
 published tag. Historical `v0.34.8-rc2` and `v0.34.8-rc1` remain on GitHub and are superseded.
 
 For a self-custody miner, installation, verified snapshot bootstrap, wallet
@@ -184,7 +184,7 @@ command:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.8-rc3 \
+  --release-tag v0.34.8-rc4 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --start-mining
@@ -231,7 +231,7 @@ handing off to mining or service automation:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.8-rc3 \
+  --release-tag v0.34.8-rc4 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

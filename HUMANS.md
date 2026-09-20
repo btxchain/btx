@@ -106,7 +106,7 @@ Install and first-run: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
 
 Using and proving the model network: [doc/modelnet/howto.md](doc/modelnet/howto.md).
 
-This working tree is **0.34.8rc3** (`CLIENT_VERSION_IS_RELEASE=false`).
+This working tree is **0.34.8rc4** (`CLIENT_VERSION_IS_RELEASE=false`).
 The last released client remains **v0.34.7**. Final `IS_RELEASE=true` is the operator go-ahead after this RC.
 Host, seed, search, share, watch folder,
 `showmodel` / `unhostmodel` / `exportmodellink`, mining `first_run` doctor
@@ -292,7 +292,7 @@ search when you do not want the query to leave this node.
 
 - **Release:** **v0.34.7** (Native Model Network, including search, release
   campaigns, and creation bounties). Last shipping tag.
-- **Release candidate:** **0.34.8rc3** (`CLIENT_VERSION_IS_RELEASE=false`).
+- **Release candidate:** **0.34.8rc4** (`CLIENT_VERSION_IS_RELEASE=false`).
   Merge to main still requires operator go-ahead. Host / seed / search / share / watch / doctor:
   [doc/modelnet/first-run.md](doc/modelnet/first-run.md). CLI:
   [contrib/modelnet/btx-model](contrib/modelnet/btx-model). Optional cloud /
