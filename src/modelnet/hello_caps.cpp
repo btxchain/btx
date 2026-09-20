@@ -62,6 +62,7 @@ UniValue HelloCapabilityArray()
              "BTXPKG_CORE_V3",
              "CAPABILITY_HANDOFF_V1",
              "LAN_DISCOVERY_V1",
+             "SAFETY_ADVISORY_V1",
          }) {
         const int v = VersionSuffix(c);
         UniValue o(UniValue::VOBJ);

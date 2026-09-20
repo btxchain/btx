@@ -300,7 +300,12 @@ bool ShouldDemandSeed(const PreservationPolicy& p, AdmissionLevel admission)
 {
     if (p.storage_quota_bytes == 0) return false;
     if (p.seed_mode != SeedMode::AUTO) return false;
-    if (admission == AdmissionLevel::FAILED) return false;
+    if (admission == AdmissionLevel::FAILED ||
+        admission == AdmissionLevel::FETCHING ||
+        admission == AdmissionLevel::ENCRYPTED_UNQUALIFIED ||
+        admission == AdmissionLevel::NOT_RUN_RESOURCE_LIMIT) {
+        return false;
+    }
     return true;
 }
 

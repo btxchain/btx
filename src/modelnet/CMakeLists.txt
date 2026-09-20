@@ -31,6 +31,7 @@ add_library(bitcoin_modelnet STATIC
   qualification.cpp
   identity.cpp
   acl.cpp
+  safety.cpp
   access_policy.cpp
   community.cpp
   reciprocity.cpp

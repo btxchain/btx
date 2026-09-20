@@ -52,11 +52,24 @@ bool LooksLikeExecutable(const std::string& filename_hint, Span<const unsigned c
     const auto lower = ToLower(filename_hint);
     if (lower.ends_with(".pt") || lower.ends_with(".pth") || lower.ends_with(".pkl") ||
         lower.ends_with(".py") || lower.ends_with(".so") || lower.ends_with(".dll") ||
-        lower.ends_with(".ipynb") || lower.ends_with(".sh") || lower.ends_with(".cu")) {
+        lower.ends_with(".exe") || lower.ends_with(".ipynb") || lower.ends_with(".sh") ||
+        lower.ends_with(".cu") || lower.ends_with(".wasm") || lower.ends_with(".jar") ||
+        lower.ends_with(".class") || lower.ends_with(".bat") || lower.ends_with(".cmd") ||
+        lower.ends_with(".ps1") || lower.ends_with(".dylib")) {
         return true;
     }
     if (bytes.size() >= 4 && bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' && bytes[3] == 'F') return true;
     if (bytes.size() >= 2 && bytes[0] == 'M' && bytes[1] == 'Z') return true;
+    if (bytes.size() >= 2 && bytes[0] == '#' && bytes[1] == '!') return true;
+    if (bytes.size() >= 4 && bytes[0] == 0 && bytes[1] == 'a' && bytes[2] == 's' && bytes[3] == 'm') return true;
+    if (bytes.size() >= 4) {
+        const uint32_t m = (uint32_t(bytes[0]) << 24) | (uint32_t(bytes[1]) << 16) |
+                           (uint32_t(bytes[2]) << 8) | uint32_t(bytes[3]);
+        if (m == 0xFEEDFACE || m == 0xFEEDFACF || m == 0xCEFAEDFE || m == 0xCFFAEDFE ||
+            m == 0xCAFEBABE || m == 0xBEBAFECA) {
+            return true;
+        }
+    }
     return LooksLikePickle(bytes);
 }
 

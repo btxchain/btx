@@ -25,6 +25,7 @@ constexpr uint8_t RECORD_POLICY_BUNDLE = 21;
 constexpr uint8_t RECORD_PRESERVATION_CIRCLE = 22;
 constexpr uint8_t RECORD_FREE_GRANT = 23;
 constexpr uint8_t RECORD_SERVICE_RECEIPT = 24;
+constexpr uint8_t RECORD_SAFETY_ADVISORY = 25;
 
 const char* RecordKindName(uint8_t kind);
 

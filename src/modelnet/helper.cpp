@@ -46,6 +46,7 @@
 #include <modelnet/direct_seed.h>
 #include <modelnet/resource_uri.h>
 #include <modelnet/router.h>
+#include <modelnet/safety.h>
 #include <modelnet/store.h>
 #include <modelnet/swarm.h>
 #include <modelnet/transfer.h>
@@ -1462,6 +1463,12 @@ bool CheckFreeGrantEntitlement(const ModelCatalog& cat, const NativeRequest& req
                                uint32_t file_index, uint32_t piece_index, bool whole_file, uint32_t n_pieces,
                                UniValue& gbody, NativeResponse& resp)
 {
+    EnsureSafetyBound(HelperDir(cat));
+    if (GlobalSafety().SubjectBlocked(entry.model_id.Hex()) || GlobalSafety().SubjectBlocked(entry.artifact_id.Hex())) {
+        resp.status = 404;
+        resp.body = JsonError("NOT_FOUND", "not seeded");
+        return false;
+    }
     const std::string gp = RequestHeader(req, "X-BTX-Grant-Payload");
     const std::string gs = RequestHeader(req, "X-BTX-Grant-Sig");
     const std::string gpk = RequestHeader(req, "X-BTX-Grant-Pubkey");
@@ -1521,10 +1528,50 @@ bool CheckFreeGrantEntitlement(const ModelCatalog& cat, const NativeRequest& req
     return true;
 }
 
+void UnseedSafetyTarget(ModelCatalog& cat, const std::string& hex)
+{
+    Digest48 id;
+    std::string e;
+    if (!Digest48::FromHex(hex, id, e)) return;
+    (void)cat.Seed(id, false, e);
+}
+
+bool AllowGrantIssue(const std::string& peer, int64_t now_ms, std::string& err)
+{
+    static std::mutex mu;
+    static std::map<std::string, std::vector<int64_t>> hits;
+    std::lock_guard<std::mutex> lock(mu);
+    auto& v = hits[peer.empty() ? "pq1-peer" : peer];
+    v.erase(std::remove_if(v.begin(), v.end(), [&](int64_t t) { return now_ms - t > 60000; }), v.end());
+    if (v.size() >= 32) {
+        err = "grant issue limited";
+        return false;
+    }
+    v.push_back(now_ms);
+    return true;
+}
+
+void ApplyInboundSafetyRecord(ModelCatalog& cat, const SignedRecordHint& h, int64_t now, UniValue& o)
+{
+    if (h.kind != RECORD_SAFETY_ADVISORY) return;
+    EnsureSafetyBound(HelperDir(cat));
+    UniValue decoded;
+    std::string err;
+    if (!DecodeRecord(h.kind, h.payload, decoded, err)) return;
+    bool applied = false;
+    (void)GlobalSafety().IngestSigned(decoded, h.provider_id, h.record_id.Hex(), now, applied, err);
+    o.pushKV("safety_applied", applied);
+    o.pushKV("safety_requires_pin", !applied);
+    if (applied && decoded.exists("target_id") && decoded["target_id"].isStr()) {
+        UnseedSafetyTarget(cat, decoded["target_id"].get_str());
+    }
+}
+
 bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResponse& resp)
 {
     resp = {};
     resp.content_type = "application/json";
+    EnsureSafetyBound(HelperDir(cat));
     const std::string root{MODEL_HTTP_ROOT};
     if (req.path.find("btxcapability") != std::string::npos || req.path.find("capability") != std::string::npos ||
         req.path.find("btxlock") != std::string::npos || req.path.find("tensormap") != std::string::npos ||
@@ -1572,7 +1619,9 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             return true;
         }
         CatalogEntry served;
-        if (!cat.Find(id, served) || !served.seeded) {
+        if (!cat.Find(id, served) || !served.seeded || served.incomplete || !served.bytes_verified ||
+            GlobalSafety().SubjectBlocked(served.model_id.Hex()) ||
+            GlobalSafety().SubjectBlocked(served.artifact_id.Hex())) {
             resp.status = 404;
             resp.body = JsonError("NOT_FOUND", "not seeded");
             return true;
@@ -1608,19 +1657,13 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         Digest48 artifact;
         bool found = Digest48::FromHex(xfer, artifact, err) && cat.Find(artifact, entry);
         if (!found) {
-            UniValue listed;
-            cat.List(listed);
-            if (listed.exists("models") && !listed["models"].getValues().empty()) {
-                found = Digest48::FromHex(listed["models"][0]["artifact_id"].get_str(), artifact, err) &&
-                        cat.Find(artifact, entry);
-            }
-        }
-        if (!found) {
             resp.status = 404;
             resp.body = JsonError("NOT_FOUND", "no artifact");
             return true;
         }
-        if (!entry.seeded) {
+        if (!entry.seeded || entry.incomplete || !entry.bytes_verified ||
+            GlobalSafety().SubjectBlocked(entry.model_id.Hex()) ||
+            GlobalSafety().SubjectBlocked(entry.artifact_id.Hex())) {
             resp.status = 404;
             resp.body = JsonError("NOT_FOUND", "not seeded");
             return true;
@@ -1732,7 +1775,9 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         }
         const uint32_t file_index = static_cast<uint32_t>(std::strtoul(rest.c_str() + slash + 1, nullptr, 10));
         CatalogEntry entry;
-        if (!cat.Find(artifact, entry) || !entry.seeded) {
+        if (!cat.Find(artifact, entry) || !entry.seeded || entry.incomplete || !entry.bytes_verified ||
+            GlobalSafety().SubjectBlocked(entry.model_id.Hex()) ||
+            GlobalSafety().SubjectBlocked(entry.artifact_id.Hex())) {
             resp.status = 404;
             resp.body = JsonError("NOT_FOUND", "not seeded");
             return true;
@@ -1799,13 +1844,12 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         UniValue models(UniValue::VARR);
         if (listed.exists("models")) {
             for (const auto& m : listed["models"].getValues()) {
-                bool any = false;
-                if (m.exists("files") && m["files"].isArray()) {
-                    for (const auto& f : m["files"].getValues()) {
-                        if (f.exists("piece_count") && f["piece_count"].getInt<int>() > 0) any = true;
-                    }
-                }
-                if (!any && (!m.exists("seeded") || !m["seeded"].get_bool())) continue;
+                if (!m.exists("seeded") || !m["seeded"].get_bool()) continue;
+                if (m.exists("incomplete") && m["incomplete"].get_bool()) continue;
+                if (m.exists("bytes_verified") && !m["bytes_verified"].get_bool()) continue;
+                if (m.exists("complete") && !m["complete"].get_bool()) continue;
+                if (m.exists("model_id") && m["model_id"].isStr() && GlobalSafety().SubjectBlocked(m["model_id"].get_str())) continue;
+                if (m.exists("artifact_id") && m["artifact_id"].isStr() && GlobalSafety().SubjectBlocked(m["artifact_id"].get_str())) continue;
                 UniValue one = m;
                 if (one.exists("files") && one["files"].isArray()) {
                     UniValue files(UniValue::VARR);
@@ -2321,6 +2365,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         oann.pushKV("accepted", true);
         oann.pushKV("signed", true);
         oann.pushKV("record_id", h.record_id.Hex());
+        ApplyInboundSafetyRecord(cat, h, now, oann);
         resp.body = oann.write();
         return true;
     }
@@ -2428,6 +2473,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         oann.pushKV("accepted", true);
         oann.pushKV("signed", true);
         oann.pushKV("record_id", h.record_id.Hex());
+        ApplyInboundSafetyRecord(cat, h, now, oann);
         resp.body = oann.write();
         return true;
     }
@@ -2456,9 +2502,17 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             return true;
         }
         CatalogEntry e;
-        if (!cat.Find(model_id, e) || !e.seeded || e.incomplete || !e.bytes_verified) {
+        if (!cat.Find(model_id, e) || !e.seeded || e.incomplete || !e.bytes_verified ||
+            GlobalSafety().SubjectBlocked(e.model_id.Hex()) || GlobalSafety().SubjectBlocked(e.artifact_id.Hex())) {
             resp.status = 404;
             resp.body = JsonError("NOT_FOUND", "no seeded local grant");
+            return true;
+        }
+        std::string stampede_err;
+        if (!AllowGrantIssue(OriginRatePeer(req), ConnNowMs(), stampede_err)) {
+            resp.status = 429;
+            resp.body = JsonError("ORIGIN_STAMPEDE", stampede_err.empty() ? "grant issue limited" : stampede_err);
+            resp.headers.emplace_back("Retry-After", "1");
             return true;
         }
         const uint32_t file_index = body.exists("file_index") ? body["file_index"].getInt<uint32_t>() : 0;
@@ -3365,19 +3419,18 @@ void ApplyProfilePolicyLive(ModelCatalog& cat, const ProfilePolicy& policy)
 
 bool CollectPreviewFiles(const fs::path& src, std::vector<std::pair<fs::path, std::string>>& files, std::string& err)
 {
-    auto skip_name = [](const std::string& rels) {
-        const auto lower = ToLower(rels);
-        return lower.ends_with(".pt") || lower.ends_with(".pth") || lower.ends_with(".pkl") ||
-               lower.ends_with(".pickle") || lower.ends_with(".py") || lower.ends_with(".so") ||
-               lower.ends_with(".bin") || lower.ends_with(".exe") || lower.ends_with(".dll");
-    };
+    std::error_code sec;
+    if (fs::is_symlink(src, sec)) {
+        err = "symlink rejected";
+        return false;
+    }
     if (!fs::exists(src)) {
         err = "path does not exist";
         return false;
     }
     if (fs::is_regular_file(src)) {
         const std::string name = fs::PathToString(src.filename());
-        if (skip_name(name)) {
+        if (RelPathLooksUnsafe(name)) {
             err = "pickle/.pt/.py/.so/.bin skipped";
             return false;
         }
@@ -3389,12 +3442,13 @@ bool CollectPreviewFiles(const fs::path& src, std::vector<std::pair<fs::path, st
         return false;
     }
     for (const auto& ent : fs::recursive_directory_iterator(src)) {
+        if (ent.is_symlink()) continue;
         if (!ent.is_regular_file()) continue;
         fs::path rel = fs::relative(ent.path(), src);
         const std::string rels = rel.generic_string();
         std::string perr;
         if (!IsPortableRelPath(rels, perr)) continue;
-        if (skip_name(rels)) continue;
+        if (RelPathLooksUnsafe(rels)) continue;
         files.emplace_back(ent.path(), rels);
     }
     if (files.empty()) {
@@ -3577,7 +3631,15 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
         } else if (ent.is_directory()) {
             std::vector<std::pair<fs::path, std::string>> files;
             std::string perr;
-            if (CollectPreviewFiles(ent.path(), files, perr)) consider(ent.path());
+            if (CollectPreviewFiles(ent.path(), files, perr)) {
+                bool has_weights = false;
+                for (const auto& f : files) {
+                    const auto lower = ToLower(f.second);
+                    if (lower.ends_with(".gguf") || lower.ends_with(".safetensors")) has_weights = true;
+                }
+                if (has_weights) consider(ent.path());
+                else skip_obj(fs::PathToString(ent.path()), "no weight files");
+            }
         }
     }
     UniValue paths(UniValue::VARR);
@@ -4459,6 +4521,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     };
 
     if (!BoundModelEventJournal()) BindModelEventLayer(HelperDir(cat));
+    EnsureSafetyBound(HelperDir(cat));
     EnsureCloudLoaded(cat);
     LoadRetrieveJobs(cat);
     if (IsCloudHelperMethod(method)) {
@@ -6624,6 +6687,95 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("added", peer);
         result.pushKV("automatic_spend_atoms", 0);
         result.pushKV("note", "model-plane contact; not AddrMan; not monetary addnode");
+        return true;
+    }
+    if (method == "addmodelsafetypublisher") {
+        if (!Arg(0).isStr()) {
+            err_code = "INVALID_PARAMETER";
+            err = "publisher_id";
+            return false;
+        }
+        const std::string label = (params.isArray() && params.size() > 1 && Arg(1).isStr()) ? Arg(1).get_str() : "";
+        if (!GlobalSafety().PinPublisher(Arg(0).get_str(), label, err)) {
+            err_code = "SAFETY";
+            return false;
+        }
+        result.pushKV("schema_version", 2);
+        result.pushKV("ok", true);
+        result.pushKV("publisher_id", Arg(0).get_str());
+        result.pushKV("automatic_spend_atoms", 0);
+        result.pushKV("consensus", false);
+        result.pushKV("note", "local pin of a safety publisher; not BanMan; not chain consensus");
+        return true;
+    }
+    if (method == "removemodelsafetypublisher") {
+        if (!Arg(0).isStr()) {
+            err_code = "INVALID_PARAMETER";
+            err = "publisher_id";
+            return false;
+        }
+        result.pushKV("schema_version", 2);
+        result.pushKV("removed", GlobalSafety().UnpinPublisher(Arg(0).get_str()));
+        result.pushKV("automatic_spend_atoms", 0);
+        return true;
+    }
+    if (method == "listmodelsafetypublishers") {
+        result = GlobalSafety().PublishersJson();
+        return true;
+    }
+    if (method == "listmodelsafetyadvisories") {
+        result = GlobalSafety().AdvisoriesJson(static_cast<int64_t>(std::time(nullptr)));
+        return true;
+    }
+    if (method == "listmodelsafetywarnings") {
+        result = GlobalSafety().WarningsJson(static_cast<int64_t>(std::time(nullptr)));
+        result.pushKV("note", "unpinned signed gossip; not an automatic deny");
+        return true;
+    }
+    if (method == "reportmodelmalicious") {
+        if (!Arg(0).isStr()) {
+            err_code = "INVALID_PARAMETER";
+            err = "model_id";
+            return false;
+        }
+        uint8_t sev = SAFETY_MALWARE;
+        if (params.isArray() && params.size() > 1 && Arg(1).isStr()) {
+            const std::string s = ToLower(Arg(1).get_str());
+            if (s == "unsafe_exec" || s == "unsafe") sev = SAFETY_UNSAFE_EXEC;
+            else if (s == "spam") sev = SAFETY_SPAM;
+            else if (s == "garbage") sev = SAFETY_GARBAGE;
+            else if (s == "malware") sev = SAFETY_MALWARE;
+            else {
+                err_code = "INVALID_PARAMETER";
+                err = "severity";
+                return false;
+            }
+        }
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        if (!GlobalSafety().LocalReport(Arg(0).get_str(), SAFETY_TARGET_MODEL, sev, "operator", now, err)) {
+            err_code = "SAFETY";
+            return false;
+        }
+        UnseedSafetyTarget(cat, Arg(0).get_str());
+        UniValue extra(UniValue::VOBJ);
+        extra.pushKV("target_kind", SAFETY_TARGET_MODEL);
+        extra.pushKV("target_id", Arg(0).get_str());
+        extra.pushKV("severity", sev);
+        extra.pushKV("reason_code", 1);
+        extra.pushKV("content_sha384", std::string(96, '0'));
+        extra.pushKV("note", "operator");
+        SignedRecordHint h;
+        std::string rec_err;
+        const bool signed_ok = IssueAndStoreRecord(cat, RECORD_SAFETY_ADVISORY, extra, 30 * DAY_SECONDS, h, rec_err);
+        result.pushKV("schema_version", 2);
+        result.pushKV("ok", true);
+        result.pushKV("local_applied", true);
+        result.pushKV("signed", signed_ok);
+        if (signed_ok) result.pushKV("record_id", h.record_id.Hex());
+        else result.pushKV("sign_error", rec_err);
+        result.pushKV("automatic_spend_atoms", 0);
+        result.pushKV("consensus", false);
+        result.pushKV("note", "local deny plus optional signed advisory for pinned peers; not BanMan");
         return true;
     }
     if (method == "getmodelpeers") {
@@ -9176,6 +9328,7 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
             Digest48 id;
             std::string e;
             if (!Digest48::FromHex(m["model_id"].get_str(), id, e)) continue;
+            if (GlobalSafety().SubjectBlocked(id.Hex())) continue;
             const std::string adm = (m.exists("admission") && m["admission"].isStr()) ? m["admission"].get_str() : "";
             if (adm == "FAILED" || adm == "NOT_RUN_RESOURCE_LIMIT") continue;
             const std::string key = id.Hex();

@@ -4,6 +4,7 @@
 
 #include <modelnet/verified_manifest.h>
 
+#include <modelnet/safety.h>
 #include <modelnet/store.h>
 #include <modelnet/types.h>
 
@@ -62,6 +63,10 @@ bool VerifyManifestAgainstRequest(const UniValue& manifest, VerifiedManifest& ou
         }
         cf.path = f["path"].get_str();
         if (!IsPortableRelPath(cf.path, err)) return false;
+        if (RelPathLooksUnsafe(cf.path)) {
+            err = "skipped unsafe or unsupported name";
+            return false;
+        }
         if (!FileRoleFromName(f["role"].get_str(), cf.role)) {
             err = "role";
             return false;

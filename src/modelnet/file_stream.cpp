@@ -5,6 +5,7 @@
 #include <modelnet/file_stream.h>
 
 #include <crypto/sha384.h>
+#include <modelnet/qualification.h>
 #include <span.h>
 #include <util/fs.h>
 #include <util/fs_helpers.h>
@@ -399,6 +400,10 @@ bool FileStreamHydration::FlushPiece(std::string& err)
         return false;
     }
     Span<const unsigned char> piece{m_buf.data(), m_buf_fill};
+    if (m_st.next_piece == 0 && LooksLikeExecutable("", piece)) {
+        err = "rejected pickle/executable/script format";
+        return false;
+    }
     const Digest48 leaf = ChunkLeaf(m_st.next_piece, piece);
     if (!m_quarantine->PutVerifiedPiece(m_artifact, m_file_index, m_st.next_piece, piece, leaf, err)) {
         return false;

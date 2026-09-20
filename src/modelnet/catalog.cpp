@@ -7,6 +7,7 @@
 #include <modelnet/crypto.h>
 #include <modelnet/piece_ranges.h>
 #include <modelnet/resource_uri.h>
+#include <modelnet/safety.h>
 #include <modelnet/verified_manifest.h>
 #include <modelnet/hello_caps.h>
 #include <crypto/sha384.h>
@@ -27,14 +28,7 @@ FileRole RoleFromRelPath(const std::string& rel, bool& skip)
 {
     skip = false;
     const auto lower = ToLower(rel);
-    if (lower.starts_with(".") || lower.find("/.") != std::string::npos) {
-        skip = true;
-        return FileRole::WEIGHTS;
-    }
-    if (lower.ends_with(".pt") || lower.ends_with(".pth") || lower.ends_with(".pkl") ||
-        lower.ends_with(".py") || lower.ends_with(".so") || lower.ends_with(".bin") ||
-        lower.ends_with(".exe") || lower.ends_with(".dll") || lower.ends_with(".ipynb") ||
-        lower.ends_with(".cu") || lower.ends_with(".sig")) {
+    if (RelPathLooksUnsafe(rel)) {
         skip = true;
         return FileRole::WEIGHTS;
     }
@@ -169,6 +163,7 @@ UniValue CapabilitiesObject()
     c.pushKV("query_summary_v1", true);
     c.pushKV("index_reconcile_v1", true);
     c.pushKV("metadata_gossip_v1", true);
+    c.pushKV("safety_advisory_v1", true);
     c.pushKV("origin_offer_v1", true);
     c.pushKV("lan_discovery_v1", true);
     c.pushKV("selective_files_v1", true);
@@ -215,6 +210,11 @@ bool ImportRegularFile(ModelStore& store, const Digest48& staging_artifact, uint
     out = {};
     out.path = relpath;
     if (!IsPortableRelPath(relpath, err)) return false;
+    std::error_code sec;
+    if (fs::is_symlink(src, sec)) {
+        err = "symlink rejected";
+        return false;
+    }
     bool skip = false;
     out.role = RoleFromRelPath(relpath, skip);
     if (skip) {
@@ -223,6 +223,16 @@ bool ImportRegularFile(ModelStore& store, const Digest48& staging_artifact, uint
     }
 
     const std::string srcs = fs::PathToString(src);
+    {
+        std::ifstream peek(src, std::ios::binary);
+        unsigned char magic[24]{};
+        peek.read(reinterpret_cast<char*>(magic), 24);
+        const auto n = static_cast<size_t>(peek.gcount());
+        if (LooksLikeExecutable(relpath, Span<const unsigned char>{magic, n})) {
+            err = "rejected pickle/executable/script format";
+            return false;
+        }
+    }
     if (out.role == FileRole::WEIGHTS) {
         QualReport report;
         const auto qr = QualifyFile(srcs, report);
@@ -306,6 +316,11 @@ ModelCatalog::ModelCatalog(fs::path dir, uint64_t quota_bytes)
 
 void ModelCatalog::DemandSeedLocked(CatalogEntry& e)
 {
+    EnsureSafetyBound(m_dir);
+    if (GlobalSafety().SubjectBlocked(e.model_id.Hex()) || GlobalSafety().SubjectBlocked(e.artifact_id.Hex())) {
+        e.seeded = false;
+        return;
+    }
     if (!ShouldDemandSeed(m_policy, e.admission)) return;
     if (e.admission == AdmissionLevel::BYTES_VERIFIED ||
         e.admission == AdmissionLevel::STRUCTURE_VERIFIED ||
@@ -533,7 +548,17 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
         err = "payload storage is 0 until -modelstorage / -modelcache allocates a quota";
         return false;
     }
+    EnsureSafetyBound(m_dir);
+    if (m_models.size() >= MAX_CATALOG_MODELS) {
+        err = "catalog entry cap";
+        return false;
+    }
     const fs::path src = fs::PathFromString(path);
+    std::error_code sec;
+    if (fs::is_symlink(src, sec)) {
+        err = "symlink rejected";
+        return false;
+    }
     if (!fs::exists(src)) {
         err = "path does not exist";
         return false;
@@ -546,9 +571,16 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
             err = perr;
             return false;
         }
+        bool skip = false;
+        (void)RoleFromRelPath(name, skip);
+        if (skip) {
+            err = "skipped unsafe or unsupported name";
+            return false;
+        }
         files.emplace_back(src, name);
     } else if (fs::is_directory(src)) {
         for (const auto& ent : fs::recursive_directory_iterator(src)) {
+            if (ent.is_symlink()) continue;
             if (!ent.is_regular_file()) continue;
             fs::path rel = fs::relative(ent.path(), src);
             std::string rels = rel.generic_string();
@@ -643,6 +675,11 @@ bool ModelCatalog::Seed(const Digest48& model_id, bool on, std::string& err)
     for (auto& m : m_models) {
         if (m.model_id == model_id) {
             if (on) {
+                EnsureSafetyBound(m_dir);
+                if (GlobalSafety().SubjectBlocked(m.model_id.Hex()) || GlobalSafety().SubjectBlocked(m.artifact_id.Hex())) {
+                    err = "safety";
+                    return false;
+                }
                 m.seeded = true;
                 m.bytes_verified = m.bytes_verified || AdmissionImpliesBytesVerified(m.admission);
                 m.admission = AdmissionLevel::SEEDING;
@@ -991,6 +1028,7 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
         err = "corrupt chunk";
         return false;
     }
+    std::string relpath;
     {
         std::lock_guard<std::mutex> lock(m_mu);
         bool found = false;
@@ -1009,12 +1047,26 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
                 err = "file size mismatch";
                 return false;
             }
+            EnsureSafetyBound(m_dir);
+            if (GlobalSafety().SubjectBlocked(m.model_id.Hex()) || GlobalSafety().SubjectBlocked(m.artifact_id.Hex())) {
+                err = "safety";
+                return false;
+            }
+            relpath = m.core.files[file_index].path;
             break;
         }
         if (!found) {
             err = "unknown artifact";
             return false;
         }
+    }
+    if (piece_index == 0 && (RelPathLooksUnsafe(relpath) || LooksLikeExecutable(relpath, bytes))) {
+        EnsureSafetyBound(m_dir);
+        std::string serr;
+        GlobalSafety().LocalReport(artifact.Hex(), SAFETY_TARGET_ARTIFACT, SAFETY_UNSAFE_EXEC,
+                                   "executable prefix", GetTime(), serr);
+        err = "rejected pickle/executable/script format";
+        return false;
     }
     const Digest48 leaf = ChunkLeaf(piece_index, bytes);
     if (!m_store.PutVerifiedPiece(artifact, file_index, piece_index, bytes, leaf, err)) return false;
@@ -1027,10 +1079,6 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
         for (auto& m : m_models) {
             if (!(m.artifact_id == artifact)) continue;
             m.incomplete = true;
-            if (ShouldDemandSeed(m_policy, m.admission) || m.seeded) {
-                m.seeded = true;
-                if (!m.seeding_started_at) m.seeding_started_at = GetTime();
-            }
             m.last_access_at = GetTime();
             m.useful_bytes_received += static_cast<int64_t>(bytes.size());
             break;
@@ -1088,7 +1136,29 @@ bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& er
 {
     VerifiedManifest vm;
     if (!VerifyManifestAgainstRequest(manifest, vm, err)) return false;
+    for (const auto& f : vm.core.files) {
+        if (RelPathLooksUnsafe(f.path)) {
+            err = "skipped unsafe or unsupported name";
+            return false;
+        }
+    }
+    EnsureSafetyBound(m_dir);
+    if (GlobalSafety().SubjectBlocked(vm.model_id.Hex()) || GlobalSafety().SubjectBlocked(vm.artifact_id.Hex())) {
+        err = "safety";
+        return false;
+    }
     std::lock_guard<std::mutex> lock(m_mu);
+    bool updating = false;
+    for (const auto& existing : m_models) {
+        if (existing.model_id == vm.model_id) {
+            updating = true;
+            break;
+        }
+    }
+    if (!updating && m_models.size() >= MAX_CATALOG_MODELS) {
+        err = "catalog entry cap";
+        return false;
+    }
     CatalogEntry e;
     e.model_id = vm.model_id;
     e.artifact_id = vm.artifact_id;
@@ -1105,10 +1175,7 @@ bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& er
         e.admission = AdmissionLevel::FETCHING;
         e.bytes_verified = false;
         e.incomplete = true;
-        if (ShouldDemandSeed(m_policy, e.admission)) {
-            e.seeded = true;
-            if (!e.seeding_started_at) e.seeding_started_at = GetTime();
-        }
+        e.seeded = false;
     }
     for (auto& existing : m_models) {
         if (existing.model_id == e.model_id) {
