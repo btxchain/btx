@@ -1,0 +1,10 @@
+statement,domain,signer_role,economic,runtime_ready
+ProviderProfile,BTX/HCP/ProviderProfile/v1,provider_root,no,no
+CapabilityOffer,BTX/HCP/CapabilityOffer/v1,provider_operational,no,no
+FundingQuote,BTX/HCP/FundingQuote/v1,provider_operational,quote_only,no
+FinanceIntent,BTX/HCP/FinanceIntent/v1,provider_operational,intent,no
+FinancialReceipt,BTX/HCP/FinancialReceipt/v1,provider_operational,attestation_only,no
+CapabilityHandoff,BTX/HCP/CapabilityHandoff/v1,provider_operational,no,no
+LocalReadinessReport,BTX/HCP/LocalReadinessReport/v1,device,no,observation_only
+HostedAccountPolicy,not_a_statement,CEX_account,spend_bounds,never_runtime
+LocalCapabilityGrant,not_a_statement,owner_local,never_spend,runtime_admission

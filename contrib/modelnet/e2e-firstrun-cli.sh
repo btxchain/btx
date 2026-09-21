@@ -13,8 +13,8 @@ trap cleanup EXIT
 [[ -x "$BIN" ]] || die "missing $BIN"
 rm -rf "$SCRATCH"; mkdir -p "$SCRATCH/zero" "$SCRATCH/pos" "$SCRATCH/src"
 python3 -c 'import struct; from pathlib import Path; Path("'"$SCRATCH"'/src/model.safetensors").write_bytes(struct.pack("<Q",2)+b"{}")'
-# quota 0: no -modelstorage
-"$BIN" -modeldir="$SCRATCH/zero" -modelrpcsocket="$SCRATCH/zero/modeld.sock" >"$SCRATCH/zero.log" 2>&1 &
+# quota 0: explicit -modelstorage=0 (omitting the flag is AUTO on standalone modeld)
+"$BIN" -modeldir="$SCRATCH/zero" -modelstorage=0 -modelrpcsocket="$SCRATCH/zero/modeld.sock" >"$SCRATCH/zero.log" 2>&1 &
 PID=$!
 python3 - "$SCRATCH/zero/modeld.sock" "$SCRATCH/src" "$PID" "$SCRATCH/zero.log" "$ROOT/contrib/modelnet" <<'PY'
 import json,socket,sys

@@ -1,0 +1,59 @@
+{
+  "schema_revision": "1.2",
+  "provider_id": "provider-a",
+  "created_at": "1789603200",
+  "projection_id": "projection-id-demo",
+  "scope": {
+    "tenant_id": "tenant-a",
+    "legal_entity_id": "entity-a",
+    "portfolio_id": "portfolio-a"
+  },
+  "as_of": "1789603200",
+  "observed_cutoff": "1789603200",
+  "watermarks": [
+    {
+      "provider_id": "provider-a",
+      "stream_id": "stream-id-demo",
+      "generation": "generation-demo",
+      "sequence": "1",
+      "effective_at": "1789603200"
+    }
+  ],
+  "metric_results": [
+    {
+      "metric_ref": {
+        "object_type": "ProviderProfile",
+        "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "value": {
+        "currency": "USD",
+        "exponent": 2,
+        "minor": "10000"
+      },
+      "count": null,
+      "status": "COMPLETE",
+      "eligible_count": "1",
+      "unpriced_count": "0",
+      "excluded_count": "0"
+    }
+  ],
+  "position_refs": [
+    {
+      "object_type": "ProviderProfile",
+      "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "operational_refs": [
+    {
+      "object_type": "ProviderProfile",
+      "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "reconciliation_refs": [
+    {
+      "object_type": "ProviderProfile",
+      "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "next_cursor": null
+}

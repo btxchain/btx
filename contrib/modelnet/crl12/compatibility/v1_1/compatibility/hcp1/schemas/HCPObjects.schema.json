@@ -1,0 +1,2128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.example.invalid/btx/hcp/1/objects",
+  "title": "Proposed HCP/1 object contracts",
+  "$comment": "Publication URI is a placeholder, not a deployed registry. Native signature and semantic validation remain mandatory.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ProviderProfileEnvelope"
+    },
+    {
+      "$ref": "#/$defs/CapabilityOfferEnvelope"
+    },
+    {
+      "$ref": "#/$defs/FundingQuoteEnvelope"
+    },
+    {
+      "$ref": "#/$defs/FinanceIntentEnvelope"
+    },
+    {
+      "$ref": "#/$defs/FinancialReceiptEnvelope"
+    },
+    {
+      "$ref": "#/$defs/CapabilityHandoffEnvelope"
+    },
+    {
+      "$ref": "#/$defs/LocalReadinessReportEnvelope"
+    }
+  ],
+  "$defs": {
+    "Digest48": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "Digest32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "UIntString": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "Id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "HttpsUrl": {
+      "type": "string",
+      "pattern": "^https://[^\\s]+$",
+      "maxLength": 2048
+    },
+    "Network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "type": "string",
+          "enum": [
+            "MAINNET",
+            "TESTNET",
+            "REGTEST"
+          ]
+        },
+        "genesis_hash": {
+          "$ref": "#/$defs/Digest32"
+        }
+      },
+      "required": [
+        "environment",
+        "genesis_hash"
+      ]
+    },
+    "Effects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "INSPECT",
+          "FETCH_METADATA",
+          "ACQUIRE_MODEL",
+          "SEED_MODEL",
+          "INSTALL_CLIENT",
+          "PLAN_LOCAL_RUN",
+          "EXECUTE_LOCAL_RUN",
+          "REPORT_READINESS"
+        ]
+      },
+      "maxItems": 16,
+      "minItems": 0
+    },
+    "Readiness": {
+      "type": "string",
+      "enum": [
+        "VERIFIED_FILES",
+        "RUNTIME_LOADED",
+        "RUNTIME_READY",
+        "FIRST_USEFUL_RESULT"
+      ]
+    },
+    "FinancialState": {
+      "type": "string",
+      "enum": [
+        "PREPARED",
+        "AUTHORIZED",
+        "RESERVED",
+        "SIGNING",
+        "SIGNED",
+        "BROADCAST_UNKNOWN",
+        "BROADCAST",
+        "CONFIRMED",
+        "NATIVE_OUTCOME_OBSERVED",
+        "SETTLED",
+        "EXPIRED",
+        "CANCELED",
+        "REJECTED",
+        "RECONCILIATION_REQUIRED",
+        "CONFIRMATION_REVERTED",
+        "REFUND_ELIGIBLE",
+        "REFUND_SUBMITTED",
+        "REFUNDED"
+      ]
+    },
+    "Action": {
+      "type": "string",
+      "enum": [
+        "FUND_RELEASE",
+        "FUND_BOUNTY",
+        "CLAIM",
+        "REFUND",
+        "CONVERT",
+        "WITHDRAW"
+      ]
+    },
+    "Amounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "principal_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "network_fee_cap_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "service_fee_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "tax_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "max_total_debit_atoms": {
+          "$ref": "#/$defs/UIntString"
+        }
+      },
+      "required": [
+        "principal_atoms",
+        "network_fee_cap_atoms",
+        "service_fee_atoms",
+        "tax_atoms",
+        "max_total_debit_atoms"
+      ]
+    },
+    "SourceHint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "NATIVE_PROVIDER",
+            "NATIVE_ROUTER"
+          ]
+        }
+      },
+      "required": [
+        "provider_key_id",
+        "endpoint",
+        "kind"
+      ]
+    },
+    "PackageRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "package_core_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "file_sha384": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "recipe_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "download_url": {
+          "$ref": "#/$defs/HttpsUrl"
+        }
+      },
+      "required": [
+        "package_core_id",
+        "file_sha384",
+        "recipe_id",
+        "download_url"
+      ]
+    },
+    "ProviderProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "profile_sequence": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "issued_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "origin": {
+          "$ref": "#/$defs/HttpsUrl"
+        },
+        "api_base": {
+          "$ref": "#/$defs/HttpsUrl"
+        },
+        "network": {
+          "$ref": "#/$defs/Network"
+        },
+        "supported_profiles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "DISCOVERY",
+              "HANDOFF",
+              "CUSTODY",
+              "FUNDING",
+              "FLEET"
+            ]
+          },
+          "maxItems": 5,
+          "minItems": 1
+        },
+        "package_core_versions": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 255
+          },
+          "maxItems": 16,
+          "minItems": 1
+        },
+        "keyset_url": {
+          "$ref": "#/$defs/HttpsUrl"
+        },
+        "oauth_metadata_url": {
+          "$ref": "#/$defs/HttpsUrl"
+        },
+        "custody_modes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "DISCOVERY_ONLY",
+              "CUSTODIAL",
+              "SELF_CUSTODY"
+            ]
+          },
+          "maxItems": 3,
+          "minItems": 1
+        },
+        "financial_observation_modes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "HOSTED_ATTESTED",
+              "INDEPENDENT_VERIFIER"
+            ]
+          },
+          "maxItems": 2,
+          "minItems": 0
+        },
+        "max_body_bytes": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "max_page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "privacy_url": {
+          "$ref": "#/$defs/HttpsUrl"
+        },
+        "export_supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "version",
+        "provider_id",
+        "profile_sequence",
+        "issued_at_ms",
+        "expires_at_ms",
+        "origin",
+        "api_base",
+        "network",
+        "supported_profiles",
+        "package_core_versions",
+        "keyset_url",
+        "oauth_metadata_url",
+        "custody_modes",
+        "financial_observation_modes",
+        "max_body_bytes",
+        "max_page_size",
+        "privacy_url",
+        "export_supported"
+      ]
+    },
+    "CapabilityOffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "network": {
+          "$ref": "#/$defs/Network"
+        },
+        "offer_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "issued_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "package": {
+          "$ref": "#/$defs/PackageRef"
+        },
+        "capability_labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "maxItems": 64,
+          "minItems": 0
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Digest48"
+          },
+          "maxItems": 32,
+          "minItems": 0
+        },
+        "availability_scope": {
+          "type": "string",
+          "enum": [
+            "LOCAL_OBSERVATION",
+            "DECLARED_PROVIDER_VIEW"
+          ]
+        },
+        "observed_provider_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "economic_status": {
+          "type": "string",
+          "enum": [
+            "PUBLIC",
+            "RELEASE_PENDING",
+            "BOUNTY",
+            "UNKNOWN"
+          ]
+        },
+        "economy_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest48"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sponsored": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "version",
+        "provider_id",
+        "network",
+        "offer_id",
+        "issued_at_ms",
+        "expires_at_ms",
+        "package",
+        "capability_labels",
+        "evidence_refs",
+        "availability_scope",
+        "observed_provider_count",
+        "economic_status",
+        "economy_ref",
+        "sponsored"
+      ]
+    },
+    "FundingQuote": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "network": {
+          "$ref": "#/$defs/Network"
+        },
+        "quote_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "quote_kind": {
+          "type": "string",
+          "enum": [
+            "FIRM",
+            "INDICATIVE"
+          ]
+        },
+        "action": {
+          "$ref": "#/$defs/NativeEconomicAction"
+        },
+        "target_object_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "terms_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "native_template_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "round_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest48"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest48"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "amounts": {
+          "$ref": "#/$defs/Amounts"
+        },
+        "refund_controller": {
+          "type": "string",
+          "enum": [
+            "CUSTOMER_KEY",
+            "CEX_CUSTODIAL_KEY"
+          ]
+        },
+        "required_confirmations": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "issued_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "conversion_quote_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conversion_quote": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConversionQuote"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "provider_id",
+        "account_ref",
+        "network",
+        "quote_id",
+        "quote_kind",
+        "action",
+        "target_object_id",
+        "terms_id",
+        "native_template_id",
+        "round_id",
+        "lot_id",
+        "amounts",
+        "refund_controller",
+        "required_confirmations",
+        "issued_at_ms",
+        "expires_at_ms",
+        "conversion_quote_ref",
+        "conversion_quote"
+      ]
+    },
+    "FinanceIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "actor_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "network": {
+          "$ref": "#/$defs/Network"
+        },
+        "intent_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "quote_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "quote_body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "action": {
+          "$ref": "#/$defs/NativeEconomicAction"
+        },
+        "terms_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "native_template_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "amounts": {
+          "$ref": "#/$defs/Amounts"
+        },
+        "policy_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "policy_revision": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "refund_controller": {
+          "type": "string",
+          "enum": [
+            "CUSTOMER_KEY",
+            "CEX_CUSTODIAL_KEY"
+          ]
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        }
+      },
+      "required": [
+        "version",
+        "provider_id",
+        "account_ref",
+        "actor_ref",
+        "network",
+        "intent_id",
+        "client_operation_id",
+        "quote_id",
+        "quote_body_id",
+        "action",
+        "terms_id",
+        "native_template_id",
+        "amounts",
+        "policy_id",
+        "policy_revision",
+        "refund_controller",
+        "expires_at_ms"
+      ]
+    },
+    "NativeObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transaction_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest32"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_index": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "block_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest32"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "block_height": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UIntString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confirmations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UIntString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        }
+      },
+      "required": [
+        "transaction_id",
+        "output_index",
+        "block_hash",
+        "block_height",
+        "confirmations",
+        "observed_at_ms"
+      ]
+    },
+    "FinancialReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "network": {
+          "$ref": "#/$defs/Network"
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "receipt_sequence": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "supersedes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest48"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "intent_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "intent_body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "action": {
+          "$ref": "#/$defs/NativeEconomicAction"
+        },
+        "terms_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "quote_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "amounts": {
+          "$ref": "#/$defs/Amounts"
+        },
+        "actual_network_fee_atoms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UIntString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/FinancialState"
+        },
+        "evidence_basis": {
+          "type": "string",
+          "enum": [
+            "CEX_LEDGER",
+            "NATIVE_NODE_OBSERVED",
+            "EXTERNAL_VERIFIER_OBSERVED"
+          ]
+        },
+        "custody_mode": {
+          "type": "string",
+          "enum": [
+            "CUSTODIAL",
+            "SELF_CUSTODY"
+          ]
+        },
+        "refund_controller": {
+          "type": "string",
+          "enum": [
+            "CUSTOMER_KEY",
+            "CEX_CUSTODIAL_KEY"
+          ]
+        },
+        "native_observation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        }
+      },
+      "required": [
+        "version",
+        "provider_id",
+        "account_ref",
+        "network",
+        "receipt_id",
+        "receipt_sequence",
+        "supersedes",
+        "intent_id",
+        "intent_body_id",
+        "action",
+        "terms_id",
+        "quote_id",
+        "amounts",
+        "actual_network_fee_atoms",
+        "state",
+        "evidence_basis",
+        "custody_mode",
+        "refund_controller",
+        "native_observation",
+        "observed_at_ms"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "CONFIRMED",
+                  "NATIVE_OUTCOME_OBSERVED",
+                  "SETTLED",
+                  "REFUNDED"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence_basis": {
+                "enum": [
+                  "NATIVE_NODE_OBSERVED",
+                  "EXTERNAL_VERIFIER_OBSERVED"
+                ]
+              },
+              "native_observation": {
+                "type": "object",
+                "properties": {
+                  "transaction_id": {
+                    "$ref": "#/$defs/Digest32"
+                  },
+                  "block_hash": {
+                    "$ref": "#/$defs/Digest32"
+                  },
+                  "block_height": {
+                    "$ref": "#/$defs/UIntString"
+                  },
+                  "confirmations": {
+                    "$ref": "#/$defs/UIntString"
+                  }
+                },
+                "required": [
+                  "transaction_id",
+                  "block_hash",
+                  "block_height",
+                  "confirmations"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "CapabilityHandoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "device_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "network": {
+          "$ref": "#/$defs/Network"
+        },
+        "handoff_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_nonce": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "issued_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "package": {
+          "$ref": "#/$defs/PackageRef"
+        },
+        "readiness_target": {
+          "$ref": "#/$defs/Readiness"
+        },
+        "requested_effects": {
+          "$ref": "#/$defs/Effects"
+        },
+        "source_hints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceHint"
+          },
+          "maxItems": 16,
+          "minItems": 0
+        },
+        "receipt_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest48"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reporting_requested": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "version",
+        "provider_id",
+        "account_ref",
+        "device_id",
+        "network",
+        "handoff_id",
+        "client_operation_id",
+        "request_nonce",
+        "issued_at_ms",
+        "expires_at_ms",
+        "package",
+        "readiness_target",
+        "requested_effects",
+        "source_hints",
+        "receipt_ref",
+        "reporting_requested"
+      ]
+    },
+    "LocalReadinessReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "device_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "handoff_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "package_core_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "recipe_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "generation_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ACCEPTED",
+            "PREPARING",
+            "READY",
+            "FAILED",
+            "RETIRED"
+          ]
+        },
+        "readiness_target": {
+          "$ref": "#/$defs/Readiness"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        }
+      },
+      "required": [
+        "version",
+        "provider_id",
+        "account_ref",
+        "device_id",
+        "handoff_id",
+        "package_core_id",
+        "recipe_id",
+        "generation_ref",
+        "state",
+        "readiness_target",
+        "error_code",
+        "observed_at_ms"
+      ]
+    },
+    "HostedAccountPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "revision": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "allowed_actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Action"
+          },
+          "maxItems": 6,
+          "minItems": 1
+        },
+        "allowed_terms_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Digest48"
+          },
+          "maxItems": 256,
+          "minItems": 0
+        },
+        "allowed_publishers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "maxItems": 32,
+          "minItems": 0
+        },
+        "per_action_principal_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "lifetime_principal_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "lifetime_fee_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "outstanding_exposure_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "max_actions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "max_concurrent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "revoked": {
+          "type": "boolean"
+        },
+        "refund_replenishes_lifetime": {
+          "const": false
+        }
+      },
+      "required": [
+        "policy_id",
+        "revision",
+        "allowed_actions",
+        "allowed_terms_ids",
+        "allowed_publishers",
+        "per_action_principal_atoms",
+        "lifetime_principal_atoms",
+        "lifetime_fee_atoms",
+        "outstanding_exposure_atoms",
+        "max_actions",
+        "max_concurrent",
+        "expires_at_ms",
+        "revoked",
+        "refund_replenishes_lifetime"
+      ],
+      "anyOf": [
+        {
+          "properties": {
+            "allowed_terms_ids": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "allowed_publishers": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/Id"
+        },
+        "stage": {
+          "$ref": "#/$defs/Id"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_action": {
+          "$ref": "#/$defs/Id"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "retryable",
+        "correlation_id",
+        "next_action",
+        "message"
+      ]
+    },
+    "OperationStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "state": {
+          "$ref": "#/$defs/Id"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "updated_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "result_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "state",
+        "body_id",
+        "updated_at_ms",
+        "result_ref",
+        "error"
+      ]
+    },
+    "Event": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "stream_generation": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "object_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "event_type": {
+          "$ref": "#/$defs/Id"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "body_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest48"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "event_id",
+        "stream_generation",
+        "sequence",
+        "account_ref",
+        "object_ref",
+        "event_type",
+        "observed_at_ms",
+        "body_ref"
+      ]
+    },
+    "BalanceView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "asset": {
+          "const": "BTX"
+        },
+        "available_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "held_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "committed_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "evidence_basis": {
+          "const": "CEX_LEDGER"
+        }
+      },
+      "required": [
+        "asset",
+        "available_atoms",
+        "held_atoms",
+        "committed_atoms",
+        "observed_at_ms",
+        "evidence_basis"
+      ]
+    },
+    "ExportManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "export_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "PREPARING",
+            "READY",
+            "FAILED"
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              },
+              "sha384": {
+                "$ref": "#/$defs/Digest48"
+              },
+              "bytes": {
+                "$ref": "#/$defs/UIntString"
+              }
+            },
+            "required": [
+              "path",
+              "sha384",
+              "bytes"
+            ]
+          },
+          "maxItems": 4096,
+          "minItems": 0
+        },
+        "custody_obligations_included": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "export_id",
+        "state",
+        "files",
+        "custody_obligations_included"
+      ]
+    },
+    "ProviderProfileEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "const": "ProviderProfile"
+        },
+        "body": {
+          "$ref": "#/$defs/ProviderProfile"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{4840}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ]
+    },
+    "CapabilityOfferEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "const": "CapabilityOffer"
+        },
+        "body": {
+          "$ref": "#/$defs/CapabilityOffer"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{4840}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ]
+    },
+    "FundingQuoteEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "const": "FundingQuote"
+        },
+        "body": {
+          "$ref": "#/$defs/FundingQuote"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{4840}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ]
+    },
+    "FinanceIntentEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "const": "FinanceIntent"
+        },
+        "body": {
+          "$ref": "#/$defs/FinanceIntent"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{4840}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ]
+    },
+    "FinancialReceiptEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "const": "FinancialReceipt"
+        },
+        "body": {
+          "$ref": "#/$defs/FinancialReceipt"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{4840}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ]
+    },
+    "CapabilityHandoffEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "const": "CapabilityHandoff"
+        },
+        "body": {
+          "$ref": "#/$defs/CapabilityHandoff"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{4840}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ]
+    },
+    "LocalReadinessReportEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "const": "LocalReadinessReport"
+        },
+        "body": {
+          "$ref": "#/$defs/LocalReadinessReport"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{4840}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ]
+    },
+    "SearchRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capability_labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "maxItems": 32,
+          "minItems": 0
+        }
+      },
+      "required": [
+        "query",
+        "limit"
+      ]
+    },
+    "CreateHandoffRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "device_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "package_core_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "recipe_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "request_nonce": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "readiness_target": {
+          "$ref": "#/$defs/Readiness"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "device_id",
+        "package_core_id",
+        "recipe_id",
+        "request_nonce",
+        "readiness_target"
+      ]
+    },
+    "QuoteRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/NativeEconomicAction"
+        },
+        "target_object_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "terms_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "principal_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "max_network_fee_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "custody_mode": {
+          "type": "string",
+          "enum": [
+            "CUSTODIAL",
+            "SELF_CUSTODY"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "target_object_id",
+        "terms_id",
+        "principal_atoms",
+        "max_network_fee_atoms",
+        "custody_mode"
+      ]
+    },
+    "CreateIntentRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "quote_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "expected_quote_id": {
+          "$ref": "#/$defs/Digest48"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "quote_id",
+        "expected_quote_id"
+      ]
+    },
+    "AuthorizeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_body_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "policy_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "policy_revision": {
+          "$ref": "#/$defs/UIntString"
+        }
+      },
+      "required": [
+        "expected_body_id",
+        "policy_id",
+        "policy_revision"
+      ]
+    },
+    "ExpectedBodyRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_body_id": {
+          "$ref": "#/$defs/Digest48"
+        }
+      },
+      "required": [
+        "expected_body_id"
+      ]
+    },
+    "EnrollRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "device_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "device_public_key_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "challenge": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "device_id",
+        "device_public_key_ref",
+        "challenge"
+      ]
+    },
+    "ConfirmDeviceRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "challenge": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_device_key_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "challenge",
+        "expected_device_key_id"
+      ]
+    },
+    "SubscriptionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "policy_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "publisher_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "object_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "RELEASE",
+              "BOUNTY"
+            ]
+          },
+          "maxItems": 2,
+          "minItems": 1
+        },
+        "event_action": {
+          "type": "string",
+          "enum": [
+            "NOTIFY",
+            "PREPARE_FUNDING",
+            "FUND_UNDER_POLICY"
+          ]
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "policy_id",
+        "publisher_id",
+        "object_kinds",
+        "event_action"
+      ]
+    },
+    "ExportRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "PACKAGES",
+              "LOCKS",
+              "INTENTS",
+              "RECEIPTS",
+              "POLICIES",
+              "CUSTODY_OBLIGATIONS"
+            ]
+          },
+          "maxItems": 6,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "include"
+      ]
+    },
+    "ResearchRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "BOUNTY_DRAFT",
+            "BOUNTY_SUBMISSION"
+          ]
+        },
+        "canonical_record_ref": {
+          "$ref": "#/$defs/Digest48"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "kind",
+        "canonical_record_ref"
+      ]
+    },
+    "EmptyRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {},
+      "required": []
+    },
+    "SearchResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityOfferEnvelope"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coverage": {
+          "const": "PROVIDER_OBSERVATION"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor",
+        "coverage"
+      ]
+    },
+    "EventPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "more": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "events",
+        "next_cursor",
+        "more"
+      ]
+    },
+    "IdList": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ids",
+        "next_cursor"
+      ]
+    },
+    "EconomyView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Digest48"
+        },
+        "terms_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest48"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/Id"
+        },
+        "funded_atoms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UIntString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_basis": {
+          "type": "string",
+          "enum": [
+            "UNKNOWN",
+            "NATIVE_NODE_OBSERVED",
+            "DECLARED_RECORD"
+          ]
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        }
+      },
+      "required": [
+        "target_id",
+        "terms_id",
+        "status",
+        "funded_atoms",
+        "evidence_basis",
+        "observed_at_ms"
+      ]
+    },
+    "DeviceView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "device_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "PENDING",
+            "PAIRED",
+            "REVOKED"
+          ]
+        },
+        "account_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "device_key_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "device_id",
+        "status",
+        "account_ref",
+        "device_key_id"
+      ]
+    },
+    "NativeEconomicAction": {
+      "type": "string",
+      "enum": [
+        "FUND_RELEASE",
+        "FUND_BOUNTY",
+        "CLAIM",
+        "REFUND"
+      ]
+    },
+    "ConversionQuote": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "venue_quote_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "source_asset": {
+          "type": "string",
+          "pattern": "^[A-Z0-9._-]{2,16}$"
+        },
+        "source_amount_minor": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "source_exponent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18
+        },
+        "target_btx_atoms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "max_slippage_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/UIntString"
+        },
+        "reverse_conversion_authorized": {
+          "const": false
+        }
+      },
+      "required": [
+        "venue_quote_ref",
+        "source_asset",
+        "source_amount_minor",
+        "source_exponent",
+        "target_btx_atoms",
+        "max_slippage_bps",
+        "expires_at_ms",
+        "reverse_conversion_authorized"
+      ]
+    }
+  }
+}

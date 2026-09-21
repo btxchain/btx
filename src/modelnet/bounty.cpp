@@ -5,6 +5,7 @@
 #include <modelnet/bounty.h>
 
 #include <modelnet/catalog.h>
+#include <modelnet/event_journal.h>
 #include <modelnet/identity.h>
 #include <modelnet/search.h>
 #include <crypto/sha384.h>
@@ -16,6 +17,8 @@
 #include <set>
 #include <sstream>
 #include <mutex>
+#include <string>
+#include <vector>
 
 namespace modelnet {
 namespace {
@@ -37,6 +40,10 @@ const std::set<std::string>& HelperMethods()
         "getbountyterms",
         "getbountycapabilities",
         "createbountydraft",
+        "listbountydrafts",
+        "getbountydraft",
+        "updatebountydraft",
+        "deletebountydraft",
         "validatebountyterms",
         "publishbounty",
         "revisebounty",
@@ -107,6 +114,41 @@ std::string StrArg(const UniValue& params, size_t i, const std::string& key = {}
     return {};
 }
 
+bool CanonicalAtomsField(const UniValue& v, int64_t& n, std::string& err)
+{
+    if (v.isStr()) return CanonicalAtoms(v.get_str(), n, err);
+    if (v.isNum()) return CanonicalAtoms(std::to_string(v.getInt<int64_t>()), n, err);
+    err = "amount_atoms";
+    n = 0;
+    return false;
+}
+
+/** floor(atoms * 10000 / total) without overflowing int64 inside MoneyRange. */
+int64_t AtomsToBps(int64_t atoms, int64_t total)
+{
+    if (total <= 0 || atoms <= 0) return 0;
+    if (atoms >= total) return 10000;
+    const unsigned __int128 num =
+        static_cast<unsigned __int128>(static_cast<uint64_t>(atoms)) * 10000u;
+    const int64_t bps =
+        static_cast<int64_t>(num / static_cast<unsigned __int128>(static_cast<uint64_t>(total)));
+    return bps > 10000 ? 10000 : bps;
+}
+
+bool AddMoneyAtoms(int64_t& total, int64_t amount, std::string& err)
+{
+    if (amount < 0 || amount > MAX_MONEY_ATOMS) {
+        err = "MoneyRange";
+        return false;
+    }
+    if (total > MAX_MONEY_ATOMS - amount) {
+        err = "total MoneyRange";
+        return false;
+    }
+    total += amount;
+    return true;
+}
+
 std::string IdemKey(const UniValue& params)
 {
     const UniValue& a = ArgN(params, 0);
@@ -173,7 +215,7 @@ std::string LotId(const std::string& round_id, uint32_t ordinal)
     return Sha384Bytes(Span<const unsigned char>{b.data(), b.size()}).Hex();
 }
 
-const std::set<std::string> kTermsKeys = {
+const std::vector<std::string> kTermsKeyOrder = {
     "terms_version",
     "network_id",
     "requester_identity",
@@ -204,6 +246,126 @@ const std::set<std::string> kTermsKeys = {
     "fee_policy",
     "sealed_confidentiality_disclosure",
 };
+
+const std::set<std::string> kTermsKeys(kTermsKeyOrder.begin(), kTermsKeyOrder.end());
+
+const std::set<std::string> kDerivedAtPublish = {
+    "terms_version",
+    "network_id",
+    "requester_identity",
+};
+
+std::vector<std::string> MissingTermsFields(const UniValue& terms)
+{
+    std::vector<std::string> missing;
+    for (const auto& req : kTermsKeyOrder) {
+        if (!terms.exists(req)) missing.push_back(req);
+    }
+    return missing;
+}
+
+std::vector<std::string> UnknownTermsFields(const UniValue& terms)
+{
+    std::vector<std::string> unknown;
+    for (const std::string& k : terms.getKeys()) {
+        if (!kTermsKeys.count(k)) unknown.push_back(k);
+    }
+    return unknown;
+}
+
+std::string TermsIdPreview(const UniValue& terms)
+{
+    Digest48 id;
+    CSHA384 hasher;
+    std::vector<unsigned char> canon;
+    std::string err;
+    if (CanonicalEncode(terms, canon, err)) {
+        hasher.Write(canon.data(), canon.size());
+    } else {
+        const std::string raw = terms.write();
+        hasher.Write(reinterpret_cast<const unsigned char*>(raw.data()), raw.size());
+    }
+    hasher.Finalize(id.data.data());
+    return id.Hex();
+}
+
+void PushChecklist(UniValue& o, const UniValue& terms)
+{
+    struct Section {
+        const char* name;
+        std::vector<const char*> keys;
+        const char* note;
+    };
+    const Section sections[] = {
+        {"overview", {"title"}, nullptr},
+        {"description", {"description", "tags", "deliverable_classes", "license_statement"}, nullptr},
+        {"evaluation", {"evaluation_spec_id", "submission_mode", "challenge_policy", "selection_rule", "max_model_bytes", "sealed_confidentiality_disclosure"}, nullptr},
+        {"money_terms", {"target_atoms", "fee_policy", "payout_authority", "max_lots_per_round", "nomination_min_bps"}, "declared goal, not funding; automatic_spend_atoms=0"},
+        {"council", {"council", "threshold"}, "operator-supplied ML-DSA-44 keys only; never synthesized"},
+        {"timeline", {"funding_close_height", "submission_close_height", "evaluation_close_height", "earliest_award_height", "last_safe_award_height", "refund_height", "minimum_confirmations", "claim_margin_blocks"}, "Gitcoin milestone analog: ordered heights, not payout tranches"},
+    };
+    UniValue checklist(UniValue::VOBJ);
+    for (const auto& sec : sections) {
+        UniValue s(UniValue::VOBJ);
+        UniValue missing(UniValue::VARR);
+        for (const char* k : sec.keys) {
+            if (!terms.exists(k)) missing.push_back(k);
+        }
+        s.pushKV("ok", missing.empty());
+        s.pushKV("missing", missing);
+        if (sec.note) s.pushKV("note", sec.note);
+        checklist.pushKV(sec.name, s);
+    }
+    o.pushKV("checklist", checklist);
+}
+
+void PushDraftCompleteness(UniValue& o, const UniValue& terms, bool complete)
+{
+    const auto missing = MissingTermsFields(terms);
+    UniValue miss(UniValue::VARR);
+    UniValue user_miss(UniValue::VARR);
+    for (const auto& f : missing) {
+        miss.push_back(f);
+        if (!kDerivedAtPublish.count(f)) user_miss.push_back(f);
+    }
+    UniValue derived(UniValue::VARR);
+    derived.push_back("terms_version");
+    derived.push_back("network_id");
+    derived.push_back("requester_identity");
+    UniValue unknown(UniValue::VARR);
+    for (const auto& f : UnknownTermsFields(terms)) unknown.push_back(f);
+    o.pushKV("missing_fields", miss);
+    o.pushKV("missing_count", static_cast<int>(miss.size()));
+    o.pushKV("user_missing_fields", user_miss);
+    o.pushKV("user_missing_count", static_cast<int>(user_miss.size()));
+    o.pushKV("required_count", static_cast<int>(kTermsKeyOrder.size()));
+    o.pushKV("derived_at_publish", derived);
+    o.pushKV("unknown_fields", unknown);
+    PushChecklist(o, terms);
+    const std::string preview = TermsIdPreview(terms);
+    if (!preview.empty()) o.pushKV("terms_id_preview", preview);
+    o.pushKV("automatic_spend_atoms", 0);
+    if (complete) o.pushKV("one_liner", "publishbounty is wallet-plane; automatic_spend_atoms stays 0");
+    else if (user_miss.size() > 0 && user_miss[0].isStr()) o.pushKV("one_liner", "fill missing field: " + user_miss[0].get_str());
+    else if (miss.size() > 0) o.pushKV("one_liner", "ready to publish; remaining fields stamped at publish");
+    else if (unknown.size() > 0) o.pushKV("one_liner", "drop unknown fields before publish");
+    else o.pushKV("one_liner", "incomplete draft stays local");
+}
+
+UniValue BountyNextActions(bool complete, bool published)
+{
+    UniValue a(UniValue::VARR);
+    if (!complete) {
+        a.push_back("fill remaining BountyTerms fields; council and heights are required to publish");
+        a.push_back("validatebountyterms");
+    } else if (!published) {
+        a.push_back("publishbounty {\"draft_id\":\"...\"}  # research identity; does not spend");
+    } else {
+        a.push_back("preparebountyfunding  # wallet plane; never automatic");
+    }
+    a.push_back("automatic_spend_atoms stays 0");
+    return a;
+}
 
 } // namespace
 
@@ -334,10 +496,9 @@ UniValue FundingView(const std::string& target, const std::string& pledged, cons
     UniValue o(UniValue::VOBJ);
     o.pushKV("target_atoms", target);
     o.pushKV("pledged_atoms", pledged);
-    int64_t t = 0, p = 0;
+    int64_t t = 0;
     std::string err;
-    CanonicalAtoms(target, t, err);
-    CanonicalAtoms(pledged, p, err);
+    if (!CanonicalAtoms(target, t, err)) t = 0;
     if (confirmed.isNull()) {
         o.pushKV("confirmed_atoms", UniValue::VNULL);
         o.pushKV("remaining_atoms", UniValue::VNULL);
@@ -347,11 +508,17 @@ UniValue FundingView(const std::string& target, const std::string& pledged, cons
     }
     const std::string cs = confirmed.isStr() ? confirmed.get_str() : std::to_string(confirmed.getInt<int64_t>());
     int64_t c = 0;
-    CanonicalAtoms(cs, c, err);
+    if (!CanonicalAtoms(cs, c, err)) {
+        o.pushKV("confirmed_atoms", UniValue::VNULL);
+        o.pushKV("remaining_atoms", UniValue::VNULL);
+        o.pushKV("funding_progress_known", false);
+        o.pushKV("funded_bps", UniValue::VNULL);
+        return o;
+    }
     o.pushKV("confirmed_atoms", cs);
     o.pushKV("remaining_atoms", std::to_string(std::max<int64_t>(0, t - c)));
     o.pushKV("funding_progress_known", true);
-    o.pushKV("funded_bps", t > 0 ? std::min<int64_t>(10000, c * 10000 / t) : 0);
+    o.pushKV("funded_bps", AtomsToBps(c, t));
     return o;
 }
 
@@ -363,7 +530,11 @@ bool EligibleBps(const std::string& principal, const std::string& frozen_total, 
         err = "eligibility range";
         return false;
     }
-    return p * 10000 >= t * min_bps;
+    const unsigned __int128 lhs =
+        static_cast<unsigned __int128>(static_cast<uint64_t>(p)) * 10000u;
+    const unsigned __int128 rhs = static_cast<unsigned __int128>(static_cast<uint64_t>(t)) *
+                                  static_cast<unsigned __int128>(static_cast<uint32_t>(min_bps));
+    return lhs >= rhs;
 }
 
 bool AllocateFeeReserve(const std::vector<int64_t>& reserves, int64_t fee, std::vector<int64_t>& charges,
@@ -424,11 +595,7 @@ int64_t DedupePrincipal(const std::vector<std::pair<std::string, int64_t>>& lots
     }
     int64_t total = 0;
     for (const auto& kv : values) {
-        if (total > MAX_MONEY_ATOMS - kv.second) {
-            err = "total MoneyRange";
-            return -1;
-        }
-        total += kv.second;
+        if (!AddMoneyAtoms(total, kv.second, err)) return -1;
     }
     return total;
 }
@@ -625,7 +792,11 @@ int64_t BountyChainIndex::ConfirmedAtoms(const std::string& bounty_id) const
 {
     int64_t n = 0;
     for (const auto& kv : m_facts) {
-        if (kv.second.bounty_id == bounty_id && !kv.second.spent) n += kv.second.amount_atoms;
+        if (kv.second.bounty_id != bounty_id || kv.second.spent) continue;
+        const int64_t a = kv.second.amount_atoms;
+        if (a < 0 || a > MAX_MONEY_ATOMS) continue;
+        std::string err;
+        if (!AddMoneyAtoms(n, a, err)) return MAX_MONEY_ATOMS;
     }
     return n;
 }
@@ -690,6 +861,8 @@ bool BountyChainIndex::ImportManifest(const UniValue& manifest, std::string& err
         err = "manifest object only, not a host path";
         return false;
     }
+    std::vector<BountyChainFact> facts;
+    std::vector<std::pair<std::string, int64_t>> lots;
     for (const auto& lot : manifest["lots"].getValues()) {
         if (!lot.isObject() || !lot.exists("outpoint")) continue;
         BountyChainFact f;
@@ -697,11 +870,13 @@ bool BountyChainIndex::ImportManifest(const UniValue& manifest, std::string& err
         f.lot_id = lot.exists("lot_id") ? lot["lot_id"].get_str() : "";
         f.bounty_id = manifest.exists("bounty_id") ? manifest["bounty_id"].get_str() : "";
         if (lot.exists("amount_atoms")) {
-            if (lot["amount_atoms"].isStr()) CanonicalAtoms(lot["amount_atoms"].get_str(), f.amount_atoms, err);
-            else f.amount_atoms = lot["amount_atoms"].getInt<int64_t>();
+            if (!CanonicalAtomsField(lot["amount_atoms"], f.amount_atoms, err)) return false;
         }
-        Observe(f);
+        facts.push_back(f);
+        lots.emplace_back(f.outpoint, f.amount_atoms);
     }
+    if (DedupePrincipal(lots, err) < 0) return false;
+    for (const auto& f : facts) Observe(f);
     return true;
 }
 
@@ -817,6 +992,11 @@ UniValue BountyStore::Event(const std::string& kind, const std::string& bounty_i
     e.pushKV("payload", payload);
     e.pushKV("authority", "local_signed_or_chain");
     m_events.push_back(e);
+    if (BoundModelEventJournal()) {
+        ObserveResult ores;
+        std::string jerr;
+        (void)JournalObserveBounty(e, ores, jerr);
+    }
     return e;
 }
 
@@ -840,7 +1020,9 @@ UniValue BountyStore::BountyEntryLocked(const std::string& bounty_id) const
         const UniValue& p = kv.second.body["payload"];
         if (p.exists("bounty_id") && p["bounty_id"].get_str() == bounty_id && p.exists("principal_atoms")) {
             int64_t n = 0;
-            if (CanonicalAtoms(p["principal_atoms"].get_str(), n, err)) psum += n;
+            if (CanonicalAtoms(p["principal_atoms"].get_str(), n, err)) {
+                if (!AddMoneyAtoms(psum, n, err)) psum = MAX_MONEY_ATOMS;
+            }
         }
     }
     pledged = std::to_string(psum);
@@ -930,14 +1112,135 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
     if (method == "createbountydraft") {
         UniValue terms = ObjArg(params, 0);
         if (terms.exists("terms")) terms = terms["terms"];
-        if (!ValidateBountyTerms(terms, m_network, err)) return fail("INVALID_PARAMETER", err);
+        const bool complete = ValidateBountyTerms(terms, m_network, err);
+        if (!complete) {
+            if (!terms.exists("title") || !terms["title"].isStr() || terms["title"].get_str().empty()) {
+                return fail("INVALID_PARAMETER", err.empty() ? "title required" : err);
+            }
+            err.clear();
+            err_code.clear();
+        }
         const std::string id = RandHex(16);
         m_drafts[id] = terms;
         result.setObject();
         result.pushKV("draft_id", id);
+        result.pushKV("copy_text", "draft_id=" + id);
         result.pushKV("local_only", true);
         result.pushKV("published", false);
+        result.pushKV("recipe_complete", complete);
+        result.pushKV("next_actions", BountyNextActions(complete, false));
+        PushDraftCompleteness(result, terms, complete);
         Event("draft", id, terms);
+        return ok();
+    }
+
+    if (method == "listbountydrafts") {
+        result.setObject();
+        UniValue arr(UniValue::VARR);
+        bool all_complete = !m_drafts.empty();
+        std::string first_one_liner;
+        for (const auto& kv : m_drafts) {
+            UniValue o(UniValue::VOBJ);
+            o.pushKV("draft_id", kv.first);
+            o.pushKV("copy_text", "draft_id=" + kv.first);
+            o.pushKV("title", kv.second.exists("title") ? kv.second["title"] : "");
+            const bool complete = ValidateBountyTerms(kv.second, m_network, err);
+            err.clear();
+            err_code.clear();
+            o.pushKV("recipe_complete", complete);
+            o.pushKV("next_actions", BountyNextActions(complete, false));
+            PushDraftCompleteness(o, kv.second, complete);
+            if (!complete) all_complete = false;
+            if (first_one_liner.empty() && o.exists("one_liner") && o["one_liner"].isStr()) {
+                first_one_liner = o["one_liner"].get_str();
+            }
+            arr.push_back(o);
+        }
+        result.pushKV("drafts", arr);
+        result.pushKV("count", static_cast<int>(arr.size()));
+        result.pushKV("next_actions", arr.empty() ? [] {
+            UniValue a(UniValue::VARR);
+            a.push_back("createbountydraft");
+            a.push_back("automatic_spend_atoms stays 0");
+            return a;
+        }() : BountyNextActions(all_complete, false));
+        result.pushKV("automatic_spend_atoms", 0);
+        if (arr.empty()) result.pushKV("one_liner", "no local drafts");
+        else if (arr.size() == 1) result.pushKV("one_liner", first_one_liner);
+        else result.pushKV("one_liner", std::to_string(arr.size()) + " local drafts; " + first_one_liner);
+        return true;
+    }
+
+    if (method == "getbountydraft") {
+        const std::string id = StrArg(params, 0, "draft_id");
+        auto it = m_drafts.find(id);
+        if (it == m_drafts.end()) return fail("NOT_FOUND", "draft");
+        result.setObject();
+        result.pushKV("draft_id", id);
+        result.pushKV("copy_text", "draft_id=" + id);
+        result.pushKV("terms", it->second);
+        const bool complete = ValidateBountyTerms(it->second, m_network, err);
+        err.clear();
+        err_code.clear();
+        result.pushKV("recipe_complete", complete);
+        result.pushKV("next_actions", BountyNextActions(complete, false));
+        PushDraftCompleteness(result, it->second, complete);
+        return true;
+    }
+
+    if (method == "updatebountydraft") {
+        std::string id = StrArg(params, 0, "draft_id");
+        UniValue patch = ObjArg(params, 1);
+        if (ArgN(params, 0).isObject() && patch.empty()) {
+            patch = ArgN(params, 0);
+        }
+        if (id.empty() && patch.exists("draft_id") && patch["draft_id"].isStr()) {
+            id = patch["draft_id"].get_str();
+        }
+        if (patch.exists("terms") && patch["terms"].isObject()) patch = patch["terms"];
+        auto it = m_drafts.find(id);
+        if (it == m_drafts.end()) return fail("NOT_FOUND", "draft");
+        UniValue merged(UniValue::VOBJ);
+        std::set<std::string> overlay;
+        for (const std::string& k : patch.getKeys()) {
+            if (k == "draft_id") continue;
+            merged.pushKV(k, patch[k]);
+            overlay.insert(k);
+        }
+        for (const std::string& k : it->second.getKeys()) {
+            if (overlay.count(k)) continue;
+            merged.pushKV(k, it->second[k]);
+        }
+        it->second = merged;
+        const bool complete = ValidateBountyTerms(it->second, m_network, err);
+        err.clear();
+        err_code.clear();
+        result.setObject();
+        result.pushKV("draft_id", id);
+        result.pushKV("copy_text", "draft_id=" + id);
+        result.pushKV("terms", it->second);
+        result.pushKV("local_only", true);
+        result.pushKV("published", false);
+        result.pushKV("recipe_complete", complete);
+        result.pushKV("next_actions", BountyNextActions(complete, false));
+        PushDraftCompleteness(result, it->second, complete);
+        Event("draft", id, it->second);
+        return ok();
+    }
+
+    if (method == "deletebountydraft") {
+        const std::string id = StrArg(params, 0, "draft_id");
+        if (m_drafts.erase(id) == 0) return fail("NOT_FOUND", "draft");
+        result.setObject();
+        result.pushKV("draft_id", id);
+        result.pushKV("deleted", true);
+        result.pushKV("local_only", true);
+        result.pushKV("automatic_spend_atoms", 0);
+        result.pushKV("one_liner", "draft deleted; still local, never spent");
+        UniValue next(UniValue::VARR);
+        next.push_back("listbountydrafts");
+        next.push_back("automatic_spend_atoms stays 0");
+        result.pushKV("next_actions", next);
         return ok();
     }
 
@@ -945,8 +1248,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         UniValue terms = ObjArg(params, 0);
         if (terms.exists("terms")) terms = terms["terms"];
         result.setObject();
-        result.pushKV("ok", ValidateBountyTerms(terms, m_network, err));
+        const bool ok_terms = ValidateBountyTerms(terms, m_network, err);
+        result.pushKV("ok", ok_terms);
         result.pushKV("error", err);
+        result.pushKV("recipe_complete", ok_terms);
+        result.pushKV("next_actions", BountyNextActions(ok_terms, false));
+        PushDraftCompleteness(result, terms, ok_terms);
         err.clear();
         err_code.clear();
         return true;
@@ -976,6 +1283,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         const std::string draft_id = a.exists("draft_id") ? a["draft_id"].get_str() : StrArg(params, 0);
         auto it = m_drafts.find(draft_id);
         if (it == m_drafts.end()) return fail("NOT_FOUND", "draft");
+        // Gitcoin-comparable gate: an incomplete draft may be saved, but it must
+        // never be signed or published. Re-validate here (createbountydraft allows
+        // title-only drafts) so a partial checklist can never reach the chain view.
+        if (!ValidateBountyTerms(it->second, m_network, err)) {
+            return fail("INVALID_PARAMETER", err.empty() ? "recipe incomplete" : ("recipe incomplete: " + err));
+        }
         SignedEnvelope env;
         if (!sign_terms(it->second, env)) return fail("REJECTED", err);
         if (!VerifySignedEnvelope(env, m_network, err)) return fail("REJECTED", err);
@@ -1004,6 +1317,8 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         rec.pushKV("expires_at", 0);
         rec.pushKV("metadata_sequence", 1);
         result.pushKV("search_record", rec);
+        result.pushKV("next_actions", BountyNextActions(true, true));
+        result.pushKV("automatic_spend_atoms", 0);
         Event("publish", bounty_id, result);
         return ok();
     }
@@ -1623,22 +1938,38 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         f.bounty_id = a.exists("bounty_id") ? a["bounty_id"].get_str() : "";
         f.lot_id = a.exists("lot_id") ? a["lot_id"].get_str() : "";
         if (a.exists("amount_atoms")) {
-            if (a["amount_atoms"].isStr()) CanonicalAtoms(a["amount_atoms"].get_str(), f.amount_atoms, err);
-            else f.amount_atoms = a["amount_atoms"].getInt<int64_t>();
+            if (!CanonicalAtomsField(a["amount_atoms"], f.amount_atoms, err))
+                return fail("INVALID_PARAMETER", err.empty() ? "amount_atoms" : err);
         }
         if (a.exists("confirmations")) f.confirmations = a["confirmations"].getInt<int>();
         if (a.exists("height")) f.height = static_cast<uint32_t>(a["height"].getInt<int64_t>());
         if (a.exists("spent")) f.spent = a["spent"].get_bool();
+        if (!f.spent) {
+            int64_t confirmed = m_chain.ConfirmedAtoms(f.bounty_id);
+            if (const BountyChainFact* prev = m_chain.Get(f.outpoint)) {
+                if (prev->bounty_id == f.bounty_id && !prev->spent && prev->amount_atoms >= 0 &&
+                    prev->amount_atoms <= confirmed) {
+                    confirmed -= prev->amount_atoms;
+                }
+            }
+            if (!AddMoneyAtoms(confirmed, f.amount_atoms, err))
+                return fail("INVALID_PARAMETER", err.empty() ? "total MoneyRange" : err);
+        }
         m_chain.Observe(f);
         result = m_chain.Snapshot(f.bounty_id);
         return ok();
     }
 
     if (method == "reorgbountychain") {
+        const std::string bounty_id = StrArg(params, 0, "bounty_id");
         m_chain.DisconnectTip();
-        result = m_chain.Snapshot(StrArg(params, 0, "bounty_id"));
+        result = m_chain.Snapshot(bounty_id);
+        UniValue payload(UniValue::VOBJ);
+        payload.pushKV("corrective", true);
+        payload.pushKV("silent_delete", false);
         result.pushKV("reorg", true);
-        return true;
+        result.pushKV("event", Event("REORG", bounty_id, payload));
+        return ok();
     }
 
     if (method == "exportbountyrecovery") {

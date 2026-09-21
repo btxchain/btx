@@ -15,7 +15,12 @@
 #include <vector>
 
 static constexpr uint8_t P2MR_LEAF_VERSION = 0xc2;
+// P2MR has no internal-key parity bit (unlike BIP341 TAPROOT_LEAF_MASK).
+// Consensus, policy, and signing require control[0] == P2MR_LEAF_VERSION
+// exactly; masking with 0xfe would accept 0xc3 as 0xc2 (wtxid malleability).
 static constexpr uint8_t P2MR_LEAF_MASK = 0xfe;
+static_assert((P2MR_LEAF_VERSION & P2MR_LEAF_MASK) == P2MR_LEAF_VERSION);
+static_assert((P2MR_LEAF_VERSION | 0x01) != P2MR_LEAF_VERSION);
 static constexpr size_t P2MR_PROGRAM_SIZE = 32;
 static constexpr size_t P2MR_CONTROL_BASE_SIZE = 1;
 static constexpr size_t P2MR_CONTROL_NODE_SIZE = 32;
@@ -47,6 +52,12 @@ bool ParseP2MRAnyPubkeyPush(
     PQAlgorithm& algo,
     Span<const unsigned char>& pubkey,
     size_t& consumed);
+
+/** First CHECKSIG (not CHECKSIGADD) pubkey in a P2MR leaf. */
+bool ExtractP2MRChecksigPubkey(
+    Span<const unsigned char> script,
+    PQAlgorithm& algo,
+    std::vector<unsigned char>& pubkey);
 
 opcodetype GetP2MRChecksigOpcode(PQAlgorithm algo);
 opcodetype GetP2MRChecksigAddOpcode(PQAlgorithm algo);

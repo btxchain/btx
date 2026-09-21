@@ -740,6 +740,99 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_connected_peer_loses_preference_at_ac
     BOOST_CHECK(!consensus_peer.fDisconnect);
 }
 
+BOOST_AUTO_TEST_CASE(chain_sync_protects_peer_when_tip_has_auth_work_deficit)
+{
+    // Issue #190: TrustAdjustedWork(peer) vs raw tip->nChainWork is
+    // unsatisfiable on a live default node (authenticated-work deficit
+    // >> 6-block allowance). A full-outbound peer that announced our own
+    // tip must still earn a protect-from-disconnect slot.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ResetSharedPeermanFixture(m_node);
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+
+    const auto saved_mock_time{GetMockTime()};
+    struct RestoreMockTime {
+        std::chrono::seconds saved;
+        ~RestoreMockTime() { SetMockTime(saved); }
+    } restore_mock_time{saved_mock_time};
+
+    const CBlockIndex* starting_tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(starting_tip != nullptr);
+    mineBlock(m_node, std::chrono::seconds{starting_tip->GetBlockTime() + 1});
+    CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime()} +
+                std::chrono::hours{48});
+
+    const arith_uint256 saved_chain{
+        WITH_LOCK(::cs_main, return tip->nChainWork)};
+    const arith_uint256 saved_auth{
+        WITH_LOCK(::cs_main, return tip->nAuthenticatedChainWork)};
+    struct RestoreTipWork {
+        CBlockIndex* tip;
+        arith_uint256 chain;
+        arith_uint256 auth;
+        ~RestoreTipWork()
+        {
+            LOCK(::cs_main);
+            tip->nChainWork = chain;
+            tip->nAuthenticatedChainWork = auth;
+        }
+    } restore_work{tip, saved_chain, saved_auth};
+
+    {
+        LOCK(::cs_main);
+        const arith_uint256 proof{GetBlockProof(*tip)};
+        arith_uint256 deficit{proof};
+        deficit *= 1000;
+        tip->nChainWork = saved_auth + deficit;
+        const arith_uint256 peer_adjusted{
+            GetTrustAdjustedChainWork(*tip, TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS)};
+        BOOST_REQUIRE(peer_adjusted < tip->nChainWork);
+        BOOST_REQUIRE(peer_adjusted >= tip->nAuthenticatedChainWork);
+    }
+
+    CNode peer{/*id=*/1901,
+               /*sock=*/nullptr,
+               CAddress{},
+               /*nKeyedNetGroupIn=*/0,
+               /*nLocalHostNonceIn=*/0,
+               CAddress{},
+               /*addrNameIn=*/"auth-deficit-protect",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight + 1);
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    connman.FlushSendBuffer(peer);
+
+    struct FinalizePeer {
+        PeerManager& peerman;
+        CNode& peer;
+        ~FinalizePeer() { peerman.FinalizeNode(peer); }
+    } finalize{peerman, peer};
+
+    std::vector<CBlock> known_headers{CBlock{tip->GetBlockHeader()}};
+    auto headers_msg{
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(known_headers))};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(peer, std::move(headers_msg)));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+
+    CNodeStateStats stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(peer.GetId(), stats));
+    BOOST_REQUIRE(stats.m_chain_sync_protected);
+    BOOST_REQUIRE_EQUAL(stats.m_total_chain_sync_protected_peer_count, 1);
+    BOOST_REQUIRE(!peer.fDisconnect);
+}
+
 BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
@@ -4686,7 +4779,8 @@ BOOST_AUTO_TEST_CASE(encdr_pending_cap_retains_followed_chain_body)
     BOOST_CHECK_EQUAL(indexed->nStatus & BLOCK_HAVE_DATA, 0);
 
     // Skip-fetch: the retained body must not produce an unbounded getdata
-    // storm while the cap stays exhausted.
+    // storm while the cap stays exhausted. Issue #163: idle catch-up must
+    // not re-GETDATA a hash the deferred/retained store already holds.
     connman.FlushSendBuffer(peer);
     for (int i = 0; i < 5; ++i) {
         BOOST_CHECK(peerman.SendMessages(&peer));
@@ -4986,6 +5080,8 @@ BOOST_AUTO_TEST_CASE(linear_tip_child_replays_when_authenticated_work_lags)
     ActivateRcAtTip(consensus, *tip);
     // Production deadlock: one-job pending cap. Unthrottle the 1/min
     // rate windows so a budget miss cannot masquerade as the lane bug.
+    // Issue #163: mainnet stays at nMatMulRCMaxPendingVerifications{1};
+    // this test forces that same cap (regtest defaults to uint32 max).
     consensus.nMatMulRCMaxPendingVerifications = 1;
     consensus.nMatMulRCPeerVerifyBudgetPerMin = 16;
     consensus.nMatMulRCGlobalVerifyBudgetPerMin = 16;

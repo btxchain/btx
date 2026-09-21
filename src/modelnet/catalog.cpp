@@ -7,11 +7,15 @@
 #include <modelnet/crypto.h>
 #include <modelnet/piece_ranges.h>
 #include <modelnet/resource_uri.h>
+#include <modelnet/safety.h>
+#include <modelnet/verified_manifest.h>
+#include <modelnet/hello_caps.h>
 #include <crypto/sha384.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <fstream>
 #include <random>
@@ -24,14 +28,7 @@ FileRole RoleFromRelPath(const std::string& rel, bool& skip)
 {
     skip = false;
     const auto lower = ToLower(rel);
-    if (lower.starts_with(".") || lower.find("/.") != std::string::npos) {
-        skip = true;
-        return FileRole::WEIGHTS;
-    }
-    if (lower.ends_with(".pt") || lower.ends_with(".pth") || lower.ends_with(".pkl") ||
-        lower.ends_with(".py") || lower.ends_with(".so") || lower.ends_with(".bin") ||
-        lower.ends_with(".exe") || lower.ends_with(".dll") || lower.ends_with(".ipynb") ||
-        lower.ends_with(".cu") || lower.ends_with(".sig")) {
+    if (RelPathLooksUnsafe(rel)) {
         skip = true;
         return FileRole::WEIGHTS;
     }
@@ -100,6 +97,17 @@ bool AdmissionImpliesStructureVerified(AdmissionLevel a)
 
 } // namespace
 
+namespace {
+std::atomic<bool> g_adv_cloud{false};
+std::atomic<bool> g_adv_direct{false};
+} // namespace
+
+void SetAdvertisedCloudCaps(bool cloud_attached, bool direct_cloud_seed)
+{
+    g_adv_cloud.store(cloud_attached);
+    g_adv_direct.store(direct_cloud_seed);
+}
+
 bool GuessFileRole(const std::string& relpath, FileRole& role)
 {
     bool skip = false;
@@ -114,6 +122,19 @@ UniValue CapabilitiesObject()
     c.pushKV("protocol", 2);
     c.pushKV("uri", true);
     c.pushKV("importmodel", true);
+    c.pushKV("hostmodel", true);
+    c.pushKV("checkmodelsetup", true);
+    c.pushKV("previewmodelimport", true);
+    c.pushKV("getmodelsharecard", true);
+    c.pushKV("getmodeltransfers", true);
+    c.pushKV("setmodelalias", true);
+    c.pushKV("scanmodelwatch", true);
+    c.pushKV("getmodelwatchstatus", true);
+    c.pushKV("showmodel", true);
+    c.pushKV("exportmodellink", true);
+    c.pushKV("unhostmodel", true);
+    c.pushKV("removemodelalias", true);
+    c.pushKV("openmodelshare", true);
     c.pushKV("seedmodel", true);
     c.pushKV("listmodels", true);
     c.pushKV("getmodelmanifest", true);
@@ -135,6 +156,25 @@ UniValue CapabilitiesObject()
     c.pushKV("searchmodels", true);
     c.pushKV("decentralized_search", true);
     c.pushKV("automatic_spend_atoms", 0);
+    c.pushKV("full_file_stream_v1", true);
+    c.pushKV("subpiece_v1", true);
+    c.pushKV("package_v1", true);
+    c.pushKV("erasure_preservation_v1", true);
+    c.pushKV("query_summary_v1", true);
+    c.pushKV("index_reconcile_v1", true);
+    c.pushKV("metadata_gossip_v1", true);
+    c.pushKV("safety_advisory_v1", true);
+    c.pushKV("origin_offer_v1", true);
+    c.pushKV("lan_discovery_v1", true);
+    c.pushKV("selective_files_v1", true);
+    c.pushKV("capabilities", HelloCapabilityArray());
+    c.pushKV("quic", false);
+    c.pushKV("utp", "NONSHIPPING");
+    c.pushKV("btx_torrentd_process", false);
+    c.pushKV("cloud_attached_storage", g_adv_cloud.load());
+    c.pushKV("direct_cloud_seed", g_adv_direct.load());
+    c.pushKV("model_event_journal", true);
+    c.pushKV("subscription_mandate", true);
     c.pushKV("demand_seed_default", true);
     c.pushKV("preserve_rare", true);
     c.pushKV("follow_configured_peers_default", true);
@@ -149,6 +189,7 @@ UniValue CapabilitiesObject()
              "POST /hello", "POST /query", "POST /records/get", "POST /records/announce",
              "GET /manifests/{id}", "POST /availability", "POST /quotes",
              "POST /transfers/{id}/payment", "GET /transfers/{id}/pieces/{file}/{piece}",
+             "GET /files/{artifact}/{file}",
              "POST /releases/{id}/pledges", "POST /releases/{id}/rounds", "POST /releases/{id}/signatures",
              "POST /ext/caps", "POST /ext/resolve", "POST /ext/objects/get", "POST /ext/objects/announce",
              "POST /ext/free/grant", "POST /ext/receipts",
@@ -169,6 +210,11 @@ bool ImportRegularFile(ModelStore& store, const Digest48& staging_artifact, uint
     out = {};
     out.path = relpath;
     if (!IsPortableRelPath(relpath, err)) return false;
+    std::error_code sec;
+    if (fs::is_symlink(src, sec)) {
+        err = "symlink rejected";
+        return false;
+    }
     bool skip = false;
     out.role = RoleFromRelPath(relpath, skip);
     if (skip) {
@@ -177,6 +223,16 @@ bool ImportRegularFile(ModelStore& store, const Digest48& staging_artifact, uint
     }
 
     const std::string srcs = fs::PathToString(src);
+    {
+        std::ifstream peek(src, std::ios::binary);
+        unsigned char magic[24]{};
+        peek.read(reinterpret_cast<char*>(magic), 24);
+        const auto n = static_cast<size_t>(peek.gcount());
+        if (LooksLikeExecutable(relpath, Span<const unsigned char>{magic, n})) {
+            err = "rejected pickle/executable/script format";
+            return false;
+        }
+    }
     if (out.role == FileRole::WEIGHTS) {
         QualReport report;
         const auto qr = QualifyFile(srcs, report);
@@ -260,6 +316,11 @@ ModelCatalog::ModelCatalog(fs::path dir, uint64_t quota_bytes)
 
 void ModelCatalog::DemandSeedLocked(CatalogEntry& e)
 {
+    EnsureSafetyBound(m_dir);
+    if (GlobalSafety().SubjectBlocked(e.model_id.Hex()) || GlobalSafety().SubjectBlocked(e.artifact_id.Hex())) {
+        e.seeded = false;
+        return;
+    }
     if (!ShouldDemandSeed(m_policy, e.admission)) return;
     if (e.admission == AdmissionLevel::BYTES_VERIFIED ||
         e.admission == AdmissionLevel::STRUCTURE_VERIFIED ||
@@ -487,7 +548,17 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
         err = "payload storage is 0 until -modelstorage / -modelcache allocates a quota";
         return false;
     }
+    EnsureSafetyBound(m_dir);
+    if (m_models.size() >= MAX_CATALOG_MODELS) {
+        err = "catalog entry cap";
+        return false;
+    }
     const fs::path src = fs::PathFromString(path);
+    std::error_code sec;
+    if (fs::is_symlink(src, sec)) {
+        err = "symlink rejected";
+        return false;
+    }
     if (!fs::exists(src)) {
         err = "path does not exist";
         return false;
@@ -500,9 +571,16 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
             err = perr;
             return false;
         }
+        bool skip = false;
+        (void)RoleFromRelPath(name, skip);
+        if (skip) {
+            err = "skipped unsafe or unsupported name";
+            return false;
+        }
         files.emplace_back(src, name);
     } else if (fs::is_directory(src)) {
         for (const auto& ent : fs::recursive_directory_iterator(src)) {
+            if (ent.is_symlink()) continue;
             if (!ent.is_regular_file()) continue;
             fs::path rel = fs::relative(ent.path(), src);
             std::string rels = rel.generic_string();
@@ -522,10 +600,34 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
         return false;
     }
     std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+    bool has_weights = false;
+    for (const auto& file : files) {
+        const auto lower = ToLower(file.second);
+        if (lower.ends_with(".gguf") || lower.ends_with(".safetensors")) {
+            has_weights = true;
+            break;
+        }
+    }
+    if (!has_weights) {
+        err = "no weight files";
+        return false;
+    }
 
     std::ostringstream nonce;
     nonce << std::hex << std::random_device{}() << std::random_device{}();
     const Digest48 staging = StagingId(nonce.str());
+    bool commit_staging = false;
+    struct StagingCleanup {
+        ModelStore& store;
+        Digest48 id;
+        bool& commit;
+        ~StagingCleanup()
+        {
+            if (commit) return;
+            std::string ignored;
+            (void)store.RemoveArtifact(id, ignored);
+        }
+    } cleanup{m_store, staging, commit_staging};
 
     std::vector<CoreFile> cores;
     bool saw_st = false, saw_gguf = false;
@@ -564,6 +666,7 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     if (!EncodeArtifactCore(ac, aenc, err)) return false;
     const Digest48 artifact_id = ArtifactCoreId(aenc);
     if (!m_store.RenameArtifact(staging, artifact_id, err)) return false;
+    commit_staging = true;
     DropPieceTreeCache(staging);
 
     out = {};
@@ -597,6 +700,11 @@ bool ModelCatalog::Seed(const Digest48& model_id, bool on, std::string& err)
     for (auto& m : m_models) {
         if (m.model_id == model_id) {
             if (on) {
+                EnsureSafetyBound(m_dir);
+                if (GlobalSafety().SubjectBlocked(m.model_id.Hex()) || GlobalSafety().SubjectBlocked(m.artifact_id.Hex())) {
+                    err = "safety";
+                    return false;
+                }
                 m.seeded = true;
                 m.bytes_verified = m.bytes_verified || AdmissionImpliesBytesVerified(m.admission);
                 m.admission = AdmissionLevel::SEEDING;
@@ -672,6 +780,8 @@ UniValue ModelCatalog::FileAvailabilityJson(const Digest48& artifact, const Mode
         one.pushKV("complete", complete);
         one.pushKV("piece_count", static_cast<int>(have.size()));
         one.pushKV("pieces_total", static_cast<int>(n));
+        one.pushKV("piece_size", static_cast<int64_t>(PIECE_SIZE));
+        one.pushKV("hash_alg", "sha384");
         files.push_back(one);
         ++fi;
     }
@@ -765,6 +875,9 @@ bool ModelCatalog::GetManifest(const Digest48& id, UniValue& out, std::string& e
     UniValue files(UniValue::VARR);
     for (const auto& f : e.core.files) files.push_back(CoreFileJson(f));
     out.pushKV("files", files);
+    out.pushKV("file_count", static_cast<int>(e.core.files.size()));
+    out.pushKV("piece_size", static_cast<int64_t>(PIECE_SIZE));
+    out.pushKV("hash_alg", "sha384");
     out.pushKV("seeded", e.seeded);
     out.pushKV("admission", AdmissionLevelName(e.admission));
     out.pushKV("bytes_verified", e.bytes_verified || AdmissionImpliesBytesVerified(e.admission));
@@ -808,6 +921,43 @@ bool ModelCatalog::FindExact(ResourceKind kind, const Digest48& digest, CatalogE
             return true;
         }
     }
+    return false;
+}
+
+bool ModelCatalog::MarkIncomplete(const Digest48& model_or_artifact, bool incomplete, std::string& err)
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    for (auto& m : m_models) {
+        if (!(m.model_id == model_or_artifact || m.artifact_id == model_or_artifact)) continue;
+        m.incomplete = incomplete;
+        if (incomplete) {
+            m.bytes_verified = false;
+            m.admission = AdmissionLevel::FETCHING;
+            m.completed_at = 0;
+        }
+        return PersistLocked(err);
+    }
+    err = "unknown model";
+    return false;
+}
+
+bool ModelCatalog::NoteUsefulBytes(const Digest48& model_or_artifact, int64_t served_delta, int64_t received_delta, std::string& err)
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    for (auto& m : m_models) {
+        if (!(m.model_id == model_or_artifact || m.artifact_id == model_or_artifact)) continue;
+        const int64_t now = GetTime();
+        if (served_delta > 0) {
+            m.useful_bytes_served += served_delta;
+            m.last_served_at = now;
+        }
+        if (received_delta > 0) {
+            m.useful_bytes_received += received_delta;
+            m.last_access_at = now;
+        }
+        return PersistLocked(err);
+    }
+    err = "unknown model";
     return false;
 }
 
@@ -903,10 +1053,13 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
         err = "corrupt chunk";
         return false;
     }
+    std::string relpath;
     {
         std::lock_guard<std::mutex> lock(m_mu);
+        bool found = false;
         for (const auto& m : m_models) {
             if (!(m.artifact_id == artifact)) continue;
+            found = true;
             if (file_index >= m.core.files.size()) {
                 err = "wrong file index";
                 return false;
@@ -919,8 +1072,26 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
                 err = "file size mismatch";
                 return false;
             }
+            EnsureSafetyBound(m_dir);
+            if (GlobalSafety().SubjectBlocked(m.model_id.Hex()) || GlobalSafety().SubjectBlocked(m.artifact_id.Hex())) {
+                err = "safety";
+                return false;
+            }
+            relpath = m.core.files[file_index].path;
             break;
         }
+        if (!found) {
+            err = "unknown artifact";
+            return false;
+        }
+    }
+    if (piece_index == 0 && (RelPathLooksUnsafe(relpath) || LooksLikeExecutable(relpath, bytes))) {
+        EnsureSafetyBound(m_dir);
+        std::string serr;
+        GlobalSafety().LocalReport(artifact.Hex(), SAFETY_TARGET_ARTIFACT, SAFETY_UNSAFE_EXEC,
+                                   "executable prefix", GetTime(), serr);
+        err = "rejected pickle/executable/script format";
+        return false;
     }
     const Digest48 leaf = ChunkLeaf(piece_index, bytes);
     if (!m_store.PutVerifiedPiece(artifact, file_index, piece_index, bytes, leaf, err)) return false;
@@ -933,11 +1104,8 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
         for (auto& m : m_models) {
             if (!(m.artifact_id == artifact)) continue;
             m.incomplete = true;
-            if (ShouldDemandSeed(m_policy, m.admission) || m.seeded) {
-                m.seeded = true;
-                if (!m.seeding_started_at) m.seeding_started_at = GetTime();
-            }
             m.last_access_at = GetTime();
+            m.useful_bytes_received += static_cast<int64_t>(bytes.size());
             break;
         }
         PersistLocked(err);
@@ -952,14 +1120,16 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
     return true;
 }
 
-void ModelCatalog::AddPeer(const std::string& endpoint)
+bool ModelCatalog::AddPeer(const std::string& endpoint)
 {
+    if (endpoint.empty()) return false;
     std::lock_guard<std::mutex> lock(m_mu);
-    if (std::find(m_peers.begin(), m_peers.end(), endpoint) == m_peers.end()) {
-        m_peers.push_back(endpoint);
-        std::string err;
-        PersistLocked(err);
-    }
+    if (std::find(m_peers.begin(), m_peers.end(), endpoint) != m_peers.end()) return true;
+    if (m_peers.size() >= 64) return false;
+    m_peers.push_back(endpoint);
+    std::string err;
+    PersistLocked(err);
+    return true;
 }
 
 std::vector<std::string> ModelCatalog::Peers() const
@@ -990,30 +1160,37 @@ bool ModelCatalog::VerifyFileDigest(const Digest48& artifact, uint32_t file_inde
 
 bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& err, bool complete)
 {
-    std::lock_guard<std::mutex> lock(m_mu);
-    CatalogEntry e;
-    if (!Digest48::FromHex(manifest["model_id"].get_str(), e.model_id, err)) return false;
-    if (!Digest48::FromHex(manifest["artifact_id"].get_str(), e.artifact_id, err)) return false;
-    e.label = "retrieved";
-    e.core.version = 2;
-    e.core.format_profile = static_cast<uint16_t>(manifest["format_profile"].getInt<int>());
-    e.core.execution_profile = static_cast<uint16_t>(manifest["execution_profile"].getInt<int>());
-    for (const auto& f : manifest["files"].getValues()) {
-        CoreFile cf;
-        cf.path = f["path"].get_str();
-        if (!FileRoleFromName(f["role"].get_str(), cf.role)) {
-            err = "role";
+    VerifiedManifest vm;
+    if (!VerifyManifestAgainstRequest(manifest, vm, err)) return false;
+    for (const auto& f : vm.core.files) {
+        if (RelPathLooksUnsafe(f.path)) {
+            err = "skipped unsafe or unsupported name";
             return false;
         }
-        cf.size = f["size"].getInt<uint64_t>();
-        if (!Digest48::FromHex(f["sha384"].get_str(), cf.sha384, err)) return false;
-        if (!Digest48::FromHex(f["pieces_root"].get_str(), cf.pieces_root, err)) return false;
-        e.core.files.push_back(cf);
     }
-    e.artifact.version = 2;
-    e.artifact.codec = 1;
-    e.artifact.model_id = e.model_id;
-    e.artifact.files = e.core.files;
+    EnsureSafetyBound(m_dir);
+    if (GlobalSafety().SubjectBlocked(vm.model_id.Hex()) || GlobalSafety().SubjectBlocked(vm.artifact_id.Hex())) {
+        err = "safety";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(m_mu);
+    bool updating = false;
+    for (const auto& existing : m_models) {
+        if (existing.model_id == vm.model_id) {
+            updating = true;
+            break;
+        }
+    }
+    if (!updating && m_models.size() >= MAX_CATALOG_MODELS) {
+        err = "catalog entry cap";
+        return false;
+    }
+    CatalogEntry e;
+    e.model_id = vm.model_id;
+    e.artifact_id = vm.artifact_id;
+    e.label = "retrieved";
+    e.core = std::move(vm.core);
+    e.artifact = std::move(vm.artifact);
     if (complete) {
         e.admission = AdmissionLevel::BYTES_VERIFIED;
         e.bytes_verified = true;
@@ -1024,10 +1201,7 @@ bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& er
         e.admission = AdmissionLevel::FETCHING;
         e.bytes_verified = false;
         e.incomplete = true;
-        if (ShouldDemandSeed(m_policy, e.admission)) {
-            e.seeded = true;
-            if (!e.seeding_started_at) e.seeding_started_at = GetTime();
-        }
+        e.seeded = false;
     }
     for (auto& existing : m_models) {
         if (existing.model_id == e.model_id) {

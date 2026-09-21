@@ -1,0 +1,23 @@
+{
+  "name": "@btx/crl12-sdk",
+  "version": "0.34.8",
+  "private": true,
+  "description": "Cognitive Reserve Layer v1.2 TypeScript client. Additive HCP/1 extension (43 ops). No executeAllocation; automatic_spend_atoms stays 0.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test src/body_id.test.ts src/desktop_context.test.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

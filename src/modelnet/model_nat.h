@@ -5,6 +5,8 @@
 #ifndef BITCOIN_MODELNET_MODEL_NAT_H
 #define BITCOIN_MODELNET_MODEL_NAT_H
 
+#include <netaddress.h>
+
 #include <cstdint>
 #include <string>
 
@@ -31,6 +33,9 @@ struct ModelMapResult {
 /** Wallet / monetary RPC / attestor control — never mapped, never PEX'd. */
 bool IsForbiddenControlPort(uint16_t port);
 bool IsForbiddenControlEndpoint(const std::string& endpoint, std::string& err);
+bool IsForbiddenRelayAddr(const CNetAddr& addr);
+bool IsForbiddenOutboundDialAddr(const CNetAddr& addr);
+bool IsForbiddenRelayEndpoint(const std::string& endpoint, std::string& err);
 bool SplitListenBind(const std::string& bind, std::string& host, uint16_t& port);
 
 bool MappingWouldExposeControlPlane(uint16_t port);
@@ -54,6 +59,7 @@ struct RelayConnectRequest {
     std::string endpoint;
     std::string expected_service_id;
     std::string presented_service_id;
+    std::string reservation_id;
 };
 
 bool ValidateRelayConnect(const RelayConnectRequest& req, bool relay_enabled, std::string& err);

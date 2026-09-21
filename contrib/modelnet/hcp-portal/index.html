@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>BTX HCP reference portal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #f7f5f0;
+      --ink: #1a1a1a;
+      --muted: #555;
+      --line: #cfc8ba;
+      --card: #fff;
+      --ann: #6b3fa0;
+      --fact: #0b5d3b;
+      --warn: #8a3b12;
+      --unk: #6a5200;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    header {
+      padding: 1.25rem 1.5rem 0.5rem;
+      max-width: 64rem;
+      margin: 0 auto;
+    }
+    h1 { font-size: 1.35rem; margin: 0 0 0.4rem; }
+    h2 { font-size: 1.05rem; margin: 0 0 0.6rem; }
+    h3 { font-size: 0.92rem; margin: 0.8rem 0 0.35rem; }
+    .banner, .note, .ann-label, .fact-label {
+      font-size: 0.88rem;
+      line-height: 1.4;
+    }
+    .banner {
+      background: #efe6d4;
+      border: 1px solid var(--line);
+      padding: 0.7rem 0.85rem;
+      margin: 0.7rem 0;
+    }
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      max-width: 64rem;
+      margin: 0 auto;
+      padding: 0.5rem 1.5rem;
+    }
+    nav button, section button, .row button {
+      font: inherit;
+      cursor: pointer;
+      border: 1px solid #333;
+      background: #fff;
+      padding: 0.35rem 0.7rem;
+    }
+    nav button[aria-current="page"] { background: #1a1a1a; color: #fff; }
+    main { max-width: 64rem; margin: 0 auto; padding: 0 1.5rem 2.5rem; }
+    section.view {
+      display: none;
+      border: 1px solid var(--line);
+      background: var(--card);
+      padding: 1rem;
+      margin: 0.6rem 0;
+    }
+    section.view.active { display: block; }
+    .note { color: var(--muted); }
+    .ann-label { color: var(--ann); font-weight: 600; }
+    .fact-label { color: var(--fact); font-weight: 600; }
+    .warn { color: var(--warn); }
+    .unknown { color: var(--unk); font-weight: 600; }
+    label { display: block; font-size: 0.85rem; margin: 0.45rem 0 0.15rem; }
+    input, textarea, select {
+      font: inherit;
+      width: 100%;
+      max-width: 36rem;
+      padding: 0.3rem 0.4rem;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0.5rem 0; }
+    pre, .panel {
+      background: #f3f1eb;
+      padding: 0.55rem 0.7rem;
+      overflow: auto;
+      font-size: 0.8rem;
+      border: 1px solid #e4dfd4;
+    }
+    .split { display: grid; gap: 0.75rem; }
+    @media (min-width: 48rem) {
+      .split { grid-template-columns: 1fr 1fr; }
+    }
+    .hit { border: 1px solid var(--line); padding: 0.6rem; margin: 0.5rem 0; }
+    .badge {
+      display: inline-block;
+      border: 1px solid var(--ann);
+      color: var(--ann);
+      font-size: 0.75rem;
+      padding: 0.1rem 0.35rem;
+      margin-right: 0.3rem;
+    }
+    .status {
+      font-family: ui-monospace, monospace;
+      font-size: 0.78rem;
+      white-space: pre-wrap;
+      min-height: 3rem;
+    }
+    .stage { list-style: none; padding: 0; }
+    .stage li { padding: 0.25rem 0; border-bottom: 1px solid #eee; }
+    .stage li[data-state="done"] { color: var(--fact); }
+    .stage li[data-state="unknown"] { color: var(--unk); }
+    .stage li[data-state="blocked"] { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>BTX Hosted Control Plane — reference portal</h1>
+    <p class="note">Catalogue and pairing shell. Not a wallet, not a CEX, not a consensus client.
+      Isolated <strong>REGTEST / loopback</strong> lab only.</p>
+    <div class="banner">
+      <strong>Browser cannot possess custody keys.</strong>
+      This page never holds wallet seeds, ML-DSA spend material, or native wallet RPC.
+      Access tokens, if typed, stay in this origin’s session fields — never in the URL bar,
+      query, fragment, or pairing URI. Pairing is <strong>outbound-only</strong>
+      (device dials out / polls). HTTP <strong>202 is UNKNOWN</strong>, not settlement;
+      this page never auto-submits a finance intent on 202, timeout, or lost response.
+      Ranking copy is a <span class="ann-label">catalogue annotation</span>, not a protocol fact.
+    </div>
+    <div class="row">
+      <label for="base">Gateway origin (loopback)
+        <input id="base" spellcheck="false" value="http://127.0.0.1:18780" />
+      </label>
+    </div>
+    <div class="row">
+      <button type="button" data-base="http://127.0.0.1:18780">Walletless :18780</button>
+      <button type="button" data-base="http://127.0.0.1:18781">Finance lab :18781</button>
+    </div>
+    <label for="token">Optional gateway access token (not a custody key; header-only; never stored in URI)
+      <input id="token" type="password" autocomplete="off" placeholder="leave empty for public reads" />
+    </label>
+    <p class="note" id="uri-strip" hidden></p>
+  </header>
+  <nav aria-label="Views">
+    <button type="button" data-view="catalogue" aria-current="page">Catalogue</button>
+    <button type="button" data-view="terms">Terms / quote</button>
+    <button type="button" data-view="approvals">Approvals</button>
+    <button type="button" data-view="treasury">Treasury</button>
+    <button type="button" data-view="devices">Devices</button>
+    <button type="button" data-view="progress">Progress</button>
+    <button type="button" data-view="export">Export</button>
+  </nav>
+  <main>
+    <section class="view active" id="view-catalogue">
+      <h2>Catalogue / search</h2>
+      <p class="note">POST <code>/capabilities/search</code>. Hits may be empty
+        (<code>incomplete: true</code>). Sponsored rank, trending, and quality claims are
+        <span class="ann-label">catalogue annotations</span>
+        (<code>observed_at</code>, coverage, freshness). They never become package identity,
+        <code>terms_id</code>, funding authority, or local runtime admission.</p>
+      <label for="q">Query (bounded natural language; not SQL, not wallet RPC)
+        <input id="q" placeholder="document.classification" />
+      </label>
+      <div class="row">
+        <button type="button" id="search-live">Search loopback</button>
+        <button type="button" id="search-fixture">Show lab fixture</button>
+      </div>
+      <div id="hits"></div>
+    </section>
+
+    <section class="view" id="view-terms">
+      <h2>Terms and funding quote</h2>
+      <p class="note">Exact IDs are protocol facts. Economy percents and “trending” copy are
+        <span class="ann-label">catalogue annotations</span>.
+        Quotes bind <code>terms_id</code> + atom strings. Unsigned fixtures confer no settlement.</p>
+      <label for="target">Economy target_id
+        <input id="target" value="target-demo" />
+      </label>
+      <div class="row">
+        <button type="button" id="economy-live">GET /economy/{id}</button>
+        <button type="button" id="quote-live">POST /finance/quotes (expect fail-closed if unauth)</button>
+        <button type="button" id="quote-fixture">Show quote fixture</button>
+      </div>
+      <div class="split">
+        <div>
+          <h3 class="fact-label">Protocol facts</h3>
+          <pre id="terms-facts"></pre>
+        </div>
+        <div>
+          <h3 class="ann-label">Catalogue annotations</h3>
+          <pre id="terms-ann"></pre>
+        </div>
+      </div>
+      <pre id="terms-raw"></pre>
+    </section>
+
+    <section class="view" id="view-approvals">
+      <h2>Approvals (finite HostedAccountPolicy)</h2>
+      <p class="note">Authorization binds the exact intent <code>body_id</code> and
+        <code>policy_revision</code>. Model text, ranking, or “urgency” cannot widen limits.
+        HostedAccountPolicy is never a LocalCapabilityGrant.</p>
+      <div class="split">
+        <div>
+          <h3>Policy digest (fixture)</h3>
+          <pre id="policy-digest"></pre>
+        </div>
+        <div>
+          <h3>Authorize intent</h3>
+          <label>expected_body_id <input id="expected-body" spellcheck="false" /></label>
+          <label>policy_revision <input id="policy-rev" value="1" /></label>
+          <label>intent_id <input id="intent-id" value="intent-demo" /></label>
+          <div class="row">
+            <button type="button" id="authorize">Authorize exact digest</button>
+          </div>
+          <p class="note">This button only POSTs <code>/finance/intents/{id}/authorize</code>.
+            It does not submit, broadcast, or spend.</p>
+        </div>
+      </div>
+      <pre id="approvals-out"></pre>
+    </section>
+
+    <section class="view" id="view-treasury">
+      <h2>Treasury / activity</h2>
+      <p class="note">Atom amounts stay decimal strings. <code>automatic_spend_atoms</code> stays
+        <strong>0</strong>. Financial mutations need DPoP- or mTLS-bound tokens at the gateway.
+        A FinancialReceipt is <strong>HOSTED_ATTESTED</strong> observation — not consensus-ready
+        and not RUNTIME_READY. HTTP 202 stays UNKNOWN; reuse the same
+        <code>client_operation_id</code>; never mint a second intent to “retry.”</p>
+      <div class="row">
+        <button type="button" id="balances">GET /treasury/balances</button>
+        <button type="button" id="prepare-intent">Prepare intent (no submit)</button>
+        <button type="button" id="poll-op">Poll operation</button>
+      </div>
+      <p class="unknown" id="treasury-unknown" hidden>Last finance response was HTTP 202 UNKNOWN.
+        Submit stays off. Poll the same operation. Do not auto-submit.</p>
+      <div class="split">
+        <div>
+          <h3>Balances / hold</h3>
+          <pre id="treasury-bal"></pre>
+        </div>
+        <div>
+          <h3>Activity</h3>
+          <pre id="treasury-act"></pre>
+        </div>
+      </div>
+      <p class="note">Submit is a separate, explicit control and is disabled after 202 or timeout.
+        This page will not call <code>/submit</code> from a timer.</p>
+      <div class="row">
+        <button type="button" id="submit-intent" disabled>Submit (disabled — no auto-submit)</button>
+      </div>
+    </section>
+
+    <section class="view" id="view-devices">
+      <h2>Devices — outbound pairing</h2>
+      <p class="note">The <em>device</em> (local <code>btx-hosted</code>) creates its own pairing
+        key and a short-lived challenge. This browser only displays identifiers and asks the
+        authenticated account to approve that exact device. The device then <strong>dials out</strong>
+        or polls <code>GET /devices/{id}/handoffs</code>. No inbound runtime port. No
+        browser-to-unrestricted-localhost privileged route. No token in the pairing URI.</p>
+      <label>device_id <input id="device-id" value="device-demo" /></label>
+      <label>pairing challenge (from the device, not a spend key)
+        <input id="device-challenge" value="pair-demo-challenge" /></label>
+      <div class="row">
+        <button type="button" id="make-pair-uri">Build pairing URI (no token)</button>
+        <button type="button" id="refuse-token-uri">Demonstrate token-in-URI refusal</button>
+        <button type="button" id="enroll">POST /devices/enroll</button>
+        <button type="button" id="confirm">POST …/confirm</button>
+        <button type="button" id="poll-handoffs">Poll handoffs (outbound)</button>
+        <button type="button" id="revoke">POST …/revoke</button>
+      </div>
+      <p class="fact-label" id="pair-uri"></p>
+      <pre id="devices-out"></pre>
+    </section>
+
+    <section class="view" id="view-progress">
+      <h2>Progress</h2>
+      <p class="note">Ready is shown only after an authorized coarse device report
+        (<code>LocalReadinessReport</code>). Never inferred from a funding receipt, download count,
+        or a live socket. HTTP 202 remains UNKNOWN.</p>
+      <label>handoff / operation id <input id="progress-id" value="handoff-demo" /></label>
+      <div class="row">
+        <button type="button" id="progress-live">GET /handoffs/{id} + /operations/{id}</button>
+        <button type="button" id="progress-fixture">Fixture stages</button>
+      </div>
+      <ul class="stage" id="stages">
+        <li data-state="blocked">FETCH_METADATA</li>
+        <li data-state="blocked">ACQUIRE_MODEL</li>
+        <li data-state="blocked">PLAN_LOCAL_RUN</li>
+        <li data-state="blocked">Authorized device report</li>
+        <li data-state="blocked">RUNTIME_READY (not inferred from receipt)</li>
+      </ul>
+      <pre id="progress-out"></pre>
+    </section>
+
+    <section class="view" id="view-export">
+      <h2>Export / customer exit</h2>
+      <p class="note">Portable public state, policy snapshots, quotes, receipts, intent status,
+        and documented custody/refund obligations. Secrets stay omitted.
+        <code>self_custody_claimed</code> is false under CEX custodial keys.
+        HTTP 202 is an async export, not a proof of solvency.</p>
+      <div class="row">
+        <button type="button" id="export-live">POST /exports (include_secrets false)</button>
+        <button type="button" id="export-fixture">Show fixture manifest</button>
+      </div>
+      <pre id="export-out"></pre>
+    </section>
+
+    <section id="log-always" style="margin-top:1rem;">
+      <h2>Last HTTP</h2>
+      <pre class="status" id="log">(idle)</pre>
+    </section>
+  </main>
+  <script src="portal.js"></script>
+</body>
+</html>

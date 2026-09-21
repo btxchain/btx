@@ -32,7 +32,7 @@ bool RelayTable::Reserve(const std::string& service_id, const std::string& netgr
         err = "service_id";
         return false;
     }
-    if (IsForbiddenControlEndpoint(relay_endpoint, err)) return false;
+    if (IsForbiddenRelayEndpoint(relay_endpoint, err)) return false;
     int per_id = 0, per_ng = 0;
     for (const auto& r : m_rsvp) {
         if (r.service_id == service_id) ++per_id;
@@ -102,6 +102,18 @@ bool RelayTable::AllowForward(const std::string& reservation_id, uint64_t nbytes
     return false;
 }
 
+void RelayTable::AddForwardedBytes(const std::string& reservation_id, uint64_t nbytes, int64_t now_ms)
+{
+    if (nbytes == 0) return;
+    for (auto& r : m_rsvp) {
+        if (r.reservation_id != reservation_id) continue;
+        r.bytes_used += nbytes;
+        r.last_activity_ms = now_ms;
+        m_forwarded += nbytes;
+        return;
+    }
+}
+
 void RelayTable::CloseConn(const std::string& reservation_id)
 {
     for (auto& r : m_rsvp) {
@@ -117,6 +129,17 @@ bool RelayTable::Has(const std::string& reservation_id) const
 {
     for (const auto& r : m_rsvp) {
         if (r.reservation_id == reservation_id) return true;
+    }
+    return false;
+}
+
+bool RelayTable::Get(const std::string& reservation_id, RelayReservation& out) const
+{
+    for (const auto& r : m_rsvp) {
+        if (r.reservation_id == reservation_id) {
+            out = r;
+            return true;
+        }
     }
     return false;
 }

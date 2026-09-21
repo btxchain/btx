@@ -53,6 +53,9 @@ private Q_SLOTS:
     void onResultRefund();
     void onResultCache();
     void onPublishSearchRecord();
+    void onImportModel();
+    void onImportBrowse();
+    void copyImportShareUri();
 
 private:
     Ui::ModelNetPage *ui;
@@ -62,6 +65,11 @@ private:
     std::optional<UniValue> tryRpc(const std::string& method, const UniValue& params) const;
     void refreshConsent();
     void refreshResourceGovernorStatus();
+    void refreshSetupStatus();
+    void refreshDev348ProfileCloud();
+    void refreshDev348WatchesActivity();
+    void showImportShare(const UniValue& result);
+    void refreshTransfersAndShares();
     void refreshLocalCatalogCache();
     void clearResultsList();
     void renderSearchResponse(const UniValue& result);
@@ -78,11 +86,25 @@ private:
     void showCachePlan(const QString& release_id);
     void pollCampaign(const QString& id, int attempt);
     void pollFeedSequence();
+    void refreshCapabilities();
+    void onCapabilityEnsure();
+    void onCapabilityPrefetch();
+    void onCapabilitySleep();
+    void onCapabilityRelease();
+    void onCapabilityWake();
+    void onCapabilityUpdate();
+    void onCapabilitySwitch();
+    void onCapabilityEvents();
+    void onCapabilityTtc();
+    void onCapabilityRuntimeCaps();
+    void showCapabilityReply(const std::string& method, const std::optional<UniValue>& got,
+                             const QString& fail, bool wake = false);
     UniValue buildSearchQueryObject(const std::optional<std::string>& scope,
                                     const std::optional<std::string>& sort_override) const;
     int modelsScopeTabIndex() const;
 
     QString m_full_uri;
+    QString m_import_share_uri;
     UniValue m_cached_listmodels{UniValue::VARR};
     bool m_have_local_cache{false};
     UniValue m_last_search_params{UniValue::VNULL};

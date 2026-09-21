@@ -110,7 +110,7 @@ cp share/examples/modelnet.conf.example ~/.btx/modelnet.conf
 |---|---|
 | `modelnet=1` | Enable the model network. Packaged default **on**. `modelnet=0` disables the helper. |
 | `modelrpcsocket=<path>` | Unix socket for helper JSON-RPC (default `<datadir>/modelnet/modeld.sock`). If set, `btxd` does not spawn or kill that helper. |
-| `modelrelay=1` | CPU-only model discovery relay hint; default on with `modelnet`. Not monetary AddrMan. |
+| `modelrelay=1` | CPU-only model discovery relay hint; default **off**. Not monetary AddrMan. |
 | `modelhost=1` | Advertise a public model-serving hint only after proven reachability. Default **off**. |
 | `modelstorage=auto` | Packaged default AUTO budget. `0` = no payload. Explicit sizes are FIXED. |
 | `resourcegovernor=auto` | Local spare-capacity policy. Never consensus, never auto-spend. |

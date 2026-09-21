@@ -1,0 +1,20 @@
+{
+  "schema_revision": "1.2",
+  "provider_id": "provider-a",
+  "created_at": "1789603200",
+  "metric_id": "metric-id-demo",
+  "metric_kind": "GLOBAL_COGNITIVE_NET_WORTH",
+  "scope_role": "MANAGER",
+  "inclusion_kinds": [
+    "NATIVE_RESERVE",
+    "FINANCIAL_INSTRUMENT"
+  ],
+  "basis": "DIRECT_ONLY",
+  "valuation_purpose": "MARKET_VALUE",
+  "mandate_required": true,
+  "policy_ref": {
+    "object_type": "ProviderProfile",
+    "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "generation": "1"
+}

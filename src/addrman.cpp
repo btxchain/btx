@@ -24,6 +24,16 @@
 #include <cmath>
 #include <optional>
 
+/** ADDR/ADDRV2 service bits are unauthenticated. Do not persist or synthesize
+ *  the serving-GPU-attestor fingerprint (CONSENSUS|ARCHIVE) into AddrMan.
+ *  Matches node::discovery_relay::ServicesLookLikeServingGpuAttestor and the
+ *  VERSION SetServices skip in net_processing (do not name operator hosts). */
+[[nodiscard]] static bool AddrManRejectsGpuAttestorFingerprint(ServiceFlags services)
+{
+    return (services & NODE_MATMUL_CONSENSUS) &&
+           (services & NODE_MATMUL_ATTESTATION_ARCHIVE);
+}
+
 /** Over how many buckets entries with tried addresses from a single group (/16 for IPv4) are spread */
 static constexpr uint32_t ADDRMAN_TRIED_BUCKETS_PER_GROUP{8};
 /** Over how many buckets entries with new addresses originating from a single group are spread */
@@ -554,6 +564,12 @@ bool AddrManImpl::AddSingle(const CAddress& addr, const CNetAddr& source, std::c
     if (!addr.IsRoutable())
         return false;
 
+    // Gossip must not insert a serving GPU attestor into AddrMan. Connecting
+    // via addnode still works; VERSION will not stamp these bits either.
+    if (AddrManRejectsGpuAttestorFingerprint(addr.nServices)) {
+        return false;
+    }
+
     nid_type nId;
     AddrInfo* pinfo = Find(addr, &nId);
 
@@ -570,8 +586,12 @@ bool AddrManImpl::AddSingle(const CAddress& addr, const CNetAddr& source, std::c
             pinfo->nTime = std::max(NodeSeconds{0s}, addr.nTime - time_penalty);
         }
 
-        // add services
-        pinfo->nServices = ServiceFlags(pinfo->nServices | addr.nServices);
+        // add services — but do not let unverified bits synthesize a
+        // CONSENSUS|ARCHIVE fingerprint onto an existing miner/archive entry
+        const ServiceFlags merged{ServiceFlags(pinfo->nServices | addr.nServices)};
+        if (!AddrManRejectsGpuAttestorFingerprint(merged)) {
+            pinfo->nServices = merged;
+        }
 
         // do not update if no new information is present
         if (addr.nTime <= pinfo->nTime) {

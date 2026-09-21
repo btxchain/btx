@@ -6,19 +6,34 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <core_io.h>
+#include <crypto/sha256.h>
 #include <key_io.h>
 #include <rpc/server.h>
 #include <rpc/util.h>
+#include <script/descriptor.h>
+#include <span.h>
+#include <util/strencodings.h>
 #include <util/translation.h>
 #include <wallet/context.h>
 #include <wallet/receive.h>
 #include <wallet/rpc/wallet.h>
 #include <wallet/rpc/util.h>
+#include <wallet/rpc/bcp1.h>
+#include <wallet/bcp1_watchonly.h>
 #include <wallet/shielded_wallet.h>
 #include <wallet/wallet.h>
 #include <wallet/walletutil.h>
 
+#include <algorithm>
+#include <array>
+#include <iterator>
+#include <map>
 #include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <vector>
 
 #include <univalue.h>
 
@@ -27,6 +42,143 @@ namespace wallet {
 
 static constexpr auto LEGACY_WALLET_DISABLED_ERROR =
     "BTX PQ policy: only descriptor wallets are supported (descriptors=true)";
+
+static bool DecodePQFingerprintHex(std::string_view hex, std::array<unsigned char, 4>& out)
+{
+    if (hex.size() != 8 || !IsHex(hex)) return false;
+    const std::vector<unsigned char> bytes = ParseHex(std::string{hex});
+    if (bytes.size() != out.size()) return false;
+    std::copy(bytes.begin(), bytes.end(), out.begin());
+    return true;
+}
+
+static std::array<unsigned char, 4> PQFingerprintFromSeed(Span<const unsigned char> seed)
+{
+    std::array<unsigned char, 32> hash{};
+    CSHA256().Write(seed.data(), seed.size()).Finalize(hash.data());
+    std::array<unsigned char, 4> fp{};
+    std::copy(hash.begin(), hash.begin() + fp.size(), fp.begin());
+    return fp;
+}
+
+/** Parse the token inside pqhd(...) into a fingerprint, and a seed when the token is the private form. */
+static bool ParsePQHDInnerToken(std::string_view token, std::array<unsigned char, 4>& fingerprint, std::optional<std::array<unsigned char, 32>>& seed_out)
+{
+    seed_out.reset();
+    std::string first{token};
+    if (!first.empty() && first.front() == '[') {
+        const auto rb = first.find(']');
+        if (rb == std::string::npos || rb < 2) return false;
+        first = first.substr(1, rb - 1);
+    }
+    const auto slash = first.find('/');
+    if (slash != std::string::npos) first = first.substr(0, slash);
+    first = ToLower(first);
+    if (first.size() == 64 && IsHex(first)) {
+        const std::vector<unsigned char> seed_bytes = ParseHex(first);
+        if (seed_bytes.size() != 32) return false;
+        std::array<unsigned char, 32> seed{};
+        std::copy(seed_bytes.begin(), seed_bytes.end(), seed.begin());
+        fingerprint = PQFingerprintFromSeed(seed);
+        seed_out = seed;
+        return true;
+    }
+    return DecodePQFingerprintHex(first, fingerprint);
+}
+
+struct ParsedPQHDKey {
+    std::array<unsigned char, 4> fingerprint{};
+    std::optional<std::array<unsigned char, 32>> seed;
+};
+
+/** Accept gethdkeys identifiers: pqhd/<fp>, raw 8-hex fingerprint, pqhd(...) strings, or a 32-byte seed hex. */
+static std::optional<ParsedPQHDKey> ParsePQHDKeyArg(std::string hdkey)
+{
+    hdkey = ToLower(hdkey);
+    if (hdkey.empty()) return std::nullopt;
+
+    ParsedPQHDKey parsed;
+    if (hdkey.rfind("pqhd/", 0) == 0) {
+        if (!DecodePQFingerprintHex(hdkey.substr(5), parsed.fingerprint)) return std::nullopt;
+        return parsed;
+    }
+    if (hdkey.rfind("pqhd(", 0) == 0) {
+        const auto close = hdkey.rfind(')');
+        if (close == std::string::npos || close <= 5) return std::nullopt;
+        if (!ParsePQHDInnerToken(std::string_view(hdkey).substr(5, close - 5), parsed.fingerprint, parsed.seed)) {
+            return std::nullopt;
+        }
+        return parsed;
+    }
+    if (hdkey.front() == '[') {
+        if (!ParsePQHDInnerToken(hdkey, parsed.fingerprint, parsed.seed)) return std::nullopt;
+        return parsed;
+    }
+    if (hdkey.size() == 64 && IsHex(hdkey)) {
+        const std::vector<unsigned char> seed_bytes = ParseHex(hdkey);
+        if (seed_bytes.size() != 32) return std::nullopt;
+        std::array<unsigned char, 32> seed{};
+        std::copy(seed_bytes.begin(), seed_bytes.end(), seed.begin());
+        parsed.fingerprint = PQFingerprintFromSeed(seed);
+        parsed.seed = seed;
+        return parsed;
+    }
+    if (DecodePQFingerprintHex(hdkey, parsed.fingerprint)) return parsed;
+    return std::nullopt;
+}
+
+struct PQHDKeyRecord {
+    std::array<unsigned char, 4> fingerprint{};
+    std::optional<std::array<unsigned char, 32>> seed;
+};
+
+static void CollectPQHDKeysFromDescriptor(const Descriptor& desc, std::map<std::string, PQHDKeyRecord>& out)
+{
+    for (const auto& [fp, seed] : desc.ExtractAllPQSeeds()) {
+        auto& rec = out[HexStr(fp)];
+        rec.fingerprint = fp;
+        rec.seed = seed;
+    }
+    const std::string pub = desc.ToString(/*compat_format=*/false);
+    size_t pos = 0;
+    while ((pos = pub.find("pqhd(", pos)) != std::string::npos) {
+        pos += 5;
+        const auto end = pub.find(')', pos);
+        if (end == std::string::npos) break;
+        std::array<unsigned char, 4> fp{};
+        std::optional<std::array<unsigned char, 32>> seed;
+        if (ParsePQHDInnerToken(std::string_view(pub).substr(pos, end - pos), fp, seed)) {
+            auto& rec = out[HexStr(fp)];
+            rec.fingerprint = fp;
+            if (seed && !rec.seed) rec.seed = seed;
+        }
+        pos = end + 1;
+    }
+}
+
+static std::map<std::string, PQHDKeyRecord> CollectPQHDKeysFromSPKMs(const std::set<ScriptPubKeyMan*>& spkms)
+{
+    std::map<std::string, PQHDKeyRecord> out;
+    for (auto* spkm : spkms) {
+        auto* desc_spkm{dynamic_cast<DescriptorScriptPubKeyMan*>(spkm)};
+        if (!desc_spkm) continue;
+        LOCK(desc_spkm->cs_desc_man);
+        WalletDescriptor w_desc = desc_spkm->GetWalletDescriptor();
+        if (!w_desc.descriptor) continue;
+        CollectPQHDKeysFromDescriptor(*w_desc.descriptor, out);
+    }
+    return out;
+}
+
+static std::optional<std::array<unsigned char, 32>> FindPQSeedForFingerprint(const CWallet& wallet, const std::array<unsigned char, 4>& fingerprint)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    const std::string want = HexStr(fingerprint);
+    const auto found = CollectPQHDKeysFromSPKMs(wallet.GetAllScriptPubKeyMans());
+    const auto it = found.find(want);
+    if (it != found.end()) return it->second.seed;
+    return std::nullopt;
+}
 
 static const std::map<uint64_t, std::string> WALLET_FLAG_CAVEATS{
     {WALLET_FLAG_AVOID_REUSE,
@@ -493,6 +645,8 @@ static RPCHelpMan createwallet()
 #endif
     }
 
+    ApplyExchangeWatchOnlyCreateFlags(flags, *context.args);
+
 #ifndef USE_BDB
     if (!(flags & WALLET_FLAG_DESCRIPTORS)) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Compiled without bdb support (required for legacy wallets)");
@@ -511,6 +665,11 @@ static RPCHelpMan createwallet()
     if (!wallet) {
         RPCErrorCode code = status == DatabaseStatus::FAILED_ENCRYPT ? RPC_WALLET_ENCRYPTION_FAILED : RPC_WALLET_ERROR;
         throw JSONRPCError(code, error.original);
+    }
+
+    bilingual_str watchonly_err;
+    if (!EnsureExchangeWatchOnly(*wallet, *context.args, watchonly_err)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, watchonly_err.original);
     }
 
     UniValue obj(UniValue::VOBJ);
@@ -891,7 +1050,8 @@ RPCHelpMan gethdkeys()
 {
     return RPCHelpMan{
         "gethdkeys",
-        "\nList all BIP 32 HD keys in the wallet and which descriptors use them.\n",
+        "\nList all HD keys in the wallet and which descriptors use them.\n"
+        "BIP32 descriptors are reported with xpub/xprv. Default P2MR wallets use pqhd() providers and are reported with fingerprint/pq_seed_id instead of a fabricated xpub.\n",
         {
             {"options", RPCArg::Type::OBJ_NAMED_PARAMS, RPCArg::Optional::OMITTED, "", {
                 {"active_only", RPCArg::Type::BOOL, RPCArg::Default{false}, "Show the keys for only active descriptors"},
@@ -901,9 +1061,12 @@ RPCHelpMan gethdkeys()
         RPCResult{RPCResult::Type::ARR, "", "", {
             {
                 {RPCResult::Type::OBJ, "", "", {
-                    {RPCResult::Type::STR, "xpub", "The extended public key"},
-                    {RPCResult::Type::BOOL, "has_private", "Whether the wallet has the private key for this xpub"},
+                    {RPCResult::Type::STR, "xpub", /*optional=*/true, "The extended public key (BIP32 descriptors only)"},
+                    {RPCResult::Type::STR_HEX, "fingerprint", /*optional=*/true, "The 4-byte PQ HD master fingerprint (pqhd descriptors)"},
+                    {RPCResult::Type::STR, "pq_seed_id", /*optional=*/true, "Identifier for this PQ HD key, suitable for createwalletdescriptor's hdkey argument (pqhd/<fingerprint>)"},
+                    {RPCResult::Type::BOOL, "has_private", "Whether the wallet has the private key / PQ master seed for this HD key"},
                     {RPCResult::Type::STR, "xprv", /*optional=*/true, "The extended private key if \"private\" is true"},
+                    {RPCResult::Type::STR_HEX, "pq_seed", /*optional=*/true, "The 32-byte PQ master seed if \"private\" is true"},
                     {RPCResult::Type::ARR, "descriptors", "Array of descriptor objects that use this HD key",
                     {
                         {RPCResult::Type::OBJ, "", "", {
@@ -946,23 +1109,38 @@ RPCHelpMan gethdkeys()
 
             std::map<CExtPubKey, std::set<std::tuple<std::string, bool, bool>>> wallet_xpubs;
             std::map<CExtPubKey, CExtKey> wallet_xprvs;
+            std::map<std::string, std::set<std::tuple<std::string, bool, bool>>> wallet_pq;
+            std::map<std::string, PQHDKeyRecord> wallet_pq_keys;
             for (auto* spkm : spkms) {
                 auto* desc_spkm{dynamic_cast<DescriptorScriptPubKeyMan*>(spkm)};
                 CHECK_NONFATAL(desc_spkm);
                 LOCK(desc_spkm->cs_desc_man);
                 WalletDescriptor w_desc = desc_spkm->GetWalletDescriptor();
 
+                std::string desc_str;
+                bool ok = desc_spkm->GetDescriptorString(desc_str, false);
+                CHECK_NONFATAL(ok);
+                const bool active = wallet->IsActiveScriptPubKeyMan(*spkm);
+
                 // Retrieve the pubkeys from the descriptor
                 std::set<CPubKey> desc_pubkeys;
                 std::set<CExtPubKey> desc_xpubs;
                 w_desc.descriptor->GetPubKeys(desc_pubkeys, desc_xpubs);
                 for (const CExtPubKey& xpub : desc_xpubs) {
-                    std::string desc_str;
-                    bool ok = desc_spkm->GetDescriptorString(desc_str, false);
-                    CHECK_NONFATAL(ok);
-                    wallet_xpubs[xpub].emplace(desc_str, wallet->IsActiveScriptPubKeyMan(*spkm), desc_spkm->HasPrivKey(xpub.pubkey.GetID()));
+                    wallet_xpubs[xpub].emplace(desc_str, active, desc_spkm->HasPrivKey(xpub.pubkey.GetID()));
                     if (std::optional<CKey> key = priv ? desc_spkm->GetKey(xpub.pubkey.GetID()) : std::nullopt) {
                         wallet_xprvs[xpub] = CExtKey(xpub, *key);
+                    }
+                }
+
+                if (w_desc.descriptor) {
+                    std::map<std::string, PQHDKeyRecord> desc_pq;
+                    CollectPQHDKeysFromDescriptor(*w_desc.descriptor, desc_pq);
+                    for (auto& [fp_hex, rec] : desc_pq) {
+                        wallet_pq[fp_hex].emplace(desc_str, active, rec.seed.has_value());
+                        auto& stored = wallet_pq_keys[fp_hex];
+                        stored.fingerprint = rec.fingerprint;
+                        if (rec.seed && !stored.seed) stored.seed = rec.seed;
                     }
                 }
             }
@@ -990,6 +1168,28 @@ RPCHelpMan gethdkeys()
                 response.push_back(std::move(xpub_info));
             }
 
+            for (const auto& [fp_hex, descs] : wallet_pq) {
+                bool has_seed = false;
+                UniValue descriptors(UniValue::VARR);
+                for (const auto& [desc, active, has_priv] : descs) {
+                    UniValue d(UniValue::VOBJ);
+                    d.pushKV("desc", desc);
+                    d.pushKV("active", active);
+                    has_seed |= has_priv;
+                    descriptors.push_back(std::move(d));
+                }
+                const auto& rec = wallet_pq_keys.at(fp_hex);
+                UniValue pq_info(UniValue::VOBJ);
+                pq_info.pushKV("fingerprint", fp_hex);
+                pq_info.pushKV("pq_seed_id", "pqhd/" + fp_hex);
+                pq_info.pushKV("has_private", has_seed);
+                if (priv && has_seed && rec.seed) {
+                    pq_info.pushKV("pq_seed", HexStr(*rec.seed));
+                }
+                pq_info.pushKV("descriptors", std::move(descriptors));
+                response.push_back(std::move(pq_info));
+            }
+
             return response;
         },
     };
@@ -1005,7 +1205,7 @@ static RPCHelpMan createwalletdescriptor()
             {"type", RPCArg::Type::STR, RPCArg::Optional::NO, "The address type the descriptor will produce. Supported option is \"p2mr\"."},
             {"options", RPCArg::Type::OBJ_NAMED_PARAMS, RPCArg::Optional::OMITTED, "", {
                 {"internal", RPCArg::Type::BOOL, RPCArg::DefaultHint{"Both external and internal will be generated unless this parameter is specified"}, "Whether to only make one descriptor that is internal (if parameter is true) or external (if parameter is false)"},
-                {"hdkey", RPCArg::Type::STR, RPCArg::DefaultHint{"The HD key used by all other active descriptors"}, "The HD key that the wallet knows the private key of, listed using 'gethdkeys', to use for this descriptor's key"},
+                {"hdkey", RPCArg::Type::STR, RPCArg::DefaultHint{"The HD key used by all other active descriptors"}, "The HD key that the wallet knows the private key of, listed using 'gethdkeys', to use for this descriptor's key. For P2MR/pqhd wallets this is the fingerprint or pq_seed_id (pqhd/<fingerprint>), not an xpub"},
             }},
         },
         RPCResult{
@@ -1054,32 +1254,67 @@ static RPCHelpMan createwalletdescriptor()
             EnsureWalletIsUnlocked(*pwallet);
 
             CExtPubKey xpub;
+            std::optional<std::array<unsigned char, 32>> pq_seed;
             if (hdkey.isNull()) {
-                std::set<CExtPubKey> active_xpubs = pwallet->GetActiveHDPubKeys();
-                if (active_xpubs.size() != 1) {
-                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Unable to determine which HD key to use from active descriptors. Please specify with 'hdkey'");
+                const auto active_pq = CollectPQHDKeysFromSPKMs(pwallet->GetActiveScriptPubKeyMans());
+                if (active_pq.size() == 1) {
+                    const auto& rec = active_pq.begin()->second;
+                    if (!rec.seed) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("PQ master seed for fingerprint %s is not known", HexStr(rec.fingerprint)));
+                    }
+                    pq_seed = rec.seed;
+                } else {
+                    std::set<CExtPubKey> active_xpubs = pwallet->GetActiveHDPubKeys();
+                    if (active_xpubs.size() != 1) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Unable to determine which HD key to use from active descriptors. Please specify with 'hdkey'");
+                    }
+                    xpub = *active_xpubs.begin();
                 }
-                xpub = *active_xpubs.begin();
             } else {
-                xpub = DecodeExtPubKey(hdkey.get_str());
-                if (!xpub.pubkey.IsValid()) {
-                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Unable to parse HD key. Please provide a valid xpub");
+                if (const auto parsed = ParsePQHDKeyArg(hdkey.get_str())) {
+                    if (parsed->seed) {
+                        const auto have = FindPQSeedForFingerprint(*pwallet, parsed->fingerprint);
+                        if (!have || *have != *parsed->seed) {
+                            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("PQ master seed for fingerprint %s is not known", HexStr(parsed->fingerprint)));
+                        }
+                        pq_seed = parsed->seed;
+                    } else {
+                        pq_seed = FindPQSeedForFingerprint(*pwallet, parsed->fingerprint);
+                        if (!pq_seed) {
+                            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("PQ master seed for fingerprint %s is not known", HexStr(parsed->fingerprint)));
+                        }
+                    }
+                } else {
+                    xpub = DecodeExtPubKey(hdkey.get_str());
+                    if (!xpub.pubkey.IsValid()) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Unable to parse HD key. Please provide a PQ fingerprint from gethdkeys (pqhd/<fingerprint>)");
+                    }
                 }
             }
-
-            std::optional<CKey> key = pwallet->GetKey(xpub.pubkey.GetID());
-            if (!key) {
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Private key for %s is not known", EncodeExtPubKey(xpub)));
-            }
-            CExtKey active_hdkey(xpub, *key);
 
             std::vector<std::reference_wrapper<DescriptorScriptPubKeyMan>> spkms;
             WalletBatch batch{pwallet->GetDatabase()};
-            for (bool internal : internals) {
-                WalletDescriptor w_desc = GenerateWalletDescriptor(xpub, *output_type, internal);
-                uint256 w_id = DescriptorID(*w_desc.descriptor);
-                if (!pwallet->GetScriptPubKeyMan(w_id)) {
-                    spkms.emplace_back(pwallet->SetupDescriptorScriptPubKeyMan(batch, active_hdkey, *output_type, internal));
+            if (pq_seed) {
+                for (bool internal : internals) {
+                    WalletDescriptor w_desc = GeneratePQWalletDescriptor(*pq_seed, internal);
+                    uint256 w_id = DescriptorID(*w_desc.descriptor);
+                    if (!pwallet->GetScriptPubKeyMan(w_id)) {
+                        spkms.emplace_back(pwallet->SetupPQDescriptorScriptPubKeyMan(batch, *pq_seed, internal));
+                    }
+                }
+            } else {
+                std::optional<CKey> key = pwallet->GetKey(xpub.pubkey.GetID());
+                if (!key) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Private key for %s is not known", EncodeExtPubKey(xpub)));
+                }
+                CExtKey active_hdkey(xpub, *key);
+
+                for (bool internal : internals) {
+                    WalletDescriptor w_desc = GenerateWalletDescriptor(xpub, *output_type, internal);
+                    uint256 w_id = DescriptorID(*w_desc.descriptor);
+                    if (!pwallet->GetScriptPubKeyMan(w_id)) {
+                        spkms.emplace_back(pwallet->SetupDescriptorScriptPubKeyMan(batch, active_hdkey, *output_type, internal));
+                    }
                 }
             }
             if (spkms.empty()) {
@@ -1114,6 +1349,8 @@ RPCHelpMan keypoolrefill();
 RPCHelpMan newkeypool();
 RPCHelpMan getaddressesbylabel();
 RPCHelpMan listlabels();
+RPCHelpMan exportlabels();
+RPCHelpMan importlabels();
 #ifdef ENABLE_EXTERNAL_SIGNER
 RPCHelpMan walletdisplayaddress();
 #endif // ENABLE_EXTERNAL_SIGNER
@@ -1279,7 +1516,7 @@ RPCHelpMan buildhtlcrefund();
 
 Span<const CRPCCommand> GetWalletRPCCommands()
 {
-    static const CRPCCommand commands[]{
+    static const CRPCCommand base[]{
         {"rawtransactions", &fundrawtransaction},
         {"wallet", &abandontransaction},
         {"wallet", &abortrescan},
@@ -1300,6 +1537,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &dumpmasterprivkey},
         {"wallet", &dumpwallet},
         {"wallet", &encryptwallet},
+        {"wallet", &exportlabels},
         {"wallet", &exportwalletbundle},
         {"wallet", &getaddressesbylabel},
         {"wallet", &getaddressinfo},
@@ -1315,6 +1553,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &getwalletinfo},
         {"wallet", &importaddress},
         {"wallet", &importdescriptors},
+        {"wallet", &importlabels},
         {"wallet", &importmulti},
         {"wallet", &importprivkey},
         {"wallet", &importprunedfunds},
@@ -1455,6 +1694,12 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &buildhtlcclaim},
         {"wallet", &buildhtlcrefund},
     };
+    static const std::vector<CRPCCommand> commands = [] {
+        std::vector<CRPCCommand> v(std::begin(base), std::end(base));
+        const auto bcp1 = GetBCP1WalletRPCCommands();
+        v.insert(v.end(), bcp1.begin(), bcp1.end());
+        return v;
+    }();
     return commands;
 }
 } // namespace wallet

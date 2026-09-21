@@ -79,6 +79,8 @@
 #include <wallet/types.h>
 #include <wallet/walletdb.h>
 #include <wallet/walletutil.h>
+#include <wallet/bcp1_deposit.h>
+#include <wallet/bcp1_watchonly.h>
 
 #include <algorithm>
 #include <cassert>
@@ -581,6 +583,7 @@ bool RemoveWallet(WalletContext& context, const std::shared_ptr<CWallet>& wallet
 
     // Unregister with the validation interface which also drops shared pointers.
     wallet->DisconnectChainNotifications();
+    ForgetWalletDepositObservations(*wallet);
     {
         LOCK(context.wallets_mutex);
         std::vector<std::shared_ptr<CWallet>>::iterator i = std::find(context.wallets.begin(), context.wallets.end(), wallet);
@@ -700,6 +703,15 @@ std::shared_ptr<CWallet> LoadWalletInternal(WalletContext& context, const std::s
             error = Untranslated("Wallet loading failed.") + Untranslated(" ") + error;
             status = DatabaseStatus::FAILED_LOAD;
             return nullptr;
+        }
+
+        if (context.args) {
+            bilingual_str watch_err;
+            if (!EnsureExchangeWatchOnly(*wallet, *context.args, watch_err)) {
+                error = watch_err;
+                status = DatabaseStatus::FAILED_LOAD;
+                return nullptr;
+            }
         }
 
         NotifyWalletLoaded(context, wallet);
@@ -880,6 +892,15 @@ std::shared_ptr<CWallet> CreateWallet(WalletContext& context, const std::string&
 
             // Relock the wallet
             wallet->Lock();
+        }
+    }
+
+    if (context.args) {
+        bilingual_str watch_err;
+        if (!EnsureExchangeWatchOnly(*wallet, *context.args, watch_err)) {
+            error = watch_err;
+            status = DatabaseStatus::FAILED_CREATE;
+            return nullptr;
         }
     }
 
@@ -1696,6 +1717,30 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const 
             t.detach(); // thread runs free
         }
     }
+    const std::vector<std::string> deposit_cmds = gArgs.GetArgs("-walletdepositnotify");
+    if (!deposit_cmds.empty()) {
+#ifdef WIN32
+        const std::string walletname_escaped = "wallet_name_substitution_is_not_available_on_Windows";
+#else
+        const std::string walletname_escaped = ShellEscape(GetName());
+#endif
+        for (const UniValue& ev : DepositNotifyEventsForTx(*this, hash, fInsertedNew)) {
+            const std::string ev_name = ev.exists("event") && ev["event"].isStr() ? ev["event"].get_str() : "";
+            const std::string json = ev.write();
+            for (std::string command : deposit_cmds) {
+                ReplaceAll(command, "%s", hash.GetHex());
+                ReplaceAll(command, "%e", ev_name);
+                ReplaceAll(command, "%w", walletname_escaped);
+#ifndef WIN32
+                ReplaceAll(command, "%j", ShellEscape(json));
+#else
+                ReplaceAll(command, "%j", json);
+#endif
+                std::thread t(runCommand, command);
+                t.detach();
+            }
+        }
+    }
 #endif
 
     return &wtx;
@@ -2120,6 +2165,13 @@ void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& b
             }
         }
 
+        std::vector<uint256> connected_txids;
+        connected_txids.reserve(block.data->vtx.size());
+        for (const auto& ptx : block.data->vtx) {
+            connected_txids.push_back(ptx->GetHash().ToUint256());
+        }
+        NoteBlockConnected(*this, block.hash, block.height, connected_txids);
+
         // Persist the locator only after all transparent and shielded state for
         // this block has been processed.
         WriteBestBlock();
@@ -2430,6 +2482,13 @@ void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
                 }
             }
         }
+
+        std::vector<uint256> disconnected_txids;
+        disconnected_txids.reserve(block.data->vtx.size());
+        for (const auto& ptx : block.data->vtx) {
+            disconnected_txids.push_back(ptx->GetHash().ToUint256());
+        }
+        NoteBlockDisconnected(*this, block.hash, block.height, disconnected_txids);
 
         if (m_shielded_wallet) {
             LOCK(m_shielded_wallet->cs_shielded);
@@ -3309,13 +3368,14 @@ SigningResult CWallet::SignMessage(const MessageSignatureFormat format, const st
 
             std::map<int, bilingual_str> errors;
             if (SignTransaction(to_sign, coins, SIGHASH_ALL, errors)) {
-                MessageSignatureFormat output_format{format};
+                // P2MR BIP-322 signatures are witness-only. A scriptSig is the
+                // classical P2PKH path and must not be emitted.
                 if (!to_sign.vin[0].scriptSig.empty() || to_sign.vin[0].scriptWitness.IsNull()) {
-                    output_format = MessageSignatureFormat::FULL;
+                    return SigningResult::SIGNING_FAILED;
                 }
 
                 DataStream stream;
-                if (output_format == MessageSignatureFormat::SIMPLE) {
+                if (format == MessageSignatureFormat::SIMPLE) {
                     stream << to_sign.vin[0].scriptWitness.stack;
                 } else {
                     stream << TX_WITH_WITNESS(to_sign);

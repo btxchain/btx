@@ -230,6 +230,72 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager, TestChain100Setup)
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
 }
 
+//! #194: m_attested_assumeutxo must not outlive the snapshot chainstate.
+//! DeleteSnapshotChainstate (reindex) and ResetChainstates (restart/cleanup)
+//! used to leave the override set, so a later compiled-pin loadtxoutset at a
+//! different height could false-positive fatalError in
+//! MaybeCompleteSnapshotValidation.
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_clears_attested_assumeutxo_on_snapshot_teardown, TestChain100Setup)
+{
+    ChainstateManager& manager = *m_node.chainman;
+    const uint256 snapshot_blockhash{
+        WITH_LOCK(manager.GetMutex(), return manager.ActiveTip()->GetBlockHash())};
+
+    auto activate_in_memory_snapshot = [&]() {
+        Chainstate& snapshot = WITH_LOCK(::cs_main, return manager.ActivateExistingSnapshot(snapshot_blockhash));
+        snapshot.InitCoinsDB(
+            /*cache_size_bytes=*/1 << 23, /*in_memory=*/true, /*should_wipe=*/false);
+        LOCK(::cs_main);
+        snapshot.InitCoinsCache(1 << 23);
+        snapshot.CoinsTip().SetBestBlock(snapshot_blockhash);
+        for (Chainstate* cs : manager.GetAll()) {
+            cs->ClearBlockIndexCandidates();
+        }
+        BOOST_REQUIRE(snapshot.LoadChainTip());
+        for (Chainstate* cs : manager.GetAll()) {
+            cs->PopulateBlockIndexCandidates();
+        }
+    };
+
+    const AssumeutxoData stale{
+        .height = 42,
+        .hash_serialized = AssumeutxoHash{uint256::ONE},
+        .m_chain_tx_count = 43,
+        .blockhash = uint256::ONE,
+    };
+
+    activate_in_memory_snapshot();
+    BOOST_REQUIRE(manager.IsSnapshotActive());
+
+    const fs::path snapshot_dir{
+        manager.m_options.datadir /
+        fs::u8path(strprintf("chainstate%s", node::SNAPSHOT_CHAINSTATE_SUFFIX))};
+    fs::create_directories(snapshot_dir);
+
+    {
+        LOCK(::cs_main);
+        manager.SetAttestedAssumeutxoForTest(stale);
+        BOOST_REQUIRE(manager.GetAttestedAssumeutxoForTest().has_value());
+        BOOST_REQUIRE_EQUAL(manager.GetAttestedAssumeutxoForTest()->height, 42);
+        BOOST_REQUIRE(manager.DeleteSnapshotChainstate());
+        BOOST_CHECK(!manager.GetAttestedAssumeutxoForTest().has_value());
+    }
+    BOOST_CHECK(!manager.IsSnapshotActive());
+    BOOST_CHECK(!fs::exists(snapshot_dir));
+
+    activate_in_memory_snapshot();
+    BOOST_REQUIRE(manager.IsSnapshotActive());
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    {
+        LOCK(::cs_main);
+        manager.SetAttestedAssumeutxoForTest(stale);
+        BOOST_REQUIRE(manager.GetAttestedAssumeutxoForTest().has_value());
+        manager.ResetChainstates();
+        BOOST_CHECK(!manager.GetAttestedAssumeutxoForTest().has_value());
+        BOOST_CHECK_EQUAL(manager.GetAll().size(), 0);
+    }
+}
+
 //! invalidateblock of a block at or below the assumeutxo base used to
 //! DisconnectTip the base (no undo, nFile=-1) and AbortNode. The 0.34.1
 //! fork-rejoin notes told operators to do exactly that. Refuse instead.

@@ -311,6 +311,9 @@ false until the corresponding campaign bits are actually set.
 
 * Update [bips.md](bips.md) to account for changes since the last release.
 * Update version in `CMakeLists.txt` (don't forget to set `CLIENT_VERSION_RC` to `0`).
+* Update `COPYRIGHT_YEAR` in `CMakeLists.txt` to the release year; it sets
+  `DEFAULT_SOFTWARE_EXPIRY` (`src/clientversion.h`), so leaving it stale ships
+  a client that expires on the old date.
 * Update manpages (see previous section)
 * Write release notes (see "Write the release notes" below) in doc/release-notes.md. If necessary,
   archive the previous release notes as doc/release-notes/release-notes-${VERSION}.md.

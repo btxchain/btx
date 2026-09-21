@@ -44,7 +44,13 @@ using util::SplitString;
 using util::TrimString;
 
 const std::string UNIX_EPOCH_TIME = "UNIX epoch time";
-const std::string EXAMPLE_ADDRESS[2] = {"bc1q09vm5lfy0j5reeulh4x5752q25uqqvz34hufdl", "bc1q02ad21edsxd23d32dfgqqsz4vv4nmtfzuklhy3"};
+// Dummy WitnessV2P2MR Bech32m encodings (HRP "btx") that DecodeDestination accepts
+// on BTX mainnet. Merkle roots are all-zero and 0x00..0x1f. Not Bitcoin bech32;
+// bitcoin: URIs remain rejected.
+const std::string EXAMPLE_ADDRESS[2] = {
+    "btx1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqcglxku",
+    "btx1zqqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s3u5yk9",
+};
 
 std::string GetAllOutputTypes()
 {

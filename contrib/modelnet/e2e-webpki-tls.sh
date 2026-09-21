@@ -79,8 +79,6 @@ try:
             raise SystemExit("BRIDGE-06: two-label name must not match one-level wildcard")
 except ssl.SSLCertVerificationError:
     print("BRIDGE-06 PASS wildcard depth: aa.bb.split.example.test != *.split.example.test")
-except ssl.SSLError as e:
-    print("BRIDGE-06 PASS wildcard mismatch", type(e).__name__)
 PY
 
 echo "== system-trust WebPKI client handshake PUBLIC_WEBPKI_HOST=${PUBLIC_WEBPKI_HOST} =="

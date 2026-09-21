@@ -19,6 +19,7 @@
 #include <wallet/feebumper.h>
 #include <wallet/fees.h>
 #include <wallet/rpc/util.h>
+#include <wallet/bcp1_watchonly.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
 
@@ -106,6 +107,21 @@ static const UniValue& GetSubtractFeeFromOutputsOption(const UniValue& options)
 
 static UniValue FinishTransaction(const std::shared_ptr<CWallet> pwallet, const UniValue& options, CMutableTransaction& rawTx)
 {
+    // send / sendall attempt in-process signing below (FillPSBT with
+    // sign=true) unless this is a watch-only wallet. Leftover private keys in a
+    // disable_private_keys wallet must not complete or broadcast the tx.
+    // A BCP/1 exchange watch-only wallet must use the external signing package
+    // flow instead.
+    bilingual_str refuse_err;
+    if (RefusePrivateSign(*pwallet, refuse_err)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, refuse_err.original);
+    }
+    const bool allow_inprocess_sign = !pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) ||
+                                      CanDelegateExternalPsbtSign(*pwallet);
+    if (allow_inprocess_sign) {
+        EnsureWalletIsUnlocked(*pwallet);
+    }
+
     if (!options.exists("locktime")) {
         LOCK(pwallet->cs_wallet);
         MaybeDiscourageFeeSniping2(*pwallet, rawTx);
@@ -118,7 +134,7 @@ static UniValue FinishTransaction(const std::shared_ptr<CWallet> pwallet, const 
     // so external signers are not asked to sign more than once.
     bool complete;
     pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, /*sign=*/false, /*bip32derivs=*/true);
-    const auto err{pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/false)};
+    const auto err{pwallet->FillPSBT(psbtx, complete, SIGHASH_DEFAULT, /*sign=*/allow_inprocess_sign, /*bip32derivs=*/false)};
     if (err) {
         throw JSONRPCPSBTError(*err);
     }
@@ -936,10 +952,9 @@ RPCHelpMan fundrawtransaction()
                                             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction id"},
                                             {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "The output index"},
                                             {"weight", RPCArg::Type::NUM, RPCArg::Optional::NO, "The maximum weight for this input, "
-                                                "including the weight of the outpoint and sequence number. "
-                                                "Note that serialized signature sizes are not guaranteed to be consistent, "
-                                                "so the maximum DER signatures size of 73 bytes should be used when considering ECDSA signatures."
-                                                "Remember to convert serialized sizes to weight units when necessary."},
+                                                "including the outpoint and sequence number. "
+                                                "Use the P2MR witness size for the chosen leaf (ML-DSA-44 or SLH-DSA-SHAKE-128s). "
+                                                "On BTX weight equals serialized size (WITNESS_SCALE_FACTOR=1)."},
                                         },
                                     },
                                 },
@@ -1086,6 +1101,14 @@ RPCHelpMan signrawtransactionwithwallet()
     const std::shared_ptr<const CWallet> pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
 
+    bilingual_str refuse_err;
+    if (RefusePrivateSign(*pwallet, refuse_err)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, refuse_err.original);
+    }
+    if (pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) && !CanDelegateExternalPsbtSign(*pwallet)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
+    }
+
     CMutableTransaction mtx;
     if (!DecodeHexTx(mtx, request.params[0].get_str())) {
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed. Make sure the tx has at least one input.");
@@ -1219,6 +1242,15 @@ static RPCHelpMan bumpfee_helper(std::string method_name)
 
     if (pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) && !pwallet->IsWalletFlagSet(WALLET_FLAG_EXTERNAL_SIGNER) && !want_psbt) {
         throw JSONRPCError(RPC_WALLET_ERROR, "bumpfee is not available with wallets that have private keys disabled. Use psbtbumpfee instead.");
+    }
+
+    // bumpfee signs in-process (feebumper::SignTransaction below); psbtbumpfee
+    // only builds an unsigned PSBT and must stay available to BCP/1 wallets.
+    if (!want_psbt) {
+        bilingual_str refuse_err;
+        if (RefusePrivateSign(*pwallet, refuse_err)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, refuse_err.original);
+        }
     }
 
     uint256 hash(ParseHashV(request.params[0], "txid"));
@@ -1401,9 +1433,8 @@ RPCHelpMan send()
                             {"sequence", RPCArg::Type::NUM, RPCArg::DefaultHint{"depends on the value of the 'replaceable' and 'locktime' arguments"}, "The sequence number"},
                             {"weight", RPCArg::Type::NUM, RPCArg::DefaultHint{"Calculated from wallet and solving data"}, "The maximum weight for this input, "
                                         "including the weight of the outpoint and sequence number. "
-                                        "Note that signature sizes are not guaranteed to be consistent, "
-                                        "so the maximum DER signatures size of 73 bytes should be used when considering ECDSA signatures."
-                                        "Remember to convert serialized sizes to weight units when necessary."},
+                                        "Use the P2MR witness size for the chosen leaf (ML-DSA-44 or SLH-DSA-SHAKE-128s). "
+                                        "On BTX weight equals serialized size (WITNESS_SCALE_FACTOR=1)."},
                           }},
                         },
                     },
@@ -1847,6 +1878,16 @@ RPCHelpMan walletprocesspsbt()
         }
     }
 
+    if (sign && !CanDelegateExternalPsbtSign(wallet)) {
+        bilingual_str refuse_err;
+        if (RefusePrivateSign(wallet, refuse_err)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, refuse_err.original);
+        }
+        if (wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
+        }
+    }
+
     // Fill transaction with our data and also sign
     bool complete = true;
 
@@ -1893,9 +1934,8 @@ RPCHelpMan walletcreatefundedpsbt()
                                     {"sequence", RPCArg::Type::NUM, RPCArg::DefaultHint{"depends on the value of the 'locktime' and 'options.replaceable' arguments"}, "The sequence number"},
                                     {"weight", RPCArg::Type::NUM, RPCArg::DefaultHint{"Calculated from wallet and solving data"}, "The maximum weight for this input, "
                                         "including the weight of the outpoint and sequence number. "
-                                        "Note that signature sizes are not guaranteed to be consistent, "
-                                        "so the maximum DER signatures size of 73 bytes should be used when considering ECDSA signatures."
-                                        "Remember to convert serialized sizes to weight units when necessary."},
+                                        "Use the P2MR witness size for the chosen leaf (ML-DSA-44 or SLH-DSA-SHAKE-128s). "
+                                        "On BTX weight equals serialized size (WITNESS_SCALE_FACTOR=1)."},
                                 },
                             },
                         },

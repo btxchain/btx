@@ -111,6 +111,7 @@ const std::map<uint8_t, Layout>& Layouts()
         {22, {"PreservationCircle", {{"title", T_Str(96)}, {"description", T_Str(1024)}, {"collection_id", T_Hex(48)}, {"target_observed_groups", T_U(8)}, {"suggested_storage_bytes", T_U(64)}, {"suggested_lease_seconds", T_U(32)}}}},
         {23, {"FreeGrant", {{"transfer_id", T_Hex(32)}, {"buyer_id", T_Hex(48)}, {"model_id", T_Hex(48)}, {"artifact_id", T_Hex(48)}, {"file_index", T_U(32)}, {"first_piece", T_U(32)}, {"piece_count", T_U(32)}, {"maximum_bytes", T_U(64)}, {"grant_nonce", T_Hex(32)}, {"queue_class", T_U(8)}}}},
         {24, {"ServiceReceipt", {{"receipt_kind", T_U(8)}, {"transfer_id", T_Hex(32)}, {"provider_id", T_Hex(48)}, {"buyer_id", T_Hex(48)}, {"model_id", T_Hex(48)}, {"artifact_id", T_Hex(48)}, {"file_index", T_U(32)}, {"first_piece", T_U(32)}, {"piece_count", T_U(32)}, {"verified_bytes", T_U(64)}, {"outcome", T_U(8)}, {"previous_receipt_id", T_Hex(48)}}}},
+        {25, {"SafetyAdvisory", {{"target_kind", T_U(8)}, {"target_id", T_Hex(48)}, {"severity", T_U(8)}, {"reason_code", T_U(16)}, {"content_sha384", T_Hex(48)}, {"note", T_Str(192)}}}},
     };
     return layouts;
 }
@@ -406,7 +407,7 @@ bool CheckRecord(uint8_t kind, const UniValue& v, std::string& err)
         err = "invalid expiry";
         return false;
     }
-    if ((kind == 17 || kind == 20 || kind == 21 || kind == 23 || kind == 24) && !expires) {
+    if ((kind == 17 || kind == 20 || kind == 21 || kind == 23 || kind == 24 || kind == 25) && !expires) {
         err = "expiry required";
         return false;
     }
@@ -554,6 +555,18 @@ bool CheckRecord(uint8_t kind, const UniValue& v, std::string& err)
             return false;
         }
     }
+    if (kind == 25) {
+        const uint64_t tk = U8(v, "target_kind");
+        const uint64_t sev = U8(v, "severity");
+        if ((tk != 1 && tk != 2 && tk != 3) || (sev < 1 || sev > 4)) {
+            err = "advisory shape";
+            return false;
+        }
+        if (expires - issued > 90 * static_cast<uint64_t>(DAY_SECONDS)) {
+            err = "advisory too long";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -670,6 +683,24 @@ bool VerifyTypedRecord(uint8_t kind,
     if (!SigningMessage(kind, body, msg, err)) return false;
     if (!VerifyMlDsa44(pk, Span<const unsigned char>{msg.data.data(), msg.data.size()}, sig)) {
         err = "bad signature";
+        return false;
+    }
+    if (!body.exists("signer_id") || !body["signer_id"].isStr()) {
+        err = "signer identity mismatch";
+        return false;
+    }
+    const std::string sid = body["signer_id"].get_str();
+    bool id_ok = false;
+    if (kind == RECORD_FREE_GRANT || kind == RECORD_SERVICE_RECEIPT) {
+        id_ok = sid == ProviderId(pk).Hex();
+    } else if (kind == RECORD_SAFETY_ADVISORY) {
+        id_ok = sid == PublisherId(pk).Hex() || sid == ResearchIdentityId(pk).Hex();
+    } else {
+        id_ok = sid == ProviderId(pk).Hex() || sid == PublisherId(pk).Hex() ||
+                sid == ResearchIdentityId(pk).Hex();
+    }
+    if (!id_ok) {
+        err = "signer identity mismatch";
         return false;
     }
     const int64_t exp = body.exists("expires_at") ? body["expires_at"].getInt<int64_t>() : 0;

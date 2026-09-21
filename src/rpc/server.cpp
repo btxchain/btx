@@ -175,6 +175,7 @@ static RPCHelpMan stop()
                 RPCExamples{""},
         [&](const RPCHelpMan& self, const JSONRPCRequest& jsonRequest) -> UniValue
 {
+    EnsureNotWalletRestricted(jsonRequest);
     // Event loop will exit after current HTTP requests have been handled, so
     // this reply will get back to the client.
     CHECK_NONFATAL((CHECK_NONFATAL(EnsureAnyNodeContext(jsonRequest.context).shutdown_request))());

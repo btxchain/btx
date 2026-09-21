@@ -133,8 +133,17 @@ in the new version did **not** include `86` (Ampere consumer / RTX 30-series),
 the kernels for your card are absent. Depending on whether embedded PTX is present
 and JIT-compilable, this surfaces at runtime as a kernel-load / launch error and
 triggers the fallback. **This is the most likely cause for an `sm_86` card whose
-gate clearly passes** (sm_86 >= sm_80). Fix: rebuild with `86` in the arch list
-(§5).
+gate clearly passes** (sm_86 >= sm_80).
+
+The published v0.34.5 and v0.34.8-rc3 `*-cuda12.tar.gz` archives embed
+`sm_100a`, `sm_120`, and `sm_120a` SASS and `sm_120` PTX only (CUDA 12.9).
+They are not an Ampere image. Running that tarball on an RTX 30-series card
+starts DEGRADED (`no_rc_self_qualified_device_backend`) even when the runtime
+probe reports the device ready. See
+[linux-release-builds.md](linux-release-builds.md). Fix for a source tree:
+rebuild with `86` in the arch list on CUDA **12.9 or newer** (§5). That
+compile is not published ExactReplay admission for Ampere (issue 131 closed:
+canonical LT IMMA layout declined).
 
 ### 4b. CUDA 12-built binary run against a CUDA 13 runtime (or vice versa)
 
@@ -202,6 +211,12 @@ Notes:
   the build adopts that value.
 - Multiple archs are semicolon-separated, e.g.
   `-DBTX_CUDA_ARCHITECTURES="80;86;89"`.
+- CUDA **12.8 and earlier**: `cicc` SIGSEGV compiling
+  `src/cuda/matmul_v4_rc_rowleaf_gpu.cu` for `sm_80` / `sm_86` / `sm_89` /
+  `sm_90` (issue 131; confirmed at every `-O` including `-O0`). Use **CUDA 12.9
+  or newer** for those architectures. `sm_120` compiles on 12.8. A source
+  build with `-DBTX_CUDA_ARCHITECTURES=86` is not a published ExactReplay
+  admission path for Ampere.
 - `nvcc` (the CUDA toolkit) must match the installed driver/runtime major version
   (see §4b/§4c). On WSL2 install the CUDA toolkit inside Ubuntu and keep the
   Windows NVIDIA driver current.
@@ -271,10 +286,14 @@ affect which backend runs.
      - `no_supported_device` -> GPU not visible to CUDA (check `nvidia-smi`,
        `BTX_MATMUL_CUDA_DEVICES`, WSL2 GPU passthrough).
 3. **Did this start right after a version bump, on an `sm_86` card whose gate
-   passes?** -> most likely the new build omits `86` from the arch list or was
-   built against a mismatched CUDA toolkit. Rebuild from source with
-   `-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES="86"` against the
-   matching toolkit (§5).
+   passes?** -> most likely the new build omits `86` from the arch list (the
+   published `cuda12` tarball is Blackwell-only) or was built against a
+   mismatched CUDA toolkit. Rebuild from source with CUDA **12.9+**
+   (`cicc` on CUDA <= 12.8 SIGSEGV compiling `matmul_v4_rc_rowleaf_gpu.cu`
+   for `sm_80`/`86`/`89`/`90`) and
+   `-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES="86"` against
+   the matching toolkit (§5). That is not published ExactReplay admission
+   for Ampere (issue 131).
 4. **Re-verify:** restart with `BTX_MATMUL_BACKEND=cuda`, then confirm
    `MatMul mining backend: CUDA (... requested_backend_available)` and that no
    new `MATMUL WARNING: CUDA backend ... fallback to CPU` lines appear, GPU

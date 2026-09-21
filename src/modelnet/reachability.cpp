@@ -41,6 +41,16 @@ void PruneTimes(std::vector<int64_t>& times, int64_t now_ms)
                 times.end());
 }
 
+void PruneMap(std::map<std::string, std::vector<int64_t>>& m, int64_t now_ms)
+{
+    for (auto it = m.begin(); it != m.end();) {
+        PruneTimes(it->second, now_ms);
+        if (it->second.empty()) it = m.erase(it);
+        else ++it;
+    }
+    while (m.size() > 256) m.erase(m.begin());
+}
+
 } // namespace
 
 const char* ReachabilityStateName(ReachabilityState s)
@@ -123,6 +133,10 @@ bool ReachabilityTracker::AdmitProbe(const DialbackRequest& req, std::string& er
         err = "request_id";
         return false;
     }
+    if (req.requester.size() > 64 || req.requester_netgroup.size() > 64) {
+        err = "requester";
+        return false;
+    }
     if (req.ttl_ms <= 0 || req.ttl_ms > 5 * 60 * 1000) {
         err = "ttl";
         return false;
@@ -132,14 +146,14 @@ bool ReachabilityTracker::AdmitProbe(const DialbackRequest& req, std::string& er
         err = "concurrent probes";
         return false;
     }
+    PruneMap(m_req_times, req.now_ms);
+    PruneMap(m_ng_times, req.now_ms);
     auto& rt = m_req_times[req.requester];
-    PruneTimes(rt, req.now_ms);
     if (static_cast<int>(rt.size()) >= m_lim.max_probes_per_requester_per_minute) {
         err = "requester rate";
         return false;
     }
     auto& ng = m_ng_times[req.requester_netgroup];
-    PruneTimes(ng, req.now_ms);
     if (static_cast<int>(ng.size()) >= m_lim.max_probes_per_netgroup_per_minute) {
         err = "netgroup rate";
         return false;

@@ -48,7 +48,7 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
 
     vbox->addWidget(transactionView);
     QPushButton *exportButton = new QPushButton(tr("&Export"), this);
-    exportButton->setToolTip(tr("Export the data in the current tab to a file"));
+    exportButton->setToolTip(tr("Export the transaction history in the current tab to a file"));
     if (platformStyle->getImagesOnButtons()) {
         exportButton->setIcon(platformStyle->SingleColorIcon(":/icons/export"));
     }

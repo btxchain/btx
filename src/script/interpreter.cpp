@@ -2358,11 +2358,12 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         if (control.size() < P2MR_CONTROL_BASE_SIZE || control.size() > P2MR_CONTROL_MAX_SIZE || ((control.size() - P2MR_CONTROL_BASE_SIZE) % P2MR_CONTROL_NODE_SIZE) != 0) {
             return set_error(serror, SCRIPT_ERR_P2MR_WRONG_CONTROL_SIZE);
         }
-        if ((control[0] & P2MR_LEAF_MASK) != P2MR_LEAF_VERSION) {
+        // Exact 0xc2: P2MR has no parity bit. Masking would accept 0xc3 (wtxid malleability).
+        if (control[0] != P2MR_LEAF_VERSION) {
             return set_error(serror, SCRIPT_ERR_P2MR_WRONG_LEAF_VERSION);
         }
 
-        execdata.m_tapleaf_hash = ComputeP2MRLeafHash(control[0] & P2MR_LEAF_MASK, script);
+        execdata.m_tapleaf_hash = ComputeP2MRLeafHash(control[0], script);
         if (!VerifyP2MRCommitment(control, program, execdata.m_tapleaf_hash)) {
             return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
         }
@@ -2518,7 +2519,13 @@ size_t static WitnessSigOps(int witversion, const std::vector<unsigned char>& wi
     }
 
     if (witversion == 2 && witprogram.size() == WITNESS_V2_P2MR_SIZE && witness.stack.size() >= 2) {
-        const auto& leaf_script_bytes = witness.stack[witness.stack.size() - 2];
+        // Same stack layout as VerifyWitnessProgram: optional 0x50 annex, then
+        // control block, then leaf script. Counting stack[size-2] while an
+        // annex is present hashes the control block and zero-rates the leaf
+        // (MAX_BLOCK_SIGOPS_COST bypass for a consensus-valid annex).
+        const auto& stack = witness.stack;
+        const bool have_annex = stack.size() >= 3 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG;
+        const auto& leaf_script_bytes = stack[stack.size() - (have_annex ? 3 : 2)];
         CScript leaf_script(leaf_script_bytes.begin(), leaf_script_bytes.end());
 
         size_t n_sigops{0};
@@ -2531,6 +2538,13 @@ size_t static WitnessSigOps(int witversion, const std::vector<unsigned char>& wi
                 n_sigops += VALIDATION_WEIGHT_PER_MLDSA_SIGOP;
                 break;
             case OP_CHECKSIG_SLHDSA:
+                n_sigops += VALIDATION_WEIGHT_PER_SLHDSA_SIGOP;
+                break;
+            case OP_CHECKSIGFROMSTACK:
+                // Same verification as CHECKSIG_*; the opcode is shared across
+                // algorithms, so count at the SLH-DSA weight (the per-opcode
+                // maximum). A leaf that also contains CHECKSIG_* still adds
+                // those arms separately.
                 n_sigops += VALIDATION_WEIGHT_PER_SLHDSA_SIGOP;
                 break;
             case OP_CHECKSIGADD_MLDSA:

@@ -493,9 +493,9 @@ class PSBTTest(BitcoinTestFramework):
         p2wsh = wmulti.addmultisigaddress(2, [pubkey0, pubkey1, pubkey2], "", "bech32")['address']
         p2sh_p2wsh = wmulti.addmultisigaddress(2, [pubkey0, pubkey1, pubkey2], "", "p2sh-segwit")['address']
         if not self.options.descriptors:
-            wmulti.importaddress(p2sh)
-            wmulti.importaddress(p2wsh)
-            wmulti.importaddress(p2sh_p2wsh)
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", wmulti.importaddress, p2sh)
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", wmulti.importaddress, p2wsh)
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", wmulti.importaddress, p2sh_p2wsh)
         p2wpkh = self.nodes[1].getnewaddress("", "bech32")
         p2pkh = self.nodes[1].getnewaddress("", "legacy")
         p2sh_p2wpkh = self.nodes[1].getnewaddress("", "p2sh-segwit")
@@ -802,13 +802,18 @@ class PSBTTest(BitcoinTestFramework):
             assert_equal(created_tx, creator['result'])
 
         # Signer tests
-        for i, signer in enumerate(signers):
-            self.nodes[2].createwallet(wallet_name="wallet{}".format(i))
-            wrpc = self.nodes[2].get_wallet_rpc("wallet{}".format(i))
-            for key in signer['privkeys']:
-                wrpc.importprivkey(key)
-            signed_tx = wrpc.walletprocesspsbt(signer['psbt'], True, "ALL")['psbt']
-            assert_equal(signed_tx, signer['result'])
+        if self.options.descriptors:
+            for i, signer in enumerate(signers):
+                self.nodes[2].createwallet(wallet_name="wallet{}".format(i))
+                wrpc = self.nodes[2].get_wallet_rpc("wallet{}".format(i))
+                for key in signer['privkeys']:
+                    wrpc.importprivkey(key)
+                signed_tx = wrpc.walletprocesspsbt(signer['psbt'], True, "ALL")['psbt']
+                assert_equal(signed_tx, signer['result'])
+        else:
+            self.nodes[2].createwallet(wallet_name="wallet0")
+            wrpc = self.nodes[2].get_wallet_rpc("wallet0")
+            assert_raises_rpc_error(-8, "importprivkey is disabled", wrpc.importprivkey, signers[0]['privkeys'][0])
 
         # Combiner test
         for combiner in combiners:
@@ -829,8 +834,11 @@ class PSBTTest(BitcoinTestFramework):
             assert_equal(extracted, extractor['result'])
 
         # Unload extra wallets
-        for i, signer in enumerate(signers):
-            self.nodes[2].unloadwallet("wallet{}".format(i))
+        if self.options.descriptors:
+            for i, signer in enumerate(signers):
+                self.nodes[2].unloadwallet("wallet{}".format(i))
+        else:
+            self.nodes[2].unloadwallet("wallet0")
 
         if self.options.descriptors:
             self.test_utxo_conversion()
@@ -1073,11 +1081,14 @@ class PSBTTest(BitcoinTestFramework):
         addr = self.nodes[0].deriveaddresses(desc)[0]
         self.nodes[0].sendtoaddress(addr, 10)
         self.generate(self.nodes[0], 1)
-        self.nodes[0].importprivkey(privkey)
-
-        psbt = watchonly.sendall([wallet.getnewaddress()])["psbt"]
-        signed_tx = self.nodes[0].walletprocesspsbt(psbt)
-        self.nodes[0].sendrawtransaction(signed_tx["hex"])
+        if self.options.descriptors:
+            self.nodes[0].importprivkey(privkey)
+            psbt = watchonly.sendall([wallet.getnewaddress()])["psbt"]
+            signed_tx = self.nodes[0].walletprocesspsbt(psbt)
+            self.nodes[0].sendrawtransaction(signed_tx["hex"])
+        else:
+            assert_raises_rpc_error(-8, "importprivkey is disabled", self.nodes[0].importprivkey, privkey)
+            psbt = self.nodes[0].walletcreatefundedpsbt([], {self.nodes[0].getnewaddress(): 1})["psbt"]
 
         # Same test but for taproot
         if self.options.descriptors:

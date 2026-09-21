@@ -1,0 +1,3036 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:cex:cognitive-reserve:1.1",
+  "title": "Cognitive Reserve signed objects v1.1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ReserveExtensionProfileV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/EntityLinkV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/PortfolioV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/ReservePolicyV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/ReserveSnapshotV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/WorkloadProfileV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/TCOComparisonV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/CapitalPlanV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/AllocationPlanV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/ApprovalRuleV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/ApprovalRequestV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/ApprovalDecisionV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/CapabilityPositionV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/ResearchProgramV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/ProgramMembershipV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/ProductOfferV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/CapitalExecutionReceiptV1_1Envelope"
+    },
+    {
+      "$ref": "#/$defs/ReserveReportV1_1Envelope"
+    }
+  ],
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "maxLength": 128
+    },
+    "Digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "UInt": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "maxLength": 20
+    },
+    "Decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})(\\.[0-9]{1,12})?$",
+      "maxLength": 33
+    },
+    "Amount": {
+      "type": "object",
+      "properties": {
+        "unit_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9]{1,11}$"
+        },
+        "exponent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18
+        },
+        "minor_units": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "unit_code",
+        "exponent",
+        "minor_units"
+      ],
+      "additionalProperties": false
+    },
+    "Ref": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/Id"
+        },
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "NativeNetwork": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "REGTEST",
+            "TESTNET",
+            "MAINNET"
+          ]
+        },
+        "genesis_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "name",
+        "genesis_hash"
+      ],
+      "additionalProperties": false
+    },
+    "ScopedPortfolio": {
+      "type": "object",
+      "properties": {
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "portfolio_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "legal_entity_id",
+        "portfolio_id"
+      ],
+      "additionalProperties": false
+    },
+    "Observation": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "evidence_basis": {
+          "type": "string",
+          "enum": [
+            "SOURCE_DOCUMENT",
+            "LEDGER",
+            "NATIVE_NODE",
+            "CUSTOMER_INPUT",
+            "LOCAL_DEVICE",
+            "VENUE_QUOTE",
+            "MEASURED_WORKLOAD"
+          ]
+        },
+        "reference": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "source_id",
+        "observed_at",
+        "evidence_basis"
+      ],
+      "additionalProperties": false
+    },
+    "Exposure": {
+      "type": "object",
+      "properties": {
+        "principal_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "network_fee_cap_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "service_fee_cap_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "maximum_debit_atoms": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "principal_atoms",
+        "network_fee_cap_atoms",
+        "service_fee_cap_atoms",
+        "maximum_debit_atoms"
+      ],
+      "additionalProperties": false
+    },
+    "CostLine": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": [
+            "ACQUISITION",
+            "HARDWARE",
+            "ENERGY",
+            "OPERATIONS",
+            "MAINTENANCE",
+            "UPDATE",
+            "REPLACEMENT",
+            "NETWORK",
+            "EXTERNAL_SERVICE"
+          ]
+        },
+        "period_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120
+        },
+        "known": {
+          "type": "boolean"
+        },
+        "amount": {
+          "$ref": "#/$defs/Amount"
+        },
+        "observation": {
+          "$ref": "#/$defs/Observation"
+        }
+      },
+      "required": [
+        "category",
+        "period_index",
+        "known",
+        "observation"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalSeat": {
+      "type": "object",
+      "properties": {
+        "person_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "role": {
+          "$ref": "#/$defs/Id"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "person_id",
+        "role",
+        "legal_entity_id"
+      ],
+      "additionalProperties": false
+    },
+    "CapitalLeg": {
+      "type": "object",
+      "properties": {
+        "leg_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "CONVERT",
+            "FUND_RELEASE",
+            "FUND_BOUNTY",
+            "CLAIM",
+            "REFUND",
+            "PARTNER_REFERRAL",
+            "PARTNER_OPERATION",
+            "HANDOFF",
+            "LOCAL_PREPARATION",
+            "REPORT"
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "scope": {
+          "$ref": "#/$defs/ScopedPortfolio"
+        },
+        "effect_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "child_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "maximum_exposure": {
+          "$ref": "#/$defs/Exposure"
+        },
+        "compensation": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "REVIEW_REQUIRED",
+            "EXACT_PREAUTHORIZED"
+          ]
+        }
+      },
+      "required": [
+        "leg_id",
+        "kind",
+        "depends_on",
+        "scope",
+        "effect_ref",
+        "child_operation_id",
+        "compensation"
+      ],
+      "additionalProperties": false
+    },
+    "BodyCommon": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "ReserveExtensionProfileV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "extension_id": {
+          "const": "COGNITIVE_RESERVE_V1_1"
+        },
+        "parent_profile_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "schema_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "operations_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "supported_features": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "ENTITIES",
+              "RESERVES",
+              "CAPITAL_PLANS",
+              "COMMITTEES",
+              "PROGRAMMES",
+              "HOLDINGS",
+              "PRODUCTS",
+              "REPORTS"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "extension_id",
+        "parent_profile_body_id",
+        "schema_digest",
+        "operations_digest",
+        "supported_features",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "EntityLinkV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "link_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "parent_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "child_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "relationship": {
+          "type": "string",
+          "enum": [
+            "CORPORATE_GROUP",
+            "FAMILY_GROUP",
+            "ADVISER",
+            "FOUNDATION",
+            "OTHER_DECLARED"
+          ]
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "VIEW",
+              "DRAFT",
+              "REPORT"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 3
+        },
+        "accepted_by": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 1,
+          "maxItems": 2
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "REVOKED",
+            "EXPIRED"
+          ]
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "link_id",
+        "parent_entity_id",
+        "child_entity_id",
+        "relationship",
+        "scopes",
+        "accepted_by",
+        "generation",
+        "expires_at",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "PortfolioV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "portfolio_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "purpose": {
+          "type": "string",
+          "enum": [
+            "STRATEGIC_RESERVE",
+            "DEPLOYMENT",
+            "RESEARCH",
+            "LIQUIDITY"
+          ]
+        },
+        "reporting_currency": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 12
+        },
+        "policy_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "ARCHIVED"
+          ]
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "portfolio_id",
+        "account_ref",
+        "label",
+        "purpose",
+        "reporting_currency",
+        "generation",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "ReservePolicyV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "scope": {
+          "$ref": "#/$defs/ScopedPortfolio"
+        },
+        "policy_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "protected_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "per_plan_cap_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "lifetime_cap_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "outstanding_cap_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "permitted_actions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "FUND_RELEASE",
+              "FUND_BOUNTY",
+              "CONVERT",
+              "WITHDRAW",
+              "PARTNER_OPERATION"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 5
+        },
+        "replenishment_mode": {
+          "type": "string",
+          "enum": [
+            "SUGGEST",
+            "AUTO"
+          ]
+        },
+        "replenishment": {
+          "type": "object",
+          "properties": {
+            "allowed_source_assets": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 12
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "lower_band_atoms": {
+              "$ref": "#/$defs/UInt"
+            },
+            "target_atoms": {
+              "$ref": "#/$defs/UInt"
+            },
+            "max_order_atoms": {
+              "$ref": "#/$defs/UInt"
+            },
+            "max_turnover_atoms": {
+              "$ref": "#/$defs/UInt"
+            },
+            "cooldown_seconds": {
+              "$ref": "#/$defs/UInt"
+            },
+            "max_price_age_seconds": {
+              "$ref": "#/$defs/UInt"
+            },
+            "slippage_bps": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            }
+          },
+          "required": [
+            "allowed_source_assets",
+            "lower_band_atoms",
+            "target_atoms",
+            "max_order_atoms",
+            "max_turnover_atoms",
+            "cooldown_seconds",
+            "max_price_age_seconds",
+            "slippage_bps"
+          ],
+          "additionalProperties": false
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "REVOKED",
+            "EXPIRED"
+          ]
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "scope",
+        "policy_id",
+        "generation",
+        "protected_atoms",
+        "per_plan_cap_atoms",
+        "lifetime_cap_atoms",
+        "outstanding_cap_atoms",
+        "permitted_actions",
+        "replenishment_mode",
+        "expires_at",
+        "status"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "replenishment_mode": {
+                "const": "AUTO"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "replenishment"
+            ]
+          }
+        }
+      ]
+    },
+    "ReserveSnapshotV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "scope": {
+          "$ref": "#/$defs/ScopedPortfolio"
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "ledger_sequence": {
+          "$ref": "#/$defs/UInt"
+        },
+        "policy_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "available_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "protected_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "remaining_authority_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "allocation_capacity_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "existing_hold_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "committed_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "refund_pending_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "valuation": {
+          "$ref": "#/$defs/Amount"
+        },
+        "valuation_observation": {
+          "$ref": "#/$defs/Observation"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "scope",
+        "snapshot_id",
+        "ledger_sequence",
+        "policy_ref",
+        "available_atoms",
+        "protected_atoms",
+        "remaining_authority_atoms",
+        "allocation_capacity_atoms",
+        "existing_hold_atoms",
+        "committed_atoms",
+        "refund_pending_atoms",
+        "observed_at"
+      ],
+      "additionalProperties": false
+    },
+    "WorkloadProfileV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "workload_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "accepted_task_definition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "evidence_minimum": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "annual_accepted_tasks": {
+          "$ref": "#/$defs/UInt"
+        },
+        "horizon_months": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        },
+        "data_policy": {
+          "type": "string",
+          "enum": [
+            "LOCAL_ONLY",
+            "PRIVATE_FABRIC",
+            "EXTERNAL_ALLOWED"
+          ]
+        },
+        "runtime_profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CostLine"
+          },
+          "minItems": 0,
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "workload_id",
+        "generation",
+        "objective",
+        "accepted_task_definition",
+        "evidence_minimum",
+        "annual_accepted_tasks",
+        "horizon_months",
+        "data_policy",
+        "runtime_profiles",
+        "assumptions"
+      ],
+      "additionalProperties": false
+    },
+    "TCOComparisonV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "comparison_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "workload_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "calculation_version": {
+          "$ref": "#/$defs/Id"
+        },
+        "quality_equivalent": {
+          "type": "boolean"
+        },
+        "route": {
+          "type": "string",
+          "enum": [
+            "REUSE_LOCAL",
+            "ACQUIRE_PUBLIC",
+            "COMPOSE_LOCAL",
+            "ACQUIRE_LICENSED",
+            "FUND_RELEASE",
+            "FUND_CREATION",
+            "RETAIN_EXTERNAL_SERVICE"
+          ]
+        },
+        "candidate_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "cost_lines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CostLine"
+          },
+          "minItems": 0,
+          "maxItems": 256
+        },
+        "total_cash_cost": {
+          "$ref": "#/$defs/Amount"
+        },
+        "break_even_annual_tasks": {
+          "$ref": "#/$defs/Decimal"
+        },
+        "unknown_inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "comparison_id",
+        "workload_ref",
+        "calculation_version",
+        "quality_equivalent",
+        "route",
+        "candidate_refs",
+        "cost_lines",
+        "unknown_inputs",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "CapitalPlanV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "plan_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "comparison_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "selected_recipe_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "route": {
+          "$ref": "#/$defs/Id"
+        },
+        "maximum_exposure": {
+          "$ref": "#/$defs/Exposure"
+        },
+        "expected_outcome": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "observation_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "plan_id",
+        "objective",
+        "comparison_ref",
+        "route",
+        "maximum_exposure",
+        "expected_outcome",
+        "observation_refs",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "AllocationPlanV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "allocation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "capital_plan_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "policy_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "network": {
+          "$ref": "#/$defs/NativeNetwork"
+        },
+        "legs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapitalLeg"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "maximum_exposure": {
+          "$ref": "#/$defs/Exposure"
+        },
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "allocation_id",
+        "capital_plan_ref",
+        "policy_ref",
+        "network",
+        "legs",
+        "maximum_exposure",
+        "client_operation_id",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalRuleV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "eligible_roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "distinct_person_quorum": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "exclude_initiator": {
+          "type": "boolean"
+        },
+        "veto_enabled": {
+          "type": "boolean"
+        },
+        "threshold_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "REVOKED",
+            "EXPIRED"
+          ]
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "rule_id",
+        "generation",
+        "eligible_roles",
+        "distinct_person_quorum",
+        "exclude_initiator",
+        "veto_enabled",
+        "threshold_atoms",
+        "expires_at",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalRequestV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "allocation_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "allocation_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "rule_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "rule_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "policy_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "policy_generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "initiator_person_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "maximum_exposure": {
+          "$ref": "#/$defs/Exposure"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "request_id",
+        "allocation_ref",
+        "allocation_body_id",
+        "rule_ref",
+        "rule_body_id",
+        "policy_ref",
+        "policy_generation",
+        "initiator_person_id",
+        "maximum_exposure",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalDecisionV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "decision_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "request_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "allocation_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "policy_generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "rule_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "actor": {
+          "$ref": "#/$defs/ApprovalSeat"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "APPROVE",
+            "REJECT",
+            "WITHDRAW"
+          ]
+        },
+        "sequence": {
+          "$ref": "#/$defs/UInt"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "decision_id",
+        "request_ref",
+        "request_body_id",
+        "allocation_body_id",
+        "policy_generation",
+        "rule_body_id",
+        "actor",
+        "decision",
+        "sequence",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "CapabilityPositionV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "position_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "portfolio_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "package_core_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "recipe_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "lock_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "resource_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        },
+        "rights_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "acquisition_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "allocated_cost": {
+          "$ref": "#/$defs/Amount"
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "ACQUIRED",
+            "DEPLOYING",
+            "USABLE",
+            "SUPERSEDED",
+            "RETIRED"
+          ]
+        },
+        "readiness_observation": {
+          "$ref": "#/$defs/Observation"
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "position_id",
+        "portfolio_id",
+        "package_core_id",
+        "recipe_id",
+        "lock_id",
+        "resource_refs",
+        "rights_ref",
+        "acquisition_refs",
+        "lifecycle",
+        "generation"
+      ],
+      "additionalProperties": false
+    },
+    "ResearchProgramV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "program_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "native_terms_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "programme_ceiling_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "visibility": {
+          "type": "string",
+          "enum": [
+            "PRIVATE",
+            "MEMBERS",
+            "PUBLIC"
+          ]
+        },
+        "deadline": {
+          "$ref": "#/$defs/UInt"
+        },
+        "generation": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "program_id",
+        "objective",
+        "evidence_refs",
+        "native_terms_refs",
+        "programme_ceiling_atoms",
+        "visibility",
+        "deadline",
+        "generation"
+      ],
+      "additionalProperties": false
+    },
+    "ProgramMembershipV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "membership_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "program_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "member_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "SPONSOR",
+            "SUPPLIER",
+            "OBSERVER"
+          ]
+        },
+        "ceiling_atoms": {
+          "$ref": "#/$defs/UInt"
+        },
+        "accepted_terms_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "WITHDRAWN",
+            "EXPIRED"
+          ]
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "membership_id",
+        "program_ref",
+        "member_entity_id",
+        "role",
+        "ceiling_atoms",
+        "accepted_terms_ref",
+        "status",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "ProductOfferV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "offer_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "product_provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "product_class": {
+          "type": "string",
+          "enum": [
+            "CUSTODY",
+            "SPOT_OTC",
+            "TREASURY_CREDIT",
+            "HEDGING",
+            "INFRASTRUCTURE_FINANCE",
+            "RESEARCH_ADMINISTRATION"
+          ]
+        },
+        "rights_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "eligibility_policy_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "fee_disclosure_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "supported_action": {
+          "type": "string",
+          "enum": [
+            "REFERRAL",
+            "QUOTE",
+            "EXISTING_PRODUCT_EXECUTION"
+          ]
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UInt"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "offer_id",
+        "product_provider_id",
+        "product_class",
+        "rights_ref",
+        "eligibility_policy_ref",
+        "fee_disclosure_ref",
+        "supported_action",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "CapitalExecutionReceiptV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "execution_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "allocation_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "allocation_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "child_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "PLANNED",
+            "APPROVAL_PENDING",
+            "AUTHORIZED",
+            "EXECUTING",
+            "PARTIAL",
+            "COMPLETED",
+            "RECONCILIATION_REQUIRED",
+            "CANCELED_WHERE_SAFE"
+          ]
+        },
+        "actual_fees": {
+          "$ref": "#/$defs/Amount"
+        },
+        "observation": {
+          "$ref": "#/$defs/Observation"
+        },
+        "sequence": {
+          "$ref": "#/$defs/UInt"
+        },
+        "supersedes": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "execution_id",
+        "allocation_ref",
+        "allocation_body_id",
+        "child_refs",
+        "state",
+        "observation",
+        "sequence"
+      ],
+      "additionalProperties": false
+    },
+    "ReserveReportV1_1": {
+      "type": "object",
+      "properties": {
+        "schema_revision": {
+          "const": "1.1"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UInt"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "report_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "snapshot_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "position_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "commitment_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "reporting_currency": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 12
+        },
+        "report_type": {
+          "type": "string",
+          "enum": [
+            "CORPORATE",
+            "INSTITUTIONAL",
+            "FAMILY_GROUP",
+            "PROGRAMME",
+            "FOCUS_EXPORT"
+          ]
+        },
+        "period_start": {
+          "$ref": "#/$defs/UInt"
+        },
+        "period_end": {
+          "$ref": "#/$defs/UInt"
+        },
+        "as_of": {
+          "$ref": "#/$defs/UInt"
+        },
+        "export_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "provider_id",
+        "created_at",
+        "legal_entity_id",
+        "report_id",
+        "snapshot_refs",
+        "position_refs",
+        "commitment_refs",
+        "reporting_currency",
+        "report_type",
+        "period_start",
+        "period_end",
+        "as_of"
+      ],
+      "additionalProperties": false
+    },
+    "ReserveExtensionProfileV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ReserveExtensionProfileV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ReserveExtensionProfileV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "EntityLinkV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "EntityLinkV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/EntityLinkV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "PortfolioV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "PortfolioV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/PortfolioV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ReservePolicyV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ReservePolicyV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ReservePolicyV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ReserveSnapshotV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ReserveSnapshotV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ReserveSnapshotV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "WorkloadProfileV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "WorkloadProfileV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/WorkloadProfileV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "TCOComparisonV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "TCOComparisonV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/TCOComparisonV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "CapitalPlanV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "CapitalPlanV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/CapitalPlanV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "AllocationPlanV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "AllocationPlanV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/AllocationPlanV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalRuleV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ApprovalRuleV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ApprovalRuleV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalRequestV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ApprovalRequestV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ApprovalRequestV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalDecisionV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ApprovalDecisionV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ApprovalDecisionV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "CapabilityPositionV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "CapabilityPositionV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/CapabilityPositionV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ResearchProgramV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ResearchProgramV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ResearchProgramV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ProgramMembershipV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ProgramMembershipV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ProgramMembershipV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ProductOfferV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ProductOfferV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ProductOfferV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "CapitalExecutionReceiptV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "CapitalExecutionReceiptV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/CapitalExecutionReceiptV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "ReserveReportV1_1Envelope": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "const": "ReserveReportV1_1"
+        },
+        "body": {
+          "$ref": "#/$defs/ReserveReportV1_1"
+        },
+        "body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4840}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "body",
+        "body_id",
+        "signer_key_id",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "Error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/Id"
+        },
+        "stage": {
+          "$ref": "#/$defs/Id"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "safe_next_action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "reference": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "retryable",
+        "correlation_id",
+        "safe_next_action"
+      ],
+      "additionalProperties": false
+    },
+    "Job": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ACCEPTED",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "RECONCILIATION_REQUIRED"
+          ]
+        },
+        "result_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "job_id",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "MutationRequest": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "expected_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "expected_generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "policy_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "expected_body_id"
+      ],
+      "additionalProperties": false
+    },
+    "RefRequest": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "subject_ref": {
+          "$ref": "#/$defs/Ref"
+        },
+        "expected_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "parameters_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "subject_ref",
+        "expected_body_id"
+      ],
+      "additionalProperties": false
+    },
+    "RoleAssignmentRequest": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "legal_entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "person_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "expected_generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "approval_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "legal_entity_id",
+        "person_id",
+        "roles",
+        "expected_generation",
+        "approval_ref"
+      ],
+      "additionalProperties": false
+    },
+    "CreateReserveExtensionProfileV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ReserveExtensionProfileV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateEntityLinkV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/EntityLinkV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreatePortfolioV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/PortfolioV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateReservePolicyV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ReservePolicyV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateReserveSnapshotV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ReserveSnapshotV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateWorkloadProfileV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/WorkloadProfileV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateTCOComparisonV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/TCOComparisonV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateCapitalPlanV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/CapitalPlanV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateAllocationPlanV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/AllocationPlanV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateApprovalRuleV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ApprovalRuleV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateApprovalRequestV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ApprovalRequestV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateApprovalDecisionV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ApprovalDecisionV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateCapabilityPositionV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/CapabilityPositionV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateResearchProgramV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ResearchProgramV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateProgramMembershipV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ProgramMembershipV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateProductOfferV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ProductOfferV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateCapitalExecutionReceiptV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/CapitalExecutionReceiptV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "CreateReserveReportV1_1": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "body": {
+          "$ref": "#/$defs/ReserveReportV1_1"
+        },
+        "expected_parent_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "EntityLinkV1_1List": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EntityLinkV1_1Envelope"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "items",
+        "snapshot_id"
+      ],
+      "additionalProperties": false
+    },
+    "PortfolioV1_1List": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PortfolioV1_1Envelope"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "items",
+        "snapshot_id"
+      ],
+      "additionalProperties": false
+    },
+    "ReservePolicyV1_1List": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReservePolicyV1_1Envelope"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "items",
+        "snapshot_id"
+      ],
+      "additionalProperties": false
+    },
+    "WorkloadProfileV1_1List": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkloadProfileV1_1Envelope"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "items",
+        "snapshot_id"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalRuleV1_1List": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApprovalRuleV1_1Envelope"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "items",
+        "snapshot_id"
+      ],
+      "additionalProperties": false
+    },
+    "ResearchProgramV1_1List": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResearchProgramV1_1Envelope"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "items",
+        "snapshot_id"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalDecisionV1_1List": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApprovalDecisionV1_1Envelope"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "items",
+        "snapshot_id"
+      ],
+      "additionalProperties": false
+    },
+    "CapabilityPositionV1_1List": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityPositionV1_1Envelope"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "items",
+        "snapshot_id"
+      ],
+      "additionalProperties": false
+    },
+    "LifecycleRequest": {
+      "type": "object",
+      "properties": {
+        "client_operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "expected_body_id": {
+          "$ref": "#/$defs/Digest"
+        },
+        "expected_generation": {
+          "$ref": "#/$defs/UInt"
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "ACQUIRED",
+            "DEPLOYING",
+            "USABLE",
+            "SUPERSEDED",
+            "RETIRED"
+          ]
+        },
+        "evidence_ref": {
+          "$ref": "#/$defs/Ref"
+        }
+      },
+      "required": [
+        "client_operation_id",
+        "expected_body_id",
+        "expected_generation",
+        "lifecycle",
+        "evidence_ref"
+      ],
+      "additionalProperties": false
+    },
+    "ProductOfferV1_1List": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProductOfferV1_1Envelope"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "items",
+        "snapshot_id"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

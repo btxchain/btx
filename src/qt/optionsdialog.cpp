@@ -355,7 +355,7 @@ OptionsDialog::OptionsDialog(QWidget* parent, bool enableWallet)
 
     rejectspkreuse = new QCheckBox(tabMempool);
     rejectspkreuse->setText(tr("Disallow most address reuse"));
-    rejectspkreuse->setToolTip(tr("With this option enabled, your memory pool will only allow each unique payment destination to be used once, effectively deprioritising address reuse. Address reuse is not technically supported, and harms the privacy of all Bitcoin users. It also has limited real-world utility, and has been known to be common with spam."));
+    rejectspkreuse->setToolTip(tr("With this option enabled, your memory pool will only allow each unique payment destination to be used once, effectively deprioritising address reuse. Address reuse is not technically supported, and harms the privacy of all BTX users. It also has limited real-world utility, and has been known to be common with spam."));
     verticalLayout_Mempool->addWidget(rejectspkreuse);
     FixTabOrder(rejectspkreuse);
 
@@ -392,25 +392,25 @@ OptionsDialog::OptionsDialog(QWidget* parent, bool enableWallet)
 
     rejectunknownscripts = new QCheckBox(groupBox_Spamfiltering);
     rejectunknownscripts->setText(tr("Ignore unrecognised receiver scripts"));
-    rejectunknownscripts->setToolTip(tr("With this option enabled, unrecognised receiver (\"pubkey\") scripts will be ignored. Unrecognisable scripts could be used to bypass further spam filters. If your software is outdated, they may also be used to trick you into thinking you were sent bitcoins that will never confirm."));
+    rejectunknownscripts->setToolTip(tr("With this option enabled, unrecognised receiver (\"pubkey\") scripts will be ignored. Unrecognisable scripts could be used to bypass further spam filters. If your software is outdated, they may also be used to trick you into thinking you were sent BTX that will never confirm."));
     verticalLayout_Spamfiltering->addWidget(rejectunknownscripts);
     FixTabOrder(rejectunknownscripts);
 
     rejectunknownwitness = new QCheckBox(groupBox_Spamfiltering);
     rejectunknownwitness->setText(tr("Reject unknown witness script versions"));
-    rejectunknownwitness->setToolTip(tr("Some attempts to spam Bitcoin intentionally use undefined witness script formats reserved for future use. By enabling this option, your node will reject transactions using these undefined/future versions. Note that if you send to many addressses in a single transaction, the entire transaction may be rejected if any single one of them attempts to use an undefined format."));
+    rejectunknownwitness->setToolTip(tr("Some attempts to spam BTX intentionally use undefined witness script formats reserved for future use. By enabling this option, your node will reject transactions using these undefined/future versions. Note that if you send to many addressses in a single transaction, the entire transaction may be rejected if any single one of them attempts to use an undefined format."));
     verticalLayout_Spamfiltering->addWidget(rejectunknownwitness);
     FixTabOrder(rejectunknownwitness);
 
     rejectparasites = new QCheckBox(groupBox_Spamfiltering);
     rejectparasites->setText(tr("Reject parasite transactions"));
-    rejectparasites->setToolTip(tr("With this option enabled, transactions related to parasitic overlay protocols will be ignored. Parasites are transactions using Bitcoin as a technical infrastructure to animate other protocols, unrelated to ordinary money transfers."));
+    rejectparasites->setToolTip(tr("With this option enabled, transactions related to parasitic overlay protocols will be ignored. Parasites are transactions using BTX as a technical infrastructure to animate other protocols, unrelated to ordinary money transfers."));
     verticalLayout_Spamfiltering->addWidget(rejectparasites);
     FixTabOrder(rejectparasites);
 
     rejecttokens = new QCheckBox(groupBox_Spamfiltering);
-    rejecttokens->setText(tr("Ignore transactions involving non-bitcoin token/asset overlay protocols"));
-    rejecttokens->setToolTip(tr("With this option enabled, transactions involving non-bitcoin tokens/assets will not be relayed or mined by your node. Due to not having value, and some technical design flaws, token mints and transfers are often spammy and can bog down the network."));
+    rejecttokens->setText(tr("Ignore transactions involving non-BTX token/asset overlay protocols"));
+    rejecttokens->setToolTip(tr("With this option enabled, transactions involving non-BTX tokens/assets will not be relayed or mined by your node. Due to not having value, and some technical design flaws, token mints and transfers are often spammy and can bog down the network."));
     verticalLayout_Spamfiltering->addWidget(rejecttokens);
     FixTabOrder(rejecttokens);
 
@@ -419,13 +419,13 @@ OptionsDialog::OptionsDialog(QWidget* parent, bool enableWallet)
 
     minrelaycoinblocks = new BitcoinAmountField(groupBox_Spamfiltering);
     minrelaycoinblocks->SetMaxValue(std::numeric_limits<CAmount>::max());
-    minrelaycoinblocks->setToolTip(tr("This effectively acts as a rate limit. When bitcoins are spent, they reset to zero \"coinblocks\" (aka coin age) and slowly build up more coinblocks based on their value each block afterward. Small coins take longer than large amounts."));
+    minrelaycoinblocks->setToolTip(tr("This effectively acts as a rate limit. When BTX is spent, they reset to zero \"coinblocks\" (aka coin age) and slowly build up more coinblocks based on their value each block afterward. Small coins take longer than large amounts."));
     CreateOptionUI(verticalLayout_Spamfiltering, minrelaycoinblocks, tr("Delay accepting transactions spending coins that have been at rest less than %s per block."));
 
     minrelaymaturity = new QSpinBox(groupBox_Spamfiltering);
     minrelaymaturity->setMinimum(0);
     minrelaymaturity->setMaximum(std::numeric_limits<int>::max());
-    minrelaymaturity->setToolTip(tr("This effectively acts as a rate limit. When bitcoins are spent, they reset to zero blocks and slowly mature each block afterward, regardless of their value."));
+    minrelaymaturity->setToolTip(tr("This effectively acts as a rate limit. When BTX is spent, they reset to zero blocks and slowly mature each block afterward, regardless of their value."));
     CreateOptionUI(verticalLayout_Spamfiltering, minrelaymaturity, tr("Delay accepting transactions spending coins that have been at rest fewer than %s blocks."));
 
     bytespersigop = new QSpinBox(groupBox_Spamfiltering);
@@ -487,7 +487,7 @@ OptionsDialog::OptionsDialog(QWidget* parent, bool enableWallet)
 
     rejectbarepubkey = new QCheckBox(groupBox_Spamfiltering);
     rejectbarepubkey->setText(tr("Ignore bare/exposed public keys (pay-to-IP)"));
-    rejectbarepubkey->setToolTip(tr("Spam is sometimes disguised to appear as if it is a deprecated pay-to-IP (bare pubkey) transaction, where the \"key\" is actually arbitrary data (not a real key) instead. Support for pay-to-IP was only ever supported by Satoshi's early Bitcoin wallet, which has been abandoned since 2011."));
+    rejectbarepubkey->setToolTip(tr("Spam is sometimes disguised to appear as if it is a deprecated pay-to-IP (bare pubkey) transaction, where the \"key\" is actually arbitrary data (not a real key) instead. Support for pay-to-IP was only ever present in very early wallets, which have been abandoned since 2011."));
     verticalLayout_Spamfiltering->addWidget(rejectbarepubkey);
     FixTabOrder(rejectbarepubkey);
 
@@ -529,7 +529,7 @@ OptionsDialog::OptionsDialog(QWidget* parent, bool enableWallet)
     datacarriersize = new QSpinBox(groupBox_Spamfiltering);
     datacarriersize->setMinimum(0);
     datacarriersize->setMaximum(std::numeric_limits<int>::max());
-    datacarriersize->setToolTip(tr("While Bitcoin itself does not support attaching arbitrary data to transactions, despite that various methods for disguising it have been devised over the years. Since it is sometimes impractical to detect small spam disguised as ordinary transactions, it is sometimes considered beneficial to tolerate certain kinds of less harmful data attachments."));
+    datacarriersize->setToolTip(tr("While BTX itself does not support attaching arbitrary data to transactions, despite that various methods for disguising it have been devised over the years. Since it is sometimes impractical to detect small spam disguised as ordinary transactions, it is sometimes considered beneficial to tolerate certain kinds of less harmful data attachments."));
     CreateOptionUI(verticalLayout_Spamfiltering, datacarriersize, tr("Ignore transactions with additional data larger than %s bytes."));
 
     datacarriercost = new QDoubleSpinBox(groupBox_Spamfiltering);
@@ -548,7 +548,7 @@ OptionsDialog::OptionsDialog(QWidget* parent, bool enableWallet)
 
     rejectnonstddatacarrier = new QCheckBox(groupBox_Spamfiltering);
     rejectnonstddatacarrier->setText(tr("Ignore data embedded with non-standard formats"));
-    rejectnonstddatacarrier->setToolTip(tr("Some attempts to spam Bitcoin intentionally use non-standard formats in an attempt to bypass the datacarrier limits. Without this option, %1 will attempt to detect these and enforce the intended limits. By enabling this option, your node will ignore these transactions entirely (when detected) even if they fall within the configured limits otherwise."));
+    rejectnonstddatacarrier->setToolTip(tr("Some attempts to spam BTX intentionally use non-standard formats in an attempt to bypass the datacarrier limits. Without this option, %1 will attempt to detect these and enforce the intended limits. By enabling this option, your node will ignore these transactions entirely (when detected) even if they fall within the configured limits otherwise."));
     verticalLayout_Spamfiltering->addWidget(rejectnonstddatacarrier);
     FixTabOrder(rejectnonstddatacarrier);
 
@@ -1089,7 +1089,6 @@ void OptionsDialog::on_resetButton_clicked()
         QStringList items;
         QString strPrefix = tr("Use policy defaults for %1");
         items << strPrefix.arg(tr(CLIENT_NAME));
-        items << strPrefix.arg(tr("Bitcoin Core")+" ");
 
         QInputDialog dialog(this);
         dialog.setWindowTitle(tr("Confirm options reset"));

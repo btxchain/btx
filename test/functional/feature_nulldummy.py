@@ -65,13 +65,31 @@ class NULLDUMMYTest(BitcoinTestFramework):
         rawtx = self.nodes[0].createrawtransaction([input], output)
         # Details only needed for scripthash or witness spends
         input = None if not input_details else [{**input, **input_details}]
-        signedtx = self.nodes[0].signrawtransactionwithkey(rawtx, [privkey], input)
-        return tx_from_hex(signedtx["hex"])
+        assert_raises_rpc_error(
+            -8,
+            "signrawtransactionwithkey is disabled",
+            self.nodes[0].signrawtransactionwithkey,
+            rawtx,
+            [privkey],
+            input,
+        )
+        raise AssertionError("BTX PQ policy disables WIF ECDSA signing")
 
     def run_test(self):
-        self.privkey, self.pubkey = generate_keypair(wif=True)
-        cms = self.nodes[0].createmultisig(1, [self.pubkey.hex()])
-        wms = self.nodes[0].createmultisig(1, [self.pubkey.hex()], 'p2sh-segwit')
+        privkey, _pubkey = generate_keypair(wif=True)
+        rawtx = self.nodes[0].createrawtransaction(
+            [{"txid": "00" * 32, "vout": 0}],
+            [{"mpLQjfK79b7CCV4VMJWEWAj5Mpx8Up5zxB": 1}],
+        )
+        assert_raises_rpc_error(
+            -8,
+            "signrawtransactionwithkey is disabled",
+            self.nodes[0].signrawtransactionwithkey,
+            rawtx,
+            [privkey],
+        )
+        self.log.info("BTX PQ policy disables WIF ECDSA signing; skipping legacy NULLDUMMY matrix")
+        return
         self.ms_address = cms["address"]
         ms_unlock_details = {"scriptPubKey": address_to_scriptpubkey(self.ms_address).hex(),
                              "redeemScript": cms["redeemScript"]}

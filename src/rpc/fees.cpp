@@ -32,8 +32,8 @@ static RPCHelpMan estimatesmartfee()
     return RPCHelpMan{"estimatesmartfee",
         "\nEstimates the approximate fee per kilobyte needed for a transaction to begin\n"
         "confirmation within conf_target blocks if possible and return the number of blocks\n"
-        "for which the estimate is valid. Uses virtual transaction size as defined\n"
-        "in BIP 141 (witness data is discounted).\n",
+        "for which the estimate is valid. Uses transaction weight, which on BTX equals\n"
+        "serialized size (WITNESS_SCALE_FACTOR=1; witness data is not discounted).\n",
         {
             {"conf_target", RPCArg::Type::NUM, RPCArg::Optional::NO, "Confirmation target in blocks (1 - 1008)"},
             {"estimate_mode", RPCArg::Type::STR, RPCArg::Default{"economical"}, "The fee estimate mode.\n"
@@ -102,8 +102,8 @@ static RPCHelpMan estimaterawfee()
         "implementation of fee estimation. The parameters it can be called with\n"
         "and the results it returns will change if the internal implementation changes.\n"
         "\nEstimates the approximate fee per kilobyte needed for a transaction to begin\n"
-        "confirmation within conf_target blocks if possible. Uses virtual transaction size as\n"
-        "defined in BIP 141 (witness data is discounted).\n",
+        "confirmation within conf_target blocks if possible. Uses transaction weight, which\n"
+        "on BTX equals serialized size (WITNESS_SCALE_FACTOR=1; witness data is not discounted).\n",
         {
             {"conf_target", RPCArg::Type::NUM, RPCArg::Optional::NO, "Confirmation target in blocks (1 - 1008)"},
             {"threshold", RPCArg::Type::NUM, RPCArg::Default{0.95}, "The proportion of transactions in a given feerate range that must have been\n"

@@ -45,9 +45,9 @@ static void SetupBitcoinUtilArgs(ArgsManager &argsman)
     argsman.AddArg("-version", "Print version and exit", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 
     argsman.AddCommand("grind", "Perform proof of work on hex header string");
-    argsman.AddCommand("verifyupdatesig", "Verify a detached auto-update release signature offline. Args: <algo> <pubkey-hex> <file> <sig-file>; algo is ml-dsa-44, slh-dsa-128s, or secp256k1. Prints OK and exits 0 on success.");
+    argsman.AddCommand("verifyupdatesig", "Verify a detached auto-update release signature offline. Args: <algo> <pubkey-hex> <file> <sig-file>; algo is ml-dsa-44, slh-dsa-128s, or secp256k1. The .sig is lowercase hex for fleet compatibility; verify still accepts raw binary leftovers. Prints OK and exits 0 on success.");
     argsman.AddCommand("genupdatekey", "Generate an OFFLINE post-quantum auto-update release keypair. Args: [algo] (ml-dsa-44 default, or slh-dsa-128s). Prints the secret SEED (store offline -- it is the private key) and the public key hex for -autoupdatepubkey.");
-    argsman.AddCommand("signupdatesig", "Sign a release artifact with an OFFLINE post-quantum release key. Args: <algo> <seed-hex> <file> [out-sig]. Writes a detached signature (default <file>.sig) that 'verifyupdatesig' and the node accept.");
+    argsman.AddCommand("signupdatesig", "Sign a release artifact with an OFFLINE post-quantum release key. Args: <algo> <seed-hex> <file> [out-sig]. Writes a newline-terminated lowercase hex detached signature (default <file>.sig) for fleet compatibility that 'verifyupdatesig' and the node accept. verifyupdatesig still accepts raw binary leftovers.");
 
     SetupChainParamsBaseOptions(argsman);
 }
@@ -169,12 +169,12 @@ static std::optional<std::vector<unsigned char>> ReadAllBytes(const std::string&
     return std::vector<unsigned char>{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
-// Mirror node::DecodeSignatureBody: accept raw/DER bytes, hex, or base64 so the installer can
-// feed the same signature artifacts the node fetches.
+// Mirror node::DecodeSignatureBody: hex first (including encodings that start with
+// ASCII '0' == 0x30), then base64, then raw body. Do not treat a leading 0x30 as
+// preferred secp256k1 DER — that skipped hex decode on fleet .sig files.
 static std::vector<unsigned char> DecodeUpdateSignature(const std::vector<unsigned char>& body)
 {
     if (body.empty()) return {};
-    if (body.front() == 0x30) return body; // binary DER (secp256k1)
     const std::string text = util::TrimString(std::string{reinterpret_cast<const char*>(body.data()), body.size()});
     if (!text.empty()) {
         if (IsHex(text) && text.size() % 2 == 0) {
@@ -248,11 +248,14 @@ static int SignUpdateSig(const std::vector<std::string>& args, std::string& strP
     std::vector<unsigned char> sig;
     if (!key.Sign(digest, sig, /*slhdsa_fips205=*/true) || sig.empty()) { strPrint = "signing failed"; return EXIT_FAILURE; }
 
+    // Newline-terminated lowercase hex so pre-rc3 TrimAscii cannot drop a trailing
+    // 0x0a / 0x20 from a raw ML-DSA-44 blob (~4.6% of signatures).
+    const std::string encoded = HexStr(sig) + '\n';
     std::ofstream out{out_path, std::ios::binary | std::ios::trunc};
     if (!out.is_open()) { strPrint = "cannot write signature file: " + out_path; return EXIT_FAILURE; }
-    out.write(reinterpret_cast<const char*>(sig.data()), static_cast<std::streamsize>(sig.size()));
+    out.write(encoded.data(), static_cast<std::streamsize>(encoded.size()));
     if (!out.good()) { strPrint = "failed writing signature file: " + out_path; return EXIT_FAILURE; }
-    strPrint = "wrote " + out_path + " (" + std::to_string(sig.size()) + " bytes, " + canonical + ")";
+    strPrint = "wrote " + out_path + " (" + std::to_string(sig.size()) + "-byte " + canonical + " signature as lowercase hex)";
     return EXIT_SUCCESS;
 }
 

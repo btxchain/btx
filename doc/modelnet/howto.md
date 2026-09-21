@@ -1,9 +1,13 @@
-# How to test and use 0.34.7 model hosting
+# How to test and use model hosting in this tree (0.34.8-dev)
 
 This is the operator/researcher guide for **using** and **proving** the
 Native Model Network in this tree. Packaged `planning/acceptance-matrix.csv`
 is the production bar (PASS only where this tree has a Boost test or e2e
 script). Re-run the scripts; do not treat a capabilities bit as PASS.
+The last shipping tag is **0.34.7**; this tree is 0.34.8-dev
+(`IS_RELEASE=false`), so the first-run verbs below (`showmodel`,
+`unhostmodel`, `exportmodellink`, `btx-model show` / `unhost` / `link`)
+are new here and are not part of 0.34.7.
 
 **Fail-fast:** every script below exits on the first error. Do not wait
 minutes after a `FAIL` / `retrieve failed` line.
@@ -29,6 +33,47 @@ Defaults for a packaged install (`-modelnet=1`, `-modelstorage=auto`):
 
 `seedmodel` is only for `-modelseed=manual`.
 
+## First-run doctor
+
+Before you import, ask whether this node can host. Combined human
+walkthrough: [first-run.md](first-run.md). Agent recipes:
+[agent-recipes.md](agent-recipes.md).
+
+```bash
+btx-cli getsetupstatus
+btx-cli checkmodelsetup
+contrib/modelnet/btx-model doctor
+```
+
+`checkmodelsetup` reports `identity_ready`, `quota`, `pq1`, `ready_to_host`,
+`watch_dir`, `remaining_bytes`, `one_liner`, and `next_actions`. First helper
+start writes `identities.json` automatically (not a wallet key).
+`getsetupstatus` adds chain/mining `getmininginfo.first_run` (ExactReplay
+readiness: `ready_to_mine`, `ibd`, `blocks`, `peer_count`, `headers`,
+`verificationprogress`, `one_liner`, `recommended_action`, `next_actions`)
+when `btxd` is up. `hostmodel` is the alias of `importmodel` (pin + signed
+search card + demand-seed). Ollama-style: `showmodel`, `setmodelalias` /
+`unhostmodel`, `exportmodellink` (`.btx` magnet analog). Watch folder:
+`-modelwatch=<dir>` then `scanmodelwatch` (`.btx` cards are opened, not
+imported as weights). Content-list and keep-state reads never fetch or infer:
+`getmodelmanifest` (per-file `path`/`role`/`size`/`sha384`, the aria2 metalink
+analog), `qualifymodel` (static structure check of a local path, the
+force-recheck analog), and `listmodels` filtered by `pinned`/`seeded`
+(`ipfs pin ls` analog). `exportmodelpath` returns the verified local store root
+and source path (`btx-model path NAME`; `hf download --local-dir` analog).
+`searchmodels` already accepts catalog filters (`format`, `quantization`,
+`family`, `architecture`, `min_size_bytes` / `max_size_bytes`,
+`min_provider_count`, …); `btx-model search --format gguf --fits --sort size_asc`
+names them on the CLI. `--fits` is this node's remaining **storage** quota, not
+a RAM/VRAM or inference claim.
+
+Filesystem `-modelwatch` / `scanmodelwatch` is a **drop folder**, not a
+publisher watch. 0.34.8-dev `cloud` / `follow` / `events` / `profile` on
+`contrib/modelnet/btx-model` **fail closed** if the helper lacks the method.
+They are not CSV PASS. See [storage-backends.md](storage-backends.md),
+[watches.md](watches.md). Dual door: [HUMANS.md](../../HUMANS.md) vs
+[AGENTS.md](../../AGENTS.md) (`--json`).
+
 ## Search, feed, and funding (GUI + RPC)
 
 The Models page default is **Latest** (`getmodelfeed` NETWORK NEWEST), not
@@ -42,7 +87,8 @@ btx-cli getmodeleconomyentry '<model_id>'
 # Fund Release in the GUI calls preparefundmodelrelease (unsigned). Wallet signs.
 ```
 
-Creator path: `importmodel` → `publishmodelsearchrecord` →
+Creator path: `importmodel` (default pin + signed search card) →
+`publishmodelsearchrecord` only if you need to edit metadata →
 `createmodelrelease` (SHA-256 only) → campaign appears in network search/feed
 → fund → claim reveals secret → public model.
 

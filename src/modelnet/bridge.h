@@ -33,10 +33,14 @@ class ModelBridge {
     mutable std::mutex m_mu;
     std::queue<BoundedModelHint> m_hints;
     ModelStatus m_status;
-    static constexpr size_t MAX_HINTS = 64;
 
 public:
+    static constexpr size_t MAX_HINTS = 64;
+
     bool TryEnqueuePublicHint(BoundedModelHint hint);
+    /** Pop one public hint. Production caller: ProcessMessage model-hint
+     *  consumer in net_processing.cpp. That consumer fail-closed-drops
+     *  malformed hints and never auto-spends or connects. */
     std::optional<BoundedModelHint> TryDequeueHint();
     ModelStatus SnapshotStatus() const;
     void SetHelperReady(bool ready, bool pq1, const std::string& err);

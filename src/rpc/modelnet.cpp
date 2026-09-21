@@ -13,7 +13,10 @@
 #include <modelnet/resource_uri.h>
 #include <modelnet/supervisor.h>
 #include <core_io.h>
+#include <kernel/chainstatemanager_opts.h>
+#include <net.h>
 #include <node/context.h>
+#include <node/mining_guard.h>
 #include <node/transaction.h>
 #include <primitives/transaction.h>
 #include <rpc/server.h>
@@ -22,8 +25,10 @@
 #include <rpc/util.h>
 #include <txmempool.h>
 #include <uint256.h>
+#include <validation.h>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <sync.h>
 #include <univalue.h>
 #include <util/fs.h>
@@ -235,6 +240,9 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
             if (name == "getmodelnetworkinfo" || name == "getmodelcryptoinfo") {
                 UniValue r = LocalNetworkInfo();
                 r.pushKV("helper_error", err);
+                // Unix just failed: do not keep a stale READY latch from the
+                // supervisor poll (up to ~2s for -modelrpcsocket).
+                r.pushKV("helper_ready", false);
                 return r;
             }
             throw JSONRPCError(RPC_MISC_ERROR, "model helper unavailable: " + err);
@@ -358,7 +366,7 @@ static RPCHelpMan getmodelsearchrecord()
 }
 static RPCHelpMan publishmodelsearchrecord()
 {
-    return ProxyOrLocal("publishmodelsearchrecord", "Sign and announce ModelSearchRecord. Not a wallet spend.\n",
+    return ProxyOrLocal("publishmodelsearchrecord", "Sign and announce ModelSearchRecord. Creates a local research identity if none exists. Not a wallet spend.\n",
                         {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "model_id or btx://"},
                          {"metadata", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "searchable metadata object", RPCArgOptions{.skip_type_check = true}}});
 }
@@ -409,8 +417,8 @@ static RPCHelpMan getnetworkmodelstats()
 }
 static RPCHelpMan getmodelaliases()
 {
-    return ProxyOrLocal("getmodelaliases", "Aliases with provenance.\n",
-                        {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "model_id or btx://"}});
+    return ProxyOrLocal("getmodelaliases", "Aliases with provenance. Omit id to list every local alias.\n",
+                        {{"id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "model_id or btx://"}});
 }
 static RPCHelpMan searchpublishers()
 {
@@ -569,13 +577,203 @@ static RPCHelpMan getmodelmanifest()
 
 static RPCHelpMan importmodel()
 {
-    return ProxyOrLocal("importmodel", "Import a local file or directory, hash, chunk, and optionally pin. Never executes pickle/.pt.\n",
+    return ProxyOrLocal("importmodel", "Import a local file or directory, hash, chunk, optionally pin, and by default publish a signed search card. Never executes pickle/.pt.\n",
                         {
                             {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "filesystem path"},
                             {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "import options", {
-                                {"pin", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "pin after import"},
+                                {"pin", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "pin after import (default true)"},
+                                {"publish", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "sign and publish a search record (default true)"},
                             }},
                         });
+}
+
+static RPCHelpMan hostmodel()
+{
+    return ProxyOrLocal("hostmodel", "Alias of importmodel: pin, demand-seed, and publish a signed search card. Never spends. Never starts inference.\n",
+                        {
+                            {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "filesystem path"},
+                            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "import options", {
+                                {"pin", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "pin after import (default true)"},
+                                {"publish", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "sign and publish a search record (default true)"},
+                            }},
+                        });
+}
+
+static RPCHelpMan checkmodelsetup()
+{
+    return ProxyOrLocal("checkmodelsetup", "First-run doctor for the model helper: identity, quota, PQ1, next_actions. Never spends.\n", {});
+}
+
+static RPCHelpMan previewmodelimport()
+{
+    return ProxyOrLocal("previewmodelimport", "Size and inferred metadata vs quota. Does not hash or import.\n",
+                        {{"path", RPCArg::Type::STR, RPCArg::Optional::NO, "filesystem path"}});
+}
+
+static RPCHelpMan getmodelsharecard()
+{
+    return ProxyOrLocal("getmodelsharecard", "Copy-paste share card (btx:// plus family/format/quant). Magnet analog.\n",
+                        {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI or hex id"}});
+}
+
+static RPCHelpMan getmodeltransfers()
+{
+    return ProxyOrLocal("getmodeltransfers", "Local torrent-style transfer list: state, ratio, seeded, pinned.\n", {});
+}
+
+static RPCHelpMan setmodelalias()
+{
+    return ProxyOrLocal("setmodelalias", "Add an Ollama-style alias and re-sign the search card. Not a wallet label.\n",
+                        {
+                            {"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI or hex id"},
+                            {"alias", RPCArg::Type::STR, RPCArg::Optional::NO, "short name"},
+                        });
+}
+
+static RPCHelpMan scanmodelwatch()
+{
+    return ProxyOrLocal("scanmodelwatch", "Scan -modelwatch directory and host new GGUF/SafeTensors. Idempotent.\n",
+                        {{"dir", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "override watch dir for this scan"}});
+}
+
+static RPCHelpMan getmodelwatchstatus()
+{
+    return ProxyOrLocal("getmodelwatchstatus", "Report -modelwatch path. Side-effect-free. Never spends.\n", {});
+}
+
+static RPCHelpMan showmodel()
+{
+    return ProxyOrLocal("showmodel", "Ollama-style show: share card, aliases, local bytes. Never spends. Never inference.\n",
+                        {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI, hex, alias, or copy_text"}});
+}
+
+static RPCHelpMan exportmodellink()
+{
+    return ProxyOrLocal("exportmodellink", "Write or return a .btx magnet analog (canonical URI + copy_text). Not a torrent file.\n",
+                        {
+                            {"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI, hex, or alias"},
+                            {"path", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "optional filesystem path to write"},
+                        });
+}
+
+static RPCHelpMan unhostmodel()
+{
+    return ProxyOrLocal("unhostmodel", "Unpin and unseed in one call. Does not delete pieces. Never spends.\n",
+                        {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI, hex, or alias"}});
+}
+
+static RPCHelpMan removemodelalias()
+{
+    return ProxyOrLocal("removemodelalias", "Remove an Ollama-style alias and re-sign the search card.\n",
+                        {
+                            {"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI, hex, or alias"},
+                            {"alias", RPCArg::Type::STR, RPCArg::Optional::NO, "alias to drop"},
+                        });
+}
+
+static RPCHelpMan openmodelshare()
+{
+    return ProxyOrLocal("openmodelshare", "Parse share.copy_text or a .btx link. Preview only; never retrieve or spend.\n",
+                        {{"text", RPCArg::Type::STR, RPCArg::Optional::NO, "copy_text, btx:// URI, or link contents"}});
+}
+
+static RPCHelpMan getsetupstatus()
+{
+    return RPCHelpMan{
+        "getsetupstatus",
+        "First-run doctor for money (ExactReplay mining) and models. Never spends. Never starts inference.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::ELISION, "", "doctor fields"},
+        }},
+        RPCExamples{HelpExampleCli("getsetupstatus", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("schema_version", 1);
+            out.pushKV("automatic_spend_atoms", 0);
+            UniValue next(UniValue::VARR);
+
+            UniValue money(UniValue::VOBJ);
+            try {
+                node::NodeContext& node = EnsureAnyNodeContext(request.context);
+                const auto guard = node::GetMiningChainGuardStatus(node);
+                money.pushKV("blocks", guard.local_tip_height);
+                money.pushKV("peer_count", guard.peer_count);
+                money.pushKV("initialblockdownload", guard.initial_block_download);
+                money.pushKV("ibd", guard.initial_block_download);
+                money.pushKV("network_active", guard.network_active);
+                money.pushKV("mining_healthy", guard.healthy);
+                money.pushKV("unattended_healthy", guard.healthy);
+                money.pushKV("min_peers", guard.min_peer_count);
+                money.pushKV("mining_recommended_action", node::GetMiningChainGuardRecommendedAction(guard));
+                money.pushKV("chain", gArgs.GetChainTypeString());
+                money.pushKV("rpc", "getmininginfo");
+                bool refuse_template = guard.initial_block_download;
+                try {
+                    ChainstateManager& chainman = EnsureChainman(node);
+                    LOCK(cs_main);
+                    if (const CBlockIndex* tip = chainman.ActiveChain().Tip()) {
+                        money.pushKV("verificationprogress", chainman.GuessVerificationProgress(tip));
+                        money.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : tip->nHeight);
+                        const bool loading = chainman.m_blockman.LoadingBlocks();
+                        const bool work = tip->nChainWork >= chainman.MinimumChainWork();
+                        refuse_template = kernel::MiningTemplateShouldRefuseIbd(loading, /*has_tip=*/true, work);
+                        const bool age_only = kernel::IbdIsAgeOnlyStaleTip(guard.initial_block_download, loading, true, work);
+                        std::string ibd_kind = "none";
+                        if (loading) ibd_kind = "loading";
+                        else if (!work) ibd_kind = "insufficient_chain_work";
+                        else if (age_only) ibd_kind = "age_only";
+                        money.pushKV("ibd_kind", ibd_kind);
+                        if (age_only) money.pushKV("one_liner", "Tip is stale by age; keep requesting ExactReplay work.");
+                        else if (refuse_template) money.pushKV("one_liner", "Waiting for chain sync.");
+                        else money.pushKV("one_liner", node::GetMiningChainGuardRecommendedAction(guard));
+                    }
+                } catch (const std::exception&) {
+                }
+                money.pushKV("ready_to_mine", guard.healthy && !refuse_template);
+                money.pushKV("template_issuable", !refuse_template);
+                if (node.connman) {
+                    UniValue conn(UniValue::VOBJ);
+                    conn.pushKV("in", static_cast<uint64_t>(node.connman->GetNodeCount(ConnectionDirection::In)));
+                    conn.pushKV("out", static_cast<uint64_t>(node.connman->GetNodeCount(ConnectionDirection::Out)));
+                    conn.pushKV("total", static_cast<uint64_t>(node.connman->GetNodeCount(ConnectionDirection::Both)));
+                    money.pushKV("connections", conn);
+                }
+                if (refuse_template) next.push_back("wait for chain sync before mining");
+                else next.push_back(std::string("mining: ") + node::GetMiningChainGuardRecommendedAction(guard));
+            } catch (const std::exception& e) {
+                money.pushKV("error", e.what());
+                next.push_back("start btxd");
+            }
+            out.pushKV("money", money);
+
+            UniValue models;
+            std::string err;
+            if (HelperCall("checkmodelsetup", UniValue(UniValue::VARR), models, err)) {
+                out.pushKV("models", models);
+                if (models.exists("ready_to_host") && models["ready_to_host"].isTrue()) {
+                    next.push_back("hostmodel <path>");
+                }
+            } else {
+                UniValue m(UniValue::VOBJ);
+                m.pushKV("helper_ready", false);
+                m.pushKV("error", err.empty() ? "btx-modeld not connected" : err);
+                m.pushKV("automatic_spend_atoms", 0);
+                out.pushKV("models", m);
+                next.push_back("start btx-modeld or wait for owned helper");
+            }
+            next.push_back("automatic_spend_atoms stays 0");
+            out.pushKV("next_actions", next);
+            std::string one = "hostmodel <path>";
+            if (models.exists("one_liner") && models["one_liner"].isStr()) one = models["one_liner"].get_str();
+            else if (money.exists("mining_recommended_action") && money["mining_recommended_action"].isStr()) {
+                one = money["mining_recommended_action"].get_str();
+            }
+            out.pushKV("one_liner", one);
+            return out;
+        },
+    };
 }
 
 static RPCHelpMan seedmodel()
@@ -706,7 +904,7 @@ static RPCHelpMan getmodelpolicy()
 {
     return ProxyOrLocal("getmodelpolicy",
                         "Local free-first and propagation policy. Automatic spend default is 0.\n"
-                        "Demand-seed is the default once a storage budget is allocated. Catalog contacts (-modelpeer, addmodelnode, PEX) are followed by default. Arbitrary advertised models are not fetched; preserve_rare remains opt-in.\n",
+                        "Demand-seed is the default once a storage budget is allocated. Catalog contacts (-modelpeer, addmodelnode) are followed by default. PEX hints stay TTL'd. Arbitrary advertised models are not fetched; preserve_rare remains opt-in.\n",
                         {});
 }
 
@@ -1232,7 +1430,11 @@ BOUNTY_PROXY(getbounty, "Inspect a bounty entry. Unknown chain facts are null.\n
 BOUNTY_PROXY(getbountyeconomy, "Pledged vs confirmed funding. Pledged is never confirmed.\n")
 BOUNTY_PROXY(getbountyterms, "Return the signed BountyTerms envelope.\n")
 BOUNTY_PROXY(getbountycapabilities, "Installed records, scripts, and executed evaluation profiles only.\n")
-BOUNTY_PROXY(createbountydraft, "Local draft. No publication or deposit.\n")
+BOUNTY_PROXY(createbountydraft, "Local draft. Title-only drafts are incomplete until all BountyTerms fields exist. No publication or deposit.\n")
+BOUNTY_PROXY(listbountydrafts, "List local bounty drafts. No chain spend.\n")
+BOUNTY_PROXY(getbountydraft, "Inspect a local bounty draft. No chain spend.\n")
+BOUNTY_PROXY(updatebountydraft, "Patch a local bounty draft in place. Never publishes or spends.\n")
+BOUNTY_PROXY(deletebountydraft, "Delete a local bounty draft. Never spends.\n")
 BOUNTY_PROXY(validatebountyterms, "Schema, timeline, council, and money checks. Does not predict quality.\n")
 BOUNTY_PROXY(publishbounty, "Sign exact terms with the research key. No wallet spend.\n")
 BOUNTY_PROXY(revisebounty, "New terms id. Old deposits never migrate.\n")
@@ -1268,6 +1470,129 @@ BOUNTY_PROXY(createagentmandate, "Finite mandate. No unbounded all-recipient def
 BOUNTY_PROXY(revokeagentmandate, "Blocks new signatures, not already released ones.\n")
 BOUNTY_PROXY(getagentactivity, "Redacted local audit. No telemetry.\n")
 BOUNTY_PROXY(reservemandate, "Atomic mandate reservation. Cannot exceed budget or swap refund keys.\n")
+BOUNTY_PROXY(createsubscriptionmandate, "Finite SubscriptionMandate for future objects. Distinct from AgentMandate. Never unbounded. automatic_spend_atoms remains 0.\n")
+BOUNTY_PROXY(getsubscriptionmandate, "Inspect a SubscriptionMandate. No wallet keys.\n")
+BOUNTY_PROXY(getsubscriptionactivity, "WALLET_OWNER ActionPage: event to terms to reservation. Never wallet keys or telemetry. automatic_spend_atoms remains 0.\n")
+BOUNTY_PROXY(revokesubscriptionmandate, "Blocks new SubscriptionMandate signatures. Already broadcast stays real.\n")
+BOUNTY_PROXY(reservesubscriptionmandate, "Atomic SubscriptionMandate reservation. Cannot exceed budget.\n")
+BOUNTY_PROXY(watchmodelpublisher, "Local publisher watch. Distinct from filesystem -modelwatch. Default NOTIFY. No spend.\n")
+BOUNTY_PROXY(watchmodelcollection, "Local collection watch. No spend.\n")
+BOUNTY_PROXY(watchmodelquery, "Stored bounded search filter. Uses ordinary feed/search sync. No extra fanout.\n")
+BOUNTY_PROXY(watchmodel, "Watch one model id. No spend.\n")
+BOUNTY_PROXY(listmodelwatches, "List local network watches. Not filesystem drop-folder status.\n")
+BOUNTY_PROXY(getmodelwatch, "Inspect one network watch. Not getmodelwatchstatus.\n")
+BOUNTY_PROXY(unwatchmodel, "Remove a local network watch.\n")
+BOUNTY_PROXY(getmodelevents, "Replay local ModelEventJournal after a cursor. Node-local observations, not consensus.\n")
+BOUNTY_PROXY(getmodeleventsequence, "Current local event sequence / cursor.\n")
+BOUNTY_PROXY(waitformodelevent, "Long-poll events after a cursor. Timeout, bounded page, no shell.\n")
+BOUNTY_PROXY(getmodelwatchactions, "Drain queued watch actions. FREE_DOWNLOAD is coordinator getmodel FREE_ONLY. Never auto-spend.\n")
+BOUNTY_PROXY(observemodelchannel, "Apply a publisher-signed channel pointer. Not model identity.\n")
+BOUNTY_PROXY(seedlabmodelchannel, "Lab-only: generate a publisher key, sign a stable channel, and store it. Not identity. automatic_spend_atoms stays 0.\n")
+BOUNTY_PROXY(getmodelchannel, "Inspect a signed channel pointer.\n")
+BOUNTY_PROXY(listmodelchannels, "List local signed channels.\n")
+BOUNTY_PROXY(getmodelprofile, "Operator profile preset. Ordinary policy only.\n")
+BOUNTY_PROXY(setmodelprofile, "Persist personal|infrastructure|mirror|custom. Host-auto/follow/preserve/upload apply live; NODE_MODEL_HOST still follows AutoHostShouldAdvertise.\n")
+BOUNTY_PROXY(setcloudstorage, "Persist local S3/R2/MinIO origin config. Credential ref only; secrets never in RPC JSON, search, events, or GUI. allow_link_local is rejected.\n")
+BOUNTY_PROXY(testcloudstorage, "Local origin probe. FakeS3 or configured backend. Not WAN evidence. No secrets out.\n")
+BOUNTY_PROXY(getcloudstorageinfo, "Cloud origin health and layout. No credentials. Live R2 WAN remains NOT_RUN.\n")
+BOUNTY_PROXY(getmodelmirror, "Local mirror keep/follow policy. Node role only; not consensus or search privilege. Never auto-spends.\n")
+BOUNTY_PROXY(setmodelmirror, "Persist publisher/collection/query keep-N. automatic_spend_atoms stays 0.\n")
+BOUNTY_PROXY(executemodelimport, "Execute an ImportPlan. Staging UUID until VerifiedManifest. HF/torrent integrity is not authorship. No live HTTP; no auto-spend.\n")
+BOUNTY_PROXY(getmodelimport, "Import job status. Source integrity is not publisher authorship.\n")
+BOUNTY_PROXY(cancelmodelimport, "Drop a local import job. Never spends.\n")
+BOUNTY_PROXY(resumemodelimport, "Re-prepare staging for a local ImportPlan. No live HTTP.\n")
+BOUNTY_PROXY(publishmodelimport, "Status only until VerifiedManifest is accepted. Does not wallet-sign.\n")
+BOUNTY_PROXY(createbtxpackage, "Binary .btxbundle (secret-scan). Distinct from exportmodellink magnet analog. No secrets.\n")
+BOUNTY_PROXY(inspectbtxpackage, "Decode a public .btxbundle. Does not mutate the catalog.\n")
+BOUNTY_PROXY(verifybtxpackage, "Verify public .btxbundle framing. Catalog install still needs VerifiedManifest.\n")
+BOUNTY_PROXY(importbtxpackage, "Inspect a .btxbundle. Does not auto-install or spend.\n")
+BOUNTY_PROXY(exportbtxbundle, "Alias of createbtxpackage. exportmodellink remains the JSON magnet analog.\n")
+BOUNTY_PROXY(exportbtxpackage, "AHP catalog name. Alias of exportbtxbundle/createbtxpackage. Not a magnet analog.\n")
+BOUNTY_PROXY(getbtxpackagedocument, "Inert escaped virtual document. Never writes project or home AGENTS.md.\n")
+BOUNTY_PROXY(getbtxpackagecapabilities, "Actually supported package/handoff profiles. GUI remains DEFERRED_WITH_EVIDENCE.\n")
+BOUNTY_PROXY(planbtxacquisition, "FREE_ONLY AcquisitionPlan. Does not download. automatic_spend_atoms stays 0.\n")
+BOUNTY_PROXY(executebtxacquisition, "Execute a finite FREE_ONLY plan. Verified local files become MODEL_READY; otherwise SELECTION_READY without claiming swarm bytes. No auto-spend.\n")
+BOUNTY_PROXY(getbtxacquisition, "Owned acquisition job status and receipt. Never spends.\n")
+BOUNTY_PROXY(cancelbtxacquisition, "Cancel an owned acquisition job. Reservations released; no spend.\n")
+BOUNTY_PROXY(planbtxclientinstall, "InstallPlan from independently trusted catalogue. TRUST_REQUIRED otherwise. Does not install.\n")
+BOUNTY_PROXY(planbtxruntime, "RuntimePlan only. Does not execute. No arbitrary argv or remote inference.\n")
+BOUNTY_PROXY(resolvebtxcapability, "Owner-local capability resolver. Typed plan required. Never public HTTP. automatic_spend_atoms stays 0.\n")
+BOUNTY_PROXY(planbtxcapability, "Finite CapabilityPlan. No spend. No remote inference.\n")
+BOUNTY_PROXY(ensurebtxcapability, "IMPLEMENTED_LAB. Runs the local fixture path for a granted plan; does not yet dereference recipe digests.\n")
+BOUNTY_PROXY(getbtxcapability, "Owner-local job/lease readiness. No public pointers.\n")
+BOUNTY_PROXY(cancelbtxcapability, "Logical cancel. Physical disposition may remain STILL_IN_FLIGHT.\n")
+BOUNTY_PROXY(releasebtxcapability, "Release a quiescent lease only.\n")
+BOUNTY_PROXY(prefetchbtxcapability, "Bounded speculative prefetch. Rejects prompt transcripts. automatic_spend_atoms stays 0.\n")
+BOUNTY_PROXY(sleepbtxcapability, "Preserve weights; discard KV/workspace. Not readiness.\n")
+BOUNTY_PROXY(wakebtxcapability, "Rebuild discarded KV before readiness. Remap alone is not success.\n")
+BOUNTY_PROXY(getbtxresidency, "Owner-local residency facts. Never public raw pointers.\n")
+BOUNTY_PROXY(inspectbtxtensormap, "Derive a bounded TensorRangeMap from verified header bytes.\n")
+BOUNTY_PROXY(exportbtxlock, "Export canonical lock bytes. No secrets.\n")
+BOUNTY_PROXY(importbtxlock, "Import a digest-bound lock. ensure --locked performs no re-resolution.\n")
+BOUNTY_PROXY(planbtxcapabilityupdate, "Propose a new lock beside the active generation.\n")
+BOUNTY_PROXY(switchbtxcapability, "Atomic generation switch with journal/rollback.\n")
+BOUNTY_PROXY(getbtxcapabilityevents, "Owner-local capability lifecycle events.\n")
+BOUNTY_PROXY(getbtxruntimecapabilities, "Actual probed local adapters. Absent hardware is NOT_RUN, never a stub PASS.\n")
+BOUNTY_PROXY(getbtxttctrace, "Critical-path TTC, not occupancy sum.\n")
+BOUNTY_PROXY(accepthcphandoff, "Accept a signed HCP/1 CapabilityHandoff. Requires LocalCapabilityGrant. Not a wallet. automatic_spend_atoms stays 0.\n")
+BOUNTY_PROXY(enrollhcpprovider, "Operator-accepted HCP provider enrollment. Package self-signature never auto-enrolls.\n")
+BOUNTY_PROXY(previewhcpprovider, "Preview an HCP ProviderProfile without trusting it or connecting an account.\n")
+BOUNTY_PROXY(sethcplocalgrant, "Install an owner-local capability grant. HostedAccountPolicy is not runtime or spend authority.\n")
+BOUNTY_PROXY(gethcpreadiness, "Local readiness is independent of FinancialReceipt.\n")
+BOUNTY_PROXY(exporthcpstate, "Export public HCP/package state. No secrets, prompts, KV, or custody keys.\n")
+BOUNTY_PROXY(importhcpstate, "Import public HCP state. Secrets are refused. Not a wallet restore.\n")
+BOUNTY_PROXY(sethcpreporting, "Owner opt-in readiness reporting. Default off. No prompts/KV.\n")
+BOUNTY_PROXY(hcphandle, "Owner-local typed HCP handle. Not public HTTP capability. No /rpc passthrough.\n")
+BOUNTY_PROXY(pairhcpdevice, "Pair a device for outbound-only HCP handoff. No inbound runtime port.\n")
+BOUNTY_PROXY(revokehcpdevice, "Revoke a paired HCP device. Local public capability remains under owner policy.\n")
+BOUNTY_PROXY(gethcpconnectorstatus, "Walletless connector status. start_wallet and start_mining stay off in the preset.\n")
+BOUNTY_PROXY(applyhcpwalletless, "Apply the walletless HCP client preset. No monetary wallet or mining.\n")
+BOUNTY_PROXY(hcphealth, "HCP connector health. automatic_spend_atoms stays 0.\n")
+BOUNTY_PROXY(planhcplocal, "Local TTC plan for a hosted handoff recipe. Does not report private inventory.\n")
+BOUNTY_PROXY(puthcplocalitysources, "Lab-only LAN vs internet TTC sources for planhcplocal. Does not report inventory. automatic_spend_atoms stays 0.\n")
+BOUNTY_PROXY(minthcphandoff, "Mint a lab-signed CapabilityHandoff. Not a wallet. automatic_spend_atoms stays 0.\n")
+BOUNTY_PROXY(ensurehcplocal, "Owner-local ensure for a hosted recipe. No remote inference. No second downloader.\n")
+BOUNTY_PROXY(preparemodelerasure, "Evaluate per-stripe erasure health. Global n is not reconstructability.\n")
+BOUNTY_PROXY(executemodelerasure, "Evaluate erasure plan. Does not change canonical model identity.\n")
+BOUNTY_PROXY(getmodelerasurehealth, "Per-stripe reconstructability. Global shard count is informational only.\n")
+BOUNTY_PROXY(repairmodel, "Report per-stripe deficit. Does not auto-repair or spend.\n")
+BOUNTY_PROXY(gettorrentsourcestatus, "Torrent/magnet infohash status. Packaged bridge; btx-torrentd is not a process.\n")
+BOUNTY_PROXY(getmodeloriginoffer, "Native-proxy origin offer. Presigned GET is not a meter. No secrets out.\n")
+BOUNTY_PROXY(getmodeloriginstatus, "Origin broker counters. Native proxy default.\n")
+BOUNTY_PROXY(querymodelsummary, "Bounded query summary (sample cap 32). Not a global census.\n")
+BOUNTY_PROXY(reconcilemodelindex, "Anti-entropy want list (cap 256). Digests do not authorize insert.\n")
+BOUNTY_PROXY(getmodelobjectlayout, "WHOLE_FILE / LARGE_EXTENTS / PIECE_OBJECTS arithmetic. Does not replace R2 SOURCE_FILES.\n")
+BOUNTY_PROXY(validatesubpiece, "SUBPIECE_V1 256 KiB request check. Overlap/overflow rejected. Partial pieces are not advertised.\n")
+BOUNTY_PROXY(getmodelbulkstatus, "Low-priority bulk share. Interactive piece traffic keeps priority.\n")
+BOUNTY_PROXY(getmodelioexecutor, "Bounded outstanding I/O. Not io_uring.\n")
+BOUNTY_PROXY(getevaluatedtransport, "uTP/QUIC/dedup/64-80/10M catalog disposition. NONSHIPPING / NOT_RUN stay honest.\n")
+BOUNTY_PROXY(addmodelstorage, "Catalog alias of setcloudstorage. Does not duplicate the private method.\n")
+BOUNTY_PROXY(inspectmodelstorage, "Catalog alias of testcloudstorage. Not WAN evidence.\n")
+BOUNTY_PROXY(testmodelstorage, "Catalog alias of testcloudstorage. Bounded probe only.\n")
+BOUNTY_PROXY(listmodelstorage, "Catalog alias of getcloudstorageinfo. No secrets.\n")
+BOUNTY_PROXY(getmodelcapabilities, "Catalog alias of getmodelnetworkinfo. No unexecuted capability flags.\n")
+BOUNTY_PROXY(getmodeltransfermetrics, "Catalog alias of getmodeltransfers.\n")
+BOUNTY_PROXY(requestmodelorigin, "Catalog alias of getmodeloriginoffer. Presigned GET is not a meter.\n")
+BOUNTY_PROXY(getmodeloriginhealth, "Catalog alias of getmodeloriginstatus.\n")
+BOUNTY_PROXY(getmodelmirrorstatus, "Catalog alias of getmodelmirror.\n")
+BOUNTY_PROXY(removemodelstorage, "Detach local cloud handle. Never deletes remote bucket objects.\n")
+BOUNTY_PROXY(setmodelstoragepolicy, "Local handle policy. Credentials do not approve unlimited I/O.\n")
+BOUNTY_PROXY(setbootstrapdistributor, "Truthful bootstrap leases. Does not advertise false missing bitfields.\n")
+BOUNTY_PROXY(getbootstrapstatus, "Bootstrap lease counters. Origin independence is a later disable-origin proof.\n")
+BOUNTY_PROXY(setmodeluploadpolicy, "Finite upload slots. Connection count is not service capacity.\n")
+BOUNTY_PROXY(getmodeluploadinfo, "Upload scheduler slots and per-identity/netgroup caps.\n")
+BOUNTY_PROXY(planmodelstoragemigration, "Local migration plan. No bulk I/O.\n")
+BOUNTY_PROXY(executemodelstoragemigration, "Does not execute a second 400 GiB copy. Plan only unless authorized.\n")
+BOUNTY_PROXY(setmodelswarmhealer, "Local healer policy. Repair is not auto-spend.\n")
+BOUNTY_PROXY(settorrentsourcepolicy, "Torrent worker gets no S3 credentials. btx-torrentd is not a process.\n")
+BOUNTY_PROXY(getmodelroutingstatus, "Query/LAN/delegated routing diagnostics. Not consensus.\n")
+BOUNTY_PROXY(setmodeldiscoverypolicy, "Local discovery policy. Throughput is not ranking authority.\n")
+BOUNTY_PROXY(getmodelresidency, "ABSENT/STAGING/VERIFIED_*/REPAIRABLE/UNAVAILABLE. HeadObject is not VERIFIED_REMOTE.\n")
+BOUNTY_PROXY(getmodeldedupinfo, "Physical byte digest reuse. Content-defined dedup is NONSHIPPING.\n")
+BOUNTY_PROXY(getmodellandiscovery, "LAN endpoint observation. Not a public-address requirement.\n")
+BOUNTY_PROXY(getmodelfileselection, "SELECTIVE_FILES_V1. Unselected files are not HAVE.\n")
+BOUNTY_PROXY(getmultipartjournal, "Multipart journal. ETag is not SHA-384 identity.\n")
+BOUNTY_PROXY(getsourcepolicy, "SSRF pin. Torrent worker receives no S3 credentials. No redirects.\n")
 BOUNTY_PROXY(observebountychain, "Watch-only outpoint observation. Not a consensus oracle.\n")
 BOUNTY_PROXY(reorgbountychain, "Disconnect last observed tip. Secret knowledge is not chain state.\n")
 BOUNTY_PROXY(exportbountyrecovery, "Scripts and lineage. No seed or private keys.\n")
@@ -1591,6 +1916,20 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &unmutesearchpublisher},
         {"modelnet", &getmodelmanifest},
         {"modelnet", &importmodel},
+        {"modelnet", &hostmodel},
+        {"modelnet", &checkmodelsetup},
+        {"modelnet", &previewmodelimport},
+        {"modelnet", &getmodelsharecard},
+        {"modelnet", &getmodeltransfers},
+        {"modelnet", &setmodelalias},
+        {"modelnet", &scanmodelwatch},
+        {"modelnet", &getmodelwatchstatus},
+        {"modelnet", &showmodel},
+        {"modelnet", &exportmodellink},
+        {"modelnet", &unhostmodel},
+        {"modelnet", &removemodelalias},
+        {"modelnet", &openmodelshare},
+        {"modelnet", &getsetupstatus},
         {"modelnet", &seedmodel},
         {"modelnet", &unseedmodel},
         {"modelnet", &pinmodel},
@@ -1640,6 +1979,10 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &getbountyterms},
         {"modelnet", &getbountycapabilities},
         {"modelnet", &createbountydraft},
+        {"modelnet", &listbountydrafts},
+        {"modelnet", &getbountydraft},
+        {"modelnet", &updatebountydraft},
+        {"modelnet", &deletebountydraft},
         {"modelnet", &validatebountyterms},
         {"modelnet", &publishbounty},
         {"modelnet", &revisebounty},
@@ -1675,6 +2018,129 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &revokeagentmandate},
         {"modelnet", &getagentactivity},
         {"modelnet", &reservemandate},
+        {"modelnet", &createsubscriptionmandate},
+        {"modelnet", &getsubscriptionmandate},
+        {"modelnet", &getsubscriptionactivity},
+        {"modelnet", &revokesubscriptionmandate},
+        {"modelnet", &reservesubscriptionmandate},
+        {"modelnet", &watchmodelpublisher},
+        {"modelnet", &watchmodelcollection},
+        {"modelnet", &watchmodelquery},
+        {"modelnet", &watchmodel},
+        {"modelnet", &listmodelwatches},
+        {"modelnet", &getmodelwatch},
+        {"modelnet", &unwatchmodel},
+        {"modelnet", &getmodelevents},
+        {"modelnet", &getmodeleventsequence},
+        {"modelnet", &waitformodelevent},
+        {"modelnet", &getmodelwatchactions},
+        {"modelnet", &observemodelchannel},
+        {"modelnet", &seedlabmodelchannel},
+        {"modelnet", &getmodelchannel},
+        {"modelnet", &listmodelchannels},
+        {"modelnet", &getmodelprofile},
+        {"modelnet", &setmodelprofile},
+        {"modelnet", &setcloudstorage},
+        {"modelnet", &testcloudstorage},
+        {"modelnet", &getcloudstorageinfo},
+        {"modelnet", &getmodelmirror},
+        {"modelnet", &setmodelmirror},
+        {"modelnet", &executemodelimport},
+        {"modelnet", &getmodelimport},
+        {"modelnet", &cancelmodelimport},
+        {"modelnet", &resumemodelimport},
+        {"modelnet", &publishmodelimport},
+        {"modelnet", &createbtxpackage},
+        {"modelnet", &inspectbtxpackage},
+        {"modelnet", &verifybtxpackage},
+        {"modelnet", &importbtxpackage},
+        {"modelnet", &exportbtxbundle},
+        {"modelnet", &exportbtxpackage},
+        {"modelnet", &getbtxpackagedocument},
+        {"modelnet", &getbtxpackagecapabilities},
+        {"modelnet", &planbtxacquisition},
+        {"modelnet", &executebtxacquisition},
+        {"modelnet", &getbtxacquisition},
+        {"modelnet", &cancelbtxacquisition},
+        {"modelnet", &planbtxclientinstall},
+        {"modelnet", &planbtxruntime},
+        {"modelnet", &resolvebtxcapability},
+        {"modelnet", &planbtxcapability},
+        {"modelnet", &ensurebtxcapability},
+        {"modelnet", &getbtxcapability},
+        {"modelnet", &cancelbtxcapability},
+        {"modelnet", &releasebtxcapability},
+        {"modelnet", &prefetchbtxcapability},
+        {"modelnet", &sleepbtxcapability},
+        {"modelnet", &wakebtxcapability},
+        {"modelnet", &getbtxresidency},
+        {"modelnet", &inspectbtxtensormap},
+        {"modelnet", &exportbtxlock},
+        {"modelnet", &importbtxlock},
+        {"modelnet", &planbtxcapabilityupdate},
+        {"modelnet", &switchbtxcapability},
+        {"modelnet", &getbtxcapabilityevents},
+        {"modelnet", &getbtxruntimecapabilities},
+        {"modelnet", &getbtxttctrace},
+        {"modelnet", &accepthcphandoff},
+        {"modelnet", &enrollhcpprovider},
+        {"modelnet", &previewhcpprovider},
+        {"modelnet", &sethcplocalgrant},
+        {"modelnet", &gethcpreadiness},
+        {"modelnet", &exporthcpstate},
+        {"modelnet", &importhcpstate},
+        {"modelnet", &sethcpreporting},
+        {"modelnet", &hcphandle},
+        {"modelnet", &pairhcpdevice},
+        {"modelnet", &revokehcpdevice},
+        {"modelnet", &gethcpconnectorstatus},
+        {"modelnet", &applyhcpwalletless},
+        {"modelnet", &hcphealth},
+        {"modelnet", &planhcplocal},
+        {"modelnet", &puthcplocalitysources},
+        {"modelnet", &minthcphandoff},
+        {"modelnet", &ensurehcplocal},
+        {"modelnet", &preparemodelerasure},
+        {"modelnet", &executemodelerasure},
+        {"modelnet", &getmodelerasurehealth},
+        {"modelnet", &repairmodel},
+        {"modelnet", &gettorrentsourcestatus},
+        {"modelnet", &getmodeloriginoffer},
+        {"modelnet", &getmodeloriginstatus},
+        {"modelnet", &querymodelsummary},
+        {"modelnet", &reconcilemodelindex},
+        {"modelnet", &getmodelobjectlayout},
+        {"modelnet", &validatesubpiece},
+        {"modelnet", &getmodelbulkstatus},
+        {"modelnet", &getmodelioexecutor},
+        {"modelnet", &getevaluatedtransport},
+        {"modelnet", &addmodelstorage},
+        {"modelnet", &inspectmodelstorage},
+        {"modelnet", &testmodelstorage},
+        {"modelnet", &listmodelstorage},
+        {"modelnet", &getmodelcapabilities},
+        {"modelnet", &getmodeltransfermetrics},
+        {"modelnet", &requestmodelorigin},
+        {"modelnet", &getmodeloriginhealth},
+        {"modelnet", &getmodelmirrorstatus},
+        {"modelnet", &removemodelstorage},
+        {"modelnet", &setmodelstoragepolicy},
+        {"modelnet", &setbootstrapdistributor},
+        {"modelnet", &getbootstrapstatus},
+        {"modelnet", &setmodeluploadpolicy},
+        {"modelnet", &getmodeluploadinfo},
+        {"modelnet", &planmodelstoragemigration},
+        {"modelnet", &executemodelstoragemigration},
+        {"modelnet", &setmodelswarmhealer},
+        {"modelnet", &settorrentsourcepolicy},
+        {"modelnet", &getmodelroutingstatus},
+        {"modelnet", &setmodeldiscoverypolicy},
+        {"modelnet", &getmodelresidency},
+        {"modelnet", &getmodeldedupinfo},
+        {"modelnet", &getmodellandiscovery},
+        {"modelnet", &getmodelfileselection},
+        {"modelnet", &getmultipartjournal},
+        {"modelnet", &getsourcepolicy},
         {"modelnet", &observebountychain},
         {"modelnet", &reorgbountychain},
         {"modelnet", &exportbountyrecovery},

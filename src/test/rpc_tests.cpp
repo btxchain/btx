@@ -4,6 +4,7 @@
 
 #include <arith_uint256.h>
 #include <base58.h>
+#include <chainparams.h>
 #include <core_io.h>
 #include <hash.h>
 #include <interfaces/chain.h>
@@ -16,6 +17,7 @@
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
+#include <script/descriptor.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <uint256.h>
@@ -244,10 +246,11 @@ BOOST_AUTO_TEST_CASE(rpc_rawsign)
     BOOST_REQUIRE(!converted_privkey2.empty());
     std::string privkey1 = "\"" + converted_privkey1 + "\"";
     std::string privkey2 = "\"" + converted_privkey2 + "\"";
-    r = CallRPC(std::string("signrawtransactionwithkey ")+notsigned+" [] "+prevout);
-    BOOST_CHECK(r.get_obj().find_value("complete").get_bool() == false);
-    r = CallRPC(std::string("signrawtransactionwithkey ")+notsigned+" ["+privkey1+","+privkey2+"] "+prevout);
-    BOOST_CHECK(r.get_obj().find_value("complete").get_bool() == true);
+    const auto is_pq_disabled = [](const std::runtime_error& e) {
+        return std::string(e.what()).find("signrawtransactionwithkey is disabled") != std::string::npos;
+    };
+    BOOST_CHECK_EXCEPTION(CallRPC(std::string("signrawtransactionwithkey ")+notsigned+" [] "+prevout), std::runtime_error, is_pq_disabled);
+    BOOST_CHECK_EXCEPTION(CallRPC(std::string("signrawtransactionwithkey ")+notsigned+" ["+privkey1+","+privkey2+"] "+prevout), std::runtime_error, is_pq_disabled);
 }
 
 BOOST_AUTO_TEST_CASE(rpc_createraw_op_return_disabled)
@@ -496,6 +499,52 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_pq_wallet_methods)
     BOOST_CHECK_EQUAL(result[1][1].get_str(), "pk_slh(bbbbbbbb)");
     BOOST_CHECK_EQUAL(result[2].get_str(), "pq-msig");
     BOOST_CHECK_EQUAL(result[3].get_bool(), true);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("backupwalletbundle", {"/tmp/bundle", "wallet-pass", "false"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 3U);
+    BOOST_CHECK_EQUAL(result[0].get_str(), "/tmp/bundle");
+    BOOST_CHECK_EQUAL(result[1].get_str(), "wallet-pass");
+    BOOST_CHECK_EQUAL(result[2].get_bool(), false);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("backupwalletbundlearchive", {"/tmp/w.bundle.btx", "archive-pass", "wallet-pass", "true"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 4U);
+    BOOST_CHECK_EQUAL(result[0].get_str(), "/tmp/w.bundle.btx");
+    BOOST_CHECK_EQUAL(result[1].get_str(), "archive-pass");
+    BOOST_CHECK_EQUAL(result[2].get_str(), "wallet-pass");
+    BOOST_CHECK_EQUAL(result[3].get_bool(), true);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("exportwalletbundle", {"/tmp/w.btxwallet.json", "wallet-pass", "1700000000"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 3U);
+    BOOST_CHECK_EQUAL(result[0].get_str(), "/tmp/w.btxwallet.json");
+    BOOST_CHECK_EQUAL(result[1].get_str(), "wallet-pass");
+    BOOST_CHECK_EQUAL(result[2].getInt<int64_t>(), 1700000000);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("importwalletbundle", {"/tmp/w.btxwallet.json", "false"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 2U);
+    BOOST_CHECK_EQUAL(result[0].get_str(), "/tmp/w.btxwallet.json");
+    BOOST_CHECK_EQUAL(result[1].get_bool(), false);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("restorewalletbundle", {"webwallet", "/tmp/w.btxwallet.json", "true", "false"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 4U);
+    BOOST_CHECK_EQUAL(result[0].get_str(), "webwallet");
+    BOOST_CHECK_EQUAL(result[1].get_str(), "/tmp/w.btxwallet.json");
+    BOOST_CHECK_EQUAL(result[2].get_bool(), true);
+    BOOST_CHECK_EQUAL(result[3].get_bool(), false);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("restorewalletbundlearchive", {"testwallet", "/tmp/w.bundle.btx", "archive-pass", "false"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 4U);
+    BOOST_CHECK_EQUAL(result[0].get_str(), "testwallet");
+    BOOST_CHECK_EQUAL(result[1].get_str(), "/tmp/w.bundle.btx");
+    BOOST_CHECK_EQUAL(result[2].get_str(), "archive-pass");
+    BOOST_CHECK_EQUAL(result[3].get_bool(), false);
+
+    const std::string pq_master_seeds{R"(["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"])"};
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("importdescriptors", {"[]", "[]", pq_master_seeds}));
+    BOOST_REQUIRE_EQUAL(result.size(), 3U);
+    BOOST_CHECK(result[0].isArray());
+    BOOST_CHECK(result[1].isArray());
+    BOOST_CHECK(result[2].isArray());
+    BOOST_CHECK_EQUAL(result[2].size(), 1U);
 }
 
 BOOST_AUTO_TEST_CASE(rpc_convert_values_btx_mining_methods)
@@ -539,6 +588,20 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_btx_mining_methods)
     BOOST_REQUIRE_EQUAL(result.size(), 2U);
     BOOST_CHECK_EQUAL(result[0].getInt<int>(), 199290);
     BOOST_CHECK_EQUAL(result[1].getInt<int>(), 199295);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("offerattestedutxosnapshot", {"utxo.dat", "utxo.manifest", "1048576"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 3U);
+    BOOST_CHECK_EQUAL(result[0].get_str(), "utxo.dat");
+    BOOST_CHECK_EQUAL(result[1].get_str(), "utxo.manifest");
+    BOOST_CHECK_EQUAL(result[2].getInt<int>(), 1048576);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("fetchattestedutxosnapshot", {"utxo.dat", "utxo.manifest", "00", "3", "120000"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 5U);
+    BOOST_CHECK_EQUAL(result[0].get_str(), "utxo.dat");
+    BOOST_CHECK_EQUAL(result[1].get_str(), "utxo.manifest");
+    BOOST_CHECK_EQUAL(result[2].get_str(), "00");
+    BOOST_CHECK_EQUAL(result[3].getInt<int>(), 3);
+    BOOST_CHECK_EQUAL(result[4].getInt<int64_t>(), 120000);
 }
 
 BOOST_AUTO_TEST_CASE(rpc_convert_values_bridge_methods)
@@ -626,6 +689,10 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_modelnet_methods)
     BOOST_CHECK(RPCConvertValues("setmodelpolicy", {"{\"preserve_rare\":false}"})[0].isObject());
     BOOST_CHECK(RPCConvertValues("importmodelcontacts", {"[\"127.0.0.1:8443\"]"})[0].isArray());
     BOOST_CHECK(RPCConvertValues("removemodelrule", {"3"})[0].isNum());
+    BOOST_CHECK(RPCConvertValues("inspectbountytransaction", {"{}"})[0].isObject());
+    BOOST_CHECK(RPCConvertValues("preparebountyclaim", {"{}"})[0].isObject());
+    BOOST_CHECK(RPCConvertValues("preparebountyrefund", {"{}"})[0].isObject());
+    BOOST_CHECK(RPCConvertValues("signbountyfunding", {"{}"})[0].isObject());
 }
 
 BOOST_AUTO_TEST_CASE(rpc_getblockstats_calculate_percentiles_by_weight)
@@ -1212,6 +1279,41 @@ BOOST_AUTO_TEST_CASE(getblockchaininfo_better_work_twin_blocked_by_local_commitm
         }
     }
     BOOST_CHECK(saw_observation);
+}
+
+BOOST_AUTO_TEST_CASE(p2mr_only_descriptor_rpcs_on_enforcing_chain)
+{
+    BOOST_REQUIRE(Params().GetConsensus().fEnforceP2MROnlyOutputs);
+
+    const auto is_p2mr_policy = [](const std::runtime_error& e) {
+        const std::string message{e.what()};
+        return message.find("BTX PQ policy") != std::string::npos &&
+               message.find("P2MR") != std::string::npos;
+    };
+
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("getdescriptorinfo wpkh(02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9)"),
+        std::runtime_error,
+        is_p2mr_policy);
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("getdescriptorinfo pkh(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5)"),
+        std::runtime_error,
+        is_p2mr_policy);
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("deriveaddresses " + AddChecksum("wpkh(02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9)")),
+        std::runtime_error,
+        is_p2mr_policy);
+
+    BOOST_CHECK_NO_THROW(CallRPC(
+        "getdescriptorinfo mr(pqhd(d34db33f/0h/0h/0/*),pk_slh(pqhd(d34db33f/0h/0h/0/*)))"));
+    BOOST_CHECK_NO_THROW(CallRPC(
+        "deriveaddresses addr(" + EXAMPLE_ADDRESS[0] + ") null {\"require_checksum\":false}"));
+
+    const UniValue decoded = CallRPC("decodescript 76a914011111111111111111111111111111111111111188ac");
+    BOOST_CHECK(decoded.exists("asm"));
+    BOOST_CHECK(decoded.exists("type"));
+    BOOST_CHECK(!decoded.exists("p2sh"));
+    BOOST_CHECK(!decoded.exists("segwit"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

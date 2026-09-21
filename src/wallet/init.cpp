@@ -73,6 +73,8 @@ void WalletInit::AddWalletOptions(ArgsManager& argsman) const
     argsman.AddArg("-signer=<cmd>", "External signing tool, see doc/external-signer.md", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
     argsman.AddArg("-signerfingerprint=<hex>", "Preferred external signer fingerprint when multiple devices are connected", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
 #endif
+    argsman.AddArg("-exchange-watchonly", "BCP/1: refuse in-process private signing. Wallets must be descriptor + disable_private_keys (external signer or imported deposit pool). See doc/integrations/bcp1.md", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
+    argsman.AddHiddenArgs({"-bcp1software"});
     argsman.AddArg("-autoshieldcoinbase", "Automatically shield mature coinbase outputs into the shielded pool when a new block arrives (default: false). Historical/pre-sunset opt-in for fund preservation: mined rewards stay as post-quantum transparent (P2MR, ML-DSA/SLH-DSA) outputs, which carry no shielded-proof soundness exposure, unless the operator chooses privacy before the sunset. Even when enabled, auto-shielding does not begin until the configured C-002 shielded-pool hardening height activates (block 123,000 on mainnet; see -autoshieldcoinbaseminheight) and is inert once shielded pool credits are disabled by consensus.", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
     argsman.AddArg("-autoshieldcoinbaseminheight=<n>", "Do not auto-shield coinbase below this block height (default: the configured C-002 shielded-pool hardening height, 123000 on mainnet). Lower it (e.g. 0) only on test networks where C-002 is effectively active early.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::WALLET);
     argsman.AddArg("-bridgependingconfirmdepth=<n>", strprintf("Keep active bridge recovery records until settlement/refund reaches at least <n> confirmations before archiving (default: %u)", DEFAULT_BRIDGE_PENDING_CONFIRM_DEPTH), ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
@@ -87,6 +89,7 @@ void WalletInit::AddWalletOptions(ArgsManager& argsman) const
     argsman.AddArg("-walletimplicitsegwit", strprintf("Support segwit when restoring wallet backups and importing keys (default: %u)", DEFAULT_WALLET_IMPLICIT_SEGWIT), ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
 #if HAVE_SYSTEM
     argsman.AddArg("-walletnotify=<cmd>", "Execute command when a wallet transaction changes. %s in cmd is replaced by TxID, %w is replaced by wallet name, %b is replaced by the hash of the block including the transaction (set to 'unconfirmed' if the transaction is not included) and %h is replaced by the block height (-1 if not included). %w is not currently implemented on windows. On systems where %w is supported, it should NOT be quoted because this would break shell escaping used to invoke the command.", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
+    argsman.AddArg("-walletdepositnotify=<cmd>", "BCP/1: execute command when a wallet deposit changes. %s=txid, %e=event name (deposit.detected, …), %j=JSON object (chain/txid/vout/amount_atoms/status/…). Does not add ZMQ topics. %w=wallet name (not on windows).", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
 #endif
     argsman.AddArg("-walletrbf", strprintf("Send transactions with full-RBF opt-in enabled (RPC only, default: %u)", DEFAULT_WALLET_RBF), ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
 
@@ -123,6 +126,10 @@ bool WalletInit::ParameterInteraction() const
          return InitError(Untranslated("A version conflict was detected between the run-time BerkeleyDB library and the one used during compilation."));
      }
 #endif
+    if (gArgs.GetBoolArg("-exchange-watchonly", false) && gArgs.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
+        return InitError(Untranslated("-exchange-watchonly requires the wallet; do not combine with -disablewallet"));
+    }
+
     if (gArgs.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
         for (const std::string& wallet : gArgs.GetArgs("-wallet")) {
             LogPrintf("%s: parameter interaction: -disablewallet -> ignoring -wallet=%s\n", __func__, wallet);

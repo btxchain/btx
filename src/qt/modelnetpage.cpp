@@ -19,6 +19,7 @@
 #include <modelnet/resource_uri.h>
 #endif
 
+#include <QFileDialog>
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QObject>
@@ -31,10 +32,14 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QStringList>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -198,6 +203,147 @@ QString UniStrField(const UniValue& obj, const char* key)
     return {};
 }
 
+QString FormatPercentField(const UniValue& v)
+{
+    if (v.isNull()) return {};
+    if (v.isStr()) {
+        QString s = QString::fromStdString(v.get_str()).trimmed();
+        if (s.isEmpty()) return {};
+        if (!s.contains(QLatin1Char('%'))) s += QLatin1Char('%');
+        return s;
+    }
+    if (v.isNum()) {
+        const double d = v.get_real();
+        QString s = QString::number(d, 'f', 1);
+        if (s.endsWith(QStringLiteral(".0"))) s.chop(2);
+        return s + QLatin1Char('%');
+    }
+    return {};
+}
+
+QString FormatBytesPerSecField(const UniValue& v)
+{
+    if (v.isNull()) return {};
+    if (v.isNum()) {
+        return HumanBytes(static_cast<int64_t>(v.get_real())) + QStringLiteral("/s");
+    }
+    if (v.isStr()) {
+        const QString s = QString::fromStdString(v.get_str()).trimmed();
+        if (s.isEmpty()) return {};
+        return s.contains(QLatin1Char('/')) ? s : s + QStringLiteral("/s");
+    }
+    return {};
+}
+
+QString TransferRateSuffix(const UniValue& obj)
+{
+    if (!obj.isObject()) return {};
+    QStringList bits;
+    if (obj.exists("percent") && !obj["percent"].isNull()) {
+        const QString p = FormatPercentField(obj["percent"]);
+        if (!p.isEmpty()) bits << p;
+    }
+    if (obj.exists("bytes_per_sec") && !obj["bytes_per_sec"].isNull()) {
+        const QString r = FormatBytesPerSecField(obj["bytes_per_sec"]);
+        if (!r.isEmpty()) bits << r;
+    }
+    return bits.join(QStringLiteral(" · "));
+}
+
+QString TransferRateSuffixFromRow(const UniValue& row)
+{
+    if (!row.isObject()) return {};
+    QString s = TransferRateSuffix(row);
+    if (!s.isEmpty()) return s;
+    if (row.exists("share") && row["share"].isObject()) {
+        s = TransferRateSuffix(row["share"]);
+        if (!s.isEmpty()) return s;
+    }
+    if (row.exists("job") && row["job"].isObject()) {
+        s = TransferRateSuffix(row["job"]);
+        if (!s.isEmpty()) return s;
+    }
+    if (row.exists("transfer") && row["transfer"].isObject()) {
+        s = TransferRateSuffix(row["transfer"]);
+        if (!s.isEmpty()) return s;
+    }
+    return {};
+}
+
+QString FormatAliasesLine(const UniValue& result, const UniValue* share)
+{
+    QStringList names;
+    auto collect = [&](const UniValue& o) {
+        if (!o.isObject() || !o.exists("aliases")) return;
+        const UniValue& a = o["aliases"];
+        if (a.isArray()) {
+            for (const auto& item : a.getValues()) {
+                if (item.isStr()) {
+                    const QString s = QString::fromStdString(item.get_str()).trimmed();
+                    if (!s.isEmpty()) names << s;
+                } else if (item.isObject() && item.exists("alias") && item["alias"].isStr()) {
+                    const QString s = QString::fromStdString(item["alias"].get_str()).trimmed();
+                    if (!s.isEmpty()) names << s;
+                }
+            }
+        } else if (a.isStr()) {
+            const QString s = QString::fromStdString(a.get_str()).trimmed();
+            if (!s.isEmpty()) names << s;
+        }
+    };
+    collect(result);
+    if (share) collect(*share);
+    names.removeDuplicates();
+    if (names.isEmpty()) return {};
+    return QObject::tr("aliases: %1").arg(names.join(QStringLiteral(", ")));
+}
+
+QString FormatTransfersPane(const UniValue& root)
+{
+    QStringList lines;
+    lines << QObject::tr("Rates (percent / bytes_per_sec) appear only when the JSON includes them. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.");
+
+    const UniValue* arr = nullptr;
+    if (root.exists("transfers") && root["transfers"].isArray()) {
+        arr = &root["transfers"];
+    } else if (root.exists("models") && root["models"].isArray()) {
+        arr = &root["models"];
+    } else if (root.exists("jobs") && root["jobs"].isArray()) {
+        arr = &root["jobs"];
+    } else if (root.isArray()) {
+        arr = &root;
+    }
+
+    if (arr) {
+        for (const auto& t : arr->getValues()) {
+            if (!t.isObject()) continue;
+            QString name = ModelDisplayName(t);
+            if (name == QStringLiteral("—")) {
+                QString uri = UniStrField(t, "uri");
+                if (uri.isEmpty() && t.exists("share") && t["share"].isObject()) {
+                    uri = UniStrField(t["share"], "copy_text");
+                    if (uri.isEmpty()) uri = UniStrField(t["share"], "uri");
+                }
+                if (!uri.isEmpty()) name = uri;
+            }
+            const QString state = UniStrField(t, "state");
+            const QString rates = TransferRateSuffixFromRow(t);
+            QStringList bits;
+            bits << name;
+            if (!state.isEmpty()) bits << state;
+            if (!rates.isEmpty()) bits << rates;
+            lines << bits.join(QStringLiteral(" · "));
+        }
+    } else {
+        const QString rates = TransferRateSuffixFromRow(root);
+        if (!rates.isEmpty()) lines << rates;
+    }
+
+    lines << QString();
+    lines << QString::fromStdString(root.write(2));
+    return lines.join(QLatin1Char('\n'));
+}
+
 QString FormatJobLine(const UniValue& job, const QString& label)
 {
     if (job.isStr()) {
@@ -228,6 +374,8 @@ QString FormatJobLine(const UniValue& job, const QString& label)
 
 QString FormatResourceGovernorStatus(const UniValue& info)
 {
+    // Keep this formatter secret-free and profile-free. 0.34.8-dev
+    // profile / optional-cloud copy belongs on dev348ProfileCloudLabel.
     QStringList lines;
     lines << QObject::tr("Resource governor");
     if (info.exists("mode") && info["mode"].isStr()) {
@@ -296,6 +444,659 @@ QString FormatResourceGovernorStatus(const UniValue& info)
     return lines.join(QLatin1Char('\n'));
 }
 
+#ifdef ENABLE_MODELNET
+QString FormatReadyFlag(const UniValue& v)
+{
+    if (v.isBool()) return v.get_bool() ? QObject::tr("yes") : QObject::tr("no");
+    if (v.isObject()) {
+        if (v.exists("ready")) return FormatReadyFlag(v["ready"]);
+        if (v.exists("ok")) return FormatReadyFlag(v["ok"]);
+    }
+    if (v.isStr()) {
+        const QString s = QString::fromStdString(v.get_str());
+        if (!s.isEmpty()) return s;
+    }
+    if (v.isNum()) {
+        return v.getInt<int>() != 0 ? QObject::tr("yes") : QObject::tr("no");
+    }
+    return QString::fromStdString(v.write());
+}
+
+const UniValue* NestedObject(const UniValue& obj, const char* const* keys, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) {
+        if (obj.exists(keys[i]) && obj[keys[i]].isObject()) return &obj[keys[i]];
+    }
+    return nullptr;
+}
+
+const UniValue* MiningDoctorSection(const UniValue& info)
+{
+    if (info.exists("first_run") && info["first_run"].isObject()) return &info["first_run"];
+    if (info.exists("mining") && info["mining"].isObject()) {
+        const UniValue& m = info["mining"];
+        if (m.exists("first_run") && m["first_run"].isObject()) return &m["first_run"];
+        return &m;
+    }
+    if (info.exists("chain") && info["chain"].isObject()) {
+        const UniValue& c = info["chain"];
+        if (c.exists("first_run") && c["first_run"].isObject()) return &c["first_run"];
+        if (c.exists("ibd") || c.exists("ready_to_mine") || c.exists("initial_block_download")) return &c;
+    }
+    return nullptr;
+}
+
+void CollectNextActions(const UniValue& obj, QStringList& acts)
+{
+    if (!obj.exists("next_actions") || !obj["next_actions"].isArray()) return;
+    for (const auto& a : obj["next_actions"].getValues()) {
+        QString s;
+        if (a.isStr()) {
+            s = QString::fromStdString(a.get_str());
+        } else if (a.isObject()) {
+            if (a.exists("action") && a["action"].isStr()) {
+                s = QString::fromStdString(a["action"].get_str());
+            } else if (a.exists("text") && a["text"].isStr()) {
+                s = QString::fromStdString(a["text"].get_str());
+            }
+        }
+        if (s.isEmpty() || acts.contains(s)) continue;
+        acts << s;
+    }
+}
+
+QString FormatSetupDoctor(const UniValue& info, const QString& rpc_name, QString& watch_dir_out)
+{
+    const char* kModelKeys[] = {
+        "model", "checkmodelsetup", "models", "modelnet", "helper", "model_setup"};
+    const UniValue* model = NestedObject(info, kModelKeys, sizeof(kModelKeys) / sizeof(kModelKeys[0]));
+    const UniValue* mining = MiningDoctorSection(info);
+
+    auto pick = [&](const char* key) -> const UniValue* {
+        if (info.exists(key) && !info[key].isNull()) return &info[key];
+        if (model && model->exists(key) && !(*model)[key].isNull()) return &(*model)[key];
+        if (mining && mining->exists(key) && !(*mining)[key].isNull()) return &(*mining)[key];
+        return nullptr;
+    };
+
+    QStringList lines;
+    lines << QObject::tr("Setup status (%1). showmodel / unhostmodel are RPC (not auto-run). This page does not auto-getmodel or spend (automatic_spend_atoms stays 0).")
+                 .arg(rpc_name);
+
+    auto add_flag = [&](const QString& label, const char* key, const char* alt = nullptr) {
+        const UniValue* v = pick(key);
+        if (!v && alt) v = pick(alt);
+        if (!v) return;
+        lines << label.arg(FormatReadyFlag(*v));
+    };
+
+    add_flag(QObject::tr("Identity ready: %1"), "identity_ready");
+    if (const UniValue* id = pick("identity_id")) {
+        if (id->isStr() && !id->get_str().empty()) {
+            lines << QObject::tr("Identity: %1").arg(QString::fromStdString(id->get_str()));
+        }
+    }
+    add_flag(QObject::tr("PQ1: %1"), "pq1", "pq1_ready");
+    add_flag(QObject::tr("Ready to host: %1"), "ready_to_host", "helper_ready");
+    add_flag(QObject::tr("Ready to mine: %1"), "ready_to_mine");
+    add_flag(QObject::tr("IBD: %1"), "ibd", "initial_block_download");
+
+    if (const UniValue* rec = pick("recommended_action")) {
+        if (rec->isStr() && !rec->get_str().empty()) {
+            lines << QObject::tr("Recommended: %1").arg(QString::fromStdString(rec->get_str()));
+        }
+    }
+
+    if (const UniValue* q = pick("quota")) {
+        if (q->isObject()) {
+            int64_t bytes = -1;
+            int64_t used = -1;
+            if ((*q).exists("bytes") && (*q)["bytes"].isNum()) {
+                bytes = (*q)["bytes"].getInt<int64_t>();
+            } else if ((*q).exists("quota_bytes") && (*q)["quota_bytes"].isNum()) {
+                bytes = (*q)["quota_bytes"].getInt<int64_t>();
+            }
+            if ((*q).exists("used_bytes") && (*q)["used_bytes"].isNum()) {
+                used = (*q)["used_bytes"].getInt<int64_t>();
+            } else if ((*q).exists("used") && (*q)["used"].isNum()) {
+                used = (*q)["used"].getInt<int64_t>();
+            }
+            if (bytes >= 0 && used >= 0) {
+                lines << QObject::tr("Quota: %1 used / %2").arg(HumanBytes(used), HumanBytes(bytes));
+            } else if (bytes >= 0) {
+                lines << QObject::tr("Quota: %1").arg(HumanBytes(bytes));
+            } else {
+                lines << QObject::tr("Quota: %1").arg(QString::fromStdString(q->write()));
+            }
+        } else if (q->isNum()) {
+            lines << QObject::tr("Quota: %1").arg(HumanBytes(q->getInt<int64_t>()));
+        } else if (q->isStr() && !q->get_str().empty()) {
+            lines << QObject::tr("Quota: %1").arg(QString::fromStdString(q->get_str()));
+        }
+    } else if (const UniValue* qb = pick("quota_bytes")) {
+        if (qb->isNum()) {
+            const int64_t bytes = qb->getInt<int64_t>();
+            const UniValue* used = pick("used_bytes");
+            if (used && used->isNum()) {
+                lines << QObject::tr("Quota: %1 used / %2")
+                             .arg(HumanBytes(used->getInt<int64_t>()), HumanBytes(bytes));
+            } else {
+                lines << QObject::tr("Quota: %1").arg(HumanBytes(bytes));
+            }
+        }
+    }
+
+    if (const UniValue* wd = pick("watch_dir")) {
+        if (wd->isStr()) {
+            watch_dir_out = QString::fromStdString(wd->get_str());
+            if (!watch_dir_out.isEmpty()) {
+                lines << QObject::tr("Watch dir: %1").arg(watch_dir_out);
+            } else {
+                lines << QObject::tr("Watch dir: not set (-modelwatch)");
+            }
+        }
+    }
+    if (const UniValue* p = pick("profile")) {
+        if (p->isStr() && !p->get_str().empty()) {
+            lines << QObject::tr("Operator profile: %1").arg(QString::fromStdString(p->get_str()));
+        }
+    }
+    if (const UniValue* s = pick("cloud_layout_sentence")) {
+        if (s->isStr() && !s->get_str().empty()) {
+            lines << QObject::tr("%1").arg(QString::fromStdString(s->get_str()));
+        }
+    }
+    if (const UniValue* s = pick("r2_auto_sentence")) {
+        if (s->isStr() && !s->get_str().empty()) {
+            lines << QObject::tr("%1").arg(QString::fromStdString(s->get_str()));
+        }
+    }
+
+    QStringList acts;
+    CollectNextActions(info, acts);
+    if (model) CollectNextActions(*model, acts);
+    if (mining) CollectNextActions(*mining, acts);
+    if (!acts.isEmpty()) {
+        lines << QObject::tr("Next: %1").arg(acts.join(QStringLiteral("; ")));
+    }
+
+    return lines.join(QLatin1Char('\n'));
+}
+
+bool Dev348LooksLikeSecretKey(const std::string& key)
+{
+    std::string k = key;
+    for (char& c : k) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c == '-') c = '_';
+    }
+    if (k == "credential_ref" || k == "credential_refs") return false;
+    return k.find("secret") != std::string::npos
+        || k.find("password") != std::string::npos
+        || k.find("passwd") != std::string::npos
+        || k.find("private_key") != std::string::npos
+        || k.find("api_key") != std::string::npos
+        || k.find("session_token") != std::string::npos
+        || k.find("auth_token") != std::string::npos
+        || k.find("credential_value") != std::string::npos;
+}
+
+QString Dev348PickStr(const UniValue& obj, const char* const* keys, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) {
+        const char* key = keys[i];
+        if (Dev348LooksLikeSecretKey(key)) continue;
+        if (!obj.exists(key) || obj[key].isNull()) continue;
+        if (obj[key].isStr()) {
+            const std::string s = obj[key].get_str();
+            if (!s.empty()) return QString::fromStdString(s);
+        }
+        if (obj[key].isBool()) {
+            return obj[key].get_bool() ? QObject::tr("yes") : QObject::tr("no");
+        }
+        if (obj[key].isNum()) {
+            return QString::number(obj[key].getInt<int64_t>());
+        }
+    }
+    return {};
+}
+
+QString FormatDev348ProfileCloud(const UniValue* profile, bool profile_rpc,
+                                 const UniValue* cloud, bool cloud_rpc)
+{
+    QStringList lines;
+    lines << QObject::tr("0.34.8-dev (not a shipping tag). Operator profile and optional cloud backing.");
+    lines << QObject::tr("Cloud backing is optional. Secrets are never shown here. automatic_spend_atoms stays 0.");
+    if (!profile_rpc) {
+        lines << QObject::tr("Profile: getmodelprofile is not on this helper (fails closed).");
+    } else if (profile && profile->isObject()) {
+        const char* kName[] = {"profile", "name"};
+        const char* kHost[] = {"host", "modelhost"};
+        const char* kSeed[] = {"seed"};
+        const QString name = Dev348PickStr(*profile, kName, 2);
+        const QString host = Dev348PickStr(*profile, kHost, 2);
+        const QString seed = Dev348PickStr(*profile, kSeed, 1);
+        QString row = QObject::tr("Profile: %1").arg(name.isEmpty() ? QObject::tr("(unset)") : name);
+        if (!host.isEmpty()) row += QObject::tr(" | host=%1").arg(host);
+        if (!seed.isEmpty()) row += QObject::tr(" | seed=%1").arg(seed);
+        lines << row;
+    } else {
+        lines << QObject::tr("Profile: getmodelprofile returned no object.");
+    }
+    if (!cloud_rpc) {
+        lines << QObject::tr("Cloud: getcloudstorageinfo is not on this helper (fails closed). Local pieces remain the swarm unit.");
+    } else if (cloud && cloud->isObject()) {
+        const char* kProv[] = {"provider", "cloud_provider"};
+        const char* kLay[] = {"layout", "cloud_object_layout"};
+        const char* kEnd[] = {"endpoint"};
+        const char* kBkt[] = {"bucket"};
+        const char* kCred[] = {"credential_ref"};
+        const QString provider = Dev348PickStr(*cloud, kProv, 2);
+        const QString layout = Dev348PickStr(*cloud, kLay, 2);
+        const QString endpoint = Dev348PickStr(*cloud, kEnd, 1);
+        const QString bucket = Dev348PickStr(*cloud, kBkt, 1);
+        const QString cred = Dev348PickStr(*cloud, kCred, 1);
+        QString row = QObject::tr("Cloud backing (optional):");
+        if (!provider.isEmpty()) row += QObject::tr(" provider=%1").arg(provider);
+        if (!layout.isEmpty()) row += QObject::tr(" layout=%1").arg(layout);
+        if (!endpoint.isEmpty()) row += QObject::tr(" endpoint=%1").arg(endpoint);
+        if (!bucket.isEmpty()) row += QObject::tr(" bucket=%1").arg(bucket);
+        if (!cred.isEmpty()) row += QObject::tr(" credential_ref=%1").arg(cred);
+        lines << row;
+        lines << QObject::tr("R2 AUTO uses SOURCE_FILES + STREAM_FILE. Pieces stay the swarm unit.");
+    } else {
+        lines << QObject::tr("Cloud: getcloudstorageinfo returned no object. Cloud backing remains optional.");
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+bool Dev348LooksLikeQueryOrPresign(const std::string& key, const QString& value)
+{
+    std::string k = key;
+    for (char& c : k) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c == '-') c = '_';
+    }
+    if (k.find("query") != std::string::npos) return true;
+    if (k.find("presign") != std::string::npos) return true;
+    if (k.find("url") != std::string::npos) return true;
+    if (k.find("credential") != std::string::npos) return true;
+    if (k.find("secret_access") != std::string::npos) return true;
+    if (k.find("access_key") != std::string::npos) return true;
+    if (Dev348LooksLikeSecretKey(key)) return true;
+    if (value.isEmpty()) return false;
+    const QString lower = value.toLower();
+    if (lower.contains(QStringLiteral("aws_secret"))) return true;
+    if (lower.contains(QStringLiteral("secret_access_key"))) return true;
+    if (value.contains(QStringLiteral("X-Amz-"), Qt::CaseInsensitive)) return true;
+    if (lower.contains(QStringLiteral("presign"))) return true;
+    if (value.contains(QLatin1Char('?')) &&
+        (lower.contains(QLatin1String("http://")) || lower.contains(QLatin1String("https://")) ||
+         lower.startsWith(QLatin1String("http://")) || lower.startsWith(QLatin1String("https://")))) {
+        return true;
+    }
+    if ((lower.startsWith(QLatin1String("http://")) || lower.startsWith(QLatin1String("https://"))) &&
+        value.contains(QLatin1Char('?'))) {
+        return true;
+    }
+    return false;
+}
+
+QString Dev348SafeDisplay(const std::string& key, const QString& value)
+{
+    if (value.isEmpty()) return {};
+    if (Dev348LooksLikeQueryOrPresign(key, value)) return {};
+    return value;
+}
+
+int64_t Dev348IntField(const UniValue& obj, const char* key, int64_t def = 0)
+{
+    if (!obj.exists(key) || obj[key].isNull()) return def;
+    if (obj[key].isNum()) return obj[key].getInt<int64_t>();
+    if (obj[key].isStr()) {
+        try {
+            return static_cast<int64_t>(std::stoll(obj[key].get_str()));
+        } catch (...) {
+            return def;
+        }
+    }
+    return def;
+}
+
+QString FormatDev348WatchAction(const QString& raw)
+{
+    QString action = raw.trimmed();
+    if (action.isEmpty()) action = QStringLiteral("NOTIFY");
+    if (action.compare(QStringLiteral("PREPARE_FUNDING"), Qt::CaseInsensitive) == 0) {
+        return QStringLiteral("PREPARE_FUNDING") + QObject::tr(" (unsigned)");
+    }
+    return action;
+}
+
+QString FormatDev348WatchTarget(const UniValue& w)
+{
+    const QString kind = UniStrField(w, "kind").trimmed();
+    if (kind.compare(QStringLiteral("QUERY"), Qt::CaseInsensitive) == 0) {
+        return QObject::tr("QUERY (string omitted)");
+    }
+    auto id_for = [&](const char* field) {
+        const QString raw = UniStrField(w, field);
+        const QString safe = Dev348SafeDisplay(field, raw);
+        if (!raw.isEmpty() && safe.isEmpty()) return QObject::tr("(redacted)");
+        return safe;
+    };
+    if (kind.compare(QStringLiteral("PUBLISHER"), Qt::CaseInsensitive) == 0) {
+        const QString id = id_for("publisher_id");
+        return QObject::tr("PUBLISHER %1").arg(id.isEmpty() ? QObject::tr("(unset)") : id);
+    }
+    if (kind.compare(QStringLiteral("COLLECTION"), Qt::CaseInsensitive) == 0) {
+        const QString id = id_for("collection_id");
+        return QObject::tr("COLLECTION %1").arg(id.isEmpty() ? QObject::tr("(unset)") : id);
+    }
+    if (kind.compare(QStringLiteral("MODEL"), Qt::CaseInsensitive) == 0) {
+        const QString id = id_for("model_id");
+        return QObject::tr("MODEL %1").arg(id.isEmpty() ? QObject::tr("(unset)") : id);
+    }
+    const QString publisher = id_for("publisher_id");
+    const QString collection = id_for("collection_id");
+    const QString model = id_for("model_id");
+    if (!publisher.isEmpty()) return QObject::tr("PUBLISHER %1").arg(publisher);
+    if (!collection.isEmpty()) return QObject::tr("COLLECTION %1").arg(collection);
+    if (!model.isEmpty()) return QObject::tr("MODEL %1").arg(model);
+    if (!kind.isEmpty() && !Dev348LooksLikeQueryOrPresign("kind", kind)) {
+        return kind + QObject::tr(" (query omitted)");
+    }
+    return QObject::tr("QUERY (string omitted)");
+}
+
+QString FormatDev348WatchId(const UniValue& w)
+{
+    const QString raw = UniStrField(w, "watch_id");
+    const QString id = Dev348SafeDisplay("watch_id", raw);
+    if (!raw.isEmpty() && id.isEmpty()) return QObject::tr("(redacted)");
+    if (id.isEmpty()) return QStringLiteral("—");
+    return id;
+}
+
+QString FormatDev348Watches(const UniValue* listed, bool listed_rpc)
+{
+    QStringList lines;
+    lines << QObject::tr("0.34.8-dev (not a shipping tag). Network watches from listmodelwatches. Filesystem -modelwatch / getmodelwatchstatus is not listmodelwatches.");
+    lines << QObject::tr("Filesystem drop folder is not a publisher watch. Actions: NOTIFY / FREE_DOWNLOAD / KEEP / PREPARE_FUNDING (unsigned) / FUND_WITH_MANDATE. This page does not auto-getmodel, spend, or call wallet RPCs. automatic_spend_atoms stays 0.");
+    if (!listed_rpc) {
+        lines << QObject::tr("listmodelwatches is not on this helper (fails closed).");
+        return lines.join(QLatin1Char('\n'));
+    }
+    const UniValue* arr = nullptr;
+    UniValue one(UniValue::VARR);
+    if (listed && listed->isArray()) {
+        arr = listed;
+    } else if (listed && listed->isObject() && listed->exists("watches") && (*listed)["watches"].isArray()) {
+        arr = &(*listed)["watches"];
+    } else if (listed && listed->isObject() && listed->exists("watch_id")) {
+        one.push_back(*listed);
+        arr = &one;
+    }
+    if (!arr) {
+        lines << QObject::tr("listmodelwatches returned no watch list.");
+        return lines.join(QLatin1Char('\n'));
+    }
+    int shown = 0;
+    const int cap = 24;
+    for (const UniValue& w : arr->getValues()) {
+        if (!w.isObject()) continue;
+        const QString raw_action = UniStrField(w, "action");
+        const QString safe_action = Dev348SafeDisplay("action", raw_action);
+        QString action;
+        if (!raw_action.isEmpty() && safe_action.isEmpty()) {
+            action = QObject::tr("(redacted)");
+        } else {
+            action = FormatDev348WatchAction(safe_action);
+        }
+        lines << QObject::tr("%1 — %2 — %3")
+                     .arg(FormatDev348WatchId(w), FormatDev348WatchTarget(w), action);
+        if (++shown >= cap) break;
+    }
+    if (shown == 0) {
+        lines << QObject::tr("No publisher/collection/query watches.");
+    } else if (static_cast<int>(arr->size()) > shown) {
+        lines << QObject::tr("… %1 more").arg(static_cast<int>(arr->size()) - shown);
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+QString FormatDev348Activity(const UniValue* sequence, bool sequence_rpc,
+                             const UniValue* events, bool events_rpc)
+{
+    QStringList lines;
+    lines << QObject::tr("0.34.8-dev (not a shipping tag). Activity snippet from getmodeleventsequence + last page of getmodelevents.");
+    lines << QObject::tr("Untrusted event text is not a command, path, RPC, or mandate. PREPARE_FUNDING is unsigned. automatic_spend_atoms stays 0.");
+    if (!sequence_rpc && !events_rpc) {
+        lines << QObject::tr("getmodeleventsequence and getmodelevents are not on this helper (fails closed).");
+        return lines.join(QLatin1Char('\n'));
+    }
+    if (!sequence_rpc) {
+        lines << QObject::tr("getmodeleventsequence is not on this helper (fails closed). Last page of getmodelevents was not selected.");
+        return lines.join(QLatin1Char('\n'));
+    }
+    if (!events_rpc) {
+        lines << QObject::tr("getmodelevents is not on this helper (fails closed).");
+        return lines.join(QLatin1Char('\n'));
+    }
+    int64_t seq = 0;
+    if (sequence && sequence->isObject()) {
+        seq = Dev348IntField(*sequence, "sequence", 0);
+    } else if (sequence && sequence->isNum()) {
+        seq = sequence->getInt<int64_t>();
+    }
+    lines << QObject::tr("sequence=%1").arg(QString::number(seq));
+    const UniValue* arr = nullptr;
+    if (events && events->isArray()) {
+        arr = events;
+    } else if (events && events->isObject() && events->exists("events") && (*events)["events"].isArray()) {
+        arr = &(*events)["events"];
+    }
+    if (!arr || arr->empty()) {
+        lines << QObject::tr("No local events on the last page.");
+        return lines.join(QLatin1Char('\n'));
+    }
+    const int snippet = 12;
+    const int n = static_cast<int>(arr->size());
+    const int start = n > snippet ? n - snippet : 0;
+    if (start > 0) {
+        lines << QObject::tr("… %1 earlier on this last page (object_id and event_type only).").arg(start);
+    }
+    int shown = 0;
+    for (int i = start; i < n; ++i) {
+        const UniValue& ev = (*arr)[i];
+        if (!ev.isObject()) continue;
+        // Do not render untrusted_text / provenance / query strings. object_id + event_type only.
+        const QString oid_raw = UniStrField(ev, "object_id");
+        const QString et_raw = UniStrField(ev, "event_type");
+        QString oid = Dev348SafeDisplay("object_id", oid_raw);
+        QString et = Dev348SafeDisplay("event_type", et_raw);
+        if (!oid_raw.isEmpty() && oid.isEmpty()) oid = QObject::tr("(redacted)");
+        if (!et_raw.isEmpty() && et.isEmpty()) et = QObject::tr("(redacted)");
+        lines << QObject::tr("%1  %2")
+                     .arg(oid.isEmpty() ? QStringLiteral("—") : oid)
+                     .arg(et.isEmpty() ? QStringLiteral("—") : et);
+        ++shown;
+    }
+    if (shown == 0) {
+        lines << QObject::tr("No local events on the last page.");
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+#endif // ENABLE_MODELNET
+
+bool CapJsonTrue(const UniValue& o, const char* k)
+{
+    return o.isObject() && o.exists(k) && o[k].isTrue();
+}
+
+bool CapJsonFalse(const UniValue& o, const char* k)
+{
+    return o.isObject() && o.exists(k) && o[k].isFalse();
+}
+
+bool CapabilityLooksLikeWalletPath(const QString& s)
+{
+    const QString lower = s.toLower();
+    return lower.contains(QStringLiteral("wallet.dat"))
+        || lower.contains(QStringLiteral("/wallets/"))
+        || lower.contains(QStringLiteral("\\wallets\\"))
+        || lower.contains(QStringLiteral("walletdir"));
+}
+
+bool CapabilityLooksLikePublicHttp(const QString& s)
+{
+    const QString lower = s.trimmed().toLower();
+    return lower.startsWith(QStringLiteral("http://")) || lower.startsWith(QStringLiteral("https://"));
+}
+
+bool CapabilityWakeRejected(const UniValue& result)
+{
+    if (!result.isObject()) return false;
+    if (CapJsonTrue(result, "remap_only")) return true;
+    if (CapJsonTrue(result, "premature_ready")) return true;
+    return false;
+}
+
+bool CapabilitySmokeBlocked(const UniValue& result)
+{
+    if (!result.isObject()) return false;
+    if (CapJsonTrue(result, "smoke_blocked") || CapJsonTrue(result, "block_warmup")) return true;
+    if (CapJsonFalse(result, "smoke_passed")) return true;
+    if (CapJsonFalse(result, "smoke_performed") && CapJsonTrue(result, "ready")) return true;
+    if (result.exists("progress") && result["progress"].isObject()) {
+        const UniValue& p = result["progress"];
+        if (CapJsonTrue(p, "smoke_blocked")) return true;
+        if (CapJsonFalse(p, "runtime_ready")) return true;
+        if (CapJsonFalse(p, "first_useful_result") && p.exists("percent_ready") && p["percent_ready"].isNum()
+            && p["percent_ready"].getInt<int>() >= 100) {
+            return true;
+        }
+    }
+    if (CapJsonFalse(result, "switch_ready")) return true;
+    return false;
+}
+
+bool CapabilityWalletKey(const std::string& k)
+{
+    std::string low = k;
+    for (char& c : low) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    if (low == "funded_wallet") return false;
+    return low == "wallet" || low.find("wallet_path") != std::string::npos || low.find("walletdir") != std::string::npos
+        || low.find("wallet_dir") != std::string::npos;
+}
+
+UniValue SanitizeCapabilityJson(const UniValue& v, bool smoke_blocked, bool wake_reject)
+{
+    if (v.isArray()) {
+        UniValue a(UniValue::VARR);
+        for (const auto& e : v.getValues()) a.push_back(SanitizeCapabilityJson(e, smoke_blocked, false));
+        return a;
+    }
+    if (!v.isObject()) {
+        if (v.isStr()) {
+            const QString s = QString::fromStdString(v.get_str());
+            if (CapabilityLooksLikeWalletPath(s) || CapabilityLooksLikePublicHttp(s)) {
+                return UniValue("redacted");
+            }
+        }
+        return v;
+    }
+    UniValue out(UniValue::VOBJ);
+    for (const auto& k : v.getKeys()) {
+        if (k == "automatic_spend_atoms") {
+            out.pushKV(k, 0);
+            continue;
+        }
+        if (wake_reject && (k == "ready" || k == "premature_ready" || k == "remap_only")) continue;
+        if (CapabilityWalletKey(k) && !v[k].isBool()) continue;
+        if (k == "progress" && v[k].isObject()) {
+            UniValue p(UniValue::VOBJ);
+            int percent = -1;
+            for (const auto& pk : v[k].getKeys()) {
+                if (pk == "percent_ready") {
+                    if (v[k][pk].isNum()) percent = v[k][pk].getInt<int>();
+                    continue;
+                }
+                if (pk == "automatic_spend_atoms") {
+                    p.pushKV(pk, 0);
+                    continue;
+                }
+                p.pushKV(pk, SanitizeCapabilityJson(v[k][pk], smoke_blocked, false));
+            }
+            if (smoke_blocked) {
+                if (percent < 0 || percent >= 100) percent = 70;
+                p.pushKV("percent_ready", percent);
+                p.pushKV("runtime_ready", false);
+                p.pushKV("first_useful_result", false);
+            } else if (percent >= 0) {
+                p.pushKV("percent_ready", percent);
+            }
+            out.pushKV("progress", p);
+            continue;
+        }
+        out.pushKV(k, SanitizeCapabilityJson(v[k], smoke_blocked, false));
+    }
+    if (wake_reject) {
+        out.pushKV("remap_only", true);
+        out.pushKV("ready", false);
+        out.pushKV("premature_ready", true);
+    }
+    if (!out.exists("automatic_spend_atoms")) out.pushKV("automatic_spend_atoms", 0);
+    return out;
+}
+
+QString FormatCapabilityOutput(const std::string& method, const UniValue& result, bool wake)
+{
+    QStringList lines;
+    lines << QObject::tr("%1 (owner-local; never public HTTP; automatic_spend_atoms=0)")
+                 .arg(QString::fromStdString(method));
+    const bool wake_reject = wake && CapabilityWakeRejected(result);
+    const bool smoke_blocked = CapabilitySmokeBlocked(result);
+    if (wake_reject) {
+        lines << QObject::tr("remap_only is not readiness. Discarded KV/workspace must be rebuilt. Not success (PREMATURE_READY).");
+    }
+    if (smoke_blocked) {
+        lines << QObject::tr("Progress: smoke blocked or not passed — not 100% ready. Canonical bytes, tensors, transforms, runtime, and first result are separate.");
+    }
+    lines << QString::fromStdString(SanitizeCapabilityJson(result, smoke_blocked, wake_reject).write(2));
+    return lines.join(QLatin1Char('\n'));
+}
+
+UniValue CapabilityZeroGrant()
+{
+    UniValue grant(UniValue::VOBJ);
+    grant.pushKV("caller", "local");
+    grant.pushKV("automatic_spend_atoms", 0);
+    return grant;
+}
+
+UniValue CapabilityRpcParams(const UniValue& obj)
+{
+    UniValue params(UniValue::VARR);
+    params.push_back(obj);
+    return params;
+}
+
+QString WatchFolderHintText(const QString& watch_dir)
+{
+    QString configured = watch_dir;
+    if (configured.isEmpty()) {
+        configured = QString::fromStdString(gArgs.GetArg("-modelwatch", ""));
+    }
+    if (configured.isEmpty()) {
+        return QObject::tr("Watch folder: not set. Start btxd with -modelwatch=<dir> to auto-host new GGUF or SafeTensors files (scanmodelwatch). This is a filesystem drop folder, not a publisher watch. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.");
+    }
+    return QObject::tr("Watch folder: %1 (-modelwatch). New GGUF/SafeTensors are auto-hosted; scanmodelwatch is idempotent. This is a filesystem drop folder, not a publisher watch. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.")
+        .arg(configured);
+}
+
 } // namespace
 
 ModelNetPage::ModelNetPage(QWidget *parent) :
@@ -323,6 +1124,19 @@ ModelNetPage::ModelNetPage(QWidget *parent) :
     connect(ui->searchLineEdit, &QLineEdit::returnPressed, this, &ModelNetPage::runModelSearch);
     connect(ui->searchLineEdit, &QLineEdit::textChanged, this, &ModelNetPage::onSearchTextChanged);
     connect(ui->publishButton, &QPushButton::clicked, this, &ModelNetPage::onPublishSearchRecord);
+    connect(ui->importButton, &QPushButton::clicked, this, &ModelNetPage::onImportModel);
+    connect(ui->importBrowseButton, &QPushButton::clicked, this, &ModelNetPage::onImportBrowse);
+    connect(ui->importCopyUriButton, &QPushButton::clicked, this, &ModelNetPage::copyImportShareUri);
+    connect(ui->capabilityEnsureButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilityEnsure);
+    connect(ui->capabilityPrefetchButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilityPrefetch);
+    connect(ui->capabilitySleepButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilitySleep);
+    connect(ui->capabilityReleaseButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilityRelease);
+    connect(ui->capabilityWakeButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilityWake);
+    connect(ui->capabilityUpdateButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilityUpdate);
+    connect(ui->capabilitySwitchButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilitySwitch);
+    connect(ui->capabilityEventsButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilityEvents);
+    connect(ui->capabilityTtcButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilityTtc);
+    connect(ui->capabilityRuntimeCapsButton, &QPushButton::clicked, this, &ModelNetPage::onCapabilityRuntimeCaps);
     connect(ui->modelsScopeTabWidget, &QTabWidget::currentChanged, this, [this](int) {
         ui->searchCoverageLabel->setText(
             tr("Scope changed — run Search to refresh results (coverage always incomplete)."));
@@ -334,6 +1148,8 @@ ModelNetPage::ModelNetPage(QWidget *parent) :
 
     ui->uriDisplayLabel->installEventFilter(this);
     ui->uriRowWidget->setVisible(false);
+    ui->importShareRowWidget->setVisible(false);
+    ui->importAliasHintLabel->setVisible(false);
     refresh();
 }
 
@@ -371,6 +1187,12 @@ void ModelNetPage::copyOpenedUri()
 {
     if (m_full_uri.isEmpty()) return;
     GUIUtil::setClipboard(m_full_uri);
+}
+
+void ModelNetPage::copyImportShareUri()
+{
+    if (m_import_share_uri.isEmpty()) return;
+    GUIUtil::setClipboard(m_import_share_uri);
 }
 
 bool ModelNetPage::eventFilter(QObject* obj, QEvent* ev)
@@ -483,6 +1305,116 @@ void ModelNetPage::refreshResourceGovernorStatus()
     ui->resourceGovernorStatusLabel->setText(text);
 #else
     ui->resourceGovernorStatusLabel->setVisible(false);
+#endif
+}
+
+void ModelNetPage::refreshSetupStatus()
+{
+#ifdef ENABLE_MODELNET
+    QString rpc_used;
+    std::optional<UniValue> info;
+    if (m_client_model) {
+        info = tryRpc("getsetupstatus", UniValue(UniValue::VARR));
+        if (info) {
+            rpc_used = QStringLiteral("getsetupstatus");
+        } else {
+            info = tryRpc("checkmodelsetup", UniValue(UniValue::VARR));
+            if (info) {
+                rpc_used = QStringLiteral("checkmodelsetup");
+            } else {
+                info = tryRpc("getmodelnetworkinfo", UniValue(UniValue::VARR));
+                if (info) rpc_used = QStringLiteral("getmodelnetworkinfo");
+            }
+        }
+    }
+    QString watch_dir;
+    if (!m_client_model) {
+        ui->doctorStatusLabel->setText(
+            tr("Setup status: connect the wallet to btxd to run getsetupstatus "
+               "(fallback: checkmodelsetup / getmodelnetworkinfo). "
+               "showmodel / unhostmodel are RPC. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0."));
+    } else if (!info) {
+        ui->doctorStatusLabel->setText(
+            tr("Setup status: getsetupstatus, checkmodelsetup, and getmodelnetworkinfo are unavailable. "
+               "Use btx-cli getsetupstatus. showmodel / unhostmodel are RPC. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0."));
+    } else {
+        ui->doctorStatusLabel->setText(FormatSetupDoctor(*info, rpc_used, watch_dir));
+    }
+    ui->watchFolderHintLabel->setText(WatchFolderHintText(watch_dir));
+#else
+    ui->doctorStatusLabel->setText(tr("Model network was not compiled into this GUI."));
+    ui->watchFolderHintLabel->setText(WatchFolderHintText(QString()));
+#endif
+}
+
+void ModelNetPage::refreshDev348ProfileCloud()
+{
+#ifdef ENABLE_MODELNET
+    if (!m_client_model) {
+        ui->dev348ProfileCloudLabel->setText(
+            tr("0.34.8-dev (not a shipping tag). Operator profile and optional cloud backing.\n"
+               "Cloud backing is optional. Secrets are never shown. automatic_spend_atoms stays 0.\n"
+               "Connect to btxd to query getmodelprofile / getcloudstorageinfo. Missing methods fail closed."));
+        return;
+    }
+    const auto profile = tryRpc("getmodelprofile", UniValue(UniValue::VARR));
+    const auto cloud = tryRpc("getcloudstorageinfo", UniValue(UniValue::VARR));
+    ui->dev348ProfileCloudLabel->setText(
+        FormatDev348ProfileCloud(profile ? &*profile : nullptr, bool(profile),
+                                 cloud ? &*cloud : nullptr, bool(cloud)));
+#else
+    ui->dev348ProfileCloudLabel->setText(
+        tr("0.34.8-dev profile/cloud panel: model network was not compiled into this GUI. "
+           "Cloud backing is optional. Secrets are never shown."));
+#endif
+}
+
+void ModelNetPage::refreshDev348WatchesActivity()
+{
+#ifdef ENABLE_MODELNET
+    if (!m_client_model) {
+        ui->dev348WatchesLabel->setText(
+            tr("0.34.8-dev (not a shipping tag). Network watches from listmodelwatches. Filesystem -modelwatch / getmodelwatchstatus is not listmodelwatches.\n"
+               "Filesystem drop folder is not a publisher watch. PREPARE_FUNDING is unsigned. automatic_spend_atoms stays 0.\n"
+               "Connect to btxd to query listmodelwatches. Missing methods fail closed."));
+        ui->dev348ActivityLabel->setText(
+            tr("0.34.8-dev (not a shipping tag). Activity snippet from getmodeleventsequence + last page of getmodelevents.\n"
+               "Untrusted event text is not a command, path, RPC, or mandate. automatic_spend_atoms stays 0.\n"
+               "Connect to btxd. Missing methods fail closed."));
+        return;
+    }
+    const auto listed = tryRpc("listmodelwatches", UniValue(UniValue::VARR));
+    ui->dev348WatchesLabel->setText(FormatDev348Watches(listed ? &*listed : nullptr, bool(listed)));
+
+    const auto sequence = tryRpc("getmodeleventsequence", UniValue(UniValue::VARR));
+    // Bounded getmodelevents only. Never waitformodelevent / wait_s / timeout_ms (must not hang
+    // if the helper lacks the method). Never wallet RPCs. Never auto-getmodel.
+    UniValue req(UniValue::VOBJ);
+    const int64_t page_max = 100;
+    req.pushKV("limit", page_max);
+    if (sequence) {
+        int64_t seq = 0;
+        if (sequence->isObject()) {
+            seq = Dev348IntField(*sequence, "sequence", 0);
+        } else if (sequence->isNum()) {
+            seq = sequence->getInt<int64_t>();
+        }
+        const int64_t cursor = seq > page_max ? seq - page_max : 0;
+        req.pushKV("cursor", cursor);
+    }
+    UniValue params(UniValue::VARR);
+    params.push_back(req);
+    const auto events = tryRpc("getmodelevents", params);
+    ui->dev348ActivityLabel->setText(
+        FormatDev348Activity(sequence ? &*sequence : nullptr, bool(sequence),
+                             events ? &*events : nullptr, bool(events)));
+#else
+    ui->dev348WatchesLabel->setText(
+        tr("0.34.8-dev watches panel: model network was not compiled into this GUI. "
+           "Filesystem -modelwatch / getmodelwatchstatus is not listmodelwatches. Secrets are never shown. automatic_spend_atoms stays 0."));
+    ui->dev348ActivityLabel->setText(
+        tr("0.34.8-dev activity panel: model network was not compiled into this GUI. "
+           "Untrusted event text is not a command, path, RPC, or mandate. automatic_spend_atoms stays 0."));
 #endif
 }
 
@@ -1158,6 +2090,20 @@ void ModelNetPage::onPublishSearchRecord()
     UniValue meta(UniValue::VOBJ);
     meta.pushKV("display_name", name.toStdString());
     meta.pushKV("canonical_name", name.toStdString());
+    const QString family = ui->publishFamilyEdit->text().trimmed();
+    const QString format = ui->publishFormatEdit->text().trimmed();
+    const QString tags = ui->publishTagsEdit->text().trimmed();
+    const QString desc = ui->publishDescriptionEdit->text().trimmed();
+    if (!family.isEmpty()) meta.pushKV("family", family.toStdString());
+    if (!format.isEmpty()) meta.pushKV("format", format.toStdString());
+    if (!desc.isEmpty()) meta.pushKV("short_description", desc.toStdString());
+    if (!tags.isEmpty()) {
+        UniValue arr(UniValue::VARR);
+        for (const QString& t : tags.split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+            arr.push_back(t.trimmed().toStdString());
+        }
+        meta.pushKV("tags", arr);
+    }
     UniValue params(UniValue::VARR);
     params.push_back(id.toStdString());
     params.push_back(meta);
@@ -1174,11 +2120,396 @@ void ModelNetPage::onPublishSearchRecord()
 #endif
 }
 
+void ModelNetPage::onImportBrowse()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Import model file"), QString(),
+        tr("Models and share cards (*.gguf *.safetensors *.btx *.btxlink);;All files (*)"));
+    if (!path.isEmpty()) ui->importPathEdit->setText(path);
+}
+
+void ModelNetPage::showImportShare(const UniValue& result)
+{
+    m_import_share_uri.clear();
+    const UniValue* share = nullptr;
+    if (result.exists("share") && result["share"].isObject()) {
+        share = &result["share"];
+    }
+
+    QString copy_text;
+    if (share && share->exists("copy_text") && (*share)["copy_text"].isStr()) {
+        copy_text = QString::fromStdString((*share)["copy_text"].get_str());
+    } else if (result.exists("copy_text") && result["copy_text"].isStr()) {
+        copy_text = QString::fromStdString(result["copy_text"].get_str());
+    }
+
+    QString uri;
+    if (share && share->exists("uri") && (*share)["uri"].isStr()) {
+        uri = QString::fromStdString((*share)["uri"].get_str());
+    } else if (result.exists("uri") && result["uri"].isStr()) {
+        uri = QString::fromStdString(result["uri"].get_str());
+    }
+#ifdef ENABLE_MODELNET
+    if (!uri.isEmpty()) {
+        const std::string full = modelnet::CopyUri(uri.toStdString());
+        if (!full.empty()) uri = QString::fromStdString(full);
+    }
+#endif
+
+    auto fill_if_empty = [](QLineEdit* edit, const UniValue& obj, const char* key) {
+        if (!edit->text().trimmed().isEmpty()) return;
+        if (obj.exists(key) && obj[key].isStr()) {
+            edit->setText(QString::fromStdString(obj[key].get_str()));
+        }
+    };
+    if (share) {
+        fill_if_empty(ui->publishFamilyEdit, *share, "family");
+        fill_if_empty(ui->publishFormatEdit, *share, "format");
+    }
+
+    m_import_share_uri = uri;
+    if (copy_text.isEmpty() && !uri.isEmpty()) {
+        copy_text = uri;
+    }
+
+    QString rates = TransferRateSuffixFromRow(result);
+    if (rates.isEmpty() && share) rates = TransferRateSuffix(*share);
+    if (rates.isEmpty() && result.exists("transfers") && result["transfers"].isArray()) {
+        for (const auto& t : result["transfers"].getValues()) {
+            rates = TransferRateSuffixFromRow(t);
+            if (!rates.isEmpty()) break;
+        }
+    }
+
+    QString line = copy_text;
+    if (!rates.isEmpty()) {
+        if (!line.isEmpty()) line += QStringLiteral(" · ");
+        line += rates;
+    }
+
+    const bool show = !copy_text.isEmpty() || !uri.isEmpty() || !rates.isEmpty();
+    ui->importShareRowWidget->setVisible(show);
+    ui->importShareLabel->setText(line);
+    ui->importCopyUriButton->setVisible(!uri.isEmpty());
+    ui->importCopyUriButton->setEnabled(!uri.isEmpty());
+
+    QString hint = tr("After copy_text, optionally setmodelalias <id> <name> so showmodel and getmodel can use an Ollama-style alias. unhostmodel unpins and unseeds in one call. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.");
+    const QString aliases = FormatAliasesLine(result, share);
+    if (!aliases.isEmpty()) {
+        hint = aliases + QLatin1Char('\n') + hint;
+    }
+    ui->importAliasHintLabel->setText(hint);
+    ui->importAliasHintLabel->setVisible(show);
+}
+
+void ModelNetPage::onImportModel()
+{
+#ifdef ENABLE_MODELNET
+    if (!m_client_model) {
+        ui->publishOutput->setPlainText(
+            tr("Node RPC is not connected. Connect the wallet, or use btx-cli importmodel."));
+        return;
+    }
+    QString path = ui->importPathEdit->text().trimmed();
+    if (path.isEmpty()) {
+        onImportBrowse();
+        path = ui->importPathEdit->text().trimmed();
+    }
+    if (path.isEmpty()) {
+        ui->publishOutput->setPlainText(tr("Choose a local GGUF or SafeTensors path to import."));
+        return;
+    }
+    const bool looks_share =
+        path.contains(QStringLiteral("btx://"), Qt::CaseInsensitive) ||
+        path.endsWith(QStringLiteral(".btx"), Qt::CaseInsensitive) ||
+        path.endsWith(QStringLiteral(".btxlink"), Qt::CaseInsensitive);
+    if (looks_share) {
+        UniValue share_params(UniValue::VARR);
+        share_params.push_back(path.toStdString());
+        const auto preview = tryRpc("openmodelshare", share_params);
+        if (!preview) {
+            showImportShare(UniValue(UniValue::VOBJ));
+            ui->publishOutput->setPlainText(
+                tr("openmodelshare (preview only; never retrieves or spends)\n") +
+                callRpc("openmodelshare", share_params));
+            return;
+        }
+        showImportShare(*preview);
+        ui->publishOutput->setPlainText(
+            tr("openmodelshare (preview only; automatic_spend_atoms=0; this page does not auto-getmodel)\n") +
+            QString::fromStdString(preview->write(2)));
+        return;
+    }
+    UniValue opts(UniValue::VOBJ);
+    opts.pushKV("pin", true);
+    opts.pushKV("publish", true);
+    UniValue params(UniValue::VARR);
+    params.push_back(path.toStdString());
+    params.push_back(opts);
+    const auto result = tryRpc("importmodel", params);
+    if (!result) {
+        showImportShare(UniValue(UniValue::VOBJ));
+        ui->publishOutput->setPlainText(callRpc("importmodel", params));
+        return;
+    }
+    if (result->exists("model_id") && (*result)["model_id"].isStr()) {
+        ui->publishModelIdEdit->setText(QString::fromStdString((*result)["model_id"].get_str()));
+    }
+    if (result->exists("format") && (*result)["format"].isStr() &&
+        ui->publishFormatEdit->text().trimmed().isEmpty()) {
+        ui->publishFormatEdit->setText(QString::fromStdString((*result)["format"].get_str()));
+    }
+    if (result->exists("family") && (*result)["family"].isStr() &&
+        ui->publishFamilyEdit->text().trimmed().isEmpty()) {
+        ui->publishFamilyEdit->setText(QString::fromStdString((*result)["family"].get_str()));
+    }
+    showImportShare(*result);
+    QString out = tr("importmodel (pin+publish; automatic_spend_atoms=0)\n");
+    const QString copy_text = ui->importShareLabel->text();
+    if (!copy_text.isEmpty()) {
+        out += copy_text + QLatin1Char('\n');
+    }
+    if (ui->importAliasHintLabel->isVisible() && !ui->importAliasHintLabel->text().isEmpty()) {
+        out += ui->importAliasHintLabel->text() + QLatin1Char('\n');
+    }
+    out += QString::fromStdString(result->write(2));
+    ui->publishOutput->setPlainText(out);
+#else
+    ui->publishOutput->setPlainText(tr("Model network support was not compiled into this GUI."));
+#endif
+}
+
+void ModelNetPage::refreshTransfersAndShares()
+{
+    const QString rpc_note = tr("\n\nRPC: %1 (same name as CLI). This page never calls getmodel/importmodel automatically.");
+
+    QString downloads;
+    if (const auto xfer = tryRpc("getmodeltransfers", UniValue(UniValue::VARR))) {
+        downloads = tr("getmodeltransfers\n") + FormatTransfersPane(*xfer);
+    } else {
+        downloads = tr("getmodeltransfers unavailable on this node.\n") +
+                    callRpc("getmodeltransfers");
+    }
+    downloads += QLatin1Char('\n') + tr("getmodeljob") + QLatin1Char('\n');
+    if (const auto job = tryRpc("getmodeljob", UniValue(UniValue::VARR))) {
+        const QString job_rates = TransferRateSuffixFromRow(*job);
+        if (!job_rates.isEmpty()) {
+            downloads += tr("getmodeljob rates: %1").arg(job_rates) + QLatin1Char('\n');
+        }
+        downloads += QString::fromStdString(job->write(2));
+    } else {
+        downloads += callRpc("getmodeljob");
+    }
+    ui->downloadsOutput->setPlainText(downloads + rpc_note.arg(QStringLiteral("getmodeltransfers, getmodeljob")));
+
+    QString shared = tr("Seeded/shared inventory is the same listmodels RPC. Demand-seed is -modelseed=auto after a positive budget; this page does not advertise new models by itself.");
+    if (const auto listed = tryRpc("listmodels", UniValue(UniValue::VARR))) {
+        shared += QLatin1String("\n\n") + tr("listmodels") + QLatin1Char('\n') + FormatTransfersPane(*listed);
+    } else {
+        shared += QLatin1String("\n\n") + callRpc("listmodels");
+    }
+    ui->sharedOutput->setPlainText(shared + rpc_note.arg(QStringLiteral("listmodels, getmodeltransfers")));
+}
+
+void ModelNetPage::refreshCapabilities()
+{
+    const auto caps = tryRpc("getbtxruntimecapabilities", UniValue(UniValue::VARR));
+    if (!caps) {
+        ui->capabilityStatusLabel->setText(
+            tr("Capabilities: helper down or RPC unavailable (HELPER_DOWN). Monetary node continues. automatic_spend_atoms stays 0."));
+        return;
+    }
+    QString line = tr("Capabilities — Available now / Preparing. Public HTTP is 405. GUI BUILD_GUI=OFF on this compile tree is DEFERRED_WITH_EVIDENCE for live widgets; this tab is the registered front door.");
+    if (caps->exists("gui") && (*caps)["gui"].isStr()) {
+        line += QLatin1Char(' ') + QString::fromStdString((*caps)["gui"].get_str());
+    }
+    ui->capabilityStatusLabel->setText(line);
+    if (ui->capabilityOutput->toPlainText().isEmpty()) {
+        ui->capabilityOutput->setPlainText(FormatCapabilityOutput("getbtxruntimecapabilities", *caps, false));
+    }
+}
+
+void ModelNetPage::onCapabilityEnsure()
+{
+    UniValue recipe(UniValue::VOBJ);
+    recipe.pushKV("recipe_kind", "FULL_MODEL");
+    UniValue comps(UniValue::VARR);
+    UniValue c(UniValue::VOBJ);
+    c.pushKV("name", "base");
+    UniValue res(UniValue::VOBJ);
+    res.pushKV("kind", "MODEL");
+    res.pushKV("digest48", std::string(96, 'a'));
+    c.pushKV("resource", res);
+    c.pushKV("role", "BASE");
+    c.pushKV("required", true);
+    comps.push_back(c);
+    recipe.pushKV("components", comps);
+    UniValue grant(UniValue::VOBJ);
+    grant.pushKV("caller", "local");
+    grant.pushKV("host_bytes", 8388608);
+    grant.pushKV("automatic_spend_atoms", 0);
+    UniValue plan_req(UniValue::VOBJ);
+    plan_req.pushKV("recipe", recipe);
+    plan_req.pushKV("grant", grant);
+    UniValue params(UniValue::VARR);
+    params.push_back(plan_req);
+    const auto plan = tryRpc("planbtxcapability", params);
+    if (!plan) {
+        ui->capabilityOutput->setPlainText(tr("planbtxcapability failed (not runtime-ready). automatic_spend_atoms=0"));
+        return;
+    }
+    UniValue ens(UniValue::VOBJ);
+    if (plan->exists("plan_id") && (*plan)["plan_id"].isStr()) ens.pushKV("plan_id", (*plan)["plan_id"].get_str());
+    ens.pushKV("grant", grant);
+    UniValue ens_params(UniValue::VARR);
+    ens_params.push_back(ens);
+    const auto got = tryRpc("ensurebtxcapability", ens_params);
+    if (!got) {
+        ui->capabilityOutput->setPlainText(
+            tr("ensurebtxcapability failed (not runtime-ready). automatic_spend_atoms=0\n") +
+            FormatCapabilityOutput("planbtxcapability", *plan, false));
+        return;
+    }
+    showCapabilityReply("ensurebtxcapability", got, tr("ensurebtxcapability failed. automatic_spend_atoms stays 0."));
+    if (got->exists("lease_id") && (*got)["lease_id"].isStr()) {
+        ui->capabilityLeaseEdit->setText(QString::fromStdString((*got)["lease_id"].get_str()));
+    }
+}
+
+void ModelNetPage::showCapabilityReply(const std::string& method, const std::optional<UniValue>& got,
+                                      const QString& fail, bool wake)
+{
+    if (!got) {
+        ui->capabilityOutput->setPlainText(fail);
+        return;
+    }
+    ui->capabilityOutput->setPlainText(FormatCapabilityOutput(method, *got, wake));
+}
+
+void ModelNetPage::onCapabilityPrefetch()
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("grant", CapabilityZeroGrant());
+    o.pushKV("kind", "DEMAND");
+    o.pushKV("automatic_spend_atoms", 0);
+    const auto got = tryRpc("prefetchbtxcapability", CapabilityRpcParams(o));
+    showCapabilityReply("prefetchbtxcapability", got, tr("prefetchbtxcapability failed. automatic_spend_atoms stays 0."));
+}
+
+void ModelNetPage::onCapabilitySleep()
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("lease_id", ui->capabilityLeaseEdit->text().trimmed().toStdString());
+    o.pushKV("automatic_spend_atoms", 0);
+    const auto got = tryRpc("sleepbtxcapability", CapabilityRpcParams(o));
+    showCapabilityReply("sleepbtxcapability", got,
+                         tr("sleepbtxcapability failed; remap-only is not ready. automatic_spend_atoms stays 0."));
+}
+
+void ModelNetPage::onCapabilityRelease()
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("lease_id", ui->capabilityLeaseEdit->text().trimmed().toStdString());
+    o.pushKV("automatic_spend_atoms", 0);
+    const auto got = tryRpc("releasebtxcapability", CapabilityRpcParams(o));
+    showCapabilityReply("releasebtxcapability", got, tr("releasebtxcapability failed. automatic_spend_atoms stays 0."));
+}
+
+void ModelNetPage::onCapabilityWake()
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("lease_id", ui->capabilityLeaseEdit->text().trimmed().toStdString());
+    o.pushKV("remap_only", false);
+    o.pushKV("automatic_spend_atoms", 0);
+    o.pushKV("grant", CapabilityZeroGrant());
+    const auto got = tryRpc("wakebtxcapability", CapabilityRpcParams(o));
+    if (got && CapabilityWakeRejected(*got)) {
+        showCapabilityReply("wakebtxcapability", got,
+                            tr("wakebtxcapability: remap_only is not readiness. automatic_spend_atoms stays 0."),
+                            /*wake=*/true);
+        return;
+    }
+    showCapabilityReply("wakebtxcapability", got,
+                         tr("wakebtxcapability failed. remap_only is not readiness. automatic_spend_atoms stays 0."),
+                         /*wake=*/true);
+    if (got && got->exists("lease_id") && (*got)["lease_id"].isStr()) {
+        ui->capabilityLeaseEdit->setText(QString::fromStdString((*got)["lease_id"].get_str()));
+    }
+}
+
+void ModelNetPage::onCapabilityUpdate()
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("preview", true);
+    o.pushKV("automatic_spend_atoms", 0);
+    // Never send smoke_passed=true from this page. Smoke blocked is not 100% ready.
+    o.pushKV("smoke_passed", false);
+    const std::string lock = ui->capabilityLeaseEdit->text().trimmed().toStdString();
+    if (!lock.empty()) o.pushKV("lock_id", lock);
+    o.pushKV("grant", CapabilityZeroGrant());
+    const auto got = tryRpc("planbtxcapabilityupdate", CapabilityRpcParams(o));
+    showCapabilityReply("planbtxcapabilityupdate", got,
+                         tr("planbtxcapabilityupdate failed. Old generation remains. automatic_spend_atoms stays 0."));
+    if (got && got->exists("proposed_lock") && (*got)["proposed_lock"].isStr()) {
+        const QString proposed = QString::fromStdString((*got)["proposed_lock"].get_str());
+        if (!CapabilityLooksLikeWalletPath(proposed)) {
+            ui->capabilityNewLockEdit->setText(proposed);
+        }
+    }
+}
+
+void ModelNetPage::onCapabilitySwitch()
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("old_lock", ui->capabilityLeaseEdit->text().trimmed().toStdString());
+    const QString neu = ui->capabilityNewLockEdit->text().trimmed();
+    if (!neu.isEmpty()) o.pushKV("new_lock", neu.toStdString());
+    o.pushKV("automatic_spend_atoms", 0);
+    o.pushKV("grant", CapabilityZeroGrant());
+    const auto got = tryRpc("switchbtxcapability", CapabilityRpcParams(o));
+    showCapabilityReply("switchbtxcapability", got,
+                         tr("switchbtxcapability failed. automatic_spend_atoms stays 0."));
+}
+
+void ModelNetPage::onCapabilityEvents()
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("cursor", 0);
+    o.pushKV("automatic_spend_atoms", 0);
+    const auto got = tryRpc("getbtxcapabilityevents", CapabilityRpcParams(o));
+    showCapabilityReply("getbtxcapabilityevents", got,
+                         tr("getbtxcapabilityevents failed. automatic_spend_atoms stays 0."));
+}
+
+void ModelNetPage::onCapabilityTtc()
+{
+    UniValue o(UniValue::VOBJ);
+    const QString id = ui->capabilityLeaseEdit->text().trimmed();
+    if (!id.isEmpty()) o.pushKV("job_id", id.toStdString());
+    o.pushKV("automatic_spend_atoms", 0);
+    const auto got = tryRpc("getbtxttctrace", CapabilityRpcParams(o));
+    showCapabilityReply("getbtxttctrace", got,
+                         tr("getbtxttctrace failed (job_id required). automatic_spend_atoms stays 0. Smoke blocked is not 100% ready."));
+}
+
+void ModelNetPage::onCapabilityRuntimeCaps()
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("automatic_spend_atoms", 0);
+    const auto got = tryRpc("getbtxruntimecapabilities", CapabilityRpcParams(o));
+    showCapabilityReply("getbtxruntimecapabilities", got,
+                         tr("getbtxruntimecapabilities failed (HELPER_DOWN). automatic_spend_atoms stays 0. Public HTTP is 405."));
+}
+
 void ModelNetPage::refresh()
 {
     refreshResourceGovernorStatus();
+    refreshSetupStatus();
+    refreshDev348ProfileCloud();
+    refreshDev348WatchesActivity();
     refreshConsent();
     refreshLocalCatalogCache();
+    refreshCapabilities();
 
     const QString rpc_note = tr("\n\nRPC: %1 (same name as CLI). This page never calls getmodel/importmodel automatically.");
     if (ui->resultsList->count() == 0 && m_client_model) {
@@ -1199,13 +2530,7 @@ void ModelNetPage::refresh()
                 rpc_note.arg(QStringLiteral("searchmodels, getmodelfeed, getmodeleconomyentry")));
         }
     }
-    ui->downloadsOutput->setPlainText(
-        tr("getmodeljob") + QLatin1Char('\n') + callRpc("getmodeljob") +
-        rpc_note.arg(QStringLiteral("getmodeljob")));
-    ui->sharedOutput->setPlainText(
-        tr("Seeded/shared inventory is the same listmodels RPC. Demand-seed is -modelseed=auto after a positive budget; this page does not advertise new models by itself.") +
-        QLatin1String("\n\n") + callRpc("listmodels") +
-        rpc_note.arg(QStringLiteral("listmodels")));
+    refreshTransfersAndShares();
     ui->collectionsOutput->setPlainText(
         tr("searchcollections — signed immutable membership snapshots. This GUI does not auto-subscribe or auto-fetch.\n") +
         callRpc("searchcollections") +

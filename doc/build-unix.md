@@ -72,15 +72,36 @@ tree disables it with `-DWITH_MODELNET=OFF`.
 
 PQ1 transport in the helper requires **OpenSSL 3.5+** with **ML-KEM-768** and
 **ML-DSA-44** (`openssl list -kem-algorithms` / `list -signature-algorithms`).
-System OpenSSL **3.0.x** cannot host the helper TLS identity; use bundled libs,
-set `BTX_OPENSSL` to an OpenSSL 3.5 binary, or launch via
-[contrib/modelnet/run-modeld.sh](../contrib/modelnet/run-modeld.sh).
+Ubuntu 22.04 and 24.04 apt ship OpenSSL **3.0.x** (`libssl-dev`). That cannot
+host the helper TLS identity. Homebrew `brew install openssl@3` is a **macOS**
+prefix; it is not a Linux `OPENSSL_ROOT_DIR`.
 
-Example researcher build (no GUI):
+Either:
+
+1. Build OpenSSL 3.5+ into a prefix and point CMake at **both** the headers and
+   the matching libraries. `OPENSSL_ROOT_DIR` alone is not enough: CMake's
+   `FindOpenSSL` can pick 3.5 headers and the distro 3.0 `libssl.so`. Pin the
+   libraries (use `lib/` or `lib64/` as the prefix actually installed; `.a` if
+   you built static):
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DBUILD_BENCH=OFF
+PREFIX="$HOME/.local/opt/openssl-3.5"
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DBUILD_BENCH=OFF \
+  -DWITH_MODELNET=ON \
+  -DOPENSSL_ROOT_DIR="$PREFIX" \
+  -DOPENSSL_SSL_LIBRARY="$PREFIX/lib/libssl.so" \
+  -DOPENSSL_CRYPTO_LIBRARY="$PREFIX/lib/libcrypto.so"
 cmake --build build --target btx-modeld btx-modelcheck btx-open
+```
+
+   Confirm ML-KEM-768 / ML-DSA-44 with that prefix's `bin/openssl`. At runtime
+   set `BTX_OPENSSL` to that binary, or launch via
+   [contrib/modelnet/run-modeld.sh](../contrib/modelnet/run-modeld.sh).
+
+2. Monetary-only (works with distro OpenSSL 3.0.x):
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DWITH_MODELNET=OFF
 ```
 
 Architecture, economics, and RPC semantics: [modelnet/README.md](modelnet/README.md).
@@ -253,9 +274,16 @@ Optional port mapping library (see: `-DWITH_MINIUPNPC=ON`):
 
     sudo apt install libminiupnpc-dev
 
-ZMQ is on by default (`-DWITH_ZMQ=ON`) and requires:
+ZMQ is on by default (`-DWITH_ZMQ=ON`) and requires `libzmq3-dev`.
+`python3-zmq` is only the Python module used by functional tests; it does not
+provide `libzmq`.
 
-    sudo apt-get install libzmq3-dev
+    sudo apt-get install libzmq3-dev libssl-dev
+
+`libssl-dev` on Ubuntu 22.04/24.04 is OpenSSL **3.0.x**. Install it so CMake
+can find OpenSSL headers, but it does **not** satisfy `-DWITH_MODELNET=ON`
+(needs 3.5+ with ML-KEM-768 / ML-DSA-44). See
+[Optional: Native Model Network](#optional-native-model-network-with_modelnet).
 
 Release `btxd` binaries must pass `python3 scripts/release/verify_release_btxd.py <btxd>`
 (`ldd` must show `libzmq`). A binary that still contains `-zmqpubhashblock` strings
@@ -267,15 +295,17 @@ User-Space, Statically Defined Tracing (USDT) dependencies:
 
 GUI dependencies:
 
-Bitcoin Core includes a GUI built with the cross-platform Qt Framework. To compile the GUI, we need to install
-the necessary parts of Qt and some image processing tools, and pass `-DBUILD_GUI=ON` to cmake.
-Skip if you don't intend to use the GUI.
+The GUI is **off** by default (`-DBUILD_GUI=OFF`). Skip this section unless you
+intend to build `btx-qt`. Linux release `btx-qt` is Qt **6**
+(`-DWITH_QT_VERSION=6`). CMake still defaults `WITH_QT_VERSION` to 5, so pass
+6 explicitly.
 
-    sudo apt-get install qtbase5-dev qttools5-dev qttools5-dev-tools librsvg2-bin imagemagick
+    sudo apt-get install qt6-base-dev qt6-tools-dev qt6-l10n-tools \
+      qt6-tools-dev-tools librsvg2-bin imagemagick
 
 Additionally, to support Wayland protocol for modern desktop environments:
 
-    sudo apt install qtwayland5
+    sudo apt install qt6-wayland
 
 The GUI will be able to encode addresses in QR codes unless this feature is explicitly disabled. To install libqrencode, run:
 
@@ -283,7 +313,9 @@ The GUI will be able to encode addresses in QR codes unless this feature is expl
 
 Otherwise, if you don't need QR encoding support, use the `-DWITH_QRENCODE=OFF` option to disable this feature in order to compile the GUI.
 
-Note: You can also build with Qt 6 (instead of Qt 5) by passing `-DWITH_QT_VERSION=6` to cmake.
+Configure with `-DBUILD_GUI=ON -DWITH_QT_VERSION=6`. Qt 5 packages
+(`qtbase5-dev qttools5-dev`) still work if you leave the CMake default
+(`-DWITH_QT_VERSION=5`); the Linux release recipe uses Qt 6.
 
 
 ### Fedora
@@ -322,15 +354,16 @@ User-Space, Statically Defined Tracing (USDT) dependencies:
 
 GUI dependencies:
 
-Bitcoin Core includes a GUI built with the cross-platform Qt Framework. To compile the GUI, we need to install
-the necessary parts of Qt and some image processing tools, and pass `-DBUILD_GUI=ON` to cmake.
-Skip if you don't intend to use the GUI.
+The GUI is **off** by default (`-DBUILD_GUI=OFF`). Skip this section unless you
+intend to build `btx-qt`. Linux release `btx-qt` is Qt **6**; pass
+`-DBUILD_GUI=ON -DWITH_QT_VERSION=6` (CMake still defaults `WITH_QT_VERSION` to
+5).
 
-    sudo dnf install qt5-qttools-devel qt5-qtbase-devel librsvg2-tools ImageMagick
+    sudo dnf install qt6-qtbase-devel qt6-qttools-devel librsvg2-tools ImageMagick
 
 Additionally, to support Wayland protocol for modern desktop environments:
 
-    sudo dnf install qt5-qtwayland
+    sudo dnf install qt6-qtwayland
 
 The GUI will be able to encode addresses in QR codes unless this feature is explicitly disabled. To install libqrencode, run:
 

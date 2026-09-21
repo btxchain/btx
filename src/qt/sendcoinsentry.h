@@ -21,7 +21,7 @@ namespace Ui {
 }
 
 /**
- * A single entry in the dialog for sending bitcoins.
+ * A single entry in the dialog for sending BTX.
  */
 class SendCoinsEntry : public QWidget
 {

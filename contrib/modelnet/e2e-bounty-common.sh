@@ -4,7 +4,13 @@ export LC_ALL=C
 set -euo pipefail
 
 BOUNTY_E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BOUNTY_E2E_BIN="${BIN:-${BIN_DIR:-$BOUNTY_E2E_ROOT/build-gcc13/bin}}"
+if [[ -n "${BIN:-}" && -d "${BIN}" && -x "${BIN}/btxd" ]]; then
+  BOUNTY_E2E_BIN="$BIN"
+elif [[ -n "${BIN_DIR:-}" && -d "${BIN_DIR}" && -x "${BIN_DIR}/btxd" ]]; then
+  BOUNTY_E2E_BIN="$BIN_DIR"
+else
+  BOUNTY_E2E_BIN="$BOUNTY_E2E_ROOT/build-gcc13/bin"
+fi
 BOUNTY_E2E_MODELD="${MODELD:-$BOUNTY_E2E_BIN/btx-modeld}"
 BOUNTY_E2E_BTXD="$BOUNTY_E2E_BIN/btxd"
 BOUNTY_E2E_CLI="$BOUNTY_E2E_BIN/btx-cli"

@@ -1,0 +1,507 @@
+{
+  "revision": "1.1",
+  "base": "HCP/1",
+  "operation_count": 50,
+  "operations": [
+    {
+      "operation_id": "getCognitiveReserveExtension",
+      "method": "GET",
+      "path": "/btx/hcp/v1/extensions/cognitive-reserve",
+      "scope": "catalog:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ReserveExtensionProfileV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createEntityLink",
+      "method": "POST",
+      "path": "/btx/hcp/v1/reserve/entities/links",
+      "scope": "entities:admin",
+      "effect": "DRAFT_OR_POLICY",
+      "request_schema": "CreateEntityLinkV1_1",
+      "response_schema": "EntityLinkV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "listEntityLink",
+      "method": "GET",
+      "path": "/btx/hcp/v1/reserve/entities/links",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "EntityLinkV1_1List",
+      "notes": ""
+    },
+    {
+      "operation_id": "getEntityLink",
+      "method": "GET",
+      "path": "/btx/hcp/v1/reserve/entities/links/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "EntityLinkV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createPortfolio",
+      "method": "POST",
+      "path": "/btx/hcp/v1/reserve/portfolios",
+      "scope": "capital:prepare",
+      "effect": "DRAFT_OR_POLICY",
+      "request_schema": "CreatePortfolioV1_1",
+      "response_schema": "PortfolioV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "listPortfolio",
+      "method": "GET",
+      "path": "/btx/hcp/v1/reserve/portfolios",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "PortfolioV1_1List",
+      "notes": ""
+    },
+    {
+      "operation_id": "getPortfolio",
+      "method": "GET",
+      "path": "/btx/hcp/v1/reserve/portfolios/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "PortfolioV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createReservePolicy",
+      "method": "POST",
+      "path": "/btx/hcp/v1/reserve/policies",
+      "scope": "policies:admin",
+      "effect": "DRAFT_OR_POLICY",
+      "request_schema": "CreateReservePolicyV1_1",
+      "response_schema": "ReservePolicyV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "listReservePolicy",
+      "method": "GET",
+      "path": "/btx/hcp/v1/reserve/policies",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ReservePolicyV1_1List",
+      "notes": ""
+    },
+    {
+      "operation_id": "getReservePolicy",
+      "method": "GET",
+      "path": "/btx/hcp/v1/reserve/policies/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ReservePolicyV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createWorkloadProfile",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/workloads",
+      "scope": "capital:prepare",
+      "effect": "DRAFT_OR_POLICY",
+      "request_schema": "CreateWorkloadProfileV1_1",
+      "response_schema": "WorkloadProfileV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "listWorkloadProfile",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/workloads",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "WorkloadProfileV1_1List",
+      "notes": ""
+    },
+    {
+      "operation_id": "getWorkloadProfile",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/workloads/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "WorkloadProfileV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createApprovalRule",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/approval-rules",
+      "scope": "policies:admin",
+      "effect": "DRAFT_OR_POLICY",
+      "request_schema": "CreateApprovalRuleV1_1",
+      "response_schema": "ApprovalRuleV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "listApprovalRule",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/approval-rules",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ApprovalRuleV1_1List",
+      "notes": ""
+    },
+    {
+      "operation_id": "getApprovalRule",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/approval-rules/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ApprovalRuleV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createResearchProgram",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/programs",
+      "scope": "research:publish",
+      "effect": "DRAFT_OR_POLICY",
+      "request_schema": "CreateResearchProgramV1_1",
+      "response_schema": "ResearchProgramV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "listResearchProgram",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/programs",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ResearchProgramV1_1List",
+      "notes": ""
+    },
+    {
+      "operation_id": "getResearchProgram",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/programs/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ResearchProgramV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "assignEntityRoles",
+      "method": "POST",
+      "path": "/btx/hcp/v1/reserve/entities/roles",
+      "scope": "entities:admin",
+      "effect": "POLICY",
+      "request_schema": "RoleAssignmentRequest",
+      "response_schema": "Job",
+      "notes": ""
+    },
+    {
+      "operation_id": "revokeEntityLink",
+      "method": "POST",
+      "path": "/btx/hcp/v1/reserve/entities/links/{id}/revoke",
+      "scope": "entities:admin",
+      "effect": "POLICY",
+      "request_schema": "MutationRequest",
+      "response_schema": "EntityLinkV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "getReserveSnapshot",
+      "method": "GET",
+      "path": "/btx/hcp/v1/reserve/portfolios/{id}/snapshot",
+      "scope": "reserve:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ReserveSnapshotV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "revokeReservePolicy",
+      "method": "POST",
+      "path": "/btx/hcp/v1/reserve/policies/{id}/revoke",
+      "scope": "policies:admin",
+      "effect": "POLICY",
+      "request_schema": "MutationRequest",
+      "response_schema": "ReservePolicyV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "planReserveReplenishment",
+      "method": "POST",
+      "path": "/btx/hcp/v1/reserve/replenishment/plans",
+      "scope": "capital:prepare",
+      "effect": "PLAN",
+      "request_schema": "RefRequest",
+      "response_schema": "CapitalPlanV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createTCOComparison",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/comparisons",
+      "scope": "capital:prepare",
+      "effect": "PLAN",
+      "request_schema": "RefRequest",
+      "response_schema": "TCOComparisonV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "getTCOComparison",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/comparisons/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "TCOComparisonV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createCapitalPlan",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/plans",
+      "scope": "capital:prepare",
+      "effect": "PLAN",
+      "request_schema": "CreateCapitalPlanV1_1",
+      "response_schema": "CapitalPlanV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "getCapitalPlan",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/plans/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "CapitalPlanV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createAllocationPlan",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/allocations",
+      "scope": "capital:prepare",
+      "effect": "PLAN",
+      "request_schema": "CreateAllocationPlanV1_1",
+      "response_schema": "AllocationPlanV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "getAllocationPlan",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/allocations/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "AllocationPlanV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createApprovalRequest",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/approvals",
+      "scope": "capital:prepare",
+      "effect": "PLAN",
+      "request_schema": "CreateApprovalRequestV1_1",
+      "response_schema": "ApprovalRequestV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "getApprovalRequest",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/approvals/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ApprovalRequestV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "recordApprovalDecision",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/approvals/{id}/decisions",
+      "scope": "capital:approve",
+      "effect": "AUTHORIZE",
+      "request_schema": "CreateApprovalDecisionV1_1",
+      "response_schema": "ApprovalDecisionV1_1Envelope",
+      "notes": "Derive actor from verified caller; request actor must match. Approval does not execute."
+    },
+    {
+      "operation_id": "listApprovalDecisions",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/approvals/{id}/decisions",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ApprovalDecisionV1_1List",
+      "notes": ""
+    },
+    {
+      "operation_id": "executeAllocation",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/allocations/{id}/execute",
+      "scope": "capital:execute",
+      "effect": "EXECUTE_APPROVED",
+      "request_schema": "MutationRequest",
+      "response_schema": "CapitalExecutionReceiptV1_1Envelope",
+      "notes": "Recheck exact plan, quorum, policy and reserve; dispatch only approved child effects."
+    },
+    {
+      "operation_id": "getCapitalExecution",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/executions/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "CapitalExecutionReceiptV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "cancelCapitalExecution",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/executions/{id}/cancel",
+      "scope": "capital:execute",
+      "effect": "CANCEL_SAFE_ONLY",
+      "request_schema": "MutationRequest",
+      "response_schema": "CapitalExecutionReceiptV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "listCapabilityPositions",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/positions",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "CapabilityPositionV1_1List",
+      "notes": ""
+    },
+    {
+      "operation_id": "getCapabilityPosition",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/positions/{id}",
+      "scope": "capital:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "CapabilityPositionV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createCapabilityPosition",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/positions",
+      "scope": "holdings:write",
+      "effect": "RECORD",
+      "request_schema": "CreateCapabilityPositionV1_1",
+      "response_schema": "CapabilityPositionV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "updateCapabilityLifecycle",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/positions/{id}/lifecycle",
+      "scope": "holdings:write",
+      "effect": "RECORD",
+      "request_schema": "LifecycleRequest",
+      "response_schema": "CapabilityPositionV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "joinResearchProgram",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/programs/{id}/memberships",
+      "scope": "research:publish",
+      "effect": "MEMBERSHIP_ONLY",
+      "request_schema": "CreateProgramMembershipV1_1",
+      "response_schema": "ProgramMembershipV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "prepareProgramCommitment",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/programs/{id}/commitments",
+      "scope": "capital:prepare",
+      "effect": "PLAN",
+      "request_schema": "RefRequest",
+      "response_schema": "AllocationPlanV1_1Envelope",
+      "notes": "Creates a proposal, never an unapproved financial commitment."
+    },
+    {
+      "operation_id": "listProductOffers",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/products",
+      "scope": "products:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ProductOfferV1_1List",
+      "notes": ""
+    },
+    {
+      "operation_id": "getProductOffer",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/products/{id}",
+      "scope": "products:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ProductOfferV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createProductReferral",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/products/{id}/referral",
+      "scope": "products:refer",
+      "effect": "REFERRAL_ONLY",
+      "request_schema": "RefRequest",
+      "response_schema": "Job",
+      "notes": ""
+    },
+    {
+      "operation_id": "createReserveReport",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/reports",
+      "scope": "reports:create",
+      "effect": "REPORT",
+      "request_schema": "RefRequest",
+      "response_schema": "Job",
+      "notes": ""
+    },
+    {
+      "operation_id": "getReserveReport",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/reports/{id}",
+      "scope": "reports:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "ReserveReportV1_1Envelope",
+      "notes": ""
+    },
+    {
+      "operation_id": "createCapitalExport",
+      "method": "POST",
+      "path": "/btx/hcp/v1/capital/exports",
+      "scope": "exports:create",
+      "effect": "EXPORT",
+      "request_schema": "RefRequest",
+      "response_schema": "Job",
+      "notes": ""
+    },
+    {
+      "operation_id": "getCapitalExport",
+      "method": "GET",
+      "path": "/btx/hcp/v1/capital/exports/{id}",
+      "scope": "exports:read",
+      "effect": "READ",
+      "request_schema": null,
+      "response_schema": "Job",
+      "notes": ""
+    }
+  ]
+}

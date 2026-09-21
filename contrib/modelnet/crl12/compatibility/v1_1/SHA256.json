@@ -1,0 +1,10 @@
+{
+  "agents/CURSOR_COORDINATOR_PROMPT.md": "66bfcf8ef2ea545e4185a8eb29c2f1d76e94cec20f15298d3b9dc94ebc73520b",
+  "compatibility/hcp1/schemas/HCPObjects.schema.json": "04c27408745fe41602d1f1dfde0eea65aaa04d4ec8017b6830fc3908fd2ef4fb",
+  "compatibility/hcp1/schemas/openapi.yaml": "80ce81430e0b70c4b11ff871456d9926dca69ad8242421fcb0570e691a80652e",
+  "docs/02_Cognitive_Reserve_Implementation_Spec.md": "ec84cd35709df601185a2795afcb2df2dae9119ee85eb0ac3a51b293a3693f24",
+  "schemas/CognitiveReserve.schema.json": "3e58bb587c7d4b87e84e63274e95f8dac38cf8e78dd9a12c7ea2e9697ae02171",
+  "schemas/openapi-v1.1.yaml": "d25b309e69e2f09965c3e346ec2b397ab524d85e79aaea45283ce51e120b07b5",
+  "schemas/operations-v1.1.json": "89715d402ffa5f718e660846e0b46360f0571a62aec53d6de668463600d7ac1f",
+  "tests/native-acceptance-v1.1.csv": "68da057b9a5c00334ca931ea2e0a93c67e190fab657feb03254c36f9e61bd35b"
+}

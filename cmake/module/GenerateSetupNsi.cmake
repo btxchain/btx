@@ -6,9 +6,9 @@ function(generate_setup_nsi)
   set(abs_top_srcdir ${PROJECT_SOURCE_DIR})
   set(abs_top_builddir ${PROJECT_BINARY_DIR})
   set(CLIENT_URL ${PROJECT_HOMEPAGE_URL})
-  # Keep the bitcoin: URI scheme until the Qt/payment handling surface is
-  # migrated separately from this build-label cleanup.
-  set(CLIENT_TARNAME "bitcoin")
+  # Register the btx: URI scheme. Do not claim bitcoin: — that handler belongs
+  # to Bitcoin Core.
+  set(CLIENT_TARNAME "btx")
   set(BTX_GUI_NAME "btx-qt")
   set(BTX_DAEMON_NAME "btxd")
   set(BTX_CLI_NAME "btx-cli")

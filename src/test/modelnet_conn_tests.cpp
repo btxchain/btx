@@ -251,6 +251,9 @@ BOOST_AUTO_TEST_CASE(conn_rly_01_to_10)
     BOOST_CHECK(!ValidateRelayConnect(rr, true, err));
     BOOST_CHECK_EQUAL(tab.Alternate("203.0.113.1:29447", "svc-a"), "203.0.113.2:29447");
     BOOST_CHECK_EQUAL(tab.StatusJson()["automatic_spend_atoms"].getInt<int>(), 0);
+
+    RelayReservation priv;
+    BOOST_CHECK(!tab.Reserve("svc", "ng", "10.0.0.1:29447", 0, priv, err));
 }
 
 BOOST_AUTO_TEST_CASE(conn_hp_01_to_10)
@@ -476,7 +479,7 @@ BOOST_AUTO_TEST_CASE(conn_http_endpoints_and_rpc_fields)
     req.path = std::string(MODEL_HTTP_ROOT) + "ext/relay/reserve";
     req.body = "{\"service_id\":\"svc\",\"netgroup\":\"ng\",\"relay_endpoint\":\"203.0.113.1:29447\"}";
     BOOST_CHECK(HandleNativeRequest(cat, req, resp));
-    BOOST_CHECK_EQUAL(resp.status, 200);
+    BOOST_CHECK_EQUAL(resp.status, 403);
 
     req.path = std::string(MODEL_HTTP_ROOT) + "ext/holepunch";
     req.body = "{\"local\":[\"203.0.113.8:29447\"],\"remote\":[\"198.51.100.9:29447\"],\"rtt_ms\":20,\"direct\":false,\"pq1\":false,\"identity\":false}";

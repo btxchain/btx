@@ -29,6 +29,34 @@ fs::path ArtifactDir(const fs::path& root, const Digest48& artifact)
     return root / "artifacts" / artifact.Hex().c_str();
 }
 
+/** Read a committed piece after checking file_size. Never reads more than PIECE_SIZE. */
+bool ReadBoundedPiece(const fs::path& path, std::vector<unsigned char>& out, std::string& err)
+{
+    std::error_code ec;
+    const auto sz = std::filesystem::file_size(path, ec);
+    if (ec) {
+        err = "missing piece";
+        return false;
+    }
+    if (sz == 0 || sz > PIECE_SIZE) {
+        err = "invalid piece size";
+        return false;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        err = "missing piece";
+        return false;
+    }
+    out.resize(static_cast<size_t>(sz));
+    in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(sz));
+    if (static_cast<uint64_t>(in.gcount()) != sz) {
+        out.clear();
+        err = "piece read failed";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 bool IsPortableRelPath(const std::string& path, std::string& err)
@@ -243,6 +271,14 @@ bool ModelStore::PutVerifiedPiece(const Digest48& artifact, uint32_t file_index,
     fs::create_directories(dir);
     const fs::path final_path = dir / (std::to_string(piece_index) + ".piece").c_str();
     if (fs::exists(final_path)) {
+        std::vector<unsigned char> existing;
+        if (!ReadBoundedPiece(final_path, existing, err)) {
+            return false;
+        }
+        if (existing.size() != bytes.size() || ChunkLeaf(piece_index, existing) != expected_leaf) {
+            err = "existing piece mismatch";
+            return false;
+        }
         return true;
     }
     if (!m_quota.max_bytes) {
@@ -283,13 +319,7 @@ bool ModelStore::GetPiece(const Digest48& artifact, uint32_t file_index, uint32_
 {
     const fs::path path = ArtifactDir(m_root, artifact) / std::to_string(file_index).c_str() /
                            (std::to_string(piece_index) + ".piece").c_str();
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        err = "missing piece";
-        return false;
-    }
-    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return true;
+    return ReadBoundedPiece(path, out, err);
 }
 
 bool ModelStore::HasPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index) const
@@ -299,6 +329,28 @@ bool ModelStore::HasPiece(const Digest48& artifact, uint32_t file_index, uint32_
     std::error_code ec;
     const auto sz = std::filesystem::file_size(path, ec);
     return !ec && sz > 0;
+}
+
+bool ModelStore::DeletePiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index, std::string& err)
+{
+    const fs::path dir = ArtifactDir(m_root, artifact) / std::to_string(file_index).c_str();
+    const fs::path path = dir / (std::to_string(piece_index) + ".piece").c_str();
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec) return true;
+    const auto sz = std::filesystem::file_size(path, ec);
+    const uint64_t drop = (!ec && sz > 0) ? static_cast<uint64_t>(sz) : 0;
+    std::filesystem::remove(path, ec);
+    if (ec) {
+        err = "piece remove failed";
+        return false;
+    }
+    if (drop > 0) {
+        if (m_quota.used_bytes >= drop) m_quota.used_bytes -= drop;
+        else m_quota.used_bytes = 0;
+    }
+    const fs::path proof = dir / (std::to_string(piece_index) + ".proof.json").c_str();
+    std::filesystem::remove(proof, ec);
+    return true;
 }
 
 bool ModelStore::Pin(const Digest48& model_id, std::string& err)

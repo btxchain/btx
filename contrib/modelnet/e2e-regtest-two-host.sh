@@ -29,6 +29,11 @@ FETCHER_BTXD="${FETCHER_BTXD:-\$HOME/.local/opt/btx-0.34.7-b094c6ba420f/bin/btxd
 FETCHER_CLI="${FETCHER_CLI:-${FETCHER_BTXD%/*}/btx-cli}"
 FETCHER_MODELD="${FETCHER_MODELD:-\$HOME/.local/opt/btx-0.34.7-rc-modeld/bin/btx-modeld}"
 FETCHER_LD_LIBRARY_PATH="${FETCHER_LD_LIBRARY_PATH:-\$HOME/.local/opt/btx-0.34.7-rc-modeld/lib}"
+# Dedicated ports: never share 18443/18444 with the lab /var/lib/btxd node.
+SEEDER_P2P="${SEEDER_P2P:-38044}"
+SEEDER_RPC="${SEEDER_RPC:-38043}"
+FETCHER_P2P="${FETCHER_P2P:-38144}"
+FETCHER_RPC="${FETCHER_RPC:-38143}"
 PROD_SEEDER="${SEEDER_PROD_PIDS:?set SEEDER_PROD_PIDS}"
 PROD_FETCHER="${FETCHER_PROD_PIDS:?set FETCHER_PROD_PIDS}"
 
@@ -106,7 +111,7 @@ rm -rf "\$DIR"
 mkdir -p "\$DIR/btxd" "\$DIR/modeld" "\$DIR/src"
 python3 -c "import struct; from pathlib import Path; Path('\$DIR/src/model.safetensors').write_bytes(struct.pack('<Q', 2)+b'{}')"
 nohup "\$BTXD" -regtest -datadir="\$DIR/btxd" -server \\
-  -listen=0 -port=18444 -rpcport=18443 -rpcuser=regtest -rpcpassword=regtest \\
+  -listen=0 -port=${SEEDER_P2P} -rpcport=${SEEDER_RPC} -rpcuser=regtest -rpcpassword=regtest \\
   -fallbackfee=0.0002 -disablewallet \\
   -regtestmatmulbindingheight=2147483647 \\
   -regtestmatmulproductdigestheight=2147483647 \\
@@ -139,7 +144,7 @@ fi
 rm -rf "\$DIR"
 mkdir -p "\$DIR/btxd" "\$DIR/modeld"
 nohup "\$BTXD" -regtest -datadir="\$DIR/btxd" -server \\
-  -listen=0 -port=18454 -rpcport=18453 -rpcuser=regtest -rpcpassword=regtest \\
+  -listen=0 -port=${FETCHER_P2P} -rpcport=${FETCHER_RPC} -rpcuser=regtest -rpcpassword=regtest \\
   -fallbackfee=0.0002 -disablewallet \\
   -regtestmatmulbindingheight=2147483647 \\
   -regtestmatmulproductdigestheight=2147483647 \\
@@ -195,9 +200,9 @@ wait_rpc() {
 }
 
 echo "== isolated monetary nodes =="
-SEED_CHAIN="$(wait_rpc "$SEEDER" "${SEEDER_CLI}" "${SEEDER_DIR}/btxd" 18443 "${SEEDER_DIR}/btxd.pid" "${SEEDER_DIR}/btxd.log")"
+SEED_CHAIN="$(wait_rpc "$SEEDER" "${SEEDER_CLI}" "${SEEDER_DIR}/btxd" "$SEEDER_RPC" "${SEEDER_DIR}/btxd.pid" "${SEEDER_DIR}/btxd.log")"
 echo "$SEED_CHAIN" | python3 -c 'import json,sys; i=json.load(sys.stdin); assert i.get("chain")=="regtest", i; print("seeder", i["chain"], "blocks", i.get("blocks"))' || die "seeder not regtest: $SEED_CHAIN"
-FETCH_CHAIN="$(wait_rpc "$FETCHER" "${FETCHER_CLI}" "${FETCHER_DIR}/btxd" 18453 "${FETCHER_DIR}/btxd.pid" "${FETCHER_DIR}/btxd.log")"
+FETCH_CHAIN="$(wait_rpc "$FETCHER" "${FETCHER_CLI}" "${FETCHER_DIR}/btxd" "$FETCHER_RPC" "${FETCHER_DIR}/btxd.pid" "${FETCHER_DIR}/btxd.log")"
 echo "$FETCH_CHAIN" | python3 -c 'import json,sys; i=json.load(sys.stdin); assert i.get("chain")=="regtest", i; print("fetcher", i["chain"], "blocks", i.get("blocks"))' || die "fetcher not regtest: $FETCH_CHAIN"
 
 echo "== SSH tunnel seeder:${MODELD_PORT} -> fetcher:127.0.0.1:${MODELD_PORT} =="

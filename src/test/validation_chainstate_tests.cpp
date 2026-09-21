@@ -3396,6 +3396,110 @@ BOOST_FIXTURE_TEST_CASE(chainstate_signer_does_not_abandon_attested_tip_for_dual
     chainman.CheckBlockIndex();
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstate_consensus_signer_ignores_lower_work_signed_frontier, TestChain100Setup)
+{
+    // Live 224580 fork: an old signed sibling at 224581 repeatedly pulled a
+    // CONSENSUS signer off its validated branch at 224585. Normal work
+    // selection then returned to 224585, repeating the disconnect/connect loop.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
+    auto& action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& park_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t start;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nReorgProtectionStartHeight = start;
+            mode = saved_mode;
+            action = saved_action;
+            park_depth = saved_park_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
+        }
+    } restore{consensus, consensus.nReorgProtectionStartHeight, mode, mode,
+              action, action, park_depth, park_depth,
+              hysteresis_work_margin, hysteresis_work_margin};
+    consensus.nReorgProtectionStartHeight = 10;
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+    action = kernel::DeepReorgAction::PARK;
+    park_depth = 6;
+    hysteresis_work_margin = 2;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* const signed_sibling{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(signed_sibling != nullptr);
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, signed_sibling));
+    for (int i = 0; i < 5; ++i) CreateAndProcessBlock({}, script);
+    CBlockIndex* const validated_tip{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(validated_tip != nullptr);
+    // Prepare the next body before enabling the signer so this test isolates
+    // activation from block-template policy. It is submitted below.
+    const auto next_block{std::make_shared<const CBlock>(
+        CreateBlock({}, script, chainstate))};
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(signed_sibling);
+        BOOST_REQUIRE_EQUAL(validated_tip->nHeight, signed_sibling->nHeight + 4);
+        BOOST_REQUIRE(validated_tip->GetAncestor(signed_sibling->nHeight - 1) ==
+                      signed_sibling->pprev);
+        BOOST_REQUIRE(validated_tip->nChainWork > signed_sibling->nChainWork);
+        BOOST_REQUIRE(validated_tip->nAuthenticatedChainWork == validated_tip->nChainWork);
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'b')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::HasLocalSigner());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      signed_sibling->GetBlockHash(), signed_sibling->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.IndexHasTrustedMatMulAuthority(signed_sibling));
+        BOOST_REQUIRE(!chainman.IndexHasTrustedMatMulAuthority(validated_tip));
+        // Require this before ActivateBestChain: the unfixed selector would
+        // nominate the old sibling and can loop between both branches.
+        BOOST_REQUIRE(chainman.FindUniqueCompetingAttestedIndex() == nullptr);
+        BOOST_REQUIRE(chainstate.FindMostWorkChainForTest() == validated_tip);
+        BOOST_CHECK(!chainman.IsAttestedAbandonForkCandidate(signed_sibling));
+    }
+    for (int i = 0; i < 3; ++i) {
+        state = BlockValidationState{};
+        BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+        BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == validated_tip);
+    }
+    BOOST_REQUIRE(chainman.ProcessNewBlock(next_block, /*force_processing=*/true,
+                                          /*min_pow_checked=*/true, /*new_block=*/nullptr));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                next_block->GetHash());
+    BOOST_CHECK((signed_sibling->nStatus & BLOCK_FAILED_MASK) == 0);
+    chainman.CheckBlockIndex();
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstate_consensus_signer_rejoins_signed_frontier_from_losing_twin, TestChain100Setup)
 {
     // CONSENSUS GPU miner attested its own losing twin; signed frontier

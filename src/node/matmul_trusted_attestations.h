@@ -59,6 +59,7 @@ void ResetForTest();
 [[nodiscard]] bool IsTrustedMirror();
 [[nodiscard]] bool ServesAttestations();
 [[nodiscard]] bool HasLocalSigner();
+[[nodiscard]] bool HasLocalPqSigner();
 /** Default for -matmulattestationserve. A plain consensus node (no local
  *  signing key, not -matmulvalidation=trusted) must not answer GETMMATTEST;
  *  that is the live isolation default so public fan-in cannot serialize
@@ -71,11 +72,13 @@ void ResetForTest();
 [[nodiscard]] std::chrono::milliseconds WaitTimeout();
 [[nodiscard]] size_t Threshold();
 [[nodiscard]] std::vector<CPubKey> TrustedSigners();
+[[nodiscard]] std::vector<std::vector<unsigned char>> TrustedPqSigners();
 [[nodiscard]] bool OpenAttestorsEnabled();
 [[nodiscard]] size_t OpenThreshold();
 [[nodiscard]] std::vector<CPubKey> AdmittedOpenSigners();
 [[nodiscard]] std::vector<CPubKey> FrozenOpenSigners();
 [[nodiscard]] bool IsAuthoritySigner(const CPubKey& pubkey);
+[[nodiscard]] bool IsAuthorityPqSigner(const std::vector<unsigned char>& pubkey);
 [[nodiscard]] bool IsBlocked(const CPubKey& pubkey);
 [[nodiscard]] std::vector<CPubKey> BlockedSigners();
 [[nodiscard]] std::vector<CPubKey> ConfigBlockedSigners();
@@ -107,10 +110,15 @@ void SetBlockIndexHeightLookup(BlockIndexHeightLookup lookup);
     const matmul::trusted::ExactReplayAttestation& attestation,
     const uint256& expected_hash,
     int32_t expected_height);
+[[nodiscard]] matmul::trusted::AddResult AddPq(
+    const matmul::trusted::ExactReplayPqAttestation& attestation,
+    const uint256& expected_hash,
+    int32_t expected_height);
 [[nodiscard]] matmul::trusted::AddResult SignAuthoritative(
     const uint256& block_hash,
     int32_t block_height,
-    matmul::trusted::ExactReplayAttestation* produced = nullptr);
+    matmul::trusted::ExactReplayAttestation* produced = nullptr,
+    matmul::trusted::ExactReplayPqAttestation* produced_pq = nullptr);
 /**
  * This node's own validated BlockDisconnected. Releases the local mint slot
  * when the minted hash left the active chain, so SignAuthoritative can
@@ -209,6 +217,8 @@ VerifyUtxoSnapshotManifest(
     std::vector<matmul::trusted::ExactReplayAttestation>* quorum = nullptr);
 [[nodiscard]] std::vector<matmul::trusted::ExactReplayAttestation> Get(
     const uint256& block_hash, int32_t block_height);
+[[nodiscard]] std::vector<matmul::trusted::ExactReplayPqAttestation> GetPq(
+    const uint256& block_hash, int32_t block_height);
 [[nodiscard]] matmul::trusted::StoreStats Stats();
 
 /**
@@ -304,6 +314,40 @@ static constexpr double GETMMATTEST_LIVE_REQUEST_BURST{16.0};
 static constexpr double GETMMATTEST_HISTORICAL_REQUEST_BURST{4.0};
 static constexpr auto GETMMATTEST_LIVE_TOKEN_REFILL{std::chrono::seconds{1}};
 static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4}};
+/** In-flight GETMMATTEST occupancy for tip chatter / competing hashes.
+ *  Peer-success hints in net_processing keep using this 60s window. */
+static constexpr auto GETMMATTEST_REQUEST_TTL{std::chrono::seconds{60}};
+/** Consensus catch-up occupancy when the body is already local and the
+ *  first ask produced no quorum. Measured #154: retry at 60s unblocks
+ *  in a few seconds, so the TTL — not GPU — was the 1-block/min floor.
+ *  Matches MATMUL_ATTESTATION_MISS_BACKOFF_BASE. */
+static constexpr auto GETMMATTEST_CATCHUP_REQUEST_TTL{std::chrono::seconds{5}};
+/** How far headers must lead the active tip before the catch-up TTL
+ *  applies. Same numeric floor as signed-frontier stall_headers_ahead;
+ *  this is NOT signed-frontier catch-up (that flag stays mirror-only). */
+static constexpr int GETMMATTEST_CATCHUP_TTL_HEADERS_AHEAD{2};
+
+/**
+ * Occupancy TTL for one GETMMATTEST hash. Do not use this to flip
+ * IsSignedFrontierCatchUp: that predicate is trusted-mirror-only, and
+ * PreferGetMmAttestPeer(catch_up=1) skips consensus_node peers that
+ * lack ARCHIVE / recent MMATTEST / gpu_attestor — the #154 node (two
+ * consensus peers, catch_up=0) would then ask nobody.
+ *
+ * Peer-success / authority-hint expiry stays at GETMMATTEST_REQUEST_TTL.
+ */
+[[nodiscard]] inline std::chrono::seconds GetMmAttestRequestTtl(
+    bool consensus_mode,
+    bool trusted_mirror,
+    int headers_ahead,
+    bool body_local)
+{
+    if (consensus_mode && !trusted_mirror && body_local &&
+        headers_ahead >= GETMMATTEST_CATCHUP_TTL_HEADERS_AHEAD) {
+        return GETMMATTEST_CATCHUP_REQUEST_TTL;
+    }
+    return GETMMATTEST_REQUEST_TTL;
+}
 
 /** Archives serve historical GETMMATTEST. A local signer does not:
  *  only the live tip window. Height above tip (catch-up suffix) is
@@ -2591,20 +2635,33 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
            manual || noban;
 }
 
-/** Advertised NODE_NETWORK plus a matching header is not a replacement body
- *  source. Only a peer that has actually delivered a BLOCK/CMPCTBLOCK/
- *  BLOCKTXN counts, so only-source protection is not inverted by header-only
- *  archives. Eligibility (GPU / NODE_NETWORK / manual / noban) still goes
- *  through `may_serve_bodies`; that peer must also have served a body. */
+/** Whether another peer is a replacement GETDATA source for a silent owner.
+ *
+ *  `may_serve_bodies` is the eligibility gate (GPU / NODE_NETWORK / manual /
+ *  noban). During signed-frontier catch-up only a frontier body source counts,
+ *  so a miner who advertised headers cannot look like an alternative to the
+ *  last archive.
+ *
+ *  Disconnect / only-source protection (`require_served_block=true`, the
+ *  default): a header-only NODE_NETWORK advertiser is not enough; the peer
+ *  must have delivered a BLOCK/CMPCTBLOCK/BLOCKTXN. Otherwise we would
+ *  disconnect the only archive that actually serves bodies.
+ *
+ *  Pause / 15s fail-over (`require_served_block=false`): cold-start has no
+ *  delivered bodies yet. A second outbound that advertised the hole and can
+ *  serve must still be enough to pause a silent first GETDATA owner, or the
+ *  same peer re-wins the slot forever (peerman silent-failover tests; issue
+ *  #163 follow-on). */
 [[nodiscard]] inline bool PeerCountsAsAlternativeBodyDownloadSource(
     bool may_serve_bodies,
     bool signed_frontier_catch_up,
     bool signed_frontier_body_source,
-    bool has_served_block)
+    bool has_served_block,
+    bool require_served_block = true)
 {
     if (!may_serve_bodies) return false;
     if (signed_frontier_catch_up && !signed_frontier_body_source) return false;
-    return has_served_block;
+    return !require_served_block || has_served_block;
 }
 
 /** Root-first must not delete a fresh GETDATA because a second peer is

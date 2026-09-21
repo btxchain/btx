@@ -1,0 +1,121 @@
+# Isolated CRL/1.2 conformance lab. Generic identities only.
+# A role advertisement is not customer authority. Self-attestation is not
+# centrally granted certification.
+revision: "1.2"
+lab_id: lab-crl12-001
+network: isolated-regtest
+not_central_certification: true
+issuer_class: SELF_ATTESTED
+evidence_level: REFERENCE
+
+identity:
+  issuer: https://identity.example
+  audience: configured-crl-audience
+  sender_constraint: REQUIRED
+  credential_ref: os-secret:lab-client
+
+# Two generic providers. No brand names, no privileged allowlist.
+providers:
+  - id: provider-a
+    origin: https://provider-a.example
+    api_base: /btx/hcp/v1
+    role_manifest_ref: OPERATOR_ACCEPTED_EXACT_REFERENCE
+  - id: provider-b
+    origin: https://provider-b.example
+    api_base: /btx/hcp/v1
+    role_manifest_ref: OPERATOR_ACCEPTED_EXACT_REFERENCE
+
+# Nine generic roles. A provider may claim a subset. Endpoints must map to
+# registered operations; missing production routes are not advertised.
+roles:
+  DISCOVERY:
+    role_id: DISCOVERY
+    provider_id: provider-a
+    effects: [READ]
+    adapter_id: adapter-discovery-a
+    source_contract: exact-package-bytes
+    evidence: original authorship, bounded search, source outage, no wallet dependency
+    not_central_certification: true
+  CUSTODY:
+    role_id: CUSTODY
+    provider_id: provider-a
+    effects: [READ, RECORD]
+    adapter_id: adapter-custody-a
+    source_contract: native-keys-and-scripts
+    evidence: inherit HCP custody; signer ambiguity, backup and recovery
+    not_central_certification: true
+  EXECUTION:
+    role_id: EXECUTION
+    provider_id: provider-b
+    effects: [READ, PLAN]
+    adapter_id: adapter-execution-b
+    source_contract: eligible-venue-operations
+    evidence: inherit HCP/v1.1 quotes, idempotency, partial outcomes
+    not_central_certification: true
+  FUNDING:
+    role_id: FUNDING
+    provider_id: provider-a
+    effects: [READ, PLAN]
+    adapter_id: adapter-funding-a
+    source_contract: native-release-bounty-claim-refund
+    evidence: inherit HCP/v1.1 per-account mapping; no automatic spend
+    not_central_certification: true
+  TREASURY:
+    role_id: TREASURY
+    provider_id: provider-a
+    effects: [READ, PLAN]
+    adapter_id: adapter-treasury-a
+    source_contract: reserve-availability-and-mandates
+    evidence: inherit v1.1 floor, concurrent allocation
+    not_central_certification: true
+  DEVICE_HANDOFF:
+    role_id: DEVICE_HANDOFF
+    provider_id: provider-b
+    effects: [READ]
+    adapter_id: adapter-handoff-b
+    source_contract: owner-local-verification
+    evidence: inherit JIT/HCP grant, acquisition, runtime readiness
+    not_central_certification: true
+  ASSET_SERVICING:
+    role_id: ASSET_SERVICING
+    provider_id: provider-a
+    effects: [READ, RECORD]
+    adapter_id: adapter-asset-servicing-a
+    source_contract: namespaced-identity-and-bitemporal-positions
+    evidence: rights issuer, valuation, reconciliation; no native ledger mutation
+    not_central_certification: true
+  PORTFOLIO_ANALYTICS:
+    role_id: PORTFOLIO_ANALYTICS
+    provider_id: provider-b
+    effects: [READ, PLAN, TRANSLATE_TO_DRAFT]
+    adapter_id: adapter-analytics-b
+    source_contract: scoped-metrics-and-snapshots
+    evidence: draft-only instructions; no executeAllocation from analytics scope
+    not_central_certification: true
+  FIAT_RAIL:
+    role_id: FIAT_RAIL
+    provider_id: provider-b
+    effects: [READ]
+    adapter_id: adapter-fiat-b
+    source_contract: operator-approved-fiat-flow
+    evidence: permitted fiat flow only; not presumed digital-asset support
+    not_central_certification: true
+
+policy:
+  public_model_toll: false
+  local_reporting_default: OFF
+  role_binding_requires_owner: true
+  auto_financial_failover: false
+  imported_balance_is_spendable: false
+  brand_dispatch: forbidden
+
+limits:
+  signed_body_bytes: 1048576
+  batch_rows: 1000
+  chunk_bytes: 16777216
+  projection_sources: 32
+  projection_metrics: 32
+  page_rows_default: 100
+  page_rows_max: 1000
+  graph_depth: 16
+  scenario_shocks: 64

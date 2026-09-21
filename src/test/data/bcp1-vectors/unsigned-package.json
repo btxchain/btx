@@ -1,0 +1,70 @@
+{
+  "format": "BTXPSBT",
+  "version": 1,
+  "network": "main",
+  "chain": "BTX",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "note": "Unsigned skeleton. Native tests fill pubkey, P2MR leaf/control, digest, script_pubkey, and unsigned_tx_hex from derivation.json (synthetic seed). Package JSON must never carry a seed or secret key.",
+  "unsigned_tx_hex": "",
+  "txid": "",
+  "inputs": [
+    {
+      "index": 0,
+      "txid": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "vout": 0,
+      "prevout": {
+        "txid": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "vout": 0
+      },
+      "amount_atoms": 125000000,
+      "script_pubkey": "",
+      "sequence": 4294967295,
+      "p2mr": {
+        "merkle_root": "",
+        "leaf_script": "",
+        "leaf_version": 194,
+        "leaf_hash": "",
+        "control_block": "c2"
+      },
+      "path": "m/87h/0h/0h/0/0",
+      "pubkeys": [
+        {
+          "algo": "ML-DSA-44",
+          "pubkey": "",
+          "master_fingerprint": "00000000"
+        }
+      ],
+      "sighash": "DEFAULT",
+      "digest": "",
+      "signatures": []
+    }
+  ],
+  "outputs": [
+    {
+      "index": 0,
+      "address": "",
+      "amount_atoms": 50000000,
+      "script_pubkey": "",
+      "role": "withdrawal"
+    },
+    {
+      "index": 1,
+      "address": "",
+      "amount_atoms": 74900000,
+      "script_pubkey": "",
+      "role": "change",
+      "path": "m/87h/0h/0h/1/0"
+    }
+  ],
+  "change": [
+    {
+      "index": 1,
+      "amount_atoms": 74900000,
+      "path": "m/87h/0h/0h/1/0",
+      "role": "change"
+    }
+  ],
+  "fee_atoms": 100000,
+  "weight": 0,
+  "locktime": 0
+}

@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cognitive Reserve — capital workspace</title>
+  <style>
+    :root {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #172231;
+      background: #f5f6f8;
+      font-size: 15px;
+      --ink: #172231;
+      --muted: #526170;
+      --line: #dce1e6;
+      --card: #fff;
+      --brand: #132732;
+      --focus: #3465ac;
+      --warn: #604f2c;
+      --warn-bg: #f4efe4;
+      --ok: #234a59;
+      --unk: #6a5200;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body { min-height: 100vh; }
+    button, input, select, textarea { font: inherit; }
+    button, select, input, textarea { min-height: 44px; }
+    button {
+      border: 1px solid #c9d0da;
+      border-radius: 10px;
+      background: #fff;
+      padding: 10px 16px;
+      cursor: pointer;
+      color: inherit;
+    }
+    button.primary { background: #12394a; color: #fff; border-color: #12394a; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 3px;
+    }
+    .skip {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      z-index: 20;
+      transform: translateY(-200%);
+    }
+    .skip:focus { transform: none; }
+    aside {
+      position: fixed;
+      inset: 0 auto 0 0;
+      width: 220px;
+      padding: 30px 20px;
+      background: var(--brand);
+      color: #fff;
+    }
+    aside .brand { font-size: 20px; font-weight: 650; letter-spacing: -.5px; margin-bottom: 8px; }
+    aside .sub { font-size: 12px; color: #b8c8d2; line-height: 1.5; margin-bottom: 28px; }
+    nav.primary button {
+      display: block;
+      background: none;
+      border: none;
+      color: #d5e0e7;
+      text-align: left;
+      width: 100%;
+      margin: 6px 0;
+      border-radius: 8px;
+    }
+    nav.primary button[aria-current="page"] { background: #2c4654; color: #fff; font-weight: 650; }
+    .secondary { margin-top: 28px; font-size: 12px; color: #9fb0bb; }
+    .secondary button {
+      display: block;
+      width: 100%;
+      background: none;
+      border: none;
+      color: #b8c8d2;
+      text-align: left;
+      min-height: 40px;
+      padding: 8px 10px;
+    }
+    main { margin-left: 220px; max-width: 1500px; padding: 32px 44px 70px; }
+    header.top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 22px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+    label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 7px; }
+    select, input, textarea {
+      border: 1px solid #c7d0d9;
+      border-radius: 9px;
+      background: #fff;
+      padding: 8px 12px;
+      max-width: 100%;
+      width: 100%;
+    }
+    textarea { min-height: 72px; resize: vertical; }
+    .context { display: flex; gap: 18px; flex-wrap: wrap; }
+    .context > div { min-width: 180px; }
+    .kicker { letter-spacing: 1.7px; font-size: 11px; font-weight: 700; color: #647485; text-transform: uppercase; }
+    h1 { font-size: 36px; font-weight: 650; letter-spacing: -1.2px; margin: 10px 0 14px; }
+    h2 { font-size: 22px; font-weight: 650; letter-spacing: -.5px; margin: 0 0 15px; }
+    h3 { font-size: 16px; line-height: 1.35; margin: 0 0 8px; }
+    p { line-height: 1.65; max-width: 820px; color: #475668; }
+    .lead { font-size: 17px; margin-bottom: 24px; }
+    .row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 24px 0; }
+    .card { background: var(--card); border: 1px solid #e0e5eb; border-radius: 16px; padding: 24px; }
+    .metric {
+      font-size: 30px;
+      font-weight: 650;
+      letter-spacing: -.7px;
+      margin: 14px 0 8px;
+      overflow-wrap: anywhere;
+    }
+    .small { font-size: 12px; line-height: 1.5; color: #607080; }
+    .split { display: grid; grid-template-columns: 1.25fr 1fr; gap: 22px; }
+    .pill { display: inline-block; padding: 5px 9px; border-radius: 7px; background: #edf3f6; color: #345467; font-size: 12px; font-weight: 600; }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th { text-align: left; color: #607080; font-size: 12px; font-weight: 600; }
+    td, th { padding: 15px 8px; border-bottom: 1px solid #e6ebef; overflow-wrap: anywhere; }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 22px 0; }
+    section.view[hidden] { display: none; }
+    .callout { border-left: 3px solid #527788; padding: 10px 18px; background: #edf2f5; margin: 24px 0; line-height: 1.6; }
+    .warning { padding: 14px; border-radius: 9px; background: var(--warn-bg); color: var(--warn); }
+    .unknown { padding: 14px; border-radius: 9px; background: #f7f1dc; color: var(--unk); font-weight: 650; }
+    footer.note { margin-top: 36px; font-size: 12px; color: #667789; }
+    dialog {
+      width: min(760px, 94vw);
+      border: 1px solid #cdd6de;
+      border-radius: 18px;
+      padding: 28px;
+      max-height: 90vh;
+      overflow: auto;
+    }
+    dialog::backdrop { background: #17273588; }
+    .form { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .timeline { padding: 16px 0; border-bottom: 1px solid #e0e6ed; line-height: 1.7; }
+    .status { font-weight: 650; color: var(--ok); }
+    a { color: #194e70; }
+    .chip { font-size: 11px; background: #edf2f7; padding: 6px 9px; border-radius: 6px; display: inline-block; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+    #packet { display: grid; gap: 10px; margin: 18px 0; }
+    #packet > div { display: grid; grid-template-columns: 220px 1fr; gap: 12px; padding: 8px 0; border-bottom: 1px solid #e6ebef; }
+    #packet dt { color: #607080; font-weight: 600; }
+    pre.raw {
+      background: #f3f1eb;
+      padding: 12px;
+      overflow: auto;
+      font-size: 12px;
+      border: 1px solid #e4dfd4;
+      border-radius: 8px;
+      white-space: pre-wrap;
+    }
+    .check { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+    .check input { width: auto; min-height: 22px; }
+    .gateway { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 720px; }
+    html[lang="ja"] h1, html[lang="ja"] .payer { line-height: 1.45; }
+    @media (max-width: 980px) {
+      aside { position: static; width: auto; padding: 18px; }
+      aside .sub { margin-bottom: 10px; }
+      nav.primary, .secondary { display: flex; flex-wrap: wrap; }
+      nav.primary button, .secondary button { width: auto; margin: 2px; }
+      main { margin: 0; padding: 25px; }
+      .row, .split, .form, .gateway, #packet > div { grid-template-columns: 1fr; }
+      h1 { font-size: 30px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to capital workspace</a>
+  <aside>
+    <div class="brand">Cognitive Reserve</div>
+    <div class="sub">BTX · Capital for machine capability<br>HCP/1 + CR11 product shell</div>
+    <nav class="primary" aria-label="Primary">
+      <button type="button" data-page="overview" aria-current="page">Overview</button>
+      <button type="button" data-page="reserves">Reserves</button>
+      <button type="button" data-page="capabilities">Capabilities</button>
+      <button type="button" data-page="build">Build</button>
+      <button type="button" data-page="approvals">Approvals</button>
+      <button type="button" data-page="activity">Activity</button>
+    </nav>
+    <div class="secondary">
+      <div class="kicker" style="color:#9fb0bb;margin-bottom:8px">Secondary</div>
+      <button type="button" data-page="reports">Reports</button>
+      <button type="button" data-page="gateway">Gateway</button>
+    </div>
+  </aside>
+  <main id="main">
+    <header class="top">
+      <div>
+        <div class="kicker">Capital workspace</div>
+        <div style="margin-top:8px">
+          <span class="chip">HCP/1 · Cognitive Reserve v1.1</span>
+          <span class="chip" id="spend-chip"><code>automatic_spend_atoms</code> = 0</span>
+        </div>
+        <p class="small payer" id="payer-banner" style="margin-top:12px;max-width:none">
+          Legal payer: <strong class="entity-label">Example Operating Co.</strong>
+          · Portfolio: <strong id="portfolio-label">working</strong>
+          · Group view is not debit authority.
+        </p>
+      </div>
+      <div class="context">
+        <div>
+          <label for="persona">Workspace role</label>
+          <select id="persona">
+            <option value="treasury">Corporate treasury</option>
+            <option value="operator">Institutional operator</option>
+            <option value="principal">Family principal</option>
+            <option value="adviser">Adviser · draft only</option>
+          </select>
+        </div>
+        <div>
+          <label for="entity">Legal payer</label>
+          <select id="entity">
+            <option value="company">Example Operating Co.</option>
+            <option value="trust">Example Family Trust</option>
+            <option value="foundation">Example Research Foundation</option>
+          </select>
+        </div>
+        <div>
+          <label for="portfolio">Portfolio</label>
+          <select id="portfolio">
+            <option value="demo">working · demo</option>
+          </select>
+        </div>
+        <div>
+          <label for="locale">Display locale</label>
+          <select id="locale">
+            <option value="en">English</option>
+            <option value="ja">日本語</option>
+          </select>
+        </div>
+      </div>
+    </header>
+
+    <div class="check" style="margin-bottom:18px">
+      <input id="family-view" type="checkbox" />
+      <label for="family-view" style="margin:0">Group / family overview — visibility only, not debit authority</label>
+    </div>
+    <p id="family-banner" class="warning" hidden>
+      Viewing related entities. Each company, trust and foundation keeps its own financial authority.
+      This overview cannot authorize a debit, pooled spend, or adviser self-approval.
+    </p>
+    <p id="uri-strip" class="warning" hidden></p>
+    <p id="session-note" class="callout" hidden></p>
+
+    <section class="view" id="overview">
+      <div class="kicker">Your productive capital</div>
+      <h1 tabindex="-1">Hold reserves. Build capability.</h1>
+      <p class="lead">Plan the next capability investment without losing sight of liquidity, ownership or what your machines can use.</p>
+      <div class="row">
+        <div class="card">
+          <label>Financial reserve · available</label>
+          <div class="metric amount" id="ov-available">45,000 BTX</div>
+          <div class="small">Canonical atoms: <code id="ov-available-canon">45000</code>. After existing holds. Protected floor: <span class="floor-label">20,000</span>.</div>
+        </div>
+        <div class="card">
+          <label>Capital committed</label>
+          <div class="metric amount" id="ov-committed">8,500 BTX</div>
+          <div class="small">Native research/release lots. Separate from available funds. Not merged NAV.</div>
+        </div>
+        <div class="card">
+          <label>Cognitive holdings</label>
+          <div class="metric" id="ov-holdings">24 recipes</div>
+          <div class="small">Observed usable deployments. Productive resources, not cash NAV.</div>
+        </div>
+      </div>
+      <div class="split">
+        <div class="card">
+          <h2>Make the next capital decision</h2>
+          <p>Start from a recurring workload, an exact capability package or a missing research objective. One packet; separate financial and local permissions.</p>
+          <div class="actions">
+            <button type="button" class="primary" data-start="plan">Create capital plan</button>
+            <button type="button" data-go="capabilities">Explore capabilities</button>
+            <button type="button" id="refresh-overview">Load live snapshot</button>
+          </div>
+          <span class="pill">One packet · family view cannot debit</span>
+        </div>
+        <div class="card">
+          <h2>Selected entity</h2>
+          <div class="metric entity-label payer" style="font-size:22px">Example Operating Co.</div>
+          <p>Group relationships provide visibility. Each legal payer retains its own financial authority and portfolio.</p>
+          <button type="button" data-go="reserves">Review reserve policy</button>
+        </div>
+      </div>
+      <div class="card" style="margin-top:22px">
+        <h2>Entity links (visibility, not pooled funds)</h2>
+        <div id="entity-links" class="small">No hosted links loaded. Live GET <code>/reserve/entities/links</code>.</div>
+      </div>
+    </section>
+
+    <section class="view" id="reserves" hidden>
+      <div class="kicker">Financial capital</div>
+      <h1 tabindex="-1">Protect the reserve. Allocate deliberately.</h1>
+      <p class="lead">Available funds, protected capital and remaining mandate are different constraints.</p>
+      <p class="callout" id="capacity-sentence">This portfolio can allocate up to 10,000 BTX while retaining its protected reserve.</p>
+      <div class="split">
+        <div class="card">
+          <label for="floor">Protected floor · BTX atoms (canonical)</label>
+          <input id="floor" type="text" inputmode="numeric" value="20000" autocomplete="off" />
+          <label for="authority" style="margin-top:18px">Remaining approved capacity · BTX atoms</label>
+          <input id="authority" type="text" inputmode="numeric" value="10000" autocomplete="off" />
+          <div class="metric amount" id="capacity">10,000 BTX</div>
+          <div class="small">New allocation capacity = max(0, min(available − protected, remaining authority)). Preview does not trade.</div>
+          <div class="actions">
+            <button type="button" id="policy-preview">Preview policy (SUGGEST)</button>
+            <button type="button" id="load-snapshot">GET portfolio snapshot</button>
+            <button type="button" id="create-policy">POST reserve policy</button>
+          </div>
+          <div id="policy-status" role="status" class="small">SUGGEST replenishment. No trade is executed by this preview.</div>
+        </div>
+        <div class="card">
+          <h2>Reserve policy</h2>
+          <table>
+            <tr><th>Purpose</th><td>Strategic reserve</td></tr>
+            <tr><th>Replenishment</th><td>Suggest only (default)</td></tr>
+            <tr><th>Financial authority</th><td>Two distinct people</td></tr>
+            <tr><th>Lifetime refunds</th><td>Do not reset mandate</td></tr>
+            <tr><th>Provider exit</th><td>Obligations remain attributed</td></tr>
+            <tr><th>Family view debit</th><td id="family-debit-flag">false</td></tr>
+          </table>
+          <p class="small">Existing eligible custody, OTC and financing products appear through their actual provider contracts. Referral is not a loan or a debit.</p>
+          <div class="actions">
+            <button type="button" id="list-products">GET /capital/products</button>
+            <button type="button" id="product-referral">Request introduction (referral only)</button>
+          </div>
+          <pre class="raw" id="products-out">(no products loaded)</pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="capabilities" hidden>
+      <div class="kicker">Cognitive capital</div>
+      <h1 tabindex="-1">Acquire what the workload needs.</h1>
+      <p class="lead">Choose evidence and fit first. Let the local BTX client reuse what is already close to compute.</p>
+      <div class="row">
+        <div class="card">
+          <span class="pill">Public · free acquisition</span>
+          <h3>Document extraction</h3>
+          <p>Exact recipe with structured-output evaluation. Base available locally; missing adapter sourced from LAN.</p>
+          <div class="small">Local execution · finite local grant · no CEX payment, new wallet, or subscription.</div>
+          <div class="actions">
+            <button type="button" class="primary" id="free-acquire">Prepare locally</button>
+            <button type="button" id="search-public">Search public catalogue</button>
+          </div>
+        </div>
+        <div class="card">
+          <span class="pill">Release funding</span>
+          <h3>Specialist reasoning</h3>
+          <p>Review committed evidence, release conditions and native refund path before allocating capital.</p>
+          <div class="actions">
+            <button type="button" data-start="plan">Create capital plan</button>
+          </div>
+        </div>
+        <div class="card">
+          <span class="pill">Missing capability</span>
+          <h3>Define the next objective</h3>
+          <p>Commission an outcome with explicit acceptance, rather than choosing a model name in advance.</p>
+          <div class="actions">
+            <button type="button" data-go="build">Open research desk</button>
+          </div>
+        </div>
+      </div>
+      <div class="callout">The hosted catalogue proposes candidates. The customer's local resolver selects the eligible realization and verifies every acquired resource. Ranking is a catalogue annotation, not protocol identity.</div>
+      <div id="free-status" role="status" class="small"></div>
+      <h2>Holdings</h2>
+      <div class="actions">
+        <button type="button" id="list-positions">GET /capital/positions</button>
+      </div>
+      <div id="positions-out" class="small">No positions loaded.</div>
+    </section>
+
+    <section class="view" id="build" hidden>
+      <div class="kicker">Capital formation</div>
+      <h1 tabindex="-1">A market-organized frontier lab.</h1>
+      <p class="lead">Coordinate sponsors and suppliers around a measurable capability objective. Membership is not a debit.</p>
+      <div class="card">
+        <h2>Research programmes</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Objective</th><th>Structure</th><th>State</th></tr>
+            </thead>
+            <tbody id="program-rows">
+              <tr><td>Structured document reliability</td><td>Three independent sponsor lots</td><td>Evidence review</td></tr>
+              <tr><td>Memory-efficient local specialization</td><td>Native creation bounty</td><td>Submissions open</td></tr>
+              <tr><td>Public specialist-model release</td><td>Native release terms</td><td>Disclosure pending</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="actions">
+          <button type="button" class="primary" data-start="plan">Draft research allocation</button>
+          <button type="button" id="list-programs">GET /capital/programs</button>
+          <button type="button" id="create-program">POST research programme</button>
+          <button type="button" id="join-program">Join programme (membership only)</button>
+          <button type="button" id="prepare-commitment">Prepare commitment (proposal, not execute)</button>
+        </div>
+        <p class="small">Programme membership does not authorize a debit. Each legal entity retains its contribution and refund responsibility.</p>
+        <pre class="raw" id="program-out">(idle)</pre>
+      </div>
+    </section>
+
+    <section class="view" id="approvals" hidden>
+      <div class="kicker">Governed decisions</div>
+      <h1 tabindex="-1">One precise packet.</h1>
+      <p class="lead">Review the objective, maximum exposure and local effects together. Record their authorities separately. Distinct people, not logins.</p>
+      <div class="card">
+        <h2 id="approval-title">No plan awaiting review</h2>
+        <p id="approval-description">Create a capital plan to populate the decision packet.</p>
+        <dl id="packet" class="small">
+          <div><dt>Legal payer</dt><dd class="entity-label payer">Example Operating Co.</dd></div>
+          <div><dt>Portfolio</dt><dd id="pkt-portfolio" class="payer">working · demo</dd></div>
+          <div><dt>Objective</dt><dd id="pkt-objective">—</dd></div>
+          <div><dt>Maximum debit (canonical atoms)</dt><dd id="pkt-exposure" class="amount">—</dd></div>
+          <div><dt>Reserve remaining</dt><dd id="pkt-remaining" class="amount">—</dd></div>
+          <div><dt>Conversion / native terms</dt><dd id="pkt-terms">Exact production records required; unsigned fixtures confer no settlement.</dd></div>
+          <div><dt>Local effect</dt><dd id="pkt-local">Independent device permission. Financial approval cannot override software trust.</dd></div>
+        </dl>
+        <p class="small">Client operation (stable, reused): <code id="pkt-cop">none</code></p>
+        <div class="actions">
+          <button type="button" id="financial-approve" disabled>Record financial approval</button>
+          <button type="button" id="local-approve" disabled>Record local permission</button>
+          <button type="button" id="execute" class="primary" disabled>Execute approved allocation</button>
+        </div>
+        <p class="small">Execute stays off until both authorities are recorded, the role may debit, family view is off, and no UNKNOWN broadcast is outstanding. Duplicate clicks reuse the same <code>client_operation_id</code>.</p>
+        <div id="approval-status" role="status" class="small"></div>
+      </div>
+    </section>
+
+    <section class="view" id="activity" hidden>
+      <div class="kicker">Independent outcomes</div>
+      <h1 tabindex="-1">Money and readiness, clearly separated.</h1>
+      <p class="lead">A confirmed transaction is not a loaded model. An API timeout is not proof that nothing happened.</p>
+      <div id="unknown-banner" class="unknown" hidden>
+        Transaction outcome is being reconciled. The hold is retained. View the existing operation.
+        Do not start a new payment.
+      </div>
+      <div class="split">
+        <div class="card">
+          <h2>Financial timeline</h2>
+          <div class="timeline">Reserve policy: <span class="status">Active · suggest only</span></div>
+          <div class="timeline" id="finance-timeline">Capital plan: <span class="status">No current effect</span></div>
+          <div class="timeline">Existing programme: <span class="status">Capital committed; release awaits disclosure</span></div>
+        </div>
+        <div class="card">
+          <h2>Local capability timeline</h2>
+          <div class="timeline" id="local-timeline">Device: <span class="status">Available for local preparation</span></div>
+          <div class="timeline">Hosted reporting: <span class="status">Off by default</span></div>
+          <div class="timeline">Provider outage: <span class="status">Acquired public capability remains usable</span></div>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" id="view-operation">View existing operation</button>
+        <button type="button" id="simulate-unknown">Show lost-broadcast copy</button>
+      </div>
+      <p class="small">There is no “retry new payment” control. HTTP 202 and lost broadcast stay UNKNOWN until the original bytes are reconciled.</p>
+      <pre class="raw" id="activity-out">(idle)</pre>
+    </section>
+
+    <section class="view" id="reports" hidden>
+      <div class="kicker">Relationship product</div>
+      <h1 tabindex="-1">Reports and export</h1>
+      <p class="lead">Executive summary of reserves, commitments and productive outcomes. Forecast savings stay separate from measured savings.</p>
+      <div class="actions">
+        <button type="button" id="create-report">POST /capital/reports</button>
+        <button type="button" id="create-export">POST /capital/exports</button>
+      </div>
+      <pre class="raw" id="report-out">(idle)</pre>
+    </section>
+
+    <section class="view" id="gateway" hidden>
+      <div class="kicker">Loopback lab</div>
+      <h1 tabindex="-1">Same origin as <code>btx-hcpd</code></h1>
+      <p class="lead">This browser never holds custody keys, wallet seeds, or spend material. Access tokens stay in this origin’s session field — never in the URL bar, query, fragment, or pairing URI.</p>
+      <div class="card">
+        <div class="gateway">
+          <div>
+            <label for="base">Gateway origin (loopback)</label>
+            <input id="base" spellcheck="false" value="http://127.0.0.1:18781" autocomplete="off" />
+          </div>
+          <div>
+            <label for="token">Gateway access token (not a custody key; header only)</label>
+            <input id="token" type="password" autocomplete="off" placeholder="leave empty for public reads" />
+          </div>
+        </div>
+        <div class="actions">
+          <button type="button" data-base="http://127.0.0.1:18780">Walletless :18780</button>
+          <button type="button" data-base="http://127.0.0.1:18781">Finance lab :18781</button>
+          <button type="button" id="ping-health">GET /health</button>
+          <button type="button" id="lab-session">Lab session (no token in URI)</button>
+        </div>
+        <p class="small">Lab session uses <code>/lab/pkce</code>, <code>/lab/authorize</code>, <code>/lab/token</code> JSON bodies. DPoP proofs are built in-page from <code>jkt</code> + SHA-256 <code>ath</code>. <code>/lab/dpop?access_token=</code> is never called. Live <code>fetch</code> may be blocked if the gateway sends no CORS headers.</p>
+        <pre class="raw" id="log">(idle)</pre>
+      </div>
+    </section>
+
+    <footer class="note">
+      Static Cognitive Reserve portal. No custody keys, no token-in-URI, no <code>automatic_spend_atoms</code> other than 0.
+      Family/group view is not debit authority. HTTP 202 is UNKNOWN — reconcile the existing operation.
+      Production uses typed HCP/CR11 APIs and independent local grants. A browser checkbox is not committee, custody, or local-grant authority.
+    </footer>
+    <div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
+  </main>
+
+  <dialog id="plan-dialog" aria-labelledby="plan-heading" aria-modal="true">
+    <form method="dialog" id="plan-form">
+      <div class="kicker">Workload to capital</div>
+      <h2 id="plan-heading" style="margin-top:12px">Compare the ownership route</h2>
+      <p>Planning example with equivalent accepted-task quality. Selected payer: <strong class="entity-label payer">Example Operating Co.</strong> · Portfolio: <strong id="dialog-portfolio">working · demo</strong></p>
+      <div class="form">
+        <div>
+          <label for="tasks">Accepted tasks per year (canonical)</label>
+          <input id="tasks" type="text" inputmode="numeric" value="20000000" autocomplete="off" />
+        </div>
+        <div>
+          <label for="service-price">External price per accepted task · USD (canonical)</label>
+          <input id="service-price" type="text" inputmode="decimal" value="0.01" autocomplete="off" />
+        </div>
+        <div>
+          <label for="upfront">Local upfront cash cost · USD (canonical)</label>
+          <input id="upfront" type="text" inputmode="numeric" value="50000" autocomplete="off" />
+        </div>
+        <div>
+          <label for="annual">Local annual allocated cost · USD (canonical)</label>
+          <input id="annual" type="text" inputmode="numeric" value="65000" autocomplete="off" />
+        </div>
+      </div>
+      <div class="row" style="grid-template-columns:1fr 1fr">
+        <div class="card">
+          <label>Three-year service cost (display)</label>
+          <div id="service-total" class="metric amount" style="font-size:25px">$600,000</div>
+        </div>
+        <div class="card">
+          <label>Three-year local cost (display)</label>
+          <div id="local-total" class="metric amount" style="font-size:25px">$245,000</div>
+        </div>
+      </div>
+      <p class="small">Local costs include infrastructure allocation and operations. Forecast savings are not a financial balance. A new assumption creates a new immutable comparison.</p>
+      <div class="actions">
+        <button type="submit" value="cancel">Close</button>
+        <button type="submit" id="create-packet" value="default" class="primary">Create review packet</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="portal.js"></script>
+</body>
+</html>

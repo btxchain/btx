@@ -1731,9 +1731,6 @@ BOOST_AUTO_TEST_CASE(message_sign)
 
     const std::string message = "Trust no one";
 
-    const std::string expected_signature =
-        "IPojfrX2dfPnH26UegfbGQQLrdK844DlHq5157/P6h57WyuS/Qsl+h/WSVGDF4MUi4rWSswW38oimDYfNNUBUOk=";
-
     CKey privkey;
     std::string generated_signature;
 
@@ -1748,10 +1745,10 @@ BOOST_AUTO_TEST_CASE(message_sign)
     BOOST_REQUIRE_MESSAGE(privkey.IsValid(),
         "Confirm the private key is valid");
 
-    BOOST_CHECK_MESSAGE(MessageSign(privkey, message, generated_signature),
-        "Sign with a valid private key");
+    BOOST_CHECK_MESSAGE(!MessageSign(privkey, message, generated_signature),
+        "BTX does not produce classical secp256k1 compact message signatures");
 
-    BOOST_CHECK_EQUAL(expected_signature, generated_signature);
+    BOOST_CHECK(generated_signature.empty());
 
     // BIP-322 tests
     // (no signing done here, as we need a wallet to do so)
@@ -1797,147 +1794,10 @@ BOOST_AUTO_TEST_CASE(message_verify)
 
     BOOST_CHECK_EQUAL(
         MessageVerify(
-            ReencodeBitcoinMainnetAddress("3B5fQsEXEaV8v6U3ejYc8XaKXAkyQj2MjV"),
-            "AA==",
-            "message too"),
-        MessageVerificationResult::ERR_INVALID /* ERR_ADDRESS_NO_KEY */);
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
             ReencodeBitcoinMainnetAddress("1KqbBpLy5FARmTPD4VZnDDpYjkUvkr82Pm"),
             "invalid signature, not in base64 encoding",
             "message should be irrelevant"),
         MessageVerificationResult::ERR_MALFORMED_SIGNATURE);
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("1KqbBpLy5FARmTPD4VZnDDpYjkUvkr82Pm"),
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            "message should be irrelevant"),
-        MessageVerificationResult::ERR_INVALID /* ERR_PUBKEY_NOT_RECOVERED */);
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("15CRxFdyRpGZLW9w8HnHvVduizdL5jKNbs"),
-            "IPojfrX2dfPnH26UegfbGQQLrdK844DlHq5157/P6h57WyuS/Qsl+h/WSVGDF4MUi4rWSswW38oimDYfNNUBUOk=",
-            "I never signed this"),
-        MessageVerificationResult::ERR_NOT_SIGNED);
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("15CRxFdyRpGZLW9w8HnHvVduizdL5jKNbs"),
-            "IPojfrX2dfPnH26UegfbGQQLrdK844DlHq5157/P6h57WyuS/Qsl+h/WSVGDF4MUi4rWSswW38oimDYfNNUBUOk=",
-            "Trust no one"),
-        MessageVerificationResult::OK);
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("11canuhp9X2NocwCq7xNrQYTmUgZAnLK3"),
-            "IIcaIENoYW5jZWxsb3Igb24gYnJpbmsgb2Ygc2Vjb25kIGJhaWxvdXQgZm9yIGJhbmtzIAaHRtbCeDZINyavx14=",
-            "Trust me"),
-        MessageVerificationResult::OK);
-
-    // BIP-322 tests
-
-    // privkey: L3VFeEujGtevx9w18HD1fhRbCH67Az2dpCymeRE1SoPK6XQtaN2k
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"),
-            "AkcwRAIgM2gBAQqvZX15ZiysmKmQpDrG83avLIT492QBzLnQIxYCIBaTpOaD20qRlEylyxFSeEA2ba9YOixpX8z46TSDtS40ASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
-            ""),
-        MessageVerificationResult::OK);
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"),
-            "AkcwRAIgZRfIY3p7/DoVTty6YZbWS71bc5Vct9p9Fia83eRmw2QCICK/ENGfwLtptFluMGs2KsqoNSk89pO7F29zJLUx9a/sASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
-            "Hello World"),
-        MessageVerificationResult::OK);
-
-    // BIP322 signature created using buidl-python library with same parameters as test on line 2596
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"),
-         "AkgwRQIhAOzyynlqt93lOKJr+wmmxIens//zPzl9tqIOua93wO6MAiBi5n5EyAcPScOjf1lAqIUIQtr3zKNeavYabHyR8eGhowEhAsfxIAMZZEKUPYWI4BruhAQjzFT8FSFSajuFwrDL1Yhy",
-            "Hello World"),
-        MessageVerificationResult::OK);
-
-    // 2-of-3 p2sh multisig BIP322 signature (created with the buidl-python library)
-    // Keys are defined as (HDRootWIF, bip322_path)
-    // Key1 (L4DksdGZ4KQJfcLHD5Dv25fu8Rxyv7hHi2RjZR4TYzr8c6h9VNrp, m/45'/0/0/1)
-    // Key2 (KzSRqnCVwjzY8id2X5oHEJWXkSHwKUYaAXusjwgkES8BuQPJnPNu, m/45'/0/0/3)
-    // Key3 (L1zt9Rw7HrU7jaguMbVzhiX8ffuVkmMis5wLHddXYuHWYf8u8uRj, m/45'/0/0/6)
-    // BIP322 includes signs from Key2 and Key3
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("3LnYoUkFrhyYP3V7rq3mhpwALz1XbCY9Uq"),
-         "AAAAAAHNcfHaNfl8f/+ZC2gTr8aF+0KgppYjKM94egaNm/u1ZAAAAAD8AEcwRAIhAJ6hdj61vLDP+aFa30qUZQmrbBfE0kiOObYvt5nqPSxsAh9IrOKFwflfPRUcQ/5e0REkdFHVP2GGdUsMgDet+sNlAUcwRAIgH3eW/VyFDoXvCasd8qxgwj5NDVo0weXvM6qyGXLCR5YCIEwjbEV6fS6RWP6QsKOcMwvlGr1/SgdCC6pW4eH87/YgAUxpUiECKJfGy28imLcuAeNBLHCNv3NRP5jnJwFDNRXCYNY/vJ4hAv1RQtaZs7+vKqQeWl2rb/jd/gMxkEjUnjZdDGPDZkMLIQL65cH2X5O7LujjTLDL2l8Pxy0Y2UUR99u1qCfjdz7dklOuAAAAAAEAAAAAAAAAAAFqAAAAAA==",
-            "This will be a p2sh 2-of-3 multisig BIP 322 signed message"),
-        MessageVerificationResult::OK);
-
-    // 3-of-3 p2wsh multisig BIP322 signature (created with the buidl-python library)
-    // Keys are defined as (HDRootWIF, bip322_path)
-    // Key1 (L4DksdGZ4KQJfcLHD5Dv25fu8Rxyv7hHi2RjZR4TYzr8c6h9VNrp, m/45'/0/0/6)
-    // Key2 (KzSRqnCVwjzY8id2X5oHEJWXkSHwKUYaAXusjwgkES8BuQPJnPNu, m/45'/0/0/9)
-    // Key3 (L1zt9Rw7HrU7jaguMbVzhiX8ffuVkmMis5wLHddXYuHWYf8u8uRj, m/45'/0/0/11)
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1qlqtuzpmazp2xmcutlwv0qvggdvem8vahkc333usey4gskug8nutsz53msw"),    "BQBIMEUCIQDQoXvGKLH58exuujBOta+7+GN7vi0lKwiQxzBpuNuXuAIgIE0XYQlFDOfxbegGYYzlf+tqegleAKE6SXYIa1U+uCcBRzBEAiATegywVl6GWrG9jJuPpNwtgHKyVYCX2yfuSSDRFATAaQIgTLlU6reLQsSIrQSF21z3PtUO2yAUseUWGZqRUIE7VKoBSDBFAiEAgxtpidsU0Z4u/+5RB9cyeQtoCW5NcreLJmWXZ8kXCZMCIBR1sXoEinhZE4CF9P9STGIcMvCuZjY6F5F0XTVLj9SjAWlTIQP3dyWvTZjUENWJowMWBsQrrXCUs20Gu5YF79CG5Ga0XSEDwqI5GVBOuFkFzQOGH5eTExSAj2Z/LDV/hbcvAPQdlJMhA17FuuJd+4wGuj+ZbVxEsFapTKAOwyhfw9qpch52JKxbU64=",
-            "This will be a p2wsh 3-of-3 multisig BIP 322 signed message"),
-        MessageVerificationResult::OK);
-
-    // Single key p2tr BIP322 signature (created with the buidl-python library)
-    // PrivateKeyWIF L3VFeEujGtevx9w18HD1fhRbCH67Az2dpCymeRE1SoPK6XQtaN2k
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1ppv609nr0vr25u07u95waq5lucwfm6tde4nydujnu8npg4q75mr5sxq8lt3"),
-            "AUHd69PrJQEv+oKTfZ8l+WROBHuy9HKrbFCJu7U1iK2iiEy1vMU5EfMtjc+VSHM7aU0SDbak5IUZRVno2P5mjSafAQ==",
-            "Hello World"),
-        MessageVerificationResult::OK);
-
-    // Same p2tr BIP322 signature as above (created with the buidl-python library)
-    // Signature should not verify against the message
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1ppv609nr0vr25u07u95waq5lucwfm6tde4nydujnu8npg4q75mr5sxq8lt3"),
-            "AUHd69PrJQEv+oKTfZ8l+WROBHuy9HKrbFCJu7U1iK2iiEy1vMU5EfMtjc+VSHM7aU0SDbak5IUZRVno2P5mjSafAQ==",
-            "Hello World - This should fail"),
-        MessageVerificationResult::ERR_INVALID);
-
-    // wrong address
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1qkecg9ly2xwxqgdy9egpuy87qc9x26smpts562s"),
-            "AkcwRAIgM2gBAQqvZX15ZiysmKmQpDrG83avLIT492QBzLnQIxYCIBaTpOaD20qRlEylyxFSeEA2ba9YOixpX8z46TSDtS40ASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
-            ""),
-        MessageVerificationResult::ERR_INVALID);
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1qkecg9ly2xwxqgdy9egpuy87qc9x26smpts562s"),
-            "AkcwRAIgZRfIY3p7/DoVTty6YZbWS71bc5Vct9p9Fia83eRmw2QCICK/ENGfwLtptFluMGs2KsqoNSk89pO7F29zJLUx9a/sASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
-            "Hello World"),
-        MessageVerificationResult::ERR_INVALID);
-
-    // wrong signature / message (signatures swapped)
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"),
-            "AkcwRAIgZRfIY3p7/DoVTty6YZbWS71bc5Vct9p9Fia83eRmw2QCICK/ENGfwLtptFluMGs2KsqoNSk89pO7F29zJLUx9a/sASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
-            ""),
-        MessageVerificationResult::ERR_INVALID);
-
-    BOOST_CHECK_EQUAL(
-        MessageVerify(
-            ReencodeBitcoinMainnetAddress("bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"),
-            "AkcwRAIgM2gBAQqvZX15ZiysmKmQpDrG83avLIT492QBzLnQIxYCIBaTpOaD20qRlEylyxFSeEA2ba9YOixpX8z46TSDtS40ASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
-            "Hello World"),
-        MessageVerificationResult::ERR_INVALID);
-
-    // invalid address
 
     BOOST_CHECK_EQUAL(
         MessageVerify(
@@ -1946,14 +1806,55 @@ BOOST_AUTO_TEST_CASE(message_verify)
             ""),
         MessageVerificationResult::ERR_INVALID_ADDRESS);
 
-    // malformed signature
-
     BOOST_CHECK_EQUAL(
         MessageVerify(
             ReencodeBitcoinMainnetAddress("bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"),
             "AkcwRAIgClVQ8S9yX1h8YThlGElD9lOrQbOwbFDjkYb0ebfiq+oCIDHgb/X9WNalNNtqTXb465ufbv9JuLxcJf8qi7DP6yOXASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI",
             ""),
         MessageVerificationResult::ERR_MALFORMED_SIGNATURE);
+
+    // Compact ECDSA and BIP322 wrapping of secp256k1 destinations are refused.
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            ReencodeBitcoinMainnetAddress("15CRxFdyRpGZLW9w8HnHvVduizdL5jKNbs"),
+            "IPojfrX2dfPnH26UegfbGQQLrdK844DlHq5157/P6h57WyuS/Qsl+h/WSVGDF4MUi4rWSswW38oimDYfNNUBUOk=",
+            "Trust no one"),
+        MessageVerificationResult::ERR_NOT_SIGNED);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            ReencodeBitcoinMainnetAddress("3B5fQsEXEaV8v6U3ejYc8XaKXAkyQj2MjV"),
+            "AA==",
+            "message too"),
+        MessageVerificationResult::ERR_NOT_SIGNED);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            ReencodeBitcoinMainnetAddress("bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"),
+            "AkcwRAIgM2gBAQqvZX15ZiysmKmQpDrG83avLIT492QBzLnQIxYCIBaTpOaD20qRlEylyxFSeEA2ba9YOixpX8z46TSDtS40ASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
+            ""),
+        MessageVerificationResult::ERR_NOT_SIGNED);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            ReencodeBitcoinMainnetAddress("3LnYoUkFrhyYP3V7rq3mhpwALz1XbCY9Uq"),
+            "AA==",
+            "p2sh classical dest is refused regardless of payload"),
+        MessageVerificationResult::ERR_NOT_SIGNED);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            ReencodeBitcoinMainnetAddress("bc1qlqtuzpmazp2xmcutlwv0qvggdvem8vahkc333usey4gskug8nutsz53msw"),
+            "AA==",
+            "p2wsh classical dest is refused regardless of payload"),
+        MessageVerificationResult::ERR_NOT_SIGNED);
+
+    BOOST_CHECK_EQUAL(
+        MessageVerify(
+            ReencodeBitcoinMainnetAddress("bc1ppv609nr0vr25u07u95waq5lucwfm6tde4nydujnu8npg4q75mr5sxq8lt3"),
+            "AUHd69PrJQEv+oKTfZ8l+WROBHuy9HKrbFCJu7U1iK2iiEy1vMU5EfMtjc+VSHM7aU0SDbak5IUZRVno2P5mjSafAQ==",
+            "Hello World"),
+        MessageVerificationResult::ERR_NOT_SIGNED);
 }
 
 BOOST_AUTO_TEST_CASE(message_hash)

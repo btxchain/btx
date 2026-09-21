@@ -35,8 +35,9 @@ A  ↔  PQ1 application session  ↔  (relay forwards opaque bytes)  ↔  B
 ```
 
 Outer control may authenticate the relay role. Inner PQ1 remains
-authoritative. A relay cannot impersonate a peer (`expected_service_id`
-must match). `POST /ext/relay/connect` splices TCP only after that check.
+authoritative. `POST /ext/relay/connect` splices TCP only after a live
+reservation for the registered endpoint, with that reservation's byte and
+connection ceilings applied. `-modelrelay` defaults off.
 
 ## Rendezvous
 

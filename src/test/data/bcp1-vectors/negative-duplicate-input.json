@@ -1,0 +1,7 @@
+{
+  "id": "negative-duplicate-input",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "mutation": "duplicate_vin",
+  "note": "ValidateStructure / testmempoolaccept must reject a package that spends the same prevout twice."
+}

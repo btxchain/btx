@@ -31,7 +31,10 @@ namespace matmul::trusted {
  *
  * These statements are not consensus proofs, do not change a block's hash or
  * validity, and are not CheckBlock / header objects. A pinned M-of-N set
- * (`-matmultrustedpubkey`) remains sufficient authority for CPU archives.
+ * (`-matmultrustedpubkey` and/or `-matmultrustedpqpubkey`) remains sufficient
+ * authority for CPU archives. ML-DSA-44 pin members are independent of
+ * compressed-secp256k1 members: N is their sum. Consensus miners still
+ * ExactReplay locally; a pin signature never skips GPU on consensus.
  * When open attestors are enabled, additional GPUs may speak; they count as
  * authority only after local admission on a hash that already has pin quorum.
  * The chain identifier MUST be that chain's genesis hash.
@@ -82,12 +85,45 @@ struct ExactReplayAttestation {
                            const ExactReplayAttestation&) = default;
 };
 
+/**
+ * ML-DSA-44 ExactReplay attestation. Separate P2P object (`mmattestpq`) so
+ * pre-0.34.8 peers ignore it and the secp `mmattest` v2 wire stays unchanged.
+ * Statement fields are the same V2 ExactReplay statement; the signature
+ * domain is distinct. Not a consensus object.
+ */
+inline constexpr size_t EXACT_REPLAY_ML_DSA_44_PK{1312};
+inline constexpr size_t EXACT_REPLAY_ML_DSA_44_SK{2560};
+inline constexpr size_t EXACT_REPLAY_ML_DSA_44_SIG{2420};
+
+struct ExactReplayPqAttestation {
+    ExactReplayStatement statement{};
+    std::vector<unsigned char> signer{};
+    std::vector<unsigned char> signature{};
+
+    SERIALIZE_METHODS(ExactReplayPqAttestation, obj)
+    {
+        READWRITE(obj.statement, obj.signer, obj.signature);
+    }
+
+    friend bool operator==(const ExactReplayPqAttestation&,
+                           const ExactReplayPqAttestation&) = default;
+};
+
 /** Double-SHA256 of a domain separator and the canonical V2 statement. */
 [[nodiscard]] uint256 StatementHash(const ExactReplayStatement& statement);
+
+/** Double-SHA256 of the ML-DSA-44 attestation domain and the V2 statement. */
+[[nodiscard]] uint256 StatementHashPq(const ExactReplayStatement& statement);
 
 /** Create a canonical compressed-secp256k1 ECDSA attestation. */
 [[nodiscard]] std::optional<ExactReplayAttestation> SignStatement(
     const ExactReplayStatement& statement, const CKey& signer);
+
+/** Create an ML-DSA-44 attestation over StatementHashPq. */
+[[nodiscard]] std::optional<ExactReplayPqAttestation> SignStatementMlDsa44(
+    const ExactReplayStatement& statement,
+    const std::vector<unsigned char>& secret_key,
+    const std::vector<unsigned char>& public_key);
 
 /**
  * Watchtower refutation: the signer asserts ExactReplay *failed* for this
@@ -182,6 +218,21 @@ enum class VerifyResult : uint8_t {
     const uint256& expected_hash,
     int32_t expected_height);
 
+[[nodiscard]] VerifyResult VerifyAttestationPq(
+    const ExactReplayPqAttestation& attestation,
+    const uint256& expected_chain_id,
+    const uint256& expected_replay_authority_context,
+    const uint256& expected_hash,
+    int32_t expected_height,
+    const std::set<std::vector<unsigned char>>& trusted_pq_signers);
+
+[[nodiscard]] VerifyResult VerifyAttestationPqCrypto(
+    const ExactReplayPqAttestation& attestation,
+    const uint256& expected_chain_id,
+    const uint256& expected_replay_authority_context,
+    const uint256& expected_hash,
+    int32_t expected_height);
+
 [[nodiscard]] VerifyResult VerifyRefutationCrypto(
     const ExactReplayRefutation& refutation,
     const uint256& expected_chain_id,
@@ -224,11 +275,16 @@ struct StoreConfig {
     uint256 chain_id{};
     uint256 replay_authority_context{};
     std::vector<CPubKey> trusted_signers{};
+    /** ML-DSA-44 pin members. Distinct 1312-byte public keys. Counted in N
+     *  independently of trusted_signers. Empty keeps the live secp pin. */
+    std::vector<std::vector<unsigned char>> trusted_pq_signers{};
     size_t threshold{1};
     size_t max_blocks{4096};
     size_t max_attestations{16384};
     std::chrono::milliseconds ttl{std::chrono::hours{24}};
     std::optional<CKey> local_signer{};
+    std::optional<std::vector<unsigned char>> local_pq_pk{};
+    std::optional<std::vector<unsigned char>> local_pq_sk{};
     /** When true, valid-unpinned statements are heard and keys that co-sign
      *  a pin-quorum hash are listed as admitted. They do not enter HasQuorum.
      *  Default false keeps unit tests closed. */
@@ -343,7 +399,8 @@ struct StoreStats {
  * substitute for local ExactReplay. Each bucket is keyed by both height and
  * hash, and each configured signer contributes at most one vote.
  *
- * HasQuorum is PinQuorum only (M-of-N of `-matmultrustedpubkey`).
+ * HasQuorum is PinQuorum only (M-of-N of `-matmultrustedpubkey` plus
+ * `-matmultrustedpqpubkey`, counted as independent members).
  * SkipExactReplay is trusted-mirror AND HasQuorum: pin quorum never
  * skips ExactReplay on consensus miners, and the pin is not
  * FindMostWorkChain or getblocktemplate fork choice on consensus.
@@ -365,6 +422,10 @@ public:
                                 const uint256& expected_hash,
                                 int32_t expected_height);
 
+    [[nodiscard]] AddResult AddPq(const ExactReplayPqAttestation& attestation,
+                                  const uint256& expected_hash,
+                                  int32_t expected_height);
+
     /**
      * Sign with the optional configured local key, validate/store the result,
      * and optionally return it for P2P publication or RPC inspection.
@@ -373,6 +434,11 @@ public:
         const uint256& block_hash,
         int32_t block_height,
         ExactReplayAttestation* produced = nullptr);
+
+    [[nodiscard]] AddResult SignLocalPq(
+        const uint256& block_hash,
+        int32_t block_height,
+        ExactReplayPqAttestation* produced = nullptr);
 
     /**
      * This node's own validated BlockDisconnected. If this process SignLocal'd
@@ -445,6 +511,12 @@ public:
         const uint256& block_hash,
         int32_t block_height) const;
 
+    [[nodiscard]] bool HasQuorumFromAttestations(
+        const std::vector<ExactReplayAttestation>& attestations,
+        const std::vector<ExactReplayPqAttestation>& pq_attestations,
+        const uint256& block_hash,
+        int32_t block_height) const;
+
     /**
      * Store a pin/admitted refutation. `expected_height` must be the
      * block-index height of `expected_hash`, not a peer-declared value.
@@ -460,11 +532,15 @@ public:
     [[nodiscard]] std::vector<ExactReplayAttestation> GetAttestations(
         const uint256& block_hash, int32_t block_height) const;
 
+    [[nodiscard]] std::vector<ExactReplayPqAttestation> GetPqAttestations(
+        const uint256& block_hash, int32_t block_height) const;
+
     /**
      * Snapshot every retained attestation (for durable archive flush).
      * Order is height/hash ascending; callers may rewrite a bounded disk file.
      */
     [[nodiscard]] std::vector<ExactReplayAttestation> ExportAll() const;
+    [[nodiscard]] std::vector<ExactReplayPqAttestation> ExportAllPq() const;
 
     /**
      * When true, wall-clock TTL pruning is disabled. Capacity eviction still
@@ -532,7 +608,14 @@ public:
     {
         return m_trusted_signers;
     }
+    [[nodiscard]] const std::set<std::vector<unsigned char>>&
+    TrustedPqSigners() const
+    {
+        return m_trusted_pq_signers;
+    }
     [[nodiscard]] std::optional<CPubKey> LocalSignerPubKey() const;
+    [[nodiscard]] std::optional<std::vector<unsigned char>> LocalPqPubKey()
+        const;
     [[nodiscard]] bool OpenAttestorsEnabled() const
     {
         return m_config.open_attestors;
@@ -545,9 +628,13 @@ public:
     }
     [[nodiscard]] size_t MaxVotesPerBlock() const;
     [[nodiscard]] bool IsPinnedSigner(const CPubKey& pubkey) const;
+    [[nodiscard]] bool IsPinnedPqSigner(
+        const std::vector<unsigned char>& pubkey) const;
     [[nodiscard]] bool IsAdmittedOpenSigner(const CPubKey& pubkey) const;
     [[nodiscard]] bool IsFrozenOpenSigner(const CPubKey& pubkey) const;
     [[nodiscard]] bool IsAuthoritySigner(const CPubKey& pubkey) const;
+    [[nodiscard]] bool IsAuthorityPqSigner(
+        const std::vector<unsigned char>& pubkey) const;
     [[nodiscard]] bool IsBlocked(const CPubKey& pubkey) const;
     [[nodiscard]] std::set<CPubKey> BlockedSigners() const;
     [[nodiscard]] std::set<CPubKey> ConfigBlockedSigners() const;
@@ -603,6 +690,8 @@ private:
     struct Bucket {
         Clock::time_point updated{};
         std::map<CPubKey, ExactReplayAttestation> attestations{};
+        std::map<std::vector<unsigned char>, ExactReplayPqAttestation>
+            pq_attestations{};
         bool quorum_counted{false};
     };
 
@@ -616,6 +705,8 @@ private:
                                        const Bucket& bucket) const;
     [[nodiscard]] bool WouldReachQuorumLocked(const BlockKey& key,
                                               const CPubKey& signer) const;
+    [[nodiscard]] bool WouldReachQuorumLocked(
+        const BlockKey& key, const std::vector<unsigned char>& pq_signer) const;
     [[nodiscard]] bool IsBlockedLocked(const CPubKey& pubkey) const;
     [[nodiscard]] size_t UnblockedPinMembersLocked() const;
     void DropHeardLocked(const CPubKey& pubkey);
@@ -652,6 +743,8 @@ private:
     [[nodiscard]] size_t QuorumBlockCountLocked() const;
     [[nodiscard]] std::vector<ExactReplayAttestation> GetAttestationsLocked(
         const BlockKey& key) const;
+    [[nodiscard]] std::vector<ExactReplayPqAttestation> GetPqAttestationsLocked(
+        const BlockKey& key) const;
 
     struct HeardKey {
         int32_t height{-1};
@@ -668,6 +761,7 @@ private:
 
     StoreConfig m_config;
     std::set<CPubKey> m_trusted_signers;
+    std::set<std::vector<unsigned char>> m_trusted_pq_signers;
     std::set<CPubKey> m_blocked_config;
 
     mutable std::mutex m_mutex;

@@ -59,8 +59,8 @@ static constexpr bool DEFAULT_RPC_DOC_CHECK{
 extern const std::string UNIX_EPOCH_TIME;
 
 /**
- * Example bech32 addresses for the RPCExamples help documentation. They are intentionally
- * invalid to prevent accidental transactions by users.
+ * Example P2MR (witness v2 Bech32m) addresses for the RPCExamples help documentation.
+ * These are valid DecodeDestination encodings of dummy merkle roots, not Bitcoin bech32.
  */
 extern const std::string EXAMPLE_ADDRESS[2];
 

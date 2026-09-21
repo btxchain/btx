@@ -2172,6 +2172,42 @@ class msg_getmmattest:
         return "msg_getmmattest(block_hash=%064x)" % self.block_hash
 
 
+class msg_getmmatpq:
+    """Request cached ML-DSA-44 MatMul attestations for a block."""
+    __slots__ = ("block_hash",)
+    msgtype = b"getmmatpq"
+
+    def __init__(self, block_hash=0):
+        self.block_hash = block_hash
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+
+    def serialize(self):
+        return ser_uint256(self.block_hash)
+
+    def __repr__(self):
+        return "msg_getmmatpq(block_hash=%064x)" % self.block_hash
+
+
+class msg_mmattestpq:
+    """ML-DSA-44 ExactReplay attestations. Opaque payload for the harness."""
+    __slots__ = ("payload",)
+    msgtype = b"mmattestpq"
+
+    def __init__(self, payload=b""):
+        self.payload = payload
+
+    def deserialize(self, f):
+        self.payload = f.read()
+
+    def serialize(self):
+        return self.payload
+
+    def __repr__(self):
+        return "msg_mmattestpq(len=%d)" % len(self.payload)
+
+
 class msg_mmsketch:
     """Carry the full self-authenticating 8*m^2 sketch-cache payload for one block
     (v4.4 ENC-DR, tension-resolution §4.3). Payload: 32-byte block hash followed by

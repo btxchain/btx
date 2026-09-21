@@ -47,10 +47,11 @@ class CreateWalletTest(BitcoinTestFramework):
         w1 = node.get_wallet_rpc('w1')
         assert_raises_rpc_error(-4, "Error: This wallet has no available keys", w1.getnewaddress)
         assert_raises_rpc_error(-4, "Error: This wallet has no available keys", w1.getrawchangeaddress)
-        w1.importpubkey(w0.getaddressinfo(address1)['pubkey'])
+        assert_raises_rpc_error(-8, "importpubkey is disabled", w1.rpc.importpubkey, "03789ed0bb717d88f7d321a368d905e7430207ebbd82bd342cf11ae157a7ace5fd")
 
         self.log.info('Test that private keys cannot be imported')
         privkey, pubkey = generate_keypair(wif=True)
+        assert_raises_rpc_error(-8, "importprivkey is disabled", w1.rpc.importprivkey, privkey)
         assert_raises_rpc_error(-4, 'Cannot import private keys to a wallet with private keys disabled', w1.importprivkey, privkey)
         if self.options.descriptors:
             result = w1.importdescriptors([{'desc': descsum_create('wpkh(' + privkey + ')'), 'timestamp': 'now'}])
@@ -66,7 +67,7 @@ class CreateWalletTest(BitcoinTestFramework):
         w2 = node.get_wallet_rpc('w2')
         assert_raises_rpc_error(-4, "Error: This wallet has no available keys", w2.getnewaddress)
         assert_raises_rpc_error(-4, "Error: This wallet has no available keys", w2.getrawchangeaddress)
-        w2.importpubkey(w0.getaddressinfo(address1)['pubkey'])
+        assert_raises_rpc_error(-8, "importpubkey is disabled", w2.rpc.importpubkey, "03789ed0bb717d88f7d321a368d905e7430207ebbd82bd342cf11ae157a7ace5fd")
 
         self.log.info("Test blank creation with private keys enabled.")
         self.nodes[0].createwallet(wallet_name='w3', disable_private_keys=False, blank=True)
@@ -74,8 +75,10 @@ class CreateWalletTest(BitcoinTestFramework):
         assert_equal(w3.getwalletinfo()['keypoolsize'], 0)
         assert_raises_rpc_error(-4, "Error: This wallet has no available keys", w3.getnewaddress)
         assert_raises_rpc_error(-4, "Error: This wallet has no available keys", w3.getrawchangeaddress)
-        # Import private key
-        w3.importprivkey(generate_keypair(wif=True)[0])
+        # Raw importprivkey RPC is fail-closed; descriptor wallets map the wrapper to importdescriptors.
+        assert_raises_rpc_error(-8, "importprivkey is disabled", w3.rpc.importprivkey, generate_keypair(wif=True)[0])
+        if self.options.descriptors:
+            w3.importprivkey(generate_keypair(wif=True)[0])
         # Imported private keys are currently ignored by the keypool
         assert_equal(w3.getwalletinfo()['keypoolsize'], 0)
         assert_raises_rpc_error(-4, "Error: This wallet has no available keys", w3.getnewaddress)

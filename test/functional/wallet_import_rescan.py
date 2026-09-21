@@ -2,11 +2,8 @@
 # Copyright (c) 2014-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test rescans when importing pre-existing data into loaded legacy wallets."""
+"""Test rescans refuse classical secp ingest on loaded legacy wallets."""
 
-import time
-
-from test_framework.authproxy import JSONRPCException
 from test_framework.blocktools import (
     REGTEST_GENERIC_P2P_MATMUL_ARGS,
     create_block,
@@ -14,10 +11,12 @@ from test_framework.blocktools import (
 )
 from test_framework.script import CScript
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.util import assert_raises_rpc_error
 from test_framework.wallet_util import (
     create_legacy_wallet_with_tool,
     get_generate_key,
 )
+import time
 
 
 class ImportRescanTest(BitcoinTestFramework):
@@ -76,34 +75,15 @@ class ImportRescanTest(BitcoinTestFramework):
         # security-relevant behavior: rescanning historical chain data for a
         # pre-existing imported key.
         key = get_generate_key()
-        historical_txid = self.mine_coinbase_to_key(key)
+        self.mine_coinbase_to_key(key)
 
-        self.nodes[0].importprivkey(key.privkey, "rescanned", True)
-        assert self.nodes[0].gettransaction(historical_txid)["confirmations"] == 1
-
-        self.nodes[1].importprivkey(key.privkey, "no rescan", False)
-        try:
-            self.nodes[1].gettransaction(historical_txid)
-            raise AssertionError("rescan-disabled import unexpectedly found historical transaction")
-        except JSONRPCException as error:
-            assert error.error["code"] == -5
-
-        live_txid = self.mine_coinbase_to_key(key)
-        assert self.nodes[0].gettransaction(live_txid)["confirmations"] == 1
-        assert self.nodes[1].gettransaction(live_txid)["confirmations"] == 1
+        self.log.info("importprivkey is disabled (legacy ECDSA)")
+        assert_raises_rpc_error(-8, "importprivkey is disabled", self.nodes[0].importprivkey, key.privkey, "rescanned", True)
+        assert_raises_rpc_error(-8, "importprivkey is disabled", self.nodes[1].importprivkey, key.privkey, "no rescan", False)
 
         watch_key = get_generate_key()
-        self.nodes[1].importaddress(watch_key.p2pkh_addr, "watch only", False)
-        watch_txid = self.mine_coinbase_to_key(watch_key)
-        watch_tx = self.nodes[1].gettransaction(watch_txid, True)
-        assert watch_tx["confirmations"] == 1
-
-        self.restart_node(0)
-        self.restart_node(1)
-        self.nodes[0].loadwallet(self.default_wallet_name)
-        self.nodes[1].loadwallet(self.default_wallet_name)
-        assert self.nodes[0].gettransaction(historical_txid)["confirmations"] == 3
-        assert self.nodes[1].gettransaction(watch_txid)["confirmations"] == 1
+        self.log.info("importaddress refuses secp256k1 P2PKH ingest")
+        assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", self.nodes[1].importaddress, watch_key.p2pkh_addr, "watch only", False)
 
 
 if __name__ == '__main__':

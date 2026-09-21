@@ -3,9 +3,9 @@
 This document is the operator-facing contract for the signed auto-update channel
 implemented by `src/node/autoupdate.*` (the node side) and
 [`install.sh`](./install.sh) (the builder/installer the node launches). It
-exists to answer one question precisely: **how do we roll the first
-post-quantum-signed release to a fleet without bricking nodes that predate the
-post-quantum verifier?**
+exists to answer one question precisely: **how is a post-quantum-signed release
+rolled to the fleet from the first hop, and what if a node must not
+auto-update?**
 
 ## Threat model recap
 
@@ -13,9 +13,10 @@ BTX is a post-quantum chain. The auto-update channel can ship code to every
 node, so it is the single most powerful trust path in the system and **must
 itself be quantum-safe**. A classical (secp256k1/ECDSA) signature on the release
 manifest would be the weakest link: an adversary able to forge it could push
-arbitrary code fleet-wide. Hence the default release-signature scheme is
-**ML-DSA-44** (`DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO` in `node/autoupdate.h`),
-not secp256k1.
+arbitrary code fleet-wide. The only accepted release-signature schemes are
+post-quantum: **ML-DSA-44** (default, `DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO`
+in `node/autoupdate.h`) or **SLH-DSA-128s**. Classical secp256k1/ECDSA is
+**retired** and is not a working hop.
 
 ## How verification works
 
@@ -28,9 +29,8 @@ any signed `git_commit`) before building.
 - **PQ schemes (`ml-dsa-44`, `slh-dsa-128s`):** verified with
   `btx-util verifyupdatesig <algo> <pubkey-hex> <file> <sig-file>`. This means
   **the installer needs a `btx-util` binary present** to verify a PQ-signed
-  release.
-- **Classical (`secp256k1`):** verified with `openssl dgst -verify`. No
-  `btx-util` required.
+  release. The node does not accept classical (`secp256k1`/`ecdsa`) release
+  signatures.
 
 The node hands the installer the scheme + key it used via
 `BTX_AUTOUPDATE_PUBKEY_ALGO` / `BTX_AUTOUPDATE_PUBKEY`, and the directory of the
@@ -42,7 +42,8 @@ sibling `btx-util` portably (no `/proc` dependency on macOS/BSD).
 A node that was installed **before** `btx-util` was shipped into the release tree
 has no PQ verifier on disk. If such a node is configured for a PQ scheme, the
 **first** PQ-signed update cannot be verified by the installer and is correctly
-refused (fail-closed). We must not strand those nodes.
+refused (fail-closed). Do not try to unstick that install with a classical
+auto-update hop: that path is retired.
 
 ### Resolution (the release plan)
 
@@ -55,20 +56,21 @@ refused (fail-closed). We must not strand those nodes.
    `current/bin/btx-util` / link dir, the running btxd's sibling (Linux
    `/proc`), then `PATH`.
 
-2. **Legacy first hop is classical only for nodes that predate `btx-util`.**
-   If an old install has no local `btx-util`, operators can run one update with
-   `-autoupdatepubkeyalgo=secp256k1` and the historical classical release key
-   (documented in `node/autoupdate.h`). That hop only needs `openssl`, which is
-   already a hard dependency. It delivers a modern release — and therefore
-   `btx-util` — to the node.
+2. **PQ-only from the first hop (`ml-dsa-44` / `slh-dsa-128s`).** Configure
+   `-autoupdatepubkeyalgo=ml-dsa-44 -autoupdatepubkey=<2624-hex>` (or
+   `slh-dsa-128s` with its matching key). The historical classical hop
+   (`-autoupdatepubkeyalgo=secp256k1`) is **retired**: rc3+ `InitError` rejects
+   `secp256k1`/`ecdsa`, and a node still set to that value **will not start**.
+   Do not use it as a working hop.
 
-3. **Switch to PQ for every subsequent hop.** Once v0.31+ is active (so
-   `btx-util` exists), reconfigure the node to the PQ scheme
-   (`-autoupdatepubkeyalgo=ml-dsa-44 -autoupdatepubkey=<2624-hex>`). From here
-   the powerful update path is fully quantum-safe.
+3. **If this node must not auto-update**, leave the channel inert with
+   `-autoupdate=0` or `-autoupdatepubkey=0`. Do not use a classical scheme as
+   an off switch.
 
-New installs and current release archives skip step 2 entirely: they already
-have `btx-util`, so they can be PQ-only from the first hop.
+New installs and current release archives already include `btx-util`, so they
+run PQ-only from the first hop. An older install that still lacks `btx-util`
+must be upgraded by hand to a tree that includes it; there is no working
+secp256k1 auto-update path on rc3+.
 
 ### Why the default is active on mainnet
 
@@ -77,8 +79,8 @@ key, and mainnet auto-update defaults to that PQ scheme. A btx.dev/DNS/TLS
 compromise is not enough to ship code: the manifest, optional pinned commit, and
 prebuilt artifacts still need signatures from the offline release key. Operators
 can opt out or override the trust root with `-autoupdate=0`,
-`-autoupdatepubkey=0`, or an explicit `-autoupdatepubkey` /
-`-autoupdatepubkeyalgo` pair.
+`-autoupdatepubkey=0`, or an explicit PQ `-autoupdatepubkey` /
+`-autoupdatepubkeyalgo` pair (`ml-dsa-44` or `slh-dsa-128s`).
 
 ## Manifest fields
 
@@ -136,8 +138,8 @@ when none matches or verification fails.
   platforms distinguish `glibc` vs `musl` (so an Alpine node never installs a
   glibc build), and both `aarch64` and `arm64` spellings are tried.
 - **Trust** is anchored exactly like the manifest: the tarball's detached
-  signature is verified under the SAME scheme/key (`btx-util verifyupdatesig` for
-  PQ, `openssl` for classical). The artifact URLs must also be under
+  signature is verified under the SAME scheme/key (`btx-util verifyupdatesig`).
+  The artifact URLs must also be under
   `BTX_TRUSTED_ORIGIN`. Because the install only runs when `git_commit` is pinned
   in the signed manifest, the prebuilt is bound to a specific signed commit.
 - **Fallback:** a missing/mismatched/unverifiable artifact (or a platform with no
@@ -157,8 +159,9 @@ Per release, for each supported `(os, arch, libc)`:
    container).
 2. `tar -czf btx-<ver>-<platform>.tar.gz bin/` and record `sha256`.
 3. Sign the tarball bytes with the **offline release key** in the release scheme
-   (ML-DSA-44 by default): produce `…​.tar.gz.sig`. Verify locally with
-   `btx-util verifyupdatesig <algo> <pubkey-hex> <tarball> <sig>` → `OK`.
+   (ML-DSA-44 by default) via `btx-util signupdatesig`: produce `…​.tar.gz.sig`
+   as **newline-terminated hex** (see the signing runbook below). Verify locally
+   with `btx-util verifyupdatesig <algo> <pubkey-hex> <tarball> <sig>` → `OK`.
 4. Sign `version.txt` (and optionally `git_commit`) the same way.
 5. Publish `version.txt`, `version.txt.sig`, `install.sh`, and every
    `…​.tar.gz` + `…​.tar.gz.sig` under `https://btx.dev/`.
@@ -218,9 +221,15 @@ permanent early canary, a high value to update last).
 
 ```sh
 # 1. Build version.txt with the fields above, pinning git_commit.
-# 2. Sign the raw manifest bytes with the release private key:
-#    - PQ:        produce ML-DSA-44 signature over version.txt  -> version.txt.sig
-#    - classical: openssl dgst -sha256 -sign release.pem -out version.txt.sig version.txt
+# 2. Sign with the offline PQ release key (ml-dsa-44 or slh-dsa-128s only):
+btx-util signupdatesig ml-dsa-44 <seed-hex> version.txt version.txt.sig
+#    version.txt.sig is **newline-terminated hex**, not a raw 2420-byte
+#    ML-DSA-44 blob. Pre-rc3 DecodeSignatureBody (TrimAscii+IsHex/ParseHex)
+#    and rc3 BodyIsAllHexText both accept that encoding. Do not publish
+#    raw binary signatures: a 2420-byte payload can start or end with
+#    ASCII whitespace, and deployed TrimAscii would strip those bytes
+#    (~4.6% of signatures), leaving a length the fleet rejects with no
+#    recovery.
 # 3. (optional) sign the pinned commit id the same way -> git_commit.txt.sig
 # 4. Publish version.txt, version.txt.sig, install.sh under https://btx.dev/.
 # Verify locally before publishing:

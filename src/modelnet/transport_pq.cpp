@@ -8,10 +8,12 @@
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
+#include <openssl/objects.h>
 #include <openssl/ssl.h>
 #include <openssl/pem.h>
 
 #include <array>
+#include <cctype>
 #include <cstring>
 #include <vector>
 
@@ -136,13 +138,21 @@ bool InspectNegotiated(void* ssl_void, NegotiatedPq1& out)
     out.group = group ? group : "";
     const SSL_CIPHER* cipher = SSL_get_current_cipher(ssl);
     out.ciphersuite = cipher ? SSL_CIPHER_get_name(cipher) : "";
-    int nid = 0;
     const char* sig = nullptr;
 #if OPENSSL_VERSION_NUMBER >= 0x30200000L
     SSL_get0_peer_signature_name(ssl, &sig);
 #endif
-    out.sigalg = sig ? sig : "";
-    (void)nid;
+    if (sig && *sig) {
+        out.sigalg = sig;
+    } else {
+        int nid = 0;
+        if (SSL_get_peer_signature_nid(ssl, &nid) == 1 && nid != 0) {
+            const char* sn = OBJ_nid2sn(nid);
+            out.sigalg = sn ? sn : "";
+        } else {
+            out.sigalg.clear();
+        }
+    }
     out.ok = IsStrictPq1(out);
     return true;
 }
@@ -157,6 +167,9 @@ bool IsStrictPq1(const NegotiatedPq1& n)
     }
     // Hybrid groups must never pass even if a library reports them under another alias.
     if (n.group.find("X25519") != std::string::npos || n.group.find("SecP") != std::string::npos) return false;
+    std::string sig = n.sigalg;
+    for (char& c : sig) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (sig != "mldsa44" && sig != "ml-dsa-44" && sig != "mldsa_44") return false;
     return true;
 }
 

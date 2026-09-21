@@ -4,8 +4,14 @@
 
 #include <matmul/trusted_exact_replay_attestation.h>
 
+#include <random.h>
+#include <span.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
+
+extern "C" {
+#include <libbitcoinpqc/ml_dsa.h>
+}
 
 #include <array>
 #include <atomic>
@@ -14,6 +20,7 @@
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -69,6 +76,29 @@ ExactReplayAttestation MustSign(const ExactReplayStatement& statement,
                                 const CKey& key)
 {
     auto attestation{SignStatement(statement, key)};
+    BOOST_REQUIRE(attestation.has_value());
+    return *attestation;
+}
+
+std::pair<std::vector<unsigned char>, std::vector<unsigned char>> MakePqKey()
+{
+    std::vector<unsigned char> pk(EXACT_REPLAY_ML_DSA_44_PK, 0);
+    std::vector<unsigned char> sk(EXACT_REPLAY_ML_DSA_44_SK, 0);
+    unsigned char rnd[128];
+    for (size_t off = 0; off < sizeof(rnd); off += 32) {
+        GetStrongRandBytes(Span<unsigned char>{rnd + off, 32});
+    }
+    BOOST_REQUIRE_EQUAL(
+        ml_dsa_44_keygen(pk.data(), sk.data(), rnd, sizeof(rnd)), 0);
+    return {std::move(pk), std::move(sk)};
+}
+
+ExactReplayPqAttestation MustSignPq(
+    const ExactReplayStatement& statement,
+    const std::vector<unsigned char>& sk,
+    const std::vector<unsigned char>& pk)
+{
+    auto attestation{SignStatementMlDsa44(statement, sk, pk)};
     BOOST_REQUIRE(attestation.has_value());
     return *attestation;
 }
@@ -1322,6 +1352,114 @@ BOOST_AUTO_TEST_CASE(blocklist_durable_miss_and_refute_and_local)
     BOOST_CHECK(live.AddBlocklistedSigner(keys[1].GetPubKey()) ==
                 BlocklistResult::LocalSigner);
     BOOST_CHECK(!live.IsBlocked(keys[1].GetPubKey()));
+}
+
+BOOST_AUTO_TEST_CASE(pq_attestation_sign_verify_and_wrong_domain)
+{
+    const auto [pk, sk]{MakePqKey()};
+    const uint256 chain{TestHash(0xa1)};
+    const uint256 block{TestHash(0xa2)};
+    const auto statement{MakeStatement(chain, block, 7)};
+    const auto attestation{MustSignPq(statement, sk, pk)};
+    BOOST_CHECK_EQUAL(attestation.signer.size(), EXACT_REPLAY_ML_DSA_44_PK);
+    BOOST_CHECK_EQUAL(attestation.signature.size(), EXACT_REPLAY_ML_DSA_44_SIG);
+
+    const std::set<std::vector<unsigned char>> trusted{pk};
+    BOOST_CHECK_EQUAL(
+        VerifyResultName(VerifyAttestationPq(
+            attestation, chain, REPLAY_AUTHORITY_CONTEXT, block, 7, trusted)),
+        "valid");
+    BOOST_CHECK(StatementHashPq(statement) != StatementHash(statement));
+
+    auto other{pk};
+    other[0] ^= 0x01;
+    const std::set<std::vector<unsigned char>> other_pin{other};
+    BOOST_CHECK(VerifyAttestationPq(attestation, chain, REPLAY_AUTHORITY_CONTEXT,
+                                    block, 7, other_pin) ==
+                VerifyResult::UntrustedSigner);
+
+    auto mutated{attestation};
+    mutated.signature[10] ^= 0x01;
+    BOOST_CHECK(VerifyAttestationPqCrypto(
+                    mutated, chain, REPLAY_AUTHORITY_CONTEXT, block, 7) ==
+                VerifyResult::InvalidSignature);
+
+    DataStream stream;
+    stream << attestation;
+    ExactReplayPqAttestation decoded;
+    stream >> decoded;
+    BOOST_CHECK(decoded == attestation);
+}
+
+BOOST_AUTO_TEST_CASE(pq_and_secp_are_independent_pin_members)
+{
+    const auto secp{MakeKeys(1)};
+    const auto [pq_pk, pq_sk]{MakePqKey()};
+    const uint256 chain{TestHash(0xb1)};
+    const uint256 block{TestHash(0xb2)};
+    auto config{MakeConfig(chain, secp, /*threshold=*/2)};
+    config.trusted_pq_signers.push_back(pq_pk);
+    AttestationStore store{config};
+    BOOST_CHECK_EQUAL(store.TrustedSigners().size(), 1U);
+    BOOST_CHECK_EQUAL(store.TrustedPqSigners().size(), 1U);
+    BOOST_CHECK_EQUAL(store.UnblockedPinMembers(), 2U);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 11), secp[0]),
+                          block, 11) == AddResult::Accepted);
+    BOOST_CHECK(!store.HasQuorum(block, 11));
+    BOOST_CHECK(store.AddPq(MustSignPq(MakeStatement(chain, block, 11), pq_sk,
+                                       pq_pk),
+                            block, 11) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(block, 11));
+    BOOST_CHECK_EQUAL(store.GetAttestations(block, 11).size(), 1U);
+    BOOST_CHECK_EQUAL(store.GetPqAttestations(block, 11).size(), 1U);
+    BOOST_CHECK(store.HasQuorumFromAttestations(
+        store.GetAttestations(block, 11), store.GetPqAttestations(block, 11),
+        block, 11));
+    BOOST_CHECK(!store.HasQuorumFromAttestations(
+        store.GetAttestations(block, 11), block, 11));
+}
+
+BOOST_AUTO_TEST_CASE(pq_only_pin_and_local_sign)
+{
+    const auto [pq_pk, pq_sk]{MakePqKey()};
+    const uint256 chain{TestHash(0xc1)};
+    const uint256 block{TestHash(0xc2)};
+    StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = REPLAY_AUTHORITY_CONTEXT;
+    config.trusted_pq_signers.push_back(pq_pk);
+    config.threshold = 1;
+    config.local_pq_pk = pq_pk;
+    config.local_pq_sk = pq_sk;
+    AttestationStore store{config};
+    BOOST_CHECK(store.LocalPqPubKey().has_value());
+    BOOST_CHECK(store.SignLocal(block, 12) == AddResult::NoLocalSigner);
+    BOOST_CHECK(store.SignLocalPq(block, 12) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(block, 12));
+    BOOST_CHECK(store.AddPq(store.GetPqAttestations(block, 12).front(), block,
+                            12) == AddResult::Duplicate);
+}
+
+BOOST_AUTO_TEST_CASE(pq_pin_rejects_empty_and_wrong_size)
+{
+    StoreConfig empty;
+    empty.chain_id = TestHash(0xd1);
+    empty.replay_authority_context = REPLAY_AUTHORITY_CONTEXT;
+    BOOST_CHECK_THROW(AttestationStore{empty}, std::invalid_argument);
+
+    const auto [pq_pk, pq_sk]{MakePqKey()};
+    StoreConfig bad;
+    bad.chain_id = TestHash(0xd2);
+    bad.replay_authority_context = REPLAY_AUTHORITY_CONTEXT;
+    bad.trusted_pq_signers.push_back(std::vector<unsigned char>(16, 1));
+    BOOST_CHECK_THROW(AttestationStore{bad}, std::invalid_argument);
+
+    StoreConfig ok;
+    ok.chain_id = TestHash(0xd3);
+    ok.replay_authority_context = REPLAY_AUTHORITY_CONTEXT;
+    ok.trusted_pq_signers.push_back(pq_pk);
+    ok.threshold = 1;
+    BOOST_CHECK_NO_THROW(AttestationStore{ok});
 }
 
 BOOST_AUTO_TEST_SUITE_END()

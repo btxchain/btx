@@ -1,0 +1,1 @@
+{"jsonrpc": "1.0", "id": 1, "method": "watchmodelpublisher", "params": [{"publisher_id": "<publisher_id>", "action": "NOTIFY", "automatic_spend_atoms": 0}]}

@@ -1,0 +1,2550 @@
+#!/usr/bin/env python3
+"""btx-model — first-run unix JSON-RPC client for a scratch btx-modeld.
+
+Verbs: init, doctor, host, preview, search, get, pull, show, ls, files, path,
+open, share, transfers, check, pins, alias, rm-alias, unhost, link, bounty-draft
+(title, JSON, or @FILE), watch-scan, plus 0.34.8-dev cloud/follow/events/mirror/
+profile (fail closed if the helper lacks the method).
+
+Human door: stderr one_liners / next hints. Agent door: stdout JSON; --json
+suppresses stderr extras. Dual-door docs: HUMANS.md vs AGENTS.md.
+
+No inference. Never spends (automatic_spend_atoms=0). Fail closed.
+Never defaults to a production helper socket.
+Never puts raw cloud secrets on argv (use --credential-ref / --secret-file).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sys
+from typing import Any
+
+VERBS = (
+    "init",
+    "doctor",
+    "host",
+    "preview",
+    "search",
+    "get",
+    "pull",
+    "show",
+    "ls",
+    "open",
+    "share",
+    "transfers",
+    "files",
+    "path",
+    "check",
+    "pins",
+    "pause",
+    "resume",
+    "alias",
+    "rm-alias",
+    "unhost",
+    "link",
+    "bounty-draft",
+    "watch-scan",
+    "cloud",
+    "follow",
+    "events",
+    "mirror",
+    "profile",
+    "import-plan",
+    "package",
+    "erasure",
+    "torrent-status",
+    "origin-offer",
+    "transport",
+)
+
+# Scratch-only default. Never ~/.local/opt, /opt/btx, or a live packaged helper.
+DEFAULT_SOCKET = os.path.join(".", "e2e-scratch", "modeld.sock")
+
+# Agent door. Default is human (stderr hints) + JSON stdout. --json is stdout only.
+JSON_MODE = False
+CLI_SCHEMA_VERSION = 2
+DEV348_NOTE = "0.34.8-dev; fails closed if helper lacks method"
+
+# First-run URI examples. btx:// is a model resource; BIP21 payment is btx:<P2MR>.
+# bitcoin: is not a BTX payment URI. Placeholders only — this CLI never spends.
+MODEL_URI_EXAMPLE = (
+    "btx://pqwy06q0q7wwzy70aeq45sxnlvq3mr067yt4jzphzvnfn2c4zc24zxz665zdprf0nwgskvqq9cq365u9n8l25"
+)
+PAYMENT_URI_EXAMPLE = "btx:<p2mr-address>"
+PAYMENT_ADDRESS_TYPE = "P2MR"
+FIRST_RUN_URI_NOTE = (
+    "model share is btx://… ; BIP21 payment is btx:<P2MR> on btx-cli; "
+    "bitcoin: is not a BTX payment URI; this CLI never spends and never infers"
+)
+
+CONNECT_TIMEOUT_S = 5.0
+DEFAULT_TIMEOUT_S = 60.0
+# Helper unix RPC wait is 24h; keep it for retrieve.
+GET_TIMEOUT_S = 24.0 * 3600.0
+
+UNSAFE_SUFFIXES = (".pt", ".pth", ".pkl", ".pickle", ".py", ".so", ".bin")
+
+# A share card is a btx:// token, copy_text, or a small .btx/JSON/TXT file.
+# Weights are never read as share text and share text is never read as weights.
+_SHARE_FILE_SUFFIXES = (".btx", ".json", ".txt")
+MAX_SHARE_FILE_BYTES = 1 << 16
+_BTX_URI_PREFIX = "btx://"
+_MODEL_ID_HEX_LEN = 96
+
+# A BountyTerms draft is a small JSON object. Anything larger is not a draft:
+# refuse instead of reading weights / archives as terms.
+MAX_DRAFT_FILE_BYTES = 1 << 20
+
+# Local hint used when the helper returns no next_actions (draft verbs only).
+DRAFT_NEXT_HINT = (
+    "incomplete drafts stay local; publishbounty needs recipe_complete=true; "
+    "preparebountyfunding is wallet plane and never automatic"
+)
+
+# Live packaged helper trees. Scratch e2e sockets never match these.
+_FORBIDDEN_SOCKET_MARKERS = (
+    "/.local/opt/",
+    "/opt/btx",
+    "/var/lib/btxd",
+    "libexec/btxd.real",
+    "/usr/local/var/btx",
+)
+
+USAGE = """\
+usage: btx-model [--socket PATH] [--json] [SOCKET] <verb> [args...]
+
+Socket (fail closed; never a live packaged helper):
+  1. --socket PATH
+  2. env MODELD_SOCK or BTX_MODELD_SOCKET
+  3. first positional argument if it looks like a path
+  4. otherwise ./e2e-scratch/modeld.sock (printed on stderr)
+     never ~/.bitcoin, never a packaged helper path
+
+  --json                         agent door: versioned JSON on stdout only
+                                 (no stderr one_liner / next / copy_text)
+
+First-run examples (no inference, automatic_spend_atoms=0):
+  btx-model doctor
+  btx-model doctor --json            agent door: stdout JSON only
+  btx-model init
+  btx-model host ./model.safetensors
+  btx-model link NAME                btx:// share card, not a payment
+
+URI schemes (do not mix):
+  model resource   btx://<token>     share / get / open; never a payment destination
+  payment BIP21    btx:<p2mr>        wallet plane: btx-cli getnewaddress (P2MR)
+  never            bitcoin:<addr>    not a BTX payment URI
+
+Money stays on btx-cli (legacy alias: bitcoin-cli). This CLI never spends.
+  btx-cli getnewaddress              P2MR receive address
+  btx-cli sendtoaddress <p2mr> 0.1   explicit wallet send; never auto, never bitcoin:
+
+verbs:
+  init                           checkmodelsetup (one_liner on stderr if present);
+                                 create the local research publisher only if missing
+  doctor                         checkmodelsetup
+  host PATH [OPTIONS_JSON]       hostmodel (pin+publish+seed; alias of importmodel)
+  host SHARE.btx | 'btx://…'     share link, not weights: preview card + getmodel
+  preview PATH                   previewmodelimport (size vs quota; no hash)
+  search [TEXT] [--scope LOCAL|PEERS|NETWORK|ALL]
+         [--format F] [--quantization Q] [--family F] [--architecture A]
+         [--publisher NAME] [--state S] [--min-size-bytes N]
+         [--max-size-bytes N] [--min-providers N] [--min-parameters N]
+         [--license SPDX] [--locally-verified] [--sort SORT] [--limit N]
+         [--fits] [QUERY_OBJECT]
+                                 searchmodels catalog filters (default scope
+                                 LOCAL). --fits keeps hits inside this node's
+                                 remaining storage quota (storage only; no
+                                 inference, no RAM claim)
+  get URI [MODE]                 getmodel by URI or id (default FREE_ONLY)
+  pull NAME [MODE]               getmodel by alias, local name, id, or URI
+  show NAME                      showmodel: share + local + aliases + bytes
+  ls [--incomplete]              getmodeltransfers (name, aliases, bytes, rates);
+                                 --incomplete keeps downloading / percent<100 rows
+                                 (huggingface-cli resume analog; never fetches)
+  open SHARE|FILE|-              openmodelshare preview (never fetches weights)
+  share ID                       getmodelsharecard
+  transfers                      getmodeltransfers
+  files NAME                     getmodelmanifest: per-file path/role/size/sha384
+                                 (aria2 metalink content list; local model only)
+  path NAME                      exportmodelpath: verified local store root and
+                                 source path (hf --local-dir / reveal in folder)
+  check PATH                     qualifymodel: static structure check of a local
+                                 file or directory (no runtime, no inference)
+  pins [--type pinned|seeded|both]
+                                 listmodels filtered to kept/served models
+                                 (`ipfs pin ls` analog; this node's observation)
+  pause JOB                      cancelmodeljob (stop a live retrieve; does not spend)
+  resume NAME                    getmodel NAME FREE_ONLY (same as pull)
+  alias [ID [NAME]]              getmodelaliases / setmodelalias
+  rm-alias ALIAS [ID]            removemodelalias (alias lives in the signed card)
+  unhost NAME                    unhostmodel: unpin + unseed in one call
+  link NAME [PATH|--out PATH] [--stdout] [--force]
+                                 exportmodellink: .btx magnet analog
+                                 (canonical uri + copy_text; never weights)
+                                 ('-' as PATH writes the card to stdout)
+  bounty-draft TITLE|@FILE.json|--file FILE|--list|--get ID|--update ID JSON|--delete ID|--validate ID|@FILE|JSON
+                                 createbountydraft (title-only ok; @FILE is a
+                                 local BountyTerms JSON object, never weights) /
+                                 listbountydrafts / getbountydraft /
+                                 validatebountyterms (checklist only; never publishes)
+  watch-scan [DIR]               scanmodelwatch
+                                 (filesystem drop folder; NOT a publisher watch)
+
+  0.34.8-dev (not shipped; fail closed if the helper has no method):
+  cloud add|test|status          setcloudstorage / testcloudstorage /
+                                 getcloudstorageinfo. add takes endpoint/bucket/
+                                 prefix/region/layout/provider/credential-ref.
+                                 Use --credential-ref env:NAME or --secret-file
+                                 (never a raw secret on argv).
+  follow publisher|collection ID  watchmodelpublisher / watchmodelcollection
+         [--action notify|free-download|prepare-funding]
+                                 default action NOTIFY; never auto-spend
+  events [--cursor N] [--wait S] getmodelevents; waitformodelevent if --wait.
+                                 Probe getmodelevents first so unknown RPC cannot hang.
+  mirror [--publisher ID] [--keep-latest N]
+                                 getmodelmirror / setmodelmirror (no auto-spend)
+  profile show|set NAME         getmodelprofile / setmodelprofile
+                                 NAME=personal|infrastructure|mirror|custom
+  import-plan @PLAN.json|status PLAN_ID
+                                 executemodelimport / getmodelimport
+                                 (staging until VerifiedManifest; no live HTTP)
+  package create|inspect JSON|HEX|.btx
+                                 createbtxpackage / inspectbtxpackage
+                                 (.btx path or hex; link remains magnet analog)
+  erasure prepare @MANIFEST.json getmodelerasurehealth / preparemodelerasure
+                                 (per-stripe; global n is not reconstructability)
+  torrent-status MAGNET          gettorrentsourcestatus (no btx-torrentd process)
+  origin-offer ARTIFACT          getmodeloriginoffer (native proxy; not a meter)
+  transport                      getevaluatedtransport (uTP NONSHIPPING; quic false)
+
+NAME is resolved locally in this order: btx:// token, model id, alias, local
+search name, local label. Unknown values stay null; nothing is invented.
+No inference. automatic_spend_atoms=0. Scratch helper only.
+Payment URIs are btx:<P2MR> on btx-cli; bitcoin: is not a BTX URI.
+Copy-paste recipes: contrib/modelnet/recipes/*.json
+Filesystem -modelwatch is not a publisher/collection watch (see doc/modelnet/watches.md).
+"""
+
+
+def _die(msg: str, code: int = 1) -> None:
+    if JSON_MODE:
+        json.dump(
+            {
+                "schema_version": CLI_SCHEMA_VERSION,
+                "ok": False,
+                "available": False,
+                "error": msg,
+                "automatic_spend_atoms": 0,
+            },
+            sys.stdout,
+            indent=2,
+            ensure_ascii=False,
+        )
+        sys.stdout.write("\n")
+    else:
+        print(f"btx-model: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def _looks_like_socket(arg: str) -> bool:
+    if arg in VERBS or arg in ("help", "-h", "--help"):
+        return False
+    if arg.startswith("-"):
+        return False
+    if arg.endswith(".sock") or arg.endswith("modeld.sock"):
+        return True
+    return "/" in arg or arg in (".", "..") or arg.startswith(".")
+
+
+def _resolve_path(path: str) -> str:
+    expanded = os.path.expanduser(path)
+    if os.path.exists(expanded):
+        return os.path.realpath(expanded)
+    return os.path.abspath(expanded)
+
+
+def _is_forbidden_helper_socket(path: str) -> bool:
+    resolved = _resolve_path(path).replace("\\", "/")
+    return any(marker in resolved for marker in _FORBIDDEN_SOCKET_MARKERS)
+
+
+def _parse_argv(argv: list[str]) -> tuple[str, str, list[str], bool]:
+    """Return (socket, verb, verb_args, used_default_socket)."""
+    global JSON_MODE
+    # Design name is MODELD_SOCK (reference clients). BTX_MODELD_SOCKET is an alias.
+    socket_path = (
+        os.environ.get("MODELD_SOCK", "").strip()
+        or os.environ.get("BTX_MODELD_SOCKET", "").strip()
+    )
+    from_flag = False
+    json_mode = False
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help", "help"):
+            JSON_MODE = json_mode
+            return "", "help", [], False
+        if a in ("--json",):
+            json_mode = True
+            i += 1
+            continue
+        if a == "--socket":
+            if i + 1 >= len(argv):
+                JSON_MODE = json_mode
+                _die("--socket requires a path", 2)
+            socket_path = argv[i + 1]
+            from_flag = True
+            i += 2
+            continue
+        if a.startswith("--socket="):
+            socket_path = a.split("=", 1)[1]
+            from_flag = True
+            i += 1
+            continue
+        rest.append(a)
+        i += 1
+    cleaned: list[str] = []
+    for a in rest:
+        if a == "--json":
+            json_mode = True
+        else:
+            cleaned.append(a)
+    rest = cleaned
+    JSON_MODE = json_mode
+
+    if rest and _looks_like_socket(rest[0]) and not from_flag:
+        socket_path = rest[0]
+        rest = rest[1:]
+
+    used_default = False
+    if not socket_path:
+        socket_path = DEFAULT_SOCKET
+        used_default = True
+
+    if not rest:
+        _die("missing verb" if JSON_MODE else "missing verb\n" + USAGE, 2)
+    verb = rest[0]
+    if verb not in VERBS:
+        _die(f"unknown verb {verb!r}" if JSON_MODE else f"unknown verb {verb!r}\n" + USAGE, 2)
+    return socket_path, verb, rest[1:], used_default
+
+
+def _loads_maybe(text: str) -> Any:
+    stripped = text.strip()
+    if stripped[:1] in "{[":
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError as e:
+            _die(f"invalid JSON argument: {e}")
+    return text
+
+
+def _refuse_unsafe_path(path: str) -> None:
+    low = path.lower()
+    for suffix in UNSAFE_SUFFIXES:
+        if low.endswith(suffix):
+            _die(f"refusing {suffix} path (no pickle/.pt execution, no inference): {path}")
+
+
+def _refuse_spend_options(obj: Any, where: str) -> None:
+    if not isinstance(obj, dict):
+        return
+    if obj.get("auto_pay") not in (None, False, 0, "0"):
+        _die(f"{where}: refusing auto_pay")
+    spend = obj.get("automatic_spend_atoms", obj.get("automatic_spend"))
+    if spend is None:
+        return
+    try:
+        n = int(spend)
+    except (TypeError, ValueError):
+        _die(f"{where}: automatic_spend_atoms must be 0")
+    if n != 0:
+        _die(f"{where}: automatic_spend_atoms must be 0 (got {spend!r})")
+
+
+def _read_draft_terms(path: str, where: str) -> dict[str, Any]:
+    """Read a local BountyTerms JSON object from a file.
+
+    Untrusted data: the bytes are parsed as strict JSON and forwarded only as
+    createbountydraft terms. They are never executed, never inferred, never
+    hashed as model weights, and never a shell command or filesystem plan.
+    """
+    if not path:
+        _die(f"{where}: empty draft file path", 2)
+    _refuse_unsafe_path(path)
+    resolved = _resolve_path(path)
+    if not os.path.isfile(resolved):
+        _die(f"{where}: not a regular file: {path}", 2)
+    try:
+        size = os.path.getsize(resolved)
+    except OSError as e:
+        _die(f"{where}: stat {path}: {e}")
+    if size == 0:
+        _die(f"{where}: draft file is empty: {path}", 2)
+    if size > MAX_DRAFT_FILE_BYTES:
+        _die(
+            f"{where}: draft file is {size} bytes > {MAX_DRAFT_FILE_BYTES}; "
+            "BountyTerms is small JSON, model weights are never read as terms"
+        )
+    try:
+        with open(resolved, "r", encoding="utf-8-sig") as fh:
+            text = fh.read(MAX_DRAFT_FILE_BYTES + 1)
+    except (OSError, UnicodeDecodeError) as e:
+        _die(f"{where}: read {path}: {e}")
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError as e:
+        _die(f"{where}: {path} is not JSON: {e}")
+    terms = loaded
+    if isinstance(loaded, dict) and isinstance(loaded.get("terms"), dict):
+        terms = loaded["terms"]
+    if not isinstance(terms, dict):
+        _die(f"{where}: {path} must contain a BountyTerms JSON object")
+    return terms
+
+
+def _walk_fail_closed(obj: Any, where: str) -> None:
+    if isinstance(obj, dict):
+        if obj.get("inference") or obj.get("runtime_exec") or obj.get("runtime_started"):
+            _die(f"{where}: helper result started inference/runtime; fail closed")
+        _refuse_spend_options(obj, where)
+        for v in obj.values():
+            _walk_fail_closed(v, where)
+    elif isinstance(obj, list):
+        for v in obj:
+            _walk_fail_closed(v, where)
+
+
+def _try_rpc(
+    sock: str,
+    method: str,
+    params: list[Any] | None = None,
+    *,
+    timeout: float = DEFAULT_TIMEOUT_S,
+) -> tuple[Any, Any]:
+    """One JSON line over the helper socket.
+
+    Returns (result, None), or (None, error_object) when the helper answers with
+    a JSON-RPC error. Transport problems still die: a socket that never answered
+    leaves nothing to fall back to.
+    """
+    if _is_forbidden_helper_socket(sock):
+        _die(
+            f"refusing production helper socket {sock!r}; "
+            "set MODELD_SOCK or BTX_MODELD_SOCKET to a scratch path under ./e2e-scratch"
+        )
+    if not os.path.exists(sock):
+        _die(f"socket not found: {sock} (scratch helper only; will not use a production path)")
+
+    payload = {
+        "jsonrpc": "1.0",
+        "id": 1,
+        "method": method,
+        "params": params if params is not None else [],
+    }
+    line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n"
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(min(float(timeout), CONNECT_TIMEOUT_S))
+        try:
+            s.connect(sock)
+        except OSError as e:
+            _die(f"connect {sock}: {e} (fail closed)")
+        s.settimeout(float(timeout))
+        s.sendall(line.encode("utf-8"))
+        try:
+            s.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+            except TimeoutError:
+                _die(f"{method}: timeout after {timeout}s")
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+    finally:
+        s.close()
+
+    if not data:
+        _die(f"{method}: empty reply (fail closed)")
+    try:
+        reply = json.loads(data.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        _die(f"{method}: invalid JSON reply: {e}")
+    if not isinstance(reply, dict):
+        _die(f"{method}: reply is not an object")
+    err = reply.get("error")
+    if err not in (None, {}, []):
+        return None, err
+    result = reply.get("result")
+    _walk_fail_closed(result, method)
+    return result, None
+
+
+def rpc(sock: str, method: str, params: list[Any] | None = None, *, timeout: float = DEFAULT_TIMEOUT_S) -> Any:
+    result, err = _try_rpc(sock, method, params, timeout=timeout)
+    if err is not None:
+        _die(f"{method}: {_err_text(err)}")
+    return result
+
+
+def _err_text(err: Any) -> str:
+    if isinstance(err, dict):
+        code = err.get("code") or err.get("error") or ""
+        msg = err.get("message") or err.get("reason") or ""
+        text = ": ".join(str(x) for x in (code, msg) if x)
+        return text or json.dumps(err, ensure_ascii=False)
+    return str(err)
+
+
+def _missing_method(err: Any) -> bool:
+    text = _err_text(err).lower()
+    return "method_not_found" in text or "unknown model rpc" in text
+
+
+def _invalid_parameter(err: Any) -> bool:
+    return "invalid_parameter" in _err_text(err).lower()
+
+
+def _rpc_any(
+    sock: str,
+    method: str,
+    variants: list[list[Any]],
+    *,
+    timeout: float = DEFAULT_TIMEOUT_S,
+) -> tuple[Any, Any]:
+    """Call one method with a few plausible param shapes.
+
+    Returns the first non-INVALID_PARAMETER answer, so a helper without the verb
+    fails closed on METHOD_NOT_FOUND instead of the CLI guessing forever.
+    """
+    last: Any = None
+    for params in variants:
+        result, err = _try_rpc(sock, method, params, timeout=timeout)
+        if err is None:
+            return result, None
+        last = err
+        if _missing_method(err) or not _invalid_parameter(err):
+            return None, err
+    return None, last
+
+
+def _next_actions(result: Any, where: str) -> list[str]:
+    """Helper next_actions are operator hints. Validate shape; never execute."""
+    if not isinstance(result, dict) or "next_actions" not in result:
+        return []
+    actions = result["next_actions"]
+    if not isinstance(actions, list) or any(not isinstance(a, str) for a in actions):
+        _die(f"{where}: next_actions must be a list of strings: {actions!r}")
+    return list(actions)
+
+
+def _first_btx_token(text: str) -> str:
+    """First btx:// token in copy_text, a .btx card, or a pasted URI."""
+    pos = text.find(_BTX_URI_PREFIX)
+    if pos < 0:
+        return ""
+    end = pos + len(_BTX_URI_PREFIX)
+    # Stop at JSON/CSV/quote delimiters too, so a .btx card's `"uri": "btx://…",`
+    # does not pick up the closing quote.
+    while end < len(text) and not text[end].isspace() and text[end] not in ",\"'`<>()[]{}|":
+        end += 1
+    return text[pos:end]
+
+
+def _looks_like_model_id(text: str) -> bool:
+    s = text.strip()
+    return len(s) == _MODEL_ID_HEX_LEN and all(c in "0123456789abcdefABCDEF" for c in s)
+
+
+def _as_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return None
+
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        n = _as_int(value)
+        if n is not None:
+            return n
+    return None
+
+
+def _read_share_file(path: str, where: str) -> str:
+    resolved = _resolve_path(path)
+    if not os.path.isfile(resolved):
+        _die(f"{where}: not a regular file: {path}", 2)
+    try:
+        size = os.path.getsize(resolved)
+    except OSError as e:
+        _die(f"{where}: stat {path}: {e}")
+    if size > MAX_SHARE_FILE_BYTES:
+        _die(f"{where}: {path} is {size} bytes, too large to be a share card")
+    try:
+        with open(resolved, "r", encoding="utf-8-sig", errors="replace") as fh:
+            return fh.read(MAX_SHARE_FILE_BYTES)
+    except OSError as e:
+        _die(f"{where}: read {path}: {e}")
+
+
+def _share_token(source: str, where: str) -> str:
+    """A share card is a btx:// token, copy_text, or a small .btx/JSON/TXT file.
+
+    Untrusted data: the text is only searched for a btx:// token. It is never a
+    path, a shell command, an RPC payload, or a model file.
+    """
+    if source == "-":
+        text = sys.stdin.read()
+    elif source.lower().endswith(_SHARE_FILE_SUFFIXES) or os.sep in source:
+        if not os.path.isfile(_resolve_path(source)):
+            _die(f"{where}: no such share card: {source}", 2)
+        if not source.lower().endswith(_SHARE_FILE_SUFFIXES):
+            _die(f"{where}: {source} is not a .btx/JSON/TXT share card")
+        text = _read_share_file(source, where)
+    else:
+        text = source
+    token = _first_btx_token(text)
+    if not token:
+        _die(f"{where}: no btx:// token; pass copy_text, a .btx card, or - for stdin", 2)
+    return token
+
+
+def _alias_rows(sock: str) -> list[dict[str, Any]]:
+    result, _err = _try_rpc(sock, "getmodelaliases", [])
+    if not isinstance(result, dict):
+        return []
+    return [r for r in (result.get("aliases") or []) if isinstance(r, dict)]
+
+
+def _local_rows(sock: str) -> list[dict[str, Any]]:
+    result, _err = _try_rpc(sock, "listmodels", [])
+    if not isinstance(result, dict):
+        return []
+    return [r for r in (result.get("models") or []) if isinstance(r, dict)]
+
+
+def _search_cards(sock: str, text: str = "") -> list[dict[str, Any]]:
+    query: dict[str, Any] = {"scope": "LOCAL"}
+    if text:
+        query["text"] = text
+    result, _err = _try_rpc(sock, "searchmodels", [query])
+    if not isinstance(result, dict):
+        return []
+    return [c for c in (result.get("results") or []) if isinstance(c, dict)]
+
+
+def _live_jobs(sock: str) -> list[dict[str, Any]]:
+    result, _err = _try_rpc(sock, "getmodeljob", [])
+    if not isinstance(result, dict):
+        return []
+    return [j for j in (result.get("jobs") or []) if isinstance(j, dict)]
+
+
+def _resolve_user(sock: str, ref: str) -> dict[str, Any]:
+    """Resolve a user-typed model reference the way `ollama pull NAME` does.
+
+    Order: btx:// token, model id, local alias, local search name, local label.
+    All lookups are LOCAL. Unresolved stays unresolved so the caller can hand the
+    raw text to the helper (newer helpers resolve aliases on their side too).
+    """
+    token = _first_btx_token(ref)
+    if token:
+        return {"input": ref, "uri": token, "model_id": "", "how": "uri"}
+    if _looks_like_model_id(ref):
+        return {"input": ref, "uri": "", "model_id": ref, "how": "model_id"}
+    low = ref.strip().lower()
+    for row in _alias_rows(sock):
+        if str(row.get("alias") or "").strip().lower() == low:
+            return {
+                "input": ref,
+                "uri": str(row.get("uri") or ""),
+                "model_id": str(row.get("model_id") or ""),
+                "alias": str(row.get("alias") or ""),
+                "how": "alias",
+            }
+    for card in _search_cards(sock):
+        names = [str(card.get("name") or "")] + [str(a) for a in (card.get("aliases") or [])]
+        if any(n.strip() and n.strip().lower() == low for n in names):
+            return {
+                "input": ref,
+                "uri": str(card.get("uri") or ""),
+                "model_id": str(card.get("model_id") or ""),
+                "how": "name",
+            }
+    for row in _local_rows(sock):
+        if str(row.get("label") or "").strip().lower() == low:
+            return {
+                "input": ref,
+                "uri": str(row.get("uri") or ""),
+                "model_id": str(row.get("model_id") or ""),
+                "how": "label",
+            }
+    return {"input": ref, "uri": "", "model_id": "", "how": "unresolved"}
+
+
+def _target(resolved: dict[str, Any]) -> str:
+    return str(resolved.get("uri") or resolved.get("model_id") or resolved.get("input") or "")
+
+
+def _row_for(resolved: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    uri = str(resolved.get("uri") or "")
+    mid = str(resolved.get("model_id") or "")
+    for row in rows:
+        if uri and str(row.get("uri") or "") == uri:
+            return row
+        if mid and str(row.get("model_id") or "") == mid:
+            return row
+    return None
+
+
+def _aliases_for(sock: str, resolved: dict[str, Any], row: dict[str, Any] | None) -> list[str]:
+    mid = str((row or {}).get("model_id") or resolved.get("model_id") or "")
+    uri = str((row or {}).get("uri") or resolved.get("uri") or "")
+    out = set()
+    for alias in _alias_rows(sock):
+        if mid and str(alias.get("model_id") or "") == mid:
+            out.add(str(alias.get("alias")))
+        elif uri and str(alias.get("uri") or "") == uri:
+            out.add(str(alias.get("alias")))
+    out.discard("")
+    return sorted(out)
+
+
+def _safe_filename(name: str) -> str:
+    cleaned = "".join(c if (c.isalnum() or c in "-._") else "-" for c in name.strip())
+    return cleaned.strip("-.") or "model"
+
+
+def _share_preview(sock: str, source: str, where: str) -> dict[str, Any]:
+    """openmodelshare preview, falling back to openbtxuri on an older helper.
+
+    Preview only: no fetch, no inference, no wallet, no spend.
+    """
+    token = _share_token(source, where)
+    result, err = _rpc_any(sock, "openmodelshare", [[source], [token]])
+    degraded = ""
+    if result is None:
+        if not _missing_method(err):
+            _die(f"{where}: {_err_text(err)}")
+        result = rpc(sock, "openbtxuri", [token])
+        degraded = "helper has no openmodelshare; used openbtxuri"
+    if not isinstance(result, dict):
+        _die(f"{where}: helper reply is not an object")
+    card, _cerr = _try_rpc(sock, "getmodelsharecard", [token])
+    if isinstance(card, dict):
+        result.setdefault("share_card", card)
+    actions = [a for a in (result.get("next_actions") or []) if isinstance(a, str)]
+    for step in (
+        f"getmodel {token} FREE_ONLY",
+        f"getmodelsharecard {token}",
+        f"exportmodellink {token}",
+    ):
+        if step not in actions:
+            actions.append(step)
+    result["next_actions"] = actions
+    result["preview_only"] = True
+    result["weights_hashed"] = False
+    result["hosted"] = False
+    if degraded:
+        result["degraded"] = degraded
+    return result
+
+
+def _first_run_examples() -> dict[str, Any]:
+    """User-visible first-run URI examples. Documentation only; never a spend."""
+    return {
+        "model_uri_example": MODEL_URI_EXAMPLE,
+        "payment_uri_example": PAYMENT_URI_EXAMPLE,
+        "payment_uri_scheme": "btx:",
+        "payment_address_type": PAYMENT_ADDRESS_TYPE,
+        "wallet_cli": "btx-cli",
+        "bitcoin_payment_uri": False,
+        "inference": False,
+        "automatic_spend_atoms": 0,
+        "note": FIRST_RUN_URI_NOTE,
+    }
+
+
+def _attach_first_run(result: Any) -> Any:
+    if not isinstance(result, dict):
+        return result
+    result.setdefault("automatic_spend_atoms", 0)
+    result.setdefault("inference", False)
+    result.setdefault("first_run", _first_run_examples())
+    return result
+
+
+def _print(result: Any, where: str = "") -> None:
+    json.dump(result, sys.stdout, indent=2, ensure_ascii=False, sort_keys=False)
+    sys.stdout.write("\n")
+    if JSON_MODE:
+        return
+    if isinstance(result, dict):
+        one = result.get("one_liner")
+        if isinstance(one, str) and one.strip():
+            print(one, file=sys.stderr)
+        ct = result.get("copy_text")
+        if isinstance(ct, str) and ct.strip():
+            print(f"copy_text: {ct}", file=sys.stderr)
+    for action in _next_actions(result, where or "result"):
+        print(f"next: {action}", file=sys.stderr)
+
+
+def cmd_init(sock: str, args: list[str]) -> None:
+    """Ollama-ish first run: local research publisher identity + doctor.
+
+    Never a wallet key, never a spend. The helper also creates this identity on
+    start, so `init` succeeds without creating a second one.
+    """
+    if args:
+        _die("init takes no arguments", 2)
+    doctor = rpc(sock, "checkmodelsetup", [])
+    created = False
+    if isinstance(doctor, dict) and not doctor.get("identity_ready"):
+        result, err = _try_rpc(sock, "createmodelidentity", [])
+        if result is None:
+            if not _missing_method(err):
+                _die(f"createmodelidentity: {_err_text(err)}")
+        else:
+            created = True
+        doctor = rpc(sock, "checkmodelsetup", [])
+    if isinstance(doctor, dict):
+        doctor = _attach_first_run(doctor)
+        one = doctor.get("one_liner")
+        if not JSON_MODE and isinstance(one, str) and one.strip():
+            print(one, file=sys.stderr)
+    actions = list(doctor.get("next_actions") or []) if isinstance(doctor, dict) else []
+    initialized = bool(isinstance(doctor, dict) and doctor.get("identity_ready"))
+    if not initialized:
+        actions.append("fix checkmodelsetup before hosting")
+    _print(
+        {
+            "schema_version": 2,
+            "initialized": initialized,
+            "identity_created": created,
+            "socket": sock,
+            "doctor": doctor,
+            "first_run": _first_run_examples(),
+            "next_actions": actions,
+            "automatic_spend_atoms": 0,
+            "inference": False,
+            "note": "local ML-DSA research publisher only; not a wallet key. " + FIRST_RUN_URI_NOTE,
+        },
+        "init",
+    )
+
+
+def cmd_doctor(sock: str, args: list[str]) -> None:
+    if args:
+        _die("doctor takes no arguments", 2)
+    _print(_attach_first_run(rpc(sock, "checkmodelsetup", [])), "checkmodelsetup")
+
+
+def cmd_host(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("host requires a filesystem path", 2)
+    path = args[0]
+    # A .btx card or pasted copy_text is a share link, not weights. Preview it
+    # instead of hashing a card as a model (never import, never broadcast).
+    token = _first_btx_token(path)
+    if not token and path.lower().endswith(_SHARE_FILE_SUFFIXES) and os.path.isfile(_resolve_path(path)):
+        try:
+            small_enough = os.path.getsize(_resolve_path(path)) <= MAX_SHARE_FILE_BYTES
+        except OSError:
+            small_enough = False
+        # A large .json is a payload, not a card: fall through to hostmodel.
+        if small_enough:
+            token = _first_btx_token(_read_share_file(path, "host"))
+    if token:
+        if not JSON_MODE:
+            print(
+                "btx-model: share card, not model weights; previewing the card "
+                "(no hash, no import, no seed)",
+                file=sys.stderr,
+            )
+        _print(_share_preview(sock, path if os.path.isfile(_resolve_path(path)) else token, "host"), "openmodelshare")
+        return
+    _refuse_unsafe_path(path)
+    params: list[Any] = [path]
+    if len(args) > 1:
+        opts = _loads_maybe(args[1])
+        if not isinstance(opts, dict):
+            _die("host options must be a JSON object")
+        _refuse_spend_options(opts, "host")
+        params.append(opts)
+    else:
+        params.append({"pin": True, "publish": True})
+    _print(rpc(sock, "hostmodel", params), "hostmodel")
+
+
+def cmd_preview(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("preview requires a filesystem path", 2)
+    path = args[0]
+    _refuse_unsafe_path(path)
+    _print(rpc(sock, "previewmodelimport", [path]), "previewmodelimport")
+
+
+# LM Studio / Hugging Face catalog filters, named on the CLI. The RPC already
+# accepts these; btx-model only stops the caller from hand-writing JSON.
+# Integer flags land under `filters.*`, string flags under `filters.*`, and
+# `--sort`/`--limit` are top-level query fields (ParseSearchQuery).
+_SEARCH_INT_FILTERS = {
+    "--min-size-bytes": "min_size_bytes",
+    "--max-size-bytes": "max_size_bytes",
+    "--min-providers": "min_provider_count",
+    "--min-parameters": "min_parameters",
+    "--max-parameters": "max_parameters",
+}
+_SEARCH_STR_FILTERS = {
+    "--format": "format",
+    "--quantization": "quantization",
+    "--family": "family",
+    "--architecture": "architecture",
+    "--publisher": "publisher_name",
+    "--state": "state",
+    "--license": "license",
+}
+
+
+def _search_size_bytes(card: dict[str, Any]) -> int | None:
+    """Signed `size_bytes` from a search card, else the nested economy copies."""
+    nested = card.get("model") if isinstance(card.get("model"), dict) else {}
+    entry = card.get("entry") if isinstance(card.get("entry"), dict) else {}
+    entry_model = entry.get("model") if isinstance(entry.get("model"), dict) else {}
+    return _first_int(card.get("size_bytes"), nested.get("size_bytes"), entry_model.get("size_bytes"))
+
+
+def _filter_fits(sock: str, result: Any) -> Any:
+    """LM Studio "fits my machine", read-only and local.
+
+    A hit fits when its signed `size_bytes` is <= `checkmodelsetup.remaining_bytes`
+    on this node. Storage only: BTX never runs inference, so this is not a RAM or
+    VRAM claim. Unknown size or an unset quota is `null` and is dropped rather
+    than guessed (`automatic_spend_atoms` stays 0).
+    """
+    if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+        return result
+    doctor, _err = _try_rpc(sock, "checkmodelsetup", [])
+    remaining = _as_int(doctor.get("remaining_bytes")) if isinstance(doctor, dict) else None
+    quota = _as_int(doctor.get("quota")) if isinstance(doctor, dict) else None
+    kept: list[Any] = []
+    unknown = 0
+    too_large = 0
+    for card in result["results"]:
+        if not isinstance(card, dict):
+            continue
+        size = _search_size_bytes(card)
+        card["fits_remaining_bytes"] = remaining
+        if remaining is None or remaining <= 0 or size is None:
+            card["fits_storage"] = None
+            unknown += 1
+            continue
+        card["fits_storage"] = bool(size <= remaining)
+        if card["fits_storage"]:
+            kept.append(card)
+        else:
+            too_large += 1
+    result["results"] = kept
+    result["results_returned"] = len(kept)
+    result["fits"] = {
+        "quota_bytes": quota,
+        "remaining_bytes": remaining,
+        "kept": len(kept),
+        "dropped_too_large": too_large,
+        "dropped_size_unknown": unknown,
+        "basis": "this node's remaining model storage quota (payload bytes)",
+        "inference": False,
+        "note": "storage quota only; not a RAM/VRAM claim and not an inference capability",
+    }
+    result.setdefault("automatic_spend_atoms", 0)
+    return result
+
+
+def cmd_search(sock: str, args: list[str]) -> None:
+    """LM Studio-ish catalog filters over searchmodels (default scope LOCAL).
+
+    Flags map to fields ParseSearchQuery already accepts, so this is a caller
+    convenience: no new helper state, no network beyond the requested scope, no
+    spend, no inference. `--fits` compares signed sizes against this node's
+    remaining storage quota and drops what does not fit.
+    """
+    scope = "LOCAL"
+    text = ""
+    extra: dict[str, Any] | None = None
+    filters: dict[str, Any] = {}
+    sort = ""
+    limit: int | None = None
+    fits = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        name = a.split("=", 1)[0] if a.startswith("--") else ""
+        if name in _SEARCH_INT_FILTERS or name in _SEARCH_STR_FILTERS or name in ("--scope", "--sort", "--limit"):
+            if "=" in a:
+                value = a.split("=", 1)[1]
+            else:
+                if i + 1 >= len(args):
+                    _die(f"search {name} requires a value", 2)
+                value = args[i + 1]
+                i += 1
+            if name == "--scope":
+                scope = value
+            elif name == "--sort":
+                sort = value
+            elif name == "--limit":
+                n = _as_int(value)
+                if n is None or n <= 0:
+                    _die("search --limit requires a positive integer", 2)
+                limit = n
+            elif name in _SEARCH_INT_FILTERS:
+                n = _as_int(value)
+                if n is None:
+                    _die(f"search {name} requires an integer", 2)
+                filters[_SEARCH_INT_FILTERS[name]] = n
+            else:
+                filters[_SEARCH_STR_FILTERS[name]] = value
+            i += 1
+            continue
+        if a == "--fits":
+            fits = True
+            i += 1
+            continue
+        if a == "--locally-verified":
+            filters["locally_verified"] = True
+            i += 1
+            continue
+        loaded = _loads_maybe(a)
+        if isinstance(loaded, dict):
+            extra = loaded
+            i += 1
+            continue
+        text = str(loaded)
+        i += 1
+    query: dict[str, Any] = {"scope": scope}
+    if extra:
+        query.update(extra)
+        query.setdefault("scope", scope)
+    if filters:
+        merged = dict(filters)
+        existing = query.get("filters")
+        if isinstance(existing, dict):
+            merged = {**existing, **merged}
+        query["filters"] = merged
+    if sort:
+        query["sort"] = sort
+    if limit is not None:
+        query["limit"] = limit
+    if text:
+        query.setdefault("text", text)
+    result = rpc(sock, "searchmodels", [query])
+    if fits:
+        result = _filter_fits(sock, result)
+    _print(result, "searchmodels")
+
+
+def cmd_get(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("get requires a btx:// URI or model id", 2)
+    uri = args[0]
+    mode: Any = "FREE_ONLY"
+    if len(args) > 1:
+        mode = _loads_maybe(args[1])
+        _refuse_spend_options(mode, "get")
+    _print(rpc(sock, "getmodel", [uri, mode], timeout=GET_TIMEOUT_S), "getmodel")
+
+
+def cmd_share(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("share requires a local or search id", 2)
+    _print(rpc(sock, "getmodelsharecard", [args[0]]), "getmodelsharecard")
+
+
+def cmd_pull(sock: str, args: list[str]) -> None:
+    """`ollama pull NAME`: getmodel NAME FREE_ONLY (alias or URI)."""
+    if not args:
+        _die("pull requires a model name, alias, model id, or btx:// URI", 2)
+    ref = args[0]
+    mode: Any = "FREE_ONLY"
+    if len(args) > 1:
+        mode = _loads_maybe(args[1])
+        _refuse_spend_options(mode, "pull")
+        if isinstance(mode, str) and mode != "FREE_ONLY":
+            _die("pull is FREE_ONLY only; use get for other modes", 2)
+        if isinstance(mode, dict):
+            pol = mode.get("mode") or mode.get("retrieval_policy")
+            if pol not in (None, "FREE_ONLY"):
+                _die("pull is FREE_ONLY only; use get for other modes", 2)
+        mode = "FREE_ONLY"
+    # Helper ResolveUserId accepts alias or URI. Client-side resolve is only a
+    # fallback when this helper still wants a canonical id.
+    result, err = _try_rpc(sock, "getmodel", [ref, mode], timeout=GET_TIMEOUT_S)
+    if result is not None:
+        _print(result, "getmodel")
+        return
+    resolved = _resolve_user(sock, ref)
+    if resolved["how"] == "unresolved":
+        _die(
+            f"pull {ref!r}: no local alias, model name, id, or btx:// URI "
+            f"({_err_text(err)}). Run 'btx-model ls' or use a btx:// URI"
+        )
+    result = rpc(sock, "getmodel", [_target(resolved), mode], timeout=GET_TIMEOUT_S)
+    if isinstance(result, dict):
+        result.setdefault("pulled_by", resolved["how"])
+        if resolved.get("alias"):
+            result.setdefault("alias", resolved["alias"])
+    _print(result, "getmodel")
+
+
+def cmd_show(sock: str, args: list[str]) -> None:
+    """`ollama show`: share + local + aliases + bytes in one read."""
+    if len(args) != 1:
+        _die("show requires exactly one model name, alias, id, or btx:// URI", 2)
+    ref = args[0]
+    result, err = _try_rpc(sock, "showmodel", [ref])
+    if result is not None:
+        _print(result, "showmodel")
+        return
+    if not _missing_method(err):
+        _die(f"showmodel: {_err_text(err)}")
+    # Spec fallback: getmodelsharecard when this helper has no showmodel.
+    card, card_err = _try_rpc(sock, "getmodelsharecard", [ref])
+    if card is not None and isinstance(card, dict) and isinstance(card.get("share"), dict):
+        if card.get("aliases") is not None and card.get("local") is not None:
+            _print(card, "getmodelsharecard")
+            return
+    if card_err is not None and not _missing_method(card_err) and not _invalid_parameter(card_err):
+        _die(f"getmodelsharecard: {_err_text(card_err)}")
+    _print(_composed_show(sock, ref), "showmodel")
+
+
+def _composed_show(sock: str, ref: str) -> dict[str, Any]:
+    """ollama-show shape from read-only verbs an older helper already has."""
+    resolved = _resolve_user(sock, ref)
+    if resolved["how"] == "unresolved":
+        _die(
+            f"show {ref!r}: no local alias, model name, id, or btx:// URI; "
+            "run 'btx-model ls' or 'btx-model search TEXT' first"
+        )
+    share = rpc(sock, "getmodelsharecard", [_target(resolved)])
+    share_obj = share.get("share") if isinstance(share.get("share"), dict) else {}
+    rows = _local_rows(sock)
+    row = _row_for(resolved, rows)
+    mid = str((row or {}).get("model_id") or resolved.get("model_id") or "")
+    cards = [c for c in _search_cards(sock) if str(c.get("model_id") or "") == mid]
+    card = cards[0] if cards else {}
+    job: dict[str, Any] = {}
+    for candidate in _live_jobs(sock):
+        if mid and str(candidate.get("model_id") or "") == mid:
+            job = candidate
+            break
+    uri = str(share_obj.get("uri") or resolved.get("uri") or (row or {}).get("uri") or _target(resolved))
+    local = bool(row) or bool(share.get("local"))
+    actions = [f"getmodel {uri} FREE_ONLY"]
+    if local:
+        actions += [f"link {ref}", f"unhost {ref}", "getmodeltransfers"]
+    else:
+        actions += ["hostmodel <path>  # keep a local copy before serving"]
+    return {
+        "schema_version": 2,
+        "name": str(card.get("name") or (row or {}).get("label") or ""),
+        "aliases": _aliases_for(sock, resolved, row),
+        "model_id": mid or str(card.get("model_id") or ""),
+        "uri": uri,
+        "local": local,
+        "bytes": _first_int((row or {}).get("bytes"), card.get("size_bytes"), share_obj.get("size_bytes")),
+        "state": (row or {}).get("state"),
+        "share": share_obj,
+        "transfer": (
+            {
+                "job_id": job.get("job_id"),
+                "status": job.get("status"),
+                "bytes_committed": _as_int(job.get("bytes_committed")),
+                "bytes_per_sec": _as_int(job.get("bytes_per_sec")),
+            }
+            if job
+            else None
+        ),
+        "signed_metadata": share.get("signed_metadata"),
+        "resolved_by": resolved["how"],
+        "next_actions": actions,
+        "automatic_spend_atoms": 0,
+        "composed_by": "btx-model (this helper has no showmodel)",
+    }
+
+
+def cmd_ls(sock: str, args: list[str]) -> None:
+    """`ollama ls` / Transmission list: getmodeltransfers."""
+    incomplete = False
+    for arg in args:
+        if arg in ("--incomplete", "--downloading"):
+            incomplete = True
+        else:
+            _die("ls takes no arguments except --incomplete; use 'search TEXT' to look beyond this node", 2)
+    result = rpc(sock, "getmodeltransfers", [])
+    if incomplete:
+        if not isinstance(result, dict):
+            _die("ls --incomplete: getmodeltransfers did not return an object")
+        rows = result.get("transfers") if isinstance(result.get("transfers"), list) else []
+        kept: list[Any] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            state = str(row.get("state") or "")
+            pct = _as_int(row.get("percent"))
+            if state == "downloading" or (pct is not None and pct < 100):
+                kept.append(row)
+        result["transfers"] = kept
+        result["count"] = len(kept)
+        result["filter"] = "incomplete"
+        result["automatic_spend_atoms"] = 0
+        result.setdefault(
+            "note",
+            "incomplete is this node's download view; resume is still an explicit pull/get FREE_ONLY",
+        )
+    _print(result, "getmodeltransfers")
+
+
+def cmd_open(sock: str, args: list[str]) -> None:
+    """`ipfs cat`-style resolve-by-card: preview a share link, never fetch it."""
+    if len(args) != 1:
+        _die("open requires exactly one btx:// URI, copy_text, .btx card, or - for stdin", 2)
+    _print(_share_preview(sock, args[0], "open"), "openmodelshare")
+
+
+def cmd_transfers(sock: str, args: list[str]) -> None:
+    if args:
+        _die("transfers takes no arguments", 2)
+    _print(rpc(sock, "getmodeltransfers", []), "getmodeltransfers")
+
+
+def cmd_files(sock: str, args: list[str]) -> None:
+    """aria2 metalink / qBittorrent content tab: per-file size + sha384.
+
+    The list comes from the stored manifest of a *local* model. This is a read of
+    helper state, not a re-hash, not a download, and never a runtime start.
+    """
+    if len(args) != 1:
+        _die("files requires exactly one local model name, alias, id, or btx:// URI", 2)
+    ref = args[0]
+    resolved = _resolve_user(sock, ref)
+    result, err = _rpc_any(sock, "getmodelmanifest", [[ref], [_target(resolved)]])
+    if result is None:
+        if not _missing_method(err):
+            _die(f"getmodelmanifest: {_err_text(err)}")
+        _die(
+            "files: this helper has no getmodelmanifest. The file list and its "
+            "hashes are helper-side state; btx-model will not invent them"
+        )
+    if not isinstance(result, dict):
+        _print(result, "getmodelmanifest")
+        return
+    members = [f for f in (result.get("files") or []) if isinstance(f, dict)]
+    total = 0
+    for member in members:
+        try:
+            total += int(member.get("size") or 0)
+        except (TypeError, ValueError):
+            pass
+    result.setdefault("file_count", len(members))
+    result.setdefault("total_bytes", total)
+    result["weights_rehashed"] = False
+    result.setdefault("automatic_spend_atoms", 0)
+    result.setdefault(
+        "note",
+        "paths and sha384 come from the stored manifest; not a re-hash and not a "
+        "usefulness, safety, or alignment claim",
+    )
+    result.setdefault("next_actions", ["path " + ref, f"show {ref}", "transfers"])
+    _print(result, "files")
+
+
+def cmd_path(sock: str, args: list[str]) -> None:
+    """`huggingface-cli download --local-dir` / reveal-in-folder.
+
+    Verified local store root, source path, and file list. Read of helper state:
+    never starts a runtime, never re-hashes weights, never spends.
+    """
+    if len(args) != 1:
+        _die("path requires exactly one local model name, alias, id, or btx:// URI", 2)
+    ref = args[0]
+    resolved = _resolve_user(sock, ref)
+    result, err = _rpc_any(sock, "exportmodelpath", [[ref], [_target(resolved)]])
+    if result is None:
+        if _missing_method(err):
+            _die("path: this helper has no exportmodelpath; local paths are helper-side state")
+        if "not_found" in _err_text(err).lower():
+            _die(f"path {ref!r}: no local copy on this node; run 'btx-model ls' ({_err_text(err)})")
+        _die(f"exportmodelpath: {_err_text(err)}")
+    if not isinstance(result, dict):
+        _print(result, "exportmodelpath")
+        return
+    result["weights_rehashed"] = False
+    result["runtime_started"] = False
+    members = [f for f in (result.get("files") or []) if isinstance(f, dict)]
+    result.setdefault("file_count", len(members))
+    result.setdefault("automatic_spend_atoms", 0)
+    result.setdefault(
+        "note",
+        "local store paths only; opening a folder never starts a runtime and never spends",
+    )
+    result.setdefault(
+        "next_actions",
+        [f"files {ref}", f"host {result.get('source_path') or '<path>'}  # to serve it", "unhost <name>"],
+    )
+    _print(result, "path")
+
+
+def cmd_check(sock: str, args: list[str]) -> None:
+    """qBittorrent force-recheck analog: static structure check of a local path.
+
+    Bytes are read, never executed: pickle / `.pt` / `.bin` paths are refused, no
+    runtime starts, and no inference is requested. Useful before `preview`/`host`.
+    """
+    if len(args) != 1:
+        _die("check requires exactly one local file or directory path", 2)
+    path = args[0]
+    _refuse_unsafe_path(path)
+    resolved = _resolve_path(path)
+    if not os.path.isfile(resolved) and not os.path.isdir(resolved):
+        _die(f"check: no such file or directory: {path}", 2)
+    result, err = _rpc_any(sock, "qualifymodel", [[resolved], [path]])
+    if result is None:
+        if not _missing_method(err):
+            _die(f"qualifymodel: {_err_text(err)}")
+        _die("check: this helper has no qualifymodel; structure checks are helper-side")
+    if not isinstance(result, dict):
+        _print(result, "qualifymodel")
+        return
+    result.setdefault("path", resolved)
+    result["weights_hashed"] = False
+    result["runtime_started"] = False
+    result.setdefault("automatic_spend_atoms", 0)
+    result.setdefault("next_actions", [f"preview {path}", f"host {path}"])
+    _print(result, "check")
+
+
+def cmd_pins(sock: str, args: list[str]) -> None:
+    """`ipfs pin ls` analog: local keep/serve state, filtered by type.
+
+    Pure view over `listmodels`; it is this node's observation, never a global
+    count and never consensus.
+    """
+    kind = "pinned"
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--type":
+            if i + 1 >= len(args):
+                _die("pins --type requires pinned, seeded, or both", 2)
+            kind = args[i + 1].strip().lower()
+            i += 2
+            continue
+        elif a.startswith("--type="):
+            kind = a.split("=", 1)[1].strip().lower()
+            i += 1
+            continue
+        elif a.startswith("-"):
+            _die(f"pins: unknown argument {a!r}", 2)
+        else:
+            _die("pins takes no positional arguments; usage: pins [--type pinned|seeded|both]", 2)
+        i += 1
+    if kind not in ("pinned", "seeded", "both"):
+        _die("pins --type must be pinned, seeded, or both", 2)
+    rows = _local_rows(sock)
+
+    def keep(row: dict[str, Any]) -> bool:
+        pinned = bool(row.get("pinned"))
+        seeded = bool(row.get("seeded"))
+        if kind == "pinned":
+            return pinned
+        if kind == "seeded":
+            return seeded
+        return pinned or seeded
+
+    selected = [row for row in rows if keep(row)]
+    _print(
+        {
+            "schema_version": 2,
+            "type": kind,
+            "count": len(selected),
+            "models": selected,
+            "automatic_spend_atoms": 0,
+            "note": "local keep/serve observation of this node; not a global count, not consensus",
+            "next_actions": ["transfers", "show <name>", "unhost <name>"],
+        },
+        "pins",
+    )
+
+
+def cmd_pause(sock: str, args: list[str]) -> None:
+    """Transmission pause analog: cancelmodeljob. Does not delete pieces."""
+    if len(args) != 1:
+        _die("pause requires a job_id from getmodeltransfers / getmodeljob", 2)
+    _print(rpc(sock, "cancelmodeljob", [args[0]]), "cancelmodeljob")
+
+
+def cmd_resume(sock: str, args: list[str]) -> None:
+    """Resume a retrieve the same way as pull: getmodel FREE_ONLY. Never spends."""
+    if not args:
+        _die("resume requires a name, alias, id, or btx:// URI", 2)
+    cmd_pull(sock, args)
+
+
+def cmd_alias(sock: str, args: list[str]) -> None:
+    if not args:
+        _print(rpc(sock, "getmodelaliases", []), "getmodelaliases")
+        return
+    if len(args) == 1:
+        _print(rpc(sock, "getmodelaliases", [args[0]]), "getmodelaliases")
+        return
+    model_id, name = args[0], args[1]
+    _print(rpc(sock, "setmodelalias", [model_id, name]), "setmodelalias")
+
+
+def cmd_rm_alias(sock: str, args: list[str]) -> None:
+    """Remove an alias. Aliases live in the signed search record, so this needs
+    the helper write path: an unsigned local rewrite is REJECTED by design."""
+    if not args:
+        _die("rm-alias requires an alias (or: rm-alias MODEL_ID ALIAS)", 2)
+    if len(args) > 2:
+        _die("rm-alias takes at most MODEL_ID and ALIAS", 2)
+    alias = args[-1]
+    model_id = args[0] if len(args) == 2 else ""
+    if not model_id:
+        for row in _alias_rows(sock):
+            if str(row.get("alias") or "").strip().lower() == alias.strip().lower():
+                model_id = str(row.get("model_id") or "")
+                alias = str(row.get("alias"))
+                break
+    if not model_id:
+        model_id = str(_resolve_user(sock, alias).get("model_id") or "")
+    if not model_id:
+        _die(f"rm-alias: unknown alias {alias!r}; run 'btx-model alias' to list local aliases", 1)
+    result, err = _rpc_any(sock, "removemodelalias", [[model_id, alias]])
+    if result is not None:
+        _print(result, "removemodelalias")
+        return
+    if _missing_method(err):
+        _die(
+            "rm-alias: this helper has no removemodelalias. Aliases are part of the "
+            "signed search record, so removal must go through the helper write path; "
+            "hand-edited or unsigned records are REJECTED"
+        )
+    _die(f"removemodelalias: {_err_text(err)}")
+
+
+def cmd_unhost(sock: str, args: list[str]) -> None:
+    """`ollama rm`/stop-seeding: unpin + unseed in one call, files kept on disk."""
+    if len(args) != 1:
+        _die("unhost requires exactly one model name, alias, id, or btx:// URI", 2)
+    ref = args[0]
+    resolved = _resolve_user(sock, ref)
+    if resolved["how"] == "unresolved":
+        _die(f"unhost {ref!r}: no local alias, model name, id, or btx:// URI; run 'btx-model ls'")
+    result, err = _rpc_any(sock, "unhostmodel", [[ref], [_target(resolved)]])
+    if result is not None:
+        _print(result, "unhostmodel")
+        return
+    if not _missing_method(err):
+        _die(f"unhostmodel: {_err_text(err)}")
+    # Older helper: unpinmodel + unseedmodel are the two halves of unhost.
+    idarg = str(resolved.get("model_id") or _target(resolved))
+    unpin = rpc(sock, "unpinmodel", [idarg])
+    unseed = rpc(sock, "unseedmodel", [idarg])
+    row = _row_for(resolved, _local_rows(sock))
+    _print(
+        {
+            "schema_version": 2,
+            "uri": str(resolved.get("uri") or (row or {}).get("uri") or ""),
+            "model_id": idarg,
+            "pinned": (row or {}).get("pinned"),
+            "seeded": (row or {}).get("seeded"),
+            "unpinned": not bool((unpin or {}).get("pinned", False)),
+            "unseeded": not bool((unseed or {}).get("seeded", False)),
+            "steps": [
+                {"method": "unpinmodel", "result": unpin},
+                {"method": "unseedmodel", "result": unseed},
+            ],
+            "degraded": "helper has no unhostmodel; ran unpinmodel + unseedmodel",
+            "next_actions": ["ls", "getmodeltransfers", "hostmodel <path>  # to serve it again"],
+            "automatic_spend_atoms": 0,
+            "note": "stops serving the local copy; files stay on disk and the signed card stays published",
+        },
+        "unhostmodel",
+    )
+
+
+def cmd_link(sock: str, args: list[str]) -> None:
+    """`qBittorrent .torrent`-style magnet file: canonical uri + copy_text only."""
+    if not args:
+        _die("link requires a model name, alias, id, or btx:// URI", 2)
+    ref = args[0]
+    out_path = ""
+    to_stdout = False
+    force = False
+    i = 1
+    while i < len(args):
+        a = args[i]
+        if a == "--stdout":
+            to_stdout = True
+            i += 1
+            continue
+        if a == "--force":
+            force = True
+            i += 1
+            continue
+        if a == "--out":
+            if i + 1 >= len(args):
+                _die("link --out requires a path", 2)
+            out_path = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("--out="):
+            out_path = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a.startswith("-"):
+            _die(f"link: unknown argument {a!r}", 2)
+        # Documented form: `link NAME ./name.btx`
+        if out_path:
+            _die(f"link: unexpected extra path {a!r}", 2)
+        out_path = a
+        i += 1
+    variants: list[list[Any]] = []
+    if out_path:
+        # `exportmodellink ID PATH`: the path is a plain string parameter.
+        variants.append([ref, out_path])
+    variants.append([ref])
+    result, err = _rpc_any(sock, "exportmodellink", variants)
+    if result is not None:
+        # The helper returns the card under `link`; hoist it so every caller sees
+        # the same top-level uri/copy_text contract.
+        if isinstance(result, dict) and isinstance(result.get("link"), dict):
+            for key in ("uri", "copy_text", "family", "format", "quantization", "signed"):
+                if result["link"].get(key) is not None:
+                    result.setdefault(key, result["link"][key])
+        _print(result, "exportmodellink")
+        return
+    if not _missing_method(err):
+        _die(f"exportmodellink: {_err_text(err)}")
+    doc = _composed_link_doc(sock, ref)
+    if to_stdout:
+        _print(doc, "exportmodellink")
+        return
+    if not out_path:
+        out_path = _safe_filename(str(doc.get("name") or doc.get("model_id") or "model")) + ".btx"
+    if out_path == "-":
+        _print(doc, "exportmodellink")
+        return
+    resolved_path = _resolve_path(out_path)
+    if os.path.exists(resolved_path) and not force:
+        _die(f"link: {out_path} exists; pass --force to overwrite (or --stdout)")
+    try:
+        with open(resolved_path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2, ensure_ascii=False, sort_keys=False)
+            fh.write("\n")
+        written = os.path.getsize(resolved_path)
+    except OSError as e:
+        _die(f"link: write {out_path}: {e}")
+    _print(
+        {
+            "schema_version": 2,
+            "path": os.path.abspath(resolved_path),
+            "uri": doc["uri"],
+            "copy_text": doc["copy_text"],
+            "bytes_written": written,
+            "composed_by": "btx-model (this helper has no exportmodellink)",
+            "next_actions": [
+                f"open {out_path}",
+                f"getmodel {doc['uri']} FREE_ONLY",
+                "getmodeltransfers",
+            ],
+            "automatic_spend_atoms": 0,
+            "note": "a .btx card is a share link, never weights",
+        },
+        "exportmodellink",
+    )
+
+
+def _composed_link_doc(sock: str, ref: str) -> dict[str, Any]:
+    """.btx share document: canonical uri + copy_text, never a weight file."""
+    resolved = _resolve_user(sock, ref)
+    if resolved["how"] == "unresolved":
+        _die(f"link {ref!r}: no local alias, model name, id, or btx:// URI; run 'btx-model ls'")
+    share = rpc(sock, "getmodelsharecard", [_target(resolved)])
+    share_obj = share.get("share") if isinstance(share.get("share"), dict) else {}
+    uri = str(share_obj.get("uri") or resolved.get("uri") or "")
+    if not uri:
+        _die(f"link {ref!r}: helper returned no canonical uri; refusing to invent one")
+    row = _row_for(resolved, _local_rows(sock))
+    mid = str((row or {}).get("model_id") or resolved.get("model_id") or "")
+    card = next((c for c in _search_cards(sock) if mid and str(c.get("model_id") or "") == mid), {})
+    return {
+        "schema_version": 2,
+        "kind": "btx_model_share",
+        "uri": uri,
+        "copy_text": str(share_obj.get("copy_text") or uri),
+        "model_id": mid,
+        "name": str(card.get("name") or (row or {}).get("label") or resolved.get("alias") or ""),
+        "family": share_obj.get("family"),
+        "format": share_obj.get("format"),
+        "quantization": share_obj.get("quantization"),
+        "size_bytes": _first_int(share_obj.get("size_bytes"), (row or {}).get("bytes"), card.get("size_bytes")),
+        "signed": bool(share_obj.get("signed")),
+        "hint": "btx-model open FILE   # or: btx-cli getmodel URI FREE_ONLY",
+        "automatic_spend_atoms": 0,
+    }
+
+
+def cmd_bounty_draft(sock: str, args: list[str]) -> None:
+    where = "bounty-draft"
+    if not args or args[0] == "--list":
+        extra = args[1:] if args and args[0] == "--list" else []
+        params: list[Any] = []
+        if extra:
+            loaded = _loads_maybe(extra[0])
+            params = [loaded] if isinstance(loaded, dict) else extra
+        result = rpc(sock, "listbountydrafts", params)
+        if not JSON_MODE and not _next_actions(result, "listbountydrafts"):
+            print(f"next: {DRAFT_NEXT_HINT}", file=sys.stderr)
+        _print(result, "listbountydrafts")
+        return
+    if args[0] == "--get":
+        if len(args) < 2:
+            _die("bounty-draft --get requires a draft id", 2)
+        result = rpc(sock, "getbountydraft", [args[1]])
+        if not JSON_MODE and not _next_actions(result, "getbountydraft"):
+            print(f"next: {DRAFT_NEXT_HINT}", file=sys.stderr)
+        _print(result, "getbountydraft")
+        return
+    if args[0] == "--update":
+        if len(args) < 3:
+            _die("bounty-draft --update requires DRAFT_ID and a JSON object or @FILE", 2)
+        patch_src = args[2]
+        if patch_src.startswith("@"):
+            patch = _read_draft_terms(patch_src[1:], where)
+        else:
+            loaded = _loads_maybe(args[2])
+            if not isinstance(loaded, dict):
+                _die("bounty-draft --update needs a JSON object", 2)
+            patch = loaded
+        _refuse_spend_options(patch, where)
+        result = rpc(sock, "updatebountydraft", [args[1], patch])
+        if not JSON_MODE and not _next_actions(result, "updatebountydraft"):
+            print(f"next: {DRAFT_NEXT_HINT}", file=sys.stderr)
+        _print(result, "updatebountydraft")
+        return
+    if args[0] == "--delete":
+        if len(args) != 2:
+            _die("bounty-draft --delete requires a draft id", 2)
+        result = rpc(sock, "deletebountydraft", [args[1]])
+        _print(result, "deletebountydraft")
+        return
+    if args[0] == "--validate":
+        if len(args) != 2:
+            _die("bounty-draft --validate requires a draft id, @FILE, or JSON object", 2)
+        src = args[1]
+        terms: dict[str, Any]
+        extra: dict[str, Any] = {}
+        if src.startswith("@"):
+            terms = _read_draft_terms(src[1:], where)
+        elif len(src) == 32 and all(c in "0123456789abcdefABCDEF" for c in src):
+            draft = rpc(sock, "getbountydraft", [src])
+            if not isinstance(draft, dict) or not isinstance(draft.get("terms"), dict):
+                _die("bounty-draft --validate: getbountydraft returned no terms")
+            terms = draft["terms"]
+            extra["draft_id"] = src
+            if isinstance(draft.get("copy_text"), str):
+                extra["copy_text"] = draft["copy_text"]
+        else:
+            loaded = _loads_maybe(src)
+            if not isinstance(loaded, dict):
+                _die("bounty-draft --validate needs a draft id, @FILE, or JSON object", 2)
+            terms = loaded
+        _refuse_spend_options(terms, where)
+        result = rpc(sock, "validatebountyterms", [terms])
+        if isinstance(result, dict):
+            result.update({k: v for k, v in extra.items() if k not in result})
+        if not JSON_MODE and not _next_actions(result, "validatebountyterms"):
+            print(f"next: {DRAFT_NEXT_HINT}", file=sys.stderr)
+        _print(result, "validatebountyterms")
+        return
+    if args[0] in ("--file", "-f"):
+        if len(args) != 2:
+            _die("bounty-draft --file requires exactly one JSON path", 2)
+        args = [args[1]]
+    if args[0].startswith("@"):
+        if len(args) != 1:
+            _die("bounty-draft @FILE takes no extra arguments; put every field in the file", 2)
+        terms = _read_draft_terms(args[0][1:], where)
+    else:
+        loaded = _loads_maybe(args[0])
+        if isinstance(loaded, dict):
+            terms = loaded
+        else:
+            terms = {"title": str(loaded)}
+            if len(args) > 1:
+                more = _loads_maybe(args[1])
+                if isinstance(more, dict):
+                    terms.update(more)
+    _refuse_spend_options(terms, where)
+    # Title-only incomplete drafts stay unpublished. Do not invent a council.
+    result = rpc(sock, "createbountydraft", [terms])
+    if isinstance(result, dict) and result.get("published") is True:
+        _die("createbountydraft published a draft; incomplete drafts must stay local")
+    if not JSON_MODE and not _next_actions(result, "createbountydraft"):
+        print(f"next: {DRAFT_NEXT_HINT}", file=sys.stderr)
+    _print(result, "createbountydraft")
+
+
+def cmd_watch_scan(sock: str, args: list[str]) -> None:
+    params: list[Any] = []
+    if args:
+        params = [args[0]]
+    _print(rpc(sock, "scanmodelwatch", params), "scanmodelwatch")
+
+
+# --- 0.34.8-dev: cloud / follow / events / mirror / profile -----------------
+# Fail immediately on METHOD_NOT_FOUND. Do not hang. automatic_spend_atoms=0.
+# Raw secrets never on argv. Helper result is wrapped; unknown fields stay null.
+
+_CLOUD_PROVIDERS = ("AUTO", "GENERIC_S3", "AWS_S3", "CLOUDFLARE_R2", "MINIO")
+_CLOUD_LAYOUTS = ("AUTO", "SOURCE_FILES", "PIECE_OBJECTS")
+_CLOUD_READ = ("AUTO", "STREAM_FILE", "PIECE_GET")
+_FOLLOW_ACTIONS = {
+    "notify": "NOTIFY",
+    "free-download": "FREE_DOWNLOAD",
+    "free_download": "FREE_DOWNLOAD",
+    "prepare-funding": "PREPARE_FUNDING",
+    "prepare_funding": "PREPARE_FUNDING",
+}
+_PROFILES = ("personal", "infrastructure", "mirror", "custom")
+_FORBIDDEN_SECRET_FLAGS = (
+    "--secret",
+    "--password",
+    "--secret-access-key",
+    "--aws-secret-access-key",
+    "--access-key-secret",
+    "--access-key",
+    "--aws-secret",
+)
+_SECRET_KEY_NEEDLES = (
+    "secret",
+    "password",
+    "passwd",
+    "private_key",
+    "secret_access_key",
+    "session_token",
+    "api_key",
+    "auth_token",
+    "credential_value",
+    "aws_secret",
+)
+
+
+def _is_secret_key(key: str) -> bool:
+    k = str(key).lower().replace("-", "_")
+    if k in ("credential_ref", "credential_refs"):
+        return False
+    return any(n in k for n in _SECRET_KEY_NEEDLES)
+
+
+def _redact_secrets(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            if _is_secret_key(str(k)):
+                out[str(k)] = None
+            else:
+                out[str(k)] = _redact_secrets(v)
+        return out
+    if isinstance(obj, list):
+        return [_redact_secrets(v) for v in obj]
+    return obj
+
+
+def _rpc_dev(
+    sock: str,
+    method: str,
+    variants: list[list[Any]] | None = None,
+    *,
+    timeout: float = DEFAULT_TIMEOUT_S,
+) -> Any:
+    """Call one 0.34.8-dev RPC. METHOD_NOT_FOUND dies immediately (no hang)."""
+    params_list = variants if variants is not None else [[]]
+    result, err = _rpc_any(sock, method, params_list, timeout=timeout)
+    if result is not None:
+        return result
+    if _missing_method(err):
+        _die(f"{method}: method not found ({DEV348_NOTE})")
+    _die(f"{method}: {_err_text(err)}")
+
+
+def _take_opts(
+    args: list[str],
+    valued: set[str],
+    boolean: set[str] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    boolean = boolean or set()
+    opts: dict[str, Any] = {}
+    pos: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            pos.extend(args[i + 1 :])
+            break
+        low = a.split("=", 1)[0] if a.startswith("--") else a
+        if low in _FORBIDDEN_SECRET_FLAGS or any(a.startswith(f + "=") for f in _FORBIDDEN_SECRET_FLAGS):
+            _die(
+                "refusing raw secret on argv; use --credential-ref env:NAME "
+                "or --secret-file PATH (contents are never copied onto argv)",
+                2,
+            )
+        name = a.split("=", 1)[0] if a.startswith("--") else ""
+        if name in boolean:
+            if "=" in a:
+                val = a.split("=", 1)[1].strip().lower()
+                opts[name] = val not in ("0", "false", "no", "off")
+            else:
+                opts[name] = True
+            i += 1
+            continue
+        if name in valued:
+            if "=" in a:
+                opts[name] = a.split("=", 1)[1]
+            else:
+                if i + 1 >= len(args):
+                    _die(f"{name} requires a value", 2)
+                opts[name] = args[i + 1]
+                i += 1
+            i += 1
+            continue
+        if a.startswith("-"):
+            _die(f"unknown argument {a!r}", 2)
+        pos.append(a)
+        i += 1
+    return opts, pos
+
+
+def _pick(src: Any, *keys: str) -> Any:
+    if not isinstance(src, dict):
+        return None
+    for key in keys:
+        if key in src and src[key] is not None:
+            return src[key]
+    return None
+
+
+def _emit_dev(
+    kind: str,
+    method: str,
+    result: Any,
+    fields: dict[str, Any],
+    *,
+    note: str,
+    next_actions: list[str],
+) -> None:
+    redacted = _redact_secrets(result) if result is not None else None
+    obj: dict[str, Any] = {
+        "schema_version": CLI_SCHEMA_VERSION,
+        "kind": kind,
+        "client": "btx-model",
+        "client_version": "0.34.8-dev",
+        "released": False,
+        "ok": True,
+        "available": True,
+        "method": method,
+        "error": None,
+    }
+    for key, value in fields.items():
+        obj[key] = value
+    obj["result"] = redacted
+    obj["note"] = note
+    obj["next_actions"] = next_actions
+    obj["automatic_spend_atoms"] = 0
+    _refuse_spend_options(obj, kind)
+    _print(obj, method)
+
+
+def cmd_cloud(sock: str, args: list[str]) -> None:
+    if not args:
+        _die(
+            "cloud requires add, test, or status\n"
+            "  cloud add --endpoint URL --bucket NAME [--prefix P] [--region R]\n"
+            "            [--layout AUTO|SOURCE_FILES|PIECE_OBJECTS]\n"
+            "            [--provider AUTO|GENERIC_S3|AWS_S3|CLOUDFLARE_R2|MINIO]\n"
+            "            [--read-strategy AUTO|STREAM_FILE|PIECE_GET]\n"
+            "            [--credential-ref env:NAME] [--secret-file PATH]\n"
+            "            [--allow-request-heavy-cloud-layout]\n"
+            "  cloud test\n"
+            "  cloud status",
+            2,
+        )
+    sub = args[0]
+    rest = args[1:]
+    if sub == "status":
+        if rest:
+            _die("cloud status takes no arguments", 2)
+        result = _rpc_dev(sock, "getcloudstorageinfo", [[]])
+        src = result if isinstance(result, dict) else {}
+        _emit_dev(
+            "cloud_storage",
+            "getcloudstorageinfo",
+            result,
+            {
+                "command": "status",
+                "provider": _pick(src, "provider", "cloud_provider"),
+                "endpoint": _pick(src, "endpoint"),
+                "bucket": _pick(src, "bucket"),
+                "prefix": _pick(src, "prefix"),
+                "region": _pick(src, "region"),
+                "layout": _pick(src, "layout", "cloud_object_layout"),
+                "read_strategy": _pick(src, "read_strategy", "cloud_read_strategy"),
+                "credential_ref": _pick(src, "credential_ref"),
+                "reachable": _pick(src, "reachable"),
+                "auth_ok": _pick(src, "auth_ok", "auth"),
+                "health": _pick(src, "health"),
+            },
+            note=(
+                "cloud backing is optional; pieces remain the swarm unit. "
+                "Secrets are never returned. " + DEV348_NOTE
+            ),
+            next_actions=["cloud test", "cloud add --endpoint … --bucket … --credential-ref env:BTX_CLOUD_CREDENTIAL"],
+        )
+        return
+    if sub == "test":
+        if rest:
+            _die("cloud test takes no arguments", 2)
+        result = _rpc_dev(sock, "testcloudstorage", [[], [{}]])
+        src = result if isinstance(result, dict) else {}
+        _emit_dev(
+            "cloud_storage",
+            "testcloudstorage",
+            result,
+            {
+                "command": "test",
+                "provider": _pick(src, "provider", "cloud_provider"),
+                "endpoint": _pick(src, "endpoint"),
+                "bucket": _pick(src, "bucket"),
+                "prefix": _pick(src, "prefix"),
+                "region": _pick(src, "region"),
+                "layout": _pick(src, "layout", "cloud_object_layout"),
+                "read_strategy": _pick(src, "read_strategy", "cloud_read_strategy"),
+                "credential_ref": _pick(src, "credential_ref"),
+                "reachable": _pick(src, "reachable"),
+                "auth_ok": _pick(src, "auth_ok", "auth"),
+                "health": _pick(src, "health"),
+            },
+            note=(
+                "testcloudstorage is a local helper probe, not WAN evidence. "
+                "Do not treat ok here as a production origin receipt. " + DEV348_NOTE
+            ),
+            next_actions=["cloud status"],
+        )
+        return
+    if sub != "add":
+        _die(f"cloud: unknown subcommand {sub!r} (add|test|status)", 2)
+    valued = {
+        "--endpoint",
+        "--bucket",
+        "--prefix",
+        "--region",
+        "--layout",
+        "--provider",
+        "--read-strategy",
+        "--credential-ref",
+        "--secret-file",
+    }
+    opts, pos = _take_opts(rest, valued, {"--allow-request-heavy-cloud-layout"})
+    if pos:
+        _die(f"cloud add: unexpected positional {pos[0]!r}; use flags only", 2)
+    if opts.get("--credential-ref") and opts.get("--secret-file"):
+        _die("cloud add: pass either --credential-ref or --secret-file, not both", 2)
+    cred_ref: str | None = None
+    cred_kind = "path"
+    if opts.get("--credential-ref"):
+        cred_ref = str(opts["--credential-ref"]).strip()
+        if not cred_ref:
+            _die("cloud add: --credential-ref is empty", 2)
+        if cred_ref.startswith("env:"):
+            cred_kind = "env"
+            cred_ref = cred_ref[4:]
+            if not cred_ref or not cred_ref.replace("_", "").isalnum():
+                _die("cloud add: env credential name is invalid", 2)
+        elif cred_ref.startswith("file:"):
+            cred_ref = cred_ref[5:]
+            cred_kind = "path"
+        else:
+            cred_kind = "path"
+    secret_file = str(opts.get("--secret-file") or "").strip()
+    if secret_file:
+        _refuse_unsafe_path(secret_file)
+        resolved = _resolve_path(secret_file)
+        if not os.path.isfile(resolved):
+            _die(f"cloud add: --secret-file is not a regular file: {secret_file}", 2)
+        try:
+            mode = os.stat(resolved).st_mode & 0o777
+        except OSError as e:
+            _die(f"cloud add: stat --secret-file: {e}")
+        if mode & 0o077:
+            _die(
+                f"cloud add: --secret-file mode is {oct(mode)}; refuse world/group-readable "
+                "(want 0600). Not reading the file onto argv.",
+                2,
+            )
+        cred_ref = resolved
+    endpoint = str(opts.get("--endpoint") or "").strip()
+    bucket = str(opts.get("--bucket") or "").strip()
+    if not endpoint or not bucket:
+        _die("cloud add requires --endpoint and --bucket", 2)
+    layout = str(opts.get("--layout") or "AUTO").strip().upper()
+    provider = str(opts.get("--provider") or "AUTO").strip().upper()
+    read_strategy = str(opts.get("--read-strategy") or "AUTO").strip().upper()
+    if provider not in _CLOUD_PROVIDERS:
+        _die(f"cloud add: --provider must be one of {', '.join(_CLOUD_PROVIDERS)}", 2)
+    if layout not in _CLOUD_LAYOUTS:
+        _die(f"cloud add: --layout must be one of {', '.join(_CLOUD_LAYOUTS)}", 2)
+    if read_strategy not in _CLOUD_READ:
+        _die(f"cloud add: --read-strategy must be one of {', '.join(_CLOUD_READ)}", 2)
+    allow_heavy = bool(opts.get("--allow-request-heavy-cloud-layout"))
+    prefix = str(opts.get("--prefix") or "").strip() or None
+    region = str(opts.get("--region") or "").strip() or None
+    cfg: dict[str, Any] = {
+        "endpoint": endpoint,
+        "bucket": bucket,
+        "prefix": prefix,
+        "region": region,
+        "layout": layout,
+        "cloud_object_layout": layout,
+        "provider": provider,
+        "cloud_provider": provider,
+        "read_strategy": read_strategy,
+        "cloud_read_strategy": read_strategy,
+        "credential_ref": cred_ref,
+        "credential_ref_kind": cred_kind,
+        "allow_request_heavy_cloud_layout": allow_heavy,
+        "automatic_spend_atoms": 0,
+    }
+    _refuse_spend_options(cfg, "cloud add")
+    result = _rpc_dev(sock, "setcloudstorage", [[cfg]])
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "cloud_storage",
+        "setcloudstorage",
+        result,
+        {
+            "command": "add",
+            "provider": _pick(src, "provider", "cloud_provider") or provider,
+            "endpoint": _pick(src, "endpoint") or endpoint,
+            "bucket": _pick(src, "bucket") or bucket,
+            "prefix": _pick(src, "prefix") if _pick(src, "prefix") is not None else prefix,
+            "region": _pick(src, "region") if _pick(src, "region") is not None else region,
+            "layout": _pick(src, "layout", "cloud_object_layout") or layout,
+            "read_strategy": _pick(src, "read_strategy", "cloud_read_strategy") or read_strategy,
+            "credential_ref": _pick(src, "credential_ref") or cred_ref,
+            "reachable": _pick(src, "reachable"),
+            "auth_ok": _pick(src, "auth_ok", "auth"),
+            "health": _pick(src, "health"),
+        },
+        note=(
+            "setcloudstorage stores a local origin config. Credentials stay in the "
+            "ref/file; they are not written to search records, events, or this JSON. "
+            + DEV348_NOTE
+        ),
+        next_actions=["cloud test", "cloud status"],
+    )
+
+
+def cmd_follow(sock: str, args: list[str]) -> None:
+    if not args:
+        _die(
+            "follow requires publisher|collection ID "
+            "[--action notify|free-download|prepare-funding]",
+            2,
+        )
+    kind = args[0].strip().lower()
+    if kind not in ("publisher", "collection"):
+        _die("follow: first argument must be publisher or collection", 2)
+    opts, pos = _take_opts(args[1:], {"--action"})
+    if not pos:
+        _die(f"follow {kind} requires an id", 2)
+    if len(pos) != 1:
+        _die("follow: extra positional arguments", 2)
+    target = pos[0]
+    action_raw = str(opts.get("--action") or "notify").strip().lower()
+    if action_raw in ("fund", "fund-with-mandate", "fund_with_mandate"):
+        _die(
+            "follow: FUND_WITH_MANDATE is not a follow action; default is NOTIFY. "
+            "PREPARE_FUNDING is unsigned and never spends. automatic_spend_atoms stays 0",
+            2,
+        )
+    if action_raw not in _FOLLOW_ACTIONS:
+        _die(
+            "follow --action must be notify, free-download, or prepare-funding "
+            "(default notify; never auto-spend)",
+            2,
+        )
+    action = _FOLLOW_ACTIONS[action_raw]
+    method = "watchmodelpublisher" if kind == "publisher" else "watchmodelcollection"
+    id_key = "publisher_id" if kind == "publisher" else "collection_id"
+    payload = {
+        id_key: target,
+        "action": action,
+        "automatic_spend_atoms": 0,
+    }
+    _refuse_spend_options(payload, "follow")
+    result = _rpc_dev(
+        sock,
+        method,
+        [[payload], [target, action], [target, {"action": action}]],
+    )
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "model_watch",
+        method,
+        result,
+        {
+            "watch_kind": kind,
+            "publisher_id": _pick(src, "publisher_id") or (target if kind == "publisher" else None),
+            "collection_id": _pick(src, "collection_id") or (target if kind == "collection" else None),
+            "action": _pick(src, "action") or action,
+            "watch_id": _pick(src, "watch_id", "id"),
+            "filesystem_watch": False,
+        },
+        note=(
+            "publisher/collection watch is not the filesystem -modelwatch drop folder. "
+            "Default action is NOTIFY. FREE_DOWNLOAD uses existing FREE_ONLY getmodel. "
+            "PREPARE_FUNDING is an unsigned plan. automatic_spend_atoms stays 0. "
+            + DEV348_NOTE
+        ),
+        next_actions=["events", "events --cursor 0"],
+    )
+
+
+def cmd_events(sock: str, args: list[str]) -> None:
+    opts, pos = _take_opts(args, {"--cursor", "--wait"})
+    if pos:
+        _die("events takes no positional arguments (use --cursor / --wait)", 2)
+    cursor_raw = opts.get("--cursor")
+    wait_raw = opts.get("--wait")
+    cursor: int | None = None
+    if cursor_raw is not None and str(cursor_raw).strip() != "":
+        n = _as_int(cursor_raw)
+        if n is None or n < 0:
+            _die("events --cursor requires a non-negative integer", 2)
+        cursor = n
+    wait_s: float | None = None
+    if wait_raw is not None and str(wait_raw).strip() != "":
+        try:
+            wait_s = float(wait_raw)
+        except (TypeError, ValueError):
+            _die("events --wait requires seconds (number)", 2)
+        if wait_s < 0:
+            _die("events --wait must be >= 0", 2)
+        if wait_s == 0:
+            wait_s = None
+    query: dict[str, Any] = {
+        "cursor": cursor,
+        "wait_s": None,
+        "automatic_spend_atoms": 0,
+    }
+    # Probe getmodelevents first so --wait cannot hang on an unknown RPC.
+    listed = _rpc_dev(sock, "getmodelevents", [[query], [cursor], []])
+    waited = None
+    method = "getmodelevents"
+    if wait_s is not None:
+        wait_query = dict(query)
+        wait_query["wait_s"] = wait_s
+        wait_query["timeout_s"] = wait_s
+        waited = _rpc_dev(
+            sock,
+            "waitformodelevent",
+            [[wait_query], [cursor, wait_s], [wait_s]],
+            timeout=float(wait_s) + 5.0,
+        )
+        method = "waitformodelevent"
+        listed = waited if waited is not None else listed
+    src = listed if isinstance(listed, dict) else {}
+    events = src.get("events") if isinstance(src.get("events"), list) else None
+    _emit_dev(
+        "model_events",
+        method,
+        listed,
+        {
+            "cursor": _pick(src, "cursor", "local_sequence", "next_cursor") if cursor is None else cursor,
+            "wait_s": wait_s,
+            "next_cursor": _pick(src, "next_cursor", "local_sequence"),
+            "events": events,
+            "event_count": len(events) if events is not None else None,
+            "waited": waited is not None,
+        },
+        note=(
+            "events are local observations (journal), not consensus. "
+            "Reorgs emit corrective events; they are not silent deletes. "
+            + DEV348_NOTE
+        ),
+        next_actions=["events --cursor <next>", "follow publisher <id>"],
+    )
+
+
+def cmd_mirror(sock: str, args: list[str]) -> None:
+    opts, pos = _take_opts(args, {"--publisher", "--keep-latest", "--collection", "--query"})
+    if pos:
+        _die("mirror takes no positional arguments (use --publisher / --keep-latest)", 2)
+    publisher = str(opts.get("--publisher") or "").strip() or None
+    collection = str(opts.get("--collection") or "").strip() or None
+    query = str(opts.get("--query") or "").strip() or None
+    keep_raw = opts.get("--keep-latest")
+    keep_latest: int | None = None
+    if keep_raw is not None and str(keep_raw).strip() != "":
+        keep_latest = _as_int(keep_raw)
+        if keep_latest is None or keep_latest < 0:
+            _die("mirror --keep-latest requires a non-negative integer", 2)
+    mutating = any(v is not None for v in (publisher, collection, query, keep_latest))
+    if mutating:
+        payload = {
+            "publisher_id": publisher,
+            "collection_id": collection,
+            "query": query,
+            "keep_latest": keep_latest,
+            "automatic_spend_atoms": 0,
+        }
+        _refuse_spend_options(payload, "mirror")
+        result = _rpc_dev(sock, "setmodelmirror", [[payload]])
+        method = "setmodelmirror"
+    else:
+        result = _rpc_dev(sock, "getmodelmirror", [[]])
+        method = "getmodelmirror"
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "model_mirror",
+        method,
+        result,
+        {
+            "publisher_id": _pick(src, "publisher_id") if _pick(src, "publisher_id") is not None else publisher,
+            "collection_id": _pick(src, "collection_id") if _pick(src, "collection_id") is not None else collection,
+            "query": _pick(src, "query") if _pick(src, "query") is not None else query,
+            "keep_latest": _pick(src, "keep_latest") if _pick(src, "keep_latest") is not None else keep_latest,
+            "profile": _pick(src, "profile"),
+        },
+        note=(
+            "mirror policy is local config, not a monetary privilege and not consensus. "
+            "It never auto-spends. " + DEV348_NOTE
+        ),
+        next_actions=["profile show", "follow publisher <id>"],
+    )
+
+
+def cmd_profile(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("profile requires show or set personal|infrastructure|mirror|custom", 2)
+    sub = args[0].strip().lower()
+    if sub == "show":
+        if args[1:]:
+            _die("profile show takes no extra arguments", 2)
+        result = _rpc_dev(sock, "getmodelprofile", [[]])
+        src = result if isinstance(result, dict) else {}
+        _emit_dev(
+            "model_profile",
+            "getmodelprofile",
+            result,
+            {
+                "command": "show",
+                "profile": _pick(src, "profile", "name"),
+                "storage_bytes": _pick(src, "storage_bytes", "quota_bytes", "storage"),
+                "seed": _pick(src, "seed"),
+                "preserve_rare": _pick(src, "preserve_rare"),
+                "relay": _pick(src, "relay"),
+                "index": _pick(src, "index"),
+                "host": _pick(src, "host", "modelhost"),
+                "upload_bps": _pick(src, "upload_bps"),
+                "follow": _pick(src, "follow"),
+                "profiles": list(_PROFILES),
+            },
+            note=(
+                "profiles are config presets, not protocol. They never bypass the "
+                "resource governor and never grant monetary/search/consensus privilege. "
+                + DEV348_NOTE
+            ),
+            next_actions=[
+                "profile set personal",
+                "profile set infrastructure",
+                "profile set mirror",
+                "profile set custom",
+            ],
+        )
+        return
+    if sub != "set":
+        _die("profile: subcommand must be show or set", 2)
+    if len(args) < 2:
+        _die("profile set requires personal|infrastructure|mirror|custom", 2)
+    name = args[1].strip().lower()
+    if name not in _PROFILES:
+        _die("profile set NAME must be personal, infrastructure, mirror, or custom", 2)
+    extra: dict[str, Any] | None = None
+    if len(args) > 3:
+        _die("profile set takes NAME and optional JSON object only", 2)
+    if len(args) > 2:
+        loaded = _loads_maybe(args[2])
+        if not isinstance(loaded, dict):
+            _die("profile set extra argument must be a JSON object", 2)
+        extra = loaded
+        _refuse_spend_options(extra, "profile set")
+    payload: dict[str, Any] = {
+        "profile": name.upper() if name != "custom" else "CUSTOM",
+        "automatic_spend_atoms": 0,
+    }
+    if extra:
+        payload.update(extra)
+        payload["automatic_spend_atoms"] = 0
+    result = _rpc_dev(
+        sock,
+        "setmodelprofile",
+        [[name], [name.upper()], [payload]],
+    )
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "model_profile",
+        "setmodelprofile",
+        result,
+        {
+            "command": "set",
+            "profile": _pick(src, "profile", "name") or name,
+            "storage_bytes": _pick(src, "storage_bytes", "quota_bytes", "storage"),
+            "seed": _pick(src, "seed"),
+            "preserve_rare": _pick(src, "preserve_rare"),
+            "relay": _pick(src, "relay"),
+            "index": _pick(src, "index"),
+            "host": _pick(src, "host", "modelhost"),
+            "upload_bps": _pick(src, "upload_bps"),
+            "follow": _pick(src, "follow"),
+            "profiles": list(_PROFILES),
+        },
+        note=(
+            "profile set writes ordinary local args. INFRASTRUCTURE enables "
+            "relay+index+host-auto as independent roles; relay still does not cache "
+            "payloads. " + DEV348_NOTE
+        ),
+        next_actions=["profile show", "doctor"],
+    )
+
+
+def _json_obj(args: list[str]) -> dict[str, Any]:
+    if not args:
+        return {}
+    raw = args[0]
+    if raw.startswith("@"):
+        with open(raw[1:], "r", encoding="utf-8") as fh:
+            obj = json.load(fh)
+        if not isinstance(obj, dict):
+            _die("JSON object required", 2)
+        return obj
+    obj = json.loads(raw)
+    if not isinstance(obj, dict):
+        _die("JSON object required", 2)
+    return obj
+
+
+def cmd_import_plan(sock: str, args: list[str]) -> None:
+    if args and args[0] in ("status", "get"):
+        if len(args) < 2:
+            _die("import-plan status requires PLAN_ID", 2)
+        result = _rpc_dev(sock, "getmodelimport", [[{"plan_id": args[1]}]])
+        method = "getmodelimport"
+    else:
+        result = _rpc_dev(sock, "executemodelimport", [[_json_obj(args)]], timeout=GET_TIMEOUT_S)
+        method = "executemodelimport"
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "model_import_plan",
+        method,
+        result,
+        {
+            "plan_id": _pick(src, "plan_id"),
+            "phase": _pick(src, "phase"),
+            "live_http": _pick(src, "live_http"),
+            "authorship": _pick(src, "authorship"),
+        },
+        note="ImportPlan staging until VerifiedManifest. Source integrity is not authorship. "
+        + DEV348_NOTE,
+        next_actions=["import-plan status <plan_id>", "doctor"],
+    )
+
+
+def cmd_package(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("package requires create JSON|@FILE or inspect HEX|.btx", 2)
+    sub = args[0].strip().lower()
+    if sub == "inspect":
+        if len(args) < 2:
+            _die("package inspect requires a .btx path or hex", 2)
+        target = args[1]
+        expanded = os.path.expanduser(target)
+        if os.path.exists(expanded) or target.lower().endswith(".btx"):
+            result = _rpc_dev(sock, "inspectbtxpackage", [[{"path": expanded}]])
+        else:
+            result = _rpc_dev(sock, "inspectbtxpackage", [[{"hex": target}]])
+        method = "inspectbtxpackage"
+    else:
+        payload = _json_obj(args[1:] if sub == "create" else args)
+        result = _rpc_dev(sock, "createbtxpackage", [[payload]])
+        method = "createbtxpackage"
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "model_package",
+        method,
+        result,
+        {"kind": _pick(src, "kind"), "bytes": _pick(src, "bytes"), "ok": _pick(src, "ok")},
+        note="Binary .btxbundle is distinct from exportmodellink magnet analog. " + DEV348_NOTE,
+        next_actions=["package inspect <hex|file.btx>", "link NAME"],
+    )
+
+
+def cmd_erasure(sock: str, args: list[str]) -> None:
+    result = _rpc_dev(sock, "preparemodelerasure", [[_json_obj(args[1:] if args and args[0] == "prepare" else args)]])
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "model_erasure",
+        "preparemodelerasure",
+        result,
+        {
+            "reconstructable": _pick(src, "reconstructable"),
+            "repair_executed": _pick(src, "repair_executed"),
+        },
+        note="Per-stripe reconstructability. Global n is not sufficiency. " + DEV348_NOTE,
+        next_actions=["erasure prepare @manifest.json"],
+    )
+
+
+def cmd_torrent_status(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("torrent-status requires a magnet or infohash locator", 2)
+    result = _rpc_dev(sock, "gettorrentsourcestatus", [[{"locator": args[0]}]])
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "torrent_source",
+        "gettorrentsourcestatus",
+        result,
+        {
+            "infohash": _pick(src, "infohash"),
+            "torrentd_process": _pick(src, "torrentd_process"),
+            "authorship": _pick(src, "authorship"),
+        },
+        note="Packaged torrent bridge. btx-torrentd is not a process. " + DEV348_NOTE,
+        next_actions=["import-plan @plan.json"],
+    )
+
+
+def cmd_origin_offer(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("origin-offer requires artifact_id", 2)
+    result = _rpc_dev(sock, "getmodeloriginoffer", [[{"artifact_id": args[0], "length_bytes": 4096}]])
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "origin_offer",
+        "getmodeloriginoffer",
+        result,
+        {
+            "mode": _pick(src, "mode"),
+            "presigned_get_is_meter": _pick(src, "presigned_get_is_meter"),
+        },
+        note="Native proxy default. Presigned GET is not a meter. " + DEV348_NOTE,
+        next_actions=["transport"],
+    )
+
+
+def cmd_transport(sock: str, args: list[str]) -> None:
+    if args:
+        _die("transport takes no arguments", 2)
+    result = _rpc_dev(sock, "getevaluatedtransport", [[]])
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "evaluated_transport",
+        "getevaluatedtransport",
+        result,
+        {
+            "utp": _pick(src, "utp"),
+            "quic": _pick(src, "quic"),
+            "btx_torrentd_process": _pick(src, "btx_torrentd_process"),
+        },
+        note="Evaluated work. uTP is NONSHIPPING. Live R2 WAN is NOT_RUN. " + DEV348_NOTE,
+        next_actions=["doctor"],
+    )
+
+
+COMMANDS = {
+    "init": cmd_init,
+    "doctor": cmd_doctor,
+    "host": cmd_host,
+    "preview": cmd_preview,
+    "search": cmd_search,
+    "get": cmd_get,
+    "pull": cmd_pull,
+    "show": cmd_show,
+    "ls": cmd_ls,
+    "open": cmd_open,
+    "share": cmd_share,
+    "transfers": cmd_transfers,
+    "files": cmd_files,
+    "path": cmd_path,
+    "check": cmd_check,
+    "pins": cmd_pins,
+    "pause": cmd_pause,
+    "resume": cmd_resume,
+    "alias": cmd_alias,
+    "rm-alias": cmd_rm_alias,
+    "unhost": cmd_unhost,
+    "link": cmd_link,
+    "bounty-draft": cmd_bounty_draft,
+    "watch-scan": cmd_watch_scan,
+    "cloud": cmd_cloud,
+    "follow": cmd_follow,
+    "events": cmd_events,
+    "mirror": cmd_mirror,
+    "profile": cmd_profile,
+    "import-plan": cmd_import_plan,
+    "package": cmd_package,
+    "erasure": cmd_erasure,
+    "torrent-status": cmd_torrent_status,
+    "origin-offer": cmd_origin_offer,
+    "transport": cmd_transport,
+}
+
+
+def main(argv: list[str] | None = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    sock, verb, args, used_default = _parse_argv(argv)
+    if verb == "help":
+        sys.stdout.write(USAGE)
+        return
+    if used_default and not JSON_MODE:
+        print(f"btx-model: socket {sock}", file=sys.stderr)
+    if _is_forbidden_helper_socket(sock):
+        _die(
+            f"refusing production helper socket {sock!r}; "
+            "set MODELD_SOCK or BTX_MODELD_SOCKET to a scratch path under ./e2e-scratch"
+        )
+    COMMANDS[verb](sock, args)
+
+
+if __name__ == "__main__":
+    main()

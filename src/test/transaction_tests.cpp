@@ -1511,4 +1511,56 @@ BOOST_AUTO_TEST_CASE(p2mr_multisig_witness_sigop_count)
                           VALIDATION_WEIGHT_PER_SLHDSA_MULTISIG_SIGOP);
 }
 
+BOOST_AUTO_TEST_CASE(p2mr_csfs_witness_sigop_count)
+{
+    const std::vector<unsigned char> slh_pk(SLHDSA128S_PUBKEY_SIZE, 0x44);
+    const std::vector<unsigned char> ml_pk(MLDSA44_PUBKEY_SIZE, 0x55);
+
+    CScript csfs_leaf;
+    csfs_leaf << slh_pk << OP_CHECKSIGFROMSTACK;
+    const uint256 csfs_root =
+        ComputeP2MRMerkleRoot({ComputeP2MRLeafHash(P2MR_LEAF_VERSION, csfs_leaf)});
+    CScript csfs_spk;
+    csfs_spk << OP_2 << ToByteVector(csfs_root);
+    CScriptWitness csfs_witness;
+    csfs_witness.stack = {
+        std::vector<unsigned char>(csfs_leaf.begin(), csfs_leaf.end()),
+        {P2MR_LEAF_VERSION},
+    };
+    BOOST_CHECK_EQUAL(CountWitnessSigOps(CScript{}, csfs_spk, &csfs_witness,
+                                         SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS),
+                      static_cast<size_t>(VALIDATION_WEIGHT_PER_SLHDSA_SIGOP));
+
+    CScript ml_csfs_leaf;
+    ml_csfs_leaf << ml_pk << OP_CHECKSIGFROMSTACK;
+    const uint256 ml_csfs_root =
+        ComputeP2MRMerkleRoot({ComputeP2MRLeafHash(P2MR_LEAF_VERSION, ml_csfs_leaf)});
+    CScript ml_csfs_spk;
+    ml_csfs_spk << OP_2 << ToByteVector(ml_csfs_root);
+    CScriptWitness ml_csfs_witness;
+    ml_csfs_witness.stack = {
+        std::vector<unsigned char>(ml_csfs_leaf.begin(), ml_csfs_leaf.end()),
+        {P2MR_LEAF_VERSION},
+    };
+    BOOST_CHECK_EQUAL(CountWitnessSigOps(CScript{}, ml_csfs_spk, &ml_csfs_witness,
+                                         SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS),
+                      static_cast<size_t>(VALIDATION_WEIGHT_PER_SLHDSA_SIGOP));
+
+    CScript combined_leaf;
+    combined_leaf << slh_pk << OP_CHECKSIGFROMSTACK << OP_VERIFY << ml_pk << OP_CHECKSIG_MLDSA;
+    const uint256 combined_root =
+        ComputeP2MRMerkleRoot({ComputeP2MRLeafHash(P2MR_LEAF_VERSION, combined_leaf)});
+    CScript combined_spk;
+    combined_spk << OP_2 << ToByteVector(combined_root);
+    CScriptWitness combined_witness;
+    combined_witness.stack = {
+        std::vector<unsigned char>(combined_leaf.begin(), combined_leaf.end()),
+        {P2MR_LEAF_VERSION},
+    };
+    BOOST_CHECK_EQUAL(CountWitnessSigOps(CScript{}, combined_spk, &combined_witness,
+                                         SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS),
+                      static_cast<size_t>(VALIDATION_WEIGHT_PER_SLHDSA_SIGOP +
+                                          VALIDATION_WEIGHT_PER_MLDSA_SIGOP));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

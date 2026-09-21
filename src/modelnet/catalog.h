@@ -97,6 +97,9 @@ public:
     bool Find(const Digest48& model_or_artifact, CatalogEntry& out) const;
     /** Typed lookup: MODEL matches model_id only, ARTIFACT matches artifact_id only. */
     bool FindExact(ResourceKind kind, const Digest48& digest, CatalogEntry& out) const;
+    /** Mark FETCHING so getmodel will TryHydrateFromCloud. Does not rewrite identity. */
+    bool MarkIncomplete(const Digest48& model_or_artifact, bool incomplete, std::string& err);
+    bool NoteUsefulBytes(const Digest48& model_or_artifact, int64_t served_delta, int64_t received_delta, std::string& err);
     bool InstallFromManifest(const UniValue& manifest, std::string& err, bool complete = true);
     bool VerifyFileDigest(const Digest48& artifact, uint32_t file_index, const Digest48& expected, std::string& err);
     bool GetVerifiedPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
@@ -105,7 +108,8 @@ public:
     bool PutFetchedPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
                           Span<const unsigned char> bytes, const std::vector<Digest48>& proof,
                           uint64_t file_size, const Digest48& pieces_root, std::string& err);
-    void AddPeer(const std::string& endpoint);
+    /** Operator / -modelpeer contacts only. Unauthenticated PEX must not call this. */
+    bool AddPeer(const std::string& endpoint);
     std::vector<std::string> Peers() const;
     uint64_t QuotaBytes() const { return m_store.QuotaBytes(); }
     uint64_t UsedBytes() const { return m_store.UsedBytes(); }
@@ -117,6 +121,7 @@ bool ImportRegularFile(ModelStore& store, const Digest48& staging_artifact, uint
                        QualReport* qual, std::string& err);
 
 UniValue CapabilitiesObject();
+void SetAdvertisedCloudCaps(bool cloud_attached, bool direct_cloud_seed);
 
 } // namespace modelnet
 

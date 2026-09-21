@@ -992,10 +992,20 @@ static bool rest_getutxos(const std::any& context, HTTPRequest* req, const std::
                 if (fInputParsed) //don't allow sending input over URI and HTTP RAW DATA
                     return RESTERR(req, HTTP_BAD_REQUEST, "Combination of URI scheme inputs and raw post data is not allowed");
 
-                DataStream oss{};
-                oss << strRequestMutable;
+                // Raw BIP64 bytes, not a length-prefixed std::string. `<< str`
+                // would consume the compact-size length as fCheckMemPool and
+                // then allocate a vector from attacker-controlled remaining
+                // bytes (up to MAX_SIZE) before the outpoint cap below.
+                DataStream oss{MakeUCharSpan(strRequestMutable)};
                 oss >> fCheckMemPool;
-                oss >> vOutPoints;
+                const uint64_t n_outpoints{ReadCompactSize(oss)};
+                if (n_outpoints > MAX_GETUTXOS_OUTPOINTS) {
+                    return RESTERR(req, HTTP_BAD_REQUEST, strprintf("Error: max outpoints exceeded (max: %d, tried: %d)", MAX_GETUTXOS_OUTPOINTS, n_outpoints));
+                }
+                vOutPoints.resize(n_outpoints);
+                for (COutPoint& out : vOutPoints) {
+                    oss >> out;
+                }
             }
         } catch (const std::ios_base::failure&) {
             // abort in case of unreadable binary data

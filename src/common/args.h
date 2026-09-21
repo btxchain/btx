@@ -484,6 +484,12 @@ protected:
         LOCK(cs_args);
         fn(m_settings);
     }
+    template <typename Fn>
+    void LockSettings(Fn&& fn) const
+    {
+        LOCK(cs_args);
+        fn(std::as_const(m_settings));
+    }
 
     /**
      * Log the config file options and the command line arguments,

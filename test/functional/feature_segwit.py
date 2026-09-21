@@ -392,6 +392,28 @@ class SegWitTest(BitcoinTestFramework):
         assert_equal(Decimal(signed["fee"]), fee)
 
         if not self.options.descriptors:
+            self.log.info("Verify importprivkey/importaddress refuse secp ingest")
+            assert_raises_rpc_error(
+                -8,
+                "importprivkey is disabled",
+                self.nodes[0].importprivkey,
+                "92e6XLo5jVAVwrQKPNTs93oQco8f8sDNBcpv73Dsrs397fQtFQn",
+            )
+            assert_raises_rpc_error(
+                -8,
+                "importpubkey is disabled",
+                self.nodes[0].importpubkey,
+                "0363D44AABD0F1699138239DF2F042C3282C0671CC7A76826A55C8203D90E39242",
+            )
+            assert_raises_rpc_error(
+                -8,
+                "importaddress is disabled for secp256k1",
+                self.nodes[1].importaddress,
+                "a9142f8c469c2f0084c48e11f998ffbe7efa7549f26d87",
+                "",
+                False,
+            )
+            return
             self.log.info("Verify behaviour of importaddress and listunspent")
 
             # Some public keys to be used later

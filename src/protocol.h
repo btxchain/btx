@@ -316,6 +316,13 @@ inline constexpr const char* GETMMATTEST{"getmmattest"};
  * Receivers validate the domain, chain, height, hash, configured signer set,
  * signature, uniqueness, and M-of-N threshold before using a quorum. */
 inline constexpr const char* MMATTEST{"mmattest"};
+/** Request cached ML-DSA-44 ExactReplay attestations for one block hash.
+ * Unknown to pre-0.34.8 peers (ignored). Reply is MMATTESTPQ. */
+inline constexpr const char* GETMMATPQ{"getmmatpq"};
+/** Carries a bounded vector of ML-DSA-44 Profile-1 ExactReplay attestations.
+ * Same trust rules as MMATTEST; independent pin members. Unknown to
+ * pre-0.34.8 peers (ignored). */
+inline constexpr const char* MMATTESTPQ{"mmattestpq"};
 /** Watchtower ExactReplay-failed statement. Policy data, never consensus.
  * Pin-member refutations block open quorum on that hash; pin quorum is
  * unchanged. Unknown to pre-0.34 peers (ignored). */
@@ -456,6 +463,8 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::MMSKETCH,
     NetMsgType::GETMMATTEST,
     NetMsgType::MMATTEST,
+    NetMsgType::GETMMATPQ,
+    NetMsgType::MMATTESTPQ,
     NetMsgType::MMATREFUTE,
     NetMsgType::GETRCCARRIER,
     NetMsgType::RCCARRIER,

@@ -288,8 +288,11 @@ BOOST_AUTO_TEST_CASE(swarm_ps_01_verified_piece_without_index)
     uint64_t file_size = 0;
     BOOST_REQUIRE(cat.GetVerifiedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size, err));
     modelnet::ModelCatalog cat2{tmp / "dst", 8 << 20};
-    BOOST_REQUIRE(cat2.PutFetchedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size,
-                                     imported.core.files[0].pieces_root, err));
+    UniValue man;
+    BOOST_REQUIRE(cat.GetManifest(imported.model_id, man, err));
+    BOOST_REQUIRE_MESSAGE(cat2.InstallFromManifest(man, err, /*complete=*/false), err);
+    BOOST_REQUIRE_MESSAGE(cat2.PutFetchedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size,
+                                     imported.core.files[0].pieces_root, err), err);
     std::vector<unsigned char> again;
     std::vector<modelnet::Digest48> proof2;
     uint64_t fs2 = 0;
@@ -413,11 +416,19 @@ BOOST_AUTO_TEST_CASE(swarm_nat_01_10_control_plane)
     using namespace modelnet;
     BOOST_CHECK(IsForbiddenControlPort(8332));
     BOOST_CHECK(IsForbiddenControlPort(18443));
+    BOOST_CHECK(IsForbiddenControlPort(19334));
+    BOOST_CHECK(IsForbiddenControlPort(19335));
     BOOST_CHECK(!IsForbiddenControlPort(29447));
     BOOST_CHECK(MappingWouldExposeControlPlane(8332));
     std::string err;
     BOOST_CHECK(IsForbiddenControlEndpoint("10.0.0.1:8332", err));
     BOOST_CHECK(!IsForbiddenControlEndpoint("10.0.0.1:29447", err));
+    BOOST_CHECK(IsForbiddenRelayEndpoint("10.0.0.1:29447", err));
+    BOOST_CHECK(IsForbiddenRelayEndpoint("127.0.0.1:29447", err));
+    BOOST_CHECK(!IsForbiddenRelayEndpoint("203.0.113.1:29447", err));
+    BOOST_CHECK(IsForbiddenPexEndpoint("10.0.0.1:29447", err));
+    BOOST_CHECK(IsForbiddenPexEndpoint("127.0.0.1:29447", err));
+    BOOST_CHECK(!IsForbiddenPexEndpoint("203.0.113.1:29447", err));
     BOOST_CHECK(!MayAdvertiseModelHost(true, false, false));
     BOOST_CHECK(MayAdvertiseModelHost(true, true, false));
     BOOST_CHECK(!MayAdvertiseModelHost(true, true, true));
@@ -425,8 +436,14 @@ BOOST_AUTO_TEST_CASE(swarm_nat_01_10_control_plane)
     rr.endpoint = "10.0.0.1:29447";
     rr.expected_service_id = "aa";
     rr.presented_service_id = "bb";
+    rr.reservation_id = "rsvp";
     BOOST_CHECK(!ValidateRelayConnect(rr, true, err));
     rr.presented_service_id = "aa";
+    BOOST_CHECK(!ValidateRelayConnect(rr, true, err));
+    rr.endpoint = "203.0.113.1:29447";
+    rr.reservation_id.clear();
+    BOOST_CHECK(!ValidateRelayConnect(rr, true, err));
+    rr.reservation_id = "rsvp";
     BOOST_CHECK(ValidateRelayConnect(rr, true, err));
     BOOST_CHECK(!ValidateRelayConnect(rr, false, err));
     BOOST_CHECK(!ValidateRendezvous("10.0.0.1:8332", "", "", err));

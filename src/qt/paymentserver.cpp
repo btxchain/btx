@@ -30,10 +30,12 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QStringList>
+#include <QUrl>
 #include <QUrlQuery>
 
 const int BITCOIN_IPC_CONNECT_TIMEOUT = 1000; // milliseconds
-const QString BITCOIN_IPC_PREFIX("bitcoin:");
+const QString BTX_IPC_PREFIX("btx:");
+const QString BTX_MODEL_URI_PREFIX("btx://");
 
 //
 // Create a name that is unique for:
@@ -42,7 +44,7 @@ const QString BITCOIN_IPC_PREFIX("bitcoin:");
 //
 static QString ipcServerName()
 {
-    QString name("BitcoinQt");
+    QString name("BTXQt");
 
     // Append a simple hash of the datadir
     // Note that gArgs.GetDataDirNet() returns a different path
@@ -76,8 +78,7 @@ void PaymentServer::ipcParseCommandLine(int argc, char* argv[])
         QString arg(argv[i]);
         if (arg.startsWith("-")) continue;
 
-        if (arg.startsWith(BITCOIN_IPC_PREFIX, Qt::CaseInsensitive)) // bitcoin: URI
-        {
+        if (arg.startsWith(BTX_IPC_PREFIX, Qt::CaseInsensitive)) {
             savedPaymentRequests.insert(arg);
         }
     }
@@ -126,7 +127,8 @@ PaymentServer::PaymentServer(QObject* parent, bool startLocalServer)
     : QObject(parent)
 {
     // Install global event filter to catch QFileOpenEvents
-    // on Mac: sent when you click bitcoin: links
+    // on Mac: sent when you click btx: payment links or btx:// model links
+    // bitcoin: is not a BTX payment URI
     // other OSes: helpful when dealing with payment request files
     if (parent)
         parent->installEventFilter(this);
@@ -143,7 +145,7 @@ PaymentServer::PaymentServer(QObject* parent, bool startLocalServer)
         if (!uriServer->listen(name)) {
             // constructor is called early in init, so don't use "Q_EMIT message()" here
             QMessageBox::critical(nullptr, tr("Payment request error"),
-                tr("Cannot start bitcoin: click-to-pay handler"));
+                tr("Cannot start btx: click-to-pay handler"));
         }
         else {
             connect(uriServer, &QLocalServer::newConnection, this, &PaymentServer::handleURIConnection);
@@ -154,7 +156,7 @@ PaymentServer::PaymentServer(QObject* parent, bool startLocalServer)
 PaymentServer::~PaymentServer() = default;
 
 //
-// OSX-specific way of handling bitcoin: URIs
+// OSX-specific way of handling btx: payment URIs and btx:// model URIs
 //
 bool PaymentServer::eventFilter(QObject *object, QEvent *event)
 {
@@ -183,36 +185,41 @@ void PaymentServer::uiReady()
 
 void PaymentServer::handleURIOrFile(const QString& s)
 {
+    const QString uri = s.trimmed();
     if (saveURIs)
     {
-        savedPaymentRequests.insert(s);
+        savedPaymentRequests.insert(uri);
         return;
     }
 
-    // V11-URI-13: a model resource URI must never enter DecodeDestination / Send Coins.
-    if (s.startsWith(QLatin1String("btx:"), Qt::CaseInsensitive)) {
-        Q_EMIT receivedModelResource(s);
+    // V11-URI-13: model identity is btx://… and must never enter DecodeDestination.
+    // Payment BIP21 is btx:<address> (no //). Do not treat the payment scheme as a model.
+    // Match only at the start so a BIP21 query cannot smuggle btx:// into model routing.
+    if (uri.startsWith(BTX_MODEL_URI_PREFIX, Qt::CaseInsensitive)) {
+        Q_EMIT receivedModelResource(uri);
         return;
     }
 
-    if (s.startsWith("bitcoin://", Qt::CaseInsensitive))
+    if (uri.startsWith(QLatin1String("bitcoin:"), Qt::CaseInsensitive))
     {
-        Q_EMIT message(tr("URI handling"), tr("'bitcoin://' is not a valid URI. Use 'bitcoin:' instead."),
+        Q_EMIT message(tr("URI handling"),
+            tr("BTX does not handle Bitcoin URIs. Use a btx: payment URI."),
             CClientUIInterface::MSG_ERROR);
+        return;
     }
-    else if (s.startsWith(BITCOIN_IPC_PREFIX, Qt::CaseInsensitive)) // bitcoin: URI
+    else if (uri.startsWith(BTX_IPC_PREFIX, Qt::CaseInsensitive))
     {
-        QUrlQuery uri((QUrl(s)));
+        QUrlQuery uriQuery((QUrl(uri)));
         // normal URI
         {
             SendCoinsRecipient recipient;
-            if (GUIUtil::parseBitcoinURI(s, &recipient))
+            if (GUIUtil::parseBitcoinURI(uri, &recipient))
             {
                 std::string error_msg;
                 const CTxDestination dest = DecodeDestination(recipient.address.toStdString(), error_msg);
 
                 if (!IsValidDestination(dest)) {
-                    if (uri.hasQueryItem("r")) {  // payment request
+                    if (uriQuery.hasQueryItem("r")) {  // payment request
                         Q_EMIT message(tr("URI handling"),
                             tr("Cannot process payment request because BIP70 is not supported.\n"
                                "Due to widespread security flaws in BIP70 it's strongly recommended that any merchant instructions to switch wallets be ignored.\n"
@@ -227,15 +234,23 @@ void PaymentServer::handleURIOrFile(const QString& s)
             }
             else
                 Q_EMIT message(tr("URI handling"),
-                    tr("URI cannot be parsed! This can be caused by an invalid Bitcoin address or malformed URI parameters."),
+                    tr("URI cannot be parsed! This can be caused by an invalid BTX address or malformed URI parameters."),
                     CClientUIInterface::ICON_WARNING);
 
             return;
         }
     }
 
-    if (QFile::exists(s)) // payment request file
-    {
+    QString path = uri;
+    if (uri.startsWith(QLatin1String("file:"), Qt::CaseInsensitive)) {
+        path = QUrl(uri).toLocalFile();
+    }
+    if (QFile::exists(path)) {
+        const QString lower = path.toLower();
+        if (lower.endsWith(QLatin1String(".btx")) || lower.endsWith(QLatin1String(".btxlink"))) {
+            Q_EMIT receivedModelResource(path);
+            return;
+        }
         Q_EMIT message(tr("Payment request file handling"),
             tr("Cannot process payment request because BIP70 is not supported.\n"
                "Due to widespread security flaws in BIP70 it's strongly recommended that any merchant instructions to switch wallets be ignored.\n"

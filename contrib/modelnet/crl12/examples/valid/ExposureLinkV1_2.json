@@ -1,0 +1,31 @@
+{
+  "schema_revision": "1.2",
+  "provider_id": "provider-a",
+  "created_at": "1789603200",
+  "link_id": "link-id-demo",
+  "scope": {
+    "tenant_id": "tenant-a",
+    "legal_entity_id": "entity-a",
+    "portfolio_id": "portfolio-a"
+  },
+  "source_ref": {
+    "object_type": "ProviderProfile",
+    "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "links": [
+    {
+      "target_ref": {
+        "object_type": "InstitutionalAssetRecordV1_2",
+        "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "relationship": "FINANCIAL_LOOKTHROUGH",
+      "weight": {
+        "coefficient": "8",
+        "scale": 1
+      }
+    }
+  ],
+  "financial_leverage_policy_ref": null,
+  "effective_at": "1789603200",
+  "coverage_bps": 8000
+}

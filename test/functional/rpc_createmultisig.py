@@ -113,8 +113,7 @@ class RpcCreateMultiSigTest(BitcoinTestFramework):
         addresses = [self.nodes[1].getnewaddress(address_type='legacy') for _ in range(2)]
         assert_raises_rpc_error(-5, 'no full public key for address', lambda: self.nodes[0].addmultisigaddress(nrequired=1, keys=addresses))
         for a in addresses:
-            # Importing all addresses should not change the result
-            self.nodes[0].importaddress(a)
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", self.nodes[0].importaddress, a)
         assert_raises_rpc_error(-5, 'no full public key for address', lambda: self.nodes[0].addmultisigaddress(nrequired=1, keys=addresses))
 
         # Bech32m address type is disallowed for legacy wallets

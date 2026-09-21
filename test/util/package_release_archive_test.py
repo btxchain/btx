@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -96,7 +97,11 @@ class PackageReleaseArchiveTest(unittest.TestCase):
 
                 wrapper = archive.extractfile("btx-29.2/bin/btxd")
                 assert wrapper is not None
-                self.assertIn("missing runtime libraries", wrapper.read().decode("utf-8"))
+                wrapper_text = wrapper.read().decode("utf-8")
+                self.assertIn("missing runtime libraries", wrapper_text)
+                self.assertIn("objdump -T", wrapper_text)
+                self.assertIn("GLIBCXX", wrapper_text)
+                self.assertIn("BTX_GLIBC_PREFIX", wrapper_text)
 
     def test_cuda_archive_names_match_release_platform_ids(self):
         self.assertEqual(
@@ -350,6 +355,91 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                         str(source_root),
                     ]
                 )
+
+    def _stage_linux_wrapper(self, root: pathlib.Path, *, glibc_sym: str = "GLIBC_2.99") -> pathlib.Path:
+        bindir = root / "bin"
+        libexec = root / "libexec"
+        bindir.mkdir()
+        libexec.mkdir()
+        wrapper = bindir / "btxd"
+        wrapper.write_text(self.module.wrapper_payload("btxd", "linux-x86_64"), encoding="utf-8")
+        wrapper.chmod(0o755)
+        real = libexec / "btxd.real"
+        real.write_bytes(b"#!/bin/sh\necho should-not-run\n" + glibc_sym.encode() + b"\nGLIBCXX_3.4.99\n")
+        real.chmod(0o755)
+        tools = root / "tools"
+        tools.mkdir()
+        (tools / "ldd").write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' "
+            "'\\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x0)' "
+            "'\\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x0)'\n",
+            encoding="utf-8",
+        )
+        (tools / "getconf").write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = GNU_LIBC_VERSION ]; then echo 'glibc 2.35'; exit 0; fi\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        (tools / "ldd").chmod(0o755)
+        (tools / "getconf").chmod(0o755)
+        return wrapper
+
+    def test_linux_wrapper_payload_checks_version_symbols(self):
+        payload = self.module.wrapper_payload("btxd", "linux-x86_64")
+        self.assertIsNotNone(payload)
+        self.assertIn("objdump -T", payload)
+        self.assertIn("GLIBC", payload)
+        self.assertIn("GLIBCXX", payload)
+        self.assertIn("GNU_LIBC_VERSION", payload)
+        self.assertIn("BTX_GLIBC_PREFIX", payload)
+        self.assertIn("ldd --version", payload)
+        modeld = self.module.wrapper_payload("btx-modeld", "linux-x86_64")
+        self.assertIn("objdump -T", modeld)
+        self.assertNotIn("libsqlite3-0", modeld)
+
+    def test_linux_wrapper_reports_glibc_version_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            wrapper = self._stage_linux_wrapper(root)
+            env = os.environ.copy()
+            env["PATH"] = f"{root / 'tools'}:{env.get('PATH', '')}"
+            env.pop("BTX_GLIBC_PREFIX", None)
+            proc = subprocess.run(
+                [str(wrapper), "--version"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 127)
+            self.assertIn("GLIBC_2.99", proc.stderr)
+            self.assertIn("2.35", proc.stderr)
+            self.assertIn("version nodes", proc.stderr)
+            self.assertNotIn("should-not-run", proc.stdout)
+
+    def test_linux_wrapper_honors_btx_glibc_prefix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            wrapper = self._stage_linux_wrapper(root)
+            libdir = root / "glibc" / "usr" / "lib" / "x86_64-linux-gnu"
+            libdir.mkdir(parents=True)
+            loader = libdir / "ld-linux-x86-64.so.2"
+            loader.write_text("#!/bin/sh\nprintf 'loader-ok\\n'\n", encoding="utf-8")
+            loader.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{root / 'tools'}:{env.get('PATH', '')}"
+            env["BTX_GLIBC_PREFIX"] = str(root / "glibc")
+            proc = subprocess.run(
+                [str(wrapper), "--version"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("loader-ok", proc.stdout)
 
 
 if __name__ == "__main__":

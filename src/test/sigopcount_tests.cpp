@@ -254,10 +254,53 @@ BOOST_AUTO_TEST_CASE(GetTxSigOpCost)
         scriptWitness.stack.emplace_back(std::vector<unsigned char>{P2MR_LEAF_VERSION});
 
         BuildTxs(spendingTx, coins, creationTx, scriptPubKey, CScript{}, scriptWitness);
+        const int64_t p2mr_sigops =
+            VALIDATION_WEIGHT_PER_MLDSA_SIGOP +
+            VALIDATION_WEIGHT_PER_MLDSA_MULTISIG_SIGOP +
+            VALIDATION_WEIGHT_PER_SLHDSA_MULTISIG_SIGOP;
+        assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) == p2mr_sigops);
+
+        // Annex is consensus-valid; sigops must still come from the leaf, not the control block.
+        scriptWitness.stack.emplace_back(std::vector<unsigned char>{ANNEX_TAG, 0x00});
+        BuildTxs(spendingTx, coins, creationTx, scriptPubKey, CScript{}, scriptWitness);
+        assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) == p2mr_sigops);
+    }
+
+    // P2MR CSFS is a full PQ verification; count it with the other P2MR arms.
+    {
+        const std::vector<unsigned char> slh_pk(SLHDSA128S_PUBKEY_SIZE, 0x44);
+        const std::vector<unsigned char> ml_pk(MLDSA44_PUBKEY_SIZE, 0x55);
+        CScript csfs_leaf;
+        csfs_leaf << slh_pk << OP_CHECKSIGFROMSTACK;
+        const uint256 csfs_hash = ComputeP2MRLeafHash(P2MR_LEAF_VERSION, csfs_leaf);
+        const uint256 csfs_root = ComputeP2MRMerkleRoot({csfs_hash});
+        CScript csfs_spk;
+        csfs_spk << OP_2 << ToByteVector(csfs_root);
+        CScriptWitness csfs_witness;
+        csfs_witness.stack = {
+            {},
+            std::vector<unsigned char>(csfs_leaf.begin(), csfs_leaf.end()),
+            {P2MR_LEAF_VERSION},
+        };
+        BuildTxs(spendingTx, coins, creationTx, csfs_spk, CScript{}, csfs_witness);
         assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) ==
-               VALIDATION_WEIGHT_PER_MLDSA_SIGOP +
-                   VALIDATION_WEIGHT_PER_MLDSA_MULTISIG_SIGOP +
-                   VALIDATION_WEIGHT_PER_SLHDSA_MULTISIG_SIGOP);
+               VALIDATION_WEIGHT_PER_SLHDSA_SIGOP);
+
+        CScript combined_leaf;
+        combined_leaf << slh_pk << OP_CHECKSIGFROMSTACK << OP_VERIFY << ml_pk << OP_CHECKSIG_MLDSA;
+        const uint256 combined_hash = ComputeP2MRLeafHash(P2MR_LEAF_VERSION, combined_leaf);
+        const uint256 combined_root = ComputeP2MRMerkleRoot({combined_hash});
+        CScript combined_spk;
+        combined_spk << OP_2 << ToByteVector(combined_root);
+        CScriptWitness combined_witness;
+        combined_witness.stack = {
+            {},
+            std::vector<unsigned char>(combined_leaf.begin(), combined_leaf.end()),
+            {P2MR_LEAF_VERSION},
+        };
+        BuildTxs(spendingTx, coins, creationTx, combined_spk, CScript{}, combined_witness);
+        assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) ==
+               VALIDATION_WEIGHT_PER_SLHDSA_SIGOP + VALIDATION_WEIGHT_PER_MLDSA_SIGOP);
     }
 }
 

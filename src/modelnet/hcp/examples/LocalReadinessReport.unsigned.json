@@ -1,0 +1,20 @@
+{
+  "object_type": "LocalReadinessReport",
+  "body": {
+    "version": 1,
+    "provider_id": "provider-demo",
+    "account_ref": "account-demo",
+    "device_id": "device-demo",
+    "handoff_id": "handoff-demo",
+    "package_core_id": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+    "recipe_id": "333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
+    "generation_ref": "generation-demo",
+    "state": "FAILED",
+    "readiness_target": "RUNTIME_READY",
+    "error_code": "SYNTHETIC_FIXTURE",
+    "observed_at_ms": "1790000000000"
+  },
+  "body_id": "477a4bec7c5dafee0859dc75b6c6d0fc347a5cfd77d8539739493ff083d97fd683c0bfd67d35070c968e5056c4671cfd",
+  "signer_key_id": "unsigned-demo",
+  "signature": null
+}

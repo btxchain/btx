@@ -91,9 +91,11 @@ by \fB\-autoupdatepubkeyalgo\fR. Set to 0 to make auto\-update inert.
 .HP
 \fB\-autoupdatepubkeyalgo=\fR<scheme>
 .IP
-Release signature scheme: ml\-dsa\-44, slh\-dsa\-128s, or secp256k1. The
-post\-quantum schemes keep the update channel quantum\-safe
-(default: ml\-dsa\-44).
+Release signature scheme: ml\-dsa\-44 or slh\-dsa\-128s (default: ml\-dsa\-44).
+Classical secp256k1 is not accepted. Auto\-update is PQ\-only from the
+first hop; a historical classical hop will not start on rc3+. If this
+node must not auto\-update, use \fB\-autoupdate=\fR0 or
+\fB\-autoupdatepubkey=\fR0 (inert).
 .HP
 \fB\-autoupdatepython=\fR<path>
 .IP

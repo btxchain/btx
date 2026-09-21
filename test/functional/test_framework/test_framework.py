@@ -872,13 +872,36 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
             self.log.debug("Creating cache directory {}".format(cache_node_dir))
 
             initialize_datadir(self.options.cachedir, CACHE_NODE_ID, self.chain, self.disable_autoconnect)
+            # Keep product regtest heights (v4/BMX4C/DRLT@100, RC@101, toy RC
+            # dims). Copied test nodes start CONSENSUS on this datadir; the
+            # cache miner is throwaway. Two generate() traps sit inside the
+            # 199-block window:
+            #   * Height 100 is EncDr DIGEST_RECOMPUTE, not RC.
+            #     ContextualCheckBlock verifies EncDr (sketch-cache / CPU
+            #     recompute) but does not set LOCAL_EXACT_REPLAY
+            #     (validation.cpp only persists that bit on the RC path).
+            #     CONSENSUS ConnectTip then defers ("ExactReplay required")
+            #     and the tip stays at 99 — generate() still returns hashes.
+            #     setmocktime (below) makes IBD false, so the IBD skip does
+            #     not save cache creation. Warm caches skip this loop.
+            #   * Heights 101–199 are RC toy-dim ExactReplay. Auto-fallback
+            #     is the regtest default; pin cpu-diagnostic so a inherited
+            #     CUDA env / failed canary cannot HEADER_ONLY the body.
+            # Economic mode still runs EncDr/RC in ContextualCheckBlock; it
+            # only skips the ConnectTip verified-bit gate. Do not pass
+            # -regtestrcheight here: that would mine block 100 as RC while
+            # consumer nodes still treat height 100 as EncDr (reindex split).
             self.nodes.append(
                 TestNode(
                     CACHE_NODE_ID,
                     cache_node_dir,
                     chain=self.chain,
                     extra_conf=["bind=127.0.0.1"],
-                    extra_args=['-disablewallet'],
+                    extra_args=[
+                        '-disablewallet',
+                        '-matmulvalidation=economic',
+                        '-matmulrcexecution=cpu-diagnostic',
+                    ],
                     rpchost=None,
                     timewait=self.rpc_timeout,
                     timeout_factor=self.options.timeout_factor,
@@ -888,7 +911,14 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
                     cwd=self.options.tmpdir,
                     descriptors=self.options.descriptors,
                 ))
-            self.start_node(CACHE_NODE_ID)
+            self.start_node(
+                CACHE_NODE_ID,
+                env={
+                    "BTX_MATMUL_BACKEND": "cpu",
+                    "BTX_MATMUL_V4_BACKEND": "cpu",
+                    "BTX_MATMUL_REQUIRE_BACKEND": "cpu",
+                },
+            )
             cache_node = self.nodes[CACHE_NODE_ID]
 
             # Wait for RPC connections to be ready
@@ -906,11 +936,25 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
             gen_addresses = [k.address for k in TestNode.PRIV_KEYS][:3] + [create_deterministic_address_bcrt1_p2tr_op_true()[0]]
             assert_equal(len(gen_addresses), 4)
             for i in range(8):
+                nblocks = 25 if i != 7 else 24
+                expected_height = 199 if i == 7 else (i + 1) * 25
                 self.generatetoaddress(
                     cache_node,
-                    nblocks=25 if i != 7 else 24,
+                    nblocks=nblocks,
                     address=gen_addresses[i % len(gen_addresses)],
+                    sync_fun=self.no_op,
                 )
+                info = cache_node.getblockchaininfo()
+                if info["blocks"] != expected_height:
+                    raise AssertionError(
+                        "cache generation stalled at height %s (expected %s after "
+                        "batch %s, nblocks=%s); chaintips=%s. Height 100 is EncDr "
+                        "DIGEST_RECOMPUTE and CONSENSUS ConnectTip requires "
+                        "BLOCK_EXACT_REPLAY_VERIFIED, which generate() only "
+                        "persists on the RC path."
+                        % (info["blocks"], expected_height, i, nblocks,
+                           cache_node.getchaintips())
+                    )
 
             assert_equal(cache_node.getblockchaininfo()["blocks"], 199)
 

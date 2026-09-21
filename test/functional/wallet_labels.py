@@ -67,6 +67,8 @@ class WalletLabelsTest(BitcoinTestFramework):
             assert_raises_rpc_error(-11, "Invalid label name", *rpc_call, "*")
 
     def test_sort_multisig(self, node):
+        assert_raises_rpc_error(-8, "importprivkey is disabled", node.importprivkey, "cSJUMwramrFYHKPfY77FH94bv4Q5rwUCyfD6zX3kLro4ZcWsXFEM")
+        return
         node.importprivkey("cSJUMwramrFYHKPfY77FH94bv4Q5rwUCyfD6zX3kLro4ZcWsXFEM")
         node.importprivkey("cSpQbSsdKRmxaSWJ3TckCFTrksXNPbh8tfeZESGNQekkVxMbQ77H")
         node.importprivkey("cRNbfcJgnvk2QJEVbMsxzoprotm1cy3kVA2HoyjSs3ss5NY5mQqr")
@@ -96,6 +98,8 @@ class WalletLabelsTest(BitcoinTestFramework):
         assert_raises_rpc_error(-1, "address_type provided in both options and 4th parameter", node.addmultisigaddress, 2, addresses, {"address_type": 'legacy'}, 'bech32')
 
     def test_sort_multisig_with_uncompressed_hash160(self, node):
+        assert_raises_rpc_error(-8, "importpubkey is disabled", node.importpubkey, "02632b12f4ac5b1d1b72b2a3b508c19172de44f6f46bcee50ba33f3f9291e47ed0")
+        return
         node.importpubkey("02632b12f4ac5b1d1b72b2a3b508c19172de44f6f46bcee50ba33f3f9291e47ed0")
         node.importpubkey("04dd4fe618a8ad14732f8172fe7c9c5e76dd18c2cc501ef7f86e0f4e285ca8b8b32d93df2f4323ebb02640fa6b975b2e63ab3c9d6979bc291193841332442cc6ad")
         address = "2MxvEpFdXeEDbnz8MbRwS23kDZC8tzQ9NjK"

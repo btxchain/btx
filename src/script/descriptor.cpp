@@ -36,6 +36,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using util::Split;
@@ -582,10 +583,12 @@ public:
 
 /** PQ-native HD key provider — derives PQ keys directly from a 32-byte master seed via HKDF.
  *
- *  Descriptor syntax: pqhd(fingerprint/coin_typeh/accounth/change/ *)
- *  Private form:      pqhd(hexseed/coin_typeh/accounth/change/ *)
+ *  Public form:       pqhd([fingerprint/87h/coin_typeh/accounth/change]/*)
+ *  Compat/DB form:    pqhd(fingerprint/coin_typeh/accounth/change/*)
+ *  Private form:      pqhd(hexseed/coin_typeh/accounth/change/*)
  *
  *  The seed is NEVER exposed in public ToString() — only a 4-byte fingerprint is shown.
+ *  COMPAT omits the BIP380 origin so DescriptorID stays stable across this format change.
  */
 class PQHDPubkeyProvider final : public PubkeyProvider
 {
@@ -677,9 +680,20 @@ public:
 
     std::string ToString(StringType type=StringType::PUBLIC) const override
     {
-        // Public form: show fingerprint only, never the seed
-        return strprintf("pqhd(%s/%uh/%uh/%u/*)",
-                         HexStr(m_fingerprint), m_coin_type, m_account, m_change);
+        // COMPAT (DescriptorID / wallet DB identity): fingerprint in key position, no origin.
+        if (type == StringType::COMPAT) {
+            return strprintf("pqhd(%s/%uh/%uh/%u/*)",
+                             HexStr(m_fingerprint), m_coin_type, m_account, m_change);
+        }
+        // PUBLIC: BIP380-style origin when fingerprint/path fields exist (they always do
+        // after construction). Never emit the seed.
+        const std::vector<uint32_t> origin_path{
+            87U | 0x80000000U,
+            m_coin_type | 0x80000000U,
+            m_account | 0x80000000U,
+            m_change,
+        };
+        return strprintf("pqhd([%s%s]/*)", HexStr(m_fingerprint), FormatHDKeypath(origin_path));
     }
 
     bool ToPrivateString(const SigningProvider& arg, std::string& out) const override
@@ -2461,13 +2475,90 @@ std::optional<uint32_t> ParseKeyPathNum(Span<const char> elem, bool& apostrophe,
 }
 
 /** Try to parse a pqhd(...) PQ-native HD key provider.
- *  Format: pqhd(hexseed/coin_typeh/accounth/change/ *)
- *  or:     pqhd(fingerprint/coin_typeh/accounth/change/ *)   (public form)
+ *  Format: pqhd(hexseed/coin_typeh/accounth/change/*)
+ *  or:     pqhd(fingerprint/coin_typeh/accounth/change/*)              (compat/DB form)
+ *  or:     pqhd([fingerprint/87h/coin_typeh/accounth/change]/*)        (public BIP380 origin)
  */
 std::unique_ptr<PubkeyProvider> ParsePQHD(uint32_t key_exp_index, const Span<const char>& sp, std::string& error)
 {
     Span<const char> inner = sp;
     if (!script::Func("pqhd", inner)) return nullptr;
+
+    auto make_provider = [&](bool has_seed,
+                             const std::array<unsigned char, 32>& seed,
+                             const std::array<unsigned char, 4>& fingerprint,
+                             uint32_t coin_type, uint32_t account, uint32_t change)
+        -> std::unique_ptr<PubkeyProvider> {
+        if (has_seed) {
+            return std::make_unique<PQHDPubkeyProvider>(key_exp_index, seed, coin_type, account, change);
+        }
+        return std::make_unique<PQHDPubkeyProvider>(key_exp_index, fingerprint, coin_type, account, change);
+    };
+
+    auto parse_hardened_index = [&](Span<const char> elem, const char* what) -> std::optional<uint32_t> {
+        bool dummy_apos = false;
+        auto opt = ParseKeyPathNum(elem, dummy_apos, error);
+        if (!opt) return std::nullopt;
+        if (!(*opt & 0x80000000U)) {
+            error = strprintf("pqhd() %s must be hardened (e.g. 0h)", what);
+            return std::nullopt;
+        }
+        return *opt & 0x7FFFFFFFU;
+    };
+
+    auto parse_unhardened_change = [&](Span<const char> elem) -> std::optional<uint32_t> {
+        bool dummy_apos = false;
+        auto opt = ParseKeyPathNum(elem, dummy_apos, error);
+        if (!opt) return std::nullopt;
+        if (*opt & 0x80000000U) {
+            error = "pqhd() change must not be hardened";
+            return std::nullopt;
+        }
+        return *opt;
+    };
+
+    // BIP380 origin form: pqhd([fingerprint/87h/coin_typeh/accounth/change]/*)
+    if (!inner.empty() && inner[0] == '[') {
+        auto close_split = Split(inner, ']');
+        if (close_split.size() != 2) {
+            error = "pqhd() origin is missing closing ']'";
+            return nullptr;
+        }
+        std::string rest(close_split[1].begin(), close_split[1].end());
+        if (rest != "/*") {
+            error = "pqhd() origin form must end with ]/*";
+            return nullptr;
+        }
+        auto origin_split = Split(close_split[0].subspan(1), '/');
+        if (origin_split.size() != 5) {
+            error = "pqhd() origin must be [fingerprint/87h/coin_typeh/accounth/change]";
+            return nullptr;
+        }
+        std::string fp_hex(origin_split[0].begin(), origin_split[0].end());
+        std::array<unsigned char, 4> fingerprint{};
+        if (!IsHex(fp_hex) || fp_hex.size() != 8) {
+            error = "pqhd() origin fingerprint must be 4-byte hex (8 hex chars)";
+            return nullptr;
+        }
+        std::vector<unsigned char> fp_bytes = ParseHex(fp_hex);
+        std::copy(fp_bytes.begin(), fp_bytes.end(), fingerprint.begin());
+
+        bool dummy_apos = false;
+        auto purpose_opt = ParseKeyPathNum(origin_split[1], dummy_apos, error);
+        if (!purpose_opt) return nullptr;
+        if (*purpose_opt != (87U | 0x80000000U)) {
+            error = "pqhd() origin purpose must be 87h";
+            return nullptr;
+        }
+        auto coin_type = parse_hardened_index(origin_split[2], "coin_type");
+        if (!coin_type) return nullptr;
+        auto account = parse_hardened_index(origin_split[3], "account");
+        if (!account) return nullptr;
+        auto change = parse_unhardened_change(origin_split[4]);
+        if (!change) return nullptr;
+
+        return make_provider(/*has_seed=*/false, {}, fingerprint, *coin_type, *account, *change);
+    }
 
     auto split = Split(inner, '/');
     // Expect: hexseed_or_fp / coin_typeh / accounth / change / *
@@ -2500,41 +2591,14 @@ std::unique_ptr<PubkeyProvider> ParsePQHD(uint32_t key_exp_index, const Span<con
         return nullptr;
     }
 
-    // Parse coin_type (hardened)
-    bool dummy_apos = false;
-    auto coin_type_opt = ParseKeyPathNum(split[1], dummy_apos, error);
-    if (!coin_type_opt) return nullptr;
-    uint32_t coin_type_raw = *coin_type_opt;
-    if (!(coin_type_raw & 0x80000000U)) {
-        error = "pqhd() coin_type must be hardened (e.g. 0h)";
-        return nullptr;
-    }
-    uint32_t coin_type = coin_type_raw & 0x7FFFFFFFU;
+    auto coin_type = parse_hardened_index(split[1], "coin_type");
+    if (!coin_type) return nullptr;
+    auto account = parse_hardened_index(split[2], "account");
+    if (!account) return nullptr;
+    auto change = parse_unhardened_change(split[3]);
+    if (!change) return nullptr;
 
-    // Parse account (hardened)
-    auto account_opt = ParseKeyPathNum(split[2], dummy_apos, error);
-    if (!account_opt) return nullptr;
-    uint32_t account_raw = *account_opt;
-    if (!(account_raw & 0x80000000U)) {
-        error = "pqhd() account must be hardened (e.g. 0h)";
-        return nullptr;
-    }
-    uint32_t account = account_raw & 0x7FFFFFFFU;
-
-    // Parse change (unhardened)
-    auto change_opt = ParseKeyPathNum(split[3], dummy_apos, error);
-    if (!change_opt) return nullptr;
-    uint32_t change_raw = *change_opt;
-    if (change_raw & 0x80000000U) {
-        error = "pqhd() change must not be hardened";
-        return nullptr;
-    }
-    uint32_t change = change_raw;
-
-    if (has_seed) {
-        return std::make_unique<PQHDPubkeyProvider>(key_exp_index, seed, coin_type, account, change);
-    }
-    return std::make_unique<PQHDPubkeyProvider>(key_exp_index, fingerprint, coin_type, account, change);
+    return make_provider(has_seed, seed, fingerprint, *coin_type, *account, *change);
 }
 
 /** Parse a public key that excludes origin information. */
@@ -2635,6 +2699,14 @@ std::vector<std::unique_ptr<PubkeyProvider>> ParsePubkeyInner(uint32_t key_exp_i
 std::vector<std::unique_ptr<PubkeyProvider>> ParsePubkey(uint32_t key_exp_index, const Span<const char>& sp, ParseScriptContext ctx, FlatSigningProvider& out, std::string& error)
 {
     std::vector<std::unique_ptr<PubkeyProvider>> ret;
+    // Public pqhd() embeds ']' inside the provider (`pqhd([fp/87h/...]/*)`).
+    // Do not treat that as a BIP380 origin wrapper around the whole key.
+    static constexpr std::string_view pqhd_prefix{"pqhd("};
+    if (sp.size() >= pqhd_prefix.size() &&
+        std::equal(pqhd_prefix.begin(), pqhd_prefix.end(), sp.begin())) {
+        bool apostrophe = false;
+        return ParsePubkeyInner(key_exp_index, sp, ctx, out, apostrophe, error);
+    }
     auto origin_split = Split(sp, ']');
     if (origin_split.size() > 2) {
         error = "Multiple ']' characters found for a single pubkey";

@@ -573,6 +573,9 @@ inspecting signatures in Mach-O binaries.")
         libicns
         librsvg-2.40
         ;; Scripting
+        ;; python3 splices GIT_BUILD_INFO in make_release_tarball.sh.
+        ;; Do not add perl or OpenSSL 3.5 at this pin (no new substitutes;
+        ;; OpenSSL in-tree is 3.0.8 via osslsigncode/oscrypto only).
         python-minimal ;; (3.10)
         ;; Git
         git-minimal

@@ -138,6 +138,13 @@ Miscellaneous:
 - `git`
 - `gnupg`
 - `python3`
+- `gzip`
+- `xz`
+
+These host tools are also what `./contrib/guix/guix-build` expects
+(`check_tools`: `make`, `cmake`, `gzip`, `xz`, plus `cat`, `mkdir`,
+`getent`, `curl`, `git`, `guix`). `perl` is not required; the release
+tarball splice uses `python3` inside the pinned Guix profile.
 
 ### Building and Installing Guix's dependencies
 

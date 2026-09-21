@@ -1,0 +1,25 @@
+{
+  "schema_revision": "1.2",
+  "provider_id": "provider-a",
+  "created_at": "1789603200",
+  "receipt_id": "receipt-id-demo",
+  "scope": {
+    "tenant_id": "tenant-a",
+    "legal_entity_id": "entity-a",
+    "portfolio_id": "portfolio-a"
+  },
+  "operation_id": "operation-id-demo",
+  "request_body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "state": "ACCEPTED",
+  "result_refs": [
+    {
+      "object_type": "ProviderProfile",
+      "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "original_provider_ref": {
+    "object_type": "ProviderProfile",
+    "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "sequence": "1"
+}

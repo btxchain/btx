@@ -1,0 +1,8 @@
+{
+  "id": "negative-corrupt-signature",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "base": "unsigned-package.json",
+  "mutation": "flip_first_signature_byte",
+  "note": "finalizeexternalsign / InsertBcp1Signature / PackageReadyToBroadcast must fail closed. A valid ML-DSA-44 signature with any byte flipped must not verify."
+}

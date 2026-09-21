@@ -23,6 +23,17 @@ constexpr uint32_t ROLE_HOST = 1u << 1;
 constexpr size_t MAX_MDPEERS_HINTS = 16;
 constexpr size_t MAX_MDPEERS_BYTES = 4096;
 constexpr size_t SENDMODELS_BYTES = 18;
+constexpr size_t GETMDPEERS_BYTES = 17;
+constexpr uint8_t HINT_ADDR_IPV4 = 1;
+constexpr uint8_t HINT_ADDR_IPV6 = 2;
+constexpr uint8_t HINT_ADDR_HOSTNAME = 3;
+
+/** Wire admit for sendmodels / getmdpeers / mdpeers (#173). */
+enum class HintWireDisposition : uint8_t {
+    ACCEPT,    //!< same version (or unversioned current layout) and plausible size
+    IGNORE,    //!< other MODEL_PROTOCOL_VERSION; must not Misbehave
+    MISBEHAVE, //!< same-version garbage, or unreadable version prefix
+};
 
 struct SendModels {
     uint16_t version{MODEL_PROTOCOL_VERSION};
@@ -56,6 +67,16 @@ struct PublicEndpointHint {
 bool ParseSendModels(Span<const unsigned char> payload, SendModels& out, std::string& err);
 bool SerializeSendModels(const SendModels& msg, std::vector<unsigned char>& out, std::string& err);
 bool ParseGetMdPeers(Span<const unsigned char> payload, GetMdPeers& out, std::string& err);
+bool ParseMdPeers(Span<const unsigned char> payload, std::vector<PublicEndpointHint>& out, std::string& err);
+bool SerializeMdPeers(const std::vector<PublicEndpointHint>& hints, std::vector<unsigned char>& out, std::string& err);
+
+HintWireDisposition ClassifySendModelsWire(Span<const unsigned char> payload);
+HintWireDisposition ClassifyGetMdPeersWire(Span<const unsigned char> payload);
+HintWireDisposition ClassifyMdPeersWire(Span<const unsigned char> payload);
+
+bool PublicEndpointHintWellFormed(const PublicEndpointHint& hint, std::string& err);
+/** Introduction-only (empty endpoint + non-empty from_addr) is well-formed. */
+bool PublicHintWellFormed(const PublicEndpointHint& hint, const std::string& from_addr, std::string& err);
 
 /** HTTP path root for native model protocol. */
 inline constexpr const char* MODEL_HTTP_ROOT = "/btx-model/2/";

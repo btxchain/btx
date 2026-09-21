@@ -5,6 +5,8 @@
 #ifndef BITCOIN_MODELNET_SUPERVISOR_H
 #define BITCOIN_MODELNET_SUPERVISOR_H
 
+#include <modelnet/profile.h>
+#include <univalue.h>
 #include <util/fs.h>
 
 #include <atomic>
@@ -38,9 +40,16 @@ struct HelperLaunchConfig {
     uint64_t auto_cap_bytes{0};
     uint64_t reserve_bytes{0};
     uint64_t upload_bps{0};
+    /** CPU-only discovery relay. Independent of hosting. */
+    bool relay{false};
+    /** Search-index role (policy). Helper already maintains a local index; not a monetary NODE_* bit. */
+    bool index{false};
+    /** -modelhost=auto|1. Never implied merely because the helper is running. */
+    HostMode host_mode{HostMode::OFF};
     /** PQ1 listen host:port. Empty = unix RPC only. Packaged btxd default is 0.0.0.0:29447. */
     std::string bind;
     std::vector<std::string> peers;
+    std::string watch_dir;
     /** Operator set -modelrpcsocket: connect, do not spawn, do not kill. */
     bool external_socket{false};
     bool required{false};
@@ -68,6 +77,9 @@ struct HelperSpawnSpec {
 bool EnvLooksLikeWalletSecret(const std::string& key);
 std::vector<std::string> SanitizeHelperEnv(char** envp);
 std::vector<std::string> BuildHelperArgv(const HelperLaunchConfig& cfg);
+void ApplyProfileToLaunchConfig(const ProfilePolicy& policy, HelperLaunchConfig& cfg);
+/** Copy advertised_host / public_host_reachable from helper getmodelnetworkinfo JSON. */
+void ApplyHelperNetworkInfo(HelperStatus& st, const UniValue& result);
 bool ArgvContainsWalletMaterial(const std::vector<std::string>& argv);
 int NextBackoffMs(int fail_count, uint32_t jitter);
 
@@ -87,6 +99,8 @@ class HelperSupervisor {
     void ReapLocked();
     bool WaitReady(int timeout_ms, std::string& err);
     void RequestStopOwned();
+    void PollAndSyncHostBit();
+    void ClearHostBit();
 
 public:
     explicit HelperSupervisor(HelperLaunchConfig cfg, std::function<bool()> shutdown = {});

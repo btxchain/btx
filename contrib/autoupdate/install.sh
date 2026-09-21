@@ -38,7 +38,7 @@ BTX_AUTOUPDATE_TELEMETRY_QUERY="${BTX_AUTOUPDATE_TELEMETRY_QUERY:-}"
 # Release-signature scheme + key forwarded by the node. When the scheme is a post-quantum one
 # (ml-dsa-44 / slh-dsa-128s) the installer verifies signatures with `btx-util verifyupdatesig`
 # instead of openssl, so the source/commit trust is quantum-safe and matches the node.
-BTX_AUTOUPDATE_PUBKEY_ALGO="${BTX_AUTOUPDATE_PUBKEY_ALGO:-secp256k1}"
+BTX_AUTOUPDATE_PUBKEY_ALGO="${BTX_AUTOUPDATE_PUBKEY_ALGO:-ml-dsa-44}"
 BTX_AUTOUPDATE_PUBKEY="${BTX_AUTOUPDATE_PUBKEY:-}"
 BTX_UTIL="${BTX_UTIL:-}"
 BTX_TARGET_PID="${BTX_TARGET_PID:-}"
@@ -48,6 +48,8 @@ BTX_TARGET_WALLETDIR="${BTX_TARGET_WALLETDIR:-}"
 BTX_TARGET_BLOCKSDIR="${BTX_TARGET_BLOCKSDIR:-}"
 BTX_TARGET_PIDFILE="${BTX_TARGET_PIDFILE:-}"
 BTX_TARGET_CHAIN_FLAG="${BTX_TARGET_CHAIN_FLAG:-}"
+# RPC targeting for health_probe / rollback (same harvested flags as stop_running_node).
+BTX_PROBE_RPC_ARGS=()
 BTX_UPDATER_TEST_ALLOW_NON_BTXD_PID="${BTX_UPDATER_TEST_ALLOW_NON_BTXD_PID:-0}"
 BTX_STOP_TIMEOUT_SECONDS="${BTX_STOP_TIMEOUT_SECONDS:-120}"
 BTX_CLEANUP_CACHE_REPO=""
@@ -844,6 +846,11 @@ extract_wallet_args_from_lines() {
   awk -F= '$1 == "WALLET" && length($0) > length($1) + 1 {print "-wallet=" substr($0, length($1) + 2)}'
 }
 
+# Command-line tokens that restart_node does not reconstruct (prune/port/bind/autoupdate*/…).
+extract_residual_args_from_lines() {
+  awk -F= '$1 == "RESIDUAL" && length($0) > length($1) + 1 {print substr($0, length($1) + 2)}'
+}
+
 read_runtime_flags() {
   local pid="$1"
   local target_file="$2"
@@ -861,6 +868,12 @@ load_runtime_wallet_args() {
   local file_path="$1"
   [[ -f "$file_path" ]] || return 0
   extract_wallet_args_from_lines <"$file_path"
+}
+
+load_runtime_residual_args() {
+  local file_path="$1"
+  [[ -f "$file_path" ]] || return 0
+  extract_residual_args_from_lines <"$file_path"
 }
 
 target_note_pid() {
@@ -902,6 +915,32 @@ for i, token in enumerate(tokens):
     elif token.startswith("-wallet="):
         wallets.append(token.split("=", 1)[1])
 
+# restart_node already re-emits these; everything else on the command line is a residual
+# forwarded through its "$@" tail (and therefore through rollback_release too).
+consumed_value_flags = ("-datadir", "-conf", "-walletdir", "-blocksdir", "-pid", "-wallet")
+chain_flags = ("-testnet4", "-testnet", "-signet", "-regtest")
+consumed = [False] * len(tokens)
+if tokens:
+    consumed[0] = True  # argv0: the running binary, not a flag
+i = 1
+while i < len(tokens):
+    tok = tokens[i]
+    if tok in chain_flags:
+        consumed[i] = True
+        i += 1
+        continue
+    name = tok.split("=", 1)[0]
+    if name in consumed_value_flags:
+        consumed[i] = True
+        if "=" not in tok and i + 1 < len(tokens):
+            consumed[i + 1] = True
+            i += 2
+            continue
+        i += 1
+        continue
+    i += 1
+residuals = [tokens[j] for j in range(len(tokens)) if not consumed[j]]
+
 print(f"DATADIR={take_flag('-datadir')}")
 print(f"CONF={take_flag('-conf')}")
 print(f"WALLETDIR={take_flag('-walletdir')}")
@@ -915,6 +954,8 @@ print(f"RPCPASSWORD={take_flag('-rpcpassword')}")
 print(f"CHAIN_FLAG={chain_flag}")
 for wallet in wallets:
     print(f"WALLET={wallet}")
+for token in residuals:
+    print(f"RESIDUAL={token}")
 PY
 }
 
@@ -1201,8 +1242,32 @@ restart_node() {
   nohup "$daemon_bin" ${args[@]+"${args[@]}"} >>"$log_dir/restart.log" 2>&1 &
   local restarted_pid=$!
   sleep 3
+  # Do not adjudicate here. A healthy `-daemon` parent exits after fork (kill -0 on $! fails),
+  # and an InitError child is gone in tens of milliseconds. Returning non-zero would abort
+  # rollback/start-if-stopped under `set -e`. Warn and fall through; health_probe is the adjudicator
+  # on the update path (and rollback already dies if its own probe fails).
   if ! kill -0 "$restarted_pid" >/dev/null 2>&1; then
-    die "updated btxd exited immediately after restart; inspect $log_dir/restart.log"
+    local found_daemon_pid=""
+    if [[ -n "$pidfile" ]]; then
+      local candidate_path candidate_pid
+      local -a pidfile_candidates=("$pidfile")
+      if [[ "$pidfile" != /* && -n "$datadir" ]]; then
+        pidfile_candidates+=("$datadir/$pidfile")
+      fi
+      for candidate_path in "${pidfile_candidates[@]}"; do
+        [[ -f "$candidate_path" ]] || continue
+        candidate_pid="$(tr -d '[:space:]' <"$candidate_path" 2>/dev/null || true)"
+        if pid_is_numeric "${candidate_pid:-}" && kill -0 "$candidate_pid" >/dev/null 2>&1; then
+          found_daemon_pid="$candidate_pid"
+          break
+        fi
+      done
+    fi
+    if [[ -n "$found_daemon_pid" ]]; then
+      note "restarted btxd daemonized to pid ${found_daemon_pid}; RPC health probe is the adjudicator"
+    else
+      warn "launched btxd pid ${restarted_pid} exited within 3s; not failing yet — RPC health probe is the adjudicator. inspect ${log_dir}/restart.log"
+    fi
   fi
 }
 
@@ -1232,8 +1297,9 @@ rollback_release() {
   warn "updated node ($failed_label) failed its health probe; rolling back to $previous_current"
   status_event "rollback" "begin" "from $failed_label to $(basename "$previous_current")"
   activate_release_tree "$previous_current" "$BTX_INSTALL_ROOT" "$BTX_LINK_DIR"
+  # "$@" is the same restart tail as the update path (wallets + residual command-line tokens).
   restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" "$@"
-  if ! health_probe "$BTX_LINK_DIR/btx-cli" "$datadir" "$conf_path" "$chain_flag"; then
+  if ! health_probe "$BTX_LINK_DIR/btx-cli" "$datadir" "$conf_path" "$chain_flag" ${BTX_PROBE_RPC_ARGS[@]+"${BTX_PROBE_RPC_ARGS[@]}"}; then
     die "rollback restart of the previous release also failed its health probe; manual intervention required"
   fi
   die "update to ${failed_label} failed its health probe and was rolled back to the previous release"
@@ -1307,7 +1373,9 @@ main() {
   local runtime_flags_file="$BTX_TMPDIR/runtime-flags.env"
   local runtime_datadir="" target_fingerprint="" rpcport="" rpcconnect="" rpccookiefile="" rpcuser="" rpcpassword=""
   local -a wallet_args=()
+  local -a restart_extra_args=()
   local detect_status=0
+  BTX_PROBE_RPC_ARGS=()
   set +e
   detected_pid="$(detect_running_btxd "$datadir")"
   detect_status=$?
@@ -1335,6 +1403,15 @@ main() {
     while IFS= read -r wallet_arg; do
       [[ -n "$wallet_arg" ]] && wallet_args+=("$wallet_arg")
     done < <(load_runtime_wallet_args "$runtime_flags_file")
+    restart_extra_args=("${wallet_args[@]+"${wallet_args[@]}"}")
+    while IFS= read -r residual_arg; do
+      [[ -n "$residual_arg" ]] && restart_extra_args+=("$residual_arg")
+    done < <(load_runtime_residual_args "$runtime_flags_file")
+    [[ -n "$rpcport" ]] && BTX_PROBE_RPC_ARGS+=("-rpcport=$rpcport")
+    [[ -n "$rpcconnect" ]] && BTX_PROBE_RPC_ARGS+=("-rpcconnect=$rpcconnect")
+    [[ -n "$rpccookiefile" ]] && BTX_PROBE_RPC_ARGS+=("-rpccookiefile=$rpccookiefile")
+    [[ -n "$rpcuser" ]] && BTX_PROBE_RPC_ARGS+=("-rpcuser=$rpcuser")
+    [[ -n "$rpcpassword" ]] && BTX_PROBE_RPC_ARGS+=("-rpcpassword=$rpcpassword")
   fi
 
   [[ -n "$datadir" ]] || datadir="$runtime_datadir"
@@ -1483,18 +1560,18 @@ main() {
 
   if [[ -n "$detected_pid" && "$BTX_AUTO_RESTART" == "1" ]]; then
     stage "restart"
-    restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" ${wallet_args[@]+"${wallet_args[@]}"}
+    restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" ${restart_extra_args[@]+"${restart_extra_args[@]}"}
     # The node was running before; verify the new binary is actually healthy (RPC reachable) and
     # roll back to the previous release if it crash-loops, so a bad release cannot down the fleet.
     if [[ "${BTX_HEALTH_PROBE:-1}" == "1" ]]; then
       stage "health-probe"
-      if ! health_probe "$BTX_LINK_DIR/btx-cli" "$datadir" "$conf_path" "$chain_flag"; then
-        rollback_release "$previous_current" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "${version}-${resolved_short_sha}" ${wallet_args[@]+"${wallet_args[@]}"}
+      if ! health_probe "$BTX_LINK_DIR/btx-cli" "$datadir" "$conf_path" "$chain_flag" ${BTX_PROBE_RPC_ARGS[@]+"${BTX_PROBE_RPC_ARGS[@]}"}; then
+        rollback_release "$previous_current" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "${version}-${resolved_short_sha}" ${restart_extra_args[@]+"${restart_extra_args[@]}"}
       fi
       status_event "health-probe" "healthy"
     fi
   elif [[ -z "$detected_pid" && "$BTX_START_IF_STOPPED" == "1" ]]; then
-    restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" ${wallet_args[@]+"${wallet_args[@]}"}
+    restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" ${restart_extra_args[@]+"${restart_extra_args[@]}"}
   else
     note "No running BTX node needed a restart"
   fi
@@ -1511,4 +1588,6 @@ main() {
   note "Current release root: $BTX_INSTALL_ROOT/current"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

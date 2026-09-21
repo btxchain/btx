@@ -255,6 +255,11 @@ BASE_CONFIGFLAGS="-DREDUCE_EXPORTS=ON -DBUILD_BENCH=OFF -DBUILD_GUI_TESTS=OFF -D
 # pass it explicitly so a stale cache cannot drop it the way 0.33.4.2 native
 # tarballs did. zeromq is already part of the depends set.
 BASE_CONFIGFLAGS="$BASE_CONFIGFLAGS -DWITH_ZMQ=ON"
+# This time-machine pin packages OpenSSL 3.0.8. WITH_MODELNET=ON requires
+# OpenSSL 3.5+ (ML-KEM-768 / ML-DSA-44) and is not possible here; do not
+# advance the pin or add OpenSSL 3.5 in-manifest (that changes every hash).
+# Native 0.34.8rc3 archives were not cut by this recipe.
+BASE_CONFIGFLAGS="$BASE_CONFIGFLAGS -DWITH_MODELNET=OFF"
 BASE_CONFIGFLAGS="$BASE_CONFIGFLAGS -DCMAKE_SKIP_BUILD_RPATH=TRUE"  # check-symbols is fussy about rpath and we don't need it
 
 make_cuda_host_compiler_wrapper() {
@@ -327,6 +332,9 @@ set_cuda_config_for_flavor() {
             # (dedicated object TU with -gencode=arch=compute_120a,code=sm_120a;
             # see cmake/BTXCudaSm120a.cmake). Guix releases keep native OFF so
             # the fatbin builds without sm_120a toolkit requirements.
+            # Native published cuda12 is Blackwell-only. This in-tree arch list
+            # is not how 0.34.8rc3 archives were cut; do not treat it as the
+            # published cuda12 matrix.
             CUDA_CONFIGFLAGS="-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=80-real;86-real;89-real;90-real;100-real;101-real;103-real;120-real;121-real;80-virtual;100-virtual;120-virtual -DCMAKE_CUDA_ARCHITECTURES=80-real;86-real;89-real;90-real;100-real;101-real;103-real;120-real;121-real;80-virtual;100-virtual;120-virtual -DCUDAToolkit_ROOT=$cuda_root -DCMAKE_CUDA_COMPILER=$CUDA_COMPILER_FOR_CMAKE -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_COMPILER_FOR_CMAKE $CUDA_LIBRARY_CONFIGFLAGS -DCMAKE_CUDA_RUNTIME_LIBRARY=Static -DBTX_CUDA_RUNTIME_LIBRARY=Static"
             ;;
         x86_64-linux-gnu:cuda13)
@@ -479,9 +487,13 @@ assert_shipped_btxd_has_zmq() {
     "$python_bin" "${DISTSRC}/scripts/release/verify_release_btxd.py" "$btxd"
 }
 
-CONSENSUS_CONFIGFLAGS="$BASE_CONFIGFLAGS -DBTX_ENABLE_CUDA_EXPERIMENTAL=OFF"
+# Consensus-only library must not pull modelnet TLS (issue #185). Explicit
+# -DWITH_MODELNET=OFF even though BASE_CONFIGFLAGS already carries it.
+CONSENSUS_CONFIGFLAGS="$BASE_CONFIGFLAGS -DBTX_ENABLE_CUDA_EXPERIMENTAL=OFF -DWITH_MODELNET=OFF"
 mkdir -p "$DISTSRC"
 set_cuda_config_for_flavor
+# MAIN inherits WITH_MODELNET=OFF from BASE. A modelnet Guix binary still
+# needs a later pin with OpenSSL 3.5; that is not this recipe.
 MAIN_CONFIGFLAGS="$BASE_CONFIGFLAGS $CUDA_CONFIGFLAGS"
 LINUX_ARTIFACT_SUFFIX="$(linux_artifact_suffix_for_flavor)"
 

@@ -18,7 +18,9 @@ namespace modelnet {
 
 /** Spec B0 §8.4 resource ceilings. */
 constexpr int PQ1_HTTP_WORKERS = 8;
+constexpr int PQ1_UNIX_WORKERS = 2;
 constexpr int PQ1_HTTP_QUEUE = 32;
+constexpr int PQ1_UNIX_QUEUE = 16;
 constexpr int PQ1_MAX_INBOUND = 16;
 constexpr int PQ1_MAX_OUTBOUND = 8;
 /** One IPv4 buyer must be able to pipeline PQ1_INFLIGHT_PIECES. Still << MAX_INBOUND. */
@@ -26,6 +28,10 @@ constexpr int PQ1_MAX_INBOUND_PER_NETGROUP = 8;
 constexpr int PQ1_INFLIGHT_PIECES = 8;
 constexpr int PQ1_HANDSHAKE_MS = 10000;
 constexpr int PQ1_IDLE_MS = 30000;
+constexpr int PQ1_MAX_REQUESTS_PER_CONN = 32;
+constexpr int PQ1_CONN_MAX_MS = 120000;
+constexpr int PQ1_RELAY_CONNECT_MS = 5000;
+constexpr int PQ1_RELAY_SPLICE_MS = 30000;
 /** 4 MiB piece on a slow WAN; 120s fail-closed the granite fresh-buyer. */
 constexpr int PQ1_TRANSFER_MS = 600000;
 constexpr int PQ1_UNAUTH_HANDSHAKE_LIMIT = 4;

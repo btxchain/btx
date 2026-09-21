@@ -354,8 +354,7 @@ BOOST_FIXTURE_TEST_CASE(importwallet_rescan, TestChain100Setup)
         RemoveWallet(context, wallet, /* load_on_start= */ std::nullopt);
     }
 
-    // Call importwallet RPC and verify all blocks with timestamps >= BLOCK_TIME
-    // were scanned, and no prior blocks were scanned.
+    // Call importwallet RPC. WIF dump import is fail-closed (legacy ECDSA).
     {
         const std::shared_ptr<CWallet> wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
         LOCK(wallet->cs_wallet);
@@ -371,16 +370,15 @@ BOOST_FIXTURE_TEST_CASE(importwallet_rescan, TestChain100Setup)
         AddWallet(context, wallet);
         LOCK(Assert(m_node.chainman)->GetMutex());
         wallet->SetLastBlockProcessed(m_node.chainman->ActiveChain().Height(), m_node.chainman->ActiveChain().Tip()->GetBlockHash());
-        wallet::importwallet().HandleRequest(request);
-        RemoveWallet(context, wallet, /* load_on_start= */ std::nullopt);
-
-        BOOST_CHECK_EQUAL(wallet->mapWallet.size(), 3U);
-        BOOST_CHECK_EQUAL(m_coinbase_txns.size(), 103U);
-        for (size_t i = 0; i < m_coinbase_txns.size(); ++i) {
-            bool found = wallet->GetWalletTx(m_coinbase_txns[i]->GetHash());
-            bool expected = i >= 100;
-            BOOST_CHECK_EQUAL(found, expected);
+        bool threw{false};
+        try {
+            wallet::importwallet().HandleRequest(request);
+        } catch (const UniValue& err) {
+            threw = err.write().find("importwallet is disabled") != std::string::npos;
         }
+        BOOST_CHECK_MESSAGE(threw, "importwallet must refuse legacy WIF dumps");
+        BOOST_CHECK_EQUAL(wallet->mapWallet.size(), 0U);
+        RemoveWallet(context, wallet, /* load_on_start= */ std::nullopt);
     }
 }
 

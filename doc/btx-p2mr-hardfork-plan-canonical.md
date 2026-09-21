@@ -459,8 +459,8 @@ File: src/test/pq_consensus_tests.cpp (NEW)
     Provide wrong sibling hash in control block
     Assert WITNESS_PROGRAM_MISMATCH error
   Test: p2mr_wrong_leaf_version_fails
-    Use leaf version 0xc0 (tapscript) instead of 0xc2
-    Assert failure
+    Use leaf version 0xc0 (tapscript) or 0xc3 (odd twin of 0xc2) instead of 0xc2
+    Assert failure (exact comparison; do not mask with 0xfe)
   Test: p2mr_empty_witness_fails
     Provide empty witness stack
     Assert WITNESS_PROGRAM_WITNESS_EMPTY error
@@ -510,12 +510,12 @@ File: src/script/interpreter.cpp
             ((control.size() - P2MR_CONTROL_BASE_SIZE) % P2MR_CONTROL_NODE_SIZE) != 0) {
             return set_error(serror, SCRIPT_ERR_P2MR_WRONG_CONTROL_SIZE);
         }
-        // Verify leaf version
-        if ((control[0] & P2MR_LEAF_MASK) != P2MR_LEAF_VERSION) {
+        // Verify leaf version exactly (no TAPROOT-style 0xfe mask; 0xc3 is invalid)
+        if (control[0] != P2MR_LEAF_VERSION) {
             return set_error(serror, SCRIPT_ERR_P2MR_WRONG_LEAF_VERSION);
         }
         // Compute leaf hash and verify Merkle commitment
-        uint256 leaf_hash = ComputeP2MRLeafHash(control[0] & P2MR_LEAF_MASK, script);
+        uint256 leaf_hash = ComputeP2MRLeafHash(control[0], script);
         if (!VerifyP2MRCommitment(control, program, leaf_hash)) {
             return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
         }

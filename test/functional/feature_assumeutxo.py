@@ -15,11 +15,15 @@ from shutil import rmtree
 
 from dataclasses import dataclass
 from decimal import Decimal
+from test_framework.address import (
+    base58_to_byte,
+)
 from test_framework.authproxy import JSONRPCException
 from test_framework.blocktools import (
         create_block,
         create_coinbase
 )
+from test_framework.key import ECKey
 from test_framework.messages import (
     CBlockHeader,
     from_hex,
@@ -29,6 +33,7 @@ from test_framework.messages import (
 from test_framework.p2p import (
     P2PInterface,
 )
+from test_framework.script import CScript, sign_input_legacy
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_approx,
@@ -53,6 +58,22 @@ REINDEX_CHAINSTATE_WARNING = (
     "Warning: Using -reindex-chainstate on MatMul chains does not rerun all contextual "
     "Phase 2 checks. Use -reindex for full historical re-validation."
 )
+def sign_legacy_input_with_wif(raw_hex, wif, script_hex):
+    """Sign a single-input legacy tx in the test harness. Production WIF RPCs are disabled."""
+    payload, _version = base58_to_byte(wif)
+    compressed = len(payload) == 33 and payload[-1] == 1
+    key = ECKey()
+    key.set(payload[:32], compressed)
+    tx = tx_from_hex(raw_hex)
+    spk = CScript(bytes.fromhex(script_hex))
+    if len(bytes(spk)) >= 1 and bytes(spk)[0] == 0x76:
+        tx.vin[0].scriptSig = bytes(CScript([key.get_pubkey().get_bytes()]))
+    else:
+        tx.vin[0].scriptSig = b""
+    sign_input_legacy(tx, 0, spk, key)
+    return tx.serialize().hex()
+
+
 WEEKLY_SNAPSHOT_TARGET_BYTES = 2642412320
 WEEKLY_SNAPSHOT_TARGET_DAYS = 7
 WEEKLY_SNAPSHOT_TARGET_BLOCKS = 6720
@@ -337,12 +358,20 @@ class AssumeutxoTest(BitcoinTestFramework):
             [prevout],
             [{destination: Decimal(output_value) / Decimal("100000000")}],
         )
-        tx = node.signrawtransactionwithkey(
+        assert_raises_rpc_error(
+            -8,
+            "signrawtransactionwithkey is disabled",
+            node.signrawtransactionwithkey,
             raw_tx,
             [node.get_deterministic_priv_key().key],
             [prevout],
         )
-        txid = node.sendrawtransaction(tx["hex"], maxfeerate=0)
+        tx_hex = sign_legacy_input_with_wif(
+            raw_tx,
+            node.get_deterministic_priv_key().key,
+            prevout["scriptPubKey"],
+        )
+        txid = node.sendrawtransaction(tx_hex, maxfeerate=0)
 
         assert txid in node.getrawmempool()
 
@@ -883,11 +912,19 @@ class AssumeutxoTest(BitcoinTestFramework):
         )[0]
         output_value = Decimal(str(prev_tx["vout"][0]["value"])) - Decimal("0.001")
         raw_tx = n1.createrawtransaction([prevout], [{destination: output_value}])
-        signed_tx = n1.signrawtransactionwithkey(
+        assert_raises_rpc_error(
+            -8,
+            "signrawtransactionwithkey is disabled",
+            n1.signrawtransactionwithkey,
             raw_tx,
             [bytes_to_wif(self.mini_wallet._priv_key.get_bytes())],
             [prevout],
-        )["hex"]
+        )
+        signed_tx = sign_legacy_input_with_wif(
+            raw_tx,
+            bytes_to_wif(self.mini_wallet._priv_key.get_bytes()),
+            prevout["scriptPubKey"],
+        )
         signed_txid = tx_from_hex(signed_tx).rehash()
 
         assert n1.gettxout(prev_tx['txid'], 0) is not None

@@ -124,6 +124,9 @@ RCAdmissionStore::RCAdmissionStore(Config config) : m_config{config}
         std::max<size_t>(1, m_config.max_unknown_candidates_per_hash);
     m_config.max_unknown_submissions_per_netgroup =
         std::max<size_t>(1, m_config.max_unknown_submissions_per_netgroup);
+    m_config.max_unknown_submission_netgroups =
+        std::max(m_config.max_unknown_entries,
+                 m_config.max_unknown_submission_netgroups);
 }
 
 RCDeferredBodyCooldowns::RCDeferredBodyCooldowns()
@@ -155,6 +158,9 @@ bool RCDeferredBodyCooldowns::Mark(
         m_deadlines.erase(existing);
     }
     if (m_deadlines.size() >= m_config.max_entries) {
+        Prune(now);
+    }
+    if (m_deadlines.size() >= m_config.max_entries) {
         const auto oldest{std::min_element(
             m_deadlines.begin(), m_deadlines.end(),
             [](const auto& lhs, const auto& rhs) {
@@ -184,6 +190,23 @@ bool RCDeferredBodyCooldowns::Contains(
         return false;
     }
     return true;
+}
+
+bool RCDeferredBodyCooldowns::ContainsHash(
+    const uint256& block_hash,
+    std::chrono::steady_clock::time_point now)
+{
+    // Hash-range scan, not a full-store prune: idle catch-up checks one
+    // candidate at a time. Expire only this hash's due keys.
+    for (auto it{m_deadlines.lower_bound(std::make_pair(block_hash, uint64_t{0}))};
+         it != m_deadlines.end() && it->first.first == block_hash;) {
+        if (now >= it->second) {
+            it = m_deadlines.erase(it);
+            continue;
+        }
+        return true;
+    }
+    return false;
 }
 
 void RCDeferredBodyCooldowns::Erase(const uint256& block_hash)
@@ -238,6 +261,12 @@ RCAdmissionStore::RememberResult RCAdmissionStore::Remember(
             m_config.max_unknown_candidates_per_hash &&
         m_unknown_entries.count(key) == 0) {
         return RememberResult::HashQuota;
+    }
+    if (m_unknown_submission_history.find(keyed_netgroup) ==
+            m_unknown_submission_history.end() &&
+        m_unknown_submission_history.size() >=
+            m_config.max_unknown_submission_netgroups) {
+        return RememberResult::RateLimited;
     }
     auto& submissions{m_unknown_submission_history[keyed_netgroup]};
     if (submissions.size() >=

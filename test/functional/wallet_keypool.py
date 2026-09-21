@@ -79,7 +79,8 @@ class KeyPoolTest(BitcoinTestFramework):
                 "timestamp": "now"
             }])
         else:
-            nodes[0].importaddress("bcrt1q95gp4zeaah3qcerh35yhw02qeptlzasdtst55v", "label", rescan=False)
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", nodes[0].importaddress, "bcrt1q95gp4zeaah3qcerh35yhw02qeptlzasdtst55v", "label", False)
+            return
         import_addr_data = nodes[0].getaddressinfo("bcrt1q95gp4zeaah3qcerh35yhw02qeptlzasdtst55v")
         assert import_addr_data["iswatchonly"] is not self.options.descriptors
         assert not import_addr_data["ismine"]
@@ -97,6 +98,9 @@ class KeyPoolTest(BitcoinTestFramework):
         assert not import_pub_data["ismine"]
         assert not import_pub_data["isactive"]
 
+        assert_raises_rpc_error(-8, "importprivkey is disabled", nodes[0].rpc.importprivkey, "cPMX7v5CNV1zCphFSq2hnR5rCjzAhA1GsBfD1qrJGdj4QEfu38Qx", "label", False)
+        if not self.options.descriptors:
+            return
         nodes[0].importprivkey("cPMX7v5CNV1zCphFSq2hnR5rCjzAhA1GsBfD1qrJGdj4QEfu38Qx", "label", rescan=False)
         import_priv_data = nodes[0].getaddressinfo("bcrt1qa985v5d53qqtrfujmzq2zrw3r40j6zz4ns02kj")
         assert not import_priv_data["iswatchonly"]

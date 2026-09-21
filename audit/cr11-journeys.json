@@ -1,0 +1,162 @@
+[
+  {
+    "id": "CR11-J01",
+    "title": "Corporate workload to capital",
+    "given": "A technical owner defines an accepted workload; finance holds a protected BTX reserve.",
+    "steps": "Compare equivalent alternatives, select a local recipe, create allocation, obtain distinct approvals, fund where required, hand off and verify a useful local result.",
+    "assertions": "Separate actual money, forecast/actual cost, local authorization and readiness; preserve the reserve floor.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J02",
+    "title": "Institutional reserve mandate",
+    "given": "An institutional legal account with existing custody and OTC adapters.",
+    "steps": "Establish a reserve policy, approve bounded replenishment, execute an actual test order and allocate to a native capability release.",
+    "assertions": "Mandate and quote limits hold, reporting reconciles and no inference hot-path charge is created.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J03",
+    "title": "Family operating companies",
+    "given": "A principal, adviser, two companies and foundation with separate accounts.",
+    "steps": "Draft a group programme, choose each payer, obtain separate authority and deploy the output to permitted company devices.",
+    "assertions": "Group visibility never pools funds or authorizes an adviser debit.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J04",
+    "title": "Foundation research",
+    "given": "A foundation has a finite research allocation and committed native bounty terms.",
+    "steps": "Join a programme, approve one lot, process submission/evaluation under native rules and claim or refund as appropriate.",
+    "assertions": "No equity, revenue right or indefinite spend is inferred from the sponsorship.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J05",
+    "title": "Free cold acquisition",
+    "given": "A clean walletless client and a public capability.",
+    "steps": "Discover via hosted catalogue, pair device, accept finite local grant, verify package and acquire from native peers.",
+    "assertions": "No wallet synchronization, CEX toll or untrusted software installation occurs.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J06",
+    "title": "Resident base and LAN adapter",
+    "given": "A base is resident and an exact compatible adapter is on LAN.",
+    "steps": "Receive a CEX internet source hint, resolve locally, fetch only missing verified data and prepare runtime.",
+    "assertions": "The same locked recipe completes with recorded reuse and no private inventory upload.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J07",
+    "title": "Reserve replenishment concurrency",
+    "given": "Multiple replicas receive repeated low-reserve events.",
+    "steps": "Run SUGGEST then separately authorized AUTO mode through cooldown, turnover and price changes.",
+    "assertions": "One owned order at a time, no unintended trade in SUGGEST and safe ambiguous-order handling.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J08",
+    "title": "Committee changes mid-plan",
+    "given": "A multi-person approval packet has nearly reached quorum.",
+    "steps": "Change amount, revoke a role, expire a quote and retry final approval/submit.",
+    "assertions": "No stale authority is accepted and the UI explains the specific new review.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J09",
+    "title": "Conversion partial success",
+    "given": "A conversion is executed before native funding.",
+    "steps": "Expire the funding terms, lose one response, restart workers and resume the parent allocation.",
+    "assertions": "BTX remains in the account; no automatic reverse or duplicated conversion/funding.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J10",
+    "title": "Unknown native broadcast",
+    "given": "Actual isolated native transaction dispatch loses its response.",
+    "steps": "Restart all gateways, recover signer/outbox and reconcile the original bytes and outpoint.",
+    "assertions": "One debit, one authorized native transaction and correct eventual receipt.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J11",
+    "title": "Independent co-sponsors",
+    "given": "Three independent entities contribute to one programme.",
+    "steps": "Aggregate progress, complete one claim and one refund branch under native terms.",
+    "assertions": "Every customer lot and beneficiary remains independently attributed.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J12",
+    "title": "Refund and reserve authority",
+    "given": "A funded lot reaches a valid native refund condition.",
+    "steps": "Prepare, authorize, execute, confirm and credit refund; submit a new allocation.",
+    "assertions": "Balance restores but lifetime mandate remains consumed unless explicitly renewed.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J13",
+    "title": "Infrastructure partner",
+    "given": "A capital plan requires additional approved hardware.",
+    "steps": "Request a partner offer and referral, then record actual separately authorized product progression.",
+    "assertions": "Referral is not a loan, GPU purchase or funded BTX output; fees follow real events.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J14",
+    "title": "Collateral interaction",
+    "given": "Existing partner product encumbers portfolio BTX.",
+    "steps": "Run concurrent funding and collateral updates through the real account adapter.",
+    "assertions": "Funds cannot be allocated twice and reserve snapshot states remain intelligible.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J15",
+    "title": "Board reporting",
+    "given": "Multiple currencies, invoices, holdings and commitments exist.",
+    "steps": "Import cost data, generate consistent entity/group reports, export pinned FOCUS fields and correct an observation.",
+    "assertions": "No false NAV, double fees, stale zero valuation or forecast-as-actual saving.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J16",
+    "title": "Adviser revocation",
+    "given": "An adviser has access to drafts and reports across selected entities.",
+    "steps": "Revoke access during a queued export and attempted approval.",
+    "assertions": "No new unauthorized disclosure or execution; historical audit remains intact.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J17",
+    "title": "Two-provider customer exit",
+    "given": "Customer has acquired public capability and pending finance at provider A.",
+    "steps": "Export exact packages/locks/receipts, disconnect A and enroll B for new discovery.",
+    "assertions": "Local capability persists; A obligations stay attributed; no financial replay at B.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J18",
+    "title": "Accessible browser and agent parity",
+    "given": "A first-time user and a scoped agent access the built portal and SDK.",
+    "steps": "Complete workload, reserve review, approval, handoff and progress with keyboard/reader and typed APIs.",
+    "assertions": "Both use identical immutable contracts and no terminal or unsafe token handoff.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J19",
+    "title": "Outage and load",
+    "given": "Measured API/job load with one slow auxiliary product service.",
+    "steps": "Fail gateway leader, database connections, report consumer and hosted connectivity while a local model is active.",
+    "assertions": "Financial recovery remains fenced, resources bounded and local public use continues.",
+    "status": "NOT_RUN"
+  },
+  {
+    "id": "CR11-J20",
+    "title": "Integrated candidate",
+    "given": "Final fingerprint, baseline contract artifacts and all supported backends.",
+    "steps": "Run50newoperations,190newcases,120basecases and relevant AHP/JIT journeys; obtain independent review.",
+    "assertions": "Report actual evidence tiers, fix real blockers and stop for operator release approval.",
+    "status": "NOT_RUN"
+  }
+]

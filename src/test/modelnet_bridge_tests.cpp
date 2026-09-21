@@ -690,4 +690,71 @@ BOOST_AUTO_TEST_CASE(public_download_verified_chunks_before_emission)
     BOOST_CHECK_EQUAL(br.canonical_btx, uri);
 }
 
+static void DrainBridgeHints()
+{
+    auto& bridge = modelnet::GetModelBridge();
+    while (bridge.TryDequeueHint()) {}
+}
+
+/** Mirrors the ProcessMessage model-hint consumer: dequeue, fail-closed
+ *  drop of malformed, never connect, never spend. */
+static size_t ConsumePublicHintsLikeNetProcessing()
+{
+    size_t n = 0;
+    auto& bridge = modelnet::GetModelBridge();
+    while (auto consumed = bridge.TryDequeueHint()) {
+        std::string herr;
+        if (!modelnet::PublicHintWellFormed(consumed->hint, consumed->from_addr, herr)) {
+            continue;
+        }
+        ++n;
+    }
+    return n;
+}
+
+BOOST_AUTO_TEST_CASE(try_dequeue_hint_consumer_unpins_max_hints)
+{
+    DrainBridgeHints();
+    auto& bridge = modelnet::GetModelBridge();
+    BOOST_CHECK_EQUAL(bridge.SnapshotStatus().queued_hints, 0U);
+
+    modelnet::BoundedModelHint empty;
+    BOOST_CHECK(!bridge.TryEnqueuePublicHint(empty));
+
+    for (size_t i = 0; i < modelnet::ModelBridge::MAX_HINTS; ++i) {
+        modelnet::BoundedModelHint h;
+        h.from_addr = "192.0.2." + std::to_string(static_cast<int>(i % 200) + 1) + ":1";
+        BOOST_REQUIRE(bridge.TryEnqueuePublicHint(std::move(h)));
+    }
+    BOOST_CHECK_EQUAL(bridge.SnapshotStatus().queued_hints, modelnet::ModelBridge::MAX_HINTS);
+
+    modelnet::BoundedModelHint extra;
+    extra.from_addr = "198.51.100.1:1";
+    BOOST_CHECK(!bridge.TryEnqueuePublicHint(extra));
+
+    BOOST_CHECK_EQUAL(ConsumePublicHintsLikeNetProcessing(), modelnet::ModelBridge::MAX_HINTS);
+    BOOST_CHECK_EQUAL(bridge.SnapshotStatus().queued_hints, 0U);
+    BOOST_REQUIRE(bridge.TryEnqueuePublicHint(std::move(extra)));
+    BOOST_CHECK_EQUAL(ConsumePublicHintsLikeNetProcessing(), 1U);
+    BOOST_CHECK_EQUAL(bridge.SnapshotStatus().queued_hints, 0U);
+    DrainBridgeHints();
+}
+
+BOOST_AUTO_TEST_CASE(dequeued_hint_same_policy_for_any_from_addr)
+{
+    DrainBridgeHints();
+    auto& bridge = modelnet::GetModelBridge();
+    const char* addrs[] = {"192.0.2.1:8333", "198.51.100.7:8333", "203.0.113.50:29447"};
+    for (const char* a : addrs) {
+        modelnet::BoundedModelHint h;
+        h.from_addr = a;
+        BOOST_REQUIRE(bridge.TryEnqueuePublicHint(std::move(h)));
+        auto consumed = bridge.TryDequeueHint();
+        BOOST_REQUIRE(consumed);
+        std::string err;
+        BOOST_CHECK(modelnet::PublicHintWellFormed(consumed->hint, consumed->from_addr, err));
+    }
+    DrainBridgeHints();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

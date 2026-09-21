@@ -372,6 +372,34 @@ BOOST_AUTO_TEST_CASE(trust_adjusted_work_identity_and_bounded_credit)
     }
 }
 
+// Issue #190: protect-from-disconnect and ConsiderEviction used to compare
+// TrustAdjustedWork(peer) against raw tip->nChainWork. On a live default
+// node the authenticated-work deficit is thousands of block-proofs vs a
+// 6-block allowance, so TrustAdjustedWork(tip) << tip.nChainWork. A peer
+// that announced our own tip then fails the comparison: no outbound is
+// protected and every outbound arms the 20-minute chain-sync timeout.
+// Compare adjusted vs adjusted. WP-8 MinimumChainWork disconnect stays on
+// raw claimed work.
+BOOST_AUTO_TEST_CASE(chain_sync_eviction_must_compare_adjusted_to_adjusted)
+{
+    LOCK(::cs_main);
+    constexpr unsigned int kAllowance{TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS};
+    const Consensus::Params params = ParamsWithFork(/*fork_height=*/1);
+    Chain c;
+    c.Add(ST_AUTHENTICATED);
+    CBlockIndex* last_auth = c.Add(ST_AUTHENTICATED);
+    for (int i = 0; i < 1000; ++i) c.Add(ST_HEADER_ONLY);
+    c.Recompute(params);
+
+    const CBlockIndex& tip = c.blocks.back();
+    const arith_uint256 peer_adjusted{GetTrustAdjustedChainWork(tip, kAllowance)};
+    BOOST_CHECK(peer_adjusted < tip.nChainWork);
+    BOOST_CHECK(peer_adjusted >= GetTrustAdjustedChainWork(tip, kAllowance));
+    BOOST_CHECK(GetTrustAdjustedChainWork(tip, kAllowance) < tip.nChainWork);
+    BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(*last_auth, kAllowance).GetHex(),
+                      last_auth->nChainWork.GetHex());
+}
+
 // An Epoch-A RC header extending an authenticated tip has greater raw claimed
 // work. With the production bounded allowance it MUST be able to displace that
 // tip as operational best header so the body can be chased — otherwise a node

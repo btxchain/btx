@@ -226,8 +226,10 @@ class ListSinceBlockTest(BitcoinTestFramework):
 
         self.sync_all()
 
-        # share utxo between nodes[1] and nodes[2]
         privkey, pubkey = generate_keypair(wif=True)
+        if not self.options.descriptors:
+            assert_raises_rpc_error(-8, "importprivkey is disabled", self.nodes[2].importprivkey, privkey)
+            return
         address = key_to_p2wpkh(pubkey)
         self.nodes[2].sendtoaddress(address, 10)
         self.generate(self.nodes[2], 6)

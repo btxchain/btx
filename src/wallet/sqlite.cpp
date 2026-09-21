@@ -370,8 +370,25 @@ bool SQLiteDatabase::Rewrite(const char* skip)
 
 bool SQLiteDatabase::Backup(const std::string& dest) const
 {
-    sqlite3* db_copy;
-    int res = sqlite3_open(dest.c_str(), &db_copy);
+    // sqlite3_open() may treat the destination as a URI (file:...?mode=) depending
+    // on how SQLite was built. Always open a plain filesystem path.
+    if (dest.empty() || dest.find('\0') != std::string::npos) return false;
+    if (dest.size() >= 5) {
+        const bool file_uri =
+            (dest[0] == 'f' || dest[0] == 'F') &&
+            (dest[1] == 'i' || dest[1] == 'I') &&
+            (dest[2] == 'l' || dest[2] == 'L') &&
+            (dest[3] == 'e' || dest[3] == 'E') &&
+            dest[4] == ':';
+        if (file_uri) return false;
+    }
+    if (dest.find('?') != std::string::npos || dest.find('#') != std::string::npos) {
+        return false;
+    }
+
+    sqlite3* db_copy{nullptr};
+    const int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
+    int res = sqlite3_open_v2(dest.c_str(), &db_copy, flags, nullptr);
     if (res != SQLITE_OK) {
         sqlite3_close(db_copy);
         return false;

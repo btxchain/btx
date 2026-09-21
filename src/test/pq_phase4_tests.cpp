@@ -231,6 +231,27 @@ BOOST_AUTO_TEST_CASE(signp2mr_ctv_only_witness_has_two_items)
     BOOST_CHECK(sigdata.scriptWitness.stack[1] == std::vector<unsigned char>({P2MR_LEAF_VERSION}));
 }
 
+BOOST_AUTO_TEST_CASE(signp2mr_rejects_odd_leaf_version)
+{
+    CPQKey key;
+    key.MakeNewKey(PQAlgorithm::ML_DSA_44);
+    BOOST_REQUIRE(key.IsValid());
+
+    const std::vector<unsigned char> leaf_script = BuildP2MRScript(PQAlgorithm::ML_DSA_44, key.GetPubKey());
+    P2MRSignContext ctx{leaf_script};
+    FlatSigningProvider provider = BuildSingleLeafProvider(ctx.merkle_root, leaf_script, key);
+    auto& spend = provider.p2mr_spends.begin()->second;
+    std::vector<unsigned char> odd_control{*spend.scripts.begin()->second.begin()};
+    odd_control[0] = 0xc3;
+    spend.scripts.clear();
+    spend.scripts[leaf_script].insert(odd_control);
+
+    MutableTransactionSignatureCreator creator(
+        ctx.tx_spend, /*input_idx=*/0, ctx.tx_credit.vout.at(0).nValue, &ctx.txdata, SIGHASH_DEFAULT);
+    SignatureData sigdata;
+    BOOST_CHECK(!ProduceSignature(provider, creator, ctx.tx_credit.vout.at(0).scriptPubKey, sigdata));
+}
+
 BOOST_AUTO_TEST_CASE(signp2mr_ctv_checksig_witness_has_three_items)
 {
     CPQKey key;
@@ -1831,6 +1852,38 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_p2mr_control_leaf_version_mismatch)
     const uint256 request_root = ConfigureSingleLeafP2MRInput(request_psbt.inputs[0], {OP_TRUE});
     request_psbt.inputs[0].witness_utxo = CTxOut{1'000, BuildP2MROutput(request_root)};
     request_psbt.inputs[0].m_p2mr_control_block[0] = static_cast<uint8_t>(P2MR_LEAF_VERSION - 2);
+
+    const std::vector<unsigned char> path_pubkey(MLDSA44_PUBKEY_SIZE, 0x2A);
+    request_psbt.inputs[0].m_p2mr_bip32_paths[path_pubkey] = SerializeP2MRKeyOrigin(
+        /*fingerprint=*/{0x00, 0x00, 0x00, 0x01},
+        /*path=*/{0x80000057, 0x80000001, 0x00000000});
+
+    ExternalSigner signer{
+        "false",
+        "regtest",
+        "00000001",
+        "mock"};
+
+    std::string error;
+    bool signed_ok = true;
+    BOOST_CHECK_NO_THROW(signed_ok = signer.SignTransaction(request_psbt, error));
+    BOOST_CHECK(!signed_ok);
+    BOOST_CHECK(error.find("control block leaf version mismatch") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(external_signer_rejects_p2mr_control_odd_leaf_version)
+{
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vin[0].prevout = COutPoint{Txid::FromUint256(uint256::ONE), 0};
+    tx.vout.resize(1);
+    tx.vout[0].nValue = 1'000;
+    tx.vout[0].scriptPubKey = CScript{} << OP_TRUE;
+
+    PartiallySignedTransaction request_psbt{tx};
+    const uint256 request_root = ConfigureSingleLeafP2MRInput(request_psbt.inputs[0], {OP_TRUE});
+    request_psbt.inputs[0].witness_utxo = CTxOut{1'000, BuildP2MROutput(request_root)};
+    request_psbt.inputs[0].m_p2mr_control_block[0] = 0xc3;
 
     const std::vector<unsigned char> path_pubkey(MLDSA44_PUBKEY_SIZE, 0x2A);
     request_psbt.inputs[0].m_p2mr_bip32_paths[path_pubkey] = SerializeP2MRKeyOrigin(

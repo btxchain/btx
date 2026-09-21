@@ -156,6 +156,10 @@ class TestNode():
                 # expensive Q*=256 Phase-B seal. Keep the general functional
                 # harness and its 199-block cache on Phase A; the dedicated
                 # seal test opts back in with a later command-line argument.
+                # Cache *creation* also has to cross EncDr@100 / RC@101: that
+                # miner is configured in BitcoinTestFramework._initialize_chain
+                # (economic + cpu-diagnostic). Do not raise those heights here
+                # — -regtestmatmul* on every TestNode clears assumeutxo metadata.
                 self.args.append("-regtestmatmulltsealaspow=0")
 
         if self.version_is_at_least(190000):

@@ -10,6 +10,7 @@
 #include <util/result.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
+#include <wallet/bcp1_watchonly.h>
 #include <wallet/coincontrol.h>
 #include <wallet/rpc/util.h>
 #include <wallet/spend.h>
@@ -85,6 +86,19 @@ RPCHelpMan sweeptoself()
         {
             std::shared_ptr<CWallet> const pwallet{GetWalletForJSONRPCRequest(request)};
             if (!pwallet) return UniValue::VNULL;
+
+            // CreateTransaction(sign=true) then CommitTransaction is in-process
+            // spend with no FillPSBT / -signer path. BCP/1 watch-only gets the
+            // same policy error as send / signrawtransactionwithwallet.
+            // Leftover keys on disable_private_keys must not auto-spend.
+            bilingual_str refuse_err;
+            if (RefusePrivateSign(*pwallet, refuse_err)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, refuse_err.original);
+            }
+            if (pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
+            }
+
             pwallet->BlockUntilSyncedToCurrentChain();
 
             UniValue options{request.params[0].isNull() ? UniValue::VOBJ : request.params[0]};

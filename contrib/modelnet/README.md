@@ -19,6 +19,13 @@ service. It holds:
 | `dependency-lock.md` | DOC-02 OpenSSL/GCC/CUDA pins |
 | `e2e-resolve-8-4.sh` | RESOLVE-03/04/07 loopback independent router + 8/4 RTT |
 | `e2e-nat-congested.sh` | RECIP-07/08/10 delayed proxy + STORE-01 resume |
+| `hcp-sdk/` | HCP/1 typed clients (Python `btx_hcp.py`, TypeScript). Not a wallet. `automatic_spend_atoms=0`. HTTP 202 is not settlement. |
+| `hcp-portal/` | Static catalogue/pairing shell (`index.html`). No custody keys, no token-in-URI. |
+| `hcp-gateway/` | Design YAML only (`config.example.yaml`). Native gateway binary is `btx-hcpd`, not this kit. |
+| `hcp-reference/` | Offline contract/simulator kit. SIMULATION_ONLY. Not OAuth, ML-DSA, custody, or a live CEX. |
+| `crf-sdk/` | Cognitive Reserve v1.1 typed clients (additive to HCP/1; 50 ops). Not a second ledger. |
+| `crf-portal/` | Reserve/committee/holdings portal shell. Family view is not debit authority. |
+| `crf-reference/` | Offline capacity/TCO/DAG/quorum reference. Not an exchange ledger. |
 
 ```bash
 cd contrib/modelnet/reference

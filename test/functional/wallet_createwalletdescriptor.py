@@ -30,11 +30,22 @@ class WalletCreateDescriptorTest(BitcoinTestFramework):
         default_wallet = self.nodes[0].get_wallet_rpc(self.default_wallet_name)
         try:
             default_wallet.getnewaddress(address_type="p2mr")
+            keys = default_wallet.gethdkeys()
+            assert_equal(len(keys), 1)
+            assert "pq_seed_id" in keys[0]
+            assert "xpub" not in keys[0]
             assert_raises_rpc_error(
                 -8,
                 P2MR_ONLY_DESCRIPTOR_ERROR,
                 default_wallet.createwalletdescriptor,
                 "bech32",
+            )
+            assert_raises_rpc_error(
+                -4,
+                "Descriptor already exists",
+                default_wallet.createwalletdescriptor,
+                type="p2mr",
+                hdkey=keys[0]["pq_seed_id"],
             )
             self.log.info("BTX P2MR-only policy detected; skipping upstream createwalletdescriptor matrix.")
             return

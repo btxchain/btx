@@ -1,11 +1,11 @@
-# Model bounties (0.34.7)
+# Model bounties (0.34.8rc4)
 
 Proposed demand-side market on the model plane: fund creation and evaluation of
 a model that matches published requirements **before** a winning `model_id`
 exists. Release campaigns (supply-side: disclose an already-encrypted model)
 remain a separate product path — see [modelnet/model-economy.md](modelnet/model-economy.md).
 
-`CLIENT_VERSION_IS_RELEASE` is **true** in this tree (0.34.7). Schemas and RPC
+`CLIENT_VERSION_IS_RELEASE` is **false** in this tree (0.34.8rc4). Schemas and RPC
 names document the product contract; implementation gates and evidence rows in
 [contrib/modelnet/bounty/tests/acceptance-matrix.csv](../contrib/modelnet/bounty/tests/acceptance-matrix.csv)
 remain the readiness record for bounty methods.

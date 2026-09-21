@@ -3,6 +3,7 @@
 Standalone entry for the zero-wallet path (root addendum §2, §11.4, §13.2).
 Inference is **local after acquisition**. This path needs **no wallet, no
 coins, no mining, and no chain sync** if you run `btx-modeld` alone.
+People: [first-run.md](first-run.md). Agents: [agent-recipes.md](agent-recipes.md).
 
 Qt Models-first pages (first-run GUI, Models tab) are specified in
 addendum §2.3 / D10 and are **out of scope** for this tree. Use CLI flags
@@ -54,27 +55,63 @@ build/bin/btx-modelcheck /path/to/model.safetensors
 Pickle / `.pt` / `.py` / `.so` are refused. A `STRUCTURE_VERIFIED` result
 is not a claim that the model is useful or safe.
 
-## 3. Import and optionally seed
+## 3. Doctor, then host (pin + publish + seed)
+
+First helper start creates `identities.json` (ML-DSA research publisher and
+a secret under `tls/`). You do not call `createmodelidentity` first. That
+identity is **not** a wallet key.
 
 ```bash
 build/bin/btx-modeld \
   -modeldir=./modelnet-data \
-  -modelcache=85899345920 \
+  -modelstorage=auto \
   -modelbind=127.0.0.1:29447 \
   -modelhost
 ```
 
-Unix RPC (one JSON line):
+Unix RPC (one JSON line). Doctor first, then host. `hostmodel` is the
+happy-path alias of `importmodel` (pin + signed search card + demand-seed):
 
 ```json
-{"jsonrpc":"1.0","id":1,"method":"importmodel","params":["/path/to/dir",{"pin":true}]}
+{"jsonrpc":"1.0","id":1,"method":"checkmodelsetup","params":[]}
+{"jsonrpc":"1.0","id":1,"method":"hostmodel","params":["/path/to/dir"]}
+{"jsonrpc":"1.0","id":1,"method":"showmodel","params":["alias-or-btx://"]}
+{"jsonrpc":"1.0","id":1,"method":"exportmodellink","params":["alias-or-btx://"]}
+{"jsonrpc":"1.0","id":1,"method":"unhostmodel","params":["alias-or-btx://"]}
+{"jsonrpc":"1.0","id":1,"method":"importmodel","params":["/path/to/dir"]}
 ```
 
-Then `getmodel` / `listmodels`. With `-modelseed=auto` (the default once
-quota is positive) the imported model is **already seeded**; `seedmodel` is
-only required for `-modelseed=manual`. Default quota is **0**;
-import refuses until `-modelstorage` / `-modelcache` is a positive size
-(`80GiB` or raw bytes).
+Read-only inspect before or after hosting (no fetch, no runtime):
+`getmodelmanifest` (per-file `path`/`role`/`size`/`sha384`),
+`qualifymodel` (static structure check of a local path), and `listmodels`
+filtered by `pinned`/`seeded`. `exportmodelpath` reports the verified local
+store root and source path (`hf download --local-dir` analog). CLI:
+`btx-model files` / `path` / `check` / `pins`. `btx-model ls --incomplete`
+is the huggingface-cli resume analog (this node's downloads only; resume
+is still an explicit `pull` / `getmodel FREE_ONLY`). `btx-model bounty-draft
+--validate` is the Gitcoin checklist (`validatebountyterms`); it never
+publishes and never spends.
+
+`searchmodels` filters (`format`, `quantization`, `family`, `architecture`,
+`min_size_bytes` / `max_size_bytes`, `min_provider_count`, `pinned`, `seeded`)
+are named on the CLI, e.g.
+`btx-model search --format gguf --max-size-bytes 8000000000 --sort size_asc`.
+`--fits` keeps only hits inside this node's remaining storage quota. It is
+storage only: BTX does not run inference, so it is not a RAM/VRAM claim.
+
+Defaults: `pin=true`, `publish=true` (signed search card; family / format /
+quantization inferred from filenames). Pass `{"publish":false}` to skip the
+card. The result includes `share` (`uri`, `copy_text`, …) and
+`next_actions`. Unix RPC waits up to 24h for large imports (`importmodel` /
+`hostmodel` / `getmodel` / `waitformodelevent` / `scanmodelwatch`); other helper
+methods use a 120s reply timeout.
+
+Then `getmodel` / `listmodels` / `getmodeltransfers`. With `-modelseed=auto`
+(the default once quota is positive) the hosted model is **already seeded**;
+`seedmodel` is only required for `-modelseed=manual`. Packaged /
+`-modelstorage=auto` allocates a bounded budget. `-modelstorage=0` stores no
+payload; import refuses until quota is positive (`auto`, `80GiB`, or raw
+bytes).
 
 ## 4. Retrieve free from a peer
 

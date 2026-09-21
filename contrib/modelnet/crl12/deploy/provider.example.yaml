@@ -1,0 +1,36 @@
+# Template only. Substitute enrolled endpoints, actual networks and secret references.
+revision: '1.2'
+provider:
+  id: provider-a
+  origin: https://provider-a.example
+  api_base: /btx/hcp/v1
+  role_manifest_ref: OPERATOR_ACCEPTED_EXACT_REFERENCE
+  roles: [DISCOVERY, TREASURY, DEVICE_HANDOFF, PORTFOLIO_ANALYTICS]
+identity:
+  issuer: https://identity.example
+  credential_ref: os-secret:configured-provider-client
+  audience: configured-crl-audience
+  sender_constraint: REQUIRED
+adapters:
+  custody: external-approved-service
+  execution: external-approved-service
+  position_source: configured-authoritative-book
+  valuation_source: configured-accepted-prices
+  mandate_source: configured-legal-mandates
+  portfolio_sink: generic-snapshot-sink
+policy:
+  public_model_toll: false
+  local_reporting_default: OFF
+  role_binding_requires_owner: true
+  auto_financial_failover: false
+  imported_balance_is_spendable: false
+limits:
+  signed_body_bytes: 1048576
+  batch_rows: 1000
+  chunk_bytes: 16777216
+  projection_sources: 32
+  projection_metrics: 32
+  page_rows_default: 100
+  page_rows_max: 1000
+  graph_depth: 16
+  scenario_shocks: 64

@@ -297,13 +297,8 @@ class WalletBackupTest(BitcoinTestFramework):
             for node_num in range(3):
                 self.nodes[node_num].createwallet(wallet_name=self.default_wallet_name, descriptors=self.options.descriptors, load_on_startup=True)
                 assert_equal(self.nodes[node_num].getbalance(), 0)
-                self.nodes[node_num].importwallet(self.nodes[node_num].datadir_path / 'wallet.dump')
-
-            self.sync_blocks()
-
-            assert_equal(self.nodes[0].getbalance(), balance0)
-            assert_equal(self.nodes[1].getbalance(), balance1)
-            assert_equal(self.nodes[2].getbalance(), balance2)
+                assert_raises_rpc_error(-8, "importwallet is disabled", self.nodes[node_num].importwallet, self.nodes[node_num].datadir_path / 'wallet.dump')
+                assert_equal(self.nodes[node_num].getbalance(), 0)
 
         # Backup to source wallet file must fail
         sourcePaths = [

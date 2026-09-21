@@ -1,0 +1,24 @@
+{
+  "schema_revision": "1.2",
+  "provider_id": "provider-a",
+  "created_at": "1789603200",
+  "adapter_id": "adapter-id-demo",
+  "interface_name": "PositionSourceAdapter",
+  "interface_revision": "interface-revision-demo",
+  "schema_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "operations": [
+    "read_snapshot",
+    "read_changes"
+  ],
+  "support": "IMPLEMENTED",
+  "ambiguity_contract_ref": {
+    "object_type": "ProviderProfile",
+    "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "evidence_refs": [
+    {
+      "object_type": "ProviderProfile",
+      "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

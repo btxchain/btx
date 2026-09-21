@@ -76,26 +76,14 @@ grep -qi 'Content-Security-Policy: default-src '\''none' "$SCRATCH/headers.txt" 
 grep -qi 'X-Content-Type-Options: nosniff' "$SCRATCH/headers.txt" || die "nosniff"
 echo "D09-BROWSER-CSP PASS"
 
-# PUBLIC_DOWNLOAD from Chrome fetch (Range via curl; Chrome GET of landing already did browser).
+# PUBLIC_DOWNLOAD: curl Range plus Chrome GET of the verified bytes (not a swallowed dump-dom).
 curl -sf -H 'Range: bytes=0-7' "http://127.0.0.1:${PORT}/${TOKEN}/f/0" -o "$SCRATCH/range.bin"
 [[ "$(wc -c <"$SCRATCH/range.bin")" -eq 8 ]] || die "range length"
-python3 - <<PY
-from pathlib import Path
-html = Path("$SCRATCH/fetch.html")
-html.write_text("""<!DOCTYPE html><html><body><script>
-fetch("http://127.0.0.1:%s/${TOKEN}/f/0").then(r => {
-  document.title = r.headers.get("content-security-policy") + "|" + r.headers.get("content-type");
-  return r.arrayBuffer();
-}).then(b => { document.body.textContent = "BYTES:"+b.byteLength; }).catch(e => { document.body.textContent = "ERR:"+e; });
-</script></body></html>
-""" % ("$PORT",))
-PY
-# CSP default-src none on the download URL; the test page is file:// so fetch is the browser.
 timeout 30 "$CHROME" --headless=new --disable-gpu --no-sandbox --disable-dev-shm-usage \
   --user-data-dir="$SCRATCH/chrome2" \
-  --virtual-time-budget=4000 \
-  --dump-dom "file://$SCRATCH/fetch.html" >"$SCRATCH/fetch-dom.html" 2>"$SCRATCH/chrome-fetch.err" || true
-# file:// fetch to 127.0.0.1 may be blocked; curl Range already proved emission. Chrome landing proved browser.
+  --dump-dom "http://127.0.0.1:${PORT}/${TOKEN}/f/0" \
+  >"$SCRATCH/fetch-dom.html" 2>"$SCRATCH/chrome-fetch.err" || die "chrome GET of public download hung or failed"
+grep -q 'verified-bytes' "$SCRATCH/fetch-dom.html" || die "chrome GET missing verified payload (see $SCRATCH/chrome-fetch.err)"
 echo "D09-BROWSER-DOWNLOAD PASS range=8 verified_dir"
 
 # Local CA (not public WebPKI). Prove TLS edge with generated CA.

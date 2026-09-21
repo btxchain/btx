@@ -1,0 +1,38 @@
+{
+  "object_type": "ProviderProfile",
+  "body": {
+    "version": 1,
+    "provider_id": "provider-demo",
+    "profile_sequence": "1",
+    "issued_at_ms": "1790000000000",
+    "expires_at_ms": "1790000600000",
+    "origin": "https://exchange.example",
+    "api_base": "https://exchange.example/btx/hcp/v1",
+    "network": {
+      "environment": "REGTEST",
+      "genesis_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "supported_profiles": [
+      "DISCOVERY",
+      "HANDOFF"
+    ],
+    "package_core_versions": [
+      3
+    ],
+    "keyset_url": "https://exchange.example/btx/hcp/keys",
+    "oauth_metadata_url": "https://exchange.example/.well-known/oauth-authorization-server",
+    "custody_modes": [
+      "DISCOVERY_ONLY"
+    ],
+    "financial_observation_modes": [
+      "HOSTED_ATTESTED"
+    ],
+    "max_body_bytes": "1048576",
+    "max_page_size": 100,
+    "privacy_url": "https://exchange.example/privacy",
+    "export_supported": true
+  },
+  "body_id": "e6e116748b68cef0a9eecb678a2fd47191d75139377ceacbf40f68af325a80f1613938eb4391a5fe7c78b9b5b603a8e2",
+  "signer_key_id": "unsigned-demo",
+  "signature": "aa"
+}

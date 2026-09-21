@@ -10026,7 +10026,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
 
         if (unique_abandon) {
             // Unique competing attested HAVE_DATA: lost same-height race,
-            // attested chain pulled ahead, heavier unattested fork,
+            // attested chain pulled ahead, heavier unattested fork on a mirror,
             // dual-attested siblings with the signed frontier off this
             // chain (live 2026-08-15), or the unique attested HAVE_DATA
             // child of an already-attested tip (catch-up, LCA depth 0).
@@ -12427,8 +12427,9 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     // Consensus+pin with no local WIF: pin is telemetry. A stolen pin key
     // must not steer fork choice (unique_abandon / GBT parent). Trusted
     // mirrors and local signers keep the recovery / archive-follow path.
+    const bool trusted_mirror{node::matmul_trusted::IsTrustedMirror()};
     if (!node::matmul_trusted::PinSteersFindUniqueCompetingAttestedIndex(
-            node::matmul_trusted::IsTrustedMirror(),
+            trusted_mirror,
             node::matmul_trusted::HasLocalSigner())) {
         return nullptr;
     }
@@ -12456,6 +12457,14 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         if (!(idx->nStatus & BLOCK_HAVE_DATA) ||
             !idx->IsValid(BLOCK_VALID_TRANSACTIONS) ||
             !idx->HaveNumChainTxs()) {
+            return;
+        }
+        // A consensus signer's validated tip must not lose work solely
+        // because a competing branch has an attestation. Otherwise normal
+        // work selection reconnects the heavier branch and this override
+        // repeatedly rolls it back (live 224585 -> 224580 -> 224581).
+        // Mirrors retain authority-follow recovery to a lower-work branch.
+        if (!trusted_mirror && idx->nChainWork < tip->nChainWork) {
             return;
         }
         // On-chain attested ancestors are not competing. Do this before
@@ -12541,8 +12550,7 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         // short-reorg away from it.
         if (!suffix.empty()) {
             competing = std::move(suffix);
-        } else if (node::matmul_trusted::HasLocalSigner() &&
-                   !node::matmul_trusted::IsTrustedMirror()) {
+        } else if (node::matmul_trusted::HasLocalSigner() && !trusted_mirror) {
             // CONSENSUS signer: do not abandon an already-attested tip for
             // a dual-attested same-height twin (live 190354 reversal).
             // If the signed frontier has moved onto a competing fork
@@ -12651,10 +12659,8 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         return fork_child;
     }
     // Equal-work attested sibling (lost race) and more-work attested
-    // chain (signer pulled ahead) must switch; less-work attested
-    // recovers a heavier unattested fork. Restricting to strictly-less
-    // work left consensus miners stranded on their own unattested
-    // sibling while the attested chain advanced (live 187847).
+    // chain (signer pulled ahead) remain eligible. Only trusted mirrors
+    // recover from a heavier unattested fork onto a less-work attested one.
     return unique;
 }
 
@@ -17703,6 +17709,11 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         m_attested_assumeutxo = *attested_au;
         LogPrintf("[snapshot] activated attested-fast-forward snapshot at height %d (%s)\n",
                   attested_au->height, base_blockhash.ToString());
+    } else {
+        // Total assignment: a compiled-pin snapshot must not inherit an
+        // override left by a previous attested snapshot that this process
+        // already discarded.
+        m_attested_assumeutxo.reset();
     }
 
     // BTX cannot make the snapshot active until its shielded appendix and
@@ -18288,6 +18299,7 @@ void ChainstateManager::ResetChainstates()
     m_ibd_chainstate.reset();
     m_snapshot_chainstate.reset();
     m_active_chainstate = nullptr;
+    m_attested_assumeutxo.reset();
     m_shielded_nullifiers.reset();
     shielded::ShieldedMerkleTree::ResetCommitmentIndexStore();
     shielded::registry::ShieldedAccountRegistryState::ResetPayloadStore();
@@ -22410,6 +22422,7 @@ bool ChainstateManager::DeleteSnapshotChainstate()
     m_active_chainstate = m_ibd_chainstate.get();
     m_active_chainstate->m_mempool = m_snapshot_chainstate->m_mempool;
     m_snapshot_chainstate.reset();
+    m_attested_assumeutxo.reset();
     return true;
 }
 

@@ -1,0 +1,37 @@
+{
+  "schema_revision": "1.2",
+  "provider_id": "provider-a",
+  "created_at": "1789603200",
+  "scenario_id": "scenario-id-demo",
+  "scope": {
+    "tenant_id": "tenant-a",
+    "legal_entity_id": "entity-a",
+    "portfolio_id": "portfolio-a"
+  },
+  "projection_ref": {
+    "object_type": "ProviderProfile",
+    "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "shocks": [
+    {
+      "factor": "RESERVE_PRICE",
+      "target_ref": {
+        "object_type": "ProviderProfile",
+        "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "value": {
+        "coefficient": "8",
+        "scale": 1
+      },
+      "unit": "MULTIPLIER"
+    }
+  ],
+  "method": "DETERMINISTIC_SHOCK_V1",
+  "assumption_refs": [
+    {
+      "object_type": "ProviderProfile",
+      "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "expires_at": "1789689600"
+}

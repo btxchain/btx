@@ -176,6 +176,11 @@ bool VerifyFreeGrant(Span<const unsigned char> payload,
         err = "signature";
         return false;
     }
+    if (!body.exists("signer_id") || !body["signer_id"].isStr() ||
+        body["signer_id"].get_str() != ServiceSignerId(pk).Hex()) {
+        err = "signer identity mismatch";
+        return false;
+    }
     const int64_t expires = body["expires_at"].getInt<int64_t>();
     if (now > 0 && now >= expires) {
         err = "expired";
@@ -251,6 +256,74 @@ bool EncodeGrantEnvelope(const SignedFreeGrant& g, std::vector<unsigned char>& o
     return !out.empty();
 }
 
+bool RedeemGrantUseUnlocked(UniValue& store, const std::string& nonce_hex, const std::string& use_key, std::string& err)
+{
+    if (nonce_hex.size() != 64 || use_key.empty()) {
+        err = "grant_nonce";
+        return false;
+    }
+    UniValue used = store.exists("uses") ? store["uses"] : UniValue(UniValue::VOBJ);
+    UniValue arr = used.exists(nonce_hex) ? used[nonce_hex] : UniValue(UniValue::VARR);
+    const auto file_all = use_key.find(":all") != std::string::npos;
+    const std::string file_prefix = use_key.substr(0, use_key.find(':'));
+    for (const auto& v : arr.getValues()) {
+        if (!v.isStr()) continue;
+        const std::string& have = v.get_str();
+        if (have == use_key) {
+            err = "replay";
+            return false;
+        }
+        if (file_all && have.rfind(file_prefix + ":", 0) == 0) {
+            err = "replay";
+            return false;
+        }
+        if (!file_all && have == file_prefix + ":all") {
+            err = "replay";
+            return false;
+        }
+    }
+    if (arr.size() >= 256) {
+        err = "grant use cap";
+        return false;
+    }
+    arr.push_back(use_key);
+    used.pushKV(nonce_hex, arr);
+    store.pushKV("uses", used);
+    return true;
+}
+
+bool VerifyHostedFreeGrant(const fs::path& helper_dir,
+                           Span<const unsigned char> payload,
+                           Span<const unsigned char> sig,
+                           Span<const unsigned char> presented_pk,
+                           int64_t now,
+                           const std::string& use_key,
+                           UniValue& body,
+                           std::string& err,
+                           bool record_use)
+{
+    std::vector<unsigned char> host_pk, host_sk;
+    Digest48 signer_id;
+    if (!LoadOrCreateServiceIdentity(helper_dir, host_pk, host_sk, signer_id, err)) return false;
+    if (!presented_pk.empty() &&
+        (presented_pk.size() != host_pk.size() ||
+         !std::equal(presented_pk.begin(), presented_pk.end(), host_pk.begin()))) {
+        err = "grant identity";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_grant_store_mu);
+    if (!VerifyFreeGrant(payload, sig, host_pk, now, {}, body, err)) return false;
+    if (!record_use) return true;
+    UniValue store;
+    if (!ReadObj(helper_dir / "grant_redeems.json", store)) {
+        err = "grant redeem store";
+        return false;
+    }
+    const std::string nonce = body["grant_nonce"].get_str();
+    if (!RedeemGrantUseUnlocked(store, nonce, use_key, err)) return false;
+    return WriteObj(helper_dir / "grant_redeems.json", store, err);
+}
+
 bool ConsumeGrantNonce(const fs::path& helper_dir, const std::string& nonce_hex, uint64_t& sequence, std::string& err)
 {
     if (nonce_hex.size() != 64) {
@@ -259,7 +332,10 @@ bool ConsumeGrantNonce(const fs::path& helper_dir, const std::string& nonce_hex,
     }
     std::lock_guard<std::mutex> lock(g_grant_store_mu);
     UniValue store;
-    ReadObj(helper_dir / "grant_nonces.json", store);
+    if (!ReadObj(helper_dir / "grant_nonces.json", store)) {
+        err = "grant nonce store";
+        return false;
+    }
     UniValue arr = store.exists("nonces") ? store["nonces"] : UniValue(UniValue::VARR);
     for (const auto& n : arr.getValues()) {
         if (n.isStr() && n.get_str() == nonce_hex) {
@@ -267,8 +343,15 @@ bool ConsumeGrantNonce(const fs::path& helper_dir, const std::string& nonce_hex,
             return false;
         }
     }
-    arr.push_back(nonce_hex);
-    store.pushKV("nonces", arr);
+    constexpr size_t kGrantNonceCap = 4096;
+    UniValue kept(UniValue::VARR);
+    const auto values = arr.getValues();
+    const size_t start = values.size() > kGrantNonceCap - 1 ? values.size() - (kGrantNonceCap - 1) : 0;
+    for (size_t i = start; i < values.size(); ++i) {
+        kept.push_back(values[i]);
+    }
+    kept.push_back(nonce_hex);
+    store.pushKV("nonces", kept);
     const uint64_t seq = store.exists("sequence") ? store["sequence"].getInt<uint64_t>() + 1 : 1;
     store.pushKV("sequence", seq);
     sequence = seq;

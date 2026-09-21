@@ -1,0 +1,31 @@
+{
+  "schema_revision": "1.2",
+  "provider_id": "provider-a",
+  "created_at": "1789603200",
+  "manifest_id": "manifest-id-demo",
+  "profile_ref": {
+    "object_type": "ProviderProfile",
+    "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "roles": [
+    "PREFERRED_EXCHANGE"
+  ],
+  "endpoints": [
+    {
+      "operation_id": "getPortfolioProjection",
+      "relative_path": "/institutional/projections/{id}",
+      "effect": "READ"
+    }
+  ],
+  "network_refs": [
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "conformance_refs": [
+    {
+      "object_type": "ProviderProfile",
+      "body_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "sequence": "1",
+  "expires_at": "1789689600"
+}

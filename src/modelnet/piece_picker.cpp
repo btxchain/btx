@@ -4,6 +4,7 @@
 
 #include <modelnet/piece_picker.h>
 #include <modelnet/piece_ranges.h>
+#include <modelnet/transfer_session.h>
 #include <modelnet/types.h>
 
 #include <algorithm>
@@ -41,19 +42,44 @@ double ThroughputOf(const std::map<std::string, PeerMetrics>& metrics, const std
     return it->second.throughput_bps;
 }
 
+/** True if o has a numeric last_update_ms or updated_ms (even when the value is 0). */
+bool JsonTimestampMs(const UniValue& o, int64_t& out)
+{
+    if (!o.isObject()) return false;
+    auto take = [&](const char* key) -> bool {
+        if (!o.exists(key) || !o[key].isNum()) return false;
+        try {
+            out = o[key].getInt<int64_t>();
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
+    if (take("last_update_ms")) return true;
+    if (take("updated_ms")) return true;
+    return false;
+}
+
 } // namespace
 
 std::string DiversityKey(const PeerId& peer)
 {
     if (!peer.service_id.empty()) return std::string("id:") + peer.service_id;
-    if (!peer.netgroup.empty()) return std::string("ng:") + peer.netgroup;
     return std::string("ep:") + peer.endpoint;
+}
+
+std::string NetgroupKey(const PeerId& peer)
+{
+    return peer.netgroup;
 }
 
 bool SourceIsFresh(const SourceAvailability& src, const PickConfig& cfg)
 {
-    if (cfg.now_ms <= 0 || src.last_update_ms == 0) return true;
-    if (cfg.now_ms < src.last_update_ms) return true;
+    // now_ms<=0: unset clock / tests treat every source as fresh.
+    // last_update_ms==0 is unknown, not all-have, when now_ms>0.
+    if (cfg.now_ms <= 0) return true;
+    if (src.last_update_ms == 0) return false;
+    if (src.last_update_ms > cfg.now_ms) return false;
     return (cfg.now_ms - src.last_update_ms) <= cfg.stale_after_ms;
 }
 
@@ -210,6 +236,7 @@ std::vector<PieceAssignment> PickRarestFirst(uint32_t file_index,
     }
 
     std::map<std::string, uint64_t> assigned_bytes;
+    std::map<std::string, int> assigned_ng;
     std::map<std::string, uint64_t> peer_inflight = {};
     for (const auto& kv : metrics) peer_inflight[kv.first] = kv.second.inflight_bytes;
     uint64_t global = 0;
@@ -233,6 +260,7 @@ std::vector<PieceAssignment> PickRarestFirst(uint32_t file_index,
     auto pick_sources = [&](uint32_t piece, int rarity) {
         struct Src {
             std::string endpoint;
+            std::string netgroup;
             double tput{0};
             PeerXferState st{PeerXferState::ACTIVE};
         };
@@ -243,6 +271,8 @@ std::vector<PieceAssignment> PickRarestFirst(uint32_t file_index,
             if (MetricsFailed(metrics, s.peer.endpoint)) continue;
             Src x;
             x.endpoint = s.peer.endpoint;
+            x.netgroup = NetgroupKey(s.peer);
+            if (x.netgroup.empty()) x.netgroup = x.endpoint;
             x.tput = ThroughputOf(metrics, s.peer.endpoint);
             const auto it = metrics.find(s.peer.endpoint);
             x.st = it == metrics.end() ? PeerXferState::ACTIVE : it->second.state;
@@ -284,11 +314,19 @@ std::vector<PieceAssignment> PickRarestFirst(uint32_t file_index,
             }
             const uint64_t win = window_of(src.endpoint);
             const uint64_t inflight = peer_inflight[src.endpoint] + assigned_bytes[src.endpoint];
-            if (!unique_rare && win > 0 && inflight + PIECE_SIZE > win) continue;
-            if (!unique_rare && cfg.global_inflight_ceiling > 0 &&
-                global + PIECE_SIZE > cfg.global_inflight_ceiling) {
+            if (win == 0) continue;
+            if (!unique_rare && inflight + PIECE_SIZE > win) continue;
+            if (cfg.global_inflight_ceiling > 0 && global + PIECE_SIZE > cfg.global_inflight_ceiling) {
                 continue;
             }
+            if (cfg.credit) {
+                const uint64_t ceil = cfg.credit->Ceiling();
+                // Ceiling 0 is no allocation, not unlimited.
+                if (ceil == 0) continue;
+                if (cfg.credit->Reserved() + global + PIECE_SIZE > ceil) continue;
+            }
+            const std::string ng = src.netgroup.empty() ? src.endpoint : src.netgroup;
+            if (cfg.max_per_netgroup > 0 && assigned_ng[ng] >= cfg.max_per_netgroup) continue;
             PieceAssignment a;
             a.endpoint = src.endpoint;
             a.file_index = file_index;
@@ -296,6 +334,7 @@ std::vector<PieceAssignment> PickRarestFirst(uint32_t file_index,
             a.endgame_duplicate = got > 0;
             out.push_back(a);
             assigned_bytes[src.endpoint] += PIECE_SIZE;
+            assigned_ng[ng] += 1;
             global += PIECE_SIZE;
             ++got;
         }
@@ -401,7 +440,8 @@ bool ParseAvailabilitySources(const UniValue& availability_json,
                                const PeerId& peer,
                                const Digest48& artifact,
                                std::vector<SourceAvailability>& out,
-                               std::string& err)
+                               std::string& err,
+                               int64_t observed_at_ms)
 {
     UniValue models = UniValue(UniValue::VARR);
     if (availability_json.isObject() && availability_json.exists("local") &&
@@ -416,6 +456,10 @@ bool ParseAvailabilitySources(const UniValue& availability_json,
         err = "availability models";
         return false;
     }
+    int64_t root_ts = 0;
+    const bool have_root_ts = JsonTimestampMs(availability_json, root_ts) ||
+        (availability_json.isObject() && availability_json.exists("local") &&
+         JsonTimestampMs(availability_json["local"], root_ts));
     for (const auto& m : models.getValues()) {
         if (!m.isObject()) continue;
         if (m.exists("artifact_id") && m["artifact_id"].isStr() &&
@@ -423,19 +467,43 @@ bool ParseAvailabilitySources(const UniValue& availability_json,
             continue;
         }
         if (!m.exists("files") || !m["files"].isArray()) continue;
+        int64_t model_ts = 0;
+        const bool have_model_ts = JsonTimestampMs(m, model_ts);
         for (const auto& f : m["files"].getValues()) {
             SourceAvailability src;
             src.peer = peer;
             src.peer.endpoint = endpoint;
+            if (f.exists("netgroup") && f["netgroup"].isStr()) {
+                src.peer.netgroup = f["netgroup"].get_str();
+            } else if (m.exists("netgroup") && m["netgroup"].isStr()) {
+                src.peer.netgroup = m["netgroup"].get_str();
+            }
             src.file_index = f.exists("file_index") ? f["file_index"].getInt<uint32_t>() : 0;
             src.piece_count = f.exists("piece_count") ? f["piece_count"].getInt<uint32_t>() : 0;
+            if (f.exists("service_id") && f["service_id"].isStr()) {
+                src.peer.service_id = f["service_id"].get_str();
+            } else if (m.exists("service_id") && m["service_id"].isStr()) {
+                src.peer.service_id = m["service_id"].get_str();
+            }
             if (f.exists("ranges")) {
                 if (!ParsePieceRangesJson(f["ranges"], src.ranges, err)) return false;
                 uint32_t covered = 0;
                 for (const auto& r : src.ranges) covered += r.count;
                 if (src.piece_count == 0) src.piece_count = covered;
+                if (!CanonicalizePieceRanges(src.ranges, src.piece_count, err)) return false;
             }
-            src.last_update_ms = 0;
+            int64_t ts = 0;
+            if (JsonTimestampMs(f, ts)) {
+                src.last_update_ms = ts;
+            } else if (have_model_ts) {
+                src.last_update_ms = model_ts;
+            } else if (have_root_ts) {
+                src.last_update_ms = root_ts;
+            } else if (observed_at_ms > 0) {
+                src.last_update_ms = observed_at_ms;
+            } else {
+                src.last_update_ms = 0;
+            }
             out.push_back(std::move(src));
         }
     }

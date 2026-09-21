@@ -18,6 +18,8 @@
 
 namespace modelnet {
 
+class CreditBroker;
+
 /** Local transfer health. Slow is not BanMan; FAILED is local quarantine. */
 enum class PeerXferState {
     ACTIVE = 0,
@@ -37,7 +39,7 @@ struct SourceAvailability {
     uint32_t file_index{0};
     uint32_t piece_count{0};
     std::vector<PieceRange> ranges;
-    /** 0 = treat as fresh (tests / unknown). */
+    /** 0 = unknown. Not all-have: SourceIsFresh is false when now_ms > 0. */
     int64_t last_update_ms{0};
 };
 
@@ -72,6 +74,10 @@ struct PickConfig {
     int64_t stale_after_ms{60000};
     bool preserve_rare{false};
     int max_assignments{32};
+    /** Optional process-wide ceiling. Rare lane may not bypass it. */
+    CreditBroker* credit{nullptr};
+    /** 0 = unlimited. Caps assignments that share NetgroupKey, not endpoint. */
+    int max_per_netgroup{0};
 };
 
 struct SwarmSnapshot {
@@ -85,9 +91,15 @@ struct SwarmSnapshot {
     int partial_sources{0};
 };
 
-/** Distinct authenticated identity, else netgroup, else endpoint. */
+/** Identity dimension only (service_id, else endpoint). Netgroup is a separate limiter. */
 std::string DiversityKey(const PeerId& peer);
 
+/** Retrieve leftover re-invokes PickRarestFirst this many times, then self-peer fallback. */
+inline constexpr int kPickerReschedulePasses = 4;
+
+std::string NetgroupKey(const PeerId& peer);
+
+/** now_ms<=0: all sources fresh. last_update_ms==0 is not all-have when now_ms>0. */
 bool SourceIsFresh(const SourceAvailability& src, const PickConfig& cfg);
 bool SourceHasPiece(const SourceAvailability& src, uint32_t file_index, uint32_t piece_index);
 
@@ -142,12 +154,20 @@ std::vector<uint32_t> EndangeredPieces(uint32_t file_index,
                                     const std::map<std::string, PeerMetrics>& metrics,
                                     const PickConfig& cfg);
 
+/**
+ * Parse availability JSON into picker sources.
+ * Stamps last_update_ms from numeric JSON last_update_ms or updated_ms (file,
+ * then model, then root / local). If those fields are absent and
+ * observed_at_ms > 0, uses observed_at_ms. Default 0 keeps 6-arg callers
+ * (helper.cpp) compiling until they pass a live observation time.
+ */
 bool ParseAvailabilitySources(const UniValue& availability_json,
                                const std::string& endpoint,
                                const PeerId& peer,
                                const Digest48& artifact,
                                std::vector<SourceAvailability>& out,
-                               std::string& err);
+                               std::string& err,
+                               int64_t observed_at_ms = 0);
 
 UniValue SwarmSnapshotJson(const SwarmSnapshot& snap);
 

@@ -241,7 +241,7 @@
          <item>
           <widget class="QValueComboBox" name="addressType">
            <property name="toolTip">
-            <string>Choose the default address type to select when receiving coins.</string>
+            <string>P2MR is the only address type BTX issues. Legacy, bech32, and taproot types are not offered.</string>
            </property>
           </widget>
          </item>
@@ -388,7 +388,7 @@
        <item>
         <widget class="QCheckBox" name="mapPortUpnp">
          <property name="toolTip">
-          <string>Automatically open the Bitcoin client port on the router. This only works when your router supports UPnP and it is enabled.</string>
+          <string>Automatically open the BTX client port on the router. This only works when your router supports UPnP and it is enabled.</string>
          </property>
          <property name="text">
           <string>Map port using &amp;UPnP</string>
@@ -398,7 +398,7 @@
        <item>
         <widget class="QCheckBox" name="mapPortNatpmp">
          <property name="toolTip">
-          <string>Automatically open the Bitcoin client port on the router. This only works when your router supports PCP or NAT-PMP and it is enabled. The external port could be random.</string>
+          <string>Automatically open the BTX client port on the router. This only works when your router supports PCP or NAT-PMP and it is enabled. The external port could be random.</string>
          </property>
          <property name="text">
           <string>Map port using PCP or NA&amp;T-PMP</string>
@@ -418,7 +418,7 @@
        <item>
         <widget class="QCheckBox" name="connectSocks">
          <property name="toolTip">
-          <string>Connect to the Bitcoin network through a SOCKS5 proxy.</string>
+          <string>Connect to the BTX network through a SOCKS5 proxy.</string>
          </property>
          <property name="text">
           <string>Connect through &amp;SOCKS5 proxy (default proxy):</string>
@@ -605,7 +605,7 @@
        <item>
         <widget class="QCheckBox" name="connectSocksTor">
          <property name="toolTip">
-          <string>Connect to the Bitcoin network through a separate SOCKS5 proxy for Tor onion services.</string>
+          <string>Connect to the BTX network through a separate SOCKS5 proxy for Tor onion services.</string>
          </property>
          <property name="text">
           <string>Use separate SOCKS&amp;5 proxy to reach peers via Tor onion services:</string>
@@ -877,7 +877,7 @@
        <item>
         <widget class="QCheckBox" name="displayAddresses">
          <property name="toolTip">
-          <string>Whether to show Bitcoin addresses in the transaction list or not.</string>
+          <string>Whether to show BTX addresses in the transaction list or not.</string>
          </property>
          <property name="text">
           <string>&amp;Display addresses in transaction list</string>
@@ -954,8 +954,8 @@
          <item>
           <widget class="QLabel" name="qrFont_preview">
            <property name="text">
-            <string notr="true">1NS17iag9jJgT…
-bc1p2q3rvn3gp…</string>
+            <string notr="true">btx1z35yvjel7sr…
+btx1z2q3rvn3gp…</string>
            </property>
           </widget>
          </item>

@@ -41,6 +41,7 @@
 #include <matmul/pow_v4.h>
 #include <net.h>
 #include <net_processing.h>
+#include <node/chain_staleness.h>
 #include <node/context.h>
 #include <node/gbt_longpoll.h>
 #include <node/matmul_trusted_attestations.h>
@@ -6695,6 +6696,54 @@ static RPCHelpMan getmininginfo()
                             }
                             }
                         ),
+                        {RPCResult::Type::OBJ, "first_run", "First-run wizard summary (Public Pool / sv2-ui style tiles). Advisory display only; never a consensus, difficulty, or spend input",
+                        {
+                            {RPCResult::Type::BOOL, "ready_to_mine", "Chain guard is healthy and GBT would not refuse for historical catch-up (age-only IBD can still request work)"},
+                            {RPCResult::Type::BOOL, "ibd", "Still in initial block download (Core latch, including age-only stale tip)"},
+                            {RPCResult::Type::BOOL, "initialblockdownload", "Alias of ibd"},
+                            {RPCResult::Type::STR, "ibd_kind", "none | loading | insufficient_chain_work | age_only"},
+                            {RPCResult::Type::BOOL, "unattended_healthy", "Mining chain guard healthy (distinct from ready_to_mine)"},
+                            {RPCResult::Type::BOOL, "template_issuable", "getblocktemplate would not refuse for historical IBD"},
+                            {RPCResult::Type::BOOL, "challenge_issuable", "MatMul chain with a tip (getmatmulchallenge is the work verb)"},
+                            {RPCResult::Type::STR, "challenge_rpc", "Work RPC name"},
+                            {RPCResult::Type::STR, "template_rpc", "Template RPC name"},
+                            {RPCResult::Type::STR, "peer_count_kind", "How peer_count is sampled"},
+                            {RPCResult::Type::NUM, "blocks", "Local tip height"},
+                            {RPCResult::Type::NUM, "peer_count", "Peers the mining chain guard counts (usable height sample; not total connections)"},
+                            {RPCResult::Type::NUM, "headers", "Best known header height"},
+                            {RPCResult::Type::NUM, "verificationprogress", "Estimate toward network tip, 0..1"},
+                            {RPCResult::Type::STR, "recommended_action", "Chain-guard recommended miner action"},
+                            {RPCResult::Type::STR, "one_liner", "Single advisory sentence"},
+                            {RPCResult::Type::ARR, "next_actions", "Suggested next steps",
+                            {
+                                {RPCResult::Type::STR, "", "next action"},
+                            }},
+                            {RPCResult::Type::NUM, "automatic_spend_atoms", "Always 0"},
+                            {RPCResult::Type::STR, "version", "btxd version string (sv2-ui footer analog)"},
+                            {RPCResult::Type::NUM, "uptime_s", "Seconds since node start"},
+                            {RPCResult::Type::BOOL, "network_active", "Whether P2P networking is active"},
+                            {RPCResult::Type::BOOL, "mining_guard_enabled", "Whether the mining chain guard is enabled on this node"},
+                            {RPCResult::Type::NUM, "min_peers", "Configured minimum peer count for a healthy guard decision"},
+                            {RPCResult::Type::NUM, "connections_total", /*optional=*/true, "Total P2P connections (omitted when the connection manager is unavailable)"},
+                            {RPCResult::Type::NUM, "connections_out", /*optional=*/true, "Outbound P2P connections (omitted when the connection manager is unavailable)"},
+                            {RPCResult::Type::OBJ, "connections", /*optional=*/true, "Core -getinfo style P2P counts",
+                            {
+                                {RPCResult::Type::NUM, "in", "Inbound P2P connections"},
+                                {RPCResult::Type::NUM, "out", "Outbound P2P connections"},
+                                {RPCResult::Type::NUM, "total", "Total P2P connections"},
+                            }},
+                            {RPCResult::Type::NUM, "outbound_peers", /*optional=*/true, "Alias of connections.out"},
+                            {RPCResult::Type::BOOL, "is_stale", "Same idea as getblockchaininfo.is_stale (display only)"},
+                            {RPCResult::Type::OBJ, "exact_replay", /*optional=*/true, "Compact copy of backend_runtime.rc_exact_replay (snapshot; does not trigger qualification)",
+                            {
+                                {RPCResult::Type::ELISION, "", "production_eligible / activation_ready / admission_path / resolved_provider"},
+                            }},
+                            {RPCResult::Type::NUM, "difficulty", "Current tip difficulty (display only)"},
+                            {RPCResult::Type::NUM, "tip_age_s", "Seconds since the local tip block time (0 if future-dated)"},
+                            {RPCResult::Type::NUM, "matmul_digests_per_second", /*optional=*/true, "Same value as top-level matmul_digests_per_second; only on MatMul chains"},
+                            {RPCResult::Type::BOOL, "has_warnings", "Whether this response carries any warning"},
+                            {RPCResult::Type::NUM, "warnings_count", "Number of warnings in the top-level warnings field"},
+                        }},
                     }},
                 RPCExamples{
                     HelpExampleCli("getmininginfo", "")
@@ -6805,6 +6854,103 @@ static RPCHelpMan getmininginfo()
         }
     }
     obj.pushKV("warnings", std::move(warnings));
+    {
+        UniValue first_run(UniValue::VOBJ);
+        const bool loading = chainman.m_blockman.LoadingBlocks();
+        const bool has_tip = true;
+        const bool sufficient_work = tip.nChainWork >= chainman.MinimumChainWork();
+        const bool in_ibd = chainman.IsInitialBlockDownload();
+        const bool refuse_template = kernel::MiningTemplateShouldRefuseIbd(loading, has_tip, sufficient_work);
+        const bool age_only = kernel::IbdIsAgeOnlyStaleTip(in_ibd, loading, has_tip, sufficient_work);
+        std::string ibd_kind = "none";
+        if (loading) ibd_kind = "loading";
+        else if (!sufficient_work) ibd_kind = "insufficient_chain_work";
+        else if (age_only) ibd_kind = "age_only";
+        first_run.pushKV("ready_to_mine", chain_guard_status.healthy && !refuse_template);
+        first_run.pushKV("initialblockdownload", in_ibd);
+        first_run.pushKV("ibd", in_ibd);
+        first_run.pushKV("ibd_kind", ibd_kind);
+        first_run.pushKV("unattended_healthy", chain_guard_status.healthy);
+        first_run.pushKV("template_issuable", !refuse_template);
+        first_run.pushKV("challenge_issuable", chainman.GetConsensus().fMatMulPOW);
+        first_run.pushKV("challenge_rpc", "getmatmulchallenge");
+        first_run.pushKV("template_rpc", "getblocktemplate");
+        first_run.pushKV("peer_count_kind", "chain_guard_outbound_sample");
+        first_run.pushKV("blocks", chain_guard_status.local_tip_height);
+        first_run.pushKV("peer_count", chain_guard_status.peer_count);
+        first_run.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : tip.nHeight);
+        first_run.pushKV("verificationprogress", chainman.GuessVerificationProgress(&tip));
+        first_run.pushKV("recommended_action", node::GetMiningChainGuardRecommendedAction(chain_guard_status));
+        std::string one;
+        if (refuse_template) {
+            one = strprintf("Waiting for chain sync (verificationprogress=%0.4f).", chainman.GuessVerificationProgress(&tip));
+        } else if (age_only) {
+            one = "Tip is stale by age; keep requesting ExactReplay work.";
+        } else {
+            one = node::GetMiningChainGuardRecommendedAction(chain_guard_status);
+        }
+        first_run.pushKV("one_liner", one);
+        UniValue next(UniValue::VARR);
+        if (refuse_template) next.push_back("wait_for_tip");
+        else if (age_only) next.push_back("getmatmulchallenge");
+        else next.push_back(node::GetMiningChainGuardRecommendedAction(chain_guard_status));
+        next.push_back("getmatmulchallenge for ExactReplay work (not a hash lottery)");
+        next.push_back("getsetupstatus for combined money+models doctor");
+        first_run.pushKV("next_actions", next);
+        first_run.pushKV("automatic_spend_atoms", 0);
+        first_run.pushKV("version", FormatFullVersion());
+        first_run.pushKV("uptime_s", GetTime() - GetStartupTime());
+        first_run.pushKV("network_active", chain_guard_status.network_active);
+        first_run.pushKV("mining_guard_enabled", chain_guard_status.enabled);
+        first_run.pushKV("min_peers", chain_guard_status.min_peer_count);
+        if (node.connman) {
+            const uint64_t cin = static_cast<uint64_t>(node.connman->GetNodeCount(ConnectionDirection::In));
+            const uint64_t cout = static_cast<uint64_t>(node.connman->GetNodeCount(ConnectionDirection::Out));
+            const uint64_t ctot = static_cast<uint64_t>(node.connman->GetNodeCount(ConnectionDirection::Both));
+            first_run.pushKV("connections_total", ctot);
+            first_run.pushKV("connections_out", cout);
+            first_run.pushKV("outbound_peers", cout);
+            UniValue conn(UniValue::VOBJ);
+            conn.pushKV("in", cin);
+            conn.pushKV("out", cout);
+            conn.pushKV("total", ctot);
+            first_run.pushKV("connections", conn);
+        }
+        first_run.pushKV("difficulty", GetDifficulty(tip));
+        const int64_t first_run_tip_age_s{GetTime() - tip.GetBlockTime()};
+        first_run.pushKV("tip_age_s", first_run_tip_age_s > 0 ? first_run_tip_age_s : 0);
+        first_run.pushKV("is_stale", node::ComputeChainTipStaleness(&tip, chainman.m_best_header).is_stale);
+        if (obj.exists("matmul_digests_per_second")) {
+            first_run.pushKV("matmul_digests_per_second", obj["matmul_digests_per_second"]);
+        }
+        if (obj.exists("backend_runtime") && obj["backend_runtime"].isObject() &&
+            obj["backend_runtime"].exists("rc_exact_replay") && obj["backend_runtime"]["rc_exact_replay"].isObject()) {
+            const UniValue& rc = obj["backend_runtime"]["rc_exact_replay"];
+            UniValue er(UniValue::VOBJ);
+            auto copyk = [&](const char* k) {
+                if (rc.exists(k)) er.pushKV(k, rc[k]);
+            };
+            copyk("production_eligible");
+            copyk("activation_ready");
+            copyk("admission_path");
+            copyk("resolved_provider");
+            copyk("startup_canary_passed");
+            if (obj["backend_runtime"].exists("required_backend_satisfied")) {
+                er.pushKV("required_backend_satisfied", obj["backend_runtime"]["required_backend_satisfied"]);
+            }
+            first_run.pushKV("exact_replay", er);
+        }
+        {
+            int warnings_count{0};
+            const UniValue& first_run_warnings{obj["warnings"]};
+            if (first_run_warnings.isArray()) warnings_count = static_cast<int>(first_run_warnings.size());
+            else if (first_run_warnings.isStr()) warnings_count = first_run_warnings.get_str().empty() ? 0 : 1;
+            else if (first_run_warnings.isBool()) warnings_count = first_run_warnings.get_bool() ? 1 : 0;
+            first_run.pushKV("has_warnings", warnings_count > 0);
+            first_run.pushKV("warnings_count", warnings_count);
+        }
+        obj.pushKV("first_run", first_run);
+    }
     return obj;
 },
     };

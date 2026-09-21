@@ -12,6 +12,7 @@ from test_framework.descriptors import descsum_create
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
+    assert_raises_rpc_error,
 )
 BLOCK_TIME = 60 * 10
 
@@ -61,7 +62,8 @@ class WalletReindexTest(BitcoinTestFramework):
             assert len(import_res) == 1
             assert import_res[0]['success']
         else:
-            wallet_watch_only.importaddress(wallet_addr, rescan=False)
+            assert_raises_rpc_error(-8, "importaddress is disabled for secp256k1", wallet_watch_only.importaddress, wallet_addr, "", False)
+            return
         assert_equal(len(wallet_watch_only.listtransactions()), 0)
 
         # Depending on the wallet type, the birth time changes.

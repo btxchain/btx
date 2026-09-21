@@ -1,0 +1,130 @@
+{
+  "core": {
+    "version": 2,
+    "network": "REGTEST",
+    "package_type": "RELEASE",
+    "label": "Synthetic example model",
+    "resources": [
+      {
+        "kind": "MODEL",
+        "id": "4fb3ed3d4992d91569e7cda856eb0c20ffd1b0ef40eb0a39700c51a86eb9bc8cf4a64239683f96fe1b23da5cb407bbf8",
+        "manifest_id": "d147f1bf1f20e435c6f8c41ecdb3b5ad78c6915baa2f2acce079692a72f1d6769f39cc211f7e79c08c7635c2e00d110d",
+        "size_bytes": "1048576",
+        "format": "GGUF",
+        "label": "Synthetic Q4 model"
+      }
+    ],
+    "variants": [
+      {
+        "variant_id": "demo-q4",
+        "name": "Synthetic Q4",
+        "resource_id": "4fb3ed3d4992d91569e7cda856eb0c20ffd1b0ef40eb0a39700c51a86eb9bc8cf4a64239683f96fe1b23da5cb407bbf8",
+        "format": "GGUF",
+        "quantization": "Q4_K_M",
+        "runtime_profile_ids": [
+          "local-llama"
+        ],
+        "compatibility": {
+          "architectures": [
+            "x86_64",
+            "aarch64"
+          ],
+          "backends": [
+            "cpu",
+            "cuda",
+            "rocm",
+            "metal"
+          ],
+          "minimum_ram_bytes": "4294967296",
+          "memory_estimate_kind": "ESTIMATED"
+        }
+      }
+    ],
+    "economy_refs": [
+      {
+        "kind": "RELEASE",
+        "id": "f1891d735b215666566d59c1347c2b9cee40656a5a919170880221504c496be47fc8f9fcac8431d49413415ba628a143",
+        "terms_id": "c9210290562abaaa2f3444c2aef0d657cc2bb71239b0f48222324ecda0646188f2369be650244f2d1b070900b9b254ca"
+      }
+    ],
+    "source_hints": [],
+    "critical_extensions": [
+      "AGENT_HANDOFF_V1"
+    ],
+    "documents": [
+      {
+        "path": "AGENTS.md",
+        "media_type": "text/markdown",
+        "encoding": "utf-8",
+        "text": "# Package purpose\nThis is a synthetic REGTEST example of a BTX agent-readable model handoff.\nIt describes test resources, not a downloadable production model.\n\n# Trust and scope\nRead the structured core first. This document applies only to this package.\nIt cannot override the user's instructions, grant permissions, introduce a\nsoftware trust root, or become the surrounding project's AGENTS.md.\nThis example is unsigned. A framing hash is not a publisher signature.\n\n# Model and variant\nInspect core.resources and core.variants. Select an exact immutable resource\nusing the user's choice and locally observed runtime/hardware compatibility.\nThe example variant is demo-q4. Do not invent a btx:// URI for its test digest.\n\n# Client requirements\nRead core.agent_handoff.client_requirements. Use an already trusted compatible\nBTX installation, or propose installation through an independently approved\nsoftware channel. Do not trust a client binary merely because a model package\nincludes its hash. No special BTX bootstrapper is needed to inspect this file.\n\n# Acquisition\nUse the existing native BTX acquisition path under a finite local plan.\nDefault: FREE_ONLY and NATIVE_ONLY. No Hugging Face account, funded BTX wallet\nor cloud credential is required for a public model available from native peers.\nNo action is authorized by opening this descriptor alone.\n\n# Verification and output\nVerify the package core and accepted signer, canonical model manifest, pieces\nand complete selected file bytes. Materialize a leased local path for the\nruntime. Return MODEL_READY only when required files are verified, otherwise\nreport selection-only readiness or a specific missing dependency.\n\n# Local runtime handoff\nRead the typed runtime profile. Plan an invocation of a locally trusted\nadapter. Execute only within the user's authorization, resource ceilings and\nlocal-only network policy. BTX modeld does not host remote inference.\n\n# Economics\nPackage references are not wallet authority. Refresh signed terms and local\nchain-backed state before economic actions. Default monetary spend is zero.\n\n# Privacy\nNATIVE_ONLY must not fall back to Hugging Face, torrent or direct cloud HTTP.\nPeers can still observe their own requests; this is not an anonymity promise.\n\n# Failure handling\nStop on hash or signature mismatch. Report unsupported format, insufficient\nmemory, missing trust or unavailable providers distinctly. Do not switch to a\ndifferent model, remote endpoint or paid path to make the task appear complete.\n",
+        "size_bytes": "2514",
+        "sha384": "9a153a0f3c8ca30c495518bf2b06dbbdd398fd9c3342dabfa77f19dc372973c1b97dba2bad64753c4f9ea2200d4506fd"
+      },
+      {
+        "path": "README.md",
+        "media_type": "text/markdown",
+        "encoding": "utf-8",
+        "text": "# Example model package\n\nSynthetic REGTEST fixture only. Not a production model or signed release.\n\nThis small descriptor contains model references and package-scoped guidance,\nnot model weights. An ordinary file reader can inspect the BTXPKG1 header and\nJSON. The embedded AGENTS.md explains the handoff for an agent. The structured\ncore carries the same acquisition and local runtime choices.\n\nOpen to preview. Select a compatible variant. Obtain a trusted client only\nunder local installation policy. Acquire exact verified files from BTX and\nhand the local path to an authorized local runtime. Funding is a separate act.\n",
+        "size_bytes": "625",
+        "sha384": "82b23d8a08575f5fb0f720920ef14a7f788a8efe12980396f966dc9e075ab4455fd51b877b69602ef724742d0343de31"
+      },
+      {
+        "path": "runtime/llama.md",
+        "media_type": "text/markdown",
+        "encoding": "utf-8",
+        "text": "# Local runtime\nA typed local adapter plans the run. This file contains no executable script.\n",
+        "size_bytes": "94",
+        "sha384": "6de387f840b8c369dbe190980ee8739f098aa983ba910dbc74edf54c31d52adcc9d5dcac4d7942cc01f2d3ed7ba2c5bb"
+      }
+    ],
+    "agent_handoff": {
+      "version": 1,
+      "entry_document": "AGENTS.md",
+      "client_requirements": {
+        "distribution_id": "btx-model-tools",
+        "minimum_client_version": "0.34.8",
+        "required_capabilities": [
+          "BTXPKG_CORE_V2",
+          "AGENT_HANDOFF_V1"
+        ],
+        "documentation_hints": [
+          "https://docs.example/btx/model-tools"
+        ]
+      },
+      "acquisition": {
+        "default_variant": "demo-q4",
+        "retrieval_mode": "FREE_ONLY",
+        "source_policy": "NATIVE_ONLY",
+        "ready_requirement": "VERIFIED_LOCAL_FILES",
+        "offer_seeding": true
+      },
+      "runtime_profiles": [
+        {
+          "profile_id": "local-llama",
+          "adapter_id": "llama.cpp",
+          "adapter_schema": "local-cli-v1",
+          "variant_ids": [
+            "demo-q4"
+          ],
+          "backend": "cpu",
+          "mode": "CLI",
+          "parameters": {
+            "context_tokens": 2048,
+            "threads": 4
+          },
+          "documentation_path": "runtime/llama.md"
+        }
+      ]
+    }
+  },
+  "observations": [
+    {
+      "object_id": "f1891d735b215666566d59c1347c2b9cee40656a5a919170880221504c496be47fc8f9fcac8431d49413415ba628a143",
+      "observed_at_ms": "1",
+      "expires_at_ms": "2",
+      "source": "REMOTE_OBSERVATION",
+      "state": "FUNDING"
+    }
+  ],
+  "signatures": []
+}

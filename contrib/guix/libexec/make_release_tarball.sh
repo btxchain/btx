@@ -23,11 +23,21 @@ git archive --prefix="${DISTNAME}/" HEAD |
   --exclude 'doc/release-notes' \
  # end of tar options
 
-# Generate correct build info file from git, before we lose git
+# Generate correct build info file from git, before we lose git.
+# The pinned Guix profile has python3 (python-minimal), not perl.
 GIT_BUILD_INFO="$(cmake -P cmake/script/GenerateBuildInfo.cmake)"
-GIT_BUILD_INFO="${GIT_BUILD_INFO}" perl -0777 -pi -e \
-  's{// No build information available}{$ENV{GIT_BUILD_INFO}}' \
-  "${DISTNAME}/cmake/script/GenerateBuildInfo.cmake"
+GIT_BUILD_INFO="${GIT_BUILD_INFO}" python3 - "${DISTNAME}/cmake/script/GenerateBuildInfo.cmake" <<'PY'
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+needle = "// No build information available"
+text = path.read_text(encoding="utf-8")
+if needle not in text:
+    raise SystemExit(f"{path}: placeholder {needle!r} not found")
+path.write_text(text.replace(needle, os.environ["GIT_BUILD_INFO"], 1), encoding="utf-8")
+PY
 
 tar \
   --format=ustar \

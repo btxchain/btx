@@ -1,0 +1,12 @@
+{
+  "id": "negative-spent-input",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "base": "unsigned-package.json",
+  "mutation": "spend_already_spent_prevout",
+  "status": "SPENT",
+  "txid": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+  "vout": 0,
+  "rpc": ["getdepositstatus", "testmempoolaccept"],
+  "note": "ValidateStructure cannot see the UTXO set: a structurally valid BTXPSBT that spends an already-spent prevout still decodes. Rejection is mempool/wallet: getdepositstatus reports SPENT; testmempoolaccept fails with missing inputs. Native tests mark the derivation.json prevout spent before applying this mutation."
+}

@@ -7,6 +7,7 @@
 #include <common/netif.h>
 #include <common/pcp.h>
 #include <netaddress.h>
+#include <netbase.h>
 #include <random.h>
 #include <util/threadinterrupt.h>
 
@@ -24,6 +25,7 @@ namespace {
 const uint16_t kForbidden[] = {
     8332, 18332, 18443, 18444, 28332, 28333, 8333, 18333, 38332, 38333,
     18766, 18445, 8334, 28334,
+    19334, 19335, 19443, 19444,
 };
 
 bool ParseHostPort(const std::string& in, std::string& host, uint16_t& port)
@@ -77,6 +79,49 @@ bool IsForbiddenControlEndpoint(const std::string& endpoint, std::string& err)
         endpoint.find("wallet") != std::string::npos ||
         endpoint.find(".cookie") != std::string::npos) {
         err = "wallet path";
+        return true;
+    }
+    return false;
+}
+
+bool IsForbiddenRelayAddr(const CNetAddr& addr)
+{
+    if (!addr.IsValid()) return false;
+    if (addr.IsLocal() || addr.IsInternal() || addr.IsBindAny()) return true;
+    if (addr.IsRFC1918() || addr.IsRFC2544() || addr.IsRFC3927() || addr.IsRFC4193() ||
+        addr.IsRFC6598()) {
+        return true;
+    }
+    return false;
+}
+
+bool IsForbiddenOutboundDialAddr(const CNetAddr& addr)
+{
+    if (!addr.IsValid()) return false;
+    if (addr.IsLocal() || addr.IsInternal() || addr.IsBindAny()) return true;
+    if (addr.IsRFC2544() || addr.IsRFC3927() || addr.IsRFC4193() || addr.IsRFC4862() ||
+        addr.IsRFC6598()) {
+        return true;
+    }
+    return false;
+}
+
+bool IsForbiddenRelayEndpoint(const std::string& endpoint, std::string& err)
+{
+    if (IsForbiddenControlEndpoint(endpoint, err)) return true;
+    std::string host;
+    uint16_t port = 0;
+    if (!ParseHostPort(endpoint, host, port)) {
+        err = "bad endpoint";
+        return true;
+    }
+    const CService numeric = LookupNumeric(host, port);
+    if (!numeric.IsValid()) {
+        err = "endpoint must be numeric host:port";
+        return true;
+    }
+    if (IsForbiddenRelayAddr(numeric)) {
+        err = "non-public relay target";
         return true;
     }
     return false;
@@ -207,7 +252,11 @@ bool ValidateRelayConnect(const RelayConnectRequest& req, bool relay_enabled, st
         err = "relay disabled";
         return false;
     }
-    if (IsForbiddenControlEndpoint(req.endpoint, err)) return false;
+    if (req.reservation_id.empty()) {
+        err = "reservation required";
+        return false;
+    }
+    if (IsForbiddenRelayEndpoint(req.endpoint, err)) return false;
     if (!req.expected_service_id.empty() && !req.presented_service_id.empty() &&
         req.expected_service_id != req.presented_service_id) {
         err = "identity mismatch";

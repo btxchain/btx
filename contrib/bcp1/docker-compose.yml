@@ -1,0 +1,163 @@
+# BCP/1 isolated certification sidecars.
+#
+# Never CUDA, modeld, GUI, or production ports 18443/18444.
+# Never /var/lib/btxd. Loopback binds only.
+#
+# Canonical isolated-regtest btxd is started by run-certification.sh
+# (test/functional/feature_bcp1.py, ephemeral ports, timeout-factor=1).
+#
+#   docker compose -f contrib/bcp1/docker-compose.yml up cert-runner
+#
+# cert-runner mounts the repo and runs ./run-certification, which prints
+# === BCP/1 PASS rows === (PASS/FAIL per case) and N/13 PASS. Requires a
+# host-built monetary-only btxd (BTXD=...) or test/config.ini — no CUDA image.
+#
+# Sidecars only (no cert): mock-signer + webhook on loopback.
+#
+# Optional long-running monetary node (host binary bind-mount, no image build):
+#   BTXD_BIN=/path/to/btxd BTXCLI_BIN=/path/to/btx-cli \
+#     docker compose -f contrib/bcp1/docker-compose.yml --profile node up
+
+name: bcp1-cert
+
+networks:
+  bcp1:
+    driver: bridge
+
+volumes:
+  bcp1-regtest-data:
+
+services:
+  mock-signer:
+    image: python:3.12-slim-bookworm
+    restart: "no"
+    init: true
+    working_dir: /opt/bcp1
+    command: ["python3", "/opt/bcp1/mock_signer.py", "--http", "0.0.0.0:18781"]
+    volumes:
+      - ./mock_signer.py:/opt/bcp1/mock_signer.py:ro
+    ports:
+      - "127.0.0.1:18781:18781"
+    networks: [bcp1]
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+
+  webhook:
+    image: python:3.12-slim-bookworm
+    restart: "no"
+    init: true
+    working_dir: /opt/bcp1
+    command: ["python3", "/opt/bcp1/mock_signer.py", "--webhook", "0.0.0.0:18782"]
+    volumes:
+      - ./mock_signer.py:/opt/bcp1/mock_signer.py:ro
+    ports:
+      - "127.0.0.1:18782:18782"
+    networks: [bcp1]
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+
+  # Host monetary-only btxd. Does not pull CUDA, modeld, or GUI.
+  # Isolated RPC/P2P (39443/39444) — not 18443/18444, not 19334/19335.
+  btxd:
+    profiles: ["node"]
+    image: python:3.12-slim-bookworm
+    restart: "no"
+    init: true
+    user: "1000:1000"
+    working_dir: /bcp1/data
+    command:
+      - python3
+      - -c
+      - |
+        import os, sys
+        binary = "/opt/btx/bin/btxd"
+        if not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+            sys.stderr.write("BCP/1: mount a monetary-only btxd at /opt/btx/bin/btxd (BTXD_BIN). No CUDA image.\n")
+            sys.exit(1)
+        os.execv(binary, [
+            binary,
+            "-regtest",
+            "-datadir=/bcp1/data",
+            "-server=1",
+            "-listen=1",
+            "-txindex=1",
+            "-exchange-watchonly=1",
+            "-modelnet=0",
+            "-nomodelnet",
+            "-port=39444",
+            "-rpcport=39443",
+            "-rpcbind=0.0.0.0",
+            "-rpcallowip=127.0.0.0/8",
+            "-rpcuser=bcp1",
+            "-rpcpassword=bcp1cert",
+            "-fallbackfee=0.0002",
+            "-zmqpubsequence=tcp://0.0.0.0:39445",
+            "-zmqpubhashblock=tcp://0.0.0.0:39446",
+            "-zmqpubhashtx=tcp://0.0.0.0:39447",
+            "-signer=python3 /opt/bcp1/mock_signer.py",
+        ])
+    volumes:
+      - ${BTXD_BIN:-/dev/null}:/opt/btx/bin/btxd:ro
+      - ./mock_signer.py:/opt/bcp1/mock_signer.py:ro
+      - bcp1-regtest-data:/bcp1/data
+    ports:
+      - "127.0.0.1:39443:39443"
+      - "127.0.0.1:39444:39444"
+      - "127.0.0.1:39445:39445"
+    networks: [bcp1]
+    environment:
+      LD_LIBRARY_PATH: ${BCP1_LD_LIBRARY_PATH:-}
+    depends_on:
+      - mock-signer
+      - webhook
+
+  # Runs contrib/bcp1/run-certification.sh from a repo bind-mount.
+  # Documents the PASS row list; does not build btxd inside Docker (no CUDA).
+  # Never binds 18443/18444 or /var/lib/btxd.
+  cert-runner:
+    image: python:3.12-slim-bookworm
+    restart: "no"
+    init: true
+    working_dir: /work/contrib/bcp1
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        if [[ -x "${BTXD:-}" ]]; then
+          export BTXD
+        elif [[ -f /work/build-gcc13/bin/btxd ]]; then
+          export BTXD=/work/build-gcc13/bin/btxd
+        elif [[ -f /work/build/bin/btxd ]]; then
+          export BTXD=/work/build/bin/btxd
+        else
+          echo "BCP/1 cert-runner: set BTXD=/path/to/monetary-only btxd (-DWITH_MODELNET=OFF) or build under /work/build-gcc13" >&2
+          exit 1
+        fi
+        refuse=/var/lib/btxd
+        if [[ "${BTXD}" == "${refuse}"* ]]; then
+          echo "BCP/1 cert-runner: refusing production datadir binary path" >&2
+          exit 1
+        fi
+        exec bash ./run-certification.sh "$@"
+    volumes:
+      - ../..:/work:ro
+      - ./run-certification.sh:/work/contrib/bcp1/run-certification.sh:ro
+      - ./mock_signer.py:/work/contrib/bcp1/mock_signer.py:ro
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:exec
+    environment:
+      BTXD: ${BTXD:-}
+      BCP1_CONFIGFILE: ${BCP1_CONFIGFILE:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      - mock-signer
+      - webhook

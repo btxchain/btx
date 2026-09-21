@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "kind": "BOUNTY",
+  "uri": "btx://bounty/111111111111111111111111111111111111111111111111",
+  "copy_text": "demo bounty",
+  "automatic_spend_atoms": 0
+}

@@ -116,13 +116,15 @@ set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architec
 option(BTX_CUDA_SM120_MXFP4_NATIVE
   "Native block-scaled MXFP4 MMA sm_120a object TU (default-on in CUDA builds; the configure probe below auto-disables it if the toolkit cannot assemble compute_120a)"
   ${BTX_ENABLE_CUDA_EXPERIMENTAL})
-# Optional SM100 / B200 native packaging probe (Agent E+I). Default OFF.
-# The configure probe is intentionally fail-closed without B200 evidence —
-# enabling this option FATAL_ERRORs until a real sm_100 MX probe lands.
-# Independent of BTX_CUDA_SM120_MXFP4_NATIVE (SM120 packaging preserved).
+# Optional SM100 / B200 native packaging (Agent E+I). Default OFF so a plain
+# CUDA consumer build (CUDA 12.8+ / sm_120) does not link the datacenter
+# sm_100a object. Pass -DBTX_CUDA_SM100_NATIVE=ON to request it; the
+# configure probe below still auto-disables if this toolkit cannot assemble
+# compute_100a. Independent of BTX_CUDA_SM120_MXFP4_NATIVE (SM120 packaging
+# preserved).
 option(BTX_CUDA_SM100_NATIVE
-  "Native SM100/B200 tcgen05 MXFP4 path (default-on in CUDA builds; the configure probe below auto-disables it if the toolkit cannot assemble compute_100a — fail-closed)"
-  ${BTX_ENABLE_CUDA_EXPERIMENTAL})
+  "Native SM100/B200 tcgen05 MXFP4 path (default OFF; pass -DBTX_CUDA_SM100_NATIVE=ON to request. The configure probe below auto-disables it if the toolkit cannot assemble compute_100a — fail-closed)"
+  OFF)
 # Cloud TPU is served through a separately built, version-pinned PJRT/libtpu
 # bridge that registers the narrow provider ABI in src/tpu. The core never
 # links OpenXLA directly. OFF keeps registration and all launches fail-closed.
@@ -204,17 +206,19 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     endif()
   endif()
   # SM100 / B200: real sm_100a tcgen05 configure probe (cmake/BTXCudaSm100.cmake).
-  # Independent of SM120 packaging above (separate ISA / separate latch). Still
-  # fail-closed: a toolkit that cannot assemble the tcgen05 block-scale snippet
-  # under compute_100a FATAL_ERRORs, and even a passing probe only compiles the
-  # object IN — the runtime backend stays fail-closed until the bit-exact self-qual
-  # suite passes on real B200 silicon (SelectedBackend==SM100_MMA).
+  # Independent of SM120 packaging above (separate ISA / separate latch).
+  # Default OFF: this block runs only when the caller passes
+  # -DBTX_CUDA_SM100_NATIVE=ON. A toolkit that cannot assemble the tcgen05
+  # block-scale snippet under compute_100a auto-disables the option (does not
+  # break the rest of the CUDA build). A passing probe only compiles the
+  # object IN — the runtime backend stays fail-closed until the bit-exact
+  # self-qual suite passes on real B200 silicon (SelectedBackend==SM100_MMA).
   if(BTX_CUDA_SM100_NATIVE)
     btx_cuda_probe_sm100_native(BTX_CUDA_SM100_NATIVE_PROBE_OK)
     if(NOT BTX_CUDA_SM100_NATIVE_PROBE_OK)
-      # Default-on in CUDA builds: a toolkit without sm_100a tcgen05 support must
-      # NOT break the build — disable the native object and fall back to the
-      # SM100_CUBLASLT latch / exact INT8 path (both still mine).
+      # Explicit -DBTX_CUDA_SM100_NATIVE=ON, but this toolkit cannot assemble
+      # sm_100a tcgen05: do not break the build — disable the native object
+      # and fall back to the SM100_CUBLASLT latch / exact INT8 path (both still mine).
       unset(BTX_CUDA_SM100_NATIVE CACHE)
       set(BTX_CUDA_SM100_NATIVE OFF)
       message(WARNING
@@ -1715,27 +1719,27 @@ target_link_libraries(bitcoin_common PUBLIC btx_matmul_backend)
 
 include(InstallBinaryComponent)
 
-# Build canonical BTX binary names while keeping legacy bitcoin-* command aliases.
+# bitcoin-* / bitcoind names in CMAKE_INSTALL_PREFIX collide with Bitcoin Core.
+# Keep them off unless an operator explicitly opts in. Even then, never delete a
+# real bitcoind; only replace a missing path or a symlink to a BTX binary.
+option(BTX_INSTALL_BITCOIN_ALIASES
+  "Install bitcoin-* / bitcoind name aliases into CMAKE_INSTALL_PREFIX (default OFF). UNIX install still refuses to replace a regular file."
+  OFF)
+if(BTX_INSTALL_BITCOIN_ALIASES)
+  message(STATUS "BTX_INSTALL_BITCOIN_ALIASES=ON: UNIX bitcoin-* install symlinks are enabled (never replacing a real bitcoind)")
+endif()
+
+# Build-tree aliases for canonical BTX binaries. Install of bitcoin-* names is
+# gated by BTX_INSTALL_BITCOIN_ALIASES (default OFF).
 function(add_legacy_binary_alias target_name legacy_binary)
   get_target_property(canonical_binary ${target_name} OUTPUT_NAME)
   if(NOT canonical_binary)
     set(canonical_binary ${target_name})
   endif()
 
-  if(WIN32)
-    add_custom_command(
-      TARGET ${target_name} POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:${target_name}>
-        $<TARGET_FILE_DIR:${target_name}>/${legacy_binary}${CMAKE_EXECUTABLE_SUFFIX}
-      VERBATIM
-    )
-    install(FILES $<TARGET_FILE:${target_name}>
-      DESTINATION ${CMAKE_INSTALL_BINDIR}
-      RENAME ${legacy_binary}${CMAKE_EXECUTABLE_SUFFIX}
-      COMPONENT ${target_name}
-    )
-  else()
+  # UNIX build-tree symlink only (does not touch CMAKE_INSTALL_PREFIX).
+  # Windows POST_BUILD copy to bitcoind.exe is skipped: that name belongs to Core.
+  if(NOT WIN32)
     add_custom_command(
       TARGET ${target_name} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E rm -f
@@ -1745,11 +1749,46 @@ function(add_legacy_binary_alias target_name legacy_binary)
         $<TARGET_FILE_DIR:${target_name}>/${legacy_binary}
       VERBATIM
     )
-    install(CODE
-      "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E rm -f \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/${legacy_binary}\")\n"
-      "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink \"${canonical_binary}\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/${legacy_binary}\")\n"
-    )
   endif()
+
+  if(NOT BTX_INSTALL_BITCOIN_ALIASES)
+    return()
+  endif()
+
+  if(WIN32)
+    message(STATUS
+      "BTX_INSTALL_BITCOIN_ALIASES=ON does not install ${legacy_binary}${CMAKE_EXECUTABLE_SUFFIX} on Windows (would replace Bitcoin Core).")
+    return()
+  endif()
+
+  # UNIX install: never rm a regular file named bitcoind / bitcoin-*.
+  # Replace only if the path is missing or is already a symlink to a BTX binary.
+  install(CODE "
+    set(_alias \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/${legacy_binary}\")
+    set(_canonical \"${canonical_binary}\")
+    set(_replace TRUE)
+    if(IS_SYMLINK \"\${_alias}\")
+      file(READ_SYMLINK \"\${_alias}\" _target)
+      cmake_path(GET _target FILENAME _target_name)
+      set(_btx_names
+        btxd btx-cli btx-tx btx-util btx-wallet btx-node
+        btx-gui btx-qt test_btx bench_btx)
+      list(FIND _btx_names \"\${_target_name}\" _idx)
+      if(_idx EQUAL -1 AND NOT _target_name MATCHES \"^btx\")
+        set(_replace FALSE)
+        message(WARNING
+          \"Not replacing \${_alias}: symlink target '\${_target}' is not a BTX binary\")
+      endif()
+    elseif(EXISTS \"\${_alias}\")
+      set(_replace FALSE)
+      message(WARNING
+        \"Not replacing \${_alias}: existing path is not a BTX symlink (refusing to delete a real ${legacy_binary})\")
+    endif()
+    if(_replace)
+      execute_process(COMMAND \"${CMAKE_COMMAND}\" -E rm -f \"\${_alias}\")
+      execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink \"\${_canonical}\" \"\${_alias}\")
+    endif()
+  ")
 endfunction()
 
 # Provide backward-compatible legacy CMake build targets.
@@ -2106,10 +2145,14 @@ if(BUILD_CLI)
   target_link_libraries(btx-cli
     core_interface
     bitcoin_cli
-    bitcoin_common
     libevent::core
     libevent::extra
   )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(btx-cli ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(btx-cli bitcoin_common bitcoin_shielded)
+  endif()
   install_binary_component(btx-cli HAS_MANPAGE)
   add_legacy_binary_alias(btx-cli bitcoin-cli)
   add_legacy_target_alias(bitcoin-cli btx-cli)

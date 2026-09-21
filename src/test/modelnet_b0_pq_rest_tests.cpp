@@ -130,6 +130,13 @@ BOOST_AUTO_TEST_CASE(pq_18_missing_pq_fail_closed)
     n.sigalg = "ed25519";
     n.ok = true;
     BOOST_CHECK(!modelnet::IsStrictPq1(n));
+    n.tls_version = "TLSv1.3";
+    n.group = "MLKEM768";
+    n.ciphersuite = "TLS_AES_256_GCM_SHA384";
+    n.sigalg.clear();
+    BOOST_CHECK(!modelnet::IsStrictPq1(n));
+    n.sigalg = "mldsa44";
+    BOOST_CHECK(modelnet::IsStrictPq1(n));
     const UniValue caps = modelnet::CapabilitiesObject();
     BOOST_CHECK_EQUAL(caps["pq1_http"].get_bool(), true);
 }

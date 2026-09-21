@@ -901,7 +901,7 @@ static bool IsWitnessStandardImpl(const CTransaction& tx, const CCoinsViewCache&
                 out_reason = reason_prefix + "p2mr-control-size";
                 return false;
             }
-            if ((control_block[0] & P2MR_LEAF_MASK) != P2MR_LEAF_VERSION) {
+            if (control_block[0] != P2MR_LEAF_VERSION) {
                 out_reason = reason_prefix + "p2mr-leaf-version";
                 return false;
             }

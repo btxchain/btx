@@ -881,16 +881,19 @@ BOOST_AUTO_TEST_CASE(p2mr_witness_rejects_bad_leaf_version)
 
     const auto witness = BuildSignedSingleLeafP2MRWitness(tx_spend, tx_credit.vout.at(0), spend_key, leaf_script);
     BOOST_REQUIRE(witness.has_value());
-    tx_spend.vin.at(0).scriptWitness = *witness;
-    tx_spend.vin.at(0).scriptWitness.stack.back().front() = 0xc0;
 
     CCoinsView coins_view;
     CCoinsViewCache coins_cache(&coins_view);
     AddCoins(coins_cache, CTransaction{tx_credit}, /*nHeight=*/0);
 
-    std::string reason;
-    BOOST_CHECK(!IsWitnessStandard(CTransaction{tx_spend}, coins_cache, "", reason));
-    BOOST_CHECK_EQUAL(reason, "p2mr-leaf-version");
+    for (const uint8_t bad_version : {uint8_t{0xc0}, uint8_t{0xc3}}) {
+        tx_spend.vin.at(0).scriptWitness = *witness;
+        tx_spend.vin.at(0).scriptWitness.stack.back().front() = bad_version;
+
+        std::string reason;
+        BOOST_CHECK(!IsWitnessStandard(CTransaction{tx_spend}, coins_cache, "", reason));
+        BOOST_CHECK_EQUAL(reason, "p2mr-leaf-version");
+    }
 }
 
 BOOST_AUTO_TEST_CASE(p2mr_transaction_accepted_by_mempool)

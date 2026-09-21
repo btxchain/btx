@@ -77,7 +77,7 @@ bool ParseProviderHint(const UniValue& obj, int64_t now_ms, int64_t ttl_ms, Prov
 
 bool IsForbiddenPexEndpoint(const std::string& endpoint, std::string& err)
 {
-    return IsForbiddenControlEndpoint(endpoint, err);
+    return IsForbiddenRelayEndpoint(endpoint, err);
 }
 
 bool ProviderExchange::Ingest(const std::string& from_endpoint,
@@ -98,16 +98,20 @@ bool ProviderExchange::Ingest(const std::string& from_endpoint,
         ++m_stats.rejected;
         return false;
     }
-    auto& times = m_peer_times[from_endpoint];
-    times.erase(std::remove_if(times.begin(), times.end(),
-                                 [&](int64_t t) { return now_ms - t > 60000; }),
-                times.end());
-    if (static_cast<int>(times.size()) >= m_limits.max_per_peer_per_minute) {
-        err = "pex rate limited";
-        ++m_stats.rejected;
-        return false;
+    auto tit = m_peer_times.find(from_endpoint);
+    if (tit != m_peer_times.end()) {
+        tit->second.erase(std::remove_if(tit->second.begin(), tit->second.end(),
+                                         [&](int64_t t) { return now_ms - t > 60000; }),
+                          tit->second.end());
+        if (tit->second.empty()) {
+            m_peer_times.erase(tit);
+        } else if (static_cast<int>(tit->second.size()) >= m_limits.max_per_peer_per_minute) {
+            err = "pex rate limited";
+            ++m_stats.rejected;
+            return false;
+        }
     }
-    times.push_back(now_ms);
+    m_peer_times[from_endpoint].push_back(now_ms);
 
     UniValue recs = UniValue(UniValue::VARR);
     if (body.exists("providers") && body["providers"].isArray()) recs = body["providers"];

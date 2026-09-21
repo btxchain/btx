@@ -419,8 +419,15 @@ void ResourceGovernor::MaybeTransition(int64_t now_ms)
             // quiet: keep / gradually raise (already at auto_ceil)
         }
     }
-    if (!p.upload_auto && p.upload_max_bps > 0) auto_ceil = p.upload_max_bps;
-    if (p.upload_max_bps > 0) auto_ceil = std::min(auto_ceil, p.upload_max_bps);
+    // Operator/profile upload_max_bps may replace the auto ceiling, but must
+    // not restore a hard environmental stop (metered / OFF / battery floor).
+    if (!p.upload_auto && p.upload_max_bps > 0 && auto_ceil > 0) auto_ceil = p.upload_max_bps;
+    if (p.upload_max_bps > 0 && auto_ceil > 0) auto_ceil = std::min(auto_ceil, p.upload_max_bps);
+    if (m_mode == GovernorMode::OFF || m_user_pause) auto_ceil = 0;
+    if (s.metered && !p.background_on_metered) auto_ceil = 0;
+    if (!s.on_ac && !p.battery_background_allowed) {
+        auto_ceil = std::min(auto_ceil, p.background_upload_floor_bps);
+    }
     m_effective_upload_bps = auto_ceil;
 
     if (thermal_crit) m_preserve_reason = PauseReason::THERMAL_PRESSURE;
@@ -519,9 +526,13 @@ BackgroundPermit ResourceGovernor::Permit(GovernorJob job) const
 
 bool ResourceGovernor::MiningAllowed() const
 {
+    // OFF denies mining (and all other governed work). It is not an ungoverned
+    // mining mode and must stay false here.
     if (m_unavailable || m_mode == GovernorMode::OFF || !m_mining_consent) return false;
     if (m_user_pause || m_validation || m_foreground_ai) return false;
-    if (!m_have_sample) return true; // not armed: do not change existing miner behavior
+    // Unarmed AUTO/hysteresis must not fail-open. MaybeTransition already
+    // starts mining when auto-schedule is off (existing -gen miner). Returning
+    // true here let SolveMatMulV4RC's consent latch skip idle gating.
     return m_mining_active && m_intensity > 0;
 }
 

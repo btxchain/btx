@@ -8,8 +8,6 @@
 #include <hash.h>
 #include <key.h>
 #include <key_io.h>
-#include <outputtype.h>
-#include <pubkey.h>
 #include <script/interpreter.h>
 #include <streams.h>
 #include <uint256.h>
@@ -42,7 +40,8 @@ static constexpr unsigned int BIP322_REQUIRED_FLAGS =
 |   SCRIPT_VERIFY_P2SH
 |   SCRIPT_VERIFY_WITNESS
 |   SCRIPT_VERIFY_TAPROOT
-|   SCRIPT_VERIFY_MINIMALIF;
+|   SCRIPT_VERIFY_MINIMALIF
+|   SCRIPT_VERIFY_REJECT_LEGACY_SIGS;
 
 static constexpr unsigned int BIP322_INCONCLUSIVE_FLAGS =
     SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS
@@ -103,42 +102,17 @@ MessageVerificationResult MessageVerify(
         return MessageVerificationResult::ERR_INVALID_ADDRESS;
     }
 
-    OutputType signed_for_outputtype;
-    if (std::holds_alternative<PKHash>(destination)) {
-        signed_for_outputtype = OutputType::LEGACY;
-    } else if (std::holds_alternative<ScriptHash>(destination)) {
-        signed_for_outputtype = OutputType::P2SH_SEGWIT;
-    } else if (std::holds_alternative<WitnessV0KeyHash>(destination)) {
-        signed_for_outputtype = OutputType::BECH32;
-    } else {
-        return MessageVerifyBIP322(destination, *signature_bytes, message, MessageVerificationResult::ERR_ADDRESS_NO_KEY);
+    // BTX is post-quantum only. Compact ECDSA and BIP322 wrapping of
+    // secp256k1 P2PKH / P2SH / P2WPKH / P2WSH / P2TR are not accepted.
+    if (std::holds_alternative<PKHash>(destination) ||
+        std::holds_alternative<ScriptHash>(destination) ||
+        std::holds_alternative<WitnessV0KeyHash>(destination) ||
+        std::holds_alternative<WitnessV0ScriptHash>(destination) ||
+        std::holds_alternative<WitnessV1Taproot>(destination)) {
+        return MessageVerificationResult::ERR_NOT_SIGNED;
     }
 
-    uint8_t sigtype{(*signature_bytes)[0]};
-    if (sigtype < 27 || sigtype > 42) {
-        return MessageVerifyBIP322(destination, *signature_bytes, message, MessageVerificationResult::ERR_MALFORMED_SIGNATURE);
-    }
-    sigtype = (sigtype - 27) >> 2;
-    if (sigtype == 3) {
-        (*signature_bytes)[0] -= 8;
-        signed_for_outputtype = OutputType::BECH32;
-    } else if (sigtype == 2) {
-        (*signature_bytes)[0] -= 4;
-        signed_for_outputtype = OutputType::P2SH_SEGWIT;
-    }
-
-    CPubKey pubkey;
-    if (!pubkey.RecoverCompact(MessageHash(message, MessageSignatureFormat::LEGACY), *signature_bytes)) {
-        return MessageVerifyBIP322(destination, *signature_bytes, message, MessageVerificationResult::ERR_PUBKEY_NOT_RECOVERED);
-    }
-
-    CTxDestination recovered_dest = GetDestinationForKey(pubkey, signed_for_outputtype);
-
-    if (!(recovered_dest == destination)) {
-        return MessageVerifyBIP322(destination, *signature_bytes, message, MessageVerificationResult::ERR_NOT_SIGNED);
-    }
-
-    return MessageVerificationResult::OK;
+    return MessageVerifyBIP322(destination, *signature_bytes, message, MessageVerificationResult::ERR_ADDRESS_NO_KEY);
 }
 
 bool MessageSign(
@@ -146,15 +120,11 @@ bool MessageSign(
     const std::string& message,
     std::string& signature)
 {
-    std::vector<unsigned char> signature_bytes;
-
-    if (!privkey.SignCompact(MessageHash(message, MessageSignatureFormat::LEGACY), signature_bytes)) {
-        return false;
-    }
-
-    signature = EncodeBase64(signature_bytes);
-
-    return true;
+    // BTX does not produce classical secp256k1 compact message signatures.
+    (void)privkey;
+    (void)message;
+    signature.clear();
+    return false;
 }
 
 uint256 MessageHash(const std::string& message, MessageSignatureFormat format)

@@ -3,7 +3,14 @@
 export LC_ALL=C
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BIN="${BIN_DIR:-${BIN:-$ROOT/build-gcc13/bin}}"
+# Inherited BIN may be a binary (btx-hcpd). Only honor a directory that contains btxd.
+if [[ -n "${BIN:-}" && -d "${BIN}" && -x "${BIN}/btxd" ]]; then
+  :
+elif [[ -n "${BIN_DIR:-}" && -d "${BIN_DIR}" && -x "${BIN_DIR}/btxd" ]]; then
+  BIN="$BIN_DIR"
+else
+  BIN="$ROOT/build-gcc13/bin"
+fi
 MODELD="${MODELD:-$BIN/btx-modeld}"
 TEST_BTX="${TEST_BTX:-$BIN/test_btx}"
 BTXD="${BTXD:-$BIN/btxd}"
@@ -11,6 +18,8 @@ CLI="${CLI:-$BIN/btx-cli}"
 WORKDIR="$ROOT/e2e-scratch/bounty-all-$$"
 HELPER_PID=""
 BTXD_PID=""
+# Dedicated ports: never share 18443/18444 with the lab /var/lib/btxd node.
+RPCPORT=37943
 failn=0
 passn=0
 
@@ -27,7 +36,7 @@ cleanup() {
     done
   fi
   if [[ -n "${BTXD_PID}" ]] && kill -0 "$BTXD_PID" 2>/dev/null; then
-    "$CLI" -regtest -datadir="$WORKDIR/node" -rpcuser=u -rpcpassword=p stop >/dev/null 2>&1 || true
+    "$CLI" -regtest -datadir="$WORKDIR/node" -rpcuser=u -rpcpassword=p -rpcport="$RPCPORT" stop >/dev/null 2>&1 || true
     for _ in $(seq 1 40); do
       kill -0 "$BTXD_PID" 2>/dev/null || break
       sleep 0.1
@@ -42,6 +51,8 @@ trap cleanup EXIT
 
 [[ -x "$MODELD" ]] || die "missing $MODELD"
 [[ -x "$TEST_BTX" ]] || die "missing $TEST_BTX"
+[[ -x "$BTXD" ]] || die "missing executable $BTXD (BIN=$BIN)"
+[[ -x "$CLI" ]] || die "missing executable $CLI (BIN=$BIN)"
 
 # I — GUI source (no terminal required for the contract)
 "$ROOT/contrib/modelnet/e2e-bounty-gui-gates.sh" || die "GUI gates"
@@ -162,8 +173,8 @@ got = rpc("getbounty", [bounty_id])
 if got.get("object_kind") != "BOUNTY":
     raise SystemExit(got)
 econ = rpc("getbountyeconomy", [bounty_id])
-if econ.get("pledged_atoms") in (None,):
-    pass
+if econ.get("pledged_atoms") in (None, ""):
+    raise SystemExit(f"pledged_atoms missing: {econ}")
 # A — discover by description
 print("A-discover-ok", bounty_id)
 
@@ -175,7 +186,11 @@ print("D-no-auto-award")
 
 # F — freeze before broadcast (no chain)
 frozen = rpc("freezebountyfundinground", [{"bounty_id": bounty_id, "lots": [{"ordinal": 0, "principal_atoms": "1000000"}]}])
-print("F-freeze", frozen.get("round_id") or frozen.get("frozen") or True)
+if not frozen.get("round_id"):
+    raise SystemExit(f"F-freeze missing round_id: {frozen}")
+if frozen.get("mutable_outputs") is not False:
+    raise SystemExit(f"F-freeze outputs still mutable: {frozen}")
+print("F-freeze", frozen.get("round_id"))
 
 # G — mandate budget / refund swap
 man = rpc("createagentmandate", [{
@@ -198,12 +213,13 @@ except RuntimeError:
     pass
 print("G-mandate")
 
-# C — staged lineage advertised
-if "htlc_sha256" not in json.dumps(caps):
-    # capabilities script_profile must mention both trees
-    if "htlc" not in str(caps.get("script_profile", "")).lower() and "htlc_sha256" not in str(caps):
-        if "refund" not in str(caps.get("script_profile", "")):
-            raise SystemExit(f"script profile: {caps}")
+# C — staged lineage advertised (both HTLC and refund trees)
+caps_blob = json.dumps(caps)
+profile = str(caps.get("script_profile", "")).lower()
+if "htlc_sha256" not in caps_blob and "htlc" not in profile:
+    raise SystemExit(f"script profile missing htlc tree: {caps}")
+if "refund" not in profile and "refund" not in caps_blob:
+    raise SystemExit(f"script profile missing refund tree: {caps}")
 print("C-script-profile")
 
 # E — reorg reverses chain facts
@@ -218,12 +234,12 @@ print("E-reorg")
 
 # B — recovery export contains no secrets; helper may later be offline
 rec = rpc("exportbountyrecovery", [{"bounty_id": bounty_id}])
-blob = json.dumps(rec)
-if "wallet_seed" in blob and rec.get("wallet_seed") not in (False, False):
-    if rec.get("wallet_seed") is True:
-        raise SystemExit(rec)
-if rec.get("private_keys") is True:
-    raise SystemExit(rec)
+if rec.get("wallet_seed") not in (None, False, "false", 0, ""):
+    raise SystemExit(f"recovery leaked wallet_seed: {rec}")
+if rec.get("private_keys") not in (None, False, "false", 0, "", []):
+    raise SystemExit(f"recovery leaked private_keys: {rec}")
+if rec.get("secrets") not in (None, False, "false", 0, ""):
+    raise SystemExit(f"recovery leaked secrets: {rec}")
 print("B-recovery")
 
 # J — bounded page / no flood
@@ -238,9 +254,6 @@ rpc("getmodelbounties", [{"text": "coding agents", "scope": "LOCAL"}])
 net = rpc("searchbounties", [{"text": "coding agents", "scope": "NETWORK"}])
 if net.get("complete") is True or net.get("global_complete") is True:
     raise SystemExit(f"NETWORK claimed complete: {net}")
-if not net.get("fanout_attempted") and net.get("scope") not in ("NETWORK", "network"):
-    # store path may omit fanout_attempted when called only via helper
-    pass
 if "index_peers_configured" not in net and "fanout_attempted" not in net:
     raise SystemExit(f"NETWORK search did not attempt fanout: {net}")
 
@@ -316,52 +329,61 @@ PY
 ok A-H-helper
 
 # Live-path wallet RPC inventory via isolated regtest btxd (never production).
-if [[ -x "$BTXD" && -x "$CLI" ]]; then
-  RPCPORT=$((21000 + $$ % 20000))
-  mkdir -p "$WORKDIR/node"
-  "$BTXD" -regtest -datadir="$WORKDIR/node" -listen=0 -server=1 -nomodelnet \
-    -rpcuser=u -rpcpassword=p -rpcport="$RPCPORT" -fallbackfee=0.0001 -daemon=0 \
-    >"$WORKDIR/btxd.log" 2>&1 &
-  BTXD_PID=$!
-  ready=0
-  for _ in $(seq 1 80); do
-    if "$CLI" -regtest -datadir="$WORKDIR/node" -rpcuser=u -rpcpassword=p -rpcport="$RPCPORT" getblockchaininfo >/dev/null 2>&1; then
-      ready=1
-      break
-    fi
-    sleep 0.1
-  done
-  [[ "$ready" = 1 ]] || die "isolated btxd rpc not ready (see $WORKDIR/btxd.log)"
-  for rpcname in preparebountyfunding inspectbountytransaction signbountyfunding submitbountyfunding \
-                 inspectbountyaward signbountyaward submitbountyaward preparebountyclaim signbountyclaim \
-                 submitbountyclaim preparebountyrefund signbountyrefund submitbountyrefund \
-                 searchbounties getbountycapabilities getmodelfeed; do
-    helpout="$("$CLI" -regtest -datadir="$WORKDIR/node" -rpcuser=u -rpcpassword=p -rpcport="$RPCPORT" help "$rpcname" 2>&1 || true)"
-    if echo "$helpout" | grep -qi 'unknown command\|not found'; then
-      die "RPC not registered: $rpcname ($helpout)"
-    fi
-  done
-  "$CLI" -regtest -datadir="$WORKDIR/node" -rpcuser=u -rpcpassword=p -rpcport="$RPCPORT" stop >/dev/null 2>&1 || true
-  for _ in $(seq 1 40); do
-    kill -0 "$BTXD_PID" 2>/dev/null || break
-    sleep 0.1
-  done
-  BTXD_PID=""
-  ok WALLET-rpc-help
-  BTX_BOUNTY_E2E_SCALE_CAP="${BTX_BOUNTY_E2E_SCALE_CAP:-32}" \
-    BIN="$BIN" MODELD="$MODELD" python3 "$ROOT/contrib/modelnet/e2e-bounty-scenarios.py" \
-    || die "e2e-bounty-scenarios"
-  ok E2E-A-J-regtest
-else
-  die "missing isolated btxd/btx-cli"
-fi
+mkdir -p "$WORKDIR/node"
+"$BTXD" -regtest -datadir="$WORKDIR/node" -listen=0 -server=1 -nomodelnet \
+  -rpcuser=u -rpcpassword=p -rpcport="$RPCPORT" -fallbackfee=0.0001 -daemon=0 \
+  >"$WORKDIR/btxd.log" 2>&1 &
+BTXD_PID=$!
+ready=0
+for _ in $(seq 1 80); do
+  if "$CLI" -regtest -datadir="$WORKDIR/node" -rpcuser=u -rpcpassword=p -rpcport="$RPCPORT" getblockchaininfo >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 0.1
+done
+[[ "$ready" = 1 ]] || die "isolated btxd rpc not ready (see $WORKDIR/btxd.log)"
+for rpcname in preparebountyfunding inspectbountytransaction signbountyfunding submitbountyfunding \
+               inspectbountyaward signbountyaward submitbountyaward preparebountyclaim signbountyclaim \
+               submitbountyclaim preparebountyrefund signbountyrefund submitbountyrefund \
+               searchbounties getbountycapabilities getmodelfeed; do
+  helpout="$("$CLI" -regtest -datadir="$WORKDIR/node" -rpcuser=u -rpcpassword=p -rpcport="$RPCPORT" help "$rpcname" 2>&1)" \
+    || die "RPC help failed: $rpcname"
+  if echo "$helpout" | grep -qi 'unknown command\|not found\|method not found'; then
+    die "RPC not registered: $rpcname ($helpout)"
+  fi
+  echo "$helpout" | grep -Fq "$rpcname" || die "RPC help missing $rpcname ($helpout)"
+done
+"$CLI" -regtest -datadir="$WORKDIR/node" -rpcuser=u -rpcpassword=p -rpcport="$RPCPORT" stop >/dev/null 2>&1 || true
+for _ in $(seq 1 40); do
+  kill -0 "$BTXD_PID" 2>/dev/null || break
+  sleep 0.1
+done
+BTXD_PID=""
+ok WALLET-rpc-help
+BTX_BOUNTY_E2E_SCALE_CAP="${BTX_BOUNTY_E2E_SCALE_CAP:-32}" \
+  BIN="$BIN" MODELD="$MODELD" python3 "$ROOT/contrib/modelnet/e2e-bounty-scenarios.py" \
+  || die "e2e-bounty-scenarios"
+ok E2E-A-J-regtest
 
-# HTTP bridge 403 on wallet/eval/mandate (H)
-python3 - <<'PY'
+# HTTP bridge 403 on wallet/eval/mandate (H) — native HandleBridgeRequest 403s must exist
+python3 - "$ROOT/src/test/modelnet_bounty_tests.cpp" <<'PY'
 from pathlib import Path
 import sys
-sys.path.insert(0, str(Path(r"""$ROOT""") / "contrib/modelnet"))
-print("bridge-403 covered in modelnet_bounty_tests HandleBridgeRequest")
+text = Path(sys.argv[1]).read_text()
+need = (
+    ("/signbountyfunding", "403"),
+    ("/api/v1/runbountyevaluation", "403"),
+    ("/createagentmandate", "403"),
+)
+for path, status in need:
+    i = text.find(f'HandleBridgeRequest("GET", "{path}"')
+    if i < 0:
+        raise SystemExit(f"missing HandleBridgeRequest GET {path}")
+    window = text[i:i + 280]
+    if status not in window:
+        raise SystemExit(f"{path} missing {status}: {window}")
+print("H-bridge-unit source 403s present")
 PY
 ok H-bridge-unit
 
@@ -374,9 +396,7 @@ grep -n 'helper cannot supply amount' "$ROOT/src/wallet/model_funding.cpp" >/dev
 ok B-refund-source
 
 # J soak: helper still alive, no /tmp leak of this run
-if [[ -d /tmp/test_runner_* ]]; then
-  echo "note: leftover test_runner (not from this script)"
-fi
+[[ -n "${HELPER_PID}" ]] && kill -0 "$HELPER_PID" 2>/dev/null || die "helper died before J-resource"
 ok J-resource
 
 if [[ "$failn" -ne 0 ]]; then

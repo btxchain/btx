@@ -10,6 +10,7 @@
 #include <modelnet/auto_storage.h>
 #include <modelnet/catalog.h>
 #include <modelnet/helper.h>
+#include <modelnet/hcp.h>
 #include <modelnet/piece_ranges.h>
 #include <modelnet/policy.h>
 #include <modelnet/store.h>
@@ -388,7 +389,11 @@ BOOST_AUTO_TEST_CASE(grow_auto_cap_message)
 BOOST_AUTO_TEST_CASE(start_12_with_modelnet_on)
 {
 #ifdef ENABLE_MODELNET
-    BOOST_CHECK(true);
+    BOOST_CHECK(modelnet::IsHcpHelperMethod("hcphealth"));
+    BOOST_CHECK(modelnet::IsHcpHelperMethod("gethcpreadiness"));
+    BOOST_CHECK(modelnet::IsHcpHelperMethod("sethcpreporting"));
+    BOOST_CHECK(!modelnet::IsHcpHelperMethod("dumpprivkey"));
+    BOOST_CHECK(!modelnet::IsHcpHelperMethod("sendtoaddress"));
 #else
     BOOST_FAIL("this binary was not built WITH_MODELNET");
 #endif

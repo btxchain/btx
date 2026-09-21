@@ -1,0 +1,36 @@
+{
+  "object_type": "FundingQuote",
+  "body": {
+    "version": 1,
+    "provider_id": "provider-demo",
+    "account_ref": "account-demo",
+    "network": {
+      "environment": "REGTEST",
+      "genesis_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "quote_id": "quote-demo",
+    "quote_kind": "FIRM",
+    "action": "FUND_RELEASE",
+    "target_object_id": "444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+    "terms_id": "555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+    "native_template_id": "666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666",
+    "round_id": null,
+    "lot_id": null,
+    "amounts": {
+      "principal_atoms": "1000",
+      "network_fee_cap_atoms": "30",
+      "service_fee_atoms": "20",
+      "tax_atoms": "0",
+      "max_total_debit_atoms": "1050"
+    },
+    "refund_controller": "CEX_CUSTODIAL_KEY",
+    "required_confirmations": 6,
+    "issued_at_ms": "1790000000000",
+    "expires_at_ms": "1790000600000",
+    "conversion_quote_ref": null,
+    "conversion_quote": null
+  },
+  "body_id": "218705dd2e377b731b199b9bb12dbe337538baf70edd5a1f4ae20e92f2c046a877d94043b10b95b0f9d0538707e1ff15",
+  "signer_key_id": "unsigned-demo",
+  "signature": null
+}

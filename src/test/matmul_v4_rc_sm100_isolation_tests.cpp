@@ -61,7 +61,8 @@ static_assert(std::numeric_limits<int32_t>::max() == 2147483647);
 
 BOOST_AUTO_TEST_CASE(rc_sm100_native_probe_fail_closed_without_b200)
 {
-    // Packaging probe stub: always false in this tree (no B200 evidence).
+    // Default packaging does not link the sm_100a object (opt-in via
+    // -DBTX_CUDA_SM100_NATIVE=ON). Consumer CUDA / sm_120 stays fail-closed.
     BOOST_CHECK(!matmul_v4::cuda::RcOzakiMxfp4Sm100NativeLinked());
 #if defined(BTX_CUDA_SM100_NATIVE)
     // If somehow defined, still must not imply SM120_MMA packaging alone.

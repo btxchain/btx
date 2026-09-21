@@ -41,6 +41,15 @@ UniValue TrustedSignerPubKeysJSON()
     return PubKeysJSON(node::matmul_trusted::TrustedSigners());
 }
 
+UniValue TrustedPqSignerPubKeysJSON()
+{
+    UniValue keys{UniValue::VARR};
+    for (const auto& pubkey : node::matmul_trusted::TrustedPqSigners()) {
+        keys.push_back(HexStr(pubkey));
+    }
+    return keys;
+}
+
 CPubKey ParseCompressedPubKeyHex(const std::string& encoded)
 {
     if (!IsHex(encoded)) {
@@ -139,15 +148,19 @@ RPCHelpMan getmatmultrustedstatus()
                 {RPCResult::Type::BOOL, "chain_oracle", "True only for consensus and trusted modes. False on a discovery relay."},
                 {RPCResult::Type::BOOL, "serves_attestations", ""},
                 {RPCResult::Type::BOOL, "local_signer", ""},
-                {RPCResult::Type::BOOL, "single_key_pin", "True when configured M<2 or N<2. On a trusted mirror this is ExactReplay-skip authority; on consensus+pin it is telemetry only."},
+                {RPCResult::Type::BOOL, "local_pq_signer", "True when this process holds an ML-DSA-44 ExactReplay signing key"},
+                {RPCResult::Type::BOOL, "single_key_pin", "True when configured M<2 or N<2. On a trusted mirror this is ExactReplay-skip authority; on consensus+pin it is telemetry only. N counts secp and ML-DSA-44 pin members independently."},
                 {RPCResult::Type::BOOL, "single_key_trusted_authority", "Trusted mirror whose quorum can skip ExactReplay with one key (N<2 or M<2)"},
                 {RPCResult::Type::BOOL, "collocated_signer_pin", "Local attestation WIF is also a pin member in a single-key or trusted-mirror topology (stolen keyfile amplifier)"},
                 {RPCResult::Type::NUM, "attestation_version", ""},
                 {RPCResult::Type::STR_HEX, "replay_authority_context", /*optional=*/true, "Versioned ExactReplay authority context for this configuration"},
                 {RPCResult::Type::NUM, "threshold", ""},
-                {RPCResult::Type::NUM, "trusted_signers", ""},
-                {RPCResult::Type::ARR, "trusted_signer_pubkeys", "Configured compressed secp256k1 pubkeys this node currently trusts (the pin). Always sufficient for quorum when M-of-N is met.",
+                {RPCResult::Type::NUM, "trusted_signers", "Configured compressed secp256k1 pin members"},
+                {RPCResult::Type::ARR, "trusted_signer_pubkeys", "Configured compressed secp256k1 pubkeys this node currently trusts (the secp pin). Combined with trusted_pq_signer_pubkeys for M-of-N.",
                     {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::NUM, "trusted_pq_signers", "Configured ML-DSA-44 pin members"},
+                {RPCResult::Type::ARR, "trusted_pq_signer_pubkeys", "Configured ML-DSA-44 public keys this node currently trusts. Counted in N independently of secp pin members.",
+                    {{RPCResult::Type::STR_HEX, "", "ML-DSA-44 pubkey hex"}}},
                 {RPCResult::Type::BOOL, "open_attestors", "Whether valid-unpinned attestations are heard and may be admitted after co-signing a pin-quorum hash"},
                 {RPCResult::Type::NUM, "open_threshold", "Distinct pinned-or-admitted unfrozen votes required for open quorum (0 when open attestors are disabled)"},
                 {RPCResult::Type::ARR, "admitted_open_pubkeys", "Open keys admitted locally after co-signing a pin-quorum hash",
@@ -216,7 +229,12 @@ RPCHelpMan getmatmultrustedstatus()
             result.pushKV(
                 "local_signer",
                 node::matmul_trusted::HasLocalSigner());
-            const size_t n_signers{node::matmul_trusted::TrustedSigners().size()};
+            result.pushKV(
+                "local_pq_signer",
+                node::matmul_trusted::HasLocalPqSigner());
+            const size_t n_signers{
+                node::matmul_trusted::TrustedSigners().size() +
+                node::matmul_trusted::TrustedPqSigners().size()};
             const size_t threshold{node::matmul_trusted::Threshold()};
             const bool trusted_mirror{node::matmul_trusted::IsTrustedMirror()};
             const bool configured{node::matmul_trusted::IsConfigured()};
@@ -256,6 +274,12 @@ RPCHelpMan getmatmultrustedstatus()
                 static_cast<uint64_t>(
                     node::matmul_trusted::TrustedSigners().size()));
             result.pushKV("trusted_signer_pubkeys", TrustedSignerPubKeysJSON());
+            result.pushKV(
+                "trusted_pq_signers",
+                static_cast<uint64_t>(
+                    node::matmul_trusted::TrustedPqSigners().size()));
+            result.pushKV("trusted_pq_signer_pubkeys",
+                          TrustedPqSignerPubKeysJSON());
             result.pushKV(
                 "open_attestors",
                 node::matmul_trusted::OpenAttestorsEnabled());
@@ -583,6 +607,8 @@ RPCHelpMan getmatmulattestors()
                 {RPCResult::Type::NUM, "open_threshold", ""},
                 {RPCResult::Type::ARR, "pinned_pubkeys", "Local -matmultrustedpubkey set",
                     {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "pinned_pq_pubkeys", "Local -matmultrustedpqpubkey set",
+                    {{RPCResult::Type::STR_HEX, "", "ML-DSA-44 pubkey hex"}}},
                 {RPCResult::Type::ARR, "admitted_open_pubkeys", "Admitted after co-signing a pin-quorum hash",
                     {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
                 {RPCResult::Type::ARR, "frozen_open_pubkeys", "Equivocating open keys",
@@ -610,6 +636,7 @@ RPCHelpMan getmatmulattestors()
                 "open_threshold",
                 static_cast<uint64_t>(node::matmul_trusted::OpenThreshold()));
             result.pushKV("pinned_pubkeys", TrustedSignerPubKeysJSON());
+            result.pushKV("pinned_pq_pubkeys", TrustedPqSignerPubKeysJSON());
             result.pushKV(
                 "admitted_open_pubkeys",
                 PubKeysJSON(node::matmul_trusted::AdmittedOpenSigners()));
@@ -827,8 +854,12 @@ RPCHelpMan getfinalityinfo()
                           kernel::MatMulModeIsChainAuthority(mode));
             result.pushKV("trusted_mirror", node::matmul_trusted::IsTrustedMirror());
             result.pushKV("trusted_signer_pubkeys", TrustedSignerPubKeysJSON());
+            result.pushKV("trusted_pq_signer_pubkeys",
+                          TrustedPqSignerPubKeysJSON());
             {
-                const size_t n_signers{node::matmul_trusted::TrustedSigners().size()};
+                const size_t n_signers{
+                    node::matmul_trusted::TrustedSigners().size() +
+                    node::matmul_trusted::TrustedPqSigners().size()};
                 const size_t threshold{node::matmul_trusted::Threshold()};
                 const bool trusted_mirror{node::matmul_trusted::IsTrustedMirror()};
                 const bool configured{node::matmul_trusted::IsConfigured()};

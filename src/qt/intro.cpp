@@ -21,6 +21,7 @@
 
 #include <QCheckBox>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QFileDialog>
@@ -140,11 +141,17 @@ Intro::Intro(QWidget *parent, int64_t blockchain_size_gb, int64_t chain_state_si
     ui->welcomeLabel->setText(ui->welcomeLabel->text().arg(CLIENT_NAME));
     ui->storageLabel->setText(ui->storageLabel->text().arg(CLIENT_NAME));
 
+    const auto chainparams = CreateChainParams(gArgs, gArgs.GetChainType());
+    // SMILE v2 genesis nTime 1773878400 is 2026-03-19 UTC, not Bitcoin 2009.
+    const int launch_year = chainparams
+        ? QDateTime::fromSecsSinceEpoch(static_cast<qint64>(chainparams->GenesisBlock().nTime)).toUTC().date().year()
+        : 2026;
+
     ui->lblExplanation1->setText(ui->lblExplanation1->text()
         .arg(CLIENT_NAME)
         .arg(m_blockchain_size_gb)
-        .arg(2009)
-        .arg(tr("Bitcoin"))
+        .arg(launch_year)
+        .arg(CLIENT_NAME)
     );
     ui->lblExplanation2->setText(ui->lblExplanation2->text().arg(CLIENT_NAME));
 
@@ -170,7 +177,7 @@ Intro::Intro(QWidget *parent, int64_t blockchain_size_gb, int64_t chain_state_si
     UpdatePruneLabels(ui->prune->checkState() == Qt::Checked);
 
     ui->modelStorageSpin->setRange(0, 1048576);
-    ui->modelStorageSpin->setValue(500);
+    ui->modelStorageSpin->setValue(0);
     ui->modelStorageUnit->setCurrentIndex(1); // GiB
     ui->modelNetParticipate->setChecked(true);
     ui->modelStorageAuto->setChecked(true);
@@ -226,7 +233,6 @@ Intro::Intro(QWidget *parent, int64_t blockchain_size_gb, int64_t chain_state_si
         }
     }
     if (!have_user_assumevalid) {
-        const auto chainparams = CreateChainParams(gArgs, gArgs.GetChainType());
         const uint256 default_assumevalid = chainparams ? chainparams->GetConsensus().defaultAssumeValid : uint256();
         if (default_assumevalid.IsNull()) {
             // no chainparams assumevalid (nor user-provided), so hide the options entirely
@@ -502,8 +508,8 @@ bool Intro::showIfNeeded(std::unique_ptr<Intro>& intro)
         settings.setValue("fReset", false);
     }
     /* Only override -datadir if different from the default, to make it possible to
-     * override -datadir in the bitcoin.conf file in the default data directory
-     * (to be consistent with bitcoind behavior)
+     * override -datadir in the btx.conf file in the default data directory
+     * (to be consistent with btxd behavior)
      */
     if(dataDir != GUIUtil::getDefaultDataDirectory()) {
         gArgs.SoftSetArg("-datadir", fs::PathToString(GUIUtil::QStringToPath(dataDir))); // use OS locale for path setting
@@ -625,14 +631,17 @@ void Intro::UpdatePruneLabels(bool prune_checked)
         storageRequiresMsg = tr("Approximately %1 GB of data will be stored in this directory.");
     }
     ui->pruneMiB->setEnabled(prune_checked);
-    static constexpr uint64_t nPowTargetSpacing = 10 * 60;  // from chainparams, which we don't have at this stage
+    const auto prune_params = CreateChainParams(gArgs, gArgs.GetChainType());
+    const uint64_t nPowTargetSpacing = prune_params
+        ? static_cast<uint64_t>(prune_params->GetConsensus().nPowTargetSpacing)
+        : 90;  // BTX mainnet/testnet spacing; never Bitcoin's 10 minutes
     static constexpr uint32_t expected_block_data_size = 2250000;  // includes undo data
     const uint64_t expected_backup_days = m_prune_target_mib * MiB_BYTES / (uint64_t(expected_block_data_size) * 86400 / nPowTargetSpacing);
     ui->lblPruneSuffix->setText(
         //: Explanatory text on the capability of the current prune target.
         tr("(sufficient to restore backups %n day(s) old)", "", expected_backup_days));
     ui->sizeWarningLabel->setText(
-        tr("%1 will download and store a copy of the Bitcoin block chain.").arg(CLIENT_NAME) + " " +
+        tr("%1 will download and store a copy of the %2 block chain.").arg(CLIENT_NAME).arg(CLIENT_NAME) + " " +
         storageRequiresMsg.arg(m_required_space_gb) + " " +
         tr("The wallet will also be stored in this directory.")
     );

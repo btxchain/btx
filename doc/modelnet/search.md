@@ -7,8 +7,13 @@ Every node, RPC response, and explorer page must treat results as a **current ne
 locally indexed records, configured index peers, and bounded peer replies. Nothing here implies a
 **global complete directory**.
 
-**Release posture:** `CLIENT_VERSION_IS_RELEASE` is `true` in this tree (0.34.7).
-Treat wire shapes as implemented in helper `DispatchHelperRpc`.
+**Release posture:** this tree is **0.34.8-dev**
+(`CLIENT_VERSION_IS_RELEASE=false`). Last shipping tag is **v0.34.7**.
+Search RPCs exist in this helper. Treat wire shapes as implemented in helper
+`DispatchHelperRpc`. MinIO / cloud storage RPCs also exist in 0.34.8-dev
+(`setcloudstorage` / `testcloudstorage` / `getcloudstorageinfo`); live R2
+WAN is **HONEST_NOT_RUN**. `IS_RELEASE=false` means this tree is not a
+shipping tag, not that those RPCs are absent.
 
 ## Four planes (do not conflate)
 

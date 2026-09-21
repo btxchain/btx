@@ -20,8 +20,10 @@ add_library(bitcoin_wallet STATIC EXCLUDE_FROM_ALL
   receive.cpp
   rpc/addresses.cpp
   rpc/backup.cpp
+  rpc/bcp1.cpp
   rpc/coins.cpp
   rpc/encrypt.cpp
+  rpc/labels.cpp
   rpc/signmessage.cpp
   rpc/spend.cpp
   rpc/sweep.cpp
@@ -40,6 +42,10 @@ add_library(bitcoin_wallet STATIC EXCLUDE_FROM_ALL
   wallet.cpp
   walletdb.cpp
   walletutil.cpp
+  bcp1_package.cpp
+  bcp1_deposit.cpp
+  bcp1_watchonly.cpp
+  signer_provider.cpp
 )
 target_link_libraries(bitcoin_wallet
   PUBLIC

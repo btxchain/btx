@@ -86,14 +86,17 @@ Perform proof of work on hex header string
 signupdatesig
 .IP
 Sign a release artifact with an OFFLINE post\-quantum release key. Args:
-<algo> <seed\-hex> <file> [out\-sig]. Writes a detached signature
-(default <file>.sig) that 'verifyupdatesig' and the node accept.
+<algo> <seed\-hex> <file> [out\-sig]. Writes a newline\-terminated
+lowercase hex detached signature (default <file>.sig) that
+'verifyupdatesig' and the node accept. Do not publish a raw 2420\-byte
+signature: deployed TrimAscii can collide with whitespace bytes.
 .IP
 verifyupdatesig
 .IP
 Verify a detached auto\-update release signature offline. Args: <algo>
-<pubkey\-hex> <file> <sig\-file>; algo is ml\-dsa\-44, slh\-dsa\-128s,
-or secp256k1. Prints OK and exits 0 on success.
+<pubkey\-hex> <file> <sig\-file>; algo is ml\-dsa\-44 or slh\-dsa\-128s.
+The .sig is newline\-terminated lowercase hex for fleet compatibility.
+Prints OK and exits 0 on success.
 .SH COPYRIGHT
 Copyright (C) 2009-2026 The BTX developers
 Copyright (C) 2009-2026 The Bitcoin Core developers

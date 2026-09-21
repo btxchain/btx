@@ -300,7 +300,12 @@ bool ShouldDemandSeed(const PreservationPolicy& p, AdmissionLevel admission)
 {
     if (p.storage_quota_bytes == 0) return false;
     if (p.seed_mode != SeedMode::AUTO) return false;
-    if (admission == AdmissionLevel::FAILED) return false;
+    if (admission == AdmissionLevel::FAILED ||
+        admission == AdmissionLevel::FETCHING ||
+        admission == AdmissionLevel::ENCRYPTED_UNQUALIFIED ||
+        admission == AdmissionLevel::NOT_RUN_RESOURCE_LIMIT) {
+        return false;
+    }
     return true;
 }
 
@@ -424,7 +429,7 @@ UniValue PolicyToJson(const PreservationPolicy& p)
     o.pushKV("preservation_propagation", p.preserve_rare && p.storage_quota_bytes > 0);
     o.pushKV("peer_follow_propagation", p.follow_configured_peers && p.seed_mode == SeedMode::AUTO && p.storage_quota_bytes > 0);
     o.pushKV("release_propagation", p.seed_mode == SeedMode::AUTO && p.storage_quota_bytes > 0);
-    o.pushKV("unsolicited_fetch", "arbitrary advertised models stay off; catalog contacts (-modelpeer, addmodelnode, PEX) are followed when seed=auto and storage>0");
+    o.pushKV("unsolicited_fetch", "arbitrary advertised models stay off; catalog contacts (-modelpeer, addmodelnode) are followed when seed=auto and storage>0; PEX hints stay TTL'd and are not persisted");
     return o;
 }
 

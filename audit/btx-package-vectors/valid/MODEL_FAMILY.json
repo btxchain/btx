@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "MODEL_FAMILY",
+  "uri": "btx://family/222222222222222222222222222222222222222222222222",
+  "copy_text": "demo family",
+  "variants": [
+    "base",
+    "instruct"
+  ],
+  "automatic_spend_atoms": 0
+}

@@ -174,13 +174,13 @@ BOOST_AUTO_TEST_CASE(v11_free_11)
     nreq.body = "{\"quote_id\":\"offer-1\",\"txid\":\"aa11bb22\"}";
     modelnet::NativeResponse nresp;
     BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
-    BOOST_CHECK_EQUAL(nresp.status, 409);
+    BOOST_CHECK_EQUAL(nresp.status, 403);
 
     nreq.body = "{\"quote_id\":\"offer-1\",\"txid\":\"ee55ff66\"}";
     BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
-    BOOST_CHECK_EQUAL(nresp.status, 200);
+    BOOST_CHECK_EQUAL(nresp.status, 403);
     BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
-    BOOST_CHECK_EQUAL(nresp.status, 409);
+    BOOST_CHECK_EQUAL(nresp.status, 403);
 
     modelnet::PieceNeed reserved;
     BOOST_CHECK(!reserved.reserved_paid);

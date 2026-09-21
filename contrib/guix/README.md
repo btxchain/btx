@@ -17,6 +17,22 @@ Conservatively, you will need:
 - 8GB of free disk space **per platform triple** you're planning on building
   (see the `HOSTS` [environment variable description][env-vars-list])
 
+`./contrib/guix/guix-build` also requires these **host** tools on `PATH`
+(enforced by `check_tools`):
+
+- `cat`, `mkdir`, `make`, `cmake`, `gzip`, `xz`
+- `getent`, `curl`, `git`, `guix`
+
+A clean host fails in the first second if `make` is missing. `cmake`,
+`gzip`, and `xz` are used by the depends tree and by the container profile
+as well; listing them here avoids a multi-hour Guix environment build
+before a missing-tool failure.
+
+`perl` is **not** a host or container requirement. `make_release_tarball.sh`
+splices `GIT_BUILD_INFO` with `python3`, which is already in the pinned
+Guix profile (`python-minimal`). Installing `perl` on the host does not
+help: the tarball step runs under `guix shell --container`.
+
 # Installation and Setup
 
 If you don't have Guix installed and set up, please follow the instructions in
@@ -107,6 +123,15 @@ the CUDA Toolkit to be installed on the target machine. The target machine must
 have a compatible NVIDIA driver and a GPU covered by the archive's embedded CUDA
 architecture list. See [Linux Release Build
 Variants](/doc/linux-release-builds.md) for the hardware and driver matrix.
+
+This recipe configures `-DWITH_MODELNET=OFF`. The pinned time-machine
+commit packages OpenSSL **3.0.8**; `WITH_MODELNET=ON` needs OpenSSL **3.5+**
+and is not possible until that pin is advanced (which would change every
+output hash). Do not treat a successful Guix build at this pin as a
+modelnet-enabled binary. Native published 0.34.8rc3 archives were **not**
+cut by this recipe. Native published cuda12, when present, is
+Blackwell-only — the in-tree Guix cuda12 architecture list is not a claim
+about those archives.
 
 ## Codesigning build outputs
 

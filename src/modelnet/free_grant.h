@@ -71,6 +71,17 @@ bool VerifyFreeGrant(Span<const unsigned char> payload,
                      UniValue& body,
                      std::string& err);
 
+/** Verify against this helper's service identity and mark `use_key` redeemed. */
+bool VerifyHostedFreeGrant(const fs::path& helper_dir,
+                           Span<const unsigned char> payload,
+                           Span<const unsigned char> sig,
+                           Span<const unsigned char> presented_pk,
+                           int64_t now,
+                           const std::string& use_key,
+                           UniValue& body,
+                           std::string& err,
+                           bool record_use = true);
+
 bool RejectExpiredTamperedReplay(Span<const unsigned char> payload,
                                   Span<const unsigned char> sig,
                                   Span<const unsigned char> pk,

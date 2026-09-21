@@ -29,6 +29,7 @@
 #include <util/strencodings.h>
 #include <util/translation.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <limits>
@@ -1501,6 +1502,36 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*trusted_mirror=*/true, /*configured=*/true,
         /*blocks_behind=*/0, /*followed_ahead=*/36,
         /*stall_headers_ahead=*/2, /*frontier_available=*/true));
+    using node::matmul_trusted::GetMmAttestRequestTtl;
+    using node::matmul_trusted::GETMMATTEST_CATCHUP_REQUEST_TTL;
+    using node::matmul_trusted::GETMMATTEST_REQUEST_TTL;
+    // #154: consensus catch-up with a local body uses the short occupancy
+    // TTL. signed_frontier_catch_up stays false for consensus (above).
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(
+            /*consensus_mode=*/true, /*trusted_mirror=*/false,
+            /*headers_ahead=*/5113, /*body_local=*/true)
+            .count(),
+        GETMMATTEST_CATCHUP_REQUEST_TTL.count());
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(true, false, /*headers_ahead=*/1,
+                              /*body_local=*/true)
+            .count(),
+        GETMMATTEST_REQUEST_TTL.count());
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(true, false, /*headers_ahead=*/40,
+                              /*body_local=*/false)
+            .count(),
+        GETMMATTEST_REQUEST_TTL.count());
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(/*consensus_mode=*/false,
+                              /*trusted_mirror=*/true,
+                              /*headers_ahead=*/40, /*body_local=*/true)
+            .count(),
+        GETMMATTEST_REQUEST_TTL.count());
+    BOOST_CHECK_EQUAL(
+        GetMmAttestRequestTtl(true, false, 0, true).count(),
+        GETMMATTEST_REQUEST_TTL.count());
     using node::matmul_trusted::CappedFollowedCatchUpAhead;
     // Live signer 2026-08-16: 13 unattested HEADER_ONLY children of the
     // attested tip must not look like a 13-block catch-up hole.
@@ -1994,7 +2025,8 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!StalledTowerFetchPeerMayServeBodies(
         true, true, /*version_handshake_complete=*/false, false, false));
     using node::matmul_trusted::PeerCountsAsAlternativeBodyDownloadSource;
-    // Header-only NODE_NETWORK is not a replacement body source.
+    // Header-only NODE_NETWORK is not a replacement for disconnect /
+    // only-source protection: proven body delivery is required.
     BOOST_CHECK(!PeerCountsAsAlternativeBodyDownloadSource(
         /*may_serve_bodies=*/true, /*signed_frontier_catch_up=*/false,
         /*signed_frontier_body_source=*/false, /*has_served_block=*/false));
@@ -2007,6 +2039,19 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*signed_frontier_body_source=*/false, true));
     BOOST_CHECK(PeerCountsAsAlternativeBodyDownloadSource(
         true, true, /*signed_frontier_body_source=*/true, true));
+    // Pause / 15s fail-over: a body-capable advertiser is enough on
+    // unsigned catch-up so a silent first GETDATA owner yields before
+    // anyone has delivered a body (issue #163 follow-on).
+    BOOST_CHECK(PeerCountsAsAlternativeBodyDownloadSource(
+        true, false, false, /*has_served_block=*/false,
+        /*require_served_block=*/false));
+    BOOST_CHECK(!PeerCountsAsAlternativeBodyDownloadSource(
+        true, /*signed_frontier_catch_up=*/true,
+        /*signed_frontier_body_source=*/false, false,
+        /*require_served_block=*/false));
+    BOOST_CHECK(PeerCountsAsAlternativeBodyDownloadSource(
+        true, true, /*signed_frontier_body_source=*/true, false,
+        /*require_served_block=*/false));
     using node::matmul_trusted::TrustedMirrorKeepFetchingCoveredUnconnected;
     BOOST_CHECK(TrustedMirrorKeepFetchingCoveredUnconnected(
         /*signed_frontier_catch_up=*/true,
@@ -2192,6 +2237,29 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(CatchUpMayPauseOnSlowDelivery(false, true, false));
     BOOST_CHECK(!CatchUpMayPauseOnSlowDelivery(
         false, false, false, /*peers_downloading_before=*/1));
+    // Issue #184: CatchUpMayPauseOnSlowDelivery never-pauses when the
+    // eligible-source count is 1. Call sites must pass 1 when THIS hash has
+    // no alternative, even if m_peers_downloading_from >= 2 (those peers may
+    // be downloading other blocks). The rc3 formula
+    // max(peers_downloading_before, alt?2:1) passed 3 and paused the sole
+    // source for up to 10 minutes. Jpp's shape:
+    // (has_alternative || advertised_takeover) ? max(2, peers) : 1
+    BOOST_CHECK_EQUAL(
+        /*no alternative, 3 downloaders of other hashes*/ (
+            false ? std::max(2, 3) : 1),
+        1);
+    BOOST_CHECK_EQUAL(
+        /*alternative present, 3 downloaders*/ (true ? std::max(2, 3) : 1),
+        3);
+    BOOST_CHECK_EQUAL(
+        /*alternative present, 1 downloader*/ (true ? std::max(2, 1) : 1),
+        2);
+    BOOST_CHECK(!CatchUpMayPauseOnSlowDelivery(
+        false, false, false, /*sole source of this hash*/ 1));
+    BOOST_CHECK(CatchUpMayPauseOnSlowDelivery(
+        false, false, false, /*alternative present*/ 3));
+    BOOST_CHECK(CatchUpMayPauseOnSlowDelivery(
+        false, false, false, /*alternative present, max(2,1)*/ 2));
     BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
         /*far_behind=*/true, /*persistent=*/true, /*manual_or_noban=*/false,
         /*keep_catchup_source=*/false, /*only_eligible_source=*/false));

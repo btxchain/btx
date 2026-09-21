@@ -1,4 +1,4 @@
-This directory contains the source code for the Bitcoin Core graphical user interface (GUI). It uses the [Qt](https://www1.qt.io/developers/) cross-platform framework.
+This directory contains the source code for the BTX graphical user interface (GUI). It uses the [Qt](https://www1.qt.io/developers/) cross-platform framework.
 
 The current precise version for Qt 5 is specified in [qt.mk](/depends/packages/qt.mk).
 
@@ -34,7 +34,7 @@ To run:
 
 #### bitcoingui.(h/cpp)
 
-- Represents the main window of the Bitcoin UI.
+- Represents the main window of the BTX UI.
 
 #### \*model.(h/cpp)
 
@@ -51,7 +51,7 @@ To run:
 
 #### paymentserver.(h/cpp)
 
-- (Deprecated) Used to process BIP21 payment URI requests. Also handles URI-based application switching (e.g. when following a bitcoin:... link from a browser).
+- Processes BIP21 `btx:<addr>` payment URIs and `btx://` model resources. Bitcoin `bitcoin:` URIs are not supported.
 
 #### Native Model Network URIs (`btx://…`)
 
@@ -72,7 +72,7 @@ uploads payload bytes. See [doc/modelnet/howto.md](/doc/modelnet/howto.md).
 
 * UI elements like BitcoinAmountField, which inherit from QWidget.
 * `bitcoinstrings.cpp`: automatically generated
-* `bitcoinunits.(h/cpp)`: BTC / mBTC / etc. handling
+* `bitcoinunits.(h/cpp)`: BTX / mBTX / atom / TBC handling
 * `callback.h`
 * `guiconstants.h`: UI colors, app name, etc.
 * `guiutil.h`: several helper functions
@@ -132,4 +132,4 @@ sudo apt-get install qtcreator
 
 8. While in the `Projects` tab, ensure that you have the `btx-qt` executable specified under `Run`
  - If the executable is not specified: click `"Choose..."`, navigate to `build/bin`, and select `btx-qt`
-9. You're all set! Start developing, building, and debugging the Bitcoin Core GUI
+9. You're all set! Start developing, building, and debugging the BTX GUI

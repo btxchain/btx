@@ -149,15 +149,12 @@ if len(peers.get("peers") or []) < 2:
     raise SystemExit(f"need 2 peers: {peers}")
 
 print("step 9: availability / search LOCAL after A publish")
-try:
-    rpc(sa, "publishmodelsearchrecord", [imp.get("model_id") or "aa" + "00" * 47, {
-        "type": "btx-model-search-v1",
-        "canonical_name": "combined-20",
-        "display_name": "Combined 20",
-        "expires_at": 0,
-    }])
-except Exception as e:
-    print("note: publishmodelsearchrecord", e, flush=True)
+rpc(sa, "publishmodelsearchrecord", [imp.get("model_id") or "aa" + "00" * 47, {
+    "type": "btx-model-search-v1",
+    "canonical_name": "combined-20",
+    "display_name": "Combined 20",
+    "expires_at": 0,
+}])
 
 print("step 10: start FREE_ONLY retrieve on C")
 got = rpc(sc, "getmodel", [uri, "FREE_ONLY"])
@@ -255,11 +252,13 @@ sha2=(man.get("files") or [{}])[0].get("sha384")
 if sha2!=sha:
     raise SystemExit(f"resume sha {sha2} != {sha}")
 print("step 19: search LOCAL still works")
-try:
-    sm=rpc("searchmodels",[{"text":"combined","scope":"LOCAL","limit":20}])
-    print("     searchmodels coverage", (sm.get("coverage") or {}).get("complete"))
-except Exception as e:
-    print("note: searchmodels", e)
+sm=rpc("searchmodels",[{"text":"combined","scope":"LOCAL","limit":20}])
+names=[(h.get("name") or h.get("canonical_name") or h.get("display_name") or "") for h in (sm.get("results") or [])]
+if "combined-20" not in names and "Combined 20" not in names:
+    raise SystemExit("search LOCAL missing combined-20: %s" % sm)
+if (sm.get("coverage") or {}).get("global_complete") is True:
+    raise SystemExit("LOCAL claimed global complete: %s" % sm)
+print("     searchmodels coverage", (sm.get("coverage") or {}).get("complete"), "names", names[:5])
 print("step 20: automatic_spend_atoms=0, classical_fallback false")
 if int(info.get("automatic_spend_atoms") or 0)!=0:
     raise SystemExit("spend")

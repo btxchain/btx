@@ -97,6 +97,37 @@ struct DurableAttestationKey {
     }
 };
 
+struct DurablePqAttestationKey {
+    static constexpr uint8_t PREFIX{'q'};
+    uint8_t prefix{PREFIX};
+    uint256 authority_namespace{};
+    int32_t height{-1};
+    uint256 block_hash{};
+
+    SERIALIZE_METHODS(DurablePqAttestationKey, obj)
+    {
+        READWRITE(obj.prefix, obj.authority_namespace, obj.height,
+                  obj.block_hash);
+    }
+
+    friend bool operator<(const DurablePqAttestationKey& lhs,
+                          const DurablePqAttestationKey& rhs)
+    {
+        return std::tie(lhs.authority_namespace, lhs.height, lhs.block_hash) <
+               std::tie(rhs.authority_namespace, rhs.height, rhs.block_hash);
+    }
+};
+
+struct DurablePqNamespacePrefix {
+    uint8_t prefix{DurablePqAttestationKey::PREFIX};
+    uint256 authority_namespace{};
+
+    SERIALIZE_METHODS(DurablePqNamespacePrefix, obj)
+    {
+        READWRITE(obj.prefix, obj.authority_namespace);
+    }
+};
+
 struct DurableNamespacePrefix {
     uint8_t prefix{DurableAttestationKey::PREFIX};
     uint256 authority_namespace{};
@@ -654,6 +685,85 @@ bool LoadDurableAttestations(
     return true;
 }
 
+bool LoadDurablePqAttestations(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store,
+    std::string& error)
+{
+    if (!g_durable_db || store->TrustedPqSigners().empty()) return true;
+    const uint256 authority_namespace{AuthorityNamespace(*store)};
+    std::unique_ptr<CDBIterator> cursor{g_durable_db->NewIterator()};
+    cursor->Seek(DurablePqNamespacePrefix{
+        .authority_namespace = authority_namespace});
+    size_t records{0};
+    int32_t highest{-1};
+    std::map<int32_t, std::set<uint256>> all_quorum;
+    for (; cursor->Valid(); cursor->Next()) {
+        DurablePqAttestationKey key;
+        if (!cursor->GetKey(key) ||
+            key.prefix != DurablePqAttestationKey::PREFIX ||
+            key.authority_namespace != authority_namespace) {
+            break;
+        }
+        std::vector<matmul::trusted::ExactReplayPqAttestation> attestations;
+        if (!cursor->GetValue(attestations) || attestations.empty() ||
+            attestations.size() > store->MaxVotesPerBlock()) {
+            error = "durable PQ attestation database contains a malformed record";
+            return false;
+        }
+        std::set<std::vector<unsigned char>> seen;
+        for (const auto& attestation : attestations) {
+            if (attestation.statement.block_hash != key.block_hash ||
+                attestation.statement.block_height != key.height ||
+                !seen.insert(attestation.signer).second) {
+                error = "durable PQ attestation database key/value mismatch";
+                return false;
+            }
+            const auto verified{matmul::trusted::VerifyAttestationPq(
+                attestation, store->ChainId(),
+                store->ReplayAuthorityContext(), key.block_hash, key.height,
+                store->TrustedPqSigners())};
+            if (verified != matmul::trusted::VerifyResult::Valid) {
+                if (verified != matmul::trusted::VerifyResult::UntrustedSigner) {
+                    error = strprintf(
+                        "durable PQ attestation database record rejected: %s",
+                        matmul::trusted::VerifyResultName(verified));
+                    return false;
+                }
+                continue;
+            }
+            const auto result{store->AddPq(attestation, key.block_hash, key.height)};
+            if (result != matmul::trusted::AddResult::Accepted &&
+                result != matmul::trusted::AddResult::Duplicate &&
+                result != matmul::trusted::AddResult::Capacity &&
+                result != matmul::trusted::AddResult::UntrustedSigner) {
+                error = strprintf("durable PQ hot-cache import rejected: %s",
+                                  matmul::trusted::AddResultName(result));
+                return false;
+            }
+        }
+        ++records;
+        if (store->HasQuorum(key.block_hash, key.height)) {
+            highest = std::max(highest, key.height);
+            all_quorum[key.height].insert(key.block_hash);
+        }
+    }
+    {
+        std::lock_guard lock{g_mutex};
+        g_highest_attested_height =
+            std::max(g_highest_attested_height, highest);
+        for (const auto& [height, hashes] : all_quorum) {
+            for (const auto& hash : hashes) {
+                g_quorum_hashes_by_height[height].insert(hash);
+            }
+        }
+    }
+    if (records != 0) {
+        LogPrintf("Verified %zu durable MatMul ML-DSA-44 attestation block record(s)\n",
+                  records);
+    }
+    return true;
+}
+
 void PersistWithdrawnLocalVote(int32_t height, const uint256& block_hash)
 {
     if (height < 0 || block_hash.IsNull()) return;
@@ -775,6 +885,95 @@ std::vector<matmul::trusted::ExactReplayAttestation> ReadDurableAttestations(
         });
     }
     return out;
+}
+
+bool PersistDurablePqAttestations(
+    Span<const matmul::trusted::ExactReplayPqAttestation> pending,
+    std::string& error)
+{
+    if (!g_durable_db) {
+        error = "durable attestation database is not open";
+        return false;
+    }
+    if (!g_durable_namespace.has_value()) {
+        error = "durable attestation authority namespace is unavailable";
+        return false;
+    }
+    auto store{Store()};
+    std::map<DurablePqAttestationKey,
+             std::vector<matmul::trusted::ExactReplayPqAttestation>> grouped;
+    for (const auto& attestation : pending) {
+        if (!store || !store->IsAuthorityPqSigner(attestation.signer)) {
+            continue;
+        }
+        grouped[DurablePqAttestationKey{
+            .authority_namespace = *g_durable_namespace,
+            .height = attestation.statement.block_height,
+            .block_hash = attestation.statement.block_hash}]
+            .push_back(attestation);
+    }
+    CDBBatch write_batch{*g_durable_db};
+    for (auto& [key, additions] : grouped) {
+        std::vector<matmul::trusted::ExactReplayPqAttestation> attestations;
+        const auto status{g_durable_db->TryRead(key, attestations)};
+        if (status.status != CDBWrapper::ReadStatus::Code::OK &&
+            status.status != CDBWrapper::ReadStatus::Code::NOT_FOUND) {
+            error = "failed to read durable PQ attestation record";
+            return false;
+        }
+        std::set<std::vector<unsigned char>> seen;
+        std::vector<matmul::trusted::ExactReplayPqAttestation> kept;
+        for (const auto& existing : attestations) {
+            if (store && store->IsAuthorityPqSigner(existing.signer) &&
+                seen.insert(existing.signer).second) {
+                kept.push_back(existing);
+            }
+        }
+        for (auto& addition : additions) {
+            if (seen.insert(addition.signer).second) {
+                kept.push_back(std::move(addition));
+            }
+        }
+        if (!kept.empty()) {
+            write_batch.Write(key, kept);
+        }
+    }
+    if (!grouped.empty() && !g_durable_db->WriteBatch(write_batch, true)) {
+        error = "failed to sync durable PQ attestation batch";
+        return false;
+    }
+    return true;
+}
+
+std::vector<matmul::trusted::ExactReplayPqAttestation> ReadDurablePqAttestations(
+    const uint256& block_hash, int32_t block_height)
+{
+    std::lock_guard io_lock{g_persist_io_mutex};
+    if (!g_durable_db || !g_durable_namespace.has_value()) return {};
+    std::vector<matmul::trusted::ExactReplayPqAttestation> out;
+    const auto status{g_durable_db->TryRead(
+        DurablePqAttestationKey{.authority_namespace = *g_durable_namespace,
+                                .height = block_height,
+                                .block_hash = block_hash},
+        out)};
+    if (status.status != CDBWrapper::ReadStatus::Code::OK) return {};
+    if (auto store{Store()}) {
+        std::erase_if(
+            out, [&](const matmul::trusted::ExactReplayPqAttestation& a) {
+                return !store->IsAuthorityPqSigner(a.signer);
+            });
+    }
+    return out;
+}
+
+void PersistAfterPqMutation(
+    const matmul::trusted::ExactReplayPqAttestation& attestation)
+{
+    std::lock_guard config_lock{g_mutex};
+    if (!g_persist_enabled || g_persist_path.empty()) return;
+    std::string error;
+    std::lock_guard io_lock{g_persist_io_mutex};
+    (void)PersistDurablePqAttestations(Span{&attestation, 1}, error);
 }
 
 bool LoadPersistenceSnapshot(
@@ -1210,7 +1409,14 @@ bool ServesAttestations()
 bool HasLocalSigner()
 {
     auto store{Store()};
-    return store && store->LocalSignerPubKey().has_value();
+    return store && (store->LocalSignerPubKey().has_value() ||
+                     store->LocalPqPubKey().has_value());
+}
+
+bool HasLocalPqSigner()
+{
+    auto store{Store()};
+    return store && store->LocalPqPubKey().has_value();
 }
 
 std::chrono::milliseconds WaitTimeout()
@@ -1230,6 +1436,13 @@ std::vector<CPubKey> TrustedSigners()
     auto store{Store()};
     if (!store) return {};
     return {store->TrustedSigners().begin(), store->TrustedSigners().end()};
+}
+
+std::vector<std::vector<unsigned char>> TrustedPqSigners()
+{
+    auto store{Store()};
+    if (!store) return {};
+    return {store->TrustedPqSigners().begin(), store->TrustedPqSigners().end()};
 }
 
 bool OpenAttestorsEnabled()
@@ -1264,6 +1477,12 @@ bool IsAuthoritySigner(const CPubKey& pubkey)
 {
     auto store{Store()};
     return store && store->IsAuthoritySigner(pubkey);
+}
+
+bool IsAuthorityPqSigner(const std::vector<unsigned char>& pubkey)
+{
+    auto store{Store()};
+    return store && store->IsAuthorityPqSigner(pubkey);
 }
 
 bool IsBlocked(const CPubKey& pubkey)
@@ -1411,13 +1630,38 @@ matmul::trusted::AddResult Add(
     return result;
 }
 
+matmul::trusted::AddResult AddPq(
+    const matmul::trusted::ExactReplayPqAttestation& attestation,
+    const uint256& expected_hash,
+    int32_t expected_height)
+{
+    auto store{Store()};
+    if (!store) return matmul::trusted::AddResult::UntrustedSigner;
+    const auto result{store->AddPq(attestation, expected_hash, expected_height)};
+    if ((result == matmul::trusted::AddResult::Accepted ||
+         result == matmul::trusted::AddResult::Duplicate) &&
+        store->IsAuthorityPqSigner(attestation.signer) &&
+        store->HasQuorum(expected_hash, expected_height)) {
+        NoteAcceptedAttestationHeight(expected_height, expected_hash);
+    }
+    if (result == matmul::trusted::AddResult::Accepted) {
+        PersistAfterPqMutation(attestation);
+    }
+    return result;
+}
+
 matmul::trusted::AddResult SignAuthoritative(
     const uint256& block_hash,
     int32_t block_height,
-    matmul::trusted::ExactReplayAttestation* produced)
+    matmul::trusted::ExactReplayAttestation* produced,
+    matmul::trusted::ExactReplayPqAttestation* produced_pq)
 {
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::NoLocalSigner;
+    if (!store->LocalSignerPubKey().has_value() &&
+        !store->LocalPqPubKey().has_value()) {
+        return matmul::trusted::AddResult::NoLocalSigner;
+    }
     // Dual-quorum: never mint a second local signature at a height that
     // already has pin quorum on a different hash (live 2026-08-15:
     // 94f70747 then a9590c15 at 190354). g_quorum_hashes_by_height survives
@@ -1431,19 +1675,42 @@ matmul::trusted::AddResult SignAuthoritative(
     if (HasCompetingQuorum(block_hash, block_height)) {
         return matmul::trusted::AddResult::HeightOccupied;
     }
+    matmul::trusted::AddResult secp_result{
+        matmul::trusted::AddResult::NoLocalSigner};
     matmul::trusted::ExactReplayAttestation signed_attestation;
-    const auto result{
-        store->SignLocal(block_hash, block_height, &signed_attestation)};
-    if (produced && (result == matmul::trusted::AddResult::Accepted ||
-                     result == matmul::trusted::AddResult::Duplicate ||
-                     result == matmul::trusted::AddResult::Heard)) {
-        *produced = signed_attestation;
+    if (store->LocalSignerPubKey().has_value()) {
+        secp_result =
+            store->SignLocal(block_hash, block_height, &signed_attestation);
+        if (produced && (secp_result == matmul::trusted::AddResult::Accepted ||
+                         secp_result == matmul::trusted::AddResult::Duplicate ||
+                         secp_result == matmul::trusted::AddResult::Heard)) {
+            *produced = signed_attestation;
+        }
+        if (secp_result == matmul::trusted::AddResult::Accepted) {
+            PersistAfterMutation(signed_attestation);
+        }
     }
-    if (result == matmul::trusted::AddResult::Accepted ||
-        result == matmul::trusted::AddResult::Duplicate) {
-        const auto local_pk{store->LocalSignerPubKey()};
-        if (local_pk && store->IsAuthoritySigner(*local_pk) &&
-            store->HasQuorum(block_hash, block_height)) {
+    matmul::trusted::AddResult pq_result{
+        matmul::trusted::AddResult::NoLocalSigner};
+    matmul::trusted::ExactReplayPqAttestation signed_pq;
+    if (store->LocalPqPubKey().has_value()) {
+        pq_result = store->SignLocalPq(block_hash, block_height, &signed_pq);
+        if (produced_pq &&
+            (pq_result == matmul::trusted::AddResult::Accepted ||
+             pq_result == matmul::trusted::AddResult::Duplicate)) {
+            *produced_pq = signed_pq;
+        }
+        if (pq_result == matmul::trusted::AddResult::Accepted) {
+            PersistAfterPqMutation(signed_pq);
+        }
+    }
+    const bool secp_ok{
+        secp_result == matmul::trusted::AddResult::Accepted ||
+        secp_result == matmul::trusted::AddResult::Duplicate};
+    const bool pq_ok{pq_result == matmul::trusted::AddResult::Accepted ||
+                     pq_result == matmul::trusted::AddResult::Duplicate};
+    if (secp_ok || pq_ok) {
+        if (store->HasQuorum(block_hash, block_height)) {
             NoteAcceptedAttestationHeight(block_height, block_hash);
         }
         if (block_height >= 0 && !block_hash.IsNull()) {
@@ -1451,10 +1718,8 @@ matmul::trusted::AddResult SignAuthoritative(
             g_local_signed_hash_by_height.emplace(block_height, block_hash);
         }
     }
-    if (result == matmul::trusted::AddResult::Accepted) {
-        PersistAfterMutation(signed_attestation);
-    }
-    return result;
+    if (store->LocalSignerPubKey().has_value()) return secp_result;
+    return pq_result;
 }
 
 bool NotifyActiveChainBlockDisconnected(int32_t height,
@@ -1585,8 +1850,10 @@ bool HasQuorum(const uint256& block_hash, int32_t block_height)
     // is disk-backed and queried only on a miss so restart provenance does not
     // disappear after max_blocks blocks.
     const auto historical{ReadDurableAttestations(block_hash, block_height)};
-    return store->HasQuorumFromAttestations(historical, block_hash,
-                                           block_height);
+    const auto historical_pq{
+        ReadDurablePqAttestations(block_hash, block_height)};
+    return store->HasQuorumFromAttestations(historical, historical_pq,
+                                           block_hash, block_height);
 }
 
 bool HasQuorumInMemory(const uint256& block_hash, int32_t block_height)
@@ -1649,6 +1916,21 @@ std::vector<matmul::trusted::ExactReplayAttestation> Get(
     auto attestations{store->GetAttestations(block_hash, block_height)};
     if (attestations.size() >= store->Threshold()) return attestations;
     auto durable{ReadDurableAttestations(block_hash, block_height)};
+    return durable.size() > attestations.size() ? std::move(durable)
+                                                : std::move(attestations);
+}
+
+std::vector<matmul::trusted::ExactReplayPqAttestation> GetPq(
+    const uint256& block_hash, int32_t block_height)
+{
+    auto store{Store()};
+    if (!store) return {};
+    auto attestations{store->GetPqAttestations(block_hash, block_height)};
+    if (attestations.size() >= store->TrustedPqSigners().size() &&
+        !attestations.empty()) {
+        return attestations;
+    }
+    auto durable{ReadDurablePqAttestations(block_hash, block_height)};
     return durable.size() > attestations.size() ? std::move(durable)
                                                 : std::move(attestations);
 }
@@ -1758,6 +2040,7 @@ bool OpenPersistence(const fs::path& path, std::string& error)
                 !LoadOpenAttestorState(store) ||
                 !LoadWithdrawnLocalVotes(store) ||
                 !LoadDurableAttestations(store, error) ||
+                !LoadDurablePqAttestations(store, error) ||
                 !LoadPersistenceSnapshot(store, path, error) ||
                 !LoadWal(store, path, error) ||
                 !ResetLegacyArchive(path, error) ||

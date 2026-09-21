@@ -131,6 +131,21 @@ bool DecodeP2MRChecksigOpcode(opcodetype opcode, PQAlgorithm& algo, bool& is_che
     }
 }
 
+bool ExtractP2MRChecksigPubkey(Span<const unsigned char> script, PQAlgorithm& algo, std::vector<unsigned char>& pubkey)
+{
+    pubkey.clear();
+    Span<const unsigned char> pk;
+    size_t consumed = 0;
+    if (!ParseP2MRAnyPubkeyPush(script, 0, algo, pk, consumed)) return false;
+    if (script.size() < consumed + 1) return false;
+    PQAlgorithm op_algo;
+    bool is_add = false;
+    if (!DecodeP2MRChecksigOpcode(static_cast<opcodetype>(script[consumed]), op_algo, is_add)) return false;
+    if (is_add || op_algo != algo) return false;
+    pubkey.assign(pk.begin(), pk.end());
+    return true;
+}
+
 uint256 ComputeP2MRLeafHash(uint8_t leaf_version, Span<const unsigned char> script)
 {
     return (HashWriter{TaggedHash("P2MRLeaf")} << leaf_version << CompactSizeWriter(script.size()) << script).GetSHA256();

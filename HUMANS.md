@@ -98,13 +98,73 @@ path. Machine sequences belong in [AGENTS.md](AGENTS.md).
 
 ### 1. Run the current line
 
-The current software line is **v0.34.7**. For a validating node that becomes
+The last shipping tag is **v0.34.7**. For a validating node that becomes
 useful without waiting for a full historical sync, the fast-start snapshot is
 **assumeutxo-219000**.
 
 Install and first-run: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
 
 Using and proving the model network: [doc/modelnet/howto.md](doc/modelnet/howto.md).
+
+This working tree is **0.34.8rc4** (`CLIENT_VERSION_IS_RELEASE=false`).
+The last released client remains **v0.34.7**. Final `IS_RELEASE=true` is the operator go-ahead after this RC.
+Host, seed, search, share, watch folder,
+`showmodel` / `unhostmodel` / `exportmodellink`, mining `first_run` doctor
+tiles, bounty `checklist` / `--validate`, and doctor:
+[doc/modelnet/first-run.md](doc/modelnet/first-run.md). CLI wrapper:
+[contrib/modelnet/btx-model](contrib/modelnet/btx-model)
+(people: stderr hints; agents: `--json` stdout). Optional 0.34.8-dev cloud
+backing, publisher follow, events, and profiles **fail closed** if the
+helper lacks the method: [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md),
+[doc/modelnet/watches.md](doc/modelnet/watches.md). Filesystem `-modelwatch`
+is not a publisher watch.
+
+### Source → storage → model (0.34.8-dev; `IS_RELEASE=false`)
+
+A person can pin a **local** file (or review an ImportPlan for Hugging Face /
+torrent), choose **local disk** or an S3-compatible backend, and publish a
+verified `btx://` identity. Hugging Face / torrent hashes prove **bytes**, not
+original authorship. A presigned URL is reusable bearer access, not a meter.
+Erasure repair is **per stripe**. Automatic spend stays **0**.
+
+```text
+btx-model doctor
+btx-model host ./model.safetensors
+btx-model link NAME                 # exportmodellink magnet analog
+btx-model import-plan @plan.json    # staging UUID until VerifiedManifest
+btx-model package create '{}'       # .btxbundle; not a secret dump
+btx-model package inspect FILE.btx # preview only; does not install or spend
+btx-open FILE.btx                   # local inspect; never writes AGENTS.md
+```
+
+Live Hugging Face HTTP, live R2 WAN, GUI, and wallet-signed subscriptions are
+**not** claimed here. Cloud add uses `--credential-ref`, never a raw secret on
+argv: [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md).
+
+### Hosted Control Plane / walletless discovery (0.34.8-dev; `IS_RELEASE=false`)
+
+A person can **discover** public capabilities through a hosted catalogue without
+opening a monetary wallet, mining, or completing a full chain sync. The
+walletless preset is `btx-hosted`; the loopback gateway is `btx-hcpd`. Public
+search is not a CEX login requirement and is not a remote-inference product.
+
+Automatic BTX spend stays **0**. A hosted listing is not a payment instruction.
+Enrolling a provider authorizes communication, not spend and not local runtime
+admission. Live exchange identity, live custody HSM, and live CUDA DMA are
+**not** claimed here.
+
+**Cognitive Reserve v1.1** is a **negotiated HCP/1 extension of that same
+hosted plane**, not a fifth product, not a new coin, and not remote inference.
+The original **34** HCP operations stay as they are. A venue’s catalogue does
+not imply reserve, committee, or programme support — those require an explicit
+`GET /extensions/cognitive-reserve` profile. Automatic spend remains **0**.
+This tree is still **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`) and does
+not replace the production GPU attestor. Operator notes:
+[doc/hosted/HCP_OPERATOR_NOTES.md](doc/hosted/HCP_OPERATOR_NOTES.md). Spec:
+[doc/modelnet/crf/](doc/modelnet/crf/).
+
+Operator index: [doc/hosted/README.md](doc/hosted/README.md). Spec and CEX
+guide: [doc/modelnet/hcp/](doc/modelnet/hcp/).
 
 Bounties (inspect, fund, evaluate, recover): [doc/bounties.md](doc/bounties.md).
 
@@ -231,16 +291,35 @@ search when you do not want the query to leave this node.
 ## Current line
 
 - **Release:** **v0.34.7** (Native Model Network, including search, release
-  campaigns, and creation bounties).
+  campaigns, and creation bounties). Last shipping tag.
+- **Release candidate:** **0.34.8rc4** (`CLIENT_VERSION_IS_RELEASE=false`).
+  Merge to main still requires operator go-ahead. Host / seed / search / share / watch / doctor:
+  [doc/modelnet/first-run.md](doc/modelnet/first-run.md). CLI:
+  [contrib/modelnet/btx-model](contrib/modelnet/btx-model). Optional cloud /
+  follow / events / profile (fail closed; not a PASS):
+  [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md),
+  [doc/modelnet/cloud-seeding.md](doc/modelnet/cloud-seeding.md),
+  [doc/modelnet/events.md](doc/modelnet/events.md),
+  [doc/modelnet/watches.md](doc/modelnet/watches.md),
+  [doc/modelnet/mirroring.md](doc/modelnet/mirroring.md).
+  Hosted Control Plane / walletless discovery (`IS_RELEASE=false`; not live
+  CEX IdP): [doc/hosted/README.md](doc/hosted/README.md),
+  [doc/modelnet/hcp/](doc/modelnet/hcp/). Cognitive Reserve v1.1 is a
+  negotiated HCP/1 extension of that same plane (not a fifth plane; 34 HCP
+  ops preserved): [doc/modelnet/crf/](doc/modelnet/crf/).
 - **Fast-start snapshot:** **assumeutxo-219000**. Do not load withdrawn
   assumeutxo-199299 / assumeutxo-199300 snapshots.
 
 Further reading:
 
 - People: this file, then [doc/modelnet/howto.md](doc/modelnet/howto.md),
+  [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
   [doc/bounties.md](doc/bounties.md),
   [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
+- Dual door: this file is people; [AGENTS.md](AGENTS.md) is the machine
+  contract (`btx-model --json`).
 - Full strategic essay:
   [doc/design/btx-decentralized-frontier-ai-lab.md](doc/design/btx-decentralized-frontier-ai-lab.md).
 - Operator index: [doc/modelnet/README.md](doc/modelnet/README.md).
+- Hosted Control Plane (0.34.8-dev): [doc/hosted/README.md](doc/hosted/README.md).
 - Agents: [AGENTS.md](AGENTS.md).

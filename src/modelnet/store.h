@@ -67,6 +67,7 @@ public:
     bool GetPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
                   std::vector<unsigned char>& out, std::string& err) const;
     bool HasPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index) const;
+    bool DeletePiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index, std::string& err);
     bool SavePieceIndex(const Digest48& artifact, uint32_t file_index, const PieceIndex& idx, std::string& err);
     bool LoadPieceIndex(const Digest48& artifact, uint32_t file_index, PieceIndex& idx, std::string& err) const;
     bool SavePieceProof(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,

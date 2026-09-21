@@ -1,0 +1,9 @@
+role,adapter,source_contract,scope_mapping,time_semantics,idempotency,ambiguity,evidence,status
+DISCOVERY,PackageAdapter,TO_MAP,tenant/entity,source observed time,exact package hash,missing vs unavailable,TO_RUN,NOT_RUN
+CUSTODY,CustodyAdapter,TO_MAP,legal account,signer journal time,business intent,signed vs unknown,TO_RUN,NOT_RUN
+TREASURY,LedgerAdapter,TO_MAP,entity/portfolio,ledger sequence,durable intent hold,uncertain hold vs rejected,TO_RUN,NOT_RUN
+ASSET_SERVICING,PositionSourceAdapter,TO_MAP,beneficial position,effective+recorded+received,source generation sequence,gap vs zero position,TO_RUN,NOT_RUN
+ASSET_SERVICING,ValuationSourceAdapter,TO_MAP,position/policy,mark date+validity,exact observation,unpriced vs zero,TO_RUN,NOT_RUN
+PORTFOLIO_ANALYTICS,MandateEvidenceAdapter,TO_MAP,manager/client/portfolio,validity interval,exact policy version,unknown authority,TO_RUN,NOT_RUN
+PORTFOLIO_ANALYTICS,PortfolioProjectionSink,TO_MAP,tenant/entity,asof+observation cutoff,snapshot digest,partial vs complete,TO_RUN,NOT_RUN
+DEVICE_HANDOFF,LocalCapabilityAdapter,TO_MAP,owner/device,lease generation,exact handoff,downloaded vs ready,TO_RUN,NOT_RUN

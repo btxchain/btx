@@ -28,9 +28,23 @@ class WalletGetHDKeyTest(BitcoinTestFramework):
         node = self.nodes[0]
         native = node.get_wallet_rpc(self.default_wallet_name)
 
-        # Native BTX wallets use pqhd() providers, so the BIP32-specific RPC
-        # correctly has no entries for the active P2MR descriptors.
-        assert_equal(native.gethdkeys(), [])
+        # Default BTX wallets are P2MR/pqhd: gethdkeys must emit fingerprint /
+        # pq_seed_id, never a fabricated xpub, and must not be empty.
+        pq_keys = native.gethdkeys()
+        assert_equal(len(pq_keys), 1)
+        assert "fingerprint" in pq_keys[0]
+        assert_equal(len(pq_keys[0]["fingerprint"]), 8)
+        assert_equal(pq_keys[0]["pq_seed_id"], "pqhd/" + pq_keys[0]["fingerprint"])
+        assert "xpub" not in pq_keys[0]
+        assert "xprv" not in pq_keys[0]
+        assert_equal(pq_keys[0]["has_private"], True)
+        assert_equal(len(pq_keys[0]["descriptors"]) >= 1, True)
+
+        pq_priv = native.gethdkeys(private=True)
+        assert_equal(len(pq_priv), 1)
+        assert "pq_seed" in pq_priv[0]
+        assert "xprv" not in pq_priv[0]
+        assert_equal(len(pq_priv[0]["pq_seed"]), 64)
 
         self.log.info("BIP32 keys in explicitly imported secp descriptors remain queryable")
         node.createwallet("secp-imports", blank=True, descriptors=True)

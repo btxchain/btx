@@ -1,8 +1,15 @@
 # BTX Download-and-Go Guide
 
-> **Current line:** **v0.34.7**. See
-> [0.34.7 release notes](release-notes/release-notes-0.34.7.md) and
-> [release notes](release-notes.md). Historical 0.34.5 convergence notes:
+> **Current line:** **v0.34.8-rc4** (prerelease). See
+> [0.34.8 release notes](release-notes/release-notes-0.34.8.md) and
+> [release notes](release-notes.md). The GitHub tag that resolves is
+> [`v0.34.8-rc4`](https://github.com/btxchain/btx/releases/tag/v0.34.8-rc4);
+> `refs/tags/v0.34.7` is not published — do not pass `--release-tag v0.34.7`.
+> **Installer:** `contrib/faststart/btx-agent-setup.py` is for **signed final
+> releases** that publish `btx-release-manifest.json` and `SHA256SUMS.asc`.
+> `--release-tag v0.34.8-rc4` 404s on that manifest. For this prerelease,
+> unpack the GitHub archive directly (below).
+> Historical 0.34.5 convergence notes:
 > [release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
 > Epoch A is live at height 185000. EncDr stall recovery at 199299 is
 > withdrawn. Fast-start snapshot:
@@ -37,19 +44,47 @@ paths, see [BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.m
 
 ## 1. Fast-sync with Assumeutxo
 
-For agentic or unattended installs, the shortest end-to-end flow is:
+### Prerelease / rc tags (including v0.34.8-rc4): unpack the GitHub archive
+
+`python3 contrib/faststart/btx-agent-setup.py --release-tag v0.34.8-rc4`
+exits with HTTP 404 fetching
+`https://github.com/btxchain/btx/releases/download/v0.34.8-rc4/btx-release-manifest.json`.
+That tag publishes the tarballs and an unsigned `SHA256SUMS`; it does **not**
+publish `btx-release-manifest.json` or `SHA256SUMS.asc`. `--allow-unsigned-release`
+does not help: the installer still needs the manifest. Unpack the archive:
+
+```bash
+# CPU-only. The cuda12 tarball on this tag is Blackwell-only
+# (sm_100a / sm_120 / sm_120a SASS, sm_120 PTX); do not use it on
+# Ampere / Ada / Hopper. See linux-release-builds.md.
+curl -fsSL -O https://github.com/btxchain/btx/releases/download/v0.34.8-rc4/btx-0.34.8-rc3-x86_64-linux-gnu.tar.gz
+curl -fsSL -O https://github.com/btxchain/btx/releases/download/v0.34.8-rc4/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+tar xzf btx-0.34.8-rc3-x86_64-linux-gnu.tar.gz
+```
+
+The GitHub tag `v0.34.8-rc4` is the live prerelease. `v0.34.7` is not a
+published tag. Historical `v0.34.8-rc2` and `v0.34.8-rc1` remain on GitHub and are superseded.
+
+Continue from the datadir / snapshot steps below using the unpacked `bin/`.
+
+### Signed final releases: `btx-agent-setup.py`
+
+When a GitHub release **does** publish `btx-release-manifest.json` and
+`SHA256SUMS.asc`, the shortest unattended flow is:
 
 ```bash
 export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.7 \
+  --release-tag vX.Y.Z \
   --preset miner \
   --datadir="$HOME/.btx"
 ```
 
-The GitHub tag `v0.34.7` is published with the 0.34.7 release.
+Pass the signed final tag, not an rc tag, unless that rc tag actually lists
+those two assets.
 
 Add `--start-mining` when the same command should also provision the mining
 wallet/address and start the bundled live-mining supervisor after the verified
@@ -58,7 +93,7 @@ fast-start bootstrap succeeds:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.7 \
+  --release-tag vX.Y.Z \
   --preset miner \
   --datadir="$HOME/.btx" \
   --start-mining
@@ -80,11 +115,15 @@ against `SHA256SUMS` and `SHA256SUMS.asc` for remote releases, downloads the
 matching snapshot manifest, and invokes the fast-start bootstrap wrapper. The
 installer keeps its temporary download cache in a sibling
 `<install-dir>-agent-setup-cache` directory unless you override `--cache-dir`.
-Linux release bundles include CPU-only, CUDA 12, and CUDA 13 x86_64 archives;
+It applies only to tags that actually publish those files. Linux **signed
+final** bundles may include CPU-only, CUDA 12, and CUDA 13 x86_64 archives;
 see [Linux Release Build Variants](linux-release-builds.md) for the supported
-GPU hardware and target-host NVIDIA driver requirements. Pass
-`--platform linux-x86_64-cuda12` or `--platform linux-x86_64-cuda13` when you
-want to force a CUDA archive instead of relying on the detected default.
+GPU hardware and target-host NVIDIA driver requirements. The published
+`linux-x86_64-cuda12` archive is Blackwell-only (`sm_100a` / `sm_120` /
+`sm_120a`); do not pass `--platform linux-x86_64-cuda12` for Ampere, Ada,
+Hopper, or RTX 4090. On a signed final that publishes a matching CUDA 13
+asset, `--platform linux-x86_64-cuda13` selects that fatbin. v0.34.8-rc4 did
+not publish `cuda13` and has no installer manifest.
 For private GitHub releases, set `BTX_GITHUB_TOKEN`, `GITHUB_TOKEN`, or
 `GH_TOKEN` before running the installer so it can authenticate the manifest and
 archive fetches through the GitHub release asset API. The same token env vars
@@ -98,7 +137,7 @@ progress on stderr and prints a clean JSON summary on stdout:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.7 \
+  --release-tag vX.Y.Z \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"
@@ -113,12 +152,58 @@ When `--preset miner` is used, that summary also includes
 `mining_results_dir` so an unattended installer can immediately hand off to the
 local mining supervisor without guessing paths.
 
+### Linux userspace (glibc / libstdc++)
+
+The published `*-x86_64-linux-gnu*.tar.gz` archives for v0.34.8-rc1 are linked
+against **GLIBC_2.38** and **GLIBCXX_3.4.32**. They load on Ubuntu 24.04
+(glibc 2.39) and Debian 13. They do **not** load on Debian 12 (2.36) or
+Ubuntu 22.04 (2.35). `ldd` reporting no missing `.so` names is not enough:
+libc and libstdc++ are present on those LTS hosts, the version nodes are not,
+and libc plus libstdc++ are two separate version-node sets to check. In the
+published archive, issue 169 reports `btx-cli` at `GLIBC_2.34` rather than
+`2.38`, so the `btx-cli` libc floor differs from `btxd`'s.
+
+Source builds from this tree still target the Ubuntu 22.04 / GCC 11.1+
+baseline. The version-node check is in the `bin/btxd` / `bin/btx-modeld`
+wrapper that `scripts/release/package_release_archive.py` generates for
+archives cut from this tree: it compares `objdump -T` (or `readelf -V`)
+GLIBC/GLIBCXX symbols against `getconf GNU_LIBC_VERSION` and the host
+`libstdc++.so.6`, then exits 127 naming the required version. The wrapper in
+the **already-published** v0.34.8-rc1 archive predates that check and only
+runs the `ldd` soname preflight, so on 22.04 it execs `libexec/btxd.real` and
+the raw loader error (`version 'GLIBC_2.38' not found`) is what you see. Its
+apt hint also prints the Ubuntu 24.04 package spelling (`libevent-2.1-7t64`);
+on 22.04 the libevent names have no `t64` suffix (`libevent-2.1-7`).
+
+This RC does not ship a glibc-2.35 tarball. Building from source on the LTS
+host is the supported path. An unprivileged workaround proven on Debian 12
+(no rebuild, no root), using Debian 13 `libc6` / `libstdc++6` / `libgcc-s1`
+extracted into a private prefix:
+
+```bash
+# Example debs that have been shown to work: libc6 2.41-12+deb13u4,
+# libstdc++6 14.2.0-19, libgcc-s1 14.2.0-19. Do not apt-install trixie
+# packages onto a bookworm or jammy system.
+mkdir -p "$HOME/btxglibc"
+dpkg-deb -x libc6_*.deb "$HOME/btxglibc"
+dpkg-deb -x libstdc++6_*.deb "$HOME/btxglibc"
+dpkg-deb -x libgcc-s1_*.deb "$HOME/btxglibc"
+export BTX_GLIBC_PREFIX="$HOME/btxglibc"
+./bin/btxd --version
+./bin/btx-modeld --version
+```
+
+That is a lab/agent sideload, not "download and go". `bin/btxd` honors
+`BTX_GLIBC_PREFIX` by exec'ing that prefix's `ld-linux-x86-64.so.2` with
+`--library-path`.
+
 If you prefer to run the bootstrap steps yourself:
 
-1. Download the BTX binary release.
-2. Download the latest matching `snapshot.dat`, `snapshot.manifest.json`, and
-   `btx-release-manifest.json` published for that release.
-3. Verify `SHA256SUMS` and `SHA256SUMS.asc`.
+1. Download the BTX binary release (rc tags: unpack the GitHub tarball as
+   above; do not wait for `btx-release-manifest.json`).
+2. Download the latest matching `snapshot.dat` and `snapshot.manifest.json`.
+   Signed finals also publish `btx-release-manifest.json`; rc tags may not.
+3. Verify `SHA256SUMS`. Signed finals also publish `SHA256SUMS.asc`.
 4. Check that the manifest's `snapshot_sha256`, height, and base block hash
    match the release notes or `m_assumeutxo_data`, and keep
    `snapshot_file_version` as the troubleshooting record.
@@ -384,7 +469,9 @@ To keep this workflow usable for binary users, every release should ship:
 
 `contrib/faststart/btx-agent-setup.py` relies on the release manifest to select
 the correct archive automatically, so the bundle contract matters just as much
-as the snapshot itself.
+as the snapshot itself. Prerelease / rc tags that omit
+`btx-release-manifest.json` or `SHA256SUMS.asc` are unpack-the-tarball, not
+agent-setup.
 
 The release-generation helper is:
 

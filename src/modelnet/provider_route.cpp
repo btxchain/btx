@@ -6,6 +6,7 @@
 
 #include <crypto/common.h>
 #include <modelnet/crypto.h>
+#include <modelnet/model_nat.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
@@ -42,7 +43,14 @@ int BucketIndex(const Digest48& self, const Digest48& other)
 {
     for (size_t i = 0; i < Digest48::SIZE; ++i) {
         const unsigned char x = self.data[i] ^ other.data[i];
-        if (x != 0) return static_cast<int>(i);
+        if (x == 0) continue;
+        int bit = 0;
+        unsigned char mask = 0x80;
+        while ((x & mask) == 0 && mask != 0) {
+            mask >>= 1;
+            ++bit;
+        }
+        return static_cast<int>(i * 8 + static_cast<size_t>(bit));
     }
     return 0;
 }
@@ -59,6 +67,11 @@ bool XorCloser(const Digest48& target, const RouteContact& a, const RouteContact
 }
 
 } // namespace
+
+int RoutingBucketIndex(const Digest48& self, const Digest48& other)
+{
+    return BucketIndex(self, other);
+}
 
 std::vector<unsigned char> ProviderRecordPreimage(const ProviderRecord& r)
 {
@@ -173,7 +186,17 @@ bool ProviderRecordFromJson(const UniValue& o, ProviderRecord& r, std::string& e
     if (o.exists("endpoints") && o["endpoints"].isArray()) {
         for (const auto& e : o["endpoints"].getValues()) {
             if (r.endpoints.size() >= PROVIDER_MAX_ENDPOINTS) break;
-            if (e.isStr()) r.endpoints.push_back(e.get_str());
+            if (!e.isStr()) continue;
+            if (e.get_str().size() > 256) {
+                err = "endpoint too long";
+                return false;
+            }
+            std::string eerr;
+            if (IsForbiddenRelayEndpoint(e.get_str(), eerr)) {
+                err = eerr.empty() ? "forbidden endpoint" : eerr;
+                return false;
+            }
+            r.endpoints.push_back(e.get_str());
         }
     }
     if (o.exists("reachability_kind")) r.reachability_kind = o["reachability_kind"].get_str();
@@ -194,7 +217,7 @@ bool RoutingTable::Insert(const RouteContact& c, std::string& err)
         err = "endpoint";
         return false;
     }
-    const int b = BucketIndex(m_self, c.id);
+    const int b = RoutingBucketIndex(m_self, c.id);
     auto& bucket = m_buckets[static_cast<size_t>(b) % m_buckets.size()];
     for (auto& prev : bucket) {
         if (prev.id == c.id) {

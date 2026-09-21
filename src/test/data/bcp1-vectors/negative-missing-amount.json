@@ -1,0 +1,8 @@
+{
+  "id": "negative-missing-amount",
+  "expect": "reject",
+  "profile": "BTX_EXCHANGE_PROFILE_V1",
+  "base": "unsigned-package.json",
+  "mutation": "omit_amount_atoms",
+  "note": "prepareexternalsign / ValidateBcp1Structure must fail closed on missing prevout amount."
+}

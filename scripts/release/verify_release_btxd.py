@@ -34,11 +34,21 @@ as separate arguments. `--archive` unpacks a shippable tarball/zip and
 gates `libexec/btxd.real` (or `bin/btxd`). Guix, cut, collect, and
 publish all invoke this script; an unrecognized file is FAIL, not a
 skip. A skipped gate is how issues 111 and 122 shipped twice.
+
+`ldd` returning no "not found" sonames is not the whole runtime story.
+The v0.34.8-rc1 CPU archive is linked against GLIBC_2.38 / GLIBCXX_3.4.32;
+Ubuntu 22.04 (glibc 2.35) and Debian 12 (2.36) have libc.so.6 and
+libstdc++.so.6 installed, so `ldd` looks clean and the loader then fails
+on a version node (issue 169). Before launching a Linux daemon this gate
+reads the required GLIBC/GLIBCXX/CXXABI version nodes from `objdump -T`
+(or `readelf -V`) and prints them, so a baseline-host FAIL names the
+archive's floor instead of only the host's missing symbol.
 """
 
 from __future__ import annotations
 
 import argparse
+import platform
 import re
 import struct
 import subprocess
@@ -125,6 +135,56 @@ def elf_needed_ldd(path: Path) -> list[str]:
         if match:
             needed.append(match.group(1))
     return needed
+
+
+ELF_VERSION_PREFIXES = ("GLIBC", "GLIBCXX", "CXXABI")
+
+
+def version_key(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in value.split(".") if part.isdigit())
+
+
+def host_glibc_version() -> str:
+    try:
+        name, version = platform.libc_ver()
+    except Exception:  # pragma: no cover - platform probe must never gate
+        return ""
+    return version if name == "glibc" else ""
+
+
+def elf_required_versions(path: Path) -> dict[str, str]:
+    """Highest GLIBC/GLIBCXX/CXXABI version node the ELF names (objdump -T).
+
+    `ldd` only reports missing sonames. Debian 12 and Ubuntu 22.04 ship
+    libc.so.6 and libstdc++.so.6, so that preflight passes and the loader
+    then fails on a version node. Reading the floor from the binary itself
+    is what makes a 22.04 gate FAIL explicit (issue 169).
+    """
+    if not path.is_file() or classify(path) != "elf":
+        return {}
+    text = ""
+    for command in (["objdump", "-T", str(path)], ["readelf", "-V", str(path)]):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            continue
+        text = result.stdout or ""
+        if text.strip():
+            break
+    if not text.strip():
+        return {}
+    required: dict[str, str] = {}
+    for prefix in ELF_VERSION_PREFIXES:
+        found = re.findall(rf"\b{prefix}_([0-9]+(?:\.[0-9]+)+)", text)
+        if found:
+            required[prefix] = max(found, key=version_key)
+    return required
+
+
+def required_versions_summary(path: Path) -> str:
+    return ", ".join(
+        f"{prefix}_{value}" for prefix, value in elf_required_versions(path).items()
+    )
 
 
 def verify_linux(path: Path) -> None:
@@ -302,9 +362,19 @@ def verify_launch(path: Path, timeout: float = 30.0) -> None:
         raise VerifyError(f"{path}: cannot execute: {exc}") from exc
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
+        required = required_versions_summary(path)
+        hint = ""
+        if required:
+            hint = (
+                f" Required version nodes (objdump -T): {required}. "
+                "If that floor is above the host (Debian 12 / Ubuntu 22.04 "
+                "provide glibc 2.36 / 2.35), ldd still looks clean; build from "
+                "source there or raise the documented baseline (issue 169)."
+            )
         raise VerifyError(
             f"{path}: `{path.name} -version` exited {result.returncode} (need 0)"
             + (f": {err}" if err else "")
+            + hint
         )
 
 
@@ -324,6 +394,14 @@ def verify_path_for_ship(path: Path) -> str:
     how = verify_binary(path)
     if is_daemon(path):
         if native_launch_possible(kind):
+            required = required_versions_summary(path)
+            if required:
+                host = host_glibc_version()
+                print(
+                    f"verify_release_btxd: note {path.name} requires {required} "
+                    f"(objdump -T; host GLIBC {host or 'unknown'})",
+                    file=sys.stderr,
+                )
             verify_launch(path)
             how = f"{how}+launch"
         else:

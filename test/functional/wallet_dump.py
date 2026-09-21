@@ -47,8 +47,15 @@ class WalletDumpTest(BitcoinTestFramework):
         # transactions. Keep this test on the supported compatibility surface:
         # load an existing wallet and round-trip pre-existing key material.
         key = get_generate_key()
-        self.nodes[0].importprivkey(key.privkey, "runtime fixture", False)
-        assert self.nodes[0].getaddressinfo(key.p2pkh_addr)["ismine"]
+        self.log.info("importprivkey is disabled (legacy ECDSA)")
+        assert_raises_rpc_error(
+            -8,
+            "importprivkey is disabled",
+            self.nodes[0].importprivkey,
+            key.privkey,
+            "runtime fixture",
+            False,
+        )
 
         wallet_unenc_dump = self.nodes[0].datadir_path / "wallet.unencrypted.dump"
         wallet_enc_dump = self.nodes[0].datadir_path / "wallet.encrypted.dump"
@@ -58,7 +65,6 @@ class WalletDumpTest(BitcoinTestFramework):
         with open(wallet_unenc_dump, encoding="utf8") as dump_file:
             dump_text = dump_file.read()
         assert "# End of dump" in dump_text
-        assert key.p2pkh_addr in dump_text
 
         self.nodes[0].encryptwallet("test")
         with WalletUnlock(self.nodes[0], "test"):
@@ -67,13 +73,13 @@ class WalletDumpTest(BitcoinTestFramework):
 
         self.create_legacy_wallet("w2")
         w2 = self.nodes[0].get_wallet_rpc("w2")
-        assert not w2.getaddressinfo(key.p2pkh_addr)["ismine"]
-        w2.importwallet(wallet_unenc_dump)
-        assert w2.getaddressinfo(key.p2pkh_addr)["ismine"]
-
-        w2.unloadwallet()
-        self.nodes[0].loadwallet("w2")
-        assert self.nodes[0].get_wallet_rpc("w2").getaddressinfo(key.p2pkh_addr)["ismine"]
+        self.log.info("importwallet is disabled (legacy WIF)")
+        assert_raises_rpc_error(
+            -8,
+            "importwallet is disabled",
+            w2.importwallet,
+            wallet_unenc_dump,
+        )
 
 
 if __name__ == '__main__':

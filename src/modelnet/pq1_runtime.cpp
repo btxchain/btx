@@ -7,8 +7,10 @@
 #include <modelnet/crypto.h>
 #include <modelnet/transport_pq.h>
 #include <univalue.h>
+#include <util/fs.h>
 #include <util/strencodings.h>
 
+#include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/crypto.h>
@@ -31,6 +33,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <system_error>
 
 namespace modelnet {
 namespace {
@@ -80,6 +83,7 @@ std::string OpensslBin()
     if (const char* e = std::getenv("BTX_OPENSSL")) return e;
     static const std::string cached = [] {
         const char* cands[] = {
+            "/opt/openssl-3.5.8/bin/openssl",
             "/opt/homebrew/opt/openssl@3/bin/openssl",
             "/opt/homebrew/opt/openssl/bin/openssl",
             "/usr/local/opt/openssl@3/bin/openssl",
@@ -348,7 +352,15 @@ bool ExtractPeerTransportPin(void* ssl_void, Digest48& out, std::string& err)
     }
     unsigned char* der = nullptr;
     const int len = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(cert), &der);
+    EVP_PKEY* pkey = X509_get_pubkey(cert);
     X509_free(cert);
+    if (!pkey || (EVP_PKEY_is_a(pkey, "ML-DSA-44") != 1 && EVP_PKEY_is_a(pkey, "mldsa44") != 1)) {
+        if (pkey) EVP_PKEY_free(pkey);
+        if (der) OPENSSL_free(der);
+        err = "peer key is not ML-DSA-44";
+        return false;
+    }
+    EVP_PKEY_free(pkey);
     if (len <= 0 || !der) {
         err = "peer SPKI encode failed";
         return false;
@@ -360,16 +372,22 @@ bool ExtractPeerTransportPin(void* ssl_void, Digest48& out, std::string& err)
 
 bool CheckOrStorePin(const fs::path& pinfile, const std::string& endpoint, const Digest48& pin, std::string& err)
 {
+    static std::mutex g_pin_mu;
+    std::lock_guard<std::mutex> lock(g_pin_mu);
     UniValue obj(UniValue::VOBJ);
     if (fs::exists(pinfile)) {
         std::ifstream in(pinfile);
         std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (!raw.empty() && !obj.read(raw)) {
+        if (raw.empty() || !obj.read(raw) || !obj.isObject()) {
             err = "pin file corrupt";
             return false;
         }
     }
     if (obj.exists(endpoint)) {
+        if (!obj[endpoint].isStr()) {
+            err = "pin file corrupt";
+            return false;
+        }
         Digest48 stored;
         if (!Digest48::FromHex(obj[endpoint].get_str(), stored, err)) return false;
         if (stored != pin) {
@@ -380,20 +398,41 @@ bool CheckOrStorePin(const fs::path& pinfile, const std::string& endpoint, const
     }
     obj.pushKV(endpoint, pin.Hex());
     fs::create_directories(pinfile.parent_path());
-    std::ofstream out(pinfile, std::ios::trunc);
-    if (!out) {
+    const fs::path tmp = pinfile.parent_path() / (pinfile.filename().native() + ".tmp");
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) {
+            err = "pin file write";
+            return false;
+        }
+        out << obj.write() << "\n";
+        if (!out) {
+            err = "pin file write";
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::rename(tmp, pinfile, ec);
+    if (ec) {
         err = "pin file write";
         return false;
     }
-    out << obj.write() << "\n";
     return true;
 }
 
 uint32_t Ipv4Netgroup(const sockaddr* sa, socklen_t len)
 {
-    if (!sa || len < static_cast<socklen_t>(sizeof(sockaddr_in))) return 0;
-    if (sa->sa_family != AF_INET) return 0;
-    return ntohl(reinterpret_cast<const sockaddr_in*>(sa)->sin_addr.s_addr);
+    if (!sa) return 0;
+    if (sa->sa_family == AF_INET && len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
+        return ntohl(reinterpret_cast<const sockaddr_in*>(sa)->sin_addr.s_addr);
+    }
+    if (sa->sa_family == AF_INET6 && len >= static_cast<socklen_t>(sizeof(sockaddr_in6))) {
+        const auto* a = reinterpret_cast<const sockaddr_in6*>(sa);
+        uint32_t h = 2166136261u;
+        for (int i = 0; i < 8; ++i) h = (h * 16777619u) ^ a->sin6_addr.s6_addr[i];
+        return h ? h : 1u;
+    }
+    return 0xffffffffu;
 }
 
 int CountUnauthAndBump(uint32_t netgroup)
@@ -433,8 +472,11 @@ void ConnLimits::ReleaseInbound(uint32_t netgroup)
 {
     std::lock_guard<std::mutex> lock(g_netgroup_mu);
     auto it = g_inbound_netgroup.find(netgroup);
-    if (it != g_inbound_netgroup.end() && it->second > 0) --it->second;
-    inbound.fetch_sub(1);
+    if (it != g_inbound_netgroup.end()) {
+        if (it->second > 0) --it->second;
+        if (it->second == 0) g_inbound_netgroup.erase(it);
+    }
+    if (inbound.load() > 0) inbound.fetch_sub(1);
 }
 
 bool ConnLimits::TryOutbound()

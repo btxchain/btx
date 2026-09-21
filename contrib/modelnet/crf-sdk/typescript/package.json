@@ -1,0 +1,23 @@
+{
+  "name": "@btx/crf-sdk",
+  "version": "0.34.8",
+  "private": true,
+  "description": "Cognitive Reserve v1.1 TypeScript client. Additive HCP/1 extension (50 ops). HTTP 202 is UNKNOWN; never auto-submit. Not a wallet; automatic_spend_atoms stays 0.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test src/body_id.test.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

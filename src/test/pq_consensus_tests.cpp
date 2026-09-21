@@ -561,12 +561,14 @@ BOOST_AUTO_TEST_CASE(p2mr_wrong_leaf_version_fails)
     std::vector<unsigned char> signature;
     BOOST_REQUIRE(key.Sign(*sighash, signature));
 
-    CScriptWitness witness;
-    witness.stack = {signature, leaf_script, {0xc0}};
+    for (const uint8_t bad_version : {uint8_t{0xc0}, uint8_t{0xc3}}) {
+        CScriptWitness witness;
+        witness.stack = {signature, leaf_script, {bad_version}};
 
-    ScriptError err{SCRIPT_ERR_UNKNOWN_ERROR};
-    BOOST_CHECK(!VerifyP2MRSpend(ctx, witness, err));
-    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_P2MR_WRONG_LEAF_VERSION);
+        ScriptError err{SCRIPT_ERR_UNKNOWN_ERROR};
+        BOOST_CHECK(!VerifyP2MRSpend(ctx, witness, err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_P2MR_WRONG_LEAF_VERSION);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(p2mr_empty_witness_fails)

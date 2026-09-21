@@ -995,8 +995,8 @@ bool IsCommittedP2MRControl(
     Span<const unsigned char> script,
     Span<const unsigned char> control)
 {
-    if (control.empty() || (control[0] & P2MR_LEAF_MASK) != P2MR_LEAF_VERSION) return false;
-    const uint256 leaf_hash{ComputeP2MRLeafHash(control[0] & P2MR_LEAF_MASK, script)};
+    if (control.empty() || control[0] != P2MR_LEAF_VERSION) return false;
+    const uint256 leaf_hash{ComputeP2MRLeafHash(control[0], script)};
     return VerifyP2MRCommitment(control, program, leaf_hash);
 }
 

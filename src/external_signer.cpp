@@ -117,8 +117,7 @@ bool ValidateP2MRSignerPreconditions(
             error = strprintf("Input %u P2MR merkle root does not match prevout commitment", input_index);
             return false;
         }
-        const uint8_t control_leaf_version = input.m_p2mr_control_block.front() & P2MR_LEAF_MASK;
-        if (control_leaf_version != input.m_p2mr_leaf_version) {
+        if (input.m_p2mr_control_block.front() != input.m_p2mr_leaf_version) {
             error = strprintf("Input %u selected P2MR control block leaf version mismatch", input_index);
             return false;
         }
