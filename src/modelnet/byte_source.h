@@ -28,6 +28,22 @@ public:
     virtual std::string Locator() const = 0;
     /** Source integrity (HF revision, torrent infohash). Not publisher authorship. */
     virtual std::string SourceIntegrity() const { return {}; }
+    /** Optional file selection for multi-file registry/torrent sources. */
+    virtual void SelectFile(const std::string& relative, const std::string& sha384_hex = {})
+    {
+        (void)relative;
+        (void)sha384_hex;
+    }
+    /**
+     * Bind the declared file size and optional per-piece SHA-384 leaves
+     * (ChunkLeaf). Whole-file sha384 is applied only when an extent covers the
+     * entire file. Each piece Read may come from a different origin.
+     */
+    virtual void BindFileIdentity(uint64_t size_bytes, const std::vector<std::string>& piece_sha384_hex)
+    {
+        (void)size_bytes;
+        (void)piece_sha384_hex;
+    }
 };
 
 } // namespace modelnet

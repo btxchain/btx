@@ -53,6 +53,9 @@ VERBS = (
     "mirror",
     "profile",
     "import-plan",
+    "fetch",
+    "resolve",
+    "verify",
     "package",
     "erasure",
     "torrent-status",
@@ -205,13 +208,17 @@ verbs:
                                  default action NOTIFY; never auto-spend
   events [--cursor N] [--wait S] getmodelevents; waitformodelevent if --wait.
                                  Probe getmodelevents first so unknown RPC cannot hang.
-  mirror [--publisher ID] [--keep-latest N]
+  mirror [--publisher ID] [--keep-latest N] [--min-independent-origins N]
                                  getmodelmirror / setmodelmirror (no auto-spend)
   profile show|set NAME         getmodelprofile / setmodelprofile
                                  NAME=personal|infrastructure|mirror|custom
   import-plan @PLAN.json|status PLAN_ID
                                  executemodelimport / getmodelimport
-                                 (staging until VerifiedManifest; no live HTTP)
+                                 (staging until VerifiedManifest; live HTTPS only
+                                 with live_wan / BTX_MODELNET_LIVE_WAN=1)
+  fetch @PLAN.json               alias of import-plan; walletless; monetary plane stays
+  resolve @PLAN.json             local origin dump; no wallet, no chain, no fetch
+  verify PLAN_ID                 alias of import-plan status
   package create|inspect JSON|HEX|.btx
                                  createbtxpackage / inspectbtxpackage
                                  (.btx path or hex; link remains magnet analog)
@@ -2207,7 +2214,7 @@ def cmd_events(sock: str, args: list[str]) -> None:
 
 
 def cmd_mirror(sock: str, args: list[str]) -> None:
-    opts, pos = _take_opts(args, {"--publisher", "--keep-latest", "--collection", "--query"})
+    opts, pos = _take_opts(args, {"--publisher", "--keep-latest", "--collection", "--query", "--min-independent-origins"})
     if pos:
         _die("mirror takes no positional arguments (use --publisher / --keep-latest)", 2)
     publisher = str(opts.get("--publisher") or "").strip() or None
@@ -2219,7 +2226,13 @@ def cmd_mirror(sock: str, args: list[str]) -> None:
         keep_latest = _as_int(keep_raw)
         if keep_latest is None or keep_latest < 0:
             _die("mirror --keep-latest requires a non-negative integer", 2)
-    mutating = any(v is not None for v in (publisher, collection, query, keep_latest))
+    min_raw = opts.get("--min-independent-origins")
+    min_origins: int | None = None
+    if min_raw is not None and str(min_raw).strip() != "":
+        min_origins = _as_int(min_raw)
+        if min_origins is None or min_origins < 1:
+            _die("mirror --min-independent-origins requires an integer >= 1", 2)
+    mutating = any(v is not None for v in (publisher, collection, query, keep_latest, min_origins))
     if mutating:
         payload = {
             "publisher_id": publisher,
@@ -2228,6 +2241,8 @@ def cmd_mirror(sock: str, args: list[str]) -> None:
             "keep_latest": keep_latest,
             "automatic_spend_atoms": 0,
         }
+        if min_origins is not None:
+            payload["min_independent_origins"] = min_origins
         _refuse_spend_options(payload, "mirror")
         result = _rpc_dev(sock, "setmodelmirror", [[payload]])
         method = "setmodelmirror"
@@ -2244,6 +2259,7 @@ def cmd_mirror(sock: str, args: list[str]) -> None:
             "collection_id": _pick(src, "collection_id") if _pick(src, "collection_id") is not None else collection,
             "query": _pick(src, "query") if _pick(src, "query") is not None else query,
             "keep_latest": _pick(src, "keep_latest") if _pick(src, "keep_latest") is not None else keep_latest,
+            "min_independent_origins": _pick(src, "min_independent_origins"),
             "profile": _pick(src, "profile"),
         },
         note=(
@@ -2357,10 +2373,17 @@ def _json_obj(args: list[str]) -> dict[str, Any]:
             obj = json.load(fh)
         if not isinstance(obj, dict):
             _die("JSON object required", 2)
-        return obj
-    obj = json.loads(raw)
-    if not isinstance(obj, dict):
-        _die("JSON object required", 2)
+    else:
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            _die("JSON object required", 2)
+    params = obj.get("params")
+    if isinstance(params, list) and params and isinstance(params[0], dict) and (
+        "plan_id" in params[0] or "origins" in params[0] or "source" in params[0]
+    ):
+        return params[0]
+    if isinstance(params, dict) and ("plan_id" in params or "origins" in params or "source" in params):
+        return params
     return obj
 
 
@@ -2385,8 +2408,59 @@ def cmd_import_plan(sock: str, args: list[str]) -> None:
             "authorship": _pick(src, "authorship"),
         },
         note="ImportPlan staging until VerifiedManifest. Source integrity is not authorship. "
+        "Fetch is walletless; monetary plane stays for spend, bounties, and preservation. "
         + DEV348_NOTE,
-        next_actions=["import-plan status <plan_id>", "doctor"],
+        next_actions=["import-plan status <plan_id>", "verify <plan_id>", "doctor"],
+    )
+
+
+def cmd_fetch(sock: str, args: list[str]) -> None:
+    cmd_import_plan(sock, args)
+
+
+def cmd_verify(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("verify requires PLAN_ID", 2)
+    cmd_import_plan(sock, ["status", args[0]])
+
+
+def cmd_resolve(_sock: str, args: list[str]) -> None:
+    plan = _json_obj(args)
+    origins = plan.get("origins") if isinstance(plan.get("origins"), list) else []
+    source = plan.get("source") if isinstance(plan.get("source"), dict) else {}
+    where = [o.get("type") for o in origins if isinstance(o, dict) and o.get("type")]
+    if not where and isinstance(source.get("kind"), str):
+        where = [str(source.get("kind")).lower()]
+    identity = {
+        "what": "cryptographic artifact; btx:// is the durable namespace",
+        "who": "native BTX publisher signatures remain; OMS/Sigstore/Cosign/OCI attestations are extra evidence, never identity",
+        "where": where,
+        "run": "local capability evidence; not vendor naming",
+        "how": "distribution funding: free, private, BTX incentives, bounties, paid hosting; token is not an admission ticket to fetch",
+        "evidence": "BTX aggregates provenance; it is not the sole CA",
+        "money": "not required to fetch; monetary plane stays for spend, bounties, preservation",
+    }
+    result = {
+        "wallet_required": False,
+        "publisher_must_republish": False,
+        "automatic_spend_atoms": 0,
+        "origins": origins,
+        "identity": identity,
+    }
+    _emit_dev(
+        "model_resolve",
+        "resolve",
+        result,
+        {
+            "wallet_required": False,
+            "publisher_must_republish": False,
+            "origin_count": len(origins),
+        },
+        note=(
+            "Provider-independent resolution. No wallet, no chain sync, no fetch. "
+            "Monetary plane stays for spend/bounties/preservation."
+        ),
+        next_actions=["fetch @plan.json", "import-plan @plan.json"],
     )
 
 
@@ -2522,6 +2596,9 @@ COMMANDS = {
     "mirror": cmd_mirror,
     "profile": cmd_profile,
     "import-plan": cmd_import_plan,
+    "fetch": cmd_fetch,
+    "resolve": cmd_resolve,
+    "verify": cmd_verify,
     "package": cmd_package,
     "erasure": cmd_erasure,
     "torrent-status": cmd_torrent_status,

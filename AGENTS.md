@@ -118,8 +118,11 @@ publisher watch ([doc/modelnet/watches.md](doc/modelnet/watches.md)).
 `link`, `bounty-draft` (`--validate` / `--update` / `--delete`), `watch-scan`.
 **0.34.8-dev** (fail closed if missing): `cloud add|test|status`,
 `follow publisher|collection`, `events`, `mirror`, `profile show|set`,
-`import-plan`, `package`, `erasure`, `torrent-status`, `origin-offer`,
-`transport`. Catalog names `addmodelstorage` / `getmodelcapabilities`
+`import-plan`, `fetch`, `resolve`, `verify`, `package`, `erasure`, `torrent-status`, `origin-offer`,
+`transport`. **0.34.9-dev** registry independence: `fetch`/`resolve`/`verify`
+are walletless; the monetary plane stays. See
+[doc/modelnet/registry-independence.md](doc/modelnet/registry-independence.md).
+Catalog names `addmodelstorage` / `getmodelcapabilities`
 reuse `setcloudstorage` / `getmodelnetworkinfo` (`alias_of` in the result).
 `--json` is the agent door. `automatic_spend_atoms` stays 0. Do not pass
 raw cloud secrets on argv (`--credential-ref env:BTX_CLOUD_CREDENTIAL` or

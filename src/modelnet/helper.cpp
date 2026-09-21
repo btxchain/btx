@@ -4276,6 +4276,12 @@ UniValue MirrorPolicyToJson(const UniValue& stored, const OperatorProfile& prof,
     o.pushKV("profile", OperatorProfileName(prof));
     o.pushKV("preserve_rare", policy.preserve_rare);
     o.pushKV("automatic_spend_atoms", 0);
+    int min_origins = 1;
+    if (o.exists("min_independent_origins") && o["min_independent_origins"].isNum()) {
+        min_origins = o["min_independent_origins"].getInt<int>();
+    }
+    if (min_origins < 1) min_origins = 1;
+    o.pushKV("min_independent_origins", min_origins);
     o.pushKV("note", "mirror is a local keep/follow policy, not a monetary or consensus privilege");
     if (!o.exists("selectors") || !o["selectors"].isArray()) {
         o.pushKV("selectors", UniValue(UniValue::VARR));
@@ -4338,6 +4344,17 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
         sel.pushKV("collection_id", collection);
         sel.pushKV("query", query);
         sel.pushKV("keep_latest", keep_latest);
+        int min_origins = 1;
+        if (o.exists("min_independent_origins") && !o["min_independent_origins"].isNull()) {
+            if (o["min_independent_origins"].isNum()) min_origins = o["min_independent_origins"].getInt<int>();
+            else if (o["min_independent_origins"].isStr()) min_origins = std::atoi(o["min_independent_origins"].get_str().c_str());
+        }
+        if (min_origins < 1) {
+            err_code = "INVALID_PARAMETER";
+            err = "min_independent_origins must be >= 1";
+            return false;
+        }
+        sel.pushKV("min_independent_origins", min_origins);
         sel.pushKV("automatic_spend_atoms", 0);
         UniValue next(UniValue::VARR);
         bool replaced = false;
@@ -4362,6 +4379,7 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
             next.push_back(sel);
         }
         stored.pushKV("selectors", next);
+        stored.pushKV("min_independent_origins", min_origins);
         stored.pushKV("automatic_spend_atoms", 0);
         std::string werr;
         if (!WriteJsonFile(path, stored, werr)) {

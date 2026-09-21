@@ -455,6 +455,28 @@ contrib/modelnet/btx-model bounty-draft @./terms.json
 contrib/modelnet/btx-model bounty-draft --update '<draft_id>' @./terms.json
 ```
 
+## 8. 0.34.9-dev — registry independence / capability evidence
+
+**0.34.9-dev pointer.** This paragraph is new; the shipping-tag statements
+above are unchanged. See [registry-independence.md](registry-independence.md)
+(**what** an artifact is: `btx://` + `VerifiedManifest`; **where** bytes come
+from: `origins[]`) and [capability-evidence.md](capability-evidence.md)
+(**can it run here**). OCI/OMS/Sigstore/Cosign are extra origins/evidence,
+not replacements for BTX identity or BTX signatures.
+
+`btx-model fetch` / `resolve` / `verify` are walletless **0.34.9-dev** verbs
+(they exist so agents have a stable door; fail closed if the helper lacks the
+method). Fetch needs no wallet and no BTX balance. The monetary plane stays:
+wallets, ExactReplay, PQ signatures, and bounties are untouched, and
+`automatic_spend_atoms` stays **0**. No web UI; the agent door is
+`btx-model --json` (stdout only, stderr suppressed).
+
+```bash
+contrib/modelnet/btx-model --json resolve '<btx://…>'
+contrib/modelnet/btx-model --json verify '<btx://…>'
+contrib/modelnet/btx-model --json fetch '<btx://…>'
+```
+
 ## Hard no
 
 - Do not collapse prepare/sign/submit. Do not set `auto_pay`.

@@ -111,9 +111,8 @@ BOOST_AUTO_TEST_CASE(torrent_padding_silently_short_reads_FINDING)
     BOOST_CHECK(out.empty());
 }
 
-// R3-1 / R3-3. The staging writer never compares the delivered length to the
-// declared one, so the short read above becomes a truncated staged file that
-// reports success.
+// R3-1 / R3-3. Staging now fails closed on a short torrent read instead of
+// writing a truncated file and reporting success.
 BOOST_AUTO_TEST_CASE(torrent_padding_silently_short_reads_into_staging_FINDING)
 {
     const fs::path root = m_path_root / "r3-torrent-short";
@@ -131,10 +130,8 @@ BOOST_AUTO_TEST_CASE(torrent_padding_silently_short_reads_into_staging_FINDING)
     src.InjectFileBytes("model.safetensors", Bytes("weig"));
     BOOST_REQUIRE(src.Pin(err));
 
-    BOOST_REQUIRE(coord.StageFromSource(src, coord.AcceptedFiles()[0], /*budget=*/64, err));
-    const fs::path staged = coord.StagingDir() / fs::PathFromString("model.safetensors");
-    BOOST_REQUIRE(fs::exists(staged));
-    BOOST_CHECK_EQUAL(fs::file_size(staged), 4U); // declared 6, staged 4, no error
+    BOOST_CHECK(!coord.StageFromSource(src, coord.AcceptedFiles()[0], /*budget=*/64, err));
+    BOOST_CHECK_EQUAL(err, "short read");
 }
 
 // R3-9. Nothing hashes the payload against the infohash: no v1 SHA-1 piece
@@ -351,8 +348,7 @@ BOOST_AUTO_TEST_CASE(xet_extent_bounds_hold)
 
 // --- identity binding -------------------------------------------------------
 
-// R3-2. AcceptVerifiedManifest adopts a caller-supplied model_id without
-// hashing, or even requiring, any staged bytes.
+// R3-2. AcceptVerifiedManifest now fails closed if nothing was staged.
 BOOST_AUTO_TEST_CASE(publish_ready_without_any_staged_bytes_FINDING)
 {
     const fs::path root = m_path_root / "r3-no-bytes";
@@ -364,20 +360,18 @@ BOOST_AUTO_TEST_CASE(publish_ready_without_any_staged_bytes_FINDING)
     BOOST_CHECK(coord.Phase() == modelnet::ImportPhase::STAGING);
 
     const fs::path staged = coord.StagingDir() / fs::PathFromString("model.safetensors");
-    BOOST_REQUIRE(!fs::exists(staged)); // nothing was ever fetched
+    BOOST_REQUIRE(!fs::exists(staged));
 
     modelnet::VerifiedManifest vm;
     vm.model_id.data.fill(0xab);
     vm.artifact_id.data.fill(0xcd);
-    BOOST_REQUIRE(coord.AcceptVerifiedManifest(vm, err));
-    BOOST_CHECK(coord.Phase() == modelnet::ImportPhase::PUBLISH_READY);
-    BOOST_CHECK(coord.HasFinalModelId());
-    BOOST_CHECK_EQUAL(coord.FinalModelId().Hex(), vm.model_id.Hex());
-    BOOST_CHECK(!fs::exists(staged));
+    BOOST_CHECK(!coord.AcceptVerifiedManifest(vm, err));
+    BOOST_CHECK_EQUAL(err, "verified manifest files");
+    BOOST_CHECK(coord.Phase() == modelnet::ImportPhase::STAGING);
+    BOOST_CHECK(!coord.HasFinalModelId());
 }
 
-// R3-2. Staged bytes unrelated to the manifest are accepted too: the id is
-// asserted by the caller, not derived from what is on disk.
+// R3-2. Staged bytes must re-hash; a caller-supplied id is not enough.
 BOOST_AUTO_TEST_CASE(staged_bytes_are_not_rehashed_at_accept_FINDING)
 {
     const fs::path root = m_path_root / "r3-no-rehash";
@@ -394,10 +388,13 @@ BOOST_AUTO_TEST_CASE(staged_bytes_are_not_rehashed_at_accept_FINDING)
     modelnet::VerifiedManifest vm;
     vm.model_id.data.fill(0x11);
     vm.artifact_id.data.fill(0x22);
+    BOOST_CHECK(!coord.AcceptVerifiedManifest(vm, err));
+    BOOST_CHECK_EQUAL(err, "verified manifest files");
+
+    BOOST_REQUIRE(modelnet::MakeVerifiedManifestFromStaged(coord.StagingDir(), {"model.safetensors"}, vm, err));
     BOOST_REQUIRE(coord.AcceptVerifiedManifest(vm, err));
     BOOST_CHECK_EQUAL(coord.FinalModelId().Hex(), vm.model_id.Hex());
 
-    // The snapshot token still never appears in status JSON.
     const std::string dumped = coord.StatusJson().write();
     BOOST_CHECK(dumped.find("snapshot_token") == std::string::npos);
     BOOST_CHECK(dumped.find(plan.snapshot_token) == std::string::npos);

@@ -59,6 +59,25 @@ Keep-N is “keep the latest N verified artifacts matching the selector.”
 It is not a paid pin and not an auto-`getmodel` of arbitrary advertisements.
 Preserve-rare remains a separate explicit flag (`-modelpreserverare`).
 
+### 0.34.9-dev: `min_independent_origins` (>= 1)
+
+`setmodelmirror` also accepts `min_independent_origins` (**integer >= 1**).
+It sets the minimum number of *independent* origins a kept artifact should be
+seen from before it counts as mirrored. This is a **local keep/follow policy**
+on the model plane: not consensus, not fork choice, not a search-ranking
+signal, and **not** a monetary privilege or spend authority.
+`automatic_spend_atoms` stays **0**; a mirror never auto-pays a pin.
+
+```bash
+contrib/modelnet/btx-model --json mirror --publisher '<publisher_id>' --keep-latest 3 --min-independent-origins 2
+```
+
+Counting independent origins is this node's own observation, not global truth,
+and not WAN evidence. Extra origins (OCI / OMS / Sigstore / Cosign) are
+additional evidence-only sources; they do **not** replace BTX identity or BTX
+signatures. Keep the monetary plane unchanged: mirrors store no wallet
+secrets and money stays on `btxd`.
+
 ## Cloud is optional
 
 A mirror may use local disk only. Attaching R2/S3 is optional backing, not

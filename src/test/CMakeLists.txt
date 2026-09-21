@@ -688,6 +688,7 @@ if(WITH_MODELNET)
     modelnet_authz_tests.cpp
     modelnet_r2_storage_tests.cpp
     modelnet_r3_import_tests.cpp
+    modelnet_registry_independence_tests.cpp
     modelnet_r8_mandate_tests.cpp
     modelnet_healer_negcache_tests.cpp
     hcp_remaining_gap_tests.cpp

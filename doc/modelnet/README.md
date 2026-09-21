@@ -215,6 +215,8 @@ In-tree capability bits are not CSV PASS and not a B0 rewrite. The bar is
 | [recovery.md](recovery.md) | DOC-03 helper / campaign / HTLC recovery |
 | [first-run.md](first-run.md) | Host / seed / search / share / watch folder / doctor (0.34.8-dev) |
 | [agent-recipes.md](agent-recipes.md) | Agent door (never spend, never inference) |
+| [registry-independence.md](registry-independence.md) | **0.34.9-dev** multi-origin verified artifact resolver. Origins are disposable; `btx://` is identity. Walletless fetch; monetary plane stays. OCI/OMS are additive, not replacements. |
+| [capability-evidence.md](capability-evidence.md) | **0.34.9-dev** local run/capability evidence; not vendor naming |
 | [storage-backends.md](storage-backends.md) | 0.34.8-dev: piece vs cloud object; MinIO/cloud RPCs exist; R2 AUTO; `IS_RELEASE=false`; live R2 WAN **HONEST_NOT_RUN** |
 | [cloud-seeding.md](cloud-seeding.md) | 0.34.8-dev: origin as bootstrap, not billing model; fail closed |
 | [events.md](events.md) | 0.34.8-dev local event journal |

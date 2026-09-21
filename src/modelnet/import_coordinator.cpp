@@ -9,12 +9,15 @@
 #include <modelnet/qualification.h>
 #include <modelnet/source_huggingface.h>
 #include <modelnet/source_local.h>
+#include <modelnet/source_registry.h>
 #include <modelnet/source_torrent.h>
 #include <modelnet/store.h>
+#include <modelnet/types.h>
 #include <random.h>
 #include <span.h>
 #include <util/strencodings.h>
 
+#include <algorithm>
 #include <fstream>
 
 namespace modelnet {
@@ -22,15 +25,7 @@ namespace {
 
 const char* KindName(ImportSourceKind k)
 {
-    switch (k) {
-    case ImportSourceKind::LOCAL: return "LOCAL";
-    case ImportSourceKind::HUGGINGFACE: return "HUGGINGFACE";
-    case ImportSourceKind::TORRENT: return "TORRENT";
-    case ImportSourceKind::MAGNET: return "MAGNET";
-    case ImportSourceKind::BTX: return "BTX";
-    case ImportSourceKind::S3: return "S3";
-    }
-    return "LOCAL";
+    return ImportSourceKindName(k);
 }
 
 const char* PhaseName(ImportPhase p)
@@ -51,6 +46,9 @@ std::string ProvenanceFor(const ImportPlan& plan)
     }
     if (plan.kind == ImportSourceKind::HUGGINGFACE) {
         return HUGGINGFACE_PROVENANCE_NOTE;
+    }
+    if (ImportKindIsRegistry(plan.kind) || plan.origins.size() > 1) {
+        return REGISTRY_PROVENANCE_NOTE;
     }
     if (!plan.provenance_note.empty()) return plan.provenance_note;
     return "source_integrity_only;not_publisher_authorship";
@@ -188,16 +186,8 @@ bool ImportCoordinator::StageFromSource(ByteSource& src, const ImportFileSpec& s
         err = "size";
         return false;
     }
-    std::vector<unsigned char> bytes;
-    IoExecutor io(1);
-    if (!io.Submit(err)) return false;
-    const bool got = src.Read({0, spec.size_bytes}, bytes, budget_bytes, err);
-    io.Complete();
-    if (!got) return false;
-    if (LooksLikePickle(bytes) || LooksLikeExecutable(dest, bytes)) {
-        err = "pickle/.pt execution forbidden";
-        return false;
-    }
+    src.SelectFile(spec.source_path.empty() ? dest : spec.source_path, spec.sha384_hex);
+    src.BindFileIdentity(spec.size_bytes, spec.piece_sha384_hex);
     const fs::path outp = StagingDir() / fs::PathFromString(dest);
     fs::create_directories(outp.parent_path());
     std::ofstream out(outp, std::ios::binary);
@@ -205,13 +195,45 @@ bool ImportCoordinator::StageFromSource(ByteSource& src, const ImportFileSpec& s
         err = "open";
         return false;
     }
-    if (!bytes.empty()) {
-        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    uint64_t remaining_budget = budget_bytes;
+    uint64_t off = 0;
+    IoExecutor io(1);
+    if (!io.Submit(err)) return false;
+    while (off < spec.size_bytes) {
+        const uint64_t n = std::min<uint64_t>(PIECE_SIZE, spec.size_bytes - off);
+        std::vector<unsigned char> bytes;
+        const bool got = src.Read({off, n}, bytes, remaining_budget, err);
+        if (!got) {
+            io.Complete();
+            return false;
+        }
+        if (bytes.size() != n) {
+            io.Complete();
+            err = "short read";
+            return false;
+        }
+        if (off == 0 && (LooksLikePickle(bytes) || LooksLikeExecutable(dest, bytes))) {
+            io.Complete();
+            err = "pickle/.pt execution forbidden";
+            return false;
+        }
+        if (!bytes.empty()) {
+            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        }
+        if (!out) {
+            io.Complete();
+            err = "write";
+            return false;
+        }
+        if (remaining_budget < n) {
+            io.Complete();
+            err = "credit exhausted";
+            return false;
+        }
+        remaining_budget -= n;
+        off += n;
     }
-    if (!out) {
-        err = "write";
-        return false;
-    }
+    io.Complete();
     return true;
 }
 
@@ -227,6 +249,9 @@ bool ImportCoordinator::AcceptVerifiedManifest(const VerifiedManifest& vm, std::
     }
     if (!m_plan.expected_btx_manifest.empty() && m_plan.expected_btx_manifest != vm.model_id.Hex()) {
         err = "ID_MISMATCH";
+        return false;
+    }
+    if (!BindVerifiedManifestToStaged(vm, StagingDir(), err)) {
         return false;
     }
     m_verified = vm;
@@ -259,6 +284,26 @@ UniValue ImportCoordinator::StatusJson() const
     o.pushKV("provenance_note", ProvenanceFor(m_plan));
     o.pushKV("authorship", "not implied by source integrity");
     o.pushKV("has_verified_manifest", m_verified.has_value());
+    UniValue identity(UniValue::VOBJ);
+    identity.pushKV("what", "cryptographic artifact; btx:// is the durable namespace");
+    identity.pushKV("who", "native BTX publisher signatures remain; OpenSSF OMS/Sigstore/Cosign are extra evidence, never identity");
+    identity.pushKV("money", "not required to fetch; monetary plane stays for spend, bounties, preservation");
+    identity.pushKV("how", "distribution funding: free, private, BTX incentives, bounties, paid hosting; token is not an admission ticket to fetch");
+    UniValue where(UniValue::VARR);
+    for (const auto& origin : m_plan.origins) where.push_back(origin.type);
+    if (where.empty()) where.push_back(KindName(m_plan.kind));
+    identity.pushKV("where", where);
+    identity.pushKV("run", "local capability evidence; not vendor naming");
+    identity.pushKV("evidence", "BTX aggregates native publisher signatures plus OMS/Sigstore/Cosign/OCI attestations; it is not the sole CA");
+    o.pushKV("identity", identity);
+    UniValue origins(UniValue::VARR);
+    for (const auto& origin : m_plan.origins) {
+        UniValue e(UniValue::VOBJ);
+        e.pushKV("type", origin.type);
+        e.pushKV("priority", origin.priority);
+        origins.push_back(e);
+    }
+    o.pushKV("origins", origins);
     UniValue files(UniValue::VARR);
     for (const auto& f : m_accepted) {
         UniValue e(UniValue::VOBJ);
@@ -277,18 +322,45 @@ UniValue ImportCoordinator::StatusJson() const
 
 std::unique_ptr<ByteSource> MakePlanByteSource(const ImportPlan& plan, std::string& err)
 {
-    if (plan.kind == ImportSourceKind::LOCAL) {
-        if (plan.locator.empty()) {
+    ImportPlan p = plan;
+    SynthesizeOriginsFromV1(p);
+    if (p.origins.size() > 1) {
+        return std::make_unique<MultiOriginByteSource>(std::move(p));
+    }
+    if (p.kind == ImportSourceKind::LOCAL) {
+        if (p.locator.empty()) {
             err = "locator";
             return nullptr;
         }
-        return std::make_unique<LocalFileByteSource>(fs::PathFromString(plan.locator));
+        return std::make_unique<LocalFileByteSource>(fs::PathFromString(p.locator));
     }
-    if (plan.kind == ImportSourceKind::HUGGINGFACE) {
-        return std::make_unique<HuggingFaceByteSource>(plan.locator, plan.snapshot_token, /*follow_redirects=*/false);
+    if (p.kind == ImportSourceKind::HUGGINGFACE) {
+        return std::make_unique<HuggingFaceByteSource>(p.locator, p.snapshot_token, /*follow_redirects=*/false);
     }
-    if (plan.kind == ImportSourceKind::TORRENT || plan.kind == ImportSourceKind::MAGNET) {
-        return std::make_unique<TorrentByteSource>(plan.locator, plan.snapshot_token, TorrentMapFromPlan(plan));
+    if (p.kind == ImportSourceKind::TORRENT || p.kind == ImportSourceKind::MAGNET) {
+        return std::make_unique<TorrentByteSource>(p.locator, p.snapshot_token, TorrentMapFromPlan(p));
+    }
+    if (p.kind == ImportSourceKind::S3) {
+        ImportOrigin o;
+        o.type = "s3";
+        o.locator = p.locator;
+        o.snapshot_token = p.snapshot_token;
+        return std::make_unique<S3OriginByteSource>(std::move(o));
+    }
+    if (p.kind == ImportSourceKind::BTX) {
+        ImportOrigin o;
+        o.type = "btx";
+        o.locator = p.locator;
+        o.snapshot_token = p.snapshot_token;
+        return std::make_unique<BtxOriginByteSource>(std::move(o));
+    }
+    if (ImportKindIsRegistry(p.kind) || p.kind == ImportSourceKind::HTTP) {
+        ImportOrigin o;
+        o.type = ImportOriginTypeName(p.kind);
+        o.locator = p.locator;
+        o.snapshot_token = p.snapshot_token;
+        o.integrity = p.resolved_revision;
+        return std::make_unique<RegistryByteSource>(std::move(o), p.live_wan);
     }
     err = "source adapter not in this module";
     return nullptr;

@@ -208,8 +208,7 @@ BOOST_AUTO_TEST_CASE(import_coordinator_staging_uuid_until_verified_manifest)
     BOOST_CHECK(fs::exists(a.StagingDir() / fs::PathFromString("model.safetensors")));
 
     modelnet::VerifiedManifest vm;
-    vm.model_id.data.fill(0x11);
-    vm.artifact_id.data.fill(0x22);
+    BOOST_REQUIRE(modelnet::MakeVerifiedManifestFromStaged(a.StagingDir(), {"model.safetensors"}, vm, err));
     BOOST_REQUIRE(a.AcceptVerifiedManifest(vm, err));
     BOOST_CHECK(a.HasFinalModelId());
     BOOST_CHECK_EQUAL(a.FinalModelId().Hex(), vm.model_id.Hex());
@@ -258,8 +257,10 @@ BOOST_AUTO_TEST_CASE(make_plan_bytesource_and_ssrf)
     BOOST_CHECK_EQUAL(err, "ssrf");
 
     auto s3 = SamplePlan(modelnet::ImportSourceKind::S3, "s3://bucket/key");
-    BOOST_CHECK(!modelnet::MakePlanByteSource(s3, err));
-    BOOST_CHECK_EQUAL(err, "source adapter not in this module");
+    auto s3src = modelnet::MakePlanByteSource(s3, err);
+    BOOST_REQUIRE(s3src);
+    BOOST_CHECK_EQUAL(s3src->Kind(), "S3");
+    BOOST_REQUIRE(s3src->Pin(err));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
