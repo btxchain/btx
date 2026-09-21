@@ -31,6 +31,12 @@ readiness record carries `funded_wallet=false` and `remote_endpoint=false`. A
 node can verify, store, and report capability without holding secrets or a
 balance, and without spending.
 
+Import StatusJson emits a structured `capability` object at
+`readiness_target=VERIFIED_FILES` (`inference=false`) without probing a GPU.
+That is a local statement about the import plane, not a vendor name and not a
+network-wide accelerator requirement. ProbeAcceleratedAdapters remains the
+later host-observation path described below.
+
 ## Vendor naming is not evidence
 
 A Hugging Face `pipeline_tag`, a ModelScope task label, a catalog SKU, or an

@@ -461,6 +461,8 @@ BOOST_AUTO_TEST_CASE(mirror_policy_and_native_file_stream_hello)
     BOOST_CHECK_EQUAL(empty["automatic_spend_atoms"].getInt<int>(), 0);
     BOOST_CHECK_EQUAL(empty["mirror_privilege"].get_bool(), false);
     BOOST_CHECK(empty["selectors"].isArray());
+    BOOST_CHECK_EQUAL(empty["min_independent_origins"].getInt<int>(), 1);
+    BOOST_CHECK(!empty["fetch_fails_below_min"].get_bool());
 
     UniValue payload(UniValue::VOBJ);
     payload.pushKV("publisher_id", "pub-mirror");

@@ -44,6 +44,8 @@ public:
         (void)size_bytes;
         (void)piece_sha384_hex;
     }
+    /** Origin types that supplied pieces for the current file, in Read order. */
+    virtual std::vector<std::string> PieceOrigins() const { return {}; }
 };
 
 } // namespace modelnet

@@ -73,10 +73,12 @@ contrib/modelnet/btx-model --json mirror --publisher '<publisher_id>' --keep-lat
 ```
 
 Counting independent origins is this node's own observation, not global truth,
-and not WAN evidence. Extra origins (OCI / OMS / Sigstore / Cosign) are
-additional evidence-only sources; they do **not** replace BTX identity or BTX
-signatures. Keep the monetary plane unchanged: mirrors store no wallet
-secrets and money stays on `btxd`.
+and not WAN evidence. A fetch that sees fewer origins than the target still
+**succeeds**; `getmodelimport` reports `below_min_independent_origins` and
+`getmodelmirror` reports `fetch_fails_below_min: false`. Extra origins (OCI /
+OMS / Sigstore / Cosign) are additional evidence-only sources; they do **not**
+replace BTX identity or BTX signatures. Keep the monetary plane unchanged:
+mirrors store no wallet secrets and money stays on `btxd`.
 
 ## Cloud is optional
 

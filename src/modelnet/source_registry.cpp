@@ -338,12 +338,14 @@ void RegistryByteSource::SelectFile(const std::string& relative, const std::stri
 {
     m_file = relative;
     m_sha384_hex = sha384_hex;
+    m_piece_origins.clear();
 }
 
 void RegistryByteSource::BindFileIdentity(uint64_t size_bytes, const std::vector<std::string>& piece_sha384_hex)
 {
     m_size_bytes = size_bytes;
     m_piece_hex = piece_sha384_hex;
+    m_piece_origins.clear();
 }
 
 bool RegistryByteSource::Pin(std::string& err)
@@ -379,6 +381,7 @@ bool RegistryByteSource::Read(const ReadExtent& extent, std::vector<unsigned cha
                 out.clear();
                 return false;
             }
+            m_piece_origins.push_back(m_origin.type);
             return true;
         }
     }
@@ -400,6 +403,7 @@ bool RegistryByteSource::Read(const ReadExtent& extent, std::vector<unsigned cha
         out.clear();
         return false;
     }
+    m_piece_origins.push_back(m_origin.type);
     return true;
 }
 
@@ -518,6 +522,12 @@ std::string MultiOriginByteSource::SourceIntegrity() const
 {
     if (m_plan.origins.empty()) return m_plan.snapshot_token;
     return m_plan.origins.front().snapshot_token;
+}
+
+int MultiOriginByteSource::IndependentOriginCount() const
+{
+    std::set<std::string> unique(m_piece_origins.begin(), m_piece_origins.end());
+    return static_cast<int>(unique.size());
 }
 
 S3OriginByteSource::S3OriginByteSource(ImportOrigin origin) : m_origin(std::move(origin)) {}

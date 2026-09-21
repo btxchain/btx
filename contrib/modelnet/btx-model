@@ -2428,9 +2428,17 @@ def cmd_resolve(_sock: str, args: list[str]) -> None:
     plan = _json_obj(args)
     origins = plan.get("origins") if isinstance(plan.get("origins"), list) else []
     source = plan.get("source") if isinstance(plan.get("source"), dict) else {}
+    evidence = plan.get("provenance_evidence") if isinstance(plan.get("provenance_evidence"), list) else []
     where = [o.get("type") for o in origins if isinstance(o, dict) and o.get("type")]
     if not where and isinstance(source.get("kind"), str):
         where = [str(source.get("kind")).lower()]
+    min_origins = plan.get("min_independent_origins", 1)
+    try:
+        min_origins_n = int(min_origins)
+    except (TypeError, ValueError):
+        min_origins_n = 1
+    if min_origins_n < 1:
+        min_origins_n = 1
     identity = {
         "what": "cryptographic artifact; btx:// is the durable namespace",
         "who": "native BTX publisher signatures remain; OMS/Sigstore/Cosign/OCI attestations are extra evidence, never identity",
@@ -2440,12 +2448,36 @@ def cmd_resolve(_sock: str, args: list[str]) -> None:
         "evidence": "BTX aggregates provenance; it is not the sole CA",
         "money": "not required to fetch; monetary plane stays for spend, bounties, preservation",
     }
+    attached = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "")
+        row = {
+            "kind": kind,
+            "role": "native_btx_publisher" if kind == "btx_publisher" else "additional_evidence",
+            "verified_here": False,
+        }
+        if item.get("locator"):
+            row["locator"] = item.get("locator")
+        if item.get("note"):
+            row["note"] = item.get("note")
+        attached.append(row)
     result = {
         "wallet_required": False,
         "publisher_must_republish": False,
         "automatic_spend_atoms": 0,
         "origins": origins,
         "identity": identity,
+        "provenance_evidence": attached,
+        "min_independent_origins": min_origins_n,
+        "capability": {
+            "readiness_target": "VERIFIED_FILES",
+            "inference": False,
+            "funded_wallet": False,
+            "automatic_spend_atoms": 0,
+            "authority": "local capability evidence; not vendor naming",
+        },
     }
     _emit_dev(
         "model_resolve",
@@ -2455,10 +2487,12 @@ def cmd_resolve(_sock: str, args: list[str]) -> None:
             "wallet_required": False,
             "publisher_must_republish": False,
             "origin_count": len(origins),
+            "min_independent_origins": min_origins_n,
         },
         note=(
             "Provider-independent resolution. No wallet, no chain sync, no fetch. "
-            "Monetary plane stays for spend/bounties/preservation."
+            "Monetary plane stays for spend/bounties/preservation. "
+            "OMS/Sigstore/Cosign are attached evidence, not verified here."
         ),
         next_actions=["fetch @plan.json", "import-plan @plan.json"],
     )

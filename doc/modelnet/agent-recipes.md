@@ -354,6 +354,10 @@ contrib/modelnet/btx-model --json mirror --publisher pub-mirror --keep-latest 3 
 ```
 
 Expect `wallet_required: false`, `publisher_must_republish: false`,
-`automatic_spend_atoms: 0`. Live HTTPS stays fail-closed unless `live_wan` or
-`BTX_MODELNET_LIVE_WAN=1`. Do not invent WAN evidence. Do not strip wallets
-or consensus from the node.
+`automatic_spend_atoms: 0`. `resolve` dumps planned `origins[]`, attached
+`provenance_evidence` (OMS/Sigstore/Cosign parse-only), and a structured
+`capability` object. After `fetch`, `getmodelimport` / `verify` report
+`piece_origins` and `independent_origin_count`. `min_independent_origins` is
+an observation target, not a fetch admission ticket. Live HTTPS stays
+fail-closed unless `live_wan` or `BTX_MODELNET_LIVE_WAN=1`. Do not invent WAN
+evidence. Do not strip wallets or consensus from the node.

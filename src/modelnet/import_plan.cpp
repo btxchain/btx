@@ -188,6 +188,21 @@ bool ParseImportPlan(const UniValue& json, ImportPlan& out, std::string& err)
         if (json["live_wan"].isBool()) out.live_wan = json["live_wan"].get_bool();
         else if (json["live_wan"].isNum()) out.live_wan = json["live_wan"].getInt<int>() != 0;
     }
+    if (json.exists("min_independent_origins") && !json["min_independent_origins"].isNull()) {
+        int n = 1;
+        if (json["min_independent_origins"].isNum()) n = json["min_independent_origins"].getInt<int>();
+        else if (json["min_independent_origins"].isStr()) {
+            n = std::atoi(json["min_independent_origins"].get_str().c_str());
+        } else {
+            err = "min_independent_origins";
+            return false;
+        }
+        if (n < 1) {
+            err = "min_independent_origins";
+            return false;
+        }
+        out.min_independent_origins = n;
+    }
 
     auto parse_origin = [&](const UniValue& src, ImportOrigin& origin, ImportSourceKind* kind_out) -> bool {
         if (!src.isObject()) {
@@ -374,6 +389,7 @@ UniValue ImportPlanJson(const ImportPlan& plan)
     o.pushKV("files", files);
     o.pushKV("wallet_required", false);
     o.pushKV("publisher_must_republish", false);
+    o.pushKV("min_independent_origins", plan.min_independent_origins);
     UniValue ev(UniValue::VARR);
     for (const auto& pe : plan.provenance_evidence) {
         UniValue e(UniValue::VOBJ);

@@ -70,6 +70,7 @@ struct ImportPlan {
     std::vector<ProvenanceEvidence> provenance_evidence;
     bool live_wan{false};
     bool wallet_required{false}; // fetch never requires a wallet; monetary plane is separate
+    int min_independent_origins{1}; // observation target; does not fail a single-origin fetch
 };
 
 bool ParseImportPlan(const UniValue& json, ImportPlan& out, std::string& err);

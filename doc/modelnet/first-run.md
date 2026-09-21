@@ -472,9 +472,9 @@ wallets, ExactReplay, PQ signatures, and bounties are untouched, and
 `btx-model --json` (stdout only, stderr suppressed).
 
 ```bash
-contrib/modelnet/btx-model --json resolve '<btx://…>'
-contrib/modelnet/btx-model --json verify '<btx://…>'
-contrib/modelnet/btx-model --json fetch '<btx://…>'
+contrib/modelnet/btx-model --json resolve @contrib/modelnet/recipes/registry-independence-origins.json
+contrib/modelnet/btx-model --json verify PLAN_ID
+contrib/modelnet/btx-model --json fetch @contrib/modelnet/recipes/registry-independence-origins.json
 ```
 
 ## Hard no

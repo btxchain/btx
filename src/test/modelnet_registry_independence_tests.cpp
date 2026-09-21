@@ -138,6 +138,8 @@ BOOST_AUTO_TEST_CASE(v1_source_synthesizes_origins_and_wallet_is_never_required)
     const UniValue dumped = modelnet::ImportPlanJson(plan);
     BOOST_CHECK(!dumped["wallet_required"].get_bool());
     BOOST_CHECK(!dumped["publisher_must_republish"].get_bool());
+    BOOST_CHECK_EQUAL(dumped["min_independent_origins"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(plan.min_independent_origins, 1);
 }
 
 BOOST_AUTO_TEST_CASE(unknown_provenance_kind_rejected_btx_publisher_kept)
@@ -186,6 +188,23 @@ BOOST_AUTO_TEST_CASE(piece_routing_skips_failed_origin_then_hash_binds)
     BOOST_CHECK(idj["identity"]["money"].get_str().find("monetary plane stays") != std::string::npos);
     BOOST_CHECK(idj["identity"]["how"].get_str().find("admission ticket") != std::string::npos);
     BOOST_CHECK(idj["identity"]["evidence"].get_str().find("not the sole CA") != std::string::npos);
+    BOOST_REQUIRE_EQUAL(idj["piece_origins"].getValues().size(), 1U);
+    BOOST_CHECK_EQUAL(idj["piece_origins"][0].get_str(), "modelscope");
+    BOOST_CHECK_EQUAL(idj["independent_origin_count"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(idj["min_independent_origins"].getInt<int>(), 1);
+    BOOST_CHECK(!idj["below_min_independent_origins"].get_bool());
+    BOOST_REQUIRE_EQUAL(idj["provenance_evidence"].getValues().size(), 2U);
+    BOOST_CHECK_EQUAL(idj["provenance_evidence"][0]["kind"].get_str(), "btx_publisher");
+    BOOST_CHECK_EQUAL(idj["provenance_evidence"][0]["role"].get_str(), "native_btx_publisher");
+    BOOST_CHECK(!idj["provenance_evidence"][0]["verified_here"].get_bool());
+    BOOST_CHECK_EQUAL(idj["provenance_evidence"][1]["kind"].get_str(), "openssf_oms");
+    BOOST_CHECK_EQUAL(idj["provenance_evidence"][1]["role"].get_str(), "additional_evidence");
+    BOOST_CHECK(!idj["provenance_evidence"][1]["verified_here"].get_bool());
+    BOOST_CHECK_EQUAL(idj["capability"]["readiness_target"].get_str(), "VERIFIED_FILES");
+    BOOST_CHECK(!idj["capability"]["inference"].get_bool());
+    BOOST_CHECK(!idj["capability"]["funded_wallet"].get_bool());
+    BOOST_CHECK_EQUAL(idj["capability"]["automatic_spend_atoms"].getInt<int>(), 0);
+    BOOST_CHECK(!idj["wallet_required"].get_bool());
 
     modelnet::VerifiedManifest vm;
     BOOST_REQUIRE(modelnet::MakeVerifiedManifestFromStaged(coord.StagingDir(), {"model.safetensors"}, vm, err));
@@ -306,6 +325,7 @@ BOOST_AUTO_TEST_CASE(piece_zero_from_hf_piece_one_from_modelscope)
     BOOST_REQUIRE_EQUAL(multi->PieceOrigins().size(), 2U);
     BOOST_CHECK_EQUAL(multi->PieceOrigins()[0], "huggingface");
     BOOST_CHECK_EQUAL(multi->PieceOrigins()[1], "modelscope");
+    BOOST_CHECK_EQUAL(multi->IndependentOriginCount(), 2);
     modelnet::ClearRegistryInjections();
 }
 
@@ -412,7 +432,57 @@ BOOST_AUTO_TEST_CASE(executemodelimport_routes_modelscope_after_hf_fail)
     BOOST_CHECK(result["identity"]["who"].get_str().find("BTX publisher") != std::string::npos);
     BOOST_CHECK(result["identity"]["money"].get_str().find("monetary plane stays") != std::string::npos);
     BOOST_CHECK(result["identity"]["how"].get_str().find("admission ticket") != std::string::npos);
+    BOOST_CHECK_EQUAL(result["independent_origin_count"].getInt<int>(), 1);
+    BOOST_REQUIRE_EQUAL(result["piece_origins"].getValues().size(), 1U);
+    BOOST_CHECK_EQUAL(result["piece_origins"][0].get_str(), "modelscope");
+    BOOST_CHECK_EQUAL(result["capability"]["readiness_target"].get_str(), "VERIFIED_FILES");
+    BOOST_REQUIRE_EQUAL(result["provenance_evidence"].getValues().size(), 2U);
+    BOOST_CHECK(!result["provenance_evidence"][1]["verified_here"].get_bool());
     modelnet::ClearRegistryInjections();
+}
+
+BOOST_AUTO_TEST_CASE(min_independent_origins_is_observation_not_admission)
+{
+    modelnet::ClearRegistryInjections();
+    auto plan = MultiPlan();
+    plan.min_independent_origins = 2;
+    modelnet::InjectRegistryOriginError("huggingface");
+    modelnet::InjectRegistryOriginBytes("modelscope", Bytes("weigh"));
+    const fs::path root = m_path_root / "reg-min-origins";
+    modelnet::ImportCoordinator coord{plan, root};
+    std::string err;
+    BOOST_REQUIRE(coord.PrepareStaging(err));
+    auto src = modelnet::MakePlanByteSource(plan, err);
+    BOOST_REQUIRE(src);
+    BOOST_REQUIRE(coord.StageFromSource(*src, coord.AcceptedFiles()[0], 5, err));
+    const auto st = coord.StatusJson();
+    BOOST_CHECK_EQUAL(st["independent_origin_count"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(st["min_independent_origins"].getInt<int>(), 2);
+    BOOST_CHECK(st["below_min_independent_origins"].get_bool());
+    BOOST_CHECK_EQUAL(coord.Phase(), modelnet::ImportPhase::STAGING);
+    BOOST_CHECK(!st["wallet_required"].get_bool());
+    modelnet::VerifiedManifest vm;
+    BOOST_REQUIRE(modelnet::MakeVerifiedManifestFromStaged(coord.StagingDir(), {"model.safetensors"}, vm, err));
+    BOOST_REQUIRE(coord.AcceptVerifiedManifest(vm, err));
+    BOOST_CHECK_EQUAL(coord.Phase(), modelnet::ImportPhase::PUBLISH_READY);
+    BOOST_CHECK(coord.StatusJson()["below_min_independent_origins"].get_bool());
+    modelnet::ClearRegistryInjections();
+}
+
+BOOST_AUTO_TEST_CASE(min_independent_origins_below_one_is_rejected)
+{
+    UniValue j(UniValue::VOBJ);
+    j.pushKV("plan_id", PlanId('m'));
+    UniValue src(UniValue::VOBJ);
+    src.pushKV("kind", "LOCAL");
+    src.pushKV("locator", "/tmp/x");
+    src.pushKV("snapshot_token", "t");
+    j.pushKV("source", src);
+    j.pushKV("min_independent_origins", 0);
+    modelnet::ImportPlan plan;
+    std::string err;
+    BOOST_CHECK(!modelnet::ParseImportPlan(j, plan, err));
+    BOOST_CHECK_EQUAL(err, "min_independent_origins");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

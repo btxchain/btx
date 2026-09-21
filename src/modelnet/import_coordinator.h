@@ -38,6 +38,7 @@ class ImportCoordinator {
     std::vector<ImportFileSpec> m_accepted;
     std::optional<VerifiedManifest> m_verified;
     std::string m_fail_reason;
+    std::vector<std::string> m_piece_origins;
 
 public:
     ImportCoordinator(ImportPlan plan, fs::path stage_root);

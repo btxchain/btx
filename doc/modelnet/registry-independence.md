@@ -28,8 +28,17 @@ peers are **origins**, not identities.
 A publisher does **not** have to republish into BTX before BTX can fetch the
 native artifact. OCI is an origin and an import/export shape. OpenSSF OMS,
 Sigstore, Cosign, and OCI attestations are **additional** provenance evidence
-slots beside **native BTX publisher signatures**. BTX aggregates evidence; it
-is not the sole CA of AI.
+slots beside **native BTX publisher signatures**. The import plane **parses and
+attaches** those slots (`verified_here=false`); cryptographic verification of
+OMS/Sigstore/Cosign is a later gate. BTX aggregates evidence; it is not the
+sole CA of AI.
+
+`getmodelimport` / `ImportCoordinator::StatusJson` emit `piece_origins`,
+`independent_origin_count`, `min_independent_origins`,
+`below_min_independent_origins`, `provenance_evidence`, and a structured
+`capability` object (`readiness_target=VERIFIED_FILES`, `inference=false`,
+`funded_wallet=false`). Capability here is a local statement, not a GPU
+requirement and not an inference run.
 
 ## Five questions that must not collapse
 
@@ -84,4 +93,12 @@ that erases BTX.
 ## Mirror policy
 
 `setmodelmirror` accepts `min_independent_origins` (>= 1). That is a local
-keep/follow policy, not a monetary privilege and not consensus.
+keep/follow policy, not a monetary privilege and not consensus. The same
+integer may appear on an import plan. Seeing fewer independent origins than
+the target **does not fail a walletless fetch**; StatusJson reports
+`below_min_independent_origins` as an observation. `getmodelmirror` echoes
+`fetch_fails_below_min: false`.
+
+OCI ModelPack import/export (KitOps layout as a first-class package shape,
+not only a blob origin) is still later work. OCI blob GET via
+`/v2/{repo}/blobs/{digest}` is already an origin.

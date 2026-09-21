@@ -4282,6 +4282,7 @@ UniValue MirrorPolicyToJson(const UniValue& stored, const OperatorProfile& prof,
     }
     if (min_origins < 1) min_origins = 1;
     o.pushKV("min_independent_origins", min_origins);
+    o.pushKV("fetch_fails_below_min", false);
     o.pushKV("note", "mirror is a local keep/follow policy, not a monetary or consensus privilege");
     if (!o.exists("selectors") || !o["selectors"].isArray()) {
         o.pushKV("selectors", UniValue(UniValue::VARR));

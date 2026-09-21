@@ -43,6 +43,7 @@ class RegistryByteSource : public ByteSource {
     bool m_live_wan{false};
     bool m_pinned{false};
     std::string m_last_url;
+    std::vector<std::string> m_piece_origins;
 
 public:
     RegistryByteSource(ImportOrigin origin, bool live_wan);
@@ -55,6 +56,7 @@ public:
     std::string Locator() const override { return m_origin.locator; }
     std::string SourceIntegrity() const override { return m_origin.snapshot_token; }
     std::string LastUrl() const { return m_last_url; }
+    std::vector<std::string> PieceOrigins() const override { return m_piece_origins; }
 };
 
 /**
@@ -84,7 +86,8 @@ public:
     std::string SourceIntegrity() const override;
     std::string LastOriginType() const { return m_last_origin; }
     const std::vector<std::string>& Conflicts() const { return m_conflicts; }
-    const std::vector<std::string>& PieceOrigins() const { return m_piece_origins; }
+    std::vector<std::string> PieceOrigins() const override { return m_piece_origins; }
+    int IndependentOriginCount() const;
 };
 
 class S3OriginByteSource : public ByteSource {

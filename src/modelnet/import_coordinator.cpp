@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <set>
 
 namespace modelnet {
 namespace {
@@ -126,6 +127,7 @@ bool ImportCoordinator::PrepareStaging(std::string& err)
     m_accepted.clear();
     m_verified.reset();
     m_fail_reason.clear();
+    m_piece_origins.clear();
     for (const auto& f : m_plan.files) {
         const std::string dest = f.destination_path.empty() ? f.source_path : f.destination_path;
         std::string perr;
@@ -234,6 +236,14 @@ bool ImportCoordinator::StageFromSource(ByteSource& src, const ImportFileSpec& s
         off += n;
     }
     io.Complete();
+    const auto pieces = src.PieceOrigins();
+    if (!pieces.empty()) {
+        m_piece_origins.insert(m_piece_origins.end(), pieces.begin(), pieces.end());
+    } else {
+        const std::string fallback =
+            !m_plan.origins.empty() ? m_plan.origins.front().type : ImportOriginTypeName(m_plan.kind);
+        m_piece_origins.push_back(fallback);
+    }
     return true;
 }
 
@@ -304,6 +314,36 @@ UniValue ImportCoordinator::StatusJson() const
         origins.push_back(e);
     }
     o.pushKV("origins", origins);
+    UniValue piece_origins(UniValue::VARR);
+    for (const auto& origin : m_piece_origins) piece_origins.push_back(origin);
+    o.pushKV("piece_origins", piece_origins);
+    std::set<std::string> unique(m_piece_origins.begin(), m_piece_origins.end());
+    const int independent = static_cast<int>(unique.size());
+    o.pushKV("independent_origin_count", independent);
+    o.pushKV("min_independent_origins", m_plan.min_independent_origins);
+    o.pushKV("below_min_independent_origins",
+             !m_piece_origins.empty() && independent < m_plan.min_independent_origins);
+    UniValue evidence(UniValue::VARR);
+    for (const auto& pe : m_plan.provenance_evidence) {
+        UniValue e(UniValue::VOBJ);
+        e.pushKV("kind", pe.kind);
+        e.pushKV("role", pe.kind == "btx_publisher" ? "native_btx_publisher" : "additional_evidence");
+        e.pushKV("verified_here", false);
+        if (!pe.locator.empty()) e.pushKV("locator", pe.locator);
+        if (!pe.note.empty()) e.pushKV("note", pe.note);
+        evidence.push_back(e);
+    }
+    o.pushKV("provenance_evidence", evidence);
+    UniValue cap(UniValue::VOBJ);
+    cap.pushKV("readiness_target", "VERIFIED_FILES");
+    cap.pushKV("inference", false);
+    cap.pushKV("funded_wallet", false);
+    cap.pushKV("automatic_spend_atoms", 0);
+    cap.pushKV("authority", "local capability evidence; not vendor naming");
+    o.pushKV("capability", cap);
+    o.pushKV("wallet_required", false);
+    o.pushKV("publisher_must_republish", false);
+    o.pushKV("automatic_spend_atoms", 0);
     UniValue files(UniValue::VARR);
     for (const auto& f : m_accepted) {
         UniValue e(UniValue::VOBJ);
