@@ -476,7 +476,7 @@ BOOST_AUTO_TEST_CASE(unique_todo_catalog_not_s3)
 
 BOOST_AUTO_TEST_CASE(unique_todo_spend_zero)
 {
-    BOOST_CHECK(!CLIENT_VERSION_IS_RELEASE);
+    BOOST_CHECK(CLIENT_VERSION_IS_RELEASE);
     modelnet::ModelCatalog cat{m_path_root / "todo-spend", 1 << 20};
     std::string code, err;
     for (const char* m : {"getmodelnetworkinfo", "getevaluatedtransport", "getbtxpackagecapabilities",
@@ -715,7 +715,7 @@ BOOST_AUTO_TEST_CASE(unique_todo_gpu_attestor_untouched)
     BOOST_CHECK_EQUAL(CLIENT_VERSION_MAJOR, 0);
     BOOST_CHECK_EQUAL(CLIENT_VERSION_MINOR, 34);
     BOOST_CHECK_EQUAL(CLIENT_VERSION_BUILD, 8);
-    BOOST_CHECK(!CLIENT_VERSION_IS_RELEASE);
+    BOOST_CHECK(CLIENT_VERSION_IS_RELEASE);
 #ifdef MODELNET_BTXD_PATH
     const std::string p = MODELNET_BTXD_PATH;
     BOOST_CHECK(p.find("libexec/btxd.real") == std::string::npos);

@@ -1,13 +1,13 @@
-# Model events (0.34.8-dev)
+# Model events (0.34.8)
 
-**Status:** **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). Not a shipping
-tag. Last shipping tag is **v0.34.7**. `getmodelevents` /
+**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.8**. `getmodelevents` /
 `getmodeleventsequence` / `waitformodelevent` exist in this helper (unit-
 tested). The CLI wrapper **fails closed** if an older helper lacks the
 method. An unknown helper RPC returns `METHOD_NOT_FOUND` immediately (no
 hang). Live helper-death log dump is **NOT_RUN** (no `btx-modeld` spawn).
 This page is not a PASS and not WAN evidence. Live HTTPS/R2 remains
-**NOT_RUN**. `CLIENT_VERSION_IS_RELEASE=false`.
+**NOT_RUN**. `CLIENT_VERSION_IS_RELEASE=true`.
 
 CLI: `contrib/modelnet/btx-model events [--cursor N] [--wait SEC] --json`.
 Recipe: [../../contrib/modelnet/recipes/events.json](../../contrib/modelnet/recipes/events.json).

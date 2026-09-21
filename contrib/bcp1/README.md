@@ -2,7 +2,7 @@
 
 BTX Custody Profile 1 / `BTX_EXCHANGE_PROFILE_V1`: a **regtest** environment that exercises the monetary custody surface without HCP, Model Network, mining, GUI, or GPU.
 
-**Release state.** This harness targets the **0.34.8rc4** tree (`CLIENT_VERSION_RC=4`, `CLIENT_VERSION_IS_RELEASE=false`); the last shipping tag is **0.34.7**. It is development tooling, not a release attestation.
+**Release state.** This harness targets the **0.34.8** tree (`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`); the shipping tag is **v0.34.8**. It is development tooling, not a listing attestation.
 
 **No listing claim.** Nothing here states or implies that any exchange, custodian, or venue has listed, integrated, or approved BTX.
 

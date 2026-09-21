@@ -11,9 +11,9 @@ The `note` / `coverage_disclaimer` strings state **current network view; not a
 complete global directory**. Low `remote_count` is normal. Never interpret results
 as a global census.
 
-**Release posture:** last shipping tag is **v0.34.7**. This tree is
-**0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). 0.34.8 is **not** a
-shipping tag. First-run walkthrough: [first-run.md](first-run.md). CLI:
+**Release posture:** shipping tag is **v0.34.8**. This tree is
+**0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). First-run walkthrough:
+[first-run.md](first-run.md). CLI:
 [../../contrib/modelnet/btx-model](../../contrib/modelnet/btx-model).
 
 **User id:** `IdFromUser` / `ResolveUserId` accept a canonical `btx://`, a
@@ -730,9 +730,9 @@ Do not collapse prepare/sign/submit.
 
 ## 0.34.8-dev cloud / events / watches / profile (not a shipping tag)
 
-These helper RPCs **exist** in this 0.34.8-dev tree
-(`CLIENT_VERSION_IS_RELEASE=false`). **`btx-model` still fails closed** if an
-older helper is missing the method. This is **not** a shipping catalogue.
+These helper RPCs **exist** in this 0.34.8 tree
+(`CLIENT_VERSION_IS_RELEASE=true`). **`btx-model` still fails closed** if an
+older helper is missing the method.
 No PASS. Live HTTPS/R2 WAN is **NOT_RUN** (OpenSSL HTTPS transport is
 compiled; no live origin round-trip). SCALE huge / 400GiB body stream is
 **NOT_RUN**. GUI is source-only (`BUILD_GUI=OFF`; `bitcoin-qt` was not built

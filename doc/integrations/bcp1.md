@@ -2,7 +2,7 @@
 
 Contract name: **`BTX_EXCHANGE_PROFILE_V1`**.
 
-**Release state.** This contract describes the tree at **0.34.8rc4** (`CLIENT_VERSION_RC=4`, `CLIENT_VERSION_IS_RELEASE=false`). It has not been frozen by a shipping tag; the last shipping tag is **0.34.7**. Treat the surface below as a release-candidate contract under review, not a published standard.
+**Release state.** This contract describes the tree at **0.34.8** (`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`). Shipping tag **v0.34.8**. Treat the surface below as the published BCP/1 contract in this client; it is not independently certified.
 
 **Scope.** BCP/1 is a **major monetary-wallet addition**: it adds the wallet RPCs and the external-digest signing lifecycle described here, and it also changes existing signing RPCs and wallet lifecycle behavior. It is larger than an integration wrapper and should be reviewed at wallet level.
 

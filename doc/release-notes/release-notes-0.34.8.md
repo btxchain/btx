@@ -1,8 +1,8 @@
-# BTX 0.34.8 — pre-merge development (first-run, JIT capability, HCP, Cognitive Reserve)
+# BTX 0.34.8 — first-run, JIT capability, HCP, Cognitive Reserve
 
-**Status:** **pre-merge development**. `CLIENT_VERSION` is **0.34.8** with
-`CLIENT_VERSION_IS_RELEASE=false`. This is not a shipping tag and not a
-consensus change. **0.34.7** remains the last released client.
+**Status:** **shipping**. `CLIENT_VERSION` is **0.34.8** with
+`CLIENT_VERSION_RC=0` and `CLIENT_VERSION_IS_RELEASE=true`. GitHub tag
+**v0.34.8**. Not a consensus change relative to 0.34.7.
 
 This note is the public explanation of the whole 0.34.8-dev surface that
 lands on top of merged 0.34.7: first-run conveniences, NETWORK-02 packages,
@@ -62,10 +62,10 @@ A node with **no** pin membership, **no** attestor key, and **no**
 trusted-mirror pin must still reach tip from ExactReplay alone. Operator
 fleet observation is **not** a 0.34.8 release bar.
 
-## Precompiled archives (pre-merge)
+## Precompiled archives
 
-Archives are **0.34.8-dev** (`IS_RELEASE=false`). They are review/test
-assets, not a GitHub Releases cut. Packaged `bin/btxd` is a `#!/bin/sh`
+Archives are **0.34.8** (`IS_RELEASE=true`). GitHub tag **v0.34.8**.
+Packaged `bin/btxd` is a `#!/bin/sh`
 wrapper; `ldd bin/btxd` is not verification. Gate:
 `python3 scripts/release/verify_release_btxd.py` on the **real**
 `libexec/btxd.real` (ZMQ + `btxd -version`).

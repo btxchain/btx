@@ -15,8 +15,8 @@ synthetic MODEL token (not a hosted model):
 btx://pqwy06q0q7wwzy70aeq45sxnlvq3mr067yt4jzphzvnfn2c4zc24zxz665zdprf0nwgskvqq9cq365u9n8l25
 ```
 
-Last shipping tag is **0.34.7**. This tree is **0.34.8-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`). 0.34.8 is not a shipping tag.
+Shipping tag is **v0.34.8**. This tree is **0.34.8**
+(`CLIENT_VERSION_IS_RELEASE=true`).
 
 ## What you are about to do
 
@@ -329,7 +329,7 @@ Empty `-modelwatch` is off. The doctor reports the configured path.
 
 This **filesystem drop folder is not a publisher watch**. Publisher /
 collection follow, event journal, and optional cloud backing exist in this
-**0.34.8-dev** helper (`CLIENT_VERSION_IS_RELEASE=false`). FakeS3 is
+**0.34.8** helper (`CLIENT_VERSION_IS_RELEASE=true`). FakeS3 is
 unit-tested; live HTTPS/R2 is **NOT_RUN** (OpenSSL HTTPS transport is
 compiled; live R2 WAN is not PASS). SCALE huge / 400GiB body stream is
 **NOT_RUN**. The CLI wrapper still fails closed if an older helper has no
@@ -417,7 +417,7 @@ the agent door (stdout only). People keep stderr hints without `--json`.
 R2 AUTO is `SOURCE_FILES` + `STREAM_FILE`. Pieces remain the swarm unit.
 FakeS3 is unit-tested. Live HTTPS/R2 is **NOT_RUN** (transport compiled; WAN
 not PASS). SCALE huge is **NOT_RUN**. GUI watches are 0.34.8-dev source
-(`BUILD_GUI=OFF`). `CLIENT_VERSION_IS_RELEASE=false`. HF/Xet/torrent adapters
+(`BUILD_GUI=OFF`). `CLIENT_VERSION_IS_RELEASE=true`. HF/Xet/torrent adapters
 are local-native (pin/SSRF/CAS/infohash). They do **not** download from the
 public internet in this tree. See
 [storage-backends.md](storage-backends.md) and

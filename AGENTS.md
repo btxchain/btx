@@ -2,8 +2,8 @@
 
 Humans: read [HUMANS.md](HUMANS.md), then ignore this file. Product overview:
 [README.md](README.md). This is the operations manual for coding agents,
-research agents, and automation in BTX **0.34.8rc4** (`CLIENT_VERSION_RC=4`, `IS_RELEASE=false`).
-The last shipping tag is **0.34.7**. Merge to main still requires operator go-ahead.
+research agents, and automation in BTX **0.34.8** (`CLIENT_VERSION_RC=0`, `IS_RELEASE=true`).
+The shipping tag is **v0.34.8**.
 
 Default posture is **read-only**. Do not compile, commit, push, spend, evaluate,
 or mutate unless the operator asked or a finite `AgentMandate` covers the action.
@@ -29,8 +29,8 @@ issuance, miner preference, BanMan, AddrMan, or monetary peer scoring.
 
 ### HCP plane (`btx-hcpd` / `btx-hosted`)
 
-0.34.8rc4, `CLIENT_VERSION_IS_RELEASE=false` (RC tag, not a final shipping
-tag; code is in this tree). Operator index: [doc/hosted/README.md](doc/hosted/README.md).
+0.34.8, `CLIENT_VERSION_IS_RELEASE=true` (shipping tag **v0.34.8**).
+Operator index: [doc/hosted/README.md](doc/hosted/README.md).
 Spec: [doc/modelnet/hcp/](doc/modelnet/hcp/). Authority:
 [audit/hcp-authority-matrix.md](audit/hcp-authority-matrix.md).
 
@@ -226,8 +226,8 @@ do not advertise them in `getbountycapabilities` until execution is real.
 
 ## Release and session constraints
 
-This tree is **0.34.8rc4** (`CLIENT_VERSION_IS_RELEASE=false`). The last
-shipping tag is **0.34.7** (`CLIENT_VERSION_IS_RELEASE=true` on that tag).
+This tree is **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). The shipping
+tag is **v0.34.8**.
 
 - No unapproved git push, merge, or `CLIENT_VERSION` bump.
 - Do not compile (`cmake`, `ninja`, `cmake --build`) unless the operator asked.

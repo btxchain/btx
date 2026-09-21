@@ -1,7 +1,7 @@
-# Cloud seeding (0.34.8-dev)
+# Cloud seeding (0.34.8)
 
-**Status:** **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). Not a shipping
-tag. Last shipping tag is **v0.34.7**. Helper RPCs `setcloudstorage` /
+**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.8**. Helper RPCs `setcloudstorage` /
 `testcloudstorage` / `getcloudstorageinfo` exist in this helper. FakeS3 is
 **unit-tested**. Live HTTPS/R2 is **NOT_RUN**. The CLI wrapper still **fails
 closed** if an older helper lacks the method. This page does **not** claim a

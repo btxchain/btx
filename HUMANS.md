@@ -98,7 +98,7 @@ path. Machine sequences belong in [AGENTS.md](AGENTS.md).
 
 ### 1. Run the current line
 
-The last shipping tag is **v0.34.7**. For a validating node that becomes
+The last shipping tag is **v0.34.8**. For a validating node that becomes
 useful without waiting for a full historical sync, the fast-start snapshot is
 **assumeutxo-219000**.
 
@@ -106,8 +106,8 @@ Install and first-run: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
 
 Using and proving the model network: [doc/modelnet/howto.md](doc/modelnet/howto.md).
 
-This working tree is **0.34.8rc4** (`CLIENT_VERSION_IS_RELEASE=false`).
-The last released client remains **v0.34.7**. Final `IS_RELEASE=true` is the operator go-ahead after this RC.
+This working tree is **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`).
+GitHub tag **v0.34.8** is the shipping client.
 Host, seed, search, share, watch folder,
 `showmodel` / `unhostmodel` / `exportmodellink`, mining `first_run` doctor
 tiles, bounty `checklist` / `--validate`, and doctor:
@@ -119,7 +119,7 @@ helper lacks the method: [doc/modelnet/storage-backends.md](doc/modelnet/storage
 [doc/modelnet/watches.md](doc/modelnet/watches.md). Filesystem `-modelwatch`
 is not a publisher watch.
 
-### Source → storage → model (0.34.8-dev; `IS_RELEASE=false`)
+### Source → storage → model (0.34.8; `IS_RELEASE=true`)
 
 A person can pin a **local** file (or review an ImportPlan for Hugging Face /
 torrent), choose **local disk** or an S3-compatible backend, and publish a
@@ -141,7 +141,7 @@ Live Hugging Face HTTP, live R2 WAN, GUI, and wallet-signed subscriptions are
 **not** claimed here. Cloud add uses `--credential-ref`, never a raw secret on
 argv: [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md).
 
-### Hosted Control Plane / walletless discovery (0.34.8-dev; `IS_RELEASE=false`)
+### Hosted Control Plane / walletless discovery (0.34.8; `IS_RELEASE=true`)
 
 A person can **discover** public capabilities through a hosted catalogue without
 opening a monetary wallet, mining, or completing a full chain sync. The
@@ -158,7 +158,7 @@ hosted plane**, not a fifth product, not a new coin, and not remote inference.
 The original **34** HCP operations stay as they are. A venue’s catalogue does
 not imply reserve, committee, or programme support — those require an explicit
 `GET /extensions/cognitive-reserve` profile. Automatic spend remains **0**.
-This tree is still **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`) and does
+This tree is **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`) and does
 not replace the production GPU attestor. Operator notes:
 [doc/hosted/HCP_OPERATOR_NOTES.md](doc/hosted/HCP_OPERATOR_NOTES.md). Spec:
 [doc/modelnet/crf/](doc/modelnet/crf/).
@@ -290,10 +290,9 @@ search when you do not want the query to leave this node.
 
 ## Current line
 
-- **Release:** **v0.34.7** (Native Model Network, including search, release
-  campaigns, and creation bounties). Last shipping tag.
-- **Release candidate:** **0.34.8rc4** (`CLIENT_VERSION_IS_RELEASE=false`).
-  Merge to main still requires operator go-ahead. Host / seed / search / share / watch / doctor:
+- **Release:** **v0.34.8** (Native Model Network first-run, HCP, JIT capability,
+  including search, release campaigns, and creation bounties). Shipping tag.
+- Host / seed / search / share / watch / doctor:
   [doc/modelnet/first-run.md](doc/modelnet/first-run.md). CLI:
   [contrib/modelnet/btx-model](contrib/modelnet/btx-model). Optional cloud /
   follow / events / profile (fail closed; not a PASS):
@@ -302,7 +301,7 @@ search when you do not want the query to leave this node.
   [doc/modelnet/events.md](doc/modelnet/events.md),
   [doc/modelnet/watches.md](doc/modelnet/watches.md),
   [doc/modelnet/mirroring.md](doc/modelnet/mirroring.md).
-  Hosted Control Plane / walletless discovery (`IS_RELEASE=false`; not live
+  Hosted Control Plane / walletless discovery (`IS_RELEASE=true`; not live
   CEX IdP): [doc/hosted/README.md](doc/hosted/README.md),
   [doc/modelnet/hcp/](doc/modelnet/hcp/). Cognitive Reserve v1.1 is a
   negotiated HCP/1 extension of that same plane (not a fifth plane; 34 HCP

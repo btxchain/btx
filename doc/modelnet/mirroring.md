@@ -1,7 +1,7 @@
-# Mirroring (0.34.8-dev)
+# Mirroring (0.34.8)
 
-**Status:** **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). Not a shipping
-tag. Last shipping tag is **v0.34.7**. `getmodelmirror` / `setmodelmirror` /
+**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.8**. `getmodelmirror` / `setmodelmirror` /
 `setmodelprofile` exist in this helper (keep-N, `automatic_spend_atoms=0`).
 The CLI wrapper **fails closed** if an older helper lacks the method. This
 page is not a PASS and not evidence that a public mirror is running.

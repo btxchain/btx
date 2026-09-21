@@ -1,9 +1,8 @@
-# BTX Native Model Network (0.34.8-dev)
+# BTX Native Model Network (0.34.8)
 
-**Status:** **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). This tree is
-not a shipping tag. The last shipping tag is **v0.34.7**. The Native Model
-Network shipped in 0.34.7; this index covers that plane plus 0.34.8-dev
-surfaces.
+**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.8**. The Native Model Network shipped in 0.34.7; this index covers
+that plane plus 0.34.8 surfaces.
 
 **Readers:** people start at [HUMANS.md](../../HUMANS.md). Autonomous agents
 start at [AGENTS.md](../../AGENTS.md). The strategic essay is

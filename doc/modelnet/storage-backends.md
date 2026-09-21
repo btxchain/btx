@@ -1,8 +1,7 @@
-# Storage backends (0.34.8-dev)
+# Storage backends (0.34.8)
 
-**Status:** **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). Not a
-shipping tag (`IS_RELEASE=false` means this tree is not sealed, not that
-the code is missing). Last shipping tag is **v0.34.7**. This page describes
+**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.8**. Live R2 WAN remains **HONEST_NOT_RUN**. This page describes
 the intended layout. Helper MinIO / cloud RPCs **exist** in this tree
 (`setcloudstorage` / `testcloudstorage` / `getcloudstorageinfo`). FakeS3 is
 **unit-tested**. Live R2 WAN is **HONEST_NOT_RUN**. CLI verbs still fail

@@ -4,8 +4,8 @@ This is the operator/researcher guide for **using** and **proving** the
 Native Model Network in this tree. Packaged `planning/acceptance-matrix.csv`
 is the production bar (PASS only where this tree has a Boost test or e2e
 script). Re-run the scripts; do not treat a capabilities bit as PASS.
-The last shipping tag is **0.34.7**; this tree is 0.34.8-dev
-(`IS_RELEASE=false`), so the first-run verbs below (`showmodel`,
+The shipping tag is **v0.34.8**; this tree is 0.34.8
+(`IS_RELEASE=true`). The first-run verbs below (`showmodel`,
 `unhostmodel`, `exportmodellink`, `btx-model show` / `unhost` / `link`)
 are new here and are not part of 0.34.7.
 

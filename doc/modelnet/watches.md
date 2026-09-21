@@ -1,7 +1,7 @@
-# Watches (0.34.8-dev)
+# Watches (0.34.8)
 
-**Status:** **0.34.8-dev** (`CLIENT_VERSION_IS_RELEASE=false`). Not a shipping
-tag. Last shipping tag is **v0.34.7**. Publisher / collection / query /
+**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.8**. Publisher / collection / query /
 model watch RPCs exist in this helper (unit-tested). The CLI wrapper **fails
 closed** if an older helper lacks the method. GUI watches are 0.34.8-dev
 **source** (`BUILD_GUI=OFF`; do not claim `bitcoin-qt` was built). This page

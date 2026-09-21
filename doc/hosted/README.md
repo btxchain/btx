@@ -1,7 +1,7 @@
-# Hosted Control Plane (0.34.8-dev)
+# Hosted Control Plane (0.34.8)
 
-**Status:** development in this tree. **Not a shipping tag.** Last shipping
-release remains **v0.34.7**. `CLIENT_VERSION_IS_RELEASE=false`.
+**Status:** in this tree. Shipping tag **v0.34.8**.
+`CLIENT_VERSION_IS_RELEASE=true`. Not a live CEX IdP.
 
 The Hosted Control Plane (HCP/1) is a **third plane**. It is not consensus,
 not the Native Model Network helper, and not a public HTTP capability API on
@@ -28,7 +28,7 @@ not imply the extension. Unknown or disabled extension routes return
 `PROFILE_UNSUPPORTED` and must **not** fall back to unrestricted funding.
 The customer's machine still verifies bytes, applies an owner
 `LocalCapabilityGrant`, and runs locally. Automatic BTX spend is **0**.
-`CLIENT_VERSION_IS_RELEASE` remains **false**. The production GPU attestor is
+`CLIENT_VERSION_IS_RELEASE` is **true**. The production GPU attestor is
 not replaced.
 
 Walletless discovery does **not** require opening a monetary wallet, mining,
@@ -83,7 +83,7 @@ ledger): [../../contrib/modelnet/crf-sdk/](../../contrib/modelnet/crf-sdk/).
 | Extension ops | 50, only when `ReserveExtensionProfileV1_1` is advertised |
 | `automatic_spend_atoms` | **0** |
 | Production attestor | **not replaced** |
-| `CLIENT_VERSION_IS_RELEASE` | **false** (0.34.8-dev) |
+| `CLIENT_VERSION_IS_RELEASE` | **true** (0.34.8) |
 
 Lab topology is still two independently configured `btx-hcpd` instances
 (`127.0.0.1:18780` walletless, optional `:18781` `-finance=1`). The

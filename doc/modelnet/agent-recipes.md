@@ -8,8 +8,8 @@ Machine contract for coding agents, research agents, and automation on the
 Default posture is **read-only**. These recipes host, search, share, and
 inspect. They do **not** spend, mine, evaluate-execute, or start inference.
 
-Last shipping tag is **0.34.7**. This tree is **0.34.8-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`).
+Shipping tag is **v0.34.8**. This tree is **0.34.8**
+(`CLIENT_VERSION_IS_RELEASE=true`).
 
 ## Hard stop
 

@@ -6,7 +6,7 @@
 #  - CMake 3.22.1, https://packages.ubuntu.com/jammy/cmake
 #
 # That is the *source-build* baseline (GCC 11.1+; see README "Building from
-# Source"). The published *-x86_64-linux-gnu*.tar.gz archives for v0.34.8-rc1
+# Source"). The published *-x86_64-linux-gnu*.tar.gz archives for v0.34.8
 # are linked against GLIBC_2.38 / GLIBCXX_3.4.32 and need Ubuntu 24.04 or
 # Debian 13; Ubuntu 22.04 and Debian 12 cannot load them. See
 # doc/linux-release-builds.md (issue 169).
@@ -36,8 +36,8 @@ set(CLIENT_NAME "BTX")
 set(CLIENT_VERSION_MAJOR 0)
 set(CLIENT_VERSION_MINOR 34)
 set(CLIENT_VERSION_BUILD 8)
-set(CLIENT_VERSION_RC 4)
-set(CLIENT_VERSION_IS_RELEASE "false")
+set(CLIENT_VERSION_RC 0)
+set(CLIENT_VERSION_IS_RELEASE "true")
 set(COPYRIGHT_YEAR "2026")
 
 set(CLIENT_VERSION_SUFFIX "")
