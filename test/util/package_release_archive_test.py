@@ -94,6 +94,9 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                 self.assertIn("btx-29.2/contrib/faststart/btx-faststart.py", names)
                 self.assertIn("btx-29.2/contrib/mining/start-live-mining.sh", names)
                 self.assertIn("btx-29.2/doc/btx-download-and-go.md", names)
+                self.assertIn("btx-29.2/contrib/modelnet/btx-model", names)
+                self.assertIn("btx-29.2/doc/modelnet/registry-independence.md", names)
+                self.assertIn("btx-29.2/doc/release-notes/release-notes-0.34.9-dev.md", names)
 
                 wrapper = archive.extractfile("btx-29.2/bin/btxd")
                 assert wrapper is not None
