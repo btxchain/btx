@@ -8,10 +8,14 @@
 // are extra evidence slots. OCI is an origin, not a replacement packaging silo.
 
 #include <modelnet/helper.h>
+#include <modelnet/identity.h>
 #include <modelnet/import_coordinator.h>
 #include <modelnet/import_plan.h>
+#include <modelnet/oci_modelpack.h>
+#include <modelnet/provenance.h>
 #include <modelnet/registry_resolver.h>
 #include <modelnet/source_huggingface.h>
+#include <modelnet/source_local.h>
 #include <modelnet/source_registry.h>
 #include <modelnet/store.h>
 #include <modelnet/types.h>
@@ -20,12 +24,16 @@
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <arpa/inet.h>
 #include <fstream>
+#include <netinet/in.h>
 #include <string>
+#include <sys/socket.h>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_registry_independence_tests, BasicTestingSetup)
@@ -483,6 +491,236 @@ BOOST_AUTO_TEST_CASE(min_independent_origins_below_one_is_rejected)
     std::string err;
     BOOST_CHECK(!modelnet::ParseImportPlan(j, plan, err));
     BOOST_CHECK_EQUAL(err, "min_independent_origins");
+}
+
+BOOST_AUTO_TEST_CASE(leafless_multi_origin_does_not_splice_pieces)
+{
+    modelnet::ClearRegistryInjections();
+    const uint64_t psz = modelnet::PIECE_SIZE;
+    const uint64_t sz = psz + 8;
+    modelnet::SetRegistryGetForTests([psz](const std::string& url, uint64_t offset, uint64_t length,
+                                           std::vector<unsigned char>& out, std::string& err) {
+        const bool hf = url.find("huggingface.co") != std::string::npos;
+        if (offset < psz && hf) {
+            out.assign(length, static_cast<unsigned char>('A'));
+            err.clear();
+            return true;
+        }
+        if (offset >= psz && hf) {
+            err = "origin unavailable";
+            return false;
+        }
+        out.assign(length, static_cast<unsigned char>('Y'));
+        err.clear();
+        return true;
+    });
+    auto plan = MultiPlan();
+    plan.files[0].size_bytes = sz;
+    plan.files[0].piece_sha384_hex.clear();
+    plan.files[0].sha384_hex.clear();
+    const fs::path root = m_path_root / "reg-leafless-mix";
+    modelnet::ImportCoordinator coord{plan, root};
+    std::string err;
+    BOOST_REQUIRE(coord.PrepareStaging(err));
+    auto src = modelnet::MakePlanByteSource(plan, err);
+    BOOST_REQUIRE(src);
+    BOOST_CHECK(!coord.StageFromSource(*src, coord.AcceptedFiles()[0], sz, err));
+    BOOST_CHECK(err == "origin unavailable" || err == "UNBOUND_ORIGIN_MIX");
+    auto* multi = dynamic_cast<modelnet::MultiOriginByteSource*>(src.get());
+    BOOST_REQUIRE(multi);
+    BOOST_CHECK(multi->IndependentOriginCount() != 2);
+    BOOST_CHECK(!multi->OriginsMixedWithoutIdentity() || multi->IndependentOriginCount() == 0);
+    modelnet::ClearRegistryInjections();
+}
+
+BOOST_AUTO_TEST_CASE(declared_whole_file_sha384_is_enforced_across_pieces)
+{
+    modelnet::ClearRegistryInjections();
+    const uint64_t psz = modelnet::PIECE_SIZE;
+    const uint64_t sz = psz + 8;
+    std::vector<unsigned char> want(sz, static_cast<unsigned char>('A'));
+    const fs::path tdir = m_path_root / "reg-sha-want";
+    fs::create_directories(tdir);
+    {
+        std::ofstream out(tdir / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(want.data()), static_cast<std::streamsize>(want.size()));
+    }
+    modelnet::VerifiedManifest tmp;
+    std::string err;
+    BOOST_REQUIRE(modelnet::MakeVerifiedManifestFromStaged(tdir, {"model.safetensors"}, tmp, err));
+    modelnet::SetRegistryGetForTests([](const std::string&, uint64_t, uint64_t length,
+                                        std::vector<unsigned char>& out, std::string& e) {
+        out.assign(length, static_cast<unsigned char>('Y'));
+        e.clear();
+        return true;
+    });
+    auto plan = MultiPlan();
+    plan.files[0].size_bytes = sz;
+    plan.files[0].sha384_hex = tmp.core.files[0].sha384.Hex();
+    plan.files[0].piece_sha384_hex.clear();
+    const fs::path root = m_path_root / "reg-sha-pieces";
+    modelnet::ImportCoordinator coord{plan, root};
+    BOOST_REQUIRE(coord.PrepareStaging(err));
+    auto src = modelnet::MakePlanByteSource(plan, err);
+    BOOST_REQUIRE(src);
+    BOOST_CHECK(!coord.StageFromSource(*src, coord.AcceptedFiles()[0], sz, err));
+    BOOST_CHECK_EQUAL(err, "HASH_MISMATCH");
+    modelnet::ClearRegistryInjections();
+}
+
+BOOST_AUTO_TEST_CASE(https_range_requires_206_and_rejects_chunked)
+{
+    std::string err;
+    modelnet::RegistryHttpResponse resp;
+    const std::string two_hundred = "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nABCDEFGH";
+    BOOST_REQUIRE(modelnet::ParseRegistryHttpResponse(two_hundred, resp, err));
+    std::vector<unsigned char> out;
+    BOOST_CHECK(!modelnet::RegistryHttpBodyAllowed(resp, /*range_requested=*/true, 4, 4, out, err));
+    BOOST_CHECK_EQUAL(err, "range not satisfied");
+
+    const std::string chunked = "HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\nABCD";
+    BOOST_REQUIRE(modelnet::ParseRegistryHttpResponse(chunked, resp, err));
+    BOOST_CHECK(resp.chunked);
+    BOOST_CHECK(!modelnet::RegistryHttpBodyAllowed(resp, true, 0, 4, out, err));
+    BOOST_CHECK_EQUAL(err, "chunked encoding forbidden");
+
+    const std::string no_len = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/8\r\n\r\nABCD";
+    BOOST_REQUIRE(modelnet::ParseRegistryHttpResponse(no_len, resp, err));
+    BOOST_CHECK(!modelnet::RegistryHttpBodyAllowed(resp, true, 0, 4, out, err));
+    BOOST_CHECK_EQUAL(err, "content-length required");
+
+    const std::string ok = "HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 4-7/8\r\n\r\nEFGH";
+    BOOST_REQUIRE(modelnet::ParseRegistryHttpResponse(ok, resp, err));
+    BOOST_REQUIRE(modelnet::RegistryHttpBodyAllowed(resp, true, 4, 4, out, err));
+    BOOST_CHECK_EQUAL(std::string(out.begin(), out.end()), "EFGH");
+}
+
+BOOST_AUTO_TEST_CASE(resolved_private_addresses_are_not_global_unicast)
+{
+    sockaddr_in v4{};
+    v4.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &v4.sin_addr);
+    BOOST_CHECK(!modelnet::AddressIsGlobalUnicast(reinterpret_cast<sockaddr*>(&v4), sizeof(v4)));
+    inet_pton(AF_INET, "10.1.2.3", &v4.sin_addr);
+    BOOST_CHECK(!modelnet::AddressIsGlobalUnicast(reinterpret_cast<sockaddr*>(&v4), sizeof(v4)));
+    inet_pton(AF_INET, "192.168.1.1", &v4.sin_addr);
+    BOOST_CHECK(!modelnet::AddressIsGlobalUnicast(reinterpret_cast<sockaddr*>(&v4), sizeof(v4)));
+    inet_pton(AF_INET, "169.254.1.1", &v4.sin_addr);
+    BOOST_CHECK(!modelnet::AddressIsGlobalUnicast(reinterpret_cast<sockaddr*>(&v4), sizeof(v4)));
+    inet_pton(AF_INET, "100.64.0.1", &v4.sin_addr);
+    BOOST_CHECK(!modelnet::AddressIsGlobalUnicast(reinterpret_cast<sockaddr*>(&v4), sizeof(v4)));
+    inet_pton(AF_INET, "1.1.1.1", &v4.sin_addr);
+    BOOST_CHECK(modelnet::AddressIsGlobalUnicast(reinterpret_cast<sockaddr*>(&v4), sizeof(v4)));
+
+    sockaddr_in6 v6{};
+    v6.sin6_family = AF_INET6;
+    inet_pton(AF_INET6, "::1", &v6.sin6_addr);
+    BOOST_CHECK(!modelnet::AddressIsGlobalUnicast(reinterpret_cast<sockaddr*>(&v6), sizeof(v6)));
+    inet_pton(AF_INET6, "fc00::1", &v6.sin6_addr);
+    BOOST_CHECK(!modelnet::AddressIsGlobalUnicast(reinterpret_cast<sockaddr*>(&v6), sizeof(v6)));
+    inet_pton(AF_INET6, "2001:4860:4860::8888", &v6.sin6_addr);
+    BOOST_CHECK(modelnet::AddressIsGlobalUnicast(reinterpret_cast<sockaddr*>(&v6), sizeof(v6)));
+}
+
+BOOST_AUTO_TEST_CASE(btx_publisher_evidence_verifies_locally_without_wan)
+{
+    std::vector<unsigned char> pk, sk, sig;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const std::string payload = "btx-provenance-v1";
+    BOOST_REQUIRE(modelnet::SignMlDsa44(sk, Span<const unsigned char>{reinterpret_cast<const unsigned char*>(payload.data()), payload.size()}, sig, err));
+    modelnet::ProvenanceEvidence pe;
+    pe.kind = "btx_publisher";
+    pe.payload = payload;
+    pe.algorithm = "ML-DSA-44";
+    pe.public_key_hex = HexStr(pk);
+    pe.signature_hex = HexStr(sig);
+    modelnet::ProvenanceVerifyResult vr;
+    BOOST_REQUIRE(modelnet::VerifyProvenanceEvidence(pe, vr));
+    BOOST_CHECK(vr.verified_here);
+    pe.payload = "tampered";
+    BOOST_REQUIRE(modelnet::VerifyProvenanceEvidence(pe, vr));
+    BOOST_CHECK(!vr.verified_here);
+    BOOST_CHECK_EQUAL(vr.error, "SIGNATURE_INVALID");
+}
+
+BOOST_AUTO_TEST_CASE(modelpack_config_is_an_origin_layout_not_identity)
+{
+    UniValue cfg(UniValue::VOBJ);
+    cfg.pushKV("schemaVersion", "1.0.0");
+    cfg.pushKV("mediaType", modelnet::MODELPACK_MEDIA_TYPE);
+    UniValue model(UniValue::VOBJ);
+    model.pushKV("path", "model.safetensors");
+    UniValue parts(UniValue::VARR);
+    UniValue part(UniValue::VOBJ);
+    part.pushKV("path", "model.safetensors");
+    part.pushKV("size", 5);
+    part.pushKV("digest", "sha384:" + std::string(96, 'a'));
+    parts.push_back(part);
+    model.pushKV("parts", parts);
+    cfg.pushKV("model", model);
+    UniValue origin(UniValue::VOBJ);
+    origin.pushKV("registry", "ghcr.io");
+    origin.pushKV("repository", "org/model");
+    origin.pushKV("digest", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    cfg.pushKV("origin", origin);
+
+    UniValue j(UniValue::VOBJ);
+    j.pushKV("plan_id", PlanId('k'));
+    j.pushKV("modelpack", cfg);
+    modelnet::ImportPlan plan;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(modelnet::ParseImportPlan(j, plan, err), err);
+    BOOST_REQUIRE_EQUAL(plan.files.size(), 1U);
+    BOOST_CHECK_EQUAL(plan.files[0].destination_path, "model.safetensors");
+    BOOST_CHECK_EQUAL(plan.files[0].size_bytes, 5U);
+    BOOST_REQUIRE_EQUAL(plan.origins.size(), 1U);
+    BOOST_CHECK_EQUAL(plan.origins[0].type, "oci");
+    BOOST_CHECK(plan.origins[0].locator.find("ghcr.io") != std::string::npos);
+
+    const fs::path tdir = m_path_root / "reg-mp-stage";
+    fs::create_directories(tdir);
+    {
+        std::ofstream out(tdir / "model.safetensors", std::ios::binary);
+        out << "weigh";
+    }
+    modelnet::VerifiedManifest vm;
+    BOOST_REQUIRE(modelnet::MakeVerifiedManifestFromStaged(tdir, {"model.safetensors"}, vm, err));
+    UniValue exported;
+    BOOST_REQUIRE(modelnet::ExportModelPackConfig(vm, plan, exported, err));
+    BOOST_CHECK_EQUAL(exported["mediaType"].get_str(), modelnet::MODELPACK_MEDIA_TYPE);
+    BOOST_CHECK(exported["origin"]["identity"].get_str().find("not the identity") != std::string::npos);
+    BOOST_CHECK(!exported["wallet_required"].get_bool());
+}
+
+BOOST_AUTO_TEST_CASE(parseimportplan_expands_modelpack_without_wallet)
+{
+    UniValue cfg(UniValue::VOBJ);
+    cfg.pushKV("mediaType", modelnet::MODELPACK_MEDIA_TYPE);
+    UniValue model(UniValue::VOBJ);
+    model.pushKV("path", "weights.safetensors");
+    cfg.pushKV("model", model);
+    UniValue origin(UniValue::VOBJ);
+    origin.pushKV("locator", "oci://ghcr.io/org/model");
+    origin.pushKV("digest", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    cfg.pushKV("origin", origin);
+    UniValue planj(UniValue::VOBJ);
+    planj.pushKV("plan_id", PlanId('q'));
+    planj.pushKV("modelpack", cfg);
+    const fs::path tmp = m_path_root / "reg-parse-mp";
+    modelnet::ModelCatalog cat{tmp / "cat", 1 << 20};
+    UniValue params(UniValue::VARR);
+    params.push_back(planj);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("method", "parseimportplan");
+    req.pushKV("params", params);
+    UniValue result;
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, req, result, code, err), err);
+    BOOST_CHECK(!result["wallet_required"].get_bool());
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int>(), 0);
+    BOOST_REQUIRE(result["files"].isArray());
+    BOOST_CHECK_EQUAL(result["files"][0]["destination_path"].get_str(), "weights.safetensors");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

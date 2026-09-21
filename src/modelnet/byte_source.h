@@ -46,6 +46,10 @@ public:
     }
     /** Origin types that supplied pieces for the current file, in Read order. */
     virtual std::vector<std::string> PieceOrigins() const { return {}; }
+    /** Origins that passed a leaf or whole-file hash check. */
+    virtual std::vector<std::string> BoundPieceOrigins() const { return {}; }
+    /** True if piece substitution happened without a bound identity. */
+    virtual bool OriginsMixedWithoutIdentity() const { return false; }
 };
 
 } // namespace modelnet

@@ -350,14 +350,17 @@ Spec: [registry-independence.md](registry-independence.md).
 contrib/modelnet/btx-model --json resolve @contrib/modelnet/recipes/registry-independence-origins.json
 contrib/modelnet/btx-model --json fetch @contrib/modelnet/recipes/registry-independence-origins.json
 contrib/modelnet/btx-model --json verify '<plan_id>'
+contrib/modelnet/btx-model --json modelpack import @contrib/modelnet/recipes/registry-independence-origins.json
 contrib/modelnet/btx-model --json mirror --publisher pub-mirror --keep-latest 3 --min-independent-origins 2
 ```
 
 Expect `wallet_required: false`, `publisher_must_republish: false`,
 `automatic_spend_atoms: 0`. `resolve` dumps planned `origins[]`, attached
-`provenance_evidence` (OMS/Sigstore/Cosign parse-only), and a structured
-`capability` object. After `fetch`, `getmodelimport` / `verify` report
-`piece_origins` and `independent_origin_count`. `min_independent_origins` is
-an observation target, not a fetch admission ticket. Live HTTPS stays
-fail-closed unless `live_wan` or `BTX_MODELNET_LIVE_WAN=1`. Do not invent WAN
-evidence. Do not strip wallets or consensus from the node.
+`provenance_evidence` (local verify when key material is present; otherwise
+`verified_here: false`), and a structured `capability` object. After `fetch`,
+`getmodelimport` / `verify` report `piece_origins` and
+`independent_origin_count`. Leafless multi-origin plans lock the first
+successful origin per file. `min_independent_origins` is an observation
+target, not a fetch admission ticket. Live HTTPS stays fail-closed unless
+`live_wan` or `BTX_MODELNET_LIVE_WAN=1`. Do not invent WAN evidence. Do not
+strip wallets or consensus from the node.

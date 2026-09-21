@@ -8,6 +8,8 @@
 #include <modelnet/byte_source.h>
 #include <util/fs.h>
 
+#include <sys/socket.h>
+
 namespace modelnet {
 
 class LocalFileByteSource : public ByteSource {
@@ -26,6 +28,8 @@ public:
 
 /** Hugging Face / HTTP locators: pin policy only. Never follow redirects. SSRF deny. */
 bool HuggingFaceLocatorAllowed(const std::string& locator, std::string& err);
+/** True when the resolved address is globally routable (not loopback/private/ULA/link-local/CGNAT). */
+bool AddressIsGlobalUnicast(const sockaddr* sa, socklen_t len);
 
 } // namespace modelnet
 

@@ -54,6 +54,13 @@ struct ProvenanceEvidence {
     std::string kind; // btx_publisher | openssf_oms | sigstore | cosign | oci_attestation | vendor_attestation | unsigned
     std::string locator;
     std::string note;
+    std::string payload;
+    std::string payload_b64;
+    std::string payload_type;
+    std::string algorithm;
+    std::string public_key_hex;
+    std::string signature_hex;
+    std::string signature_b64;
 };
 
 /** Immutable once ParseImportPlan succeeds. */

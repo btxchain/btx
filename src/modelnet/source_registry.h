@@ -8,6 +8,7 @@
 #include <modelnet/byte_source.h>
 #include <modelnet/import_plan.h>
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -28,6 +29,29 @@ void InjectRegistryOriginBytes(const std::string& origin_type, std::vector<unsig
 void InjectRegistryOriginError(const std::string& origin_type);
 void ClearRegistryInjections();
 bool LiveRegistryWanEnabled();
+
+enum class IdentityMatch : uint8_t {
+    MISMATCH = 0,
+    UNCHECKED = 1,
+    LEAF = 2,
+    WHOLE_FILE = 3,
+};
+
+struct RegistryHttpResponse {
+    int status{0};
+    bool has_location{false};
+    bool chunked{false};
+    bool has_content_length{false};
+    uint64_t content_length{0};
+    bool has_content_range{false};
+    uint64_t range_start{0};
+    uint64_t range_end{0};
+    std::string body;
+};
+
+bool ParseRegistryHttpResponse(const std::string& raw, RegistryHttpResponse& out, std::string& err);
+bool RegistryHttpBodyAllowed(const RegistryHttpResponse& resp, bool range_requested, uint64_t offset, uint64_t length,
+                             std::vector<unsigned char>& out, std::string& err);
 
 /**
  * One registry origin. Pin/SSRF via HuggingFaceLocatorAllowed (generic HTTPS gate).
@@ -71,8 +95,11 @@ class MultiOriginByteSource : public ByteSource {
     uint64_t m_size_bytes{0};
     std::vector<std::string> m_piece_hex;
     std::string m_last_origin;
+    std::string m_locked_origin;
     std::vector<std::string> m_conflicts;
     std::vector<std::string> m_piece_origins;
+    std::vector<std::string> m_bound_piece_origins;
+    bool m_mixed_without_identity{false};
 
 public:
     explicit MultiOriginByteSource(ImportPlan plan);
@@ -87,6 +114,8 @@ public:
     std::string LastOriginType() const { return m_last_origin; }
     const std::vector<std::string>& Conflicts() const { return m_conflicts; }
     std::vector<std::string> PieceOrigins() const override { return m_piece_origins; }
+    std::vector<std::string> BoundPieceOrigins() const override { return m_bound_piece_origins; }
+    bool OriginsMixedWithoutIdentity() const override { return m_mixed_without_identity; }
     int IndependentOriginCount() const;
 };
 

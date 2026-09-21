@@ -6,6 +6,7 @@
 
 #include <modelnet/import_plan.h>
 #include <modelnet/io_executor.h>
+#include <modelnet/provenance.h>
 #include <modelnet/qualification.h>
 #include <modelnet/source_huggingface.h>
 #include <modelnet/source_local.h>
@@ -128,6 +129,8 @@ bool ImportCoordinator::PrepareStaging(std::string& err)
     m_verified.reset();
     m_fail_reason.clear();
     m_piece_origins.clear();
+    m_bound_piece_origins.clear();
+    m_origins_mixed_without_identity = false;
     for (const auto& f : m_plan.files) {
         const std::string dest = f.destination_path.empty() ? f.source_path : f.destination_path;
         std::string perr;
@@ -236,6 +239,16 @@ bool ImportCoordinator::StageFromSource(ByteSource& src, const ImportFileSpec& s
         off += n;
     }
     io.Complete();
+    out.close();
+    if (!spec.sha384_hex.empty()) {
+        Digest48 sha, root;
+        uint64_t sz = 0;
+        if (!HashFileSha384AndPiecesRoot(outp, sha, root, sz, err)) return false;
+        if (sz != spec.size_bytes || sha.Hex() != spec.sha384_hex) {
+            err = "HASH_MISMATCH";
+            return false;
+        }
+    }
     const auto pieces = src.PieceOrigins();
     if (!pieces.empty()) {
         m_piece_origins.insert(m_piece_origins.end(), pieces.begin(), pieces.end());
@@ -243,6 +256,13 @@ bool ImportCoordinator::StageFromSource(ByteSource& src, const ImportFileSpec& s
         const std::string fallback =
             !m_plan.origins.empty() ? m_plan.origins.front().type : ImportOriginTypeName(m_plan.kind);
         m_piece_origins.push_back(fallback);
+    }
+    const auto bound = src.BoundPieceOrigins();
+    m_bound_piece_origins.insert(m_bound_piece_origins.end(), bound.begin(), bound.end());
+    if (src.OriginsMixedWithoutIdentity()) m_origins_mixed_without_identity = true;
+    if (!spec.sha384_hex.empty() && bound.empty() && !pieces.empty() && !m_origins_mixed_without_identity) {
+        std::set<std::string> unique(pieces.begin(), pieces.end());
+        if (unique.size() == 1) m_bound_piece_origins.push_back(*unique.begin());
     }
     return true;
 }
@@ -260,6 +280,16 @@ bool ImportCoordinator::AcceptVerifiedManifest(const VerifiedManifest& vm, std::
     if (!m_plan.expected_btx_manifest.empty() && m_plan.expected_btx_manifest != vm.model_id.Hex()) {
         err = "ID_MISMATCH";
         return false;
+    }
+    for (const auto& spec : m_plan.files) {
+        if (spec.sha384_hex.empty()) continue;
+        const std::string dest = spec.destination_path.empty() ? spec.source_path : spec.destination_path;
+        for (const auto& cf : vm.core.files) {
+            if (cf.path == dest && cf.sha384.Hex() != spec.sha384_hex) {
+                err = "HASH_MISMATCH";
+                return false;
+            }
+        }
     }
     if (!BindVerifiedManifestToStaged(vm, StagingDir(), err)) {
         return false;
@@ -317,18 +347,26 @@ UniValue ImportCoordinator::StatusJson() const
     UniValue piece_origins(UniValue::VARR);
     for (const auto& origin : m_piece_origins) piece_origins.push_back(origin);
     o.pushKV("piece_origins", piece_origins);
-    std::set<std::string> unique(m_piece_origins.begin(), m_piece_origins.end());
-    const int independent = static_cast<int>(unique.size());
+    std::set<std::string> unique_bound(m_bound_piece_origins.begin(), m_bound_piece_origins.end());
+    std::set<std::string> unique_all(m_piece_origins.begin(), m_piece_origins.end());
+    const int independent = m_origins_mixed_without_identity
+                                ? static_cast<int>(unique_bound.size())
+                                : static_cast<int>((!unique_bound.empty() ? unique_bound : unique_all).size());
     o.pushKV("independent_origin_count", independent);
     o.pushKV("min_independent_origins", m_plan.min_independent_origins);
     o.pushKV("below_min_independent_origins",
              !m_piece_origins.empty() && independent < m_plan.min_independent_origins);
+    o.pushKV("origins_mixed_without_identity", m_origins_mixed_without_identity);
     UniValue evidence(UniValue::VARR);
     for (const auto& pe : m_plan.provenance_evidence) {
         UniValue e(UniValue::VOBJ);
         e.pushKV("kind", pe.kind);
         e.pushKV("role", pe.kind == "btx_publisher" ? "native_btx_publisher" : "additional_evidence");
-        e.pushKV("verified_here", false);
+        ProvenanceVerifyResult vr;
+        (void)VerifyProvenanceEvidence(pe, vr);
+        e.pushKV("verified_here", vr.verified_here);
+        if (!vr.algorithm.empty()) e.pushKV("algorithm", vr.algorithm);
+        if (!vr.error.empty()) e.pushKV("verify_error", vr.error);
         if (!pe.locator.empty()) e.pushKV("locator", pe.locator);
         if (!pe.note.empty()) e.pushKV("note", pe.note);
         evidence.push_back(e);

@@ -17,6 +17,7 @@
 #include <modelnet/lan_discovery.h>
 #include <modelnet/multipart_journal.h>
 #include <modelnet/object_layout.h>
+#include <modelnet/oci_modelpack.h>
 #include <modelnet/origin_broker.h>
 #include <modelnet/package_acquisition.h>
 #include <modelnet/package_channel.h>
@@ -832,7 +833,8 @@ bool ErasureFromObject(const UniValue& o, UniValue& result, std::string& err_cod
 bool IsNetwork02HelperMethod(const std::string& method)
 {
     return method == "executemodelimport" || method == "getmodelimport" || method == "cancelmodelimport" ||
-           method == "resumemodelimport" || method == "publishmodelimport" || method == "createbtxpackage" ||
+           method == "resumemodelimport" || method == "publishmodelimport" || method == "parseimportplan" ||
+           method == "exportmodelpack" || method == "createbtxpackage" ||
            method == "inspectbtxpackage" || method == "verifybtxpackage" || method == "importbtxpackage" ||
            method == "exportbtxbundle" || method == "preparemodelerasure" || method == "executemodelerasure" ||
            method == "getmodelerasurehealth" || method == "repairmodel" || method == "gettorrentsourcestatus" ||
@@ -893,6 +895,35 @@ bool DispatchNetwork02RpcOnce(ModelCatalog& cat, const std::string& method, cons
     }
     if (method == "executemodelimport") {
         return ExecuteImport(cat, o, result, err_code, err);
+    }
+    if (method == "parseimportplan") {
+        ImportPlan plan;
+        if (!ParseImportPlan(o, plan, err)) {
+            err_code = "INVALID_PARAMETER";
+            return false;
+        }
+        result = ImportPlanJson(plan);
+        result.pushKV("wallet_required", false);
+        result.pushKV("automatic_spend_atoms", 0);
+        return true;
+    }
+    if (method == "exportmodelpack") {
+        const std::string plan_id = o.exists("plan_id") && o["plan_id"].isStr() ? o["plan_id"].get_str() : "";
+        std::lock_guard<std::mutex> lock(g_n02_mu);
+        auto it = g_imports.find(plan_id);
+        if (it == g_imports.end() || !it->second || !it->second->Verified()) {
+            err = "unknown plan_id";
+            err_code = "INVALID_PARAMETER";
+            return false;
+        }
+        UniValue pack;
+        if (!ExportModelPackConfig(*it->second->Verified(), it->second->Plan(), pack, err)) {
+            err_code = "INVALID_PARAMETER";
+            return false;
+        }
+        result = pack;
+        result.pushKV("automatic_spend_atoms", 0);
+        return true;
     }
     if (method == "getmodelimport" || method == "cancelmodelimport" || method == "resumemodelimport" ||
         method == "publishmodelimport") {

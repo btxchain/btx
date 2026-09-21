@@ -35,10 +35,26 @@ sole CA of AI.
 
 `getmodelimport` / `ImportCoordinator::StatusJson` emit `piece_origins`,
 `independent_origin_count`, `min_independent_origins`,
-`below_min_independent_origins`, `provenance_evidence`, and a structured
-`capability` object (`readiness_target=VERIFIED_FILES`, `inference=false`,
-`funded_wallet=false`). Capability here is a local statement, not a GPU
-requirement and not an inference run.
+`below_min_independent_origins`, `origins_mixed_without_identity`,
+`provenance_evidence`, and a structured `capability` object
+(`readiness_target=VERIFIED_FILES`, `inference=false`, `funded_wallet=false`).
+Capability here is a local statement, not a GPU requirement and not an
+inference run.
+
+Piece-level mixing requires bound identity: `piece_sha384` leaves, or a
+whole-file `sha384` checked after the file is assembled. Without leaves, the
+first successful origin is locked for that file; a later origin cannot splice
+in. `independent_origin_count` only treats mixed origins as independence when
+those pieces passed a hash check.
+
+OMS / Sigstore / Cosign slots verify **locally** when `public_key_hex` and a
+signature are present (ML-DSA-44, ED25519, or ECDSA-P256-SHA256, including
+DSSE PAE). There is no Rekor/Fulcio WAN client. Missing key material stays
+`verified_here=false`. Native BTX publisher signatures remain first-class.
+
+KitOps/ModelPack config maps onto `origins[]` + `files[]` via `parseimportplan`
+/ `btx-model modelpack import`. `exportmodelpack` writes the same layout from a
+verified import. The layout is an origin, not `btx://` identity.
 
 ## Five questions that must not collapse
 
@@ -100,5 +116,8 @@ the target **does not fail a walletless fetch**; StatusJson reports
 `fetch_fails_below_min: false`.
 
 OCI ModelPack import/export (KitOps layout as a first-class package shape,
-not only a blob origin) is still later work. OCI blob GET via
-`/v2/{repo}/blobs/{digest}` is already an origin.
+not only a blob origin) is implemented as `parseimportplan` /
+`exportmodelpack` and `btx-model modelpack import|export`. Live HTTPS remains
+fail-closed unless inject / `live_wan` / `BTX_MODELNET_LIVE_WAN=1`. The live
+client requires TLS 1.2+, peer verify, no redirects, `Content-Length`, `206`
+for Range, and post-DNS `AddressIsGlobalUnicast` before connect.

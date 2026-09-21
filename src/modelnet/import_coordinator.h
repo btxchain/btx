@@ -39,6 +39,8 @@ class ImportCoordinator {
     std::optional<VerifiedManifest> m_verified;
     std::string m_fail_reason;
     std::vector<std::string> m_piece_origins;
+    std::vector<std::string> m_bound_piece_origins;
+    bool m_origins_mixed_without_identity{false};
 
 public:
     ImportCoordinator(ImportPlan plan, fs::path stage_root);
@@ -55,6 +57,7 @@ public:
     bool HasFinalModelId() const { return m_verified.has_value(); }
     Digest48 FinalModelId() const;
     Digest48 FinalArtifactId() const;
+    const std::optional<VerifiedManifest>& Verified() const { return m_verified; }
     UniValue StatusJson() const;
 };
 

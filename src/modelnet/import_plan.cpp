@@ -4,6 +4,7 @@
 
 #include <modelnet/import_plan.h>
 
+#include <modelnet/oci_modelpack.h>
 #include <modelnet/store.h>
 
 #include <algorithm>
@@ -287,7 +288,7 @@ bool ParseImportPlan(const UniValue& json, ImportPlan& out, std::string& err)
             out.expected_btx_manifest = src["expected_btx_manifest"].get_str();
         }
         if (out.origins.empty()) out.origins.push_back(std::move(origin));
-    } else if (out.origins.empty()) {
+    } else if (out.origins.empty() && !(json.exists("modelpack") && json["modelpack"].isObject())) {
         err = "source";
         return false;
     }
@@ -296,6 +297,9 @@ bool ParseImportPlan(const UniValue& json, ImportPlan& out, std::string& err)
         out.expected_btx_manifest = json["expected_btx_manifest"].get_str();
     }
     out.provenance_note = "source_integrity_only;not_publisher_authorship";
+    if (json.exists("modelpack") && json["modelpack"].isObject()) {
+        if (!ApplyModelPackConfig(json["modelpack"], out, err)) return false;
+    }
     SynthesizeOriginsFromV1(out);
     if (json.exists("files") && json["files"].isArray()) {
         for (const auto& f : json["files"].getValues()) {
@@ -336,6 +340,27 @@ bool ParseImportPlan(const UniValue& json, ImportPlan& out, std::string& err)
             if (e.exists("kind") && e["kind"].isStr()) pe.kind = LowerCopy(e["kind"].get_str());
             if (e.exists("locator") && e["locator"].isStr()) pe.locator = e["locator"].get_str();
             if (e.exists("note") && e["note"].isStr()) pe.note = e["note"].get_str();
+            if (e.exists("payload") && e["payload"].isStr()) pe.payload = e["payload"].get_str();
+            if (e.exists("payload_b64") && e["payload_b64"].isStr()) pe.payload_b64 = e["payload_b64"].get_str();
+            if (e.exists("payload_type") && e["payload_type"].isStr()) pe.payload_type = e["payload_type"].get_str();
+            if (e.exists("algorithm") && e["algorithm"].isStr()) pe.algorithm = e["algorithm"].get_str();
+            if (e.exists("public_key_hex") && e["public_key_hex"].isStr()) pe.public_key_hex = e["public_key_hex"].get_str();
+            if (e.exists("signature_hex") && e["signature_hex"].isStr()) pe.signature_hex = e["signature_hex"].get_str();
+            if (e.exists("signature_b64") && e["signature_b64"].isStr()) pe.signature_b64 = e["signature_b64"].get_str();
+            if (e.exists("envelope") && e["envelope"].isObject()) {
+                const UniValue& env = e["envelope"];
+                if (pe.payload_type.empty() && env.exists("payloadType") && env["payloadType"].isStr()) {
+                    pe.payload_type = env["payloadType"].get_str();
+                }
+                if (pe.payload_b64.empty() && env.exists("payload") && env["payload"].isStr()) {
+                    pe.payload_b64 = env["payload"].get_str();
+                }
+                if (pe.signature_b64.empty() && env.exists("signatures") && env["signatures"].isArray() &&
+                    env["signatures"].size() > 0 && env["signatures"][0].isObject()) {
+                    const UniValue& s0 = env["signatures"][0];
+                    if (s0.exists("sig") && s0["sig"].isStr()) pe.signature_b64 = s0["sig"].get_str();
+                }
+            }
             if (pe.kind != "btx_publisher" && pe.kind != "openssf_oms" && pe.kind != "sigstore" &&
                 pe.kind != "cosign" && pe.kind != "unsigned" && pe.kind != "oci_attestation" &&
                 pe.kind != "vendor_attestation") {
@@ -396,6 +421,8 @@ UniValue ImportPlanJson(const ImportPlan& plan)
         e.pushKV("kind", pe.kind);
         if (!pe.locator.empty()) e.pushKV("locator", pe.locator);
         if (!pe.note.empty()) e.pushKV("note", pe.note);
+        if (!pe.algorithm.empty()) e.pushKV("algorithm", pe.algorithm);
+        if (!pe.payload_type.empty()) e.pushKV("payload_type", pe.payload_type);
         ev.push_back(e);
     }
     o.pushKV("provenance_evidence", ev);

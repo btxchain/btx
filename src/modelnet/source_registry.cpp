@@ -28,13 +28,120 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <poll.h>
 #include <set>
+#include <sys/time.h>
 
 namespace modelnet {
+namespace {
+
+std::string HeaderLower(std::string s)
+{
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return s;
+}
+
+} // namespace
+
+bool ParseRegistryHttpResponse(const std::string& raw, RegistryHttpResponse& out, std::string& err)
+{
+    out = {};
+    const auto hdr_end = raw.find("\r\n\r\n");
+    if (hdr_end == std::string::npos) {
+        err = "http headers";
+        return false;
+    }
+    const std::string headers = raw.substr(0, hdr_end);
+    out.body = raw.substr(hdr_end + 4);
+    {
+        const auto sp = headers.find(' ');
+        if (sp != std::string::npos) out.status = std::atoi(headers.c_str() + sp + 1);
+    }
+    const std::string hl = HeaderLower(headers);
+    if (hl.find("\nlocation:") != std::string::npos) out.has_location = true;
+    const auto te = hl.find("\ntransfer-encoding:");
+    if (te != std::string::npos) {
+        auto val = hl.substr(te + 19);
+        const auto nl = val.find('\n');
+        if (nl != std::string::npos) val.resize(nl);
+        while (!val.empty() && (val.front() == ' ' || val.front() == '\t' || val.front() == '\r')) val.erase(val.begin());
+        while (!val.empty() && (val.back() == ' ' || val.back() == '\r' || val.back() == '\t')) val.pop_back();
+        if (val != "identity") out.chunked = true;
+    }
+    const auto cl = hl.find("\ncontent-length:");
+    if (cl != std::string::npos) {
+        out.has_content_length = true;
+        out.content_length = static_cast<uint64_t>(std::strtoull(hl.c_str() + cl + 16, nullptr, 10));
+    }
+    const auto cr = hl.find("\ncontent-range:");
+    if (cr != std::string::npos) {
+        auto val = hl.substr(cr + 15);
+        const auto nl = val.find('\n');
+        if (nl != std::string::npos) val.resize(nl);
+        const auto b = val.find("bytes");
+        if (b != std::string::npos) val = val.substr(b + 5);
+        while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
+        const auto dash = val.find('-');
+        const auto slash = val.find('/');
+        if (dash != std::string::npos) {
+            out.has_content_range = true;
+            out.range_start = static_cast<uint64_t>(std::strtoull(val.c_str(), nullptr, 10));
+            out.range_end = static_cast<uint64_t>(std::strtoull(val.c_str() + dash + 1, nullptr, 10));
+            (void)slash;
+        }
+    }
+    return true;
+}
+
+bool RegistryHttpBodyAllowed(const RegistryHttpResponse& resp, bool range_requested, uint64_t offset, uint64_t length,
+                             std::vector<unsigned char>& out, std::string& err)
+{
+    out.clear();
+    if (resp.status == 301 || resp.status == 302 || resp.status == 303 || resp.status == 307 || resp.status == 308 ||
+        resp.has_location) {
+        err = "redirects forbidden";
+        return false;
+    }
+    if (resp.chunked) {
+        err = "chunked encoding forbidden";
+        return false;
+    }
+    if (!resp.has_content_length) {
+        err = "content-length required";
+        return false;
+    }
+    if (range_requested) {
+        if (resp.status != 206) {
+            err = "range not satisfied";
+            return false;
+        }
+        if (resp.has_content_range && resp.range_start != offset) {
+            err = "content-range";
+            return false;
+        }
+    } else if (resp.status != 200) {
+        err = "http status";
+        return false;
+    }
+    if (resp.body.size() < resp.content_length) {
+        err = "short read";
+        return false;
+    }
+    std::string body = resp.body.substr(0, static_cast<size_t>(resp.content_length));
+    if (range_requested && length > 0 && body.size() > length) body.resize(static_cast<size_t>(length));
+    out.assign(body.begin(), body.end());
+    return true;
+}
+
 namespace {
 
 std::mutex g_mu;
@@ -59,34 +166,43 @@ std::string Sha384Hex(const std::vector<unsigned char>& bytes)
 }
 
 /** Piece leaves use ChunkLeaf. Whole-file sha384 only when the extent is the entire file. */
-bool ExtentMatchesIdentity(const ReadExtent& extent, const std::vector<unsigned char>& got, uint64_t size_bytes,
-                           const std::string& sha384_hex, const std::vector<std::string>& piece_hex, std::string& why)
+IdentityMatch ExtentMatchesIdentity(const ReadExtent& extent, const std::vector<unsigned char>& got, uint64_t size_bytes,
+                                    const std::string& sha384_hex, const std::vector<std::string>& piece_hex,
+                                    std::string& why)
 {
-    if (!piece_hex.empty() && extent.offset % PIECE_SIZE == 0) {
-        const size_t idx = static_cast<size_t>(extent.offset / PIECE_SIZE);
-        if (idx < piece_hex.size()) {
-            const uint64_t expect_len =
-                size_bytes > extent.offset ? std::min<uint64_t>(PIECE_SIZE, size_bytes - extent.offset) : extent.length;
-            if (got.size() != expect_len) {
-                why = "HASH_MISMATCH";
-                return false;
-            }
-            const std::string leaf = ChunkLeaf(idx, Span<const unsigned char>{got.data(), got.size()}).Hex();
-            if (leaf != piece_hex[idx]) {
-                why = "HASH_MISMATCH";
-                return false;
-            }
-            return true;
+    if (!piece_hex.empty()) {
+        if (extent.offset % PIECE_SIZE != 0) {
+            why = "HASH_MISMATCH";
+            return IdentityMatch::MISMATCH;
         }
+        const size_t idx = static_cast<size_t>(extent.offset / PIECE_SIZE);
+        if (idx >= piece_hex.size()) {
+            why = "HASH_MISMATCH";
+            return IdentityMatch::MISMATCH;
+        }
+        const uint64_t expect_len =
+            size_bytes > extent.offset ? std::min<uint64_t>(PIECE_SIZE, size_bytes - extent.offset) : extent.length;
+        if (got.size() != expect_len) {
+            why = "HASH_MISMATCH";
+            return IdentityMatch::MISMATCH;
+        }
+        const std::string leaf = ChunkLeaf(idx, Span<const unsigned char>{got.data(), got.size()}).Hex();
+        if (leaf != piece_hex[idx]) {
+            why = "HASH_MISMATCH";
+            return IdentityMatch::MISMATCH;
+        }
+        return IdentityMatch::LEAF;
     }
     if (!sha384_hex.empty() && size_bytes > 0 && extent.offset == 0 && extent.length == size_bytes &&
         got.size() == size_bytes) {
         if (Sha384Hex(got) != sha384_hex) {
             why = "HASH_MISMATCH";
-            return false;
+            return IdentityMatch::MISMATCH;
         }
+        return IdentityMatch::WHOLE_FILE;
     }
-    return true;
+    why.clear();
+    return IdentityMatch::UNCHECKED;
 }
 
 bool CopyExtent(const std::vector<unsigned char>& src, const ReadExtent& extent, uint64_t budget,
@@ -148,6 +264,44 @@ bool ParseHttpsUrl(const std::string& url, ParsedHttps& out, std::string& err)
     return true;
 }
 
+constexpr int kRegistryHttpsTimeoutMs = 15000;
+
+void ApplySocketTimeouts(int fd, int timeout_ms)
+{
+    timeval tv{};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+bool WaitFd(int fd, short events, int timeout_ms, std::string& err)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            err = "timeout";
+            return false;
+        }
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = events;
+        const int rc = ::poll(&pfd, 1, static_cast<int>(left));
+        if (rc == 0) {
+            err = "timeout";
+            return false;
+        }
+        if (rc < 0) {
+            if (errno == EINTR) continue;
+            err = "connect";
+            return false;
+        }
+        return true;
+    }
+}
+
 bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std::vector<unsigned char>& out,
                    std::string& err)
 {
@@ -170,16 +324,59 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
         return false;
     }
     int fd = -1;
+    std::string last = "ssrf";
+    bool saw_global = false;
     for (addrinfo* ai = raw; ai; ai = ai->ai_next) {
+        if (!ai->ai_addr) continue;
+        if (!AddressIsGlobalUnicast(ai->ai_addr, ai->ai_addrlen)) {
+            last = "ssrf";
+            continue;
+        }
+        saw_global = true;
+#ifdef SOCK_CLOEXEC
+        fd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol);
+#else
         fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-        ::close(fd);
-        fd = -1;
+#endif
+        if (fd < 0) {
+            last = "connect";
+            continue;
+        }
+#ifndef SOCK_CLOEXEC
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        const int cr = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (cr != 0 && errno != EINPROGRESS && errno != EINTR) {
+            last = "connect";
+            ::close(fd);
+            fd = -1;
+            continue;
+        }
+        std::string werr;
+        if (!WaitFd(fd, POLLOUT, kRegistryHttpsTimeoutMs, werr)) {
+            last = werr.empty() ? "timeout" : werr;
+            ::close(fd);
+            fd = -1;
+            continue;
+        }
+        int soerr = 0;
+        socklen_t slen = sizeof(soerr);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
+        if (soerr != 0) {
+            last = "connect";
+            ::close(fd);
+            fd = -1;
+            continue;
+        }
+        if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        ApplySocketTimeouts(fd, kRegistryHttpsTimeoutMs);
+        break;
     }
     freeaddrinfo(raw);
     if (fd < 0) {
-        err = "connect";
+        err = saw_global ? last : "ssrf";
         return false;
     }
 
@@ -202,8 +399,9 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
         return false;
     }
 
+    const bool range_requested = length > 0;
     std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.host + "\r\nConnection: close\r\n";
-    if (length > 0) {
+    if (range_requested) {
         req += "Range: bytes=" + std::to_string(offset) + "-" + std::to_string(offset + length - 1) + "\r\n";
     }
     req += "\r\n";
@@ -217,7 +415,15 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
 
     std::string raw_resp;
     char buf[4096];
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRegistryHttpsTimeoutMs);
     while (true) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            SSL_free(ssl);
+            SSL_CTX_free(ctx);
+            ::close(fd);
+            err = "timeout";
+            return false;
+        }
         const int n = SSL_read(ssl, buf, sizeof(buf));
         if (n <= 0) break;
         raw_resp.append(buf, static_cast<size_t>(n));
@@ -234,30 +440,9 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
     SSL_CTX_free(ctx);
     ::close(fd);
 
-    const auto hdr_end = raw_resp.find("\r\n\r\n");
-    if (hdr_end == std::string::npos) {
-        err = "http headers";
-        return false;
-    }
-    const std::string headers = raw_resp.substr(0, hdr_end);
-    int status = 0;
-    {
-        const auto sp = headers.find(' ');
-        if (sp != std::string::npos) status = std::atoi(headers.c_str() + sp + 1);
-    }
-    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308 ||
-        headers.find("\nLocation:") != std::string::npos || headers.find("\nlocation:") != std::string::npos) {
-        err = "redirects forbidden";
-        return false;
-    }
-    if (status != 200 && status != 206) {
-        err = "http status";
-        return false;
-    }
-    const std::string body = raw_resp.substr(hdr_end + 4);
-    out.assign(body.begin(), body.end());
-    if (length > 0 && out.size() > length) out.resize(static_cast<size_t>(length));
-    return true;
+    RegistryHttpResponse resp;
+    if (!ParseRegistryHttpResponse(raw_resp, resp, err)) return false;
+    return RegistryHttpBodyAllowed(resp, range_requested, offset, length, out, err);
 }
 
 bool FetchUrl(const std::string& url, uint64_t offset, uint64_t length, std::vector<unsigned char>& out, bool live_wan,
@@ -377,7 +562,8 @@ bool RegistryByteSource::Read(const ReadExtent& extent, std::vector<unsigned cha
         auto it = g_type_bytes.find(m_origin.type);
         if (it != g_type_bytes.end()) {
             if (!CopyExtent(it->second, extent, budget_bytes, out, err)) return false;
-            if (!ExtentMatchesIdentity(extent, out, m_size_bytes, m_sha384_hex, m_piece_hex, err)) {
+            if (ExtentMatchesIdentity(extent, out, m_size_bytes, m_sha384_hex, m_piece_hex, err) ==
+                IdentityMatch::MISMATCH) {
                 out.clear();
                 return false;
             }
@@ -399,7 +585,7 @@ bool RegistryByteSource::Read(const ReadExtent& extent, std::vector<unsigned cha
         return false;
     }
     out = std::move(body);
-    if (!ExtentMatchesIdentity(extent, out, m_size_bytes, m_sha384_hex, m_piece_hex, err)) {
+    if (ExtentMatchesIdentity(extent, out, m_size_bytes, m_sha384_hex, m_piece_hex, err) == IdentityMatch::MISMATCH) {
         out.clear();
         return false;
     }
@@ -425,6 +611,10 @@ void MultiOriginByteSource::SelectFile(const std::string& relative, const std::s
 {
     m_file = relative;
     m_sha384_hex = sha384_hex;
+    m_locked_origin.clear();
+    m_mixed_without_identity = false;
+    m_piece_origins.clear();
+    m_bound_piece_origins.clear();
 }
 
 void MultiOriginByteSource::BindFileIdentity(uint64_t size_bytes, const std::vector<std::string>& piece_sha384_hex)
@@ -432,6 +622,9 @@ void MultiOriginByteSource::BindFileIdentity(uint64_t size_bytes, const std::vec
     m_size_bytes = size_bytes;
     m_piece_hex = piece_sha384_hex;
     m_piece_origins.clear();
+    m_bound_piece_origins.clear();
+    m_locked_origin.clear();
+    m_mixed_without_identity = false;
 }
 
 bool MultiOriginByteSource::Pin(std::string& err)
@@ -465,6 +658,7 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
     m_conflicts.clear();
     std::string last = "origin unavailable";
     for (const auto& o : m_plan.origins) {
+        if (!m_locked_origin.empty() && o.type != m_locked_origin) continue;
         std::unique_ptr<ByteSource> src;
         if (o.type == "local") {
             src = std::make_unique<LocalFileByteSource>(fs::PathFromString(o.locator));
@@ -497,13 +691,25 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
             continue;
         }
         std::string why;
-        if (!ExtentMatchesIdentity(extent, got, m_size_bytes, m_sha384_hex, m_piece_hex, why)) {
+        const IdentityMatch match = ExtentMatchesIdentity(extent, got, m_size_bytes, m_sha384_hex, m_piece_hex, why);
+        if (match == IdentityMatch::MISMATCH) {
             m_conflicts.push_back(o.type + ":" + why);
             last = "ORIGIN_CONFLICT";
             continue;
         }
+        const bool identity_bound = match == IdentityMatch::LEAF || match == IdentityMatch::WHOLE_FILE;
+        if (!identity_bound) {
+            if (m_locked_origin.empty()) {
+                m_locked_origin = o.type;
+            } else if (m_locked_origin != o.type) {
+                m_mixed_without_identity = true;
+                last = "UNBOUND_ORIGIN_MIX";
+                continue;
+            }
+        }
         m_last_origin = o.type;
         m_piece_origins.push_back(o.type);
+        if (identity_bound) m_bound_piece_origins.push_back(o.type);
         out = std::move(got);
         err.clear();
         return true;
@@ -526,7 +732,12 @@ std::string MultiOriginByteSource::SourceIntegrity() const
 
 int MultiOriginByteSource::IndependentOriginCount() const
 {
-    std::set<std::string> unique(m_piece_origins.begin(), m_piece_origins.end());
+    if (m_mixed_without_identity) {
+        std::set<std::string> unique(m_bound_piece_origins.begin(), m_bound_piece_origins.end());
+        return static_cast<int>(unique.size());
+    }
+    const auto& src = !m_bound_piece_origins.empty() ? m_bound_piece_origins : m_piece_origins;
+    std::set<std::string> unique(src.begin(), src.end());
     return static_cast<int>(unique.size());
 }
 

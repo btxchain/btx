@@ -90,6 +90,8 @@ add_library(bitcoin_modelnet STATIC
   source_huggingface.cpp
   source_xet.cpp
   source_torrent.cpp
+  provenance.cpp
+  oci_modelpack.cpp
   registry_resolver.cpp
   source_registry.cpp
   object_layout.cpp

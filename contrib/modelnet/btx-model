@@ -56,6 +56,7 @@ VERBS = (
     "fetch",
     "resolve",
     "verify",
+    "modelpack",
     "package",
     "erasure",
     "torrent-status",
@@ -219,6 +220,9 @@ verbs:
   fetch @PLAN.json               alias of import-plan; walletless; monetary plane stays
   resolve @PLAN.json             local origin dump; no wallet, no chain, no fetch
   verify PLAN_ID                 alias of import-plan status
+  modelpack import|export @JSON  parse KitOps/ModelPack config into a plan, or
+                                 export a verified import as ModelPack (origin
+                                 layout, not btx:// identity)
   package create|inspect JSON|HEX|.btx
                                  createbtxpackage / inspectbtxpackage
                                  (.btx path or hex; link remains magnet analog)
@@ -2498,6 +2502,46 @@ def cmd_resolve(_sock: str, args: list[str]) -> None:
     )
 
 
+def cmd_modelpack(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("modelpack requires import @CONFIG.json or export PLAN_ID", 2)
+    sub = args[0].strip().lower()
+    if sub == "export":
+        if len(args) < 2:
+            _die("modelpack export requires PLAN_ID", 2)
+        result = _rpc_dev(sock, "exportmodelpack", [[{"plan_id": args[1]}]])
+        src = result if isinstance(result, dict) else {}
+        _emit_dev(
+            "model_modelpack",
+            "exportmodelpack",
+            result,
+            {
+                "mediaType": _pick(src, "mediaType"),
+                "wallet_required": False,
+            },
+            note="ModelPack/KitOps is an origin layout. btx:// remains identity. Monetary plane stays.",
+            next_actions=["resolve @plan.json", "fetch @plan.json"],
+        )
+        return
+    payload = _json_obj(args[1:] if sub == "import" else args)
+    if "modelpack" not in payload and payload.get("mediaType"):
+        wrapped = {"plan_id": payload.get("plan_id") or ("9" * 96), "modelpack": payload}
+        payload = wrapped
+    result = _rpc_dev(sock, "parseimportplan", [[payload]])
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "model_modelpack",
+        "parseimportplan",
+        result,
+        {
+            "wallet_required": False,
+            "origin_count": len(src.get("origins") or []) if isinstance(src.get("origins"), list) else 0,
+        },
+        note="ModelPack parsed as disposable OCI origin. Fetch stays walletless.",
+        next_actions=["fetch @plan.json", "resolve @plan.json"],
+    )
+
+
 def cmd_package(sock: str, args: list[str]) -> None:
     if not args:
         _die("package requires create JSON|@FILE or inspect HEX|.btx", 2)
@@ -2633,6 +2677,7 @@ COMMANDS = {
     "fetch": cmd_fetch,
     "resolve": cmd_resolve,
     "verify": cmd_verify,
+    "modelpack": cmd_modelpack,
     "package": cmd_package,
     "erasure": cmd_erasure,
     "torrent-status": cmd_torrent_status,
