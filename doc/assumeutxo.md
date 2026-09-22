@@ -84,6 +84,15 @@ the node is tip-usable. A newer compiled snapshot height shrinks the
 foreground gap further — prefer the latest `m_assumeutxo_data` entry published
 for your binary.
 
+**Pre-attestation persist (#163, this 0.34.9-dev tree).** Historical holes
+below the attestation epoch on the assumeutxo **background** chainstate can
+persist block bodies without waiting for a GETMMATTEST that will never be
+sent. That is the 0.34.8 scheduling seal (`77343da8`: retained tip-child gets
+the one RC job; cap stays 1) plus the persist follow-up. It is not a
+consensus change and not a reason to load withdrawn pins
+(assumeutxo-199299 / 199300). GitHub issue
+[#163](https://github.com/btxchain/btx/issues/163) is closed.
+
 ### BTX fast-start workflow
 
 BTX uses assumeutxo to support a "download the binary and go" workflow for:

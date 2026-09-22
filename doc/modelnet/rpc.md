@@ -11,9 +11,9 @@ The `note` / `coverage_disclaimer` strings state **current network view; not a
 complete global directory**. Low `remote_count` is normal. Never interpret results
 as a global census.
 
-**Release posture:** shipping tag is **v0.34.8**. This tree is
-**0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). First-run walkthrough:
-[first-run.md](first-run.md). CLI:
+**Release posture:** last shipping tag is **v0.34.8**. This tree is
+**0.34.9-dev** (`CLIENT_VERSION_IS_RELEASE=false`). First-run walkthrough:
+[first-run.md](first-run.md). Local generate: [generate.md](generate.md). CLI:
 [../../contrib/modelnet/btx-model](../../contrib/modelnet/btx-model).
 
 **User id:** `IdFromUser` / `ResolveUserId` accept a canonical `btx://`, a
@@ -33,7 +33,7 @@ Conceptual background: [search.md](search.md), [directory.md](directory.md),
 |---|---|
 | `getmodelnetworkinfo` / `getmodelcryptoinfo` | Schema 2, OpenSSL identity, PQ1 flags, **capabilities**, `automatic_spend_atoms=0` |
 | `decoderesource` / `encoderesource` / `decoderesourceuri` / `encoderesourceuri` | Compact URI; no network |
-| `openbtxuri` | Preview-only; never inference / mining / wallet |
+| `openbtxuri` | Preview-only; never generate / mining / wallet |
 | `resolveresource` | Typed lookup; coverage incomplete |
 | `importmodel` | Stream hash + 4 MiB pieces; pin + signed search card by default (`publish:true`). Never executes pickle/.pt |
 | `hostmodel` | Alias of `importmodel` (pin + signed search card + demand-seed). Returns `share` + `next_actions`. A `.btx` / copy_text path is **not** hashed as weights |
@@ -54,7 +54,11 @@ Conceptual background: [search.md](search.md), [directory.md](directory.md),
 | `listmodels` | Local catalog; 0.34.8 adds `state`, `ratio`, `share`, `name`, `aliases`, `imported_at`; live retrieve `percent` / `bytes_per_sec` / `eta_s` / `job_id` |
 | Search / directory / index (below) | Implemented in helper `DispatchHelperRpc` (`search.cpp`) |
 | `getmodelmanifest` | Verified metadata |
-| `exportmodelpath` | Verified local store root + source path + file list (`btx-model path`; `hf download --local-dir` analog); never starts a runtime |
+| `exportmodelpath` | Verified local checkout (`path` / `usable_runtime_root`); hardlink from `source_path` when SHA-384 still matches; never starts a network server |
+| `loadmodel` | Materialize checkout; inventory SafeTensors; optional `BTX_MODEL_CUDA_LOADER --hold --smoke`. `inference=false` |
+| `unloadmodel` | SIGTERM helper-spawned CUDA loader only |
+| `generatemodel` | Local one-shot generate if host profile matches. Fail-closed unknown arch / pickle / missing adapter |
+| `getmodelhostprofile` | What this helper can generate (`BTX_MODEL_GENERATE` / `BTX_LLAMA_CLI`). CUDA smoke is not generate |
 | `seedmodel` / `unseedmodel` | Manual serve / stop. Default `seed=auto` already seeds after import/`getmodel`. Prefer `unhostmodel` to unpin+unseed together |
 | `qualifymodel` | Structure only |
 | `getmodel` | `FREE_ONLY` retrieve (URI, digest48, **alias**, or `copy_text`); demand-seeds when `seed=auto` |
@@ -92,10 +96,16 @@ POST `/btx-model/2/quotes` records a prepaid quote. POST `.../payment` journals 
 | `REJECTED` | Record verify/import failed, sequence rollback, unsigned override, index cap, publisher spam |
 | `NOT_ENABLED` | Build or capability off (monetary proxy paths) |
 | `HELPER_DOWN` | Proxy socket missing (`btxd` only) |
-| `IMPORT_FAILED` | Index import parse/verify failure |
+| `INCOMPATIBLE_HOST_PROFILE` | `generatemodel`: unknown architecture, pickle, or missing adapter |
+| `NOT_RUN` | Generate adapter / llama-cli missing or exited; CUDA loader not run |
 
 Monetary RPC errors (`RPC_WALLET_*`, etc.) never apply on the helper unix
 socket researcher profile.
+
+Unix RPC is **one JSON line**. Helper wait is **24h** for `importmodel` /
+`hostmodel` / `getmodel` / `waitformodelevent` / `scanmodelwatch` /
+`loadmodel` / `generatemodel`. Other methods use **120s**. Do not treat the
+30s PQ1 idle window as the unix timeout.
 
 ## Global limits (search / records)
 
@@ -113,20 +123,21 @@ Record field bounds: see [search.md](search.md).
 
 ---
 
-## First-run conveniences (0.34.8-dev)
+## First-run conveniences
 
 People: [first-run.md](first-run.md). Agents: [agent-recipes.md](agent-recipes.md).
 Copy-paste bodies: [../../contrib/modelnet/recipes/](../../contrib/modelnet/recipes/).
 CLI: [../../contrib/modelnet/btx-model](../../contrib/modelnet/btx-model)
-(`init`, `ls`, `show`, `pull`, `unhost`, `link`, `rm-alias`, `pause` /
+(`init`, `ls`, `show`, `pull`, `unhost`, `link`, `load`, `unload`,
+`generate`, `host-profile`, `rm-alias`, `pause` /
 `resume`, `bounty-draft --update` / `--delete`, plus round-1 verbs).
-**0.34.8-dev** wrapper verbs `cloud`, `follow`, `events`, `mirror`,
+Wrapper verbs `cloud`, `follow`, `events`, `mirror`,
 `profile` fail closed if the helper lacks the method (`--json` agent door).
-`automatic_spend_atoms` stays **0**. No auto-spend. No inference.
+`automatic_spend_atoms` stays **0**. No auto-spend. No remote inference.
+Local generate is `generatemodel` ([generate.md](generate.md)).
 Pickle / `.pt` are refused. User ids parse `share.copy_text` (first `btx://`
 token) and **aliases**. The URI has no query string (`dn=` stays on
-`copy_text`). These methods exist in this development tree; they are **not**
-a claim that 0.34.8 is released. Last shipping tag remains **v0.34.7**.
+`copy_text`). Last shipping tag remains **v0.34.8**.
 
 ### checkmodelsetup
 
@@ -223,7 +234,7 @@ contrib/modelnet/btx-model link qwen3-local /path/to/qwen3.btx
 ### openmodelshare
 
 Preview-only open of a pasted card or `.btx` file. Same contract as
-`openbtxuri`: never inference, never mining, never wallet.
+`openbtxuri`: preview only; never generate, never mining, never wallet.
 
 **Request:** `copy_text`, a `btx://` token, or a filesystem path to a `.btx`
 / text file.
@@ -234,6 +245,67 @@ FREE_ONLY`, `getmodelsharecard`, …), `network: false`, `inference: false`,
 
 ```bash
 btx-cli openmodelshare /path/to/qwen3.btx
+```
+
+### loadmodel
+
+Materialize a complete replica. Inventory SafeTensors. When
+`BTX_MODEL_CUDA_LOADER` is an executable, spawn `--hold --smoke` and keep
+tensors resident. Never starts a network inference server.
+
+**Request:** `id` (`btx://`, hex, alias).
+
+**Response:** `path` / `usable_runtime_root`, `inference: false`,
+`remote_inference: false`, optional `device_loaded` / `weights_resident` /
+`smoke_passed` / `loader_pid`, `automatic_spend_atoms: 0`.
+
+```bash
+btx-cli loadmodel qwen3-local
+contrib/modelnet/btx-model load qwen3-local
+```
+
+### unloadmodel
+
+Stop the helper-spawned CUDA loader for this replica. Does not touch
+production `btxd`.
+
+```bash
+btx-cli unloadmodel qwen3-local
+contrib/modelnet/btx-model unload qwen3-local
+```
+
+### getmodelhostprofile
+
+What this helper can generate locally. CUDA smoke is not generate.
+
+**Response:** `can_generate`, `formats[]`, `backends[]`,
+`cuda_smoke_is_not_generate: true`, `trust_remote_code: false`,
+`remote_inference: false`, `automatic_spend_atoms: 0`.
+
+```bash
+btx-cli getmodelhostprofile
+contrib/modelnet/btx-model host-profile
+```
+
+### generatemodel
+
+Local one-shot generate for a **complete** replica whose format/architecture
+matches this host profile. Fail-closed otherwise. Contract:
+[generate.md](generate.md).
+
+**Request:** `id`, then a prompt string **or** `{ "prompt", "max_new_tokens" }`
+(1..512, default 32). Prompt ≤ 64 KiB.
+
+**Response (ok):** `generated: true`, `local_generate: true`, `text`,
+`backend`, `inference: false`, `remote_inference: false`,
+`network_server: false`, `automatic_spend_atoms: 0`.
+
+**Errors:** `INCOMPLETE`, `INCOMPATIBLE_HOST_PROFILE` (message is the reason),
+`NOT_RUN` (adapter missing or failed).
+
+```bash
+btx-cli generatemodel qwen3-local '{"prompt":"Hello","max_new_tokens":32}'
+contrib/modelnet/btx-model generate qwen3-local "Hello" --max-new-tokens 32
 ```
 
 ### unhostmodel
@@ -728,10 +800,10 @@ Do not collapse prepare/sign/submit.
 
 ---
 
-## 0.34.8-dev cloud / events / watches / profile (not a shipping tag)
+## Cloud / events / watches / profile (fail closed)
 
-These helper RPCs **exist** in this 0.34.8 tree
-(`CLIENT_VERSION_IS_RELEASE=true`). **`btx-model` still fails closed** if an
+These helper RPCs **exist** in this tree
+(`CLIENT_VERSION_IS_RELEASE=false`). **`btx-model` still fails closed** if an
 older helper is missing the method.
 No PASS. Live HTTPS/R2 WAN is **NOT_RUN** (OpenSSL HTTPS transport is
 compiled; no live origin round-trip). SCALE huge / 400GiB body stream is

@@ -77,10 +77,15 @@ free disk into free VRAM. A host may be able to **store** an artifact it cannot
 **reside**; that is a `RUNTIME_LOADED` / `RUNTIME_READY` distinction, not a
 failure of fetch.
 
-## BTX does not run inference
+## Local generate is not a remote inference marketplace
 
-BTX is not the inference engine. The monetary plane (wallets, bounties,
-ExactReplay, consensus) remains and is the **HOW / funding** layer, not an
-admission ticket: it does not gate fetch, verification, or a local run. The
-engine is whatever local runtime the operator supplies; BTX acquires verified
-bytes and reports local capability, and leaves execution to the host.
+BTX does not sell prompts and does not start a network inference server.
+`generatemodel` is a **local one-shot** when the verified replica matches
+this host profile (GGUF + llama.cpp, or allowlisted SafeTensors +
+`BTX_MODEL_GENERATE`). Unknown architectures, pickle, and missing adapters
+fail closed (`INCOMPATIBLE_HOST_PROFILE` / `NOT_RUN`). CUDA `--hold --smoke`
+is not generate. Contract: [generate.md](generate.md).
+
+The monetary plane (wallets, bounties, ExactReplay, consensus) remains the
+**HOW / funding** layer, not an admission ticket: it does not gate fetch,
+verification, or a local run. Fetch does not require a wallet.

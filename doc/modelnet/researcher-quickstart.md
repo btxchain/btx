@@ -97,16 +97,21 @@ publishes and never spends.
 are named on the CLI, e.g.
 `btx-model search --format gguf --max-size-bytes 8000000000 --sort size_asc`.
 `--fits` keeps only hits inside this node's remaining storage quota. It is
-storage only: BTX does not run inference, so it is not a RAM/VRAM claim.
+storage only: it is not a RAM/VRAM claim and not a generate-profile match.
 
 Defaults: `pin=true`, `publish=true` (signed search card; family / format /
 quantization inferred from filenames). Pass `{"publish":false}` to skip the
 card. The result includes `share` (`uri`, `copy_text`, …) and
-`next_actions`. Unix RPC waits up to 24h for large imports (`importmodel` /
-`hostmodel` / `getmodel` / `waitformodelevent` / `scanmodelwatch`); other helper
-methods use a 120s reply timeout.
+`next_actions`. Unix RPC waits up to 24h for large imports and generate
+(`importmodel` / `hostmodel` / `getmodel` / `waitformodelevent` /
+`scanmodelwatch` / `loadmodel` / `generatemodel`); other helper methods use a
+120s reply timeout.
 
-Then `getmodel` / `listmodels` / `getmodeltransfers`. With `-modelseed=auto`
+Then `getmodel` / `listmodels` / `getmodeltransfers`. After a complete
+replica, `exportmodelpath` rebuilds a checkout; `loadmodel` may hold
+SafeTensors on a GPU; `generatemodel` is local one-shot text when this host
+profile matches ([generate.md](generate.md)). CUDA smoke is not generate.
+With `-modelseed=auto`
 (the default once quota is positive) the hosted model is **already seeded**;
 `seedmodel` is only required for `-modelseed=manual`. Packaged /
 `-modelstorage=auto` allocates a bounded budget. `-modelstorage=0` stores no
@@ -125,7 +130,8 @@ On a second helper (no `-modelhost` required):
 (`btx://…` is a placeholder. Substitute a complete 91-character URI.)
 
 `automatic_spend_atoms` stays 0. Paid modes return `APPROVAL_REQUIRED` in
-this tree.
+this tree. After retrieve completes, local generate is [generate.md](generate.md)
+when the replica matches this host. CUDA smoke is not generate.
 
 Smoke: `python3 contrib/modelnet/two_helper_retrieve.py build/bin`
 

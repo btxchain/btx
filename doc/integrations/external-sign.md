@@ -1,6 +1,8 @@
 # BCP/1 external signing
 
-**Release state.** This document describes the **0.34.8** tree (`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`); the shipping tag is **v0.34.8**. It is not a published vendor HSM certification.
+**Release state.** This document describes the BCP/1 signing lifecycle that
+shipped in **v0.34.8**. This working tree is **0.34.9-dev**
+(`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=false`). It is not a published vendor HSM certification.
 
 **Proven scope.** Isolated-regtest `feature_bcp1.py` proves a **software** ML-DSA-44 round trip: watch-only deposit pool → unsigned package → canonical digests → valid signature → `finalizeexternalsign complete=true` → `testmempoolaccept` → explicit `sendrawtransaction`. It does **not** prove a live vendor HSM, PKCS#11, KMIP, or HTTPS adapter (those classes fail closed with no client linked). `--stub-signature` remains a negative test only. See [../../contrib/bcp1/README.md](../../contrib/bcp1/README.md).
 

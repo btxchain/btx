@@ -1,12 +1,13 @@
-# BTX 0.34.9-dev — Registry Independence (tester snapshot)
+# BTX 0.34.9-dev — Registry Independence, host / load / generate
 
 **Status:** development snapshot for
 [PR 198](https://github.com/btxchain/btx/pull/198).
 `CLIENT_VERSION` is **0.34.9** with `CLIENT_VERSION_IS_RELEASE=false`.
 This is **not** a shipping tag and **not** a consensus change.
 
-Use it to exercise origin-independent fetch, piece routing, ModelPack import,
-and the `btx-model` agent door. Do not treat it as `v0.34.8` or as
+Use it to exercise origin-independent fetch, `.btx` / `btx://` retrieve,
+checkout, optional GPU load, host-profile local generate, assumeutxo persist
+(#163), and the `btx-model` agent door. Do not treat it as `v0.34.8` or as
 production-ready.
 
 ## Linux x86_64 CPU archive
@@ -40,6 +41,21 @@ python3 contrib/modelnet/btx-model --help
 `bin/btxd` is a wrapper. The ELF is `libexec/btxd.real`. Gate it with
 `python3 scripts/release/verify_release_btxd.py --archive …` if you rebuild.
 
+## What landed on this branch
+
+| Surface | What to expect |
+|---|---|
+| **Registry independence** | Origins are disposable. `btx://` + `VerifiedManifest` is identity. Hugging Face / ModelScope / local disk are origins, not catalogues of record. |
+| **Host / share / retrieve** | `hostmodel` demand-seeds. `.btx` is a JSON magnet analog (not hashed as weights). `getmodel` accepts a `.btx` path or `btx://`. Unix `getmodel` is async (`status=running` + `job_id`). |
+| **Checkout** | `exportmodelpath` rebuilds files under `checkout/<artifact>/` and hardlinks from `source_path` when SHA-384 still matches. |
+| **Load** | `loadmodel` inventories SafeTensors. Optional `BTX_MODEL_CUDA_LOADER --hold --smoke` keeps tensors resident. `unloadmodel` SIGTERMs that child only. Never a network inference server. |
+| **Generate** | `generatemodel` / `getmodelhostprofile`: GGUF + `BTX_LLAMA_CLI`, or allowlisted SafeTensors + `BTX_MODEL_GENERATE`. Unknown arch / pickle / missing adapter fail closed. CUDA smoke is **not** generate. [generate.md](../modelnet/generate.md). |
+| **Assumeutxo persist (#163)** | Pre-attestation historical hole bodies on the background chainstate can persist without GETMMATTEST. Issue **#163** is closed. |
+
+`automatic_spend_atoms` stays **0**. `execution_profile` stays **0**
+(unqualified). `trust_remote_code` stays **false**. `inference=false` and
+`remote_inference=false` on load/generate.
+
 ## What to test
 
 - Walletless model import: `wallet_required=false`,
@@ -54,14 +70,26 @@ python3 contrib/modelnet/btx-model --help
 - LOCAL import may omit `files[]`; `piece_origins` records `"local"`; a
   second import of the same bytes is idempotent.
 - Leafless multi-origin mix without `piece_sha384_hex` must fail closed.
+- Host → share `.btx` / `btx://` → retrieve `FREE_ONLY` → `exportmodelpath`
+  checkout (hardlink when hashes match).
+- `loadmodel` with `BTX_MODEL_CUDA_LOADER` set; `unloadmodel` must not
+  touch production `btxd`.
+- `getmodelhostprofile` then `generatemodel` on a complete replica that
+  matches this host. Unknown architecture / pickle must fail closed.
+  Missing adapter / llama-cli is `NOT_RUN`, not a fake PASS.
 
 Protocol: [registry-independence.md](../modelnet/registry-independence.md).
-Agent recipes §10: [agent-recipes.md](../modelnet/agent-recipes.md).
+Generate: [generate.md](../modelnet/generate.md).
+Agent recipes: [agent-recipes.md](../modelnet/agent-recipes.md).
 
 ## What this is not
 
 - Not `--latest`. Leave current shipping / rc tags alone.
 - Not a recut of `v0.34.8`.
 - Not signed Guix. Treat binaries as a convenience for testers of PR 198.
-- Not CUDA. Not macOS. Not Windows.
+- Not CUDA. Not macOS. Not Windows. The CPU archive does not include a
+  generate adapter or llama.cpp; those are operator env
+  (`BTX_MODEL_GENERATE` / `BTX_LLAMA_CLI`).
+- Not a network inference server.
 - Not a reason to stop a live production `btxd`.
+- Not a claim that GitHub issue #138 is closed.

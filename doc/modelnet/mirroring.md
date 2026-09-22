@@ -1,7 +1,7 @@
-# Mirroring (0.34.8)
+# Mirroring (0.34.8 surface)
 
-**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
-**v0.34.8**. `getmodelmirror` / `setmodelmirror` /
+**Status:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
+(`CLIENT_VERSION_IS_RELEASE=false`). `getmodelmirror` / `setmodelmirror` /
 `setmodelprofile` exist in this helper (keep-N, `automatic_spend_atoms=0`).
 The CLI wrapper **fails closed** if an older helper lacks the method. This
 page is not a PASS and not evidence that a public mirror is running.

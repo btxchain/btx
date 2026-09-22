@@ -65,3 +65,10 @@ BTX_WAN_E2E=1 SEEDER=127.0.0.1:39447 contrib/modelnet/e2e-wan-two-helper.sh
 ```bash
 contrib/modelnet/check-with-modelnet-off.sh
 ```
+
+## Local generate (not DOC-01)
+
+Host-profile generate is documented in [generate.md](generate.md). Do not
+paste `generatemodel` into this page as an executable example: DOC-01
+(`validate-doc-examples.sh`) only proves `btx-modelcheck` / `btx-open` /
+helper presence, not an adapter. CUDA smoke is not generate.

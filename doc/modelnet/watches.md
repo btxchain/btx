@@ -1,7 +1,7 @@
-# Watches (0.34.8)
+# Watches (0.34.8 surface)
 
-**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
-**v0.34.8**. Publisher / collection / query /
+**Status:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
+(`CLIENT_VERSION_IS_RELEASE=false`). Publisher / collection / query /
 model watch RPCs exist in this helper (unit-tested). The CLI wrapper **fails
 closed** if an older helper lacks the method. GUI watches are 0.34.8-dev
 **source** (`BUILD_GUI=OFF`; do not claim `bitcoin-qt` was built). This page
@@ -18,7 +18,7 @@ These are **not** the same subsystem.
 
 | Surface | What it is | RPC / CLI | Auto-spend |
 |---|---|---|---|
-| **Filesystem drop folder** | Drop GGUF / SafeTensors into a directory; helper hosts like `hostmodel` | `-modelwatch=<dir>`, `scanmodelwatch`, `getmodelwatchstatus`; CLI `watch-scan` | **0**. Does **not** auto-`getmodel` |
+| **Filesystem drop folder** | Drop GGUF / SafeTensors into a directory; helper hosts like `hostmodel`. A dropped `.btx` card is **opened** and starts `getmodel` `FREE_ONLY` (quota applies to the model, not the card bytes) | `-modelwatch=<dir>`, `scanmodelwatch`, `getmodelwatchstatus`; CLI `watch-scan` | **0**. Weights drops do **not** auto-`getmodel`; `.btx` cards do retrieve |
 | **Publisher / collection / query / model watch** | Local policy: notice (and optionally fetch free) when a signed object changes | `watchmodelpublisher` / `watchmodelcollection` / `watchmodelquery` / `watchmodel`; `listmodelwatches` / `getmodelwatch` / `unwatchmodel`; CLI `follow` | **0**. Default action is **NOTIFY** |
 
 `getmodelwatchstatus` is the **folder** doctor (`watch_dir`, `configured`).
@@ -51,7 +51,7 @@ helper lacks method)`. `DispatchHelperRpc` of an unknown method is
 `METHOD_NOT_FOUND` immediately; `automatic_spend_atoms` is not required on
 that error.
 
-## RPC names (0.34.8-dev helper; `CLIENT_VERSION_IS_RELEASE=false`)
+## RPC names (this helper; `CLIENT_VERSION_IS_RELEASE=false`)
 
 Do not confuse with the **implemented** folder pair
 `scanmodelwatch` / `getmodelwatchstatus`.

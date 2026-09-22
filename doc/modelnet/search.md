@@ -7,12 +7,12 @@ Every node, RPC response, and explorer page must treat results as a **current ne
 locally indexed records, configured index peers, and bounded peer replies. Nothing here implies a
 **global complete directory**.
 
-**Release posture:** this tree is **0.34.8**
-(`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag is **v0.34.8**.
+**Release posture:** last shipping tag is **v0.34.8**. This tree is
+**0.34.9-dev** (`CLIENT_VERSION_IS_RELEASE=false`).
 Search RPCs exist in this helper. Treat wire shapes as implemented in helper
-`DispatchHelperRpc`. MinIO / cloud storage RPCs also exist in 0.34.8-dev
+`DispatchHelperRpc`. MinIO / cloud storage RPCs also exist
 (`setcloudstorage` / `testcloudstorage` / `getcloudstorageinfo`); live R2
-WAN is **HONEST_NOT_RUN**. `IS_RELEASE=true` seals the client; it does not
+WAN is **HONEST_NOT_RUN**. `IS_RELEASE=false` on this branch; it does not
 claim a live R2 WAN PASS.
 
 ## Four planes (do not conflate)

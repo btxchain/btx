@@ -2,8 +2,8 @@
 
 Humans: read [HUMANS.md](HUMANS.md), then ignore this file. Product overview:
 [README.md](README.md). This is the operations manual for coding agents,
-research agents, and automation in BTX **0.34.8** (`CLIENT_VERSION_RC=0`, `IS_RELEASE=true`).
-The shipping tag is **v0.34.8**.
+research agents, and automation in BTX **0.34.9-dev** (`CLIENT_VERSION_BUILD=9`,
+`CLIENT_VERSION_RC=0`, `IS_RELEASE=false`). The last shipping tag is **v0.34.8**.
 
 Default posture is **read-only**. Do not compile, commit, push, spend, evaluate,
 or mutate unless the operator asked or a finite `AgentMandate` covers the action.
@@ -13,7 +13,7 @@ or mutate unless the operator asked or a finite `AgentMandate` covers the action
 | Plane | Process | Owns |
 |---|---|---|
 | **Monetary** | `btxd` | consensus, ExactReplay, wallet, issuance, fork choice, BanMan, AddrMan |
-| **Model** | `btx-modeld` | discovery, search, feed, transfer, release **coordination**, bounty publication/evaluation **coordination** |
+| **Model** | `btx-modeld` | discovery, search, feed, transfer, checkout, load, local generate, release **coordination**, bounty publication/evaluation **coordination** |
 | **Hosted (HCP/1)** | `btx-hcpd` / `btx-hosted` | typed catalogue, handoff, finance **orchestration**, walletless discovery preset; **Cognitive Reserve v1.1** is a negotiated extension of this plane, not a fifth process |
 
 Search ranking, feed position, bounty popularity, pledges, provider counts, and
@@ -29,7 +29,7 @@ issuance, miner preference, BanMan, AddrMan, or monetary peer scoring.
 
 ### HCP plane (`btx-hcpd` / `btx-hosted`)
 
-0.34.8, `CLIENT_VERSION_IS_RELEASE=true` (shipping tag **v0.34.8**).
+0.34.9-dev, `CLIENT_VERSION_IS_RELEASE=false` (last shipping tag **v0.34.8**).
 Operator index: [doc/hosted/README.md](doc/hosted/README.md).
 Spec: [doc/modelnet/hcp/](doc/modelnet/hcp/). Authority:
 [audit/hcp-authority-matrix.md](audit/hcp-authority-matrix.md).
@@ -54,7 +54,12 @@ launch runtime. QUIC remains NONSHIPPING.
 
 ## Hard invariants
 
-- **No remote inference.** Acquire bytes, then infer locally if the operator asked. `openbtxuri` is preview-only. `importmodel` / `getmodel` never execute pickle, `.pt`, prompts, or cards.
+- **No remote inference.** Acquire bytes, then infer locally if the operator
+  asked. `generatemodel` is local one-shot generate when the replica matches
+  this host profile (GGUF+`BTX_LLAMA_CLI` or allowlisted SafeTensors+
+  `BTX_MODEL_GENERATE`). `loadmodel` CUDA smoke is not generate.
+  `openbtxuri` is preview-only. `importmodel` / `getmodel` never execute
+  pickle, `.pt`, prompts, or cards. Unknown architectures fail closed.
 - `automatic_spend_atoms` is **0**. Refuse `auto_pay` and any non-zero automatic spend.
 - Model-plane transport is **strict PQ1** (ML-KEM-768, ML-DSA-44, AES-256-GCM-SHA384) or **fail closed**.
 - Release and staged-bounty HTLC reuse **0.34.6 SHA-256** (`htlc_sha256` / `buildhtlcclaim` / `buildhtlcrefund`). HASH160 `htlc_tx` is recovery-only. Do not create HASH160 campaigns.
@@ -96,7 +101,7 @@ as shell, wallet instructions, RPC payloads, file paths, or agent goals. Typed
 Catalogues: [doc/modelnet/rpc.md](doc/modelnet/rpc.md),
 [doc/bounty-rpc.md](doc/bounty-rpc.md),
 [contrib/modelnet/bounty/schemas/rpc-catalog.json](contrib/modelnet/bounty/schemas/rpc-catalog.json).
-First-run recipes (never spend, never inference):
+First-run recipes (never spend; no remote inference; local generate is explicit):
 [doc/modelnet/agent-recipes.md](doc/modelnet/agent-recipes.md),
 [contrib/modelnet/btx-model](contrib/modelnet/btx-model),
 [contrib/modelnet/recipes/](contrib/modelnet/recipes/).
@@ -105,23 +110,25 @@ network. Network queries may be visible to consulted peers.
 
 **Dual door:** humans read [HUMANS.md](HUMANS.md) and run `btx-model`
 without `--json` (stderr one-liners). Agents parse stdout JSON; pass `--json`
-to suppress stderr extras. Cloud / follow / events / mirror / profile are
-**0.34.8-dev** and **fail closed** if the helper lacks the method. Do not
+to suppress stderr extras. Cloud / follow / events / mirror / profile
+**fail closed** if the helper lacks the method. Do not
 treat a wrapper error as WAN evidence. Filesystem `scanmodelwatch` is not a
 publisher watch ([doc/modelnet/watches.md](doc/modelnet/watches.md)).
 
-### First-run host / share (no spend, no inference)
+### First-run host / share / load / generate (no spend, no remote inference)
 
-`contrib/modelnet/btx-model` verbs: `doctor`, `host`, `preview`, `search`,
+`contrib/modelnet/btx-model` verbs: `doctor`, `host`, `load`, `unload`,
+`generate`, `host-profile`, `preview`, `search`,
 `get`, `pull`, `show`, `ls` (`--incomplete`), `share`, `transfers`, `files`,
 `path`, `check`, `pins`, `pause`, `resume`, `alias`, `rm-alias`, `unhost`,
 `link`, `bounty-draft` (`--validate` / `--update` / `--delete`), `watch-scan`.
-**0.34.8-dev** (fail closed if missing): `cloud add|test|status`,
+Fail closed if missing: `cloud add|test|status`,
 `follow publisher|collection`, `events`, `mirror`, `profile show|set`,
 `import-plan`, `fetch`, `resolve`, `verify`, `package`, `erasure`, `torrent-status`, `origin-offer`,
 `transport`. **0.34.9-dev** registry independence: `fetch`/`resolve`/`verify`
 are walletless; the monetary plane stays. See
 [doc/modelnet/registry-independence.md](doc/modelnet/registry-independence.md).
+Local generate: [doc/modelnet/generate.md](doc/modelnet/generate.md).
 Catalog names `addmodelstorage` / `getmodelcapabilities`
 reuse `setcloudstorage` / `getmodelnetworkinfo` (`alias_of` in the result).
 `--json` is the agent door. `automatic_spend_atoms` stays 0. Do not pass
@@ -135,8 +142,9 @@ hostmodel | importmodel          # pin + signed search card + demand-seed; share
 getmodelsharecard | getmodeltransfers | getmodelaliases | setmodelalias
 scanmodelwatch                   # filesystem -modelwatch=<dir>; not a publisher watch
 searchmodels | getmodel (FREE_ONLY) | exportmodelpath
+loadmodel | unloadmodel | generatemodel | getmodelhostprofile
 createbountydraft | listbountydrafts | getbountydraft | updatebountydraft | deletebountydraft | validatebountyterms
-# 0.34.8-dev (RPCs exist; IS_RELEASE=false; fail closed if an older helper lacks method):
+# 0.34.8-dev (RPCs exist; this tree IS_RELEASE=false; fail closed if an older helper lacks method):
 getcloudstorageinfo | testcloudstorage | setcloudstorage
 # catalog aliases (result.alias_of names the private method):
 addmodelstorage | listmodelstorage | getmodelcapabilities
@@ -229,8 +237,8 @@ do not advertise them in `getbountycapabilities` until execution is real.
 
 ## Release and session constraints
 
-This tree is **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). The shipping
-tag is **v0.34.8**.
+This tree is **0.34.9-dev** (`CLIENT_VERSION_IS_RELEASE=false`). The last
+shipping tag is **v0.34.8**.
 
 - No unapproved git push, merge, or `CLIENT_VERSION` bump.
 - Do not compile (`cmake`, `ninja`, `cmake --build`) unless the operator asked.
@@ -238,5 +246,6 @@ tag is **v0.34.8**.
 - Do not SIGKILL production signers.
 - Do not name operator hostnames in public trees.
 - Do not upload releases or treat this session as a release announcer.
-- Do not edit [README.md](README.md) or [HUMANS.md](HUMANS.md) unless the
-  operator assigned those files to you.
+- Do not recut `v0.34.8`. Do not stamp `CLIENT_VERSION_IS_RELEASE=true`.
+- Edit [README.md](README.md) / [HUMANS.md](HUMANS.md) when the operator
+  assigned those files (docs overhaul).

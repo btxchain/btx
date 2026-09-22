@@ -8,7 +8,9 @@ Epoch A (height 185000) is live, and the compiled assumeutxo pin is height
 still requires Profile 1 ExactReplay even when historical state was bootstrapped
 from a snapshot; checkpoint/assumeutxo trust must be disclosed rather than
 described as replay of all history. Profile 2 is reserved for a later
-proof-authoritative epoch. See
+proof-authoritative epoch. 0.34.9-dev testers (this branch, not `--latest`):
+[`doc/release-notes/release-notes-0.34.9-dev.md`](../../doc/release-notes/release-notes-0.34.9-dev.md).
+See
 [`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
 
 This directory contains the first-run bootstrap wrapper for operators who want

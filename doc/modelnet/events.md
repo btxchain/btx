@@ -1,13 +1,13 @@
-# Model events (0.34.8)
+# Model events (0.34.8 surface)
 
-**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
-**v0.34.8**. `getmodelevents` /
+**Status:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
+(`CLIENT_VERSION_IS_RELEASE=false`). `getmodelevents` /
 `getmodeleventsequence` / `waitformodelevent` exist in this helper (unit-
 tested). The CLI wrapper **fails closed** if an older helper lacks the
 method. An unknown helper RPC returns `METHOD_NOT_FOUND` immediately (no
 hang). Live helper-death log dump is **NOT_RUN** (no `btx-modeld` spawn).
 This page is not a PASS and not WAN evidence. Live HTTPS/R2 remains
-**NOT_RUN**. `CLIENT_VERSION_IS_RELEASE=true`.
+**NOT_RUN**.
 
 CLI: `contrib/modelnet/btx-model events [--cursor N] [--wait SEC] --json`.
 Recipe: [../../contrib/modelnet/recipes/events.json](../../contrib/modelnet/recipes/events.json).
@@ -54,7 +54,7 @@ contrib/modelnet/btx-model --json events --cursor 12 --wait 5
 unknown method is `METHOD_NOT_FOUND` immediately; `automatic_spend_atoms`
 is not required on that error.
 
-## RPC (0.34.8-dev helper; `CLIENT_VERSION_IS_RELEASE=false`)
+## RPC (this helper; `CLIENT_VERSION_IS_RELEASE=false`)
 
 | RPC | Role |
 |---|---|

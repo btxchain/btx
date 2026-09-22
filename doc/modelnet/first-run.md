@@ -2,7 +2,9 @@
 
 This is the **people** walkthrough. You do not need a wallet, coins, mining,
 or a chain sync to host a local model and share its `btx://` URI. Inference
-stays **local after acquire**. Nothing here spends BTX.
+stays **local after acquire**. `generatemodel` is the in-tree one-shot when
+the replica matches this host; it is not a network server. Nothing here
+spends BTX.
 
 Agents: stop and read [agent-recipes.md](agent-recipes.md) and
 [AGENTS.md](../../AGENTS.md). Tests and every scenario:
@@ -15,8 +17,8 @@ synthetic MODEL token (not a hosted model):
 btx://pqwy06q0q7wwzy70aeq45sxnlvq3mr067yt4jzphzvnfn2c4zc24zxz665zdprf0nwgskvqq9cq365u9n8l25
 ```
 
-Shipping tag is **v0.34.8**. This tree is **0.34.8**
-(`CLIENT_VERSION_IS_RELEASE=true`).
+Last shipping tag is **v0.34.8**. This tree is **0.34.9-dev**
+(`CLIENT_VERSION_IS_RELEASE=false`).
 
 ## What you are about to do
 
@@ -32,6 +34,9 @@ Shipping tag is **v0.34.8**. This tree is **0.34.8**
 | Share / link | Copy a `btx://` card or write a `.btx` file | magnet link / `.torrent` file |
 | Open share | Preview a pasted card or `.btx` file | `ipfs cat` by CID |
 | Unhost | Stop seeding and unpin in one step | `ollama rm` / stop seed |
+| Path / checkout | Rebuild verified files for a local runtime | `hf --local-dir` |
+| Load | Optional CUDA hold+smoke on SafeTensors | keep weights on GPU; not a server |
+| Generate | Local one-shot tokens if this host matches | llama.cpp or transformers adapter |
 | Watch folder | Drop new files in a directory; they host themselves | qBittorrent watch folder |
 
 Pickle / `.pt` / `.py` / `.so` are refused. A structure check is not a claim
@@ -140,7 +145,8 @@ You do not call `createmodelidentity` first.
 Pass `{"publish":false}` only when you want a local pin **without** a signed
 search card. Pin stays on unless you pass `{"pin":false}`. Unix RPC waits up
 to **24h** for `importmodel` / `hostmodel` / `getmodel` / `waitformodelevent` /
-`scanmodelwatch` so a large import is not killed by the 30s PQ1 idle window.
+`scanmodelwatch` / `loadmodel` / `generatemodel` so a large import or generate
+is not killed by the 30s PQ1 idle window.
 Ordinary helper methods use a **120s** unix reply timeout.
 
 The result always includes a **share card** and `next_actions`:
@@ -329,7 +335,7 @@ Empty `-modelwatch` is off. The doctor reports the configured path.
 
 This **filesystem drop folder is not a publisher watch**. Publisher /
 collection follow, event journal, and optional cloud backing exist in this
-**0.34.8** helper (`CLIENT_VERSION_IS_RELEASE=true`). FakeS3 is
+**0.34.9-dev** helper (`CLIENT_VERSION_IS_RELEASE=false`). FakeS3 is
 unit-tested; live HTTPS/R2 is **NOT_RUN** (OpenSSL HTTPS transport is
 compiled; live R2 WAN is not PASS). SCALE huge / 400GiB body stream is
 **NOT_RUN**. The CLI wrapper still fails closed if an older helper has no
@@ -337,14 +343,33 @@ method. GUI watches are 0.34.8-dev source (`BUILD_GUI=OFF`; do not claim
 `bitcoin-qt` was built). See [watches.md](watches.md), [events.md](events.md),
 [storage-backends.md](storage-backends.md). No PASS.
 
-## 6. Use it locally
+## 6. Use it locally (checkout, load, generate)
 
-Point a **local** runtime at `exportmodelpath`. BTX does not start that
-runtime and does not expose it to the network. There is no inference seller
-and no cloud **inference** fallback. Optional object-store backing (R2/S3)
-is 0.34.8-dev: FakeS3 unit-tested, HTTPS transport compiled, live HTTPS/R2
-**NOT_RUN**, and is not remote inference — see
-[storage-backends.md](storage-backends.md).
+Point a **local** runtime at `exportmodelpath` / `btx-model path`. Checkout
+hardlinks from `source_path` when SHA-384 still matches.
+
+```bash
+contrib/modelnet/btx-model path NAME
+contrib/modelnet/btx-model load NAME          # optional CUDA hold if BTX_MODEL_CUDA_LOADER
+contrib/modelnet/btx-model host-profile
+contrib/modelnet/btx-model generate NAME "Hello" --max-new-tokens 32
+contrib/modelnet/btx-model unload NAME        # helper-spawned CUDA loader only
+```
+
+`loadmodel` inventories SafeTensors. When `BTX_MODEL_CUDA_LOADER` points at
+`contrib/modelnet/cuda_safetensors_load`, it may keep tensors resident
+(`--hold --smoke`). Flags stay `inference=false`, `remote_inference=false`.
+`unloadmodel` SIGTERMs that child only (never production `btxd`).
+
+`generatemodel` is local one-shot text when the replica matches this host
+profile: GGUF + `BTX_LLAMA_CLI`, or an allowlisted SafeTensors architecture +
+`BTX_MODEL_GENERATE` (typically `contrib/modelnet/generate_local.py`).
+Unknown architectures, pickle, and missing adapters fail closed. CUDA smoke
+is **not** generate. Full contract: [generate.md](generate.md).
+
+BTX does not expose a network inference server. Optional object-store backing
+(R2/S3) is not remote inference — see
+[storage-backends.md](storage-backends.md). Live HTTPS/R2 remains **NOT_RUN**.
 
 Paid release/bounty flows are optional and still split prepare → sign →
 submit. They are not part of first-run. Title-only bounty drafts
@@ -365,12 +390,14 @@ contrib/modelnet/btx-model bounty-draft --delete '<draft_id>'
 
 ## `btx-model` cheat sheet
 
-Never spends. Never inference. Scratch helper socket only.
+Never spends. No remote inference. Scratch helper socket only.
 
 | Verb | RPC |
 |---|---|
 | `init` / `doctor` | `checkmodelsetup` (`one_liner`). Prefer `getsetupstatus` on `btxd`. |
 | `preview` / `host` | `previewmodelimport` / `hostmodel` (weights **or** `.btx` / copy_text) |
+| `load` / `unload` | `loadmodel` / `unloadmodel` (CUDA hold optional; never a network server) |
+| `generate` / `host-profile` | `generatemodel` / `getmodelhostprofile` (host-profile match) |
 | `ls [--incomplete]` | `getmodeltransfers` (`--incomplete` keeps downloading / `percent<100`) |
 | `show` | `showmodel` |
 | `search` | `searchmodels` (CLI default `LOCAL`; catalog filters + `--fits` for this node's remaining storage) |
@@ -388,12 +415,11 @@ Never spends. Never inference. Scratch helper socket only.
 | `bounty-draft` | `createbountydraft` (title string or `@file.json`); `--update` / `--delete` / `--validate` |
 | `watch-scan` | `scanmodelwatch` (`getmodelwatchstatus` is RPC-only). Filesystem folder, not publisher follow. |
 
-## 7. 0.34.8-dev optional (helper methods exist; not a shipping tag)
+## 7. Optional cloud / events / watches / profile (fail closed)
 
 These verbs exist on `contrib/modelnet/btx-model` so agents have a
 stable door. The helper in this tree implements the RPCs. If an older
-helper does not implement the RPC, the wrapper **exits immediately**
-(`method not found (0.34.8-dev; fails closed if helper lacks method)`).
+helper does not implement the RPC, the wrapper **exits immediately**.
 Unknown `DispatchHelperRpc` is `METHOD_NOT_FOUND` immediately;
 `automatic_spend_atoms` is not required on that error. That is not WAN
 evidence and not a PASS. `automatic_spend_atoms` stays **0**. `--json` is
@@ -417,7 +443,7 @@ the agent door (stdout only). People keep stderr hints without `--json`.
 R2 AUTO is `SOURCE_FILES` + `STREAM_FILE`. Pieces remain the swarm unit.
 FakeS3 is unit-tested. Live HTTPS/R2 is **NOT_RUN** (transport compiled; WAN
 not PASS). SCALE huge is **NOT_RUN**. GUI watches are 0.34.8-dev source
-(`BUILD_GUI=OFF`). `CLIENT_VERSION_IS_RELEASE=true`. HF/Xet/torrent adapters
+(`BUILD_GUI=OFF`). `CLIENT_VERSION_IS_RELEASE=false`. HF/Xet/torrent adapters
 are local-native (pin/SSRF/CAS/infohash). They do **not** download from the
 public internet in this tree. See
 [storage-backends.md](storage-backends.md) and
@@ -442,6 +468,10 @@ contrib/modelnet/btx-model ls --incomplete
 contrib/modelnet/btx-model show qwen3-local
 contrib/modelnet/btx-model files qwen3-local
 contrib/modelnet/btx-model path qwen3-local
+contrib/modelnet/btx-model load qwen3-local
+contrib/modelnet/btx-model host-profile
+contrib/modelnet/btx-model generate qwen3-local "Hello" --max-new-tokens 32
+contrib/modelnet/btx-model unload qwen3-local
 contrib/modelnet/btx-model search --format gguf --fits --sort size_asc
 contrib/modelnet/btx-model check ./incoming/model.safetensors
 contrib/modelnet/btx-model pins --type both

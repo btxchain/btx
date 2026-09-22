@@ -98,6 +98,8 @@ Never put the catalog in `wallets/` or `chainstate/`.
 
 ## Local execution after acquire
 
-After `BYTES_VERIFIED` / `PINNED`, the operator registers the verified path
-with a **locally installed** runtime (llama.cpp, a vendor toolkit, etc.).
-That runtime is out of band. BTX does not ship a remote inference API.
+After `BYTES_VERIFIED` / `PINNED`, `exportmodelpath` rebuilds a checkout.
+`loadmodel` may keep SafeTensors resident via `BTX_MODEL_CUDA_LOADER`.
+`generatemodel` runs a local adapter when the replica matches this host
+profile ([generate.md](generate.md)). CUDA smoke is not generate. BTX does
+not ship a remote inference API or a network server.

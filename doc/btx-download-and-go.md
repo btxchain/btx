@@ -9,6 +9,8 @@
 > GitHub archive directly (below). Historical prerelease
 > [`v0.34.8-rc4`](https://github.com/btxchain/btx/releases/tag/v0.34.8-rc4)
 > remains on GitHub and is superseded.
+> Testers on this branch (not `--latest`, not a recut of v0.34.8):
+> [0.34.9-dev notes](release-notes/release-notes-0.34.9-dev.md).
 > Historical 0.34.5 convergence notes:
 > [release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
 > Epoch A is live at height 185000. EncDr stall recovery at 199299 is
@@ -35,8 +37,10 @@ published rollback snapshot instead of waiting for a full historical sync
 before becoming useful.
 
 Optional Native Model Network acquire (`btx-modeld`, `btx://` URIs) is **not**
-required to run a validating node, is **not** an inference endpoint, and does
-not replace IBD or MatMul admission RPCs. Inference stays local after acquire.
+required to run a validating node, is **not** a remote inference endpoint, and
+does not replace IBD or MatMul admission RPCs. After acquire, this tree can
+`loadmodel` / `generatemodel` locally when the replica matches this host
+([modelnet/generate.md](modelnet/generate.md)). CUDA smoke is not generate.
 See [modelnet/README.md](modelnet/README.md).
 
 For a detailed from-scratch mining-node procedure using generic `/var/btx/`

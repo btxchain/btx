@@ -11,11 +11,13 @@ outputs, enforces reduced-data transaction constraints (BIP 110-style) from
 genesis, and implements **Dandelion++ transaction relay** (BIP 156) for
 network-layer anonymity.
 
-**0.34.7** connects that money to **discovery**, **public-model retrieval**,
-**release campaigns**, **creation bounties**, and **preservation**. A BTX
-node already has compute; the Native Model Network delivers models to it.
-Inference is **local after acquire**. BTX is not a remote inference
-marketplace.
+**0.34.7** connected that money to **discovery**, **public-model retrieval**,
+**release campaigns**, **creation bounties**, and **preservation**. This
+tree is **0.34.9-dev** on that isolated model plane: origin-independent
+fetch, `.btx` / `btx://` retrieve, checkout, optional GPU **load**, and
+**local generate** when the replica matches this host. A BTX node already
+has compute; the Native Model Network delivers models to it. Inference is
+**local after acquire**. BTX is not a remote inference marketplace.
 
 Two markets sit on the model plane:
 
@@ -35,8 +37,10 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.34.8** (`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`).
-GitHub tag **v0.34.8** is the shipping client.
+This working tree is **0.34.9-dev** (`CLIENT_VERSION_BUILD=9`,
+`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=false`). GitHub tag
+**v0.34.8** remains the last shipping client. Do not treat this branch as
+a recut of `v0.34.8`.
 
 ## Start here
 
@@ -54,6 +58,7 @@ manual and not the long essay.
 
 - [Start here](#start-here)
 - [Current release — v0.34.8](#current-release--v0348)
+- [This tree — 0.34.9-dev](#this-tree--0349-dev)
 - [Get a node](#get-a-node)
 - [Native Model Network (0.34.7)](#native-model-network-0347)
 - [0.34.1 monetary handover (community forks)](#0341-monetary-handover-community-forks)
@@ -84,11 +89,11 @@ manual and not the long essay.
 
 ## Current release — v0.34.8
 
-**This tree is 0.34.8** (`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`).
-It is the shipping 0.34.8 client. Seal and freeze hashes are
-written when a tag is sealed (see
-[doc/release-process.md](doc/release-process.md)). The previous monetary
-tag is **v0.34** (seal `dc46dee2`, freeze `ecfaa6c9`). Epoch A Profile 1
+**Last shipping tag is v0.34.8.** This working tree is **0.34.9-dev**
+(`CLIENT_VERSION_IS_RELEASE=false`). It is not a shipping client and not
+a recut of `v0.34.8`. Seal and freeze hashes are written when a tag is
+sealed (see [doc/release-process.md](doc/release-process.md)). The previous
+monetary tag is **v0.34** (seal `dc46dee2`, freeze `ecfaa6c9`). Epoch A Profile 1
 ExactReplay is live on mainnet at height **185000**. EncDr stall recovery
 at height **199299** is withdrawn. The shielded pool is closed at height
 **199300**. The compiled assumeutxo pin is height **219000** (the 199299 and
@@ -107,6 +112,8 @@ fork choice. See
 - [Release notes](doc/release-notes.md)
 - [0.34.5 convergence notes](doc/release-notes/release-notes-0.34.5.md)
 - [0.34.7 Native Model Network](doc/release-notes/release-notes-0.34.7.md)
+- [0.34.8 shipping notes](doc/release-notes/release-notes-0.34.8.md)
+- [0.34.9-dev (this tree)](doc/release-notes/release-notes-0.34.9-dev.md)
 - [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA, macOS arm64 Metal
 - [AssumeUTXO snapshot 219000](https://github.com/btxchain/btx/releases/tag/assumeutxo-219000) (`btx-assumeutxo-219000.dat` SHA256 `78acb7dd7eeec2a17909c6c5f7e12ffa9b4ad2ffcbd9eb464421dcd960868e7b`)
 - [AssumeUTXO snapshot 201500](https://github.com/btxchain/btx/releases/tag/assumeutxo-201500) (`btx-assumeutxo-201500.dat` SHA256 `08c52c8b34e878c4d48546cfec066bc48fceed51d7287b4ff7ec7b5727cf52c7`)
@@ -120,6 +127,27 @@ btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Do not mine on parent
 `ff80e629…` — that hash is not on the majority chain.
+
+## This tree — 0.34.9-dev
+
+PR [198](https://github.com/btxchain/btx/pull/198) is the development snapshot
+on the 0.34.8 monetary baseline. It does not change ExactReplay, issuance,
+or fork choice. Tester archives are prereleases (`v0.34.9-dev.pr198.*`),
+not `--latest`.
+
+| Surface | What landed |
+|---|---|
+| **Registry independence** | Origins are disposable; `btx://` is identity. Walletless fetch. Hugging Face / ModelScope / local disk are origins, not catalogues of record. |
+| **Host / share / retrieve** | `hostmodel` demand-seeds. `.btx` magnet analog and `btx://` retrieve `FREE_ONLY`. Unix `getmodel` is async (`status=running` + `job_id`). |
+| **Checkout** | `exportmodelpath` rebuilds files under `checkout/<artifact>/` and hardlinks from `source_path` when SHA-384 still matches. |
+| **Load** | `loadmodel` inventories SafeTensors. Optional `BTX_MODEL_CUDA_LOADER --hold --smoke` keeps tensors resident. `unloadmodel` SIGTERMs that child only. Never a network inference server. |
+| **Generate** | `generatemodel` / `getmodelhostprofile`: GGUF + `BTX_LLAMA_CLI`, or allowlisted SafeTensors + `BTX_MODEL_GENERATE`. Unknown arch / pickle fail closed. CUDA smoke is **not** generate. |
+| **Assumeutxo persist** | Pre-attestation historical hole bodies can persist without GETMMATTEST ([#163](https://github.com/btxchain/btx/issues/163)). |
+
+Operator walkthrough: [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
+[doc/modelnet/generate.md](doc/modelnet/generate.md),
+[doc/modelnet/registry-independence.md](doc/modelnet/registry-independence.md).
+Notes: [doc/release-notes/release-notes-0.34.9-dev.md](doc/release-notes/release-notes-0.34.9-dev.md).
 
 ## Get a node
 
@@ -135,18 +163,21 @@ Use `loadtxoutset`, not `loadtxoutsetattested`. Do not mine on parent
    Operator walkthrough: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
 4. **Models** (optional): isolated helper `btx-modeld`. Start with
    [doc/modelnet/README.md](doc/modelnet/README.md). Host, seed, search,
-   share, watch folder, and doctor:
-   [doc/modelnet/first-run.md](doc/modelnet/first-run.md)
-   (**0.34.8**, `CLIENT_VERSION_IS_RELEASE=true`; **v0.34.8** is the
-   shipping tag). CLI wrapper:
+   share, watch folder, doctor, **load**, and **generate**:
+   [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
+   [doc/modelnet/generate.md](doc/modelnet/generate.md)
+   (this tree **0.34.9-dev**, `CLIENT_VERSION_IS_RELEASE=false`; **v0.34.8**
+   is the last shipping tag). CLI wrapper:
    [contrib/modelnet/btx-model](contrib/modelnet/btx-model)
    (people: stderr hints; agents: `--json`). Optional cloud / follow / events
    / profile **fail closed** if the helper lacks the method — not a PASS:
    [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md).
    Filesystem `-modelwatch` is not a publisher watch.
-   0.34.8-dev workflow: local or planned HF/torrent import → local or
+   0.34.9-dev workflow: local or planned HF/torrent import → local or
    `setcloudstorage` (R2 AUTO = SOURCE_FILES) → VerifiedManifest →
-   `exportmodellink` / `.btxbundle`. Integrity ≠ authorship. No auto-spend.
+   `exportmodellink` / `.btx` share → `getmodel FREE_ONLY` → checkout →
+   `loadmodel` / `generatemodel` when the host profile matches.
+   Integrity ≠ authorship. No auto-spend. No remote inference.
 
 Ordinary free model retrieval does not require buying BTX.
 
@@ -162,7 +193,12 @@ the network. Download public models from independent peers. Support a
 **bounty** for a capability that does not yet exist. Once you have the
 artifact, run it **locally** and help preserve it.
 
-Inference is **local after acquire**. BTX is not a remote inference
+Inference is **local after acquire**. After pieces are complete,
+`exportmodelpath` rebuilds a checkout; `loadmodel` may keep SafeTensors
+resident on a GPU; `generatemodel` produces tokens only when the replica
+matches this host profile (GGUF+llama.cpp or allowlisted SafeTensors+
+`BTX_MODEL_GENERATE`). Unknown architectures and pickle fail closed.
+CUDA `--hold --smoke` is not generate. BTX is not a remote inference
 marketplace. Ordinary free retrieval does not require buying BTX.
 Research markets use the money; they do not redefine consensus. A popular
 model does not get extra monetary authority.
@@ -240,24 +276,29 @@ desktop client shows the same cards.
   because a timer expired.
 - Model ACL, seeding, and relays never write BanMan, AddrMan, or fork
   choice.
-- Remote/paid inference is **off the roadmap**.
+- Remote/paid inference is **off the roadmap**. Local generate is
+  `generatemodel` on a complete replica that matches this host; it never
+  opens a network inference port.
 
 Operator and researcher docs: [doc/modelnet/README.md](doc/modelnet/README.md),
 [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
+[doc/modelnet/generate.md](doc/modelnet/generate.md),
+[doc/modelnet/registry-independence.md](doc/modelnet/registry-independence.md),
 [doc/modelnet/model-economy.md](doc/modelnet/model-economy.md),
 [doc/modelnet/feed.md](doc/modelnet/feed.md).
 People vs agents: [HUMANS.md](HUMANS.md) / [AGENTS.md](AGENTS.md).
-0.34.8 optional cloud/events/watches (RPCs exist; `IS_RELEASE=true`;
-fail closed if an older helper lacks the method; live R2 WAN is
+0.34.8 optional cloud/events/watches (RPCs exist; last shipping
+`IS_RELEASE=true` on **v0.34.8**; this tree is 0.34.9-dev and still
+fail-closes if an older helper lacks the method; live R2 WAN is
 **HONEST_NOT_RUN**):
 [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md),
 [doc/modelnet/watches.md](doc/modelnet/watches.md).
-Release notes: [doc/release-notes/release-notes-0.34.7.md](doc/release-notes/release-notes-0.34.7.md)
-(shipping tag). 0.34.8 first-run notes:
+Release notes: [doc/release-notes/release-notes-0.34.7.md](doc/release-notes/release-notes-0.34.7.md),
 [doc/release-notes/release-notes-0.34.8.md](doc/release-notes/release-notes-0.34.8.md)
-(`CLIENT_VERSION_IS_RELEASE=true`; shipping tag **v0.34.8**).
-Hosted Control Plane / walletless discovery (0.34.8,
-`IS_RELEASE=true`; not a live CEX IdP): [doc/hosted/README.md](doc/hosted/README.md),
+(shipping tag **v0.34.8**),
+[doc/release-notes/release-notes-0.34.9-dev.md](doc/release-notes/release-notes-0.34.9-dev.md)
+(this tree). Hosted Control Plane / walletless discovery (not a live CEX
+IdP): [doc/hosted/README.md](doc/hosted/README.md),
 [doc/modelnet/hcp/](doc/modelnet/hcp/).
 
 ### Model bounties (demand-side)
@@ -287,7 +328,7 @@ Escrow reuses existing P2MR templates only — no new opcode:
 - Contributor lot: `mr(cltv_multi_pq(locktime,m,keys…),refund(height,refund_key))`
 - Staged winner payout: `mr(htlc_sha256(hash,claimant),refund(height,original_refund_key))`
 
-This tree is **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Bounty
+This tree is **0.34.9-dev** (`CLIENT_VERSION_IS_RELEASE=false`). Bounty
 coordination shipped in **v0.34.7** and continues here on the isolated
 helper; the wallet still signs every spend. See
 [doc/bounties.md](doc/bounties.md) and
@@ -307,10 +348,12 @@ not from a continuing operator release schedule on this line.** That is a
 handover, not a roadmap.
 
 **v0.34.8** is the last shipping tag
-(`CLIENT_VERSION_IS_RELEASE=true` on this tag). The Native Model Network is an
-**isolated in-tree plane** on the 0.34.6 monetary baseline: it does not
-change ExactReplay, issuance, or fork choice, and it does not revoke this
-handover. See [Native Model Network (0.34.7)](#native-model-network-0347).
+(`CLIENT_VERSION_IS_RELEASE=true` on that tag). This tree is **0.34.9-dev**.
+The Native Model Network is an **isolated in-tree plane** on the 0.34.6
+monetary baseline: it does not change ExactReplay, issuance, or fork choice,
+and it does not revoke this handover. See
+[Native Model Network (0.34.7)](#native-model-network-0347) and
+[This tree — 0.34.9-dev](#this-tree--0349-dev).
 
 The two documents that make the handover real, rather than a slogan:
 
@@ -451,8 +494,8 @@ While Epoch A still uses ExactReplay as consensus authority, a validating
 node runs `-matmulvalidation=consensus` and needs no pin. CPU archives that
 cannot ExactReplay may opt into trusted-mirror with attestors they choose;
 that is community-fork topology, not a shipped signer set. The 0.34.1
-monetary handover still applies; this tree is **0.34.8** (shipping tag
-**v0.34.8**). Historical
+monetary handover still applies; this tree is **0.34.9-dev** (last shipping
+tag **v0.34.8**). Historical
 notes live in
 [doc/btx-gpu-verified-network-transition.md](doc/btx-gpu-verified-network-transition.md).
 
@@ -468,7 +511,8 @@ feature, not a live surface. See [Shielded Pool](#shielded-pool).
 ## GPU-verified network (three-phase)
 
 That three-phase topology is **community-fork work**. The 0.34.1 monetary
-handover still applies; this tree is **0.34.8** (shipping tag **v0.34.8**).
+handover still applies; this tree is **0.34.9-dev** (last shipping tag
+**v0.34.8**).
 
 Profile 1 ExactReplay is the Epoch-A consensus check. It needs a qualified
 GPU. The recommended mode is `-matmulvalidation=consensus`: **this node**
@@ -1802,7 +1846,7 @@ The RPC surface also supports:
 
 ## Contributing
 
-**This tree is 0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). The **0.34.1 monetary handover** still
+**This tree is 0.34.9-dev** (`CLIENT_VERSION_IS_RELEASE=false`). The **0.34.1 monetary handover** still
 stands: further monetary-consensus work is expected from community forks,
 not from a continuing operator release schedule on this line. The Native
 Model Network is an isolated in-tree plane on the 0.34.6 monetary baseline;
