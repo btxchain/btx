@@ -3,7 +3,8 @@
 Standalone entry for the zero-wallet path (root addendum §2, §11.4, §13.2).
 Inference is **local after acquisition**. This path needs **no wallet, no
 coins, no mining, and no chain sync** if you run `btx-modeld` alone.
-People: [first-run.md](first-run.md). Agents: [agent-recipes.md](agent-recipes.md).
+People: [end-to-end.md](end-to-end.md), [first-run.md](first-run.md).
+Agents: [agent-recipes.md](agent-recipes.md).
 
 Qt Models-first pages (first-run GUI, Models tab) are specified in
 addendum §2.3 / D10 and are **out of scope** for this tree. Use CLI flags

@@ -107,6 +107,8 @@ Install and first-run: [doc/btx-download-and-go.md](doc/btx-download-and-go.md)
 (shipping **v0.34.8** archives). Testers on this branch:
 [doc/release-notes/release-notes-0.34.9-dev.md](doc/release-notes/release-notes-0.34.9-dev.md).
 
+End-to-end host / search / retrieve / run / bounty:
+[doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md).
 Using and proving the model network: [doc/modelnet/howto.md](doc/modelnet/howto.md).
 Local generate after acquire: [doc/modelnet/generate.md](doc/modelnet/generate.md).
 
@@ -133,17 +135,23 @@ Erasure repair is **per stripe**. Automatic spend stays **0**.
 
 ```text
 btx-model doctor
-btx-model host ./model.safetensors
-btx-model link NAME                 # exportmodellink magnet analog
-btx-model get NAME                  # FREE_ONLY retrieve (or host a .btx share)
-btx-model path NAME                 # checkout / usable_runtime_root
-btx-model host-profile              # what this helper can generate
-btx-model generate NAME "Hello"     # local one-shot; host-profile match
-btx-model import-plan @plan.json    # staging UUID until VerifiedManifest
-btx-model package create '{}'       # .btxbundle; not a secret dump
-btx-model package inspect FILE.btx # preview only; does not install or spend
-btx-open FILE.btx                   # local inspect; never writes AGENTS.md
+btx-model host ./model.safetensors   # or ./model.gguf
+btx-model search                     # LOCAL catalog; add --scope NETWORK to query peers
+btx-model search "coding agent" --scope NETWORK
+btx-model link NAME                  # exportmodellink magnet analog (.btx card)
+btx-model get NAME                   # FREE_ONLY retrieve (or host a .btx share)
+btx-model path NAME                  # checkout / usable_runtime_root
+btx-model host-profile               # what this helper can generate
+btx-model generate NAME "Hello"      # local one-shot; host-profile match
+btx-model bounty-draft "coding agent"
+btx-model bounty-draft --validate ID # checklist; never publishes, never spends
+btx-model import-plan @plan.json     # staging UUID until VerifiedManifest
+btx-model package create '{}'        # .btxbundle; not a secret dump
+btx-model package inspect FILE.btx  # preview only; does not install or spend
+btx-open FILE.btx                    # local inspect; never writes AGENTS.md
 ```
+
+Copy-paste with env and RPC notes: [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md).
 
 Live Hugging Face HTTP, live R2 WAN, GUI, and wallet-signed subscriptions are
 **not** claimed here. Cloud add uses `--credential-ref`, never a raw secret on
@@ -304,7 +312,8 @@ search when you do not want the query to leave this node.
   (registry independence, host/load/generate, assumeutxo persist). Native
   Model Network first-run, HCP, JIT capability, search, release campaigns,
   and creation bounties remain.
-- Host / seed / search / share / watch / doctor / load / generate:
+- Host / seed / search / share / watch / doctor / load / generate / bounty:
+  [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md),
   [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
   [doc/modelnet/generate.md](doc/modelnet/generate.md). CLI:
   [contrib/modelnet/btx-model](contrib/modelnet/btx-model). Optional cloud /

@@ -128,6 +128,8 @@ Fail closed if missing: `cloud add|test|status`,
 `transport`. **0.34.9-dev** registry independence: `fetch`/`resolve`/`verify`
 are walletless; the monetary plane stays. See
 [doc/modelnet/registry-independence.md](doc/modelnet/registry-independence.md).
+End-to-end host / search / retrieve / generate / bounty:
+[doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md).
 Local generate: [doc/modelnet/generate.md](doc/modelnet/generate.md).
 Catalog names `addmodelstorage` / `getmodelcapabilities`
 reuse `setcloudstorage` / `getmodelnetworkinfo` (`alias_of` in the result).

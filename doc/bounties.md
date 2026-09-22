@@ -11,6 +11,22 @@ names document the product contract; implementation gates and evidence rows in
 [contrib/modelnet/bounty/tests/acceptance-matrix.csv](../contrib/modelnet/bounty/tests/acceptance-matrix.csv)
 remain the readiness record for bounty methods.
 
+**How to use it from a node.** Search and inspect, then draft locally. Host /
+retrieve / generate of models is a separate path
+([modelnet/end-to-end.md](modelnet/end-to-end.md)). Drafts never spend:
+
+```bash
+btx-cli searchbounties
+btx-cli getbounty '<id>'
+contrib/modelnet/btx-model bounty-draft "coding agent"
+contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
+```
+
+`--validate` is a checklist (`validatebountyterms`). Publishing signed terms
+and funding a lot are later **prepare → sign → submit** wallet steps. The
+helper never auto-spends. Agents stay on `searchbounties` / `getbounty` /
+`getbountyeconomy` until the operator (or a finite mandate) covers funding.
+
 ## Lifecycle
 
 ```

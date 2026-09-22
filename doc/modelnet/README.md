@@ -183,6 +183,7 @@ In-tree capability bits are not CSV PASS and not a B0 rewrite. The bar is
 
 | File | Topic |
 |---|---|
+| [end-to-end.md](end-to-end.md) | **Copy-paste:** host, search, retrieve, run, bounty |
 | [howto.md](howto.md) | **How to test and use** every hosting scenario (fail-fast) |
 | [first-run.md](first-run.md) | Host / seed / search / share / watch / doctor / load / generate |
 | [generate.md](generate.md) | **0.34.9-dev** local generate; host-profile match; CUDA smoke is not generate |

@@ -5,7 +5,8 @@ is **v0.34.8**. This page is the operator contract for **local one-shot
 generate** after a replica is complete. It is **not** a remote inference
 marketplace, not a network server, and not CUDA `--hold --smoke`.
 
-People: [first-run.md](first-run.md) §6. Agents: [agent-recipes.md](agent-recipes.md).
+People: [end-to-end.md](end-to-end.md), [first-run.md](first-run.md) §6.
+Agents: [agent-recipes.md](agent-recipes.md).
 RPC catalogue: [rpc.md](rpc.md). Adapter: [../../contrib/modelnet/generate_local.py](../../contrib/modelnet/generate_local.py).
 
 `automatic_spend_atoms` stays **0**. `execution_profile` stays **0**

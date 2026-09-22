@@ -172,8 +172,8 @@ verbs:
          [--fits] [QUERY_OBJECT]
                                  searchmodels catalog filters (default scope
                                  LOCAL). --fits keeps hits inside this node's
-                                 remaining storage quota (storage only; no
-                                 inference, no RAM claim)
+                                 remaining storage quota (storage only; not
+                                 RAM/VRAM and not a generate-profile match)
   get URI [MODE]                 getmodel by URI or id (default FREE_ONLY)
   pull NAME [MODE]               getmodel by alias, local name, id, or URI
   show NAME                      showmodel: share + local + aliases + bytes
@@ -245,7 +245,8 @@ verbs:
 
 NAME is resolved locally in this order: btx:// token, model id, alias, local
 search name, local label. Unknown values stay null; nothing is invented.
-No inference. automatic_spend_atoms=0. Scratch helper only.
+Local generate is `generate` / generatemodel when the replica matches this
+host (not a network server). automatic_spend_atoms=0. Scratch helper only.
 Payment URIs are btx:<P2MR> on btx-cli; bitcoin: is not a BTX URI.
 Copy-paste recipes: contrib/modelnet/recipes/*.json
 Filesystem -modelwatch is not a publisher/collection watch (see doc/modelnet/watches.md).

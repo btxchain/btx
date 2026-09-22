@@ -79,6 +79,7 @@ python3 contrib/modelnet/btx-model --help
   Missing adapter / llama-cli is `NOT_RUN`, not a fake PASS.
 
 Protocol: [registry-independence.md](../modelnet/registry-independence.md).
+Copy-paste use: [end-to-end.md](../modelnet/end-to-end.md).
 Generate: [generate.md](../modelnet/generate.md).
 Agent recipes: [agent-recipes.md](../modelnet/agent-recipes.md).
 

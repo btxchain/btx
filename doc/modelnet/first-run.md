@@ -6,6 +6,9 @@ stays **local after acquire**. `generatemodel` is the in-tree one-shot when
 the replica matches this host; it is not a network server. Nothing here
 spends BTX.
 
+Copy-paste host → search → retrieve → run → bounty:
+[end-to-end.md](end-to-end.md).
+
 Agents: stop and read [agent-recipes.md](agent-recipes.md) and
 [AGENTS.md](../../AGENTS.md). Tests and every scenario:
 [howto.md](howto.md). Zero-wallet CLI: [researcher-quickstart.md](researcher-quickstart.md).

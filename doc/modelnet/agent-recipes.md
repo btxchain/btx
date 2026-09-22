@@ -1,7 +1,8 @@
 # Agent recipes — ModelNet first-run (never spend; no remote inference)
 
 Machine contract for coding agents, research agents, and automation on the
-**model plane**. Humans: [first-run.md](first-run.md). Full invariants:
+**model plane**. Humans: [first-run.md](first-run.md). Copy-paste path:
+[end-to-end.md](end-to-end.md). Full invariants:
 [AGENTS.md](../../AGENTS.md). RPC catalogue: [rpc.md](rpc.md). Local generate:
 [generate.md](generate.md). Bounties:
 [../bounty-rpc.md](../bounty-rpc.md).

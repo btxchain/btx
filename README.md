@@ -49,7 +49,7 @@ manual and not the long essay.
 
 | You are | Read |
 |---|---|
-| Humans | [HUMANS.md](HUMANS.md) |
+| Humans | [HUMANS.md](HUMANS.md) then [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md) |
 | Agents | [AGENTS.md](AGENTS.md) |
 | Operators | [doc/modelnet/README.md](doc/modelnet/README.md) and [doc/btx-download-and-go.md](doc/btx-download-and-go.md) |
 | Essay | [doc/design/btx-decentralized-frontier-ai-lab.md](doc/design/btx-decentralized-frontier-ai-lab.md) |
@@ -60,6 +60,7 @@ manual and not the long essay.
 - [Current release — v0.34.8](#current-release--v0348)
 - [This tree — 0.34.9-dev](#this-tree--0349-dev)
 - [Get a node](#get-a-node)
+- [Use BTX for models (end to end)](#use-btx-for-models-end-to-end)
 - [Native Model Network (0.34.7)](#native-model-network-0347)
 - [0.34.1 monetary handover (community forks)](#0341-monetary-handover-community-forks)
 - [Notice to trusted-mirror operators: repoint or move to consensus](#notice-to-trusted-mirror-operators-repoint-or-move-to-consensus)
@@ -144,7 +145,8 @@ not `--latest`.
 | **Generate** | `generatemodel` / `getmodelhostprofile`: GGUF + `BTX_LLAMA_CLI`, or allowlisted SafeTensors + `BTX_MODEL_GENERATE`. Unknown arch / pickle fail closed. CUDA smoke is **not** generate. |
 | **Assumeutxo persist** | Pre-attestation historical hole bodies can persist without GETMMATTEST ([#163](https://github.com/btxchain/btx/issues/163)). |
 
-Operator walkthrough: [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
+Operator walkthrough: [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md),
+[doc/modelnet/first-run.md](doc/modelnet/first-run.md),
 [doc/modelnet/generate.md](doc/modelnet/generate.md),
 [doc/modelnet/registry-independence.md](doc/modelnet/registry-independence.md).
 Notes: [doc/release-notes/release-notes-0.34.9-dev.md](doc/release-notes/release-notes-0.34.9-dev.md).
@@ -161,7 +163,9 @@ Notes: [doc/release-notes/release-notes-0.34.9-dev.md](doc/release-notes/release
    warnings: [Current release — v0.34.8](#current-release--v0348).
 3. **Run** `btxd`. Daemon config: [Running a Node](#running-a-node).
    Operator walkthrough: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
-4. **Models** (optional): isolated helper `btx-modeld`. Start with
+4. **Models** (optional): isolated helper `btx-modeld`. Copy-paste host /
+   search / retrieve / run / bounty:
+   [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md). Index:
    [doc/modelnet/README.md](doc/modelnet/README.md). Host, seed, search,
    share, watch folder, doctor, **load**, and **generate**:
    [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
@@ -180,6 +184,59 @@ Notes: [doc/release-notes/release-notes-0.34.9-dev.md](doc/release-notes/release
    Integrity ≠ authorship. No auto-spend. No remote inference.
 
 Ordinary free model retrieval does not require buying BTX.
+
+## Use BTX for models (end to end)
+
+Copy-paste path on this tree. Full walkthrough:
+[doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md). People:
+[HUMANS.md](HUMANS.md). Agents: [AGENTS.md](AGENTS.md) (`btx-model --json`).
+Generate contract: [doc/modelnet/generate.md](doc/modelnet/generate.md).
+Bounties: [doc/bounties.md](doc/bounties.md). Nothing below spends BTX.
+
+```bash
+# 0. Helper (packaged btxd starts btx-modeld; or standalone:)
+contrib/modelnet/btx-model doctor
+
+# 1. Host a GGUF or SafeTensors path (pin + signed search card + demand-seed)
+contrib/modelnet/btx-model host /path/to/model.gguf
+contrib/modelnet/btx-model ls
+contrib/modelnet/btx-model show NAME
+
+# 2. Share (magnet analog — .btx is a card, not weights)
+contrib/modelnet/btx-model link NAME ./model.btx
+contrib/modelnet/btx-model share NAME
+
+# 3. Search (default LOCAL; NETWORK may be visible to peers)
+contrib/modelnet/btx-model search
+contrib/modelnet/btx-model search "coding agent" --scope NETWORK
+contrib/modelnet/btx-model search --format gguf --fits --sort size_asc
+btx-cli searchbounties
+
+# 4. Retrieve free (unix getmodel is async: status=running + job_id)
+contrib/modelnet/btx-model get NAME
+contrib/modelnet/btx-model get ./model.btx
+contrib/modelnet/btx-model get 'btx://…'
+contrib/modelnet/btx-model ls --incomplete
+
+# 5. Run locally when this host matches (GGUF+llama.cpp or allowlisted ST+adapter)
+export BTX_MODEL_GENERATE="$PWD/contrib/modelnet/generate_local.py"
+# export BTX_LLAMA_CLI=/path/to/llama-cli          # GGUF
+# export BTX_MODEL_CUDA_LOADER=...cuda_safetensors_load  # optional hold; not generate
+contrib/modelnet/btx-model path NAME
+contrib/modelnet/btx-model host-profile
+contrib/modelnet/btx-model load NAME
+contrib/modelnet/btx-model generate NAME "Hello" --max-new-tokens 32
+contrib/modelnet/btx-model unload NAME
+
+# 6. Bounty draft (local, unpublished, never spends). Wallet prepare/sign/submit later.
+contrib/modelnet/btx-model bounty-draft "coding agent"
+contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
+```
+
+`--fits` is remaining **storage** quota, not RAM/VRAM. Unknown architecture
+and pickle fail closed. CUDA `--hold --smoke` is not generate. `FREE_ONLY`
+never becomes paid because a timer expired. Fund a release or bounty lot
+only through an explicit wallet confirmation.
 
 ## Native Model Network (0.34.7)
 

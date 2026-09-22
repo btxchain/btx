@@ -1,7 +1,8 @@
 # contrib/modelnet — reference codecs, schemas, helper smokes
 
 A BTX node already has compute. This directory is **not** an inference
-service. It holds:
+service. Copy-paste host / search / retrieve / generate / bounty:
+[doc/modelnet/end-to-end.md](../../doc/modelnet/end-to-end.md). It holds:
 
 | Path | Role |
 |---|---|

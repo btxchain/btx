@@ -11,7 +11,9 @@ security closeout, or future-upgrade boundary:
 
 - [Native Model Network (0.34.9-dev)](modelnet/README.md) — isolated model plane:
   host / share / retrieve / checkout / optional GPU load / local generate when
-  the replica matches this host (not a remote inference marketplace);
+  the replica matches this host (not a remote inference marketplace).
+  Copy-paste: [end-to-end.md](modelnet/end-to-end.md). Generate:
+  [generate.md](modelnet/generate.md).
   `btx-modeld` helper + optional `btxd` introduction bridge; monetary
   consensus unchanged when the helper is absent. Local generate:
   [generate.md](modelnet/generate.md).
