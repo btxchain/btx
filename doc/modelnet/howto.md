@@ -4,9 +4,11 @@ This is the operator/researcher guide for **using** and **proving** the
 Native Model Network in this tree. Packaged `planning/acceptance-matrix.csv`
 is the production bar (PASS only where this tree has a Boost test or e2e
 script). Re-run the scripts; do not treat a capabilities bit as PASS.
-0.34.9 includes the 0.34.8 consensus catch-up scheduling (GitHub issue
-#163, closed in seal `77343da8`: retained tip-child gets the one RC job;
-cap stays 1). The first-run verbs below (`showmodel`,
+0.34.9 includes GitHub issue #163 in full: the 0.34.8 scheduling seal
+`77343da8` (retained tip-child gets the one RC job; cap stays 1) plus the
+assumeutxo-background persist so a followed historical hole below the
+attestation epoch is not HEADER_ONLY-waiting for a GETMMATTEST that will
+never be sent. The first-run verbs below (`showmodel`,
 `unhostmodel`, `exportmodellink`, `btx-model show` / `unhost` / `link`)
 are not part of 0.34.7.
 

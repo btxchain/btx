@@ -1575,6 +1575,22 @@ static constexpr int GETMMATTEST_CATCHUP_TTL_HEADERS_AHEAD{2};
 //! instead of disk-filling before ExactReplay reaches it.
 inline constexpr int32_t PERSIST_FOLLOWED_SUFFIX_MAX_LEAD{1024};
 
+/** Issue #163 second finding: assumeutxo background (and any followed
+ *  historical hole) below the Profile-1 attestation epoch cannot
+ *  GETMMATTEST — `maybe_request_attestations_without_gpu` returns before
+ *  sending. HEADER_ONLY then waits forever (live: background tip frozen
+ *  at height 6698, 28 HEADER_ONLY admits/hour, zero GETMMATTEST). Persist
+ *  HAVE_DATA so background ConnectTip can complete with historical
+ *  validation. Once attestation is active, keep HEADER_ONLY + GETMMATTEST
+ *  so unattested RC history does not ExactReplay on the GPU. Competing
+ *  extra twins are not followed historical holes and stay HEADER_ONLY. */
+[[nodiscard]] inline constexpr bool PersistPreAttestationHistoricalHole(
+    bool followed_historical_hole,
+    bool attestation_active_at_height)
+{
+    return followed_historical_hole && !attestation_active_at_height;
+}
+
 [[nodiscard]] inline bool PersistFollowedSuffixBodyWithoutGpu(
     bool trusted_mirror,
     bool extends_active_tip,

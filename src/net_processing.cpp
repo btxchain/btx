@@ -14972,6 +14972,19 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         return true;
     }
     if (skip_competing_exactreplay) {
+        const bool attest_active{
+            m_chainparams.GetConsensus().IsMatMulTrustedReplayAttestationActive(
+                exact_reference_height)};
+        if (node::matmul_trusted::PersistPreAttestationHistoricalHole(
+                persist_unrequested_followed, attest_active)) {
+            LogInfo("Persisting pre-attestation followed historical body "
+                    "hash=%s height=%d from peer=%d without GETMMATTEST "
+                    "(assumeutxo background / snapshot ancestor)\n",
+                    block_hash.ToString(), exact_reference_height, node.GetId());
+            admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+            admission.retain_as_requested = true;
+            return true;
+        }
         if (header_only_competing_first) {
             LogInfo("MatMul admission HEADER_ONLY for %s hash=%s height=%d from peer=%d: no GPU attestation; body not connected; GETMMATTEST then re-getdata\n",
                     source, block_hash.ToString(), exact_reference_height, node.GetId());
@@ -15062,6 +15075,20 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                 m_chainman.m_blockman.LookupBlockIndex(block_hash));
         }
         if (!attested_hole) {
+            const bool attest_active{
+                m_chainparams.GetConsensus().IsMatMulTrustedReplayAttestationActive(
+                    exact_reference_height)};
+            if (node::matmul_trusted::PersistPreAttestationHistoricalHole(
+                    /*followed_historical_hole=*/true, attest_active)) {
+                LogInfo("Persisting pre-attestation followed historical body "
+                        "hash=%s height=%d from peer=%d without GETMMATTEST "
+                        "(assumeutxo background / snapshot ancestor)\n",
+                        block_hash.ToString(), exact_reference_height,
+                        node.GetId());
+                admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+                admission.retain_as_requested = true;
+                return true;
+            }
             LogDebug(BCLog::NET,
                      "HEADER_ONLY followed-chain hole hash=%s from peer=%d: no GPU attestation\n",
                      block_hash.ToString(), node.GetId());
