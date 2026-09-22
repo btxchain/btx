@@ -40,6 +40,7 @@ class ImportCoordinator {
     std::string m_fail_reason;
     std::vector<std::string> m_piece_origins;
     std::vector<std::string> m_bound_piece_origins;
+    std::vector<OriginError> m_origin_errors;
     bool m_origins_mixed_without_identity{false};
 
 public:
@@ -53,6 +54,7 @@ public:
     bool PrepareStaging(std::string& err);
     bool StageFromSource(ByteSource& src, const ImportFileSpec& spec, uint64_t budget_bytes, std::string& err);
     bool AcceptVerifiedManifest(const VerifiedManifest& vm, std::string& err);
+    void NotePieceOrigin(const std::string& type, bool bound);
 
     bool HasFinalModelId() const { return m_verified.has_value(); }
     Digest48 FinalModelId() const;

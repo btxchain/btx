@@ -665,7 +665,29 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     std::vector<unsigned char> aenc;
     if (!EncodeArtifactCore(ac, aenc, err)) return false;
     const Digest48 artifact_id = ArtifactCoreId(aenc);
-    if (!m_store.RenameArtifact(staging, artifact_id, err)) return false;
+    if (!m_store.RenameArtifact(staging, artifact_id, err)) {
+        if (err != "destination artifact exists") return false;
+        std::string ignored;
+        (void)m_store.RemoveArtifact(staging, ignored);
+        DropPieceTreeCache(staging);
+        commit_staging = true;
+        for (const auto& m : m_models) {
+            if (m.artifact_id == artifact_id) {
+                out = m;
+                if (pin && !out.pinned) {
+                    std::string pin_err;
+                    m_store.Pin(model_id, pin_err);
+                    m_store.Pin(artifact_id, pin_err);
+                    out.pinned = true;
+                    out.admission = AdmissionLevel::PINNED;
+                    out.bytes_verified = true;
+                }
+                return true;
+            }
+        }
+        err = "destination artifact exists";
+        return false;
+    }
     commit_staging = true;
     DropPieceTreeCache(staging);
 

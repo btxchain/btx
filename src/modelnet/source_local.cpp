@@ -106,6 +106,7 @@ bool LocalFileByteSource::Read(const ReadExtent& extent, std::vector<unsigned ch
         err = "short read";
         return false;
     }
+    m_piece_origins.push_back("local");
     return true;
 }
 

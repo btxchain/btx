@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <fstream>
 #include <set>
+#include <system_error>
 
 namespace modelnet {
 namespace {
@@ -130,17 +131,40 @@ bool ImportCoordinator::PrepareStaging(std::string& err)
     m_fail_reason.clear();
     m_piece_origins.clear();
     m_bound_piece_origins.clear();
+    m_origin_errors.clear();
     m_origins_mixed_without_identity = false;
-    for (const auto& f : m_plan.files) {
-        const std::string dest = f.destination_path.empty() ? f.source_path : f.destination_path;
+    auto accept = [&](ImportFileSpec keep) {
+        const std::string dest = keep.destination_path.empty() ? keep.source_path : keep.destination_path;
         std::string perr;
         if (dest.empty() || !IsPortableRelPath(dest, perr) || ImportRelPathUnsafe(dest) ||
-            ImportRelPathUnsafe(f.source_path)) {
-            continue;
+            ImportRelPathUnsafe(keep.source_path)) {
+            return;
         }
-        ImportFileSpec keep = f;
         keep.destination_path = dest;
+        if (keep.source_path.empty()) keep.source_path = dest;
         m_accepted.push_back(std::move(keep));
+    };
+    for (const auto& f : m_plan.files) accept(f);
+    if (m_accepted.empty() && m_plan.kind == ImportSourceKind::LOCAL && !m_plan.locator.empty()) {
+        const fs::path src = fs::PathFromString(m_plan.locator);
+        std::error_code ec;
+        auto consider = [&](const fs::path& p, const std::string& rel) {
+            if (rel.empty()) return;
+            ImportFileSpec spec;
+            spec.source_path = rel;
+            spec.destination_path = rel;
+            spec.size_bytes = fs::file_size(p, ec);
+            if (ec) spec.size_bytes = 0;
+            accept(std::move(spec));
+        };
+        if (fs::is_regular_file(src)) {
+            consider(src, fs::PathToString(src.filename()));
+        } else if (fs::is_directory(src)) {
+            for (const auto& ent : fs::recursive_directory_iterator(src)) {
+                if (ent.is_symlink() || !ent.is_regular_file()) continue;
+                consider(ent.path(), fs::relative(ent.path(), src).generic_string());
+            }
+        }
     }
     if (m_accepted.empty()) {
         err = "no importable files (pickle/.pt/.py/.so/.bin skipped)";
@@ -210,6 +234,14 @@ bool ImportCoordinator::StageFromSource(ByteSource& src, const ImportFileSpec& s
         const bool got = src.Read({off, n}, bytes, remaining_budget, err);
         if (!got) {
             io.Complete();
+            for (const auto& e : src.OriginErrors()) m_origin_errors.push_back(e);
+            if (m_origin_errors.empty()) {
+                std::string kind = src.Kind();
+                for (char& c : kind) {
+                    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+                }
+                m_origin_errors.push_back({kind, err});
+            }
             return false;
         }
         if (bytes.size() != n) {
@@ -260,11 +292,19 @@ bool ImportCoordinator::StageFromSource(ByteSource& src, const ImportFileSpec& s
     const auto bound = src.BoundPieceOrigins();
     m_bound_piece_origins.insert(m_bound_piece_origins.end(), bound.begin(), bound.end());
     if (src.OriginsMixedWithoutIdentity()) m_origins_mixed_without_identity = true;
+    for (const auto& e : src.OriginErrors()) m_origin_errors.push_back(e);
     if (!spec.sha384_hex.empty() && bound.empty() && !pieces.empty() && !m_origins_mixed_without_identity) {
         std::set<std::string> unique(pieces.begin(), pieces.end());
         if (unique.size() == 1) m_bound_piece_origins.push_back(*unique.begin());
     }
     return true;
+}
+
+void ImportCoordinator::NotePieceOrigin(const std::string& type, bool bound)
+{
+    if (type.empty()) return;
+    m_piece_origins.push_back(type);
+    if (bound) m_bound_piece_origins.push_back(type);
 }
 
 bool ImportCoordinator::AcceptVerifiedManifest(const VerifiedManifest& vm, std::string& err)
@@ -357,6 +397,14 @@ UniValue ImportCoordinator::StatusJson() const
     o.pushKV("below_min_independent_origins",
              !m_piece_origins.empty() && independent < m_plan.min_independent_origins);
     o.pushKV("origins_mixed_without_identity", m_origins_mixed_without_identity);
+    UniValue origin_errors(UniValue::VARR);
+    for (const auto& e : m_origin_errors) {
+        UniValue row(UniValue::VOBJ);
+        row.pushKV("type", e.type);
+        row.pushKV("error", e.error);
+        origin_errors.push_back(row);
+    }
+    o.pushKV("origin_errors", origin_errors);
     UniValue evidence(UniValue::VARR);
     for (const auto& pe : m_plan.provenance_evidence) {
         UniValue e(UniValue::VOBJ);
@@ -411,9 +459,6 @@ std::unique_ptr<ByteSource> MakePlanByteSource(const ImportPlan& plan, std::stri
             return nullptr;
         }
         return std::make_unique<LocalFileByteSource>(fs::PathFromString(p.locator));
-    }
-    if (p.kind == ImportSourceKind::HUGGINGFACE) {
-        return std::make_unique<HuggingFaceByteSource>(p.locator, p.snapshot_token, /*follow_redirects=*/false);
     }
     if (p.kind == ImportSourceKind::TORRENT || p.kind == ImportSourceKind::MAGNET) {
         return std::make_unique<TorrentByteSource>(p.locator, p.snapshot_token, TorrentMapFromPlan(p));

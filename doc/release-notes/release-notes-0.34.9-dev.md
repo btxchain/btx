@@ -11,23 +11,28 @@ production-ready.
 
 ## Linux x86_64 CPU archive
 
-Published GitHub prerelease tag: **`v0.34.9-dev.pr198`**.
+Published GitHub prerelease tag: **`v0.34.9-dev.pr198.2`** (follow-up to
+`v0.34.9-dev.pr198`; both are prereleases, not `--latest`).
 
 | Asset | Notes |
 |---|---|
-| `btx-0.34.9-dev.pr198-x86_64-linux-gnu.tar.gz` | CPU node + model helpers from this branch |
+| `btx-0.34.9-dev.pr198.2-x86_64-linux-gnu.tar.gz` | CPU node + model helpers from this branch |
 | `SHA256SUMS` | Unsigned checksums for this snapshot |
 | `btx-release-manifest.json` | Platform map for `btx-agent-setup.py` |
 
-This host-built archive is **GLIBC_2.38 / GLIBCXX_3.4.32** (Ubuntu 24.04 /
-Debian 13). Ubuntu 22.04 / Debian 12 must build from source. CUDA and macOS
-archives are not part of this snapshot.
+This host-built archive is **GLIBC_2.38 / GLIBCXX_3.4.32**. The **model plane**
+also needs **OpenSSL ≥ 3.5** (ML-KEM-768). Debian 13 and Ubuntu 25.10 work.
+Ubuntu 24.04 (OpenSSL 3.0) cannot load `btxd.real` / `btx-modeld.real` unless
+the archive's `lib/libssl.so.3` + `lib/libcrypto.so.3` are present (the
+`bin/*` wrappers prepend `lib/` to `LD_LIBRARY_PATH`). Missing `libgomp1` is
+called out by the wrapper. `btx-modeld` fail-closed on missing ML-KEM exits
+**2**. CUDA and macOS archives are not part of this snapshot.
 
 Unpack, then:
 
 ```
-tar -xzf btx-0.34.9-dev.pr198-x86_64-linux-gnu.tar.gz
-cd btx-0.34.9-dev.pr198
+tar -xzf btx-0.34.9-dev.pr198.2-x86_64-linux-gnu.tar.gz
+cd btx-0.34.9-dev.pr198.2
 ./bin/btxd -version
 python3 contrib/modelnet/btx-model --help
 ```
@@ -43,7 +48,11 @@ python3 contrib/modelnet/btx-model --help
   other allow-listed hubs as **origins**, not identities.
 - `btx-model --json fetch|resolve|verify|modelpack`.
 - Live WAN HTTPS is **fail-closed** unless you set `live_wan` /
-  `BTX_MODELNET_LIVE_WAN=1`. Default tests should use inject / local files.
+  `BTX_MODELNET_LIVE_WAN=1`. When enabled, the client follows at most three
+  re-gated `https` CDN redirects and reports `origin_errors` per origin.
+  Recipe: `contrib/modelnet/recipes/registry-live-wan-hf-config.json`.
+- LOCAL import may omit `files[]`; `piece_origins` records `"local"`; a
+  second import of the same bytes is idempotent.
 - Leafless multi-origin mix without `piece_sha384_hex` must fail closed.
 
 Protocol: [registry-independence.md](../modelnet/registry-independence.md).

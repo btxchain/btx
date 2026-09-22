@@ -17,6 +17,13 @@ struct ReadExtent {
     uint64_t length{0};
 };
 
+/** One origin that was tried and failed. StatusJson emits these so a
+ *  multi-origin miss is not reported as only the last origin's error. */
+struct OriginError {
+    std::string type;
+    std::string error;
+};
+
 /** Untrusted origin of bytes. Verification lives above storage. */
 class ByteSource {
 public:
@@ -50,6 +57,8 @@ public:
     virtual std::vector<std::string> BoundPieceOrigins() const { return {}; }
     /** True if piece substitution happened without a bound identity. */
     virtual bool OriginsMixedWithoutIdentity() const { return false; }
+    /** Per-origin failures from the last Read/Pin attempt, in try order. */
+    virtual std::vector<OriginError> OriginErrors() const { return {}; }
 };
 
 } // namespace modelnet

@@ -360,6 +360,7 @@ bool ExecuteImport(ModelCatalog& cat, const UniValue& o, UniValue& result, std::
                 return false;
             }
         }
+        coord->NotePieceOrigin("local", /*bound=*/true);
         if (!coord->AcceptVerifiedManifest(vm, err)) {
             err_code = "INVALID_PARAMETER";
             return false;
@@ -396,6 +397,14 @@ bool ExecuteImport(ModelCatalog& cat, const UniValue& o, UniValue& result, std::
                 }
             }
             result.pushKV("staged", staged);
+            {
+                const UniValue st = coord->StatusJson();
+                if (st.exists("origin_errors")) result.pushKV("origin_errors", st["origin_errors"]);
+                if (st.exists("piece_origins")) result.pushKV("piece_origins", st["piece_origins"]);
+                if (st.exists("independent_origin_count")) {
+                    result.pushKV("independent_origin_count", st["independent_origin_count"]);
+                }
+            }
             if (staged) {
                 std::vector<std::string> rels;
                 for (const auto& spec : coord->AcceptedFiles()) {

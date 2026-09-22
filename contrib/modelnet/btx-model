@@ -3,7 +3,7 @@
 
 Verbs: init, doctor, host, preview, search, get, pull, show, ls, files, path,
 open, share, transfers, check, pins, alias, rm-alias, unhost, link, bounty-draft
-(title, JSON, or @FILE), watch-scan, plus 0.34.8-dev cloud/follow/events/mirror/
+(title, JSON, or @FILE), watch-scan, plus 0.34.9-dev cloud/follow/events/mirror/
 profile (fail closed if the helper lacks the method).
 
 Human door: stderr one_liners / next hints. Agent door: stdout JSON; --json
@@ -70,7 +70,7 @@ DEFAULT_SOCKET = os.path.join(".", "e2e-scratch", "modeld.sock")
 # Agent door. Default is human (stderr hints) + JSON stdout. --json is stdout only.
 JSON_MODE = False
 CLI_SCHEMA_VERSION = 2
-DEV348_NOTE = "0.34.8-dev; fails closed if helper lacks method"
+DEV349_NOTE = "0.34.9-dev; fails closed if helper lacks method"
 
 # First-run URI examples. btx:// is a model resource; BIP21 payment is btx:<P2MR>.
 # bitcoin: is not a BTX payment URI. Placeholders only — this CLI never spends.
@@ -198,7 +198,7 @@ verbs:
   watch-scan [DIR]               scanmodelwatch
                                  (filesystem drop folder; NOT a publisher watch)
 
-  0.34.8-dev (not shipped; fail closed if the helper has no method):
+  0.34.9-dev (not shipped; fail closed if the helper has no method):
   cloud add|test|status          setcloudstorage / testcloudstorage /
                                  getcloudstorageinfo. add takes endpoint/bucket/
                                  prefix/region/layout/provider/credential-ref.
@@ -1805,7 +1805,7 @@ def _rpc_dev(
     if result is not None:
         return result
     if _missing_method(err):
-        _die(f"{method}: method not found ({DEV348_NOTE})")
+        _die(f"{method}: method not found ({DEV349_NOTE})")
     _die(f"{method}: {_err_text(err)}")
 
 
@@ -1879,7 +1879,7 @@ def _emit_dev(
         "schema_version": CLI_SCHEMA_VERSION,
         "kind": kind,
         "client": "btx-model",
-        "client_version": "0.34.8-dev",
+        "client_version": "0.34.9-dev",
         "released": False,
         "ok": True,
         "available": True,
@@ -1937,7 +1937,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
             },
             note=(
                 "cloud backing is optional; pieces remain the swarm unit. "
-                "Secrets are never returned. " + DEV348_NOTE
+                "Secrets are never returned. " + DEV349_NOTE
             ),
             next_actions=["cloud test", "cloud add --endpoint … --bucket … --credential-ref env:BTX_CLOUD_CREDENTIAL"],
         )
@@ -1967,7 +1967,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
             },
             note=(
                 "testcloudstorage is a local helper probe, not WAN evidence. "
-                "Do not treat ok here as a production origin receipt. " + DEV348_NOTE
+                "Do not treat ok here as a production origin receipt. " + DEV349_NOTE
             ),
             next_actions=["cloud status"],
         )
@@ -2079,7 +2079,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
         note=(
             "setcloudstorage stores a local origin config. Credentials stay in the "
             "ref/file; they are not written to search records, events, or this JSON. "
-            + DEV348_NOTE
+            + DEV349_NOTE
         ),
         next_actions=["cloud test", "cloud status"],
     )
@@ -2145,7 +2145,7 @@ def cmd_follow(sock: str, args: list[str]) -> None:
             "publisher/collection watch is not the filesystem -modelwatch drop folder. "
             "Default action is NOTIFY. FREE_DOWNLOAD uses existing FREE_ONLY getmodel. "
             "PREPARE_FUNDING is an unsigned plan. automatic_spend_atoms stays 0. "
-            + DEV348_NOTE
+            + DEV349_NOTE
         ),
         next_actions=["events", "events --cursor 0"],
     )
@@ -2211,7 +2211,7 @@ def cmd_events(sock: str, args: list[str]) -> None:
         note=(
             "events are local observations (journal), not consensus. "
             "Reorgs emit corrective events; they are not silent deletes. "
-            + DEV348_NOTE
+            + DEV349_NOTE
         ),
         next_actions=["events --cursor <next>", "follow publisher <id>"],
     )
@@ -2268,7 +2268,7 @@ def cmd_mirror(sock: str, args: list[str]) -> None:
         },
         note=(
             "mirror policy is local config, not a monetary privilege and not consensus. "
-            "It never auto-spends. " + DEV348_NOTE
+            "It never auto-spends. " + DEV349_NOTE
         ),
         next_actions=["profile show", "follow publisher <id>"],
     )
@@ -2303,7 +2303,7 @@ def cmd_profile(sock: str, args: list[str]) -> None:
             note=(
                 "profiles are config presets, not protocol. They never bypass the "
                 "resource governor and never grant monetary/search/consensus privilege. "
-                + DEV348_NOTE
+                + DEV349_NOTE
             ),
             next_actions=[
                 "profile set personal",
@@ -2362,7 +2362,7 @@ def cmd_profile(sock: str, args: list[str]) -> None:
         note=(
             "profile set writes ordinary local args. INFRASTRUCTURE enables "
             "relay+index+host-auto as independent roles; relay still does not cache "
-            "payloads. " + DEV348_NOTE
+            "payloads. " + DEV349_NOTE
         ),
         next_actions=["profile show", "doctor"],
     )
@@ -2413,7 +2413,7 @@ def cmd_import_plan(sock: str, args: list[str]) -> None:
         },
         note="ImportPlan staging until VerifiedManifest. Source integrity is not authorship. "
         "Fetch is walletless; monetary plane stays for spend, bounties, and preservation. "
-        + DEV348_NOTE,
+        + DEV349_NOTE,
         next_actions=["import-plan status <plan_id>", "verify <plan_id>", "doctor"],
     )
 
@@ -2566,7 +2566,7 @@ def cmd_package(sock: str, args: list[str]) -> None:
         method,
         result,
         {"kind": _pick(src, "kind"), "bytes": _pick(src, "bytes"), "ok": _pick(src, "ok")},
-        note="Binary .btxbundle is distinct from exportmodellink magnet analog. " + DEV348_NOTE,
+        note="Binary .btxbundle is distinct from exportmodellink magnet analog. " + DEV349_NOTE,
         next_actions=["package inspect <hex|file.btx>", "link NAME"],
     )
 
@@ -2582,7 +2582,7 @@ def cmd_erasure(sock: str, args: list[str]) -> None:
             "reconstructable": _pick(src, "reconstructable"),
             "repair_executed": _pick(src, "repair_executed"),
         },
-        note="Per-stripe reconstructability. Global n is not sufficiency. " + DEV348_NOTE,
+        note="Per-stripe reconstructability. Global n is not sufficiency. " + DEV349_NOTE,
         next_actions=["erasure prepare @manifest.json"],
     )
 
@@ -2601,7 +2601,7 @@ def cmd_torrent_status(sock: str, args: list[str]) -> None:
             "torrentd_process": _pick(src, "torrentd_process"),
             "authorship": _pick(src, "authorship"),
         },
-        note="Packaged torrent bridge. btx-torrentd is not a process. " + DEV348_NOTE,
+        note="Packaged torrent bridge. btx-torrentd is not a process. " + DEV349_NOTE,
         next_actions=["import-plan @plan.json"],
     )
 
@@ -2619,7 +2619,7 @@ def cmd_origin_offer(sock: str, args: list[str]) -> None:
             "mode": _pick(src, "mode"),
             "presigned_get_is_meter": _pick(src, "presigned_get_is_meter"),
         },
-        note="Native proxy default. Presigned GET is not a meter. " + DEV348_NOTE,
+        note="Native proxy default. Presigned GET is not a meter. " + DEV349_NOTE,
         next_actions=["transport"],
     )
 
@@ -2638,7 +2638,7 @@ def cmd_transport(sock: str, args: list[str]) -> None:
             "quic": _pick(src, "quic"),
             "btx_torrentd_process": _pick(src, "btx_torrentd_process"),
         },
-        note="Evaluated work. uTP is NONSHIPPING. Live R2 WAN is NOT_RUN. " + DEV348_NOTE,
+        note="Evaluated work. uTP is NONSHIPPING. Live R2 WAN is NOT_RUN. " + DEV349_NOTE,
         next_actions=["doctor"],
     )
 

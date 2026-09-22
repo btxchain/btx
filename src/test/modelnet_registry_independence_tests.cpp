@@ -7,6 +7,7 @@
 // fetch and is not removed. Native BTX signatures stay; OMS/Sigstore/Cosign
 // are extra evidence slots. OCI is an origin, not a replacement packaging silo.
 
+#include <modelnet/catalog.h>
 #include <modelnet/helper.h>
 #include <modelnet/identity.h>
 #include <modelnet/import_coordinator.h>
@@ -48,6 +49,18 @@ std::vector<unsigned char> Bytes(const std::string& s)
 std::string PlanId(char fill)
 {
     return std::string(96, fill);
+}
+
+std::vector<unsigned char> TinySafeTensors(unsigned char tag)
+{
+    const std::string json = "{\"__metadata__\":{\"t\":\"" + std::to_string(static_cast<int>(tag)) + "\"}}";
+    std::vector<unsigned char> st(8 + json.size(), 0);
+    const uint64_t n = json.size();
+    for (int i = 0; i < 8; ++i) {
+        st[static_cast<size_t>(i)] = static_cast<unsigned char>((n >> (8 * i)) & 0xff);
+    }
+    std::copy(json.begin(), json.end(), st.begin() + 8);
+    return st;
 }
 
 modelnet::ImportPlan MultiPlan()
@@ -413,6 +426,19 @@ BOOST_AUTO_TEST_CASE(hf_live_still_fail_closed_without_inject_or_env)
     std::vector<unsigned char> out;
     BOOST_CHECK(!src.Read({0, 1}, out, 8, err));
     BOOST_CHECK_EQUAL(err, "not wired to live network");
+
+    modelnet::ImportPlan p;
+    p.plan_id = PlanId('h');
+    p.kind = modelnet::ImportSourceKind::HUGGINGFACE;
+    p.locator = "https://huggingface.co/org/model";
+    p.snapshot_token = "rev";
+    p.live_wan = false;
+    auto live = modelnet::MakePlanByteSource(p, err);
+    BOOST_REQUIRE(live);
+    BOOST_CHECK_EQUAL(live->Kind(), "HUGGINGFACE");
+    BOOST_REQUIRE(live->Pin(err));
+    BOOST_CHECK(!live->Read({0, 1}, out, 8, err));
+    BOOST_CHECK_EQUAL(err, "not wired to live network");
 }
 
 BOOST_AUTO_TEST_CASE(executemodelimport_routes_modelscope_after_hf_fail)
@@ -593,6 +619,125 @@ BOOST_AUTO_TEST_CASE(https_range_requires_206_and_rejects_chunked)
     BOOST_REQUIRE(modelnet::ParseRegistryHttpResponse(ok, resp, err));
     BOOST_REQUIRE(modelnet::RegistryHttpBodyAllowed(resp, true, 4, 4, out, err));
     BOOST_CHECK_EQUAL(std::string(out.begin(), out.end()), "EFGH");
+
+    const std::string redir =
+        "HTTP/1.1 302 Found\r\nLocation: https://us.aws.cdn.hf.co/xet/weights\r\nContent-Length: 0\r\n\r\n";
+    BOOST_REQUIRE(modelnet::ParseRegistryHttpResponse(redir, resp, err));
+    BOOST_CHECK(modelnet::RegistryHttpIsRedirect(resp));
+    BOOST_CHECK_EQUAL(resp.location, "https://us.aws.cdn.hf.co/xet/weights");
+    BOOST_CHECK(!modelnet::RegistryHttpBodyAllowed(resp, true, 0, 4, out, err));
+    BOOST_CHECK_EQUAL(err, "redirects forbidden");
+
+    std::string next;
+    BOOST_REQUIRE(modelnet::ResolveHttpsRedirect(
+        "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/config.json", "/api/resolve-cache/abc",
+        next, err));
+    BOOST_CHECK_EQUAL(next, "https://huggingface.co/api/resolve-cache/abc");
+    BOOST_REQUIRE(modelnet::ResolveHttpsRedirect("https://hf-mirror.com/org/model/resolve/main/w.gguf",
+                                                 "https://huggingface.co/org/model/resolve/main/w.gguf", next, err));
+    BOOST_CHECK_EQUAL(next, "https://huggingface.co/org/model/resolve/main/w.gguf");
+    BOOST_REQUIRE(modelnet::ResolveHttpsRedirect("https://huggingface.co/org/model", "//cdn.hf.co/blob", next, err));
+    BOOST_CHECK_EQUAL(next, "https://cdn.hf.co/blob");
+    BOOST_CHECK(!modelnet::ResolveHttpsRedirect("https://huggingface.co/org/model", "http://127.0.0.1/x", next, err));
+    BOOST_CHECK_EQUAL(err, "https only");
+    std::string ssrf;
+    BOOST_REQUIRE(modelnet::ResolveHttpsRedirect("https://huggingface.co/org/model", "https://127.0.0.1/x", next, err));
+    BOOST_CHECK(!modelnet::HuggingFaceLocatorAllowed(next, ssrf));
+    BOOST_CHECK_EQUAL(ssrf, "ssrf");
+}
+
+BOOST_AUTO_TEST_CASE(multi_origin_reports_each_origin_error)
+{
+    modelnet::ClearRegistryInjections();
+    modelnet::InjectRegistryOriginError("huggingface");
+    modelnet::InjectRegistryOriginError("modelscope");
+    auto plan = MultiPlan();
+    plan.files[0].size_bytes = 5;
+    const fs::path root = m_path_root / "reg-origin-errors";
+    modelnet::ImportCoordinator coord{plan, root};
+    std::string err;
+    BOOST_REQUIRE(coord.PrepareStaging(err));
+    auto src = modelnet::MakePlanByteSource(plan, err);
+    BOOST_REQUIRE(src);
+    BOOST_CHECK(!coord.StageFromSource(*src, coord.AcceptedFiles()[0], 5, err));
+    const UniValue st = coord.StatusJson();
+    BOOST_REQUIRE(st.exists("origin_errors"));
+    BOOST_CHECK(st["origin_errors"].getValues().size() >= 2);
+    bool saw_hf = false, saw_ms = false;
+    for (const auto& row : st["origin_errors"].getValues()) {
+        if (row["type"].get_str() == "huggingface") saw_hf = true;
+        if (row["type"].get_str() == "modelscope") saw_ms = true;
+    }
+    BOOST_CHECK(saw_hf);
+    BOOST_CHECK(saw_ms);
+    modelnet::ClearRegistryInjections();
+}
+
+BOOST_AUTO_TEST_CASE(local_plan_without_files_synthesizes_from_locator)
+{
+    const fs::path tmp = m_path_root / "reg-local-synth";
+    fs::create_directories(tmp / "src");
+    const auto st = TinySafeTensors(0x61);
+    {
+        std::ofstream out(tmp / "src" / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    modelnet::ImportPlan plan;
+    plan.plan_id = PlanId('S');
+    plan.kind = modelnet::ImportSourceKind::LOCAL;
+    plan.locator = fs::PathToString(tmp / "src");
+    plan.snapshot_token = "local";
+    modelnet::ImportCoordinator coord{plan, tmp / "jobs"};
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(coord.PrepareStaging(err), err);
+    BOOST_REQUIRE_EQUAL(coord.AcceptedFiles().size(), 1U);
+    BOOST_CHECK_EQUAL(coord.AcceptedFiles()[0].destination_path, "model.safetensors");
+}
+
+BOOST_AUTO_TEST_CASE(local_import_records_piece_origin)
+{
+    const fs::path tmp = m_path_root / "reg-local-origin";
+    fs::create_directories(tmp / "src");
+    const auto st = TinySafeTensors(0x62);
+    {
+        std::ofstream out(tmp / "src" / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    modelnet::ModelCatalog cat{tmp / "cat", 1 << 20};
+    UniValue planj(UniValue::VOBJ);
+    planj.pushKV("plan_id", PlanId('L'));
+    UniValue src(UniValue::VOBJ);
+    src.pushKV("type", "local");
+    src.pushKV("locator", fs::PathToString(tmp / "src"));
+    src.pushKV("snapshot_token", "local");
+    planj.pushKV("source", src);
+    planj.pushKV("idempotency_key", "local-origin-1");
+    UniValue params(UniValue::VARR);
+    params.push_back(planj);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("method", "executemodelimport");
+    req.pushKV("params", params);
+    UniValue result;
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, req, result, code, err), err);
+    BOOST_CHECK(result["imported"].get_bool());
+    BOOST_REQUIRE(result.exists("piece_origins"));
+    BOOST_CHECK_GE(result["piece_origins"].getValues().size(), 1U);
+    BOOST_CHECK_EQUAL(result["piece_origins"][0].get_str(), "local");
+    BOOST_CHECK_GE(result["independent_origin_count"].getInt<int>(), 1);
+    BOOST_CHECK(!result["wallet_required"].get_bool());
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int>(), 0);
+
+    req.pushKV("id", 2);
+    planj.pushKV("idempotency_key", "local-origin-2");
+    planj.pushKV("plan_id", PlanId('M'));
+    params = UniValue(UniValue::VARR);
+    params.push_back(planj);
+    req.pushKV("params", params);
+    UniValue again;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, req, again, code, err), err + " " + code);
+    BOOST_CHECK(again["imported"].get_bool() || again["has_verified_manifest"].get_bool());
+    BOOST_CHECK(again.exists("model_id"));
 }
 
 BOOST_AUTO_TEST_CASE(resolved_private_addresses_are_not_global_unicast)

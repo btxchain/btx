@@ -105,6 +105,9 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                 self.assertIn("objdump -T", wrapper_text)
                 self.assertIn("GLIBCXX", wrapper_text)
                 self.assertIn("BTX_GLIBC_PREFIX", wrapper_text)
+                self.assertIn("libgomp1", wrapper_text)
+                self.assertIn("OPENSSL", wrapper_text)
+                self.assertIn("LIB_DIR", wrapper_text)
 
     def test_cuda_archive_names_match_release_platform_ids(self):
         self.assertEqual(

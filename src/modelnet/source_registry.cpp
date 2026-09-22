@@ -67,7 +67,21 @@ bool ParseRegistryHttpResponse(const std::string& raw, RegistryHttpResponse& out
         if (sp != std::string::npos) out.status = std::atoi(headers.c_str() + sp + 1);
     }
     const std::string hl = HeaderLower(headers);
-    if (hl.find("\nlocation:") != std::string::npos) out.has_location = true;
+    size_t line_start = 0;
+    while (line_start < headers.size()) {
+        auto line_end = headers.find("\r\n", line_start);
+        if (line_end == std::string::npos) line_end = headers.size();
+        const std::string line = headers.substr(line_start, line_end - line_start);
+        line_start = line_end >= headers.size() ? headers.size() : line_end + 2;
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        if (HeaderLower(line.substr(0, colon)) != "location") continue;
+        std::string val = line.substr(colon + 1);
+        while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
+        while (!val.empty() && (val.back() == ' ' || val.back() == '\t' || val.back() == '\r')) val.pop_back();
+        out.location = val;
+        out.has_location = true;
+    }
     const auto te = hl.find("\ntransfer-encoding:");
     if (te != std::string::npos) {
         auto val = hl.substr(te + 19);
@@ -100,6 +114,12 @@ bool ParseRegistryHttpResponse(const std::string& raw, RegistryHttpResponse& out
         }
     }
     return true;
+}
+
+bool RegistryHttpIsRedirect(const RegistryHttpResponse& resp)
+{
+    return resp.status == 301 || resp.status == 302 || resp.status == 303 || resp.status == 307 ||
+           resp.status == 308;
 }
 
 bool RegistryHttpBodyAllowed(const RegistryHttpResponse& resp, bool range_requested, uint64_t offset, uint64_t length,
@@ -149,6 +169,7 @@ RegistryGetFn g_test_get;
 std::map<std::string, std::vector<unsigned char>> g_url_bytes;
 std::map<std::string, std::vector<unsigned char>> g_type_bytes;
 std::set<std::string> g_type_error;
+std::map<std::string, std::string> g_redirect_final;
 
 bool EnvLiveWan()
 {
@@ -264,6 +285,48 @@ bool ParseHttpsUrl(const std::string& url, ParsedHttps& out, std::string& err)
     return true;
 }
 
+bool ResolveHttpsRedirectInner(const std::string& current_url, const std::string& location, std::string& out,
+                               std::string& err)
+{
+    std::string loc = location;
+    while (!loc.empty() && (loc.front() == ' ' || loc.front() == '\t')) loc.erase(loc.begin());
+    while (!loc.empty() && (loc.back() == ' ' || loc.back() == '\t' || loc.back() == '\r')) loc.pop_back();
+    if (loc.size() >= 2 && loc.front() == '<' && loc.back() == '>') loc = loc.substr(1, loc.size() - 2);
+    auto hash = loc.find('#');
+    if (hash != std::string::npos) loc.resize(hash);
+    if (loc.empty()) {
+        err = "redirect location";
+        return false;
+    }
+    if (loc.rfind("http://", 0) == 0) {
+        err = "https only";
+        return false;
+    }
+    if (loc.rfind("https://", 0) == 0) {
+        out = loc;
+        return true;
+    }
+    if (loc.rfind("//", 0) == 0) {
+        out = "https:" + loc;
+        return true;
+    }
+    ParsedHttps cur;
+    if (!ParseHttpsUrl(current_url, cur, err)) return false;
+    std::string path;
+    if (loc.front() == '/') {
+        path = loc;
+    } else {
+        const auto slash = cur.path.rfind('/');
+        const std::string dir = slash == std::string::npos ? "/" : cur.path.substr(0, slash + 1);
+        path = dir + loc;
+    }
+    std::string hostport = cur.host;
+    if (cur.port != 443) hostport += ":" + std::to_string(cur.port);
+    out = "https://" + hostport + path;
+    err.clear();
+    return true;
+}
+
 constexpr int kRegistryHttpsTimeoutMs = 15000;
 
 void ApplySocketTimeouts(int fd, int timeout_ms)
@@ -302,10 +365,22 @@ bool WaitFd(int fd, short events, int timeout_ms, std::string& err)
     }
 }
 
-bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std::vector<unsigned char>& out,
-                   std::string& err)
+int RemainingMs(std::chrono::steady_clock::time_point deadline)
 {
-    out.clear();
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) return 0;
+    return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+}
+
+bool HttpsExchangeOnce(const std::string& url, uint64_t offset, uint64_t length, RegistryHttpResponse& resp,
+                       std::string& err, std::chrono::steady_clock::time_point deadline)
+{
+    resp = {};
+    const int left = RemainingMs(deadline);
+    if (left <= 0) {
+        err = "timeout";
+        return false;
+    }
     std::string ssrf;
     if (!HuggingFaceLocatorAllowed(url, ssrf)) {
         err = ssrf;
@@ -355,7 +430,7 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
             continue;
         }
         std::string werr;
-        if (!WaitFd(fd, POLLOUT, kRegistryHttpsTimeoutMs, werr)) {
+        if (!WaitFd(fd, POLLOUT, RemainingMs(deadline), werr)) {
             last = werr.empty() ? "timeout" : werr;
             ::close(fd);
             fd = -1;
@@ -371,7 +446,7 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
             continue;
         }
         if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-        ApplySocketTimeouts(fd, kRegistryHttpsTimeoutMs);
+        ApplySocketTimeouts(fd, RemainingMs(deadline));
         break;
     }
     freeaddrinfo(raw);
@@ -400,7 +475,8 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
     }
 
     const bool range_requested = length > 0;
-    std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.host + "\r\nConnection: close\r\n";
+    std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.host +
+                      "\r\nUser-Agent: BTX-modelnet/0.34.9\r\nAccept: */*\r\nConnection: close\r\n";
     if (range_requested) {
         req += "Range: bytes=" + std::to_string(offset) + "-" + std::to_string(offset + length - 1) + "\r\n";
     }
@@ -415,7 +491,6 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
 
     std::string raw_resp;
     char buf[4096];
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRegistryHttpsTimeoutMs);
     while (true) {
         if (std::chrono::steady_clock::now() >= deadline) {
             SSL_free(ssl);
@@ -440,9 +515,50 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
     SSL_CTX_free(ctx);
     ::close(fd);
 
-    RegistryHttpResponse resp;
-    if (!ParseRegistryHttpResponse(raw_resp, resp, err)) return false;
-    return RegistryHttpBodyAllowed(resp, range_requested, offset, length, out, err);
+    return ParseRegistryHttpResponse(raw_resp, resp, err);
+}
+
+bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std::vector<unsigned char>& out,
+                   std::string& err)
+{
+    out.clear();
+    std::string current = url;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_redirect_final.find(url);
+        if (it != g_redirect_final.end()) current = it->second;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRegistryHttpsTimeoutMs);
+    for (int hop = 0; hop <= 3; ++hop) {
+        RegistryHttpResponse resp;
+        if (!HttpsExchangeOnce(current, offset, length, resp, err, deadline)) return false;
+        if (RegistryHttpIsRedirect(resp)) {
+            if (hop == 3) {
+                err = "too many redirects";
+                return false;
+            }
+            if (resp.location.empty()) {
+                err = "redirect location";
+                return false;
+            }
+            std::string next;
+            if (!ResolveHttpsRedirectInner(current, resp.location, next, err)) return false;
+            std::string ssrf;
+            if (!HuggingFaceLocatorAllowed(next, ssrf)) {
+                err = ssrf;
+                return false;
+            }
+            current = next;
+            continue;
+        }
+        if (current != url) {
+            std::lock_guard<std::mutex> lock(g_mu);
+            g_redirect_final[url] = current;
+        }
+        return RegistryHttpBodyAllowed(resp, length > 0, offset, length, out, err);
+    }
+    err = "too many redirects";
+    return false;
 }
 
 bool FetchUrl(const std::string& url, uint64_t offset, uint64_t length, std::vector<unsigned char>& out, bool live_wan,
@@ -469,6 +585,11 @@ bool FetchUrl(const std::string& url, uint64_t offset, uint64_t length, std::vec
 }
 
 } // namespace
+
+bool ResolveHttpsRedirect(const std::string& current_url, const std::string& location, std::string& out, std::string& err)
+{
+    return ResolveHttpsRedirectInner(current_url, location, out, err);
+}
 
 void SetRegistryGetForTests(RegistryGetFn fn)
 {
@@ -500,6 +621,7 @@ void ClearRegistryInjections()
     g_url_bytes.clear();
     g_type_bytes.clear();
     g_type_error.clear();
+    g_redirect_final.clear();
     g_test_get = nullptr;
 }
 
@@ -552,19 +674,31 @@ bool RegistryByteSource::Read(const ReadExtent& extent, std::vector<unsigned cha
                              std::string& err)
 {
     out.clear();
-    if (!m_pinned && !Pin(err)) return false;
+    m_origin_errors.clear();
+    auto fail = [&](const std::string& why) {
+        err = why;
+        m_origin_errors.push_back({m_origin.type, err});
+        return false;
+    };
+    if (!m_pinned && !Pin(err)) {
+        m_origin_errors.push_back({m_origin.type, err});
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lock(g_mu);
         if (g_type_error.count(m_origin.type)) {
-            err = "origin unavailable";
-            return false;
+            return fail("origin unavailable");
         }
         auto it = g_type_bytes.find(m_origin.type);
         if (it != g_type_bytes.end()) {
-            if (!CopyExtent(it->second, extent, budget_bytes, out, err)) return false;
+            if (!CopyExtent(it->second, extent, budget_bytes, out, err)) {
+                m_origin_errors.push_back({m_origin.type, err});
+                return false;
+            }
             if (ExtentMatchesIdentity(extent, out, m_size_bytes, m_sha384_hex, m_piece_hex, err) ==
                 IdentityMatch::MISMATCH) {
                 out.clear();
+                m_origin_errors.push_back({m_origin.type, err});
                 return false;
             }
             m_piece_origins.push_back(m_origin.type);
@@ -574,19 +708,26 @@ bool RegistryByteSource::Read(const ReadExtent& extent, std::vector<unsigned cha
     ResolvedRegistryUrl resolved;
     const std::string file = m_file.empty() ? "model.safetensors" : m_file;
     if (!ResolveRegistryFileUrl(m_origin.type, m_origin.locator, m_origin.snapshot_token, file, resolved, err)) {
+        m_origin_errors.push_back({m_origin.type, err});
         return false;
     }
     m_last_url = resolved.url;
-    if (!HuggingFaceLocatorAllowed(resolved.url, err)) return false;
-    std::vector<unsigned char> body;
-    if (!FetchUrl(resolved.url, extent.offset, extent.length, body, m_live_wan, err)) return false;
-    if (extent.length > budget_bytes) {
-        err = "credit exhausted";
+    if (!HuggingFaceLocatorAllowed(resolved.url, err)) {
+        m_origin_errors.push_back({m_origin.type, err});
         return false;
+    }
+    std::vector<unsigned char> body;
+    if (!FetchUrl(resolved.url, extent.offset, extent.length, body, m_live_wan, err)) {
+        m_origin_errors.push_back({m_origin.type, err});
+        return false;
+    }
+    if (extent.length > budget_bytes) {
+        return fail("credit exhausted");
     }
     out = std::move(body);
     if (ExtentMatchesIdentity(extent, out, m_size_bytes, m_sha384_hex, m_piece_hex, err) == IdentityMatch::MISMATCH) {
         out.clear();
+        m_origin_errors.push_back({m_origin.type, err});
         return false;
     }
     m_piece_origins.push_back(m_origin.type);
@@ -615,6 +756,7 @@ void MultiOriginByteSource::SelectFile(const std::string& relative, const std::s
     m_mixed_without_identity = false;
     m_piece_origins.clear();
     m_bound_piece_origins.clear();
+    m_origin_errors.clear();
 }
 
 void MultiOriginByteSource::BindFileIdentity(uint64_t size_bytes, const std::vector<std::string>& piece_sha384_hex)
@@ -623,6 +765,7 @@ void MultiOriginByteSource::BindFileIdentity(uint64_t size_bytes, const std::vec
     m_piece_hex = piece_sha384_hex;
     m_piece_origins.clear();
     m_bound_piece_origins.clear();
+    m_origin_errors.clear();
     m_locked_origin.clear();
     m_mixed_without_identity = false;
 }
@@ -656,6 +799,7 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
 {
     out.clear();
     m_conflicts.clear();
+    m_origin_errors.clear();
     std::string last = "origin unavailable";
     for (const auto& o : m_plan.origins) {
         if (!m_locked_origin.empty() && o.type != m_locked_origin) continue;
@@ -668,6 +812,7 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
             src = std::make_unique<BtxOriginByteSource>(o);
         } else if (o.type == "torrent" || o.type == "magnet") {
             last = "torrent origin uses TorrentByteSource";
+            m_origin_errors.push_back({o.type, last});
             continue;
         } else {
             auto reg = std::make_unique<RegistryByteSource>(o, m_plan.live_wan);
@@ -678,6 +823,7 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
         std::string perr;
         if (!src->Pin(perr)) {
             last = perr;
+            m_origin_errors.push_back({o.type, perr});
             continue;
         }
         std::vector<unsigned char> got;
@@ -688,6 +834,7 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
             } else {
                 last = perr;
             }
+            m_origin_errors.push_back({o.type, perr.empty() ? last : perr});
             continue;
         }
         std::string why;
@@ -695,6 +842,7 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
         if (match == IdentityMatch::MISMATCH) {
             m_conflicts.push_back(o.type + ":" + why);
             last = "ORIGIN_CONFLICT";
+            m_origin_errors.push_back({o.type, why.empty() ? last : why});
             continue;
         }
         const bool identity_bound = match == IdentityMatch::LEAF || match == IdentityMatch::WHOLE_FILE;
@@ -704,6 +852,7 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
             } else if (m_locked_origin != o.type) {
                 m_mixed_without_identity = true;
                 last = "UNBOUND_ORIGIN_MIX";
+                m_origin_errors.push_back({o.type, last});
                 continue;
             }
         }

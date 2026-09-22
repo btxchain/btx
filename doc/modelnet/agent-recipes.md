@@ -362,5 +362,8 @@ Expect `wallet_required: false`, `publisher_must_republish: false`,
 `independent_origin_count`. Leafless multi-origin plans lock the first
 successful origin per file. `min_independent_origins` is an observation
 target, not a fetch admission ticket. Live HTTPS stays fail-closed unless
-`live_wan` or `BTX_MODELNET_LIVE_WAN=1`. Do not invent WAN evidence. Do not
-strip wallets or consensus from the node.
+`live_wan` or `BTX_MODELNET_LIVE_WAN=1`. When enabled it follows at most three
+re-gated `https` redirects (Hugging Face / hf-mirror / ModelScope signed CDNs).
+Tiny public-file recipe:
+`contrib/modelnet/recipes/registry-live-wan-hf-config.json`. Do not invent WAN
+evidence. Do not strip wallets or consensus from the node.

@@ -40,6 +40,7 @@ enum class IdentityMatch : uint8_t {
 struct RegistryHttpResponse {
     int status{0};
     bool has_location{false};
+    std::string location;
     bool chunked{false};
     bool has_content_length{false};
     uint64_t content_length{0};
@@ -50,13 +51,19 @@ struct RegistryHttpResponse {
 };
 
 bool ParseRegistryHttpResponse(const std::string& raw, RegistryHttpResponse& out, std::string& err);
+bool RegistryHttpIsRedirect(const RegistryHttpResponse& resp);
+/** Resolve Location against the current HTTPS URL. http:// is refused. Relative
+ *  and protocol-relative Locations are resolved against the current host. */
+bool ResolveHttpsRedirect(const std::string& current_url, const std::string& location, std::string& out,
+                          std::string& err);
 bool RegistryHttpBodyAllowed(const RegistryHttpResponse& resp, bool range_requested, uint64_t offset, uint64_t length,
                              std::vector<unsigned char>& out, std::string& err);
 
 /**
  * One registry origin. Pin/SSRF via HuggingFaceLocatorAllowed (generic HTTPS gate).
  * Read uses injected bytes, the test GET hook, or live HTTPS when live_wan is set.
- * Never follows redirects. A registry name is not the artifact identity.
+ * Live HTTPS follows at most 3 re-gated https hops (signed CDN redirects).
+ * A registry name is not the artifact identity.
  */
 class RegistryByteSource : public ByteSource {
     ImportOrigin m_origin;
@@ -68,6 +75,7 @@ class RegistryByteSource : public ByteSource {
     bool m_pinned{false};
     std::string m_last_url;
     std::vector<std::string> m_piece_origins;
+    std::vector<OriginError> m_origin_errors;
 
 public:
     RegistryByteSource(ImportOrigin origin, bool live_wan);
@@ -81,6 +89,7 @@ public:
     std::string SourceIntegrity() const override { return m_origin.snapshot_token; }
     std::string LastUrl() const { return m_last_url; }
     std::vector<std::string> PieceOrigins() const override { return m_piece_origins; }
+    std::vector<OriginError> OriginErrors() const override { return m_origin_errors; }
 };
 
 /**
@@ -99,6 +108,7 @@ class MultiOriginByteSource : public ByteSource {
     std::vector<std::string> m_conflicts;
     std::vector<std::string> m_piece_origins;
     std::vector<std::string> m_bound_piece_origins;
+    std::vector<OriginError> m_origin_errors;
     bool m_mixed_without_identity{false};
 
 public:
@@ -116,6 +126,7 @@ public:
     std::vector<std::string> PieceOrigins() const override { return m_piece_origins; }
     std::vector<std::string> BoundPieceOrigins() const override { return m_bound_piece_origins; }
     bool OriginsMixedWithoutIdentity() const override { return m_mixed_without_identity; }
+    std::vector<OriginError> OriginErrors() const override { return m_origin_errors; }
     int IndependentOriginCount() const;
 };
 

@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <clientversion.h>
 #include <modelnet/auto_storage.h>
 #include <modelnet/helper.h>
 #include <modelnet/policy.h>
@@ -34,7 +35,7 @@ static void OnSignal(int)
 static void Usage()
 {
     std::cerr <<
-        "btx-modeld — BTX Native Model Network helper (0.34.8-dev)\n"
+        "btx-modeld — BTX Native Model Network helper (" << FormatFullVersion() << ")\n"
         "\n"
         "Inference is local after a model is acquired. This process is not a remote\n"
         "inference marketplace and has no monetary consensus authority.\n"
@@ -98,7 +99,7 @@ int main(int argc, char* argv[])
             return 0;
         }
         if (a == "-version" || a == "--version") {
-            std::cout << "btx-modeld 0.34.8-dev\n" << OpenSSL_version(OPENSSL_VERSION) << "\n";
+            std::cout << "btx-modeld " << FormatFullVersion() << "\n" << OpenSSL_version(OPENSSL_VERSION) << "\n";
             return 0;
         }
         if (a == "-modelrelay") cfg.relay = true;

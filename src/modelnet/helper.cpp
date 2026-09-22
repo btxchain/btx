@@ -9417,7 +9417,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     Pq1Context pq;
     if (!pq.Ready()) {
         std::cerr << "model subsystem fail-closed: strict PQ1 unavailable: " << pq.Error() << "\n";
-        std::cerr << "monetary BTX remains independently operational.\n";
+        std::cerr << "monetary BTX remains independently operational. exiting 2.\n";
         return 2;
     }
     std::string err;

@@ -56,6 +56,21 @@ KitOps/ModelPack config maps onto `origins[]` + `files[]` via `parseimportplan`
 / `btx-model modelpack import`. `exportmodelpack` writes the same layout from a
 verified import. The layout is an origin, not `btx://` identity.
 
+Live HTTPS (opt-in `live_wan` / `BTX_MODELNET_LIVE_WAN=1`) follows **at most
+three** re-gated `https` redirects so Hugging Face / hf-mirror / ModelScope
+signed-CDN hops work. Each hop re-runs the URL string gate and
+`AddressIsGlobalUnicast` after DNS. `http://` Locations are refused. Relative
+and protocol-relative Locations are resolved against the current host. The
+final URL is memoised for later Range GETs. A single-origin Hugging Face plan
+uses the same `RegistryByteSource` as the other hubs. `StatusJson` emits
+`origin_errors: [{type, error}]` so a multi-origin miss is not reported as
+only the last origin. Inject / no-`live_wan` still fail closed with
+`not wired to live network`.
+
+A local fetch records `piece_origins: ["local"]`. Re-importing bytes that
+already exist in the catalog returns the existing identity instead of
+`destination artifact exists`.
+
 ## Five questions that must not collapse
 
 | Question | Authority |
@@ -106,6 +121,14 @@ talking to a chain, a wallet, or the network. `btx-model verify PLAN_ID` is
 Agent door: `contrib/modelnet/btx-model --json`. No web UI. No `artifactd`
 that erases BTX.
 
+A LOCAL plan may omit `files[]`. `PrepareStaging` enumerates portable
+non-executable names under the locator (file or directory). After a
+successful local import, `piece_origins` records `"local"`. Re-importing
+the same bytes is idempotent: `ImportPath` returns the existing catalog
+entry instead of failing `destination artifact exists`. Origin failures
+are listed as `origin_errors: [{type, error}]` rather than only the last
+origin's string.
+
 ## Mirror policy
 
 `setmodelmirror` accepts `min_independent_origins` (>= 1). That is a local
@@ -119,5 +142,8 @@ OCI ModelPack import/export (KitOps layout as a first-class package shape,
 not only a blob origin) is implemented as `parseimportplan` /
 `exportmodelpack` and `btx-model modelpack import|export`. Live HTTPS remains
 fail-closed unless inject / `live_wan` / `BTX_MODELNET_LIVE_WAN=1`. The live
-client requires TLS 1.2+, peer verify, no redirects, `Content-Length`, `206`
-for Range, and post-DNS `AddressIsGlobalUnicast` before connect.
+client requires TLS 1.2+, peer verify, at most three re-gated `https`
+redirects, `Content-Length`, `206` for Range, and post-DNS
+`AddressIsGlobalUnicast` before connect. Tiny public-file recipe:
+[registry-live-wan-hf-config.json](../../contrib/modelnet/recipes/registry-live-wan-hf-config.json)
+(hits the public internet; do not invent WAN evidence without `live_wan`).
