@@ -135,6 +135,8 @@ UniValue CapabilitiesObject()
     c.pushKV("exportmodelpath", true);
     c.pushKV("loadmodel", true);
     c.pushKV("unloadmodel", true);
+    c.pushKV("generatemodel", true);
+    c.pushKV("getmodelhostprofile", true);
     c.pushKV("unhostmodel", true);
     c.pushKV("removemodelalias", true);
     c.pushKV("openmodelshare", true);

@@ -224,7 +224,8 @@ Point a **local** runtime at `exportmodelpath`. Checkout hardlinks from
 `source_path` when SHA-384 still matches. `loadmodel` with
 `BTX_MODEL_CUDA_LOADER` may keep tensors resident on a GPU; it still does
 not start a network inference server (`inference=false`,
-`remote_inference=false`).
+`remote_inference=false`). `generatemodel` runs a local adapter for
+host-compatible GGUF or allowlisted SafeTensors only.
 
 ### 2. Second helper downloads free
 
@@ -246,7 +247,9 @@ demand-seeds without `seedmodel`. Expect `family=granite`,
 SafeTensors hybrid MoE/Mamba; `execution_profile` stays **0** (unqualified).
 Do not claim dense-decoder-v1. llama.cpp cannot open this checkout without
 GGUF conversion. Optional `BTX_MODEL_INFER_CMD` is an operator generate
-hook, not a fake PASS. That observation is not a usefulness or safety claim.
+hook, not a fake PASS. `generatemodel` is the host-profile generate RPC
+(`BTX_MODEL_GENERATE` / `BTX_LLAMA_CLI`); granite hybrid is allowlisted
+SafeTensors, not GGUF. That observation is not a usefulness or safety claim.
 
 Unix `getmodel` is async: `status=running` plus `job_id`. Poll
 `getmodeljob`. `contrib/modelnet/granite_host_roundtrip.py` does this and
@@ -266,6 +269,15 @@ tensors resident (`--hold --smoke`): `device_loaded=true`,
 CUDA kernel on loaded bytes. It still does not start a network inference
 server (`inference=false`, `remote_inference=false`). `unloadmodel`
 SIGTERMs the loader child only (never production `btxd`).
+`generatemodel` is local one-shot text generate when the replica matches
+this host profile: GGUF plus `BTX_LLAMA_CLI`, or an allowlisted
+SafeTensors `architectures[]` plus `BTX_MODEL_GENERATE` (typically
+`contrib/modelnet/generate_local.py`). Unknown architectures, pickle
+`.pt`/`.pkl`/`.so`, and missing adapters fail closed
+(`INCOMPATIBLE_HOST_PROFILE` / `NOT_RUN`). CUDA `--hold --smoke` is not
+generate; `getmodelhostprofile` reports `cuda_smoke_is_not_generate`.
+`execution_profile` stays **0**. `inference` / `remote_inference` /
+`network_server` stay false. `automatic_spend_atoms` stays 0.
 `contrib/modelnet/granite_user_scenarios.py` is the .btx + URI + checkout
 (+ optional CUDA) path. `contrib/modelnet/two_helper_retrieve.py` and
 `e2e-local-helper.sh` are TinySafeTensors / 10-byte stub smokes.

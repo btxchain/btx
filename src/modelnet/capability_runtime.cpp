@@ -4,6 +4,7 @@
 //
 // Trusted local runtime adapters (BTX-SPEC-0348-CAPABILITY-01 RUN).
 // Operator-env executables only: BTX_LLAMA_CLI / BTX_VLLM / BTX_MLX / BTX_MODEL_CUDA_LOADER.
+// Local generate is a separate helper RPC (generatemodel / BTX_MODEL_GENERATE).
 // Package JSON never chooses process authority. CUDA PASS requires a live
 // BTX_MODEL_CUDA_LOADER hold+smoke on a SafeTensors checkout (or verified ST bytes).
 //

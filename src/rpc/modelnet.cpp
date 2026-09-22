@@ -914,6 +914,24 @@ static RPCHelpMan unloadmodel()
                         {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI or digest48"}});
 }
 
+static RPCHelpMan generatemodel()
+{
+    return ProxyOrLocal("generatemodel",
+                        "Local one-shot generate for a complete replica whose format/architecture matches this host profile (GGUF+llama.cpp or allowlisted SafeTensors+BTX_MODEL_GENERATE). Fail-closed if incompatible or the adapter is missing. Never a network inference server. automatic_spend_atoms=0.\n",
+                        {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI or digest48"},
+                         {"opts", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "generate options", {
+                            {"prompt", RPCArg::Type::STR, RPCArg::Optional::NO, "prompt text"},
+                            {"max_new_tokens", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "1..512, default 32"},
+                         }}});
+}
+
+static RPCHelpMan getmodelhostprofile()
+{
+    return ProxyOrLocal("getmodelhostprofile",
+                        "What this helper can generate locally (operator env BTX_MODEL_GENERATE / BTX_LLAMA_CLI). CUDA smoke is not generate.\n",
+                        {});
+}
+
 static RPCHelpMan getmodelpolicy()
 {
     return ProxyOrLocal("getmodelpolicy",
@@ -1956,6 +1974,8 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &exportmodelpath},
         {"modelnet", &loadmodel},
         {"modelnet", &unloadmodel},
+        {"modelnet", &generatemodel},
+        {"modelnet", &getmodelhostprofile},
         {"modelnet", &getmodelpolicy},
         {"modelnet", &setmodelpolicy},
         {"modelnet", &listmodelidentities},

@@ -9,7 +9,9 @@ profile (fail closed if the helper lacks the method).
 Human door: stderr one_liners / next hints. Agent door: stdout JSON; --json
 suppresses stderr extras. Dual-door docs: HUMANS.md vs AGENTS.md.
 
-No inference. Never spends (automatic_spend_atoms=0). Fail closed.
+No network inference server. Local generate is `generate` when the replica
+matches this host profile (GGUF+llama.cpp or allowlisted SafeTensors +
+BTX_MODEL_GENERATE). Never spends (automatic_spend_atoms=0). Fail closed.
 Never defaults to a production helper socket.
 Never puts raw cloud secrets on argv (use --credential-ref / --secret-file).
 """
@@ -28,6 +30,8 @@ VERBS = (
     "host",
     "load",
     "unload",
+    "generate",
+    "host-profile",
     "preview",
     "search",
     "get",
@@ -156,6 +160,9 @@ verbs:
   host SHARE.btx | 'btx://…'     share link, not weights: getmodel FREE_ONLY
   load URI|ID                    loadmodel (resident CUDA if BTX_MODEL_CUDA_LOADER)
   unload URI|ID                  unloadmodel (helper-spawned loader only)
+  generate URI|ID PROMPT [--max-new-tokens N]
+                                 generatemodel (local one-shot; host-profile match)
+  host-profile                   getmodelhostprofile (GGUF/llama or ST adapter)
   preview PATH                   previewmodelimport (size vs quota; no hash)
   search [TEXT] [--scope LOCAL|PEERS|NETWORK|ALL]
          [--format F] [--quantization Q] [--family F] [--architecture A]
@@ -920,6 +927,41 @@ def cmd_unload(sock: str, args: list[str]) -> None:
     if not args:
         _die("unload requires a btx:// URI, model id, or alias", 2)
     _print(rpc(sock, "unloadmodel", [args[0]]), "unloadmodel")
+
+
+def cmd_generate(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("generate requires a btx:// URI, model id, or alias", 2)
+    opts: dict[str, Any] = {"max_new_tokens": 32}
+    rest = args[1:]
+    if rest and not rest[0].startswith("--"):
+        maybe = _loads_maybe(rest[0])
+        if isinstance(maybe, dict):
+            opts.update(maybe)
+            rest = rest[1:]
+        else:
+            opts["prompt"] = rest[0]
+            rest = rest[1:]
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--max-new-tokens" and i + 1 < len(rest):
+            opts["max_new_tokens"] = int(rest[i + 1])
+            i += 2
+            continue
+        if rest[i] == "--prompt" and i + 1 < len(rest):
+            opts["prompt"] = rest[i + 1]
+            i += 2
+            continue
+        _die(f"generate: unknown argument {rest[i]!r}", 2)
+    if not opts.get("prompt"):
+        _die("generate requires a prompt", 2)
+    _print(rpc(sock, "generatemodel", [args[0], opts], timeout=GET_TIMEOUT_S), "generatemodel")
+
+
+def cmd_host_profile(sock: str, args: list[str]) -> None:
+    if args:
+        _die("host-profile takes no arguments", 2)
+    _print(rpc(sock, "getmodelhostprofile", []), "getmodelhostprofile")
 
 
 def cmd_preview(sock: str, args: list[str]) -> None:
@@ -2666,6 +2708,8 @@ COMMANDS = {
     "host": cmd_host,
     "load": cmd_load,
     "unload": cmd_unload,
+    "generate": cmd_generate,
+    "host-profile": cmd_host_profile,
     "preview": cmd_preview,
     "search": cmd_search,
     "get": cmd_get,

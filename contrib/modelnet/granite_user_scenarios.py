@@ -193,6 +193,7 @@ def main():
     p.add_argument("--bind", default="127.0.0.1:29449")
     p.add_argument("--btx-out", default="granite.btx")
     p.add_argument("--cuda-loader", default="", help="path to cuda_safetensors_load; sets BTX_MODEL_CUDA_LOADER on the peer")
+    p.add_argument("--generate-adapter", default="", help="path to BTX_MODEL_GENERATE adapter on the peer (optional local generate after unload)")
     p.add_argument("--skip-import", action="store_true")
     p.add_argument("--retrieve-timeout", type=float, default=14400)
     p.add_argument("--import-timeout", type=float, default=7200)
@@ -220,6 +221,9 @@ def main():
     cuda_loader = Path(args.cuda_loader).absolute() if args.cuda_loader else None
     if cuda_loader is not None and not cuda_loader.is_file():
         fail(f"cuda loader is not a file: {cuda_loader}")
+    generate_adapter = Path(args.generate_adapter).absolute() if args.generate_adapter else None
+    if generate_adapter is not None and not generate_adapter.is_file():
+        fail(f"generate adapter is not a file: {generate_adapter}")
 
     bindir = Path(args.bin)
     modeld = bindir / "run-modeld.sh"
@@ -235,6 +239,8 @@ def main():
     peer_env = env.copy()
     if cuda_loader is not None:
         peer_env["BTX_MODEL_CUDA_LOADER"] = str(cuda_loader)
+    if generate_adapter is not None:
+        peer_env["BTX_MODEL_GENERATE"] = str(generate_adapter)
 
     host_dir.mkdir(parents=True, exist_ok=True)
     peer_dir.mkdir(parents=True, exist_ok=True)
@@ -450,6 +456,18 @@ def main():
         elif loaded.get("device_loaded") is True:
             fail(f"device_loaded without cuda loader: {loaded}")
         print("scenario F ok", "device_loaded", loaded.get("device_loaded"), "bytes_on_device", loaded.get("bytes_on_device"), "smoke", loaded.get("smoke_passed"), flush=True)
+
+        # G. Optional local generate after CUDA unload (host-profile match; not a network server).
+        if generate_adapter is not None:
+            gen = rpc(ps, "generatemodel", [canon, {"prompt": "Hello", "max_new_tokens": 8}], timeout=args.retrieve_timeout)
+            spend0(gen, "generatemodel")
+            if gen.get("generated") is not True or gen.get("local_generate") is not True:
+                fail(f"generatemodel did not generate: {gen}")
+            if gen.get("inference") is not False or gen.get("remote_inference") is not False:
+                fail(f"generatemodel claimed a network server: {gen}")
+            if not str(gen.get("text") or "").strip():
+                fail(f"generatemodel empty text: {gen}")
+            print("scenario G ok", "backend", gen.get("backend"), "arch", gen.get("architecture"), flush=True)
         print("GRANITE_USER_SCENARIOS PASS")
     finally:
         for proc in (ph, pp):

@@ -9,6 +9,7 @@
 #include <crypto/common.h>
 #include <modelnet/auto_storage.h>
 #include <modelnet/catalog.h>
+#include <modelnet/generate.h>
 #include <modelnet/helper.h>
 #include <modelnet/hcp.h>
 #include <modelnet/piece_ranges.h>
@@ -837,6 +838,253 @@ BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
     BOOST_CHECK_EQUAL(unloaded["unloaded"].get_bool(), true);
     BOOST_CHECK_EQUAL(unloaded["device_loaded"].get_bool(), false);
     ::unsetenv("BTX_MODEL_CUDA_LOADER");
+}
+
+BOOST_AUTO_TEST_CASE(host_generate_profile_cuda_smoke_is_not_generate)
+{
+    ::unsetenv("BTX_MODEL_GENERATE");
+    ::unsetenv("BTX_LLAMA_CLI");
+    ::unsetenv("BTX_MODEL_CUDA_LOADER");
+    const fs::path tmp = m_path_root / "host-profile";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "getmodelhostprofile");
+    rpc.pushKV("params", UniValue(UniValue::VARR));
+    UniValue result;
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
+    BOOST_CHECK_EQUAL(result["can_generate"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["cuda_smoke_is_not_generate"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result["remote_inference"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["trust_remote_code"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(inspect_checkout_rejects_pickle_and_unknown_arch)
+{
+    const fs::path pickle_dir = m_path_root / "gen-pickle";
+    fs::create_directories(pickle_dir);
+    {
+        std::ofstream st(pickle_dir / "model.safetensors", std::ios::binary);
+        const auto bytes = TinySafeTensors(0x91);
+        st.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        std::ofstream pk(pickle_dir / "evil.pkl", std::ios::binary);
+        pk << "pickle";
+    }
+    const auto pickle_view = modelnet::InspectCheckoutForGenerate(pickle_dir);
+    BOOST_CHECK(pickle_view.pickle_or_executable);
+    BOOST_CHECK(pickle_view.format == modelnet::GenerateFormat::Unsafe);
+    std::string reason;
+    modelnet::HostGenerateProfile host;
+    host.generate_adapter = true;
+    host.generate_adapter_path = "/bin/true";
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(pickle_view, host, reason));
+    BOOST_CHECK_EQUAL(reason, "unsafe_format");
+
+    const fs::path unknown = m_path_root / "gen-unknown";
+    fs::create_directories(unknown);
+    {
+        std::ofstream st(unknown / "model.safetensors", std::ios::binary);
+        const auto bytes = TinySafeTensors(0x92);
+        st.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        std::ofstream cfg(unknown / "config.json");
+        cfg << "{\"architectures\":[\"TotallyFakeForCausalLM\"]}\n";
+    }
+    const auto unk = modelnet::InspectCheckoutForGenerate(unknown);
+    BOOST_CHECK(unk.format == modelnet::GenerateFormat::SafeTensors);
+    BOOST_CHECK_EQUAL(unk.architecture, "TotallyFakeForCausalLM");
+    BOOST_CHECK(!modelnet::SafeTensorsArchitectureIsHostCompatible(unk.architecture));
+    reason.clear();
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(unk, host, reason));
+    BOOST_CHECK_EQUAL(reason, "unknown_architecture");
+
+    BOOST_CHECK(modelnet::SafeTensorsArchitectureIsHostCompatible("LlamaForCausalLM"));
+    BOOST_CHECK(modelnet::SafeTensorsArchitectureIsHostCompatible("GraniteMoeHybridForCausalLM"));
+    BOOST_CHECK(!modelnet::SafeTensorsArchitectureIsHostCompatible("custom_auto_map"));
+}
+
+BOOST_AUTO_TEST_CASE(generatemodel_compatible_fake_adapter)
+{
+    const fs::path tmp = m_path_root / "gen-ok";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const fs::path src = tmp / "src";
+    fs::create_directories(src);
+    {
+        const auto st = TinySafeTensors(0x93);
+        std::ofstream out(src / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        std::ofstream cfg(src / "config.json");
+        cfg << "{\"architectures\":[\"LlamaForCausalLM\"],\"model_type\":\"llama\"}\n";
+    }
+    std::string err;
+    modelnet::CatalogEntry imported;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), true, imported, err), err);
+
+    const fs::path adapter = tmp / "fake-generate";
+    {
+        std::ofstream out(adapter);
+        out << "#!/usr/bin/env python3\n"
+               "import json, sys\n"
+               "req = json.loads(sys.stdin.readline() or '{}')\n"
+               "print(json.dumps({\"ok\":True,\"generated\":True,\"text\":\"echo:\"+str(req.get(\"prompt\",\"\")),\"backend\":\"fake\"}), flush=True)\n";
+    }
+    ::chmod(fs::PathToString(adapter).c_str(), 0755);
+    BOOST_REQUIRE_EQUAL(::setenv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str(), 1), 0);
+    ::unsetenv("BTX_LLAMA_CLI");
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "generatemodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    UniValue opts(UniValue::VOBJ);
+    opts.pushKV("prompt", "hello-btx");
+    opts.pushKV("max_new_tokens", 8);
+    params.push_back(opts);
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    err.clear();
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
+    BOOST_CHECK_EQUAL(result["generated"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result["local_generate"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result["compatible"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result["inference"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["remote_inference"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["network_server"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["text"].get_str(), "echo:hello-btx");
+    BOOST_CHECK_EQUAL(result["backend"].get_str(), "fake");
+    BOOST_CHECK_EQUAL(result["architecture"].get_str(), "LlamaForCausalLM");
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(result["execution_profile"].getInt<int>(), 0);
+    ::unsetenv("BTX_MODEL_GENERATE");
+}
+
+BOOST_AUTO_TEST_CASE(generatemodel_unknown_architecture_fail_closed)
+{
+    const fs::path tmp = m_path_root / "gen-bad-arch";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const fs::path src = tmp / "src";
+    fs::create_directories(src);
+    {
+        const auto st = TinySafeTensors(0x94);
+        std::ofstream out(src / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        std::ofstream cfg(src / "config.json");
+        cfg << "{\"architectures\":[\"TotallyFakeForCausalLM\"]}\n";
+    }
+    std::string err;
+    modelnet::CatalogEntry imported;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), true, imported, err), err);
+    const fs::path adapter = tmp / "fake-generate";
+    {
+        std::ofstream out(adapter);
+        out << "#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({\"ok\":True,\"text\":\"nope\"}), flush=True)\n";
+    }
+    ::chmod(fs::PathToString(adapter).c_str(), 0755);
+    BOOST_REQUIRE_EQUAL(::setenv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str(), 1), 0);
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "generatemodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    params.push_back("hello");
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    err.clear();
+    const bool ok = modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(code, "INCOMPATIBLE_HOST_PROFILE");
+    BOOST_CHECK_EQUAL(err, "unknown_architecture");
+    BOOST_CHECK_EQUAL(result["generated"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["compatible"].get_bool(), false);
+    ::unsetenv("BTX_MODEL_GENERATE");
+}
+
+BOOST_AUTO_TEST_CASE(generatemodel_gguf_llama_cli)
+{
+    const fs::path tmp = m_path_root / "gen-gguf";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const fs::path src = tmp / "src";
+    fs::create_directories(src);
+    {
+        std::vector<unsigned char> gguf(24, 0);
+        std::memcpy(gguf.data(), "GGUF", 4);
+        WriteLE32(gguf.data() + 4, 3);
+        std::ofstream gg(src / "model.gguf", std::ios::binary);
+        gg.write(reinterpret_cast<const char*>(gguf.data()), static_cast<std::streamsize>(gguf.size()));
+    }
+    std::string err;
+    modelnet::CatalogEntry imported;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), true, imported, err), err);
+
+    const fs::path llama = tmp / "fake-llama";
+    {
+        std::ofstream out(llama);
+        out << "#!/usr/bin/env python3\n"
+               "import sys\n"
+               "prompt = ''\n"
+               "args = sys.argv[1:]\n"
+               "for i, a in enumerate(args):\n"
+               "    if a == '-p' and i + 1 < len(args):\n"
+               "        prompt = args[i + 1]\n"
+               "print('llama:' + prompt, flush=True)\n";
+    }
+    ::chmod(fs::PathToString(llama).c_str(), 0755);
+    ::unsetenv("BTX_MODEL_GENERATE");
+    BOOST_REQUIRE_EQUAL(::setenv("BTX_LLAMA_CLI", fs::PathToString(llama).c_str(), 1), 0);
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "generatemodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    params.push_back("gguf-hi");
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    err.clear();
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
+    BOOST_CHECK_EQUAL(result["generated"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result["text"].get_str(), "llama:gguf-hi");
+    BOOST_CHECK_EQUAL(result["backend"].get_str(), "llama.cpp");
+    BOOST_CHECK_EQUAL(result["local_generate"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result["remote_inference"].get_bool(), false);
+    ::unsetenv("BTX_LLAMA_CLI");
+}
+
+BOOST_AUTO_TEST_CASE(generatemodel_missing_adapter_is_not_run)
+{
+    ::unsetenv("BTX_MODEL_GENERATE");
+    ::unsetenv("BTX_LLAMA_CLI");
+    const fs::path tmp = m_path_root / "gen-no-adapter";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const fs::path src = tmp / "src";
+    fs::create_directories(src);
+    {
+        const auto st = TinySafeTensors(0x95);
+        std::ofstream out(src / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        std::ofstream cfg(src / "config.json");
+        cfg << "{\"architectures\":[\"LlamaForCausalLM\"]}\n";
+    }
+    std::string err;
+    modelnet::CatalogEntry imported;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), true, imported, err), err);
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "generatemodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    params.push_back("hello");
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    err.clear();
+    const bool ok = modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(code, "INCOMPATIBLE_HOST_PROFILE");
+    BOOST_CHECK_EQUAL(err, "no_generate_adapter");
+    ::unsetenv("BTX_MODEL_GENERATE");
+    ::unsetenv("BTX_LLAMA_CLI");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -34,6 +34,7 @@
 #include <modelnet/protocol.h>
 #include <modelnet/records.h>
 #include <modelnet/qualification.h>
+#include <modelnet/generate.h>
 #include <modelnet/release.h>
 #include <modelnet/economy.h>
 #include <modelnet/feed.h>
@@ -383,6 +384,156 @@ bool MaybeRunInferCmd(const fs::path& checkout, UniValue& result, std::string& e
     }
     result.pushKV("infer_ok", true);
     result.pushKV("generated", !line.empty());
+    return true;
+}
+
+bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::string& prompt,
+                        int max_new_tokens, UniValue& out, std::string& err)
+{
+    if (!fs::exists(exe) || !fs::is_regular_file(exe)) {
+        err = "BTX_MODEL_GENERATE is not a regular file";
+        return false;
+    }
+    int inpipe[2];
+    int outpipe[2];
+    if (pipe(inpipe) != 0) {
+        err = "generate pipe";
+        return false;
+    }
+    if (pipe(outpipe) != 0) {
+        close(inpipe[0]);
+        close(inpipe[1]);
+        err = "generate pipe";
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(inpipe[0]);
+        close(inpipe[1]);
+        close(outpipe[0]);
+        close(outpipe[1]);
+        err = "generate fork";
+        return false;
+    }
+    if (pid == 0) {
+        close(inpipe[1]);
+        close(outpipe[0]);
+        if (dup2(inpipe[0], STDIN_FILENO) < 0) _exit(127);
+        if (dup2(outpipe[1], STDOUT_FILENO) < 0) _exit(127);
+        close(inpipe[0]);
+        close(outpipe[1]);
+        const std::string exe_s = fs::PathToString(exe);
+        const std::string dir_s = fs::PathToString(dir);
+        const std::string n_s = std::to_string(max_new_tokens);
+        const char* argv[] = {exe_s.c_str(), "--dir", dir_s.c_str(), "--max-new-tokens", n_s.c_str(), nullptr};
+        execv(exe_s.c_str(), const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(inpipe[0]);
+    close(outpipe[1]);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("prompt", prompt);
+    req.pushKV("max_new_tokens", max_new_tokens);
+    const std::string body = req.write() + "\n";
+    if (::write(inpipe[1], body.data(), body.size()) < 0) {
+        close(inpipe[1]);
+        close(outpipe[0]);
+        kill(pid, SIGTERM);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        err = "generate stdin";
+        return false;
+    }
+    close(inpipe[1]);
+    std::string stdout_s;
+    char buf[4096];
+    ssize_t nread = 0;
+    while ((nread = ::read(outpipe[0], buf, sizeof(buf))) > 0) {
+        stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.find('\n') != std::string::npos) break;
+        if (stdout_s.size() > 1024 * 1024) break;
+    }
+    close(outpipe[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    const size_t nl = stdout_s.find('\n');
+    const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
+    if (!out.read(line) || !out.isObject()) {
+        err = "generate adapter json";
+        return false;
+    }
+    if (out.exists("ok") && !out["ok"].get_bool()) {
+        err = out.exists("error") && out["error"].isStr() ? out["error"].get_str() : "generate adapter failed";
+        return false;
+    }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        if (err.empty()) err = "generate adapter exit";
+        return false;
+    }
+    return true;
+}
+
+bool RunLlamaGenerate(const fs::path& exe, const fs::path& gguf, const std::string& prompt,
+                      int max_new_tokens, UniValue& out, std::string& err)
+{
+    if (!fs::exists(exe) || !fs::is_regular_file(exe) ||
+        ::access(fs::PathToString(exe).c_str(), X_OK) != 0) {
+        err = "BTX_LLAMA_CLI is not executable";
+        return false;
+    }
+    int outpipe[2];
+    if (pipe(outpipe) != 0) {
+        err = "llama pipe";
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(outpipe[0]);
+        close(outpipe[1]);
+        err = "llama fork";
+        return false;
+    }
+    if (pid == 0) {
+        close(outpipe[0]);
+        if (dup2(outpipe[1], STDOUT_FILENO) < 0) _exit(127);
+        const int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDERR_FILENO);
+            close(nullfd);
+        }
+        close(outpipe[1]);
+        const std::string exe_s = fs::PathToString(exe);
+        const std::string m_s = fs::PathToString(gguf);
+        const std::string n_s = std::to_string(max_new_tokens);
+        const char* argv[] = {
+            exe_s.c_str(), "-m", m_s.c_str(), "-p", prompt.c_str(), "-n", n_s.c_str(),
+            "--no-display-prompt", nullptr};
+        execv(exe_s.c_str(), const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(outpipe[1]);
+    std::string stdout_s;
+    char buf[4096];
+    ssize_t nread = 0;
+    while ((nread = ::read(outpipe[0], buf, sizeof(buf))) > 0) {
+        stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.size() > 1024 * 1024) break;
+    }
+    close(outpipe[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        err = "llama-cli exit";
+        return false;
+    }
+    while (!stdout_s.empty() && (stdout_s.back() == '\n' || stdout_s.back() == '\r')) stdout_s.pop_back();
+    out = UniValue(UniValue::VOBJ);
+    out.pushKV("ok", true);
+    out.pushKV("generated", true);
+    out.pushKV("text", stdout_s);
+    out.pushKV("backend", "llama.cpp");
+    out.pushKV("format", "gguf");
+    out.pushKV("remote_inference", false);
     return true;
 }
 
@@ -7671,6 +7822,111 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("note", "Stopped the helper-spawned CUDA loader only.");
         return true;
     }
+    if (method == "getmodelhostprofile") {
+        const HostGenerateProfile host = ProbeHostGenerateProfile();
+        result = HostGenerateProfileJson(host);
+        result.pushKV("automatic_spend_atoms", 0);
+        result.pushKV("next_actions", NextActionsArray({"generatemodel", "loadmodel"}));
+        return true;
+    }
+    if (method == "generatemodel") {
+        const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+        CatalogEntry e;
+        if (id.IsNull() || !cat.Find(id, e)) {
+            err_code = "NOT_FOUND";
+            return false;
+        }
+        if (e.incomplete) {
+            err_code = "INCOMPLETE";
+            err = "incomplete replica cannot generate; getmodel FREE_ONLY first";
+            return false;
+        }
+        std::string prompt;
+        int max_new = 32;
+        if (Arg(1).isStr()) {
+            prompt = Arg(1).get_str();
+        } else if (Arg(1).isObject()) {
+            if (Arg(1).exists("prompt") && Arg(1)["prompt"].isStr()) prompt = Arg(1)["prompt"].get_str();
+            if (Arg(1).exists("max_new_tokens")) {
+                max_new = Arg(1)["max_new_tokens"].getInt<int>();
+            }
+        }
+        if (prompt.empty()) {
+            err_code = "INVALID_PARAMETER";
+            err = "prompt required";
+            return false;
+        }
+        if (prompt.size() > 64 * 1024) {
+            err_code = "INVALID_PARAMETER";
+            err = "prompt too large";
+            return false;
+        }
+        if (max_new < 1) max_new = 1;
+        if (max_new > 512) max_new = 512;
+        const fs::path checkout = HelperDir(cat) / "checkout" / fs::PathFromString(e.artifact_id.Hex());
+        if (!cat.MaterializeCheckout(id, checkout, err)) {
+            err_code = "IO";
+            return false;
+        }
+        const HostGenerateProfile host = ProbeHostGenerateProfile();
+        const ArtifactGenerateView art = InspectCheckoutForGenerate(checkout);
+        std::string reason;
+        if (!ArtifactCompatibleWithHost(art, host, reason)) {
+            err_code = "INCOMPATIBLE_HOST_PROFILE";
+            err = reason;
+            result.pushKV("compatible", false);
+            result.pushKV("reason", reason);
+            result.pushKV("architecture", art.architecture);
+            result.pushKV("format", art.format == GenerateFormat::Gguf ? "gguf" :
+                                    art.format == GenerateFormat::SafeTensors ? "safetensors" :
+                                    art.format == GenerateFormat::Unsafe ? "unsafe" : "none");
+            result.pushKV("host", HostGenerateProfileJson(host));
+            result.pushKV("generated", false);
+            result.pushKV("remote_inference", false);
+            result.pushKV("automatic_spend_atoms", 0);
+            result.pushKV("execution_profile", static_cast<int>(e.core.execution_profile));
+            result.pushKV("next_actions", NextActionsArray({"getmodelhostprofile"}));
+            return false;
+        }
+        StopResident(e.artifact_id.Hex());
+        UniValue gen;
+        const std::string adapter = PickGenerateAdapter(art, host);
+        if (!adapter.empty()) {
+            if (!RunGenerateAdapter(fs::PathFromString(adapter), checkout, prompt, max_new, gen, err)) {
+                err_code = "NOT_RUN";
+                return false;
+            }
+        } else if (art.format == GenerateFormat::Gguf && host.llama_cli) {
+            if (!RunLlamaGenerate(fs::PathFromString(host.llama_cli_path),
+                                  fs::PathFromString(art.weights_path), prompt, max_new, gen, err)) {
+                err_code = "NOT_RUN";
+                return false;
+            }
+        } else {
+            err_code = "NOT_RUN";
+            err = "no generate adapter";
+            return false;
+        }
+        result.pushKV("schema_version", 2);
+        result.pushKV("model_id", e.model_id.Hex());
+        result.pushKV("artifact_id", e.artifact_id.Hex());
+        result.pushKV("path", fs::PathToString(checkout));
+        result.pushKV("compatible", true);
+        result.pushKV("generated", true);
+        result.pushKV("local_generate", true);
+        result.pushKV("inference", false);
+        result.pushKV("remote_inference", false);
+        result.pushKV("network_server", false);
+        result.pushKV("architecture", art.architecture);
+        result.pushKV("execution_profile", static_cast<int>(e.core.execution_profile));
+        result.pushKV("automatic_spend_atoms", 0);
+        if (gen.exists("text") && gen["text"].isStr()) result.pushKV("text", gen["text"].get_str());
+        if (gen.exists("backend") && gen["backend"].isStr()) result.pushKV("backend", gen["backend"].get_str());
+        result.pushKV("adapter", gen);
+        result.pushKV("next_actions", NextActionsArray({"generatemodel", "unloadmodel"}));
+        result.pushKV("note", "Local one-shot generate. Not a network inference server. CUDA smoke is not this RPC.");
+        return true;
+    }
     if (method == "getmodelpolicy" || method == "setmodelpolicy") {
         PreservationPolicy live = cat.Policy();
         if (method == "setmodelpolicy") {
@@ -9282,7 +9538,7 @@ int UnixRpcReplyTimeoutMs(const std::string& method)
     if (method == "waitformodelevent" || method == "importmodel" || method == "hostmodel" ||
         method == "getmodel" || method == "scanmodelwatch" || method == "executemodelimport" ||
         method == "importbtxpackage" || method == "exportmodelpath" || method == "loadmodel" ||
-        method == "unloadmodel") {
+        method == "unloadmodel" || method == "generatemodel") {
         return UNIX_RPC_LONG_REPLY_MS;
     }
     return UNIX_RPC_REPLY_MS;

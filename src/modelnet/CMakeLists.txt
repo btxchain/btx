@@ -38,6 +38,7 @@ add_library(bitcoin_modelnet STATIC
   http_bridge.cpp
   cores.cpp
   catalog.cpp
+  generate.cpp
   helper.cpp
   pq1_runtime.cpp
   piece_picker.cpp
