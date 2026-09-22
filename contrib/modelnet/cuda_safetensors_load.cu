@@ -1,11 +1,13 @@
 // Standalone safetensors -> device copy. Not linked into btxd.
-// Copies raw tensor bytes only. Does not launch kernels, mine, or start an inference server.
+// Copies raw tensor bytes. `--smoke` runs a kernel on the first tensor (xor twice,
+// weights restored). `--hold` keeps allocations until SIGTERM/SIGINT.
+// Does not mine or start a network inference server.
 //
 // Compile (default arch; operator may add -arch=sm_120):
 //   nvcc -O2 -std=c++17 -o cuda_safetensors_load cuda_safetensors_load.cu
 //
 // Usage:
-//   cuda_safetensors_load --dir <checkout> [--max-bytes N]
+//   cuda_safetensors_load --dir <checkout> [--max-bytes N] [--hold] [--smoke]
 //
 // One JSON line on stdout. CUDA missing at runtime: {"ok":false,"error":"..."} and exit 2.
 // Never prints a fake ok=true.
@@ -27,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include <csignal>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -48,6 +51,13 @@ struct Tensor {
 };
 
 std::vector<void*> g_devs;
+size_t g_first_nbytes = 0;
+volatile sig_atomic_t g_stop = 0;
+
+void on_term(int)
+{
+    g_stop = 1;
+}
 
 void free_device()
 {
@@ -55,6 +65,37 @@ void free_device()
         if (p) cudaFree(p);
     }
     g_devs.clear();
+    g_first_nbytes = 0;
+}
+
+__global__ void xor_smoke(unsigned char* p, size_t n, unsigned char k)
+{
+    const size_t i = static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x) + static_cast<size_t>(threadIdx.x);
+    if (i < n) p[i] ^= k;
+}
+
+bool run_smoke(std::string& err)
+{
+    if (g_devs.empty() || !g_devs[0] || g_first_nbytes == 0) {
+        err = "no device tensor for smoke";
+        return false;
+    }
+    const size_t n = std::min(g_first_nbytes, static_cast<size_t>(1048576));
+    const int threads = 256;
+    const int blocks = static_cast<int>((n + static_cast<size_t>(threads) - 1) / static_cast<size_t>(threads));
+    xor_smoke<<<blocks, threads>>>(static_cast<unsigned char*>(g_devs[0]), n, 0x5a);
+    xor_smoke<<<blocks, threads>>>(static_cast<unsigned char*>(g_devs[0]), n, 0x5a);
+    cudaError_t ce = cudaDeviceSynchronize();
+    if (ce != cudaSuccess) {
+        err = std::string("smoke sync: ") + cudaGetErrorString(ce);
+        return false;
+    }
+    ce = cudaGetLastError();
+    if (ce != cudaSuccess) {
+        err = std::string("smoke kernel: ") + cudaGetErrorString(ce);
+        return false;
+    }
+    return true;
 }
 
 std::string json_escape(const std::string& s)
@@ -527,6 +568,7 @@ bool copy_to_device(int fd, const unsigned char* mapped, uint64_t file_off, uint
             done += n;
         }
     }
+    if (g_devs.empty()) g_first_nbytes = static_cast<size_t>(nbytes);
     g_devs.push_back(dev);
     return true;
 }
@@ -689,10 +731,12 @@ int main(int argc, char** argv)
     const uint64_t* max_ptr = nullptr;
     uint64_t max_bytes = 0;
     bool have_max = false;
+    bool hold = false;
+    bool smoke = false;
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (std::strcmp(a, "--help") == 0) {
-            std::fprintf(stderr, "cuda_safetensors_load --dir <checkout> [--max-bytes N]\n");
+            std::fprintf(stderr, "cuda_safetensors_load --dir <checkout> [--max-bytes N] [--hold] [--smoke]\n");
             return 0;
         }
         if (std::strcmp(a, "--dir") == 0) {
@@ -709,6 +753,10 @@ int main(int argc, char** argv)
             std::string err;
             if (!parse_max_bytes(a + 12, max_bytes, err)) emit_fail(1, err);
             have_max = true;
+        } else if (std::strcmp(a, "--hold") == 0) {
+            hold = true;
+        } else if (std::strcmp(a, "--smoke") == 0) {
+            smoke = true;
         } else {
             emit_fail(1, std::string("unknown argument: ") + a);
         }
@@ -750,13 +798,30 @@ int main(int argc, char** argv)
     }
     if (tensors == 0 || bytes_on_device == 0) emit_fail(1, "no tensor bytes copied to device");
 
-    std::printf("{\"ok\":true,\"device_name\":\"%s\",\"tensors\":%llu,\"bytes_on_device\":%llu,\"files\":%llu,\"cuda_driver\":%d}\n",
+    bool smoke_passed = false;
+    if (smoke || hold) {
+        std::string serr;
+        if (!run_smoke(serr)) emit_fail(1, serr);
+        smoke_passed = true;
+    }
+
+    std::printf("{\"ok\":true,\"device_name\":\"%s\",\"tensors\":%llu,\"bytes_on_device\":%llu,\"files\":%llu,\"cuda_driver\":%d,\"resident\":%s,\"hold\":%s,\"smoke_passed\":%s,\"smoke\":\"%s\"}\n",
                 json_escape(prop.name).c_str(),
                 static_cast<unsigned long long>(tensors),
                 static_cast<unsigned long long>(bytes_on_device),
                 static_cast<unsigned long long>(files_done),
-                cuda_driver);
+                cuda_driver,
+                hold ? "true" : "false",
+                hold ? "true" : "false",
+                smoke_passed ? "true" : "false",
+                smoke_passed ? "kernel" : "");
     std::fflush(stdout);
+    if (hold) {
+        std::signal(SIGTERM, on_term);
+        std::signal(SIGINT, on_term);
+        std::signal(SIGHUP, on_term);
+        while (!g_stop) pause();
+    }
     free_device();
     return 0;
 }

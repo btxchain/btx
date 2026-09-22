@@ -26,6 +26,8 @@ VERBS = (
     "init",
     "doctor",
     "host",
+    "load",
+    "unload",
     "preview",
     "search",
     "get",
@@ -151,7 +153,9 @@ verbs:
                                  create the local research publisher only if missing
   doctor                         checkmodelsetup
   host PATH [OPTIONS_JSON]       hostmodel (pin+publish+seed; alias of importmodel)
-  host SHARE.btx | 'btx://…'     share link, not weights: preview card + getmodel
+  host SHARE.btx | 'btx://…'     share link, not weights: getmodel FREE_ONLY
+  load URI|ID                    loadmodel (resident CUDA if BTX_MODEL_CUDA_LOADER)
+  unload URI|ID                  unloadmodel (helper-spawned loader only)
   preview PATH                   previewmodelimport (size vs quota; no hash)
   search [TEXT] [--scope LOCAL|PEERS|NETWORK|ALL]
          [--format F] [--quantization Q] [--family F] [--architecture A]
@@ -872,8 +876,8 @@ def cmd_host(sock: str, args: list[str]) -> None:
     if not args:
         _die("host requires a filesystem path", 2)
     path = args[0]
-    # A .btx card or pasted copy_text is a share link, not weights. Preview it
-    # instead of hashing a card as a model (never import, never broadcast).
+    # A .btx card or pasted copy_text is a share link, not weights. Retrieve it
+    # with getmodel FREE_ONLY instead of hashing the card as a model.
     token = _first_btx_token(path)
     if not token and path.lower().endswith(_SHARE_FILE_SUFFIXES) and os.path.isfile(_resolve_path(path)):
         try:
@@ -886,11 +890,12 @@ def cmd_host(sock: str, args: list[str]) -> None:
     if token:
         if not JSON_MODE:
             print(
-                "btx-model: share card, not model weights; previewing the card "
-                "(no hash, no import, no seed)",
+                "btx-model: share card, not model weights; retrieving FREE_ONLY "
+                "(no hash of the card, no import-as-weights)",
                 file=sys.stderr,
             )
-        _print(_share_preview(sock, path if os.path.isfile(_resolve_path(path)) else token, "host"), "openmodelshare")
+        target = path if os.path.isfile(_resolve_path(path)) else token
+        _print(rpc(sock, "getmodel", [target, "FREE_ONLY"], timeout=GET_TIMEOUT_S), "getmodel")
         return
     _refuse_unsafe_path(path)
     params: list[Any] = [path]
@@ -903,6 +908,18 @@ def cmd_host(sock: str, args: list[str]) -> None:
     else:
         params.append({"pin": True, "publish": True})
     _print(rpc(sock, "hostmodel", params), "hostmodel")
+
+
+def cmd_load(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("load requires a btx:// URI, model id, or alias", 2)
+    _print(rpc(sock, "loadmodel", [args[0]], timeout=GET_TIMEOUT_S), "loadmodel")
+
+
+def cmd_unload(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("unload requires a btx:// URI, model id, or alias", 2)
+    _print(rpc(sock, "unloadmodel", [args[0]]), "unloadmodel")
 
 
 def cmd_preview(sock: str, args: list[str]) -> None:
@@ -2647,6 +2664,8 @@ COMMANDS = {
     "init": cmd_init,
     "doctor": cmd_doctor,
     "host": cmd_host,
+    "load": cmd_load,
+    "unload": cmd_unload,
     "preview": cmd_preview,
     "search": cmd_search,
     "get": cmd_get,

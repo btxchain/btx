@@ -632,7 +632,7 @@ static RPCHelpMan setmodelalias()
 
 static RPCHelpMan scanmodelwatch()
 {
-    return ProxyOrLocal("scanmodelwatch", "Scan -modelwatch directory and host new GGUF/SafeTensors. Idempotent.\n",
+    return ProxyOrLocal("scanmodelwatch", "Scan -modelwatch directory: host new GGUF/SafeTensors and FREE_ONLY retrieve dropped .btx share cards. Idempotent.\n",
                         {{"dir", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "override watch dir for this scan"}});
 }
 
@@ -897,6 +897,20 @@ static RPCHelpMan resolveresource()
 static RPCHelpMan exportmodelpath()
 {
     return ProxyOrLocal("exportmodelpath", "Return verified local store paths. Never starts a runtime.\n",
+                        {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI or digest48"}});
+}
+
+static RPCHelpMan loadmodel()
+{
+    return ProxyOrLocal("loadmodel",
+                        "Materialize a complete replica and optionally keep SafeTensors on a GPU via BTX_MODEL_CUDA_LOADER --hold --smoke. Never starts a network inference server. automatic_spend_atoms=0.\n",
+                        {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI or digest48"}});
+}
+
+static RPCHelpMan unloadmodel()
+{
+    return ProxyOrLocal("unloadmodel",
+                        "Stop the helper-spawned CUDA loader for this replica. Does not touch production btxd.\n",
                         {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI or digest48"}});
 }
 
@@ -1940,6 +1954,8 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &getmodeljob},
         {"modelnet", &cancelmodeljob},
         {"modelnet", &exportmodelpath},
+        {"modelnet", &loadmodel},
+        {"modelnet", &unloadmodel},
         {"modelnet", &getmodelpolicy},
         {"modelnet", &setmodelpolicy},
         {"modelnet", &listmodelidentities},

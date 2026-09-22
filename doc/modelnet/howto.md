@@ -1,13 +1,14 @@
-# How to test and use model hosting in this tree (0.34.8-dev)
+# How to test and use model hosting in this tree (0.34.9)
 
 This is the operator/researcher guide for **using** and **proving** the
 Native Model Network in this tree. Packaged `planning/acceptance-matrix.csv`
 is the production bar (PASS only where this tree has a Boost test or e2e
 script). Re-run the scripts; do not treat a capabilities bit as PASS.
-The shipping tag is **v0.34.8**; this tree is 0.34.8
-(`IS_RELEASE=true`). The first-run verbs below (`showmodel`,
+0.34.9 includes the 0.34.8 consensus catch-up scheduling (GitHub issue
+#163, closed in seal `77343da8`: retained tip-child gets the one RC job;
+cap stays 1). The first-run verbs below (`showmodel`,
 `unhostmodel`, `exportmodellink`, `btx-model show` / `unhost` / `link`)
-are new here and are not part of 0.34.7.
+are not part of 0.34.7.
 
 **Fail-fast:** every script below exits on the first error. Do not wait
 minutes after a `FAIL` / `retrieve failed` line.
@@ -52,15 +53,21 @@ start writes `identities.json` automatically (not a wallet key).
 readiness: `ready_to_mine`, `ibd`, `blocks`, `peer_count`, `headers`,
 `verificationprogress`, `one_liner`, `recommended_action`, `next_actions`)
 when `btxd` is up. `hostmodel` is the alias of `importmodel` (pin + signed
-search card + demand-seed). Ollama-style: `showmodel`, `setmodelalias` /
+search card + demand-seed). `btx-model host foo.btx` is **getmodel FREE_ONLY**
+(retrieves the share); it does not hash the card as weights. RPC `hostmodel` of
+a share_card still reports `reason=share_card` / `imported=false` and nests a
+FREE_ONLY retrieve. Ollama-style: `showmodel`, `setmodelalias` /
 `unhostmodel`, `exportmodellink` (`.btx` magnet analog). Watch folder:
-`-modelwatch=<dir>` then `scanmodelwatch` (`.btx` cards are opened, not
-imported as weights). Content-list and keep-state reads never fetch or infer:
+`-modelwatch=<dir>` then `scanmodelwatch` (a dropped `.btx` is opened **and**
+FREE_ONLY `getmodel` starts; quota applies to the model, not the card bytes;
+the card is not hashed as weights). Content-list and keep-state reads never fetch or infer:
 `getmodelmanifest` (per-file `path`/`role`/`size`/`sha384`, the aria2 metalink
 analog), `qualifymodel` (static structure check of a local path, the
 force-recheck analog), and `listmodels` filtered by `pinned`/`seeded`
 (`ipfs pin ls` analog). `exportmodelpath` returns the verified local store root
 and source path (`btx-model path NAME`; `hf download --local-dir` analog).
+MaterializeCheckout hardlinks from `source_path` when the original files still
+match SHA-384, so checkout does not always double disk.
 `searchmodels` already accepts catalog filters (`format`, `quantization`,
 `family`, `architecture`, `min_size_bytes` / `max_size_bytes`,
 `min_provider_count`, …); `btx-model search --format gguf --fits --sort size_asc`
@@ -211,8 +218,11 @@ Unix RPC is **one JSON line**:
 Expect `propagation.demand_propagation=true`, `peer_follow_propagation=true`, and `seed_upon_download_opt_in=false`.
 Import `seeded=true` without `seedmodel`.
 
-Point a **local** runtime at `exportmodelpath`. BTX does not start inference
-and does not expose it to the network.
+Point a **local** runtime at `exportmodelpath`. Checkout hardlinks from
+`source_path` when SHA-384 still matches. `loadmodel` with
+`BTX_MODEL_CUDA_LOADER` may keep tensors resident on a GPU; it still does
+not start a network inference server (`inference=false`,
+`remote_inference=false`).
 
 ### 2. Second helper downloads free
 
@@ -230,19 +240,30 @@ Do not `getmodel` granite into `~/.btx` or a production helper.
 
 `importmodel` of the real `ibm-granite/granite-4.0-h-tiny` fixture
 demand-seeds without `seedmodel`. Expect `family=granite`,
-`STRUCTURE_VERIFIED`, and 193 tensors on shard1. `execution_profile` stays
-0. That observation is not a usefulness or safety claim.
+`STRUCTURE_VERIFIED`, and 193 tensors on shard1. Granite-4.0-h-tiny is
+SafeTensors hybrid MoE/Mamba; `execution_profile` stays **0** (unqualified).
+Do not claim dense-decoder-v1. llama.cpp cannot open this checkout without
+GGUF conversion. Optional `BTX_MODEL_INFER_CMD` is an operator generate
+hook, not a fake PASS. That observation is not a usefulness or safety claim.
 
 Unix `getmodel` is async: `status=running` plus `job_id`. Poll
 `getmodeljob`. `contrib/modelnet/granite_host_roundtrip.py` does this and
 requires 3322 pieces and 13888336427 bytes on disk. `exportmodelpath`
-rebuilds the original HF/GGUF files from those pieces into
-`checkout/<artifact>/` (`path` / `usable_runtime_root`). SHA-384 in the
+rebuilds the original files from those pieces into
+`checkout/<artifact>/` (`path` / `usable_runtime_root`) and hardlinks from
+`source_path` when SHA-384 still matches. SHA-384 in the
 RPC is still the manifest; the checkout files are re-hashed on write.
 `getmodel` accepts a `.btx` share file or a `btx://` URI.
-`loadmodel` inventories SafeTensors and copies payloads onto CUDA device 0
-when `BTX_MODEL_CUDA_LOADER` is set to `contrib/modelnet/cuda_safetensors_load`
-(built with nvcc). It does not start a network inference server.
+`btx-model host foo.btx` is the same FREE_ONLY retrieve (not a weights
+import). RPC `hostmodel` of a share_card reports `reason=share_card` /
+`imported=false` and nests that retrieve.
+`loadmodel` inventories SafeTensors and, when `BTX_MODEL_CUDA_LOADER`
+points at `contrib/modelnet/cuda_safetensors_load` (built with nvcc), keeps
+tensors resident (`--hold --smoke`): `device_loaded=true`,
+`runtime_started=true`, `weights_resident=true`, `smoke_passed=true` from a
+CUDA kernel on loaded bytes. It still does not start a network inference
+server (`inference=false`, `remote_inference=false`). `unloadmodel`
+SIGTERMs the loader child only (never production `btxd`).
 `contrib/modelnet/granite_user_scenarios.py` is the .btx + URI + checkout
 (+ optional CUDA) path. `contrib/modelnet/two_helper_retrieve.py` and
 `e2e-local-helper.sh` are TinySafeTensors / 10-byte stub smokes.
@@ -381,6 +402,13 @@ Default `-modelruntimecheck=0` remains `NOT_RUN_CUDA_ISOLATION`.
 a live `GPU-01 RUNTIME_OBSERVED` is the e2e above. See
 `planning/acceptance-matrix.csv`.
 
+`ensurebtxcapability` remains the lab CPU fixture unless the request names
+a complete catalog replica and a non-CPU runtime (`safetensors-cuda` /
+CUDA backend + `BTX_MODEL_CUDA_LOADER`). Report `payload_source` honestly.
+`LoadTrustedRuntime` CUDA is `LIVE_RUNTIME_NOT_RUN` unless
+`BTX_MODEL_CUDA_LOADER` is set and the payload/checkout is SafeTensors.
+JIT-RUN-02 still fail-closes without that env.
+
 ### 11. Recovery
 
 See [recovery.md](recovery.md). Helper crash: restart `btx-modeld` on the
@@ -389,7 +417,7 @@ same `-modeldir`; committed pieces remain. Monetary node is independent.
 ## Isolation (do not violate)
 
 - Do not `systemctl --user stop` production `btxd` on the live attestor.
-- Do not `SIGKILL` production `btxd`.
+- Do not `SIGKILL` production `btxd`. `unloadmodel` SIGTERMs the helper-spawned CUDA loader child only.
 - Do not `getmodel` granite into `~/.btx`.
 - Do not name operator hostnames or seeder IPs in **public** trees.
 - One `-j$(nproc)` compile. `/tmp` is RAM.

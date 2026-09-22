@@ -634,14 +634,40 @@ if os.access(cli, os.X_OK):
     if cli_uri not in json.dumps(cli_open):
         raise SystemExit(f"btx-model open did not report the uri: {cli_open}")
 
-    # host of a .btx card previews the share; it never imports or broadcasts it.
+    # host of a .btx card is getmodel FREE_ONLY (retrieve the share). It never
+    # hashes the card as weights. CLI may return a getmodel object (status
+    # local or running) or a share_card wrapper with a nested retrieve.
+    # getmodel has no hosted key: requiring hosted is False would false-fail
+    # (None is not False).
     host_card = run_cli(["--socket", str(sock), "host", str(link_path)])
     if not isinstance(host_card, dict):
         raise SystemExit(f"btx-model host .btx expected object: {host_card}")
-    if host_card.get("hosted") is not False:
+    if host_card.get("automatic_spend_atoms", 0) not in (0, "0"):
+        raise SystemExit(f"btx-model host .btx automatic_spend_atoms must be 0: {host_card}")
+    if host_card.get("imported") is True:
         raise SystemExit(f"btx-model host .btx must not import a card as weights: {host_card}")
-    if "search_published" in host_card:
-        raise SystemExit(f"btx-model host .btx must not publish: {host_card}")
+    if host_card.get("hosted") is True:
+        raise SystemExit(f"btx-model host .btx must not host a card as weights: {host_card}")
+    # search_published on the card itself means the .btx was hashed as a model.
+    if host_card.get("search_published"):
+        raise SystemExit(f"btx-model host .btx must not hash/publish the card as a model: {host_card}")
+    retrieve = host_card.get("retrieve") if isinstance(host_card.get("retrieve"), dict) else {}
+    status = host_card.get("status")
+    retrieve_status = retrieve.get("status")
+    getmodel_ok = status in ("local", "running") or retrieve_status in ("local", "running")
+    share_ok = (
+        host_card.get("reason") == "share_card"
+        or host_card.get("weights_hashed") is False
+        or host_card.get("imported") is False
+    )
+    if status is not None and not getmodel_ok:
+        raise SystemExit(
+            f"btx-model host .btx getmodel status must be local or running: {host_card}"
+        )
+    if not getmodel_ok and not share_ok:
+        raise SystemExit(
+            f"btx-model host .btx expected getmodel (status local/running) or share_card, not a weights import: {host_card}"
+        )
 
     # Round 3 (models axis): HF `--local-dir` / reveal-in-folder analog.
     cli_path = run_cli(["--socket", str(sock), "path", "cli-host-alias"])

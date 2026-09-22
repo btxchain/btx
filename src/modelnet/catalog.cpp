@@ -134,6 +134,7 @@ UniValue CapabilitiesObject()
     c.pushKV("exportmodellink", true);
     c.pushKV("exportmodelpath", true);
     c.pushKV("loadmodel", true);
+    c.pushKV("unloadmodel", true);
     c.pushKV("unhostmodel", true);
     c.pushKV("removemodelalias", true);
     c.pushKV("openmodelshare", true);
@@ -1205,11 +1206,22 @@ bool ModelCatalog::MaterializeCheckout(const Digest48& model_or_artifact, const 
         return false;
     }
     fs::create_directories(dest);
+    fs::path src_root;
+    if (!e.source_path.empty()) src_root = fs::PathFromString(e.source_path);
     for (uint32_t i = 0; i < e.core.files.size(); ++i) {
         const CoreFile& f = e.core.files[i];
         if (!IsPortableRelPath(f.path, err)) return false;
         const fs::path outp = dest / fs::PathFromString(f.path);
-        if (!m_store.MaterializeFile(e.artifact_id, i, f.size, f.sha384, outp, err)) return false;
+        fs::path prefer;
+        if (!src_root.empty()) {
+            std::error_code sec;
+            if (fs::is_regular_file(src_root, sec) && !sec && e.core.files.size() == 1) {
+                prefer = src_root;
+            } else if (fs::is_directory(src_root, sec) && !sec) {
+                prefer = src_root / fs::PathFromString(f.path);
+            }
+        }
+        if (!m_store.MaterializeFile(e.artifact_id, i, f.size, f.sha384, outp, err, prefer)) return false;
     }
     return true;
 }

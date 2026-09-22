@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 """Import/seed granite-4.0-h-tiny on a host helper and FREE_ONLY retrieve on a peer.
 
-Not a claim of usefulness, safety, or alignment. execution_profile stays 0.
+ibm-granite/granite-4.0-h-tiny is SafeTensors hybrid MoE/Mamba.
+execution_profile stays 0 (unqualified). Do not claim dense-decoder-v1.
+llama.cpp cannot open this checkout without GGUF conversion.
+Optional BTX_MODEL_INFER_CMD is an operator generate hook, not a fake PASS.
+
+loadmodel with BTX_MODEL_CUDA_LOADER=contrib/modelnet/cuda_safetensors_load
+keeps tensors resident (--hold --smoke): device_loaded, runtime_started,
+weights_resident, smoke_passed from a CUDA kernel on loaded bytes. It does
+not start a network inference server (inference=false, remote_inference=false).
+unloadmodel SIGTERMs the loader child only (never production btxd).
+
+Not a claim of usefulness, safety, or alignment.
 Does not touch production btxd or the GPU.
 """
 from __future__ import annotations
@@ -136,6 +147,7 @@ def main():
             print("qualify_shard1", json.dumps(q, indent=2), flush=True)
             if q.get("result") == "REJECTED_UNSAFE_FORMAT":
                 raise SystemExit("granite shard rejected")
+            # Hybrid MoE/Mamba SafeTensors: execution_profile stays 0 (unqualified).
         man = rpc(hs, "getmodelmanifest", [uri], timeout=30)
         print("files", [(f["path"], f["size"]) for f in man.get("files", [])], flush=True)
         rpc(ps, "addmodelnode", [args.bind], timeout=10)
@@ -202,6 +214,8 @@ def main():
         nbytes = sum(p.stat().st_size for p in pieces)
         if len(pieces) != 3322 or nbytes != 13888336427:
             raise SystemExit(f"peer store {len(pieces)} pieces / {nbytes} bytes; want 3322 / 13888336427")
+        # Hardlinks from source_path when SHA-384 still matches; checkout need
+        # not double disk. Not a Hugging Face tree of piece files.
         exported = rpc(ps, "exportmodelpath", [uri], timeout=30)
         fixture = Path(args.fixture)
         files = exported.get("files") or []

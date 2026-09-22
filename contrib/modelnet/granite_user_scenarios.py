@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""User scenarios for granite-4.0-h-tiny: .btx link, FREE_ONLY retrieve, checkout, optional CUDA load.
+"""User scenarios for granite-4.0-h-tiny: .btx link, FREE_ONLY retrieve, checkout, CUDA hold+smoke.
 
-Not a claim of usefulness, safety, or alignment. inference and runtime stay off.
-automatic_spend_atoms stays 0. Does not touch production btxd or ~/.btx.
-Does not disturb a helper already bound to port 29447.
+Not a claim of usefulness, safety, or alignment. execution_profile stays 0
+(unqualified hybrid; not dense-decoder-v1). automatic_spend_atoms stays 0.
+Does not touch production btxd or ~/.btx. Does not disturb a helper on 29447.
+loadmodel with BTX_MODEL_CUDA_LOADER keeps tensors resident until unloadmodel.
+inference/remote_inference stay false (no network server).
 """
 from __future__ import annotations
 
@@ -421,21 +423,33 @@ def main():
             fail(f"checkout has no real .safetensors (piece files={len(disk_pieces)})")
         print("scenario E ok", root, "files", len(files), "safetensors", len(disk_st), flush=True)
 
-        # F. loadmodel does not start inference. CUDA load is the external loader only.
+        # F. loadmodel keeps CUDA tensors resident and smokes a kernel. No network server.
         loaded = rpc(ps, "loadmodel", [canon], timeout=args.retrieve_timeout)
         spend0(loaded, "loadmodel")
-        if loaded.get("inference") is not False or loaded.get("runtime_started") is not False:
-            fail(f"loadmodel started inference: {loaded}")
+        if loaded.get("inference") is not False or loaded.get("remote_inference") is not False:
+            fail(f"loadmodel started a network inference server: {loaded}")
+        if int(loaded.get("execution_profile") or 0) != 0:
+            fail(f"granite execution_profile must stay 0: {loaded}")
         if cuda_loader is not None:
             if peer_env.get("BTX_MODEL_CUDA_LOADER") != str(cuda_loader):
                 fail("BTX_MODEL_CUDA_LOADER was not set on the peer")
             if loaded.get("device_loaded") is not True:
                 fail(f"device_loaded is not true: {loaded}")
+            if loaded.get("weights_resident") is not True:
+                fail(f"weights_resident is not true: {loaded}")
+            if loaded.get("runtime_started") is not True:
+                fail(f"runtime_started is not true: {loaded}")
+            if loaded.get("smoke_passed") is not True:
+                fail(f"smoke_passed is not true: {loaded}")
             if int(loaded.get("bytes_on_device") or 0) <= 0:
                 fail(f"bytes_on_device not > 0: {loaded}")
+            unloaded = rpc(ps, "unloadmodel", [canon], timeout=60)
+            spend0(unloaded, "unloadmodel")
+            if unloaded.get("unloaded") is not True:
+                fail(f"unloadmodel failed: {unloaded}")
         elif loaded.get("device_loaded") is True:
             fail(f"device_loaded without cuda loader: {loaded}")
-        print("scenario F ok", "device_loaded", loaded.get("device_loaded"), "bytes_on_device", loaded.get("bytes_on_device"), flush=True)
+        print("scenario F ok", "device_loaded", loaded.get("device_loaded"), "bytes_on_device", loaded.get("bytes_on_device"), "smoke", loaded.get("smoke_passed"), flush=True)
         print("GRANITE_USER_SCENARIOS PASS")
     finally:
         for proc in (ph, pp):

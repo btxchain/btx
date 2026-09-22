@@ -26,9 +26,12 @@
 
 #include <cstring>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_hosting_tests, BasicTestingSetup)
@@ -682,6 +685,7 @@ BOOST_AUTO_TEST_CASE(loadmodel_lists_local_files_without_starting_inference)
     modelnet::ModelCatalog cat{tmp, 8 << 20};
     constexpr unsigned char tag = 0x84;
     const auto imported = ImportTiny(cat, tmp / "src", tag, true);
+    ::unsetenv("BTX_MODEL_CUDA_LOADER");
 
     UniValue rpc(UniValue::VOBJ);
     rpc.pushKV("method", "loadmodel");
@@ -737,6 +741,102 @@ BOOST_AUTO_TEST_CASE(getmodel_opens_btx_share_file)
     BOOST_CHECK_EQUAL(result["status"].get_str(), "local");
     BOOST_CHECK(result["uri"].get_str().rfind("btx://", 0) == 0);
     BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(hostmodel_share_card_retrieves_free_only)
+{
+    const fs::path tmp = m_path_root / "host-share-retrieve";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x86, true);
+    const fs::path link = tmp / "card.btx";
+    UniValue wrpc(UniValue::VOBJ);
+    wrpc.pushKV("method", "exportmodellink");
+    UniValue wparams(UniValue::VARR);
+    wparams.push_back(imported.model_id.Hex());
+    wparams.push_back(fs::PathToString(link));
+    wrpc.pushKV("params", wparams);
+    UniValue written;
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, wrpc, written, code, err), err);
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "hostmodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(fs::PathToString(link));
+    rpc.pushKV("params", params);
+    UniValue card;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, card, code, err), err);
+    BOOST_CHECK(!card["imported"].get_bool());
+    BOOST_CHECK_EQUAL(card["reason"].get_str(), "share_card");
+    BOOST_REQUIRE(card.exists("retrieve"));
+    BOOST_CHECK_EQUAL(card["retrieve"]["status"].get_str(), "local");
+}
+
+BOOST_AUTO_TEST_CASE(materialize_checkout_hardlinks_matching_source)
+{
+    const fs::path tmp = m_path_root / "checkout-hardlink";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x87, true);
+    const fs::path dest = tmp / "checkout";
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.MaterializeCheckout(imported.model_id, dest, err), err);
+    const fs::path srcf = fs::PathFromString(imported.source_path) / "model.safetensors";
+    const fs::path dstf = dest / "model.safetensors";
+    BOOST_REQUIRE(fs::exists(srcf));
+    BOOST_REQUIRE(fs::exists(dstf));
+    struct stat ss {}, ds {};
+    BOOST_REQUIRE_EQUAL(::stat(fs::PathToString(srcf).c_str(), &ss), 0);
+    BOOST_REQUIRE_EQUAL(::stat(fs::PathToString(dstf).c_str(), &ds), 0);
+    BOOST_CHECK_EQUAL(ss.st_dev, ds.st_dev);
+    BOOST_CHECK_EQUAL(ss.st_ino, ds.st_ino);
+}
+
+BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
+{
+    const fs::path tmp = m_path_root / "load-hold";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x88, true);
+    const fs::path loader = tmp / "fake-cuda-loader";
+    {
+        std::ofstream out(loader);
+        out << "#!/usr/bin/env python3\n"
+               "import signal, sys, time\n"
+               "hold = \"--hold\" in sys.argv\n"
+               "print('{\"ok\":true,\"device_name\":\"fake\",\"tensors\":1,\"bytes_on_device\":8,\"resident\":true,\"smoke_passed\":true,\"smoke\":\"kernel\"}', flush=True)\n"
+               "if hold:\n"
+               "    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))\n"
+               "    signal.signal(signal.SIGINT, lambda *a: sys.exit(0))\n"
+               "    while True:\n"
+               "        time.sleep(3600)\n"
+               "sys.exit(0)\n";
+    }
+    ::chmod(fs::PathToString(loader).c_str(), 0755);
+    BOOST_REQUIRE_EQUAL(::setenv("BTX_MODEL_CUDA_LOADER", fs::PathToString(loader).c_str(), 1), 0);
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "loadmodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
+    BOOST_CHECK_EQUAL(result["device_loaded"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result["weights_resident"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result["runtime_started"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result["inference"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["smoke_passed"].get_bool(), true);
+    BOOST_CHECK(result.exists("loader_pid"));
+    BOOST_CHECK_GT(result["loader_pid"].getInt<int64_t>(), 0);
+
+    UniValue urpc(UniValue::VOBJ);
+    urpc.pushKV("method", "unloadmodel");
+    urpc.pushKV("params", params);
+    UniValue unloaded;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, urpc, unloaded, code, err), err);
+    BOOST_CHECK_EQUAL(unloaded["unloaded"].get_bool(), true);
+    BOOST_CHECK_EQUAL(unloaded["device_loaded"].get_bool(), false);
+    ::unsetenv("BTX_MODEL_CUDA_LOADER");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

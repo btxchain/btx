@@ -338,6 +338,7 @@ BOOST_AUTO_TEST_CASE(show_export_open_unhost_empty_search)
     const UniValue scanned = Dispatch(cat, Rpc("scanmodelwatch", scanp));
     BOOST_CHECK_EQUAL(scanned["imported_count"].getInt<int>(), 0);
     BOOST_REQUIRE_GE(scanned["opened_count"].getInt<int>(), 1);
+    BOOST_REQUIRE_GE(scanned["retrieved_count"].getInt<int>(), 1);
 
     UniValue rmp(UniValue::VARR);
     rmp.push_back("qwen3-local");
@@ -688,6 +689,8 @@ BOOST_AUTO_TEST_CASE(unix_rpc_timeout_is_short_except_long_methods)
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("getmodel"), 24 * 60 * 60 * 1000);
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("waitformodelevent"), 24 * 60 * 60 * 1000);
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("scanmodelwatch"), 24 * 60 * 60 * 1000);
+    BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("loadmodel"), 24 * 60 * 60 * 1000);
+    BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("unloadmodel"), 24 * 60 * 60 * 1000);
 }
 
 BOOST_AUTO_TEST_CASE(unknown_helper_rpc_fails_immediately_method_not_found)

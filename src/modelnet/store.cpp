@@ -613,8 +613,33 @@ bool ModelStore::RenameArtifact(const Digest48& from, const Digest48& to, std::s
     return true;
 }
 
+bool FileBytesMatchSha384(const fs::path& path, uint64_t file_size, const Digest48& expected_sha384)
+{
+    std::error_code ec;
+    if (fs::is_symlink(path, ec)) return false;
+    if (!fs::is_regular_file(path, ec) || ec) return false;
+    const auto sz = fs::file_size(path, ec);
+    if (ec || sz != file_size) return false;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    CSHA384 hasher;
+    std::vector<unsigned char> buf(PIECE_SIZE);
+    uint64_t remaining = file_size;
+    while (remaining > 0) {
+        const size_t n = static_cast<size_t>(std::min<uint64_t>(PIECE_SIZE, remaining));
+        in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(n));
+        if (static_cast<size_t>(in.gcount()) != n) return false;
+        hasher.Write(buf.data(), n);
+        remaining -= n;
+    }
+    Digest48 got;
+    hasher.Finalize(got.data.data());
+    return got == expected_sha384;
+}
+
 bool ModelStore::MaterializeFile(const Digest48& artifact, uint32_t file_index, uint64_t file_size,
-                                 const Digest48& expected_sha384, const fs::path& dest, std::string& err) const
+                                 const Digest48& expected_sha384, const fs::path& dest, std::string& err,
+                                 const fs::path& prefer_link) const
 {
     if (dest.empty()) {
         err = "empty dest";
@@ -625,27 +650,18 @@ bool ModelStore::MaterializeFile(const Digest48& artifact, uint32_t file_index, 
         err = "dest is a symlink";
         return false;
     }
-    if (fs::is_regular_file(dest, ec) && !ec) {
-        const auto sz = fs::file_size(dest, ec);
-        if (!ec && sz == file_size) {
-            std::ifstream in(dest, std::ios::binary);
-            CSHA384 hasher;
-            std::vector<unsigned char> buf(PIECE_SIZE);
-            uint64_t remaining = file_size;
-            bool ok = static_cast<bool>(in);
-            while (ok && remaining > 0) {
-                const size_t n = static_cast<size_t>(std::min<uint64_t>(PIECE_SIZE, remaining));
-                in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(n));
-                if (static_cast<size_t>(in.gcount()) != n) {
-                    ok = false;
-                    break;
-                }
-                hasher.Write(buf.data(), n);
-                remaining -= n;
-            }
-            Digest48 got;
-            hasher.Finalize(got.data.data());
-            if (ok && remaining == 0 && got == expected_sha384) return true;
+    if (FileBytesMatchSha384(dest, file_size, expected_sha384)) return true;
+    if (!prefer_link.empty() && prefer_link != dest && FileBytesMatchSha384(prefer_link, file_size, expected_sha384)) {
+        if (fs::exists(dest)) {
+            fs::remove(dest, ec);
+        }
+        fs::create_directories(dest.parent_path());
+        fs::create_hard_link(prefer_link, dest, ec);
+        if (!ec && FileBytesMatchSha384(dest, file_size, expected_sha384)) return true;
+        ec.clear();
+        if (fs::copy_file(prefer_link, dest, fs::copy_options::overwrite_existing) &&
+            FileBytesMatchSha384(dest, file_size, expected_sha384)) {
+            return true;
         }
     }
     fs::create_directories(dest.parent_path());

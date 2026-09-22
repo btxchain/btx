@@ -8,6 +8,7 @@
 // Coordinator wires DispatchCapabilityRpc to these symbols.
 
 #include <modelnet/capability.h>
+#include <modelnet/resource_uri.h>
 #include <modelnet/transfer_session.h>
 
 #include <crypto/common.h>
@@ -549,7 +550,6 @@ bool PlanCapabilityUpdate(const UniValue& request, UniValue& result, std::string
 bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& result, std::string& err_code,
                       std::string& err)
 {
-    (void)cat;
     result = UniValue(UniValue::VOBJ);
     err_code.clear();
     err.clear();
@@ -755,6 +755,38 @@ bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& resu
                          UniValue(UniValue::VOBJ);
     if (!typed.exists("adapter_abi")) typed.pushKV("adapter_abi", RUNTIME_ADAPTER_ABI);
     if (!typed.exists("backend") && runtime_id == "synthetic-cpu-fixture") typed.pushKV("backend", "CPU");
+    if (!typed.exists("backend") && runtime_id == "safetensors-cuda") typed.pushKV("backend", "CUDA");
+
+    CatalogEntry catalog_e;
+    bool have_catalog = false;
+    std::string mid = FieldStr(request, "model_id");
+    if (mid.empty()) mid = FieldStr(request, "uri");
+    if (mid.empty() && request.exists("recipe") && request["recipe"].isObject()) {
+        mid = FieldStr(request["recipe"], "model_id");
+    }
+    if (!mid.empty()) {
+        Digest48 cid{};
+        std::string herr;
+        if (Digest48::FromHex(mid, cid, herr)) {
+            have_catalog = cat.Find(cid, catalog_e) && !catalog_e.incomplete;
+        } else {
+            Resource parsed;
+            if (DecodeResource(mid, parsed, herr) && parsed.kind == ResourceKind::MODEL) {
+                have_catalog = cat.Find(parsed.digest, catalog_e) && !catalog_e.incomplete;
+            }
+        }
+    }
+    bool used_catalog = false;
+    if (have_catalog && runtime_id != "synthetic-cpu-fixture") {
+        fs::path checkout = fs::temp_directory_path();
+        checkout /= fs::PathFromString(std::string("btx-ensure-") + catalog_e.artifact_id.Hex().substr(0, 24));
+        std::string merr;
+        if (!cat.MaterializeCheckout(catalog_e.model_id, checkout, merr)) {
+            return FailResult(result, err_code, err, "IO", merr, "materialize");
+        }
+        typed.pushKV("checkout_dir", fs::PathToString(checkout));
+        used_catalog = true;
+    }
 
     ReadyReceipt receipt;
     const bool block_warmup = FieldTrue(request, "block_warmup") || FieldTrue(request, "smoke_blocked");
@@ -805,12 +837,12 @@ bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& resu
     ev.pushKV("plan_id", plan_id);
     (void)AppendCapabilityEvent(ev);
 
-    // #168: this lane is IMPLEMENTED_LAB. `(void)cat` above is honest — the path
-    // materializes the local CPU fixture, it never dereferences the plan's recipe
-    // digest. So the result must not claim a canonical acquire. `acquired_bytes`
-    // is the fixture actually written, never the plan's requested byte contract.
+    // Default lane is IMPLEMENTED_LAB (CPU fixture). A complete catalog replica is
+    // used only when the request names model_id/uri and a non-CPU runtime.
     const uint64_t requested_bytes = static_cast<uint64_t>(plan.missing_bytes);
-    const uint64_t acquired_bytes = static_cast<uint64_t>(fixture.size());
+    const uint64_t acquired_bytes = used_catalog ? catalog_e.core.files.empty() ? static_cast<uint64_t>(fixture.size())
+                                                                               : catalog_e.core.files[0].size :
+                                                   static_cast<uint64_t>(fixture.size());
     int percent_ready = 100;
     if (requested_bytes > 0 && acquired_bytes < requested_bytes) {
         percent_ready = static_cast<int>((acquired_bytes * 100) / requested_bytes);
@@ -835,9 +867,12 @@ bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& resu
     progress.pushKV("percent_ready", percent_ready);
 
     result = receipt.json.isObject() ? receipt.json : UniValue(UniValue::VOBJ);
-    result.pushKV("implementation_status", "IMPLEMENTED_LAB");
-    result.pushKV("scope", "LOCAL_FIXTURE");
-    result.pushKV("fixture_path", true);
+    result.pushKV("payload_source", used_catalog ? "catalog_checkout" : "lab_cpu_fixture");
+    result.pushKV("catalog_replica", have_catalog);
+    if (have_catalog) result.pushKV("catalog_model_id", catalog_e.model_id.Hex());
+    result.pushKV("implementation_status", used_catalog ? "CATALOG_REPLICA" : "IMPLEMENTED_LAB");
+    result.pushKV("scope", used_catalog ? "CATALOG_REPLICA" : "LOCAL_FIXTURE");
+    result.pushKV("fixture_path", !used_catalog);
     // The fixture runtime loaded, but the requested recipe digest was not acquired.
     // `ready:false` keeps an agent from treating this as a completed acquire.
     result.pushKV("ready", false);

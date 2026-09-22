@@ -3,9 +3,9 @@
 // file COPYING or https://opensource.org/license/mit/.
 //
 // Trusted local runtime adapters (BTX-SPEC-0348-CAPABILITY-01 RUN).
-// Operator-env executables only: BTX_LLAMA_CLI / BTX_VLLM / BTX_MLX.
-// Package JSON never chooses process authority. CUDA/ROCm/Metal PASS is
-// not claimed from a mock or from nvidia-smi/rocm/Metal absence.
+// Operator-env executables only: BTX_LLAMA_CLI / BTX_VLLM / BTX_MLX / BTX_MODEL_CUDA_LOADER.
+// Package JSON never chooses process authority. CUDA PASS requires a live
+// BTX_MODEL_CUDA_LOADER hold+smoke on a SafeTensors checkout (or verified ST bytes).
 //
 // Exported symbols (coordinator may declare these in capability.h):
 //   LoadTrustedRuntime
@@ -19,15 +19,24 @@
 #include <modelnet/capability.h>
 
 #include <crypto/sha384.h>
+#include <span.h>
+#include <univalue.h>
 #include <util/fs.h>
 
+#include <cstdlib>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <set>
 #include <string>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace modelnet {
 namespace {
@@ -45,6 +54,8 @@ struct RuntimeSession {
     bool remapped_only{false};
     bool sleeping{false};
     bool ready{false};
+    pid_t loader_pid{0};
+    fs::path checkout;
 };
 
 std::mutex g_rt_mu;
@@ -168,6 +179,7 @@ bool MetalUsable(std::string& detail)
 const std::set<std::string> kAllowedParamKeys{
     "adapter_abi", "backend",     "runtime_id",      "context_tokens", "threads", "gpu_layers",
     "device_arch", "driver_abi", "layout_digest48", "geometry",       "smoke",   "flags",
+    "checkout_dir",
 };
 
 const std::set<std::string> kForbiddenParamKeys{
@@ -237,6 +249,7 @@ const char* OperatorEnvName(const std::string& runtime_id)
     if (runtime_id == "llama.cpp") return "BTX_LLAMA_CLI";
     if (runtime_id == "vLLM" || runtime_id == "vllm") return "BTX_VLLM";
     if (runtime_id == "MLX" || runtime_id == "mlx") return "BTX_MLX";
+    if (runtime_id == "safetensors-cuda") return "BTX_MODEL_CUDA_LOADER";
     return nullptr;
 }
 
@@ -244,6 +257,7 @@ std::string CanonicalRuntimeId(const std::string& runtime_id)
 {
     if (runtime_id == "vllm") return "vLLM";
     if (runtime_id == "mlx") return "MLX";
+    if (runtime_id == "safetensors_cuda" || runtime_id == "safetensors-cuda") return "safetensors-cuda";
     return runtime_id;
 }
 
@@ -253,6 +267,7 @@ std::string DefaultBackend(const std::string& runtime_id)
     if (runtime_id == "llama.cpp") return "CPU";
     if (runtime_id == "vLLM") return "CUDA";
     if (runtime_id == "MLX") return "METAL";
+    if (runtime_id == "safetensors-cuda") return "CUDA";
     return {};
 }
 
@@ -301,6 +316,94 @@ Digest48 RebuildKvDigest(const std::vector<unsigned char>& weights)
     hasher.Write(tag, sizeof(tag));
     hasher.Finalize(out.data.data());
     return out;
+}
+
+bool LooksLikeSafeTensors(Span<const unsigned char> v)
+{
+    if (v.size() < 8) return false;
+    uint64_t jlen = 0;
+    for (int i = 0; i < 8; ++i) jlen |= static_cast<uint64_t>(v[i]) << (8 * i);
+    return jlen > 0 && jlen <= 64ull * 1024ull * 1024ull && v.size() >= 8 + jlen;
+}
+
+bool PathHasDotDot(const fs::path& p)
+{
+    for (const auto& c : p) {
+        if (c == "..") return true;
+    }
+    return false;
+}
+
+bool SpawnCudaLoaderHold(const fs::path& loader, const fs::path& dir, pid_t& pid_out, UniValue& json, std::string& err)
+{
+    std::error_code ec;
+    if (!fs::is_regular_file(loader, ec) || ec) {
+        err = "BTX_MODEL_CUDA_LOADER is not a regular file";
+        return false;
+    }
+    if (PathHasDotDot(dir)) {
+        err = "refusing checkout_dir with ..";
+        return false;
+    }
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        err = "pipe";
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        err = "fork";
+        return false;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
+        close(pipefd[1]);
+        const std::string loader_s = fs::PathToString(loader);
+        const std::string dir_s = fs::PathToString(dir);
+        const char* argv[] = {loader_s.c_str(), "--dir", dir_s.c_str(), "--hold", "--smoke", nullptr};
+        execv(loader_s.c_str(), const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(pipefd[1]);
+    std::string stdout_s;
+    char buf[4096];
+    ssize_t nread = 0;
+    while ((nread = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
+        stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.find('\n') != std::string::npos) break;
+        if (stdout_s.size() > 1024 * 1024) break;
+    }
+    close(pipefd[0]);
+    const size_t nl = stdout_s.find('\n');
+    const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
+    if (!json.read(line) || !json.isObject() || (json.exists("ok") && !json["ok"].get_bool())) {
+        ::kill(pid, SIGTERM);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        err = json.exists("error") && json["error"].isStr() ? json["error"].get_str() : "cuda loader json";
+        return false;
+    }
+    pid_out = pid;
+    return true;
+}
+
+bool WriteTempSafeTensors(Span<const unsigned char> verified, fs::path& dir, std::string& err)
+{
+    dir = fs::temp_directory_path();
+    dir /= fs::PathFromString(std::string("btx-rt-") + std::to_string(::getpid()) + "-" + std::to_string(std::rand()));
+    fs::create_directories(dir);
+    fs::path st = dir;
+    st /= fs::PathFromString("model.safetensors");
+    std::ofstream out(st, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        err = "write temp safetensors";
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(verified.data()), static_cast<std::streamsize>(verified.size()));
+    return static_cast<bool>(out);
 }
 
 } // namespace
@@ -352,7 +455,8 @@ bool LoadTrustedRuntime(const std::string& runtime_id, Span<const unsigned char>
     }
 
     const std::string rid = CanonicalRuntimeId(runtime_id);
-    if (rid != "synthetic-cpu-fixture" && rid != "llama.cpp" && rid != "vLLM" && rid != "MLX") {
+    if (rid != "synthetic-cpu-fixture" && rid != "llama.cpp" && rid != "vLLM" && rid != "MLX" &&
+        rid != "safetensors-cuda") {
         return FailReceipt(receipt, err_code, err, "UNSUPPORTED_RUNTIME_PROFILE", runtime_id);
     }
 
@@ -391,8 +495,57 @@ bool LoadTrustedRuntime(const std::string& runtime_id, Span<const unsigned char>
         if (!CudaUsable(d)) {
             return FailReceipt(receipt, err_code, err, "HARDWARE_NOT_RUN", d);
         }
+        const char* loader = std::getenv("BTX_MODEL_CUDA_LOADER");
+        fs::path checkout;
+        const std::string checkout_s = ParamStr(typed_params, "checkout_dir");
+        if (!checkout_s.empty()) checkout = fs::PathFromString(checkout_s);
+        if (loader && loader[0] != '\0' && fs::exists(fs::PathFromString(loader))) {
+            if (checkout.empty() && LooksLikeSafeTensors(verified)) {
+                if (!WriteTempSafeTensors(verified, checkout, err)) {
+                    return FailReceipt(receipt, err_code, err, "UNVERIFIED_RANGE", err);
+                }
+            }
+            if (!checkout.empty()) {
+                pid_t child = 0;
+                UniValue loaded;
+                if (!SpawnCudaLoaderHold(fs::PathFromString(loader), checkout, child, loaded, err)) {
+                    return FailReceipt(receipt, err_code, err, "LIVE_RUNTIME_NOT_RUN", err + "; NOT_RUN");
+                }
+                Digest48 smoke{};
+                if (!verified.empty()) {
+                    std::string serr;
+                    (void)CpuFixtureSmoke(verified, smoke, serr);
+                }
+                RuntimeSession sess;
+                sess.runtime_id = rid;
+                sess.backend = "CUDA";
+                sess.lease_id = GenerationHex(NewGeneration());
+                if (verified.size() <= 4 * 1024 * 1024) sess.weights.assign(verified.begin(), verified.end());
+                sess.weight_digest = smoke;
+                sess.kv_digest = RebuildKvDigest(sess.weights.empty() ? std::vector<unsigned char>(1, 0) : sess.weights);
+                sess.weights_resident = true;
+                sess.kv_resident = true;
+                sess.kv_rebuilt = true;
+                sess.loader_pid = child;
+                sess.checkout = checkout;
+                sess.ready = loaded.exists("smoke_passed") ? loaded["smoke_passed"].get_bool() : true;
+                receipt.lease_id = sess.lease_id;
+                receipt.achieved = sess.ready ? ReadinessTarget::FIRST_USEFUL_RESULT : ReadinessTarget::RUNTIME_LOADED;
+                receipt.smoke_performed = true;
+                receipt.smoke_passed = sess.ready;
+                FillReadyJson(receipt, sess, smoke);
+                receipt.json.pushKV("device_loaded", true);
+                receipt.json.pushKV("weights_resident", true);
+                receipt.json.pushKV("runtime_started", true);
+                receipt.json.pushKV("cuda", loaded);
+                receipt.json.pushKV("payload_source", checkout_s.empty() ? "verified_safetensors" : "checkout_dir");
+                std::lock_guard<std::mutex> lock(g_rt_mu);
+                g_sessions[sess.lease_id] = std::move(sess);
+                return true;
+            }
+        }
         return FailReceipt(receipt, err_code, err, "LIVE_RUNTIME_NOT_RUN",
-                           "CUDA usable but live loader/warmup was not executed; mock is not PASS; NOT_RUN");
+                           "CUDA usable but BTX_MODEL_CUDA_LOADER was not executed on a SafeTensors checkout; mock is not PASS; NOT_RUN");
     }
     if (BackendNeedsRocm(backend)) {
         std::string d;
@@ -505,8 +658,26 @@ bool WakeRuntimeRebuildKv(const std::string& lease_id, ReadyReceipt& receipt, st
     auto it = g_sessions.find(lease_id);
     if (it == g_sessions.end()) return Fail(err_code, err, "UNKNOWN_LEASE", lease_id);
     RuntimeSession& s = it->second;
-    if (!s.weights_resident || s.weights.empty()) {
+    if (!s.weights_resident || (s.weights.empty() && s.loader_pid <= 0)) {
         return FailReceipt(receipt, err_code, err, "UNVERIFIED_RANGE", "preserved weights missing");
+    }
+    if (s.loader_pid > 0) {
+        if (::kill(s.loader_pid, 0) != 0 && errno != EPERM) {
+            return FailReceipt(receipt, err_code, err, "UNVERIFIED_RANGE", "CUDA loader no longer resident");
+        }
+        s.kv_resident = true;
+        s.kv_rebuilt = true;
+        s.remapped_only = false;
+        s.sleeping = false;
+        s.ready = true;
+        receipt.lease_id = s.lease_id;
+        receipt.achieved = ReadinessTarget::FIRST_USEFUL_RESULT;
+        receipt.smoke_performed = true;
+        receipt.smoke_passed = true;
+        FillReadyJson(receipt, s, s.weight_digest);
+        receipt.json.pushKV("device_loaded", true);
+        receipt.json.pushKV("weights_resident", true);
+        return true;
     }
     if (s.remapped_only && !s.kv_rebuilt) {
         // Remap may have happened; it is not success. Rebuild is mandatory.

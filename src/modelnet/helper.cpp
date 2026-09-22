@@ -222,7 +222,7 @@ bool InventorySafeTensorsFile(const fs::path& path, UniValue& tensors, uint64_t&
     return true;
 }
 
-bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, std::string& err)
+bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, std::string& err, pid_t* hold_pid)
 {
     std::error_code ec;
     if (!fs::is_regular_file(loader, ec) || ec) {
@@ -247,8 +247,13 @@ bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, s
         close(pipefd[1]);
         const std::string loader_s = fs::PathToString(loader);
         const std::string dir_s = fs::PathToString(dir);
-        const char* argv[] = {loader_s.c_str(), "--dir", dir_s.c_str(), nullptr};
-        execv(loader_s.c_str(), const_cast<char* const*>(argv));
+        if (hold_pid) {
+            const char* argv[] = {loader_s.c_str(), "--dir", dir_s.c_str(), "--hold", "--smoke", nullptr};
+            execv(loader_s.c_str(), const_cast<char* const*>(argv));
+        } else {
+            const char* argv[] = {loader_s.c_str(), "--dir", dir_s.c_str(), "--smoke", nullptr};
+            execv(loader_s.c_str(), const_cast<char* const*>(argv));
+        }
         _exit(127);
     }
     close(pipefd[1]);
@@ -257,21 +262,127 @@ bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, s
     ssize_t nread = 0;
     while ((nread = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
         stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.find('\n') != std::string::npos) break;
         if (stdout_s.size() > 1024 * 1024) break;
+    }
+    close(pipefd[0]);
+    const size_t nl = stdout_s.find('\n');
+    const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
+    if (!out.read(line) || !out.isObject()) {
+        int st = 0;
+        kill(pid, SIGTERM);
+        waitpid(pid, &st, 0);
+        err = "cuda loader json";
+        return false;
+    }
+    if (out.exists("ok") && !out["ok"].get_bool()) {
+        int st = 0;
+        kill(pid, SIGTERM);
+        waitpid(pid, &st, 0);
+        err = out.exists("error") && out["error"].isStr() ? out["error"].get_str() : "cuda loader failed";
+        return false;
+    }
+    if (hold_pid) {
+        *hold_pid = pid;
+        return true;
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        err = out.exists("error") && out["error"].isStr() ? out["error"].get_str() : "cuda loader failed";
+        return false;
+    }
+    return true;
+}
+
+struct ResidentCuda {
+    pid_t pid{0};
+    uint64_t bytes_on_device{0};
+    std::string device_name;
+    UniValue cuda;
+};
+
+std::mutex g_resident_mu;
+std::map<std::string, ResidentCuda> g_resident;
+
+bool PidAlive(pid_t pid)
+{
+    if (pid <= 0) return false;
+    return ::kill(pid, 0) == 0 || errno == EPERM;
+}
+
+void StopResidentLocked(const std::string& key)
+{
+    auto it = g_resident.find(key);
+    if (it == g_resident.end()) return;
+    const pid_t pid = it->second.pid;
+    g_resident.erase(it);
+    if (pid <= 0) return;
+    ::kill(pid, SIGTERM);
+    for (int i = 0; i < 50; ++i) {
+        int st = 0;
+        if (waitpid(pid, &st, WNOHANG) == pid) return;
+        usleep(100000);
+    }
+    ::kill(pid, SIGKILL);
+    int st = 0;
+    waitpid(pid, &st, 0);
+}
+
+void StopResident(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(g_resident_mu);
+    StopResidentLocked(key);
+}
+
+bool MaybeRunInferCmd(const fs::path& checkout, UniValue& result, std::string& err)
+{
+    const char* cmd = std::getenv("BTX_MODEL_INFER_CMD");
+    if (!cmd || cmd[0] == '\0') return true;
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        err = "infer pipe";
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        err = "infer fork";
+        return false;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
+        close(pipefd[1]);
+        const std::string exe = cmd;
+        const std::string dir_s = fs::PathToString(checkout);
+        const char* argv[] = {exe.c_str(), dir_s.c_str(), nullptr};
+        execv(exe.c_str(), const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(pipefd[1]);
+    std::string stdout_s;
+    char buf[4096];
+    ssize_t nread = 0;
+    while ((nread = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
+        stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.size() > 256 * 1024) break;
     }
     close(pipefd[0]);
     int st = 0;
     waitpid(pid, &st, 0);
     const size_t nl = stdout_s.find('\n');
     const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
-    if (!out.read(line) || !out.isObject()) {
-        err = "cuda loader json";
+    result.pushKV("infer_cmd", cmd);
+    result.pushKV("infer_stdout", line);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        err = "BTX_MODEL_INFER_CMD failed";
+        result.pushKV("infer_ok", false);
         return false;
     }
-    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0 || (out.exists("ok") && !out["ok"].get_bool())) {
-        err = out.exists("error") && out["error"].isStr() ? out["error"].get_str() : "cuda loader failed";
-        return false;
-    }
+    result.pushKV("infer_ok", true);
+    result.pushKV("generated", !line.empty());
     return true;
 }
 
@@ -3657,6 +3768,7 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
     UniValue imported(UniValue::VARR);
     UniValue skipped(UniValue::VARR);
     UniValue opened(UniValue::VARR);
+    UniValue retrieved(UniValue::VARR);
     auto skip_obj = [&](const std::string& path, const std::string& reason) {
         UniValue o(UniValue::VOBJ);
         o.pushKV("path", path);
@@ -3667,8 +3779,10 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
         result.pushKV("imported", imported);
         result.pushKV("skipped", skipped);
         result.pushKV("opened", opened);
+        result.pushKV("retrieved", retrieved);
         result.pushKV("imported_count", 0);
         result.pushKV("opened_count", 0);
+        result.pushKV("retrieved_count", 0);
         result.pushKV("note", "set -modelwatch=<dir> or pass a path to scanmodelwatch");
         return 0;
     }
@@ -3734,8 +3848,28 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
                 one.pushKV("reason", "share_card");
                 std::string share_text, serr;
                 if (LoadShareText(ent.path(), share_text, serr)) {
-                    one.pushKV("uri", FirstBtxToken(share_text));
+                    const std::string uri = FirstBtxToken(share_text);
+                    one.pushKV("uri", uri);
                     one.pushKV("share_text", share_text);
+                    if (!uri.empty()) {
+                        UniValue greq(UniValue::VOBJ);
+                        greq.pushKV("method", "getmodel");
+                        UniValue gp(UniValue::VARR);
+                        gp.push_back(uri);
+                        gp.push_back("FREE_ONLY");
+                        greq.pushKV("params", gp);
+                        UniValue retrieve;
+                        std::string rcode, rerr;
+                        if (DispatchHelperRpc(cat, greq, retrieve, rcode, rerr, nullptr)) {
+                            one.pushKV("retrieve", retrieve);
+                            if (retrieve.exists("status") && retrieve["status"].isStr()) {
+                                one.pushKV("status", retrieve["status"].get_str());
+                            }
+                            retrieved.push_back(one);
+                        } else if (!rerr.empty() || !rcode.empty()) {
+                            one.pushKV("retrieve_error", rerr.empty() ? rcode : rerr);
+                        }
+                    }
                 } else {
                     one.pushKV("error", serr.empty() ? "not a share card" : serr);
                 }
@@ -3783,8 +3917,10 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
     result.pushKV("imported", imported);
     result.pushKV("skipped", skipped);
     result.pushKV("opened", opened);
+    result.pushKV("retrieved", retrieved);
     result.pushKV("imported_count", static_cast<int>(imported.size()));
     result.pushKV("opened_count", static_cast<int>(opened.size()));
+    result.pushKV("retrieved_count", static_cast<int>(retrieved.size()));
     result.pushKV("last_scan_ms", g_runtime.last_watch_scan_ms);
     result.pushKV("automatic_spend_atoms", 0);
     return static_cast<int>(imported.size());
@@ -5266,6 +5402,24 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }));
             result.pushKV("automatic_spend_atoms", 0);
             result.pushKV("note", "this path is a share card, not weights; getmodel retrieves, hostmodel hosts a GGUF/SafeTensors directory");
+            if (!token.empty()) {
+                UniValue greq(UniValue::VOBJ);
+                greq.pushKV("method", "getmodel");
+                UniValue gp(UniValue::VARR);
+                gp.push_back(token);
+                gp.push_back("FREE_ONLY");
+                greq.pushKV("params", gp);
+                UniValue retrieve;
+                std::string rcode, rerr;
+                if (DispatchHelperRpc(cat, greq, retrieve, rcode, rerr, stop)) {
+                    result.pushKV("retrieve", retrieve);
+                    if (retrieve.exists("status") && retrieve["status"].isStr()) {
+                        result.pushKV("status", retrieve["status"].get_str());
+                    }
+                } else if (!rerr.empty() || !rcode.empty()) {
+                    result.pushKV("retrieve_error", rerr.empty() ? rcode : rerr);
+                }
+            }
             return true;
         }
         bool pin = true;
@@ -7379,7 +7533,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("file_count", static_cast<int>(e.core.files.size()));
         result.pushKV("automatic_spend_atoms", 0);
         result.pushKV("next_actions", NextActionsArray({"loadmodel", "openmodelshare"}));
-        result.pushKV("note", "Verified local files rebuilt from pieces. This RPC never starts a runtime.");
+        result.pushKV("note", "Verified local files rebuilt from pieces. This RPC never starts a runtime. Checkout hardlinks source files when they still match.");
+        result.pushKV("execution_profile", static_cast<int>(e.core.execution_profile));
         return true;
     }
     if (method == "loadmodel") {
@@ -7401,7 +7556,6 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         UniValue tensors(UniValue::VARR);
         uint64_t weight_bytes = 0;
-        std::error_code ec;
         for (const auto& f : e.core.files) {
             const auto lower = ToLower(f.path);
             if (!lower.ends_with(".safetensors")) continue;
@@ -7415,6 +7569,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", e.model_id.Hex());
+        result.pushKV("artifact_id", e.artifact_id.Hex());
         result.pushKV("path", fs::PathToString(checkout));
         result.pushKV("usable_runtime_root", fs::PathToString(checkout));
         result.pushKV("materialized", true);
@@ -7422,24 +7577,98 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("tensor_count", static_cast<int>(tensors.size()));
         result.pushKV("weight_bytes", weight_bytes);
         result.pushKV("inference", false);
+        result.pushKV("remote_inference", false);
         result.pushKV("runtime_started", false);
         result.pushKV("runtime_exec", false);
-        result.pushKV("remote_inference", false);
         result.pushKV("device_loaded", false);
+        result.pushKV("weights_resident", false);
+        result.pushKV("smoke_passed", false);
+        result.pushKV("execution_profile", static_cast<int>(e.core.execution_profile));
+        result.pushKV("runtime_profile", "files-only");
         result.pushKV("automatic_spend_atoms", 0);
+        const std::string rkey = e.artifact_id.Hex();
+        {
+            std::lock_guard<std::mutex> lock(g_resident_mu);
+            auto it = g_resident.find(rkey);
+            if (it != g_resident.end() && PidAlive(it->second.pid)) {
+                result.pushKV("device_loaded", true);
+                result.pushKV("runtime_started", true);
+                result.pushKV("runtime_exec", true);
+                result.pushKV("weights_resident", true);
+                result.pushKV("loader_pid", static_cast<int64_t>(it->second.pid));
+                result.pushKV("cuda", it->second.cuda);
+                result.pushKV("bytes_on_device", it->second.bytes_on_device);
+                result.pushKV("device_name", it->second.device_name);
+                if (it->second.cuda.exists("smoke_passed")) {
+                    result.pushKV("smoke_passed", it->second.cuda["smoke_passed"]);
+                }
+                result.pushKV("runtime_profile", "safetensors-cuda-resident");
+                result.pushKV("already_resident", true);
+                result.pushKV("next_actions", NextActionsArray({"unloadmodel"}));
+                result.pushKV("note", "Weights remain on device until unloadmodel. No network inference server.");
+                return true;
+            }
+        }
         const char* loader_env = std::getenv("BTX_MODEL_CUDA_LOADER");
         if (loader_env && loader_env[0] != '\0') {
             UniValue loaded;
-            if (!RunCudaLoader(fs::PathFromString(loader_env), checkout, loaded, err)) {
+            pid_t child = 0;
+            if (!RunCudaLoader(fs::PathFromString(loader_env), checkout, loaded, err, &child)) {
                 err_code = "HARDWARE_NOT_RUN";
                 return false;
             }
+            ResidentCuda rec;
+            rec.pid = child;
+            rec.cuda = loaded;
+            if (loaded.exists("bytes_on_device")) rec.bytes_on_device = loaded["bytes_on_device"].getInt<uint64_t>();
+            if (loaded.exists("device_name") && loaded["device_name"].isStr()) rec.device_name = loaded["device_name"].get_str();
+            {
+                std::lock_guard<std::mutex> lock(g_resident_mu);
+                StopResidentLocked(rkey);
+                g_resident[rkey] = rec;
+            }
             result.pushKV("device_loaded", true);
+            result.pushKV("runtime_started", true);
+            result.pushKV("runtime_exec", true);
+            result.pushKV("weights_resident", true);
+            result.pushKV("loader_pid", static_cast<int64_t>(child));
             result.pushKV("cuda", loaded);
-            if (loaded.exists("bytes_on_device")) result.pushKV("bytes_on_device", loaded["bytes_on_device"]);
-            if (loaded.exists("device_name")) result.pushKV("device_name", loaded["device_name"]);
+            result.pushKV("bytes_on_device", rec.bytes_on_device);
+            result.pushKV("device_name", rec.device_name);
+            result.pushKV("runtime_profile", "safetensors-cuda-resident");
+            if (loaded.exists("smoke_passed")) result.pushKV("smoke_passed", loaded["smoke_passed"]);
+            else result.pushKV("smoke_passed", true);
+            std::string infer_err;
+            if (!MaybeRunInferCmd(checkout, result, infer_err)) {
+                result.pushKV("infer_error", infer_err);
+            } else if (result.exists("generated") && result["generated"].get_bool()) {
+                result.pushKV("first_useful_result", true);
+            }
+            result.pushKV("next_actions", NextActionsArray({"unloadmodel"}));
+            result.pushKV("note", "Weights stay on device until unloadmodel. CUDA smoke is a kernel on loaded tensors, not a network inference server. Granite hybrid is not GGUF; llama.cpp needs conversion.");
+            return true;
         }
-        result.pushKV("note", "Weights are local files. CUDA load requires BTX_MODEL_CUDA_LOADER; this RPC never starts a network inference server.");
+        result.pushKV("next_actions", NextActionsArray({"loadmodel", "openmodelshare"}));
+        result.pushKV("note", "Weights are local files. Set BTX_MODEL_CUDA_LOADER to keep tensors resident on a GPU. This RPC never starts a network inference server.");
+        return true;
+    }
+    if (method == "unloadmodel") {
+        const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+        CatalogEntry e;
+        if (id.IsNull() || !cat.Find(id, e)) {
+            err_code = "NOT_FOUND";
+            return false;
+        }
+        StopResident(e.artifact_id.Hex());
+        result.pushKV("schema_version", 2);
+        result.pushKV("model_id", e.model_id.Hex());
+        result.pushKV("unloaded", true);
+        result.pushKV("device_loaded", false);
+        result.pushKV("weights_resident", false);
+        result.pushKV("runtime_started", false);
+        result.pushKV("automatic_spend_atoms", 0);
+        result.pushKV("next_actions", NextActionsArray({"loadmodel"}));
+        result.pushKV("note", "Stopped the helper-spawned CUDA loader only.");
         return true;
     }
     if (method == "getmodelpolicy" || method == "setmodelpolicy") {
@@ -9052,7 +9281,8 @@ int UnixRpcReplyTimeoutMs(const std::string& method)
 {
     if (method == "waitformodelevent" || method == "importmodel" || method == "hostmodel" ||
         method == "getmodel" || method == "scanmodelwatch" || method == "executemodelimport" ||
-        method == "importbtxpackage" || method == "exportmodelpath" || method == "loadmodel") {
+        method == "importbtxpackage" || method == "exportmodelpath" || method == "loadmodel" ||
+        method == "unloadmodel") {
         return UNIX_RPC_LONG_REPLY_MS;
     }
     return UNIX_RPC_REPLY_MS;

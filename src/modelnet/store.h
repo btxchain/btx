@@ -52,6 +52,8 @@ struct PieceIndex {
 
 std::vector<std::vector<Digest48>> BuildChunkTreeFromLeaves(const std::vector<Digest48>& padded_leaves);
 
+bool FileBytesMatchSha384(const fs::path& path, uint64_t file_size, const Digest48& expected_sha384);
+
 /** Filesystem model store. Never under wallet/chainstate/blocks. */
 class ModelStore {
     fs::path m_root;
@@ -90,9 +92,12 @@ public:
     /**
      * Concatenate verified pieces into dest and require SHA-384(file) == expected.
      * Skips rewrite when dest already matches. Never follows a symlink dest.
+     * When prefer_link is a regular file with the same digest, hardlink it instead
+     * of concatenating pieces (checkout does not double disk when the import source remains).
      */
     bool MaterializeFile(const Digest48& artifact, uint32_t file_index, uint64_t file_size,
-                         const Digest48& expected_sha384, const fs::path& dest, std::string& err) const;
+                         const Digest48& expected_sha384, const fs::path& dest, std::string& err,
+                         const fs::path& prefer_link = {}) const;
 };
 
 } // namespace modelnet
