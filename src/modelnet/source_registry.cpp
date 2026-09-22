@@ -140,12 +140,18 @@ bool RegistryHttpBodyAllowed(const RegistryHttpResponse& resp, bool range_reques
         return false;
     }
     if (range_requested) {
-        if (resp.status != 206) {
+        if (resp.status == 206) {
+            if (resp.has_content_range && resp.range_start != offset) {
+                err = "content-range";
+                return false;
+            }
+        } else if (resp.status == 200 && offset == 0 && length > 0 && resp.content_length == length) {
+            // Hugging Face's resolve-cache for tiny files (config.json) ignores
+            // Range and returns 200 with the whole object. Accept only when that
+            // object is exactly the requested extent so a multi-gigabyte 200
+            // cannot be treated as a piece.
+        } else {
             err = "range not satisfied";
-            return false;
-        }
-        if (resp.has_content_range && resp.range_start != offset) {
-            err = "content-range";
             return false;
         }
     } else if (resp.status != 200) {

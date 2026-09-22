@@ -143,7 +143,9 @@ not only a blob origin) is implemented as `parseimportplan` /
 `exportmodelpack` and `btx-model modelpack import|export`. Live HTTPS remains
 fail-closed unless inject / `live_wan` / `BTX_MODELNET_LIVE_WAN=1`. The live
 client requires TLS 1.2+, peer verify, at most three re-gated `https`
-redirects, `Content-Length`, `206` for Range, and post-DNS
-`AddressIsGlobalUnicast` before connect. Tiny public-file recipe:
+redirects, `Content-Length`, `206` for Range (or `200` only when offset 0
+and `Content-Length` equals the requested extent — Hugging Face's
+resolve-cache ignores Range on tiny files such as `config.json`), and
+post-DNS `AddressIsGlobalUnicast` before connect. Tiny public-file recipe:
 [registry-live-wan-hf-config.json](../../contrib/modelnet/recipes/registry-live-wan-hf-config.json)
 (hits the public internet; do not invent WAN evidence without `live_wan`).

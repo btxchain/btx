@@ -53,6 +53,8 @@ struct NativeResponse {
     uint32_t stream_file_index{0};
     uint32_t stream_n_pieces{0};
     uint64_t stream_file_size{0};
+    /** Set when the server will hang up after this response (request cap). */
+    bool close_after{false};
 };
 
 struct HelperConfig {

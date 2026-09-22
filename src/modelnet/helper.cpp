@@ -864,6 +864,8 @@ struct Pq1Session {
     int handshake_ms{PQ1_HANDSHAKE_MS};
     int io_ms{PQ1_IDLE_MS};
     bool outbound_held{false};
+    /** Operator addmodelnode of 127.0.0.1/::1 (howto loopback seeder). PEX extras stay blocked. */
+    bool allow_loopback{false};
     std::vector<std::pair<std::string, std::string>> piece_headers;
 
     ~Pq1Session() { Close(); }
@@ -956,9 +958,15 @@ struct Pq1Session {
             }
             CService resolved;
             if (!resolved.SetSockAddr(reinterpret_cast<const sockaddr*>(&c.ss), c.len) ||
-                IsForbiddenOutboundDialAddr(resolved) || IsForbiddenControlPort(resolved.GetPort())) {
+                IsForbiddenControlPort(resolved.GetPort())) {
                 last_try_err = "non-public dial target";
                 continue;
+            }
+            if (IsForbiddenOutboundDialAddr(resolved)) {
+                if (!(allow_loopback && resolved.IsLocal() && !resolved.IsBindAny())) {
+                    last_try_err = "non-public dial target";
+                    continue;
+                }
             }
             CloseTransport();
             fd = ::socket(c.family, c.socktype, c.protocol);
@@ -1069,6 +1077,12 @@ struct Pq1Session {
             return false;
         }
         transferred += raw.size();
+        for (const auto& h : resp.headers) {
+            if (ToLower(h.first) == "connection" && ToLower(h.second).find("close") != std::string::npos) {
+                CloseTransport();
+                break;
+            }
+        }
         return true;
     }
 };
@@ -1195,7 +1209,7 @@ std::string FormatHttpResponse(const NativeResponse& resp)
     for (const auto& h : resp.headers) {
         o << h.first << ": " << h.second << "\r\n";
     }
-    o << "Connection: keep-alive\r\n\r\n";
+    o << (resp.close_after ? "Connection: close\r\n\r\n" : "Connection: keep-alive\r\n\r\n");
     if (!headers_only) o << resp.body;
     return o.str();
 }
@@ -3029,6 +3043,7 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                     r.pushKV("peer_retries", job->progress.peer_retries.load());
                     {
                         std::lock_guard<std::mutex> lock(job->mu);
+                        job->last_err.clear();
                         job->result = std::move(r);
                         job->status = "done";
                     }
@@ -6467,7 +6482,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         CatalogEntry local_probe;
         const bool have_local = cat.Find(r.digest, local_probe);
         std::vector<PieceNeed> missing;
-        if (have_local && !local_probe.core.files.empty()) {
+        if (have_local && !local_probe.incomplete && !local_probe.core.files.empty()) {
             const auto& f = local_probe.core.files[0];
             const uint32_t n = f.size == 0 ? 1u : static_cast<uint32_t>((f.size + PIECE_SIZE - 1) / PIECE_SIZE);
             for (uint32_t i = 0; i < n; ++i) {
@@ -6476,9 +6491,6 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 p.piece_index = i;
                 missing.push_back(p);
             }
-        } else {
-            PieceNeed p;
-            missing.push_back(p);
         }
         std::vector<SourceOffer> sources;
         if (have_local) {
@@ -6576,14 +6588,16 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 (void)TryHydrateFromCloud(cat, local, result, herr);
                 cat.Find(r.digest, local);
             }
-            cat.ApplyDemandSeed(local.model_id, err);
-            cat.Find(r.digest, local);
-            result.pushKV("plan", "FREE");
-            result.pushKV("status", "local");
-            result.pushKV("model_id", local.model_id.Hex());
-            result.pushKV("artifact_id", local.artifact_id.Hex());
-            result.pushKV("seeded", local.seeded);
-            return true;
+            if (!local.incomplete) {
+                cat.ApplyDemandSeed(local.model_id, err);
+                cat.Find(r.digest, local);
+                result.pushKV("plan", "FREE");
+                result.pushKV("status", "local");
+                result.pushKV("model_id", local.model_id.Hex());
+                result.pushKV("artifact_id", local.artifact_id.Hex());
+                result.pushKV("seeded", local.seeded);
+                return true;
+            }
         }
         {
             Digest48 artifact;
@@ -8010,9 +8024,20 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                           const Digest48& model_id, std::string& err, std::atomic<bool>* stop, const fs::path& pinfile,
                           RetrieveProgress* progress, const std::vector<std::string>& extra_peers)
 {
+    auto loopback_ok = [&](const std::string& h, uint16_t p) {
+        if (h != "127.0.0.1" && h != "::1") return false;
+        if (IsForbiddenControlPort(p)) return false;
+        if (h == host && p == port) return true;
+        const std::string ep = h + ":" + std::to_string(p);
+        for (const auto& peer : cat.Peers()) {
+            if (peer == ep) return true;
+        }
+        return false;
+    };
     auto init_sess = [&](Pq1Session& sess) -> bool {
         sess.stop = stop;
         sess.pinfile = pinfile;
+        sess.allow_loopback = loopback_ok(host, port);
         return sess.Connect(pq, host, port, err);
     };
     Pq1Session sess;
@@ -8221,8 +8246,13 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                     if (cat.PutFetchedPiece(artifact, file_index, static_cast<uint32_t>(i), raw, proof, hdr_size, hdr_root, local_err)) {
                         return true;
                     }
-                } else if (presp.status == 403 && presp.body.find("expired") != std::string::npos) {
+                } else if (presp.status == 403 &&
+                           (presp.body.find("expired") != std::string::npos ||
+                            presp.body.find("replay") != std::string::npos ||
+                            presp.body.find("grant use cap") != std::string::npos)) {
                     // FreeGrant TTL is 600s (spec cap). A 4 GiB file on a slow WAN outlives one grant.
+                    // "replay" on a truncated piece GET, and a 256-use cap on a 1175-piece
+                    // granite shard, mint a fresh nonce and retry.
                     if (++grant_refreshes > 64) {
                         local_err = "grant refresh limit";
                         return false;
@@ -8412,6 +8442,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                 Pq1Session av;
                 av.stop = stop;
                 av.pinfile = pinfile;
+                av.allow_loopback = loopback_ok(eh, eport);
                 std::string aerr;
                 if (!av.Connect(pq, eh, eport, aerr)) return;
                 NativeRequest areq;
@@ -8509,6 +8540,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                         Pq1Session xs;
                         xs.stop = stop;
                         xs.pinfile = pinfile;
+                        xs.allow_loopback = loopback_ok(eh, eport);
                         std::string xerr;
                         if (stop && stop->load()) {
                             xfer.Cancel();
@@ -8573,6 +8605,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                 s->stop = stop;
                 s->pinfile = pinfile;
                 std::string cerr;
+                s->allow_loopback = loopback_ok(host, port);
                 if (s->Connect(pq, host, port, cerr)) {
                     pool.push_back(std::move(s));
                 } else if (pool.empty()) {
@@ -8710,6 +8743,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                         Pq1Session xs;
                         xs.stop = stop;
                         xs.pinfile = pinfile;
+                        xs.allow_loopback = loopback_ok(eh, eport);
                         std::string xerr;
                         if (!xs.Connect(pq, eh, eport, xerr)) {
                             for (uint32_t i : assigned) note_fail(i);
@@ -8760,6 +8794,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                     Pq1Session s2;
                     s2.stop = stop;
                     s2.pinfile = pinfile;
+                    s2.allow_loopback = loopback_ok(host, port);
                     std::string rerr;
                     if (s2.Connect(pq, host, port, rerr) && issue_grant(s2, file_index, rerr)) {
                         for (uint32_t i : leftover) {
@@ -9071,6 +9106,7 @@ void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* 
                 nresp.body = JsonError("BAD_JSON", "malformed request fields");
             }
         }
+        if (requests >= PQ1_MAX_REQUESTS_PER_CONN) nresp.close_after = true;
         const int wto = (nreq.path.find("/pieces/") != std::string::npos || nresp.stream_verified_file)
                             ? PQ1_TRANSFER_MS : PQ1_IDLE_MS;
         if (!SslWriteAll(ssl, cfd, FormatHttpResponse(nresp), wto, stop, err)) break;

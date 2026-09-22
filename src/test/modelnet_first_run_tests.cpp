@@ -751,6 +751,25 @@ BOOST_AUTO_TEST_CASE(native_file_stream_headers_omit_body_for_large_files)
     BOOST_CHECK(err.find("too large") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(pq1_request_cap_response_sends_connection_close)
+{
+    // Granite-sized retrieve: after PQ1_MAX_REQUESTS_PER_CONN (32) the server
+    // must advertise close. Dropping TLS without this header is unexpected eof.
+    modelnet::NativeResponse r;
+    r.status = 200;
+    r.body = "ok";
+    r.close_after = true;
+    const std::string wire = modelnet::FormatHttpResponse(r);
+    BOOST_CHECK(wire.find("Connection: close") != std::string::npos);
+    BOOST_CHECK(wire.find("Connection: keep-alive") == std::string::npos);
+
+    modelnet::NativeResponse def;
+    BOOST_CHECK(!def.close_after);
+    const std::string keep = modelnet::FormatHttpResponse(def);
+    BOOST_CHECK(keep.find("Connection: keep-alive") != std::string::npos);
+    BOOST_CHECK(keep.find("Connection: close") == std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(full_file_stream_http_body_cap_is_content_length_not_rpc)
 {
     using namespace modelnet;

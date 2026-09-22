@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Local unix-RPC e2e for btx-modeld. Does not start btxd.
-# No WAN, no granite, no operator hosts. Scratch lives on disk (not /tmp tmpfs).
+# This smoke uses a 10-byte stub safetensors. No WAN, no operator hosts.
+# Scratch lives on disk (not /tmp tmpfs).
+# Real IBM granite-4.0-h-tiny host+FREE_ONLY retrieve is
+# contrib/modelnet/granite_host_roundtrip.py with --fixture pointing at a
+# gitignored 13.888 GiB tree. Do not download 13G into this smoke.
 set -euo pipefail
 export LC_ALL=C
 

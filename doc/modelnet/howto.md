@@ -138,20 +138,29 @@ the live attestor helper.
 ### Fail-fast rule
 
 - `getmodeljob` status `failed` → print the error and **exit** (no remaining timeout).
-  While `status=running`, `last_err` is resume (transient PQ1: `tls io`,
-  `timeout`, `connect failed`, …), not a FAIL. Do not treat `last_err` /
-  `peer_retries` alone as terminal. `bytes_committed` may move across those
-  retries. Granite attach (`granite_attach_poll.py --stall-secs`, default
-  **180**): frozen `bytes_committed` with `inflight>0` is **STALL**;
-  `inflight=0` and empty `last_err` is digest verify (keep waiting). Poll
-  the newest `status=running` job (`created_ms`, then `job_id`), never a
-  stale failed `jobs[0]`.
-- Prefer loopback or LAN to the seeder (`127.0.0.1:29448` when fetcher and
-  seeder are the same host). Hairpin through a public hostname is not the
-  retrieve test.
+  Unix `getmodel` is async: it returns `status=running` and a `job_id`.
+  Poll `getmodeljob`. `getmodel` must not return `status=local` while
+  `incomplete=true` (a 1.07 GiB partial was a false PASS).
+  While `status=running`, `last_err` containing `tls io` or `unexpected eof`
+  is resume: PQ1 recycles the connection every
+  `PQ1_MAX_REQUESTS_PER_CONN=32`. That is not a FAIL. The same holds for
+  `timeout` and `connect failed`. Do not treat `last_err` / `peer_retries`
+  alone as terminal. `bytes_committed` may move across those retries.
+  Granite attach (`granite_attach_poll.py --stall-secs`, default **180**):
+  frozen `bytes_committed` with `inflight>0` is **STALL**; `inflight=0` at
+  a shard boundary is digest verify (keep waiting). Poll the newest
+  `status=running` job (`created_ms`, then `job_id`), never a stale failed
+  `jobs[0]`.
+- Prefer loopback or LAN to the seeder. Scenario 2's operator seeder is
+  `127.0.0.1:29447`. A dedicated granite seeder already bound on `29448`
+  is reached at `127.0.0.1:29448` on the same host. Hairpin through a
+  public hostname is not the retrieve test.
 - Helper process gone or log `unknown argument` / `fail-closed` → **exit** (do not wait for the socket).
 - Handshake/grant errors surface as `hello failed`, `missing FreeGrant`,
-  `piece HTTP 403 … expired` (client then refreshes the 600s FreeGrant).
+  or `piece HTTP 403`. The same piece GET retry is idempotent. The per-nonce
+  FreeGrant use cap is 65536 (a cap of 256 rejected granite shard1's 1175
+  pieces). HTTP 403 `expired`, replay, or grant use cap means mint a fresh
+  grant (the client refreshes the 600s FreeGrant on `expired`).
 - Production `btxd.real` PIDs are checked before and after two- and three-host scripts.
 
 ## Benchmarks (re-run, do not guess)
@@ -212,8 +221,25 @@ and does not expose it to the network.
 {"jsonrpc":"1.0","id":1,"method":"getmodel","params":["btx://<91-char-token>","FREE_ONLY"]}
 ```
 
-If `status=running`, poll `getmodeljob`. On WAN this is async. Loopback
-smoke: `python3 contrib/modelnet/two_helper_retrieve.py build-gcc13/bin`.
+Operator `addmodelnode` of `127.0.0.1:29447` is the intended loopback
+seeder. PEX refuses loopback. `IsForbiddenOutboundDialAddr(loop)` stays
+true. `RetrieveFreeFromPeer` sets `allow_loopback` only for an
+operator-added `127.0.0.1` or `::1`. When `29447` is already taken, bind
+the isolated helper at `127.0.0.1:29449`. `automatic_spend_atoms` stays 0.
+Do not `getmodel` granite into `~/.btx` or a production helper.
+
+`importmodel` of the real `ibm-granite/granite-4.0-h-tiny` fixture
+demand-seeds without `seedmodel`. Expect `family=granite`,
+`STRUCTURE_VERIFIED`, and 193 tensors on shard1. `execution_profile` stays
+0. That observation is not a usefulness or safety claim.
+
+Unix `getmodel` is async: `status=running` plus `job_id`. Poll
+`getmodeljob`. `contrib/modelnet/granite_host_roundtrip.py` does this and
+requires 3322 pieces and 13888336427 bytes on disk. `exportmodelpath`
+sha384 is the manifest; count the pieces on disk.
+`contrib/modelnet/two_helper_retrieve.py` and `e2e-local-helper.sh` are
+TinySafeTensors / 10-byte stub smokes. The real granite path is
+`granite_host_roundtrip.py`.
 
 ### 3. Two or three machines (isolated, not production)
 

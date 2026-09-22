@@ -322,6 +322,7 @@ void ModelCatalog::DemandSeedLocked(CatalogEntry& e)
         return;
     }
     if (!ShouldDemandSeed(m_policy, e.admission)) return;
+    if (e.incomplete) return;
     if (e.admission == AdmissionLevel::BYTES_VERIFIED ||
         e.admission == AdmissionLevel::STRUCTURE_VERIFIED ||
         e.admission == AdmissionLevel::PROFILE_VERIFIED ||
@@ -956,6 +957,7 @@ bool ModelCatalog::MarkIncomplete(const Digest48& model_or_artifact, bool incomp
             m.bytes_verified = false;
             m.admission = AdmissionLevel::FETCHING;
             m.completed_at = 0;
+            m.seeded = false;
         }
         return PersistLocked(err);
     }

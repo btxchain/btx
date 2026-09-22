@@ -7,6 +7,7 @@ Does not touch production btxd or the GPU.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -16,7 +17,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from failfast import wait_unix
+from failfast import poll_job, wait_unix
 
 
 def rpc(sock: Path, method: str, params, timeout: float):
@@ -140,14 +141,90 @@ def main():
         rpc(ps, "addmodelnode", [args.bind], timeout=10)
         t0 = time.time()
         print("retrieve FREE_ONLY", uri, flush=True)
-        got = rpc(ps, "getmodel", [uri, "FREE_ONLY"], timeout=args.retrieve_timeout)
+        got = rpc(ps, "getmodel", [uri, "FREE_ONLY"], timeout=60)
         print("getmodel", json.dumps(got, indent=2), "elapsed_s", int(time.time() - t0), flush=True)
-        if got.get("status") not in ("retrieved", "local"):
+        status = got.get("status")
+        job_id = got.get("job_id")
+        if status == "running" or got.get("async"):
+            if not job_id:
+                raise SystemExit(f"async getmodel missing job_id: {got}")
+
+            def progress(job):
+                print(
+                    "job",
+                    job.get("job_id") or job_id,
+                    job.get("status"),
+                    "elapsed",
+                    int(time.time() - t0),
+                    "bytes_committed",
+                    job.get("bytes_committed"),
+                    "pieces",
+                    job.get("pieces_committed"),
+                    "file",
+                    job.get("file_index"),
+                    "piece",
+                    job.get("piece_index"),
+                    "inflight",
+                    job.get("inflight"),
+                    "last_err",
+                    job.get("last_err") or job.get("error"),
+                    flush=True,
+                )
+
+            job = poll_job(
+                lambda: rpc(ps, "getmodeljob", [job_id], timeout=120),
+                timeout=args.retrieve_timeout,
+                interval=2.0,
+                progress=progress,
+                stall_s=300.0,
+                job_id=job_id,
+            )
+            print("job_done", json.dumps(job, indent=2), "elapsed_s", int(time.time() - t0), flush=True)
+            result = job.get("result") or {}
+            if result.get("status") not in ("retrieved", "local"):
+                raise SystemExit(f"retrieve did not complete: {job}")
+        elif status not in ("retrieved", "local"):
             raise SystemExit(f"retrieve did not complete: {got}")
         listed_b = rpc(ps, "listmodels", [], timeout=30)
         print("peer local_count", listed_b.get("local_count"), flush=True)
         if listed_b.get("local_count") != 1:
             raise SystemExit(listed_b)
+        models_b = listed_b.get("models") or []
+        if not models_b or models_b[0].get("seeded") is not True:
+            raise SystemExit(f"downloader must demand-seed the replica: {listed_b}")
+        if models_b[0].get("incomplete") is True or models_b[0].get("complete") is False:
+            raise SystemExit(f"peer replica is incomplete: {models_b[0]}")
+        info_b = rpc(ps, "getmodelnetworkinfo", [], timeout=10)
+        used = int(info_b.get("used_bytes") or 0)
+        if used < 13888336427:
+            raise SystemExit(f"peer used_bytes {used} < 13888336427 (partial store is not a retrieve)")
+        pieces = list((peer_dir / "store" / "artifacts").rglob("*.piece"))
+        nbytes = sum(p.stat().st_size for p in pieces)
+        if len(pieces) != 3322 or nbytes != 13888336427:
+            raise SystemExit(f"peer store {len(pieces)} pieces / {nbytes} bytes; want 3322 / 13888336427")
+        exported = rpc(ps, "exportmodelpath", [uri], timeout=30)
+        fixture = Path(args.fixture)
+        files = exported.get("files") or []
+        if len(files) != 13:
+            raise SystemExit(f"expected 13 granite files, got {files}")
+        total = 0
+        for f in files:
+            src = fixture / f["path"]
+            if not src.is_file():
+                raise SystemExit(f"fixture missing {f['path']}")
+            size = src.stat().st_size
+            total += size
+            if size != int(f["size"]):
+                raise SystemExit(f"size mismatch {f['path']}: fixture={size} export={f['size']}")
+            digest = hashlib.sha384()
+            with src.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != str(f.get("sha384") or "").lower():
+                raise SystemExit(f"sha384 mismatch {f['path']}: fixture={digest.hexdigest()} export={f.get('sha384')}")
+        if total != 13888336427:
+            raise SystemExit(f"granite payload {total} != 13888336427")
+        print("peer_files", [(f["path"], f["size"]) for f in files], "sha384_ok", True, flush=True)
         print("GRANITE_TWO_HELPER_FREE_RETRIEVE PASS")
     finally:
         for proc in (ph, pp):

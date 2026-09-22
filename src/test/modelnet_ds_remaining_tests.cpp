@@ -812,6 +812,86 @@ BOOST_AUTO_TEST_CASE(v11_free_01_identity_only_no_wallet)
     BOOST_CHECK_EQUAL(replay_err, "replay");
 }
 
+BOOST_AUTO_TEST_CASE(free_grant_piece_get_retry_is_idempotent)
+{
+    const fs::path tmp = m_path_root / "grant-piece-idempotent";
+    std::string err;
+    std::vector<unsigned char> pk, sk;
+    modelnet::Digest48 signer_id;
+    BOOST_REQUIRE_MESSAGE(modelnet::LoadOrCreateServiceIdentity(tmp, pk, sk, signer_id, err), err);
+
+    modelnet::FreeGrantParams p;
+    p.model_id = Dg(0xa0);
+    p.artifact_id = Dg(0xa1);
+    p.file_index = 5;
+    p.first_piece = 0;
+    p.piece_count = 8;
+    p.maximum_bytes = 8 * 4194304ull;
+    modelnet::SignedFreeGrant grant;
+    BOOST_REQUIRE_MESSAGE(modelnet::IssueFreeGrant(p, sk, pk, grant, err), err);
+
+    UniValue body;
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    BOOST_REQUIRE_MESSAGE(
+        modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:p4", body, err, true),
+        err);
+    err.clear();
+    BOOST_REQUIRE_MESSAGE(
+        modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:p4", body, err, true),
+        err);
+    err.clear();
+    BOOST_REQUIRE_MESSAGE(
+        modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:p5", body, err, true),
+        err);
+    err.clear();
+    BOOST_CHECK(!modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:all", body, err, true));
+    BOOST_CHECK_EQUAL(err, "replay");
+    BOOST_CHECK_GT(modelnet::FREE_GRANT_MAX_USES, 1175u);
+}
+
+BOOST_AUTO_TEST_CASE(getmodel_incomplete_replica_is_not_local)
+{
+    // A catalog row marked incomplete is a partial replica. getmodel FREE_ONLY
+    // must not advertise it as status=local or invent a dummy free piece.
+    std::string err;
+    const fs::path tmp = m_path_root / "getmodel-incomplete";
+    const fs::path src = tmp / "src";
+    fs::create_directories(src);
+
+    std::vector<unsigned char> stub(10, 0);
+    WriteLE64(stub.data(), 2);
+    stub[8] = '{';
+    stub[9] = '}';
+    {
+        std::ofstream out(src / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(stub.data()), static_cast<std::streamsize>(stub.size()));
+    }
+
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    modelnet::CatalogEntry imported;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), /*pin=*/true, imported, err), err);
+
+    std::string uri;
+    BOOST_REQUIRE_MESSAGE(modelnet::EncodeResource(modelnet::ResourceKind::MODEL, imported.model_id, uri, err), err);
+    BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(imported.model_id, true, err), err);
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "getmodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(uri);
+    params.push_back("FREE_ONLY");
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
+
+    BOOST_CHECK_NE(result["status"].get_str(), "local");
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+    if (result.exists("free_piece_count")) {
+        BOOST_CHECK_EQUAL(result["free_piece_count"].getInt<int>(), 0);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(v11_free_05_zero_price_no_balance)
 {
     std::string err;

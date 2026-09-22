@@ -270,8 +270,8 @@ bool RedeemGrantUseUnlocked(UniValue& store, const std::string& nonce_hex, const
         if (!v.isStr()) continue;
         const std::string& have = v.get_str();
         if (have == use_key) {
-            err = "replay";
-            return false;
+            // Same piece GET on the same nonce is an HTTP retry, not a second spend.
+            return true;
         }
         if (file_all && have.rfind(file_prefix + ":", 0) == 0) {
             err = "replay";
@@ -282,7 +282,7 @@ bool RedeemGrantUseUnlocked(UniValue& store, const std::string& nonce_hex, const
             return false;
         }
     }
-    if (arr.size() >= 256) {
+    if (arr.size() >= FREE_GRANT_MAX_USES) {
         err = "grant use cap";
         return false;
     }

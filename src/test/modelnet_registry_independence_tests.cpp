@@ -603,6 +603,14 @@ BOOST_AUTO_TEST_CASE(https_range_requires_206_and_rejects_chunked)
     std::vector<unsigned char> out;
     BOOST_CHECK(!modelnet::RegistryHttpBodyAllowed(resp, /*range_requested=*/true, 4, 4, out, err));
     BOOST_CHECK_EQUAL(err, "range not satisfied");
+    // HF resolve-cache: Range on a 8-byte object yields 200 + Content-Length 8.
+    BOOST_REQUIRE(modelnet::ParseRegistryHttpResponse(two_hundred, resp, err));
+    BOOST_REQUIRE(modelnet::RegistryHttpBodyAllowed(resp, /*range_requested=*/true, 0, 8, out, err));
+    BOOST_CHECK_EQUAL(std::string(out.begin(), out.end()), "ABCDEFGH");
+    // A 200 whose body is not the requested extent is still not a piece.
+    BOOST_REQUIRE(modelnet::ParseRegistryHttpResponse(two_hundred, resp, err));
+    BOOST_CHECK(!modelnet::RegistryHttpBodyAllowed(resp, /*range_requested=*/true, 0, 4, out, err));
+    BOOST_CHECK_EQUAL(err, "range not satisfied");
 
     const std::string chunked = "HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\nABCD";
     BOOST_REQUIRE(modelnet::ParseRegistryHttpResponse(chunked, resp, err));

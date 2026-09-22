@@ -14,7 +14,7 @@ service. It holds:
 | `e2e-public-webpki-kit.sh` | Live public DNS 42/43 (getent/dig) + system WebPKI TLS |
 | `e2e-two-node-demand.sh` | WAN retrieve; demand-seed default (no seedmodel) |
 | `run-modeld.sh` | Launch helper with bundled OpenSSL 3.5 when present |
-| `granite_*` | Optional large-fixture scripts; not a usefulness claim |
+| `granite_*` | Real `ibm-granite/granite-4.0-h-tiny` loopback scripts (URI `btx://pqc0whmrlv2emtc8eknxja6l6ffdj5mta0nj9msfsdkrz6qg0de448gm0a3kcctd92p9ekje2c97wd5glyrdl`; 13,888,336,427 bytes, 13 files, 3,322 pieces). `importmodel` demand-seeds without `seedmodel` (`family=granite`, `STRUCTURE_VERIFIED`, 193 tensors on shard1, `execution_profile` stays 0). Not a usefulness or safety claim. `granite_host_roundtrip.py` treats Unix `getmodel` as async (`status=running` and `job_id`), polls `getmodeljob`, and requires 3322 pieces / 13888336427 bytes on disk (`exportmodelpath` sha384 is the manifest; count the pieces). `two_helper_retrieve.py` and `e2e-local-helper.sh` are TinySafeTensors / 10-byte stub smokes. Hugging Face `live_wan`: Range on tiny files may return 200 with `Content-Length` equal to the requested extent at offset 0; weight CDNs still return 206. |
 | `validate-doc-examples.sh` | DOC-01/02/04: run documented CLIs; no CSV PASS |
 | `dependency-lock.md` | DOC-02 OpenSSL/GCC/CUDA pins |
 | `e2e-resolve-8-4.sh` | RESOLVE-03/04/07 loopback independent router + 8/4 RTT |

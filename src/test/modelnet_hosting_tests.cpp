@@ -522,4 +522,53 @@ BOOST_AUTO_TEST_CASE(cache_06_common_before_rare)
     BOOST_CHECK_LT(modelnet::EvictPriority(common), modelnet::EvictPriority(rare));
 }
 
+BOOST_AUTO_TEST_CASE(demand_seed_skips_incomplete_replica)
+{
+    const fs::path tmp = m_path_root / "demand-seed-incomplete";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x71, false);
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(imported.model_id, true, err), err);
+
+    modelnet::CatalogEntry before;
+    BOOST_REQUIRE_MESSAGE(cat.Find(imported.model_id, before), "Find before demand-seed");
+    BOOST_CHECK(before.incomplete);
+    BOOST_CHECK(!before.bytes_verified);
+    BOOST_CHECK(before.admission == modelnet::AdmissionLevel::FETCHING);
+    BOOST_CHECK(!before.seeded);
+
+    BOOST_REQUIRE_MESSAGE(cat.ApplyDemandSeed(imported.model_id, err), err);
+    modelnet::CatalogEntry after;
+    BOOST_REQUIRE_MESSAGE(cat.Find(imported.model_id, after), "Find still succeeds");
+    BOOST_CHECK(after.incomplete);
+    BOOST_CHECK(!after.bytes_verified);
+    BOOST_CHECK(!after.seeded);
+    BOOST_CHECK(after.admission == modelnet::AdmissionLevel::FETCHING);
+    BOOST_REQUIRE_MESSAGE(after.admission != modelnet::AdmissionLevel::SEEDING,
+                          "incomplete replica must not be newly claimed SEEDING");
+    BOOST_CHECK_EQUAL(after.useful_bytes_served, 0);
+    BOOST_CHECK_EQUAL(after.useful_bytes_received, 0);
+
+    UniValue listed;
+    BOOST_REQUIRE(cat.List(listed));
+    BOOST_CHECK(!listed.exists("automatic_spend"));
+    BOOST_CHECK(!listed.exists("automatic_spend_atoms"));
+    BOOST_REQUIRE(listed["models"].isArray());
+    BOOST_REQUIRE_EQUAL(listed["models"].size(), 1);
+    const UniValue& row = listed["models"][0];
+    BOOST_CHECK(!row.exists("automatic_spend"));
+    BOOST_CHECK(!row.exists("automatic_spend_atoms"));
+    BOOST_CHECK(row["incomplete"].get_bool());
+    BOOST_CHECK(!row["complete"].get_bool());
+    BOOST_CHECK(!row["bytes_verified"].get_bool());
+    BOOST_CHECK_EQUAL(row["admission"].get_str(), "FETCHING");
+
+    std::ifstream catalog_in(tmp / "catalog.json");
+    std::string catalog_body;
+    std::string line;
+    while (std::getline(catalog_in, line)) catalog_body += line;
+    BOOST_REQUIRE(catalog_in.eof());
+    BOOST_CHECK(catalog_body.find("automatic_spend") == std::string::npos);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
