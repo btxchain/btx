@@ -4,6 +4,7 @@
 
 #include <modelnet/helper.h>
 
+#include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <modelnet/community.h>
 #include <modelnet/crypto.h>
@@ -69,6 +70,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -167,6 +169,110 @@ std::string QuoteShellArg(const std::string& arg)
     }
     out += "'";
     return out;
+}
+
+bool InventorySafeTensorsFile(const fs::path& path, UniValue& tensors, uint64_t& nbytes, std::string& err)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        err = "open safetensors";
+        return false;
+    }
+    unsigned char hdr_len[8];
+    in.read(reinterpret_cast<char*>(hdr_len), 8);
+    if (in.gcount() != 8) {
+        err = "short safetensors header";
+        return false;
+    }
+    const uint64_t jlen = ReadLE64(hdr_len);
+    if (jlen == 0 || jlen > 64 * 1024 * 1024) {
+        err = "safetensors header too large";
+        return false;
+    }
+    std::string json(static_cast<size_t>(jlen), '\0');
+    in.read(json.data(), static_cast<std::streamsize>(jlen));
+    if (static_cast<uint64_t>(in.gcount()) != jlen) {
+        err = "short safetensors json";
+        return false;
+    }
+    UniValue header;
+    if (!header.read(json) || !header.isObject()) {
+        err = "safetensors json";
+        return false;
+    }
+    for (const std::string& k : header.getKeys()) {
+        if (k == "__metadata__") continue;
+        const UniValue& t = header[k];
+        if (!t.isObject() || !t.exists("data_offsets") || !t["data_offsets"].isArray() ||
+            t["data_offsets"].size() < 2) {
+            continue;
+        }
+        const uint64_t a = t["data_offsets"][0].getInt<uint64_t>();
+        const uint64_t b = t["data_offsets"][1].getInt<uint64_t>();
+        if (b < a) continue;
+        const uint64_t sz = b - a;
+        nbytes += sz;
+        UniValue one(UniValue::VOBJ);
+        one.pushKV("name", k);
+        if (t.exists("dtype") && t["dtype"].isStr()) one.pushKV("dtype", t["dtype"].get_str());
+        if (t.exists("shape")) one.pushKV("shape", t["shape"]);
+        one.pushKV("bytes", sz);
+        tensors.push_back(one);
+    }
+    return true;
+}
+
+bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, std::string& err)
+{
+    std::error_code ec;
+    if (!fs::is_regular_file(loader, ec) || ec) {
+        err = "BTX_MODEL_CUDA_LOADER is not a regular file";
+        return false;
+    }
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        err = "pipe";
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        err = "fork";
+        return false;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
+        close(pipefd[1]);
+        const std::string loader_s = fs::PathToString(loader);
+        const std::string dir_s = fs::PathToString(dir);
+        const char* argv[] = {loader_s.c_str(), "--dir", dir_s.c_str(), nullptr};
+        execv(loader_s.c_str(), const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(pipefd[1]);
+    std::string stdout_s;
+    char buf[4096];
+    ssize_t nread = 0;
+    while ((nread = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
+        stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.size() > 1024 * 1024) break;
+    }
+    close(pipefd[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    const size_t nl = stdout_s.find('\n');
+    const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
+    if (!out.read(line) || !out.isObject()) {
+        err = "cuda loader json";
+        return false;
+    }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0 || (out.exists("ok") && !out["ok"].get_bool())) {
+        err = out.exists("error") && out["error"].isStr() ? out["error"].get_str() : "cuda loader failed";
+        return false;
+    }
+    return true;
 }
 
 int AddrConnectPreference(const sockaddr* sa)
@@ -6420,7 +6526,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "getmodel") {
         Resource r;
         std::string hexerr;
-        const std::string user = Arg(0).get_str();
+        std::string user = Arg(0).get_str();
+        const fs::path maybe_share = fs::PathFromString(user);
+        if (fs::is_regular_file(maybe_share)) {
+            std::string share_text, serr;
+            if (LoadShareText(maybe_share, share_text, serr)) user = share_text;
+        }
         const std::string token = FirstBtxToken(user);
         if (!DecodeResource(token.empty() ? user : token, r, err)) {
             const Digest48 id = ResolveUserId(user, hexerr);
@@ -7234,14 +7345,28 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err_code = "NOT_FOUND";
             return false;
         }
+        if (e.incomplete) {
+            err_code = "INCOMPLETE";
+            err = "incomplete replica cannot be exported as a runtime root";
+            return false;
+        }
+        const fs::path checkout = HelperDir(cat) / "checkout" / fs::PathFromString(e.artifact_id.Hex());
+        if (!cat.MaterializeCheckout(id, checkout, err)) {
+            err_code = "IO";
+            return false;
+        }
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", e.model_id.Hex());
         result.pushKV("artifact_id", e.artifact_id.Hex());
         result.pushKV("store_root", fs::PathToString(cat.Store().Root()));
         result.pushKV("source_path", e.source_path);
+        result.pushKV("path", fs::PathToString(checkout));
+        result.pushKV("usable_runtime_root", fs::PathToString(checkout));
+        result.pushKV("materialized", true);
         result.pushKV("inference", false);
         result.pushKV("runtime_started", false);
         result.pushKV("runtime_exec", false);
+        result.pushKV("device_loaded", false);
         UniValue files(UniValue::VARR);
         for (const auto& f : e.core.files) {
             UniValue one(UniValue::VOBJ);
@@ -7251,7 +7376,70 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             files.push_back(one);
         }
         result.pushKV("files", files);
-        result.pushKV("note", "Verified local files. This RPC never starts a runtime.");
+        result.pushKV("file_count", static_cast<int>(e.core.files.size()));
+        result.pushKV("automatic_spend_atoms", 0);
+        result.pushKV("next_actions", NextActionsArray({"loadmodel", "openmodelshare"}));
+        result.pushKV("note", "Verified local files rebuilt from pieces. This RPC never starts a runtime.");
+        return true;
+    }
+    if (method == "loadmodel") {
+        const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+        CatalogEntry e;
+        if (id.IsNull() || !cat.Find(id, e)) {
+            err_code = "NOT_FOUND";
+            return false;
+        }
+        if (e.incomplete) {
+            err_code = "INCOMPLETE";
+            err = "incomplete replica cannot be loaded";
+            return false;
+        }
+        const fs::path checkout = HelperDir(cat) / "checkout" / fs::PathFromString(e.artifact_id.Hex());
+        if (!cat.MaterializeCheckout(id, checkout, err)) {
+            err_code = "IO";
+            return false;
+        }
+        UniValue tensors(UniValue::VARR);
+        uint64_t weight_bytes = 0;
+        std::error_code ec;
+        for (const auto& f : e.core.files) {
+            const auto lower = ToLower(f.path);
+            if (!lower.ends_with(".safetensors")) continue;
+            const fs::path st = checkout / fs::PathFromString(f.path);
+            std::string ierr;
+            if (!InventorySafeTensorsFile(st, tensors, weight_bytes, ierr)) {
+                err_code = "INVALID_MODEL";
+                err = ierr;
+                return false;
+            }
+        }
+        result.pushKV("schema_version", 2);
+        result.pushKV("model_id", e.model_id.Hex());
+        result.pushKV("path", fs::PathToString(checkout));
+        result.pushKV("usable_runtime_root", fs::PathToString(checkout));
+        result.pushKV("materialized", true);
+        result.pushKV("tensors", tensors);
+        result.pushKV("tensor_count", static_cast<int>(tensors.size()));
+        result.pushKV("weight_bytes", weight_bytes);
+        result.pushKV("inference", false);
+        result.pushKV("runtime_started", false);
+        result.pushKV("runtime_exec", false);
+        result.pushKV("remote_inference", false);
+        result.pushKV("device_loaded", false);
+        result.pushKV("automatic_spend_atoms", 0);
+        const char* loader_env = std::getenv("BTX_MODEL_CUDA_LOADER");
+        if (loader_env && loader_env[0] != '\0') {
+            UniValue loaded;
+            if (!RunCudaLoader(fs::PathFromString(loader_env), checkout, loaded, err)) {
+                err_code = "HARDWARE_NOT_RUN";
+                return false;
+            }
+            result.pushKV("device_loaded", true);
+            result.pushKV("cuda", loaded);
+            if (loaded.exists("bytes_on_device")) result.pushKV("bytes_on_device", loaded["bytes_on_device"]);
+            if (loaded.exists("device_name")) result.pushKV("device_name", loaded["device_name"]);
+        }
+        result.pushKV("note", "Weights are local files. CUDA load requires BTX_MODEL_CUDA_LOADER; this RPC never starts a network inference server.");
         return true;
     }
     if (method == "getmodelpolicy" || method == "setmodelpolicy") {
@@ -8864,7 +9052,7 @@ int UnixRpcReplyTimeoutMs(const std::string& method)
 {
     if (method == "waitformodelevent" || method == "importmodel" || method == "hostmodel" ||
         method == "getmodel" || method == "scanmodelwatch" || method == "executemodelimport" ||
-        method == "importbtxpackage") {
+        method == "importbtxpackage" || method == "exportmodelpath" || method == "loadmodel") {
         return UNIX_RPC_LONG_REPLY_MS;
     }
     return UNIX_RPC_REPLY_MS;

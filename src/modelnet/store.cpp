@@ -613,4 +613,97 @@ bool ModelStore::RenameArtifact(const Digest48& from, const Digest48& to, std::s
     return true;
 }
 
+bool ModelStore::MaterializeFile(const Digest48& artifact, uint32_t file_index, uint64_t file_size,
+                                 const Digest48& expected_sha384, const fs::path& dest, std::string& err) const
+{
+    if (dest.empty()) {
+        err = "empty dest";
+        return false;
+    }
+    std::error_code ec;
+    if (fs::is_symlink(dest, ec)) {
+        err = "dest is a symlink";
+        return false;
+    }
+    if (fs::is_regular_file(dest, ec) && !ec) {
+        const auto sz = fs::file_size(dest, ec);
+        if (!ec && sz == file_size) {
+            std::ifstream in(dest, std::ios::binary);
+            CSHA384 hasher;
+            std::vector<unsigned char> buf(PIECE_SIZE);
+            uint64_t remaining = file_size;
+            bool ok = static_cast<bool>(in);
+            while (ok && remaining > 0) {
+                const size_t n = static_cast<size_t>(std::min<uint64_t>(PIECE_SIZE, remaining));
+                in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(n));
+                if (static_cast<size_t>(in.gcount()) != n) {
+                    ok = false;
+                    break;
+                }
+                hasher.Write(buf.data(), n);
+                remaining -= n;
+            }
+            Digest48 got;
+            hasher.Finalize(got.data.data());
+            if (ok && remaining == 0 && got == expected_sha384) return true;
+        }
+    }
+    fs::create_directories(dest.parent_path());
+    fs::path tmp = dest.parent_path();
+    tmp /= fs::PathFromString(fs::PathToString(dest.filename()) + ".part");
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            err = "open dest";
+            return false;
+        }
+        CSHA384 hasher;
+        const uint64_t n = file_size == 0 ? 0 : (file_size + PIECE_SIZE - 1) / PIECE_SIZE;
+        uint64_t written = 0;
+        for (uint64_t i = 0; i < n; ++i) {
+            std::vector<unsigned char> bytes;
+            if (!GetPiece(artifact, file_index, static_cast<uint32_t>(i), bytes, err)) {
+                out.close();
+                fs::remove(tmp, ec);
+                return false;
+            }
+            if (bytes.empty()) {
+                err = "empty piece";
+                out.close();
+                fs::remove(tmp, ec);
+                return false;
+            }
+            hasher.Write(bytes.data(), bytes.size());
+            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+            if (!out) {
+                err = "write dest";
+                out.close();
+                fs::remove(tmp, ec);
+                return false;
+            }
+            written += bytes.size();
+        }
+        out.close();
+        Digest48 got;
+        hasher.Finalize(got.data.data());
+        if (written != file_size) {
+            err = "materialize size mismatch";
+            fs::remove(tmp, ec);
+            return false;
+        }
+        if (got != expected_sha384) {
+            err = "file sha384 mismatch";
+            fs::remove(tmp, ec);
+            return false;
+        }
+    }
+    fs::rename(tmp, dest, ec);
+    if (ec) {
+        err = "rename dest";
+        fs::remove(tmp, ec);
+        return false;
+    }
+    return true;
+}
+
 } // namespace modelnet

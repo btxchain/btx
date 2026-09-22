@@ -87,6 +87,12 @@ public:
     void EvictUnpinned();
     bool ListCommittedPieces(const Digest48& artifact, uint32_t file_index, std::vector<uint32_t>& out) const;
     int64_t PieceMtime(const Digest48& artifact, uint32_t file_index, uint32_t piece_index) const;
+    /**
+     * Concatenate verified pieces into dest and require SHA-384(file) == expected.
+     * Skips rewrite when dest already matches. Never follows a symlink dest.
+     */
+    bool MaterializeFile(const Digest48& artifact, uint32_t file_index, uint64_t file_size,
+                         const Digest48& expected_sha384, const fs::path& dest, std::string& err) const;
 };
 
 } // namespace modelnet

@@ -236,10 +236,16 @@ demand-seeds without `seedmodel`. Expect `family=granite`,
 Unix `getmodel` is async: `status=running` plus `job_id`. Poll
 `getmodeljob`. `contrib/modelnet/granite_host_roundtrip.py` does this and
 requires 3322 pieces and 13888336427 bytes on disk. `exportmodelpath`
-sha384 is the manifest; count the pieces on disk.
-`contrib/modelnet/two_helper_retrieve.py` and `e2e-local-helper.sh` are
-TinySafeTensors / 10-byte stub smokes. The real granite path is
-`granite_host_roundtrip.py`.
+rebuilds the original HF/GGUF files from those pieces into
+`checkout/<artifact>/` (`path` / `usable_runtime_root`). SHA-384 in the
+RPC is still the manifest; the checkout files are re-hashed on write.
+`getmodel` accepts a `.btx` share file or a `btx://` URI.
+`loadmodel` inventories SafeTensors and copies payloads onto CUDA device 0
+when `BTX_MODEL_CUDA_LOADER` is set to `contrib/modelnet/cuda_safetensors_load`
+(built with nvcc). It does not start a network inference server.
+`contrib/modelnet/granite_user_scenarios.py` is the .btx + URI + checkout
+(+ optional CUDA) path. `contrib/modelnet/two_helper_retrieve.py` and
+`e2e-local-helper.sh` are TinySafeTensors / 10-byte stub smokes.
 
 ### 3. Two or three machines (isolated, not production)
 

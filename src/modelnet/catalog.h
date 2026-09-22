@@ -102,6 +102,12 @@ public:
     bool NoteUsefulBytes(const Digest48& model_or_artifact, int64_t served_delta, int64_t received_delta, std::string& err);
     bool InstallFromManifest(const UniValue& manifest, std::string& err, bool complete = true);
     bool VerifyFileDigest(const Digest48& artifact, uint32_t file_index, const Digest48& expected, std::string& err);
+    /**
+     * Rebuild the original directory tree from verified pieces into dest.
+     * Refuses incomplete replicas. dest is the usable runtime root (HF/GGUF files),
+     * not the piece store. Does not start a runtime.
+     */
+    bool MaterializeCheckout(const Digest48& model_or_artifact, const fs::path& dest, std::string& err);
     bool GetVerifiedPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
                            std::vector<unsigned char>& bytes, std::vector<Digest48>& proof,
                            uint64_t& file_size, std::string& err) const;

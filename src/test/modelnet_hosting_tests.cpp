@@ -27,6 +27,7 @@
 #include <cstring>
 #include <chrono>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,21 @@ modelnet::CatalogEntry ImportTiny(modelnet::ModelCatalog& cat, const fs::path& d
     modelnet::CatalogEntry imported;
     BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(WriteTinyModel(dir, tag)), pin, imported, err), err);
     return imported;
+}
+
+std::vector<unsigned char> ReadFileBytes(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    BOOST_REQUIRE_MESSAGE(in, fs::PathToString(path));
+    return std::vector<unsigned char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+/** Directory result, or the safetensors file itself. */
+fs::path SafeTensorsFile(const fs::path& path)
+{
+    std::error_code ec;
+    if (fs::is_regular_file(path, ec) && !ec) return path;
+    return path / "model.safetensors";
 }
 
 } // namespace
@@ -569,6 +585,158 @@ BOOST_AUTO_TEST_CASE(demand_seed_skips_incomplete_replica)
     while (std::getline(catalog_in, line)) catalog_body += line;
     BOOST_REQUIRE(catalog_in.eof());
     BOOST_CHECK(catalog_body.find("automatic_spend") == std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(materialize_checkout_rebuilds_original_bytes)
+{
+    const fs::path tmp = m_path_root / "materialize-checkout";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    constexpr unsigned char tag = 0x81;
+    const auto imported = ImportTiny(cat, tmp / "src", tag, true);
+    const fs::path dest = tmp / "rebuilt";
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.MaterializeCheckout(imported.model_id, dest, err), err);
+    BOOST_CHECK(fs::PathToString(dest) != imported.source_path);
+    const auto got = ReadFileBytes(dest / "model.safetensors");
+    const auto expect = TinySafeTensors(tag);
+    BOOST_CHECK_EQUAL(got.size(), expect.size());
+    BOOST_CHECK(got == expect);
+}
+
+BOOST_AUTO_TEST_CASE(exportmodelpath_returns_usable_runtime_root_from_pieces)
+{
+    const fs::path tmp = m_path_root / "export-runtime-root";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    constexpr unsigned char tag = 0x82;
+    const auto imported = ImportTiny(cat, tmp / "src", tag, true);
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "exportmodelpath");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
+
+    BOOST_REQUIRE(result.exists("path"));
+    BOOST_REQUIRE(result["path"].isStr());
+    const fs::path checkout = fs::PathFromString(result["path"].get_str());
+    BOOST_CHECK(fs::is_directory(checkout));
+    BOOST_CHECK(fs::PathToString(checkout) != imported.source_path);
+    const fs::path expect_root = tmp / "checkout" / fs::PathFromString(imported.artifact_id.Hex());
+    std::error_code ec;
+    const bool checkout_matches = fs::equivalent(checkout, expect_root, ec);
+    BOOST_CHECK(!ec);
+    BOOST_CHECK(checkout_matches);
+    const auto got = ReadFileBytes(checkout / "model.safetensors");
+    const auto expect = TinySafeTensors(tag);
+    BOOST_CHECK_EQUAL(got.size(), expect.size());
+    BOOST_CHECK(got == expect);
+
+    BOOST_REQUIRE(result.exists("usable_runtime_root"));
+    BOOST_REQUIRE(result["usable_runtime_root"].isStr());
+    const fs::path runtime = fs::PathFromString(result["usable_runtime_root"].get_str());
+    BOOST_CHECK(fs::is_directory(runtime));
+    ec.clear();
+    const bool runtime_matches = fs::equivalent(runtime, checkout, ec);
+    BOOST_CHECK(!ec);
+    BOOST_CHECK(runtime_matches);
+
+    BOOST_CHECK_EQUAL(result["inference"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["runtime_started"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["runtime_exec"].get_bool(), false);
+    if (result.exists("automatic_spend_atoms")) {
+        BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(loadmodel_incomplete_replica_is_rejected)
+{
+    const fs::path tmp = m_path_root / "load-incomplete";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x83, true);
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(imported.model_id, true, err), err);
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "loadmodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    err.clear();
+    const bool ok = modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    const bool failed = !ok || !err.empty() || (result.isObject() && result.exists("error"));
+    BOOST_CHECK(failed);
+    if (result.isObject() && result.exists("device_loaded")) {
+        BOOST_CHECK_EQUAL(result["device_loaded"].get_bool(), false);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(loadmodel_lists_local_files_without_starting_inference)
+{
+    const fs::path tmp = m_path_root / "load-local";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    constexpr unsigned char tag = 0x84;
+    const auto imported = ImportTiny(cat, tmp / "src", tag, true);
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "loadmodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
+
+    BOOST_CHECK_EQUAL(result["inference"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["runtime_started"].get_bool(), false);
+    BOOST_CHECK_EQUAL(result["device_loaded"].get_bool(), false);
+    BOOST_REQUIRE(result.exists("path"));
+    BOOST_REQUIRE(result["path"].isStr());
+    const fs::path weights = SafeTensorsFile(fs::PathFromString(result["path"].get_str()));
+    BOOST_CHECK(weights.filename() == "model.safetensors");
+    const auto got = ReadFileBytes(weights);
+    const auto expect = TinySafeTensors(tag);
+    BOOST_CHECK_EQUAL(got.size(), expect.size());
+    BOOST_CHECK(got == expect);
+}
+
+BOOST_AUTO_TEST_CASE(getmodel_opens_btx_share_file)
+{
+    const fs::path tmp = m_path_root / "getmodel-btx-file";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x85, true);
+    const fs::path link = tmp / "granite.btx";
+
+    UniValue wrpc(UniValue::VOBJ);
+    wrpc.pushKV("method", "exportmodellink");
+    UniValue wparams(UniValue::VARR);
+    wparams.push_back(imported.model_id.Hex());
+    wparams.push_back(fs::PathToString(link));
+    wrpc.pushKV("params", wparams);
+    UniValue written;
+    std::string code;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, wrpc, written, code, err), err);
+    BOOST_CHECK(written["written"].get_bool());
+    BOOST_CHECK(fs::exists(link));
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "getmodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(fs::PathToString(link));
+    params.push_back("FREE_ONLY");
+    rpc.pushKV("params", params);
+    UniValue result;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
+    BOOST_CHECK_EQUAL(result["status"].get_str(), "local");
+    BOOST_CHECK(result["uri"].get_str().rfind("btx://", 0) == 0);
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

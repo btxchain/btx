@@ -132,6 +132,8 @@ UniValue CapabilitiesObject()
     c.pushKV("getmodelwatchstatus", true);
     c.pushKV("showmodel", true);
     c.pushKV("exportmodellink", true);
+    c.pushKV("exportmodelpath", true);
+    c.pushKV("loadmodel", true);
     c.pushKV("unhostmodel", true);
     c.pushKV("removemodelalias", true);
     c.pushKV("openmodelshare", true);
@@ -1178,6 +1180,36 @@ bool ModelCatalog::VerifyFileDigest(const Digest48& artifact, uint32_t file_inde
     if (got != expected) {
         err = "file sha384 mismatch";
         return false;
+    }
+    return true;
+}
+
+bool ModelCatalog::MaterializeCheckout(const Digest48& model_or_artifact, const fs::path& dest, std::string& err)
+{
+    CatalogEntry e;
+    if (!Find(model_or_artifact, e)) {
+        err = "not found";
+        return false;
+    }
+    if (e.incomplete) {
+        err = "incomplete replica";
+        return false;
+    }
+    if (dest.empty()) {
+        err = "empty dest";
+        return false;
+    }
+    std::error_code ec;
+    if (fs::is_symlink(dest, ec)) {
+        err = "checkout dest is a symlink";
+        return false;
+    }
+    fs::create_directories(dest);
+    for (uint32_t i = 0; i < e.core.files.size(); ++i) {
+        const CoreFile& f = e.core.files[i];
+        if (!IsPortableRelPath(f.path, err)) return false;
+        const fs::path outp = dest / fs::PathFromString(f.path);
+        if (!m_store.MaterializeFile(e.artifact_id, i, f.size, f.sha384, outp, err)) return false;
     }
     return true;
 }
