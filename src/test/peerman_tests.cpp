@@ -8,6 +8,7 @@
 #include <consensus/merkle.h>
 #include <key.h>
 #include <matmul/trusted_exact_replay_attestation.h>
+#include <matmul/matmul_v4_rc_cpu_confirmation.h>
 #include <net_types.h>
 #include <netbase.h>
 #include <node/matmul_rc_admission.h>
@@ -33,6 +34,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -5391,9 +5393,10 @@ BOOST_AUTO_TEST_CASE(ticketless_followed_tip_child_converges_without_rcadmit)
 // above tip. Honest suffix bodies that extend the active tip must still
 // ExactReplay and ConnectTip. Competing non-extending headers stay
 // HEADER_ONLY (no bodies sent for them here).
-BOOST_AUTO_TEST_CASE(consensus_behind_competing_twin_headers_still_converges)
+static void CheckConsensusBehindCompetingHeaders(
+    node::NodeContext& m_node, bool retain_next_child, bool cpu_pending = false)
 {
-    LOCK(NetEventsInterface::g_msgproc_mutex);
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
 
     node::matmul_trusted::ResetForTest();
     ResetSharedPeermanFixture(m_node);
@@ -5571,20 +5574,81 @@ BOOST_AUTO_TEST_CASE(consensus_behind_competing_twin_headers_still_converges)
         peer.fPauseSend = false;
     };
 
-    send_ticketed_body(honest_child);
-    send_ticketed_body(honest_grand);
+    if (retain_next_child) {
+        // Reproduce the production one-job admission race: the next body
+        // waits for capacity, capacity becomes free, and a later body arrives
+        // before the retry tick. Competing best headers must not let that
+        // later body steal the slot from the retained active-tip child.
+        consensus.nMatMulRCMaxPendingVerifications = 0;
+        peerman.SetConfiguredClaimedTipChildForTest(child_hash);
+        send_ticketed_body(honest_child);
+        BOOST_REQUIRE(peerman.HasMatMulRetainedBodyForTest(child_hash));
+        consensus.nMatMulRCMaxPendingVerifications = 1;
+        if (cpu_pending) {
+            auto release{std::make_shared<std::promise<void>>()};
+            auto ready{release->get_future().share()};
+            struct ReleaseConfirmation {
+                std::shared_ptr<std::promise<void>> release;
+                ~ReleaseConfirmation() { if (release) release->set_value(); }
+            } release_confirmation{release};
+            auto& confirmations{matmul::v4::rc::GetRCCpuConfirmationQueue()};
+            confirmations.Submit(child_hash, child_hash, {}, [ready] {
+                ready.wait();
+                return matmul::v4::rc::ExactReplayVerifyResult{};
+            });
+            BOOST_REQUIRE(confirmations.Pending(child_hash));
+            send_ticketed_body(honest_grand);
+            BOOST_REQUIRE(PeermanWaitFor([&] {
+                LOCK(::cs_main);
+                const auto* idx{m_node.chainman->m_blockman.LookupBlockIndex(grand_hash)};
+                return idx != nullptr && (idx->nStatus & BLOCK_HAVE_DATA) != 0;
+            }));
+            BOOST_CHECK(confirmations.Pending(child_hash));
+            release->set_value();
+            release_confirmation.release.reset();
+            BOOST_REQUIRE(PeermanWaitFor([&] { return !confirmations.Pending(child_hash); }));
+        } else {
+            ASSERT_DEBUG_LOG("MatMul pending verification cap reached");
+            send_ticketed_body(honest_grand);
+        }
+        if (!cpu_pending) {
+            BOOST_REQUIRE(peerman.HasMatMulRetainedBodyForTest(grand_hash));
+        }
+        peerman.SimulateMatMulPendingSlotReleaseForTest(/*rc_profile=*/true);
+        {
+            REVERSE_LOCK(msgproc_lock);
+            SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 3});
+            peerman.RetryMatMulDeferredBodiesForTest();
+            BOOST_REQUIRE(PeermanWaitFor([&] {
+                LOCK(::cs_main);
+                const auto* idx{m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+                return idx != nullptr && m_node.chainman->ActiveChain().Contains(idx);
+            }));
+            SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 4});
+            peerman.RetryMatMulDeferredBodiesForTest();
+        }
+    } else {
+        send_ticketed_body(honest_child);
+        send_ticketed_body(honest_grand);
+    }
     BOOST_CHECK(!peer.fDisconnect);
 
-    BOOST_REQUIRE(PeermanWaitFor([&] {
-        LOCK(::cs_main);
-        const CBlockIndex* idx{
-            m_node.chainman->m_blockman.LookupBlockIndex(grand_hash)};
-        return idx != nullptr &&
-               (idx->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
-               (idx->nStatus & BLOCK_HAVE_DATA) != 0 &&
-               m_node.chainman->ActiveChain().Contains(idx) &&
-               idx->IsValid(BLOCK_VALID_SCRIPTS);
-    }));
+    {
+        REVERSE_LOCK(msgproc_lock);
+        int64_t tick{tip->GetBlockTime() + 5};
+        BOOST_REQUIRE(PeermanWaitFor([&] {
+            SetMockTime(std::chrono::seconds{tick++});
+            peerman.RetryMatMulDeferredBodiesForTest();
+            LOCK(::cs_main);
+            const CBlockIndex* idx{
+                m_node.chainman->m_blockman.LookupBlockIndex(grand_hash)};
+            return idx != nullptr &&
+                   (idx->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+                   (idx->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                   m_node.chainman->ActiveChain().Contains(idx) &&
+                   idx->IsValid(BLOCK_VALID_SCRIPTS);
+        }));
+    }
     BOOST_CHECK_GE(replayed.load(std::memory_order_relaxed), 1);
     BOOST_CHECK_EQUAL(
         WITH_LOCK(::cs_main,
@@ -5612,6 +5676,21 @@ BOOST_AUTO_TEST_CASE(consensus_behind_competing_twin_headers_still_converges)
         (void)m_node.chainman->ActiveChainstate().InvalidateBlock(
             invalidate_state, connected);
     }
+}
+
+BOOST_AUTO_TEST_CASE(consensus_behind_competing_twin_headers_still_converges)
+{
+    CheckConsensusBehindCompetingHeaders(m_node, false);
+}
+
+BOOST_AUTO_TEST_CASE(retained_active_tip_child_precedes_suffix_under_competing_headers)
+{
+    CheckConsensusBehindCompetingHeaders(m_node, true);
+}
+
+BOOST_AUTO_TEST_CASE(cpu_pending_active_tip_child_does_not_reserve_gpu_admission)
+{
+    CheckConsensusBehindCompetingHeaders(m_node, true, true);
 }
 
 // Local signer / miner must not spend ExactReplay GPU on a competing EncDr

@@ -300,7 +300,19 @@ bool ExactGemmS8S8Dispatched(RCGemmDispatch& dispatch, RCGemmPhase phase,
 {
     const uint64_t macs = GemmMacs(rows, inner, cols);
     const auto run_cpu = [&]() {
-        return lt::ExactGemmS8S8(L, R, rows, inner, cols);
+        // Preserve each dot product's exact integer accumulation, but check
+        // shutdown between small row tiles rather than a mainnet-sized GEMM.
+        std::vector<int32_t> result(static_cast<size_t>(rows) * cols);
+        constexpr uint32_t TILE_ROWS{16};
+        for (uint32_t row = 0; row < rows; row += TILE_ROWS) {
+            if (ExactReplayCancellationRequested()) return std::vector<int32_t>{};
+            const uint32_t count{std::min(TILE_ROWS, rows - row)};
+            const std::vector<int8_t> left(L.begin() + static_cast<size_t>(row) * inner,
+                                         L.begin() + static_cast<size_t>(row + count) * inner);
+            const auto tile{lt::ExactGemmS8S8(left, R, count, inner, cols)};
+            std::copy(tile.begin(), tile.end(), result.begin() + static_cast<size_t>(row) * cols);
+        }
+        return result;
     };
     if (dispatch.gemm.gemm_s8s8 == nullptr) {
         if (dispatch.require_device) {
@@ -310,7 +322,7 @@ bool ExactGemmS8S8Dispatched(RCGemmDispatch& dispatch, RCGemmPhase phase,
         }
         RecordCpuGemm(dispatch, macs, false, nullptr);
         out = run_cpu();
-        return true;
+        return out.size() == static_cast<size_t>(rows) * cols;
     }
 
     std::vector<int32_t> device;
@@ -331,7 +343,7 @@ bool ExactGemmS8S8Dispatched(RCGemmDispatch& dispatch, RCGemmPhase phase,
         RecordCpuGemm(
             dispatch, macs, true, "device_exactgemm_declined_or_wrong_size");
         out = run_cpu();
-        return true;
+        return out.size() == static_cast<size_t>(rows) * cols;
     }
 
     static const bool compare =

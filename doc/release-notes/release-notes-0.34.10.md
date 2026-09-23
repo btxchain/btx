@@ -60,9 +60,11 @@ frontier). Migration stays park / `deepforkautoresolve`-gated.
 |---|---|
 | `AcquisitionEscapeCoversBlock` | Active-chain blocks and tip-extending HEADER_ONLY / retained children are never covered. |
 | `FindAcquisitionEscapeFrontier` | Unique lowest unverified parent-connectable body on the heaviest registered tower, or `nullptr`. |
-| ExactReplay admission | `MatMulMaySpendExactReplayGpu`, AcceptBlock reverify, RC progress-lane, NextRetry, and the 1 Hz replay driver spend GPU **only** on that frontier. A live HEADER_ONLY hole yields the followed tip-child rather than filling the scheduler. |
+| ExactReplay admission | `MatMulMaySpendExactReplayGpu`, AcceptBlock reverify, RC progress-lane, NextRetry, and the 1 Hz replay driver spend GPU on the unique competing frontier **or** a retained honest tip-child while that frontier is HEADER_ONLY or CPU-pending. Competing descendants stay deferred. |
 | Missing-frontier GETDATA | While the unique frontier is HEADER_ONLY, GETDATA is 1-wide and the download window clamps to that height. A competing tower with `FollowedChainAhead==0` used to 16-wide unconnectable descendants so the LCA+1 body never arrived and CPU ExactReplay confirmation never ran. |
-| Protected-replay SIGTERM | Body-holding ExactReplay still ignores ordinary branch cancellation. `Stop()` now observes `m_shutdown` on scheduler wait and replay so SIGTERM cannot wait a multi-hour protected episode / CUDA teardown. A cancelled shutdown does not publish a consensus verdict. |
+| Protected-replay SIGTERM | Body-holding ExactReplay still ignores ordinary branch cancellation. `Stop()` now observes `m_shutdown` on scheduler wait and replay so SIGTERM cannot wait a multi-hour protected episode / CUDA teardown. A cancelled shutdown does not publish a consensus verdict. Portable CPU GEMM checks cancellation between 16-row tiles. |
+| CPU mismatch confirmation | Unresolved device digest mismatches confirm on a bounded background CPU queue (`b-mmconfirm`, cap 4 pending / 64 results) instead of holding the GPU lease and the sole validation worker. Default `-matmulrcconfirmcpu=1`. Opt-out `=0` only authorizes a completed qualified exact device mismatch. |
+| Retained tip-child priority | `ReplayPriorityTipChild` keeps the next retained active-chain body ahead of competing-header work even when `m_best_header` is on another fork. CPU-pending children do not take the GPU lane. |
 | `-acquisitionstallseconds` | Ignored on mainnet. Regtest/testnet still honor it with a warning. |
 
 ## 0.34.6 → 0.34.8 (what did and did not change)

@@ -52,6 +52,7 @@
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_cpu_confirmation.h>
 #include <matmul/matmul_v4_rc_production_canary.h>
 #include <net.h>
 #include <net_permissions.h>
@@ -349,6 +350,7 @@ void Interrupt(NodeContext& node)
     // Otherwise ActivateBestChain / preciousblock sitting in an HTTP thread
     // waits forever on b-mmverify, StopHTTPServer never returns, and systemd
     // SIGKILLs — skipping PersistShieldedState and forcing a fused rebuild.
+    matmul::v4::rc::GetRCCpuConfirmationQueue().Stop();
     if (node.peerman) node.peerman->StopBackgroundWorkers();
 }
 
@@ -380,6 +382,7 @@ void Shutdown(NodeContext& node)
     // Stop mmverify before joining HTTP/RPC workers. Interrupt() already did
     // this; calling it again is idempotent. Doing it here covers the path
     // where Shutdown() runs without Interrupt() (failed init / Qt).
+    matmul::v4::rc::GetRCCpuConfirmationQueue().Stop();
     if (node.peerman) node.peerman->StopBackgroundWorkers();
 
     // Durable chainstate must be recorded BEFORE StopHTTPServer joins RPC
@@ -658,6 +661,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-governorcooldownseconds=<n>", "Seconds after a mining pause before resume is considered (default: 10).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-discoveryrelayhideaddr=<ip>", "Do not learn, GETADDR, or getnodeaddresses this IP. Repeatable. Use on discovery relays and trusted archives to hide GPU attestor addresses that advertise CONSENSUS without ARCHIVE (serve=0). Relays InitError if -addnode/-connect/-seednode targets a hidden address.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: strict-device on a chain with a finite RC activation height, auto-fallback while RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulrcconfirmcpu", "Confirm unresolved device digest mismatches using a bounded background portable CPU ExactReplay (default: 1). With 0, a completed exact device replay with current production qualification may reject a mismatched commitment without CPU confirmation. Execution failures and unqualified mismatches remain retryable. Does not disable explicit cpu-diagnostic or auto-fallback execution.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowunverifiablematmulconsensus", "Allow consensus-mode catch-up ExactReplay when the local device did not self-qualify (startup canary / production goldens miss). Startup still warns and withholds NODE_MATMUL_CONSENSUS. Mining stays fail-closed. Catch-up still fully ExactReplays every body before ConnectTip, on the available CUDA/Metal GEMM if present, otherwise on CPU. Without this flag a canary miss zeros the GEMM and digest_requests stays 0 (a live consensus-archive node: buffer_pool_uninitialized). Do not treat this as skipping ExactReplay.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted unless -matmultrustedpqpubkey is set. Mainnet trusted mirrors require at least 2 independent signers and M=2 (a 1-of-1 quorum is ExactReplay skip authority). Pass -allowsinglekeytrustedmirror=1 only as an explicit transition override. ML-DSA-44 pin members from -matmultrustedpqpubkey count toward N independently.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpqpubkey=<hex>", "ML-DSA-44 (1312-byte) public key trusted to attest successful Profile-1 ExactReplay. Repeat for additional independent pin members; each must be distinct. Counted in N alongside -matmultrustedpubkey. Does not change consensus ExactReplay: only trusted mirrors skip GPU on pin quorum. Empty keeps the live secp pin.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1925,6 +1929,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
     matmul::v4::rc::SetRCExactReplayExecutionPolicy(
         rc_execution_policy);
+    matmul::v4::rc::SetRCExactReplayCpuConfirmation(
+        args.GetBoolArg("-matmulrcconfirmcpu", true));
+    LogInfo("MatMul RC portable CPU mismatch confirmation: %s\n",
+            matmul::v4::rc::GetRCExactReplayCpuConfirmation() ? "enabled (background)" : "disabled (qualified device authority)");
 
     // Validate invariant: nFastMineHeight must equal nMatMulAsertHeight on all
     // networks.  Misconfiguration silently breaks difficulty adjustment.
