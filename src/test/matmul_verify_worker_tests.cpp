@@ -1328,6 +1328,105 @@ BOOST_AUTO_TEST_CASE(stop_drains_queue_without_completions)
     BOOST_CHECK_EQUAL(completions.load(), 2);
 }
 
+// Body-holding ExactReplay ignores ordinary job.cancelled. Stop() must still
+// cancel a running protected replay via m_shutdown so SIGTERM cannot wait
+// the whole episode. The override polls ExactReplayCancellationRequested;
+// without the live shutdown observer this case never sees Stop().
+BOOST_AUTO_TEST_CASE(protected_running_body_observes_shutdown)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    std::atomic<int> running{0};
+    std::atomic<int> saw_shutdown{0};
+    std::atomic<int> completions{0};
+    std::atomic<int> retryable_cleanups{0};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            ++running;
+            const auto deadline{
+                std::chrono::steady_clock::now() +
+                std::chrono::seconds{20}};
+            while (!matmul::v4::rc::ExactReplayCancellationRequested()) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{2});
+            }
+            if (matmul::v4::rc::ExactReplayCancellationRequested()) {
+                ++saw_shutdown;
+            }
+            return false;
+        }};
+
+    MatMulVerifyWorker::Job job{
+        .block = MakeBlock(201),
+        .height = 100,
+        .completion = [&](bool) { ++completions; },
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    BOOST_REQUIRE(WaitFor([&] { return running.load() == 1; }));
+
+    const auto t0{std::chrono::steady_clock::now()};
+    worker.Stop();
+    BOOST_CHECK_LT(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count(),
+        5000);
+    BOOST_CHECK_EQUAL(saw_shutdown.load(), 1);
+    BOOST_CHECK_EQUAL(completions.load(), 0);
+    BOOST_CHECK_EQUAL(retryable_cleanups.load(), 1);
+}
+
+// Same protection applies while the body job is still waiting for the
+// accelerator. Stop() must abort that wait via external_cancelled; a 90s
+// queue-wait timeout is not a shutdown.
+BOOST_AUTO_TEST_CASE(protected_scheduler_wait_observes_shutdown)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &owner_cancelled,
+        "hold-device-for-shutdown-test")};
+    BOOST_REQUIRE(owner);
+
+    Consensus::Params params{MakeProfile1ActiveParams()};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    std::atomic<int> completions{0};
+    std::atomic<int> retryable_cleanups{0};
+    MatMulVerifyWorker::Job job{
+        .block = MakeBlock(202),
+        .height = 100,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++completions; },
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .acquisition_recovery = true,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+
+    const auto t0{std::chrono::steady_clock::now()};
+    worker.Stop();
+    BOOST_CHECK_LT(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count(),
+        5000);
+    BOOST_CHECK_EQUAL(completions.load(), 0);
+    BOOST_CHECK_EQUAL(retryable_cleanups.load(), 1);
+    BOOST_CHECK_GE(scheduler.GetStats().cancelled_waits, 1U);
+
+    owner = {};
+    BOOST_CHECK(!scheduler.GetStats().active);
+}
+
 // Design test A.10 #4: the ENC-DR verdict memo is bounded at 64 entries with
 // FIFO eviction; lookups hit exactly the retained window.
 BOOST_AUTO_TEST_CASE(encdr_verdict_memo_bounded_fifo)

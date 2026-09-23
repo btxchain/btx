@@ -62,6 +62,7 @@ frontier). Migration stays park / `deepforkautoresolve`-gated.
 | `FindAcquisitionEscapeFrontier` | Unique lowest unverified parent-connectable body on the heaviest registered tower, or `nullptr`. |
 | ExactReplay admission | `MatMulMaySpendExactReplayGpu`, AcceptBlock reverify, RC progress-lane, NextRetry, and the 1 Hz replay driver spend GPU **only** on that frontier. A live HEADER_ONLY hole yields the followed tip-child rather than filling the scheduler. |
 | Missing-frontier GETDATA | While the unique frontier is HEADER_ONLY, GETDATA is 1-wide and the download window clamps to that height. A competing tower with `FollowedChainAhead==0` used to 16-wide unconnectable descendants so the LCA+1 body never arrived and CPU ExactReplay confirmation never ran. |
+| Protected-replay SIGTERM | Body-holding ExactReplay still ignores ordinary branch cancellation. `Stop()` now observes `m_shutdown` on scheduler wait and replay so SIGTERM cannot wait a multi-hour protected episode / CUDA teardown. A cancelled shutdown does not publish a consensus verdict. |
 | `-acquisitionstallseconds` | Ignored on mainnet. Regtest/testnet still honor it with a warning. |
 
 ## 0.34.6 → 0.34.8 (what did and did not change)
