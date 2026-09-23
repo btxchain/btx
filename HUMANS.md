@@ -111,8 +111,9 @@ End-to-end host / search / retrieve / run / bounty:
 Using and proving the model network: [doc/modelnet/howto.md](doc/modelnet/howto.md).
 Local generate after acquire: [doc/modelnet/generate.md](doc/modelnet/generate.md).
 
-This working tree is **0.34.9**. GitHub tag **v0.34.9** is the shipping
-client.
+This working tree is **0.34.10-dev**. GitHub tag **v0.34.9** is the last
+shipping client. See
+[doc/release-notes/release-notes-0.34.10.md](doc/release-notes/release-notes-0.34.10.md).
 Host, seed, search, share, watch folder,
 `showmodel` / `unhostmodel` / `exportmodellink`, **load** / **generate**,
 mining `first_run` doctor tiles, bounty `checklist` / `--validate`, and doctor:

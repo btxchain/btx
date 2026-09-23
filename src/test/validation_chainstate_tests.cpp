@@ -5576,15 +5576,21 @@ BOOST_FIXTURE_TEST_CASE(rb16_acquisition_escape_valve, TestChain100Setup)
         // idempotent re-register
         BOOST_CHECK(chainman.AcquisitionEscapeMayAcquireHeavierFork(b_tip));
 
-        // RB-16 ExactReplay admission: every block ON the acquired tower is
-        // COVERED so its ExactReplay is admitted (not budget-deferred / not
-        // parked-vetoed), even a LOW mid-tower body below the minority tip in
-        // work -- which AcquisitionEscapeActive (strictly-heavier) rejects.
+        // RB-16 ExactReplay admission: CoversBlock is the tower predicate
+        // (fetch / parked-bypass). GPU spends only the unique frontier.
         BOOST_CHECK(chainman.AcquisitionEscapeCoversBlock(b_tip));
         BOOST_CHECK(chainman.AcquisitionEscapeCoversBlock(b.front()));
         BOOST_CHECK(!chainman.AcquisitionEscapeActive(b.front())); // below tip work
         // A block on our own active chain is never "being acquired".
         BOOST_CHECK(!chainman.AcquisitionEscapeCoversBlock(a_tip));
+        chainman.SetBestHeader(b_tip);
+        const CBlockIndex* const frontier{
+            chainman.FindAcquisitionEscapeFrontier()};
+        BOOST_CHECK(frontier == nullptr ||
+                    chainman.IsAcquisitionEscapeFrontier(frontier));
+        BOOST_CHECK(frontier == nullptr ||
+                    chainman.AcquisitionEscapeCoversBlock(frontier));
+        BOOST_CHECK(!chainman.IsAcquisitionEscapeFrontier(a_tip));
 
         // (5) equal/less-work never triggers: A's own tip is not heavier.
         BOOST_CHECK(!chainman.AcquisitionEscapeMayAcquireHeavierFork(a_tip));
@@ -5595,6 +5601,36 @@ BOOST_FIXTURE_TEST_CASE(rb16_acquisition_escape_valve, TestChain100Setup)
         // the constant being finite and applied in both methods).
         BOOST_CHECK_GT(ChainstateManager::ACQUISITION_ESCAPE_MAX_LEAD, 0);
         BOOST_CHECK_LE(ChainstateManager::ACQUISITION_ESCAPE_MAX_TOWERS, size_t{2});
+    }
+
+    // HEADER_ONLY / retained child of the active tip is not Contains() yet,
+    // but it extends the tip. The exempt root is the fork LCA, so without an
+    // extends-tip exclusion CoversBlock would treat our own tip-child as
+    // competing-tower work and ExactReplay it on the acquisition GPU path.
+    {
+        const CBlock child{CreateBlock({}, script, chainstate)};
+        BlockValidationState hs;
+        BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+            {{child.GetBlockHeader()}}, /*min_pow_checked=*/true, hs));
+        LOCK(::cs_main);
+        CBlockIndex* const child_index{
+            chainman.m_blockman.LookupBlockIndex(child.GetHash())};
+        BOOST_REQUIRE(child_index != nullptr);
+        BOOST_CHECK_EQUAL(child_index->pprev, a_tip);
+        BOOST_CHECK(!chainstate.m_chain.Contains(child_index));
+        BOOST_CHECK(!(child_index->nStatus & BLOCK_HAVE_DATA));
+        BOOST_CHECK(child_index->GetAncestor(a_tip->nHeight) == a_tip);
+        chainman.SetBestHeader(b_tip);
+        BOOST_CHECK(!chainman.AcquisitionEscapeCoversBlock(child_index));
+        BOOST_CHECK(chainman.AcquisitionEscapeCoversBlock(b.front()));
+        BOOST_CHECK(!chainman.IsAcquisitionEscapeFrontier(child_index));
+        const CBlockIndex* const frontier{
+            chainman.FindAcquisitionEscapeFrontier()};
+        BOOST_CHECK(frontier != child_index);
+        if (frontier != nullptr) {
+            BOOST_CHECK(chainman.IsAcquisitionEscapeFrontier(frontier));
+            BOOST_CHECK(chainman.AcquisitionEscapeCoversBlock(frontier));
+        }
     }
 
     // (c) RB-16 fix: the valve must fire for a tip that ONLY advances on a

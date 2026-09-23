@@ -1933,12 +1933,29 @@ public:
     //! block (the block sits on that heavier competing fork we are deliberately
     //! acquiring while stale-stuck)? Unlike AcquisitionEscapeActive this does
     //! NOT require the block itself to out-work the tip -- a low mid-tower body
-    //! is below the minority tip in work but must still be ExactReplay-admitted.
-    //! Used to ADMIT ExactReplay (bypass the parked-branch veto and the
-    //! competing-body budget deferral) for the tower we are acquiring; bounded
-    //! by the same <=2 towers + stuck-state gate. Migration stays park/
-    //! deepforkautoresolve-gated; a fake tower's bodies fail ExactReplay.
+    //! is below the minority tip in work but is still on the tower (fetch,
+    //! parked-bypass, retain). ExactReplay / RC progress-lane / AcceptBlock
+    //! reverify must use FindAcquisitionEscapeFrontier, not this predicate:
+    //! every LCA+1 sibling is parent-connectable, and covering them all fills
+    //! the accelerator. Active-chain blocks and HEADER_ONLY / retained children
+    //! that extend the active tip are never covered: Contains() is false until
+    //! ConnectTip, and the exempt root is the fork LCA, so a descendant-of-LCA
+    //! test would otherwise steal ExactReplay from the tip-child onto
+    //! competing-tower GPU work. Bounded by the same <=2 towers + stuck-state
+    //! gate. Migration stays park/deepforkautoresolve-gated.
     [[nodiscard]] bool AcquisitionEscapeCoversBlock(const CBlockIndex* index) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Parent of `index` is already on the active chain or ExactReplay-verified
+    //! with data (and not FAILED). Shared by fetch lookahead and ExactReplay
+    //! admission so doomed-tower FAILED parents cannot spend GPU.
+    [[nodiscard]] bool AcquisitionEscapeParentConnectable(const CBlockIndex* index) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Unique lowest unverified parent-connectable body on the heaviest
+    //! registered competing tower, or nullptr. ExactReplay / RC progress-lane
+    //! / reverify must use this, not "any covered parent-connectable body".
+    [[nodiscard]] const CBlockIndex* FindAcquisitionEscapeFrontier() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool IsAcquisitionEscapeFrontier(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Slot-wedge hardening: a registered exempt tower whose BODY fails
     //! validation (BLOCK_FAILED_MASK on any block descending from its root)

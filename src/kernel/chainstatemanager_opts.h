@@ -676,10 +676,11 @@ struct ChainstateManagerOpts {
     //! TEST-ONLY override for the RB-16 acquisition-escape staleness window
     //! (seconds). When unset the production constant ACQUISITION_ESCAPE_STALL_
     //! SECONDS (600) applies. Exposed via the hidden -acquisitionstallseconds
-    //! debug arg purely so live convergence tests need not wait 10 minutes per
-    //! restart; it changes ONLY how long a frozen node waits before the escape
-    //! valve may arm (never any validation/migration gate), and a loud warning
-    //! is logged when set. Not for production use.
+    //! debug arg purely so regtest/testnet convergence tests need not wait 10
+    //! minutes per restart. ApplyArgsManOptions ignores the arg on mainnet
+    //! (DEBUG_ONLY does not strip conf-file keys from IS_RELEASE builds).
+    //! It changes ONLY how long a frozen node waits before the escape valve
+    //! may arm (never any validation/migration gate). Not for production.
     std::optional<int64_t> acquisition_stall_seconds{};
     //! Live-tip burst allowance in blocks. 0 disables. Default 0 so unit
     //! tests that construct Options without ApplyArgsManOptions keep mining

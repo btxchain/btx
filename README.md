@@ -37,9 +37,9 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.34.9** (`CLIENT_VERSION_BUILD=9`,
-`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`). GitHub tag
-**v0.34.9** is the shipping client. Do not recut `v0.34.8` or the
+This working tree is **0.34.10** (`CLIENT_VERSION_BUILD=10`,
+`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=false`). GitHub tag
+**v0.34.9** remains the last shipping client. Do not recut `v0.34.9` or the
 `v0.34.9-dev.pr198*` tester tags.
 
 ## Start here
@@ -58,7 +58,7 @@ manual and not the long essay.
 
 - [Start here](#start-here)
 - [Current release — v0.34.9](#current-release--v0349)
-- [This tree — 0.34.9](#this-tree--0349)
+- [This tree — 0.34.10](#this-tree--03410)
 - [Get a node](#get-a-node)
 - [Use BTX for models (end to end)](#use-btx-for-models-end-to-end)
 - [Native Model Network (0.34.7)](#native-model-network-0347)
@@ -127,7 +127,19 @@ btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
 Use `loadtxoutset`, not `loadtxoutsetattested`. Do not mine on parent
 `ff80e629…` — that hash is not on the majority chain.
 
-## This tree — 0.34.9
+## This tree — 0.34.10
+
+This tree is **0.34.10-dev** on the 0.34.9 / 0.34.8 monetary baseline. It
+does not change ExactReplay consensus, issuance, or fork choice. It fixes
+RB-16 acquisition-escape **admission**: ExactReplay spends GPU on the
+unique parent-connectable competing-tower frontier only; a retained
+tip-child yields while that frontier exists. `btxd -version` prints
+`v0.34.10` plus a git suffix. P2P subversion is `/BTX:0.34.10/`. Last
+shipping tag **v0.34.9** is not recut.
+
+Notes: [doc/release-notes/release-notes-0.34.10.md](doc/release-notes/release-notes-0.34.10.md).
+
+## This tree — 0.34.9 (shipping baseline)
 
 Tag **v0.34.9** is the shipping client on the 0.34.8 monetary baseline. It
 does not change ExactReplay, issuance, or fork choice. `btxd -version`
