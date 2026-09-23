@@ -501,6 +501,15 @@ static bool CatchUpOneWideFetch(const ChainstateManager& chainman,
                                 const CBlockIndex* peer_best = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
+    // Unique acquisition-escape frontier with no body: never 16-wide
+    // CatchUpFarBehind. A HEADER_ONLY LCA+1 twin with headers far ahead
+    // used to fill inflight with descendants while the frontier stayed
+    // have_data=0. Descendants cannot connect until that one body is
+    // ExactReplay'd.
+    if (const CBlockIndex* const acq{chainman.FindAcquisitionEscapeFrontier()};
+        acq != nullptr && (acq->nStatus & BLOCK_HAVE_DATA) == 0) {
+        return true;
+    }
     if (CatchUpFarBehind(chainman, peer_best)) {
         return false;
     }
@@ -5387,6 +5396,7 @@ static bool TrustedMirrorMayDownloadIndex(
 {
     if (index == nullptr) return false;
     if (IndexIsShortReorgAttestedForkChild(chainman, tip, index)) return false;
+    if (chainman.IsAcquisitionEscapeFrontier(index)) return false;
     if (chainman.IndexHasTrustedMatMulAuthority(index)) return false;
     if (chainman.IndexIsOnSignedFrontierChain(index)) return false;
     if (chainman.IndexIsAttestedChainTipChild(tip, index)) return false;
@@ -6590,30 +6600,30 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     if (AcquisitionFetchEscapeActive(m_chainman, state->pindexBestKnownBlock)) {
         if (const CBlockIndex* const acq_frontier{
                 FindLowestUnverifiedAcquiredBody(m_chainman)};
-            acq_frontier != nullptr &&
-            // AUTO-RECOVERY (cmpl-migration F2): only apply the tight root-first
-            // clamp while the frontier body is PRESENT-but-unverified -- that is
-            // the churn 2f50a192 targeted (a body on disk while getdata chased
-            // higher covered bodies). If the frontier body is MISSING, clamping
-            // every escape-active peer to this single global frontier+16 lets
-            // ONE dead / header-only / body-unserved tower (m_best_header) pin
-            // the fetch window and starve every OTHER registered tower, which
-            // can never assemble its full verified suffix and migrate. When the
-            // frontier is missing we widen the window so the missing frontier
-            // AND the other towers' bodies are requested -- the node fetches its
-            // way out instead of waiting for manual intervention. Bounded churn
-            // (retained-store caps); the clamp re-engages once a body lands.
-            (acq_frontier->nStatus & BLOCK_HAVE_DATA) != 0 &&
-            acq_frontier->nHeight + ACQUISITION_ESCAPE_FETCH_LOOKAHEAD <
-                nWindowEnd) {
-            LogDebug(BCLog::NET,
-                     "Acquisition root-first clamping GETDATA window peer=%d "
-                     "end=%d -> %d frontier=%d tip=%d\n",
-                     peer.m_id, nWindowEnd,
-                     acq_frontier->nHeight + ACQUISITION_ESCAPE_FETCH_LOOKAHEAD,
-                     acq_frontier->nHeight, tip_height);
-            nWindowEnd =
-                acq_frontier->nHeight + ACQUISITION_ESCAPE_FETCH_LOOKAHEAD;
+            acq_frontier != nullptr) {
+            // HAVE_DATA: bounded lookahead above the unique frontier so
+            // fetch stays root-first (2f50a192). HEADER_ONLY: clamp to the
+            // frontier height itself. Widening while the hole is missing
+            // filled inflight with unconnectable descendants.
+            // Other registered towers are not starved: FindNextBlocks still
+            // asks this peer for the missing frontier, and a second peer on
+            // another tower keeps its own last_common. Bounded: one height.
+            const bool have_body{
+                (acq_frontier->nStatus & BLOCK_HAVE_DATA) != 0};
+            const int clamp_end{have_body
+                                    ? acq_frontier->nHeight +
+                                          ACQUISITION_ESCAPE_FETCH_LOOKAHEAD
+                                    : acq_frontier->nHeight};
+            if (clamp_end < nWindowEnd) {
+                LogDebug(BCLog::NET,
+                         "Acquisition root-first clamping GETDATA window "
+                         "peer=%d end=%d -> %d frontier=%d have_body=%d "
+                         "tip=%d\n",
+                         peer.m_id, nWindowEnd, clamp_end,
+                         acq_frontier->nHeight, have_body ? 1 : 0,
+                         tip_height);
+                nWindowEnd = clamp_end;
+            }
         }
     }
 

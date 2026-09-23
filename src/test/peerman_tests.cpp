@@ -8992,6 +8992,116 @@ BOOST_AUTO_TEST_CASE(deep_competing_tower_does_not_seed_or_pin_last_common)
     node::matmul_trusted::ResetForTest();
 }
 
+BOOST_AUTO_TEST_CASE(missing_acquisition_frontier_getdata_is_root_not_descendants)
+{
+    // Acquisition-stale tip, HEADER_ONLY LCA+1 frontier, competing tower
+    // (FollowedChainAhead=0 so IsNarrowCatchUpWindow is false and fetch
+    // used to go 16-wide). FindNextBlocks then GETDATA'd descendants while
+    // the unique frontier stayed have_data=0, so CPU ExactReplay
+    // confirmation never ran. Keep GETDATA at that one height.
+    // k_ahead stays under MAX_UNAUTHENTICATED_HEADER_LEAD (72).
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+
+    constexpr int k_below{82};
+    constexpr int k_ahead{20};
+    const CBlockIndex* fork_root{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(fork_root != nullptr);
+    for (int i = 0; i < k_below; ++i) {
+        mineBlock(m_node, std::chrono::seconds{fork_root->GetBlockTime() + 1 + i});
+    }
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE_EQUAL(tip->nHeight, fork_root->nHeight + k_below);
+
+    std::vector<CBlockIndex*> fork;
+    const CBlockIndex* walk{fork_root};
+    for (int i = 0; i < k_below + k_ahead; ++i) {
+        fork.push_back(MakePeermanHeaderChild(chainman, *walk, 0xa5 + (i & 0xff)));
+        walk = fork.back();
+    }
+    BOOST_REQUIRE_EQUAL(fork.back()->nHeight, tip->nHeight + k_ahead);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return fork.back()->GetAncestor(tip->nHeight) != tip));
+    {
+        LOCK(::cs_main);
+        for (CBlockIndex* w{const_cast<CBlockIndex*>(tip)}; w != nullptr;
+             w = w->pprev) {
+            w->nAuthenticatedChainWork = w->nChainWork;
+        }
+        chainman.SetBestHeader(fork.back());
+        peerman.SetBestBlock(tip->nHeight,
+                             std::chrono::seconds{tip->GetBlockTime()});
+    }
+
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 55 * 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+    const int64_t mono_now{GetTime()};
+    WITH_LOCK(::cs_main, {
+        chainman.SetLastTipConnectMonoForTest(
+            mono_now - ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS - 1);
+    });
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode seed_peer{/*id=*/5519, /*sock=*/nullptr, CAddress{},
+                    /*nKeyedNetGroupIn=*/5519, /*nLocalHostNonceIn=*/0,
+                    CAddress{}, /*addrNameIn=*/"missing-frontier-seed",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(seed_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/fork.back()->nHeight);
+    connman.FlushSendBuffer(seed_peer);
+    SetMockTime(std::chrono::seconds{GetTime() + 180});
+    seed_peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&seed_peer));
+
+    CNode body_peer{/*id=*/5520, /*sock=*/nullptr, CAddress{},
+                    /*nKeyedNetGroupIn=*/5520, /*nLocalHostNonceIn=*/0,
+                    CAddress{}, /*addrNameIn=*/"missing-frontier-headers",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(body_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/fork.back()->nHeight);
+    connman.FlushSendBuffer(body_peer);
+    std::vector<CBlock> hdrs;
+    hdrs.reserve(fork.size());
+    for (CBlockIndex* idx : fork) hdrs.emplace_back(idx->GetBlockHeader());
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        body_peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+    body_peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(body_peer);
+    connman.FlushSendBuffer(body_peer);
+
+    SetMockTime(std::chrono::seconds{GetTime() + 180});
+    body_peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&body_peer));
+    CNodeStateStats after;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(body_peer.GetId(), after));
+    BOOST_CHECK_EQUAL(after.nCommonHeight, fork_root->nHeight);
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedGetDataForHash(body_peer, fork.front()->GetBlockHash()) > 0 ||
+            std::find(after.vHeightInFlight.begin(), after.vHeightInFlight.end(),
+                      fork.front()->nHeight) != after.vHeightInFlight.end(),
+        "missing HEADER_ONLY acquisition frontier must be GETDATA");
+    BOOST_CHECK_EQUAL(CountQueuedGetDataForHash(body_peer, fork[1]->GetBlockHash()), 0U);
+    BOOST_CHECK(std::find(after.vHeightInFlight.begin(), after.vHeightInFlight.end(),
+                          fork[1]->nHeight) == after.vHeightInFlight.end());
+
+    peerman.FinalizeNode(seed_peer);
+    peerman.FinalizeNode(body_peer);
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+    node::matmul_trusted::ResetForTest();
+}
+
 BOOST_AUTO_TEST_CASE(withdrawn_deep_tower_snaps_last_common_to_tip)
 {
     // Same topology as deep_competing_tower_does_not_seed_or_pin_last_common

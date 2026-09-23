@@ -61,7 +61,47 @@ frontier). Migration stays park / `deepforkautoresolve`-gated.
 | `AcquisitionEscapeCoversBlock` | Active-chain blocks and tip-extending HEADER_ONLY / retained children are never covered. |
 | `FindAcquisitionEscapeFrontier` | Unique lowest unverified parent-connectable body on the heaviest registered tower, or `nullptr`. |
 | ExactReplay admission | `MatMulMaySpendExactReplayGpu`, AcceptBlock reverify, RC progress-lane, NextRetry, and the 1 Hz replay driver spend GPU **only** on that frontier. A live HEADER_ONLY hole yields the followed tip-child rather than filling the scheduler. |
+| Missing-frontier GETDATA | While the unique frontier is HEADER_ONLY, GETDATA is 1-wide and the download window clamps to that height. A competing tower with `FollowedChainAhead==0` used to 16-wide unconnectable descendants so the LCA+1 body never arrived and CPU ExactReplay confirmation never ran. |
 | `-acquisitionstallseconds` | Ignored on mainnet. Regtest/testnet still honor it with a warning. |
+
+## 0.34.6 → 0.34.8 (what did and did not change)
+
+`VerifyBoundedExactReplay` **digest math is unchanged** from `v0.34.6` to
+`v0.34.8-rc4` (the only GKR edit is a resource-governor begin/end wrapper).
+A competing-header digest mismatch is therefore not a new GEMM / FS-seed
+formula.
+
+What *did* change around ExactReplay, and what this release closes:
+
+1. **CUDA-only mismatch stays retryable** (`ExactReplay: unconfirmed digest
+   mismatch; no independent provider, block remains retryable`). That
+   adjudication is already in `v0.34.6` (v4.7 audit `c9436a50`). A CUDA node
+   that disagrees with `header.matmul_digest` never marks `InvalidConsensus`
+   without a second provider. `v0.34.9` restored portable CPU ExactReplay
+   confirmation (`2bfc9716`). This binary includes that path — it can only
+   run once the frontier **body** is on disk.
+2. **ASERT unresolvable-anchor** in `pow.cpp` fail-closed to the hardest
+   target (`v0.34.8-rc4`). Header-sync synthetic windows no longer ease to
+   `powLimit`. That is header-nBits policy, not a `matmul_digest` mismatch.
+   `v0.34.8` also added PQ attestation store paths, a compiled assumeutxo
+   / checkpoint at 219000, resource-governor wrap around ExactReplay and
+   mining, and stopped consensus signers from rolling back onto a
+   lower-work attested branch. None of those change GEMM / FS-seed math.
+3. **GETDATA width on a competing HEADER_ONLY tower** (present since
+   0.34.6): `IsNarrowCatchUpWindow` is false when `FollowedChainAhead==0`
+   (`ahead < 2`), so fetch stays 16-wide. The acquisition window clamp
+   applied **only if the frontier already had `HAVE_DATA`**. A HEADER_ONLY
+   LCA+1 twin then filled inflight with unconnectable descendants and
+   never downloaded. `CatchUpFarBehind` (≥100 followed headers) is the
+   same 16-wide hole on a tip-extending suffix. Fixed above.
+
+A same-height twin of an already-connected block whose GPU *and* CPU
+ExactReplay miss `header.matmul_digest` is a **false header**, not a
+consensus-algorithm split vs 0.34.6. 0.34.6 miners that connected it either
+matched that digest on their device or persisted the body without a
+terminal ExactReplay verdict. This node must still fetch the body, let CPU
+confirm, and `InvalidConsensus` / evict the exempt tower if both providers
+miss the header. Do not mark `BLOCK_FAILED` from a CUDA-only retry.
 
 ## Precompiled archives
 
