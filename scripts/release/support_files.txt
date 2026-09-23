@@ -13,4 +13,5 @@ contrib/modelnet/btx-model
 contrib/modelnet/recipes/registry-live-wan-hf-config.json
 doc/btx-download-and-go.md
 doc/modelnet/registry-independence.md
+doc/release-notes/release-notes-0.34.9.md
 doc/release-notes/release-notes-0.34.9-dev.md

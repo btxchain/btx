@@ -1,7 +1,7 @@
 # Local generate (host-profile match)
 
-**Status:** 0.34.9-dev. `CLIENT_VERSION_IS_RELEASE=false`. Last shipping tag
-is **v0.34.8**. This page is the operator contract for **local one-shot
+**Status:** 0.34.9. `CLIENT_VERSION_IS_RELEASE=true`. Shipping tag
+**v0.34.9**. This page is the operator contract for **local one-shot
 generate** after a replica is complete. It is **not** a remote inference
 marketplace, not a network server, and not CUDA `--hold --smoke`.
 

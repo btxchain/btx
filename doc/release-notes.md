@@ -73,8 +73,8 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`). Last shipping tag is **v0.34.8**.
+`CLIENT_VERSION` in this tree is **0.34.9**
+(`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag is **v0.34.9**.
 The `v0.34` tag and 0.34.0 seal remain the pool-close cut. 0.34.1 is
 withdrawn: it partitions nodes from mainnet. 0.34.2 is withdrawn for
 consensus nodes: it deadlocks one block past the last attestation.
@@ -93,15 +93,14 @@ operator action. See
 consensus when the helper is absent. See
 [release-notes-0.34.7.md](release-notes/release-notes-0.34.7.md).
 
-**0.34.8** is the last shipping client (`IS_RELEASE=true` on tag **v0.34.8**):
-first-run, JIT capability, HCP, Cognitive Reserve. See
-[release-notes-0.34.8.md](release-notes/release-notes-0.34.8.md).
+**0.34.9** is the shipping client (`IS_RELEASE=true` on tag **v0.34.9**):
+registry independence, host / load / generate, on-chain bounty/WRC
+timelocks, ExactReplay CPU confirmation. See
+[release-notes-0.34.9.md](release-notes/release-notes-0.34.9.md).
 
-**0.34.9-dev** is this working tree (PR 198): registry independence, `.btx` /
-`btx://` retrieve, checkout, optional GPU load, host-profile local generate,
-and assumeutxo persist for pre-attestation historical holes (#163). It is
-**not** a shipping tag. See
-[release-notes-0.34.9-dev.md](release-notes/release-notes-0.34.9-dev.md).
+**0.34.8** remains the previous line (first-run, JIT capability, HCP,
+Cognitive Reserve). See
+[release-notes-0.34.8.md](release-notes/release-notes-0.34.8.md).
 
 Please report bugs using the issue tracker at GitHub, and when you
 have a diagnosis, bring the patch:

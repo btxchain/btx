@@ -5,8 +5,8 @@ a model that matches published requirements **before** a winning `model_id`
 exists. Release campaigns (supply-side: disclose an already-encrypted model)
 remain a separate product path — see [modelnet/model-economy.md](modelnet/model-economy.md).
 
-`CLIENT_VERSION_IS_RELEASE` is **false** in this 0.34.9-dev tree. Last shipping
-tag is **v0.34.8**. Schemas and RPC
+`CLIENT_VERSION_IS_RELEASE` is **true** in this 0.34.9 tree. Shipping tag
+is **v0.34.9**. Schemas and RPC
 names document the product contract; implementation gates and evidence rows in
 [contrib/modelnet/bounty/tests/acceptance-matrix.csv](../contrib/modelnet/bounty/tests/acceptance-matrix.csv)
 remain the readiness record for bounty methods.

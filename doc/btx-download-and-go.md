@@ -1,16 +1,15 @@
 # BTX Download-and-Go Guide
 
-> **Current line:** **v0.34.8** (shipping). See
-> [0.34.8 release notes](release-notes/release-notes-0.34.8.md) and
+> **Current line:** **v0.34.9** (shipping). See
+> [0.34.9 release notes](release-notes/release-notes-0.34.9.md) and
 > [release notes](release-notes.md). The GitHub tag that resolves is
-> [`v0.34.8`](https://github.com/btxchain/btx/releases/tag/v0.34.8).
-> **Installer:** `contrib/faststart/btx-agent-setup.py --release-tag v0.34.8`
+> [`v0.34.9`](https://github.com/btxchain/btx/releases/tag/v0.34.9).
+> **Installer:** `contrib/faststart/btx-agent-setup.py --release-tag v0.34.9`
 > when that tag publishes `btx-release-manifest.json`. Otherwise unpack the
-> GitHub archive directly (below). Historical prerelease
-> [`v0.34.8-rc4`](https://github.com/btxchain/btx/releases/tag/v0.34.8-rc4)
-> remains on GitHub and is superseded.
-> Testers on this branch (not `--latest`, not a recut of v0.34.8):
-> [0.34.9-dev notes](release-notes/release-notes-0.34.9-dev.md).
+> GitHub archive directly (below). Historical prereleases
+> [`v0.34.8-rc4`](https://github.com/btxchain/btx/releases/tag/v0.34.8-rc4) and
+> [`v0.34.9-dev.pr198.2`](https://github.com/btxchain/btx/releases/tag/v0.34.9-dev.pr198.2)
+> remain on GitHub and are not recut.
 > Historical 0.34.5 convergence notes:
 > [release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
 > Epoch A is live at height 185000. EncDr stall recovery at 199299 is

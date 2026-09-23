@@ -9,7 +9,7 @@ Current BTX architecture/readiness source of truth
 Use these docs first when you need the live post-`61000` hardening status,
 security closeout, or future-upgrade boundary:
 
-- [Native Model Network (0.34.9-dev)](modelnet/README.md) — isolated model plane:
+- [Native Model Network (0.34.9)](modelnet/README.md) — isolated model plane:
   host / share / retrieve / checkout / optional GPU load / local generate when
   the replica matches this host (not a remote inference marketplace).
   Copy-paste: [end-to-end.md](modelnet/end-to-end.md). Generate:
@@ -63,8 +63,8 @@ service-profile, or release-publication workflow:
 - [Assumeutxo Usage](assumeutxo.md)
 - [0.34.5 release notes — automatic convergence / self-heal](release-notes/release-notes-0.34.5.md)
 - [0.34.7 release notes — Native Model Network](release-notes/release-notes-0.34.7.md)
-- [0.34.8 release notes — first-run / HCP (shipping)](release-notes/release-notes-0.34.8.md)
-- [0.34.9-dev notes — registry independence, host/load/generate](release-notes/release-notes-0.34.9-dev.md)
+- [0.34.8 release notes — first-run / HCP](release-notes/release-notes-0.34.8.md)
+- [0.34.9 shipping notes — registry independence, host/load/generate](release-notes/release-notes-0.34.9.md)
 - [BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.md)
 - [BTX GitHub Release Automation](btx-github-release-automation.md)
 - [Release Process](release-process.md)
@@ -73,8 +73,7 @@ service-profile, or release-publication workflow:
 - [Mining Operator Helpers](../contrib/mining/README.md)
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
 
-Last shipping tag is **v0.34.8**. This working tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`). Epoch A is live on mainnet at height 185000
+Last shipping tag is **v0.34.9**. `CLIENT_VERSION_IS_RELEASE=true`. Epoch A is live on mainnet at height 185000
 (Profile 1 ExactReplay authority, optional shadow proofs). EncDr stall recovery
 at 199299 is withdrawn. Fast-start pin is assumeutxo height **219000**. Epoch B
 requires both a durable proof and ExactReplay; Epoch C makes the Profile 1 proof

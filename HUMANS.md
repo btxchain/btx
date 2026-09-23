@@ -98,22 +98,21 @@ path. Machine sequences belong in [AGENTS.md](AGENTS.md).
 
 ### 1. Run the current line
 
-The last shipping tag is **v0.34.8**. This working tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`). For a validating node that becomes
-useful without waiting for a full historical sync, the fast-start snapshot is
-**assumeutxo-219000**.
+The shipping tag is **v0.34.9**. `CLIENT_VERSION_IS_RELEASE=true`. For a
+validating node that becomes useful without waiting for a full historical
+sync, the fast-start snapshot is **assumeutxo-219000**.
 
 Install and first-run: [doc/btx-download-and-go.md](doc/btx-download-and-go.md)
-(shipping **v0.34.8** archives). Testers on this branch:
-[doc/release-notes/release-notes-0.34.9-dev.md](doc/release-notes/release-notes-0.34.9-dev.md).
+(shipping **v0.34.9** archives). Notes:
+[doc/release-notes/release-notes-0.34.9.md](doc/release-notes/release-notes-0.34.9.md).
 
 End-to-end host / search / retrieve / run / bounty:
 [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md).
 Using and proving the model network: [doc/modelnet/howto.md](doc/modelnet/howto.md).
 Local generate after acquire: [doc/modelnet/generate.md](doc/modelnet/generate.md).
 
-This working tree is **0.34.9-dev**. GitHub tag **v0.34.8** is the last
-shipping client.
+This working tree is **0.34.9**. GitHub tag **v0.34.9** is the shipping
+client.
 Host, seed, search, share, watch folder,
 `showmodel` / `unhostmodel` / `exportmodellink`, **load** / **generate**,
 mining `first_run` doctor tiles, bounty `checklist` / `--validate`, and doctor:
@@ -125,7 +124,7 @@ helper lacks the method: [doc/modelnet/storage-backends.md](doc/modelnet/storage
 [doc/modelnet/watches.md](doc/modelnet/watches.md). Filesystem `-modelwatch`
 is not a publisher watch.
 
-### Source → storage → model (0.34.9-dev)
+### Source → storage → model (0.34.9)
 
 A person can pin a **local** file (or review an ImportPlan for Hugging Face /
 torrent), choose **local disk** or an S3-compatible backend, and publish a
@@ -174,7 +173,7 @@ hosted plane**, not a fifth product, not a new coin, and not remote inference.
 The original **34** HCP operations stay as they are. A venue’s catalogue does
 not imply reserve, committee, or programme support — those require an explicit
 `GET /extensions/cognitive-reserve` profile. Automatic spend remains **0**.
-This tree is **0.34.9-dev** (`CLIENT_VERSION_IS_RELEASE=false`) and does
+This tree is **0.34.9** (`CLIENT_VERSION_IS_RELEASE=true`) and does
 not replace the production GPU attestor. Operator notes:
 [doc/hosted/HCP_OPERATOR_NOTES.md](doc/hosted/HCP_OPERATOR_NOTES.md). Spec:
 [doc/modelnet/crf/](doc/modelnet/crf/).
@@ -308,8 +307,7 @@ search when you do not want the query to leave this node.
 
 ## Current line
 
-- **Release:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
-  (registry independence, host/load/generate, assumeutxo persist). Native
+- **Release:** shipping tag **v0.34.9**. Registry independence, host/load/generate, assumeutxo persist, on-chain bounty/WRC. Native
   Model Network first-run, HCP, JIT capability, search, release campaigns,
   and creation bounties remain.
 - Host / seed / search / share / watch / doctor / load / generate / bounty:

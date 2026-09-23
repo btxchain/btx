@@ -1,7 +1,7 @@
 # Use BTX for models — host, search, run, bounty
 
-**Status:** 0.34.9-dev. `CLIENT_VERSION_IS_RELEASE=false`. Last shipping tag
-is **v0.34.8**. This is the **people** copy-paste path. Agents:
+**Status:** 0.34.9. `CLIENT_VERSION_IS_RELEASE=true`. Shipping tag
+**v0.34.9**. This is the **people** copy-paste path. Agents:
 [agent-recipes.md](agent-recipes.md). Generate contract: [generate.md](generate.md).
 Bounties: [../bounties.md](../bounties.md). Tests: [howto.md](howto.md).
 
@@ -221,4 +221,4 @@ doctor
 - Do not start a network inference server. `inference=false`.
 - Do not `SIGKILL` production `btxd`. `unloadmodel` SIGTERMs the helper-spawned
   CUDA loader child only.
-- Do not recut `v0.34.8`. This tree is 0.34.9-dev.
+- Do not recut `v0.34.8` or `v0.34.9-dev.pr198*`. This tree is 0.34.9.

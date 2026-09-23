@@ -2,8 +2,8 @@
 
 Humans: read [HUMANS.md](HUMANS.md), then ignore this file. Product overview:
 [README.md](README.md). This is the operations manual for coding agents,
-research agents, and automation in BTX **0.34.9-dev** (`CLIENT_VERSION_BUILD=9`,
-`CLIENT_VERSION_RC=0`, `IS_RELEASE=false`). The last shipping tag is **v0.34.8**.
+research agents, and automation in BTX **0.34.9** (`CLIENT_VERSION_BUILD=9`,
+`CLIENT_VERSION_RC=0`, `IS_RELEASE=true`). Shipping tag **v0.34.9**.
 
 Default posture is **read-only**. Do not compile, commit, push, spend, evaluate,
 or mutate unless the operator asked or a finite `AgentMandate` covers the action.
@@ -29,7 +29,7 @@ issuance, miner preference, BanMan, AddrMan, or monetary peer scoring.
 
 ### HCP plane (`btx-hcpd` / `btx-hosted`)
 
-0.34.9-dev, `CLIENT_VERSION_IS_RELEASE=false` (last shipping tag **v0.34.8**).
+0.34.9, `CLIENT_VERSION_IS_RELEASE=true` (shipping tag **v0.34.9**).
 Operator index: [doc/hosted/README.md](doc/hosted/README.md).
 Spec: [doc/modelnet/hcp/](doc/modelnet/hcp/). Authority:
 [audit/hcp-authority-matrix.md](audit/hcp-authority-matrix.md).
@@ -242,15 +242,14 @@ do not advertise them in `getbountycapabilities` until execution is real.
 
 ## Release and session constraints
 
-This tree is **0.34.9-dev** (`CLIENT_VERSION_IS_RELEASE=false`). The last
-shipping tag is **v0.34.8**.
+This tree is **0.34.9** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.9**.
 
 - No unapproved git push, merge, or `CLIENT_VERSION` bump.
 - Do not compile (`cmake`, `ninja`, `cmake --build`) unless the operator asked.
 - Do not disrupt production `btxd`. Do not replace a running `btxd.real`.
 - Do not SIGKILL production signers.
 - Do not name operator hostnames in public trees.
-- Do not upload releases or treat this session as a release announcer.
-- Do not recut `v0.34.8`. Do not stamp `CLIENT_VERSION_IS_RELEASE=true`.
+- Do not recut `v0.34.8` or `v0.34.9-dev.pr198*`.
 - Edit [README.md](README.md) / [HUMANS.md](HUMANS.md) when the operator
   assigned those files (docs overhaul).

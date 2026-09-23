@@ -1,7 +1,7 @@
-# BTX Native Model Network (0.34.9-dev)
+# BTX Native Model Network (0.34.9)
 
-**Status:** **0.34.9-dev** (`CLIENT_VERSION_IS_RELEASE=false`). Last shipping
-tag **v0.34.8**. The Native Model Network shipped in 0.34.7; this index covers
+**Status:** **0.34.9** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.9**. The Native Model Network shipped in 0.34.7; this index covers
 that plane plus 0.34.8 first-run / HCP and 0.34.9 host / load / generate /
 registry independence.
 
