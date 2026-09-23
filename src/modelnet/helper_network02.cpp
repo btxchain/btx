@@ -17,6 +17,7 @@
 #include <modelnet/lan_discovery.h>
 #include <modelnet/multipart_journal.h>
 #include <modelnet/object_layout.h>
+#include <modelnet/oci_modelpack.h>
 #include <modelnet/origin_broker.h>
 #include <modelnet/package_acquisition.h>
 #include <modelnet/package_channel.h>
@@ -35,7 +36,9 @@
 #include <modelnet/source_huggingface.h>
 #include <modelnet/source_local.h>
 #include <modelnet/source_policy.h>
+#include <modelnet/source_registry.h>
 #include <modelnet/source_torrent.h>
+#include <modelnet/registry_resolver.h>
 #include <modelnet/subpiece.h>
 #include <modelnet/upload_scheduler.h>
 #include <modelnet/upload_scheduler_drr.h>
@@ -287,6 +290,13 @@ UniValue EvaluatedTransportJson()
     o.pushKV("catalog_10m", "NOT_RUN");
     o.pushKV("btx_torrentd_process", false);
     o.pushKV("live_hf_http", false);
+    o.pushKV("registry_independence", true);
+    {
+        UniValue types(UniValue::VARR);
+        for (const auto& t : KnownRegistryOriginTypes()) types.push_back(t);
+        o.pushKV("registry_origin_types", types);
+    }
+    o.pushKV("live_registry_wan", LiveRegistryWanEnabled() ? "env" : "opt_in_live_wan");
     o.pushKV("live_r2_wan", "NOT_RUN");
     o.pushKV("pq1_swarm_only", true);
     return o;
@@ -317,6 +327,8 @@ bool ExecuteImport(ModelCatalog& cat, const UniValue& o, UniValue& result, std::
     }
     result = coord->StatusJson();
     result.pushKV("automatic_spend_atoms", 0);
+    result.pushKV("wallet_required", false);
+    result.pushKV("publisher_must_republish", false);
     result.pushKV("live_http", false);
     result.pushKV("torrentd_process", false);
     result.pushKV("authorship", "not implied by source integrity");
@@ -337,6 +349,18 @@ bool ExecuteImport(ModelCatalog& cat, const UniValue& o, UniValue& result, std::
             err_code = "INVALID_PARAMETER";
             return false;
         }
+        const fs::path srcp = fs::PathFromString(plan.locator);
+        for (const auto& cf : vm.core.files) {
+            const fs::path dest = coord->StagingDir() / fs::PathFromString(cf.path);
+            fs::create_directories(dest.parent_path());
+            const fs::path from = fs::is_directory(srcp) ? (srcp / fs::PathFromString(cf.path)) : srcp;
+            if (!fs::exists(from) || !fs::copy_file(from, dest, fs::copy_options::overwrite_existing)) {
+                err = "stage copy";
+                err_code = "IO_ERROR";
+                return false;
+            }
+        }
+        coord->NotePieceOrigin("local", /*bound=*/true);
         if (!coord->AcceptVerifiedManifest(vm, err)) {
             err_code = "INVALID_PARAMETER";
             return false;
@@ -346,19 +370,66 @@ bool ExecuteImport(ModelCatalog& cat, const UniValue& o, UniValue& result, std::
         result.pushKV("automatic_spend_atoms", 0);
         result.pushKV("live_http", false);
         result.pushKV("authorship", "not implied by source integrity");
-    } else if (plan.kind == ImportSourceKind::HUGGINGFACE) {
-        HuggingFaceByteSource src(plan.locator, plan.snapshot_token, /*follow_redirects=*/false);
+    } else if (plan.kind == ImportSourceKind::HUGGINGFACE || ImportKindIsRegistry(plan.kind) ||
+               plan.kind == ImportSourceKind::S3 || plan.kind == ImportSourceKind::BTX || plan.origins.size() > 1) {
         std::string perr;
-        const bool pin_ok = src.Pin(perr);
+        auto src = MakePlanByteSource(plan, perr);
+        const bool pin_ok = src && src->Pin(perr);
         result.pushKV("pin_ok", pin_ok);
         result.pushKV("pin_error", perr);
-        result.pushKV("provenance_note", HUGGINGFACE_PROVENANCE_NOTE);
+        result.pushKV("wallet_required", false);
+        result.pushKV("publisher_must_republish", false);
+        if (plan.kind == ImportSourceKind::HUGGINGFACE && plan.origins.size() <= 1) {
+            result.pushKV("provenance_note", HUGGINGFACE_PROVENANCE_NOTE);
+        } else if (plan.kind == ImportSourceKind::S3 && plan.origins.size() <= 1) {
+            result.pushKV("note", "reuse setcloudstorage; source adapter not live HTTP");
+            result.pushKV("provenance_note", REGISTRY_PROVENANCE_NOTE);
+        } else {
+            result.pushKV("provenance_note", REGISTRY_PROVENANCE_NOTE);
+        }
+        if (pin_ok && src) {
+            bool staged = true;
+            for (const auto& spec : coord->AcceptedFiles()) {
+                if (!coord->StageFromSource(*src, spec, spec.size_bytes, perr)) {
+                    staged = false;
+                    result.pushKV("stage_error", perr);
+                    break;
+                }
+            }
+            result.pushKV("staged", staged);
+            {
+                const UniValue st = coord->StatusJson();
+                if (st.exists("origin_errors")) result.pushKV("origin_errors", st["origin_errors"]);
+                if (st.exists("piece_origins")) result.pushKV("piece_origins", st["piece_origins"]);
+                if (st.exists("independent_origin_count")) {
+                    result.pushKV("independent_origin_count", st["independent_origin_count"]);
+                }
+            }
+            if (staged) {
+                std::vector<std::string> rels;
+                for (const auto& spec : coord->AcceptedFiles()) {
+                    rels.push_back(spec.destination_path.empty() ? spec.source_path : spec.destination_path);
+                }
+                VerifiedManifest vm;
+                if (MakeVerifiedManifestFromStaged(coord->StagingDir(), rels, vm, perr) &&
+                    coord->AcceptVerifiedManifest(vm, perr)) {
+                    result = coord->StatusJson();
+                    result.pushKV("imported", true);
+                    result.pushKV("automatic_spend_atoms", 0);
+                    result.pushKV("wallet_required", false);
+                    result.pushKV("publisher_must_republish", false);
+                    result.pushKV("live_http", false);
+                    result.pushKV("authorship", "not implied by source integrity");
+                    result.pushKV("staged", true);
+                } else {
+                    result.pushKV("accept_error", perr);
+                }
+            }
+        }
     } else if (plan.kind == ImportSourceKind::TORRENT || plan.kind == ImportSourceKind::MAGNET) {
         result.pushKV("infohash", ParseTorrentInfohash(plan.locator, plan.snapshot_token));
         result.pushKV("provenance_note", TORRENT_PROVENANCE_NOTE);
         result.pushKV("torrentd_process", false);
-    } else if (plan.kind == ImportSourceKind::S3) {
-        result.pushKV("note", "reuse setcloudstorage; source adapter not live HTTP");
     }
 
     std::lock_guard<std::mutex> lock(g_n02_mu);
@@ -771,7 +842,8 @@ bool ErasureFromObject(const UniValue& o, UniValue& result, std::string& err_cod
 bool IsNetwork02HelperMethod(const std::string& method)
 {
     return method == "executemodelimport" || method == "getmodelimport" || method == "cancelmodelimport" ||
-           method == "resumemodelimport" || method == "publishmodelimport" || method == "createbtxpackage" ||
+           method == "resumemodelimport" || method == "publishmodelimport" || method == "parseimportplan" ||
+           method == "exportmodelpack" || method == "createbtxpackage" ||
            method == "inspectbtxpackage" || method == "verifybtxpackage" || method == "importbtxpackage" ||
            method == "exportbtxbundle" || method == "preparemodelerasure" || method == "executemodelerasure" ||
            method == "getmodelerasurehealth" || method == "repairmodel" || method == "gettorrentsourcestatus" ||
@@ -832,6 +904,35 @@ bool DispatchNetwork02RpcOnce(ModelCatalog& cat, const std::string& method, cons
     }
     if (method == "executemodelimport") {
         return ExecuteImport(cat, o, result, err_code, err);
+    }
+    if (method == "parseimportplan") {
+        ImportPlan plan;
+        if (!ParseImportPlan(o, plan, err)) {
+            err_code = "INVALID_PARAMETER";
+            return false;
+        }
+        result = ImportPlanJson(plan);
+        result.pushKV("wallet_required", false);
+        result.pushKV("automatic_spend_atoms", 0);
+        return true;
+    }
+    if (method == "exportmodelpack") {
+        const std::string plan_id = o.exists("plan_id") && o["plan_id"].isStr() ? o["plan_id"].get_str() : "";
+        std::lock_guard<std::mutex> lock(g_n02_mu);
+        auto it = g_imports.find(plan_id);
+        if (it == g_imports.end() || !it->second || !it->second->Verified()) {
+            err = "unknown plan_id";
+            err_code = "INVALID_PARAMETER";
+            return false;
+        }
+        UniValue pack;
+        if (!ExportModelPackConfig(*it->second->Verified(), it->second->Plan(), pack, err)) {
+            err_code = "INVALID_PARAMETER";
+            return false;
+        }
+        result = pack;
+        result.pushKV("automatic_spend_atoms", 0);
+        return true;
     }
     if (method == "getmodelimport" || method == "cancelmodelimport" || method == "resumemodelimport" ||
         method == "publishmodelimport") {

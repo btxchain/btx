@@ -3,13 +3,15 @@
 
 Verbs: init, doctor, host, preview, search, get, pull, show, ls, files, path,
 open, share, transfers, check, pins, alias, rm-alias, unhost, link, bounty-draft
-(title, JSON, or @FILE), watch-scan, plus 0.34.8-dev cloud/follow/events/mirror/
+(title, JSON, or @FILE), watch-scan, plus 0.34.9-dev cloud/follow/events/mirror/
 profile (fail closed if the helper lacks the method).
 
 Human door: stderr one_liners / next hints. Agent door: stdout JSON; --json
 suppresses stderr extras. Dual-door docs: HUMANS.md vs AGENTS.md.
 
-No inference. Never spends (automatic_spend_atoms=0). Fail closed.
+No network inference server. Local generate is `generate` when the replica
+matches this host profile (GGUF+llama.cpp or allowlisted SafeTensors +
+BTX_MODEL_GENERATE). Never spends (automatic_spend_atoms=0). Fail closed.
 Never defaults to a production helper socket.
 Never puts raw cloud secrets on argv (use --credential-ref / --secret-file).
 """
@@ -26,6 +28,10 @@ VERBS = (
     "init",
     "doctor",
     "host",
+    "load",
+    "unload",
+    "generate",
+    "host-profile",
     "preview",
     "search",
     "get",
@@ -53,6 +59,10 @@ VERBS = (
     "mirror",
     "profile",
     "import-plan",
+    "fetch",
+    "resolve",
+    "verify",
+    "modelpack",
     "package",
     "erasure",
     "torrent-status",
@@ -66,7 +76,7 @@ DEFAULT_SOCKET = os.path.join(".", "e2e-scratch", "modeld.sock")
 # Agent door. Default is human (stderr hints) + JSON stdout. --json is stdout only.
 JSON_MODE = False
 CLI_SCHEMA_VERSION = 2
-DEV348_NOTE = "0.34.8-dev; fails closed if helper lacks method"
+DEV349_NOTE = "0.34.9-dev; fails closed if helper lacks method"
 
 # First-run URI examples. btx:// is a model resource; BIP21 payment is btx:<P2MR>.
 # bitcoin: is not a BTX payment URI. Placeholders only — this CLI never spends.
@@ -147,7 +157,12 @@ verbs:
                                  create the local research publisher only if missing
   doctor                         checkmodelsetup
   host PATH [OPTIONS_JSON]       hostmodel (pin+publish+seed; alias of importmodel)
-  host SHARE.btx | 'btx://…'     share link, not weights: preview card + getmodel
+  host SHARE.btx | 'btx://…'     share link, not weights: getmodel FREE_ONLY
+  load URI|ID                    loadmodel (resident CUDA if BTX_MODEL_CUDA_LOADER)
+  unload URI|ID                  unloadmodel (helper-spawned loader only)
+  generate URI|ID PROMPT [--max-new-tokens N]
+                                 generatemodel (local one-shot; host-profile match)
+  host-profile                   getmodelhostprofile (GGUF/llama or ST adapter)
   preview PATH                   previewmodelimport (size vs quota; no hash)
   search [TEXT] [--scope LOCAL|PEERS|NETWORK|ALL]
          [--format F] [--quantization Q] [--family F] [--architecture A]
@@ -157,8 +172,8 @@ verbs:
          [--fits] [QUERY_OBJECT]
                                  searchmodels catalog filters (default scope
                                  LOCAL). --fits keeps hits inside this node's
-                                 remaining storage quota (storage only; no
-                                 inference, no RAM claim)
+                                 remaining storage quota (storage only; not
+                                 RAM/VRAM and not a generate-profile match)
   get URI [MODE]                 getmodel by URI or id (default FREE_ONLY)
   pull NAME [MODE]               getmodel by alias, local name, id, or URI
   show NAME                      showmodel: share + local + aliases + bytes
@@ -194,7 +209,7 @@ verbs:
   watch-scan [DIR]               scanmodelwatch
                                  (filesystem drop folder; NOT a publisher watch)
 
-  0.34.8-dev (not shipped; fail closed if the helper has no method):
+  0.34.9-dev (not shipped; fail closed if the helper has no method):
   cloud add|test|status          setcloudstorage / testcloudstorage /
                                  getcloudstorageinfo. add takes endpoint/bucket/
                                  prefix/region/layout/provider/credential-ref.
@@ -205,13 +220,20 @@ verbs:
                                  default action NOTIFY; never auto-spend
   events [--cursor N] [--wait S] getmodelevents; waitformodelevent if --wait.
                                  Probe getmodelevents first so unknown RPC cannot hang.
-  mirror [--publisher ID] [--keep-latest N]
+  mirror [--publisher ID] [--keep-latest N] [--min-independent-origins N]
                                  getmodelmirror / setmodelmirror (no auto-spend)
   profile show|set NAME         getmodelprofile / setmodelprofile
                                  NAME=personal|infrastructure|mirror|custom
   import-plan @PLAN.json|status PLAN_ID
                                  executemodelimport / getmodelimport
-                                 (staging until VerifiedManifest; no live HTTP)
+                                 (staging until VerifiedManifest; live HTTPS only
+                                 with live_wan / BTX_MODELNET_LIVE_WAN=1)
+  fetch @PLAN.json               alias of import-plan; walletless; monetary plane stays
+  resolve @PLAN.json             local origin dump; no wallet, no chain, no fetch
+  verify PLAN_ID                 alias of import-plan status
+  modelpack import|export @JSON  parse KitOps/ModelPack config into a plan, or
+                                 export a verified import as ModelPack (origin
+                                 layout, not btx:// identity)
   package create|inspect JSON|HEX|.btx
                                  createbtxpackage / inspectbtxpackage
                                  (.btx path or hex; link remains magnet analog)
@@ -223,7 +245,8 @@ verbs:
 
 NAME is resolved locally in this order: btx:// token, model id, alias, local
 search name, local label. Unknown values stay null; nothing is invented.
-No inference. automatic_spend_atoms=0. Scratch helper only.
+Local generate is `generate` / generatemodel when the replica matches this
+host (not a network server). automatic_spend_atoms=0. Scratch helper only.
 Payment URIs are btx:<P2MR> on btx-cli; bitcoin: is not a BTX URI.
 Copy-paste recipes: contrib/modelnet/recipes/*.json
 Filesystem -modelwatch is not a publisher/collection watch (see doc/modelnet/watches.md).
@@ -861,8 +884,8 @@ def cmd_host(sock: str, args: list[str]) -> None:
     if not args:
         _die("host requires a filesystem path", 2)
     path = args[0]
-    # A .btx card or pasted copy_text is a share link, not weights. Preview it
-    # instead of hashing a card as a model (never import, never broadcast).
+    # A .btx card or pasted copy_text is a share link, not weights. Retrieve it
+    # with getmodel FREE_ONLY instead of hashing the card as a model.
     token = _first_btx_token(path)
     if not token and path.lower().endswith(_SHARE_FILE_SUFFIXES) and os.path.isfile(_resolve_path(path)):
         try:
@@ -875,11 +898,12 @@ def cmd_host(sock: str, args: list[str]) -> None:
     if token:
         if not JSON_MODE:
             print(
-                "btx-model: share card, not model weights; previewing the card "
-                "(no hash, no import, no seed)",
+                "btx-model: share card, not model weights; retrieving FREE_ONLY "
+                "(no hash of the card, no import-as-weights)",
                 file=sys.stderr,
             )
-        _print(_share_preview(sock, path if os.path.isfile(_resolve_path(path)) else token, "host"), "openmodelshare")
+        target = path if os.path.isfile(_resolve_path(path)) else token
+        _print(rpc(sock, "getmodel", [target, "FREE_ONLY"], timeout=GET_TIMEOUT_S), "getmodel")
         return
     _refuse_unsafe_path(path)
     params: list[Any] = [path]
@@ -892,6 +916,53 @@ def cmd_host(sock: str, args: list[str]) -> None:
     else:
         params.append({"pin": True, "publish": True})
     _print(rpc(sock, "hostmodel", params), "hostmodel")
+
+
+def cmd_load(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("load requires a btx:// URI, model id, or alias", 2)
+    _print(rpc(sock, "loadmodel", [args[0]], timeout=GET_TIMEOUT_S), "loadmodel")
+
+
+def cmd_unload(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("unload requires a btx:// URI, model id, or alias", 2)
+    _print(rpc(sock, "unloadmodel", [args[0]]), "unloadmodel")
+
+
+def cmd_generate(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("generate requires a btx:// URI, model id, or alias", 2)
+    opts: dict[str, Any] = {"max_new_tokens": 32}
+    rest = args[1:]
+    if rest and not rest[0].startswith("--"):
+        maybe = _loads_maybe(rest[0])
+        if isinstance(maybe, dict):
+            opts.update(maybe)
+            rest = rest[1:]
+        else:
+            opts["prompt"] = rest[0]
+            rest = rest[1:]
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--max-new-tokens" and i + 1 < len(rest):
+            opts["max_new_tokens"] = int(rest[i + 1])
+            i += 2
+            continue
+        if rest[i] == "--prompt" and i + 1 < len(rest):
+            opts["prompt"] = rest[i + 1]
+            i += 2
+            continue
+        _die(f"generate: unknown argument {rest[i]!r}", 2)
+    if not opts.get("prompt"):
+        _die("generate requires a prompt", 2)
+    _print(rpc(sock, "generatemodel", [args[0], opts], timeout=GET_TIMEOUT_S), "generatemodel")
+
+
+def cmd_host_profile(sock: str, args: list[str]) -> None:
+    if args:
+        _die("host-profile takes no arguments", 2)
+    _print(rpc(sock, "getmodelhostprofile", []), "getmodelhostprofile")
 
 
 def cmd_preview(sock: str, args: list[str]) -> None:
@@ -1794,7 +1865,7 @@ def _rpc_dev(
     if result is not None:
         return result
     if _missing_method(err):
-        _die(f"{method}: method not found ({DEV348_NOTE})")
+        _die(f"{method}: method not found ({DEV349_NOTE})")
     _die(f"{method}: {_err_text(err)}")
 
 
@@ -1868,7 +1939,7 @@ def _emit_dev(
         "schema_version": CLI_SCHEMA_VERSION,
         "kind": kind,
         "client": "btx-model",
-        "client_version": "0.34.8-dev",
+        "client_version": "0.34.9-dev",
         "released": False,
         "ok": True,
         "available": True,
@@ -1926,7 +1997,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
             },
             note=(
                 "cloud backing is optional; pieces remain the swarm unit. "
-                "Secrets are never returned. " + DEV348_NOTE
+                "Secrets are never returned. " + DEV349_NOTE
             ),
             next_actions=["cloud test", "cloud add --endpoint … --bucket … --credential-ref env:BTX_CLOUD_CREDENTIAL"],
         )
@@ -1956,7 +2027,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
             },
             note=(
                 "testcloudstorage is a local helper probe, not WAN evidence. "
-                "Do not treat ok here as a production origin receipt. " + DEV348_NOTE
+                "Do not treat ok here as a production origin receipt. " + DEV349_NOTE
             ),
             next_actions=["cloud status"],
         )
@@ -2068,7 +2139,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
         note=(
             "setcloudstorage stores a local origin config. Credentials stay in the "
             "ref/file; they are not written to search records, events, or this JSON. "
-            + DEV348_NOTE
+            + DEV349_NOTE
         ),
         next_actions=["cloud test", "cloud status"],
     )
@@ -2134,7 +2205,7 @@ def cmd_follow(sock: str, args: list[str]) -> None:
             "publisher/collection watch is not the filesystem -modelwatch drop folder. "
             "Default action is NOTIFY. FREE_DOWNLOAD uses existing FREE_ONLY getmodel. "
             "PREPARE_FUNDING is an unsigned plan. automatic_spend_atoms stays 0. "
-            + DEV348_NOTE
+            + DEV349_NOTE
         ),
         next_actions=["events", "events --cursor 0"],
     )
@@ -2200,14 +2271,14 @@ def cmd_events(sock: str, args: list[str]) -> None:
         note=(
             "events are local observations (journal), not consensus. "
             "Reorgs emit corrective events; they are not silent deletes. "
-            + DEV348_NOTE
+            + DEV349_NOTE
         ),
         next_actions=["events --cursor <next>", "follow publisher <id>"],
     )
 
 
 def cmd_mirror(sock: str, args: list[str]) -> None:
-    opts, pos = _take_opts(args, {"--publisher", "--keep-latest", "--collection", "--query"})
+    opts, pos = _take_opts(args, {"--publisher", "--keep-latest", "--collection", "--query", "--min-independent-origins"})
     if pos:
         _die("mirror takes no positional arguments (use --publisher / --keep-latest)", 2)
     publisher = str(opts.get("--publisher") or "").strip() or None
@@ -2219,7 +2290,13 @@ def cmd_mirror(sock: str, args: list[str]) -> None:
         keep_latest = _as_int(keep_raw)
         if keep_latest is None or keep_latest < 0:
             _die("mirror --keep-latest requires a non-negative integer", 2)
-    mutating = any(v is not None for v in (publisher, collection, query, keep_latest))
+    min_raw = opts.get("--min-independent-origins")
+    min_origins: int | None = None
+    if min_raw is not None and str(min_raw).strip() != "":
+        min_origins = _as_int(min_raw)
+        if min_origins is None or min_origins < 1:
+            _die("mirror --min-independent-origins requires an integer >= 1", 2)
+    mutating = any(v is not None for v in (publisher, collection, query, keep_latest, min_origins))
     if mutating:
         payload = {
             "publisher_id": publisher,
@@ -2228,6 +2305,8 @@ def cmd_mirror(sock: str, args: list[str]) -> None:
             "keep_latest": keep_latest,
             "automatic_spend_atoms": 0,
         }
+        if min_origins is not None:
+            payload["min_independent_origins"] = min_origins
         _refuse_spend_options(payload, "mirror")
         result = _rpc_dev(sock, "setmodelmirror", [[payload]])
         method = "setmodelmirror"
@@ -2244,11 +2323,12 @@ def cmd_mirror(sock: str, args: list[str]) -> None:
             "collection_id": _pick(src, "collection_id") if _pick(src, "collection_id") is not None else collection,
             "query": _pick(src, "query") if _pick(src, "query") is not None else query,
             "keep_latest": _pick(src, "keep_latest") if _pick(src, "keep_latest") is not None else keep_latest,
+            "min_independent_origins": _pick(src, "min_independent_origins"),
             "profile": _pick(src, "profile"),
         },
         note=(
             "mirror policy is local config, not a monetary privilege and not consensus. "
-            "It never auto-spends. " + DEV348_NOTE
+            "It never auto-spends. " + DEV349_NOTE
         ),
         next_actions=["profile show", "follow publisher <id>"],
     )
@@ -2283,7 +2363,7 @@ def cmd_profile(sock: str, args: list[str]) -> None:
             note=(
                 "profiles are config presets, not protocol. They never bypass the "
                 "resource governor and never grant monetary/search/consensus privilege. "
-                + DEV348_NOTE
+                + DEV349_NOTE
             ),
             next_actions=[
                 "profile set personal",
@@ -2342,7 +2422,7 @@ def cmd_profile(sock: str, args: list[str]) -> None:
         note=(
             "profile set writes ordinary local args. INFRASTRUCTURE enables "
             "relay+index+host-auto as independent roles; relay still does not cache "
-            "payloads. " + DEV348_NOTE
+            "payloads. " + DEV349_NOTE
         ),
         next_actions=["profile show", "doctor"],
     )
@@ -2357,10 +2437,17 @@ def _json_obj(args: list[str]) -> dict[str, Any]:
             obj = json.load(fh)
         if not isinstance(obj, dict):
             _die("JSON object required", 2)
-        return obj
-    obj = json.loads(raw)
-    if not isinstance(obj, dict):
-        _die("JSON object required", 2)
+    else:
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            _die("JSON object required", 2)
+    params = obj.get("params")
+    if isinstance(params, list) and params and isinstance(params[0], dict) and (
+        "plan_id" in params[0] or "origins" in params[0] or "source" in params[0]
+    ):
+        return params[0]
+    if isinstance(params, dict) and ("plan_id" in params or "origins" in params or "source" in params):
+        return params
     return obj
 
 
@@ -2385,8 +2472,133 @@ def cmd_import_plan(sock: str, args: list[str]) -> None:
             "authorship": _pick(src, "authorship"),
         },
         note="ImportPlan staging until VerifiedManifest. Source integrity is not authorship. "
-        + DEV348_NOTE,
-        next_actions=["import-plan status <plan_id>", "doctor"],
+        "Fetch is walletless; monetary plane stays for spend, bounties, and preservation. "
+        + DEV349_NOTE,
+        next_actions=["import-plan status <plan_id>", "verify <plan_id>", "doctor"],
+    )
+
+
+def cmd_fetch(sock: str, args: list[str]) -> None:
+    cmd_import_plan(sock, args)
+
+
+def cmd_verify(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("verify requires PLAN_ID", 2)
+    cmd_import_plan(sock, ["status", args[0]])
+
+
+def cmd_resolve(_sock: str, args: list[str]) -> None:
+    plan = _json_obj(args)
+    origins = plan.get("origins") if isinstance(plan.get("origins"), list) else []
+    source = plan.get("source") if isinstance(plan.get("source"), dict) else {}
+    evidence = plan.get("provenance_evidence") if isinstance(plan.get("provenance_evidence"), list) else []
+    where = [o.get("type") for o in origins if isinstance(o, dict) and o.get("type")]
+    if not where and isinstance(source.get("kind"), str):
+        where = [str(source.get("kind")).lower()]
+    min_origins = plan.get("min_independent_origins", 1)
+    try:
+        min_origins_n = int(min_origins)
+    except (TypeError, ValueError):
+        min_origins_n = 1
+    if min_origins_n < 1:
+        min_origins_n = 1
+    identity = {
+        "what": "cryptographic artifact; btx:// is the durable namespace",
+        "who": "native BTX publisher signatures remain; OMS/Sigstore/Cosign/OCI attestations are extra evidence, never identity",
+        "where": where,
+        "run": "local capability evidence; not vendor naming",
+        "how": "distribution funding: free, private, BTX incentives, bounties, paid hosting; token is not an admission ticket to fetch",
+        "evidence": "BTX aggregates provenance; it is not the sole CA",
+        "money": "not required to fetch; monetary plane stays for spend, bounties, preservation",
+    }
+    attached = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "")
+        row = {
+            "kind": kind,
+            "role": "native_btx_publisher" if kind == "btx_publisher" else "additional_evidence",
+            "verified_here": False,
+        }
+        if item.get("locator"):
+            row["locator"] = item.get("locator")
+        if item.get("note"):
+            row["note"] = item.get("note")
+        attached.append(row)
+    result = {
+        "wallet_required": False,
+        "publisher_must_republish": False,
+        "automatic_spend_atoms": 0,
+        "origins": origins,
+        "identity": identity,
+        "provenance_evidence": attached,
+        "min_independent_origins": min_origins_n,
+        "capability": {
+            "readiness_target": "VERIFIED_FILES",
+            "inference": False,
+            "funded_wallet": False,
+            "automatic_spend_atoms": 0,
+            "authority": "local capability evidence; not vendor naming",
+        },
+    }
+    _emit_dev(
+        "model_resolve",
+        "resolve",
+        result,
+        {
+            "wallet_required": False,
+            "publisher_must_republish": False,
+            "origin_count": len(origins),
+            "min_independent_origins": min_origins_n,
+        },
+        note=(
+            "Provider-independent resolution. No wallet, no chain sync, no fetch. "
+            "Monetary plane stays for spend/bounties/preservation. "
+            "OMS/Sigstore/Cosign are attached evidence, not verified here."
+        ),
+        next_actions=["fetch @plan.json", "import-plan @plan.json"],
+    )
+
+
+def cmd_modelpack(sock: str, args: list[str]) -> None:
+    if not args:
+        _die("modelpack requires import @CONFIG.json or export PLAN_ID", 2)
+    sub = args[0].strip().lower()
+    if sub == "export":
+        if len(args) < 2:
+            _die("modelpack export requires PLAN_ID", 2)
+        result = _rpc_dev(sock, "exportmodelpack", [[{"plan_id": args[1]}]])
+        src = result if isinstance(result, dict) else {}
+        _emit_dev(
+            "model_modelpack",
+            "exportmodelpack",
+            result,
+            {
+                "mediaType": _pick(src, "mediaType"),
+                "wallet_required": False,
+            },
+            note="ModelPack/KitOps is an origin layout. btx:// remains identity. Monetary plane stays.",
+            next_actions=["resolve @plan.json", "fetch @plan.json"],
+        )
+        return
+    payload = _json_obj(args[1:] if sub == "import" else args)
+    if "modelpack" not in payload and payload.get("mediaType"):
+        wrapped = {"plan_id": payload.get("plan_id") or ("9" * 96), "modelpack": payload}
+        payload = wrapped
+    result = _rpc_dev(sock, "parseimportplan", [[payload]])
+    src = result if isinstance(result, dict) else {}
+    _emit_dev(
+        "model_modelpack",
+        "parseimportplan",
+        result,
+        {
+            "wallet_required": False,
+            "origin_count": len(src.get("origins") or []) if isinstance(src.get("origins"), list) else 0,
+        },
+        note="ModelPack parsed as disposable OCI origin. Fetch stays walletless.",
+        next_actions=["fetch @plan.json", "resolve @plan.json"],
     )
 
 
@@ -2414,7 +2626,7 @@ def cmd_package(sock: str, args: list[str]) -> None:
         method,
         result,
         {"kind": _pick(src, "kind"), "bytes": _pick(src, "bytes"), "ok": _pick(src, "ok")},
-        note="Binary .btxbundle is distinct from exportmodellink magnet analog. " + DEV348_NOTE,
+        note="Binary .btxbundle is distinct from exportmodellink magnet analog. " + DEV349_NOTE,
         next_actions=["package inspect <hex|file.btx>", "link NAME"],
     )
 
@@ -2430,7 +2642,7 @@ def cmd_erasure(sock: str, args: list[str]) -> None:
             "reconstructable": _pick(src, "reconstructable"),
             "repair_executed": _pick(src, "repair_executed"),
         },
-        note="Per-stripe reconstructability. Global n is not sufficiency. " + DEV348_NOTE,
+        note="Per-stripe reconstructability. Global n is not sufficiency. " + DEV349_NOTE,
         next_actions=["erasure prepare @manifest.json"],
     )
 
@@ -2449,7 +2661,7 @@ def cmd_torrent_status(sock: str, args: list[str]) -> None:
             "torrentd_process": _pick(src, "torrentd_process"),
             "authorship": _pick(src, "authorship"),
         },
-        note="Packaged torrent bridge. btx-torrentd is not a process. " + DEV348_NOTE,
+        note="Packaged torrent bridge. btx-torrentd is not a process. " + DEV349_NOTE,
         next_actions=["import-plan @plan.json"],
     )
 
@@ -2467,7 +2679,7 @@ def cmd_origin_offer(sock: str, args: list[str]) -> None:
             "mode": _pick(src, "mode"),
             "presigned_get_is_meter": _pick(src, "presigned_get_is_meter"),
         },
-        note="Native proxy default. Presigned GET is not a meter. " + DEV348_NOTE,
+        note="Native proxy default. Presigned GET is not a meter. " + DEV349_NOTE,
         next_actions=["transport"],
     )
 
@@ -2486,7 +2698,7 @@ def cmd_transport(sock: str, args: list[str]) -> None:
             "quic": _pick(src, "quic"),
             "btx_torrentd_process": _pick(src, "btx_torrentd_process"),
         },
-        note="Evaluated work. uTP is NONSHIPPING. Live R2 WAN is NOT_RUN. " + DEV348_NOTE,
+        note="Evaluated work. uTP is NONSHIPPING. Live R2 WAN is NOT_RUN. " + DEV349_NOTE,
         next_actions=["doctor"],
     )
 
@@ -2495,6 +2707,10 @@ COMMANDS = {
     "init": cmd_init,
     "doctor": cmd_doctor,
     "host": cmd_host,
+    "load": cmd_load,
+    "unload": cmd_unload,
+    "generate": cmd_generate,
+    "host-profile": cmd_host_profile,
     "preview": cmd_preview,
     "search": cmd_search,
     "get": cmd_get,
@@ -2522,6 +2738,10 @@ COMMANDS = {
     "mirror": cmd_mirror,
     "profile": cmd_profile,
     "import-plan": cmd_import_plan,
+    "fetch": cmd_fetch,
+    "resolve": cmd_resolve,
+    "verify": cmd_verify,
+    "modelpack": cmd_modelpack,
     "package": cmd_package,
     "erasure": cmd_erasure,
     "torrent-status": cmd_torrent_status,

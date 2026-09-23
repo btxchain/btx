@@ -1678,7 +1678,7 @@ BOOST_AUTO_TEST_CASE(rc_strict_alternate_registry_requires_canary_capability)
     rc::ClearRCExactReplayAlternateProviders();
 }
 
-BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_without_alternate_is_degraded_not_quarantined)
+BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_cpu_confirms_invalid_not_quarantined)
 {
     rc::ClearRCExactReplayAlternateProviders();
     rc::ResetRCExactReplayProviderHealthForTest();
@@ -1698,29 +1698,38 @@ BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_without_alternate_is_degraded_not_qu
         .require_device = true,
         .output_row_tile = 16,
     };
-    const auto degraded{
+    const auto rejected{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
             header, params, 0, healthy)};
-    BOOST_CHECK(!degraded.ok);
-    BOOST_CHECK(degraded.outcome ==
-                rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
-    BOOST_CHECK(degraded.failure_kind ==
-                rc::RCExactReplayFailureKind::UnconfirmedDigestMismatch);
-    BOOST_CHECK(degraded.adjudication ==
-                rc::RCExactReplayAdjudication::NoIndependentProvider);
-    BOOST_CHECK_EQUAL(degraded.provider_attempts, 1U);
-    BOOST_CHECK_EQUAL(degraded.independent_provider_attempts, 0U);
-    BOOST_CHECK(!degraded.provider_quarantined);
+    BOOST_CHECK(!rejected.ok);
+    BOOST_CHECK(rejected.outcome ==
+                rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK(rejected.failure_kind ==
+                rc::RCExactReplayFailureKind::None);
+    BOOST_CHECK(rejected.adjudication ==
+                rc::RCExactReplayAdjudication::IndependentDigestConfirmed);
+    BOOST_CHECK(rejected.device_mismatch_confirmed);
+    BOOST_CHECK(rejected.device_mismatch_retried);
+    BOOST_CHECK_EQUAL(rejected.adjudicating_provider,
+                      "cpu_device_mismatch_retry");
+    BOOST_CHECK_EQUAL(rejected.digest, honest_digest);
+    BOOST_CHECK_GT(rejected.cpu_gemm_calls, 0U);
+    BOOST_CHECK(!rejected.fully_accelerated);
+    BOOST_CHECK_EQUAL(rejected.provider_attempts, 1U);
+    BOOST_CHECK_EQUAL(rejected.independent_provider_attempts, 0U);
+    BOOST_CHECK(!rejected.provider_quarantined);
     BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
 
-    // The malicious commitment cannot take the healthy provider out of
-    // service. The next honest header validates in the same process.
+    // A false header cannot take a healthy provider out of service. The next
+    // honest header still validates on the same device in this process.
     header.matmul_digest = honest_digest;
     const auto honest{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
             header, params, 0, healthy)};
     BOOST_CHECK(honest.ok);
     BOOST_CHECK(honest.outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK_EQUAL(honest.digest, honest_digest);
+    BOOST_CHECK_EQUAL(honest.cpu_gemm_calls, 0U);
     BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
     rc::ClearRCExactReplayAlternateProviders();
     rc::ResetRCExactReplayProviderHealthForTest();
@@ -1917,17 +1926,21 @@ BOOST_AUTO_TEST_CASE(rc_strict_same_callback_cannot_masquerade_as_independent)
         .require_device = true,
         .output_row_tile = 16,
     };
-    const auto degraded{
+    const auto rejected{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
             header, params, 0, primary)};
-    BOOST_CHECK(!degraded.ok);
-    BOOST_CHECK(degraded.outcome ==
-                rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
-    BOOST_CHECK(degraded.adjudication ==
-                rc::RCExactReplayAdjudication::NoIndependentProvider);
-    BOOST_CHECK_EQUAL(degraded.provider_attempts, 1U);
-    BOOST_CHECK_EQUAL(degraded.independent_provider_attempts, 0U);
-    BOOST_CHECK(!degraded.provider_quarantined);
+    BOOST_CHECK(!rejected.ok);
+    BOOST_CHECK(rejected.outcome ==
+                rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK(rejected.adjudication ==
+                rc::RCExactReplayAdjudication::IndependentDigestConfirmed);
+    BOOST_CHECK(rejected.device_mismatch_confirmed);
+    BOOST_CHECK_EQUAL(rejected.adjudicating_provider,
+                      "cpu_device_mismatch_retry");
+    BOOST_CHECK_GT(rejected.cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(rejected.provider_attempts, 1U);
+    BOOST_CHECK_EQUAL(rejected.independent_provider_attempts, 0U);
+    BOOST_CHECK(!rejected.provider_quarantined);
     rc::ClearRCExactReplayAlternateProviders();
     rc::ResetRCProductionCanaryForTest();
     rc::ResetRCExactReplayProviderHealthForTest();
@@ -2205,6 +2218,89 @@ BOOST_AUTO_TEST_CASE(rc_quarantine_backoff_escalates_and_caps)
     h.quarantine_events = 1;
     BOOST_CHECK_EQUAL(rc::RCExactReplayQuarantineBackoffSeconds(h),
                       rc::kRCExactReplayDivergentRecheckBackoffSeconds);
+}
+
+BOOST_AUTO_TEST_CASE(rc_cpu_portable_and_device_oracle_share_header_digest)
+{
+    auto header{MakeRCHeader(0x4350553d44455649)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 reference{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    BOOST_REQUIRE(!reference.IsNull());
+    header.matmul_digest = reference;
+
+    const rc::RCExactReplayAcceleration cpu_portable{
+        .backend = "cpu_portable",
+        .require_device = false,
+        .output_row_tile = 0,
+    };
+    const auto cpu{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, 0, cpu_portable)};
+    BOOST_CHECK(cpu.ok);
+    BOOST_CHECK(cpu.outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK_EQUAL(cpu.digest, reference);
+    BOOST_CHECK_GT(cpu.cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(cpu.device_gemm_calls, 0U);
+
+    lt::ExactGemmBackend oracle;
+    oracle.gemm_s8s8 = &OracleGemmS8S8;
+    const rc::RCExactReplayAcceleration device{
+        .gemm = oracle,
+        .backend = "test_device_oracle",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto accelerated{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, 0, device)};
+    BOOST_CHECK(accelerated.ok);
+    BOOST_CHECK(accelerated.outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK_EQUAL(accelerated.digest, reference);
+    BOOST_CHECK_EQUAL(accelerated.digest, cpu.digest);
+    BOOST_CHECK_GT(accelerated.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(accelerated.cpu_gemm_calls, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(rc_strict_faulty_device_cpu_recovers_honest_header)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    auto header{MakeRCHeader(0x4350555245434f56)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 honest_digest{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    BOOST_REQUIRE(!honest_digest.IsNull());
+    header.matmul_digest = honest_digest;
+
+    lt::ExactGemmBackend faulty_backend;
+    faulty_backend.gemm_s8s8 = &WrongGemmS8S8;
+    const rc::RCExactReplayAcceleration faulty{
+        .gemm = faulty_backend,
+        .backend = "test_sole_faulty_device",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto recovered{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, 0, faulty)};
+    BOOST_CHECK(recovered.ok);
+    BOOST_CHECK(recovered.outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK(recovered.adjudication ==
+                rc::RCExactReplayAdjudication::IndependentHeaderRecovered);
+    BOOST_CHECK_EQUAL(recovered.adjudicating_provider,
+                      "cpu_device_mismatch_retry");
+    BOOST_CHECK_EQUAL(recovered.acceleration_failure,
+                      "device_digest_mismatch_cpu_recovered");
+    BOOST_CHECK(recovered.device_mismatch_retried);
+    BOOST_CHECK(!recovered.device_mismatch_confirmed);
+    BOOST_CHECK_EQUAL(recovered.digest, honest_digest);
+    BOOST_CHECK_GT(recovered.cpu_gemm_calls, 0U);
+    BOOST_CHECK(!recovered.fully_accelerated);
+    BOOST_CHECK(!recovered.provider_quarantined);
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
 }
 
 BOOST_AUTO_TEST_CASE(rc_device_mismatch_auto_fallback_remains_diagnostic_only)

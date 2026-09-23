@@ -4,6 +4,7 @@
 
 #include <modelnet/helper.h>
 
+#include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <modelnet/community.h>
 #include <modelnet/crypto.h>
@@ -33,6 +34,7 @@
 #include <modelnet/protocol.h>
 #include <modelnet/records.h>
 #include <modelnet/qualification.h>
+#include <modelnet/generate.h>
 #include <modelnet/release.h>
 #include <modelnet/economy.h>
 #include <modelnet/feed.h>
@@ -53,6 +55,7 @@
 #include <random.h>
 #include <span.h>
 #include <tinyformat.h>
+#include <logging.h>
 #include <netaddress.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
@@ -69,6 +72,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -97,6 +101,20 @@
 #include <vector>
 
 namespace modelnet {
+
+fs::path UnixRpcListenPath(const fs::path& requested)
+{
+#ifndef WIN32
+    const std::string p = fs::PathToString(requested);
+    if (p.size() >= sizeof(sockaddr_un::sun_path)) {
+        unsigned char digest[32];
+        CSHA256().Write(UCharCast(p.data()), p.size()).Finalize(digest);
+        return fs::PathFromString(strprintf("/tmp/btx-md-%s.sock", HexStr(std::vector<unsigned char>(digest, digest + 8))));
+    }
+#endif
+    return requested;
+}
+
 namespace {
 
 constexpr size_t MAX_HTTP_HEADERS = PQ1_HTTP_HEADER_CAP;
@@ -167,6 +185,371 @@ std::string QuoteShellArg(const std::string& arg)
     }
     out += "'";
     return out;
+}
+
+bool InventorySafeTensorsFile(const fs::path& path, UniValue& tensors, uint64_t& nbytes, std::string& err)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        err = "open safetensors";
+        return false;
+    }
+    unsigned char hdr_len[8];
+    in.read(reinterpret_cast<char*>(hdr_len), 8);
+    if (in.gcount() != 8) {
+        err = "short safetensors header";
+        return false;
+    }
+    const uint64_t jlen = ReadLE64(hdr_len);
+    if (jlen == 0 || jlen > 64 * 1024 * 1024) {
+        err = "safetensors header too large";
+        return false;
+    }
+    std::string json(static_cast<size_t>(jlen), '\0');
+    in.read(json.data(), static_cast<std::streamsize>(jlen));
+    if (static_cast<uint64_t>(in.gcount()) != jlen) {
+        err = "short safetensors json";
+        return false;
+    }
+    UniValue header;
+    if (!header.read(json) || !header.isObject()) {
+        err = "safetensors json";
+        return false;
+    }
+    for (const std::string& k : header.getKeys()) {
+        if (k == "__metadata__") continue;
+        const UniValue& t = header[k];
+        if (!t.isObject() || !t.exists("data_offsets") || !t["data_offsets"].isArray() ||
+            t["data_offsets"].size() < 2) {
+            continue;
+        }
+        const uint64_t a = t["data_offsets"][0].getInt<uint64_t>();
+        const uint64_t b = t["data_offsets"][1].getInt<uint64_t>();
+        if (b < a) continue;
+        const uint64_t sz = b - a;
+        nbytes += sz;
+        UniValue one(UniValue::VOBJ);
+        one.pushKV("name", k);
+        if (t.exists("dtype") && t["dtype"].isStr()) one.pushKV("dtype", t["dtype"].get_str());
+        if (t.exists("shape")) one.pushKV("shape", t["shape"]);
+        one.pushKV("bytes", sz);
+        tensors.push_back(one);
+    }
+    return true;
+}
+
+bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, std::string& err, pid_t* hold_pid)
+{
+    std::error_code ec;
+    if (!fs::is_regular_file(loader, ec) || ec) {
+        err = "BTX_MODEL_CUDA_LOADER is not a regular file";
+        return false;
+    }
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        err = "pipe";
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        err = "fork";
+        return false;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
+        close(pipefd[1]);
+        const std::string loader_s = fs::PathToString(loader);
+        const std::string dir_s = fs::PathToString(dir);
+        if (hold_pid) {
+            const char* argv[] = {loader_s.c_str(), "--dir", dir_s.c_str(), "--hold", "--smoke", nullptr};
+            execv(loader_s.c_str(), const_cast<char* const*>(argv));
+        } else {
+            const char* argv[] = {loader_s.c_str(), "--dir", dir_s.c_str(), "--smoke", nullptr};
+            execv(loader_s.c_str(), const_cast<char* const*>(argv));
+        }
+        _exit(127);
+    }
+    close(pipefd[1]);
+    std::string stdout_s;
+    char buf[4096];
+    ssize_t nread = 0;
+    while ((nread = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
+        stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.find('\n') != std::string::npos) break;
+        if (stdout_s.size() > 1024 * 1024) break;
+    }
+    close(pipefd[0]);
+    const size_t nl = stdout_s.find('\n');
+    const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
+    if (!out.read(line) || !out.isObject()) {
+        int st = 0;
+        kill(pid, SIGTERM);
+        waitpid(pid, &st, 0);
+        err = "cuda loader json";
+        return false;
+    }
+    if (out.exists("ok") && !out["ok"].get_bool()) {
+        int st = 0;
+        kill(pid, SIGTERM);
+        waitpid(pid, &st, 0);
+        err = out.exists("error") && out["error"].isStr() ? out["error"].get_str() : "cuda loader failed";
+        return false;
+    }
+    if (hold_pid) {
+        *hold_pid = pid;
+        return true;
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        err = out.exists("error") && out["error"].isStr() ? out["error"].get_str() : "cuda loader failed";
+        return false;
+    }
+    return true;
+}
+
+struct ResidentCuda {
+    pid_t pid{0};
+    uint64_t bytes_on_device{0};
+    std::string device_name;
+    UniValue cuda;
+};
+
+std::mutex g_resident_mu;
+std::map<std::string, ResidentCuda> g_resident;
+
+bool PidAlive(pid_t pid)
+{
+    if (pid <= 0) return false;
+    return ::kill(pid, 0) == 0 || errno == EPERM;
+}
+
+void StopResidentLocked(const std::string& key)
+{
+    auto it = g_resident.find(key);
+    if (it == g_resident.end()) return;
+    const pid_t pid = it->second.pid;
+    g_resident.erase(it);
+    if (pid <= 0) return;
+    ::kill(pid, SIGTERM);
+    for (int i = 0; i < 50; ++i) {
+        int st = 0;
+        if (waitpid(pid, &st, WNOHANG) == pid) return;
+        usleep(100000);
+    }
+    ::kill(pid, SIGKILL);
+    int st = 0;
+    waitpid(pid, &st, 0);
+}
+
+void StopResident(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(g_resident_mu);
+    StopResidentLocked(key);
+}
+
+bool MaybeRunInferCmd(const fs::path& checkout, UniValue& result, std::string& err)
+{
+    const char* cmd = std::getenv("BTX_MODEL_INFER_CMD");
+    if (!cmd || cmd[0] == '\0') return true;
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        err = "infer pipe";
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        err = "infer fork";
+        return false;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
+        close(pipefd[1]);
+        const std::string exe = cmd;
+        const std::string dir_s = fs::PathToString(checkout);
+        const char* argv[] = {exe.c_str(), dir_s.c_str(), nullptr};
+        execv(exe.c_str(), const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(pipefd[1]);
+    std::string stdout_s;
+    char buf[4096];
+    ssize_t nread = 0;
+    while ((nread = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
+        stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.size() > 256 * 1024) break;
+    }
+    close(pipefd[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    const size_t nl = stdout_s.find('\n');
+    const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
+    result.pushKV("infer_cmd", cmd);
+    result.pushKV("infer_stdout", line);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        err = "BTX_MODEL_INFER_CMD failed";
+        result.pushKV("infer_ok", false);
+        return false;
+    }
+    result.pushKV("infer_ok", true);
+    result.pushKV("generated", !line.empty());
+    return true;
+}
+
+bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::string& prompt,
+                        int max_new_tokens, UniValue& out, std::string& err)
+{
+    if (!fs::exists(exe) || !fs::is_regular_file(exe)) {
+        err = "BTX_MODEL_GENERATE is not a regular file";
+        return false;
+    }
+    int inpipe[2];
+    int outpipe[2];
+    if (pipe(inpipe) != 0) {
+        err = "generate pipe";
+        return false;
+    }
+    if (pipe(outpipe) != 0) {
+        close(inpipe[0]);
+        close(inpipe[1]);
+        err = "generate pipe";
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(inpipe[0]);
+        close(inpipe[1]);
+        close(outpipe[0]);
+        close(outpipe[1]);
+        err = "generate fork";
+        return false;
+    }
+    if (pid == 0) {
+        close(inpipe[1]);
+        close(outpipe[0]);
+        if (dup2(inpipe[0], STDIN_FILENO) < 0) _exit(127);
+        if (dup2(outpipe[1], STDOUT_FILENO) < 0) _exit(127);
+        close(inpipe[0]);
+        close(outpipe[1]);
+        const std::string exe_s = fs::PathToString(exe);
+        const std::string dir_s = fs::PathToString(dir);
+        const std::string n_s = std::to_string(max_new_tokens);
+        const char* argv[] = {exe_s.c_str(), "--dir", dir_s.c_str(), "--max-new-tokens", n_s.c_str(), nullptr};
+        execv(exe_s.c_str(), const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(inpipe[0]);
+    close(outpipe[1]);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("prompt", prompt);
+    req.pushKV("max_new_tokens", max_new_tokens);
+    const std::string body = req.write() + "\n";
+    if (::write(inpipe[1], body.data(), body.size()) < 0) {
+        close(inpipe[1]);
+        close(outpipe[0]);
+        kill(pid, SIGTERM);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        err = "generate stdin";
+        return false;
+    }
+    close(inpipe[1]);
+    std::string stdout_s;
+    char buf[4096];
+    ssize_t nread = 0;
+    while ((nread = ::read(outpipe[0], buf, sizeof(buf))) > 0) {
+        stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.find('\n') != std::string::npos) break;
+        if (stdout_s.size() > 1024 * 1024) break;
+    }
+    close(outpipe[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    const size_t nl = stdout_s.find('\n');
+    const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
+    if (!out.read(line) || !out.isObject()) {
+        err = "generate adapter json";
+        return false;
+    }
+    if (out.exists("ok") && !out["ok"].get_bool()) {
+        err = out.exists("error") && out["error"].isStr() ? out["error"].get_str() : "generate adapter failed";
+        return false;
+    }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        if (err.empty()) err = "generate adapter exit";
+        return false;
+    }
+    return true;
+}
+
+bool RunLlamaGenerate(const fs::path& exe, const fs::path& gguf, const std::string& prompt,
+                      int max_new_tokens, UniValue& out, std::string& err)
+{
+    if (!fs::exists(exe) || !fs::is_regular_file(exe) ||
+        ::access(fs::PathToString(exe).c_str(), X_OK) != 0) {
+        err = "BTX_LLAMA_CLI is not executable";
+        return false;
+    }
+    int outpipe[2];
+    if (pipe(outpipe) != 0) {
+        err = "llama pipe";
+        return false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(outpipe[0]);
+        close(outpipe[1]);
+        err = "llama fork";
+        return false;
+    }
+    if (pid == 0) {
+        close(outpipe[0]);
+        if (dup2(outpipe[1], STDOUT_FILENO) < 0) _exit(127);
+        const int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDERR_FILENO);
+            close(nullfd);
+        }
+        close(outpipe[1]);
+        const std::string exe_s = fs::PathToString(exe);
+        const std::string m_s = fs::PathToString(gguf);
+        const std::string n_s = std::to_string(max_new_tokens);
+        const char* argv[] = {
+            exe_s.c_str(), "-m", m_s.c_str(), "-p", prompt.c_str(), "-n", n_s.c_str(),
+            "--no-display-prompt", nullptr};
+        execv(exe_s.c_str(), const_cast<char* const*>(argv));
+        _exit(127);
+    }
+    close(outpipe[1]);
+    std::string stdout_s;
+    char buf[4096];
+    ssize_t nread = 0;
+    while ((nread = ::read(outpipe[0], buf, sizeof(buf))) > 0) {
+        stdout_s.append(buf, static_cast<size_t>(nread));
+        if (stdout_s.size() > 1024 * 1024) break;
+    }
+    close(outpipe[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        err = "llama-cli exit";
+        return false;
+    }
+    while (!stdout_s.empty() && (stdout_s.back() == '\n' || stdout_s.back() == '\r')) stdout_s.pop_back();
+    out = UniValue(UniValue::VOBJ);
+    out.pushKV("ok", true);
+    out.pushKV("generated", true);
+    out.pushKV("text", stdout_s);
+    out.pushKV("backend", "llama.cpp");
+    out.pushKV("format", "gguf");
+    out.pushKV("remote_inference", false);
+    return true;
 }
 
 int AddrConnectPreference(const sockaddr* sa)
@@ -762,14 +1145,12 @@ int ListenTcp(const std::string& bind, std::string& err)
 
 int ListenUnix(fs::path& path, std::string& err)
 {
+    const fs::path requested = path;
+    path = UnixRpcListenPath(requested);
     std::string p = fs::PathToString(path);
-    if (p.size() >= sizeof(sockaddr_un::sun_path)) {
-        unsigned char digest[32];
-        CSHA256()
-            .Write(UCharCast(p.data()), p.size())
-            .Finalize(digest);
-        p = strprintf("/tmp/btx-md-%s.sock", HexStr(std::vector<unsigned char>(digest, digest + 8)));
-        path = fs::PathFromString(p);
+    if (path != requested) {
+        LogPrintf("btx-modeld: unix RPC path length %zu exceeds sockaddr_un.sun_path; listening at %s\n",
+                  fs::PathToString(requested).size(), p);
     }
     ::unlink(p.c_str());
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -864,6 +1245,8 @@ struct Pq1Session {
     int handshake_ms{PQ1_HANDSHAKE_MS};
     int io_ms{PQ1_IDLE_MS};
     bool outbound_held{false};
+    /** Operator addmodelnode of 127.0.0.1/::1 (howto loopback seeder). PEX extras stay blocked. */
+    bool allow_loopback{false};
     std::vector<std::pair<std::string, std::string>> piece_headers;
 
     ~Pq1Session() { Close(); }
@@ -956,9 +1339,15 @@ struct Pq1Session {
             }
             CService resolved;
             if (!resolved.SetSockAddr(reinterpret_cast<const sockaddr*>(&c.ss), c.len) ||
-                IsForbiddenOutboundDialAddr(resolved) || IsForbiddenControlPort(resolved.GetPort())) {
+                IsForbiddenControlPort(resolved.GetPort())) {
                 last_try_err = "non-public dial target";
                 continue;
+            }
+            if (IsForbiddenOutboundDialAddr(resolved)) {
+                if (!(allow_loopback && resolved.IsLocal() && !resolved.IsBindAny())) {
+                    last_try_err = "non-public dial target";
+                    continue;
+                }
             }
             CloseTransport();
             fd = ::socket(c.family, c.socktype, c.protocol);
@@ -1069,6 +1458,12 @@ struct Pq1Session {
             return false;
         }
         transferred += raw.size();
+        for (const auto& h : resp.headers) {
+            if (ToLower(h.first) == "connection" && ToLower(h.second).find("close") != std::string::npos) {
+                CloseTransport();
+                break;
+            }
+        }
         return true;
     }
 };
@@ -1195,7 +1590,7 @@ std::string FormatHttpResponse(const NativeResponse& resp)
     for (const auto& h : resp.headers) {
         o << h.first << ": " << h.second << "\r\n";
     }
-    o << "Connection: keep-alive\r\n\r\n";
+    o << (resp.close_after ? "Connection: close\r\n\r\n" : "Connection: keep-alive\r\n\r\n");
     if (!headers_only) o << resp.body;
     return o.str();
 }
@@ -3029,6 +3424,7 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                     r.pushKV("peer_retries", job->progress.peer_retries.load());
                     {
                         std::lock_guard<std::mutex> lock(job->mu);
+                        job->last_err.clear();
                         job->result = std::move(r);
                         job->status = "done";
                     }
@@ -3536,6 +3932,7 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
     UniValue imported(UniValue::VARR);
     UniValue skipped(UniValue::VARR);
     UniValue opened(UniValue::VARR);
+    UniValue retrieved(UniValue::VARR);
     auto skip_obj = [&](const std::string& path, const std::string& reason) {
         UniValue o(UniValue::VOBJ);
         o.pushKV("path", path);
@@ -3546,8 +3943,10 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
         result.pushKV("imported", imported);
         result.pushKV("skipped", skipped);
         result.pushKV("opened", opened);
+        result.pushKV("retrieved", retrieved);
         result.pushKV("imported_count", 0);
         result.pushKV("opened_count", 0);
+        result.pushKV("retrieved_count", 0);
         result.pushKV("note", "set -modelwatch=<dir> or pass a path to scanmodelwatch");
         return 0;
     }
@@ -3613,8 +4012,28 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
                 one.pushKV("reason", "share_card");
                 std::string share_text, serr;
                 if (LoadShareText(ent.path(), share_text, serr)) {
-                    one.pushKV("uri", FirstBtxToken(share_text));
+                    const std::string uri = FirstBtxToken(share_text);
+                    one.pushKV("uri", uri);
                     one.pushKV("share_text", share_text);
+                    if (!uri.empty()) {
+                        UniValue greq(UniValue::VOBJ);
+                        greq.pushKV("method", "getmodel");
+                        UniValue gp(UniValue::VARR);
+                        gp.push_back(uri);
+                        gp.push_back("FREE_ONLY");
+                        greq.pushKV("params", gp);
+                        UniValue retrieve;
+                        std::string rcode, rerr;
+                        if (DispatchHelperRpc(cat, greq, retrieve, rcode, rerr, nullptr)) {
+                            one.pushKV("retrieve", retrieve);
+                            if (retrieve.exists("status") && retrieve["status"].isStr()) {
+                                one.pushKV("status", retrieve["status"].get_str());
+                            }
+                            retrieved.push_back(one);
+                        } else if (!rerr.empty() || !rcode.empty()) {
+                            one.pushKV("retrieve_error", rerr.empty() ? rcode : rerr);
+                        }
+                    }
                 } else {
                     one.pushKV("error", serr.empty() ? "not a share card" : serr);
                 }
@@ -3662,8 +4081,10 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
     result.pushKV("imported", imported);
     result.pushKV("skipped", skipped);
     result.pushKV("opened", opened);
+    result.pushKV("retrieved", retrieved);
     result.pushKV("imported_count", static_cast<int>(imported.size()));
     result.pushKV("opened_count", static_cast<int>(opened.size()));
+    result.pushKV("retrieved_count", static_cast<int>(retrieved.size()));
     result.pushKV("last_scan_ms", g_runtime.last_watch_scan_ms);
     result.pushKV("automatic_spend_atoms", 0);
     return static_cast<int>(imported.size());
@@ -4276,6 +4697,13 @@ UniValue MirrorPolicyToJson(const UniValue& stored, const OperatorProfile& prof,
     o.pushKV("profile", OperatorProfileName(prof));
     o.pushKV("preserve_rare", policy.preserve_rare);
     o.pushKV("automatic_spend_atoms", 0);
+    int min_origins = 1;
+    if (o.exists("min_independent_origins") && o["min_independent_origins"].isNum()) {
+        min_origins = o["min_independent_origins"].getInt<int>();
+    }
+    if (min_origins < 1) min_origins = 1;
+    o.pushKV("min_independent_origins", min_origins);
+    o.pushKV("fetch_fails_below_min", false);
     o.pushKV("note", "mirror is a local keep/follow policy, not a monetary or consensus privilege");
     if (!o.exists("selectors") || !o["selectors"].isArray()) {
         o.pushKV("selectors", UniValue(UniValue::VARR));
@@ -4338,6 +4766,17 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
         sel.pushKV("collection_id", collection);
         sel.pushKV("query", query);
         sel.pushKV("keep_latest", keep_latest);
+        int min_origins = 1;
+        if (o.exists("min_independent_origins") && !o["min_independent_origins"].isNull()) {
+            if (o["min_independent_origins"].isNum()) min_origins = o["min_independent_origins"].getInt<int>();
+            else if (o["min_independent_origins"].isStr()) min_origins = std::atoi(o["min_independent_origins"].get_str().c_str());
+        }
+        if (min_origins < 1) {
+            err_code = "INVALID_PARAMETER";
+            err = "min_independent_origins must be >= 1";
+            return false;
+        }
+        sel.pushKV("min_independent_origins", min_origins);
         sel.pushKV("automatic_spend_atoms", 0);
         UniValue next(UniValue::VARR);
         bool replaced = false;
@@ -4362,6 +4801,7 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
             next.push_back(sel);
         }
         stored.pushKV("selectors", next);
+        stored.pushKV("min_independent_origins", min_origins);
         stored.pushKV("automatic_spend_atoms", 0);
         std::string werr;
         if (!WriteJsonFile(path, stored, werr)) {
@@ -5126,6 +5566,24 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }));
             result.pushKV("automatic_spend_atoms", 0);
             result.pushKV("note", "this path is a share card, not weights; getmodel retrieves, hostmodel hosts a GGUF/SafeTensors directory");
+            if (!token.empty()) {
+                UniValue greq(UniValue::VOBJ);
+                greq.pushKV("method", "getmodel");
+                UniValue gp(UniValue::VARR);
+                gp.push_back(token);
+                gp.push_back("FREE_ONLY");
+                greq.pushKV("params", gp);
+                UniValue retrieve;
+                std::string rcode, rerr;
+                if (DispatchHelperRpc(cat, greq, retrieve, rcode, rerr, stop)) {
+                    result.pushKV("retrieve", retrieve);
+                    if (retrieve.exists("status") && retrieve["status"].isStr()) {
+                        result.pushKV("status", retrieve["status"].get_str());
+                    }
+                } else if (!rerr.empty() || !rcode.empty()) {
+                    result.pushKV("retrieve_error", rerr.empty() ? rcode : rerr);
+                }
+            }
             return true;
         }
         bool pin = true;
@@ -6386,7 +6844,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "getmodel") {
         Resource r;
         std::string hexerr;
-        const std::string user = Arg(0).get_str();
+        std::string user = Arg(0).get_str();
+        const fs::path maybe_share = fs::PathFromString(user);
+        if (fs::is_regular_file(maybe_share)) {
+            std::string share_text, serr;
+            if (LoadShareText(maybe_share, share_text, serr)) user = share_text;
+        }
         const std::string token = FirstBtxToken(user);
         if (!DecodeResource(token.empty() ? user : token, r, err)) {
             const Digest48 id = ResolveUserId(user, hexerr);
@@ -6448,7 +6911,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         CatalogEntry local_probe;
         const bool have_local = cat.Find(r.digest, local_probe);
         std::vector<PieceNeed> missing;
-        if (have_local && !local_probe.core.files.empty()) {
+        if (have_local && !local_probe.incomplete && !local_probe.core.files.empty()) {
             const auto& f = local_probe.core.files[0];
             const uint32_t n = f.size == 0 ? 1u : static_cast<uint32_t>((f.size + PIECE_SIZE - 1) / PIECE_SIZE);
             for (uint32_t i = 0; i < n; ++i) {
@@ -6457,9 +6920,6 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 p.piece_index = i;
                 missing.push_back(p);
             }
-        } else {
-            PieceNeed p;
-            missing.push_back(p);
         }
         std::vector<SourceOffer> sources;
         if (have_local) {
@@ -6557,14 +7017,16 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 (void)TryHydrateFromCloud(cat, local, result, herr);
                 cat.Find(r.digest, local);
             }
-            cat.ApplyDemandSeed(local.model_id, err);
-            cat.Find(r.digest, local);
-            result.pushKV("plan", "FREE");
-            result.pushKV("status", "local");
-            result.pushKV("model_id", local.model_id.Hex());
-            result.pushKV("artifact_id", local.artifact_id.Hex());
-            result.pushKV("seeded", local.seeded);
-            return true;
+            if (!local.incomplete) {
+                cat.ApplyDemandSeed(local.model_id, err);
+                cat.Find(r.digest, local);
+                result.pushKV("plan", "FREE");
+                result.pushKV("status", "local");
+                result.pushKV("model_id", local.model_id.Hex());
+                result.pushKV("artifact_id", local.artifact_id.Hex());
+                result.pushKV("seeded", local.seeded);
+                return true;
+            }
         }
         {
             Digest48 artifact;
@@ -7201,14 +7663,28 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err_code = "NOT_FOUND";
             return false;
         }
+        if (e.incomplete) {
+            err_code = "INCOMPLETE";
+            err = "incomplete replica cannot be exported as a runtime root";
+            return false;
+        }
+        const fs::path checkout = HelperDir(cat) / "checkout" / fs::PathFromString(e.artifact_id.Hex());
+        if (!cat.MaterializeCheckout(id, checkout, err)) {
+            err_code = "IO";
+            return false;
+        }
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", e.model_id.Hex());
         result.pushKV("artifact_id", e.artifact_id.Hex());
         result.pushKV("store_root", fs::PathToString(cat.Store().Root()));
         result.pushKV("source_path", e.source_path);
+        result.pushKV("path", fs::PathToString(checkout));
+        result.pushKV("usable_runtime_root", fs::PathToString(checkout));
+        result.pushKV("materialized", true);
         result.pushKV("inference", false);
         result.pushKV("runtime_started", false);
         result.pushKV("runtime_exec", false);
+        result.pushKV("device_loaded", false);
         UniValue files(UniValue::VARR);
         for (const auto& f : e.core.files) {
             UniValue one(UniValue::VOBJ);
@@ -7218,7 +7694,250 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             files.push_back(one);
         }
         result.pushKV("files", files);
-        result.pushKV("note", "Verified local files. This RPC never starts a runtime.");
+        result.pushKV("file_count", static_cast<int>(e.core.files.size()));
+        result.pushKV("automatic_spend_atoms", 0);
+        result.pushKV("next_actions", NextActionsArray({"loadmodel", "openmodelshare"}));
+        result.pushKV("note", "Verified local files rebuilt from pieces. This RPC never starts a runtime. Checkout hardlinks source files when they still match.");
+        result.pushKV("execution_profile", static_cast<int>(e.core.execution_profile));
+        return true;
+    }
+    if (method == "loadmodel") {
+        const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+        CatalogEntry e;
+        if (id.IsNull() || !cat.Find(id, e)) {
+            err_code = "NOT_FOUND";
+            return false;
+        }
+        if (e.incomplete) {
+            err_code = "INCOMPLETE";
+            err = "incomplete replica cannot be loaded";
+            return false;
+        }
+        const fs::path checkout = HelperDir(cat) / "checkout" / fs::PathFromString(e.artifact_id.Hex());
+        if (!cat.MaterializeCheckout(id, checkout, err)) {
+            err_code = "IO";
+            return false;
+        }
+        UniValue tensors(UniValue::VARR);
+        uint64_t weight_bytes = 0;
+        for (const auto& f : e.core.files) {
+            const auto lower = ToLower(f.path);
+            if (!lower.ends_with(".safetensors")) continue;
+            const fs::path st = checkout / fs::PathFromString(f.path);
+            std::string ierr;
+            if (!InventorySafeTensorsFile(st, tensors, weight_bytes, ierr)) {
+                err_code = "INVALID_MODEL";
+                err = ierr;
+                return false;
+            }
+        }
+        result.pushKV("schema_version", 2);
+        result.pushKV("model_id", e.model_id.Hex());
+        result.pushKV("artifact_id", e.artifact_id.Hex());
+        result.pushKV("path", fs::PathToString(checkout));
+        result.pushKV("usable_runtime_root", fs::PathToString(checkout));
+        result.pushKV("materialized", true);
+        result.pushKV("tensors", tensors);
+        result.pushKV("tensor_count", static_cast<int>(tensors.size()));
+        result.pushKV("weight_bytes", weight_bytes);
+        result.pushKV("inference", false);
+        result.pushKV("remote_inference", false);
+        result.pushKV("runtime_started", false);
+        result.pushKV("runtime_exec", false);
+        result.pushKV("device_loaded", false);
+        result.pushKV("weights_resident", false);
+        result.pushKV("smoke_passed", false);
+        result.pushKV("execution_profile", static_cast<int>(e.core.execution_profile));
+        result.pushKV("runtime_profile", "files-only");
+        result.pushKV("automatic_spend_atoms", 0);
+        const std::string rkey = e.artifact_id.Hex();
+        {
+            std::lock_guard<std::mutex> lock(g_resident_mu);
+            auto it = g_resident.find(rkey);
+            if (it != g_resident.end() && PidAlive(it->second.pid)) {
+                result.pushKV("device_loaded", true);
+                result.pushKV("runtime_started", true);
+                result.pushKV("runtime_exec", true);
+                result.pushKV("weights_resident", true);
+                result.pushKV("loader_pid", static_cast<int64_t>(it->second.pid));
+                result.pushKV("cuda", it->second.cuda);
+                result.pushKV("bytes_on_device", it->second.bytes_on_device);
+                result.pushKV("device_name", it->second.device_name);
+                if (it->second.cuda.exists("smoke_passed")) {
+                    result.pushKV("smoke_passed", it->second.cuda["smoke_passed"]);
+                }
+                result.pushKV("runtime_profile", "safetensors-cuda-resident");
+                result.pushKV("already_resident", true);
+                result.pushKV("next_actions", NextActionsArray({"unloadmodel"}));
+                result.pushKV("note", "Weights remain on device until unloadmodel. No network inference server.");
+                return true;
+            }
+        }
+        const char* loader_env = std::getenv("BTX_MODEL_CUDA_LOADER");
+        if (loader_env && loader_env[0] != '\0') {
+            UniValue loaded;
+            pid_t child = 0;
+            if (!RunCudaLoader(fs::PathFromString(loader_env), checkout, loaded, err, &child)) {
+                err_code = "HARDWARE_NOT_RUN";
+                return false;
+            }
+            ResidentCuda rec;
+            rec.pid = child;
+            rec.cuda = loaded;
+            if (loaded.exists("bytes_on_device")) rec.bytes_on_device = loaded["bytes_on_device"].getInt<uint64_t>();
+            if (loaded.exists("device_name") && loaded["device_name"].isStr()) rec.device_name = loaded["device_name"].get_str();
+            {
+                std::lock_guard<std::mutex> lock(g_resident_mu);
+                StopResidentLocked(rkey);
+                g_resident[rkey] = rec;
+            }
+            result.pushKV("device_loaded", true);
+            result.pushKV("runtime_started", true);
+            result.pushKV("runtime_exec", true);
+            result.pushKV("weights_resident", true);
+            result.pushKV("loader_pid", static_cast<int64_t>(child));
+            result.pushKV("cuda", loaded);
+            result.pushKV("bytes_on_device", rec.bytes_on_device);
+            result.pushKV("device_name", rec.device_name);
+            result.pushKV("runtime_profile", "safetensors-cuda-resident");
+            if (loaded.exists("smoke_passed")) result.pushKV("smoke_passed", loaded["smoke_passed"]);
+            else result.pushKV("smoke_passed", true);
+            std::string infer_err;
+            if (!MaybeRunInferCmd(checkout, result, infer_err)) {
+                result.pushKV("infer_error", infer_err);
+            } else if (result.exists("generated") && result["generated"].get_bool()) {
+                result.pushKV("first_useful_result", true);
+            }
+            result.pushKV("next_actions", NextActionsArray({"unloadmodel"}));
+            result.pushKV("note", "Weights stay on device until unloadmodel. CUDA smoke is a kernel on loaded tensors, not a network inference server. Granite hybrid is not GGUF; llama.cpp needs conversion.");
+            return true;
+        }
+        result.pushKV("next_actions", NextActionsArray({"loadmodel", "openmodelshare"}));
+        result.pushKV("note", "Weights are local files. Set BTX_MODEL_CUDA_LOADER to keep tensors resident on a GPU. This RPC never starts a network inference server.");
+        return true;
+    }
+    if (method == "unloadmodel") {
+        const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+        CatalogEntry e;
+        if (id.IsNull() || !cat.Find(id, e)) {
+            err_code = "NOT_FOUND";
+            return false;
+        }
+        StopResident(e.artifact_id.Hex());
+        result.pushKV("schema_version", 2);
+        result.pushKV("model_id", e.model_id.Hex());
+        result.pushKV("unloaded", true);
+        result.pushKV("device_loaded", false);
+        result.pushKV("weights_resident", false);
+        result.pushKV("runtime_started", false);
+        result.pushKV("automatic_spend_atoms", 0);
+        result.pushKV("next_actions", NextActionsArray({"loadmodel"}));
+        result.pushKV("note", "Stopped the helper-spawned CUDA loader only.");
+        return true;
+    }
+    if (method == "getmodelhostprofile") {
+        const HostGenerateProfile host = ProbeHostGenerateProfile();
+        result = HostGenerateProfileJson(host);
+        result.pushKV("automatic_spend_atoms", 0);
+        result.pushKV("next_actions", NextActionsArray({"generatemodel", "loadmodel"}));
+        return true;
+    }
+    if (method == "generatemodel") {
+        const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+        CatalogEntry e;
+        if (id.IsNull() || !cat.Find(id, e)) {
+            err_code = "NOT_FOUND";
+            return false;
+        }
+        if (e.incomplete) {
+            err_code = "INCOMPLETE";
+            err = "incomplete replica cannot generate; getmodel FREE_ONLY first";
+            return false;
+        }
+        std::string prompt;
+        int max_new = 32;
+        if (Arg(1).isStr()) {
+            prompt = Arg(1).get_str();
+        } else if (Arg(1).isObject()) {
+            if (Arg(1).exists("prompt") && Arg(1)["prompt"].isStr()) prompt = Arg(1)["prompt"].get_str();
+            if (Arg(1).exists("max_new_tokens")) {
+                max_new = Arg(1)["max_new_tokens"].getInt<int>();
+            }
+        }
+        if (prompt.empty()) {
+            err_code = "INVALID_PARAMETER";
+            err = "prompt required";
+            return false;
+        }
+        if (prompt.size() > 64 * 1024) {
+            err_code = "INVALID_PARAMETER";
+            err = "prompt too large";
+            return false;
+        }
+        if (max_new < 1) max_new = 1;
+        if (max_new > 512) max_new = 512;
+        const fs::path checkout = HelperDir(cat) / "checkout" / fs::PathFromString(e.artifact_id.Hex());
+        if (!cat.MaterializeCheckout(id, checkout, err)) {
+            err_code = "IO";
+            return false;
+        }
+        const HostGenerateProfile host = ProbeHostGenerateProfile();
+        const ArtifactGenerateView art = InspectCheckoutForGenerate(checkout);
+        std::string reason;
+        if (!ArtifactCompatibleWithHost(art, host, reason)) {
+            err_code = "INCOMPATIBLE_HOST_PROFILE";
+            err = reason;
+            result.pushKV("compatible", false);
+            result.pushKV("reason", reason);
+            result.pushKV("architecture", art.architecture);
+            result.pushKV("format", art.format == GenerateFormat::Gguf ? "gguf" :
+                                    art.format == GenerateFormat::SafeTensors ? "safetensors" :
+                                    art.format == GenerateFormat::Unsafe ? "unsafe" : "none");
+            result.pushKV("host", HostGenerateProfileJson(host));
+            result.pushKV("generated", false);
+            result.pushKV("remote_inference", false);
+            result.pushKV("automatic_spend_atoms", 0);
+            result.pushKV("execution_profile", static_cast<int>(e.core.execution_profile));
+            result.pushKV("next_actions", NextActionsArray({"getmodelhostprofile"}));
+            return false;
+        }
+        StopResident(e.artifact_id.Hex());
+        UniValue gen;
+        const std::string adapter = PickGenerateAdapter(art, host);
+        if (!adapter.empty()) {
+            if (!RunGenerateAdapter(fs::PathFromString(adapter), checkout, prompt, max_new, gen, err)) {
+                err_code = "NOT_RUN";
+                return false;
+            }
+        } else if (art.format == GenerateFormat::Gguf && host.llama_cli) {
+            if (!RunLlamaGenerate(fs::PathFromString(host.llama_cli_path),
+                                  fs::PathFromString(art.weights_path), prompt, max_new, gen, err)) {
+                err_code = "NOT_RUN";
+                return false;
+            }
+        } else {
+            err_code = "NOT_RUN";
+            err = "no generate adapter";
+            return false;
+        }
+        result.pushKV("schema_version", 2);
+        result.pushKV("model_id", e.model_id.Hex());
+        result.pushKV("artifact_id", e.artifact_id.Hex());
+        result.pushKV("path", fs::PathToString(checkout));
+        result.pushKV("compatible", true);
+        result.pushKV("generated", true);
+        result.pushKV("local_generate", true);
+        result.pushKV("inference", false);
+        result.pushKV("remote_inference", false);
+        result.pushKV("network_server", false);
+        result.pushKV("architecture", art.architecture);
+        result.pushKV("execution_profile", static_cast<int>(e.core.execution_profile));
+        result.pushKV("automatic_spend_atoms", 0);
+        if (gen.exists("text") && gen["text"].isStr()) result.pushKV("text", gen["text"].get_str());
+        if (gen.exists("backend") && gen["backend"].isStr()) result.pushKV("backend", gen["backend"].get_str());
+        result.pushKV("adapter", gen);
+        result.pushKV("next_actions", NextActionsArray({"generatemodel", "unloadmodel"}));
+        result.pushKV("note", "Local one-shot generate. Not a network inference server. CUDA smoke is not this RPC.");
         return true;
     }
     if (method == "getmodelpolicy" || method == "setmodelpolicy") {
@@ -7991,9 +8710,20 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                           const Digest48& model_id, std::string& err, std::atomic<bool>* stop, const fs::path& pinfile,
                           RetrieveProgress* progress, const std::vector<std::string>& extra_peers)
 {
+    auto loopback_ok = [&](const std::string& h, uint16_t p) {
+        if (h != "127.0.0.1" && h != "::1") return false;
+        if (IsForbiddenControlPort(p)) return false;
+        if (h == host && p == port) return true;
+        const std::string ep = h + ":" + std::to_string(p);
+        for (const auto& peer : cat.Peers()) {
+            if (peer == ep) return true;
+        }
+        return false;
+    };
     auto init_sess = [&](Pq1Session& sess) -> bool {
         sess.stop = stop;
         sess.pinfile = pinfile;
+        sess.allow_loopback = loopback_ok(host, port);
         return sess.Connect(pq, host, port, err);
     };
     Pq1Session sess;
@@ -8202,8 +8932,13 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                     if (cat.PutFetchedPiece(artifact, file_index, static_cast<uint32_t>(i), raw, proof, hdr_size, hdr_root, local_err)) {
                         return true;
                     }
-                } else if (presp.status == 403 && presp.body.find("expired") != std::string::npos) {
+                } else if (presp.status == 403 &&
+                           (presp.body.find("expired") != std::string::npos ||
+                            presp.body.find("replay") != std::string::npos ||
+                            presp.body.find("grant use cap") != std::string::npos)) {
                     // FreeGrant TTL is 600s (spec cap). A 4 GiB file on a slow WAN outlives one grant.
+                    // "replay" on a truncated piece GET, and a 256-use cap on a 1175-piece
+                    // granite shard, mint a fresh nonce and retry.
                     if (++grant_refreshes > 64) {
                         local_err = "grant refresh limit";
                         return false;
@@ -8393,6 +9128,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                 Pq1Session av;
                 av.stop = stop;
                 av.pinfile = pinfile;
+                av.allow_loopback = loopback_ok(eh, eport);
                 std::string aerr;
                 if (!av.Connect(pq, eh, eport, aerr)) return;
                 NativeRequest areq;
@@ -8490,6 +9226,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                         Pq1Session xs;
                         xs.stop = stop;
                         xs.pinfile = pinfile;
+                        xs.allow_loopback = loopback_ok(eh, eport);
                         std::string xerr;
                         if (stop && stop->load()) {
                             xfer.Cancel();
@@ -8554,6 +9291,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                 s->stop = stop;
                 s->pinfile = pinfile;
                 std::string cerr;
+                s->allow_loopback = loopback_ok(host, port);
                 if (s->Connect(pq, host, port, cerr)) {
                     pool.push_back(std::move(s));
                 } else if (pool.empty()) {
@@ -8691,6 +9429,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                         Pq1Session xs;
                         xs.stop = stop;
                         xs.pinfile = pinfile;
+                        xs.allow_loopback = loopback_ok(eh, eport);
                         std::string xerr;
                         if (!xs.Connect(pq, eh, eport, xerr)) {
                             for (uint32_t i : assigned) note_fail(i);
@@ -8741,6 +9480,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                     Pq1Session s2;
                     s2.stop = stop;
                     s2.pinfile = pinfile;
+                    s2.allow_loopback = loopback_ok(host, port);
                     std::string rerr;
                     if (s2.Connect(pq, host, port, rerr) && issue_grant(s2, file_index, rerr)) {
                         for (uint32_t i : leftover) {
@@ -8810,7 +9550,8 @@ int UnixRpcReplyTimeoutMs(const std::string& method)
 {
     if (method == "waitformodelevent" || method == "importmodel" || method == "hostmodel" ||
         method == "getmodel" || method == "scanmodelwatch" || method == "executemodelimport" ||
-        method == "importbtxpackage") {
+        method == "importbtxpackage" || method == "exportmodelpath" || method == "loadmodel" ||
+        method == "unloadmodel" || method == "generatemodel") {
         return UNIX_RPC_LONG_REPLY_MS;
     }
     return UNIX_RPC_REPLY_MS;
@@ -8852,7 +9593,7 @@ bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const U
     }
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    const std::string p = fs::PathToString(socket_path);
+    const std::string p = fs::PathToString(UnixRpcListenPath(socket_path));
     if (p.size() >= sizeof(addr.sun_path)) {
         err = "unix path too long";
         close(fd);
@@ -9052,6 +9793,7 @@ void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* 
                 nresp.body = JsonError("BAD_JSON", "malformed request fields");
             }
         }
+        if (requests >= PQ1_MAX_REQUESTS_PER_CONN) nresp.close_after = true;
         const int wto = (nreq.path.find("/pieces/") != std::string::npos || nresp.stream_verified_file)
                             ? PQ1_TRANSFER_MS : PQ1_IDLE_MS;
         if (!SslWriteAll(ssl, cfd, FormatHttpResponse(nresp), wto, stop, err)) break;
@@ -9398,7 +10140,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     Pq1Context pq;
     if (!pq.Ready()) {
         std::cerr << "model subsystem fail-closed: strict PQ1 unavailable: " << pq.Error() << "\n";
-        std::cerr << "monetary BTX remains independently operational.\n";
+        std::cerr << "monetary BTX remains independently operational. exiting 2.\n";
         return 2;
     }
     std::string err;

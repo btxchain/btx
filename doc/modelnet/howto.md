@@ -1,13 +1,16 @@
-# How to test and use model hosting in this tree (0.34.8-dev)
+# How to test and use model hosting in this tree (0.34.9)
 
 This is the operator/researcher guide for **using** and **proving** the
 Native Model Network in this tree. Packaged `planning/acceptance-matrix.csv`
 is the production bar (PASS only where this tree has a Boost test or e2e
 script). Re-run the scripts; do not treat a capabilities bit as PASS.
-The shipping tag is **v0.34.8**; this tree is 0.34.8
-(`IS_RELEASE=true`). The first-run verbs below (`showmodel`,
+0.34.9 includes GitHub issue #163 in full: the 0.34.8 scheduling seal
+`77343da8` (retained tip-child gets the one RC job; cap stays 1) plus the
+assumeutxo-background persist so a followed historical hole below the
+attestation epoch is not HEADER_ONLY-waiting for a GETMMATTEST that will
+never be sent. The first-run verbs below (`showmodel`,
 `unhostmodel`, `exportmodellink`, `btx-model show` / `unhost` / `link`)
-are new here and are not part of 0.34.7.
+are not part of 0.34.7.
 
 **Fail-fast:** every script below exits on the first error. Do not wait
 minutes after a `FAIL` / `retrieve failed` line.
@@ -52,15 +55,21 @@ start writes `identities.json` automatically (not a wallet key).
 readiness: `ready_to_mine`, `ibd`, `blocks`, `peer_count`, `headers`,
 `verificationprogress`, `one_liner`, `recommended_action`, `next_actions`)
 when `btxd` is up. `hostmodel` is the alias of `importmodel` (pin + signed
-search card + demand-seed). Ollama-style: `showmodel`, `setmodelalias` /
+search card + demand-seed). `btx-model host foo.btx` is **getmodel FREE_ONLY**
+(retrieves the share); it does not hash the card as weights. RPC `hostmodel` of
+a share_card still reports `reason=share_card` / `imported=false` and nests a
+FREE_ONLY retrieve. Ollama-style: `showmodel`, `setmodelalias` /
 `unhostmodel`, `exportmodellink` (`.btx` magnet analog). Watch folder:
-`-modelwatch=<dir>` then `scanmodelwatch` (`.btx` cards are opened, not
-imported as weights). Content-list and keep-state reads never fetch or infer:
+`-modelwatch=<dir>` then `scanmodelwatch` (a dropped `.btx` is opened **and**
+FREE_ONLY `getmodel` starts; quota applies to the model, not the card bytes;
+the card is not hashed as weights). Content-list and keep-state reads never fetch or infer:
 `getmodelmanifest` (per-file `path`/`role`/`size`/`sha384`, the aria2 metalink
 analog), `qualifymodel` (static structure check of a local path, the
 force-recheck analog), and `listmodels` filtered by `pinned`/`seeded`
 (`ipfs pin ls` analog). `exportmodelpath` returns the verified local store root
 and source path (`btx-model path NAME`; `hf download --local-dir` analog).
+MaterializeCheckout hardlinks from `source_path` when the original files still
+match SHA-384, so checkout does not always double disk.
 `searchmodels` already accepts catalog filters (`format`, `quantization`,
 `family`, `architecture`, `min_size_bytes` / `max_size_bytes`,
 `min_provider_count`, …); `btx-model search --format gguf --fits --sort size_asc`
@@ -123,7 +132,8 @@ bundled `lib/`.
 | Isolated CUDA worker | `contrib/modelnet/cuda-isolated-e2e.sh` | Tiny kernel on a dedicated CUDA workstation only; never the live attestor GPU |
 | Granite FIT vs ExactReplay | `contrib/modelnet/e2e-cuda-granite-fit.sh` | Isolated worker: 13.8 GiB would FIT; live ExactReplay reserve is not starved |
 | One-node regtest + helper | `python3 test/functional/feature_modelnet_helper.py --configfile=build-gcc13/test/config.ini --timeout-factor=1` | `btxd -regtest` + unix helper; import demand-seeds; EXPLICIT_PAID journals a quote (automatic spend 0) |
-| HTLC (0.34.6 reuse) | **Direct file**, ASCII tmpdir (do **not** use `test_runner.py` cache): `mkdir -p /tmp/btx-htlc/atomicswap && python3 test/functional/wallet_htlc_atomicswap.py --descriptors --configfile=build-gcc13/test/config.ini --tmpdir=/tmp/btx-htlc/atomicswap --timeout-factor=1` | SCRIPT-03/09/11 claim mined + preimage on-chain; wrong preimage refused; refund after locktime. Same pattern: `wallet_modelnet_funding.py` |
+| Bounty create → find → on-chain complete | `python3 test/functional/feature_modelnet_bounty_lifecycle.py --descriptors --configfile=build-gcc13/test/config.ini --timeout-factor=1` | Owned helper, unix-only bind. Publish, `searchbounties`, mature-coinbase fund of two-leaf CLTV+refund or staged `htlc_sha256`, mine to locktime, `preparebountyaward` / `preparebountyrefund` / `preparebountyclaim`. No auto-spend. |
+| HTLC (0.34.6 reuse / WRC) | **Direct file**, disk tmpdir (do **not** use `test_runner.py` cache or tmpfs `/tmp`): `mkdir -p build-gcc13/tmp-func/atomicswap && python3 test/functional/wallet_htlc_atomicswap.py --descriptors --configfile=build-gcc13/test/config.ini --tmpdir=build-gcc13/tmp-func/atomicswap --timeout-factor=1`. Same pattern: `wallet_modelnet_funding.py` | SCRIPT-03/09/11 claim mined + preimage on-chain; wrong preimage refused; refund signed before locktime is non-final and mempool-rejected until height. |
 | Two-host isolated regtest | `contrib/modelnet/e2e-regtest-two-host.sh` | Second-process `btxd -regtest` + `btx-modeld` on `REGTEST_MODELD_PORT` (default **29449**, never 29448); production PIDs untouched |
 | Three-host isolated regtest | `contrib/modelnet/e2e-regtest-three-host.sh` | Linux pair first; then a third isolated `btx-modeld` (`THIRD_HOST`). Disk/missing-binary/`SKIP` keeps the two-host PASS |
 | Two WAN seeders | `contrib/modelnet/e2e-two-wan.sh` | STORE-01: fetcher next to two seeders (same OpenSSL); resume `local` |
@@ -138,20 +148,29 @@ the live attestor helper.
 ### Fail-fast rule
 
 - `getmodeljob` status `failed` → print the error and **exit** (no remaining timeout).
-  While `status=running`, `last_err` is resume (transient PQ1: `tls io`,
-  `timeout`, `connect failed`, …), not a FAIL. Do not treat `last_err` /
-  `peer_retries` alone as terminal. `bytes_committed` may move across those
-  retries. Granite attach (`granite_attach_poll.py --stall-secs`, default
-  **180**): frozen `bytes_committed` with `inflight>0` is **STALL**;
-  `inflight=0` and empty `last_err` is digest verify (keep waiting). Poll
-  the newest `status=running` job (`created_ms`, then `job_id`), never a
-  stale failed `jobs[0]`.
-- Prefer loopback or LAN to the seeder (`127.0.0.1:29448` when fetcher and
-  seeder are the same host). Hairpin through a public hostname is not the
-  retrieve test.
+  Unix `getmodel` is async: it returns `status=running` and a `job_id`.
+  Poll `getmodeljob`. `getmodel` must not return `status=local` while
+  `incomplete=true` (a 1.07 GiB partial was a false PASS).
+  While `status=running`, `last_err` containing `tls io` or `unexpected eof`
+  is resume: PQ1 recycles the connection every
+  `PQ1_MAX_REQUESTS_PER_CONN=32`. That is not a FAIL. The same holds for
+  `timeout` and `connect failed`. Do not treat `last_err` / `peer_retries`
+  alone as terminal. `bytes_committed` may move across those retries.
+  Granite attach (`granite_attach_poll.py --stall-secs`, default **180**):
+  frozen `bytes_committed` with `inflight>0` is **STALL**; `inflight=0` at
+  a shard boundary is digest verify (keep waiting). Poll the newest
+  `status=running` job (`created_ms`, then `job_id`), never a stale failed
+  `jobs[0]`.
+- Prefer loopback or LAN to the seeder. Scenario 2's operator seeder is
+  `127.0.0.1:29447`. A dedicated granite seeder already bound on `29448`
+  is reached at `127.0.0.1:29448` on the same host. Hairpin through a
+  public hostname is not the retrieve test.
 - Helper process gone or log `unknown argument` / `fail-closed` → **exit** (do not wait for the socket).
 - Handshake/grant errors surface as `hello failed`, `missing FreeGrant`,
-  `piece HTTP 403 … expired` (client then refreshes the 600s FreeGrant).
+  or `piece HTTP 403`. The same piece GET retry is idempotent. The per-nonce
+  FreeGrant use cap is 65536 (a cap of 256 rejected granite shard1's 1175
+  pieces). HTTP 403 `expired`, replay, or grant use cap means mint a fresh
+  grant (the client refreshes the 600s FreeGrant on `expired`).
 - Production `btxd.real` PIDs are checked before and after two- and three-host scripts.
 
 ## Benchmarks (re-run, do not guess)
@@ -202,8 +221,12 @@ Unix RPC is **one JSON line**:
 Expect `propagation.demand_propagation=true`, `peer_follow_propagation=true`, and `seed_upon_download_opt_in=false`.
 Import `seeded=true` without `seedmodel`.
 
-Point a **local** runtime at `exportmodelpath`. BTX does not start inference
-and does not expose it to the network.
+Point a **local** runtime at `exportmodelpath`. Checkout hardlinks from
+`source_path` when SHA-384 still matches. `loadmodel` with
+`BTX_MODEL_CUDA_LOADER` may keep tensors resident on a GPU; it still does
+not start a network inference server (`inference=false`,
+`remote_inference=false`). `generatemodel` runs a local adapter for
+host-compatible GGUF or allowlisted SafeTensors only.
 
 ### 2. Second helper downloads free
 
@@ -212,8 +235,53 @@ and does not expose it to the network.
 {"jsonrpc":"1.0","id":1,"method":"getmodel","params":["btx://<91-char-token>","FREE_ONLY"]}
 ```
 
-If `status=running`, poll `getmodeljob`. On WAN this is async. Loopback
-smoke: `python3 contrib/modelnet/two_helper_retrieve.py build-gcc13/bin`.
+Operator `addmodelnode` of `127.0.0.1:29447` is the intended loopback
+seeder. PEX refuses loopback. `IsForbiddenOutboundDialAddr(loop)` stays
+true. `RetrieveFreeFromPeer` sets `allow_loopback` only for an
+operator-added `127.0.0.1` or `::1`. When `29447` is already taken, bind
+the isolated helper at `127.0.0.1:29449`. `automatic_spend_atoms` stays 0.
+Do not `getmodel` granite into `~/.btx` or a production helper.
+
+`importmodel` of the real `ibm-granite/granite-4.0-h-tiny` fixture
+demand-seeds without `seedmodel`. Expect `family=granite`,
+`STRUCTURE_VERIFIED`, and 193 tensors on shard1. Granite-4.0-h-tiny is
+SafeTensors hybrid MoE/Mamba; `execution_profile` stays **0** (unqualified).
+Do not claim dense-decoder-v1. llama.cpp cannot open this checkout without
+GGUF conversion. Optional `BTX_MODEL_INFER_CMD` is an operator generate
+hook, not a fake PASS. `generatemodel` is the host-profile generate RPC
+(`BTX_MODEL_GENERATE` / `BTX_LLAMA_CLI`); granite hybrid is allowlisted
+SafeTensors, not GGUF. That observation is not a usefulness or safety claim.
+
+Unix `getmodel` is async: `status=running` plus `job_id`. Poll
+`getmodeljob`. `contrib/modelnet/granite_host_roundtrip.py` does this and
+requires 3322 pieces and 13888336427 bytes on disk. `exportmodelpath`
+rebuilds the original files from those pieces into
+`checkout/<artifact>/` (`path` / `usable_runtime_root`) and hardlinks from
+`source_path` when SHA-384 still matches. SHA-384 in the
+RPC is still the manifest; the checkout files are re-hashed on write.
+`getmodel` accepts a `.btx` share file or a `btx://` URI.
+`btx-model host foo.btx` is the same FREE_ONLY retrieve (not a weights
+import). RPC `hostmodel` of a share_card reports `reason=share_card` /
+`imported=false` and nests that retrieve.
+`loadmodel` inventories SafeTensors and, when `BTX_MODEL_CUDA_LOADER`
+points at `contrib/modelnet/cuda_safetensors_load` (built with nvcc), keeps
+tensors resident (`--hold --smoke`): `device_loaded=true`,
+`runtime_started=true`, `weights_resident=true`, `smoke_passed=true` from a
+CUDA kernel on loaded bytes. It still does not start a network inference
+server (`inference=false`, `remote_inference=false`). `unloadmodel`
+SIGTERMs the loader child only (never production `btxd`).
+`generatemodel` is local one-shot text generate when the replica matches
+this host profile: GGUF plus `BTX_LLAMA_CLI`, or an allowlisted
+SafeTensors `architectures[]` plus `BTX_MODEL_GENERATE` (typically
+`contrib/modelnet/generate_local.py`). Unknown architectures, pickle
+`.pt`/`.pkl`/`.so`, and missing adapters fail closed
+(`INCOMPATIBLE_HOST_PROFILE` / `NOT_RUN`). CUDA `--hold --smoke` is not
+generate; `getmodelhostprofile` reports `cuda_smoke_is_not_generate`.
+`execution_profile` stays **0**. `inference` / `remote_inference` /
+`network_server` stay false. `automatic_spend_atoms` stays 0.
+`contrib/modelnet/granite_user_scenarios.py` is the .btx + URI + checkout
+(+ optional CUDA) path. `contrib/modelnet/two_helper_retrieve.py` and
+`e2e-local-helper.sh` are TinySafeTensors / 10-byte stub smokes.
 
 ### 3. Two or three machines (isolated, not production)
 
@@ -349,6 +417,13 @@ Default `-modelruntimecheck=0` remains `NOT_RUN_CUDA_ISOLATION`.
 a live `GPU-01 RUNTIME_OBSERVED` is the e2e above. See
 `planning/acceptance-matrix.csv`.
 
+`ensurebtxcapability` remains the lab CPU fixture unless the request names
+a complete catalog replica and a non-CPU runtime (`safetensors-cuda` /
+CUDA backend + `BTX_MODEL_CUDA_LOADER`). Report `payload_source` honestly.
+`LoadTrustedRuntime` CUDA is `LIVE_RUNTIME_NOT_RUN` unless
+`BTX_MODEL_CUDA_LOADER` is set and the payload/checkout is SafeTensors.
+JIT-RUN-02 still fail-closes without that env.
+
 ### 11. Recovery
 
 See [recovery.md](recovery.md). Helper crash: restart `btx-modeld` on the
@@ -357,7 +432,7 @@ same `-modeldir`; committed pieces remain. Monetary node is independent.
 ## Isolation (do not violate)
 
 - Do not `systemctl --user stop` production `btxd` on the live attestor.
-- Do not `SIGKILL` production `btxd`.
+- Do not `SIGKILL` production `btxd`. `unloadmodel` SIGTERMs the helper-spawned CUDA loader child only.
 - Do not `getmodel` granite into `~/.btx`.
 - Do not name operator hostnames or seeder IPs in **public** trees.
 - One `-j$(nproc)` compile. `/tmp` is RAM.

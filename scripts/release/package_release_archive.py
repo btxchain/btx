@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -106,6 +107,12 @@ if [ ! -x "$REAL" ]; then
   exit 127
 fi
 
+LIB_DIR="$SELF_DIR/../lib"
+if [ -e "$LIB_DIR/libssl.so.3" ]; then
+  LD_LIBRARY_PATH="$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export LD_LIBRARY_PATH
+fi
+
 # Unprivileged newer-userspace prefix (dpkg-deb -x libc6 libstdc++6 libgcc-s1).
 # When set, skip the host glibc check: the prefix loader is what will run.
 if [ -n "${BTX_GLIBC_PREFIX:-}" ]; then
@@ -116,7 +123,11 @@ if [ -n "${BTX_GLIBC_PREFIX:-}" ]; then
     echo "Expected a dpkg-deb -x of libc6 (and libstdc++6, libgcc-s1) into $BTX_GLIBC_PREFIX" >&2
     exit 127
   fi
-  exec "$BTX_GLIBC_LOADER" --library-path "$BTX_GLIBC_LIBDIR" "$REAL" "$@"
+  BTX_LIBS="$BTX_GLIBC_LIBDIR"
+  if [ -e "$LIB_DIR/libssl.so.3" ]; then
+    BTX_LIBS="$LIB_DIR:$BTX_LIBS"
+  fi
+  exec "$BTX_GLIBC_LOADER" --library-path "$BTX_LIBS" "$REAL" "$@"
 fi
 
 btx_max_ver_sym() {
@@ -190,9 +201,50 @@ if command -v ldd >/dev/null 2>&1; then
       exit 127
     fi
   fi
+
+  need_ssl=$(btx_max_ver_sym "$REAL" OPENSSL)
+  ssl_so=$(ldd "$REAL" 2>/dev/null | awk '/libssl\\.so/ {print $3; exit}')
+  have_ssl=""
+  if [ -n "$ssl_so" ] && [ -e "$ssl_so" ]; then
+    have_ssl=$(btx_max_ver_sym "$ssl_so" OPENSSL)
+  fi
+  if [ -n "$need_ssl" ] && [ -n "$have_ssl" ]; then
+    need_ssl_v=${need_ssl#OPENSSL_}
+    have_ssl_v=${have_ssl#OPENSSL_}
+    if btx_ver_lt "$have_ssl_v" "$need_ssl_v"; then
+      echo "BTX @BINARY@ requires $need_ssl (this host libssl provides $have_ssl)." >&2
+      echo "The model plane needs OpenSSL 3.5+ (ML-KEM-768). Ubuntu 24.04 ships OpenSSL 3.0; Debian 13 / Ubuntu 25.10 work." >&2
+      echo "This archive may include lib/libssl.so.3 next to libexec; if that file is missing, build from source against OpenSSL 3.5." >&2
+      echo "The packaged binary is located at: $REAL" >&2
+      exit 127
+    fi
+  fi
 fi
 exec "$REAL" "$@"
 """
+
+
+def openssl_runtime_libs(btxd_path: Path) -> list[Path]:
+    """Copy the OpenSSL 3.x sonames btxd actually links, if ldd can see them."""
+    try:
+        out = subprocess.check_output(["ldd", str(btxd_path)], text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    found: list[Path] = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        name = line.strip().split(" ", 1)[0]
+        if name not in ("libssl.so.3", "libcrypto.so.3"):
+            continue
+        if "=>" not in line:
+            continue
+        path_token = line.split("=>", 1)[1].strip().split()[0]
+        path = Path(path_token)
+        if not path.is_file() or path.name in seen:
+            continue
+        seen.add(path.name)
+        found.append(path)
+    return found
 
 
 def source_date_epoch() -> int:
@@ -206,7 +258,9 @@ def wrapper_payload(binary_name: str, platform_id: str) -> str | None:
     if platform_id.startswith("linux-"):
         extra_hint = ""
         if binary_name == "btxd":
-            extra_hint = " libsqlite3-0 libzmq5"
+            extra_hint = " libsqlite3-0 libzmq5 libgomp1"
+        elif binary_name in ("btx-modeld", "btx-hcpd", "btx-capabilityd"):
+            extra_hint = " libgomp1"
         # ldd's "=> not found" only catches missing sonames. Debian 12 / Ubuntu
         # 22.04 have libc.so.6 and libstdc++.so.6, so that check passes, then
         # the loader dies on GLIBC_2.38 / GLIBCXX_3.4.32. Prefer objdump -T
@@ -468,6 +522,15 @@ def stage_release_tree(
             if not cuda_lib_re.match(source.name):
                 continue
             destination = libexec_dir / source.name
+            shutil.copy2(source, destination)
+            destination.chmod(destination.stat().st_mode | 0o111)
+            included.append(str(destination.relative_to(release_root)))
+
+    if platform_id.startswith("linux-"):
+        lib_dir = release_root / "lib"
+        for source in openssl_runtime_libs(btxd_path):
+            lib_dir.mkdir(parents=True, exist_ok=True)
+            destination = lib_dir / source.name
             shutil.copy2(source, destination)
             destination.chmod(destination.stat().st_mode | 0o111)
             included.append(str(destination.relative_to(release_root)))

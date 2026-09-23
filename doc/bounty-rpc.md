@@ -23,7 +23,7 @@ Overview: [bounties.md](bounties.md). Model-plane baseline RPCs:
 
 ## Catalog (`rpc-catalog.json`)
 
-60 methods: `searchbounties, getmodelbounties, getmodelfeed, gettrendingmodels, getbounty, getbountyeconomy, getbountyterms, getmodeleconomyentry, getmodeldirectoryentry, getbountycapabilities, createbountydraft, validatebountyterms, publishbounty, revisebounty, nominatebountyevaluator, acceptbountyappointment, listbountyevaluators, pledgebounty, withdrawbountypledge, freezebountyfundinground, preparebountyfunding, inspectbountytransaction, signbountyfunding, submitbountyfunding, getbountyfunding, exportbountyrecovery, commitbountysubmission, revealbountysubmission, getbountysubmission, listbountysubmissions, withdrawbountysubmission, preparebountyevaluation, runbountyevaluation, getbountyevaluationjob, cancelbountyevaluation, publishbountyevaluation, listbountyevaluations, createbountychallenge, listbountychallenges, resolvebountychallenge, proposebountyaward, inspectbountyaward, approvebountyaward, signbountyaward, submitbountyaward, getbountyaward, preparebountyclaim, signbountyclaim, submitbountyclaim, preparebountyrefund, signbountyrefund, submitbountyrefund, getbountyevents, watchbounty, unwatchbounty, getagentmandate, createagentmandate, revokeagentmandate, getagentactivity, importbountyrecovery`.
+61 methods: `searchbounties, getmodelbounties, getmodelfeed, gettrendingmodels, getbounty, getbountyeconomy, getbountyterms, getmodeleconomyentry, getmodeldirectoryentry, getbountycapabilities, createbountydraft, validatebountyterms, publishbounty, revisebounty, nominatebountyevaluator, acceptbountyappointment, listbountyevaluators, pledgebounty, withdrawbountypledge, freezebountyfundinground, preparebountyfunding, inspectbountytransaction, signbountyfunding, submitbountyfunding, getbountyfunding, exportbountyrecovery, commitbountysubmission, revealbountysubmission, getbountysubmission, listbountysubmissions, withdrawbountysubmission, preparebountyevaluation, runbountyevaluation, getbountyevaluationjob, cancelbountyevaluation, publishbountyevaluation, listbountyevaluations, createbountychallenge, listbountychallenges, resolvebountychallenge, proposebountyaward, preparebountyaward, inspectbountyaward, approvebountyaward, signbountyaward, submitbountyaward, getbountyaward, preparebountyclaim, signbountyclaim, submitbountyclaim, preparebountyrefund, signbountyrefund, submitbountyrefund, getbountyevents, watchbounty, unwatchbounty, getagentmandate, createagentmandate, revokeagentmandate, getagentactivity, importbountyrecovery`.
 
 ## Method reference
 
@@ -504,6 +504,23 @@ Role: **COUNCIL_POLICY_APPROVER** · Process boundary: **WALLET+MODEL** · Effec
 Result: `AwardProposal`.
 Complete transaction binding; no payment yet.
 
+## `preparebountyaward`
+Role: **COUNCIL_TX_SIGNER** · Process boundary: **WALLET** · Effect: **PREPARE**
+
+| Argument | Contract |
+|---|---|
+| `outpoint` | funded lot `txid:vout` |
+| `destination` | winner address |
+| `award_height` | CLTV height on the council leaf |
+| `council_keys` | exact council pubkeys |
+| `threshold` | m |
+| `refund_key` | contributor refund pubkey used at funding |
+| `principal_atoms` | exact escrow value |
+| `fee_atoms` | absolute spend fee |
+
+Result: signed CLTV council spend (`complete=true` when this wallet holds the threshold).
+Helper `approvebountyaward` is not this spend. `automatic_spend_atoms` stays 0.
+
 ## `inspectbountyaward`
 Role: **COUNCIL_TX_SIGNER** · Process boundary: **WALLET** · Effect: **LOCAL_READ**
 
@@ -567,13 +584,15 @@ Role: **CREATOR** · Process boundary: **WALLET** · Effect: **PREPARE**
 
 | Argument | Contract |
 |---|---|
-| `lot_ids` | staged winner outputs |
-| `secret_ref` | claim only: restricted local preimage handle |
-| `fee_ceiling_atoms` | decimal maximum |
-| `idempotency_key` | caller-scoped |
+| `outpoint` | funded staged `txid:vout` |
+| `destination` | claimant payout address |
+| `secret_ref` | local 32-byte preimage file (64 hex chars or raw). Inline `preimage`/`secret` is refused |
+| `hashlock_hex` | SHA-256 hashlock that must match `SHA256(secret_ref)` |
+| `claimant_key` | PQ claimant pubkey (this wallet must hold the key) |
+| `refund_key` / `refund_height` | original contributor refund leaf |
+| `fee_atoms` | absolute fee |
 
-Result: `SpendPlan`.
-Revalidate current chain, branch, maturity, own keys and fee policy; do not log preimages.
+Result: signed spend (`selected_path=claim`, `locktime=0`). Preimage is never returned. `submitbountyclaim` broadcasts. Unclaimed lots still refund after `refund_height` via `preparebountyrefund`.
 
 ## `signbountyclaim`
 Role: **CREATOR** · Process boundary: **WALLET** · Effect: **SIGN**
@@ -611,7 +630,8 @@ Role: **RECOVERY_SIGNER** · Process boundary: **WALLET** · Effect: **PREPARE**
 | `idempotency_key` | caller-scoped |
 
 Result: `SpendPlan`.
-Revalidate current chain, branch, maturity, own keys and fee policy; do not log preimages.
+Spends the funded `refund()` leaf after `refund_height`. Council and helper
+may be offline. Does not create a new funding transaction.
 
 ## `signbountyrefund`
 Role: **RECOVERY_SIGNER** · Process boundary: **WALLET** · Effect: **SIGN**

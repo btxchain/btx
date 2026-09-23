@@ -53,6 +53,8 @@ struct NativeResponse {
     uint32_t stream_file_index{0};
     uint32_t stream_n_pieces{0};
     uint64_t stream_file_size{0};
+    /** Set when the server will hang up after this response (request cap). */
+    bool close_after{false};
 };
 
 struct HelperConfig {
@@ -111,6 +113,16 @@ bool EnsureMlDsaTlsFiles(const fs::path& cert, const fs::path& key, std::string&
 bool LoadPq1Identity(Pq1Context& pq, const fs::path& modeldir, std::string& err);
 
 int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop = nullptr);
+
+/**
+ * Listen/connect path for helper unix RPC.
+ *
+ * Linux sockaddr_un.sun_path is 108 bytes. Datadir sockets under a long
+ * tmpdir/regtest path exceed that; ListenUnix used to hash to
+ * /tmp/btx-md-<sha256[:8]>.sock while btxd still connected to the original
+ * path ("helper not ready"). Both sides must use this mapping.
+ */
+fs::path UnixRpcListenPath(const fs::path& requested);
 
 bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err);
 

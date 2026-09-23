@@ -338,6 +338,7 @@ BOOST_AUTO_TEST_CASE(show_export_open_unhost_empty_search)
     const UniValue scanned = Dispatch(cat, Rpc("scanmodelwatch", scanp));
     BOOST_CHECK_EQUAL(scanned["imported_count"].getInt<int>(), 0);
     BOOST_REQUIRE_GE(scanned["opened_count"].getInt<int>(), 1);
+    BOOST_REQUIRE_GE(scanned["retrieved_count"].getInt<int>(), 1);
 
     UniValue rmp(UniValue::VARR);
     rmp.push_back("qwen3-local");
@@ -461,6 +462,8 @@ BOOST_AUTO_TEST_CASE(mirror_policy_and_native_file_stream_hello)
     BOOST_CHECK_EQUAL(empty["automatic_spend_atoms"].getInt<int>(), 0);
     BOOST_CHECK_EQUAL(empty["mirror_privilege"].get_bool(), false);
     BOOST_CHECK(empty["selectors"].isArray());
+    BOOST_CHECK_EQUAL(empty["min_independent_origins"].getInt<int>(), 1);
+    BOOST_CHECK(!empty["fetch_fails_below_min"].get_bool());
 
     UniValue payload(UniValue::VOBJ);
     payload.pushKV("publisher_id", "pub-mirror");
@@ -686,6 +689,9 @@ BOOST_AUTO_TEST_CASE(unix_rpc_timeout_is_short_except_long_methods)
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("getmodel"), 24 * 60 * 60 * 1000);
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("waitformodelevent"), 24 * 60 * 60 * 1000);
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("scanmodelwatch"), 24 * 60 * 60 * 1000);
+    BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("loadmodel"), 24 * 60 * 60 * 1000);
+    BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("unloadmodel"), 24 * 60 * 60 * 1000);
+    BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("generatemodel"), 24 * 60 * 60 * 1000);
 }
 
 BOOST_AUTO_TEST_CASE(unknown_helper_rpc_fails_immediately_method_not_found)
@@ -747,6 +753,25 @@ BOOST_AUTO_TEST_CASE(native_file_stream_headers_omit_body_for_large_files)
     std::string err;
     BOOST_CHECK(!modelnet::FullFileStreamAcceptContentLength(wire, clen, err));
     BOOST_CHECK(err.find("too large") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(pq1_request_cap_response_sends_connection_close)
+{
+    // Granite-sized retrieve: after PQ1_MAX_REQUESTS_PER_CONN (32) the server
+    // must advertise close. Dropping TLS without this header is unexpected eof.
+    modelnet::NativeResponse r;
+    r.status = 200;
+    r.body = "ok";
+    r.close_after = true;
+    const std::string wire = modelnet::FormatHttpResponse(r);
+    BOOST_CHECK(wire.find("Connection: close") != std::string::npos);
+    BOOST_CHECK(wire.find("Connection: keep-alive") == std::string::npos);
+
+    modelnet::NativeResponse def;
+    BOOST_CHECK(!def.close_after);
+    const std::string keep = modelnet::FormatHttpResponse(def);
+    BOOST_CHECK(keep.find("Connection: keep-alive") != std::string::npos);
+    BOOST_CHECK(keep.find("Connection: close") == std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(full_file_stream_http_body_cap_is_content_length_not_rpc)

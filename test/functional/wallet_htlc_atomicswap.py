@@ -49,6 +49,7 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
         self.num_nodes = 1
         self.setup_clean_chain = True
         self.extra_args = [["-autoshieldcoinbase=0",
+                             "-modelbind=off",
                              "-regtestmatmulbindingheight=2147483647",
                              "-regtestmatmulproductdigestheight=2147483647",
                              "-regtestmatmulv4height=2147483647",
@@ -228,18 +229,19 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
 
         refund_dest = sender.getnewaddress(address_type="p2mr")
 
-        # Before the locktime the refund leaf is not yet spendable.
+        # Before the locktime the refund leaf is signed but non-final: mempool
+        # rejects it until CLTV / nLockTime is reached.
         self.log.info("HTLC REFUND negative: refund before locktime must fail")
         assert_greater_than(refund_locktime, node.getblockcount())
-        try:
-            early = sender.buildhtlcrefund(
-                refund_desc, {"txid": r_txid, "vout": r_vout},
-                refund_dest, refund_locktime, fee)
-            assert_equal(early.get("complete", False), False)
-            if early.get("hex"):
-                assert_raises_rpc_error(-26, None, node.sendrawtransaction, early["hex"])
-        except Exception as e:  # noqa: BLE001 - RPC raising before locktime is acceptable
-            self.log.info(f"early refund correctly rejected: {e}")
+        early = sender.buildhtlcrefund(
+            refund_desc, {"txid": r_txid, "vout": r_vout},
+            refund_dest, refund_locktime, fee)
+        assert_equal(early.get("complete"), True)
+        decoded_early = node.decoderawtransaction(early["hex"])
+        assert_equal(decoded_early["locktime"], refund_locktime)
+        if decoded_early["vin"][0]["sequence"] == 0xffffffff:
+            raise AssertionError("refund sequence must be non-final for CLTV")
+        assert_raises_rpc_error(-26, None, node.sendrawtransaction, early["hex"])
 
         # Mine past the locktime, then refund.
         blocks_needed = max(0, refund_locktime - node.getblockcount())

@@ -6,8 +6,12 @@
 
 #include <util/strencodings.h>
 
+#include <arpa/inet.h>
 #include <cctype>
+#include <cstring>
 #include <fstream>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 namespace modelnet {
 namespace {
@@ -102,6 +106,7 @@ bool LocalFileByteSource::Read(const ReadExtent& extent, std::vector<unsigned ch
         err = "short read";
         return false;
     }
+    m_piece_origins.push_back("local");
     return true;
 }
 
@@ -131,6 +136,43 @@ bool HuggingFaceLocatorAllowed(const std::string& locator, std::string& err)
         return true;
     }
     err = "locator";
+    return false;
+}
+
+bool AddressIsGlobalUnicast(const sockaddr* sa, socklen_t len)
+{
+    if (!sa) return false;
+    if (sa->sa_family == AF_INET) {
+        if (len < static_cast<socklen_t>(sizeof(sockaddr_in))) return false;
+        const auto* in = reinterpret_cast<const sockaddr_in*>(sa);
+        const uint32_t ip = ntohl(in->sin_addr.s_addr);
+        const uint8_t a = static_cast<uint8_t>((ip >> 24) & 0xff);
+        const uint8_t b = static_cast<uint8_t>((ip >> 16) & 0xff);
+        if (a == 0 || a == 127 || a == 10) return false;
+        if (a == 169 && b == 254) return false;
+        if (a == 192 && b == 168) return false;
+        if (a == 172 && b >= 16 && b <= 31) return false;
+        if (a == 100 && b >= 64 && b <= 127) return false;
+        if (a >= 224) return false;
+        return true;
+    }
+    if (sa->sa_family == AF_INET6) {
+        if (len < static_cast<socklen_t>(sizeof(sockaddr_in6))) return false;
+        const auto* in6 = reinterpret_cast<const sockaddr_in6*>(sa);
+        if (IN6_IS_ADDR_UNSPECIFIED(&in6->sin6_addr) || IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr) ||
+            IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr) || IN6_IS_ADDR_SITELOCAL(&in6->sin6_addr) ||
+            IN6_IS_ADDR_MULTICAST(&in6->sin6_addr)) {
+            return false;
+        }
+        if (IN6_IS_ADDR_V4MAPPED(&in6->sin6_addr)) {
+            sockaddr_in v4{};
+            v4.sin_family = AF_INET;
+            std::memcpy(&v4.sin_addr, in6->sin6_addr.s6_addr + 12, 4);
+            return AddressIsGlobalUnicast(reinterpret_cast<const sockaddr*>(&v4), sizeof(v4));
+        }
+        if ((in6->sin6_addr.s6_addr[0] & 0xfe) == 0xfc) return false;
+        return true;
+    }
     return false;
 }
 

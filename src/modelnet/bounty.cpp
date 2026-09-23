@@ -1074,9 +1074,9 @@ UniValue BountyStore::Capabilities() const
     o.pushKV("helper_rpcs", helper_rpcs);
     UniValue wallet_rpcs(UniValue::VARR);
     for (const char* n : {"preparebountyfunding", "inspectbountytransaction", "signbountyfunding", "submitbountyfunding",
-                           "inspectbountyaward", "signbountyaward", "submitbountyaward", "preparebountyclaim",
-                           "signbountyclaim", "submitbountyclaim", "preparebountyrefund", "signbountyrefund",
-                           "submitbountyrefund"}) {
+                           "preparebountyaward", "inspectbountyaward", "signbountyaward", "submitbountyaward",
+                           "preparebountyclaim", "signbountyclaim", "submitbountyclaim", "preparebountyrefund",
+                           "signbountyrefund", "submitbountyrefund"}) {
         wallet_rpcs.push_back(n);
     }
     o.pushKV("wallet_rpcs", wallet_rpcs);

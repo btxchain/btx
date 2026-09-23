@@ -20,6 +20,8 @@ namespace modelnet {
 
 constexpr int64_t FREE_GRANT_LIFETIME_S = 600;
 constexpr int64_t FREE_GRANT_MAX_TTL_S = FREE_GRANT_LIFETIME_S;
+/** Per-nonce piece GET records. 256 rejected granite-4.0-h-tiny shard 1 (1175 pieces). */
+constexpr size_t FREE_GRANT_MAX_USES = 65536;
 
 enum class GrantRejectReason : uint8_t {
     NONE = 0,

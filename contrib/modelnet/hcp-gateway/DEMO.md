@@ -338,7 +338,7 @@ Honest **NOT_RUN** (do not report as PASS):
 - Distinct-person committee quorum against a real IdP
 - Concurrent reserve-floor proof against a production ledger
 - Native funding/refund round-trip, two-provider customer exit, CR11-J01–J20
-- `CLIENT_VERSION_IS_RELEASE=true` — remains **false**
+- `CLIENT_VERSION_IS_RELEASE=true` — remains **false** (this tree is 0.34.9-dev)
 
 Same two-instance shape (different ports `18790` / `18791`):
 `test/functional/feature_modelnet_cr11.py`. Do not run it against production

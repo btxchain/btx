@@ -5,10 +5,33 @@ a model that matches published requirements **before** a winning `model_id`
 exists. Release campaigns (supply-side: disclose an already-encrypted model)
 remain a separate product path — see [modelnet/model-economy.md](modelnet/model-economy.md).
 
-`CLIENT_VERSION_IS_RELEASE` is **true** in this tree (0.34.8). Schemas and RPC
+`CLIENT_VERSION_IS_RELEASE` is **true** in this 0.34.9 tree. Shipping tag
+is **v0.34.9**. Schemas and RPC
 names document the product contract; implementation gates and evidence rows in
 [contrib/modelnet/bounty/tests/acceptance-matrix.csv](../contrib/modelnet/bounty/tests/acceptance-matrix.csv)
 remain the readiness record for bounty methods.
+
+**How to use it from a node.** Search and inspect, then draft locally. Host /
+retrieve / generate of models is a separate path
+([modelnet/end-to-end.md](modelnet/end-to-end.md)). Drafts never spend:
+
+```bash
+btx-cli searchbounties
+btx-cli getbounty '<id>'
+contrib/modelnet/btx-model bounty-draft "coding agent"
+contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
+```
+
+`--validate` is a checklist (`validatebountyterms`). Publishing signed terms
+does not spend. Funding a lot is **prepare → sign → submit**. After the
+**real** funding outpoint is mined, completion is an on-chain CLTV spend of
+that two-leaf escrow: `preparebountyaward` after `award_height`, or
+`preparebountyrefund` after `refund_height` if the lot is still unspent.
+Helper `approvebountyaward` is policy only and is not a transaction
+signature. Isolated-regtest proof:
+`test/functional/feature_modelnet_bounty_lifecycle.py`. The helper never
+auto-spends. Agents stay on `searchbounties` / `getbounty` /
+`getbountyeconomy` until the operator (or a finite mandate) covers funding.
 
 ## Lifecycle
 
@@ -34,10 +57,11 @@ Requester                          Contributors / creators
  challenges (optional) ──► council policy approve award
     |
     v
- wallet: council sign/submit award ──► public payout or staged HTLC
+ wallet: preparebountyaward / submitbountyaward after award_height
+         (CLTV council leaf; helper approve is not this spend)
     |
-    +──► contributor refund path after refund_height if lot still unspent
-    +──► swarm distribution of released model bytes (existing model network)
+    +──► preparebountyrefund / submitbountyrefund after refund_height
+         if the lot is still unspent (contributor key only)
 ```
 
 Coordination states (`OPEN`, funding progress, submission windows) are helper
@@ -74,9 +98,10 @@ template layered on the **original** contributor refund lineage:
 `mr(htlc_sha256(hash, claimant), refund(height, original_refund_key))`
 
 Staging must not extend refund height or replace the contributor refund key
-(BOUNTY-WALLET-016/017). Creator claims with preimage via
-`preparebountyclaim` / `signbountyclaim` / `submitbountyclaim`. Same race
-rules as 0.34.6 release HTLCs: one UTXO, one winning spend path.
+(BOUNTY-WALLET-016/017). Creator claims with a local `secret_ref` preimage via
+`preparebountyclaim` / `submitbountyclaim` (inline preimage refused). Same race
+rules as 0.34.6 release HTLCs: one UTXO, one winning spend path. Unclaimed lots
+refund after `refund_height` with `preparebountyrefund`.
 
 ## Trust and authority
 

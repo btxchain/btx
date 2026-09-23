@@ -25,6 +25,11 @@ still `NOT_RUN_CUDA_ISOLATION`. A live `GPU-01 RUNTIME_OBSERVED` is
 
 Do not treat a `STRUCTURE_VERIFIED` shard as “it runs on this GPU.”
 
+`loadmodel` with `BTX_MODEL_CUDA_LOADER --hold --smoke` is a **separate**
+operator path: it may keep SafeTensors resident and xor-smoke them. That is
+**not** `generatemodel`. CUDA smoke is not generate. Host-profile generate:
+[generate.md](generate.md).
+
 Current evidence: the RTX workstation CUDA qualification worker compiles
 successfully with `nvcc -c`, and the production validator remains the only
 GPU process. Runtime kernel execution is intentionally still `NOT_RUN` until

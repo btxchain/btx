@@ -38,6 +38,9 @@
 #include <crypto/common.h>
 #include <crypto/sha384.h>
 #include <fstream>
+#ifndef WIN32
+#include <sys/un.h>
+#endif
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -1042,5 +1045,64 @@ BOOST_AUTO_TEST_CASE(helper_unix_rpc_survives_peer_hup)
     }
     join();
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(unix_rpc_listen_path_hashes_overlong)
+{
+    const std::string longp = "/tmp/" + std::string(120, 'a') + "/modeld.sock";
+    BOOST_REQUIRE(longp.size() >= sizeof(sockaddr_un::sun_path));
+    const fs::path mapped = modelnet::UnixRpcListenPath(fs::PathFromString(longp));
+    const std::string m = fs::PathToString(mapped);
+    BOOST_CHECK_EQUAL(m.find("/tmp/btx-md-"), 0);
+    BOOST_CHECK(m.size() < sizeof(sockaddr_un::sun_path));
+    BOOST_CHECK_EQUAL(fs::PathToString(modelnet::UnixRpcListenPath(mapped)), m);
+    const fs::path shortp = fs::PathFromString("/tmp/btx-md-ok.sock");
+    BOOST_CHECK(modelnet::UnixRpcListenPath(shortp) == shortp);
+}
+
+BOOST_AUTO_TEST_CASE(helper_unix_rpc_connects_when_datadir_path_is_too_long)
+{
+    const size_t lim = sizeof(sockaddr_un::sun_path);
+    const fs::path long_dir = m_args.GetDataDirBase() / fs::PathFromString(std::string(lim, 'n'));
+    fs::create_directories(long_dir);
+    modelnet::HelperConfig cfg;
+    cfg.modeldir = long_dir / "modeldir";
+    fs::create_directories(cfg.modeldir);
+    cfg.quota_bytes = 1 << 20;
+    cfg.bind.clear();
+    cfg.rpc_socket = long_dir / "modeld.sock";
+    BOOST_REQUIRE(fs::PathToString(cfg.rpc_socket).size() >= lim);
+    const fs::path mapped = modelnet::UnixRpcListenPath(cfg.rpc_socket);
+    ::unlink(fs::PathToString(mapped).c_str());
+    std::atomic<bool> stop{false};
+    std::thread t;
+    auto join = [&] {
+        stop.store(true);
+        if (t.joinable()) t.join();
+        ::unlink(fs::PathToString(mapped).c_str());
+    };
+    t = std::thread([&] { modelnet::RunModelDaemon(cfg, &stop); });
+    UniValue result;
+    std::string err;
+    UniValue params(UniValue::VARR);
+    bool ready = false;
+    const auto t0 = std::chrono::steady_clock::now();
+    try {
+        while (std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8)) {
+            if (modelnet::CallUnixRpc(cfg.rpc_socket, "getmodelnetworkinfo", params, result, err)) {
+                ready = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        BOOST_REQUIRE_MESSAGE(ready, err);
+        BOOST_CHECK(result["helper_ready"].get_bool());
+    } catch (...) {
+        join();
+        throw;
+    }
+    join();
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

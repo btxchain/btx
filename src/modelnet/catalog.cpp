@@ -132,6 +132,11 @@ UniValue CapabilitiesObject()
     c.pushKV("getmodelwatchstatus", true);
     c.pushKV("showmodel", true);
     c.pushKV("exportmodellink", true);
+    c.pushKV("exportmodelpath", true);
+    c.pushKV("loadmodel", true);
+    c.pushKV("unloadmodel", true);
+    c.pushKV("generatemodel", true);
+    c.pushKV("getmodelhostprofile", true);
     c.pushKV("unhostmodel", true);
     c.pushKV("removemodelalias", true);
     c.pushKV("openmodelshare", true);
@@ -322,6 +327,7 @@ void ModelCatalog::DemandSeedLocked(CatalogEntry& e)
         return;
     }
     if (!ShouldDemandSeed(m_policy, e.admission)) return;
+    if (e.incomplete) return;
     if (e.admission == AdmissionLevel::BYTES_VERIFIED ||
         e.admission == AdmissionLevel::STRUCTURE_VERIFIED ||
         e.admission == AdmissionLevel::PROFILE_VERIFIED ||
@@ -665,7 +671,29 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     std::vector<unsigned char> aenc;
     if (!EncodeArtifactCore(ac, aenc, err)) return false;
     const Digest48 artifact_id = ArtifactCoreId(aenc);
-    if (!m_store.RenameArtifact(staging, artifact_id, err)) return false;
+    if (!m_store.RenameArtifact(staging, artifact_id, err)) {
+        if (err != "destination artifact exists") return false;
+        std::string ignored;
+        (void)m_store.RemoveArtifact(staging, ignored);
+        DropPieceTreeCache(staging);
+        commit_staging = true;
+        for (const auto& m : m_models) {
+            if (m.artifact_id == artifact_id) {
+                out = m;
+                if (pin && !out.pinned) {
+                    std::string pin_err;
+                    m_store.Pin(model_id, pin_err);
+                    m_store.Pin(artifact_id, pin_err);
+                    out.pinned = true;
+                    out.admission = AdmissionLevel::PINNED;
+                    out.bytes_verified = true;
+                }
+                return true;
+            }
+        }
+        err = "destination artifact exists";
+        return false;
+    }
     commit_staging = true;
     DropPieceTreeCache(staging);
 
@@ -934,6 +962,7 @@ bool ModelCatalog::MarkIncomplete(const Digest48& model_or_artifact, bool incomp
             m.bytes_verified = false;
             m.admission = AdmissionLevel::FETCHING;
             m.completed_at = 0;
+            m.seeded = false;
         }
         return PersistLocked(err);
     }
@@ -1154,6 +1183,47 @@ bool ModelCatalog::VerifyFileDigest(const Digest48& artifact, uint32_t file_inde
     if (got != expected) {
         err = "file sha384 mismatch";
         return false;
+    }
+    return true;
+}
+
+bool ModelCatalog::MaterializeCheckout(const Digest48& model_or_artifact, const fs::path& dest, std::string& err)
+{
+    CatalogEntry e;
+    if (!Find(model_or_artifact, e)) {
+        err = "not found";
+        return false;
+    }
+    if (e.incomplete) {
+        err = "incomplete replica";
+        return false;
+    }
+    if (dest.empty()) {
+        err = "empty dest";
+        return false;
+    }
+    std::error_code ec;
+    if (fs::is_symlink(dest, ec)) {
+        err = "checkout dest is a symlink";
+        return false;
+    }
+    fs::create_directories(dest);
+    fs::path src_root;
+    if (!e.source_path.empty()) src_root = fs::PathFromString(e.source_path);
+    for (uint32_t i = 0; i < e.core.files.size(); ++i) {
+        const CoreFile& f = e.core.files[i];
+        if (!IsPortableRelPath(f.path, err)) return false;
+        const fs::path outp = dest / fs::PathFromString(f.path);
+        fs::path prefer;
+        if (!src_root.empty()) {
+            std::error_code sec;
+            if (fs::is_regular_file(src_root, sec) && !sec && e.core.files.size() == 1) {
+                prefer = src_root;
+            } else if (fs::is_directory(src_root, sec) && !sec) {
+                prefer = src_root / fs::PathFromString(f.path);
+            }
+        }
+        if (!m_store.MaterializeFile(e.artifact_id, i, f.size, f.sha384, outp, err, prefer)) return false;
     }
     return true;
 }

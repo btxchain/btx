@@ -1,8 +1,9 @@
-# BTX Native Model Network (0.34.8)
+# BTX Native Model Network (0.34.9)
 
-**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
-**v0.34.8**. The Native Model Network shipped in 0.34.7; this index covers
-that plane plus 0.34.8 surfaces.
+**Status:** **0.34.9** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.9**. The Native Model Network shipped in 0.34.7; this index covers
+that plane plus 0.34.8 first-run / HCP and 0.34.9 host / load / generate /
+registry independence.
 
 **Readers:** people start at [HUMANS.md](../../HUMANS.md). Autonomous agents
 start at [AGENTS.md](../../AGENTS.md). The strategic essay is
@@ -27,8 +28,9 @@ remote-inference tariff, and not a consensus privilege.
 
 This is **not** a remote inference marketplace. There is no inference seller,
 inference endpoint, inference tariff, or cloud fallback. A model that does
-not fit the local device yields an explicit compatibility result, not a
-paid remote run.
+not match this host's generate profile yields
+`INCOMPATIBLE_HOST_PROFILE`, not a paid remote run. Local one-shot generate
+is [generate.md](generate.md). CUDA `--hold --smoke` is not generate.
 
 ## Authority
 
@@ -104,7 +106,7 @@ See [propagation.md](propagation.md).
   executes pickle, `.pt`, Python, `.so`, or CUDA kernels.
 - `btx-open` — preview-only URI dispatcher (exactly one argument, no shell).
 
-**0.34.8-dev Hosted Control Plane** (`IS_RELEASE=false`; code is in this
+**0.34.9-dev Hosted Control Plane** (`IS_RELEASE=false`; code is in this
 tree): `btx-hcpd` is a loopback
 gateway with **34 typed REST operations** and **no** `/rpc` passthrough.
 `btx-hosted` is the walletless discovery preset (`automatic_spend_atoms=0`).
@@ -166,6 +168,8 @@ Honest capabilities (`getmodelnetworkinfo` → `capabilities`):
 | `FREE_ONLY` retrieve over PQ1 `/hello`, manifests, pieces | yes (octet-stream piece body) |
 | Seed / pin / list / manifest | yes |
 | `btx-open` preview | yes |
+| `loadmodel` / `unloadmodel` | yes — optional CUDA hold+smoke; never a network server |
+| `generatemodel` / `getmodelhostprofile` | yes — host-profile match; pickle/unknown arch fail closed |
 | Paid retrieve, quotes, campaign RPCs | **quotes + campaign objects yes**; helper `preparemodelfunding` / `sign` / `submit` / `buildmodelhtlcclaim` implemented (no auto-spend; `paid_chain_verify=false`) |
 | CUDA qualification | **isolated worker** (`BTX_CUDA_QUAL_WORKER`); default `-modelruntimecheck=0` is `NOT_RUN_CUDA_ISOLATION`; capability `cuda_qualification=true` for the worker path |
 | Browser bridge | **false** (optional, never native PQ fallback) |
@@ -179,7 +183,11 @@ In-tree capability bits are not CSV PASS and not a B0 rewrite. The bar is
 
 | File | Topic |
 |---|---|
+| [end-to-end.md](end-to-end.md) | **Copy-paste:** host, search, retrieve, run, bounty |
 | [howto.md](howto.md) | **How to test and use** every hosting scenario (fail-fast) |
+| [first-run.md](first-run.md) | Host / seed / search / share / watch / doctor / load / generate |
+| [generate.md](generate.md) | **0.34.9-dev** local generate; host-profile match; CUDA smoke is not generate |
+| [registry-independence.md](registry-independence.md) | **0.34.9-dev** multi-origin verified artifact resolver. Origins are disposable; `btx://` is identity. Walletless fetch; monetary plane stays. OCI/OMS are additive, not replacements. |
 | [architecture.md](architecture.md) | Process split, sockets, data dirs |
 | [economics.md](economics.md) | What is paid, what is not, metrics |
 | [free-first-policy.md](free-first-policy.md) | Retrieval modes and planner |
@@ -210,19 +218,18 @@ In-tree capability bits are not CSV PASS and not a B0 rewrite. The bar is
 | [bootstrap.md](bootstrap.md) | Introduction only; survive bootstrap loss |
 | [network-roaming.md](network-roaming.md) | Address/sleep epochs |
 | [connectivity-test-lab.md](connectivity-test-lab.md) | Namespace NAT lab |
-| [cuda-not-run.md](cuda-not-run.md) | Isolated CUDA worker; default runtime check is NOT_RUN_CUDA_ISOLATION |
+| [cuda-not-run.md](cuda-not-run.md) | Isolated CUDA worker; default runtime check is NOT_RUN_CUDA_ISOLATION; loadmodel smoke ≠ generate |
 | [examples.md](examples.md) | DOC-01 executable CLI examples |
 | [recovery.md](recovery.md) | DOC-03 helper / campaign / HTLC recovery |
-| [first-run.md](first-run.md) | Host / seed / search / share / watch folder / doctor (0.34.8-dev) |
-| [agent-recipes.md](agent-recipes.md) | Agent door (never spend, never inference) |
-| [storage-backends.md](storage-backends.md) | 0.34.8-dev: piece vs cloud object; MinIO/cloud RPCs exist; R2 AUTO; `IS_RELEASE=false`; live R2 WAN **HONEST_NOT_RUN** |
-| [cloud-seeding.md](cloud-seeding.md) | 0.34.8-dev: origin as bootstrap, not billing model; fail closed |
-| [events.md](events.md) | 0.34.8-dev local event journal |
-| [watches.md](watches.md) | Filesystem `-modelwatch` vs publisher watch |
+| [agent-recipes.md](agent-recipes.md) | Agent door (never spend; no remote inference) |
+| [capability-evidence.md](capability-evidence.md) | **0.34.9-dev** local run/capability evidence; not vendor naming |
+| [storage-backends.md](storage-backends.md) | Piece vs cloud object; MinIO/cloud RPCs exist; R2 AUTO; this tree `IS_RELEASE=false`; live R2 WAN **HONEST_NOT_RUN** |
+| [cloud-seeding.md](cloud-seeding.md) | Origin as bootstrap, not billing model; fail closed |
+| [events.md](events.md) | Local event journal |
+| [watches.md](watches.md) | Filesystem `-modelwatch` vs publisher watch; `.btx` drop retrieves |
 | [mirroring.md](mirroring.md) | Profiles + keep/follow; no auto-spend |
-| [hcp/](hcp/) | **0.34.8-dev HCP/1** (`IS_RELEASE=false`): hosted control plane |
-| [crf/](crf/) | **0.34.8-dev Cognitive Reserve v1.1** (negotiated HCP/1 extension; not a fifth plane) |
-| [hcp/01_CEX_2030s_Strategy.md](hcp/01_CEX_2030s_Strategy.md) | Strategy paper (not a shipping claim) |
+| [hcp/](hcp/) | Hosted control plane (HCP/1); last shipping tag v0.34.8 |
+| [crf/](crf/) | Cognitive Reserve v1.1 (negotiated HCP/1 extension; not a fifth plane) |
 | [hcp/01_CEX_2030s_Strategy.md](hcp/01_CEX_2030s_Strategy.md) | Strategy paper (not a shipping claim) |
 | [hcp/02_Hosted_Control_Plane_Implementation_Spec.md](hcp/02_Hosted_Control_Plane_Implementation_Spec.md) | Normative HCP/1 spec (BTX-HCP-001) |
 | [hcp/03_CEX_Integration_Guide.md](hcp/03_CEX_Integration_Guide.md) | Partner/operator integration guide |

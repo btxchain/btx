@@ -98,28 +98,33 @@ path. Machine sequences belong in [AGENTS.md](AGENTS.md).
 
 ### 1. Run the current line
 
-The last shipping tag is **v0.34.8**. For a validating node that becomes
-useful without waiting for a full historical sync, the fast-start snapshot is
-**assumeutxo-219000**.
+The shipping tag is **v0.34.9**. `CLIENT_VERSION_IS_RELEASE=true`. For a
+validating node that becomes useful without waiting for a full historical
+sync, the fast-start snapshot is **assumeutxo-219000**.
 
-Install and first-run: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
+Install and first-run: [doc/btx-download-and-go.md](doc/btx-download-and-go.md)
+(shipping **v0.34.9** archives). Notes:
+[doc/release-notes/release-notes-0.34.9.md](doc/release-notes/release-notes-0.34.9.md).
 
+End-to-end host / search / retrieve / run / bounty:
+[doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md).
 Using and proving the model network: [doc/modelnet/howto.md](doc/modelnet/howto.md).
+Local generate after acquire: [doc/modelnet/generate.md](doc/modelnet/generate.md).
 
-This working tree is **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`).
-GitHub tag **v0.34.8** is the shipping client.
+This working tree is **0.34.9**. GitHub tag **v0.34.9** is the shipping
+client.
 Host, seed, search, share, watch folder,
-`showmodel` / `unhostmodel` / `exportmodellink`, mining `first_run` doctor
-tiles, bounty `checklist` / `--validate`, and doctor:
+`showmodel` / `unhostmodel` / `exportmodellink`, **load** / **generate**,
+mining `first_run` doctor tiles, bounty `checklist` / `--validate`, and doctor:
 [doc/modelnet/first-run.md](doc/modelnet/first-run.md). CLI wrapper:
 [contrib/modelnet/btx-model](contrib/modelnet/btx-model)
-(people: stderr hints; agents: `--json` stdout). Optional 0.34.8-dev cloud
+(people: stderr hints; agents: `--json` stdout). Optional cloud
 backing, publisher follow, events, and profiles **fail closed** if the
 helper lacks the method: [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md),
 [doc/modelnet/watches.md](doc/modelnet/watches.md). Filesystem `-modelwatch`
 is not a publisher watch.
 
-### Source → storage → model (0.34.8; `IS_RELEASE=true`)
+### Source → storage → model (0.34.9)
 
 A person can pin a **local** file (or review an ImportPlan for Hugging Face /
 torrent), choose **local disk** or an S3-compatible backend, and publish a
@@ -129,19 +134,29 @@ Erasure repair is **per stripe**. Automatic spend stays **0**.
 
 ```text
 btx-model doctor
-btx-model host ./model.safetensors
-btx-model link NAME                 # exportmodellink magnet analog
-btx-model import-plan @plan.json    # staging UUID until VerifiedManifest
-btx-model package create '{}'       # .btxbundle; not a secret dump
-btx-model package inspect FILE.btx # preview only; does not install or spend
-btx-open FILE.btx                   # local inspect; never writes AGENTS.md
+btx-model host ./model.safetensors   # or ./model.gguf
+btx-model search                     # LOCAL catalog; add --scope NETWORK to query peers
+btx-model search "coding agent" --scope NETWORK
+btx-model link NAME                  # exportmodellink magnet analog (.btx card)
+btx-model get NAME                   # FREE_ONLY retrieve (or host a .btx share)
+btx-model path NAME                  # checkout / usable_runtime_root
+btx-model host-profile               # what this helper can generate
+btx-model generate NAME "Hello"      # local one-shot; host-profile match
+btx-model bounty-draft "coding agent"
+btx-model bounty-draft --validate ID # checklist; never publishes, never spends
+btx-model import-plan @plan.json     # staging UUID until VerifiedManifest
+btx-model package create '{}'        # .btxbundle; not a secret dump
+btx-model package inspect FILE.btx  # preview only; does not install or spend
+btx-open FILE.btx                    # local inspect; never writes AGENTS.md
 ```
+
+Copy-paste with env and RPC notes: [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md).
 
 Live Hugging Face HTTP, live R2 WAN, GUI, and wallet-signed subscriptions are
 **not** claimed here. Cloud add uses `--credential-ref`, never a raw secret on
 argv: [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md).
 
-### Hosted Control Plane / walletless discovery (0.34.8; `IS_RELEASE=true`)
+### Hosted Control Plane / walletless discovery
 
 A person can **discover** public capabilities through a hosted catalogue without
 opening a monetary wallet, mining, or completing a full chain sync. The
@@ -158,7 +173,7 @@ hosted plane**, not a fifth product, not a new coin, and not remote inference.
 The original **34** HCP operations stay as they are. A venue’s catalogue does
 not imply reserve, committee, or programme support — those require an explicit
 `GET /extensions/cognitive-reserve` profile. Automatic spend remains **0**.
-This tree is **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`) and does
+This tree is **0.34.9** (`CLIENT_VERSION_IS_RELEASE=true`) and does
 not replace the production GPU attestor. Operator notes:
 [doc/hosted/HCP_OPERATOR_NOTES.md](doc/hosted/HCP_OPERATOR_NOTES.md). Spec:
 [doc/modelnet/crf/](doc/modelnet/crf/).
@@ -200,9 +215,11 @@ resolves the URI, fetches verified pieces, checks the artifact, and makes it
 available for **local** use.
 
 This is not a remote inference marketplace. There is no inference seller, no
-inference endpoint, and no cloud fallback. If a model does not fit the local
-device, you get an explicit compatibility result, not a paid remote run. You
-choose the downstream runtime.
+inference endpoint, and no cloud fallback. After acquire, **this node** can
+`loadmodel` (optional GPU hold) and `generatemodel` when the replica matches
+the local host profile. If a model does not fit that profile, you get an
+explicit fail-closed result (`INCOMPATIBLE_HOST_PROFILE`), not a paid remote
+run. You still choose the downstream runtime.
 
 ### 5. Fund a release (only if you mean to)
 
@@ -260,7 +277,7 @@ disagreement about evaluation does not change the monetary base.
 | Default | Meaning |
 |---|---|
 | Free-first retrieve | Public models come from willing peers at zero price when supply exists. |
-| Local inference | After acquire, you run the model yourself. BTX does not sell prompts. |
+| Local generate | After acquire, `generatemodel` runs on this host when GGUF+llama.cpp or allowlisted SafeTensors+`BTX_MODEL_GENERATE` match. CUDA smoke is not generate. BTX does not sell prompts. |
 | Zero default spend | Automatic BTX spend is zero. Paid actions need a fresh, explicit confirmation. |
 | No central account | No BTX-operated login, email gate, or compulsory identity to retrieve public models. |
 | Fresh storage | Payload storage starts at zero until you allocate a budget. Unsolicited fetch of arbitrary advertised models stays off. |
@@ -290,10 +307,13 @@ search when you do not want the query to leave this node.
 
 ## Current line
 
-- **Release:** **v0.34.8** (Native Model Network first-run, HCP, JIT capability,
-  including search, release campaigns, and creation bounties). Shipping tag.
-- Host / seed / search / share / watch / doctor:
-  [doc/modelnet/first-run.md](doc/modelnet/first-run.md). CLI:
+- **Release:** shipping tag **v0.34.9**. Registry independence, host/load/generate, assumeutxo persist, on-chain bounty/WRC. Native
+  Model Network first-run, HCP, JIT capability, search, release campaigns,
+  and creation bounties remain.
+- Host / seed / search / share / watch / doctor / load / generate / bounty:
+  [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md),
+  [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
+  [doc/modelnet/generate.md](doc/modelnet/generate.md). CLI:
   [contrib/modelnet/btx-model](contrib/modelnet/btx-model). Optional cloud /
   follow / events / profile (fail closed; not a PASS):
   [doc/modelnet/storage-backends.md](doc/modelnet/storage-backends.md),
@@ -301,8 +321,8 @@ search when you do not want the query to leave this node.
   [doc/modelnet/events.md](doc/modelnet/events.md),
   [doc/modelnet/watches.md](doc/modelnet/watches.md),
   [doc/modelnet/mirroring.md](doc/modelnet/mirroring.md).
-  Hosted Control Plane / walletless discovery (`IS_RELEASE=true`; not live
-  CEX IdP): [doc/hosted/README.md](doc/hosted/README.md),
+  Hosted Control Plane / walletless discovery (not live CEX IdP):
+  [doc/hosted/README.md](doc/hosted/README.md),
   [doc/modelnet/hcp/](doc/modelnet/hcp/). Cognitive Reserve v1.1 is a
   negotiated HCP/1 extension of that same plane (not a fifth plane; 34 HCP
   ops preserved): [doc/modelnet/crf/](doc/modelnet/crf/).
@@ -320,5 +340,5 @@ Further reading:
 - Full strategic essay:
   [doc/design/btx-decentralized-frontier-ai-lab.md](doc/design/btx-decentralized-frontier-ai-lab.md).
 - Operator index: [doc/modelnet/README.md](doc/modelnet/README.md).
-- Hosted Control Plane (0.34.8-dev): [doc/hosted/README.md](doc/hosted/README.md).
+- Hosted Control Plane (walletless discovery): [doc/hosted/README.md](doc/hosted/README.md).
 - Agents: [AGENTS.md](AGENTS.md).

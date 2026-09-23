@@ -90,7 +90,7 @@ class RegtestLab:
             headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=180) as resp:
                 reply = json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             payload = e.read().decode() if e.fp else str(e)
@@ -136,6 +136,7 @@ class RegtestLab:
             "-fallbackfee=0.0001",
             f"-modelhelper={MODELD}",
             "-modelstorage=8MiB",
+            "-modelbind=off",
             "-autoshieldcoinbase=0",
             "-regtestmatmulbindingheight=2147483647",
             "-regtestmatmulproductdigestheight=2147483647",
@@ -155,7 +156,7 @@ class RegtestLab:
         else:
             logtxt = log.read_text(encoding="utf-8", errors="replace")[-2000:] if log.is_file() else ""
             raise RpcError("btxd not ready: " + logtxt)
-        for _ in range(40):
+        for _ in range(120):
             try:
                 info = self.cli("getmodelnetworkinfo")
             except (subprocess.CalledProcessError, RpcError, OSError, urllib.error.URLError, json.JSONDecodeError):
@@ -165,7 +166,8 @@ class RegtestLab:
                 break
             time.sleep(0.25)
         else:
-            raise RpcError("helper not ready")
+            logtxt = log.read_text(encoding="utf-8", errors="replace")[-2000:] if log.is_file() else ""
+            raise RpcError("helper not ready: " + logtxt)
 
     def stop(self):
         if self.pid:
@@ -305,7 +307,7 @@ def wallet_fund_lot(lab: RegtestLab, wallet: str, refund_key: str, principal: in
     plan = {
         "principal_atoms": str(principal),
         "refund_key": refund_key,
-        "fee_reserve_atoms": "50000",
+        "fee_reserve_atoms": "10000000",
         "council_keys": [k["public_key_hex"] for k in council],
         "threshold": 5,
         "award_height": height + 200,
@@ -320,10 +322,36 @@ def wallet_fund_lot(lab: RegtestLab, wallet: str, refund_key: str, principal: in
         json.dumps({**plan, "hex": prep.get("unsigned_hex"), "plan_id": prep.get("plan_id")}),
         wallet=wallet,
     )
+    decoded = lab.cli("decoderawtransaction", signed.get("hex"))
+    script = prep.get("output_script")
+    vout_n = 0
+    if isinstance(decoded, dict):
+        for i, v in enumerate(decoded.get("vout") or []):
+            hx = ((v.get("scriptPubKey") or {}).get("hex") or "")
+            if script and hx == script:
+                vout_n = int(v.get("n", i))
+                break
     sub = lab.cli("submitbountyfunding", json.dumps({"hex": signed.get("hex")}), wallet=wallet)
     if not sub.get("submitted") and not sub.get("duplicate"):
         raise RpcError(f"submitbountyfunding: {sub}")
-    return {"plan": plan, "prep": prep, "sub": sub}
+    txid = sub.get("txid")
+    if not txid and isinstance(decoded, dict):
+        txid = decoded.get("txid")
+    if not txid:
+        raise RpcError(f"submitbountyfunding missing txid: {sub}")
+    addr = lab.cli("getnewaddress", wallet=wallet)
+    lab.cli("generatetoaddress", 6, addr, wallet=wallet)
+    height = lab.cli("getblockcount")
+    return {
+        "plan": plan,
+        "prep": prep,
+        "sub": sub,
+        "txid": txid,
+        "vout": vout_n,
+        "outpoint": f"{txid}:{vout_n}",
+        "height": int(height) if isinstance(height, (int, str)) else 0,
+        "confirmations": 6,
+    }
 
 
 def unix_rpc(sock: Path, method: str, params=None):
@@ -392,16 +420,16 @@ def scenario_a(lab: RegtestLab):
         raise RpcError(f"observer did not discover bounty {bid} in {hits}")
     wallet = lab.ensure_wallet("funder")
     refund_pk = lab.pq_pubkey(wallet)
-    wallet_fund_lot(lab, wallet, refund_pk)
+    fund = wallet_fund_lot(lab, wallet, refund_pk)
     lab.cli(
         "observebountychain",
         json.dumps(
             {
                 "bounty_id": bid,
-                "outpoint": "f000000000000000000000000000000000000000000000000000000000000000:0",
-                "amount_atoms": "500000",
-                "confirmations": 6,
-                "height": 200,
+                "outpoint": fund["outpoint"],
+                "amount_atoms": fund["plan"]["principal_atoms"],
+                "confirmations": fund["confirmations"],
+                "height": fund["height"],
             }
         ),
     )
@@ -538,7 +566,7 @@ def scenario_d(lab: RegtestLab):
     base = {
         "principal_atoms": "100000",
         "refund_key": good_refund,
-        "fee_reserve_atoms": "50000",
+        "fee_reserve_atoms": "10000000",
         "council_keys": [k["public_key_hex"] for k in council_keys(7, lab=lab, wallet=wallet)],
         "threshold": 5,
         "award_height": 300,

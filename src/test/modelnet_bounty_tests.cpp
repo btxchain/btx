@@ -15,6 +15,7 @@
 #include <modelnet/search.h>
 #include <script/script.h>
 #include <span.h>
+#include <uint256.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
@@ -577,6 +578,25 @@ BOOST_AUTO_TEST_CASE(bounty_script_001_to_020)
     BOOST_REQUIRE(BuildStagedHtlcDescriptor(later, err));
     BOOST_CHECK_NE(later.refund_height, eight.refund_height);
 
+    UniValue secret_wire(UniValue::VOBJ);
+    secret_wire.pushKV("principal_atoms", "1");
+    secret_wire.pushKV("preimage", "00");
+    BountyEscrowPlan badp;
+    BOOST_CHECK(!ParseBountyPlan(secret_wire, badp, err));
+    BOOST_CHECK(err.find("secret_ref") != std::string::npos);
+
+    const auto secret_path = m_path_root / "bounty-secret.hex";
+    {
+        std::ofstream out{secret_path};
+        BOOST_REQUIRE(out.good());
+        out << std::string(64, 'a');
+    }
+    std::vector<unsigned char> pre;
+    BOOST_REQUIRE(LoadBountySecretRef(fs::PathToString(secret_path), pre, err));
+    BOOST_CHECK_EQUAL(pre.size(), 32U);
+    BOOST_CHECK(!LoadBountySecretRef("../etc/passwd", pre, err));
+    BOOST_CHECK(!LoadBountySecretRef("os:keyring/x", pre, err));
+
     // BOUNTY-SCRIPT-011: bounty wallet path is SIGHASH_ALL only (see SignBountyTransaction).
     BOOST_CHECK_EQUAL(SIGHASH_ALL, 1);
     BOOST_CHECK((SIGHASH_ALL & SIGHASH_ANYONECANPAY) != SIGHASH_ALL);
@@ -614,6 +634,14 @@ BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
     BountyEscrowPlan parsed;
     BOOST_REQUIRE(ParseBountyPlan(planj, parsed, err));
     BOOST_CHECK_EQUAL(parsed.principal_atoms, 12345);
+
+    planj.pushKV("outpoint", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:7");
+    planj.pushKV("destination", "winner-addr");
+    planj.pushKV("fee_atoms", "1000");
+    BOOST_REQUIRE(ParseBountyPlan(planj, parsed, err));
+    BOOST_CHECK_EQUAL(parsed.prev_vout, 7);
+    BOOST_CHECK_EQUAL(parsed.destination, "winner-addr");
+    BOOST_CHECK_EQUAL(parsed.fee_atoms, 1000);
 
     UniValue rec = BountyPlanToJson(parsed);
     BOOST_CHECK(rec.exists("helper_defaults"));
@@ -672,6 +700,30 @@ BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
         UniValue extra_insp;
         BOOST_REQUIRE(InspectBountyTransaction(escrow, triple, extra_insp, err));
         BOOST_CHECK(extra_insp["unauthorized_extra_output"].get_bool());
+    }
+
+    {
+        CMutableTransaction spend;
+        spend.nLockTime = escrow.award_height;
+        const auto prev = uint256::FromHex(std::string(64, 'a'));
+        BOOST_REQUIRE(prev);
+        spend.vin.emplace_back(COutPoint{Txid::FromUint256(*prev), 7}, CScript(), CTxIn::SEQUENCE_FINAL - 1);
+        spend.vout.emplace_back(escrow.principal_atoms - 1000, CScript() << OP_TRUE);
+        BountyEscrowPlan spend_plan = escrow;
+        spend_plan.prev_txid = *prev;
+        spend_plan.prev_vout = 7;
+        spend_plan.fee_atoms = 1000;
+        UniValue spend_insp;
+        BOOST_REQUIRE_MESSAGE(InspectBountySpend(spend_plan, spend, spend_insp, err), err);
+        BOOST_CHECK_EQUAL(spend_insp["selected_path"].get_str(), "award");
+        BOOST_CHECK(spend_insp["timelock_enforced"].get_bool());
+        spend.vin[0].nSequence = CTxIn::SEQUENCE_FINAL;
+        UniValue bad_seq;
+        BOOST_CHECK(!InspectBountySpend(spend_plan, spend, bad_seq, err));
+        spend.vin[0].nSequence = CTxIn::SEQUENCE_FINAL - 1;
+        spend.nLockTime = 1;
+        UniValue bad_lock;
+        BOOST_CHECK(!InspectBountySpend(spend_plan, spend, bad_lock, err));
     }
 
     // BOUNTY-SCRIPT-020: model evaluation pass/fail does not change monetary inspect result.
@@ -1366,6 +1418,7 @@ BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
     BOOST_CHECK(!IsBountyHelperMethod("signbountyfunding"));
     BOOST_CHECK(!IsBountyHelperMethod("submitbountyfunding"));
     BOOST_CHECK(!IsBountyHelperMethod("preparebountyclaim"));
+    BOOST_CHECK(!IsBountyHelperMethod("preparebountyaward"));
     BOOST_CHECK(!IsBountyHelperMethod("preparebountyrefund"));
 }
 

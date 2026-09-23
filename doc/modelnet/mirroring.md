@@ -1,7 +1,7 @@
-# Mirroring (0.34.8)
+# Mirroring (0.34.8 surface)
 
-**Status:** **0.34.8** (`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
-**v0.34.8**. `getmodelmirror` / `setmodelmirror` /
+**Status:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
+(`CLIENT_VERSION_IS_RELEASE=false`). `getmodelmirror` / `setmodelmirror` /
 `setmodelprofile` exist in this helper (keep-N, `automatic_spend_atoms=0`).
 The CLI wrapper **fails closed** if an older helper lacks the method. This
 page is not a PASS and not evidence that a public mirror is running.
@@ -58,6 +58,27 @@ contrib/modelnet/btx-model --json mirror --publisher '<publisher_id>' --keep-lat
 Keep-N is “keep the latest N verified artifacts matching the selector.”
 It is not a paid pin and not an auto-`getmodel` of arbitrary advertisements.
 Preserve-rare remains a separate explicit flag (`-modelpreserverare`).
+
+### 0.34.9-dev: `min_independent_origins` (>= 1)
+
+`setmodelmirror` also accepts `min_independent_origins` (**integer >= 1**).
+It sets the minimum number of *independent* origins a kept artifact should be
+seen from before it counts as mirrored. This is a **local keep/follow policy**
+on the model plane: not consensus, not fork choice, not a search-ranking
+signal, and **not** a monetary privilege or spend authority.
+`automatic_spend_atoms` stays **0**; a mirror never auto-pays a pin.
+
+```bash
+contrib/modelnet/btx-model --json mirror --publisher '<publisher_id>' --keep-latest 3 --min-independent-origins 2
+```
+
+Counting independent origins is this node's own observation, not global truth,
+and not WAN evidence. A fetch that sees fewer origins than the target still
+**succeeds**; `getmodelimport` reports `below_min_independent_origins` and
+`getmodelmirror` reports `fetch_fails_below_min: false`. Extra origins (OCI /
+OMS / Sigstore / Cosign) are additional evidence-only sources; they do **not**
+replace BTX identity or BTX signatures. Keep the monetary plane unchanged:
+mirrors store no wallet secrets and money stays on `btxd`.
 
 ## Cloud is optional
 

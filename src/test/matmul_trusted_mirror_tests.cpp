@@ -1573,6 +1573,15 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
         /*ibd=*/false, /*ahead=*/8, /*signed_frontier_catch_up=*/false,
         2, 32, 200, /*uncapped_ahead=*/200));
+    using node::matmul_trusted::PersistPreAttestationHistoricalHole;
+    BOOST_CHECK(PersistPreAttestationHistoricalHole(
+        /*followed_historical_hole=*/true,
+        /*attestation_active_at_height=*/false));
+    BOOST_CHECK(!PersistPreAttestationHistoricalHole(true, true));
+    BOOST_CHECK(!PersistPreAttestationHistoricalHole(
+        /*followed_historical_hole=*/false,
+        /*attestation_active_at_height=*/false));
+    BOOST_CHECK(!PersistPreAttestationHistoricalHole(false, true));
     using node::matmul_trusted::PersistFollowedSuffixBodyWithoutGpu;
     BOOST_CHECK(PersistFollowedSuffixBodyWithoutGpu(
         /*trusted_mirror=*/false, /*extends_active_tip=*/true,

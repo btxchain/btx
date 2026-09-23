@@ -1,7 +1,7 @@
-# Hosted Control Plane (0.34.8)
+# Hosted Control Plane (0.34.8 surface)
 
-**Status:** in this tree. Shipping tag **v0.34.8**.
-`CLIENT_VERSION_IS_RELEASE=true`. Not a live CEX IdP.
+**Status:** last shipping tag **v0.34.8**. This working tree is **0.34.9-dev**
+(`CLIENT_VERSION_IS_RELEASE=false`). HCP/1 shipped in 0.34.8. Not a live CEX IdP.
 
 The Hosted Control Plane (HCP/1) is a **third plane**. It is not consensus,
 not the Native Model Network helper, and not a public HTTP capability API on
@@ -83,7 +83,7 @@ ledger): [../../contrib/modelnet/crf-sdk/](../../contrib/modelnet/crf-sdk/).
 | Extension ops | 50, only when `ReserveExtensionProfileV1_1` is advertised |
 | `automatic_spend_atoms` | **0** |
 | Production attestor | **not replaced** |
-| `CLIENT_VERSION_IS_RELEASE` | **true** (0.34.8) |
+| `CLIENT_VERSION_IS_RELEASE` | **false** (0.34.9-dev; last shipping **v0.34.8**) |
 
 Lab topology is still two independently configured `btx-hcpd` instances
 (`127.0.0.1:18780` walletless, optional `:18781` `-finance=1`). The

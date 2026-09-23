@@ -1314,11 +1314,11 @@ BOOST_AUTO_TEST_CASE(jit_api_priv_scale_journey_safety)
         BOOST_TEST_MESSAGE("JIT-SAFETY-05 native: HELPER_DOWN does not change COIN; process-tier in feature_modelnet_*");
     }
     BOOST_TEST_CONTEXT("JIT-SAFETY-07") {
-        BOOST_CHECK(CLIENT_VERSION_IS_RELEASE);
+        BOOST_CHECK(!CLIENT_VERSION_IS_RELEASE);
         BOOST_CHECK_EQUAL(CLIENT_VERSION_MAJOR, 0);
         BOOST_CHECK_EQUAL(CLIENT_VERSION_MINOR, 34);
-        BOOST_CHECK_EQUAL(CLIENT_VERSION_BUILD, 8);
-        BOOST_TEST_MESSAGE("0.34.8 sealed; no autonomous production restart");
+        BOOST_CHECK_EQUAL(CLIENT_VERSION_BUILD, 9);
+        BOOST_TEST_MESSAGE("0.34.9-dev; no autonomous production restart");
     }
 }
 

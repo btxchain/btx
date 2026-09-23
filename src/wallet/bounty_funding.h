@@ -37,16 +37,35 @@ struct BountyEscrowPlan {
     std::string mode; // PUBLIC_PAYOUT or STAGED_RELEASE
     std::string hashlock_hex;
     std::string claimant_key;
+    std::string destination;
+    uint256 prev_txid;
+    int prev_vout{-1};
+    std::string signed_hex;
+    bool complete{false};
+    std::string selected_path;
+    /** Local claim preimage loaded from secret_ref. Never serialized to JSON. */
+    std::vector<unsigned char> claim_preimage;
+};
+
+enum class BountySpendPath {
+    AWARD,
+    REFUND,
+    CLAIM,
 };
 
 bool BuildBountyEscrowDescriptor(BountyEscrowPlan& plan, std::string& err);
 bool BuildStagedHtlcDescriptor(BountyEscrowPlan& plan, std::string& err);
 bool ExactTwoLeafTree(const std::string& descriptor, std::string& err);
 bool PrepareBountyFunding(CWallet& wallet, BountyEscrowPlan& plan, std::string& err);
+/** Spend the funded two-leaf escrow: CLTV council award, or contributor refund. */
+bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpendPath path, std::string& err);
 bool InspectBountyTransaction(const BountyEscrowPlan& plan, const CMutableTransaction& tx, UniValue& out, std::string& err);
+bool InspectBountySpend(const BountyEscrowPlan& plan, const CMutableTransaction& tx, UniValue& out, std::string& err);
 bool SignBountyTransaction(CWallet& wallet, BountyEscrowPlan& plan, CMutableTransaction& tx, std::string& err);
 UniValue BountyPlanToJson(const BountyEscrowPlan& plan);
 bool ParseBountyPlan(const UniValue& o, BountyEscrowPlan& plan, std::string& err);
+/** Read a local 32-byte preimage (raw or 64 hex chars). Rejects `..` and inline secrets. */
+bool LoadBountySecretRef(const std::string& secret_ref, std::vector<unsigned char>& preimage, std::string& err);
 
 } // namespace wallet
 

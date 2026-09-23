@@ -19,7 +19,8 @@ downloaders still see price zero.
 
 ## What is not paid, and does not exist
 
-- Remote or metered **inference**
+- Remote or metered **inference** (local `generatemodel` is host-profile
+  one-shot, not a paid remote run; CUDA smoke is not generate)
 - Protocol emissions or token rewards for hosting or advertised capacity
 - Compulsory staking or a storage token
 - Privileged release-pool commission
