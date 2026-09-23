@@ -48,6 +48,7 @@ archive's floor instead of only the host's missing symbol.
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import re
 import struct
@@ -342,12 +343,28 @@ def verify_binary(path: Path) -> str:
     )
 
 
+def packaged_openssl_libdir(path: Path) -> Path | None:
+    """libexec/*.real ships OpenSSL 3.x in ../lib (bin/btxd wrapper LD_LIBRARY_PATH)."""
+    if path.parent.name != "libexec" or not path.name.endswith(".real"):
+        return None
+    libdir = path.parent.parent / "lib"
+    if (libdir / "libssl.so.3").is_file():
+        return libdir
+    return None
+
+
 def verify_launch(path: Path, timeout: float = 30.0) -> None:
     """Refuse a binary that cannot even print its version.
 
     The CUDA 0.34 packaging miss (`libcublasLt.so.13` missing) failed here
     and was invisible to the ZMQ/ldd checks.
     """
+    env = os.environ.copy()
+    libdir = packaged_openssl_libdir(path)
+    if libdir is not None:
+        env["LD_LIBRARY_PATH"] = str(libdir) + (
+            f":{env['LD_LIBRARY_PATH']}" if env.get("LD_LIBRARY_PATH") else ""
+        )
     try:
         result = subprocess.run(
             [str(path), "-version"],
@@ -355,6 +372,7 @@ def verify_launch(path: Path, timeout: float = 30.0) -> None:
             text=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise VerifyError(f"{path}: `{path.name} -version` timed out after {timeout}s") from exc
