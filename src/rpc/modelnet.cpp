@@ -36,6 +36,7 @@
 
 #ifdef ENABLE_WALLET
 #include <interfaces/wallet.h>
+#include <support/cleanse.h>
 #include <wallet/bounty_funding.h>
 #include <wallet/model_funding.h>
 #include <wallet/rpc/util.h>
@@ -1634,7 +1635,7 @@ static RPCHelpMan preparebountyfunding()
 {
     return RPCHelpMan{
         "preparebountyfunding",
-        "Freeze an exact two-leaf CLTV-multisig+refund funding transaction. User amount and refund key required. Helper defaults are ignored.\n",
+        "Freeze an exact two-leaf funding transaction. Council CLTV+refund by default; staged SHA-256 HTLC+refund when hashlock_hex and claimant_key are set. Helper defaults are ignored.\n",
         {
             {"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Funding plan", {
                 {"principal_atoms", RPCArg::Type::STR, RPCArg::Optional::NO, "Exact user-selected amount"},
@@ -1644,6 +1645,8 @@ static RPCHelpMan preparebountyfunding()
                 {"threshold", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "m"},
                 {"award_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "CLTV award height"},
                 {"refund_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "CLTV refund height"},
+                {"hashlock_hex", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "SHA-256 hashlock for staged HTLC"},
+                {"claimant_key", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "PQ claimant pubkey for staged HTLC"},
             }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "plan"}}},
@@ -1923,9 +1926,9 @@ static RPCHelpMan preparebountyclaim()
 {
     return RPCHelpMan{
         "preparebountyclaim",
-        "Prepare staged SHA256 claim. Does not log preimages. Revalidate chain, branch, maturity, keys and fee policy.\n",
-        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "lot_ids, secret_ref, fee_ceiling", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
-        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "plan"}}},
+        "Spend a staged SHA-256 HTLC bounty lot by revealing a local secret_ref preimage. Preimage bytes are never accepted on the wire. automatic_spend_atoms stays 0.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + outpoint + destination + secret_ref", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed spend"}}},
         RPCExamples{HelpExampleCli("preparebountyclaim", "'{}'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
@@ -1933,11 +1936,31 @@ static RPCHelpMan preparebountyclaim()
             std::string err;
             wallet::BountyEscrowPlan plan;
             if (!wallet::ParseBountyPlan(request.params[0], plan, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
-            if (request.params[0].exists("secret") || request.params[0].exists("preimage")) {
+            if (request.params[0].exists("secret") || request.params[0].exists("preimage") ||
+                request.params[0].exists("preimage_hex")) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "preimages are not accepted on the wire; use secret_ref");
             }
+            if (!request.params[0].exists("secret_ref") || !request.params[0]["secret_ref"].isStr()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "secret_ref is required");
+            }
+            if (plan.destination.empty()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "destination is required");
+            }
+            if (plan.prev_vout < 0 || plan.prev_txid.IsNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "funding outpoint is required (outpoint or prevout.txid/vout)");
+            }
             plan.mode = "STAGED_RELEASE";
-            if (!wallet::BuildStagedHtlcDescriptor(plan, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            if (!wallet::LoadBountySecretRef(request.params[0]["secret_ref"].get_str(), plan.claim_preimage, err)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            }
+            auto pwallet = WalletForModelFunding(request);
+            if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, wallet::BountySpendPath::CLAIM, err)) {
+                if (!plan.claim_preimage.empty()) {
+                    memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
+                    plan.claim_preimage.clear();
+                }
+                throw JSONRPCError(RPC_WALLET_ERROR, err);
+            }
             return wallet::BountyPlanToJson(plan);
 #else
             throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");

@@ -18,20 +18,15 @@ HASH160 htlc_tx is recovery-only. KEY_RELEASE_ONLY is a campaign assurance
 label; it does not select HASH160 and does not invent htlc_sha256_tx.
 """
 
-from test_framework.authproxy import JSONRPCException
+import hashlib
+from decimal import Decimal
+
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, assert_raises_rpc_error
-
-# src/pqkey.h MLDSA44_PUBKEY_SIZE — dummy claimant/refund keys (length only).
-MLDSA44_PUBKEY_SIZE = 1312
 
 # Thin SCRIPT-03/09/11 pointer. Do not subclass WalletHtlcAtomicSwapTest here
 # (that test is already in test_runner.py --descriptors).
 SCRIPT_03_09_11 = "wallet_htlc_atomicswap.py"
-
-
-def dummy_pq(seed: int) -> str:
-    return bytes((seed + i) & 0xFF for i in range(MLDSA44_PUBKEY_SIZE)).hex()
 
 
 def assert_zero_spend(obj):
@@ -56,6 +51,7 @@ class ModelnetFundingTest(BitcoinTestFramework):
         # cheap (test_runner cache is ~20s/block once MatMul is live).
         self.extra_args = [[
             "-autoshieldcoinbase=0",
+            "-modelbind=off",
             "-regtestmatmulbindingheight=2147483647",
             "-regtestmatmulproductdigestheight=2147483647",
             "-regtestmatmulv4height=2147483647",
@@ -103,27 +99,32 @@ class ModelnetFundingTest(BitcoinTestFramework):
 
         # Mature coinbase for the unsigned funding tx. MatMul is inactive
         # (heights above), so this is cheap even with setup_clean_chain.
-        self.generate(self.nodes[0], 101)
+        # These coins are mined block rewards: the same mature coinbase that
+        # funds release-campaign HTLCs and bounty lots.
+        funder = node.get_wallet_rpc(self.default_wallet_name)
+        funding_addr = funder.getnewaddress()
+        self.generatetoaddress(self.nodes[0], 101, funding_addr)
+
+        node.createwallet(wallet_name="release_claimer")
+        claimer = node.get_wallet_rpc("release_claimer")
+        claimer_pk = claimer.exportpqkey(claimer.getnewaddress())["pubkey"]
+        refund_pk = funder.exportpqkey(funder.getnewaddress())["pubkey"]
+        preimage = bytes.fromhex("42" * 32)
+        key_hash = hashlib.sha256(preimage).hexdigest()
+        fee_sat = 1_000_000
+        amount_atoms = 10_000_000
 
         options = {
-            "key_hash": "11" * 32,
-            "claimant": dummy_pq(0x21),
-            "refund_pubkey": dummy_pq(0x31),
+            "key_hash": key_hash,
+            "claimant": claimer_pk,
+            "refund_pubkey": refund_pk,
             "refund_height": max(node.getblockcount() + 1000, 1024),
-            "amount_atoms": 100000,
+            "amount_atoms": amount_atoms,
             "auto_pay": False,
-            # Campaign label only. Funding leaf stays htlc_sha256 (not HASH160).
             "assurance": "KEY_RELEASE_ONLY",
             "assurance_mode": "KEY_RELEASE_ONLY",
         }
-        try:
-            frozen = self.prepare(node, options)
-        except JSONRPCException as e:
-            msg = str(e).lower()
-            if "insufficient" in msg or "wallet" in msg:
-                self.log.info("preparemodelfunding reached wallet (no mature coins): %s", e.error)
-                return
-            raise
+        frozen = self.prepare(funder, options)
         assert_zero_spend(frozen)
         assert_equal(frozen["htlc"], "htlc_sha256")
         desc = frozen["descriptor"]
@@ -132,20 +133,12 @@ class ModelnetFundingTest(BitcoinTestFramework):
         assert "htlc_tx(" not in desc
         unsigned = frozen["unsigned_hex"]
 
-        try:
-            signed = node.signmodelfunding(unsigned, frozen)
-        except JSONRPCException:
-            self.log.info("signmodelfunding could not sign; refusals already asserted")
-            return
-
+        signed = funder.signmodelfunding(unsigned, frozen)
         assert_zero_spend(signed)
         if not signed.get("complete"):
-            self.log.info("signmodelfunding incomplete (wallet cannot sign this HTLC funding tx)")
-            assert_raises_rpc_error(-8, "auto_pay is refused", node.signmodelfunding, unsigned, {**frozen, "auto_pay": True})
-            assert_raises_rpc_error(-8, "HASH160 htlc_tx", node.signmodelfunding, unsigned, {**frozen, "htlc": "htlc_tx", "assurance": "KEY_RELEASE_ONLY"})
-            return
+            raise AssertionError(f"signmodelfunding incomplete: {signed}")
 
-        submitted = node.submitmodelfunding(signed["hex"], frozen)
+        submitted = funder.submitmodelfunding(signed["hex"], frozen)
         assert_zero_spend(submitted)
         assert_equal(submitted["duplicate"], False)
         txid = submitted["txid"]
@@ -154,7 +147,7 @@ class ModelnetFundingTest(BitcoinTestFramework):
         # wallet_htlc_atomicswap.py --descriptors (no htlc_sha256_tx).
         mempool = node.getrawmempool()
         assert txid in mempool, submitted
-        self.generate(self.nodes[0], 1)
+        self.generatetoaddress(self.nodes[0], 1, funding_addr)
         # After mining the tx leaves mempool. Avoid wallet gettransaction:
         # coverage.py type-checks its result against RPCHelpMan.
         assert txid not in node.getrawmempool()
@@ -163,13 +156,98 @@ class ModelnetFundingTest(BitcoinTestFramework):
         assert txid in mined, mined
         assert "htlc_sha256" in frozen["descriptor"]
         assert_equal(frozen["htlc"], "htlc_sha256")
-        refuse_hash160(node, {"htlc": "htlc_tx", "assurance": "KEY_RELEASE_ONLY"})
+        refuse_hash160(funder, {"htlc": "htlc_tx", "assurance": "KEY_RELEASE_ONLY"})
 
-        dup = node.submitmodelfunding(signed["hex"], frozen)
+        dup = funder.submitmodelfunding(signed["hex"], frozen)
         assert_equal(dup["duplicate"], True)
         assert_equal(dup["submitted"], False)
         assert_zero_spend(dup)
         assert_equal(dup["txid"], submitted["txid"])
+
+        info = node.getdescriptorinfo(frozen["descriptor"])
+        desc_ck = frozen["descriptor"]
+        if "#" not in desc_ck:
+            desc_ck = f"{desc_ck}#{info['checksum']}"
+        lock_addr = node.deriveaddresses(desc_ck)[0]
+        decoded = node.decoderawtransaction(signed["hex"])
+        vout_n = None
+        for vout in decoded["vout"]:
+            spk = vout.get("scriptPubKey") or {}
+            if lock_addr in (spk.get("address"), spk.get("addresses", [None])[0] if spk.get("addresses") else None):
+                vout_n = int(vout["n"])
+                break
+            if frozen.get("output_script") and spk.get("hex") == frozen.get("output_script"):
+                vout_n = int(vout["n"])
+                break
+        if vout_n is None:
+            raise AssertionError(f"HTLC vout missing in {decoded['vout']}")
+
+        dest = claimer.getnewaddress()
+        built = claimer.buildhtlcclaim(
+            desc_ck, {"txid": txid, "vout": vout_n}, preimage.hex(), dest, fee_sat)
+        assert_equal(built["complete"], True)
+        claim_txid = node.sendrawtransaction(built["hex"])
+        self.generatetoaddress(self.nodes[0], 1, funding_addr)
+        assert claim_txid not in node.getrawmempool()
+        got = Decimal(str(claimer.getreceivedbyaddress(dest)))
+        expect = Decimal(amount_atoms - fee_sat) / Decimal(100000000)
+        assert_equal(got, expect)
+
+        # Second campaign lot: refund after CLTV without revealing the preimage.
+        refund_preimage = bytes.fromhex("a5" * 32)
+        refund_hash = hashlib.sha256(refund_preimage).hexdigest()
+        refund_height = node.getblockcount() + 6
+        refund_opts = {
+            "key_hash": refund_hash,
+            "claimant": claimer_pk,
+            "refund_pubkey": refund_pk,
+            "refund_height": refund_height,
+            "amount_atoms": amount_atoms,
+            "auto_pay": False,
+            "assurance": "KEY_RELEASE_ONLY",
+        }
+        frozen_r = self.prepare(funder, refund_opts)
+        assert_equal(frozen_r["htlc"], "htlc_sha256")
+        signed_r = funder.signmodelfunding(frozen_r["unsigned_hex"], frozen_r)
+        assert signed_r.get("complete"), signed_r
+        sub_r = funder.submitmodelfunding(signed_r["hex"], frozen_r)
+        self.generatetoaddress(self.nodes[0], 1, funding_addr)
+        info_r = node.getdescriptorinfo(frozen_r["descriptor"])
+        desc_r = frozen_r["descriptor"]
+        if "#" not in desc_r:
+            desc_r = f"{desc_r}#{info_r['checksum']}"
+        addr_r = node.deriveaddresses(desc_r)[0]
+        decoded_r = node.decoderawtransaction(signed_r["hex"])
+        vout_r = None
+        for vout in decoded_r["vout"]:
+            spk = vout.get("scriptPubKey") or {}
+            if addr_r in (spk.get("address"),):
+                vout_r = int(vout["n"])
+                break
+        if vout_r is None:
+            raise AssertionError("refund HTLC vout missing")
+        refund_dest = funder.getnewaddress()
+        early = funder.buildhtlcrefund(
+            desc_r, {"txid": sub_r["txid"], "vout": vout_r},
+            refund_dest, refund_height, fee_sat)
+        assert_equal(early.get("complete"), True)
+        decoded_early = node.decoderawtransaction(early["hex"])
+        assert_equal(decoded_early["locktime"], refund_height)
+        if decoded_early["vin"][0]["sequence"] == 0xffffffff:
+            raise AssertionError("refund sequence must be non-final for CLTV")
+        assert_raises_rpc_error(-26, None, node.sendrawtransaction, early["hex"])
+        while node.getblockcount() < refund_height:
+            self.generatetoaddress(self.nodes[0], 1, funding_addr)
+        refunded = funder.buildhtlcrefund(
+            desc_r, {"txid": sub_r["txid"], "vout": vout_r},
+            refund_dest, refund_height, fee_sat)
+        assert_equal(refunded["complete"], True)
+        refund_txid = node.sendrawtransaction(refunded["hex"])
+        self.generatetoaddress(self.nodes[0], 1, funding_addr)
+        assert refund_txid not in node.getrawmempool()
+        got_r = Decimal(str(funder.getreceivedbyaddress(refund_dest)))
+        assert_equal(got_r, expect)
+        self.log.info("release-campaign HTLC fund+claim+refund ok")
 
 
 if __name__ == "__main__":

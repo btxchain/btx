@@ -8,6 +8,8 @@
 #include <coins.h>
 #include <consensus/amount.h>
 #include <core_io.h>
+#include <crypto/sha256.h>
+#include <hash.h>
 #include <key_io.h>
 #include <modelnet/bounty.h>
 #include <modelnet/types.h>
@@ -20,7 +22,9 @@
 #include <script/script.h>
 #include <script/signingprovider.h>
 #include <span.h>
+#include <support/cleanse.h>
 #include <uint256.h>
+#include <util/fs.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
@@ -30,6 +34,7 @@
 #include <wallet/wallet.h>
 
 #include <algorithm>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -188,9 +193,65 @@ bool BuildStagedHtlcDescriptor(BountyEscrowPlan& plan, std::string& err)
     return true;
 }
 
+bool LoadBountySecretRef(const std::string& secret_ref, std::vector<unsigned char>& preimage, std::string& err)
+{
+    if (secret_ref.empty() || secret_ref.find("..") != std::string::npos) {
+        err = "secret_ref";
+        return false;
+    }
+    if (secret_ref.rfind("os:", 0) == 0 || secret_ref.rfind("keyring:", 0) == 0) {
+        err = "os/keyring secret_ref is not a spend handle; use a local 32-byte file";
+        return false;
+    }
+    const fs::path path{fs::PathFromString(secret_ref)};
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec)) {
+        err = "secret_ref file";
+        return false;
+    }
+    const auto size = fs::file_size(path, ec);
+    if (ec || size == 0 || size > 128) {
+        err = "secret_ref size";
+        return false;
+    }
+    std::ifstream in{path, std::ios::binary};
+    if (!in) {
+        err = "secret_ref file";
+        return false;
+    }
+    std::string data(static_cast<size_t>(size), '\0');
+    in.read(data.data(), static_cast<std::streamsize>(size));
+    if (!in) {
+        err = "secret_ref file";
+        return false;
+    }
+    while (!data.empty() && (data.back() == '\n' || data.back() == '\r' || data.back() == ' ' || data.back() == '\t')) {
+        data.pop_back();
+    }
+    if (IsHex(data) && data.size() == 64) {
+        preimage = ParseHex(ToLower(data));
+        return preimage.size() == 32;
+    }
+    if (data.size() == 32) {
+        preimage.assign(data.begin(), data.end());
+        return true;
+    }
+    err = "secret_ref must be 32 raw bytes or 64 hex chars";
+    return false;
+}
+
 bool PrepareBountyFunding(CWallet& wallet, BountyEscrowPlan& plan, std::string& err)
 {
-    if (plan.output_script.empty() && !BuildBountyEscrowDescriptor(plan, err)) return false;
+    if (plan.output_script.empty()) {
+        const bool staged = plan.mode == "STAGED_RELEASE" ||
+                            (!plan.hashlock_hex.empty() && !plan.claimant_key.empty());
+        if (staged) {
+            plan.mode = "STAGED_RELEASE";
+            if (!BuildStagedHtlcDescriptor(plan, err)) return false;
+        } else if (!BuildBountyEscrowDescriptor(plan, err)) {
+            return false;
+        }
+    }
     if (plan.fee_reserve_atoms > 0 && plan.fee_atoms > plan.fee_reserve_atoms) {
         err = "reserve exceeded";
         return false;
@@ -311,6 +372,9 @@ UniValue BountyPlanToJson(const BountyEscrowPlan& plan)
     }
     o.pushKV("complete", plan.complete);
     if (!plan.selected_path.empty()) o.pushKV("selected_path", plan.selected_path);
+    if (!plan.mode.empty()) o.pushKV("mode", plan.mode);
+    if (!plan.hashlock_hex.empty()) o.pushKV("hashlock_hex", plan.hashlock_hex);
+    if (!plan.claimant_key.empty()) o.pushKV("claimant_key", plan.claimant_key);
     o.pushKV("automatic_spend", 0);
     o.pushKV("helper_defaults", false);
     return o;
@@ -321,6 +385,10 @@ bool ParseBountyPlan(const UniValue& o, BountyEscrowPlan& plan, std::string& err
     plan = {};
     if (!o.isObject()) {
         err = "plan object";
+        return false;
+    }
+    if (o.exists("secret") || o.exists("preimage") || o.exists("preimage_hex")) {
+        err = "preimages are not accepted on the wire; use secret_ref";
         return false;
     }
     auto S = [&](const char* k, std::string& d) {
@@ -338,6 +406,7 @@ bool ParseBountyPlan(const UniValue& o, BountyEscrowPlan& plan, std::string& err
     S("destination", plan.destination);
     S("signed_hex", plan.signed_hex);
     S("selected_path", plan.selected_path);
+    S("mode", plan.mode);
     if (o.exists("principal_atoms")) {
         if (o["principal_atoms"].isStr()) {
             if (!modelnet::CanonicalAtoms(o["principal_atoms"].get_str(), plan.principal_atoms, err)) return false;
@@ -479,7 +548,17 @@ bool InspectBountySpend(const BountyEscrowPlan& plan_in, const CMutableTransacti
         err = "exactly one input and one output";
         return false;
     }
-    if (tx.vin[0].nSequence == CTxIn::SEQUENCE_FINAL) {
+    const bool claim = plan.selected_path == "claim";
+    if (claim) {
+        if (tx.vin[0].nSequence != CTxIn::SEQUENCE_FINAL) {
+            err = "claim sequence must be final";
+            return false;
+        }
+        if (tx.nLockTime != 0) {
+            err = "claim locktime must be 0";
+            return false;
+        }
+    } else if (tx.vin[0].nSequence == CTxIn::SEQUENCE_FINAL) {
         err = "sequence must be non-final for CLTV";
         return false;
     }
@@ -504,7 +583,11 @@ bool InspectBountySpend(const BountyEscrowPlan& plan_in, const CMutableTransacti
         err = "locktime does not match refund_height";
         return false;
     }
-    if (path.empty() && (plan.award_height > 0 || plan.refund_height > 0) &&
+    if (path == "claim" && locktime != 0) {
+        err = "claim locktime must be 0";
+        return false;
+    }
+    if (path.empty() && !claim && (plan.award_height > 0 || plan.refund_height > 0) &&
         locktime != plan.award_height && locktime != plan.refund_height) {
         err = "locktime does not match award_height or refund_height";
         return false;
@@ -534,7 +617,28 @@ bool InspectBountySpend(const BountyEscrowPlan& plan_in, const CMutableTransacti
 bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpendPath path, std::string& err)
 {
     if (plan.output_script.empty() || plan.descriptor.empty()) {
-        if (!BuildBountyEscrowDescriptor(plan, err)) return false;
+        if (!plan.hashlock_hex.empty() && !plan.claimant_key.empty()) {
+            if (!BuildStagedHtlcDescriptor(plan, err)) return false;
+        } else if (!BuildBountyEscrowDescriptor(plan, err)) {
+            return false;
+        }
+    }
+    if (path == BountySpendPath::AWARD && !plan.hashlock_hex.empty()) {
+        err = "staged lots use preparebountyclaim";
+        return false;
+    }
+    if (path == BountySpendPath::CLAIM) {
+        if (plan.hashlock_hex.size() != 64 || plan.claim_preimage.size() != 32) {
+            err = "claim requires hashlock and secret_ref";
+            return false;
+        }
+        uint256 digest;
+        CSHA256().Write(plan.claim_preimage.data(), plan.claim_preimage.size()).Finalize(digest.begin());
+        const auto want = ParseHex(plan.hashlock_hex);
+        if (want.size() != 32 || !std::equal(digest.begin(), digest.end(), want.begin())) {
+            err = "SHA256(secret_ref) does not match hashlock";
+            return false;
+        }
     }
     if (plan.destination.empty()) {
         err = "destination required";
@@ -549,8 +653,10 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
         err = "destination";
         return false;
     }
-    const uint32_t locktime = path == BountySpendPath::AWARD ? plan.award_height : plan.refund_height;
-    if (locktime < 1 || locktime >= 500000000) {
+    const bool claim = path == BountySpendPath::CLAIM;
+    const uint32_t locktime = claim ? 0 :
+        (path == BountySpendPath::AWARD ? plan.award_height : plan.refund_height);
+    if (!claim && (locktime < 1 || locktime >= 500000000)) {
         err = "height range; timestamps >=500000000 rejected";
         return false;
     }
@@ -561,7 +667,8 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
         return false;
     }
     plan.fee_atoms = fee;
-    plan.selected_path = path == BountySpendPath::AWARD ? "award" : "refund";
+    plan.selected_path = path == BountySpendPath::AWARD ? "award" :
+                         (claim ? "claim" : "refund");
 
     FlatSigningProvider parse_provider;
     std::string parse_err;
@@ -625,7 +732,7 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
 
     wallet.BlockUntilSyncedToCurrentChain();
     const int tip = wallet.chain().getHeight().value_or(-1);
-    if (tip < static_cast<int>(locktime)) {
+    if (!claim && tip < static_cast<int>(locktime)) {
         err = strprintf("timelock not mature (tip %d < locktime %u)", tip, locktime);
         return false;
     }
@@ -658,8 +765,9 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
     CMutableTransaction mtx;
     mtx.version = CTransaction::CURRENT_VERSION;
     mtx.nLockTime = locktime;
-    constexpr uint32_t max_sequence_nonfinal{CTxIn::SEQUENCE_FINAL - 1};
-    mtx.vin.emplace_back(outpoint, CScript(), max_sequence_nonfinal);
+    constexpr uint32_t seq_final{0xffffffff};
+    constexpr uint32_t seq_nonfinal{seq_final - 1};
+    mtx.vin.emplace_back(outpoint, CScript(), claim ? seq_final : seq_nonfinal);
     mtx.vout.emplace_back(out_value, GetScriptForDestination(dest));
 
     PartiallySignedTransaction psbt(mtx);
@@ -673,12 +781,39 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
         input.m_p2mr_leaf_script = award_leaf;
         input.m_p2mr_control_block = award_ctrl;
     }
+    if (claim) {
+        uint256 digest;
+        CSHA256().Write(plan.claim_preimage.data(), plan.claim_preimage.size()).Finalize(digest.begin());
+        input.sha256_preimages[digest] = plan.claim_preimage;
+    }
 
     std::vector<std::vector<unsigned char>> want;
     int need = 1;
     if (path == BountySpendPath::REFUND) {
         want.push_back(refund_pk);
         need = 1;
+    } else if (claim) {
+        need = 1;
+        if (!plan.claimant_key.empty()) {
+            std::string n;
+            if (!NormalizeKey(plan.claimant_key, n, err)) return false;
+            std::vector<unsigned char> bytes;
+            if (!KeyBytesFromNormalized(n, bytes, err)) return false;
+            want.push_back(std::move(bytes));
+        } else {
+            size_t i = 0;
+            while (i < award_leaf.size()) {
+                PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+                Span<const unsigned char> pk;
+                size_t consumed{0};
+                if (ParseP2MRAnyPubkeyPush(award_leaf, i, algo, pk, consumed)) {
+                    want.emplace_back(pk.begin(), pk.end());
+                    i += consumed;
+                    continue;
+                }
+                ++i;
+            }
+        }
     } else {
         need = plan.threshold > 0 ? plan.threshold : 2;
         if (!plan.council_keys.empty()) {
@@ -713,8 +848,9 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
         found = CollectWalletPQKeys(wallet, want, provider);
     }
     if (found < need) {
-        err = strprintf("wallet holds %d of %d required %s keys", found, need,
-                        path == BountySpendPath::AWARD ? "council" : "refund");
+        const char* which = path == BountySpendPath::AWARD ? "council" :
+                            (claim ? "claimant" : "refund");
+        err = strprintf("wallet holds %d of %d required %s keys", found, need, which);
         return false;
     }
 
@@ -738,6 +874,10 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
     plan.unsigned_hex = plan.signed_hex;
     plan.unsigned_txid = signed_mtx.GetHash().ToUint256();
     if (plan.plan_id.empty()) plan.plan_id = plan.unsigned_txid.GetHex();
+    if (!plan.claim_preimage.empty()) {
+        memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
+        plan.claim_preimage.clear();
+    }
     return true;
 }
 

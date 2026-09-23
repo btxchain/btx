@@ -653,13 +653,15 @@
       "side_effect": "PREPARE",
       "idempotency_required": true,
       "arguments": {
-        "lot_ids": "staged winner outputs",
-        "secret_ref": "claim only: restricted local preimage handle",
-        "fee_ceiling_atoms": "decimal maximum",
-        "idempotency_key": "caller-scoped"
+        "outpoint": "funded staged txid:vout",
+        "destination": "claimant payout address",
+        "secret_ref": "local 32-byte preimage file; inline preimage refused",
+        "hashlock_hex": "SHA-256 hashlock",
+        "claimant_key": "PQ claimant pubkey",
+        "fee_atoms": "absolute fee"
       },
-      "result": "SpendPlan",
-      "notes": "Revalidate current chain, branch, maturity, own keys and fee policy; do not log preimages."
+      "result": "SignedSpend",
+      "notes": "Signs the htlc_sha256 leaf. Does not log or return the preimage. Unclaimed lots refund after refund_height via preparebountyrefund."
     },
     {
       "name": "signbountyclaim",

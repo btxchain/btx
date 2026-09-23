@@ -43,11 +43,14 @@ struct BountyEscrowPlan {
     std::string signed_hex;
     bool complete{false};
     std::string selected_path;
+    /** Local claim preimage loaded from secret_ref. Never serialized to JSON. */
+    std::vector<unsigned char> claim_preimage;
 };
 
 enum class BountySpendPath {
     AWARD,
     REFUND,
+    CLAIM,
 };
 
 bool BuildBountyEscrowDescriptor(BountyEscrowPlan& plan, std::string& err);
@@ -61,6 +64,8 @@ bool InspectBountySpend(const BountyEscrowPlan& plan, const CMutableTransaction&
 bool SignBountyTransaction(CWallet& wallet, BountyEscrowPlan& plan, CMutableTransaction& tx, std::string& err);
 UniValue BountyPlanToJson(const BountyEscrowPlan& plan);
 bool ParseBountyPlan(const UniValue& o, BountyEscrowPlan& plan, std::string& err);
+/** Read a local 32-byte preimage (raw or 64 hex chars). Rejects `..` and inline secrets. */
+bool LoadBountySecretRef(const std::string& secret_ref, std::vector<unsigned char>& preimage, std::string& err);
 
 } // namespace wallet
 

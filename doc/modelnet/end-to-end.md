@@ -162,11 +162,15 @@ btx-cli submitbountyaward '{"hex":"<signed>"}'
 # if the lot is still unspent after refund_height, contributor only:
 btx-cli preparebountyrefund '{"outpoint":"<txid>:<vout>","destination":"<refund_addr>",…}'
 btx-cli submitbountyrefund '{"hex":"<signed>"}'
+# staged SHA-256 winner payout (no council):
+# preparebountyfunding with hashlock_hex+claimant_key → preparebountyclaim secret_ref
 ```
 
 Helper `proposebountyaward` / `approvebountyaward` is policy, not money.
 `observebountychain` is watch-only. Isolated-regtest proof:
-`test/functional/feature_modelnet_bounty_lifecycle.py`.
+`test/functional/feature_modelnet_bounty_lifecycle.py` (CLTV award/refund +
+staged HTLC claim/refund). Release-campaign HTLC fund/claim/refund:
+`wallet_modelnet_funding.py` + `wallet_htlc_atomicswap.py`.
 
 Funding, award, and refund are ordinary wallet spends:
 `prepare` → `sign` → `submit`. The helper never auto-spends. The chain does
@@ -206,7 +210,9 @@ doctor
 | Publish / find | `publishbounty` / `searchbounties` | no |
 | Fund a lot | wallet `preparebountyfunding` / `sign` / `submit` | **yes**, only after you confirm |
 | Award after locktime | `preparebountyaward` / `inspectbountyaward` / `submitbountyaward` | **yes**, CLTV council leaf |
+| Staged HTLC claim | `preparebountyclaim` (`secret_ref` file) / `submitbountyclaim` | **yes**, SHA-256 preimage + claimant key |
 | Refund after locktime | `preparebountyrefund` / `submitbountyrefund` | **yes**, contributor `refund()` leaf; no council |
+| Release-campaign HTLC | `preparemodelfunding` / `buildhtlcclaim` / `buildhtlcrefund` | **yes**, 0.34.6 `htlc_sha256` |
 
 ## Hard no
 

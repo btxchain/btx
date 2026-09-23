@@ -584,13 +584,15 @@ Role: **CREATOR** · Process boundary: **WALLET** · Effect: **PREPARE**
 
 | Argument | Contract |
 |---|---|
-| `lot_ids` | staged winner outputs |
-| `secret_ref` | claim only: restricted local preimage handle |
-| `fee_ceiling_atoms` | decimal maximum |
-| `idempotency_key` | caller-scoped |
+| `outpoint` | funded staged `txid:vout` |
+| `destination` | claimant payout address |
+| `secret_ref` | local 32-byte preimage file (64 hex chars or raw). Inline `preimage`/`secret` is refused |
+| `hashlock_hex` | SHA-256 hashlock that must match `SHA256(secret_ref)` |
+| `claimant_key` | PQ claimant pubkey (this wallet must hold the key) |
+| `refund_key` / `refund_height` | original contributor refund leaf |
+| `fee_atoms` | absolute fee |
 
-Result: `SpendPlan`.
-Revalidate current chain, branch, maturity, own keys and fee policy; do not log preimages.
+Result: signed spend (`selected_path=claim`, `locktime=0`). Preimage is never returned. `submitbountyclaim` broadcasts. Unclaimed lots still refund after `refund_height` via `preparebountyrefund`.
 
 ## `signbountyclaim`
 Role: **CREATOR** · Process boundary: **WALLET** · Effect: **SIGN**

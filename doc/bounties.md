@@ -98,9 +98,10 @@ template layered on the **original** contributor refund lineage:
 `mr(htlc_sha256(hash, claimant), refund(height, original_refund_key))`
 
 Staging must not extend refund height or replace the contributor refund key
-(BOUNTY-WALLET-016/017). Creator claims with preimage via
-`preparebountyclaim` / `signbountyclaim` / `submitbountyclaim`. Same race
-rules as 0.34.6 release HTLCs: one UTXO, one winning spend path.
+(BOUNTY-WALLET-016/017). Creator claims with a local `secret_ref` preimage via
+`preparebountyclaim` / `submitbountyclaim` (inline preimage refused). Same race
+rules as 0.34.6 release HTLCs: one UTXO, one winning spend path. Unclaimed lots
+refund after `refund_height` with `preparebountyrefund`.
 
 ## Trust and authority
 

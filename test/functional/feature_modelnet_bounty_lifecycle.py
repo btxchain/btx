@@ -16,6 +16,10 @@ Proves:
            early award/refund fail closed; after award_height the council
            CLTV leaf pays the winner; an unawarded lot refunds after
            refund_height without council or helper.
+           Staged SHA-256 HTLC lots: fund → preparebountyclaim(secret_ref)
+           pays the claimant; unclaimed lots refund after refund_height.
+           Edges: 1-key council refused; wrong wallet cannot award;
+           spent lot cannot be awarded twice.
 
 Helper proposebountyaward / approvebountyaward is policy only and is not
 completion. automatic_spend_atoms stays 0.
@@ -27,6 +31,7 @@ Run:
     --timeout-factor=1
 """
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -222,6 +227,180 @@ class ModelnetBountyLifecycleTest(BitcoinTestFramework):
         self.generatetoaddress(self.nodes[0], 1, funding_addr)
         return txid
 
+    def _run_edge_cases(self, funder, council, winner, winner_addr, funding_addr,
+                        council_hex, refund_key):
+        node = self.nodes[0]
+        height = node.getblockcount()
+        one_key = {
+            "principal_atoms": str(PRINCIPAL),
+            "refund_key": refund_key,
+            "fee_reserve_atoms": str(FEE_RESERVE),
+            "fee_atoms": str(FEE),
+            "council_keys": [council_hex[0]],
+            "threshold": 1,
+            "award_height": height + 6,
+            "refund_height": height + 20,
+        }
+        try:
+            funder.preparebountyfunding(one_key)
+            raise AssertionError("1-key council must be refused")
+        except JSONRPCException as exc:
+            msg = self._rpc_message(exc).lower()
+            if "council" not in msg and "threshold" not in msg and "size" not in msg:
+                raise AssertionError(f"1-key council refused for the wrong reason: {exc.error}") from exc
+
+        wire_secret = {
+            **one_key,
+            "council_keys": council_hex,
+            "threshold": 2,
+            "preimage": "11" * 32,
+        }
+        try:
+            funder.preparebountyfunding(wire_secret)
+            raise AssertionError("inline preimage must be refused")
+        except JSONRPCException as exc:
+            msg = self._rpc_message(exc).lower()
+            if "secret_ref" not in msg and "preimage" not in msg:
+                raise AssertionError(f"inline preimage refused for the wrong reason: {exc.error}") from exc
+
+        award_h = node.getblockcount() + 4
+        refund_h = award_h + 30
+        lot = self._fund_lot(funder, {
+            "principal_atoms": str(PRINCIPAL),
+            "refund_key": refund_key,
+            "fee_reserve_atoms": str(FEE_RESERVE),
+            "fee_atoms": str(FEE),
+            "council_keys": council_hex,
+            "threshold": 2,
+            "award_height": award_h,
+            "refund_height": refund_h,
+        }, funding_addr)
+        spend_opts = {
+            **lot["plan"],
+            "outpoint": f"{lot['txid']}:{lot['vout']}",
+            "destination": winner_addr,
+            "fee_atoms": str(FEE),
+        }
+        while node.getblockcount() < award_h:
+            self.generatetoaddress(node, 1, funding_addr)
+        try:
+            winner.preparebountyaward(spend_opts)
+            raise AssertionError("winner wallet must not hold council keys")
+        except JSONRPCException as exc:
+            msg = self._rpc_message(exc).lower()
+            if "key" not in msg and "council" not in msg:
+                raise AssertionError(f"wrong-wallet award refused for the wrong reason: {exc.error}") from exc
+
+        prep = council.preparebountyaward(spend_opts)
+        hex_award = prep.get("hex") or prep.get("signed_hex")
+        if not hex_award or not prep.get("complete"):
+            raise AssertionError(f"edge award: {prep}")
+        self._submit_spend(council, "submitbountyaward", hex_award, funding_addr)
+        try:
+            council.preparebountyaward(spend_opts)
+            raise AssertionError("spent lot must not award twice")
+        except JSONRPCException as exc:
+            msg = self._rpc_message(exc).lower()
+            if "spent" not in msg and "utxo" not in msg and "outpoint" not in msg:
+                raise AssertionError(f"double-award refused for the wrong reason: {exc.error}") from exc
+
+    def _run_staged_htlc(self, funder, winner, winner_addr, funding_addr, refund_key):
+        node = self.nodes[0]
+        node.createwallet(wallet_name="claimant")
+        claimant = node.get_wallet_rpc("claimant")
+        claimant_pk, _ = self._pq_pubkey(claimant)
+        preimage = bytes.fromhex("42" * 32)
+        hashlock = hashlib.sha256(preimage).hexdigest()
+        secret_path = Path(self.options.tmpdir) / "staged-secret.hex"
+        secret_path.write_text(preimage.hex() + "\n", encoding="ascii")
+
+        height = node.getblockcount()
+        refund_h = height + 8
+        staged_plan = {
+            "principal_atoms": str(PRINCIPAL),
+            "refund_key": refund_key,
+            "claimant_key": claimant_pk,
+            "hashlock_hex": hashlock,
+            "fee_reserve_atoms": str(FEE_RESERVE),
+            "fee_atoms": str(FEE),
+            "refund_height": refund_h,
+            "mode": "STAGED_RELEASE",
+        }
+        funded = self._fund_lot(funder, staged_plan, funding_addr)
+        desc = funded["descriptor"]
+        if "htlc_sha256(" not in desc:
+            raise AssertionError(f"staged funding must be htlc_sha256: {desc}")
+        if "cltv_multi_pq(" in desc:
+            raise AssertionError(f"staged funding must not be council CLTV: {desc}")
+
+        claim_opts = {
+            **funded["plan"],
+            "outpoint": f"{funded['txid']}:{funded['vout']}",
+            "destination": winner_addr,
+            "fee_atoms": str(FEE),
+            "secret_ref": str(secret_path),
+            "hashlock_hex": hashlock,
+            "claimant_key": claimant_pk,
+        }
+        try:
+            funder.preparebountyclaim(claim_opts)
+            raise AssertionError("funder must not hold the claimant key")
+        except JSONRPCException as exc:
+            msg = self._rpc_message(exc).lower()
+            if "claimant" not in msg and "key" not in msg:
+                raise AssertionError(f"wrong-wallet claim refused for the wrong reason: {exc.error}") from exc
+
+        before = winner.getreceivedbyaddress(winner_addr)
+        prep_claim = claimant.preparebountyclaim(claim_opts)
+        hex_claim = prep_claim.get("hex") or prep_claim.get("signed_hex")
+        if not hex_claim or not prep_claim.get("complete"):
+            raise AssertionError(f"preparebountyclaim: {prep_claim}")
+        assert_equal(prep_claim.get("selected_path"), "claim")
+        decoded = claimant.decoderawtransaction(hex_claim)
+        assert_equal(decoded["locktime"], 0)
+        self._submit_spend(claimant, "submitbountyclaim", hex_claim, funding_addr)
+        after = winner.getreceivedbyaddress(winner_addr)
+        expect = (PRINCIPAL - FEE) / 100_000_000
+        if abs(float(after) - float(before) - expect) > 1e-8:
+            raise AssertionError(
+                f"staged claim missing: before={before} after={after} expect_delta={expect}"
+            )
+
+        refund_h2 = node.getblockcount() + 5
+        refund_plan = {
+            "principal_atoms": str(PRINCIPAL),
+            "refund_key": refund_key,
+            "claimant_key": claimant_pk,
+            "hashlock_hex": hashlib.sha256(bytes.fromhex("a5" * 32)).hexdigest(),
+            "fee_reserve_atoms": str(FEE_RESERVE),
+            "fee_atoms": str(FEE),
+            "refund_height": refund_h2,
+            "mode": "STAGED_RELEASE",
+        }
+        refund_funded = self._fund_lot(funder, refund_plan, funding_addr)
+        refund_dest = funder.getnewaddress()
+        refund_opts = {
+            **refund_funded["plan"],
+            "outpoint": f"{refund_funded['txid']}:{refund_funded['vout']}",
+            "destination": refund_dest,
+            "fee_atoms": str(FEE),
+        }
+        self._assert_timelock_closed(funder, "preparebountyrefund", refund_opts)
+        while node.getblockcount() < refund_h2:
+            self.generatetoaddress(node, 1, funding_addr)
+        prep_refund = funder.preparebountyrefund(refund_opts)
+        hex_refund = prep_refund.get("hex") or prep_refund.get("signed_hex")
+        if not hex_refund or not prep_refund.get("complete"):
+            raise AssertionError(f"staged refund: {prep_refund}")
+        assert_equal(prep_refund.get("selected_path"), "refund")
+        before_refund = funder.getreceivedbyaddress(refund_dest)
+        self._submit_spend(funder, "submitbountyrefund", hex_refund, funding_addr)
+        after_refund = funder.getreceivedbyaddress(refund_dest)
+        if abs(float(after_refund) - float(before_refund) - expect) > 1e-8:
+            raise AssertionError(
+                f"staged HTLC refund missing: before={before_refund} after={after_refund}"
+            )
+
     def run_test(self):
         node = self.nodes[0]
         helptext = node.help()
@@ -235,6 +414,8 @@ class ModelnetBountyLifecycleTest(BitcoinTestFramework):
             "submitbountyaward",
             "preparebountyrefund",
             "submitbountyrefund",
+            "preparebountyclaim",
+            "submitbountyclaim",
         ):
             if name not in helptext:
                 raise SkipTest(f"{name} not compiled")
@@ -379,7 +560,11 @@ class ModelnetBountyLifecycleTest(BitcoinTestFramework):
             )
         assert_greater_than(float(after_refund), float(before_refund))
 
-        self.log.info("create/find/on-chain award+refund ok")
+        self._run_edge_cases(funder, council, winner, winner_addr, funding_addr,
+                             council_hex, refund_key)
+        self._run_staged_htlc(funder, winner, winner_addr, funding_addr, refund_key)
+
+        self.log.info("create/find/on-chain award+refund+staged-htlc+edges ok")
 
 
 if __name__ == "__main__":

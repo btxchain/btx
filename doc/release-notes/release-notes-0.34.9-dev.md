@@ -50,7 +50,7 @@ python3 contrib/modelnet/btx-model --help
 | **Checkout** | `exportmodelpath` rebuilds files under `checkout/<artifact>/` and hardlinks from `source_path` when SHA-384 still matches. |
 | **Load** | `loadmodel` inventories SafeTensors. Optional `BTX_MODEL_CUDA_LOADER --hold --smoke` keeps tensors resident. `unloadmodel` SIGTERMs that child only. Never a network inference server. |
 | **Generate** | `generatemodel` / `getmodelhostprofile`: GGUF + `BTX_LLAMA_CLI`, or allowlisted SafeTensors + `BTX_MODEL_GENERATE`. Unknown arch / pickle / missing adapter fail closed. CUDA smoke is **not** generate. [generate.md](../modelnet/generate.md). |
-| **Bounties** | Create → `searchbounties` find → fund a two-leaf CLTV+refund P2MR lot → complete **on-chain** with `preparebountyaward` after `award_height` or `preparebountyrefund` after `refund_height`. Helper `approvebountyaward` is not a spend. Unix RPC paths longer than `sockaddr_un.sun_path` hash to `/tmp/btx-md-<8hex>.sock`. Proof: `test/functional/feature_modelnet_bounty_lifecycle.py`. |
+| **Bounties / rewards / WRC** | Mining coinbase funds the lots. Bounty complete is an on-chain two-leaf P2MR spend: council CLTV after `award_height`, contributor `refund()` after `refund_height`, or staged SHA-256 `preparebountyclaim` via local `secret_ref`. Release-campaign / wBTX reuses `htlc_sha256` + `buildhtlcclaim` / `buildhtlcrefund`; mempool rejects refunds until locktime. Helper `approvebountyaward` is not a spend. Proofs: `feature_modelnet_bounty_lifecycle.py`, `wallet_modelnet_funding.py`, `wallet_htlc_atomicswap.py`. |
 | **Assumeutxo persist (#163)** | Pre-attestation historical hole bodies on the background chainstate can persist without GETMMATTEST. Issue **#163** is closed. |
 | **ExactReplay CPU oracle** | 0.34.8 strict-device CUDA left a digest mismatch retryable when no second GPU existed. 0.34.9 restores the 0.34.7 portable CPU ExactReplay confirmation: CUDA/Metal still serve honest headers; on mismatch, CPU ExactReplay confirms `InvalidConsensus` or recovers the header. CPU and device-oracle toy episodes must produce the same digest. |
 
@@ -81,9 +81,13 @@ python3 contrib/modelnet/btx-model --help
   Missing adapter / llama-cli is `NOT_RUN`, not a fake PASS.
 - Create → find → on-chain complete a bounty on isolated regtest (owned
   helper, `-modelbind=off`): `feature_modelnet_bounty_lifecycle.py --descriptors`.
-  Funding is a two-leaf CLTV+refund P2MR output. Completion is
-  `preparebountyaward` after `award_height` or `preparebountyrefund` after
-  `refund_height`. Helper `approvebountyaward` is not a spend.
+  Funding is a two-leaf P2MR output. Completion is
+  `preparebountyaward` after `award_height`, `preparebountyrefund` after
+  `refund_height`, or staged `preparebountyclaim` with a local `secret_ref`.
+  Helper `approvebountyaward` is not a spend. Release-campaign / wBTX HTLC
+  fund/claim/refund: `wallet_modelnet_funding.py --descriptors` and
+  `wallet_htlc_atomicswap.py --descriptors`. Lots are funded from mature
+  coinbase (mining rewards).
 
 Protocol: [registry-independence.md](../modelnet/registry-independence.md).
 Copy-paste use: [end-to-end.md](../modelnet/end-to-end.md).

@@ -578,6 +578,25 @@ BOOST_AUTO_TEST_CASE(bounty_script_001_to_020)
     BOOST_REQUIRE(BuildStagedHtlcDescriptor(later, err));
     BOOST_CHECK_NE(later.refund_height, eight.refund_height);
 
+    UniValue secret_wire(UniValue::VOBJ);
+    secret_wire.pushKV("principal_atoms", "1");
+    secret_wire.pushKV("preimage", "00");
+    BountyEscrowPlan badp;
+    BOOST_CHECK(!ParseBountyPlan(secret_wire, badp, err));
+    BOOST_CHECK(err.find("secret_ref") != std::string::npos);
+
+    const auto secret_path = m_path_root / "bounty-secret.hex";
+    {
+        std::ofstream out{secret_path};
+        BOOST_REQUIRE(out.good());
+        out << std::string(64, 'a');
+    }
+    std::vector<unsigned char> pre;
+    BOOST_REQUIRE(LoadBountySecretRef(fs::PathToString(secret_path), pre, err));
+    BOOST_CHECK_EQUAL(pre.size(), 32U);
+    BOOST_CHECK(!LoadBountySecretRef("../etc/passwd", pre, err));
+    BOOST_CHECK(!LoadBountySecretRef("os:keyring/x", pre, err));
+
     // BOUNTY-SCRIPT-011: bounty wallet path is SIGHASH_ALL only (see SignBountyTransaction).
     BOOST_CHECK_EQUAL(SIGHASH_ALL, 1);
     BOOST_CHECK((SIGHASH_ALL & SIGHASH_ANYONECANPAY) != SIGHASH_ALL);
