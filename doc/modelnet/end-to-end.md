@@ -125,7 +125,7 @@ is **not** generate. `trust_remote_code` stays **false**. Prompt ≤ 64 KiB;
 
 Full contract: [generate.md](generate.md).
 
-## 6. Bounties (inspect and draft; money is a later wallet step)
+## 6. Bounties (create, find, complete)
 
 Search and inspect **before** any spend:
 
@@ -147,6 +147,31 @@ contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
 contrib/modelnet/btx-model bounty-draft --update '<draft_id>' @./terms.json
 ```
 
+Create → find → complete on one node (wallet spends only at fund):
+
+```bash
+# complete BountyTerms object; title-only drafts will not publish
+btx-cli createbountydraft '{"terms": ...}'
+btx-cli publishbounty '{"draft_id":"<draft_id>"}'
+btx-cli searchbounties '{"text":"coding agent","scope":"LOCAL"}'
+# wallet: preparebountyfunding → inspect → signbountyfunding → submitbountyfunding
+# mine ≥ minimum_confirmations, then observebountychain with the real txid:vout
+btx-cli commitbountysubmission '{"bounty_id":"<id>","commitment":{"artifact_digest":"…"}}'
+btx-cli revealbountysubmission '{"commitment_id":"…","submission":{"artifact_dir":"/path"}}'
+btx-cli preparebountyevaluation '{"submission_id":"…","profile_id":"EXACT_CHECKS","required_files":["weights.bin"]}'
+btx-cli runbountyevaluation '{"plan_id":"…","execution_approval_ref":"operator"}'
+btx-cli publishbountyevaluation '{"job_id":"…"}'   # is_award=false
+btx-cli proposebountyaward '{"bounty_id":"<id>","submission_id":"…"}'   # paid=false
+btx-cli approvebountyaward '{"award_id":"…","decision":"APPROVE"}'      # no tx signature
+```
+
+`observebountychain` is operator-supplied: use the **mined funding
+outpoint**, not a placeholder. Helper approve is policy only. On-chain
+award is still `inspectbountyaward` → `signbountyaward` →
+`submitbountyaward` of a tx you built; there is no `preparebountyaward`
+auto-payout. Isolated-regtest proof:
+`test/functional/feature_modelnet_bounty_lifecycle.py`.
+
 Funding, award, and refund are ordinary wallet spends:
 `prepare` → `sign` → `submit`. The helper never auto-spends. The chain does
 **not** run the benchmark. Council M-of-N authorizes an award; each lot
@@ -165,8 +190,9 @@ doctor
   → link NAME.btx  |  share      magnet analog
   → get URI|.btx|NAME            FREE_ONLY retrieve (async on unix)
   → path → load → generate       local run if host profile matches
-  → bounty-draft / searchbounties
-  → (optional) wallet prepare/sign/submit for a campaign or bounty lot
+  → bounty-draft / publishbounty / searchbounties
+  → wallet prepare/sign/submit funding, observebountychain (real outpoint)
+  → commit/reveal → EXACT_CHECKS eval → propose/approve (no auto-spend)
 ```
 
 | Want | Command / RPC | Spends? |
@@ -180,7 +206,10 @@ doctor
 | GPU hold | `btx-model load` / `loadmodel` | no |
 | Tokens | `btx-model generate` / `generatemodel` | no |
 | Draft a bounty | `btx-model bounty-draft` / `createbountydraft` | no |
-| Fund / award | wallet `prepare*` / `sign*` / `submit*` | **yes**, only after you confirm |
+| Publish / find | `publishbounty` / `searchbounties` | no |
+| Fund a lot | wallet `preparebountyfunding` / `sign` / `submit` | **yes**, only after you confirm |
+| Complete (helper) | commit/reveal/eval/propose/approve | no auto-spend |
+| Award on chain | `inspectbountyaward` / `sign` / `submit` | **yes**, operator-built tx |
 
 ## Hard no
 

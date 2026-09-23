@@ -50,6 +50,7 @@ python3 contrib/modelnet/btx-model --help
 | **Checkout** | `exportmodelpath` rebuilds files under `checkout/<artifact>/` and hardlinks from `source_path` when SHA-384 still matches. |
 | **Load** | `loadmodel` inventories SafeTensors. Optional `BTX_MODEL_CUDA_LOADER --hold --smoke` keeps tensors resident. `unloadmodel` SIGTERMs that child only. Never a network inference server. |
 | **Generate** | `generatemodel` / `getmodelhostprofile`: GGUF + `BTX_LLAMA_CLI`, or allowlisted SafeTensors + `BTX_MODEL_GENERATE`. Unknown arch / pickle / missing adapter fail closed. CUDA smoke is **not** generate. [generate.md](../modelnet/generate.md). |
+| **Bounties** | Create → `searchbounties` find → fund with a real wallet tx → observe that outpoint → EXACT_CHECKS eval → propose/approve (no auto-spend). Unix RPC paths longer than `sockaddr_un.sun_path` hash to `/tmp/btx-md-<8hex>.sock` on both `btxd` and `btx-modeld`. Proof: `test/functional/feature_modelnet_bounty_lifecycle.py`. |
 | **Assumeutxo persist (#163)** | Pre-attestation historical hole bodies on the background chainstate can persist without GETMMATTEST. Issue **#163** is closed. |
 
 `automatic_spend_atoms` stays **0**. `execution_profile` stays **0**
@@ -77,6 +78,10 @@ python3 contrib/modelnet/btx-model --help
 - `getmodelhostprofile` then `generatemodel` on a complete replica that
   matches this host. Unknown architecture / pickle must fail closed.
   Missing adapter / llama-cli is `NOT_RUN`, not a fake PASS.
+- Create → find → complete a bounty on isolated regtest (owned helper,
+  `-modelbind=off`): `feature_modelnet_bounty_lifecycle.py --descriptors`.
+  `observebountychain` must use the mined funding outpoint. Helper
+  `approvebountyaward` is not `submitbountyaward`.
 
 Protocol: [registry-independence.md](../modelnet/registry-independence.md).
 Copy-paste use: [end-to-end.md](../modelnet/end-to-end.md).

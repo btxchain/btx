@@ -219,6 +219,13 @@ HelperStatus SnapshotManagedHelper()
 HelperSupervisor::HelperSupervisor(HelperLaunchConfig cfg, std::function<bool()> shutdown)
     : m_cfg(std::move(cfg)), m_shutdown(std::move(shutdown))
 {
+    const fs::path requested = m_cfg.rpc_socket;
+    m_cfg.rpc_socket = UnixRpcListenPath(requested);
+    if (m_cfg.rpc_socket != requested) {
+        LogPrintf("model helper: unix RPC path %s (%zu bytes) exceeds sockaddr_un.sun_path; using %s\n",
+                  fs::PathToString(requested), fs::PathToString(requested).size(),
+                  fs::PathToString(m_cfg.rpc_socket));
+    }
     m_st.enabled = true;
     m_st.state = HelperState::STARTING;
 }

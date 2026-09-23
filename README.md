@@ -228,9 +228,13 @@ contrib/modelnet/btx-model load NAME
 contrib/modelnet/btx-model generate NAME "Hello" --max-new-tokens 32
 contrib/modelnet/btx-model unload NAME
 
-# 6. Bounty draft (local, unpublished, never spends). Wallet prepare/sign/submit later.
+# 6. Bounty: draft locally, then publish / search / fund on the wallet path.
+# Isolated-regtest proof: test/functional/feature_modelnet_bounty_lifecycle.py
 contrib/modelnet/btx-model bounty-draft "coding agent"
 contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
+# createbountydraft → publishbounty → searchbounties → prepare/sign/submit
+# funding → observebountychain (real txid:vout) → commit/reveal/eval/approve
+# Helper approve is not a chain spend. automatic_spend_atoms stays 0.
 ```
 
 `--fits` is remaining **storage** quota, not RAM/VRAM. Unknown architecture

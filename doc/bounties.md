@@ -23,8 +23,12 @@ contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
 ```
 
 `--validate` is a checklist (`validatebountyterms`). Publishing signed terms
-and funding a lot are later **prepare → sign → submit** wallet steps. The
-helper never auto-spends. Agents stay on `searchbounties` / `getbounty` /
+does not spend. Funding a lot is **prepare → sign → submit**. Observe the
+**real** funding outpoint (`observebountychain`), then commit/reveal,
+`EXACT_CHECKS` eval, propose/approve. Helper approve is not a transaction
+signature. Isolated-regtest proof:
+`test/functional/feature_modelnet_bounty_lifecycle.py`. The helper never
+auto-spends. Agents stay on `searchbounties` / `getbounty` /
 `getbountyeconomy` until the operator (or a finite mandate) covers funding.
 
 ## Lifecycle

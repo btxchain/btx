@@ -114,6 +114,16 @@ bool LoadPq1Identity(Pq1Context& pq, const fs::path& modeldir, std::string& err)
 
 int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop = nullptr);
 
+/**
+ * Listen/connect path for helper unix RPC.
+ *
+ * Linux sockaddr_un.sun_path is 108 bytes. Datadir sockets under a long
+ * tmpdir/regtest path exceed that; ListenUnix used to hash to
+ * /tmp/btx-md-<sha256[:8]>.sock while btxd still connected to the original
+ * path ("helper not ready"). Both sides must use this mapping.
+ */
+fs::path UnixRpcListenPath(const fs::path& requested);
+
 bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err);
 
 /** Ordinary unix RPC replies: 120s. Long methods (import/host/get/wait/scan) keep 24h. */

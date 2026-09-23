@@ -55,6 +55,7 @@
 #include <random.h>
 #include <span.h>
 #include <tinyformat.h>
+#include <logging.h>
 #include <netaddress.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
@@ -100,6 +101,20 @@
 #include <vector>
 
 namespace modelnet {
+
+fs::path UnixRpcListenPath(const fs::path& requested)
+{
+#ifndef WIN32
+    const std::string p = fs::PathToString(requested);
+    if (p.size() >= sizeof(sockaddr_un::sun_path)) {
+        unsigned char digest[32];
+        CSHA256().Write(UCharCast(p.data()), p.size()).Finalize(digest);
+        return fs::PathFromString(strprintf("/tmp/btx-md-%s.sock", HexStr(std::vector<unsigned char>(digest, digest + 8))));
+    }
+#endif
+    return requested;
+}
+
 namespace {
 
 constexpr size_t MAX_HTTP_HEADERS = PQ1_HTTP_HEADER_CAP;
@@ -1130,14 +1145,12 @@ int ListenTcp(const std::string& bind, std::string& err)
 
 int ListenUnix(fs::path& path, std::string& err)
 {
+    const fs::path requested = path;
+    path = UnixRpcListenPath(requested);
     std::string p = fs::PathToString(path);
-    if (p.size() >= sizeof(sockaddr_un::sun_path)) {
-        unsigned char digest[32];
-        CSHA256()
-            .Write(UCharCast(p.data()), p.size())
-            .Finalize(digest);
-        p = strprintf("/tmp/btx-md-%s.sock", HexStr(std::vector<unsigned char>(digest, digest + 8)));
-        path = fs::PathFromString(p);
+    if (path != requested) {
+        LogPrintf("btx-modeld: unix RPC path length %zu exceeds sockaddr_un.sun_path; listening at %s\n",
+                  fs::PathToString(requested).size(), p);
     }
     ::unlink(p.c_str());
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -9580,7 +9593,7 @@ bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const U
     }
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    const std::string p = fs::PathToString(socket_path);
+    const std::string p = fs::PathToString(UnixRpcListenPath(socket_path));
     if (p.size() >= sizeof(addr.sun_path)) {
         err = "unix path too long";
         close(fd);
