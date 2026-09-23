@@ -23,9 +23,11 @@ contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
 ```
 
 `--validate` is a checklist (`validatebountyterms`). Publishing signed terms
-does not spend. Funding a lot is **prepare → sign → submit**. Observe the
-**real** funding outpoint (`observebountychain`), then commit/reveal,
-`EXACT_CHECKS` eval, propose/approve. Helper approve is not a transaction
+does not spend. Funding a lot is **prepare → sign → submit**. After the
+**real** funding outpoint is mined, completion is an on-chain CLTV spend of
+that two-leaf escrow: `preparebountyaward` after `award_height`, or
+`preparebountyrefund` after `refund_height` if the lot is still unspent.
+Helper `approvebountyaward` is policy only and is not a transaction
 signature. Isolated-regtest proof:
 `test/functional/feature_modelnet_bounty_lifecycle.py`. The helper never
 auto-spends. Agents stay on `searchbounties` / `getbounty` /
@@ -55,10 +57,11 @@ Requester                          Contributors / creators
  challenges (optional) ──► council policy approve award
     |
     v
- wallet: council sign/submit award ──► public payout or staged HTLC
+ wallet: preparebountyaward / submitbountyaward after award_height
+         (CLTV council leaf; helper approve is not this spend)
     |
-    +──► contributor refund path after refund_height if lot still unspent
-    +──► swarm distribution of released model bytes (existing model network)
+    +──► preparebountyrefund / submitbountyrefund after refund_height
+         if the lot is still unspent (contributor key only)
 ```
 
 Coordination states (`OPEN`, funding progress, submission windows) are helper

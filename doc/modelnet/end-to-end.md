@@ -147,7 +147,7 @@ contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
 contrib/modelnet/btx-model bounty-draft --update '<draft_id>' @./terms.json
 ```
 
-Create → find → complete on one node (wallet spends only at fund):
+Create → find → on-chain complete (wallet spends at fund, award, and refund):
 
 ```bash
 # complete BountyTerms object; title-only drafts will not publish
@@ -155,21 +155,17 @@ btx-cli createbountydraft '{"terms": ...}'
 btx-cli publishbounty '{"draft_id":"<draft_id>"}'
 btx-cli searchbounties '{"text":"coding agent","scope":"LOCAL"}'
 # wallet: preparebountyfunding → inspect → signbountyfunding → submitbountyfunding
-# mine ≥ minimum_confirmations, then observebountychain with the real txid:vout
-btx-cli commitbountysubmission '{"bounty_id":"<id>","commitment":{"artifact_digest":"…"}}'
-btx-cli revealbountysubmission '{"commitment_id":"…","submission":{"artifact_dir":"/path"}}'
-btx-cli preparebountyevaluation '{"submission_id":"…","profile_id":"EXACT_CHECKS","required_files":["weights.bin"]}'
-btx-cli runbountyevaluation '{"plan_id":"…","execution_approval_ref":"operator"}'
-btx-cli publishbountyevaluation '{"job_id":"…"}'   # is_award=false
-btx-cli proposebountyaward '{"bounty_id":"<id>","submission_id":"…"}'   # paid=false
-btx-cli approvebountyaward '{"award_id":"…","decision":"APPROVE"}'      # no tx signature
+# mine past award_height, then council:
+btx-cli preparebountyaward '{"outpoint":"<txid>:<vout>","destination":"<winner>","award_height":…,"refund_height":…,"council_keys":[…],"threshold":2,"refund_key":"…","principal_atoms":"…"}'
+btx-cli inspectbountyaward '{"hex":"<signed>"}'
+btx-cli submitbountyaward '{"hex":"<signed>"}'
+# if the lot is still unspent after refund_height, contributor only:
+btx-cli preparebountyrefund '{"outpoint":"<txid>:<vout>","destination":"<refund_addr>",…}'
+btx-cli submitbountyrefund '{"hex":"<signed>"}'
 ```
 
-`observebountychain` is operator-supplied: use the **mined funding
-outpoint**, not a placeholder. Helper approve is policy only. On-chain
-award is still `inspectbountyaward` → `signbountyaward` →
-`submitbountyaward` of a tx you built; there is no `preparebountyaward`
-auto-payout. Isolated-regtest proof:
+Helper `proposebountyaward` / `approvebountyaward` is policy, not money.
+`observebountychain` is watch-only. Isolated-regtest proof:
 `test/functional/feature_modelnet_bounty_lifecycle.py`.
 
 Funding, award, and refund are ordinary wallet spends:
@@ -191,8 +187,9 @@ doctor
   → get URI|.btx|NAME            FREE_ONLY retrieve (async on unix)
   → path → load → generate       local run if host profile matches
   → bounty-draft / publishbounty / searchbounties
-  → wallet prepare/sign/submit funding, observebountychain (real outpoint)
-  → commit/reveal → EXACT_CHECKS eval → propose/approve (no auto-spend)
+  → wallet prepare/sign/submit funding (two-leaf CLTV+refund)
+  → mine past award_height → preparebountyaward → submitbountyaward
+  → or, if unspent past refund_height → preparebountyrefund → submitbountyrefund
 ```
 
 | Want | Command / RPC | Spends? |
@@ -208,8 +205,8 @@ doctor
 | Draft a bounty | `btx-model bounty-draft` / `createbountydraft` | no |
 | Publish / find | `publishbounty` / `searchbounties` | no |
 | Fund a lot | wallet `preparebountyfunding` / `sign` / `submit` | **yes**, only after you confirm |
-| Complete (helper) | commit/reveal/eval/propose/approve | no auto-spend |
-| Award on chain | `inspectbountyaward` / `sign` / `submit` | **yes**, operator-built tx |
+| Award after locktime | `preparebountyaward` / `inspectbountyaward` / `submitbountyaward` | **yes**, CLTV council leaf |
+| Refund after locktime | `preparebountyrefund` / `submitbountyrefund` | **yes**, contributor `refund()` leaf; no council |
 
 ## Hard no
 

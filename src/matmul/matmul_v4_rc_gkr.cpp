@@ -5175,11 +5175,12 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
             if (!header.matmul_digest.IsNull() &&
                 acceleration.require_device &&
                 acceleration_stats.device_calls != 0) {
-                // A sole device disagreement cannot create a peer-invalid
-                // verdict or quarantine a healthy provider. The strict outer
-                // adjudicator may ask a different qualified failure domain;
-                // without one, this block remains retryable and the provider
-                // remains in service for other headers.
+                // Single-provider strict replay still does not CPU-confirm
+                // here: that would skip independently canaried GPU
+                // alternates. VerifyStrictWithAlternates tries those first,
+                // then confirms with portable CPU ExactReplay (the 0.34.7
+                // oracle) so a CUDA-only node cannot leave a false header
+                // retryable forever.
                 out.outcome =
                     ExactReplayVerifyOutcome::LocalAcceleratorFailure;
                 out.failure_kind =
@@ -5188,7 +5189,7 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
                 out.acceleration_failure =
                     "device_digest_mismatch_unconfirmed";
                 out.note =
-                    "ExactReplay: device digest mismatch; portable retry disabled in strict mode";
+                    "ExactReplay: device digest mismatch; awaiting independent provider or portable CPU ExactReplay";
             } else {
                 out.outcome =
                     ExactReplayVerifyOutcome::InvalidConsensus;
@@ -5589,15 +5590,91 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
         result.provider_quarantined = false;
         result.quarantined_provider.clear();
         result.provider_health_reason.clear();
+
+        // 0.34.7 portable oracle. Strict-device CUDA must not leave a digest
+        // mismatch retryable forever: CPU ExactReplay is the same consensus
+        // algorithm, not a lesser path. Production CUDA-only nodes otherwise
+        // never confirm a false header (competing-branch ExactReplay mismatch
+        // stayed LocalAcceleratorFailure with no independent provider).
+        RCExactReplayAccelerationStats cpu_stats;
+        RCExactReplayAcceleration cpu;
+        cpu.backend = "cpu_device_mismatch_retry";
+        cpu.require_device = false;
+        cpu.output_row_tile = 0;
+        cpu.stats = &cpu_stats;
+        const uint256 cpu_digest{
+            RecomputeResidentCurriculumAccelerated(
+                header, params, height, {}, nullptr, nullptr, cpu)};
+        aggregate_cpu_calls += cpu_stats.cpu_calls;
+        aggregate_cpu_fallbacks += cpu_stats.cpu_fallbacks;
+        result.device_mismatch_retried = true;
+
+        const auto finish_cpu_adjudication =
+            [&](ExactReplayVerifyResult& out) {
+                apply_aggregate(out);
+                out.fully_accelerated = false;
+                out.full_metal_pipeline = false;
+            };
+
+        if (!cpu_digest.IsNull() && cpu_digest == header.matmul_digest) {
+            if (target && UintToArith256(cpu_digest) > *target) {
+                result.ok = false;
+                result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
+                result.failure_kind = RCExactReplayFailureKind::None;
+                result.digest = cpu_digest;
+                result.adjudication =
+                    RCExactReplayAdjudication::IndependentHeaderRecovered;
+                result.adjudicating_provider = cpu.backend;
+                result.acceleration_failure.clear();
+                result.note =
+                    "ExactReplay: portable CPU ExactReplay reproduced the header digest over target";
+                finish_cpu_adjudication(result);
+                return result;
+            }
+            result.ok = true;
+            result.outcome = ExactReplayVerifyOutcome::Valid;
+            result.failure_kind = RCExactReplayFailureKind::None;
+            result.digest = cpu_digest;
+            result.adjudication =
+                RCExactReplayAdjudication::IndependentHeaderRecovered;
+            result.adjudicating_provider = cpu.backend;
+            result.acceleration_failure =
+                "device_digest_mismatch_cpu_recovered";
+            result.note =
+                "ExactReplay: header commitment reproduced by portable CPU ExactReplay";
+            finish_cpu_adjudication(result);
+            return result;
+        }
+
+        if (!cpu_digest.IsNull()) {
+            for (const auto& mismatch : mismatches) {
+                if (cpu_digest != mismatch.result.digest) {
+                    continue;
+                }
+                result.ok = false;
+                result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
+                result.failure_kind = RCExactReplayFailureKind::None;
+                result.digest = cpu_digest;
+                result.device_mismatch_confirmed = true;
+                result.adjudication =
+                    RCExactReplayAdjudication::IndependentDigestConfirmed;
+                result.adjudicating_provider = cpu.backend;
+                result.acceleration_failure.clear();
+                result.operator_recovery.clear();
+                result.note =
+                    "ExactReplay: digest mismatch confirmed by portable CPU ExactReplay";
+                finish_cpu_adjudication(result);
+                return result;
+            }
+        }
+
         result.operator_recovery =
-            "configure another independently qualified provider/device or repair the unavailable alternate; the current provider remains available";
-        result.adjudication = independent_attempts == 0
-            ? RCExactReplayAdjudication::NoIndependentProvider
-            : RCExactReplayAdjudication::IndependentProvidersInconclusive;
-        result.note = independent_attempts == 0
-            ? "ExactReplay: unconfirmed digest mismatch; no independent provider, block remains retryable"
-            : "ExactReplay: independent providers disagreed; block remains retryable";
-        apply_aggregate(result);
+            "portable CPU ExactReplay did not confirm the device digest or the header; retry after another qualified provider is available";
+        result.adjudication =
+            RCExactReplayAdjudication::IndependentProvidersInconclusive;
+        result.note =
+            "ExactReplay: portable CPU ExactReplay inconclusive; block remains retryable";
+        finish_cpu_adjudication(result);
         return result;
     }
 

@@ -691,6 +691,8 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_modelnet_methods)
     BOOST_CHECK(RPCConvertValues("removemodelrule", {"3"})[0].isNum());
     BOOST_CHECK(RPCConvertValues("inspectbountytransaction", {"{}"})[0].isObject());
     BOOST_CHECK(RPCConvertValues("preparebountyclaim", {"{}"})[0].isObject());
+    BOOST_CHECK(RPCConvertValues("preparebountyaward", {"{}"})[0].isObject());
+    BOOST_CHECK(RPCConvertValues("inspectbountyaward", {"{}"})[0].isObject());
     BOOST_CHECK(RPCConvertValues("preparebountyrefund", {"{}"})[0].isObject());
     BOOST_CHECK(RPCConvertValues("signbountyfunding", {"{}"})[0].isObject());
 }

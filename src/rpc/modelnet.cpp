@@ -1734,34 +1734,6 @@ static RPCHelpMan signbountyfunding()
     };
 }
 
-static RPCHelpMan NamedBountyInspect(const std::string& name)
-{
-    return RPCHelpMan{
-        name,
-        "No signing. Recompute inputs, principal, output keys, exact tree, fees and deadlines.\n",
-        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + hex", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
-        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "inspection"}}},
-        RPCExamples{HelpExampleCli(name, "'{}'")},
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
-            (void)self;
-#ifdef ENABLE_WALLET
-            std::string err;
-            wallet::BountyEscrowPlan plan;
-            const UniValue& o = request.params[0];
-            if (!wallet::ParseBountyPlan(o, plan, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
-            CMutableTransaction tx;
-            const std::string hex = o.exists("hex") ? o["hex"].get_str() : plan.unsigned_hex;
-            if (!wallet::DecodeFundingTxHex(hex, tx, err)) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, err);
-            UniValue out;
-            if (!wallet::InspectBountyTransaction(plan, tx, out, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
-            return out;
-#else
-            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
-#endif
-        },
-    };
-}
-
 static RPCHelpMan NamedBountySign(const std::string& name)
 {
     return RPCHelpMan{
@@ -1829,8 +1801,123 @@ static RPCHelpMan NamedBountySubmit(const std::string& name)
 }
 
 static RPCHelpMan submitbountyfunding() { return NamedBountySubmit("submitbountyfunding"); }
-static RPCHelpMan inspectbountyaward() { return NamedBountyInspect("inspectbountyaward"); }
-static RPCHelpMan signbountyaward() { return NamedBountySign("signbountyaward"); }
+
+#ifdef ENABLE_WALLET
+static UniValue PrepareBountyLeafRpc(const JSONRPCRequest& request, wallet::BountySpendPath path)
+{
+    std::string err;
+    wallet::BountyEscrowPlan plan;
+    if (!wallet::ParseBountyPlan(request.params[0], plan, err)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+    }
+    if (plan.destination.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "destination is required");
+    }
+    if (plan.prev_vout < 0 || plan.prev_txid.IsNull()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "funding outpoint is required (outpoint or prevout.txid/vout)");
+    }
+    auto pwallet = WalletForModelFunding(request);
+    if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, path, err)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, err);
+    }
+    return wallet::BountyPlanToJson(plan);
+}
+
+static UniValue InspectBountyLeafRpc(const JSONRPCRequest& request)
+{
+    std::string err;
+    wallet::BountyEscrowPlan plan;
+    const UniValue& o = request.params[0];
+    if (!wallet::ParseBountyPlan(o, plan, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+    CMutableTransaction tx;
+    const std::string hex = o.exists("hex") ? o["hex"].get_str() :
+                            (!plan.signed_hex.empty() ? plan.signed_hex : plan.unsigned_hex);
+    if (!wallet::DecodeFundingTxHex(hex, tx, err)) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, err);
+    UniValue out;
+    if (!wallet::InspectBountySpend(plan, tx, out, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+    return out;
+}
+
+static UniValue SignBountyLeafRpc(const JSONRPCRequest& request, wallet::BountySpendPath path)
+{
+    std::string err;
+    wallet::BountyEscrowPlan plan;
+    const UniValue& o = request.params[0];
+    if (!wallet::ParseBountyPlan(o, plan, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+    const std::string hex = o.exists("hex") ? o["hex"].get_str() :
+                            (!plan.signed_hex.empty() ? plan.signed_hex : plan.unsigned_hex);
+    if (!hex.empty()) {
+        CMutableTransaction tx;
+        if (wallet::DecodeFundingTxHex(hex, tx, err) && tx.vin.size() == 1 && !tx.vin[0].scriptWitness.IsNull()) {
+            UniValue insp;
+            if (!wallet::InspectBountySpend(plan, tx, insp, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            UniValue out = wallet::BountyPlanToJson(plan);
+            out.pushKV("hex", hex);
+            out.pushKV("txid", tx.GetHash().GetHex());
+            out.pushKV("complete", true);
+            return out;
+        }
+    }
+    auto pwallet = WalletForModelFunding(request);
+    if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, path, err)) throw JSONRPCError(RPC_WALLET_ERROR, err);
+    return wallet::BountyPlanToJson(plan);
+}
+#endif
+
+static RPCHelpMan preparebountyaward()
+{
+    return RPCHelpMan{
+        "preparebountyaward",
+        "Spend the funded two-leaf escrow via the CLTV council leaf after award_height. Helper policy is not a spend. automatic_spend_atoms stays 0.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + outpoint + destination", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed spend"}}},
+        RPCExamples{HelpExampleCli("preparebountyaward", "'{}'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+#ifdef ENABLE_WALLET
+            return PrepareBountyLeafRpc(request, wallet::BountySpendPath::AWARD);
+#else
+            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
+#endif
+        },
+    };
+}
+static RPCHelpMan inspectbountyaward()
+{
+    return RPCHelpMan{
+        "inspectbountyaward",
+        "No signing. Recompute locktime, sequence, prevout, destination and principal of a council CLTV spend.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + hex", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "inspection"}}},
+        RPCExamples{HelpExampleCli("inspectbountyaward", "'{}'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+#ifdef ENABLE_WALLET
+            return InspectBountyLeafRpc(request);
+#else
+            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
+#endif
+        },
+    };
+}
+static RPCHelpMan signbountyaward()
+{
+    return RPCHelpMan{
+        "signbountyaward",
+        "SIGHASH_ALL CLTV council spend of the funded escrow. Exact inspected fingerprint. No implicit ANYONECANPAY.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + outpoint + destination", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed"}}},
+        RPCExamples{HelpExampleCli("signbountyaward", "'{}'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+#ifdef ENABLE_WALLET
+            return SignBountyLeafRpc(request, wallet::BountySpendPath::AWARD);
+#else
+            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
+#endif
+        },
+    };
+}
 static RPCHelpMan submitbountyaward() { return NamedBountySubmit("submitbountyaward"); }
 static RPCHelpMan preparebountyclaim()
 {
@@ -1864,29 +1951,38 @@ static RPCHelpMan preparebountyrefund()
 {
     return RPCHelpMan{
         "preparebountyrefund",
-        "Prepare contributor refund after maturity. Council/helper may be offline.\n",
-        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "owned lots", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
-        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "plan"}}},
+        "Spend the funded two-leaf escrow via the contributor refund() leaf after refund_height. Council and helper may be offline.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + outpoint + destination", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed spend"}}},
         RPCExamples{HelpExampleCli("preparebountyrefund", "'{}'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
 #ifdef ENABLE_WALLET
-            std::string err;
-            wallet::BountyEscrowPlan plan;
-            if (!wallet::ParseBountyPlan(request.params[0], plan, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
-            if (plan.principal_atoms <= 0 || plan.refund_key.empty()) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "principal_atoms and refund_key are required from the user");
-            }
-            auto pwallet = WalletForModelFunding(request);
-            if (!wallet::PrepareBountyFunding(*pwallet, plan, err)) throw JSONRPCError(RPC_WALLET_ERROR, err);
-            return wallet::BountyPlanToJson(plan);
+            return PrepareBountyLeafRpc(request, wallet::BountySpendPath::REFUND);
 #else
             throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
 #endif
         },
     };
 }
-static RPCHelpMan signbountyrefund() { return NamedBountySign("signbountyrefund"); }
+static RPCHelpMan signbountyrefund()
+{
+    return RPCHelpMan{
+        "signbountyrefund",
+        "SIGHASH_ALL contributor refund spend after refund_height. Council/helper may be offline.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + outpoint + destination", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed"}}},
+        RPCExamples{HelpExampleCli("signbountyrefund", "'{}'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+#ifdef ENABLE_WALLET
+            return SignBountyLeafRpc(request, wallet::BountySpendPath::REFUND);
+#else
+            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
+#endif
+        },
+    };
+}
 static RPCHelpMan submitbountyrefund() { return NamedBountySubmit("submitbountyrefund"); }
 
 void RegisterModelNetRPCCommands(CRPCTable& t)
@@ -2185,6 +2281,7 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &inspectbountytransaction},
         {"modelnet", &signbountyfunding},
         {"modelnet", &submitbountyfunding},
+        {"modelnet", &preparebountyaward},
         {"modelnet", &inspectbountyaward},
         {"modelnet", &signbountyaward},
         {"modelnet", &submitbountyaward},

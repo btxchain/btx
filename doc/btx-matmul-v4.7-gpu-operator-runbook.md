@@ -215,22 +215,36 @@ trusted-mirror authority as hardware lifecycle evidence.
 ## Device mismatch or provider failure
 
 A first strict device digest mismatch is classified
-`LocalAcceleratorFailure` / `unconfirmed-digest-mismatch`. The node does not
-produce a consensus-invalid verdict, punish the peer, cache a negative result,
-or quarantine the provider merely because it disagreed with an untrusted
-header commitment.
+`LocalAcceleratorFailure` / `unconfirmed-digest-mismatch` at the single-provider
+layer. That layer does not punish the peer or quarantine the GPU merely because
+it disagreed with an untrusted header.
+
+The strict adjudicator then tries independently canaried GPU providers. If
+those are absent or inconclusive, it confirms with **portable CPU ExactReplay**
+(the 0.34.7 / pre-CUDA oracle). CUDA is an accelerator, not a separate
+consensus algorithm:
+
+- CPU digest equals the header → `Valid` (`IndependentHeaderRecovered`).
+- CPU digest equals the device digest and not the header → `InvalidConsensus`
+  (`IndependentDigestConfirmed`). The GPU stays in service; a false header must
+  not quarantine a healthy device.
+- CPU digest is null or disagrees with both → still retryable.
+
+Do not leave a CUDA-only mismatch retryable forever. That was a 0.34.8
+regression: a competing-branch false digest stayed `outcome=2` with
+"no independent provider" even when CPU and CUDA both computed the same honest
+digest.
 
 If a different, independently canaried backend execution identity computes the
 same non-header digest, the header is `InvalidConsensus` and both healthy
 providers remain available. If the alternate reproduces the header, only the
-faulty provider is quarantined. If no independent provider exists, the block
-remains retryable in an explicit degraded state and the sole provider continues
-serving other headers.
+faulty provider is quarantined.
 
 Recovery:
 
-1. Preserve the block as pending/retryable.
-2. Pause local mining and inspect the accelerator/driver.
+1. A CPU-confirmed false header is consensus-invalid; do not keep it pending.
+2. Pause local mining and inspect the accelerator/driver only when CPU recovered
+   an honest header that the device missed, or when CPU was inconclusive.
 3. Repair or reset the device.
 4. Retry on an independently canaried provider/device when registered. A
    process restart by itself is not independent mismatch evidence.
@@ -238,14 +252,11 @@ Recovery:
 6. Wait for qualification/canary completion and confirm clean telemetry before
    resuming service advertisement.
 
-Do not use automatic CPU replay as an inline remedy. CPU diagnostic replay is
-an operator-initiated dispute tool only. The bounded registry and deterministic
-adjudication are present, but production alternates are not registered until
-each independently addressable device/provider has its own exact production
-canary, opaque process capability, and resolver-bound physical-device execution
-identity. Until that binding exists, production independence returns false;
-free-form labels or thin callback wrappers cannot confirm a peer-invalid
-verdict.
+Automatic CPU ExactReplay on mismatch is the portable confirmation path, not an
+operator-initiated dispute tool. It does not run on every honest header (CUDA
+still serves those at device speed). Production independence still requires a
+canary-bound capability for a second GPU; free-form labels cannot stand in for
+that. Until a second GPU exists, the CPU oracle is the independent confirmation.
 
 ## Daemon lifecycle
 

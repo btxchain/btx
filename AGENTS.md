@@ -210,9 +210,12 @@ watchbounty(bounty_id)
 ```
 
 Award / claim / refund use the same prepare → inspect → sign → submit split
-(`proposebountyaward` / `approvebountyaward` / `signbountyaward` / `submitbountyaward`,
-`preparebountyclaim`, `preparebountyrefund`). Helper drafts; wallet validates the
-full tree, amounts, refund keys, network, and fees independently.
+(`preparebountyaward` / `inspectbountyaward` / `signbountyaward` / `submitbountyaward`
+after `award_height`; `preparebountyrefund` after `refund_height`; staged
+`preparebountyclaim`). Helper `proposebountyaward` / `approvebountyaward` is
+policy only, not a spend. The funded output is
+`mr(cltv_multi_pq(...),refund(...))`. Wallet validates the full tree, amounts,
+refund keys, network, and fees independently.
 
 ## Economy facts
 

@@ -50,8 +50,9 @@ python3 contrib/modelnet/btx-model --help
 | **Checkout** | `exportmodelpath` rebuilds files under `checkout/<artifact>/` and hardlinks from `source_path` when SHA-384 still matches. |
 | **Load** | `loadmodel` inventories SafeTensors. Optional `BTX_MODEL_CUDA_LOADER --hold --smoke` keeps tensors resident. `unloadmodel` SIGTERMs that child only. Never a network inference server. |
 | **Generate** | `generatemodel` / `getmodelhostprofile`: GGUF + `BTX_LLAMA_CLI`, or allowlisted SafeTensors + `BTX_MODEL_GENERATE`. Unknown arch / pickle / missing adapter fail closed. CUDA smoke is **not** generate. [generate.md](../modelnet/generate.md). |
-| **Bounties** | Create → `searchbounties` find → fund with a real wallet tx → observe that outpoint → EXACT_CHECKS eval → propose/approve (no auto-spend). Unix RPC paths longer than `sockaddr_un.sun_path` hash to `/tmp/btx-md-<8hex>.sock` on both `btxd` and `btx-modeld`. Proof: `test/functional/feature_modelnet_bounty_lifecycle.py`. |
+| **Bounties** | Create → `searchbounties` find → fund a two-leaf CLTV+refund P2MR lot → complete **on-chain** with `preparebountyaward` after `award_height` or `preparebountyrefund` after `refund_height`. Helper `approvebountyaward` is not a spend. Unix RPC paths longer than `sockaddr_un.sun_path` hash to `/tmp/btx-md-<8hex>.sock`. Proof: `test/functional/feature_modelnet_bounty_lifecycle.py`. |
 | **Assumeutxo persist (#163)** | Pre-attestation historical hole bodies on the background chainstate can persist without GETMMATTEST. Issue **#163** is closed. |
+| **ExactReplay CPU oracle** | 0.34.8 strict-device CUDA left a digest mismatch retryable when no second GPU existed. 0.34.9 restores the 0.34.7 portable CPU ExactReplay confirmation: CUDA/Metal still serve honest headers; on mismatch, CPU ExactReplay confirms `InvalidConsensus` or recovers the header. CPU and device-oracle toy episodes must produce the same digest. |
 
 `automatic_spend_atoms` stays **0**. `execution_profile` stays **0**
 (unqualified). `trust_remote_code` stays **false**. `inference=false` and
@@ -78,10 +79,11 @@ python3 contrib/modelnet/btx-model --help
 - `getmodelhostprofile` then `generatemodel` on a complete replica that
   matches this host. Unknown architecture / pickle must fail closed.
   Missing adapter / llama-cli is `NOT_RUN`, not a fake PASS.
-- Create → find → complete a bounty on isolated regtest (owned helper,
-  `-modelbind=off`): `feature_modelnet_bounty_lifecycle.py --descriptors`.
-  `observebountychain` must use the mined funding outpoint. Helper
-  `approvebountyaward` is not `submitbountyaward`.
+- Create → find → on-chain complete a bounty on isolated regtest (owned
+  helper, `-modelbind=off`): `feature_modelnet_bounty_lifecycle.py --descriptors`.
+  Funding is a two-leaf CLTV+refund P2MR output. Completion is
+  `preparebountyaward` after `award_height` or `preparebountyrefund` after
+  `refund_height`. Helper `approvebountyaward` is not a spend.
 
 Protocol: [registry-independence.md](../modelnet/registry-independence.md).
 Copy-paste use: [end-to-end.md](../modelnet/end-to-end.md).

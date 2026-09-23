@@ -23,7 +23,7 @@ Overview: [bounties.md](bounties.md). Model-plane baseline RPCs:
 
 ## Catalog (`rpc-catalog.json`)
 
-60 methods: `searchbounties, getmodelbounties, getmodelfeed, gettrendingmodels, getbounty, getbountyeconomy, getbountyterms, getmodeleconomyentry, getmodeldirectoryentry, getbountycapabilities, createbountydraft, validatebountyterms, publishbounty, revisebounty, nominatebountyevaluator, acceptbountyappointment, listbountyevaluators, pledgebounty, withdrawbountypledge, freezebountyfundinground, preparebountyfunding, inspectbountytransaction, signbountyfunding, submitbountyfunding, getbountyfunding, exportbountyrecovery, commitbountysubmission, revealbountysubmission, getbountysubmission, listbountysubmissions, withdrawbountysubmission, preparebountyevaluation, runbountyevaluation, getbountyevaluationjob, cancelbountyevaluation, publishbountyevaluation, listbountyevaluations, createbountychallenge, listbountychallenges, resolvebountychallenge, proposebountyaward, inspectbountyaward, approvebountyaward, signbountyaward, submitbountyaward, getbountyaward, preparebountyclaim, signbountyclaim, submitbountyclaim, preparebountyrefund, signbountyrefund, submitbountyrefund, getbountyevents, watchbounty, unwatchbounty, getagentmandate, createagentmandate, revokeagentmandate, getagentactivity, importbountyrecovery`.
+61 methods: `searchbounties, getmodelbounties, getmodelfeed, gettrendingmodels, getbounty, getbountyeconomy, getbountyterms, getmodeleconomyentry, getmodeldirectoryentry, getbountycapabilities, createbountydraft, validatebountyterms, publishbounty, revisebounty, nominatebountyevaluator, acceptbountyappointment, listbountyevaluators, pledgebounty, withdrawbountypledge, freezebountyfundinground, preparebountyfunding, inspectbountytransaction, signbountyfunding, submitbountyfunding, getbountyfunding, exportbountyrecovery, commitbountysubmission, revealbountysubmission, getbountysubmission, listbountysubmissions, withdrawbountysubmission, preparebountyevaluation, runbountyevaluation, getbountyevaluationjob, cancelbountyevaluation, publishbountyevaluation, listbountyevaluations, createbountychallenge, listbountychallenges, resolvebountychallenge, proposebountyaward, preparebountyaward, inspectbountyaward, approvebountyaward, signbountyaward, submitbountyaward, getbountyaward, preparebountyclaim, signbountyclaim, submitbountyclaim, preparebountyrefund, signbountyrefund, submitbountyrefund, getbountyevents, watchbounty, unwatchbounty, getagentmandate, createagentmandate, revokeagentmandate, getagentactivity, importbountyrecovery`.
 
 ## Method reference
 
@@ -504,6 +504,23 @@ Role: **COUNCIL_POLICY_APPROVER** · Process boundary: **WALLET+MODEL** · Effec
 Result: `AwardProposal`.
 Complete transaction binding; no payment yet.
 
+## `preparebountyaward`
+Role: **COUNCIL_TX_SIGNER** · Process boundary: **WALLET** · Effect: **PREPARE**
+
+| Argument | Contract |
+|---|---|
+| `outpoint` | funded lot `txid:vout` |
+| `destination` | winner address |
+| `award_height` | CLTV height on the council leaf |
+| `council_keys` | exact council pubkeys |
+| `threshold` | m |
+| `refund_key` | contributor refund pubkey used at funding |
+| `principal_atoms` | exact escrow value |
+| `fee_atoms` | absolute spend fee |
+
+Result: signed CLTV council spend (`complete=true` when this wallet holds the threshold).
+Helper `approvebountyaward` is not this spend. `automatic_spend_atoms` stays 0.
+
 ## `inspectbountyaward`
 Role: **COUNCIL_TX_SIGNER** · Process boundary: **WALLET** · Effect: **LOCAL_READ**
 
@@ -611,7 +628,8 @@ Role: **RECOVERY_SIGNER** · Process boundary: **WALLET** · Effect: **PREPARE**
 | `idempotency_key` | caller-scoped |
 
 Result: `SpendPlan`.
-Revalidate current chain, branch, maturity, own keys and fee policy; do not log preimages.
+Spends the funded `refund()` leaf after `refund_height`. Council and helper
+may be offline. Does not create a new funding transaction.
 
 ## `signbountyrefund`
 Role: **RECOVERY_SIGNER** · Process boundary: **WALLET** · Effect: **SIGN**

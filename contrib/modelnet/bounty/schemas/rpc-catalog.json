@@ -571,6 +571,26 @@
       "notes": "Recompute inputs, principal, reserves, output keys, exact tree, fees and deadlines."
     },
     {
+      "name": "preparebountyaward",
+      "role": "COUNCIL_TX_SIGNER",
+      "plane": "WALLET",
+      "side_effect": "PREPARE",
+      "idempotency_required": true,
+      "arguments": {
+        "outpoint": "funded lot txid:vout",
+        "destination": "winner address",
+        "award_height": "CLTV height on the council leaf",
+        "council_keys": "exact council pubkeys",
+        "threshold": "m",
+        "refund_key": "contributor refund pubkey used at funding",
+        "principal_atoms": "exact escrow value",
+        "fee_atoms": "absolute spend fee",
+        "idempotency_key": "caller-scoped"
+      },
+      "result": "SpendPlan",
+      "notes": "Builds and signs the CLTV council leaf spend after award_height. Helper approve is not this spend. automatic_spend_atoms stays 0."
+    },
+    {
       "name": "approvebountyaward",
       "role": "COUNCIL_POLICY_APPROVER",
       "plane": "MODEL_SIGNER",
@@ -683,7 +703,7 @@
         "idempotency_key": "caller-scoped"
       },
       "result": "SpendPlan",
-      "notes": "Revalidate current chain, branch, maturity, own keys and fee policy; do not log preimages."
+      "notes": "Spends the funded refund() leaf after refund_height. Council and helper may be offline. Does not create a new funding transaction."
     },
     {
       "name": "signbountyrefund",

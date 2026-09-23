@@ -232,8 +232,9 @@ contrib/modelnet/btx-model unload NAME
 # Isolated-regtest proof: test/functional/feature_modelnet_bounty_lifecycle.py
 contrib/modelnet/btx-model bounty-draft "coding agent"
 contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
-# createbountydraft → publishbounty → searchbounties → prepare/sign/submit
-# funding → observebountychain (real txid:vout) → commit/reveal/eval/approve
+# createbountydraft → publishbounty → searchbounties → prepare/sign/submit funding
+# mine past award_height → preparebountyaward → submitbountyaward
+# or, if unspent past refund_height → preparebountyrefund → submitbountyrefund
 # Helper approve is not a chain spend. automatic_spend_atoms stays 0.
 ```
 

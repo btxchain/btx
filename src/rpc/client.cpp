@@ -729,8 +729,14 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "importbountyrecovery", 0, "request" },
     { "preparebountyfunding", 0, "options" },
     { "inspectbountytransaction", 0, "options" },
+    { "preparebountyaward", 0, "options" },
+    { "inspectbountyaward", 0, "options" },
+    { "signbountyaward", 0, "options" },
+    { "submitbountyaward", 0, "options" },
     { "preparebountyclaim", 0, "options" },
     { "preparebountyrefund", 0, "options" },
+    { "signbountyrefund", 0, "options" },
+    { "submitbountyrefund", 0, "options" },
     { "signbountyfunding", 0, "options" },
 };
 // clang-format on
