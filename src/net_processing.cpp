@@ -7052,8 +7052,20 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             // window with competing twins of bodies we already have.
             if (tip != nullptr && pindex->nHeight <= tip->nHeight &&
                 activeChain != nullptr && !activeChain->Contains(pindex)) {
-                const bool heavier_fork_hole{
+                // The 24-block last-common keep drops a connecting body that
+                // sits further below the tip. Live 2026-09-24: the window
+                // was clamped to 227313 (134 below tip 227446) and then
+                // this skip discarded it, so inflight stayed empty.
+                const bool connecting_heavier_hole{
                     state->pindexBestKnownBlock != nullptr &&
+                    state->pindexBestKnownBlock->nChainWork > tip->nChainWork &&
+                    state->pindexBestKnownBlock->GetAncestor(tip->nHeight) != tip &&
+                    state->pindexBestKnownBlock->GetAncestor(pindex->nHeight) ==
+                        pindex &&
+                    pindex->nHeight <= nWindowEnd};
+                const bool heavier_fork_hole{
+                    connecting_heavier_hole ||
+                    (state->pindexBestKnownBlock != nullptr &&
                     state->pindexBestKnownBlock->nChainWork > tip->nChainWork &&
                     state->pindexBestKnownBlock->GetAncestor(pindex->nHeight) ==
                         pindex &&
@@ -7077,7 +7089,7 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                          true, tip->nHeight,
                          state->pindexLastCommonBlock != nullptr
                              ? state->pindexLastCommonBlock->nHeight
-                             : pindex->nHeight))};
+                             : pindex->nHeight)))};
                 if (!heavier_fork_hole) {
                     continue;
                 }
