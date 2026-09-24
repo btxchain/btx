@@ -5175,7 +5175,16 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
     RCCpuConfirmationQueue* confirmations = nullptr)
 {
     if (confirmations) {
-        if (auto prior{confirmations->Lookup(RCCpuConfirmationKey(header, params, height, target, acceleration.profile))}) return *prior;
+        // An unfinished portable CPU job is not a consensus verdict and
+        // must not skip the device check. Only a completed accept or
+        // reject is reused. Any qualified architecture is subject to the
+        // same rule; none is the referee for the others.
+        if (auto prior{confirmations->Lookup(RCCpuConfirmationKey(header, params, height, target, acceleration.profile))}) {
+            if (prior->outcome == ExactReplayVerifyOutcome::Valid ||
+                prior->outcome == ExactReplayVerifyOutcome::InvalidConsensus) {
+                return *prior;
+            }
+        }
     }
     g_exact_replay_invoke_count.fetch_add(1, std::memory_order_relaxed);
     ExactReplayVerifyResult out;
