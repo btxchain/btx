@@ -6213,10 +6213,17 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                                            min_parallel_owners)};
         if (!already && vBlocks.size() < count) {
             vBlocks.push_back(missing_honest_early);
-            LogInfo("active HEADER_ONLY tip-child GETDATA hash=%s height=%d "
-                    "peer=%d\n",
-                    honest_hash.ToString(), missing_honest_early->nHeight,
-                    peer.m_id);
+            static std::atomic<int64_t> s_last_tip_child_getdata_log{0};
+            const int64_t tip_child_log_s{GetTime()};
+            if (tip_child_log_s - s_last_tip_child_getdata_log.load(
+                                     std::memory_order_relaxed) >= 15) {
+                s_last_tip_child_getdata_log.store(
+                    tip_child_log_s, std::memory_order_relaxed);
+                LogInfo("active HEADER_ONLY tip-child GETDATA hash=%s height=%d "
+                        "peer=%d\n",
+                        honest_hash.ToString(), missing_honest_early->nHeight,
+                        peer.m_id);
+            }
         }
         m_autofetch_root_hash = honest_hash;
         if (m_autofetch_root_hash != m_stuck_root_hash) {
@@ -7120,6 +7127,17 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                                            m_header_only_competing,
                                            m_header_only_followed_skip,
                                            state->pindexBestKnownBlock)) {
+                continue;
+            }
+
+            // A digest mismatch already queued portable CPU confirmation.
+            // That lane runs for hours and does not need the body in
+            // flight. Holding the only slot froze honest catch-up on a
+            // fresh sm_120 node (PR 204, 95+ minutes, inflight only the
+            // pending frontier). Drop the request and keep walking.
+            if (matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
+                    pindex->GetBlockHash())) {
+                RemoveBlockRequest(pindex->GetBlockHash(), std::nullopt);
                 continue;
             }
 
@@ -15288,7 +15306,11 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                             // Persist HAVE_DATA so ActivateBestChain can
                             // ExactReplay at ConnectTip; do not occupy the
                             // skip set.
+                            const bool extends_active_tip{
+                                indexed != nullptr && tip != nullptr &&
+                                indexed->GetAncestor(tip->nHeight) == tip};
                             if (indexed != nullptr &&
+                                !extends_active_tip &&
                                 !node::matmul_trusted::IsTrustedMirror() &&
                                 m_chainman.AcquisitionEscapeCoversBlock(
                                     indexed) &&
@@ -15440,9 +15462,16 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         return true;
     }
     if (persist_heavier_competing_fork) {
-        LogInfo("Persisting heavier competing-fork body hash=%s height=%d "
-                "from peer=%d (not HEADER_ONLY)\n",
-                block_hash.ToString(), exact_reference_height, node.GetId());
+        static std::atomic<int64_t> s_last_heavier_persist_log{0};
+        const int64_t heavier_log_s{GetTime()};
+        if (heavier_log_s - s_last_heavier_persist_log.load(
+                               std::memory_order_relaxed) >= 15) {
+            s_last_heavier_persist_log.store(heavier_log_s,
+                                            std::memory_order_relaxed);
+            LogInfo("Persisting heavier competing-fork body hash=%s height=%d "
+                    "from peer=%d (not HEADER_ONLY)\n",
+                    block_hash.ToString(), exact_reference_height, node.GetId());
+        }
         admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
         admission.retain_as_requested = true;
         return true;
@@ -23603,9 +23632,16 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 if (!IsBlockRequested(hash) ||
                     MayDuplicateStaleBlockRequest(hash, current_time)) {
                     vToDownload.push_back(missing_honest_tip_child);
-                    LogInfo("active HEADER_ONLY tip-child probe hash=%s height=%d peer=%d\n",
-                            hash.ToString(), missing_honest_tip_child->nHeight,
-                            pto->GetId());
+                    static std::atomic<int64_t> s_last_tip_child_probe_log{0};
+                    const int64_t probe_log_s{GetTime()};
+                    if (probe_log_s - s_last_tip_child_probe_log.load(
+                                         std::memory_order_relaxed) >= 15) {
+                        s_last_tip_child_probe_log.store(
+                            probe_log_s, std::memory_order_relaxed);
+                        LogInfo("active HEADER_ONLY tip-child probe hash=%s height=%d peer=%d\n",
+                                hash.ToString(), missing_honest_tip_child->nHeight,
+                                pto->GetId());
+                    }
                 }
             }
             for (const CBlockIndex *pindex : vToDownload) {
