@@ -36,6 +36,9 @@ public:
     bool Pending(const uint256& block_hash) const;
     void Stop();
     [[nodiscard]] bool Stopped() const;
+    /** Test-only: reopen admission after Stop() once every caller is
+     *  quiescent. Production Interrupt/Shutdown must not call this. */
+    void ResetForTest();
 
 private:
     struct Entry {

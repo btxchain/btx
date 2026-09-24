@@ -1846,6 +1846,22 @@ BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_bounded_shutdown_and_failure)
     BOOST_CHECK(!failed_queue.Lookup(uint256::ONE)); // failure is retryable, not memoized
 }
 
+BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_global_queue_stop_is_durable)
+{
+    struct RestoreQueue {
+        ~RestoreQueue() { rc::GetRCCpuConfirmationQueue().ResetForTest(); }
+    } restore;
+    auto& before{rc::GetRCCpuConfirmationQueue()};
+    before.Stop();
+    auto& after{rc::GetRCCpuConfirmationQueue()};
+    BOOST_CHECK_EQUAL(&before, &after);
+    BOOST_CHECK(after.Stopped());
+    BOOST_CHECK_EQUAL(
+        after.Submit(uint256::ONE, uint256::ONE, {}, [] { return ValidConfirmation(); }).acceleration_failure,
+        "cpu_confirmation_stopped");
+    BOOST_CHECK(!before.Lookup(uint256{}));
+}
+
 BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_completed_cache_is_bounded)
 {
     rc::RCCpuConfirmationQueue queue;

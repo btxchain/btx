@@ -11,7 +11,6 @@
 #include <util/threadnames.h>
 
 #include <algorithm>
-#include <memory>
 #include <mutex>
 #include <utility>
 
@@ -31,15 +30,12 @@ uint256 RCCpuConfirmationKey(const CBlockHeader& header,
 
 RCCpuConfirmationQueue& GetRCCpuConfirmationQueue()
 {
-    static std::mutex mutex;
-    static std::unique_ptr<RCCpuConfirmationQueue> queue;
-    std::lock_guard lock{mutex};
-    // Node fixtures Stop() the process queue at teardown. Recycle so the next
-    // in-process node (or unit test) can confirm again. A caller that Stop()s
-    // a stack queue still observes cpu_confirmation_stopped on that instance.
-    if (queue && queue->Stopped()) queue.reset();
-    if (!queue) queue = std::make_unique<RCCpuConfirmationQueue>();
-    return *queue;
+    // Process-lifetime object. Interrupt/Shutdown Stop() it; a later Get()
+    // must not delete the published instance (UAF on retained ExactReplay
+    // pointers) or reopen admission. Tests call ResetForTest() after Stop()
+    // once every caller is quiescent.
+    static RCCpuConfirmationQueue queue;
+    return queue;
 }
 
 RCCpuConfirmationQueue::~RCCpuConfirmationQueue() { Stop(); }
@@ -112,6 +108,13 @@ void RCCpuConfirmationQueue::Stop()
 bool RCCpuConfirmationQueue::Stopped() const
 {
     return m_stopping.load(std::memory_order_acquire) && !m_thread.joinable();
+}
+
+void RCCpuConfirmationQueue::ResetForTest()
+{
+    Stop();
+    std::lock_guard lock{m_mutex};
+    m_stopping.store(false, std::memory_order_release);
 }
 
 void RCCpuConfirmationQueue::Run()

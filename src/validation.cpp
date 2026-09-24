@@ -41,6 +41,7 @@
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_cpu_confirmation.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_producer.h>
@@ -9400,6 +9401,8 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     m_chain.SetTip(*pindexDelete->pprev);
 
     UpdateTip(pindexDelete->pprev);
+    m_chainman.RefreshBestExtendingHeader();
+    m_chainman.MaybeUpdateBestExtendingHeader(pindexDelete);
     // Let wallets know transactions went from 1-confirmed to
     // 0-confirmed or conflicted:
     if (m_chainman.m_options.signals) {
@@ -9704,6 +9707,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     // Update m_chain & related variables.
     m_chain.SetTip(*pindexNew);
     UpdateTip(pindexNew);
+    m_chainman.RefreshBestExtendingHeader();
     // Keep the shielded prune-retention window pinned to the new tip (no-op unless pruning + shielded).
     UpdateShieldedPruneRetentionLock(*this);
     if (m_mempool) {
@@ -15702,6 +15706,11 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
             IndexHasTrustedMatMulAuthority(pindex),
             node::matmul_trusted::IsTrustedMirror())};
     const CBlockIndex* const acq_frontier{FindAcquisitionEscapeFrontier()};
+    const bool frontier_owns_gpu{
+        acq_frontier != nullptr &&
+        (acq_frontier->nStatus & BLOCK_HAVE_DATA) != 0 &&
+        !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
+            acq_frontier->GetBlockHash())};
     const bool reverify_tip_child{
         fAlreadyHave &&
         pindex->pprev != nullptr &&
@@ -15709,10 +15718,10 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         !ActiveChain().Contains(pindex) &&
         (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
         (fRequested || needs_consensus_exact_replay) &&
-        // While an acquisition frontier exists, the followed tip-child
-        // yields the accelerator. AcceptBlock re-entry used to ExactReplay
-        // it anyway (pprev==tip) and fail queue-full forever.
-        (acq_frontier == nullptr || pindex == acq_frontier)};
+        // A HEADER_ONLY or CPU-pending competing frontier does not own GPU.
+        // AcceptBlock re-entry of a persisted HAVE_DATA tip-child must still
+        // proceed; only a drivable frontier body occupies the accelerator.
+        (!frontier_owns_gpu || pindex == acq_frontier)};
     // RB-16 CONVERGENCE: only the unique lowest parent-connectable
     // unverified body on the registered heavier tower may re-enter
     // ContextualCheckBlock. CoversBlock && parent-connectable admitted
@@ -22557,6 +22566,7 @@ void ChainstateManager::RecalculateBestHeader()
     const CBlockIndex* const active_tip{ActiveChain().Tip()};
     SetBestHeader(ActiveChain().Tip());
     m_best_claimed_header = nullptr;
+    m_best_header_extending_tip = nullptr;
     if (active_tip != nullptr) {
         MaybeUpdateBestClaimedHeader(const_cast<CBlockIndex*>(active_tip));
     }

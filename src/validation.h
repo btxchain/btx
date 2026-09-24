@@ -1593,6 +1593,13 @@ public:
      * as the download target or getheaders locator.
      */
     CBlockIndex* m_best_claimed_header GUARDED_BY(::cs_main){nullptr};
+    /** Most-work header that still extends the connected tip. m_best_header
+     *  follows heaviest work, including a competing HEADER_ONLY tower, so it
+     *  cannot locate the honest tip-child once a false fork is heavier.
+     *  GETDATA uses this so an unprivileged node keeps asking for the next
+     *  authentic body without waiting for someone to addnode or
+     *  invalidateblock. */
+    CBlockIndex* m_best_header_extending_tip GUARDED_BY(::cs_main){nullptr};
     //! Headers rejected for bad-diffbits at/after stall-recovery. Memory
     //! only; the invalid tower is not stored.
     std::atomic<uint64_t> m_rejected_divergent_pow_headers{0};
@@ -2238,6 +2245,36 @@ public:
         if (m_best_claimed_header == nullptr ||
             pindex->nChainWork > m_best_claimed_header->nChainWork) {
             m_best_claimed_header = pindex;
+        }
+        MaybeUpdateBestExtendingHeader(pindex);
+    }
+
+    /** Remember the heaviest header that still extends ActiveTip(). */
+    void MaybeUpdateBestExtendingHeader(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        if (pindex == nullptr || (pindex->nStatus & BLOCK_FAILED_MASK)) return;
+        const CBlockIndex* const tip{ActiveChain().Tip()};
+        if (tip == nullptr || pindex->nHeight <= tip->nHeight) return;
+        if (pindex->GetAncestor(tip->nHeight) != tip) return;
+        if (m_best_header_extending_tip == nullptr ||
+            PreferMostWorkHeader(*m_best_header_extending_tip, *pindex)) {
+            m_best_header_extending_tip = pindex;
+        }
+    }
+
+    /** Drop the extending-tip pointer when ConnectTip / DisconnectTip moves
+     *  the tip off that branch. */
+    void RefreshBestExtendingHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        if (m_best_header_extending_tip == nullptr) return;
+        const CBlockIndex* const tip{ActiveChain().Tip()};
+        if (tip == nullptr ||
+            m_best_header_extending_tip->nHeight <= tip->nHeight ||
+            (m_best_header_extending_tip->nStatus & BLOCK_FAILED_MASK) != 0 ||
+            m_best_header_extending_tip->GetAncestor(tip->nHeight) != tip) {
+            m_best_header_extending_tip = nullptr;
         }
     }
 
