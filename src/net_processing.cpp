@@ -5518,13 +5518,30 @@ static bool TrustedMirrorMayDownloadIndex(
     }
     const CBlockIndex* const lca{LastCommonAncestor(tip, index)};
     const bool immediate_fork_child{lca != nullptr && index->pprev == lca};
-    // HAVE_DATA on a parent is not a verified prefix. Live 2026-09-24:
-    // blocks at 227500+ had parents on disk and took the GPU while the
-    // connecting hole at 227313 was still unverified, so the tip never moved.
-    const bool parent_connectable{
-        chainman.AcquisitionEscapeParentConnectable(index)};
+    // A verified parent is not enough. Live 2026-09-24 replayed 228185
+    // because its parent had BLOCK_EXACT_REPLAY_VERIFIED while an
+    // unverified gap still sat above the active tip, so the tip never
+    // moved. Walk back to the active chain; stop at the first gap.
+    bool contiguous_to_active{false};
+    if (index->pprev != nullptr && chainman.ActiveChain().Contains(index->pprev)) {
+        contiguous_to_active = true;
+    } else {
+        const CBlockIndex* walk{index->pprev};
+        for (int steps = 0; walk != nullptr && steps < 2048; ++steps) {
+            if ((walk->nStatus & BLOCK_FAILED_MASK) != 0) break;
+            if (chainman.ActiveChain().Contains(walk)) {
+                contiguous_to_active = true;
+                break;
+            }
+            if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 ||
+                (walk->nStatus & BLOCK_HAVE_DATA) == 0) {
+                break;
+            }
+            walk = walk->pprev;
+        }
+    }
     return node::matmul_trusted::HeavierCompetingForkHoleMayExactReplay(
-        /*may_fetch=*/true, immediate_fork_child, parent_connectable);
+        /*may_fetch=*/true, immediate_fork_child, contiguous_to_active);
 }
 
 [[nodiscard]] static bool IsHeaderOnlyFetchSuppressed(
