@@ -6871,13 +6871,27 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             if ((walk->nStatus & BLOCK_HAVE_DATA) == 0) lowest_missing = walk;
         }
         if (lowest_missing != nullptr && lowest_missing->nHeight < nWindowEnd) {
+            // FindNextBlocks walks forward from last_common. After the
+            // 24-block snap, last_common is the tip, which is above this
+            // hole, so a window end of 227313 made the loop condition
+            // false and inflight stayed empty. Start the walk at the
+            // hole's parent.
+            const int walk_before{pindexWalk != nullptr ? pindexWalk->nHeight : -1};
+            if (pindexWalk == nullptr ||
+                pindexWalk->nHeight >= lowest_missing->nHeight) {
+                pindexWalk = lowest_missing->pprev != nullptr
+                                 ? lowest_missing->pprev
+                                 : lowest_missing;
+            }
             static std::atomic<int64_t> s_last_clamp_log{0};
             const int64_t now_s{GetTime()};
             if (now_s - s_last_clamp_log.load(std::memory_order_relaxed) >= 15) {
                 s_last_clamp_log.store(now_s, std::memory_order_relaxed);
                 LogInfo("Competing-fork GETDATA clamped to first missing body "
-                        "peer=%d height=%d was_end=%d\n",
-                        peer.m_id, lowest_missing->nHeight, nWindowEnd);
+                        "peer=%d height=%d was_end=%d walk=%d -> %d\n",
+                        peer.m_id, lowest_missing->nHeight, nWindowEnd,
+                        walk_before,
+                        pindexWalk != nullptr ? pindexWalk->nHeight : -1);
             }
             nWindowEnd = lowest_missing->nHeight;
         }
