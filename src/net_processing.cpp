@@ -5554,6 +5554,15 @@ static bool TrustedMirrorMayDownloadIndex(
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (index == nullptr) return false;
+    // A same-height sibling of the tip is the other side of a just-mined
+    // race. Leaving it HEADER_ONLY waits on the 1-wide tip-child crawl
+    // (~2 min), which is longer than the majority's next block.
+    if (tip != nullptr && index != tip && index->pprev == tip->pprev &&
+        index->nHeight == tip->nHeight &&
+        (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
+        index->nChainWork >= tip->nChainWork) {
+        return false;
+    }
     if (IndexIsShortReorgAttestedForkChild(chainman, tip, index)) return false;
     if (chainman.IsAcquisitionEscapeFrontier(index)) return false;
     if (chainman.IndexHasTrustedMatMulAuthority(index)) return false;
@@ -6090,6 +6099,35 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
     const CBlockIndex* const missing_honest_early{
         HeaderOnlyHonestTipChildToFetch(m_chainman, m_matmul_block_lifecycle)};
+    // The other side of a same-height race. Request it from a peer whose
+    // best-known chain contains it, without waiting for the 1-wide crawl
+    // of the sibling that already won the tip.
+    if (tip != nullptr && state->pindexBestKnownBlock != nullptr &&
+        state->pindexBestKnownBlock->nHeight >= tip->nHeight) {
+        const CBlockIndex* const sibling{
+            state->pindexBestKnownBlock->GetAncestor(tip->nHeight)};
+        if (sibling != nullptr && sibling != tip &&
+            sibling->pprev == tip->pprev &&
+            (sibling->nStatus & BLOCK_FAILED_MASK) == 0 &&
+            (sibling->nStatus & BLOCK_HAVE_DATA) == 0 &&
+            sibling->nChainWork >= tip->nChainWork &&
+            !m_matmul_block_lifecycle.HasRetainedBody(sibling->GetBlockHash()) &&
+            !IsBlockRequested(sibling->GetBlockHash()) &&
+            vBlocks.size() < count) {
+            vBlocks.push_back(sibling);
+            m_header_only_competing.erase(sibling->GetBlockHash());
+            m_header_only_followed_skip.erase(sibling->GetBlockHash());
+            static std::atomic<int64_t> s_last_twin_getdata_log{0};
+            const int64_t twin_log_s{GetTime()};
+            if (twin_log_s - s_last_twin_getdata_log.load(
+                                std::memory_order_relaxed) >= 15) {
+                s_last_twin_getdata_log.store(twin_log_s, std::memory_order_relaxed);
+                LogInfo("same-height twin GETDATA hash=%s height=%d peer=%d\n",
+                        sibling->GetBlockHash().ToString(), sibling->nHeight,
+                        peer.m_id);
+            }
+        }
+    }
     // Keep each branch root-first while the active child is missing, but
     // do not reclaim another branch's requests or invent a free peer slot.
     if (missing_honest_early != nullptr) {
@@ -7111,7 +7149,12 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                          state->pindexLastCommonBlock != nullptr
                              ? state->pindexLastCommonBlock->nHeight
                              : pindex->nHeight)))};
-                if (!heavier_fork_hole) {
+                const bool immediate_tip_sibling{
+                    pindex != tip && pindex->pprev == tip->pprev &&
+                    pindex->nHeight == tip->nHeight &&
+                    (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
+                    pindex->nChainWork >= tip->nChainWork};
+                if (!heavier_fork_hole && !immediate_tip_sibling) {
                     continue;
                 }
             }
@@ -10779,8 +10822,19 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                 node::matmul_trusted::IsTrustedMirror(),
                 /*extends_tip=*/false,
                 last_header.nChainWork > tip_for_work->nChainWork)};
+        const CBlockIndex* const at_tip_height{
+            tip_for_work != nullptr && last_header.nHeight >= tip_for_work->nHeight
+                ? last_header.GetAncestor(tip_for_work->nHeight)
+                : nullptr};
+        const bool immediate_tip_sibling{
+            tip_for_work != nullptr && at_tip_height != nullptr &&
+            at_tip_height != tip_for_work &&
+            at_tip_height->pprev == tip_for_work->pprev &&
+            (at_tip_height->nStatus & BLOCK_HAVE_DATA) == 0 &&
+            at_tip_height->nChainWork >= tip_for_work->nChainWork};
         if (one_wide && !extends_active_tip) {
-            if (!local_signer_lost_twin && !heavier_competing_fork) {
+            if (!local_signer_lost_twin && !heavier_competing_fork &&
+                !immediate_tip_sibling) {
                 return;
             }
         }
