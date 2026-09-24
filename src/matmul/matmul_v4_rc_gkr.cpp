@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_cpu_confirmation.h>
 
 #include <crypto/common.h>
 #include <crypto/sha256.h>
@@ -42,6 +43,7 @@ namespace {
 std::atomic<RCExactReplayExecutionPolicy> g_exact_replay_execution_policy{
     RCExactReplayExecutionPolicy::AutoFallback};
 std::atomic<bool> g_allow_unverifiable_catchup_replay{false};
+std::atomic_bool g_cpu_confirmation{true};
 std::mutex g_last_exact_replay_mutex;
 std::optional<ExactReplayVerifyResult> g_last_exact_replay;
 std::mutex g_exact_replay_provider_health_mutex;
@@ -329,6 +331,16 @@ void ClearRCValidatorReadinessRestoredNotifier()
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy)
 {
     g_exact_replay_execution_policy.store(policy, std::memory_order_release);
+}
+
+void SetRCExactReplayCpuConfirmation(bool enabled)
+{
+    g_cpu_confirmation.store(enabled, std::memory_order_release);
+}
+
+bool GetRCExactReplayCpuConfirmation()
+{
+    return g_cpu_confirmation.load(std::memory_order_acquire);
 }
 
 void SetRCExactReplayAllowUnverifiableCatchUp(bool allow)
@@ -5048,13 +5060,119 @@ WinnerGkrSolveReport SolveCoupledProveWinner(CBlockHeader header, int32_t height
 
 namespace {
 
+bool HasQualifiedReplayCapability(const CBlockHeader& header,
+                                  const RCEpisodeParams& params, int32_t height,
+                                  const RCExactReplayAcceleration& acceleration)
+{
+    for (const auto& provider : GetRCExactReplayAlternateProviders()) {
+        if (provider.provider == acceleration.backend &&
+            RCProductionProviderCapabilityAuthorizesReplay(
+                provider.capability, provider.provider, &acceleration.gemm,
+                header.matmul_dim, params, height)) return true;
+    }
+    return false;
+}
+
+ExactReplayVerifyResult ConfirmDeviceMismatches(
+    const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
+    const arith_uint256* target, uint32_t profile, ExactReplayVerifyResult result,
+    std::vector<uint256> device_digests, bool qualified_device,
+    RCCpuConfirmationQueue* confirmations)
+{
+    result.ok = false;
+    result.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+    result.failure_kind = RCExactReplayFailureKind::UnconfirmedDigestMismatch;
+    if (!GetRCExactReplayCpuConfirmation()) {
+        // Qualification is an opaque startup-canary capability bound to this
+        // exact context, never the provider's label or the catch-up override.
+        if (qualified_device && result.fully_accelerated &&
+            result.cpu_gemm_calls == 0 && result.cpu_gemm_fallbacks == 0 &&
+            result.device_gemm_calls != 0 && !result.digest.IsNull()) {
+            result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
+            result.failure_kind = RCExactReplayFailureKind::None;
+            result.acceleration_failure.clear();
+            result.operator_recovery.clear();
+            result.note = "ExactReplay: qualified device digest mismatch; CPU confirmation disabled by operator";
+        } else {
+            result.acceleration_failure = "cpu_confirmation_disabled_unqualified_device";
+            result.note = "ExactReplay: mismatch lacks qualified device authority; block remains retryable";
+        }
+        return result;
+    }
+    // Value captures contain only replay context and results, never a GPU
+    // backend, scheduler lease, full body, or network admission ticket.
+    auto confirm = [header, params, height,
+                    target_copy = target ? std::optional<arith_uint256>{*target} : std::nullopt,
+                    result, device_digests = std::move(device_digests)]() mutable {
+        const auto start{std::chrono::steady_clock::now()};
+        RCExactReplayAccelerationStats stats;
+        RCExactReplayAcceleration cpu;
+        cpu.backend = "cpu_device_mismatch_retry";
+        cpu.stats = &stats;
+        const uint256 digest{RecomputeResidentCurriculumAccelerated(
+            header, params, height, {}, nullptr, nullptr, cpu)};
+        result.verify_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        result.rss_kib = std::max(result.rss_kib, CurrentRssKiB());
+        result.cpu_gemm_calls += stats.cpu_calls;
+        result.cpu_gemm_fallbacks += stats.cpu_fallbacks;
+        result.host_xof_calls += stats.host_xof_calls;
+        result.host_xof_elements += stats.host_xof_elements;
+        result.device_mismatch_retried = true;
+        result.fully_accelerated = false;
+        result.full_metal_pipeline = false;
+        if (ExactReplayCancellationRequested()) {
+            result.outcome = ExactReplayVerifyOutcome::Cancelled;
+            result.failure_kind = RCExactReplayFailureKind::Cancelled;
+            result.note = "ExactReplay: CPU confirmation cancelled; no consensus verdict";
+            return result;
+        }
+        if (!digest.IsNull() && digest == header.matmul_digest) {
+            result.ok = !target_copy || UintToArith256(digest) <= *target_copy;
+            result.outcome = result.ok ? ExactReplayVerifyOutcome::Valid : ExactReplayVerifyOutcome::InvalidConsensus;
+            result.failure_kind = RCExactReplayFailureKind::None;
+            result.digest = digest;
+            result.adjudication = RCExactReplayAdjudication::IndependentHeaderRecovered;
+            result.adjudicating_provider = cpu.backend;
+            result.acceleration_failure = result.ok ? "device_digest_mismatch_cpu_recovered" : "";
+            result.operator_recovery.clear();
+            result.note = result.ok ? "ExactReplay: header commitment reproduced by portable CPU ExactReplay"
+                                    : "ExactReplay: portable CPU ExactReplay reproduced the header digest over target";
+        } else if (!digest.IsNull() && std::find(device_digests.begin(), device_digests.end(), digest) != device_digests.end()) {
+            result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
+            result.failure_kind = RCExactReplayFailureKind::None;
+            result.digest = digest;
+            result.device_mismatch_confirmed = true;
+            result.adjudication = RCExactReplayAdjudication::IndependentDigestConfirmed;
+            result.adjudicating_provider = cpu.backend;
+            result.acceleration_failure.clear();
+            result.operator_recovery.clear();
+            result.note = "ExactReplay: digest mismatch confirmed by portable CPU ExactReplay";
+        } else {
+            result.adjudication = RCExactReplayAdjudication::IndependentProvidersInconclusive;
+            result.operator_recovery = "portable CPU ExactReplay did not confirm the device digest or the header; retry after another qualified provider is available";
+            result.note = "ExactReplay: portable CPU ExactReplay inconclusive; block remains retryable";
+        }
+        return result;
+    };
+    if (confirmations) {
+        return confirmations->Submit(RCCpuConfirmationKey(header, params, height, target, profile),
+                                     header.GetHash(), result, std::move(confirm));
+    }
+    // Synchronous seam for existing deterministic oracle tests only.
+    return confirm();
+}
+
 ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
     const CBlockHeader& header,
     const RCEpisodeParams& params,
     int32_t height,
     const arith_uint256* target,
-    RCExactReplayAcceleration acceleration)
+    RCExactReplayAcceleration acceleration,
+    RCCpuConfirmationQueue* confirmations = nullptr)
 {
+    if (confirmations) {
+        if (auto prior{confirmations->Lookup(RCCpuConfirmationKey(header, params, height, target, acceleration.profile))}) return *prior;
+    }
     g_exact_replay_invoke_count.fetch_add(1, std::memory_order_relaxed);
     ExactReplayVerifyResult out;
     out.require_device = acceleration.require_device;
@@ -5130,42 +5248,10 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
         if (!header.matmul_digest.IsNull() &&
             !acceleration.require_device &&
             acceleration_stats.device_calls != 0) {
-            out.device_mismatch_retried = true;
-            RCExactReplayAccelerationStats retry_stats;
-            RCExactReplayAcceleration retry;
-            retry.backend = "cpu_device_mismatch_retry";
-            retry.output_row_tile = 0;
-            retry.stats = &retry_stats;
-            const uint256 retry_digest{
-                RecomputeResidentCurriculumAccelerated(
-                    header, params, height, {}, nullptr,
-                    nullptr, retry)};
-            out.cpu_gemm_calls += retry_stats.cpu_calls;
-            out.cpu_gemm_fallbacks +=
-                retry_stats.cpu_fallbacks;
-            out.device_xof_calls += retry_stats.device_xof_calls;
-            out.device_xof_elements += retry_stats.device_xof_elements;
-            out.device_xof_fallbacks += retry_stats.device_xof_fallbacks;
-            out.host_xof_calls += retry_stats.host_xof_calls;
-            out.host_xof_elements += retry_stats.host_xof_elements;
-            out.digest = retry_digest;
-            out.fully_accelerated = false;
-            out.full_metal_pipeline = false;
-            out.verify_s =
-                std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - t0)
-                    .count();
-            out.rss_kib =
-                std::max(CurrentRssKiB(), rss0);
-            if (!retry_digest.IsNull() &&
-                retry_digest == header.matmul_digest) {
-                // The CPU oracle recovered the honest candidate. The local
-                // device remains disqualified for this verdict.
-                out.acceleration_failure =
-                    "device_digest_mismatch_cpu_recovered";
-            } else {
-                out.device_mismatch_confirmed = true;
-            }
+            return ConfirmDeviceMismatches(
+                header, params, height, target, acceleration.profile, out,
+                {out.digest}, HasQualifiedReplayCapability(header, params, height, acceleration),
+                confirmations);
         }
         if (!out.digest.IsNull() &&
             out.digest == header.matmul_digest) {
@@ -5298,8 +5384,12 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
     int32_t height,
     const arith_uint256* target,
     RCExactReplayAcceleration primary,
-    const std::string& resolution_reason)
+    const std::string& resolution_reason,
+    RCCpuConfirmationQueue* confirmations = nullptr)
 {
+    if (confirmations) {
+        if (auto prior{confirmations->Lookup(RCCpuConfirmationKey(header, params, height, target, primary.profile))}) return *prior;
+    }
     primary.require_device = true;
     primary.output_row_tile = primary.output_row_tile == 0 ? 256 : primary.output_row_tile;
     const std::string primary_provider{primary.backend};
@@ -5591,91 +5681,12 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
         result.quarantined_provider.clear();
         result.provider_health_reason.clear();
 
-        // 0.34.7 portable oracle. Strict-device CUDA must not leave a digest
-        // mismatch retryable forever: CPU ExactReplay is the same consensus
-        // algorithm, not a lesser path. Production CUDA-only nodes otherwise
-        // never confirm a false header (competing-branch ExactReplay mismatch
-        // stayed LocalAcceleratorFailure with no independent provider).
-        RCExactReplayAccelerationStats cpu_stats;
-        RCExactReplayAcceleration cpu;
-        cpu.backend = "cpu_device_mismatch_retry";
-        cpu.require_device = false;
-        cpu.output_row_tile = 0;
-        cpu.stats = &cpu_stats;
-        const uint256 cpu_digest{
-            RecomputeResidentCurriculumAccelerated(
-                header, params, height, {}, nullptr, nullptr, cpu)};
-        aggregate_cpu_calls += cpu_stats.cpu_calls;
-        aggregate_cpu_fallbacks += cpu_stats.cpu_fallbacks;
-        result.device_mismatch_retried = true;
-
-        const auto finish_cpu_adjudication =
-            [&](ExactReplayVerifyResult& out) {
-                apply_aggregate(out);
-                out.fully_accelerated = false;
-                out.full_metal_pipeline = false;
-            };
-
-        if (!cpu_digest.IsNull() && cpu_digest == header.matmul_digest) {
-            if (target && UintToArith256(cpu_digest) > *target) {
-                result.ok = false;
-                result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
-                result.failure_kind = RCExactReplayFailureKind::None;
-                result.digest = cpu_digest;
-                result.adjudication =
-                    RCExactReplayAdjudication::IndependentHeaderRecovered;
-                result.adjudicating_provider = cpu.backend;
-                result.acceleration_failure.clear();
-                result.note =
-                    "ExactReplay: portable CPU ExactReplay reproduced the header digest over target";
-                finish_cpu_adjudication(result);
-                return result;
-            }
-            result.ok = true;
-            result.outcome = ExactReplayVerifyOutcome::Valid;
-            result.failure_kind = RCExactReplayFailureKind::None;
-            result.digest = cpu_digest;
-            result.adjudication =
-                RCExactReplayAdjudication::IndependentHeaderRecovered;
-            result.adjudicating_provider = cpu.backend;
-            result.acceleration_failure =
-                "device_digest_mismatch_cpu_recovered";
-            result.note =
-                "ExactReplay: header commitment reproduced by portable CPU ExactReplay";
-            finish_cpu_adjudication(result);
-            return result;
-        }
-
-        if (!cpu_digest.IsNull()) {
-            for (const auto& mismatch : mismatches) {
-                if (cpu_digest != mismatch.result.digest) {
-                    continue;
-                }
-                result.ok = false;
-                result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
-                result.failure_kind = RCExactReplayFailureKind::None;
-                result.digest = cpu_digest;
-                result.device_mismatch_confirmed = true;
-                result.adjudication =
-                    RCExactReplayAdjudication::IndependentDigestConfirmed;
-                result.adjudicating_provider = cpu.backend;
-                result.acceleration_failure.clear();
-                result.operator_recovery.clear();
-                result.note =
-                    "ExactReplay: digest mismatch confirmed by portable CPU ExactReplay";
-                finish_cpu_adjudication(result);
-                return result;
-            }
-        }
-
-        result.operator_recovery =
-            "portable CPU ExactReplay did not confirm the device digest or the header; retry after another qualified provider is available";
-        result.adjudication =
-            RCExactReplayAdjudication::IndependentProvidersInconclusive;
-        result.note =
-            "ExactReplay: portable CPU ExactReplay inconclusive; block remains retryable";
-        finish_cpu_adjudication(result);
-        return result;
+        apply_aggregate(result);
+        std::vector<uint256> device_digests;
+        for (const auto& mismatch : mismatches) device_digests.push_back(mismatch.result.digest);
+        return ConfirmDeviceMismatches(
+            header, params, height, target, profile, result, std::move(device_digests),
+            !mismatches.front().capability.IsNull(), confirmations);
     }
 
     if (last_failure.has_value()) {
@@ -5815,9 +5826,10 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
          gate != ProductionGateAction::UnverifiableCpu)
             ? VerifyStrictWithAlternates(
                   header, params, height, target, std::move(acceleration),
-                  resolution_reason)
+                  resolution_reason, &GetRCCpuConfirmationQueue())
             : VerifyBoundedExactReplayImpl(
-                  header, params, height, target, std::move(acceleration));
+                  header, params, height, target, std::move(acceleration),
+                  &GetRCCpuConfirmationQueue());
     result.execution_policy = policy;
     result.require_device =
         policy == RCExactReplayExecutionPolicy::StrictDevice &&
@@ -5838,15 +5850,16 @@ ExactReplayVerifyResult VerifyBoundedExactReplayWithAccelerationForTest(
     const RCEpisodeParams& params,
     int32_t height,
     const RCExactReplayAcceleration& acceleration,
-    const arith_uint256* target)
+    const arith_uint256* target,
+    RCCpuConfirmationQueue* confirmations)
 {
     if (acceleration.require_device) {
         return VerifyStrictWithAlternates(
             header, params, height, target, acceleration,
-            "test_injected_provider");
+            "test_injected_provider", confirmations);
     }
     return VerifyBoundedExactReplayImpl(
-        header, params, height, target, acceleration);
+        header, params, height, target, acceleration, confirmations);
 }
 
 ExactReplayVerifyResult

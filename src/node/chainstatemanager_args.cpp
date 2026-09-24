@@ -258,19 +258,26 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
     // staleness window (default 600s) so live convergence tests need not wait 10
     // minutes per restart. It changes ONLY how long a frozen node waits before
     // the escape valve may arm -- never any validation, ExactReplay, or
-    // migration gate. Floored at 1s. A loud warning is logged so it can never be
-    // mistaken for a production setting.
+    // migration gate. Floored at 1s. Ignored on mainnet even in -dev binaries:
+    // DEBUG_ONLY does not strip conf-file keys from IS_RELEASE builds, and a
+    // 20s override re-armed competing-tower ExactReplay on every restart.
     if (auto value{args.GetIntArg("-acquisitionstallseconds")}) {
         if (*value < 1) {
             return util::Error{Untranslated(strprintf(
                 "Invalid -acquisitionstallseconds value (%d), must be at least 1",
                 *value))};
         }
-        opts.acquisition_stall_seconds = *value;
-        LogPrintf("WARNING: -acquisitionstallseconds=%d is a TEST-ONLY override of "
-                  "the acquisition-escape staleness window (production default is "
-                  "%d). Do NOT use in production.\n",
-                  *value, 600);
+        if (opts.chainparams.GetChainType() == ChainType::MAIN) {
+            LogPrintf("WARNING: -acquisitionstallseconds=%d ignored on mainnet "
+                      "(production acquisition-escape window is %d s)\n",
+                      *value, 600);
+        } else {
+            opts.acquisition_stall_seconds = *value;
+            LogPrintf("WARNING: -acquisitionstallseconds=%d is a TEST-ONLY override of "
+                      "the acquisition-escape staleness window (production default is "
+                      "%d). Do NOT use in production.\n",
+                      *value, 600);
+        }
     }
 
     return {};

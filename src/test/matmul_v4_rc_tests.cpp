@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_lt_mx_exact.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_cpu_confirmation.h>
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_extract.h>
@@ -42,7 +43,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -1676,6 +1679,232 @@ BOOST_AUTO_TEST_CASE(rc_strict_alternate_registry_requires_canary_capability)
         first, "test:registry-a", &oracle, &reason));
     BOOST_CHECK_EQUAL(reason, "invalid_or_stale_capability");
     rc::ClearRCExactReplayAlternateProviders();
+}
+
+namespace {
+struct ConfirmationPolicyGuard {
+    bool saved{rc::GetRCExactReplayCpuConfirmation()};
+    explicit ConfirmationPolicyGuard(bool enabled) {
+        rc::SetRCExactReplayCpuConfirmation(enabled);
+        rc::ClearRCExactReplayAlternateProviders();
+        rc::ResetRCProductionCanaryForTest();
+        rc::ResetRCExactReplayProviderHealthForTest();
+    }
+    ~ConfirmationPolicyGuard() {
+        rc::SetRCExactReplayCpuConfirmation(saved);
+        rc::ClearRCExactReplayAlternateProviders();
+        rc::ResetRCProductionCanaryForTest();
+        rc::ResetRCExactReplayProviderHealthForTest();
+    }
+};
+
+bool AwaitConfirmation(const std::function<bool()>& predicate)
+{
+    const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{10}};
+    while (!predicate()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    return true;
+}
+
+rc::ExactReplayVerifyResult ValidConfirmation()
+{
+    rc::ExactReplayVerifyResult result;
+    result.ok = true;
+    result.outcome = rc::ExactReplayVerifyOutcome::Valid;
+    return result;
+}
+}
+
+BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_releases_gpu_and_deduplicates)
+{
+    ConfirmationPolicyGuard policy{true};
+    std::atomic_bool release{false}, started{false};
+    rc::RCCpuConfirmationQueue queue;
+    // Occupy the single CPU lane so the real portable confirmation remains
+    // pending while the same caller validates a different block on device.
+    queue.Submit(uint256::ONE, uint256::ONE, {}, [&] {
+        started = true;
+        while (!release && !rc::ExactReplayCancellationRequested())
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        return ValidConfirmation();
+    });
+    BOOST_REQUIRE(AwaitConfirmation([&] { return started.load(); }));
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    auto header{MakeRCHeader(0x4153594e4331)};
+    const auto digest{rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    header.matmul_digest = uint256::ONE;
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &OracleGemmS8S8;
+    rc::RCExactReplayAcceleration acceleration{.gemm = backend, .backend = "test:async", .require_device = true};
+    auto& scheduler{rc::GetRCAcceleratorScheduler()};
+    scheduler.ConfigureWorkspaceCapacity("", 0);
+    std::atomic_bool cancelled{false};
+    {
+        auto lease{scheduler.Acquire(rc::RCAcceleratorScheduler::Priority::TipValidation,
+                                    &cancelled, "cpu-confirmation-disputed", nullptr,
+                                    std::chrono::milliseconds{1000}, rc::EstimateRCExactReplayWorkspaceBytes(params))};
+        BOOST_REQUIRE(lease);
+        const auto pending{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, acceleration, nullptr, &queue)};
+        BOOST_CHECK(pending.outcome == rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+        BOOST_CHECK_EQUAL(pending.acceleration_failure, "cpu_confirmation_pending");
+        BOOST_CHECK_EQUAL(pending.cpu_gemm_calls, 0U);
+    }
+    BOOST_CHECK(queue.Pending(header.GetHash()));
+    // A retry must hit the context cache without calling a now-declining
+    // device, or quarantining it, while the CPU job remains queued.
+    auto declining{acceleration};
+    declining.gemm.gemm_s8s8 = &DecliningGemmS8S8;
+    const auto duplicate{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, declining, nullptr, &queue)};
+    BOOST_CHECK_EQUAL(duplicate.acceleration_failure, "cpu_confirmation_pending");
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
+    {
+        auto lease{scheduler.Acquire(rc::RCAcceleratorScheduler::Priority::TipValidation,
+                                    &cancelled, "cpu-confirmation-other-block", nullptr,
+                                    std::chrono::milliseconds{1000}, rc::EstimateRCExactReplayWorkspaceBytes(params))};
+        BOOST_REQUIRE(lease);
+        auto honest{header};
+        honest.matmul_digest = digest;
+        const auto valid{rc::VerifyBoundedExactReplayWithAccelerationForTest(honest, params, 0, acceleration, nullptr, &queue)};
+        BOOST_CHECK(valid.ok);
+        BOOST_CHECK(valid.fully_accelerated);
+        BOOST_CHECK_EQUAL(valid.cpu_gemm_calls, 0U);
+        BOOST_CHECK(queue.Pending(header.GetHash()));
+    }
+    release = true;
+    BOOST_REQUIRE(AwaitConfirmation([&] { return !queue.Pending(header.GetHash()); }));
+    const auto confirmed{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, declining, nullptr, &queue)};
+    BOOST_CHECK(confirmed.outcome == rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK(confirmed.device_mismatch_confirmed);
+    BOOST_CHECK_EQUAL(confirmed.digest, digest);
+    BOOST_CHECK_GT(confirmed.cpu_gemm_calls, 0U);
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
+}
+
+BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_recovers_header_and_binds_target)
+{
+    ConfirmationPolicyGuard policy{true};
+    rc::RCCpuConfirmationQueue queue;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    auto header{MakeRCHeader(0x4153594e4332)};
+    header.matmul_digest = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &WrongGemmS8S8;
+    rc::RCExactReplayAcceleration acceleration{.gemm = backend, .backend = "test:wrong", .require_device = true};
+    const auto pending{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, acceleration, nullptr, &queue)};
+    BOOST_CHECK_EQUAL(pending.acceleration_failure, "cpu_confirmation_pending");
+    BOOST_REQUIRE(AwaitConfirmation([&] { return !queue.Pending(header.GetHash()); }));
+    const auto recovered{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, acceleration, nullptr, &queue)};
+    BOOST_CHECK(recovered.ok);
+    BOOST_CHECK_EQUAL(recovered.digest, header.matmul_digest);
+    const arith_uint256 impossible_target{0};
+    const auto strict_target{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, acceleration, &impossible_target, &queue)};
+    BOOST_CHECK_EQUAL(strict_target.acceleration_failure, "cpu_confirmation_pending");
+    BOOST_REQUIRE(AwaitConfirmation([&] { return !queue.Pending(header.GetHash()); }));
+    const auto rejected{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, acceleration, &impossible_target, &queue)};
+    BOOST_CHECK(rejected.outcome == rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK(!rejected.ok);
+    const auto key{rc::RCCpuConfirmationKey(header, params, 0, nullptr, 1)};
+    BOOST_CHECK(key != rc::RCCpuConfirmationKey(header, params, 1, nullptr, 1));
+    BOOST_CHECK(key != rc::RCCpuConfirmationKey(header, params, 0, nullptr, 2));
+    auto changed{params}; ++changed.rounds;
+    BOOST_CHECK(key != rc::RCCpuConfirmationKey(header, changed, 0, nullptr, 1));
+}
+
+BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_bounded_shutdown_and_failure)
+{
+    std::atomic<int> started{0};
+    std::atomic_bool saw_cancel{false};
+    rc::RCCpuConfirmationQueue queue;
+    for (size_t i = 0; i < rc::RCCpuConfirmationQueue::MAX_PENDING; ++i) {
+        const auto key{MakeRCHeader(0x434150 + i).GetHash()};
+        const auto pending{queue.Submit(key, key, {}, [&] {
+            ++started;
+            while (!rc::ExactReplayCancellationRequested()) std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            saw_cancel = true;
+            return ValidConfirmation(); // even this must not publish on shutdown
+        })};
+        BOOST_CHECK_EQUAL(pending.acceleration_failure, "cpu_confirmation_pending");
+    }
+    BOOST_REQUIRE(AwaitConfirmation([&] { return started == 1; }));
+    const auto overflow{queue.Submit(uint256::ONE, uint256::ONE, {}, [] { return ValidConfirmation(); })};
+    BOOST_CHECK_EQUAL(overflow.acceleration_failure, "cpu_confirmation_capacity");
+    BOOST_CHECK(overflow.outcome == rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    queue.Stop();
+    BOOST_CHECK(saw_cancel.load());
+    BOOST_CHECK_EQUAL(started.load(), 1);
+    BOOST_CHECK(!queue.Lookup(MakeRCHeader(0x434150).GetHash()));
+    BOOST_CHECK_EQUAL(queue.Submit(uint256::ONE, uint256::ONE, {}, [] { return ValidConfirmation(); }).acceleration_failure, "cpu_confirmation_stopped");
+
+    rc::RCCpuConfirmationQueue failed_queue;
+    failed_queue.Submit(uint256::ONE, uint256::ONE, {}, []() -> rc::ExactReplayVerifyResult { throw std::runtime_error("test"); });
+    BOOST_REQUIRE(AwaitConfirmation([&] { return !failed_queue.Pending(uint256::ONE); }));
+    const auto failed{failed_queue.Lookup(uint256::ONE)};
+    BOOST_REQUIRE(failed);
+    BOOST_CHECK(failed->outcome == rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(!failed_queue.Lookup(uint256::ONE)); // failure is retryable, not memoized
+}
+
+BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_global_queue_stop_is_durable)
+{
+    struct RestoreQueue {
+        ~RestoreQueue() { rc::GetRCCpuConfirmationQueue().ResetForTest(); }
+    } restore;
+    auto& before{rc::GetRCCpuConfirmationQueue()};
+    before.Stop();
+    auto& after{rc::GetRCCpuConfirmationQueue()};
+    BOOST_CHECK_EQUAL(&before, &after);
+    BOOST_CHECK(after.Stopped());
+    BOOST_CHECK_EQUAL(
+        after.Submit(uint256::ONE, uint256::ONE, {}, [] { return ValidConfirmation(); }).acceleration_failure,
+        "cpu_confirmation_stopped");
+    BOOST_CHECK(!before.Lookup(uint256{}));
+}
+
+BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_completed_cache_is_bounded)
+{
+    rc::RCCpuConfirmationQueue queue;
+    for (size_t i = 0; i <= rc::RCCpuConfirmationQueue::MAX_RESULTS; ++i) {
+        const auto key{MakeRCHeader(0x4341434845 + i).GetHash()};
+        queue.Submit(key, key, {}, [] { return ValidConfirmation(); });
+        BOOST_REQUIRE(AwaitConfirmation([&] { return !queue.Pending(key); }));
+    }
+    BOOST_CHECK(!queue.Lookup(MakeRCHeader(0x4341434845).GetHash()));
+    BOOST_CHECK(queue.Lookup(MakeRCHeader(0x4341434846).GetHash()));
+}
+
+BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_opt_out_requires_qualified_exact_completion)
+{
+    ConfirmationPolicyGuard policy{false};
+    rc::RCCpuConfirmationQueue queue;
+    auto header{MakeRCHeader(0x4e4f435055)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const auto digest{rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    header.matmul_digest = uint256::ONE;
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &OracleGemmS8S8;
+    rc::RCExactReplayAcceleration acceleration{.gemm = backend, .backend = "test:qualified-opt-out", .require_device = true};
+    const auto unqualified{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, acceleration, nullptr, &queue)};
+    BOOST_CHECK(unqualified.outcome == rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK_EQUAL(unqualified.acceleration_failure, "cpu_confirmation_disabled_unqualified_device");
+    BOOST_CHECK(!queue.Pending(header.GetHash()));
+    const auto capability{rc::IssueRCProductionProviderCapabilityForTest(acceleration.backend, backend, MakeReplayCapabilityEpoch(params, header.matmul_dim))};
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({.backend = backend, .provider = acceleration.backend, .capability = capability}));
+    const auto rejected{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, acceleration, nullptr, &queue)};
+    BOOST_CHECK(rejected.outcome == rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK_EQUAL(rejected.digest, digest);
+    BOOST_CHECK_EQUAL(rejected.cpu_gemm_calls, 0U);
+    BOOST_CHECK(!rejected.device_mismatch_retried);
+    BOOST_CHECK(!queue.Pending(header.GetHash()));
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
+    // Execution failure is not a mismatch, even with confirmation disabled.
+    rc::ClearRCExactReplayAlternateProviders();
+    acceleration.gemm.gemm_s8s8 = &DecliningGemmS8S8;
+    const auto failure{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, acceleration, nullptr, &queue)};
+    BOOST_CHECK(failure.outcome == rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK_EQUAL(failure.cpu_gemm_calls, 0U);
 }
 
 BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_cpu_confirms_invalid_not_quarantined)

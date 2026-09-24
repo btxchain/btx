@@ -11,12 +11,14 @@
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/trusted_exact_replay_attestation.h>
 
+#include <arith_uint256.h>
 #include <chainparams.h>
 #include <consensus/params.h>
 #include <key.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_cpu_confirmation.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
@@ -1326,6 +1328,186 @@ BOOST_AUTO_TEST_CASE(stop_drains_queue_without_completions)
     BOOST_CHECK(late.completion);
     late.completion(false);
     BOOST_CHECK_EQUAL(completions.load(), 2);
+}
+
+BOOST_AUTO_TEST_CASE(cpu_confirmation_pending_releases_worker_and_admission)
+{
+    namespace rc = matmul::v4::rc;
+    node::matmul_trusted::ResetForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    const auto saved_policy{rc::GetRCExactReplayExecutionPolicy()};
+    rc::SetRCExactReplayExecutionPolicy(rc::RCExactReplayExecutionPolicy::AutoFallback);
+    struct PolicyRestore {
+        rc::RCExactReplayExecutionPolicy saved;
+        ~PolicyRestore() { rc::SetRCExactReplayExecutionPolicy(saved); }
+    } restore{saved_policy};
+    auto release{std::make_shared<std::atomic_bool>(false)};
+    struct ReleaseCpu {
+        std::shared_ptr<std::atomic_bool> release;
+        ~ReleaseCpu() { release->store(true); }
+    } release_on_exit{release};
+    auto params{MakeProfile1ActiveParams()};
+    params.fMatMulRCUseToyDims = true;
+    const auto episode{rc::ResolveRCEpisodeParams(params, 100)};
+    auto bad{MakeProfile1Header(0x43505557414954, uint256::ONE)};
+    arith_uint256 target;
+    target.SetCompact(bad.nBits);
+    auto& queue{rc::GetRCCpuConfirmationQueue()};
+    const auto key{rc::RCCpuConfirmationKey(bad, episode, 100, &target, params.nMatMulRCProfile)};
+    queue.Submit(key, bad.GetHash(), {}, [release] {
+        while (!release->load() && !rc::ExactReplayCancellationRequested())
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        rc::ExactReplayVerifyResult result;
+        result.outcome = rc::ExactReplayVerifyOutcome::Cancelled;
+        return result;
+    });
+    std::atomic<int> verdicts{0}, cleanups{0}, leases{0};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    MatMulVerifyWorker::Job disputed{
+        .block = std::make_shared<CBlock>(bad),
+        .height = 100,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++verdicts; },
+        .retryable_failure = [&] { ++cleanups; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .rc_pending_lease = std::make_shared<PendingLeaseProbe>(leases),
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(disputed)));
+    BOOST_REQUIRE(WaitFor([&] { return cleanups == 1 && leases == 0; }));
+    BOOST_CHECK_EQUAL(verdicts.load(), 0);
+    BOOST_CHECK(!LookupMatMulEncDrVerdict(bad.GetHash()));
+    BOOST_CHECK(queue.Pending(bad.GetHash()));
+
+    auto good{MakeProfile1Header(0x43505546524545, uint256::ONE)};
+    bool solved{false};
+    for (int attempt = 0; attempt < 32; ++attempt) {
+        ++good.nNonce64;
+        good.matmul_digest = rc::RecomputeResidentCurriculumReference(good, episode, 100);
+        if (!good.matmul_digest.IsNull() && UintToArith256(good.matmul_digest) <= target) {
+            solved = true;
+            break;
+        }
+    }
+    BOOST_REQUIRE(solved);
+    std::atomic_bool valid{false};
+    MatMulVerifyWorker::Job following{
+        .block = std::make_shared<CBlock>(good),
+        .height = 100,
+        .parent_median_time_past = 1,
+        .completion = [&](bool ok) { valid = ok; ++verdicts; },
+        .retryable_failure = [&] { ++cleanups; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .rc_pending_lease = std::make_shared<PendingLeaseProbe>(leases),
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(following)));
+    BOOST_REQUIRE(WaitFor([&] { return verdicts == 1 || cleanups > 1; }));
+    BOOST_CHECK(valid.load());
+    BOOST_CHECK_EQUAL(cleanups.load(), 1);
+    BOOST_CHECK(queue.Pending(bad.GetHash()));
+    worker.Stop();
+    BOOST_CHECK_EQUAL(leases.load(), 0);
+    release->store(true);
+    BOOST_REQUIRE(WaitFor([&] { return !queue.Pending(bad.GetHash()); }));
+    (void)queue.Lookup(key);
+}
+
+// Body-holding ExactReplay ignores ordinary job.cancelled. Stop() must still
+// cancel a running protected replay via m_shutdown so SIGTERM cannot wait
+// the whole episode. The override polls ExactReplayCancellationRequested;
+// without the live shutdown observer this case never sees Stop().
+BOOST_AUTO_TEST_CASE(protected_running_body_observes_shutdown)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    std::atomic<int> running{0};
+    std::atomic<int> saw_shutdown{0};
+    std::atomic<int> completions{0};
+    std::atomic<int> retryable_cleanups{0};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            ++running;
+            const auto deadline{
+                std::chrono::steady_clock::now() +
+                std::chrono::seconds{20}};
+            while (!matmul::v4::rc::ExactReplayCancellationRequested()) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{2});
+            }
+            if (matmul::v4::rc::ExactReplayCancellationRequested()) {
+                ++saw_shutdown;
+            }
+            return false;
+        }};
+
+    MatMulVerifyWorker::Job job{
+        .block = MakeBlock(201),
+        .height = 100,
+        .completion = [&](bool) { ++completions; },
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    BOOST_REQUIRE(WaitFor([&] { return running.load() == 1; }));
+
+    const auto t0{std::chrono::steady_clock::now()};
+    worker.Stop();
+    BOOST_CHECK_LT(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count(),
+        5000);
+    BOOST_CHECK_EQUAL(saw_shutdown.load(), 1);
+    BOOST_CHECK_EQUAL(completions.load(), 0);
+    BOOST_CHECK_EQUAL(retryable_cleanups.load(), 1);
+}
+
+// Same protection applies while the body job is still waiting for the
+// accelerator. Stop() must abort that wait via external_cancelled; a 90s
+// queue-wait timeout is not a shutdown.
+BOOST_AUTO_TEST_CASE(protected_scheduler_wait_observes_shutdown)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &owner_cancelled,
+        "hold-device-for-shutdown-test")};
+    BOOST_REQUIRE(owner);
+
+    Consensus::Params params{MakeProfile1ActiveParams()};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    std::atomic<int> completions{0};
+    std::atomic<int> retryable_cleanups{0};
+    MatMulVerifyWorker::Job job{
+        .block = MakeBlock(202),
+        .height = 100,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++completions; },
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .acquisition_recovery = true,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+
+    const auto t0{std::chrono::steady_clock::now()};
+    worker.Stop();
+    BOOST_CHECK_LT(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count(),
+        5000);
+    BOOST_CHECK_EQUAL(completions.load(), 0);
+    BOOST_CHECK_EQUAL(retryable_cleanups.load(), 1);
+    BOOST_CHECK_GE(scheduler.GetStats().cancelled_waits, 1U);
+
+    owner = {};
+    BOOST_CHECK(!scheduler.GetStats().active);
 }
 
 // Design test A.10 #4: the ENC-DR verdict memo is bounded at 64 entries with

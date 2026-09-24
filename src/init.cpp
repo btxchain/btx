@@ -52,6 +52,7 @@
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_cpu_confirmation.h>
 #include <matmul/matmul_v4_rc_production_canary.h>
 #include <net.h>
 #include <net_permissions.h>
@@ -349,6 +350,7 @@ void Interrupt(NodeContext& node)
     // Otherwise ActivateBestChain / preciousblock sitting in an HTTP thread
     // waits forever on b-mmverify, StopHTTPServer never returns, and systemd
     // SIGKILLs — skipping PersistShieldedState and forcing a fused rebuild.
+    matmul::v4::rc::GetRCCpuConfirmationQueue().Stop();
     if (node.peerman) node.peerman->StopBackgroundWorkers();
 }
 
@@ -380,6 +382,7 @@ void Shutdown(NodeContext& node)
     // Stop mmverify before joining HTTP/RPC workers. Interrupt() already did
     // this; calling it again is idempotent. Doing it here covers the path
     // where Shutdown() runs without Interrupt() (failed init / Qt).
+    matmul::v4::rc::GetRCCpuConfirmationQueue().Stop();
     if (node.peerman) node.peerman->StopBackgroundWorkers();
 
     // Durable chainstate must be recorded BEFORE StopHTTPServer joins RPC
@@ -658,6 +661,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-governorcooldownseconds=<n>", "Seconds after a mining pause before resume is considered (default: 10).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-discoveryrelayhideaddr=<ip>", "Do not learn, GETADDR, or getnodeaddresses this IP. Repeatable. Use on discovery relays and trusted archives to hide GPU attestor addresses that advertise CONSENSUS without ARCHIVE (serve=0). Relays InitError if -addnode/-connect/-seednode targets a hidden address.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: strict-device on a chain with a finite RC activation height, auto-fallback while RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulrcconfirmcpu", "Confirm unresolved device digest mismatches using a bounded background portable CPU ExactReplay (default: 1). With 0, a completed exact device replay with current production qualification may reject a mismatched commitment without CPU confirmation. Execution failures and unqualified mismatches remain retryable. Does not disable explicit cpu-diagnostic or auto-fallback execution.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowunverifiablematmulconsensus", "Allow consensus-mode catch-up ExactReplay when the local device did not self-qualify (startup canary / production goldens miss). Startup still warns and withholds NODE_MATMUL_CONSENSUS. Mining stays fail-closed. Catch-up still fully ExactReplays every body before ConnectTip, on the available CUDA/Metal GEMM if present, otherwise on CPU. Without this flag a canary miss zeros the GEMM and digest_requests stays 0 (a live consensus-archive node: buffer_pool_uninitialized). Do not treat this as skipping ExactReplay.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted unless -matmultrustedpqpubkey is set. Mainnet trusted mirrors require at least 2 independent signers and M=2 (a 1-of-1 quorum is ExactReplay skip authority). Pass -allowsinglekeytrustedmirror=1 only as an explicit transition override. ML-DSA-44 pin members from -matmultrustedpqpubkey count toward N independently.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpqpubkey=<hex>", "ML-DSA-44 (1312-byte) public key trusted to attest successful Profile-1 ExactReplay. Repeat for additional independent pin members; each must be distinct. Counted in N alongside -matmultrustedpubkey. Does not change consensus ExactReplay: only trusted mirrors skip GPU on pin quorum. Empty keeps the live secp pin.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -687,7 +691,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-parkdeepreorg", "Per-node deep-reorg parking action override (NON-CONSENSUS). When 1 and -maxreorgdepthpark/profile park depth is set, the node refuses to auto-switch to a branch deeper than that depth and stays on its current tip pending operator action. When 0, it follows the automated fork-choice policy and only alarms/defers by hysteresis. When unset, the selected profile decides (the default emergency profile parks beyond depth 6).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxreorgdepthwarn=<n>", "Warn/alarm when a candidate branch would reorganize more than this many blocks (default: active -reorgprotectionprofile warn depth, standard=3). Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxreorgdepthpark=<n>", "Park/refuse automatic switch when a candidate branch would reorganize more than this many blocks and parking is enabled (default: 6 for emergency; disabled for other built-in profiles). Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-acquisitionstallseconds=<n>", "TEST-ONLY. Override the RB-16 acquisition-escape staleness window in seconds (default: 600). Only changes how long a frozen node waits before the escape valve may arm -- never any validation, ExactReplay, or migration gate. Intended solely to speed up live convergence tests; do NOT use in production. Must be >= 1.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-acquisitionstallseconds=<n>", "TEST-ONLY. Override the RB-16 acquisition-escape staleness window in seconds (default: 600). Ignored on mainnet. Only changes how long a frozen node waits before the escape valve may arm -- never any validation, ExactReplay, or migration gate. Intended solely to speed up regtest/testnet convergence tests; do NOT use in production. Must be >= 1.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-cadenceburstmax=<n>", strprintf("While this node's validated tip is live, hold ConnectTip/GETDATA so a dumped burst cannot jump more than this many blocks ahead of wall-clock 90s cadence (default: %u on mainnet emergency, 0 elsewhere; 0 disables). Local policy, not consensus. See doc/design/0.34-dump-and-run-reorg.md.", kernel::DEFAULT_CADENCE_BURST_MAX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-deepforkautoresolve", "Default-on LOCAL POLICY (non-consensus): auto-migrate this node to an HONEST deep (> park depth) strictly-heavier competing fork using network observation (seen live block-by-block as our tip climbed, sustained, still fresh, no attestation quorum on either fork), instead of parking and requiring manual invalidateblock. Refuses a flash-revealed or paced dump-and-run and fails safe to PARK + the deep-reorg warning when signals are ambiguous. Fork-choice preference only; block validity and ExactReplay-before-ConnectTip are unchanged. Set 0 to disable (proactive miners who intervene manually). Only effective under the PARK deep-reorg action.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-deepforkautoresolvesustain=<s>", "Deep-fork auto-resolve: minimum wall-clock seconds the competing suffix must have been observed extending before it may be auto-followed (default 1800).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1925,6 +1929,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
     matmul::v4::rc::SetRCExactReplayExecutionPolicy(
         rc_execution_policy);
+    matmul::v4::rc::SetRCExactReplayCpuConfirmation(
+        args.GetBoolArg("-matmulrcconfirmcpu", true));
+    LogInfo("MatMul RC portable CPU mismatch confirmation: %s\n",
+            matmul::v4::rc::GetRCExactReplayCpuConfirmation() ? "enabled (background)" : "disabled (qualified device authority)");
 
     // Validate invariant: nFastMineHeight must equal nMatMulAsertHeight on all
     // networks.  Misconfiguration silently breaks difficulty adjustment.

@@ -708,6 +708,22 @@ public:
         return it != m_entries.end() && it->second.body.has_value();
     }
 
+    /** Snapshot the bounded retained children without running chain/index
+     *  lookups under the lifecycle mutex. Retry deadlines do not remove a
+     *  body's priority over later bodies that depend on it. */
+    std::vector<uint256> RetainedChildren(const uint256& parent) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<uint256> children;
+        for (const auto& [hash, entry] : m_entries) {
+            if (entry.body && !entry.terminal_on_connect &&
+                entry.body->block->hashPrevBlock == parent) {
+                children.push_back(hash);
+            }
+        }
+        return children;
+    }
+
     // True if the retained body for `hash` is the followed tip-child / root
     // (pin_progress). Such a body is the productive catch-up root: when it
     // verifies it ConnectTips and is removed, so it can never spin. Callers use

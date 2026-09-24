@@ -1099,6 +1099,11 @@ enum class RCExactReplayQuarantineRecoveryState : uint8_t {
 /** Process startup configuration. Set before validation workers start. */
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy);
 [[nodiscard]] RCExactReplayExecutionPolicy GetRCExactReplayExecutionPolicy();
+/** Default on. Disabling confirmation only authorizes completed, strictly
+ * accelerated replays with a current production capability to reject a
+ * mismatched commitment; execution errors remain local/retryable. */
+void SetRCExactReplayCpuConfirmation(bool enabled);
+[[nodiscard]] bool GetRCExactReplayCpuConfirmation();
 /** Operator -allowunverifiablematmulconsensus: still ExactReplay catch-up
  *  when the device missed the production canary. Mining / NODE_MATMUL_CONSENSUS
  *  stay fail-closed. Default off. */
@@ -1283,7 +1288,8 @@ VerifyBoundedExactReplayWithAccelerationForTest(
     const RCEpisodeParams& params,
     int32_t height,
     const RCExactReplayAcceleration& acceleration,
-    const arith_uint256* target = nullptr);
+    const arith_uint256* target = nullptr,
+    class RCCpuConfirmationQueue* confirmations = nullptr);
 
 /** Test-only seam for the strict resolver's production-eligibility gate. */
 [[nodiscard]] ExactReplayVerifyResult

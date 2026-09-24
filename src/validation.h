@@ -1593,6 +1593,13 @@ public:
      * as the download target or getheaders locator.
      */
     CBlockIndex* m_best_claimed_header GUARDED_BY(::cs_main){nullptr};
+    /** Most-work header that still extends the connected tip. m_best_header
+     *  follows heaviest work, including a competing HEADER_ONLY tower, so it
+     *  cannot locate the honest tip-child once a false fork is heavier.
+     *  GETDATA uses this so an unprivileged node keeps asking for the next
+     *  authentic body without waiting for someone to addnode or
+     *  invalidateblock. */
+    CBlockIndex* m_best_header_extending_tip GUARDED_BY(::cs_main){nullptr};
     //! Headers rejected for bad-diffbits at/after stall-recovery. Memory
     //! only; the invalid tower is not stored.
     std::atomic<uint64_t> m_rejected_divergent_pow_headers{0};
@@ -1933,12 +1940,29 @@ public:
     //! block (the block sits on that heavier competing fork we are deliberately
     //! acquiring while stale-stuck)? Unlike AcquisitionEscapeActive this does
     //! NOT require the block itself to out-work the tip -- a low mid-tower body
-    //! is below the minority tip in work but must still be ExactReplay-admitted.
-    //! Used to ADMIT ExactReplay (bypass the parked-branch veto and the
-    //! competing-body budget deferral) for the tower we are acquiring; bounded
-    //! by the same <=2 towers + stuck-state gate. Migration stays park/
-    //! deepforkautoresolve-gated; a fake tower's bodies fail ExactReplay.
+    //! is below the minority tip in work but is still on the tower (fetch,
+    //! parked-bypass, retain). ExactReplay / RC progress-lane / AcceptBlock
+    //! reverify must use FindAcquisitionEscapeFrontier, not this predicate:
+    //! every LCA+1 sibling is parent-connectable, and covering them all fills
+    //! the accelerator. Active-chain blocks and HEADER_ONLY / retained children
+    //! that extend the active tip are never covered: Contains() is false until
+    //! ConnectTip, and the exempt root is the fork LCA, so a descendant-of-LCA
+    //! test would otherwise steal ExactReplay from the tip-child onto
+    //! competing-tower GPU work. Bounded by the same <=2 towers + stuck-state
+    //! gate. Migration stays park/deepforkautoresolve-gated.
     [[nodiscard]] bool AcquisitionEscapeCoversBlock(const CBlockIndex* index) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Parent of `index` is already on the active chain or ExactReplay-verified
+    //! with data (and not FAILED). Shared by fetch lookahead and ExactReplay
+    //! admission so doomed-tower FAILED parents cannot spend GPU.
+    [[nodiscard]] bool AcquisitionEscapeParentConnectable(const CBlockIndex* index) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Unique lowest unverified parent-connectable body on the heaviest
+    //! registered competing tower, or nullptr. ExactReplay / RC progress-lane
+    //! / reverify must use this, not "any covered parent-connectable body".
+    [[nodiscard]] const CBlockIndex* FindAcquisitionEscapeFrontier() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool IsAcquisitionEscapeFrontier(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Slot-wedge hardening: a registered exempt tower whose BODY fails
     //! validation (BLOCK_FAILED_MASK on any block descending from its root)
@@ -2221,6 +2245,36 @@ public:
         if (m_best_claimed_header == nullptr ||
             pindex->nChainWork > m_best_claimed_header->nChainWork) {
             m_best_claimed_header = pindex;
+        }
+        MaybeUpdateBestExtendingHeader(pindex);
+    }
+
+    /** Remember the heaviest header that still extends ActiveTip(). */
+    void MaybeUpdateBestExtendingHeader(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        if (pindex == nullptr || (pindex->nStatus & BLOCK_FAILED_MASK)) return;
+        const CBlockIndex* const tip{ActiveChain().Tip()};
+        if (tip == nullptr || pindex->nHeight <= tip->nHeight) return;
+        if (pindex->GetAncestor(tip->nHeight) != tip) return;
+        if (m_best_header_extending_tip == nullptr ||
+            PreferMostWorkHeader(*m_best_header_extending_tip, *pindex)) {
+            m_best_header_extending_tip = pindex;
+        }
+    }
+
+    /** Drop the extending-tip pointer when ConnectTip / DisconnectTip moves
+     *  the tip off that branch. */
+    void RefreshBestExtendingHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        if (m_best_header_extending_tip == nullptr) return;
+        const CBlockIndex* const tip{ActiveChain().Tip()};
+        if (tip == nullptr ||
+            m_best_header_extending_tip->nHeight <= tip->nHeight ||
+            (m_best_header_extending_tip->nStatus & BLOCK_FAILED_MASK) != 0 ||
+            m_best_header_extending_tip->GetAncestor(tip->nHeight) != tip) {
+            m_best_header_extending_tip = nullptr;
         }
     }
 

@@ -233,7 +233,10 @@ def openssl_runtime_libs(btxd_path: Path) -> list[Path]:
     found: list[Path] = []
     seen: set[str] = set()
     for line in out.splitlines():
-        name = line.strip().split(" ", 1)[0]
+        parts = line.strip().split()
+        if not parts:
+            continue
+        name = parts[0]
         if name not in ("libssl.so.3", "libcrypto.so.3"):
             continue
         if "=>" not in line:

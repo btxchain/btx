@@ -19,6 +19,7 @@
 #include <interfaces/chain.h>
 #include <kernel/mempool_entry.h>
 #include <logging.h>
+#include <matmul/matmul_v4_rc_cpu_confirmation.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <net.h>
 #include <net_processing.h>
@@ -120,6 +121,7 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, TestOpts opts)
     if constexpr (!G_FUZZING) {
         SeedRandomForTest(SeedRand::FIXED_SEED);
     }
+    matmul::v4::rc::GetRCCpuConfirmationQueue().ResetForTest();
     m_node.shutdown_signal = &m_interrupt;
     m_node.shutdown_request = [this]{ return m_interrupt(); };
     m_node.args = &gArgs;

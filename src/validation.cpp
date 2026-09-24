@@ -41,6 +41,7 @@
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_cpu_confirmation.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_producer.h>
@@ -9400,6 +9401,8 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     m_chain.SetTip(*pindexDelete->pprev);
 
     UpdateTip(pindexDelete->pprev);
+    m_chainman.RefreshBestExtendingHeader();
+    m_chainman.MaybeUpdateBestExtendingHeader(pindexDelete);
     // Let wallets know transactions went from 1-confirmed to
     // 0-confirmed or conflicted:
     if (m_chainman.m_options.signals) {
@@ -9704,6 +9707,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     // Update m_chain & related variables.
     m_chain.SetTip(*pindexNew);
     UpdateTip(pindexNew);
+    m_chainman.RefreshBestExtendingHeader();
     // Keep the shielded prune-retention window pinned to the new tip (no-op unless pruning + shielded).
     UpdateShieldedPruneRetentionLock(*this);
     if (m_mempool) {
@@ -11934,6 +11938,18 @@ bool ChainstateManager::AcquisitionEscapeCoversBlock(const CBlockIndex* index) c
     if (!AcquisitionTipIsStale()) return false;
     // A block already on our active chain is not "being acquired".
     if (m_active_chainstate->m_chain.Contains(index)) return false;
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    // HEADER_ONLY / retained children of the active tip are also not being
+    // acquired. Contains() is false until ConnectTip, and the exempt root is
+    // the fork LCA (always on the active chain), so a naive descendant-of-LCA
+    // test covers every post-fork block — including our own tip-child. That
+    // sent the retained tip-child through acquisition ExactReplay, where
+    // competing-tower work filled the accelerator queue and AcceptBlock
+    // failed retryable (queue full) forever.
+    if (tip != nullptr && index->nHeight >= tip->nHeight &&
+        index->GetAncestor(tip->nHeight) == tip) {
+        return false;
+    }
     // The block is covered if it DESCENDS FROM an exempt tower root (the fork
     // LCA) and is off the active chain, i.e. it sits on that heavier competing
     // fork. This holds for every ancestor of the tower tip regardless of the
@@ -11955,19 +11971,67 @@ bool ChainstateManager::AcquisitionEscapeCoversBlock(const CBlockIndex* index) c
             break;
         }
     }
-    // Rate-limited diagnostic so the live node can show why a fetched
-    // acquired-tower body is / is not admitted for ExactReplay.
+    // Rate-limited diagnostic: tower coverage, not ExactReplay admission.
+    // ExactReplay uses FindAcquisitionEscapeFrontier.
     static std::atomic<int64_t> s_last_log{0};
     const int64_t now_s{GetTime()};
     if (now_s - s_last_log.load(std::memory_order_relaxed) >= 5) {
         s_last_log.store(now_s, std::memory_order_relaxed);
+        const int extends_tip{
+            (tip != nullptr && index->nHeight >= tip->nHeight &&
+             index->GetAncestor(tip->nHeight) == tip)
+                ? 1
+                : 0};
         LogPrintf("acquisition-escape CoversBlock hash=%s height=%d covered=%d "
-                  "towers=%d contains=0 stale=1\n",
+                  "towers=%d extends_tip=%d\n",
                   index->GetBlockHash().ToString(), index->nHeight,
                   covered ? 1 : 0,
-                  static_cast<int>(m_acquisition_exempt_towers.size()));
+                  static_cast<int>(m_acquisition_exempt_towers.size()),
+                  extends_tip);
     }
     return covered;
+}
+
+bool ChainstateManager::AcquisitionEscapeParentConnectable(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr || index->pprev == nullptr) return false;
+    if ((index->pprev->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    if (m_active_chainstate == nullptr) return false;
+    return m_active_chainstate->m_chain.Contains(index->pprev) ||
+           ((index->pprev->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+            (index->pprev->nStatus & BLOCK_HAVE_DATA) != 0);
+}
+
+const CBlockIndex* ChainstateManager::FindAcquisitionEscapeFrontier() const
+{
+    AssertLockHeld(::cs_main);
+    if (!AcquisitionTipIsStale()) return nullptr;
+    if (m_active_chainstate == nullptr) return nullptr;
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    const CBlockIndex* const best{m_best_header};
+    if (tip == nullptr || best == nullptr) return nullptr;
+    if (!(best->nChainWork > tip->nChainWork)) return nullptr;
+    if (best->GetAncestor(tip->nHeight) == tip) return nullptr;
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(best)};
+    if (fork == nullptr) return nullptr;
+    const CBlockIndex* lowest{nullptr};
+    for (const CBlockIndex* walk{best};
+         walk != nullptr && walk != fork && walk->nHeight > fork->nHeight;
+         walk = walk->pprev) {
+        if ((walk->nStatus & BLOCK_FAILED_MASK) != 0) continue;
+        if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
+        if (!AcquisitionEscapeParentConnectable(walk)) continue;
+        lowest = walk;
+    }
+    if (lowest == nullptr || !AcquisitionEscapeCoversBlock(lowest)) return nullptr;
+    return lowest;
+}
+
+bool ChainstateManager::IsAcquisitionEscapeFrontier(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    return index != nullptr && index == FindAcquisitionEscapeFrontier();
 }
 
 void ChainstateManager::AcquisitionEscapeNoteBlockFailed(const CBlockIndex* failed)
@@ -15641,42 +15705,31 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         !node::matmul_trusted::SkipExactReplayForGpuAttestation(
             IndexHasTrustedMatMulAuthority(pindex),
             node::matmul_trusted::IsTrustedMirror())};
+    const CBlockIndex* const acq_frontier{FindAcquisitionEscapeFrontier()};
+    const bool frontier_owns_gpu{
+        acq_frontier != nullptr &&
+        (acq_frontier->nStatus & BLOCK_HAVE_DATA) != 0 &&
+        !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
+            acq_frontier->GetBlockHash())};
     const bool reverify_tip_child{
         fAlreadyHave &&
         pindex->pprev != nullptr &&
         pindex->pprev == ActiveTip() &&
         !ActiveChain().Contains(pindex) &&
         (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
-        (fRequested || needs_consensus_exact_replay)};
-    // RB-16 CONVERGENCE: a HAVE_DATA body on a heavier tower under ACQUISITION
-    // escape (stale tip + registered exempt tower) whose parent chain is
-    // already connectable -- parent on the active chain (the fork root) or
-    // itself ExactReplay-verified with data -- must re-enter
-    // ContextualCheckBlock so the acquired tower's verdicts assemble
-    // CONTIGUOUSLY from its fork root. Without this the fAlreadyHave early
-    // return fossilized on-disk mid-tower bodies forever (live rtx6000: tip
-    // 199416, headers 201500, GPU ExactReplaying 199460+ out of order while
-    // 199313..199459 sat HAVE_DATA/unverified -- so no connected heavier
-    // chain ever existed for deepforkautoresolve/ABC to migrate to). The
-    // parent-connectable requirement keeps admission strictly root-first;
-    // CoversBlock keeps it bounded (<=2 towers, 600s stale gate,
-    // ACQUISITION_ESCAPE_MAX_LEAD). Unrequested P2P pushes of such bodies
-    // still bail in the !fRequested anti-DoS block below (nTx!=0 /
-    // less-work), so only local catch-up or requested downloads reach CUDA.
+        (fRequested || needs_consensus_exact_replay) &&
+        // A HEADER_ONLY or CPU-pending competing frontier does not own GPU.
+        // AcceptBlock re-entry of a persisted HAVE_DATA tip-child must still
+        // proceed; only a drivable frontier body occupies the accelerator.
+        (!frontier_owns_gpu || pindex == acq_frontier)};
+    // RB-16 CONVERGENCE: only the unique lowest parent-connectable
+    // unverified body on the registered heavier tower may re-enter
+    // ContextualCheckBlock. CoversBlock && parent-connectable admitted
+    // every LCA+1 sibling and filled the scheduler.
     const bool reverify_acquired_fork_body{
         fAlreadyHave &&
         needs_consensus_exact_replay &&
-        pindex->pprev != nullptr &&
-        !ActiveChain().Contains(pindex) &&
-        (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
-        // Doomed-tower hardening (parity with AcquiredBodyParentConnectable):
-        // a FAILED parent can never ConnectTip, so its child must not
-        // re-enter ContextualCheckBlock ExactReplay.
-        (pindex->pprev->nStatus & BLOCK_FAILED_MASK) == 0 &&
-        (ActiveChain().Contains(pindex->pprev) ||
-         ((pindex->pprev->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
-          (pindex->pprev->nStatus & BLOCK_HAVE_DATA) != 0)) &&
-        AcquisitionEscapeCoversBlock(pindex)};
+        pindex == acq_frontier};
     const bool reverify_have_data{reverify_tip_child ||
                                   reverify_acquired_fork_body};
     if (fAlreadyHave && !reverify_have_data) return true;
@@ -22513,6 +22566,7 @@ void ChainstateManager::RecalculateBestHeader()
     const CBlockIndex* const active_tip{ActiveChain().Tip()};
     SetBestHeader(ActiveChain().Tip());
     m_best_claimed_header = nullptr;
+    m_best_header_extending_tip = nullptr;
     if (active_tip != nullptr) {
         MaybeUpdateBestClaimedHeader(const_cast<CBlockIndex*>(active_tip));
     }

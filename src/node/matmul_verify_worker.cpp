@@ -752,10 +752,14 @@ void MatMulVerifyWorker::WorkerLoop()
         };
         bool ok{false};
         bool local_execution_failure{false};
-        const bool shutting_down{
-            m_shutdown.load(std::memory_order_acquire)};
+        // Do not snapshot shutdown across Acquire / ExactReplay. Stop() can
+        // fire after this check; body-holding jobs ignore ordinary
+        // job.cancelled, so they need a live m_shutdown observer.
+        const auto shutdown_requested{[this] {
+            return m_shutdown.load(std::memory_order_acquire);
+        }};
         if (job.cancelled->load(std::memory_order_relaxed) &&
-            (!ProtectsBodyReplay(*pending) || shutting_down)) {
+            (!ProtectsBodyReplay(*pending) || shutdown_requested())) {
             finish_retryable_without_verdict();
             continue;
         }
@@ -830,16 +834,18 @@ void MatMulVerifyWorker::WorkerLoop()
             // Body-holding recovery replay: the scheduler must not raise the
             // job latch, or ExactReplay cancels and retryable_failure
             // immediately re-admits the same hash. Header-only speculation
-            // still yields the device via preempt_latch.
+            // still yields the device via preempt_latch. Shutdown is a
+            // separate observer so SIGTERM does not wait a multi-hour
+            // protected replay / CUDA teardown.
             accelerator_lease =
                 matmul::v4::rc::GetRCAcceleratorScheduler().Acquire(
                     device_priority,
-                    (protect_body_replay && !shutting_down)
+                    (protect_body_replay && !shutdown_requested())
                         ? nullptr
                         : job.cancelled.get(),
                     strprintf("verify:%s:%d", hash.ToString(),
                               job.height),
-                    /*external_cancelled=*/nullptr,
+                    /*external_cancelled=*/&m_shutdown,
                     matmul::v4::rc::RCAcceleratorScheduler::
                         DEFAULT_MAX_QUEUE_WAIT,
                     workspace_bytes);
@@ -860,8 +866,10 @@ void MatMulVerifyWorker::WorkerLoop()
                 accelerator_lease.QueueWaitSeconds());
         }
         matmul::v4::rc::ScopedExactReplayCancellation cancellation_scope{
-            (protect_body_replay && !shutting_down) ? nullptr
-                                                   : job.cancelled.get()};
+            (protect_body_replay && !shutdown_requested())
+                ? nullptr
+                : job.cancelled.get(),
+            /*secondary_cancelled=*/&m_shutdown};
         if (verify_override) {
             if (job.block) {
                 ok = verify_override(
@@ -1032,7 +1040,8 @@ void MatMulVerifyWorker::WorkerLoop()
             const auto suppress_verdict{[&] {
                 return local_execution_failure ||
                        (job.cancelled->load(std::memory_order_relaxed) &&
-                        (!ProtectsBodyReplay(*pending) || shutting_down));
+                        (!ProtectsBodyReplay(*pending) ||
+                         shutdown_requested()));
             }};
             if (sf.IsLeader()) {
                 ok = verify_pure();
