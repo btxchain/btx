@@ -73,10 +73,10 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.10**
-(`CLIENT_VERSION_IS_RELEASE=false`). Last shipping tag is **v0.34.9**.
-Do not recut `v0.34.9`. See
-[release-notes-0.34.10.md](release-notes/release-notes-0.34.10.md).
+`CLIENT_VERSION` in this tree is **0.34.11rc1**
+(`CLIENT_VERSION_IS_RELEASE=false`). Last shipping tag is **v0.34.10**.
+Do not recut `v0.34.10`. See
+[release-notes-0.34.11.md](release-notes/release-notes-0.34.11.md).
 The `v0.34` tag and 0.34.0 seal remain the pool-close cut. 0.34.1 is
 withdrawn: it partitions nodes from mainnet. 0.34.2 is withdrawn for
 consensus nodes: it deadlocks one block past the last attestation.
@@ -95,13 +95,19 @@ operator action. See
 consensus when the helper is absent. See
 [release-notes-0.34.7.md](release-notes/release-notes-0.34.7.md).
 
-**0.34.10** is this working tree (`IS_RELEASE=false`): acquisition-escape
-ExactReplay admits only the unique parent-connectable frontier; the
-followed tip-child yields while that frontier exists;
+**0.34.11rc1** is this working tree: per-tower GETDATA under an
+unavailable honest HEADER_ONLY tip-child, per-peer catch-up reclaim,
+and honest-tip getheaders while a long competing HEADER_ONLY tower is
+best-header. See
+[release-notes-0.34.11.md](release-notes/release-notes-0.34.11.md).
+
+**0.34.10** is the last shipping client (`IS_RELEASE=true` on tag **v0.34.10**):
+acquisition-escape ExactReplay admits only the unique parent-connectable
+frontier; the followed tip-child yields while that frontier exists;
 `-acquisitionstallseconds` is ignored on mainnet. See
 [release-notes-0.34.10.md](release-notes/release-notes-0.34.10.md).
 
-**0.34.9** is the last shipping client (`IS_RELEASE=true` on tag **v0.34.9**):
+**0.34.9** remains the previous shipping client (`IS_RELEASE=true` on tag **v0.34.9**):
 registry independence, host / load / generate, on-chain bounty/WRC
 timelocks, ExactReplay CPU confirmation. See
 [release-notes-0.34.9.md](release-notes/release-notes-0.34.9.md).

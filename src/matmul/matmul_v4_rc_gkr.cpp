@@ -5082,21 +5082,25 @@ ExactReplayVerifyResult ConfirmDeviceMismatches(
     result.ok = false;
     result.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
     result.failure_kind = RCExactReplayFailureKind::UnconfirmedDigestMismatch;
+    // A qualified, fully accelerated device is the consensus check. Its
+    // digest either matches the header or the block is invalid. A portable
+    // CPU replay is not a referee for that miss, on this architecture or
+    // any later one.
+    if (qualified_device && result.fully_accelerated &&
+        result.cpu_gemm_calls == 0 && result.cpu_gemm_fallbacks == 0 &&
+        result.device_gemm_calls != 0 && !result.digest.IsNull()) {
+        result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
+        result.failure_kind = RCExactReplayFailureKind::None;
+        result.acceleration_failure.clear();
+        result.operator_recovery.clear();
+        result.note = "ExactReplay: qualified device digest mismatch is a consensus rejection";
+        return result;
+    }
     if (!GetRCExactReplayCpuConfirmation()) {
-        // Qualification is an opaque startup-canary capability bound to this
-        // exact context, never the provider's label or the catch-up override.
-        if (qualified_device && result.fully_accelerated &&
-            result.cpu_gemm_calls == 0 && result.cpu_gemm_fallbacks == 0 &&
-            result.device_gemm_calls != 0 && !result.digest.IsNull()) {
-            result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
-            result.failure_kind = RCExactReplayFailureKind::None;
-            result.acceleration_failure.clear();
-            result.operator_recovery.clear();
-            result.note = "ExactReplay: qualified device digest mismatch; CPU confirmation disabled by operator";
-        } else {
-            result.acceleration_failure = "cpu_confirmation_disabled_unqualified_device";
-            result.note = "ExactReplay: mismatch lacks qualified device authority; block remains retryable";
-        }
+        // An unqualified or incomplete device is not a consensus authority.
+        // Leave the block retryable. Do not invent a CPU verdict for it.
+        result.acceleration_failure = "cpu_confirmation_disabled_unqualified_device";
+        result.note = "ExactReplay: mismatch lacks qualified device authority; block remains retryable";
         return result;
     }
     // Value captures contain only replay context and results, never a GPU
@@ -5171,7 +5175,16 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
     RCCpuConfirmationQueue* confirmations = nullptr)
 {
     if (confirmations) {
-        if (auto prior{confirmations->Lookup(RCCpuConfirmationKey(header, params, height, target, acceleration.profile))}) return *prior;
+        // An unfinished portable CPU job is not a consensus verdict and
+        // must not skip the device check. Only a completed accept or
+        // reject is reused. Any qualified architecture is subject to the
+        // same rule; none is the referee for the others.
+        if (auto prior{confirmations->Lookup(RCCpuConfirmationKey(header, params, height, target, acceleration.profile))}) {
+            if (prior->outcome == ExactReplayVerifyOutcome::Valid ||
+                prior->outcome == ExactReplayVerifyOutcome::InvalidConsensus) {
+                return *prior;
+            }
+        }
     }
     g_exact_replay_invoke_count.fetch_add(1, std::memory_order_relaxed);
     ExactReplayVerifyResult out;
