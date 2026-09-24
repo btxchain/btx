@@ -6855,6 +6855,33 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                  peer.m_id, nWindowEnd, cadence_allowed, tip_height);
         nWindowEnd = cadence_allowed;
     }
+    // A competing BestKnown must be fetched from its first missing body.
+    // Live 2026-09-24: inflight sat at 228201+ while the tip was 227446,
+    // so the connecting body was never the one requested.
+    if (tip != nullptr && state->pindexBestKnownBlock != nullptr &&
+        state->pindexBestKnownBlock->GetAncestor(tip->nHeight) != tip) {
+        const CBlockIndex* const fork{
+            m_chainman.ActiveChain().FindFork(state->pindexBestKnownBlock)};
+        const CBlockIndex* lowest_missing{nullptr};
+        for (const CBlockIndex* walk{state->pindexBestKnownBlock};
+             walk != nullptr && walk != fork &&
+             walk->nHeight > (fork != nullptr ? fork->nHeight : 0);
+             walk = walk->pprev) {
+            if ((walk->nStatus & BLOCK_FAILED_MASK) != 0) continue;
+            if ((walk->nStatus & BLOCK_HAVE_DATA) == 0) lowest_missing = walk;
+        }
+        if (lowest_missing != nullptr && lowest_missing->nHeight < nWindowEnd) {
+            static std::atomic<int64_t> s_last_clamp_log{0};
+            const int64_t now_s{GetTime()};
+            if (now_s - s_last_clamp_log.load(std::memory_order_relaxed) >= 15) {
+                s_last_clamp_log.store(now_s, std::memory_order_relaxed);
+                LogInfo("Competing-fork GETDATA clamped to first missing body "
+                        "peer=%d height=%d was_end=%d\n",
+                        peer.m_id, lowest_missing->nHeight, nWindowEnd);
+            }
+            nWindowEnd = lowest_missing->nHeight;
+        }
+    }
     // RB-16 ORDER: while acquiring a heavier tower, fetch only a bounded
     // lookahead above the lowest unverified parent-connectable body. Covered
     // bodies above that window are not ExactReplay-admissible yet (parent-
