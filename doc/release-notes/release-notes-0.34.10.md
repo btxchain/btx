@@ -1,10 +1,10 @@
 # BTX 0.34.10 — Acquisition-escape ExactReplay ordering
 
-**Status:** **PR / not shipping.** `CLIENT_VERSION` is **0.34.10** with
-`CLIENT_VERSION_RC=0` and `CLIENT_VERSION_IS_RELEASE=false`. P2P
-subversion is `/BTX:0.34.10/`. `btxd -version` prints `v0.34.10` plus a
-git suffix. Last shipping tag remains **v0.34.9**. Do not recut
-`v0.34.9` or `v0.34.9-dev.pr198*`.
+**Status:** **shipping**. `CLIENT_VERSION` is **0.34.10** with
+`CLIENT_VERSION_RC=0` and `CLIENT_VERSION_IS_RELEASE=true`. GitHub tag
+**v0.34.10**. P2P subversion is `/BTX:0.34.10/`. `btxd -version` prints
+`v0.34.10`. Last shipping tag remains **v0.34.9** until this merge.
+Do not recut `v0.34.9` or `v0.34.9-dev.pr198*`.
 
 Not a consensus change relative to 0.34.9. `automatic_spend_atoms` stays
 0.
@@ -112,6 +112,11 @@ miss the header. Do not mark `BLOCK_FAILED` from a CUDA-only retry.
 
 ## Precompiled archives
 
-Not a shipping cut. Archives, if built from this PR, advertise
-`/BTX:0.34.10/` and `IS_RELEASE=false`. Use
+Archives are **0.34.10** (`IS_RELEASE=true`). `btxd -version` prints
+`v0.34.10`. P2P subversion is `/BTX:0.34.10/`. Packaged `bin/btxd` is a
+`#!/bin/sh` wrapper; gate the real binary with
 `python3 scripts/release/verify_release_btxd.py` on `libexec/btxd.real`.
+
+Flavors: `x86_64-linux-gnu`, `x86_64-linux-gnu-cuda12`,
+`x86_64-linux-gnu-cuda13`, `arm64-apple-darwin`. Metal archives include
+precompiled `*.metallib` next to `libexec/btxd.real`.
