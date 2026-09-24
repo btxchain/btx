@@ -5518,11 +5518,13 @@ static bool TrustedMirrorMayDownloadIndex(
     }
     const CBlockIndex* const lca{LastCommonAncestor(tip, index)};
     const bool immediate_fork_child{lca != nullptr && index->pprev == lca};
-    const bool parent_has_data{
-        index->pprev != nullptr &&
-        (index->pprev->nStatus & BLOCK_HAVE_DATA) != 0};
+    // HAVE_DATA on a parent is not a verified prefix. Live 2026-09-24:
+    // blocks at 227500+ had parents on disk and took the GPU while the
+    // connecting hole at 227313 was still unverified, so the tip never moved.
+    const bool parent_connectable{
+        chainman.AcquisitionEscapeParentConnectable(index)};
     return node::matmul_trusted::HeavierCompetingForkHoleMayExactReplay(
-        /*may_fetch=*/true, immediate_fork_child, parent_has_data);
+        /*may_fetch=*/true, immediate_fork_child, parent_connectable);
 }
 
 [[nodiscard]] static bool IsHeaderOnlyFetchSuppressed(
@@ -5812,6 +5814,12 @@ static bool TrustedMirrorMayDownloadIndex(
         return false;
     }
     if (IndexIsHeavierCompetingForkNextHole(chainman, tip, index, peer_best_known)) {
+        // A mismatch already on the portable CPU lane must not be
+        // re-admitted. That re-entry was the AcceptBlock livelock.
+        if (matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
+                index->GetBlockHash())) {
+            return false;
+        }
         g_configured_claimed_tip_child = index->GetBlockHash();
         LogInfo("MatMul ExactReplay heavier competing-fork hole hash=%s "
                 "height=%d (HEADER_ONLY skip would have wedged GETDATA)\n",
