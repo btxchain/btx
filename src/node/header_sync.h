@@ -72,6 +72,20 @@ inline constexpr int HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD{6};
 }
 
 /**
+ * After HeaderSyncLocatorStart snaps to the connected tip because of a
+ * long competing HEADER_ONLY tower, getheaders must start AT that tip.
+ * Walking to pprev lets a competing-only peer answer from the fork LCA
+ * and replay headers we already have, so honest tip+1 is never asked for.
+ */
+[[nodiscard]] inline bool HeaderSyncKeepLocatorAtConnectedTip(
+    const CBlockIndex* locator_start,
+    const CBlockIndex* active_tip)
+{
+    return locator_start != nullptr && active_tip != nullptr &&
+           locator_start == active_tip;
+}
+
+/**
  * Whether `best_known` is a descendant of the connected tip (including
  * the tip itself). Null is not an extension: treating it as one sealed
  * minority-tip nodes out of getheaders whenever a caller omitted the
@@ -219,6 +233,14 @@ inline constexpr int CATCHUP_FAR_BEHIND_YIELD{100};
         return true;
     }
     if (version_unusable) return false;
+    // Competing BestKnown above the connected tip: keep probing from the
+    // honest locator even when VERSION equals tip and the tip is <24h old.
+    // Otherwise a long competing tower marks the peer "synced" and honest
+    // tip+1 is never requested.
+    if (!best_known_is_null && !best_known_extends_tip &&
+        best_known_height > local_tip_height) {
+        return true;
+    }
     const auto known_not_ahead = [&] {
         if (best_known_is_null) return true;
         if (!best_known_extends_tip) return true;

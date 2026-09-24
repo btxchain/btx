@@ -37,10 +37,10 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.34.10** (`CLIENT_VERSION_BUILD=10`,
-`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=false`). GitHub tag
-**v0.34.9** remains the last shipping client. Do not recut `v0.34.9` or the
-`v0.34.9-dev.pr198*` tester tags.
+This working tree is **0.34.11rc1** (`CLIENT_VERSION_BUILD=11`,
+`CLIENT_VERSION_RC=1`, `CLIENT_VERSION_IS_RELEASE=false`). GitHub tag
+**v0.34.10** remains the last shipping client. Do not recut `v0.34.10` or
+`v0.34.9`.
 
 ## Start here
 
@@ -58,6 +58,7 @@ manual and not the long essay.
 
 - [Start here](#start-here)
 - [Current release — v0.34.9](#current-release--v0349)
+- [This tree — 0.34.11](#this-tree--03411)
 - [This tree — 0.34.10](#this-tree--03410)
 - [Get a node](#get-a-node)
 - [Use BTX for models (end to end)](#use-btx-for-models-end-to-end)
@@ -126,6 +127,19 @@ btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Do not mine on parent
 `ff80e629…` — that hash is not on the majority chain.
+
+## This tree — 0.34.11
+
+This tree is **0.34.11rc1** on the 0.34.10 monetary baseline. It does not
+change ExactReplay consensus, issuance, or fork choice. It keeps
+per-tower GETDATA from starving another registered heavier fork when an
+honest HEADER_ONLY tip-child is unavailable, scopes catch-up successor
+reclaim to one peer and one tower, and starts competing-tower getheaders
+at the connected tip. `btxd -version` prints `v0.34.11rc1` plus a git
+suffix. P2P subversion is `/BTX:0.34.11rc1/`. Last shipping tag
+**v0.34.10** is not recut.
+
+Notes: [doc/release-notes/release-notes-0.34.11.md](doc/release-notes/release-notes-0.34.11.md).
 
 ## This tree — 0.34.10
 

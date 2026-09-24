@@ -115,6 +115,9 @@ BOOST_AUTO_TEST_CASE(locator_start_does_not_chase_long_competing_header_tower)
         node::HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD + 1);
     BOOST_CHECK_EQUAL(node::HeaderSyncLocatorStart(&fork[6], &tip), &tip);
     BOOST_CHECK_EQUAL(node::HeaderSyncLocatorStart(&fork[7], &tip), &tip);
+    BOOST_CHECK(node::HeaderSyncKeepLocatorAtConnectedTip(&tip, &tip));
+    BOOST_CHECK(!node::HeaderSyncKeepLocatorAtConnectedTip(&fork[6], &tip));
+    BOOST_CHECK(!node::HeaderSyncKeepLocatorAtConnectedTip(nullptr, &tip));
 }
 
 BOOST_AUTO_TEST_CASE(must_probe_table)
@@ -143,6 +146,11 @@ BOOST_AUTO_TEST_CASE(must_probe_table)
     BOOST_CHECK(!node::HeaderSyncMustProbe(199310, 199523, false, false, false,
                                            /*best_known_height=*/199382,
                                            /*best_known_extends_tip=*/true));
+    // VERSION equals tip, tip not stale, competing BestKnown above tip:
+    // still probe so honest tip+1 can be learned.
+    BOOST_CHECK(node::HeaderSyncMustProbe(199310, 199310, false, false, false,
+                                          /*best_known_height=*/199382,
+                                          /*best_known_extends_tip=*/false));
     // VERSION below tip, not stale: do not probe (pre-eb9ef0ef + same-height)
     BOOST_CHECK(!node::HeaderSyncMustProbe(199310, 199294, true, false, false));
     // VERSION below tip, even when stale: do not probe (live 0.34.5 skip)

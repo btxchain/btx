@@ -502,13 +502,14 @@ static bool CatchUpOneWideFetch(const ChainstateManager& chainman,
                                 const CBlockIndex* peer_best = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    // Unique acquisition-escape frontier with no body: never 16-wide
-    // CatchUpFarBehind. A HEADER_ONLY LCA+1 twin with headers far ahead
-    // used to fill inflight with descendants while the frontier stayed
-    // have_data=0. Descendants cannot connect until that one body is
-    // ExactReplay'd.
+    // Unique acquisition-escape frontier with no body: 1-wide only on
+    // peers whose BestKnown is that frontier. Forcing 1-wide on every
+    // peer starved GETDATA of another registered heavier fork, and an
+    // honest HEADER_ONLY tip-child then consumed that single slot.
     if (const CBlockIndex* const acq{chainman.FindAcquisitionEscapeFrontier()};
-        acq != nullptr && (acq->nStatus & BLOCK_HAVE_DATA) == 0) {
+        acq != nullptr && (acq->nStatus & BLOCK_HAVE_DATA) == 0 &&
+        peer_best != nullptr &&
+        peer_best->GetAncestor(acq->nHeight) == acq) {
         return true;
     }
     if (CatchUpFarBehind(chainman, peer_best)) {
@@ -3005,8 +3006,15 @@ private:
     /** During catch-up, free in-flight requests above `keep_through_height` so
      *  a silent seed cannot pin 16 successors while the lowest hole (or an
      *  unconnected HAVE_DATA parent) never arrives. Restart's only useful
-     *  effect was clearing this window. */
-    int ReclaimCatchupSuccessorRequests(int keep_through_height, const char* reason)
+     *  effect was clearing this window.
+     *
+     *  `only_peer` limits the reclaim to that peer's inflight (one-wide
+     *  catch-up must not cancel another peer's tower root).
+     *  `only_descendants_of` limits it to that header's own tower. */
+    int ReclaimCatchupSuccessorRequests(int keep_through_height, const char* reason,
+                                        bool only_honest_extending_suffix = false,
+                                        std::optional<NodeId> only_peer = std::nullopt,
+                                        const CBlockIndex* only_descendants_of = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** If headers/peer tips are ahead of the active tip while nothing is
@@ -3551,6 +3559,21 @@ static constexpr int64_t MATMUL_ACQ_FRONTIER_REPLAY_MIN_GAP_S{2};
     AssertLockHeld(cs_main);
     return chainman.AcquisitionEscapeActive(best_known) ||
            chainman.AcquisitionEscapeCoversBlock(best_known);
+}
+
+//! BestKnown is a registered competing acquisition tower, not the honest
+//! suffix. Global GETDATA / inflight gates keyed on an honest HEADER_ONLY
+//! tip-child must not starve this peer's tower root.
+[[nodiscard]] static bool BestKnownIsRegisteredCompetingAcquisitionTower(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* best_known)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    if (tip == nullptr || best_known == nullptr) return false;
+    if (best_known->GetAncestor(tip->nHeight) == tip) return false;
+    return chainman.AcquisitionEscapeCoversBlock(best_known);
 }
 
 //! Protect the next retained active-chain body even when best_header is on
@@ -5002,7 +5025,10 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
     return static_cast<int>(overdue.size());
 }
 
-int PeerManagerImpl::ReclaimCatchupSuccessorRequests(int keep_through_height, const char* reason)
+int PeerManagerImpl::ReclaimCatchupSuccessorRequests(int keep_through_height, const char* reason,
+                                                     bool only_honest_extending_suffix,
+                                                     std::optional<NodeId> only_peer,
+                                                     const CBlockIndex* only_descendants_of)
 {
     AssertLockHeld(cs_main);
 
@@ -5012,12 +5038,27 @@ int PeerManagerImpl::ReclaimCatchupSuccessorRequests(int keep_through_height, co
         return 0;
     }
 
+    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
     std::vector<std::pair<NodeId, uint256>> extra;
     for (const auto& [nodeid, state] : m_node_states) {
+        if (only_peer && *only_peer != nodeid) continue;
         for (const QueuedBlock& entry : state.vBlocksInFlight) {
-            if (entry.pindex != nullptr && entry.pindex->nHeight > keep_through_height) {
-                extra.emplace_back(nodeid, entry.pindex->GetBlockHash());
+            if (entry.pindex == nullptr ||
+                entry.pindex->nHeight <= keep_through_height) {
+                continue;
             }
+            if (only_honest_extending_suffix) {
+                if (tip == nullptr ||
+                    entry.pindex->GetAncestor(tip->nHeight) != tip) {
+                    continue;
+                }
+            }
+            if (only_descendants_of != nullptr &&
+                entry.pindex->GetAncestor(only_descendants_of->nHeight) !=
+                    only_descendants_of) {
+                continue;
+            }
+            extra.emplace_back(nodeid, entry.pindex->GetBlockHash());
         }
     }
     if (extra.empty()) return 0;
@@ -6019,7 +6060,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         HeaderOnlyHonestTipChildToFetch(m_chainman, m_matmul_block_lifecycle)};
     if (missing_honest_early != nullptr) {
         ReclaimCatchupSuccessorRequests(missing_honest_early->nHeight,
-                                        "honest-header-only-tip-child");
+                                        "honest-header-only-tip-child",
+                                        /*only_honest_extending_suffix=*/true);
         if (count == 0) count = 1;
     }
     if (count == 0)
@@ -6142,11 +6184,18 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             m_stuck_root_hash = m_autofetch_root_hash;
             m_stuck_root_since_s = GetTime<std::chrono::seconds>().count();
         }
-        // 1-wide: do not walk competing descendants or honest grandchildren
-        // until this hole has a body. Walking filled inflight and skipped
-        // the cap/retain path for the next honest body.
-        log_skip("honest_header_only_tip_child");
-        return;
+        // Honest-suffix peers: 1-wide the hole, do not walk grandchildren.
+        // A registered competing tower on this peer must still GETDATA its
+        // own missing root; returning here was the stall the follow-up
+        // review caught (unavailable tip-child starved another fork).
+        if (!BestKnownIsRegisteredCompetingAcquisitionTower(
+                m_chainman, tip, state->pindexBestKnownBlock)) {
+            log_skip("honest_header_only_tip_child");
+            return;
+        }
+        if (vBlocks.size() >= count) {
+            count = static_cast<unsigned>(vBlocks.size() + 1);
+        }
     }
 
     // Inbound BLOCK stays GPU-only (ShouldIgnoreNonAuthorityInboundBlock).
@@ -6234,9 +6283,16 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         return;
     }
     // Preferred sources are already clamped above when one-wide. Do not
-    // re-clamp a far-behind pipeline back to 1.
+    // re-clamp a far-behind pipeline back to 1. A competing-tower peer that
+    // already queued the honest HEADER_ONLY tip-child needs one extra slot.
     if (one_wide && count > CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER) {
         count = CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER;
+    }
+    if (missing_honest_early != nullptr &&
+        BestKnownIsRegisteredCompetingAcquisitionTower(
+            m_chainman, tip, state->pindexBestKnownBlock)) {
+        const unsigned need{static_cast<unsigned>(vBlocks.size() + 1)};
+        if (count < need) count = need;
     }
 
     // Trusted mirrors download along the active tip's chain by default.
@@ -6493,7 +6549,21 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                     state->pindexLastCommonBlock->nHeight > tip->nHeight
                 ? state->pindexLastCommonBlock->nHeight + 1
                 : tip->nHeight + 1};
-        ReclaimCatchupSuccessorRequests(keep_through, "catchup-root-only");
+        const CBlockIndex* tower_root{nullptr};
+        if (BestKnownIsRegisteredCompetingAcquisitionTower(
+                m_chainman, tip, state->pindexBestKnownBlock) &&
+            state->pindexLastCommonBlock != nullptr &&
+            state->pindexBestKnownBlock != nullptr) {
+            const int next_h{state->pindexLastCommonBlock->nHeight + 1};
+            if (next_h <= state->pindexBestKnownBlock->nHeight) {
+                tower_root = state->pindexBestKnownBlock->GetAncestor(next_h);
+            }
+        }
+        // Per-peer and per-tower: a unique-frontier 1-wide pass must not
+        // globally cancel another peer's honest tip-child or other-tower root.
+        ReclaimCatchupSuccessorRequests(keep_through, "catchup-root-only",
+                                        /*only_honest_extending_suffix=*/false,
+                                        peer.m_id, tower_root);
     }
 
     const bool have_data_unconnected{
@@ -6760,7 +6830,11 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             ? std::numeric_limits<int>::max()
             : static_cast<int>(window_end64)};
     const int cadence_allowed{m_chainman.GetCadenceHoldAllowedHeight(tip, GetTime())};
-    if (!stalled_behind_header_tower && cadence_allowed < nWindowEnd) {
+    const bool competing_acquisition_tower{
+        BestKnownIsRegisteredCompetingAcquisitionTower(
+            m_chainman, tip, state->pindexBestKnownBlock)};
+    if (!stalled_behind_header_tower && cadence_allowed < nWindowEnd &&
+        !competing_acquisition_tower) {
         LogDebug(BCLog::NET,
                  "Cadence hold clamping GETDATA window peer=%d end=%d -> %d tip=%d\n",
                  peer.m_id, nWindowEnd, cadence_allowed, tip_height);
@@ -6776,41 +6850,43 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // disarmed this clamp and getdata churned 200999+ while the frontier
     // sat on disk at 199295).
     if (AcquisitionFetchEscapeActive(m_chainman, state->pindexBestKnownBlock)) {
+        const CBlockIndex* clamp_frontier{nullptr};
         if (const CBlockIndex* const acq_frontier{
                 FindLowestUnverifiedAcquiredBody(m_chainman)};
-            acq_frontier != nullptr) {
-            // HAVE_DATA: bounded lookahead above the unique frontier so
-            // fetch stays root-first (2f50a192). HEADER_ONLY: clamp to the
-            // frontier height itself. Widening while the hole is missing
-            // filled inflight with unconnectable descendants.
-            // Clamp only peers whose BestKnown contains this frontier.
-            // A missing A-tower root must not starve GETDATA of another
-            // registered heavier tower on a different peer.
-            const bool peer_on_frontier_branch{
-                state->pindexBestKnownBlock != nullptr &&
-                state->pindexBestKnownBlock->GetAncestor(
-                    acq_frontier->nHeight) == acq_frontier};
-            if (peer_on_frontier_branch) {
-                const bool have_body{
-                    (acq_frontier->nStatus & BLOCK_HAVE_DATA) != 0};
-                int clamp_end{have_body
-                                  ? acq_frontier->nHeight +
-                                        ACQUISITION_ESCAPE_FETCH_LOOKAHEAD
-                                  : acq_frontier->nHeight};
-                if (missing_honest_early != nullptr &&
-                    missing_honest_early->nHeight > clamp_end) {
-                    clamp_end = missing_honest_early->nHeight;
-                }
-                if (clamp_end < nWindowEnd) {
-                    LogDebug(BCLog::NET,
-                             "Acquisition root-first clamping GETDATA window "
-                             "peer=%d end=%d -> %d frontier=%d have_body=%d "
-                             "tip=%d\n",
-                             peer.m_id, nWindowEnd, clamp_end,
-                             acq_frontier->nHeight, have_body ? 1 : 0,
-                             tip_height);
-                    nWindowEnd = clamp_end;
-                }
+            acq_frontier != nullptr &&
+            state->pindexBestKnownBlock != nullptr &&
+            state->pindexBestKnownBlock->GetAncestor(acq_frontier->nHeight) ==
+                acq_frontier) {
+            clamp_frontier = acq_frontier;
+        } else if (state->pindexLastCommonBlock != nullptr &&
+                   state->pindexBestKnownBlock != nullptr &&
+                   BestKnownIsRegisteredCompetingAcquisitionTower(
+                       m_chainman, tip, state->pindexBestKnownBlock)) {
+            // This peer advertises another registered tower, not the unique
+            // heaviest frontier. Clamp to that tower's missing root so a
+            // HEADER_ONLY unique frontier on tower A cannot 16-wide tower B,
+            // and so an honest tip-child GETDATA does not replace B's root.
+            const int next_h{state->pindexLastCommonBlock->nHeight + 1};
+            if (next_h <= state->pindexBestKnownBlock->nHeight) {
+                clamp_frontier = state->pindexBestKnownBlock->GetAncestor(next_h);
+            }
+        }
+        if (clamp_frontier != nullptr) {
+            const bool have_body{
+                (clamp_frontier->nStatus & BLOCK_HAVE_DATA) != 0};
+            const int clamp_end{have_body
+                                    ? clamp_frontier->nHeight +
+                                          ACQUISITION_ESCAPE_FETCH_LOOKAHEAD
+                                    : clamp_frontier->nHeight};
+            if (clamp_end < nWindowEnd) {
+                LogDebug(BCLog::NET,
+                         "Acquisition root-first clamping GETDATA window "
+                         "peer=%d end=%d -> %d frontier=%d have_body=%d "
+                         "tip=%d\n",
+                         peer.m_id, nWindowEnd, clamp_end,
+                         clamp_frontier->nHeight, have_body ? 1 : 0,
+                         tip_height);
+                nWindowEnd = clamp_end;
             }
         }
     }
@@ -10188,6 +10264,22 @@ static const CBlockIndex* HeaderSyncLocatorIndex(ChainstateManager& chainman)
         chainman.m_best_header, chainman.ActiveChain().Tip());
 }
 
+static const CBlockIndex* HeaderSyncGetHeadersAskIndex(ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const CBlockIndex* const start{HeaderSyncLocatorIndex(chainman)};
+    const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+    if (start == nullptr) return nullptr;
+    // Long competing HEADER_ONLY tower: locators already snap to the
+    // connected tip. Do not walk to pprev — that lets a competing-only
+    // peer answer from the fork LCA and replay headers we already have.
+    if (node::HeaderSyncKeepLocatorAtConnectedTip(start, tip)) {
+        return start;
+    }
+    if (start->pprev) return start->pprev;
+    return start;
+}
+
 /**
  * Special handling for unconnecting headers that might be part of a block
  * announcement.
@@ -10591,25 +10683,29 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
         // Local-signer lost-twin recovery (live 2026-08-24): miners already
         // extended an equal-work HEADER_ONLY sibling; walk that short reorg
         // root-first instead of aborting.
+        const bool local_signer_lost_twin{
+            node::matmul_trusted::HasLocalSigner() &&
+            !node::matmul_trusted::IsTrustedMirror() &&
+            TrustedMirrorShortTipReorg(tip_for_work, &last_header) &&
+            last_header.nChainWork >= tip_for_work->nChainWork};
+        const bool heavier_competing_fork{
+            node::matmul_trusted::ConsensusMinerMayFetchCompetingHeavierFork(
+                node::matmul_trusted::IsTrustedMirror(),
+                /*extends_tip=*/false,
+                last_header.nChainWork > tip_for_work->nChainWork)};
         if (one_wide && !extends_active_tip) {
-            const bool local_signer_lost_twin{
-                node::matmul_trusted::HasLocalSigner() &&
-                !node::matmul_trusted::IsTrustedMirror() &&
-                TrustedMirrorShortTipReorg(tip_for_work, &last_header) &&
-                last_header.nChainWork >= tip_for_work->nChainWork};
-            const bool heavier_competing_fork{
-                node::matmul_trusted::ConsensusMinerMayFetchCompetingHeavierFork(
-                    node::matmul_trusted::IsTrustedMirror(),
-                    /*extends_tip=*/false,
-                    last_header.nChainWork > tip_for_work->nChainWork)};
             if (!local_signer_lost_twin && !heavier_competing_fork) {
                 return;
             }
         }
         if (one_wide && tip_for_work != nullptr) {
             ReclaimCatchupSuccessorRequests(tip_for_work->nHeight + 1,
-                                            "headers-direct-fetch-catchup");
+                                            "headers-direct-fetch-catchup",
+                                            /*only_honest_extending_suffix=*/false,
+                                            pfrom.GetId());
         }
+        const bool competing_direct_fetch{
+            !extends_active_tip && (local_signer_lost_twin || heavier_competing_fork)};
         const bool proven_body_source{
             this_peer_frontier_source ||
             PeerIsGpuAuthority(pfrom.GetId(), *nodestate) ||
@@ -10628,7 +10724,7 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
             // request tip+N-15 instead of tip+1 when N>16 (the 34–100s stall).
             std::vector<const CBlockIndex*> missing_newest_first;
             while (pindexWalk && !m_chainman.ActiveChain().Contains(pindexWalk)) {
-                if (pindexWalk->nHeight <= cadence_allowed &&
+                if ((competing_direct_fetch || pindexWalk->nHeight <= cadence_allowed) &&
                     !(pindexWalk->nStatus & BLOCK_HAVE_DATA) &&
                     !IsBlockRequested(pindexWalk->GetBlockHash()) &&
                     !IsHeaderOnlyFetchSuppressed(m_chainman, tip_for_work, pindexWalk,
@@ -22425,16 +22521,17 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                          pto->GetId(), peer->m_starting_height.load());
             }
             if (may_claim_initial_sync_slot || near_tip_headers) {
-                const CBlockIndex* pindexStart = HeaderSyncLocatorIndex(m_chainman);
+                const CBlockIndex* pindexStart = HeaderSyncGetHeadersAskIndex(m_chainman);
                 /* If possible, start at the block preceding the currently
                    best known header.  This ensures that we always get a
                    non-empty list of headers back as long as the peer
                    is up-to-date.  With a non-empty response, we can initialise
                    the peer's known best block.  This wouldn't be possible
                    if we requested starting at the locator origin and
-                   got back an empty response.  */
-                if (pindexStart != nullptr && pindexStart->pprev)
-                    pindexStart = pindexStart->pprev;
+                   got back an empty response.
+                   Exception: a long competing HEADER_ONLY tower already
+                   snapped the locator to the connected tip; walking to pprev
+                   would let the peer answer from the fork LCA. */
                 if (pindexStart != nullptr &&
                     MaybeSendGetHeaders(*pto, GetLocator(pindexStart), *peer)) {
                     if (must_probe) {
@@ -22522,8 +22619,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     current_time - last_probe <= BEST_KNOWN_PROBE_INTERVAL) {
                     log_probe_declined("probe_interval");
                 } else {
-                    const CBlockIndex* start{HeaderSyncLocatorIndex(m_chainman)};
-                    if (start != nullptr && start->pprev) start = start->pprev;
+                    const CBlockIndex* start{HeaderSyncGetHeadersAskIndex(m_chainman)};
                     if (start == nullptr) {
                         log_probe_declined("no_locator_start");
                     } else if (MaybeSendGetHeaders(*pto, GetLocator(start), *peer)) {
@@ -23288,7 +23384,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             }
             std::vector<const CBlockIndex*> vToDownload;
             NodeId staller = -1;
-            auto get_inflight_budget = [&state, drive_stalled_tower_fetch,
+            auto get_inflight_budget = [this, &state, drive_stalled_tower_fetch,
                                         spread_catchup_fetch,
                                         missing_honest_tip_child]() {
                 const int remaining{
@@ -23296,7 +23392,14 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     static_cast<int>(state.vBlocksInFlight.size())};
                 if (drive_stalled_tower_fetch || spread_catchup_fetch ||
                     missing_honest_tip_child != nullptr) {
-                    return std::max(1, remaining);
+                    int floor{1};
+                    if (missing_honest_tip_child != nullptr &&
+                        BestKnownIsRegisteredCompetingAcquisitionTower(
+                            m_chainman, m_chainman.ActiveChain().Tip(),
+                            state.pindexBestKnownBlock)) {
+                        floor = 2;
+                    }
+                    return std::max(floor, remaining);
                 }
                 return std::max(0, remaining);
             };
