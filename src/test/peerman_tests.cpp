@@ -5418,7 +5418,8 @@ BOOST_AUTO_TEST_CASE(ticketless_followed_tip_child_converges_without_rcadmit)
 // ExactReplay and ConnectTip. Competing non-extending headers stay
 // HEADER_ONLY (no bodies sent for them here).
 static void CheckConsensusBehindCompetingHeaders(
-    node::NodeContext& m_node, bool retain_next_child, bool cpu_pending = false)
+    node::NodeContext& m_node, bool retain_next_child, bool cpu_pending = false,
+    bool unique_frontier_cpu_pending = false)
 {
     WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
 
@@ -5598,7 +5599,39 @@ static void CheckConsensusBehindCompetingHeaders(
         peer.fPauseSend = false;
     };
 
-    if (retain_next_child) {
+    if (unique_frontier_cpu_pending) {
+        // Live 2026-09-24: competing unique frontier GPU-mismatched then
+        // sat on cpu_confirmation_pending. Re-admitting that frontier
+        // reserved the sole RC slot with a Lookup-only retry and starved
+        // honest ExactReplay. GPU stays strict-device; CPU is background.
+        consensus.nMatMulRCMaxPendingVerifications = 1;
+        auto release{std::make_shared<std::promise<void>>()};
+        auto ready{release->get_future().share()};
+        struct ReleaseConfirmation {
+            std::shared_ptr<std::promise<void>> release;
+            ~ReleaseConfirmation() { if (release) release->set_value(); }
+        } release_confirmation{release};
+        auto& confirmations{matmul::v4::rc::GetRCCpuConfirmationQueue()};
+        const uint256 frontier_hash{competing_twin.GetHash()};
+        confirmations.Submit(frontier_hash, frontier_hash, {}, [ready] {
+            ready.wait();
+            return matmul::v4::rc::ExactReplayVerifyResult{};
+        });
+        BOOST_REQUIRE(confirmations.Pending(frontier_hash));
+        send_ticketed_body(honest_child);
+        send_ticketed_body(honest_grand);
+        BOOST_REQUIRE(PeermanWaitFor([&] {
+            LOCK(::cs_main);
+            const auto* idx{
+                m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+            return idx != nullptr && (idx->nStatus & BLOCK_HAVE_DATA) != 0;
+        }));
+        BOOST_CHECK(confirmations.Pending(frontier_hash));
+        release->set_value();
+        release_confirmation.release.reset();
+        BOOST_REQUIRE(PeermanWaitFor(
+            [&] { return !confirmations.Pending(frontier_hash); }));
+    } else if (retain_next_child) {
         // Reproduce the production one-job admission race: the next body
         // waits for capacity, capacity becomes free, and a later body arrives
         // before the retry tick. Competing best headers must not let that
@@ -5715,6 +5748,11 @@ BOOST_AUTO_TEST_CASE(retained_active_tip_child_precedes_suffix_under_competing_h
 BOOST_AUTO_TEST_CASE(cpu_pending_active_tip_child_does_not_reserve_gpu_admission)
 {
     CheckConsensusBehindCompetingHeaders(m_node, true, true);
+}
+
+BOOST_AUTO_TEST_CASE(cpu_pending_unique_frontier_does_not_occupy_gpu_slot)
+{
+    CheckConsensusBehindCompetingHeaders(m_node, false, false, true);
 }
 
 // Competing heavier headers must not starve GETDATA of an honest HEADER_ONLY

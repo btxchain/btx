@@ -3903,13 +3903,21 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                 const int64_t trace_now{count_seconds(now_s)};
                 if (trace_now - s_last_acq_skip_log.load(std::memory_order_relaxed) >= 15) {
                     s_last_acq_skip_log.store(trace_now, std::memory_order_relaxed);
+                    const bool cpu_pending{
+                        matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
+                            acq->GetBlockHash())};
                     LogInfo("acquisition replay: frontier body height=%d "
                             "hash=%s not drivable (have_data=%d "
-                            "verify_active=%d); waiting for fetch/verdict\n",
+                            "verify_active=%d cpu_pending=%d); %s\n",
                             acq->nHeight, acq->GetBlockHash().ToString(),
                             (acq->nStatus & BLOCK_HAVE_DATA) != 0 ? 1 : 0,
                             m_matmul_block_lifecycle.IsActive(
-                                acq->GetBlockHash()) ? 1 : 0);
+                                acq->GetBlockHash()) ? 1 : 0,
+                            cpu_pending ? 1 : 0,
+                            cpu_pending
+                                ? "GPU already ran; portable CPU confirmation "
+                                  "is independent and does not hold the device"
+                                : "waiting for fetch/verdict");
                 }
             } else if (acq == nullptr && tip != nullptr &&
                        followed != nullptr &&
@@ -5680,23 +5688,31 @@ static bool TrustedMirrorMayDownloadIndex(
     // descendants must not spend ExactReplay GPU. CoversBlock is a tower
     // predicate (fetch / parked-bypass / retain), not an admission ticket.
     // A HEADER_ONLY or CPU-pending frontier still GETDATAs, but must yield
-    // the device to a retained honest tip-child so the followed chain can
+    // the device to the honest tip-child so the followed chain can
     // advance. Competing descendants remain deferred until the unique
     // frontier body itself is the candidate.
+    //
+    // A CPU-pending frontier has already spent GPU (mismatch queued the
+    // portable confirmer). Re-admitting it occupies the sole RC slot with
+    // a Lookup-only retry for the entire confirmation (~hours) and
+    // starves honest ExactReplay. GPU stays on strict-device for every
+    // new body; CPU confirmation never replaces device ExactReplay.
     if (const CBlockIndex* const frontier{
             FindLowestUnverifiedAcquiredBody(chainman)}) {
-        if (index == frontier) {
+        const bool frontier_cpu_pending{
+            matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
+                frontier->GetBlockHash())};
+        if (index == frontier && !frontier_cpu_pending) {
             g_configured_claimed_tip_child = index->GetBlockHash();
             return true;
         }
         const CBlockIndex* const priority_child{
             ReplayPriorityTipChild(chainman, lifecycle)};
-        const bool yield_to_retained_child{
+        const bool yield_to_honest_child{
             priority_child != nullptr &&
             index == priority_child &&
-            lifecycle.HasRetainedBody(priority_child->GetBlockHash()) &&
             !UniqueFrontierOwnsExactReplayGpu(frontier)};
-        if (yield_to_retained_child) {
+        if (yield_to_honest_child) {
             g_configured_claimed_tip_child = index->GetBlockHash();
             return true;
         }
@@ -5706,12 +5722,13 @@ static bool TrustedMirrorMayDownloadIndex(
             s_last_order_log.store(now_s, std::memory_order_relaxed);
             LogInfo("acquisition-escape ExactReplay admission DEFERRED "
                     "hash=%s height=%d: not the unique acquisition frontier "
-                    "(frontier height=%d have_data=%d); followed tip-child "
-                    "yields unless it is the retained honest child of a "
-                    "HEADER_ONLY/CPU-pending frontier\n",
+                    "(frontier height=%d have_data=%d cpu_pending=%d); "
+                    "honest tip-child yields while the frontier is "
+                    "HEADER_ONLY/CPU-pending and does not occupy GPU\n",
                     index->GetBlockHash().ToString(), index->nHeight,
                     frontier->nHeight,
-                    (frontier->nStatus & BLOCK_HAVE_DATA) != 0 ? 1 : 0);
+                    (frontier->nStatus & BLOCK_HAVE_DATA) != 0 ? 1 : 0,
+                    frontier_cpu_pending ? 1 : 0);
         }
         return false;
     }
