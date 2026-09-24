@@ -14418,6 +14418,50 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
     }
 
     if (matmul_admission.state == MatMulBlockAdmission::State::NO_RECOMPUTE) {
+        // A digest mismatch already handed this body to the portable CPU
+        // lane. AcceptBlock then returns cpu_confirmation_pending without
+        // writing HAVE_DATA, and the next delivery re-enters immediately
+        // (live macpro2/rtx6000 2026-09-24: frontier 227313, have_data=0,
+        // cpu_pending=1, AcceptBlock several times a second). Keep the
+        // body and wait for that lane; do not tight-loop ExactReplay.
+        if (matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(hash)) {
+            constexpr auto kCpuConfirmRetry{std::chrono::seconds{30}};
+            {
+                LOCK(cs_main);
+                NoteMatMulBudgetDeferred(
+                    hash, std::chrono::duration_cast<std::chrono::microseconds>(
+                              kCpuConfirmRetry));
+                RemoveBlockRequest(hash, std::nullopt);
+            }
+            static std::atomic<int64_t> s_last_cpu_pending_retain_log{0};
+            const int64_t now_s{GetTime()};
+            if (now_s - s_last_cpu_pending_retain_log.load(
+                            std::memory_order_relaxed) >= 15) {
+                s_last_cpu_pending_retain_log.store(
+                    now_s, std::memory_order_relaxed);
+                LogInfo("Retaining body hash=%s while portable CPU "
+                        "confirmation is pending (no AcceptBlock re-entry)\n",
+                        hash.ToString());
+            }
+            if (is_retained_retry) {
+                RefreshMatMulDeferredBodyRetry(
+                    hash, "cpu confirmation still pending",
+                    node::MatMulBlockLifecycle::RetryCause::TIMER_OR_AUTHORITY,
+                    matmul_admission.capacity_epoch);
+            } else {
+                (void)StoreMatMulDeferredBody(
+                    hash, block, node,
+                    force_processing || matmul_admission.retain_as_requested,
+                    min_pow_checked, matmul_admission.is_ibd,
+                    matmul_admission.reference_height,
+                    matmul_admission.work_units, kCpuConfirmRetry,
+                    node::MatMulBlockLifecycle::RetryCause::TIMER_OR_AUTHORITY,
+                    matmul_admission.capacity_epoch);
+            }
+            release_verdict_pin();
+            release_assumevalid_trust_pin();
+            return;
+        }
         ProcessBlockSync(node.GetId(), &node, block,
                          force_processing || matmul_admission.retain_as_requested,
                          min_pow_checked, post_process);
