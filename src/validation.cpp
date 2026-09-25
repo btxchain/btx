@@ -7049,7 +7049,22 @@ void Chainstate::InvalidChainFound(CBlockIndex* pindexNew)
         m_chainman.m_best_invalid = pindexNew;
     }
     SetBlockFailureFlags(pindexNew);
-    if (m_chainman.m_best_header != nullptr && m_chainman.m_best_header->GetAncestor(pindexNew->nHeight) == pindexNew) {
+    // Block-index failure is shared by all chainstates. Retire candidates
+    // immediately, including descendants with bodies already on disk.
+    for (Chainstate* chainstate : m_chainman.GetAll()) {
+        std::erase_if(chainstate->setBlockIndexCandidates, [](const CBlockIndex* index) {
+            return (index->nStatus & BLOCK_FAILED_MASK) != 0;
+        });
+    }
+    m_chainman.AcquisitionEscapeNoteBlockFailed(pindexNew);
+    // The followed header can be on an unrelated branch while the claimed
+    // or extending header still points into the failed tower.
+    const auto failed = [](const CBlockIndex* index) {
+        return index != nullptr && (index->nStatus & BLOCK_FAILED_MASK) != 0;
+    };
+    if (failed(m_chainman.m_best_header) ||
+        failed(m_chainman.m_best_claimed_header) ||
+        failed(m_chainman.m_best_header_extending_tip)) {
         m_chainman.RecalculateBestHeader();
     }
 
@@ -7067,20 +7082,15 @@ void Chainstate::InvalidChainFound(CBlockIndex* pindexNew)
     CheckForkWarningConditions();
 }
 
-// Same as InvalidChainFound, above, except not called directly from InvalidateBlock,
-// which does its own setBlockIndexCandidates management.
+// Shared by AcceptBlock and ConnectTip. Manual invalidation records operator
+// intent separately before calling InvalidChainFound.
 void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state)
 {
     AssertLockHeld(cs_main);
-    if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+    if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
         pindex->nStatus |= BLOCK_FAILED_VALID;
         m_chainman.m_failed_blocks.insert(pindex);
         m_blockman.m_dirty_blockindex.insert(pindex);
-        setBlockIndexCandidates.erase(pindex);
-        // Slot-wedge hardening: a ConnectBlock failure on an acquired-tower
-        // body (e.g. during migration) also proves the tower dead; release
-        // its acquisition-escape exemption slot.
-        m_chainman.AcquisitionEscapeNoteBlockFailed(pindex);
         InvalidChainFound(pindex);
     }
 }
@@ -15763,15 +15773,10 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
                               /*fCheckPOW=*/true,
                               /*may_release_cs_main=*/true,
                               &rc_authority)) {
-        if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
-            pindex->nStatus |= BLOCK_FAILED_VALID;
-            m_blockman.m_dirty_blockindex.insert(pindex);
-            // Slot-wedge hardening: a covered acquired-tower body that fails
-            // CheckBlock/ContextualCheckBlock (ExactReplay) proves its tower
-            // dead; release the exemption slot so the honest tower can
-            // register.
-            AcquisitionEscapeNoteBlockFailed(pindex);
-        }
+        // A definitive body failure must retire the entire indexed branch,
+        // just like ConnectBlock failure. Otherwise headers received before
+        // the body keep the invalid tower selected for acquisition.
+        ActiveChainstate().InvalidBlockFound(pindex, state);
         LogError("%s: %s\n", __func__, state.ToString());
         return false;
     }
