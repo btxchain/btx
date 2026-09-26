@@ -1542,13 +1542,22 @@ public:
     {
         return HasMatMulRetainedBodyForTest(hash);
     }
-    void RetainMatMulBodyForTest(
-        const std::shared_ptr<const CBlock>& block) override
+    bool RetainMatMulBodyForTest(
+        const std::shared_ptr<const CBlock>& block,
+        bool pin_progress, NodeId source_peer) override
     {
         node::MatMulBlockLifecycle::RetainedBody body;
         body.block = block;
         body.bytes = 1;
-        m_matmul_block_lifecycle.Retain(block->GetHash(), std::move(body));
+        body.pin_progress = pin_progress;
+        if (source_peer != -1) {
+            const auto source{m_connman.GetNodeRef(source_peer)};
+            if (!source) return false;
+            body.source_peer = source_peer;
+            body.source_address = source->addr;
+            body.source_netgroup = source->nKeyedNetGroup;
+        }
+        return m_matmul_block_lifecycle.Retain(block->GetHash(), std::move(body));
     }
     void SimulateBlockConnectedForTest(
         const std::shared_ptr<const CBlock>& block,
@@ -2667,7 +2676,8 @@ private:
                                       int32_t reference_height,
                                       const char* source,
                                       std::optional<ScopedMatMulPendingVerification>& slot,
-                                      MatMulBlockAdmission& admission);
+                                      MatMulBlockAdmission& admission,
+                                      bool is_retained_retry = false);
 
     /** Consume one admitted near-tip header into the priority ExactReplay
      * lane. A successful verdict is persisted, but validity and chainwork are
@@ -3681,23 +3691,18 @@ static constexpr int64_t MATMUL_ACQ_FRONTIER_REPLAY_MIN_GAP_S{2};
         frontier->GetBlockHash());
 }
 
-//! RB-16 CONVERGENCE: while acquiring a heavier competing tower (stale tip,
-//! registered exempt tower), find the LOWEST unverified body above the fork
-//! root whose parent is already connectable -- parent on the active chain
-//! (the fork root) or itself ExactReplay-verified with data. This is the one
-//! body whose ExactReplay verdict extends the acquired tower's contiguous
-//! verified prefix; driving it (instead of whatever high covered body happens
-//! to arrive) is what lets a fully-connected heavier chain assemble for
-//! deepforkautoresolve / ActivateBestChain to migrate to. Returns nullptr
-//! when the escape is not armed, best_header still extends the tip, or no
-//! covered parent-connectable unverified body remains (fetch must fill a
-//! HEADER_ONLY hole). ExactReplay / RC / reverify must use this unique
-//! pointer, not "any CoversBlock body". Bounded: one pprev descent.
+//! Use the same bounded root-first selection for disk bodies, retained bodies
+//! and a body currently being delivered. A missing or CPU-pending frontier on
+//! the heaviest tower must not strand ready work on another registered tower.
 [[nodiscard]] static const CBlockIndex* FindLowestUnverifiedAcquiredBody(
-    const ChainstateManager& chainman)
+    const ChainstateManager& chainman,
+    const node::MatMulBlockLifecycle& lifecycle,
+    const CBlockIndex* incoming = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    return chainman.FindAcquisitionEscapeFrontier();
+    return chainman.FindAcquisitionEscapeFrontier([&](const CBlockIndex* index) {
+        return index == incoming || lifecycle.HasRetainedBody(index->GetBlockHash());
+    });
 }
 
 void PeerManagerImpl::AutoFetchStuckTipRoot()
@@ -3780,25 +3785,28 @@ static void MaybeWakeRetainedChildForVerifiedForkParent(
             return;
         }
         const CBlockIndex* const tip{chainman.ActiveTip()};
-        const CBlockIndex* const best{chainman.m_best_header};
-        if (tip == nullptr || best == nullptr) return;
-        if (!(best->nChainWork > tip->nChainWork)) return;
-        if (best->GetAncestor(tip->nHeight) == tip) return;
-        if ((best->nStatus & BLOCK_FAILED_MASK) != 0) return;
-        if (chainman.IsOnParkedReorgBranch(best)) return;
-        const CBlockIndex* const fork{chainman.ActiveChain().FindFork(best)};
-        if (fork == nullptr || chainman.IsOnParkedReorgBranch(fork)) return;
-
-        const CBlockIndex* next{nullptr};
-        for (const CBlockIndex* walk{best};
-             walk != nullptr && walk != fork && walk->nHeight > fork->nHeight;
-             walk = walk->pprev) {
-            if ((walk->nStatus & BLOCK_FAILED_MASK) != 0) continue;
-            if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
-            if (!lifecycle.HasRetainedBody(walk->GetBlockHash())) continue;
-            next = walk;
+        if (tip == nullptr) return;
+        const CBlockIndex* next{FindLowestUnverifiedAcquiredBody(chainman, lifecycle)};
+        if (next == nullptr) {
+            // Preserve the short-fork wake path when acquisition is not armed.
+            const CBlockIndex* const best{chainman.m_best_header};
+            if (best == nullptr || best->nChainWork <= tip->nChainWork) return;
+            if (best->GetAncestor(tip->nHeight) == tip) return;
+            if ((best->nStatus & BLOCK_FAILED_MASK) != 0) return;
+            if (chainman.IsOnParkedReorgBranch(best)) return;
+            const CBlockIndex* const fork{chainman.ActiveChain().FindFork(best)};
+            if (fork == nullptr || chainman.IsOnParkedReorgBranch(fork)) return;
+            for (const CBlockIndex* walk{best}; walk != fork; walk = walk->pprev) {
+                if ((walk->nStatus & BLOCK_FAILED_MASK) != 0) continue;
+                if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
+                if (!lifecycle.HasRetainedBody(walk->GetBlockHash())) continue;
+                next = walk;
+            }
         }
         if (next == nullptr || next->pprev == nullptr) return;
+        if (chainman.IsOnParkedReorgBranch(next)) return;
+        if (!lifecycle.HasRetainedBody(next->GetBlockHash())) return;
+        if (matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(next->GetBlockHash())) return;
         if (next->pprev->GetBlockHash() != wanted_parent) return;
         if (chainman.ActiveChain().Contains(next->pprev)) return;
 
@@ -3910,7 +3918,7 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
             // contiguous verified prefix. CPU-pending children do not reserve
             // this priority, so their confirmation cannot occupy the GPU.
             const CBlockIndex* const acq{
-                FindLowestUnverifiedAcquiredBody(m_chainman)};
+                FindLowestUnverifiedAcquiredBody(m_chainman, m_matmul_block_lifecycle)};
             const CBlockIndex* const priority_child{
                 ReplayPriorityTipChild(m_chainman, m_matmul_block_lifecycle)};
             const bool retained_tip_child{
@@ -3936,17 +3944,21 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     const bool cpu_pending{
                         matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
                             acq->GetBlockHash())};
+                    const bool retained{
+                        m_matmul_block_lifecycle.HasRetainedBody(acq->GetBlockHash())};
                     LogInfo("acquisition replay: frontier body height=%d "
-                            "hash=%s not drivable (have_data=%d "
-                            "verify_active=%d cpu_pending=%d); %s\n",
+                            "hash=%s disk replay deferred (have_data=%d "
+                            "retained=%d verify_active=%d cpu_pending=%d); %s\n",
                             acq->nHeight, acq->GetBlockHash().ToString(),
                             (acq->nStatus & BLOCK_HAVE_DATA) != 0 ? 1 : 0,
+                            retained ? 1 : 0,
                             m_matmul_block_lifecycle.IsActive(
                                 acq->GetBlockHash()) ? 1 : 0,
                             cpu_pending ? 1 : 0,
                             cpu_pending
                                 ? "GPU already ran; portable CPU confirmation "
                                   "is independent and does not hold the device"
+                                : retained ? "body handled by retained retry"
                                 : "waiting for fetch/verdict");
                 }
             } else if (acq == nullptr && tip != nullptr &&
@@ -4141,7 +4153,7 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
         // on the tip so the unique slot is not handed to competing-tower
         // island bodies while the honest child is already retained.
         if (const CBlockIndex* const acq{
-                FindLowestUnverifiedAcquiredBody(m_chainman)};
+                FindLowestUnverifiedAcquiredBody(m_chainman, m_matmul_block_lifecycle)};
             acq != nullptr && acq->pprev != nullptr &&
             !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
                 acq->GetBlockHash())) {
@@ -4179,6 +4191,21 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     candidate_hash = retry->first;
     candidate = retry->second;
     if (!candidate.block) return;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* const index{m_chainman.m_blockman.LookupBlockIndex(candidate_hash)};
+        // NextRetry may fall back to another retained body. Do not let that
+        // bypass root-first selection, including when its source disconnected
+        // and the retry uses ProcessBlockSync instead of network admission.
+        if (index != nullptr && (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+            m_chainman.AcquisitionEscapeCoversBlock(index) &&
+            (index != FindLowestUnverifiedAcquiredBody(
+                          m_chainman, m_matmul_block_lifecycle, index) ||
+             matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(candidate_hash))) {
+            RefreshMatMulDeferredBodyRetry(candidate_hash, "waiting for acquisition frontier");
+            return;
+        }
+    }
     if (frontier_off_chain && candidate_hash != fork_child_hash) {
         bool allow{false};
         {
@@ -4196,7 +4223,8 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     // retry -- otherwise a covered body that momentarily lost
                     // the RC slot race never gets re-admitted.
                     || (idx != nullptr &&
-                        m_chainman.IsAcquisitionEscapeFrontier(idx));
+                        idx == FindLowestUnverifiedAcquiredBody(
+                            m_chainman, m_matmul_block_lifecycle, idx));
         }
         if (!allow) {
             if (m_matmul_block_lifecycle.RefreshRetry(
@@ -4227,7 +4255,8 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     /*requires_expensive_verification=*/true,
                     candidate.is_ibd,
                     candidate.reference_height,
-                    /*source=*/"budget-deferred", slot, admission)) {
+                    /*source=*/"budget-deferred", slot, admission,
+                    /*is_retained_retry=*/true)) {
                 RefreshMatMulDeferredBodyRetry(
                     candidate_hash, "deferred re-admission rejected");
                 return;
@@ -5746,7 +5775,8 @@ static bool TrustedMirrorMayDownloadIndex(
     const node::MatMulBlockLifecycle& lifecycle,
     const CBlockIndex* tip,
     const CBlockIndex* index,
-    const CBlockIndex* peer_best_known = nullptr)
+    const CBlockIndex* peer_best_known = nullptr,
+    bool body_available = false)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (tip == nullptr || index == nullptr) return false;
@@ -5760,13 +5790,13 @@ static bool TrustedMirrorMayDownloadIndex(
     if (chainman.IsOnParkedReorgBranch(index) &&
         !chainman.AcquisitionEscapeCoversBlock(index)) return false;
     if (node::matmul_trusted::IsTrustedMirror()) return false;
-    // RB-16 ORDER: while a unique acquisition frontier exists, competing
+    // RB-16 ORDER: select one available registered-tower frontier; competing
     // descendants must not spend ExactReplay GPU. CoversBlock is a tower
     // predicate (fetch / parked-bypass / retain), not an admission ticket.
     // A HEADER_ONLY or CPU-pending frontier still GETDATAs, but must yield
     // the device to the honest tip-child so the followed chain can
-    // advance. Competing descendants remain deferred until the unique
-    // frontier body itself is the candidate.
+    // advance. A ready frontier on another registered tower may also run;
+    // descendants remain deferred until their own ancestors verify.
     //
     // A CPU-pending frontier has already spent GPU (mismatch queued the
     // portable confirmer). Re-admitting it occupies the sole RC slot with
@@ -5774,7 +5804,8 @@ static bool TrustedMirrorMayDownloadIndex(
     // starves honest ExactReplay. GPU stays on strict-device for every
     // new body; CPU confirmation never replaces device ExactReplay.
     if (const CBlockIndex* const frontier{
-            FindLowestUnverifiedAcquiredBody(chainman)}) {
+            FindLowestUnverifiedAcquiredBody(
+                chainman, lifecycle, body_available ? index : nullptr)}) {
         const bool frontier_cpu_pending{
             matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
                 frontier->GetBlockHash())};
@@ -5797,10 +5828,9 @@ static bool TrustedMirrorMayDownloadIndex(
         if (now_s - s_last_order_log.load(std::memory_order_relaxed) >= 5) {
             s_last_order_log.store(now_s, std::memory_order_relaxed);
             LogInfo("acquisition-escape ExactReplay admission DEFERRED "
-                    "hash=%s height=%d: not the unique acquisition frontier "
+                    "hash=%s height=%d: waiting for selected acquisition frontier "
                     "(frontier height=%d have_data=%d cpu_pending=%d); "
-                    "honest tip-child yields while the frontier is "
-                    "HEADER_ONLY/CPU-pending and does not occupy GPU\n",
+                    "missing or CPU-pending bodies do not reserve GPU\n",
                     index->GetBlockHash().ToString(), index->nHeight,
                     frontier->nHeight,
                     (frontier->nStatus & BLOCK_HAVE_DATA) != 0 ? 1 : 0,
@@ -6157,6 +6187,12 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         m_chainman.AcquisitionEscapeMayAcquireHeavierFork(state->pindexBestKnownBlock);
     }
     const bool catch_up{DownloadFailoverCatchUp(m_chainman, state->pindexBestKnownBlock)};
+    // A registered heavier tower is recovery work even when it does not
+    // extend the active tip. Give it the same bounded stale-owner handoff
+    // as followed-chain catch-up so one silent peer cannot keep the root.
+    const bool acquisition_recovery{AcquisitionFetchEscapeActive(
+        m_chainman, state->pindexBestKnownBlock)};
+    const bool failover_fetch{catch_up || acquisition_recovery};
     const bool one_wide{CatchUpOneWideFetch(
         m_chainman, IsSignedFrontierBodyCatchUp(), state->pindexBestKnownBlock)};
     // Root-first 1-wide only while near the tip. Far-behind signed-frontier
@@ -6164,11 +6200,11 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     if (one_wide && count > CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER) {
         count = CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER;
     }
-    const auto rerequest_stale_after = catch_up
+    const auto rerequest_stale_after = failover_fetch
         ? std::chrono::duration_cast<std::chrono::microseconds>(
               BLOCK_CATCHUP_DOWNLOAD_TIMEOUT)
         : std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_REREQUEST_STALE_AFTER);
-    const size_t min_parallel_owners{catch_up ? CATCHUP_MIN_PARALLEL_OWNERS : size_t{1}};
+    const size_t min_parallel_owners{failover_fetch ? CATCHUP_MIN_PARALLEL_OWNERS : size_t{1}};
     const ChainRecoveryState recovery{m_chainman.GetChainRecoveryState()};
     // Snapshot cs_main-guarded diagnostics before the lambda. Clang does not
     // propagate FindNextBlocksToDownload's EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -6762,7 +6798,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                             stuck_hash.ToString(),
                             root_first.lowest_missing->nHeight,
                             static_cast<int>(stuck_for_s));
-                } else {
+                } else if (IsBlockRequested(stuck_hash)) {
                     LogInfo("Convergence note: tip-critical block %s height=%d has "
                             "been requested for %ds with no delivery -- no connected "
                             "peer is serving this BODY. The node is at the served "
@@ -6772,18 +6808,24 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                             stuck_hash.ToString(),
                             root_first.lowest_missing->nHeight,
                             static_cast<int>(stuck_for_s));
-                    // Auto-recovery: if the stuck block is the active-chain tip+1,
-                    // arm the getdata rotation so the scheduler re-asks peers that
-                    // advertise past our tip -- the peers that actually hold the
-                    // body (off an advertised competing tower) are invisible to the
-                    // per-peer branch-gated selector, so waiting on the one silent
-                    // in-flight owner wedges forever without this.
-                    if (root_first.lowest_missing->pprev ==
+                } else {
+                    LogInfo("Convergence note: tip-critical block %s height=%d is the "
+                            "selected root but is not in flight. This is a local "
+                            "scheduling or fork-choice hold, not evidence that peers "
+                            "lack the body.\n",
+                            stuck_hash.ToString(),
+                            root_first.lowest_missing->nHeight);
+                }
+                // Auto-recovery: if the stuck block is the active-chain tip+1,
+                // arm the getdata rotation so the scheduler re-asks peers that
+                // advertise past our tip. This stays armed whether or not a
+                // request is already in flight.
+                if (!body_held &&
+                    root_first.lowest_missing->pprev ==
                         m_chainman.ActiveChain().Tip()) {
-                        if (m_autofetch_root_hash != stuck_hash) {
-                            m_autofetch_root_hash = stuck_hash;
-                            m_autofetch_tried.clear();
-                        }
+                    if (m_autofetch_root_hash != stuck_hash) {
+                        m_autofetch_root_hash = stuck_hash;
+                        m_autofetch_tried.clear();
                     }
                 }
             }
@@ -6944,7 +6986,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     if (AcquisitionFetchEscapeActive(m_chainman, state->pindexBestKnownBlock)) {
         const CBlockIndex* clamp_frontier{nullptr};
         if (const CBlockIndex* const acq_frontier{
-                FindLowestUnverifiedAcquiredBody(m_chainman)};
+                FindLowestUnverifiedAcquiredBody(m_chainman, m_matmul_block_lifecycle)};
             acq_frontier != nullptr &&
             state->pindexBestKnownBlock != nullptr &&
             state->pindexBestKnownBlock->GetAncestor(acq_frontier->nHeight) ==
@@ -14346,7 +14388,8 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 // floating covered body must not drain the progress-lane
                 // verification budget (it cannot ConnectTip yet).
                 if (bidx != nullptr &&
-                    m_chainman.IsAcquisitionEscapeFrontier(bidx)) {
+                    bidx == FindLowestUnverifiedAcquiredBody(
+                        m_chainman, m_matmul_block_lifecycle, bidx)) {
                     progress_lane = true;
                 }
             }
@@ -14692,7 +14735,8 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         const CBlockIndex* const covered_index{
                             m_chainman.m_blockman.LookupBlockIndex(hash)};
                         const CBlockIndex* const acq_frontier{
-                            m_chainman.FindAcquisitionEscapeFrontier()};
+                            FindLowestUnverifiedAcquiredBody(
+                                m_chainman, m_matmul_block_lifecycle, covered_index)};
                         acquisition_covered =
                             covered_index != nullptr &&
                             covered_index == acq_frontier;
@@ -15120,7 +15164,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     int32_t reference_height,
     const char* source,
     std::optional<ScopedMatMulPendingVerification>& slot,
-    MatMulBlockAdmission& admission)
+    MatMulBlockAdmission& admission,
+    bool is_retained_retry)
 {
     const uint256 block_hash{block.GetHash()};
     std::optional<node::MatMulBlockLifecycle::Token> lifecycle_token;
@@ -15303,7 +15348,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                         } else if (indexed == nullptr ||
                                    !MatMulMaySpendExactReplayGpu(
                                        m_chainman, m_matmul_block_lifecycle,
-                                       tip, indexed, peer_best)) {
+                                       tip, indexed, peer_best, /*body_available=*/true)) {
                             // Extra twins / trusted-mirror pin-follow: do not
                             // ExactReplay. HEADER_ONLY — except a strictly
                             // heavier competing fork whose headers we already
@@ -15320,8 +15365,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                 !node::matmul_trusted::IsTrustedMirror() &&
                                 m_chainman.AcquisitionEscapeCoversBlock(
                                     indexed) &&
-                                !m_chainman.IsAcquisitionEscapeFrontier(
-                                    indexed)) {
+                                indexed != FindLowestUnverifiedAcquiredBody(
+                                    m_chainman, m_matmul_block_lifecycle, indexed)) {
                                 // RB-16 ORDER: any covered acquired-tower body
                                 // other than the unique frontier must not be
                                 // persisted here -- on a CONSENSUS node
@@ -15691,7 +15736,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             const CBlockIndex* const covered_index{
                 m_chainman.m_blockman.LookupBlockIndex(block_hash)};
             const CBlockIndex* const acq_frontier{
-                m_chainman.FindAcquisitionEscapeFrontier()};
+                FindLowestUnverifiedAcquiredBody(
+                    m_chainman, m_matmul_block_lifecycle, covered_index)};
             // RB-16 ORDER: only the unique acquisition frontier earns the
             // reserved (progress) RC lane. A followed pprev==tip child yields
             // while that frontier exists so cap=1 cannot fill the scheduler.
@@ -15779,11 +15825,17 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // ClassifyTicketless (retain) rather than ExactReplay and HEADER_ONLY-drop:
     // that was the re-getdata livelock. Scheduler re-admission of an
     // already-retained body is the "requested retry" that may ExactReplay
-    // without a new ticket.
+    // without a new ticket. A cancelled precharged header/body attempt can
+    // retain force_processing=false; carrying that original delivery flag
+    // into every retry would retain it forever waiting for rcadmit. Only the
+    // scheduler supplies is_retained_retry, and the body must still be held.
+    // Ordinary duplicate deliveries cannot claim this exemption. Keep the
+    // original force_processing value for the separate AcceptBlock gates;
+    // pending slots, source/global budgets and ExactReplay still apply.
     const bool ticket_exempt =
         catchup_inbound_push ||
         (requested_body && is_ibd) ||
-        (requested_body && retained_retry);
+        ((requested_body || is_retained_retry) && retained_retry);
     std::optional<node::RCAdmissionTicket> accepted_ticket;
     const auto restore_accepted_ticket = [&] {
         if (!accepted_ticket) return;
@@ -16243,6 +16295,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     DrainMatMulPendingSourceUnpins();
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
+    bool exact_replay_persisted{false};
     bool exact_replay_authenticated{false};
     bool terminal_failure{false};
     {
@@ -16250,10 +16303,12 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
         const uint256 hash{block->GetHash()};
         const CBlockIndex* index{
             m_chainman.m_blockman.LookupBlockIndex(hash)};
-        exact_replay_authenticated = index != nullptr &&
+        exact_replay_persisted = index != nullptr &&
             (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
             (index->nStatus & BLOCK_HAVE_DATA) != 0 &&
             (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
+            index->IsValid(BLOCK_VALID_TRANSACTIONS);
+        exact_replay_authenticated = exact_replay_persisted &&
             index->IsValid(BLOCK_VALID_SCRIPTS);
         terminal_failure = index != nullptr &&
             (index->nStatus & BLOCK_FAILED_MASK) != 0;
@@ -16286,20 +16341,27 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     // A duplicate/no-op ProcessNewBlock result is not necessarily terminal:
     // another delivery can still own the asynchronous replay, and a local
     // accelerator failure deliberately leaves the candidate retryable. Keep
-    // that bounded observation until exact local authority succeeds, the
-    // index is permanently failed, or its TTL expires.
-    if (exact_replay_authenticated || terminal_failure) {
+    // that retryable body until replay succeeds and the body is persisted,
+    // the index is permanently failed, or its TTL expires. A verified fork
+    // body is safe to reload from disk before it reaches SCRIPTS validity:
+    // waiting for ConnectBlock would fill the pinned per-source retention
+    // cap before a long competing suffix can acquire enough work to connect.
+    if (exact_replay_persisted || terminal_failure) {
         if (lifecycle_token) {
             m_matmul_block_lifecycle.Terminal(*lifecycle_token);
         } else {
             EraseMatMulDeferredBody(block->GetHash());
         }
         ClearMatMulRCBodyDeferred(block->GetHash());
-        FinishMatMulAuthenticatedRelayObservation(
-            block->GetHash(), exact_replay_authenticated);
     } else {
         RefreshMatMulDeferredBodyRetry(
             block->GetHash(), "non-terminal replay result");
+    }
+    // Releasing the in-memory copy does not confer script validity or
+    // authenticated relay completion on an unconnected fork block.
+    if (exact_replay_authenticated || terminal_failure) {
+        FinishMatMulAuthenticatedRelayObservation(
+            block->GetHash(), exact_replay_authenticated);
     }
     if (new_block || exact_replay_authenticated) {
         if (new_block) {

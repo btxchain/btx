@@ -7049,7 +7049,22 @@ void Chainstate::InvalidChainFound(CBlockIndex* pindexNew)
         m_chainman.m_best_invalid = pindexNew;
     }
     SetBlockFailureFlags(pindexNew);
-    if (m_chainman.m_best_header != nullptr && m_chainman.m_best_header->GetAncestor(pindexNew->nHeight) == pindexNew) {
+    // Block-index failure is shared by all chainstates. Retire candidates
+    // immediately, including descendants with bodies already on disk.
+    for (Chainstate* chainstate : m_chainman.GetAll()) {
+        std::erase_if(chainstate->setBlockIndexCandidates, [](const CBlockIndex* index) {
+            return (index->nStatus & BLOCK_FAILED_MASK) != 0;
+        });
+    }
+    m_chainman.AcquisitionEscapeNoteBlockFailed(pindexNew);
+    // The followed header can be on an unrelated branch while the claimed
+    // or extending header still points into the failed tower.
+    const auto failed = [](const CBlockIndex* index) {
+        return index != nullptr && (index->nStatus & BLOCK_FAILED_MASK) != 0;
+    };
+    if (failed(m_chainman.m_best_header) ||
+        failed(m_chainman.m_best_claimed_header) ||
+        failed(m_chainman.m_best_header_extending_tip)) {
         m_chainman.RecalculateBestHeader();
     }
 
@@ -7067,20 +7082,15 @@ void Chainstate::InvalidChainFound(CBlockIndex* pindexNew)
     CheckForkWarningConditions();
 }
 
-// Same as InvalidChainFound, above, except not called directly from InvalidateBlock,
-// which does its own setBlockIndexCandidates management.
+// Shared by AcceptBlock and ConnectTip. Manual invalidation records operator
+// intent separately before calling InvalidChainFound.
 void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state)
 {
     AssertLockHeld(cs_main);
-    if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+    if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
         pindex->nStatus |= BLOCK_FAILED_VALID;
         m_chainman.m_failed_blocks.insert(pindex);
         m_blockman.m_dirty_blockindex.insert(pindex);
-        setBlockIndexCandidates.erase(pindex);
-        // Slot-wedge hardening: a ConnectBlock failure on an acquired-tower
-        // body (e.g. during migration) also proves the tower dead; release
-        // its acquisition-escape exemption slot.
-        m_chainman.AcquisitionEscapeNoteBlockFailed(pindex);
         InvalidChainFound(pindex);
     }
 }
@@ -12003,29 +12013,48 @@ bool ChainstateManager::AcquisitionEscapeParentConnectable(const CBlockIndex* in
             (index->pprev->nStatus & BLOCK_HAVE_DATA) != 0);
 }
 
-const CBlockIndex* ChainstateManager::FindAcquisitionEscapeFrontier() const
+const CBlockIndex* ChainstateManager::FindAcquisitionEscapeFrontier(
+    const std::function<bool(const CBlockIndex*)>& has_body) const
 {
     AssertLockHeld(::cs_main);
     if (!AcquisitionTipIsStale()) return nullptr;
     if (m_active_chainstate == nullptr) return nullptr;
     const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
-    const CBlockIndex* const best{m_best_header};
-    if (tip == nullptr || best == nullptr) return nullptr;
-    if (!(best->nChainWork > tip->nChainWork)) return nullptr;
-    if (best->GetAncestor(tip->nHeight) == tip) return nullptr;
-    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(best)};
-    if (fork == nullptr) return nullptr;
-    const CBlockIndex* lowest{nullptr};
-    for (const CBlockIndex* walk{best};
-         walk != nullptr && walk != fork && walk->nHeight > fork->nHeight;
-         walk = walk->pprev) {
-        if ((walk->nStatus & BLOCK_FAILED_MASK) != 0) continue;
-        if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
-        if (!AcquisitionEscapeParentConnectable(walk)) continue;
-        lowest = walk;
+    if (tip == nullptr) return nullptr;
+    const CBlockIndex* selected{nullptr};
+    arith_uint256 selected_work;
+    bool selected_ready{false};
+    // At most MAX_TOWERS ancestry walks, never a block-index scan. Keeping
+    // one representative per registered root prevents arbitrary LCA siblings
+    // from claiming the progress lane merely because CoversBlock is true.
+    for (const auto& [root, best] : m_acquisition_exempt_towers) {
+        if (best == nullptr || best->nChainWork <= tip->nChainWork) continue;
+        if (best->GetAncestor(tip->nHeight) == tip) continue;
+        const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(best)};
+        if (fork == nullptr) continue;
+        const CBlockIndex* lowest{nullptr};
+        bool failed{false};
+        for (const CBlockIndex* walk{best}; walk != fork; walk = walk->pprev) {
+            if (walk->nStatus & BLOCK_FAILED_MASK) {
+                failed = true;
+                break;
+            }
+            if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0) lowest = walk;
+        }
+        if (failed || lowest == nullptr ||
+            !AcquisitionEscapeParentConnectable(lowest) ||
+            !AcquisitionEscapeCoversBlock(lowest)) continue;
+        const bool ready{
+            !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(lowest->GetBlockHash()) &&
+            ((lowest->nStatus & BLOCK_HAVE_DATA) != 0 || (has_body && has_body(lowest)))};
+        if (selected == nullptr || (ready && !selected_ready) ||
+            (ready == selected_ready && best->nChainWork > selected_work)) {
+            selected = lowest;
+            selected_work = best->nChainWork;
+            selected_ready = ready;
+        }
     }
-    if (lowest == nullptr || !AcquisitionEscapeCoversBlock(lowest)) return nullptr;
-    return lowest;
+    return selected;
 }
 
 bool ChainstateManager::IsAcquisitionEscapeFrontier(const CBlockIndex* index) const
@@ -12103,13 +12132,13 @@ bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
     }
     auto existing{m_acquisition_exempt_towers.find(root)};
     if (existing != m_acquisition_exempt_towers.end()) {
-        if (candidate->nChainWork > existing->second) {
-            existing->second = candidate->nChainWork;
+        if (candidate->nChainWork > existing->second->nChainWork) {
+            existing->second = candidate;
         }
         return true;
     }
     if (m_acquisition_exempt_towers.size() < ACQUISITION_ESCAPE_MAX_TOWERS) {
-        m_acquisition_exempt_towers.emplace(root, candidate->nChainWork);
+        m_acquisition_exempt_towers.emplace(root, candidate);
         LogPrintf("acquisition-escape: exempting heavier competing tower "
                   "fork_root=%s from header-lead/last-common caps (tip stale, "
                   "candidate work > tip); fetch + full ExactReplay to acquire, "
@@ -12122,11 +12151,11 @@ bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
     auto lightest{m_acquisition_exempt_towers.begin()};
     for (auto it = std::next(m_acquisition_exempt_towers.begin());
          it != m_acquisition_exempt_towers.end(); ++it) {
-        if (it->second < lightest->second) lightest = it;
+        if (it->second->nChainWork < lightest->second->nChainWork) lightest = it;
     }
-    if (candidate->nChainWork > lightest->second) {
+    if (candidate->nChainWork > lightest->second->nChainWork) {
         m_acquisition_exempt_towers.erase(lightest);
-        m_acquisition_exempt_towers.emplace(root, candidate->nChainWork);
+        m_acquisition_exempt_towers.emplace(root, candidate);
         return true;
     }
     return false;
@@ -12547,8 +12576,12 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
             return;
         }
         // HEADER_ONLY holes on the path to an attested HAVE_DATA frontier
-        // are unconnectable. Proposing them made FindMostWorkChain
-        // erase+re-insert forever with cs_main held (PR 105 5302572644).
+        // are unconnectable. Proposing the frontier itself made
+        // FindMostWorkChain erase+re-insert forever with cs_main held
+        // (PR 105 5302572644). A trusted mirror may still join the
+        // body-complete prefix below the lowest hole when that prefix
+        // sits on the current signed frontier. Consensus signers keep
+        // the all-or-nothing refusal.
         {
             const CBlockIndex* const path_lca{LastCommonAncestor(tip, idx)};
             if (path_lca == nullptr ||
@@ -12556,13 +12589,31 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
                     /*on_active_chain=*/false, path_lca == idx)) {
                 return;
             }
-            for (const CBlockIndex* walk{idx->pprev};
+            const CBlockIndex* lowest_unconnectable{nullptr};
+            for (const CBlockIndex* walk{idx};
                  walk != nullptr && walk != path_lca; walk = walk->pprev) {
+                if (walk->nStatus & BLOCK_FAILED_MASK) return;
                 if (!(walk->nStatus & BLOCK_HAVE_DATA) ||
                     !walk->IsValid(BLOCK_VALID_TRANSACTIONS) ||
                     !walk->HaveNumChainTxs()) {
+                    lowest_unconnectable = walk;
+                }
+            }
+            if (lowest_unconnectable != nullptr) {
+                if (!trusted_mirror || !IndexIsOnSignedFrontierChain(idx)) {
                     return;
                 }
+                const CBlockIndex* const prefix{lowest_unconnectable->pprev};
+                if (prefix == nullptr || prefix == path_lca || prefix == tip ||
+                    m_active_chainstate->m_chain.Contains(prefix) ||
+                    (prefix->nStatus & BLOCK_FAILED_MASK) ||
+                    !(prefix->nStatus & BLOCK_HAVE_DATA) ||
+                    !prefix->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                    !prefix->HaveNumChainTxs() ||
+                    !IndexIsOnSignedFrontierChain(prefix)) {
+                    return;
+                }
+                idx = prefix;
             }
         }
         {
@@ -15763,15 +15814,10 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
                               /*fCheckPOW=*/true,
                               /*may_release_cs_main=*/true,
                               &rc_authority)) {
-        if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
-            pindex->nStatus |= BLOCK_FAILED_VALID;
-            m_blockman.m_dirty_blockindex.insert(pindex);
-            // Slot-wedge hardening: a covered acquired-tower body that fails
-            // CheckBlock/ContextualCheckBlock (ExactReplay) proves its tower
-            // dead; release the exemption slot so the honest tower can
-            // register.
-            AcquisitionEscapeNoteBlockFailed(pindex);
-        }
+        // A definitive body failure must retire the entire indexed branch,
+        // just like ConnectBlock failure. Otherwise headers received before
+        // the body keep the invalid tower selected for acquisition.
+        ActiveChainstate().InvalidBlockFound(pindex, state);
         LogError("%s: %s\n", __func__, state.ToString());
         return false;
     }

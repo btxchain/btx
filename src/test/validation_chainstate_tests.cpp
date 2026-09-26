@@ -18,6 +18,7 @@
 #include <primitives/transaction.h>
 #include <random.h>
 #include <rpc/blockchain.h>
+#include <rpc/server.h>
 #include <sync.h>
 #include <test/util/chainstate.h>
 #include <test/util/coins.h>
@@ -2472,19 +2473,6 @@ BOOST_FIXTURE_TEST_CASE(chainstate_fmwc_yields_on_attested_suffix_with_header_on
     const uint256 parent_hash{parent->GetBlockHash()};
     const int parent_height{parent->nHeight};
 
-    CKey signer;
-    signer.MakeNewKey(/*fCompressed=*/true);
-    matmul::trusted::StoreConfig config;
-    config.chain_id = uint256::ONE;
-    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
-    config.trusted_signers = {signer.GetPubKey()};
-    config.threshold = 1;
-    config.local_signer = signer;
-    std::string error;
-    BOOST_REQUIRE(node::matmul_trusted::Configure(
-        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
-        std::chrono::milliseconds{50}, error));
-
     const CBlock child_block{CreateAndProcessBlock({}, script)};
     const CBlock grand_block{CreateAndProcessBlock({}, script)};
     CBlockIndex* child{
@@ -2514,6 +2502,22 @@ BOOST_FIXTURE_TEST_CASE(chainstate_fmwc_yields_on_attested_suffix_with_header_on
         chainstate.setBlockIndexCandidates.insert(grandchild);
     }
 
+    // Configure after the disconnect. A signer installed before connect
+    // withdraws that vote on invalidate, and a later sign of the same hash
+    // is only a duplicate with no quorum.
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
                       parent_hash, parent_height) ==
                   matmul::trusted::AddResult::Accepted);
@@ -2534,6 +2538,98 @@ BOOST_FIXTURE_TEST_CASE(chainstate_fmwc_yields_on_attested_suffix_with_header_on
         for (int i = 0; i < 32; ++i) {
             BOOST_REQUIRE(chainstate.FindMostWorkChainForTest() != nullptr);
         }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_rejoins_connectable_prefix_below_frontier_hole, TestChain100Setup)
+{
+    // A trusted mirror whose active tip has quorum must still be able to
+    // move onto the body-complete prefix of a heavier signed frontier when
+    // a header-only hole sits between that prefix and the frontier. The
+    // frontier itself stays unconnectable; the prefix below the hole does
+    // not.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        chainman.m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct Restore {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            mode = saved_mode;
+        }
+    } restore{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::TRUSTED;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+
+    std::vector<CBlockIndex*> competing;
+    competing.reserve(8);
+    for (int i = 0; i < 8; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        CBlockIndex* idx{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
+        BOOST_REQUIRE(idx != nullptr);
+        competing.push_back(idx);
+    }
+    for (int i = 7; i >= 0; --i) {
+        BlockValidationState state;
+        BOOST_REQUIRE(chainstate.InvalidateBlock(state, competing[i]));
+    }
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == parent);
+
+    std::vector<CBlockIndex*> active;
+    active.reserve(3);
+    for (int i = 0; i < 3; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        CBlockIndex* idx{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
+        BOOST_REQUIRE(idx != nullptr);
+        active.push_back(idx);
+    }
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == active.back());
+    {
+        LOCK(::cs_main);
+        // Clear the failure only after the shorter branch is the tip, and
+        // do not activate. The fifth competing block is the header-only
+        // hole. The four-block prefix below it has more work than the tip.
+        chainstate.ResetBlockFailureFlags(competing.front());
+        for (CBlockIndex* idx : competing) {
+            idx->nStatus &= ~BLOCK_FAILED_MASK;
+            BOOST_REQUIRE(idx->nStatus & BLOCK_HAVE_DATA);
+        }
+        competing[4]->nStatus &= ~BLOCK_HAVE_DATA;
+        competing[4]->nDataPos = 0;
+        competing[4]->nTx = 0;
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'd')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      active.back()->GetBlockHash(), active.back()->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      competing.back()->GetBlockHash(), competing.back()->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(competing[3]->nChainWork > active.back()->nChainWork);
+        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), competing[3]);
     }
 }
 
@@ -5678,6 +5774,297 @@ BOOST_FIXTURE_TEST_CASE(rb16_acquisition_escape_valve, TestChain100Setup)
         BOOST_CHECK(!chainman.AcquisitionEscapeActive(b_tip));
     }
     SetMockTime(0);
+}
+
+namespace {
+void ReconsiderCleanupBlock(node::NodeContext& node, const uint256& hash)
+{
+    JSONRPCRequest request;
+    request.context = &node;
+    request.strMethod = "reconsiderblock";
+    request.params = UniValue{UniValue::VARR};
+    request.params.push_back(hash.GetHex());
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    tableRPC.execute(request);
+}
+
+struct InvalidBranchCleanupSetup : TestChain100Setup {
+    ChainstateManager& chainman{*m_node.chainman};
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    const CScript script{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    CBlock body{CreateBlock({}, script, chainstate)};
+    std::vector<CBlockIndex*> tower;
+    CBlockIndex* honest_tip{nullptr};
+
+    InvalidBranchCleanupSetup()
+    {
+        const CBlock honest{CreateAndProcessBlock({}, script)};
+        BOOST_REQUIRE(honest.GetHash() != body.GetHash());
+        honest_tip = WITH_LOCK(::cs_main, return chainstate.m_chain.Tip());
+        tower.push_back(IndexHeader(body));
+        for (int i = 0; i < 3; ++i) {
+            tower.push_back(IndexHeader(ChildHeader(tower.back())));
+        }
+        // A second descendant arm was never on the most-work path.
+        tower.push_back(IndexHeader(ChildHeader(tower.front(), 2)));
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.m_best_header == tower[3]);
+        BOOST_REQUIRE(chainman.m_best_claimed_header == tower[3]);
+        const int64_t now{GetTime()};
+        SetMockTime(now);
+        chainman.SetLastTipConnectMonoForTest(
+            now - ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS - 1);
+        chainman.SetAcquisitionProgressMonoForTest(
+            now - ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS - 1);
+        BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(tower[3]));
+        BOOST_REQUIRE(chainman.FindAcquisitionEscapeFrontier() != nullptr);
+    }
+
+    ~InvalidBranchCleanupSetup() { SetMockTime(0); }
+
+    CBlockIndex* IndexHeader(const CBlockHeader& header)
+    {
+        BlockValidationState state;
+        const CBlockIndex* index{nullptr};
+        BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+            {{header}}, /*min_pow_checked=*/true, state, &index));
+        BOOST_REQUIRE(index != nullptr);
+        BOOST_REQUIRE(index->GetBlockHash() == header.GetHash());
+        return const_cast<CBlockIndex*>(index);
+    }
+
+    CBlockHeader ChildHeader(const CBlockIndex* parent, unsigned time_step = 1)
+    {
+        CBlockHeader header{body.GetBlockHeader()};
+        header.hashPrevBlock = parent->GetBlockHash();
+        header.nTime = parent->nTime + time_step;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            header, parent->nHeight + 1, chainman.GetConsensus(), 5'000'000,
+            parent->GetMedianTimePast()));
+        return header;
+    }
+
+    void CheckRetired() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        BOOST_CHECK(tower.front()->nStatus & BLOCK_FAILED_VALID);
+        BOOST_CHECK(chainman.m_failed_blocks.contains(tower.front()));
+        for (CBlockIndex* index : tower) {
+            BOOST_CHECK(index->nStatus & BLOCK_FAILED_MASK);
+            BOOST_CHECK_EQUAL(index->nStatus & BLOCK_MANUALLY_INVALIDATED, 0U);
+            if (index != tower.front()) BOOST_CHECK(index->nStatus & BLOCK_FAILED_CHILD);
+            for (Chainstate* cs : chainman.GetAll()) {
+                BOOST_CHECK(!cs->setBlockIndexCandidates.contains(index));
+            }
+        }
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), honest_tip);
+        BOOST_CHECK_EQUAL(honest_tip->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_EQUAL(chainman.m_best_header, honest_tip);
+        BOOST_CHECK_EQUAL(chainman.m_best_claimed_header, honest_tip);
+        BOOST_CHECK(chainman.m_best_header_extending_tip == nullptr);
+        BOOST_CHECK_EQUAL(chainman.BestFollowedHeaderHeight(), honest_tip->nHeight);
+        BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier() == nullptr);
+        BOOST_CHECK(!chainman.AcquisitionEscapeActive(tower[3]));
+        BOOST_CHECK(!chainman.AcquisitionEscapeMayAcquireHeavierFork(tower[3]));
+    }
+};
+
+struct ScopedCleanupReplayActivation {
+    Consensus::Params& consensus;
+    int32_t v4, bmx, rc, lt;
+    explicit ScopedCleanupReplayActivation(Consensus::Params& params, int height)
+        : consensus{params}, v4{params.nMatMulV4Height}, bmx{params.nMatMulBMX4CHeight},
+          rc{params.nMatMulRCHeight}, lt{params.nMatMulDRLTHeight}
+    {
+        consensus.nMatMulV4Height = height;
+        consensus.nMatMulBMX4CHeight = height;
+        consensus.nMatMulRCHeight = height;
+        consensus.nMatMulDRLTHeight = height;
+    }
+    ~ScopedCleanupReplayActivation()
+    {
+        SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+        consensus.nMatMulV4Height = v4;
+        consensus.nMatMulBMX4CHeight = bmx;
+        consensus.nMatMulRCHeight = rc;
+        consensus.nMatMulDRLTHeight = lt;
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(acceptblock_exact_replay_failure_retires_header_tower, InvalidBranchCleanupSetup)
+{
+    const CBlockHeader next{ChildHeader(tower[3])};
+    // The cheap fixture mined a legacy body. RC is digest-only: retain the
+    // already indexed header and remove its legacy, unhashed sketch bytes.
+    body.matrix_c_data.clear();
+    {
+        // Exercise the production ExactReplay rejection path without an
+        // expensive matrix computation. Header admission already succeeded.
+        ScopedCleanupReplayActivation activation{
+            const_cast<Consensus::Params&>(chainman.GetConsensus()), tower.front()->nHeight};
+        unsigned replays{0};
+        SetMatMulExactReplayUnderReleasedCsMainHookForTest([&]() -> std::optional<bool> {
+            AssertLockNotHeld(::cs_main);
+            ++replays;
+            return false;
+        });
+        LOCK(::cs_main);
+        BlockValidationState state;
+        BOOST_CHECK(!chainman.AcceptBlock(std::make_shared<const CBlock>(body), state,
+                                         nullptr, /*requested=*/true, nullptr, nullptr,
+                                         /*min_pow_checked=*/true));
+        BOOST_CHECK(state.IsInvalid());
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "high-hash");
+        BOOST_CHECK_EQUAL(replays, 1U);
+        CheckRetired();
+        BlockValidationState duplicate;
+        BOOST_CHECK(!chainman.AcceptBlock(std::make_shared<const CBlock>(body), duplicate,
+                                         nullptr, true, nullptr, nullptr, true));
+        BOOST_CHECK_EQUAL(duplicate.GetRejectReason(), "duplicate-invalid");
+        BOOST_CHECK_EQUAL(replays, 1U);
+    }
+    BlockValidationState headers;
+    BOOST_CHECK(!chainman.ProcessNewBlockHeaders({{next}}, true, headers));
+    BOOST_CHECK_EQUAL(headers.GetRejectReason(), "bad-prevblk");
+    // Explicit reconsideration restores eligibility, not proof validity.
+    // With no retained body it waits for redelivery, then rejects again.
+    ReconsiderCleanupBlock(m_node, tower.front()->GetBlockHash());
+    {
+        ScopedCleanupReplayActivation activation{
+            const_cast<Consensus::Params&>(chainman.GetConsensus()), tower.front()->nHeight};
+        SetMatMulExactReplayUnderReleasedCsMainHookForTest([]() -> std::optional<bool> { return false; });
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainman.m_best_header, tower[3]);
+        for (CBlockIndex* index : tower) BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BlockValidationState again;
+        BOOST_CHECK(!chainman.AcceptBlock(std::make_shared<const CBlock>(body), again,
+                                         nullptr, true, nullptr, nullptr, true));
+        BOOST_CHECK_EQUAL(again.GetRejectReason(), "high-hash");
+        CheckRetired();
+    }
+    // Dirty flags must reach the block-index database, including descendants
+    // with no body. A restart must not need to rediscover the failed proof.
+    {
+        LOCK(::cs_main);
+        BlockValidationState flush;
+        BOOST_REQUIRE(chainstate.FlushStateToDisk(flush, FlushStateMode::FORCE_FLUSH));
+        for (CBlockIndex* index : tower) {
+            CDiskBlockIndex disk;
+            BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->Read(
+                std::make_pair(uint8_t{'b'}, index->GetBlockHash()), disk));
+            BOOST_CHECK_EQUAL(disk.nStatus, index->nStatus);
+        }
+    }
+    const CBlock progress{CreateAndProcessBlock({}, script)};
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) == progress.GetHash());
+    chainman.CheckBlockIndex();
+}
+
+BOOST_FIXTURE_TEST_CASE(acceptblock_mutated_body_keeps_header_tower_retryable, InvalidBranchCleanupSetup)
+{
+    CBlock mutated{body};
+    CMutableTransaction coinbase{*body.vtx.front()};
+    ++coinbase.vout.front().nValue;
+    mutated.vtx.front() = MakeTransactionRef(std::move(coinbase));
+    mutated.fChecked = false;
+    mutated.m_checked_merkle_root = false;
+    LOCK(::cs_main);
+    BlockValidationState state;
+    BOOST_CHECK(!chainman.AcceptBlock(std::make_shared<const CBlock>(mutated), state,
+                                     nullptr, true, nullptr, nullptr, true));
+    BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+    for (CBlockIndex* index : tower) BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+    BOOST_CHECK(!chainman.m_failed_blocks.contains(tower.front()));
+    BOOST_CHECK_EQUAL(chainman.m_best_header, tower[3]);
+    BOOST_CHECK(chainman.AcquisitionEscapeActive(tower[3]));
+    BlockValidationState retry;
+    BOOST_CHECK(chainman.AcceptBlock(std::make_shared<const CBlock>(body), retry,
+                                    nullptr, true, nullptr, nullptr, true));
+    BOOST_CHECK(tower.front()->nStatus & BLOCK_HAVE_DATA);
+}
+
+BOOST_FIXTURE_TEST_CASE(invalid_branch_cleanup_preserves_retryable_errors_and_other_header_targets, InvalidBranchCleanupSetup)
+{
+    LOCK(::cs_main);
+    BlockValidationState error;
+    error.Error("ExactReplay cancelled: retryable local execution failure");
+    chainstate.InvalidBlockFound(tower.front(), error);
+    for (CBlockIndex* index : tower) BOOST_CHECK_EQUAL(index->nStatus & BLOCK_FAILED_MASK, 0U);
+    BOOST_CHECK_EQUAL(chainman.m_best_header, tower[3]);
+    BOOST_CHECK(chainman.AcquisitionEscapeActive(tower[3]));
+
+    // A followed-header policy can already point at the honest chain while
+    // the separate highest-claimed-work pointer still needs invalidation.
+    chainman.SetBestHeader(honest_tip);
+    BOOST_REQUIRE_EQUAL(chainman.m_best_claimed_header, tower[3]);
+    BlockValidationState invalid;
+    invalid.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash");
+    chainstate.InvalidBlockFound(tower.front(), invalid);
+    CheckRetired();
+}
+
+BOOST_FIXTURE_TEST_CASE(invalid_branch_cleanup_recalculates_failed_extending_header, InvalidBranchCleanupSetup)
+{
+    const CBlock child{CreateBlock({}, script, chainstate)};
+    CBlockIndex* index{IndexHeader(child)};
+    LOCK(::cs_main);
+    BOOST_REQUIRE_EQUAL(chainman.m_best_header, tower[3]);
+    BOOST_REQUIRE_EQUAL(chainman.m_best_claimed_header, tower[3]);
+    BOOST_REQUIRE_EQUAL(chainman.m_best_header_extending_tip, index);
+    BlockValidationState invalid;
+    invalid.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash");
+    chainstate.InvalidBlockFound(index, invalid);
+    BOOST_CHECK(index->nStatus & BLOCK_FAILED_VALID);
+    BOOST_CHECK(chainman.m_best_header_extending_tip == nullptr);
+    BOOST_CHECK_EQUAL(chainman.m_best_header, tower[3]);
+    BOOST_CHECK_EQUAL(chainman.m_best_claimed_header, tower[3]);
+    for (CBlockIndex* other : tower) BOOST_CHECK_EQUAL(other->nStatus & BLOCK_FAILED_MASK, 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(invalid_branch_cleanup_manual_reconsider_preserves_replay_success, TestChain100Setup)
+{
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    const CScript script{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    CBlockIndex* parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    std::vector<CBlockIndex*> branch;
+    for (int i = 0; i < 3; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        LOCK(::cs_main);
+        branch.push_back(chainman.m_blockman.LookupBlockIndex(block.GetHash()));
+        BOOST_REQUIRE(chainman.PersistMatMulExactReplayVerdict(block.GetHash()));
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, branch.front()));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), parent);
+        BOOST_CHECK_EQUAL(chainman.m_best_header, parent);
+        BOOST_CHECK_EQUAL(chainman.m_best_claimed_header, parent);
+        BOOST_CHECK(chainman.m_best_header_extending_tip == nullptr);
+        for (CBlockIndex* index : branch) {
+            BOOST_CHECK(index->nStatus & BLOCK_FAILED_MASK);
+            BOOST_CHECK(index->nStatus & BLOCK_MANUALLY_INVALIDATED);
+            BOOST_CHECK(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+            BOOST_CHECK(!chainstate.setBlockIndexCandidates.contains(index));
+            chainstate.TryAddBlockIndexCandidate(index);
+            BOOST_CHECK(!chainstate.setBlockIndexCandidates.contains(index));
+        }
+    }
+    // Use the RPC implementation: clear flags, recalculate headers, then
+    // perform normal activation. Successful replay evidence must survive.
+    ReconsiderCleanupBlock(m_node, branch.front()->GetBlockHash());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), branch.back());
+        BOOST_CHECK_EQUAL(chainman.m_best_header, branch.back());
+        for (CBlockIndex* index : branch) {
+            BOOST_CHECK_EQUAL(index->nStatus & (BLOCK_FAILED_MASK | BLOCK_MANUALLY_INVALIDATED), 0U);
+            BOOST_CHECK(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+            BOOST_CHECK(!chainman.m_failed_blocks.contains(index));
+        }
+    }
+    chainman.CheckBlockIndex();
 }
 
 BOOST_AUTO_TEST_SUITE_END()
