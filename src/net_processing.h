@@ -392,8 +392,9 @@ public:
     [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
     /** Issue #130 regression: retain a MatMul lifecycle body directly, bypassing
      *  the ExactReplay deferral path so the guard is testable in CUDA-off builds. */
-    virtual void RetainMatMulBodyForTest(
-        const std::shared_ptr<const CBlock>& block) = 0;
+    virtual bool RetainMatMulBodyForTest(
+        const std::shared_ptr<const CBlock>& block,
+        bool pin_progress = false) = 0;
     /** Issue #130 regression: invoke the real BlockConnected callback with a
      *  chosen block index, to simulate a stale async callback after a reorg. */
     virtual void SimulateBlockConnectedForTest(

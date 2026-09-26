@@ -5447,6 +5447,125 @@ BOOST_AUTO_TEST_CASE(ticketless_followed_tip_child_converges_without_rcadmit)
 // above tip. Honest suffix bodies that extend the active tip must still
 // ExactReplay and ConnectTip. Competing non-extending headers stay
 // HEADER_ONLY (no bodies sent for them here).
+BOOST_AUTO_TEST_CASE(persisted_exact_replay_fork_releases_retained_capacity)
+{
+    // A competing suffix cannot reach SCRIPTS validity until it wins and
+    // ConnectBlock runs. Retaining every replayed body until then exhausted
+    // the 16-body source cap, preventing download of the block that could
+    // make the suffix win. Exercise the real duplicate-body completion path.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    auto& chainman{*m_node.chainman};
+    auto& peerman{*m_node.peerman};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* fork_parent{
+        WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    BOOST_REQUIRE(fork_parent != nullptr);
+
+    struct Cleanup {
+        ChainstateManager& chainman;
+        PeerManager& peerman;
+        ~Cleanup()
+        {
+            NeutralizeUnconnectedHeaders(chainman);
+            peerman.ResetMatMulVerifyAdmissionForTest();
+        }
+    } cleanup{chainman, peerman};
+
+    // Leave room for more than one source's retained-body limit below the
+    // active tip, so none of these fork bodies connects during the test.
+    for (int i = 0; i < 20; ++i) {
+        const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        CBlock block{MineTipChild(m_node, *tip, 0)};
+        BOOST_REQUIRE(chainman.ProcessNewBlock(
+            std::make_shared<const CBlock>(block), true, true, nullptr));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    const uint256 active_hash{
+        WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash())};
+
+    const ServiceFlags services{
+        ServiceFlags(NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode peer{/*id=*/287, /*sock=*/nullptr,
+               CAddress{PeermanTestService(0x4700007f), NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0x47, /*nLocalHostNonceIn=*/0,
+               CAddress{}, "persisted-exact-fork", ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(peer, true, services, services, PROTOCOL_VERSION, true);
+    connman.AddTestNode(peer);
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& peer;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(peer);
+            connman.RemoveTestNode(peer);
+        }
+    } finalize{connman, peerman, peer};
+
+    const auto deliver_body = [&](const CBlock& block) {
+        connman.FlushSendBuffer(peer);
+        peer.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            peer, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(block))));
+        (void)connman.ProcessMessagesOnce(peer);
+    };
+    for (int i = 0; i < 17; ++i) {
+        CBlock block{MineBlockOnParent(
+            m_node, fork_parent->GetBlockHash(), fork_parent->nHeight + 1,
+            static_cast<uint32_t>(fork_parent->GetBlockTime() + 2),
+            fork_parent->GetMedianTimePast())};
+        auto body{std::make_shared<const CBlock>(block)};
+        const uint256 hash{block.GetHash()};
+        const CBlockIndex* index{nullptr};
+        BlockValidationState state;
+        const std::vector<CBlockHeader> headers{block.GetBlockHeader()};
+        BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+            headers, true, state, &index));
+        BOOST_REQUIRE(index != nullptr);
+        BOOST_REQUIRE(chainman.ProcessNewBlock(body, true, true, nullptr));
+        if (i == 0) {
+            // The fixture's pre-RC body has no persistent ExactReplay verdict.
+            // Disk persistence alone must not retire replay work.
+            BOOST_REQUIRE(!(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
+            BOOST_REQUIRE(peerman.RetainMatMulBodyForTest(body, true));
+            deliver_body(block);
+            BOOST_CHECK(peerman.HasMatMulRetainedBodyForTest(hash));
+        }
+        // Model the successful worker verdict through its production persist
+        // helper; body and script validity still come from normal validation.
+        peerman.PersistExactReplayVerdictAndRelayForTest(hash);
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+            BOOST_REQUIRE(index->nStatus & BLOCK_HAVE_DATA);
+            BOOST_REQUIRE(index->IsValid(BLOCK_VALID_TRANSACTIONS));
+            BOOST_REQUIRE(!index->IsValid(BLOCK_VALID_SCRIPTS));
+            BOOST_REQUIRE(!(index->nStatus & BLOCK_FAILED_MASK));
+            BOOST_REQUIRE_EQUAL(chainman.ActiveTip()->GetBlockHash(), active_hash);
+        }
+        BOOST_REQUIRE_MESSAGE(peerman.RetainMatMulBodyForTest(body, true),
+                              "completed fork bodies must not fill the source cap");
+        BOOST_REQUIRE(peerman.HasMatMulRetainedBodyForTest(hash));
+        deliver_body(block);
+        BOOST_CHECK_MESSAGE(!peerman.HasMatMulRetainedBodyForTest(hash),
+                            "persisted exact replay must retire the retained body before ConnectBlock");
+        BOOST_CHECK(!peer.fDisconnect);
+        CBlock persisted;
+        BOOST_REQUIRE(chainman.m_blockman.ReadBlock(persisted, *index));
+        BOOST_CHECK_EQUAL(persisted.GetHash(), hash);
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK(index->nStatus & BLOCK_HAVE_DATA);
+            BOOST_CHECK(!index->IsValid(BLOCK_VALID_SCRIPTS));
+            BOOST_CHECK_EQUAL(chainman.ActiveTip()->GetBlockHash(), active_hash);
+        }
+        fork_parent = index;
+    }
+}
+
 static void CheckConsensusBehindCompetingHeaders(
     node::NodeContext& m_node, bool retain_next_child, bool cpu_pending = false,
     bool unique_frontier_cpu_pending = false)

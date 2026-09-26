@@ -1542,13 +1542,15 @@ public:
     {
         return HasMatMulRetainedBodyForTest(hash);
     }
-    void RetainMatMulBodyForTest(
-        const std::shared_ptr<const CBlock>& block) override
+    bool RetainMatMulBodyForTest(
+        const std::shared_ptr<const CBlock>& block,
+        bool pin_progress) override
     {
         node::MatMulBlockLifecycle::RetainedBody body;
         body.block = block;
         body.bytes = 1;
-        m_matmul_block_lifecycle.Retain(block->GetHash(), std::move(body));
+        body.pin_progress = pin_progress;
+        return m_matmul_block_lifecycle.Retain(block->GetHash(), std::move(body));
     }
     void SimulateBlockConnectedForTest(
         const std::shared_ptr<const CBlock>& block,
@@ -16243,6 +16245,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     DrainMatMulPendingSourceUnpins();
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
+    bool exact_replay_persisted{false};
     bool exact_replay_authenticated{false};
     bool terminal_failure{false};
     {
@@ -16250,10 +16253,12 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
         const uint256 hash{block->GetHash()};
         const CBlockIndex* index{
             m_chainman.m_blockman.LookupBlockIndex(hash)};
-        exact_replay_authenticated = index != nullptr &&
+        exact_replay_persisted = index != nullptr &&
             (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
             (index->nStatus & BLOCK_HAVE_DATA) != 0 &&
             (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
+            index->IsValid(BLOCK_VALID_TRANSACTIONS);
+        exact_replay_authenticated = exact_replay_persisted &&
             index->IsValid(BLOCK_VALID_SCRIPTS);
         terminal_failure = index != nullptr &&
             (index->nStatus & BLOCK_FAILED_MASK) != 0;
@@ -16286,20 +16291,27 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     // A duplicate/no-op ProcessNewBlock result is not necessarily terminal:
     // another delivery can still own the asynchronous replay, and a local
     // accelerator failure deliberately leaves the candidate retryable. Keep
-    // that bounded observation until exact local authority succeeds, the
-    // index is permanently failed, or its TTL expires.
-    if (exact_replay_authenticated || terminal_failure) {
+    // that retryable body until replay succeeds and the body is persisted,
+    // the index is permanently failed, or its TTL expires. A verified fork
+    // body is safe to reload from disk before it reaches SCRIPTS validity:
+    // waiting for ConnectBlock would fill the pinned per-source retention
+    // cap before a long competing suffix can acquire enough work to connect.
+    if (exact_replay_persisted || terminal_failure) {
         if (lifecycle_token) {
             m_matmul_block_lifecycle.Terminal(*lifecycle_token);
         } else {
             EraseMatMulDeferredBody(block->GetHash());
         }
         ClearMatMulRCBodyDeferred(block->GetHash());
-        FinishMatMulAuthenticatedRelayObservation(
-            block->GetHash(), exact_replay_authenticated);
     } else {
         RefreshMatMulDeferredBodyRetry(
             block->GetHash(), "non-terminal replay result");
+    }
+    // Releasing the in-memory copy does not confer script validity or
+    // authenticated relay completion on an unconnected fork block.
+    if (exact_replay_authenticated || terminal_failure) {
+        FinishMatMulAuthenticatedRelayObservation(
+            block->GetHash(), exact_replay_authenticated);
     }
     if (new_block || exact_replay_authenticated) {
         if (new_block) {
