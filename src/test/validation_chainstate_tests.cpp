@@ -2473,19 +2473,6 @@ BOOST_FIXTURE_TEST_CASE(chainstate_fmwc_yields_on_attested_suffix_with_header_on
     const uint256 parent_hash{parent->GetBlockHash()};
     const int parent_height{parent->nHeight};
 
-    CKey signer;
-    signer.MakeNewKey(/*fCompressed=*/true);
-    matmul::trusted::StoreConfig config;
-    config.chain_id = uint256::ONE;
-    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
-    config.trusted_signers = {signer.GetPubKey()};
-    config.threshold = 1;
-    config.local_signer = signer;
-    std::string error;
-    BOOST_REQUIRE(node::matmul_trusted::Configure(
-        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
-        std::chrono::milliseconds{50}, error));
-
     const CBlock child_block{CreateAndProcessBlock({}, script)};
     const CBlock grand_block{CreateAndProcessBlock({}, script)};
     CBlockIndex* child{
@@ -2515,6 +2502,22 @@ BOOST_FIXTURE_TEST_CASE(chainstate_fmwc_yields_on_attested_suffix_with_header_on
         chainstate.setBlockIndexCandidates.insert(grandchild);
     }
 
+    // Configure after the disconnect. A signer installed before connect
+    // withdraws that vote on invalidate, and a later sign of the same hash
+    // is only a duplicate with no quorum.
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
                       parent_hash, parent_height) ==
                   matmul::trusted::AddResult::Accepted);
@@ -2535,6 +2538,98 @@ BOOST_FIXTURE_TEST_CASE(chainstate_fmwc_yields_on_attested_suffix_with_header_on
         for (int i = 0; i < 32; ++i) {
             BOOST_REQUIRE(chainstate.FindMostWorkChainForTest() != nullptr);
         }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_rejoins_connectable_prefix_below_frontier_hole, TestChain100Setup)
+{
+    // A trusted mirror whose active tip has quorum must still be able to
+    // move onto the body-complete prefix of a heavier signed frontier when
+    // a header-only hole sits between that prefix and the frontier. The
+    // frontier itself stays unconnectable; the prefix below the hole does
+    // not.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        chainman.m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct Restore {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            mode = saved_mode;
+        }
+    } restore{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::TRUSTED;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+
+    std::vector<CBlockIndex*> competing;
+    competing.reserve(8);
+    for (int i = 0; i < 8; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        CBlockIndex* idx{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
+        BOOST_REQUIRE(idx != nullptr);
+        competing.push_back(idx);
+    }
+    for (int i = 7; i >= 0; --i) {
+        BlockValidationState state;
+        BOOST_REQUIRE(chainstate.InvalidateBlock(state, competing[i]));
+    }
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == parent);
+
+    std::vector<CBlockIndex*> active;
+    active.reserve(3);
+    for (int i = 0; i < 3; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        CBlockIndex* idx{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
+        BOOST_REQUIRE(idx != nullptr);
+        active.push_back(idx);
+    }
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == active.back());
+    {
+        LOCK(::cs_main);
+        // Clear the failure only after the shorter branch is the tip, and
+        // do not activate. The fifth competing block is the header-only
+        // hole. The four-block prefix below it has more work than the tip.
+        chainstate.ResetBlockFailureFlags(competing.front());
+        for (CBlockIndex* idx : competing) {
+            idx->nStatus &= ~BLOCK_FAILED_MASK;
+            BOOST_REQUIRE(idx->nStatus & BLOCK_HAVE_DATA);
+        }
+        competing[4]->nStatus &= ~BLOCK_HAVE_DATA;
+        competing[4]->nDataPos = 0;
+        competing[4]->nTx = 0;
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'd')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      active.back()->GetBlockHash(), active.back()->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      competing.back()->GetBlockHash(), competing.back()->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(competing[3]->nChainWork > active.back()->nChainWork);
+        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), competing[3]);
     }
 }
 

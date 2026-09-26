@@ -1242,14 +1242,14 @@ private:
     //! ACQUIRE + fully ExactReplay-validate the heavier chain (the anti-flood
     //! caps otherwise gate DATA ACQUISITION, stranding any node >72 behind).
     //! MIGRATION stays gated by park / deepforkautoresolve / quorum / operator.
-    //! Value = heaviest candidate tip chainwork seen on that tower, for
-    //! lightest-eviction so the real majority chain always keeps a slot.
+    //! Value = heaviest candidate tip seen on that tower, for work-based
+    //! eviction and root-first replay selection across the registered towers.
     //! Bounded to ACQUISITION_ESCAPE_MAX_TOWERS; cleared only on a
     //! better-chain-progress ConnectTip (a minority-fork-only connect must not
     //! wipe a tower mid-acquisition, or the +72 request cap re-arms and the
     //! tower can never re-register: it needs a past-cap header that no longer
     //! arrives once the chase stops).
-    mutable std::map<uint256, arith_uint256> m_acquisition_exempt_towers
+    mutable std::map<uint256, const CBlockIndex*> m_acquisition_exempt_towers
         GUARDED_BY(::cs_main);
     mutable std::optional<int> m_cadence_hold_logged_allowed GUARDED_BY(::cs_main);
     //! Rate limit for the deepforkautoresolve verdict diagnostic in
@@ -1962,10 +1962,13 @@ public:
     //! admission so doomed-tower FAILED parents cannot spend GPU.
     [[nodiscard]] bool AcquisitionEscapeParentConnectable(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    //! Unique lowest unverified parent-connectable body on the heaviest
-    //! registered competing tower, or nullptr. ExactReplay / RC progress-lane
-    //! / reverify must use this, not "any covered parent-connectable body".
-    [[nodiscard]] const CBlockIndex* FindAcquisitionEscapeFrontier() const
+    //! Select one root-first frontier from the bounded registered towers.
+    //! Prefer available bodies without pending CPU confirmation, then tower
+    //! work. If none is ready, return the heaviest frontier for fetching.
+    //! has_body supplements HAVE_DATA with retained or incoming body presence;
+    //! it never changes ancestry, validation, or tower eligibility.
+    [[nodiscard]] const CBlockIndex* FindAcquisitionEscapeFrontier(
+        const std::function<bool(const CBlockIndex*)>& has_body = {}) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     [[nodiscard]] bool IsAcquisitionEscapeFrontier(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

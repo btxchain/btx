@@ -394,7 +394,7 @@ public:
      *  the ExactReplay deferral path so the guard is testable in CUDA-off builds. */
     virtual bool RetainMatMulBodyForTest(
         const std::shared_ptr<const CBlock>& block,
-        bool pin_progress = false) = 0;
+        bool pin_progress = false, NodeId source_peer = -1) = 0;
     /** Issue #130 regression: invoke the real BlockConnected callback with a
      *  chosen block index, to simulate a stale async callback after a reorg. */
     virtual void SimulateBlockConnectedForTest(
