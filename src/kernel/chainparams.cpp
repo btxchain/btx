@@ -1055,6 +1055,12 @@ public:
                 // assumeutxo at this height is allowed only because this
                 // checkpoint matches (issue 127).
                 {219000, uint256{"dc51220bc7e5db96e29df9d817ae6179245d33eb8adcaaff765cfec83fdb87c3"}},
+                // 0.34.12 fast-start base. Height 228000 is 145 blocks below
+                // the header/active fork at 228145 and far past park_depth 6.
+                // Dumped from the active chain; the heavier header chain shares
+                // this ancestor. Compiled assumeutxo is allowed only because
+                // this checkpoint matches.
+                {228000, uint256{"0104909051a017c9045faf7382627e89c5b83c4bbd3c1270706d5d2ef2ab0c87"}},
             }
         };
         m_assumeutxo_data = {
@@ -1275,6 +1281,16 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"3c065aabb529eaab5646825927d9f20a91426dc7e83b4890b575324f5bfccc99"}},
                 .m_chain_tx_count = 320'540,
                 .blockhash = consteval_ctor(uint256{"dc51220bc7e5db96e29df9d817ae6179245d33eb8adcaaff765cfec83fdb87c3"}),
+                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+            },
+            {
+                // main assumeutxo snapshot at height 228'000 (0.34.12
+                // fast-start). Checkpointed above. Shielded pool closed at
+                // 199300, so the frozen-section pin matches 219000.
+                .height = 228'000,
+                .hash_serialized = AssumeutxoHash{uint256{"c53b264565f1fdafdcb4de605c90d9a09ca2bdb484494688acd09e8738fec398"}},
+                .m_chain_tx_count = 330'421,
+                .blockhash = consteval_ctor(uint256{"0104909051a017c9045faf7382627e89c5b83c4bbd3c1270706d5d2ef2ab0c87"}),
                 .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
             },
             // 199299 (f12a27d0) and 199300 (ff80e629) were dumped from the
