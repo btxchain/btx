@@ -10318,6 +10318,98 @@ static void CheckReadyAcquisitionFork(node::NodeContext& m_node, bool incoming)
     BOOST_CHECK(!(b[2].second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
 }
 
+BOOST_AUTO_TEST_CASE(unavailable_fork_cannot_hide_ready_recovery)
+{
+    // An unavailable higher-work sibling must not become the only
+    // representative of a shared ancestor, and two unavailable
+    // registrations must not keep a third ready frontier out.
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    chainman.m_cached_finished_ibd.store(true);
+    for (int i = 0; i < 6; ++i) {
+        const CBlockIndex* prev{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        mineBlock(m_node, std::chrono::seconds{prev->GetBlockTime() + 1});
+    }
+    const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    BOOST_REQUIRE(tip != nullptr && tip->nHeight >= 6);
+
+    const auto make_headers = [&](const CBlockIndex* parent, int count) {
+        std::vector<CBlockIndex*> out;
+        out.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            CBlock block{MineBlockOnParent(
+                m_node, parent->GetBlockHash(), parent->nHeight + 1,
+                parent->GetBlockTime() + 2, parent->GetMedianTimePast())};
+            BlockValidationState state;
+            const CBlockIndex* index{nullptr};
+            const std::vector<CBlockHeader> headers{block.GetBlockHeader()};
+            BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(headers, true, state, &index));
+            BOOST_REQUIRE(index != nullptr);
+            out.push_back(const_cast<CBlockIndex*>(index));
+            parent = index;
+        }
+        return out;
+    };
+    const auto store_side_body = [&](const CBlockIndex* parent) {
+        CBlock body{MineBlockOnParent(
+            m_node, parent->GetBlockHash(), parent->nHeight + 1,
+            parent->GetBlockTime() + 2, parent->GetMedianTimePast())};
+        BOOST_REQUIRE(chainman.ProcessNewBlock(
+            std::make_shared<const CBlock>(body), true, true, nullptr));
+        LOCK(::cs_main);
+        CBlockIndex* stored{chainman.m_blockman.LookupBlockIndex(body.GetHash())};
+        BOOST_REQUIRE(stored != nullptr);
+        BOOST_REQUIRE(stored->nStatus & BLOCK_HAVE_DATA);
+        stored->nStatus &= ~BLOCK_EXACT_REPLAY_VERIFIED;
+        return stored;
+    };
+
+    const CBlockIndex* shared{tip->GetAncestor(tip->nHeight - 4)};
+    BOOST_REQUIRE(shared != nullptr);
+    CBlockIndex* ready_body{store_side_body(shared)};
+    const auto ready_sibling{make_headers(ready_body, 7)};
+    const auto unavailable_sibling{make_headers(shared, 12)};
+    {
+        LOCK(::cs_main);
+        chainman.SetLastTipConnectMonoForTest(
+            GetTime() - ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS - 1);
+        BOOST_REQUIRE(unavailable_sibling.back()->nChainWork > ready_sibling.back()->nChainWork);
+        BOOST_REQUIRE(ready_sibling.back()->nChainWork > tip->nChainWork);
+        BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(unavailable_sibling.back()));
+        BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(ready_sibling.back()));
+        BOOST_CHECK_EQUAL(chainman.FindAcquisitionEscapeFrontier(), ready_body);
+        ready_body->nStatus |= BLOCK_FAILED_VALID;
+        chainman.AcquisitionEscapeNoteBlockFailed(ready_body);
+        ready_body->nStatus &= ~BLOCK_FAILED_VALID;
+    }
+
+    const CBlockIndex* lca_a{tip->GetAncestor(tip->nHeight - 5)};
+    const CBlockIndex* lca_b{tip->GetAncestor(tip->nHeight - 3)};
+    const CBlockIndex* lca_c{tip->GetAncestor(tip->nHeight - 1)};
+    BOOST_REQUIRE(lca_a && lca_b && lca_c);
+    const auto tower_a{make_headers(lca_a, 16)};
+    const auto tower_b{make_headers(lca_b, 12)};
+    CBlockIndex* ready_root{store_side_body(lca_c)};
+    const auto tower_c{make_headers(ready_root, 7)};
+    {
+        LOCK(::cs_main);
+        chainman.SetLastTipConnectMonoForTest(
+            GetTime() - ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS - 1);
+        BOOST_REQUIRE(tower_a.back()->nChainWork > tower_b.back()->nChainWork);
+        BOOST_REQUIRE(tower_b.back()->nChainWork > tower_c.back()->nChainWork);
+        BOOST_REQUIRE(tower_c.back()->nChainWork > tip->nChainWork);
+        BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(tower_a.back()));
+        BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(tower_b.back()));
+        BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(tower_c.back()));
+        BOOST_CHECK(chainman.AcquisitionEscapeActive(tower_c.back()));
+        BOOST_CHECK(!(chainman.AcquisitionEscapeActive(tower_a.back()) &&
+                      chainman.AcquisitionEscapeActive(tower_b.back())));
+        BOOST_CHECK_EQUAL(chainman.FindAcquisitionEscapeFrontier(), ready_root);
+        BOOST_CHECK(chainman.ActiveTip() == tip);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(ready_acquisition_fork_replays_while_heaviest_body_missing)
 {
     CheckReadyAcquisitionFork(m_node, false);

@@ -12069,9 +12069,11 @@ void ChainstateManager::AcquisitionEscapeNoteBlockFailed(const CBlockIndex* fail
     if (failed == nullptr || m_acquisition_exempt_towers.empty()) return;
     for (auto it = m_acquisition_exempt_towers.begin();
          it != m_acquisition_exempt_towers.end();) {
-        const CBlockIndex* const root{m_blockman.LookupBlockIndex(it->first)};
-        if (root != nullptr && failed->nHeight > root->nHeight &&
-            failed->GetAncestor(root->nHeight) == root) {
+        // A failed block drops only the representative that descends from it.
+        // A sibling that shares the fork ancestor keeps its slot.
+        const CBlockIndex* const best{it->second};
+        if (best != nullptr && failed->nHeight <= best->nHeight &&
+            best->GetAncestor(failed->nHeight) == failed) {
             LogPrintf("acquisition-escape: evicting exempt tower fork_root=%s "
                       "-- covered body %s height=%d FAILED validation (dead "
                       "tower must not hold an exemption slot)\n",
@@ -12130,9 +12132,38 @@ bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
             ++it;
         }
     }
+    // Body readiness of the root-first frontier. Header work does not make a
+    // tower ready, and a missing body must not hide a sibling that has one.
+    const auto frontier_has_body{[&](const CBlockIndex* cand) {
+        const CBlockIndex* const cand_fork{
+            m_active_chainstate->m_chain.FindFork(cand)};
+        if (cand_fork == nullptr) return false;
+        const CBlockIndex* lowest{nullptr};
+        for (const CBlockIndex* walk{cand}; walk != nullptr && walk != cand_fork;
+             walk = walk->pprev) {
+            if (walk->nStatus & BLOCK_FAILED_MASK) return false;
+            if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0) lowest = walk;
+        }
+        return lowest != nullptr &&
+               AcquisitionEscapeParentConnectable(lowest) &&
+               (lowest->nStatus & BLOCK_HAVE_DATA) != 0;
+    }};
+    const auto same_first_child{[&](const CBlockIndex* a, const CBlockIndex* b) {
+        return a->GetAncestor(fork->nHeight + 1) == b->GetAncestor(fork->nHeight + 1);
+    }};
     auto existing{m_acquisition_exempt_towers.find(root)};
     if (existing != m_acquisition_exempt_towers.end()) {
-        if (candidate->nChainWork > existing->second->nChainWork) {
+        const bool old_ready{frontier_has_body(existing->second)};
+        const bool new_ready{frontier_has_body(candidate)};
+        if (new_ready && !old_ready) {
+            existing->second = candidate;
+        } else if (old_ready && !new_ready) {
+            // Keep the sibling whose next body can be replayed.
+        } else if (same_first_child(existing->second, candidate) &&
+                   candidate->nChainWork > existing->second->nChainWork) {
+            existing->second = candidate;
+        } else if (!old_ready && !new_ready &&
+                   candidate->nChainWork > existing->second->nChainWork) {
             existing->second = candidate;
         }
         return true;
@@ -12146,15 +12177,34 @@ bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
                   root.ToString());
         return true;
     }
-    // Budget full: evict the lightest tower only if the candidate is heavier,
-    // so the real (heaviest) majority chain always keeps a slot.
-    auto lightest{m_acquisition_exempt_towers.begin()};
+    // Two slots. An unavailable registration is the eviction victim. A ready
+    // frontier is not displaced by a higher header-work tower that has no body,
+    // and a ready third candidate can take an unavailable slot.
+    auto victim{m_acquisition_exempt_towers.begin()};
     for (auto it = std::next(m_acquisition_exempt_towers.begin());
          it != m_acquisition_exempt_towers.end(); ++it) {
-        if (it->second->nChainWork < lightest->second->nChainWork) lightest = it;
+        const bool victim_ready{frontier_has_body(victim->second)};
+        const bool it_ready{frontier_has_body(it->second)};
+        if (victim_ready != it_ready) {
+            if (victim_ready) victim = it;
+        } else if (it->second->nChainWork < victim->second->nChainWork) {
+            victim = it;
+        }
     }
-    if (candidate->nChainWork > lightest->second->nChainWork) {
-        m_acquisition_exempt_towers.erase(lightest);
+    const bool candidate_ready{frontier_has_body(candidate)};
+    const bool victim_ready{frontier_has_body(victim->second)};
+    if (candidate_ready && !victim_ready) {
+        LogPrintf("acquisition-escape: ready frontier %s replaces unavailable "
+                  "registration %s (header work does not reserve a recovery "
+                  "slot without a body)\n",
+                  candidate->GetBlockHash().ToString(), victim->first.ToString());
+        m_acquisition_exempt_towers.erase(victim);
+        m_acquisition_exempt_towers.emplace(root, candidate);
+        return true;
+    }
+    if (!candidate_ready && !victim_ready &&
+        candidate->nChainWork > victim->second->nChainWork) {
+        m_acquisition_exempt_towers.erase(victim);
         m_acquisition_exempt_towers.emplace(root, candidate);
         return true;
     }

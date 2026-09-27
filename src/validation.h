@@ -1931,10 +1931,13 @@ public:
     //! STALL_SECONDS and the node is not in IBD (IBD already exempts + fetches).
     [[nodiscard]] bool AcquisitionTipIsStale() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! MUTATING: may this node exempt `candidate`'s heavier competing tower from
-    //! the header-lead / last-common caps to ACQUIRE its bodies? Registers the
-    //! tower (evicting the lightest when the 2-tower budget is full and the
-    //! candidate is heavier). Only fetch+validate is enabled; migration is
-    //! still park/deepforkautoresolve/quorum-gated. Read-only sites use
+    //! the header-lead / last-common caps to ACQUIRE its bodies? At most two
+    //! towers are registered. A tower whose root-first body is present is not
+    //! replaced by a higher-work sibling or evicted for a tower that still has
+    //! no body. A ready third tower can take a slot held by an unavailable
+    //! registration. Header work still ranks two unavailable towers. Only
+    //! fetch+validate is enabled; migration is still
+    //! park/deepforkautoresolve/quorum-gated. Read-only sites use
     //! AcquisitionEscapeActive.
     [[nodiscard]] bool AcquisitionEscapeMayAcquireHeavierFork(
         const CBlockIndex* candidate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
