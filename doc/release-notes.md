@@ -73,10 +73,10 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.11rc1**
+`CLIENT_VERSION` in this tree is **0.34.12rc1**
 (`CLIENT_VERSION_IS_RELEASE=false`). Last shipping tag is **v0.34.10**.
 Do not recut `v0.34.10`. See
-[release-notes-0.34.11.md](release-notes/release-notes-0.34.11.md).
+[release-notes-0.34.12.md](release-notes/release-notes-0.34.12.md).
 The `v0.34` tag and 0.34.0 seal remain the pool-close cut. 0.34.1 is
 withdrawn: it partitions nodes from mainnet. 0.34.2 is withdrawn for
 consensus nodes: it deadlocks one block past the last attestation.
@@ -95,10 +95,13 @@ operator action. See
 consensus when the helper is absent. See
 [release-notes-0.34.7.md](release-notes/release-notes-0.34.7.md).
 
-**0.34.11rc1** is this working tree: per-tower GETDATA under an
-unavailable honest HEADER_ONLY tip-child, per-peer catch-up reclaim,
-and honest-tip getheaders while a long competing HEADER_ONLY tower is
-best-header. See
+**0.34.12rc1** is this working tree: a node keeps validating an available
+chain when a heavier header tower has no body, a silent peer is not
+serving that body, or a cancelled ExactReplay left a retained body
+without a ticket. See
+[release-notes-0.34.12.md](release-notes/release-notes-0.34.12.md).
+**0.34.11rc1** is the previous candidate: per-tower GETDATA under an
+unavailable honest HEADER_ONLY tip-child. See
 [release-notes-0.34.11.md](release-notes/release-notes-0.34.11.md).
 
 **0.34.10** is the last shipping client (`IS_RELEASE=true` on tag **v0.34.10**):

@@ -2,7 +2,7 @@
 
 Humans: read [HUMANS.md](HUMANS.md), then ignore this file. Product overview:
 [README.md](README.md). This is the operations manual for coding agents,
-research agents, and automation in BTX **0.34.11rc1** (`CLIENT_VERSION_BUILD=11`,
+research agents, and automation in BTX **0.34.12rc1** (`CLIENT_VERSION_BUILD=12`,
 `CLIENT_VERSION_RC=1`, `IS_RELEASE=false`). Last shipping tag **v0.34.10**.
 
 Default posture is **read-only**. Do not compile, commit, push, spend, evaluate,
@@ -242,7 +242,7 @@ do not advertise them in `getbountycapabilities` until execution is real.
 
 ## Release and session constraints
 
-This tree is **0.34.11rc1** (`CLIENT_VERSION_IS_RELEASE=false`). Last shipping tag
+This tree is **0.34.12rc1** (`CLIENT_VERSION_IS_RELEASE=false`). Last shipping tag
 **v0.34.10**. Do not recut `v0.34.10`.
 
 - No unapproved git push, merge, or `CLIENT_VERSION` bump.

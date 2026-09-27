@@ -111,7 +111,7 @@ End-to-end host / search / retrieve / run / bounty:
 Using and proving the model network: [doc/modelnet/howto.md](doc/modelnet/howto.md).
 Local generate after acquire: [doc/modelnet/generate.md](doc/modelnet/generate.md).
 
-This working tree is **0.34.11rc1**. GitHub tag **v0.34.10** is the last
+This working tree is **0.34.12rc1**. GitHub tag **v0.34.10** is the last
 shipping client. See
 [doc/release-notes/release-notes-0.34.11.md](doc/release-notes/release-notes-0.34.11.md).
 Host, seed, search, share, watch folder,

@@ -75,7 +75,7 @@ service-profile, or release-publication workflow:
 - [Mining Operator Helpers](../contrib/mining/README.md)
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
 
-Last shipping tag is **v0.34.10**. This tree is **0.34.11rc1**
+Last shipping tag is **v0.34.10**. This tree is **0.34.12rc1**
 (`CLIENT_VERSION_IS_RELEASE=false`). Epoch A is live on mainnet at height 185000
 (Profile 1 ExactReplay authority, optional shadow proofs). EncDr stall recovery
 at 199299 is withdrawn. Fast-start pin is assumeutxo height **219000**. Epoch B
