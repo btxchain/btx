@@ -1251,12 +1251,34 @@ private:
     //! arrives once the chase stops).
     mutable std::map<uint256, const CBlockIndex*> m_acquisition_exempt_towers
         GUARDED_BY(::cs_main);
+    //! Local replay service accounting, advanced only by a new exact verdict.
+    //! Read-only selection and repeated deliveries must not spend turns.
+    uint256 m_acquisition_last_replayed_root GUARDED_BY(::cs_main);
+    unsigned m_acquisition_replay_burst GUARDED_BY(::cs_main){0};
     mutable std::optional<int> m_cadence_hold_logged_allowed GUARDED_BY(::cs_main);
     //! Rate limit for the deepforkautoresolve verdict diagnostic in
     //! DeepForkAutoResolveMayAct (at most one LogInfo line per interval,
     //! except acted=1 verdicts, which always log).
     mutable int64_t m_deep_fork_verdict_log_time_s GUARDED_BY(::cs_main){0};
     std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
+    std::optional<node::BoundedReorgPolicyRecord> m_bounded_reorg GUARDED_BY(::cs_main);
+    //! Monotonic time of the last forward better-chain connect. Zero until the
+    //! bounded observation window starts, so a restart cannot arm recovery
+    //! from an old timestamp.
+    int64_t m_bounded_progress_mono GUARDED_BY(::cs_main){0};
+    int m_bounded_last_forward_height GUARDED_BY(::cs_main){-1};
+    bool m_bounded_corrupt GUARDED_BY(::cs_main){false};
+    bool m_repair_plan_ready GUARDED_BY(::cs_main){false};
+    uint256 m_repair_plan_target GUARDED_BY(::cs_main);
+    uint256 m_repair_plan_digest GUARDED_BY(::cs_main);
+    uint32_t m_repair_plan_max_disconnect GUARDED_BY(::cs_main){0};
+    std::string m_repair_plan_blocker GUARDED_BY(::cs_main);
+    bool PersistBoundedReorgPolicy() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void EnsureBoundedAnchor() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void AdvanceBoundedAnchor(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool BoundedSuffixChecked(const CBlockIndex* candidate,
+                                            const CBlockIndex* fork) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Authenticated/quorum branch tips used by exceptional shallow-race
      * recovery. Maintained incrementally so each received body does not scan
@@ -1920,6 +1942,9 @@ public:
     //! connects every spacing so it never trips it.
     static constexpr int64_t ACQUISITION_ESCAPE_STALL_SECONDS{600};
     static constexpr size_t ACQUISITION_ESCAPE_MAX_TOWERS{2};
+    //! Give another ready registered fork a turn after this many completed
+    //! replays on the preferred (shallower) fork. Not a consensus parameter.
+    static constexpr unsigned ACQUISITION_REPLAY_PREFERRED_BURST{8};
     //! Bound the exempt header lead so a bogus heavier-looking tower cannot
     //! grow the index unboundedly: exempt headers only up to tip+this. Because
     //! the exempt set is CLEARED on every ConnectTip, a genuine tower slides
@@ -1966,8 +1991,10 @@ public:
     [[nodiscard]] bool AcquisitionEscapeParentConnectable(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Select one root-first frontier from the bounded registered towers.
-    //! Prefer available bodies without pending CPU confirmation, then tower
-    //! work. If none is ready, return the heaviest frontier for fetching.
+    //! Prefer available bodies without pending CPU confirmation, then the
+    //! shallowest reorg (work breaks ties). Bound consecutive replay service
+    //! so a deeper ready fork also progresses. If none is ready, return the
+    //! heaviest frontier for fetching. Selection itself spends no turns.
     //! has_body supplements HAVE_DATA with retained or incoming body presence;
     //! it never changes ancestry, validation, or tower eligibility.
     [[nodiscard]] const CBlockIndex* FindAcquisitionEscapeFrontier(
@@ -2038,6 +2065,37 @@ public:
     {
         return m_reorg_recovery;
     }
+
+    struct BoundedReorgStatus {
+        std::string mode;
+        std::string state;
+        std::string reason;
+        uint32_t normal_depth{6};
+        uint32_t recovery_ceiling{72};
+        uint32_t epoch{0};
+        int protected_height{-1};
+        uint256 protected_hash{};
+        int high_water{-1};
+        int tip_height{-1};
+        int progress_age_s{-1};
+        bool stall_armed{false};
+        int candidate_depth{-1};
+        std::string candidate_hash;
+        std::string repair_state;
+        std::string repair_digest;
+    };
+    //! Bounded-mode activation decision. May seed and persist the anchor.
+    //! ExactReplay and attestations cannot widen the ceiling.
+    [[nodiscard]] kernel::BoundedReorgDecision AssessAutomaticTransition(
+        const CBlockIndex* candidate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] BoundedReorgStatus GetBoundedReorgStatus() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** One reviewed repair. Returns a blocker string, or empty on success. */
+    [[nodiscard]] std::string PrepareBoundedReorgRepair(const uint256& target,
+                                                        uint32_t max_disconnect)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] std::string ExecuteBoundedReorgRepair(const uint256& digest)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * Import blocks from an external file

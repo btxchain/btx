@@ -61,6 +61,7 @@ static constexpr uint8_t DB_LAST_BLOCK{'l'};
 static constexpr uint8_t DB_PRUNE_LOCK{'L'};
 static constexpr uint8_t DB_PARKED_REORG_BRANCHES{'g'};
 static constexpr uint8_t DB_REORG_RECOVERY_RECORD{'G'};
+static constexpr uint8_t DB_BOUNDED_REORG_POLICY{'Q'};
 static constexpr uint8_t DB_MATMUL_REPLAY_CONTEXT{'M'};
 static constexpr uint8_t DB_VALIDATION_EPOCH{'e'};
 static constexpr uint8_t DB_VALIDATION_EPOCH_PENDING{'E'};
@@ -186,6 +187,23 @@ bool BlockTreeDB::WriteReorgRecoveryRecord(
         batch.Erase(DB_REORG_RECOVERY_RECORD);
     }
     return WriteBatch(batch, /*fSync=*/true);
+}
+
+bool BlockTreeDB::WriteBoundedReorgPolicy(const node::BoundedReorgPolicyRecord& record)
+{
+    return Write(DB_BOUNDED_REORG_POLICY, record, /*fSync=*/true);
+}
+
+bool BlockTreeDB::ReadBoundedReorgPolicy(std::optional<node::BoundedReorgPolicyRecord>& record)
+{
+    if (!Exists(DB_BOUNDED_REORG_POLICY)) {
+        record.reset();
+        return true;
+    }
+    node::BoundedReorgPolicyRecord decoded;
+    if (!Read(DB_BOUNDED_REORG_POLICY, decoded)) return false;
+    record = std::move(decoded);
+    return true;
 }
 
 bool BlockTreeDB::ReadReorgRecoveryRecord(

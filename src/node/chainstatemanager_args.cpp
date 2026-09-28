@@ -140,6 +140,56 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
                                         : kernel::DeepReorgAction::WARN;
     }
 
+    if (const auto policy{args.GetArg("-reorgpolicy")}) {
+        if (*policy == "legacy") {
+            opts.reorg_policy = kernel::ChainstateManagerOpts::ReorgPolicyMode::LEGACY;
+        } else if (*policy == "observe") {
+            opts.reorg_policy = kernel::ChainstateManagerOpts::ReorgPolicyMode::OBSERVE;
+        } else if (*policy == "bounded") {
+            opts.reorg_policy = kernel::ChainstateManagerOpts::ReorgPolicyMode::BOUNDED;
+        } else {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -reorgpolicy value (%s), expected bounded, observe, or legacy", *policy))};
+        }
+    } else {
+        opts.reorg_policy = kernel::ChainstateManagerOpts::ReorgPolicyMode::BOUNDED;
+    }
+    if (auto value{args.GetIntArg("-reorgnormaldepth")}) {
+        if (*value < 1 || *value > 999) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -reorgnormaldepth value (%d), must be from 1 to 999", *value))};
+        }
+        opts.reorg_normal_depth = static_cast<uint32_t>(*value);
+    }
+    if (auto value{args.GetIntArg("-reorgrecoverymaxdepth")}) {
+        if (*value < 1 || *value > 999) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -reorgrecoverymaxdepth value (%d), must be from 1 to 999", *value))};
+        }
+        opts.reorg_recovery_max_depth = static_cast<uint32_t>(*value);
+    }
+    if (opts.reorg_normal_depth > opts.reorg_recovery_max_depth) {
+        return util::Error{Untranslated(
+            "Invalid reorg depths: -reorgnormaldepth must be <= -reorgrecoverymaxdepth")};
+    }
+    if (auto value{args.GetIntArg("-reorgstallseconds")}) {
+        if (*value < 1) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -reorgstallseconds value (%d), must be at least 1", *value))};
+        }
+        opts.reorg_stall_seconds = *value;
+    }
+    if (opts.reorg_policy == kernel::ChainstateManagerOpts::ReorgPolicyMode::BOUNDED) {
+        if (args.GetBoolArg("-parkdeepreorg") && !*args.GetBoolArg("-parkdeepreorg")) {
+            return util::Error{Untranslated(
+                "-parkdeepreorg=0 conflicts with -reorgpolicy=bounded. Use -reorgpolicy=legacy to follow a deeper chain without the recovery ceiling.")};
+        }
+        if (args.GetBoolArg("-deepforkautoresolve") && !*args.GetBoolArg("-deepforkautoresolve")) {
+            return util::Error{Untranslated(
+                "-deepforkautoresolve=0 conflicts with -reorgpolicy=bounded. Bounded mode replaces that bypass; use -reorgpolicy=legacy to keep it.")};
+        }
+    }
+
     if (opts.deep_reorg_action != kernel::DeepReorgAction::PARK) {
         LogWarning("Deep-reorg parking is disabled (profile=%s). This node will auto-follow rewrites deeper than the emergency PARK depth of 6. Dump-and-run resistance requires the default emergency profile without -parkdeepreorg=0. See doc/design/0.34-operator-safeguards.md.\n",
                    kernel::ReorgProtectionProfileName(opts.reorg_protection_profile));

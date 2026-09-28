@@ -10563,8 +10563,34 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
             m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
             m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork) ||
             deep_fork_auto_resolve};
-        const bool park = kernel::DeepReorgShouldPark(
+        bool park = kernel::DeepReorgShouldPark(
             cm_opts.deep_reorg_action, park_depth, reorg_depth, recovery_escape);
+        kernel::BoundedReorgDecision bounded{kernel::BoundedReorgDecision::NORMAL_REORG};
+        if (cm_opts.reorg_policy != ChainstateManager::Options::ReorgPolicyMode::LEGACY &&
+            reorg_depth > 0) {
+            bounded = m_chainman.AssessAutomaticTransition(pindexMostWork);
+            if (cm_opts.reorg_policy == ChainstateManager::Options::ReorgPolicyMode::OBSERVE) {
+                LogInfo("reorgpolicy observe: decision=%d depth=%d (activation unchanged)\n",
+                        static_cast<int>(bounded), reorg_depth);
+            } else if (bounded == kernel::BoundedReorgDecision::PARK_NORMAL_DEPTH ||
+                       bounded == kernel::BoundedReorgDecision::PARK_RECOVERY_DEPTH ||
+                       bounded == kernel::BoundedReorgDecision::PARK_PROTECTED_ANCESTOR) {
+                park = true;
+                const int protected_height{m_chainman.GetBoundedReorgStatus().protected_height};
+                LogWarning("Automatic reorg parked: disconnect_depth=%d recovery_limit=%u "
+                           "old_tip_height=%d fork_height=%d protected_height=%d "
+                           "reason=%s; nearby recovery search continues\n",
+                           reorg_depth, cm_opts.reorg_recovery_max_depth,
+                           pindexOldTip->nHeight, pindexFork->nHeight, protected_height,
+                           bounded == kernel::BoundedReorgDecision::PARK_PROTECTED_ANCESTOR
+                               ? "protected_ancestor_conflict"
+                               : bounded == kernel::BoundedReorgDecision::PARK_RECOVERY_DEPTH
+                                     ? "recovery_ceiling"
+                                     : "normal_window");
+            } else {
+                park = false;
+            }
+        }
 
         if (warn || park) {
             RecordRejectedReorgDepth(
@@ -11493,8 +11519,13 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     // Deterministic layers (quorum, attested abandon, shallow recovery,
     // operator invalidate) keep priority inside MayAct; armed losing-tip
     // deferral keeps priority here.
+    const bool bounded_recovery{
+        m_chainman.m_options.reorg_policy == ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
+        m_chainman.AssessAutomaticTransition(pindex) == kernel::BoundedReorgDecision::BOUNDED_RECOVERY};
     if (parked && !defer_losing &&
-        m_chainman.DeepForkAutoResolveMayUnpark(pindex) &&
+        (bounded_recovery ||
+         (m_chainman.m_options.reorg_policy != ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
+          m_chainman.DeepForkAutoResolveMayUnpark(pindex))) &&
         m_chainman.UnparkReorgBranchContainingBlock(pindex)) {
         LogWarning("%s: auto-unparked deep-fork branch hash=%s height=%d "
                    "(deepforkautoresolve: suffix fully ExactReplay-verified; "
@@ -11869,6 +11900,25 @@ void ChainstateManager::NoteTipConnected(int64_t now)
     // that stops arriving once the getheaders chase stops).
     if (better_chain_progress) {
         m_acquisition_exempt_towers.clear();
+        m_acquisition_last_replayed_root.SetNull();
+        m_acquisition_replay_burst = 0;
+    }
+    if (m_options.reorg_policy == Options::ReorgPolicyMode::BOUNDED &&
+        better_chain_progress && tip != nullptr &&
+        tip->nHeight > m_bounded_last_forward_height) {
+        m_bounded_last_forward_height = tip->nHeight;
+        m_bounded_progress_mono = mono;
+        if (m_bounded_reorg && tip->GetBlockHash() == m_bounded_reorg->repair_target) {
+            m_bounded_reorg->repair_target.SetNull();
+            m_bounded_reorg->repair_max_disconnect = 0;
+            m_bounded_reorg->repair_expiry = 0;
+            ++m_bounded_reorg->epoch;
+            m_bounded_reorg->protected_height = -1;
+            m_bounded_reorg->high_water = -1;
+            EnsureBoundedAnchor();
+        } else {
+            AdvanceBoundedAnchor(tip);
+        }
     }
 }
 
@@ -12021,9 +12071,14 @@ const CBlockIndex* ChainstateManager::FindAcquisitionEscapeFrontier(
     if (m_active_chainstate == nullptr) return nullptr;
     const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
     if (tip == nullptr) return nullptr;
-    const CBlockIndex* selected{nullptr};
-    arith_uint256 selected_work;
-    bool selected_ready{false};
+    struct Frontier {
+        const CBlockIndex* index;
+        uint256 root;
+        arith_uint256 work;
+        int reorg_depth;
+        bool ready;
+    };
+    std::vector<Frontier> frontiers;
     // At most MAX_TOWERS ancestry walks, never a block-index scan. Keeping
     // one representative per registered root prevents arbitrary LCA siblings
     // from claiming the progress lane merely because CoversBlock is true.
@@ -12047,14 +12102,27 @@ const CBlockIndex* ChainstateManager::FindAcquisitionEscapeFrontier(
         const bool ready{
             !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(lowest->GetBlockHash()) &&
             ((lowest->nStatus & BLOCK_HAVE_DATA) != 0 || (has_body && has_body(lowest)))};
-        if (selected == nullptr || (ready && !selected_ready) ||
-            (ready == selected_ready && best->nChainWork > selected_work)) {
-            selected = lowest;
-            selected_work = best->nChainWork;
-            selected_ready = ready;
+        frontiers.push_back({lowest, root, best->nChainWork,
+                             tip->nHeight - fork->nHeight, ready});
+    }
+    if (frontiers.empty()) return nullptr;
+    std::sort(frontiers.begin(), frontiers.end(), [](const Frontier& a, const Frontier& b) {
+        if (a.ready != b.ready) return a.ready;
+        if (a.ready && a.reorg_depth != b.reorg_depth) return a.reorg_depth < b.reorg_depth;
+        if (a.work != b.work) return a.work > b.work;
+        return a.root < b.root;
+    });
+    const Frontier& preferred{frontiers.front()};
+    // Among the bounded registered forks, shallow recovery gets the first
+    // turn and most service. Headers, selector calls and duplicate verdicts
+    // cannot advance this counter; only completed new ExactReplay does.
+    if (preferred.ready && preferred.root == m_acquisition_last_replayed_root &&
+        m_acquisition_replay_burst >= ACQUISITION_REPLAY_PREFERRED_BURST) {
+        for (const Frontier& other : frontiers) {
+            if (other.ready && other.root != preferred.root) return other.index;
         }
     }
-    return selected;
+    return preferred.index;
 }
 
 bool ChainstateManager::IsAcquisitionEscapeFrontier(const CBlockIndex* index) const
@@ -13687,7 +13755,256 @@ bool ChainstateManager::LoadReorgRecoveryRecord()
                  __func__);
         return false;
     }
+    if (!m_blockman.m_block_tree_db->ReadBoundedReorgPolicy(m_bounded_reorg)) {
+        LogError("%s: corrupt bounded reorg policy; automatic deep recovery stays closed\n",
+                 __func__);
+        m_bounded_corrupt = true;
+        m_bounded_reorg.reset();
+        return true;
+    }
+    m_bounded_progress_mono = CadenceHoldMonotonicNowSeconds();
+    if (m_bounded_reorg && m_active_chainstate != nullptr &&
+        m_active_chainstate->m_chain.Tip() != nullptr &&
+        m_active_chainstate->m_chain.Tip()->GetBlockHash() == m_bounded_reorg->repair_target) {
+        m_bounded_reorg->repair_target.SetNull();
+        m_bounded_reorg->repair_max_disconnect = 0;
+        m_bounded_reorg->repair_expiry = 0;
+        (void)PersistBoundedReorgPolicy();
+    }
     return true;
+}
+
+bool ChainstateManager::PersistBoundedReorgPolicy()
+{
+    AssertLockHeld(::cs_main);
+    if (!m_bounded_reorg) return false;
+    if (!m_blockman.m_block_tree_db) return true;
+    if (!m_blockman.m_block_tree_db->WriteBoundedReorgPolicy(*m_bounded_reorg)) {
+        LogError("failed to persist bounded reorg policy\n");
+        m_bounded_corrupt = true;
+        return false;
+    }
+    return true;
+}
+
+void ChainstateManager::EnsureBoundedAnchor()
+{
+    AssertLockHeld(::cs_main);
+    if (m_options.reorg_policy != Options::ReorgPolicyMode::BOUNDED) return;
+    if (m_bounded_corrupt) return;
+    if (m_bounded_progress_mono == 0) {
+        m_bounded_progress_mono = CadenceHoldMonotonicNowSeconds();
+    }
+    if (m_bounded_reorg && m_bounded_reorg->protected_height >= 0) return;
+    const CBlockIndex* const tip{m_active_chainstate != nullptr
+                                     ? m_active_chainstate->m_chain.Tip()
+                                     : nullptr};
+    if (tip == nullptr) return;
+    node::BoundedReorgPolicyRecord record;
+    record.normal_depth = m_options.reorg_normal_depth;
+    record.recovery_max = m_options.reorg_recovery_max_depth;
+    record.high_water = tip->nHeight;
+    record.protected_height = std::max(0, tip->nHeight - static_cast<int>(record.recovery_max));
+    const CBlockIndex* const anchor{tip->GetAncestor(record.protected_height)};
+    if (anchor == nullptr) return;
+    record.protected_hash = anchor->GetBlockHash();
+    record.anchor_sequence = 1;
+    m_bounded_reorg = record;
+    m_bounded_last_forward_height = tip->nHeight;
+    (void)PersistBoundedReorgPolicy();
+}
+
+void ChainstateManager::AdvanceBoundedAnchor(const CBlockIndex* tip)
+{
+    AssertLockHeld(::cs_main);
+    if (tip == nullptr || !m_bounded_reorg || m_bounded_reorg->protected_height < 0) return;
+    if (tip->nHeight <= m_bounded_reorg->high_water) return;
+    const int new_height{std::max(0, tip->nHeight - static_cast<int>(m_bounded_reorg->recovery_max))};
+    m_bounded_reorg->high_water = tip->nHeight;
+    if (new_height > m_bounded_reorg->protected_height) {
+        const CBlockIndex* const anchor{tip->GetAncestor(new_height)};
+        if (anchor != nullptr) {
+            m_bounded_reorg->protected_height = new_height;
+            m_bounded_reorg->protected_hash = anchor->GetBlockHash();
+            ++m_bounded_reorg->anchor_sequence;
+        }
+    }
+    (void)PersistBoundedReorgPolicy();
+}
+
+bool ChainstateManager::BoundedSuffixChecked(const CBlockIndex* candidate,
+                                             const CBlockIndex* fork) const
+{
+    AssertLockHeld(::cs_main);
+    if (candidate == nullptr || fork == nullptr) return false;
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip == nullptr) return false;
+    const arith_uint256 need{tip->nChainWork + (GetBlockProof(*tip) * 2)};
+    if (candidate->nChainWork < need) return false;
+    for (const CBlockIndex* walk{candidate}; walk != nullptr && walk != fork; walk = walk->pprev) {
+        if ((walk->nStatus & BLOCK_HAVE_DATA) == 0 ||
+            (walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 ||
+            !walk->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+            !walk->HaveNumChainTxs()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+kernel::BoundedReorgDecision ChainstateManager::AssessAutomaticTransition(
+    const CBlockIndex* candidate)
+{
+    AssertLockHeld(::cs_main);
+    if (m_options.reorg_policy == Options::ReorgPolicyMode::LEGACY ||
+        candidate == nullptr || m_active_chainstate == nullptr) {
+        return kernel::BoundedReorgDecision::NORMAL_REORG;
+    }
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip == nullptr || candidate == tip) {
+        return kernel::BoundedReorgDecision::NORMAL_EXTENSION;
+    }
+    if (m_options.reorg_policy == Options::ReorgPolicyMode::BOUNDED) {
+        EnsureBoundedAnchor();
+    }
+    if (m_bounded_corrupt && m_options.reorg_policy == Options::ReorgPolicyMode::BOUNDED) {
+        return kernel::BoundedReorgDecision::PARK_PROTECTED_ANCESTOR;
+    }
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(candidate)};
+    const int depth{fork != nullptr ? tip->nHeight - fork->nHeight : tip->nHeight + 1};
+    bool descends{true};
+    if (m_bounded_reorg && m_bounded_reorg->protected_height >= 0) {
+        const CBlockIndex* const anchor{
+            m_blockman.LookupBlockIndex(m_bounded_reorg->protected_hash)};
+        descends = anchor != nullptr &&
+                   candidate->GetAncestor(m_bounded_reorg->protected_height) == anchor;
+    }
+    const int64_t now{CadenceHoldMonotonicNowSeconds()};
+    if (m_bounded_progress_mono == 0) m_bounded_progress_mono = now;
+    const bool stall_armed{now - m_bounded_progress_mono >= m_options.reorg_stall_seconds};
+    bool repair{false};
+    if (m_bounded_reorg && !m_bounded_reorg->repair_target.IsNull() &&
+        candidate->GetBlockHash() == m_bounded_reorg->repair_target &&
+        GetTime() < m_bounded_reorg->repair_expiry &&
+        depth <= static_cast<int>(m_bounded_reorg->repair_max_disconnect)) {
+        repair = true;
+    }
+    const bool checked{depth <= static_cast<int>(m_options.reorg_normal_depth) ||
+                       BoundedSuffixChecked(candidate, fork)};
+    return kernel::DecideBoundedReorg(
+        depth, m_options.reorg_normal_depth, m_options.reorg_recovery_max_depth,
+        descends, stall_armed, repair, checked);
+}
+
+ChainstateManager::BoundedReorgStatus ChainstateManager::GetBoundedReorgStatus() const
+{
+    AssertLockHeld(::cs_main);
+    BoundedReorgStatus status;
+    switch (m_options.reorg_policy) {
+    case Options::ReorgPolicyMode::BOUNDED: status.mode = "bounded"; break;
+    case Options::ReorgPolicyMode::OBSERVE: status.mode = "observe"; break;
+    case Options::ReorgPolicyMode::LEGACY: status.mode = "legacy"; break;
+    }
+    status.normal_depth = m_options.reorg_normal_depth;
+    status.recovery_ceiling = m_options.reorg_recovery_max_depth;
+    const int64_t now{CadenceHoldMonotonicNowSeconds()};
+    const int64_t progress{m_bounded_progress_mono == 0 ? now : m_bounded_progress_mono};
+    status.progress_age_s = static_cast<int>(std::max<int64_t>(0, now - progress));
+    status.stall_armed = m_options.reorg_policy == Options::ReorgPolicyMode::BOUNDED &&
+                         status.progress_age_s >= m_options.reorg_stall_seconds;
+    if (m_bounded_reorg) {
+        status.epoch = m_bounded_reorg->epoch;
+        status.protected_height = m_bounded_reorg->protected_height;
+        status.protected_hash = m_bounded_reorg->protected_hash;
+        status.high_water = m_bounded_reorg->high_water;
+    }
+    const CBlockIndex* const tip{m_active_chainstate != nullptr
+                                     ? m_active_chainstate->m_chain.Tip()
+                                     : nullptr};
+    if (tip != nullptr) {
+        status.tip_height = tip->nHeight;
+    }
+    if (m_options.reorg_policy == Options::ReorgPolicyMode::LEGACY) {
+        status.state = "LEGACY";
+        status.reason = "FOLLOWED_CHAIN_PROGRESSING";
+    } else if (m_bounded_corrupt) {
+        status.state = "OPERATOR_REQUIRED";
+        status.reason = "PARK_PROTECTED_ANCESTOR";
+    } else if (!status.stall_armed) {
+        status.state = m_bounded_progress_mono == 0 ? "BOOTSTRAP" : "FOLLOWING";
+        status.reason = "FOLLOWED_CHAIN_PROGRESSING";
+    } else {
+        status.state = "RECOVERY_ARMED";
+        status.reason = "NO_ELIGIBLE_NEARBY_FORK";
+    }
+    if (m_repair_plan_ready) {
+        status.repair_state = "READY";
+        status.repair_digest = m_repair_plan_digest.ToString();
+    } else if (!m_repair_plan_blocker.empty()) {
+        status.repair_state = "FAILED";
+        status.reason = m_repair_plan_blocker;
+    }
+    return status;
+}
+
+std::string ChainstateManager::PrepareBoundedReorgRepair(const uint256& target,
+                                                        uint32_t max_disconnect)
+{
+    AssertLockHeld(::cs_main);
+    m_repair_plan_ready = false;
+    m_repair_plan_digest.SetNull();
+    m_repair_plan_blocker.clear();
+    if (m_options.reorg_policy != Options::ReorgPolicyMode::BOUNDED) {
+        m_repair_plan_blocker = "reorgpolicy is not bounded";
+        return m_repair_plan_blocker;
+    }
+    EnsureBoundedAnchor();
+    const CBlockIndex* const index{m_blockman.LookupBlockIndex(target)};
+    const CBlockIndex* const tip{m_active_chainstate != nullptr
+                                     ? m_active_chainstate->m_chain.Tip()
+                                     : nullptr};
+    if (index == nullptr || tip == nullptr) {
+        m_repair_plan_blocker = "unknown target";
+        return m_repair_plan_blocker;
+    }
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(index)};
+    const int depth{fork != nullptr ? tip->nHeight - fork->nHeight : tip->nHeight + 1};
+    if (depth > static_cast<int>(max_disconnect)) {
+        m_repair_plan_blocker = "depth exceeds max_disconnect";
+        return m_repair_plan_blocker;
+    }
+    if (!BoundedSuffixChecked(index, fork)) {
+        m_repair_plan_blocker = "exact_replay_incomplete";
+        return m_repair_plan_blocker;
+    }
+    HashWriter hw{};
+    hw << (m_bounded_reorg ? m_bounded_reorg->epoch : 0U) << tip->GetBlockHash()
+       << target << int32_t(depth) << max_disconnect;
+    m_repair_plan_digest = hw.GetHash();
+    m_repair_plan_target = target;
+    m_repair_plan_max_disconnect = max_disconnect;
+    m_repair_plan_ready = true;
+    return {};
+}
+
+std::string ChainstateManager::ExecuteBoundedReorgRepair(const uint256& digest)
+{
+    AssertLockHeld(::cs_main);
+    if (!m_repair_plan_ready || digest != m_repair_plan_digest) {
+        return "PLAN_STALE";
+    }
+    EnsureBoundedAnchor();
+    if (!m_bounded_reorg) return "anchor unavailable";
+    m_bounded_reorg->repair_target = m_repair_plan_target;
+    m_bounded_reorg->repair_max_disconnect = m_repair_plan_max_disconnect;
+    m_bounded_reorg->repair_expiry = GetTime() + 600;
+    if (!PersistBoundedReorgPolicy()) return "failed to persist repair authorization";
+    m_repair_plan_ready = false;
+    LogWarning("bounded reorg repair authorized target=%s max_disconnect=%u expiry=%d; "
+               "standing N/R unchanged\n",
+               m_repair_plan_target.ToString(), m_repair_plan_max_disconnect,
+               static_cast<int>(m_bounded_reorg->repair_expiry));
+    return {};
 }
 
 void ChainstateManager::RefreshAuthenticatedChainWork(CBlockIndex& index)
@@ -14570,7 +14887,23 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
     AssertLockHeld(::cs_main);
     CBlockIndex* index{m_blockman.LookupBlockIndex(block_hash)};
     if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK)) return false;
+    const bool newly_verified{(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0};
     index->nStatus |= BLOCK_EXACT_REPLAY_VERIFIED;
+    if (newly_verified && !ActiveChain().Contains(index) &&
+        AcquisitionEscapeParentConnectable(index)) {
+        for (const auto& [root, best] : m_acquisition_exempt_towers) {
+            // Coverage by a shared LCA is insufficient: charge only service
+            // on the registered representative's actual ancestry.
+            if (best == nullptr || best->GetAncestor(index->nHeight) != index) continue;
+            if (m_acquisition_last_replayed_root != root) {
+                m_acquisition_last_replayed_root = root;
+                m_acquisition_replay_burst = 0;
+            }
+            m_acquisition_replay_burst = std::min(
+                m_acquisition_replay_burst + 1, ACQUISITION_REPLAY_PREFERRED_BURST);
+            break;
+        }
+    }
     m_blockman.m_dirty_blockindex.insert(index);
     CacheMatMulEncDrVerdict(block_hash, true);
     if (GetMatMulValidationMode() ==
@@ -15807,11 +16140,6 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
             IndexHasTrustedMatMulAuthority(pindex),
             node::matmul_trusted::IsTrustedMirror())};
     const CBlockIndex* const acq_frontier{FindAcquisitionEscapeFrontier()};
-    const bool frontier_owns_gpu{
-        acq_frontier != nullptr &&
-        (acq_frontier->nStatus & BLOCK_HAVE_DATA) != 0 &&
-        !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
-            acq_frontier->GetBlockHash())};
     const bool reverify_tip_child{
         fAlreadyHave &&
         pindex->pprev != nullptr &&
@@ -15819,10 +16147,9 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         !ActiveChain().Contains(pindex) &&
         (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
         (fRequested || needs_consensus_exact_replay) &&
-        // A HEADER_ONLY or CPU-pending competing frontier does not own GPU.
-        // AcceptBlock re-entry of a persisted HAVE_DATA tip-child must still
-        // proceed; only a drivable frontier body occupies the accelerator.
-        (!frontier_owns_gpu || pindex == acq_frontier)};
+        // Ready active-tip work precedes competing acquisition. A pending
+        // portable confirmation still must not reserve the GPU on retry.
+        !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(pindex->GetBlockHash())};
     // RB-16 CONVERGENCE: only the unique lowest parent-connectable
     // unverified body on the registered heavier tower may re-enter
     // ContextualCheckBlock. CoversBlock && parent-connectable admitted

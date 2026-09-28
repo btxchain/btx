@@ -10327,12 +10327,115 @@ static RPCHelpMan submitheader()
     };
 }
 
+static RPCHelpMan getreorgrecoverystatus()
+{
+    return RPCHelpMan{"getreorgrecoverystatus",
+        "\nRead-only local reorg-recovery status. Policy parking is not consensus invalidity.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR, "mode", "bounded, observe, or legacy"},
+            {RPCResult::Type::STR, "state", "FOLLOWING, BOOTSTRAP, RECOVERY_ARMED, OPERATOR_REQUIRED, or LEGACY"},
+            {RPCResult::Type::STR, "reason", "Why automatic recovery is or is not armed"},
+            {RPCResult::Type::NUM, "normal_depth", "Ordinary automatic disconnection depth"},
+            {RPCResult::Type::NUM, "recovery_ceiling", "Hard automatic recovery ceiling"},
+            {RPCResult::Type::NUM, "protected_height", "Durable protected ancestor height, or -1"},
+            {RPCResult::Type::STR_HEX, "protected_hash", "Durable protected ancestor hash"},
+            {RPCResult::Type::NUM, "progress_age_s", "Seconds since the last forward connection"},
+            {RPCResult::Type::BOOL, "stall_armed", "Whether the recovery window may be used"},
+            {RPCResult::Type::STR, "repair_state", "READY, FAILED, or empty"},
+            {RPCResult::Type::STR_HEX, "repair_digest", "Review digest of a READY plan, if any"},
+            {RPCResult::Type::BOOL, "notification_route_configured", "False unless -alertnotify is set"},
+        }},
+        RPCExamples{HelpExampleCli("getreorgrecoverystatus", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+            const bool notify{!EnsureAnyNodeContext(request.context).args->GetArg("-alertnotify", "").empty()};
+            LOCK(cs_main);
+            const auto status{chainman.GetBoundedReorgStatus()};
+            UniValue obj(UniValue::VOBJ);
+            obj.pushKV("mode", status.mode);
+            obj.pushKV("state", status.state);
+            obj.pushKV("reason", status.reason);
+            obj.pushKV("normal_depth", static_cast<int>(status.normal_depth));
+            obj.pushKV("recovery_ceiling", static_cast<int>(status.recovery_ceiling));
+            obj.pushKV("epoch", static_cast<int>(status.epoch));
+            obj.pushKV("protected_height", status.protected_height);
+            obj.pushKV("protected_hash", status.protected_hash.IsNull() ? "" : status.protected_hash.ToString());
+            obj.pushKV("high_water", status.high_water);
+            obj.pushKV("tip_height", status.tip_height);
+            obj.pushKV("progress_age_s", status.progress_age_s);
+            obj.pushKV("stall_armed", status.stall_armed);
+            obj.pushKV("repair_state", status.repair_state);
+            obj.pushKV("repair_digest", status.repair_digest);
+            obj.pushKV("notification_route_configured", notify);
+            return obj;
+        },
+    };
+}
+
+static RPCHelpMan preparereorg()
+{
+    return RPCHelpMan{"preparereorg",
+        "\nPrepare one exact reorg repair. Does not disconnect the active chain.\n",
+        {
+            {"target_hash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Exact target block hash"},
+            {"max_disconnect", RPCArg::Type::NUM, RPCArg::Optional::NO, "Maximum blocks this plan may disconnect"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR, "state", "READY or the blocker"},
+            {RPCResult::Type::STR_HEX, "review_digest", "Digest required by executereorg when READY"},
+        }},
+        RPCExamples{HelpExampleCli("preparereorg", "\"<hash>\" 295")},
+        [&](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+            const uint256 target{ParseHashV(request.params[0], "target_hash")};
+            const int max_disconnect{request.params[1].getInt<int>()};
+            if (max_disconnect < 1) throw JSONRPCError(RPC_INVALID_PARAMETER, "max_disconnect must be positive");
+            LOCK(cs_main);
+            const std::string blocker{chainman.PrepareBoundedReorgRepair(
+                target, static_cast<uint32_t>(max_disconnect))};
+            UniValue obj(UniValue::VOBJ);
+            obj.pushKV("state", blocker.empty() ? "READY" : blocker);
+            obj.pushKV("review_digest", chainman.GetBoundedReorgStatus().repair_digest);
+            return obj;
+        },
+    };
+}
+
+static RPCHelpMan executereorg()
+{
+    return RPCHelpMan{"executereorg",
+        "\nAuthorize one previously prepared repair. Standing depth limits stay unchanged. "
+        "Activation still requires the target to pass validity checks.\n",
+        {
+            {"review_digest", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Digest from a READY preparereorg"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR, "state", "AUTHORIZED or an error"},
+        }},
+        RPCExamples{HelpExampleCli("executereorg", "\"<digest>\"")},
+        [&](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+            const uint256 digest{ParseHashV(request.params[0], "review_digest")};
+            LOCK(cs_main);
+            const std::string err{chainman.ExecuteBoundedReorgRepair(digest)};
+            if (!err.empty()) throw JSONRPCError(RPC_VERIFY_ERROR, err);
+            UniValue obj(UniValue::VOBJ);
+            obj.pushKV("state", "AUTHORIZED");
+            return obj;
+        },
+    };
+}
+
 void RegisterMiningRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"mining", &getnetworkhashps},
         {"mining", &getmininginfo},
         {"mining", &getdifficultyhealth},
+        {"mining", &getreorgrecoverystatus},
+        {"mining", &preparereorg},
+        {"mining", &executereorg},
         {"mining", &getmatmulchallenge},
         {"mining", &getmatmulchallengeprofile},
         {"mining", &getmatmulservicechallenge},

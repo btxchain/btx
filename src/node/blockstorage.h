@@ -79,6 +79,30 @@ struct ReorgRecoveryRecord {
                   obj.initial_reorg_depth);
     }
 };
+
+/** Durable bounded-reorg anchor. Local policy, not block validity. */
+struct BoundedReorgPolicyRecord {
+    static constexpr uint8_t CURRENT_VERSION{1};
+    uint8_t version{CURRENT_VERSION};
+    uint32_t epoch{1};
+    uint32_t normal_depth{6};
+    uint32_t recovery_max{72};
+    int32_t protected_height{-1};
+    uint256 protected_hash;
+    int32_t high_water{-1};
+    uint32_t anchor_sequence{0};
+    uint256 repair_target;
+    uint32_t repair_max_disconnect{0};
+    int64_t repair_expiry{0};
+
+    SERIALIZE_METHODS(BoundedReorgPolicyRecord, obj)
+    {
+        READWRITE(obj.version, obj.epoch, obj.normal_depth, obj.recovery_max,
+                  obj.protected_height, obj.protected_hash, obj.high_water,
+                  obj.anchor_sequence, obj.repair_target,
+                  obj.repair_max_disconnect, obj.repair_expiry);
+    }
+};
 };
 namespace util {
 class SignalInterrupt;
@@ -103,6 +127,8 @@ public:
     bool ReadParkedReorgBranches(std::set<uint256>& roots);
     bool WriteReorgRecoveryRecord(const std::optional<node::ReorgRecoveryRecord>& record);
     bool ReadReorgRecoveryRecord(std::optional<node::ReorgRecoveryRecord>& record);
+    bool WriteBoundedReorgPolicy(const node::BoundedReorgPolicyRecord& record);
+    bool ReadBoundedReorgPolicy(std::optional<node::BoundedReorgPolicyRecord>& record);
     bool ReadMatMulReplayContext(uint256& context);
     bool WriteValidationEpoch(uint32_t epoch);
     bool ReadValidationEpoch(uint32_t& epoch);

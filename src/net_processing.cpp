@@ -3679,18 +3679,6 @@ static constexpr int64_t MATMUL_ACQ_FRONTIER_REPLAY_MIN_GAP_S{2};
            index->GetAncestor(tip->nHeight) == tip;
 }
 
-//! Unique competing frontier owns GPU only when its body is present and not
-//! already on the background CPU confirmation lane. HEADER_ONLY fetch and
-//! CPU-pending confirmation must not starve a retained honest tip-child.
-[[nodiscard]] static bool UniqueFrontierOwnsExactReplayGpu(
-    const CBlockIndex* frontier)
-{
-    if (frontier == nullptr) return false;
-    if ((frontier->nStatus & BLOCK_HAVE_DATA) == 0) return false;
-    return !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
-        frontier->GetBlockHash());
-}
-
 //! Use the same bounded root-first selection for disk bodies, retained bodies
 //! and a body currently being delivered. A missing or CPU-pending frontier on
 //! the heaviest tower must not strand ready work on another registered tower.
@@ -3910,24 +3898,21 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     }
                 }
             }
-            // RB-16 PRIORITY: evaluate the acquired-tower frontier unless
-            // an eligible active-tip child already has a retained body.
-            // Without a retained child, acquisition still outranks the broad
-            // local-signer candidate fallback above: repeatedly re-admitting
-            // an on-disk minority child must not starve the competing fork's
-            // contiguous verified prefix. CPU-pending children do not reserve
-            // this priority, so their confirmation cannot occupy the GPU.
+            // Ready active-tip children precede competing acquisition, whether
+            // retained or on disk. A missing/CPU-pending child holds no slot.
             const CBlockIndex* const acq{
                 FindLowestUnverifiedAcquiredBody(m_chainman, m_matmul_block_lifecycle)};
             const CBlockIndex* const priority_child{
                 ReplayPriorityTipChild(m_chainman, m_matmul_block_lifecycle)};
-            const bool retained_tip_child{
+            const bool ready_tip_child{
                 priority_child != nullptr &&
-                m_matmul_block_lifecycle.HasRetainedBody(
-                    priority_child->GetBlockHash())};
+                ((priority_child->nStatus & BLOCK_HAVE_DATA) != 0 ||
+                 m_matmul_block_lifecycle.HasRetainedBody(
+                     priority_child->GetBlockHash()))};
+            if (ready_tip_child) child = const_cast<CBlockIndex*>(priority_child);
             const bool acq_selected{
                 acq != nullptr &&
-                !retained_tip_child &&
+                !ready_tip_child &&
                 (acq->nStatus & BLOCK_HAVE_DATA) != 0 &&
                 !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
                     acq->GetBlockHash()) &&
@@ -4016,11 +4001,13 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                                     ? m_chainman.m_best_header->nHeight
                                     : -1);
                     }
-            } else if (!UniqueFrontierOwnsExactReplayGpu(acq) && child != nullptr &&
-                (m_chainman.IndexIsFollowedTipChild(tip, child) ||
+            } else if (child != nullptr &&
+                (child == priority_child || m_chainman.IndexIsFollowedTipChild(tip, child) ||
                  m_chainman.IndexIsAttestedChainTipChild(tip, child)) &&
                 (child->nStatus & BLOCK_HAVE_DATA) != 0 &&
                 (child->nStatus & BLOCK_FAILED_MASK) == 0 &&
+                !matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(child->GetBlockHash()) &&
+                !m_matmul_block_lifecycle.IsActive(child->GetBlockHash()) &&
                 !m_chainman.ActiveChain().Contains(child)) {
                     if (m_chainman.IsOnParkedReorgBranch(child)) {
                         (void)m_chainman.UnparkReorgBranchContainingBlock(child);
@@ -4194,12 +4181,18 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     {
         LOCK(cs_main);
         const CBlockIndex* const index{m_chainman.m_blockman.LookupBlockIndex(candidate_hash)};
+        const CBlockIndex* const priority_child{
+            ReplayPriorityTipChild(m_chainman, m_matmul_block_lifecycle)};
+        const bool ready_tip_child{
+            priority_child != nullptr &&
+            ((priority_child->nStatus & BLOCK_HAVE_DATA) != 0 ||
+             m_matmul_block_lifecycle.HasRetainedBody(priority_child->GetBlockHash()))};
         // NextRetry may fall back to another retained body. Do not let that
-        // bypass root-first selection, including when its source disconnected
-        // and the retry uses ProcessBlockSync instead of network admission.
+        // bypass active-tip priority or root-first selection, including when
+        // its source disconnected and retry uses ProcessBlockSync.
         if (index != nullptr && (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
             m_chainman.AcquisitionEscapeCoversBlock(index) &&
-            (index != FindLowestUnverifiedAcquiredBody(
+            (ready_tip_child || index != FindLowestUnverifiedAcquiredBody(
                           m_chainman, m_matmul_block_lifecycle, index) ||
              matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(candidate_hash))) {
             RefreshMatMulDeferredBodyRetry(candidate_hash, "waiting for acquisition frontier");
@@ -5790,6 +5783,18 @@ static bool TrustedMirrorMayDownloadIndex(
     if (chainman.IsOnParkedReorgBranch(index) &&
         !chainman.AcquisitionEscapeCoversBlock(index)) return false;
     if (node::matmul_trusted::IsTrustedMirror()) return false;
+    const CBlockIndex* const priority_child{ReplayPriorityTipChild(chainman, lifecycle)};
+    if (priority_child != nullptr) {
+        if (index == priority_child) {
+            g_configured_claimed_tip_child = index->GetBlockHash();
+            return true;
+        }
+        if (!IndexIsHonestExtendingSuffix(tip, index) &&
+            ((priority_child->nStatus & BLOCK_HAVE_DATA) != 0 ||
+             lifecycle.HasRetainedBody(priority_child->GetBlockHash()))) {
+            return false;
+        }
+    }
     // RB-16 ORDER: select one available registered-tower frontier; competing
     // descendants must not spend ExactReplay GPU. CoversBlock is a tower
     // predicate (fetch / parked-bypass / retain), not an admission ticket.
@@ -5810,16 +5815,6 @@ static bool TrustedMirrorMayDownloadIndex(
             matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(
                 frontier->GetBlockHash())};
         if (index == frontier && !frontier_cpu_pending) {
-            g_configured_claimed_tip_child = index->GetBlockHash();
-            return true;
-        }
-        const CBlockIndex* const priority_child{
-            ReplayPriorityTipChild(chainman, lifecycle)};
-        const bool yield_to_honest_child{
-            priority_child != nullptr &&
-            index == priority_child &&
-            !UniqueFrontierOwnsExactReplayGpu(frontier)};
-        if (yield_to_honest_child) {
             g_configured_claimed_tip_child = index->GetBlockHash();
             return true;
         }
@@ -14742,8 +14737,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                             covered_index == acq_frontier;
                         direct_authenticated_tip_child =
                             active_tip != nullptr &&
-                            block->hashPrevBlock == active_tip->GetBlockHash() &&
-                            !UniqueFrontierOwnsExactReplayGpu(acq_frontier);
+                            block->hashPrevBlock == active_tip->GetBlockHash();
                         if (const CBlockIndex* const followed_child{
                                 ReplayPriorityTipChild(
                                     m_chainman, m_matmul_block_lifecycle)}) {
@@ -14758,9 +14752,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                          IsMatMulRCBodyDeferred(followed_tip_child_hash))};
                     const bool progress_lane{
                         direct_authenticated_tip_child || acquisition_covered};
-                    if (!followed_tip_child_held ||
-                        direct_authenticated_tip_child ||
-                        acquisition_covered) {
+                    if (!followed_tip_child_held || direct_authenticated_tip_child) {
                         reserved = ReserveMatMulRCVerificationSlot(
                             m_matmul_rc_pending_verifications, cons,
                             encdr->height, work, progress_lane);
@@ -15231,6 +15223,21 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             acceptance_reaches_contextual);
         if (cheap_body_valid) {
             const CBlockIndex* indexed{m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+            // HAVE_DATA normally skips admission classification, but
+            // AcceptBlock can replay an unverified acquisition frontier on
+            // re-entry. A duplicate delivery must obey the same priority as
+            // the disk driver; the existing on-disk body remains retryable.
+            if (indexed != nullptr &&
+                (indexed->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                (indexed->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+                m_chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS &&
+                m_chainman.AcquisitionEscapeCoversBlock(indexed) &&
+                !MatMulMaySpendExactReplayGpu(
+                    m_chainman, m_matmul_block_lifecycle,
+                    m_chainman.ActiveTip(), indexed)) {
+                admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
+                return true;
+            }
             persist_unrequested_followed =
                 MatMulFollowedHistoricalHole(m_chainman, indexed);
             acceptance_stable_early_exit = indexed != nullptr &&
@@ -15364,17 +15371,14 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                 !extends_active_tip &&
                                 !node::matmul_trusted::IsTrustedMirror() &&
                                 m_chainman.AcquisitionEscapeCoversBlock(
-                                    indexed) &&
-                                indexed != FindLowestUnverifiedAcquiredBody(
-                                    m_chainman, m_matmul_block_lifecycle, indexed)) {
-                                // RB-16 ORDER: any covered acquired-tower body
-                                // other than the unique frontier must not be
+                                    indexed)) {
+                                // Every acquisition body denied replay above
+                                // (including a frontier yielding to a ready
+                                // active-tip child) must be retained, not
                                 // persisted here -- on a CONSENSUS node
                                 // AcceptBlock's ContextualCheckBlock would
-                                // ExactReplay it SYNCHRONOUSLY, re-monopolizing
-                                // the device out of order. Retain it (bounded
-                                // store, frontier-first NextRetry) until the
-                                // frontier reaches it.
+                                // otherwise replay it synchronously and bypass
+                                // scheduling. Retry through the bounded store.
                                 exact_recompute_required = false;
                                 retain_acquired_floating_body = true;
                             } else if (indexed != nullptr &&
@@ -15738,9 +15742,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             const CBlockIndex* const acq_frontier{
                 FindLowestUnverifiedAcquiredBody(
                     m_chainman, m_matmul_block_lifecycle, covered_index)};
-            // RB-16 ORDER: only the unique acquisition frontier earns the
-            // reserved (progress) RC lane. A followed pprev==tip child yields
-            // while that frontier exists so cap=1 cannot fill the scheduler.
+            // Only the selected acquisition frontier may share the progress
+            // lane; a ready active-tip child has priority over that frontier.
             acquisition_covered =
                 covered_index != nullptr && covered_index == acq_frontier;
             // A direct child of the active tip is the followed chain by
@@ -15757,14 +15760,9 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             // (jarekpiot on tag v0.34.2; independently confirmed on <node>).
             // The competing-lane reservation still protects the followed
             // lane from competing bodies; verification itself is unchanged.
-            // During RB-16 acquisition the unique frontier owns this lane
-            // only while its body is present and not on the CPU confirmation
-            // queue. A HEADER_ONLY / CPU-pending competing hole must not
-            // starve the retained honest tip-child.
             direct_authenticated_tip_child =
                 active_tip != nullptr &&
-                block.hashPrevBlock == active_tip->GetBlockHash() &&
-                !UniqueFrontierOwnsExactReplayGpu(acq_frontier);
+                block.hashPrevBlock == active_tip->GetBlockHash();
             if (const CBlockIndex* const followed_child{
                     ReplayPriorityTipChild(m_chainman, m_matmul_block_lifecycle)}) {
                 followed_tip_child_hash = followed_child->GetBlockHash();
@@ -16099,11 +16097,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // hashes while the followed child is held; they RETAIN and wait.
     // Same skip: MaybeStartMatMulRCHeaderVerification and the ProcessBlock
     // NOT_PRECHECKED self-reserve.
-    // Issue #163: while the deferred/retained store holds the followed
-    // direct tip-child, competing (non-frontier) bodies must not Reserve.
-    // The unique acquisition frontier is the exception: it takes the
-    // progress lane even if a pprev==tip child is retained, because that
-    // child cannot extend the better chain until the heavier tower verifies.
+    // A retained active-tip child precedes every competing frontier. Once
+    // it connects (or yields to CPU confirmation), acquisition can resume.
     const bool followed_tip_child_held{
         !followed_tip_child_hash.IsNull() &&
         followed_tip_child_hash != block_hash &&
@@ -16113,8 +16108,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         direct_authenticated_tip_child || acquisition_covered};
     bool reserved{false};
     if (rc_profile) {
-        if (!followed_tip_child_held || direct_authenticated_tip_child ||
-            acquisition_covered) {
+        if (!followed_tip_child_held || direct_authenticated_tip_child) {
             reserved = ReserveMatMulRCVerificationSlot(
                 m_matmul_rc_pending_verifications, params,
                 exact_reference_height, work, progress_lane);

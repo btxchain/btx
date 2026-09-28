@@ -233,6 +233,48 @@ inline constexpr ReorgProtectionProfileSettings GetReorgProtectionProfileSetting
 //! work-based recovery above: it acts only when reorg_depth > park_depth (the
 //! window WorkBasedReorgRecoveryMayArm must never be widened into). A local
 //! policy, never a consensus rule.
+//! Local bounded-recovery decision. ExactReplay success, attestations, and
+//! elapsed time do not widen `recovery_ceiling`. `repair_authorized` is one
+//! exact operator transition and still requires checked work.
+enum class BoundedReorgDecision : uint8_t {
+    NORMAL_EXTENSION,
+    NORMAL_REORG,
+    BOUNDED_RECOVERY,
+    PARK_NORMAL_DEPTH,
+    PARK_RECOVERY_DEPTH,
+    PARK_PROTECTED_ANCESTOR,
+};
+
+[[nodiscard]] inline constexpr BoundedReorgDecision DecideBoundedReorg(
+    int depth,
+    uint32_t normal_depth,
+    uint32_t recovery_ceiling,
+    bool descends_from_anchor,
+    bool stall_armed,
+    bool repair_authorized,
+    bool checked_work_ok)
+{
+    if (depth < 0) depth = 0;
+    if (depth > 0 && !descends_from_anchor && !repair_authorized) {
+        return BoundedReorgDecision::PARK_PROTECTED_ANCESTOR;
+    }
+    if (repair_authorized) {
+        return checked_work_ok ? BoundedReorgDecision::BOUNDED_RECOVERY
+                               : BoundedReorgDecision::PARK_RECOVERY_DEPTH;
+    }
+    if (depth > static_cast<int>(recovery_ceiling)) {
+        return BoundedReorgDecision::PARK_RECOVERY_DEPTH;
+    }
+    if (depth == 0) return BoundedReorgDecision::NORMAL_EXTENSION;
+    if (depth <= static_cast<int>(normal_depth)) {
+        return BoundedReorgDecision::NORMAL_REORG;
+    }
+    if (!stall_armed || !checked_work_ok) {
+        return BoundedReorgDecision::PARK_NORMAL_DEPTH;
+    }
+    return BoundedReorgDecision::BOUNDED_RECOVERY;
+}
+
 [[nodiscard]] inline constexpr bool DeepForkAutoResolveDepthInScope(
     bool enabled,
     DeepReorgAction action,
@@ -687,6 +729,27 @@ struct ChainstateManagerOpts {
     //! at test speed; production mainnet emergency sets DEFAULT_CADENCE_BURST_MAX
     //! via -cadenceburstmax / ApplyArgsManOptions.
     uint32_t cadence_burst_max{0};
+    //! Local automatic-reorg policy. LEGACY keeps the previous park /
+    //! deep-fork-auto-resolve behavior. OBSERVE reports the bounded decision
+    //! and still follows LEGACY. BOUNDED enforces the normal window and the
+    //! hard recovery ceiling. The struct default is LEGACY so unit tests that
+    //! construct Options directly keep today's behavior; ApplyArgsManOptions
+    //! selects BOUNDED when -reorgpolicy is unset.
+    enum class ReorgPolicyMode : uint8_t {
+        LEGACY = 0,
+        OBSERVE = 1,
+        BOUNDED = 2,
+    };
+    ReorgPolicyMode reorg_policy{ReorgPolicyMode::LEGACY};
+    //! Ordinary automatic disconnection depth while the followed chain is
+    //! progressing. Bounded-mode default 6.
+    uint32_t reorg_normal_depth{6};
+    //! Hard automatic recovery ceiling after a confirmed stall. Not enlarged
+    //! by ExactReplay, attestations, or a one-time repair. Bounded-mode
+    //! default 72. The permitted configured range is 1..999.
+    uint32_t reorg_recovery_max_depth{72};
+    //! Seconds without forward connection progress before a stall may arm.
+    int64_t reorg_stall_seconds{900};
     //! -deepforkautoresolve: default-on LOCAL POLICY that auto-migrates this
     //! node to an HONEST deep (> park_depth) strictly-heavier competing fork
     //! using network-observation signals, instead of parking + RB-14 warn.

@@ -5568,7 +5568,8 @@ BOOST_AUTO_TEST_CASE(persisted_exact_replay_fork_releases_retained_capacity)
 
 static void CheckConsensusBehindCompetingHeaders(
     node::NodeContext& m_node, bool retain_next_child, bool cpu_pending = false,
-    bool unique_frontier_cpu_pending = false, bool unsolicited_retry = false)
+    bool unique_frontier_cpu_pending = false, bool unsolicited_retry = false,
+    bool ready_frontier = false)
 {
     WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
 
@@ -5615,6 +5616,7 @@ static void CheckConsensusBehindCompetingHeaders(
         ~Cleanup()
         {
             SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+            peerman.InstallMatMulVerifyOverrideForTest({});
             NeutralizeUnconnectedHeaders(*Assert(node.chainman));
             peerman.ResetMatMulVerifyAdmissionForTest();
         }
@@ -5717,6 +5719,22 @@ static void CheckConsensusBehindCompetingHeaders(
                   CBlock{competing_3.GetBlockHeader()}});
     send_headers({CBlock{honest_child.GetBlockHeader()},
                   CBlock{honest_grand.GetBlockHeader()}});
+
+    if (ready_frontier) {
+        LOCK(::cs_main);
+        auto& chainman{*m_node.chainman};
+        auto* first{chainman.m_blockman.LookupBlockIndex(competing_twin.GetHash())};
+        auto* best{chainman.m_blockman.LookupBlockIndex(competing_3.GetHash())};
+        BOOST_REQUIRE(first != nullptr && best != nullptr);
+        const auto pos{chainman.m_blockman.WriteBlock(competing_twin, first->nHeight)};
+        BOOST_REQUIRE(!pos.IsNull());
+        chainman.ReceivedBlockTransactions(competing_twin, first, pos);
+        first->nStatus &= ~BLOCK_EXACT_REPLAY_VERIFIED;
+        chainman.SetLastTipConnectMonoForTest(
+            GetTime() - ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS - 1);
+        BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(best));
+        BOOST_REQUIRE(chainman.FindAcquisitionEscapeFrontier() == first);
+    }
 
     {
         LOCK(::cs_main);
@@ -5855,11 +5873,18 @@ static void CheckConsensusBehindCompetingHeaders(
             release->set_value();
             release_confirmation.release.reset();
             BOOST_REQUIRE(PeermanWaitFor([&] { return !confirmations.Pending(child_hash); }));
-        } else {
+        } else if (!ready_frontier) {
             ASSERT_DEBUG_LOG("MatMul pending verification cap reached");
             send_ticketed_body(honest_grand);
+        } else {
+            // A fresh delivery of the selected deep-fork body must not fall
+            // through to synchronous validation while the tip child waits.
+            const int before{replayed.load()};
+            send_ticketed_body(competing_twin);
+            BOOST_CHECK_EQUAL(replayed.load(), before);
+            BOOST_CHECK(peerman.HasMatMulRetainedBodyForTest(child_hash));
         }
-        if (!cpu_pending) {
+        if (!cpu_pending && !ready_frontier) {
             BOOST_REQUIRE(peerman.HasMatMulRetainedBodyForTest(grand_hash));
         }
         peerman.SimulateMatMulPendingSlotReleaseForTest(/*rc_profile=*/true);
@@ -5879,6 +5904,7 @@ static void CheckConsensusBehindCompetingHeaders(
         send_ticketed_body(honest_child);
         send_ticketed_body(honest_grand);
     }
+    if (retain_next_child && ready_frontier) send_ticketed_body(honest_grand);
     BOOST_CHECK(!peer.fDisconnect);
 
     {
@@ -5908,7 +5934,7 @@ static void CheckConsensusBehindCompetingHeaders(
             m_node.chainman->m_blockman.LookupBlockIndex(
                 competing_twin.GetHash())};
         BOOST_REQUIRE(competing_idx != nullptr);
-        BOOST_CHECK_EQUAL(competing_idx->nStatus & BLOCK_HAVE_DATA, 0);
+        BOOST_CHECK_EQUAL(bool(competing_idx->nStatus & BLOCK_HAVE_DATA), ready_frontier);
         BOOST_CHECK(!m_node.chainman->ActiveChain().Contains(competing_idx));
     }
 
@@ -5949,6 +5975,16 @@ BOOST_AUTO_TEST_CASE(cpu_pending_active_tip_child_does_not_reserve_gpu_admission
 BOOST_AUTO_TEST_CASE(cpu_pending_unique_frontier_does_not_occupy_gpu_slot)
 {
     CheckConsensusBehindCompetingHeaders(m_node, false, false, true);
+}
+
+BOOST_AUTO_TEST_CASE(active_tip_child_precedes_ready_acquisition_frontier)
+{
+    CheckConsensusBehindCompetingHeaders(m_node, false, false, false, false, true);
+}
+
+BOOST_AUTO_TEST_CASE(retained_active_tip_child_precedes_ready_acquisition_frontier)
+{
+    CheckConsensusBehindCompetingHeaders(m_node, true, false, false, false, true);
 }
 
 // Competing heavier headers must not starve GETDATA of an honest HEADER_ONLY
@@ -10135,7 +10171,8 @@ BOOST_AUTO_TEST_CASE(competing_tower_getheaders_locator_starts_at_connected_tip)
     node::matmul_trusted::ResetForTest();
 }
 
-static void CheckReadyAcquisitionFork(node::NodeContext& m_node, bool incoming)
+static void CheckReadyAcquisitionFork(node::NodeContext& m_node, bool incoming,
+                                      bool heavier_ready = false)
 {
     node::matmul_trusted::ResetForTest();
     ResetSharedPeermanFixture(m_node);
@@ -10203,6 +10240,12 @@ static void CheckReadyAcquisitionFork(node::NodeContext& m_node, bool incoming)
     };
     const auto a{make_fork(root, 6)};
     const auto b{make_fork(tip->GetAncestor(root->nHeight + 1), 4)};
+    if (heavier_ready) {
+        BOOST_REQUIRE(chainman.ProcessNewBlock(
+            std::make_shared<const CBlock>(a.front().first), true, true, nullptr));
+        LOCK(::cs_main);
+        a.front().second->nStatus &= ~BLOCK_EXACT_REPLAY_VERIFIED;
+    }
     if (!incoming) {
         BOOST_REQUIRE(chainman.ProcessNewBlock(
             std::make_shared<const CBlock>(b.front().first), true, true, nullptr));
@@ -10222,13 +10265,13 @@ static void CheckReadyAcquisitionFork(node::NodeContext& m_node, bool incoming)
             return index == b.front().second;
         }) == b.front().second);
         // Higher descendants cannot jump an unverified parent, even when
-        // their bodies arrive first. Ready towers retain work priority.
+        // their bodies arrive first. With both ready, the shallower fork wins.
         BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier([&](const CBlockIndex* index) {
             return index == b.back().second;
         }) == (incoming ? a.front().second : b.front().second));
         BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier([](const CBlockIndex*) {
             return true;
-        }) == a.front().second);
+        }) == b.front().second);
         // A failed descendant invalidates the entire representative path;
         // even its available root body must not take the replay lane.
         const auto saved_status{a[2].second->nStatus};
@@ -10296,7 +10339,7 @@ static void CheckReadyAcquisitionFork(node::NodeContext& m_node, bool incoming)
     {
         LOCK(::cs_main);
         BOOST_CHECK(b.front().second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
-        BOOST_CHECK(!(a.front().second->nStatus & BLOCK_HAVE_DATA));
+        BOOST_CHECK_EQUAL(bool(a.front().second->nStatus & BLOCK_HAVE_DATA), heavier_ready);
         BOOST_CHECK(!(a.front().second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
         BOOST_CHECK(!(b[1].second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
         BOOST_CHECK(chainman.ActiveTip() == tip);
@@ -10308,7 +10351,9 @@ static void CheckReadyAcquisitionFork(node::NodeContext& m_node, bool incoming)
     SetMockTime(std::chrono::seconds{GetTime() + 2});
     replayed = 0;
     peerman.RetryMatMulDeferredBodiesForTest();
-    BOOST_CHECK_EQUAL(replayed.load(), 0);
+    // When B lacks its next parent, a ready A must use the idle device.
+    BOOST_CHECK_EQUAL(replayed.load(), heavier_ready ? 1 : 0);
+    if (heavier_ready) BOOST_CHECK(a.front().second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
     BOOST_CHECK(!(b[2].second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
     BOOST_REQUIRE(peerman.RetainMatMulBodyForTest(std::make_shared<const CBlock>(b[1].first)));
     SetMockTime(std::chrono::seconds{GetTime() + 2});
@@ -10420,7 +10465,111 @@ BOOST_AUTO_TEST_CASE(incoming_acquisition_fork_replays_while_heaviest_body_missi
     CheckReadyAcquisitionFork(m_node, true);
 }
 
-BOOST_AUTO_TEST_CASE(review_persisted_child_progress_while_competing_frontier_missing)
+BOOST_AUTO_TEST_CASE(nearby_acquisition_fork_replays_while_deep_frontier_ready)
+{
+    CheckReadyAcquisitionFork(m_node, false, true);
+}
+
+BOOST_AUTO_TEST_CASE(incoming_nearby_acquisition_fork_precedes_ready_deep_frontier)
+{
+    CheckReadyAcquisitionFork(m_node, true, true);
+}
+
+BOOST_AUTO_TEST_CASE(acquisition_replay_priority_bounds_background_wait)
+{
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    auto& chainman{*m_node.chainman};
+    const auto* root{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    for (int i = 0; i < 3; ++i) {
+        mineBlock(m_node, std::chrono::seconds{root->GetBlockTime() + i + 1});
+    }
+    const auto* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    std::vector<CBlockIndex*> deep, near;
+    struct Cleanup {
+        ChainstateManager& chainman;
+        std::vector<CBlockIndex*>& deep;
+        std::vector<CBlockIndex*>& near;
+        ~Cleanup()
+        {
+            LOCK(::cs_main);
+            for (const auto* branch : {&deep, &near}) {
+                for (auto* index : *branch) index->nStatus &= ~BLOCK_HAVE_DATA;
+            }
+            NeutralizeUnconnectedHeaders(chainman);
+        }
+    } cleanup{chainman, deep, near};
+    auto make_fork = [&](const CBlockIndex* parent, int count,
+                         std::vector<CBlockIndex*>& branch) {
+        for (int i = 0; i < count; ++i) {
+            auto* index{MakePeermanHeaderChild(chainman, *parent, 0x71 + i)};
+            branch.push_back(index);
+            parent = index;
+        }
+    };
+    make_fork(root, 24, deep);
+    make_fork(tip->pprev, 20, near);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 700});
+    LOCK(::cs_main);
+    chainman.SetBestHeader(deep.back());
+    chainman.SetLastTipConnectMonoForTest(
+        GetTime() - ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS - 1);
+    BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(deep.back()));
+    BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(near.back()));
+    const auto all_ready = [](const CBlockIndex*) { return true; };
+    const auto complete = [&](CBlockIndex* index) {
+        // Model a completed replay and stored body, without running a GPU.
+        index->nStatus |= BLOCK_HAVE_DATA;
+        BOOST_REQUIRE(chainman.PersistMatMulExactReplayVerdict(index->GetBlockHash()));
+    };
+    for (unsigned i = 0; i < ChainstateManager::ACQUISITION_REPLAY_PREFERRED_BURST; ++i) {
+        // Read-only selector calls and repeated announcements spend no turns.
+        for (int poll = 0; poll < 12; ++poll) {
+            BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier(all_ready) == near[i]);
+            BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(near.back()));
+        }
+        complete(near[i]);
+        for (int duplicate = 0; duplicate < 12; ++duplicate) {
+            BOOST_REQUIRE(chainman.PersistMatMulExactReplayVerdict(near[i]->GetBlockHash()));
+        }
+    }
+    BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier(all_ready) == deep.front());
+    // A background turn cannot stall ready foreground work on absent bytes.
+    BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier([&](const CBlockIndex* index) {
+        return index == near[ChainstateManager::ACQUISITION_REPLAY_PREFERRED_BURST];
+    }) == near[ChainstateManager::ACQUISITION_REPLAY_PREFERRED_BURST]);
+    auto release{std::make_shared<std::promise<void>>()};
+    auto pending{release->get_future().share()};
+    struct ReleaseConfirmation {
+        std::shared_ptr<std::promise<void>> release;
+        ~ReleaseConfirmation() { if (release) release->set_value(); }
+    } release_confirmation{release};
+    auto& confirmations{matmul::v4::rc::GetRCCpuConfirmationQueue()};
+    const auto deep_hash{deep.front()->GetBlockHash()};
+    confirmations.Submit(deep_hash, deep_hash, {}, [pending] {
+        pending.wait();
+        return matmul::v4::rc::ExactReplayVerifyResult{};
+    });
+    BOOST_REQUIRE(confirmations.Pending(deep_hash));
+    BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier(all_ready) ==
+                near[ChainstateManager::ACQUISITION_REPLAY_PREFERRED_BURST]);
+    BOOST_CHECK(confirmations.Pending(deep_hash));
+    release->set_value();
+    release_confirmation.release.reset();
+    BOOST_REQUIRE(PeermanWaitFor([&] { return !confirmations.Pending(deep_hash); }));
+    BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier(all_ready) == deep.front());
+    complete(deep.front());
+    BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier(all_ready) ==
+                near[ChainstateManager::ACQUISITION_REPLAY_PREFERRED_BURST]);
+    // Parent-before-child still applies after switching branches.
+    BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier([&](const CBlockIndex* index) {
+        return index == deep.back();
+    }) == deep[1]);
+    BOOST_CHECK(!(deep[1]->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
+    BOOST_CHECK(chainman.ActiveTip() == tip);
+}
+
+static void CheckPersistedChildWithAcquisition(node::NodeContext& m_node, bool competing_ready)
 {
     node::matmul_trusted::ResetForTest();
     ResetSharedPeermanFixture(m_node);
@@ -10554,7 +10703,16 @@ BOOST_AUTO_TEST_CASE(review_persisted_child_progress_while_competing_frontier_mi
     auto& chainman{*m_node.chainman};
     const auto* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
     BOOST_REQUIRE(tip->pprev != nullptr);
-    auto* first{MakePeermanHeaderChild(chainman, *tip->pprev, 0xa1)};
+    CBlock competing{MineBlockOnParent(
+        m_node, tip->pprev->GetBlockHash(), tip->nHeight,
+        tip->pprev->GetBlockTime() + 2, tip->pprev->GetMedianTimePast())};
+    BlockValidationState state;
+    const CBlockIndex* first_const{nullptr};
+    const std::vector<CBlockHeader> competing_headers{competing.GetBlockHeader()};
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+        competing_headers, true, state, &first_const));
+    auto* first{const_cast<CBlockIndex*>(first_const)};
+    BOOST_REQUIRE(first != nullptr);
     auto* second{MakePeermanHeaderChild(chainman, *first, 0xa2)};
     auto* best{MakePeermanHeaderChild(chainman, *second, 0xa3)};
     SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 700});
@@ -10566,7 +10724,13 @@ BOOST_AUTO_TEST_CASE(review_persisted_child_progress_while_competing_frontier_mi
         BOOST_REQUIRE(chainman.AcquisitionTipIsStale());
         BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(best));
         BOOST_REQUIRE(chainman.AcquisitionEscapeCoversBlock(first));
-        BOOST_REQUIRE((first->nStatus & BLOCK_HAVE_DATA) == 0);
+        if (competing_ready) {
+            const auto pos{chainman.m_blockman.WriteBlock(competing, first->nHeight)};
+            BOOST_REQUIRE(!pos.IsNull());
+            chainman.ReceivedBlockTransactions(competing, first, pos);
+            first->nStatus &= ~BLOCK_EXACT_REPLAY_VERIFIED;
+        }
+        BOOST_REQUIRE_EQUAL(bool(first->nStatus & BLOCK_HAVE_DATA), competing_ready);
         BOOST_REQUIRE(chainman.IndexIsAttestedChainTipChild(tip, child_index));
         chainman.ActiveChainstate().TryAddBlockIndexCandidate(child_index);
     }
@@ -10581,6 +10745,16 @@ BOOST_AUTO_TEST_CASE(review_persisted_child_progress_while_competing_frontier_mi
         m_node.chainman->SetBestHeader(
             const_cast<CBlockIndex*>(m_node.chainman->ActiveTip()));
     }
+}
+
+BOOST_AUTO_TEST_CASE(review_persisted_child_progress_while_competing_frontier_missing)
+{
+    CheckPersistedChildWithAcquisition(m_node, false);
+}
+
+BOOST_AUTO_TEST_CASE(persisted_active_tip_child_precedes_ready_acquisition_frontier)
+{
+    CheckPersistedChildWithAcquisition(m_node, true);
 }
 
 BOOST_AUTO_TEST_CASE(withdrawn_deep_tower_snaps_last_common_to_tip)

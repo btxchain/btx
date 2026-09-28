@@ -5,9 +5,11 @@
 prints `v0.34.12rc1` plus a git suffix. P2P subversion is `/BTX:0.34.12/`.
 Last shipping tag remains **v0.34.10**. Do not recut `v0.34.10`.
 
-Not a consensus change. ExactReplay arithmetic, chainwork, fork choice,
-issuance, bans, and reorg policy are unchanged. An unavailable header tower
-is not marked invalid. `automatic_spend_atoms` stays 0.
+Not a consensus change. ExactReplay arithmetic, chainwork, issuance, and
+bans are unchanged. An unavailable header tower is not marked invalid.
+`automatic_spend_atoms` stays 0. Local automatic-reorg policy gains a
+bounded mode (below). It does not make a deep valid chain invalid, and it
+does not require a signer or a trusted peer.
 
 ## What this candidate fixes
 
@@ -34,6 +36,21 @@ checked:
 - Two recovery registrations remain the limit. A higher-work tower with no
   body cannot hide a ready sibling or evict a frontier that can be
   replayed. A failed block drops only the registration that descends from it.
+- A ready child of the active tip is replayed before competing acquisition.
+  Among ready registered forks, the shallower reorg is preferred. After
+  eight new ExactReplay verdicts on that fork, another ready fork gets one
+  turn. Claimed header work does not keep a deep ready fork in front of a
+  nearby ready one.
+- `-reorgpolicy=bounded` is the default. While the followed chain is
+  progressing, automatic reorgs stay within 6 blocks. After 900 seconds
+  without a forward connection, recovery may go to the closest checked
+  branch within 72 blocks. A heavier valid chain beyond that ceiling, or
+  below the persisted protected ancestor, is parked rather than adopted.
+  `preparereorg` / `executereorg` authorize one exact deeper transition and
+  do not raise the standing ceiling. `-reorgpolicy=legacy` keeps the
+  previous park and deep-fork auto-resolve behavior. `-parkdeepreorg=0`
+  conflicts with bounded mode and the node will not start until one of
+  them is changed.
 
 A fast-start snapshot is pinned at height 228000, on the shared ancestor
 below the 228145 fork. It does not choose either child of that fork.
@@ -43,12 +60,15 @@ below the 228145 fork. It does not choose either child of that fork.
 - No new peer ban for an old-body refusal, including a limited-history
   node answering `NOTFOUND` outside its service window.
 - No automatic `invalidateblock` for a missing body.
-- No change to which chain has more work. Header work still ranks two
-  towers that are equally unable to supply a body.
+- No change to which chain has more work. A parked deep branch is still
+  a valid chain; this node simply does not disconnect for it while
+  bounded mode is on.
 - Probe backoff timers and `getforkavailability` /
   `setforkacquisitionpolicy` are not part of this candidate.
 
 A node with no pin membership, no attestor key, and no trusted-mirror pin
-must still reach tip from ExactReplay alone, keep advancing across a
-signed-frontier stall without operator action, and recover without a
-restart.
+still reaches a tip from ExactReplay alone. Inside the configured recovery
+ceiling it can leave a stalled tip without an operator. Past that ceiling
+it keeps the chain it has checked until an operator authorizes one
+transition, or until it is started with `-reorgpolicy=legacy`. Peer count
+and attestations do not choose the chain or widen the ceiling.

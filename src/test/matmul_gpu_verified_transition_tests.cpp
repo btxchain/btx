@@ -533,6 +533,36 @@ BOOST_AUTO_TEST_CASE(deep_fork_auto_resolve_predicates)
     using kernel::DeepReorgAction;
 
     // In scope only when enabled, PARK, and reorg_depth > park_depth.
+    using kernel::BoundedReorgDecision;
+    using kernel::DecideBoundedReorg;
+    // A fully checked 3461-deep fork stays parked. Depth 53 can recover after
+    // a stall; 295 cannot without an explicit repair. Equal or missing work
+    // does not qualify, and a repair still cannot skip the work check.
+    BOOST_CHECK(DecideBoundedReorg(3461, 6, 72, false, true, false, true) ==
+                BoundedReorgDecision::PARK_PROTECTED_ANCESTOR);
+    BOOST_CHECK(DecideBoundedReorg(3461, 6, 72, true, true, false, true) ==
+                BoundedReorgDecision::PARK_RECOVERY_DEPTH);
+    BOOST_CHECK(DecideBoundedReorg(295, 6, 72, true, true, false, true) ==
+                BoundedReorgDecision::PARK_RECOVERY_DEPTH);
+    BOOST_CHECK(DecideBoundedReorg(295, 6, 72, true, true, true, true) ==
+                BoundedReorgDecision::BOUNDED_RECOVERY);
+    BOOST_CHECK(DecideBoundedReorg(295, 6, 72, true, true, true, false) ==
+                BoundedReorgDecision::PARK_RECOVERY_DEPTH);
+    BOOST_CHECK(DecideBoundedReorg(53, 6, 72, true, true, false, true) ==
+                BoundedReorgDecision::BOUNDED_RECOVERY);
+    BOOST_CHECK(DecideBoundedReorg(53, 6, 72, true, false, false, true) ==
+                BoundedReorgDecision::PARK_NORMAL_DEPTH);
+    BOOST_CHECK(DecideBoundedReorg(72, 6, 72, true, true, false, true) ==
+                BoundedReorgDecision::BOUNDED_RECOVERY);
+    BOOST_CHECK(DecideBoundedReorg(73, 6, 72, true, true, false, true) ==
+                BoundedReorgDecision::PARK_RECOVERY_DEPTH);
+    BOOST_CHECK(DecideBoundedReorg(6, 6, 72, true, false, false, true) ==
+                BoundedReorgDecision::NORMAL_REORG);
+    BOOST_CHECK(DecideBoundedReorg(7, 6, 72, true, false, false, true) ==
+                BoundedReorgDecision::PARK_NORMAL_DEPTH);
+    BOOST_CHECK(DecideBoundedReorg(0, 6, 72, true, false, false, true) ==
+                BoundedReorgDecision::NORMAL_EXTENSION);
+
     BOOST_CHECK(DeepForkAutoResolveDepthInScope(
         /*enabled=*/true, DeepReorgAction::PARK, /*park_depth=*/6, /*depth=*/53));
     BOOST_CHECK(!DeepForkAutoResolveDepthInScope(
