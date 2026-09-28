@@ -51,6 +51,19 @@ checked:
   previous park and deep-fork auto-resolve behavior. `-parkdeepreorg=0`
   conflicts with bounded mode and the node will not start until one of
   them is changed.
+- Quiet outbound peers whose recorded height is behind the tip are asked
+  for headers on a slow background timer (one request per peer each five
+  minutes, one across the node each 30 seconds). The locator starts at
+  that peer's last known header. This discovers a competing chain. It
+  does not download bodies or reorganize.
+- A trusted mirror can keep requesting the next header page from a
+  recognized authority after a solicited full batch, even when that
+  prefix still has less work than the local tip. A solicited full
+  authority batch that is already strictly heavier can register the
+  existing acquisition tower before the 72-header lead cap is applied.
+  Parked branches, ordinary peers, and unsolicited batches do not get
+  either exception. Learning those headers does not raise the reorg
+  ceiling or make the authority the fork-choice referee.
 
 A fast-start snapshot is pinned at height 228000, on the shared ancestor
 below the 228145 fork. It does not choose either child of that fork.

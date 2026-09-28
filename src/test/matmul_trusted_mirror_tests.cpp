@@ -3413,6 +3413,54 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
         /*best_header_known=*/false,
         /*peer_best_is_ancestor_of_best_header=*/true,
         /*peer_best_extends_best_header=*/true));
+
+    using node::matmul_trusted::TrustedMirrorMayArmHeaderContinuationAcquisition;
+    using node::matmul_trusted::TrustedMirrorMayContinueCompetingHeaders;
+    // Lower-work authority prefix: no body download, but a solicited full
+    // batch may request the next header page. Ordinary and unsolicited
+    // batches may not. A parked branch stays closed.
+    BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/true, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/false, /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(TrustedMirrorMayContinueCompetingHeaders(
+        /*body_download_allowed=*/false, /*solicited_full_batch=*/true,
+        /*is_authority_peer=*/true, /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayContinueCompetingHeaders(
+        /*body_download_allowed=*/false, /*solicited_full_batch=*/true,
+        /*is_authority_peer=*/false, /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayContinueCompetingHeaders(
+        /*body_download_allowed=*/false, /*solicited_full_batch=*/false,
+        /*is_authority_peer=*/true, /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(TrustedMirrorMayContinueCompetingHeaders(
+        /*body_download_allowed=*/true, /*solicited_full_batch=*/false,
+        /*is_authority_peer=*/true, /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayContinueCompetingHeaders(
+        /*body_download_allowed=*/true, /*solicited_full_batch=*/true,
+        /*is_authority_peer=*/true, /*on_parked_reorg_branch=*/true));
+    BOOST_CHECK(TrustedMirrorMayArmHeaderContinuationAcquisition(
+        /*solicited_full_batch=*/true, /*is_authority_peer=*/true,
+        /*extends_active_tip=*/false, /*strictly_greater_work=*/true,
+        /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayArmHeaderContinuationAcquisition(
+        /*solicited_full_batch=*/false, /*is_authority_peer=*/true,
+        /*extends_active_tip=*/false, /*strictly_greater_work=*/true,
+        /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayArmHeaderContinuationAcquisition(
+        /*solicited_full_batch=*/true, /*is_authority_peer=*/false,
+        /*extends_active_tip=*/false, /*strictly_greater_work=*/true,
+        /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayArmHeaderContinuationAcquisition(
+        /*solicited_full_batch=*/true, /*is_authority_peer=*/true,
+        /*extends_active_tip=*/true, /*strictly_greater_work=*/true,
+        /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayArmHeaderContinuationAcquisition(
+        /*solicited_full_batch=*/true, /*is_authority_peer=*/true,
+        /*extends_active_tip=*/false, /*strictly_greater_work=*/false,
+        /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayArmHeaderContinuationAcquisition(
+        /*solicited_full_batch=*/true, /*is_authority_peer=*/true,
+        /*extends_active_tip=*/false, /*strictly_greater_work=*/true,
+        /*on_parked_reorg_branch=*/true));
 }
 
 BOOST_AUTO_TEST_CASE(authority_peer_proof_is_branch_bound)

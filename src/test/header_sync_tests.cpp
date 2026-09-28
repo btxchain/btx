@@ -12,6 +12,33 @@
 
 BOOST_FIXTURE_TEST_SUITE(header_sync_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(background_refresh_does_not_trust_stale_height)
+{
+    CBlockIndex tip;
+    tip.nHeight = 231975;
+    tip.nStatus = BLOCK_VALID_TREE;
+    CBlockIndex known;
+    known.nHeight = 231835;
+    known.nStatus = BLOCK_VALID_TREE;
+    // Both snapshots are behind; neither is evidence of the remote tip now.
+    BOOST_CHECK(node::HeaderSyncBackgroundRefreshNeeded(&tip, &known, 231267));
+    BOOST_CHECK(node::HeaderSyncBackgroundRefreshNeeded(&tip, &known, 0));
+    BOOST_CHECK(node::HeaderSyncBackgroundRefreshNeeded(&tip, nullptr, 231891));
+    BOOST_CHECK(!node::HeaderSyncBackgroundRefreshNeeded(&tip, nullptr, 0));
+    BOOST_CHECK(!node::HeaderSyncBackgroundRefreshNeeded(&tip, nullptr, -1));
+    BOOST_CHECK(!node::HeaderSyncBackgroundRefreshNeeded(nullptr, &known, 1));
+    BOOST_CHECK(!node::HeaderSyncBackgroundRefreshNeeded(&tip, &tip, 231267));
+    known.nHeight = tip.nHeight;
+    BOOST_CHECK(node::HeaderSyncBackgroundRefreshNeeded(&tip, &known, 231267));
+    known.nHeight = tip.nHeight + 1;
+    BOOST_CHECK(!node::HeaderSyncBackgroundRefreshNeeded(&tip, &known, 231267));
+    known.nHeight = tip.nHeight - 1;
+    for (const auto failed : {BLOCK_FAILED_VALID, BLOCK_FAILED_CHILD}) {
+        known.nStatus = BLOCK_VALID_TREE | failed;
+        BOOST_CHECK(!node::HeaderSyncBackgroundRefreshNeeded(&tip, &known, 231267));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(locator_start_snaps_to_tip_when_best_header_is_behind)
 {
     CBlockIndex behind;

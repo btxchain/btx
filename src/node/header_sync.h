@@ -13,6 +13,29 @@
 
 namespace node {
 
+/** Background discovery is independent of the urgent, tip-relative probes.
+ * VERSION and BestKnown are snapshots: neither proves a quiet peer is still
+ * behind us. Bound requests both per connection and across the whole node. */
+inline constexpr std::chrono::minutes HEADER_SYNC_BACKGROUND_PEER_INTERVAL{5};
+inline constexpr std::chrono::seconds HEADER_SYNC_BACKGROUND_GLOBAL_INTERVAL{30};
+
+[[nodiscard]] inline bool HeaderSyncBackgroundRefreshNeeded(
+    const CBlockIndex* active_tip, const CBlockIndex* best_known,
+    int32_t starting_height)
+{
+    if (active_tip == nullptr || active_tip->nHeight <= 0) return false;
+    if (best_known == nullptr) {
+        // Bootstrap peers that the initial-sync height gate skipped. Unknown
+        // or genesis-only advertisers still do not qualify.
+        return starting_height > 0 && starting_height < active_tip->nHeight;
+    }
+    // Ahead peers already have urgent probes; peers at our exact tip use
+    // ordinary announcements. Include lagging ancestors: that peer may have
+    // switched to a fork since we last heard from it.
+    return best_known->IsValid(BLOCK_VALID_TREE) && best_known != active_tip &&
+           best_known->nHeight <= active_tip->nHeight;
+}
+
 /**
  * Locator origin for getheaders.
  *
@@ -132,10 +155,11 @@ inline constexpr int HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD{6};
  * lead cap 72). A competing BestKnown is not an extension of our tip.
  *
  * VERSION is a handshake snapshot. Peers advertising height 0 / unset
- * or below our connected tip are never probed (live 0.34.5: 171
+ * or below our connected tip are excluded from urgent probes (live 0.34.5: 171
  * getheaders/sec to one peer, including height-0 advertisers). Same-
  * height peers are still probed when the tip is stale so we can learn
- * tip+1.
+ * tip+1. Quiet lagging outbound peers have a separate, slower background
+ * refresh; these snapshots must not permanently exclude discovery.
  */
 [[nodiscard]] inline bool HeaderSyncAdvertisedHeightUnusable(
     int32_t local_tip_height,

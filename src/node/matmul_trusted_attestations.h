@@ -3275,6 +3275,43 @@ struct TrustedMirrorAuthorityHeaderView {
 }
 
 /**
+ * Header pagination is not body download. A solicited full batch from a
+ * recognized authority may continue even while the indexed prefix still has
+ * less work than the active tip. That prefix cannot prove the completed
+ * branch is heavier until the remaining headers arrive. Parked branches stay
+ * closed. Ordinary peers and unsolicited batches do not get this exception.
+ * Body download, ExactReplay, and reorganization policy are unchanged.
+ */
+[[nodiscard]] inline bool TrustedMirrorMayContinueCompetingHeaders(
+    bool body_download_allowed,
+    bool solicited_full_batch,
+    bool is_authority_peer,
+    bool on_parked_reorg_branch)
+{
+    if (on_parked_reorg_branch) return false;
+    if (body_download_allowed) return true;
+    return solicited_full_batch && is_authority_peer;
+}
+
+/**
+ * A solicited full authority batch that already has strictly greater work,
+ * and does not extend the active tip, may be offered to acquisition
+ * registration before the unauthenticated header-lead cap is applied.
+ * Registration still has to pass the stale-tip, lead, failed-branch, and
+ * tower-count checks. This does not select the branch or disconnect.
+ */
+[[nodiscard]] inline bool TrustedMirrorMayArmHeaderContinuationAcquisition(
+    bool solicited_full_batch,
+    bool is_authority_peer,
+    bool extends_active_tip,
+    bool strictly_greater_work,
+    bool on_parked_reorg_branch)
+{
+    return solicited_full_batch && is_authority_peer && !extends_active_tip &&
+           strictly_greater_work && !on_parked_reorg_branch;
+}
+
+/**
  * Sticky unattestable-reject accounting: count a hash only when it is newly
  * entered into the negative cache (or its sticky window has expired and it is
  * being re-armed). Repeat evaluations inside the window must not increment.

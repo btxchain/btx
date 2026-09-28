@@ -1504,6 +1504,9 @@ public:
             LOCK(cs_main);
             m_header_only_competing.clear();
             m_header_only_followed_skip.clear();
+            m_background_headers_pending.clear();
+            m_background_headers_last_peer = -1;
+            m_background_headers_last_sent = {};
         }
         {
             LOCK(m_matmul_rc_admission_mutex);
@@ -1838,6 +1841,8 @@ private:
      * bound it themselves (see Peer::m_headers_continuation_height).
      */
     bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window = false) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    void MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     /** Potentially fetch blocks from this peer upon receipt of a new headers tip */
     void HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -2171,6 +2176,11 @@ private:
     /** Last time we probed a peer with getheaders solely to establish
      *  pindexBestKnownBlock, keyed by NodeId. */
     std::map<NodeId, std::chrono::microseconds> m_best_known_probe_at GUARDED_BY(cs_main);
+    /** Eligible background peers rotate so send-loop order cannot starve a
+     *  quiet branch. This queue never controls urgent header or body requests. */
+    std::set<NodeId> m_background_headers_pending GUARDED_BY(cs_main);
+    NodeId m_background_headers_last_peer GUARDED_BY(cs_main){-1};
+    NodeClock::time_point m_background_headers_last_sent GUARDED_BY(cs_main){};
     void ClearMatMulRCBodyDeferred(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void PinMatMulBlockSource(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Immediate unpin. May be called with or without cs_main (RecursiveMutex).
@@ -7568,6 +7578,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     }
     DropOutboundBlockChunks(node.GetId());
     WITH_LOCK(cs_main, m_best_known_probe_at.erase(node.GetId()));
+    WITH_LOCK(cs_main, m_background_headers_pending.erase(node.GetId()));
     if (m_dandelion) m_dandelion->PeerDisconnected(node.GetId());
     NodeId nodeid = node.GetId();
     {
@@ -10734,6 +10745,53 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
     return DupHeaderDisposition::None;
 }
 
+void PeerManagerImpl::MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockHeld(cs_main);
+    const auto now{NodeClock::now()};
+    const CNodeState& state{*State(node.GetId())};
+    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+    const CBlockIndex* const known{state.pindexBestKnownBlock};
+    const auto last_activity{std::max(
+        peer.m_last_getheaders_sent, NodeClock::time_point{node.m_connected})};
+    bool eligible{
+        !node.IsInboundConn() && !node.IsAddrFetchConn() &&
+        CanServeBlocks(peer) && !node.fPauseSend &&
+        !m_chainman.m_blockman.LoadingBlocks() &&
+        !m_chainman.IsInitialBlockDownload() &&
+        node::HeaderSyncBackgroundRefreshNeeded(
+            tip, known, peer.m_starting_height.load()) &&
+        now - last_activity >= node::HEADER_SYNC_BACKGROUND_PEER_INTERVAL &&
+        !PeerLowWorkHeadersSyncInBackoff(peer.m_addr, GetTime<std::chrono::microseconds>())};
+    if (eligible) {
+        LOCK(peer.m_headers_sync_mutex);
+        eligible = !peer.m_headers_sync;
+    }
+    if (!eligible) {
+        m_background_headers_pending.erase(node.GetId());
+        return;
+    }
+    m_background_headers_pending.insert(node.GetId());
+    if (now - m_background_headers_last_sent < node::HEADER_SYNC_BACKGROUND_GLOBAL_INTERVAL) return;
+    auto next{m_background_headers_pending.upper_bound(m_background_headers_last_peer)};
+    if (next == m_background_headers_pending.end()) next = m_background_headers_pending.begin();
+    if (*next != node.GetId()) return;
+
+    // Start at this peer's fork tip, not the active/global best header. The
+    // latter can repeatedly return the first 2000 headers after a deep LCA.
+    // A newly connected lagging peer bootstraps through the normal locator.
+    const CBlockIndex* const start{known != nullptr ? known : tip};
+    if (MaybeSendGetHeaders(node, GetLocator(start), peer)) {
+        m_background_headers_last_sent = now;
+        m_background_headers_last_peer = node.GetId();
+        m_background_headers_pending.erase(node.GetId());
+        LogInfo("background header refresh: peer=%d known=%d advertised=%d tip=%d\n",
+                node.GetId(), known != nullptr ? known->nHeight : -1,
+                peer.m_starting_height.load(), tip->nHeight);
+    }
+}
+
 bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window)
 {
     // NOT eligibility-gated. Headers are cheap and self-validating, and they
@@ -13812,19 +13870,39 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 tip != nullptr &&
                 pindexLast->GetAncestor(tip->nHeight) == tip};
             if (!extends_tip) {
-                chase_more =
+                const bool authority{IsTrustedMirrorAuthorityPeer(
+                    pfrom.GetId(), peer.m_their_services, pindexLast)};
+                const bool body_ok{
                     tip != nullptr &&
                     TrustedMirrorMayDownloadIndex(
-                        m_chainman,
-                        IsTrustedMirrorAuthorityPeer(pfrom.GetId(),
-                                                     peer.m_their_services,
-                                                     pindexLast),
-                        tip, pindexLast);
+                        m_chainman, authority, tip, pindexLast)};
+                // A lower-work 2000-header prefix must not stop pagination.
+                // Body download stays on the existing work gate.
+                chase_more = node::matmul_trusted::TrustedMirrorMayContinueCompetingHeaders(
+                    body_ok, solicited_headers, authority,
+                    tip != nullptr &&
+                        m_chainman.IsOnParkedReorgBranch(pindexLast));
             }
         }
         {
             LOCK(cs_main);
             const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+            if (tip != nullptr && node::matmul_trusted::IsTrustedMirror()) {
+                const bool extends_tip{
+                    pindexLast->GetAncestor(tip->nHeight) == tip};
+                // Register a heavier authority terminal before the +72 cap
+                // asks whether that registration already exists.
+                if (node::matmul_trusted::TrustedMirrorMayArmHeaderContinuationAcquisition(
+                        solicited_headers,
+                        IsTrustedMirrorAuthorityPeer(pfrom.GetId(),
+                                                     peer.m_their_services,
+                                                     pindexLast),
+                        extends_tip,
+                        pindexLast->nChainWork > tip->nChainWork,
+                        m_chainman.IsOnParkedReorgBranch(pindexLast))) {
+                    (void)m_chainman.AcquisitionEscapeMayAcquireHeavierFork(pindexLast);
+                }
+            }
             if (tip != nullptr) {
                 const bool extends_tip{
                     pindexLast->GetAncestor(tip->nHeight) == tip};
@@ -22862,6 +22940,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // Competing-branch peers must not be the only source of getheaders.
         MaybeRequestTrustedMirrorAuthorityHeaders(*pto, *peer, current_time);
         MaybeRequestTrustedMirrorPreferredAttestations(*pto, *peer);
+
+        // Urgent/authority requests above win the per-peer send window. Quiet
+        // lagging peers still get bounded discovery even with no new INV.
+        MaybeRefreshBackgroundHeaders(*pto, *peer);
 
         //
         // Try sending block announcements via headers
