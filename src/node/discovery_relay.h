@@ -254,10 +254,20 @@ inline constexpr int MAX_INBOUND_DISCOVERY_ONLY{4};
 //! Advertise a currently-connected peer's own endpoint on GETADDR.
 //! Distinct from MayLearnAddressFromPeer. Discovery-only peers are not
 //! IBD sources; do not hand them to a bootstrapping consensus node.
-[[nodiscard]] inline bool MayAdvertiseConnectedPeer(uint64_t services,
-                                                    int32_t starting_height,
-                                                    int32_t effective_watermark)
+//!
+//! `on_historical_deep_fork` is the parked 228146 island. A peer whose
+//! best-known block sits on it is not an introduction target.
+//! `identity_unknown_above_fork` means the peer's VERSION height is at
+//! or above that split and this node has not yet seen a header that
+//! proves which child they follow. Fail closed until the header does.
+[[nodiscard]] inline bool MayAdvertiseConnectedPeer(
+    uint64_t services,
+    int32_t starting_height,
+    int32_t effective_watermark,
+    bool on_historical_deep_fork = false,
+    bool identity_unknown_above_fork = false)
 {
+    if (on_historical_deep_fork || identity_unknown_above_fork) return false;
     if (!MayAdvertiseAddress(services)) return false;
     if (ServicesAreDiscoveryOnly(services)) return false;
     return PeerLooksOnRecentNetwork(starting_height, effective_watermark);

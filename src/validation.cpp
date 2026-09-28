@@ -9558,10 +9558,21 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
         // invalidate the block so a later consensus/trusted conversion of
         // the same datadir can still connect it. Height 0 must still
         // connect so LoadChainTip can attach genesis.
-        LogDebug(BCLog::VALIDATION,
-                 "ConnectTip: discovery relay refuses to activate hash=%s height=%d\n",
-                 pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
-        return state.Error("discovery relay is not a chain oracle");
+        // The published assumeutxo base is the one later block a relay
+        // may activate, so loadtxoutset can anchor the datadir. Blocks
+        // after that base stay unconnected; the relay does not validate
+        // or serve them.
+        const auto snapshot{
+            m_chainman.GetParams().AssumeutxoForHeight(pindexNew->nHeight)};
+        const bool snapshot_base{
+            snapshot.has_value() &&
+            snapshot->blockhash == pindexNew->GetBlockHash()};
+        if (!snapshot_base) {
+            LogDebug(BCLog::VALIDATION,
+                     "ConnectTip: discovery relay refuses to activate hash=%s height=%d\n",
+                     pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
+            return state.Error("discovery relay is not a chain oracle");
+        }
     }
     if (MustDeferConflictingAttestedConnect(m_chainman, pindexNew)) {
         LogDebug(BCLog::VALIDATION,

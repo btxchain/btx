@@ -70,6 +70,18 @@ checked:
   node already on that chain is left there, and `-reorgpolicy=legacy`
   does not park it. `reconsiderblock` does not clear it while bounded
   mode is on.
+- A discovery relay indexes headers and asks peers for them, so it can
+  see which chain each peer is on. It does not download or serve block
+  bodies. GETADDR and address relay omit a peer whose best-known block
+  is on that parked fork, and omit a peer that claims a height at or
+  above the fork until a header shows they are not on it. Transaction
+  announcements are not sent to a peer already seen on that fork.
+  Addresses learned from such a peer are not stored. This is local
+  introduction policy. It does not mark the fork invalid, and an
+  ordinary node still does not need a trusted peer to follow the chain.
+  `loadtxoutset` is allowed on a discovery relay so it can anchor at
+  the published snapshot. It still does not connect blocks after that
+  base.
 
 A fast-start snapshot is pinned at height 228000, on the shared ancestor
 below the 228145 fork. It does not choose either child of that fork.

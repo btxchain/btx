@@ -4306,7 +4306,9 @@ static RPCHelpMan loadtxoutset()
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
     ChainstateManager& chainman = EnsureChainman(node);
-    EnsureNotDiscoveryRelay(chainman);
+    // Discovery relays may load the published snapshot so their datadir
+    // starts at that base. They still do not connect later blocks or
+    // serve the chain.
     const fs::path path{AbsPathForConfigVal(EnsureArgsman(node), fs::u8path(self.Arg<std::string>("path")))};
 
     FILE* file{fsbridge::fopen(path, "rb")};

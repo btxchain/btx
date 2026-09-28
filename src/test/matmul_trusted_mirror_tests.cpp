@@ -535,6 +535,15 @@ BOOST_AUTO_TEST_CASE(discovery_relay_addr_policy_hides_gpu_attestors)
     BOOST_CHECK(!MayAdvertiseConnectedPeer(
         NODE_NETWORK | NODE_WITNESS, 185109, 199390));
     BOOST_CHECK(!MayAdvertiseConnectedPeer(NODE_MATMUL_DISCOVERY, 199400, 199390));
+    BOOST_CHECK(!MayAdvertiseConnectedPeer(
+        NODE_NETWORK | NODE_WITNESS, 230000, 230010,
+        /*on_historical_deep_fork=*/true));
+    BOOST_CHECK(!MayAdvertiseConnectedPeer(
+        NODE_NETWORK | NODE_WITNESS, 230000, 230010,
+        /*on_historical_deep_fork=*/false,
+        /*identity_unknown_above_fork=*/true));
+    BOOST_CHECK(MayAdvertiseConnectedPeer(
+        NODE_NETWORK | NODE_WITNESS, 230000, 230010));
     BOOST_CHECK(MayRetainInboundHandshake(
         /*inbound=*/true, /*routable=*/true, NODE_NETWORK | NODE_WITNESS,
         199400, 199390));

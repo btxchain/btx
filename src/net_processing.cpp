@@ -88,6 +88,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <typeinfo>
 #include <utility>
@@ -1059,6 +1060,10 @@ struct Peer {
      *  This field must correlate with whether m_addr_known has been
      *  initialized.*/
     std::atomic_bool m_addr_relay_enabled{false};
+    /** Best-known block descends from the parked historical deep fork.
+     *  Address, transaction, and header-continuation relay skip this peer.
+     *  Not a protocol ban and not a consensus invalidity. */
+    std::atomic_bool m_on_historical_deep_fork{false};
     /** Whether a getaddr request to this peer is outstanding. */
     bool m_getaddr_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
     /** Guards address sending timers. */
@@ -1251,6 +1256,8 @@ struct CNodeState {
     uint64_t m_keyed_netgroup{0};
     //! The best known block we know this peer has announced.
     const CBlockIndex* pindexBestKnownBlock{nullptr};
+    //! Best-known block is on the parked historical deep fork.
+    bool m_on_historical_deep_fork{false};
     //! The hash of the last unknown block this peer has announced.
     uint256 hashLastUnknownBlock{};
     //! Sticky-probe bound: beyond-best-header getheaders probes sent to this
@@ -1843,6 +1850,11 @@ private:
     bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window = false) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     void MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
+    /** Discovery relays ask peers for headers so a best-known block on the
+     *  parked historical fork can be excluded from ADDR introduction.
+     *  Does not download bodies. */
+    void MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     /** Potentially fetch blocks from this peer upon receipt of a new headers tip */
     void HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -6052,6 +6064,14 @@ void PeerManagerImpl::UpdateBlockAvailability(NodeId nodeid, const uint256 &hash
     ProcessBlockAvailability(nodeid);
 
     const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
+    if (pindex && m_chainman.IndexOnHistoricalDeepFork(pindex)) {
+        if (CNodeState* fork_state{State(nodeid)}) {
+            fork_state->m_on_historical_deep_fork = true;
+        }
+        if (PeerRef fork_peer{GetPeerRef(nodeid)}) {
+            fork_peer->m_on_historical_deep_fork.store(true, std::memory_order_relaxed);
+        }
+    }
     if (pindex && pindex->nChainWork > 0) {
         // Trusted mirrors must not let ordinary competing-branch tips displace a
         // tip-chain best-known pointer (unattestable bodies starve authority
@@ -9492,8 +9512,9 @@ void PeerManagerImpl::RelayTransaction(const uint256& txid, const uint256& wtxid
 {
     bool queued_for_relay{false};
     LOCK(m_peer_mutex);
-    for(auto& it : m_peer_map) {
+        for(auto& it : m_peer_map) {
         Peer& peer = *it.second;
+        if (peer.m_on_historical_deep_fork.load(std::memory_order_relaxed)) continue;
         auto tx_relay = peer.GetTxRelay();
         if (!tx_relay) continue;
 
@@ -9554,6 +9575,7 @@ void PeerManagerImpl::RelayAddress(NodeId originator,
     LOCK(m_peer_mutex);
 
     for (auto& [id, peer] : m_peer_map) {
+        if (peer->m_on_historical_deep_fork.load(std::memory_order_relaxed)) continue;
         if (peer->m_addr_relay_enabled && id != originator && IsAddrCompatible(*peer, addr)) {
             uint64_t hashKey = CSipHasher(hasher).Write(id).Finalize();
             for (unsigned int i = 0; i < nRelayNodes; i++) {
@@ -10743,6 +10765,73 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
     }
     peer.m_dup_header_last_action = "skipped";
     return DupHeaderDisposition::None;
+}
+
+void PeerManagerImpl::MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    if (!m_chainman.IsDiscoveryRelay()) return;
+    if (node.IsAddrFetchConn() || node.fDisconnect || node.fPauseSend) return;
+    if (peer.m_on_historical_deep_fork.load(std::memory_order_relaxed)) return;
+
+    const auto now{NodeClock::now()};
+    const bool manual{node.IsManualConn()};
+    // One non-manual classification probe at a time. A full header batch
+    // chains on its own; this interval only starts the next peer's walk.
+    constexpr auto classify_gap{std::chrono::seconds{2}};
+    if (!manual) {
+        m_background_headers_pending.insert(node.GetId());
+        if (now - m_background_headers_last_sent < classify_gap) return;
+        auto next{m_background_headers_pending.upper_bound(
+            m_background_headers_last_peer)};
+        if (next == m_background_headers_pending.end()) {
+            next = m_background_headers_pending.begin();
+        }
+        if (next == m_background_headers_pending.end() || *next != node.GetId()) {
+            return;
+        }
+    }
+
+    CBlockLocator locator;
+    bool already_classified{false};
+    {
+        LOCK(cs_main);
+        const CNodeState* state{State(node.GetId())};
+        const CBlockIndex* const known{
+            state != nullptr ? state->pindexBestKnownBlock : nullptr};
+        already_classified =
+            state == nullptr || state->m_on_historical_deep_fork ||
+            (known != nullptr &&
+             known->nHeight >= kernel::HISTORICAL_DEEP_FORK_HEIGHT &&
+             !m_chainman.IndexOnHistoricalDeepFork(known));
+        if (!already_classified) {
+            const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+            const CBlockIndex* const start{known != nullptr ? known : tip};
+            if (start != nullptr) locator = GetLocator(start);
+        }
+    }
+    if (already_classified || locator.vHave.empty()) {
+        if (!manual) {
+            m_background_headers_pending.erase(node.GetId());
+            m_background_headers_last_peer = node.GetId();
+        }
+        return;
+    }
+    // The first probe of a manual peer starts the walk immediately.
+    // A full batch then chains inside ProcessHeadersMessage. Later probes
+    // stay inside the normal send window.
+    const bool first_probe{peer.m_last_getheaders_sent.time_since_epoch().count() == 0};
+    if (MaybeSendGetHeaders(node, locator, peer,
+                            /*bypass_send_window=*/manual && first_probe)) {
+        if (!manual) {
+            m_background_headers_last_sent = now;
+            m_background_headers_last_peer = node.GetId();
+            m_background_headers_pending.erase(node.GetId());
+        }
+    } else if (!manual) {
+        m_background_headers_pending.erase(node.GetId());
+        m_background_headers_last_peer = node.GetId();
+    }
 }
 
 void PeerManagerImpl::MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
@@ -13863,6 +13952,11 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
         // header sync. Authority peers may chase a better/equal-work branch so
         // a stranded mirror can acquire the rest of the canonical headers.
         bool chase_more{true};
+        if (m_chainman.IsDiscoveryRelay() &&
+            (peer.m_on_historical_deep_fork.load(std::memory_order_relaxed) ||
+             m_chainman.IndexOnHistoricalDeepFork(pindexLast))) {
+            chase_more = false;
+        }
         if (node::matmul_trusted::IsTrustedMirror()) {
             LOCK(cs_main);
             const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
@@ -13958,6 +14052,29 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     }
 
     UpdatePeerStateForReceivedHeaders(pfrom, peer, *pindexLast, received_new_header, nCount == m_opts.max_headers_result);
+
+    // A discovery relay indexes headers so it can tell which chain a peer
+    // is on. It does not fetch bodies, run ExactReplay, or serve the chain.
+    if (m_chainman.IsDiscoveryRelay()) {
+        if (m_chainman.IndexOnHistoricalDeepFork(pindexLast)) {
+            const bool first{!peer.m_on_historical_deep_fork.exchange(
+                true, std::memory_order_relaxed)};
+            WITH_LOCK(cs_main, if (CNodeState* fork_state{State(pfrom.GetId())}) {
+                fork_state->m_on_historical_deep_fork = true;
+            });
+            if (first) {
+                LogInfo("discovery relay: peer=%d is on the historical deep "
+                        "fork (header %s height %d); not advertising or "
+                        "relaying to it\n",
+                        pfrom.GetId(), pindexLast->GetBlockHash().ToString(),
+                        pindexLast->nHeight);
+                if (!pfrom.IsManualConn() && m_banman) {
+                    m_banman->Discourage(pfrom.addr);
+                }
+            }
+        }
+        return;
+    }
 
     if (followed_header_changed) {
         m_matmul_block_lifecycle.NoteHeaderProgress();
@@ -17755,6 +17872,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         // Store the new addresses
         std::vector<CAddress> vAddrOk;
+        const bool historical_fork_peer{
+            peer->m_on_historical_deep_fork.load(std::memory_order_relaxed)};
         const auto current_a_time{Now<NodeSeconds>()};
 
         // Update/increment addr rate limiting bucket.
@@ -17839,10 +17958,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                             static_cast<const CNetAddr&>(pfrom.addr),
                         node::discovery_relay::MayAdvertiseEndpoint(
                             static_cast<uint64_t>(addr.nServices), addr))};
-                if (inbound_listen ||
-                    (learn_from_this_peer &&
-                     node::discovery_relay::MayAdvertiseEndpoint(
-                         static_cast<uint64_t>(addr.nServices), addr))) {
+                if (!historical_fork_peer &&
+                    (inbound_listen ||
+                     (learn_from_this_peer &&
+                      node::discovery_relay::MayAdvertiseEndpoint(
+                          static_cast<uint64_t>(addr.nServices), addr)))) {
                     RelayAddress(pfrom.GetId(), addr, reachable);
                 }
             }
@@ -17856,7 +17976,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         LogDebug(BCLog::NET, "Received addr: %u addresses (%u processed, %u rate-limited) from peer=%d\n",
                  vAddr.size(), num_proc, num_rate_limit, pfrom.GetId());
 
-        if (!m_chainman.IsDiscoveryRelay() ||
+        if (historical_fork_peer) {
+            // Addresses from a peer on the parked island are not stored
+            // and were not relayed above.
+        } else if (!m_chainman.IsDiscoveryRelay() ||
             node::discovery_relay::MayLearnAddressFromPeer(
                 pfrom.IsInboundConn(), pfrom.IsManualConn(),
                 pfrom.IsAddrFetchConn())) {
@@ -21198,11 +21321,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
-        if (m_chainman.IsDiscoveryRelay()) {
-            LogDebug(BCLog::NET, "Ignoring headers on discovery relay peer=%d\n", pfrom.GetId());
-            return;
-        }
-
         std::vector<CBlockHeader> headers;
 
         // Bypass the normal CBlock deserialization, as we don't want to risk deserializing 2000 full blocks.
@@ -21488,9 +21606,44 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     }
                 }
             }
+            std::unordered_set<NodeId> on_historical_fork;
+            std::unordered_set<NodeId> unknown_above_fork;
+            {
+                LOCK(m_peer_mutex);
+                for (const auto& [id, connected] : m_peer_map) {
+                    if (connected->m_on_historical_deep_fork.load(
+                            std::memory_order_relaxed)) {
+                        on_historical_fork.insert(id);
+                    }
+                }
+            }
+            {
+                LOCK(cs_main);
+                for (const auto& [id, state] : m_node_states) {
+                    const CBlockIndex* const known{state.pindexBestKnownBlock};
+                    if (state.m_on_historical_deep_fork ||
+                        (known != nullptr &&
+                         m_chainman.IndexOnHistoricalDeepFork(known))) {
+                        on_historical_fork.insert(id);
+                        continue;
+                    }
+                    const auto height_it{starting_heights.find(id)};
+                    const int32_t version_height{
+                        height_it == starting_heights.end() ? -1 : height_it->second};
+                    const bool claims_above_fork{
+                        version_height >= kernel::HISTORICAL_DEEP_FORK_HEIGHT};
+                    const bool proven_below_or_other{
+                        known != nullptr &&
+                        known->nHeight >= kernel::HISTORICAL_DEEP_FORK_HEIGHT};
+                    if (claims_above_fork && !proven_below_or_other) {
+                        unknown_above_fork.insert(id);
+                    }
+                }
+            }
             std::vector<int32_t> network_heights;
             m_connman.ForEachNode([&](CNode* pnode) {
                 if (pnode == nullptr || pnode->fDisconnect) return;
+                if (on_historical_fork.contains(pnode->GetId())) return;
                 if ((pnode->m_nServices.load(std::memory_order_relaxed) &
                      NODE_NETWORK) == 0) {
                     return;
@@ -21511,7 +21664,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 const auto height_it{starting_heights.find(pnode->GetId())};
                 if (height_it == starting_heights.end()) return;
                 if (!node::discovery_relay::MayAdvertiseConnectedPeer(
-                        services, height_it->second, watermark)) {
+                        services, height_it->second, watermark,
+                        on_historical_fork.contains(pnode->GetId()),
+                        unknown_above_fork.contains(pnode->GetId()))) {
                     return;
                 }
                 CService endpoint;
@@ -22493,11 +22648,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
     MaybeSendAddr(*pto, *peer, current_time);
 
-    // Discovery relays introduce peers. They do not sync headers, probe
-    // BestKnown, or occupy cs_main per inbound on the GETADDR path. With
-    // ~170 inbounds that theater delayed ADDR replies past ADDR_FETCH's
-    // 5-minute timeout.
+    // Discovery relays introduce peers. Body sync stays off. A header
+    // probe classifies whether the peer's best block is the parked
+    // historical fork; that probe is the only cs_main work added here.
     if (m_chainman.IsDiscoveryRelay()) {
+        MaybeClassifyDiscoveryPeerChain(*pto, *peer);
         return true;
     }
 
