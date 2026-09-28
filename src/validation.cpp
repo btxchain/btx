@@ -10080,7 +10080,17 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // partially verified heavier rewrite still stays parked.
             const bool deep_fork_escape{
                 !authority_escape &&
+                m_chainman.m_options.reorg_policy !=
+                    ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
                 m_chainman.DeepForkAutoResolveMayUnpark(pindexNew)};
+            if (m_chainman.m_options.reorg_policy ==
+                    ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
+                m_chainman.IndexOnHistoricalDeepFork(pindexNew)) {
+                skipped_this_call.insert(pindexNew);
+                setBlockIndexCandidates.erase(pindexNew);
+                ++skipped_count;
+                continue;
+            }
             if ((!authority_escape && !deep_fork_escape) ||
                 !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
                 skipped_this_call.insert(pindexNew);
@@ -12314,6 +12324,37 @@ void ChainstateManager::NotifyCadenceHold(const bilingual_str& alarm, int allowe
         *m_cadence_hold_logged_allowed != allowed_height) {
         LogWarning("%s\n", alarm.original);
         m_cadence_hold_logged_allowed = allowed_height;
+    }
+}
+
+bool ChainstateManager::IndexOnHistoricalDeepFork(const CBlockIndex* index) const
+{
+    if (index == nullptr) return false;
+    const uint256 root{kernel::HistoricalDeepForkRoot()};
+    if (index->GetBlockHash() == root) return true;
+    if (index->nHeight < kernel::HISTORICAL_DEEP_FORK_HEIGHT) return false;
+    const CBlockIndex* const at{index->GetAncestor(kernel::HISTORICAL_DEEP_FORK_HEIGHT)};
+    return at != nullptr && at->GetBlockHash() == root;
+}
+
+void ChainstateManager::ParkHistoricalDeepFork(CBlockIndex* index)
+{
+    AssertLockHeld(::cs_main);
+    if (m_options.reorg_policy != Options::ReorgPolicyMode::BOUNDED) return;
+    if (index == nullptr || !IndexOnHistoricalDeepFork(index)) return;
+    CBlockIndex* root{index};
+    if (index->nHeight > kernel::HISTORICAL_DEEP_FORK_HEIGHT) {
+        root = const_cast<CBlockIndex*>(index->GetAncestor(kernel::HISTORICAL_DEEP_FORK_HEIGHT));
+    }
+    if (root == nullptr || IsOnParkedReorgBranch(root)) return;
+    if (m_active_chainstate != nullptr && m_active_chainstate->m_chain.Contains(root)) {
+        LogWarning("Historical deep fork %s is already on the active chain; leaving it\n",
+                   root->GetBlockHash().ToString());
+        return;
+    }
+    if (ParkReorgBranch(root)) {
+        LogWarning("Parked historical deep fork root %s height=%d (bounded policy; not marked invalid)\n",
+                   root->GetBlockHash().ToString(), root->nHeight);
     }
 }
 
@@ -15921,6 +15962,12 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     CBlockIndex* const prev_best{m_best_header};
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
+    ParkHistoricalDeepFork(pindex);
+    if (pindex != nullptr && IsOnParkedReorgBranch(pindex) && m_best_header != nullptr &&
+        IsOnParkedReorgBranch(m_best_header)) {
+        SetBestHeader(prev_best != nullptr && !IsOnParkedReorgBranch(prev_best) ? prev_best
+                                                                                : ActiveChain().Tip());
+    }
     // Stamp the victim-relative first-seen tip height ONCE, on first index
     // creation, for the local -deepforkautoresolve policy. Memory-only; never
     // consensus. Guarded on the -1 default so re-announcements do not reset it.
@@ -17120,6 +17167,10 @@ bool ChainstateManager::LoadBlockIndex()
             return false;
         }
 
+        if (const CBlockIndex* historical = m_blockman.LookupBlockIndex(kernel::HistoricalDeepForkRoot())) {
+            ParkHistoricalDeepFork(const_cast<CBlockIndex*>(historical));
+        }
+
         std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndices()};
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
                   CBlockIndexHeightOnlyComparator());
@@ -17130,7 +17181,9 @@ bool ChainstateManager::LoadBlockIndex()
             if (pindex->nStatus & BLOCK_FAILED_MASK && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
-            if (pindex->IsValid(BLOCK_VALID_TREE)) {
+            if (pindex->IsValid(BLOCK_VALID_TREE) &&
+                !(m_options.reorg_policy == Options::ReorgPolicyMode::BOUNDED &&
+                  IsOnParkedReorgBranch(pindex))) {
                 MaybeUpdateBestClaimedHeader(pindex);
                 if (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, *pindex)) {
                     SetBestHeader(pindex);

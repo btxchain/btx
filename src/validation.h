@@ -1766,6 +1766,10 @@ public:
     const CBlockIndex* FindParkedReorgBranchRoot(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsOnParkedReorgBranch(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ParkReorgBranch(CBlockIndex* branch_root) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Park HistoricalDeepForkRoot when bounded mode is on and that block is
+    //! not already on the active chain. No-op in legacy/observe.
+    void ParkHistoricalDeepFork(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool IndexOnHistoricalDeepFork(const CBlockIndex* index) const;
     bool UnparkReorgBranchContainingBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Remove stale persisted park roots that cannot safely apply to the current

@@ -64,6 +64,12 @@ checked:
   Parked branches, ordinary peers, and unsolicited batches do not get
   either exception. Learning those headers does not raise the reorg
   ceiling or make the authority the fork-choice referee.
+- Bounded mode parks one historical fork root, the 228146 block
+  `8240c62e…` that a warn-only node followed for 3461 blocks. A fresh
+  node does not sync that island. The block is not marked invalid, a
+  node already on that chain is left there, and `-reorgpolicy=legacy`
+  does not park it. `reconsiderblock` does not clear it while bounded
+  mode is on.
 
 A fast-start snapshot is pinned at height 228000, on the shared ancestor
 below the 228145 fork. It does not choose either child of that fork.

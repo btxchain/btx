@@ -245,6 +245,19 @@ enum class BoundedReorgDecision : uint8_t {
     PARK_PROTECTED_ANCESTOR,
 };
 
+//! First block of the heavier chain a warn-only node followed for 3461
+//! blocks on 2026-09-27, forking after height 228145. Bounded mode parks
+//! this root so a fresh node does not sync that island. The block is not
+//! marked failed. `-reorgpolicy=legacy` does not park it.
+[[nodiscard]] inline uint256 HistoricalDeepForkRoot()
+{
+    return uint256::FromHex(
+               "8240c62e62b47fc675610908c03045c244de1dfc06246209830ba9d98468952c")
+        .value();
+}
+
+inline constexpr int HISTORICAL_DEEP_FORK_HEIGHT{228146};
+
 [[nodiscard]] inline constexpr BoundedReorgDecision DecideBoundedReorg(
     int depth,
     uint32_t normal_depth,

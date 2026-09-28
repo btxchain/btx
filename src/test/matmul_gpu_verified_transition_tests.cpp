@@ -535,6 +535,9 @@ BOOST_AUTO_TEST_CASE(deep_fork_auto_resolve_predicates)
     // In scope only when enabled, PARK, and reorg_depth > park_depth.
     using kernel::BoundedReorgDecision;
     using kernel::DecideBoundedReorg;
+    using kernel::HistoricalDeepForkRoot;
+    BOOST_CHECK(HistoricalDeepForkRoot() ==
+                uint256::FromHex("8240c62e62b47fc675610908c03045c244de1dfc06246209830ba9d98468952c").value());
     // A fully checked 3461-deep fork stays parked. Depth 53 can recover after
     // a stall; 295 cannot without an explicit repair. Equal or missing work
     // does not qualify, and a repair still cannot skip the work check.

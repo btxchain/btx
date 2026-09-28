@@ -2461,6 +2461,11 @@ void ReconsiderBlock(ChainstateManager& chainman, uint256 block_hash) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
 
+        if (chainman.m_options.reorg_policy == kernel::ChainstateManagerOpts::ReorgPolicyMode::BOUNDED &&
+            chainman.IndexOnHistoricalDeepFork(pblockindex)) {
+            throw JSONRPCError(RPC_VERIFY_ERROR,
+                               "reconsiderblock cannot activate the historical deep fork under -reorgpolicy=bounded");
+        }
         const bool was_parked =
             chainman.FindParkedReorgBranchRoot(pblockindex) != nullptr;
         if (was_parked && !chainman.UnparkReorgBranchContainingBlock(pblockindex)) {
