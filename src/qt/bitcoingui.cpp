@@ -465,11 +465,13 @@ void BitcoinGUI::createActions()
                     continue;
                 }
 
-                connect(action, &QAction::triggered, [this, path] {
+                // AppleClang + -fopenmp cannot capture a structured binding.
+                const std::string wallet_path{path};
+                connect(action, &QAction::triggered, [this, wallet_path] {
                     auto activity = new OpenWalletActivity(m_wallet_controller, this);
                     connect(activity, &OpenWalletActivity::opened, this, &BitcoinGUI::setCurrentWallet, Qt::QueuedConnection);
                     connect(activity, &OpenWalletActivity::opened, rpcConsole, &RPCConsole::setCurrentWallet, Qt::QueuedConnection);
-                    activity->open(path);
+                    activity->open(wallet_path);
                 });
             }
             if (m_open_wallet_menu->isEmpty()) {
@@ -529,10 +531,12 @@ void BitcoinGUI::createActions()
                 name.replace(QChar('&'), QString("&&"));
                 QAction* action = m_migrate_wallet_menu->addAction(name);
 
-                connect(action, &QAction::triggered, [this, wallet_name] {
+                // AppleClang + -fopenmp cannot capture a structured binding.
+                const std::string migrate_name{wallet_name};
+                connect(action, &QAction::triggered, [this, migrate_name] {
                     auto activity = new MigrateWalletActivity(m_wallet_controller, this);
                     connect(activity, &MigrateWalletActivity::migrated, this, &BitcoinGUI::setCurrentWallet);
-                    activity->migrate(wallet_name);
+                    activity->migrate(migrate_name);
                 });
             }
             if (m_migrate_wallet_menu->isEmpty()) {
