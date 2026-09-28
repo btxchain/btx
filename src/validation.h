@@ -1776,7 +1776,11 @@ public:
     //! -reorgrecoverymaxdepth. Both chains must already be in the index.
     //! Does not mark the block failed, does not park the active chain, and
     //! does nothing in legacy or observe mode.
-    void MaybeParkDeepHeavierRewrite(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! `park` is false while a height-ordered index scan is still noting
+    //! headers. Parking in the middle of that scan compares incomplete tips
+    //! and can park the chain that later becomes the active tip. The scan
+    //! parks once, after every header has been noted.
+    void MaybeParkDeepHeavierRewrite(CBlockIndex* index, bool park = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! True when `index` lies on a heavier chain that forked from a strictly
     //! taller chain deeper than the recovery ceiling. Requires both chains
     //! in the index. Not a consensus failure.

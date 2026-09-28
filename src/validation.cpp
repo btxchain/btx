@@ -12385,20 +12385,21 @@ bool ChainstateManager::IsDeepHeavierRewriteBranch(const CBlockIndex* index) con
     return DeepRewriteChild(m_tallest_header, heavier, m_options.reorg_recovery_max_depth) != nullptr;
 }
 
-void ChainstateManager::MaybeParkDeepHeavierRewrite(CBlockIndex* index)
+void ChainstateManager::MaybeParkDeepHeavierRewrite(CBlockIndex* index, bool park)
 {
     AssertLockHeld(::cs_main);
     if (m_options.reorg_policy != Options::ReorgPolicyMode::BOUNDED) return;
-    if (index == nullptr || !index->IsValid(BLOCK_VALID_TREE)) return;
-    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return;
-
-    if (m_tallest_header == nullptr || index->nHeight > m_tallest_header->nHeight ||
-        (index->nHeight == m_tallest_header->nHeight && index->nChainWork > m_tallest_header->nChainWork)) {
-        m_tallest_header = index;
+    if (index != nullptr && index->IsValid(BLOCK_VALID_TREE) &&
+        (index->nStatus & BLOCK_FAILED_MASK) == 0) {
+        if (m_tallest_header == nullptr || index->nHeight > m_tallest_header->nHeight ||
+            (index->nHeight == m_tallest_header->nHeight && index->nChainWork > m_tallest_header->nChainWork)) {
+            m_tallest_header = index;
+        }
+        if (m_heaviest_header == nullptr || index->nChainWork > m_heaviest_header->nChainWork) {
+            m_heaviest_header = index;
+        }
     }
-    if (m_heaviest_header == nullptr || index->nChainWork > m_heaviest_header->nChainWork) {
-        m_heaviest_header = index;
-    }
+    if (!park) return;
 
     const CBlockIndex* const child{
         DeepRewriteChild(m_tallest_header, m_heaviest_header, m_options.reorg_recovery_max_depth)};
@@ -17242,8 +17243,9 @@ bool ChainstateManager::LoadBlockIndex()
         if (m_options.reorg_policy == Options::ReorgPolicyMode::BOUNDED) {
             for (CBlockIndex* pindex : vSortedByHeight) {
                 if (m_interrupt) return false;
-                MaybeParkDeepHeavierRewrite(pindex);
+                MaybeParkDeepHeavierRewrite(pindex, /*park=*/false);
             }
+            MaybeParkDeepHeavierRewrite(nullptr, /*park=*/true);
         }
 
         for (CBlockIndex* pindex : vSortedByHeight) {
