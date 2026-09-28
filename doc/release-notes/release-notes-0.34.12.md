@@ -95,7 +95,9 @@ below the 228145 fork. It does not choose either child of that fork.
 A CUDA archive must contain `libcublasLt` beside `btxd`. The driver does
 not provide that library. The packager refuses a CUDA cut that omits it.
 `libevent`, `libzmq5`, and `libgomp1` are host packages; the launch
-wrapper names the apt packages when they are missing.
+wrapper names the apt packages when they are missing. `btxd` is built
+with ZMQ. `btx-qt` is included when the GUI was built. The GUI needs Qt
+on the build machine; it is not a separate consensus binary.
 
 ## What it does not do
 

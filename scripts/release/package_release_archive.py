@@ -88,6 +88,7 @@ SUPPORT_FILES = load_support_files()
 # Packaged next to btxd when present (0.34.7 Native Model Network + 0.34.8
 # first-run / hosted HCP / CRL planes + Metal probe).
 OPTIONAL_SIBLING_BINARIES = (
+    "btx-qt",
     "btx-modeld",
     "btx-modelcheck",
     "btx-open",
