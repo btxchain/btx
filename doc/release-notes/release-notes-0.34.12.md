@@ -70,7 +70,8 @@ checked:
   node already on that chain is left there, and `-reorgpolicy=legacy`
   does not park it. `reconsiderblock` does not clear it while bounded
   mode is on.
-- A discovery relay indexes headers and asks peers for them, so it can
+- A discovery relay indexes headers and asks peers at or above that
+  fork for them, so it can
   see which chain each peer is on. It does not download or serve block
   bodies. GETADDR and address relay omit a peer whose best-known block
   is on that parked fork, and omit a peer that claims a height at or

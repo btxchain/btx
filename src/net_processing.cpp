@@ -10773,6 +10773,14 @@ void PeerManagerImpl::MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
     if (!m_chainman.IsDiscoveryRelay()) return;
     if (node.IsAddrFetchConn() || node.fDisconnect || node.fPauseSend) return;
     if (peer.m_on_historical_deep_fork.load(std::memory_order_relaxed)) return;
+    // Peers still below the historical split cannot tell us which child
+    // is live, and walking their headers crowded out peers at the tip.
+    if (!node.IsManualConn() &&
+        peer.m_starting_height.load(std::memory_order_relaxed) <
+            kernel::HISTORICAL_DEEP_FORK_HEIGHT) {
+        m_background_headers_pending.erase(node.GetId());
+        return;
+    }
 
     const auto now{NodeClock::now()};
     const bool manual{node.IsManualConn()};
@@ -13956,6 +13964,16 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
             (peer.m_on_historical_deep_fork.load(std::memory_order_relaxed) ||
              m_chainman.IndexOnHistoricalDeepFork(pindexLast))) {
             chase_more = false;
+        }
+        if (m_chainman.IsDiscoveryRelay() && chase_more) {
+            LOCK(cs_main);
+            const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+            // A peer whose headers are already on our chain and behind the
+            // tip cannot name the fork. Do not walk that suffix.
+            if (tip != nullptr && pindexLast->nHeight < tip->nHeight &&
+                tip->GetAncestor(pindexLast->nHeight) == pindexLast) {
+                chase_more = false;
+            }
         }
         if (node::matmul_trusted::IsTrustedMirror()) {
             LOCK(cs_main);
