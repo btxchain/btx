@@ -92,6 +92,11 @@ checked:
 A fast-start snapshot is pinned at height 228000, on the shared ancestor
 below the 228145 fork. It does not choose either child of that fork.
 
+A CUDA archive must contain `libcublasLt` beside `btxd`. The driver does
+not provide that library. The packager refuses a CUDA cut that omits it.
+`libevent`, `libzmq5`, and `libgomp1` are host packages; the launch
+wrapper names the apt packages when they are missing.
+
 ## What it does not do
 
 - No new peer ban for an old-body refusal, including a limited-history

@@ -521,6 +521,7 @@ def stage_release_tree(
             r"^lib(cublasLt|cublas|cudart|nvJitLink|nvrtc|culibos)(\.so(\.\d+)*)$"
         )
         libexec_dir.mkdir(parents=True, exist_ok=True)
+        bundled_cublaslt = False
         for source in sorted(btxd_path.parent.glob("lib*.so*")):
             if not cuda_lib_re.match(source.name):
                 continue
@@ -528,6 +529,18 @@ def stage_release_tree(
             shutil.copy2(source, destination)
             destination.chmod(destination.stat().st_mode | 0o111)
             included.append(str(destination.relative_to(release_root)))
+            if source.name.startswith("libcublasLt.so"):
+                bundled_cublaslt = True
+        # Launch verification runs on the build host, which already has the
+        # toolkit on the loader path. A CUDA tarball without libcublasLt
+        # then fails on a machine that only has the NVIDIA driver.
+        if not bundled_cublaslt:
+            raise FileNotFoundError(
+                "CUDA archive is missing libcublasLt next to --btxd. "
+                "Run scripts/release/bundle_cuda_runtime_libs.py on that binary first. "
+                "The NVIDIA driver does not provide libcublasLt. "
+                "libevent, libzmq5, and libgomp1 stay host packages."
+            )
 
     if platform_id.startswith("linux-"):
         lib_dir = release_root / "lib"
