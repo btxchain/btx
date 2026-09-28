@@ -1611,6 +1611,11 @@ public:
 
     /** Best header we've seen so far (used for getheaders queries' starting points). */
     CBlockIndex* m_best_header GUARDED_BY(::cs_main){nullptr};
+    /** Strictly tallest valid header (height, then work). Local bookkeeping
+     *  for the deep-heavier-rewrite park. Not a consensus tip. */
+    CBlockIndex* m_tallest_header GUARDED_BY(::cs_main){nullptr};
+    /** Most-work valid header. Compared with m_tallest_header. */
+    CBlockIndex* m_heaviest_header GUARDED_BY(::cs_main){nullptr};
     /**
      * Most-work TREE-valid header, including unattested competing forks.
      * Overlay RecalculateBestHeader / PreferTrustAdjustedHeader pin
@@ -1766,10 +1771,16 @@ public:
     const CBlockIndex* FindParkedReorgBranchRoot(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsOnParkedReorgBranch(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ParkReorgBranch(CBlockIndex* branch_root) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    //! Park HistoricalDeepForkRoot when bounded mode is on and that block is
-    //! not already on the active chain. No-op in legacy/observe.
-    void ParkHistoricalDeepFork(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    [[nodiscard]] bool IndexOnHistoricalDeepFork(const CBlockIndex* index) const;
+    //! Under -reorgpolicy=bounded, park the first block of a heavier chain
+    //! that would disconnect a strictly taller chain by more than
+    //! -reorgrecoverymaxdepth. Both chains must already be in the index.
+    //! Does not mark the block failed, does not park the active chain, and
+    //! does nothing in legacy or observe mode.
+    void MaybeParkDeepHeavierRewrite(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! True when `index` lies on a heavier chain that forked from a strictly
+    //! taller chain deeper than the recovery ceiling. Requires both chains
+    //! in the index. Not a consensus failure.
+    [[nodiscard]] bool IsDeepHeavierRewriteBranch(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool UnparkReorgBranchContainingBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Remove stale persisted park roots that cannot safely apply to the current

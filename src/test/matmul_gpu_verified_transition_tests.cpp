@@ -535,9 +535,18 @@ BOOST_AUTO_TEST_CASE(deep_fork_auto_resolve_predicates)
     // In scope only when enabled, PARK, and reorg_depth > park_depth.
     using kernel::BoundedReorgDecision;
     using kernel::DecideBoundedReorg;
-    using kernel::HistoricalDeepForkRoot;
-    BOOST_CHECK(HistoricalDeepForkRoot() ==
-                uint256::FromHex("8240c62e62b47fc675610908c03045c244de1dfc06246209830ba9d98468952c").value());
+    using kernel::IsDeepHeavierRewrite;
+    // 2026-09-27 shape: taller 231606, heavier 231288, fork 228145, ceiling 72.
+    // The heavier chain is shorter, and adopting it disconnects 3461 blocks.
+    BOOST_CHECK(IsDeepHeavierRewrite(231606, 231288, 228145, 72));
+    BOOST_CHECK(!IsDeepHeavierRewrite(231606, 231288, 228145, 3461));
+    // Disconnect of exactly the ceiling is still inside recovery.
+    BOOST_CHECK(!IsDeepHeavierRewrite(231606, 231288, 231534, 72));
+    BOOST_CHECK(IsDeepHeavierRewrite(200, 190, 100, 72));
+    // A heavier chain that is also the tallest is not parked.
+    BOOST_CHECK(!IsDeepHeavierRewrite(200, 250, 100, 72));
+    BOOST_CHECK(!IsDeepHeavierRewrite(200, 200, 100, 72));
+    BOOST_CHECK(!IsDeepHeavierRewrite(100, 90, 50, 72));
     // A fully checked 3461-deep fork stays parked. Depth 53 can recover after
     // a stall; 295 cannot without an explicit repair. Equal or missing work
     // does not qualify, and a repair still cannot skip the work check.

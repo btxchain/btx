@@ -10070,6 +10070,24 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             }
         }
 
+        if (m_chainman.m_options.reorg_policy ==
+                ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
+            m_chainman.IsDeepHeavierRewriteBranch(pindexNew)) {
+            const CBlockIndex* const active_tip{m_chain.Tip()};
+            // A node whose tip is already on the rewrite keeps extending it.
+            // A tip still below the fork is not on it, so the rewrite is
+            // skipped and the taller chain can be selected.
+            const bool tip_on_rewrite{
+                active_tip != nullptr &&
+                m_chainman.IsDeepHeavierRewriteBranch(active_tip)};
+            if (!tip_on_rewrite) {
+                skipped_this_call.insert(pindexNew);
+                setBlockIndexCandidates.erase(pindexNew);
+                ++skipped_count;
+                continue;
+            }
+        }
+
         if (m_chainman.IsOnParkedReorgBranch(pindexNew)) {
             // Mirror park-escape: if we parked our own uniquely attested
             // authority branch (self-inflicted tip-extension into the park
@@ -10094,14 +10112,6 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 m_chainman.m_options.reorg_policy !=
                     ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
                 m_chainman.DeepForkAutoResolveMayUnpark(pindexNew)};
-            if (m_chainman.m_options.reorg_policy ==
-                    ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
-                m_chainman.IndexOnHistoricalDeepFork(pindexNew)) {
-                skipped_this_call.insert(pindexNew);
-                setBlockIndexCandidates.erase(pindexNew);
-                ++skipped_count;
-                continue;
-            }
             if ((!authority_escape && !deep_fork_escape) ||
                 !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
                 skipped_this_call.insert(pindexNew);
@@ -12338,34 +12348,86 @@ void ChainstateManager::NotifyCadenceHold(const bilingual_str& alarm, int allowe
     }
 }
 
-bool ChainstateManager::IndexOnHistoricalDeepFork(const CBlockIndex* index) const
+namespace {
+
+const CBlockIndex* DeepRewriteChild(const CBlockIndex* taller, const CBlockIndex* heavier, uint32_t ceiling)
 {
-    if (index == nullptr) return false;
-    const uint256 root{kernel::HistoricalDeepForkRoot()};
-    if (index->GetBlockHash() == root) return true;
-    if (index->nHeight < kernel::HISTORICAL_DEEP_FORK_HEIGHT) return false;
-    const CBlockIndex* const at{index->GetAncestor(kernel::HISTORICAL_DEEP_FORK_HEIGHT)};
-    return at != nullptr && at->GetBlockHash() == root;
+    if (taller == nullptr || heavier == nullptr || taller == heavier) return nullptr;
+    if (!(heavier->nChainWork > taller->nChainWork)) return nullptr;
+    const CBlockIndex* fork{LastCommonAncestor(taller, heavier)};
+    if (fork == nullptr) return nullptr;
+    if (!kernel::IsDeepHeavierRewrite(taller->nHeight, heavier->nHeight, fork->nHeight, ceiling)) {
+        return nullptr;
+    }
+    return heavier->GetAncestor(fork->nHeight + 1);
 }
 
-void ChainstateManager::ParkHistoricalDeepFork(CBlockIndex* index)
+} // namespace
+
+bool ChainstateManager::IsDeepHeavierRewriteBranch(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (m_options.reorg_policy != Options::ReorgPolicyMode::BOUNDED) return false;
+    if (index == nullptr || m_tallest_header == nullptr) return false;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    if (!index->IsValid(BLOCK_VALID_TREE)) return false;
+    if (m_tallest_header->nHeight >= index->nHeight &&
+        m_tallest_header->GetAncestor(index->nHeight) == index) {
+        return false;
+    }
+    const CBlockIndex* heavier{index};
+    if (m_heaviest_header != nullptr &&
+        m_heaviest_header->nChainWork >= heavier->nChainWork &&
+        m_heaviest_header->nHeight >= index->nHeight &&
+        m_heaviest_header->GetAncestor(index->nHeight) == index) {
+        heavier = m_heaviest_header;
+    }
+    return DeepRewriteChild(m_tallest_header, heavier, m_options.reorg_recovery_max_depth) != nullptr;
+}
+
+void ChainstateManager::MaybeParkDeepHeavierRewrite(CBlockIndex* index)
 {
     AssertLockHeld(::cs_main);
     if (m_options.reorg_policy != Options::ReorgPolicyMode::BOUNDED) return;
-    if (index == nullptr || !IndexOnHistoricalDeepFork(index)) return;
-    CBlockIndex* root{index};
-    if (index->nHeight > kernel::HISTORICAL_DEEP_FORK_HEIGHT) {
-        root = const_cast<CBlockIndex*>(index->GetAncestor(kernel::HISTORICAL_DEEP_FORK_HEIGHT));
+    if (index == nullptr || !index->IsValid(BLOCK_VALID_TREE)) return;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return;
+
+    if (m_tallest_header == nullptr || index->nHeight > m_tallest_header->nHeight ||
+        (index->nHeight == m_tallest_header->nHeight && index->nChainWork > m_tallest_header->nChainWork)) {
+        m_tallest_header = index;
     }
-    if (root == nullptr || IsOnParkedReorgBranch(root)) return;
-    if (m_active_chainstate != nullptr && m_active_chainstate->m_chain.Contains(root)) {
-        LogWarning("Historical deep fork %s is already on the active chain; leaving it\n",
-                   root->GetBlockHash().ToString());
-        return;
+    if (m_heaviest_header == nullptr || index->nChainWork > m_heaviest_header->nChainWork) {
+        m_heaviest_header = index;
     }
-    if (ParkReorgBranch(root)) {
-        LogWarning("Parked historical deep fork root %s height=%d (bounded policy; not marked invalid)\n",
-                   root->GetBlockHash().ToString(), root->nHeight);
+
+    const CBlockIndex* const child{
+        DeepRewriteChild(m_tallest_header, m_heaviest_header, m_options.reorg_recovery_max_depth)};
+    if (child == nullptr) return;
+    CBlockIndex* root{const_cast<CBlockIndex*>(child)};
+    if (!IsOnParkedReorgBranch(root)) {
+        if (m_active_chainstate != nullptr && m_active_chainstate->m_chain.Contains(root)) {
+            LogWarning("Deep heavier rewrite %s is already on the active chain; leaving it\n",
+                       root->GetBlockHash().ToString());
+            return;
+        }
+        if (ParkReorgBranch(root)) {
+            const CBlockIndex* const fork{root->pprev};
+            LogWarning("Parked deep heavier rewrite root %s height=%d fork=%d taller=%d heavier=%d (bounded policy; not marked invalid)\n",
+                       root->GetBlockHash().ToString(), root->nHeight,
+                       fork != nullptr ? fork->nHeight : -1,
+                       m_tallest_header != nullptr ? m_tallest_header->nHeight : -1,
+                       m_heaviest_header != nullptr ? m_heaviest_header->nHeight : -1);
+        }
+    }
+
+    if (m_best_header == nullptr || !IsDeepHeavierRewriteBranch(m_best_header)) return;
+    const CBlockIndex* const tip{ActiveChain().Tip()};
+    // Leave the best header on the rewrite only when this node is already
+    // on that chain. A tip below the fork still follows the taller chain.
+    if (tip != nullptr && IsDeepHeavierRewriteBranch(tip)) return;
+    if (m_tallest_header != nullptr && !IsDeepHeavierRewriteBranch(m_tallest_header) &&
+        !IsOnParkedReorgBranch(m_tallest_header)) {
+        SetBestHeader(m_tallest_header);
     }
 }
 
@@ -15973,12 +16035,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     CBlockIndex* const prev_best{m_best_header};
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
-    ParkHistoricalDeepFork(pindex);
-    if (pindex != nullptr && IsOnParkedReorgBranch(pindex) && m_best_header != nullptr &&
-        IsOnParkedReorgBranch(m_best_header)) {
-        SetBestHeader(prev_best != nullptr && !IsOnParkedReorgBranch(prev_best) ? prev_best
-                                                                                : ActiveChain().Tip());
-    }
+    MaybeParkDeepHeavierRewrite(pindex);
     // Stamp the victim-relative first-seen tip height ONCE, on first index
     // creation, for the local -deepforkautoresolve policy. Memory-only; never
     // consensus. Guarded on the -1 default so re-announcements do not reset it.
@@ -17178,13 +17235,16 @@ bool ChainstateManager::LoadBlockIndex()
             return false;
         }
 
-        if (const CBlockIndex* historical = m_blockman.LookupBlockIndex(kernel::HistoricalDeepForkRoot())) {
-            ParkHistoricalDeepFork(const_cast<CBlockIndex*>(historical));
-        }
-
         std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndices()};
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
                   CBlockIndexHeightOnlyComparator());
+
+        if (m_options.reorg_policy == Options::ReorgPolicyMode::BOUNDED) {
+            for (CBlockIndex* pindex : vSortedByHeight) {
+                if (m_interrupt) return false;
+                MaybeParkDeepHeavierRewrite(pindex);
+            }
+        }
 
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
@@ -17194,7 +17254,7 @@ bool ChainstateManager::LoadBlockIndex()
             }
             if (pindex->IsValid(BLOCK_VALID_TREE) &&
                 !(m_options.reorg_policy == Options::ReorgPolicyMode::BOUNDED &&
-                  IsOnParkedReorgBranch(pindex))) {
+                  (IsOnParkedReorgBranch(pindex) || IsDeepHeavierRewriteBranch(pindex)))) {
                 MaybeUpdateBestClaimedHeader(pindex);
                 if (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, *pindex)) {
                     SetBestHeader(pindex);

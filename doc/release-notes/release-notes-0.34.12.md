@@ -64,22 +64,27 @@ checked:
   Parked branches, ordinary peers, and unsolicited batches do not get
   either exception. Learning those headers does not raise the reorg
   ceiling or make the authority the fork-choice referee.
-- Bounded mode parks one historical fork root, the 228146 block
-  `8240c62e…` that a warn-only node followed for 3461 blocks. A fresh
-  node does not sync that island. The block is not marked invalid, a
-  node already on that chain is left there, and `-reorgpolicy=legacy`
-  does not park it. `reconsiderblock` does not clear it while bounded
-  mode is on.
-- A discovery relay indexes headers and asks peers at or above that
-  fork for them, so it can
-  see which chain each peer is on. It does not download or serve block
+- Bounded mode parks a heavier chain when both header chains are
+  visible and adopting the heavier one would disconnect a strictly
+  taller chain by more than the recovery ceiling (72). The 3461-block
+  rewrite is that shape: the taller tip was 231606, the heavier tip
+  was 231288, and they forked at 228145. The parked block is not
+  marked invalid. A node already on that chain is left there.
+  `-reorgpolicy=legacy` does not park it. `reconsiderblock` does not
+  clear it while bounded mode is on. A heavier chain that is also the
+  tallest is not parked. A chain that is the only one in the index is
+  not parked, because the rule needs both sides.
+- A discovery relay indexes headers and asks peers that are not more
+  than the recovery ceiling behind its best header, so it can see
+  which chain each peer is on. It does not download or serve block
   bodies. GETADDR and address relay omit a peer whose best-known block
-  is on that parked fork, and omit a peer that claims a height at or
-  above the fork until a header shows they are not on it. Transaction
-  announcements are not sent to a peer already seen on that fork.
-  Addresses learned from such a peer are not stored. This is local
-  introduction policy. It does not mark the fork invalid, and an
-  ordinary node still does not need a trusted peer to follow the chain.
+  is on a parked deep heavier rewrite, and omit a peer that claims a
+  height more than the recovery ceiling above the relay's best header
+  until a header shows they are not on such a rewrite. Transaction
+  announcements are not sent to a peer already seen on one. Addresses
+  learned from such a peer are not stored. This is local introduction
+  policy. It does not mark the fork invalid, and an ordinary node
+  still does not need a trusted peer to follow the chain.
   `loadtxoutset` is allowed on a discovery relay so it can anchor at
   the published snapshot. It still does not connect blocks after that
   base.

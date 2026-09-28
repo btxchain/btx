@@ -2462,9 +2462,9 @@ void ReconsiderBlock(ChainstateManager& chainman, uint256 block_hash) {
         }
 
         if (chainman.m_options.reorg_policy == kernel::ChainstateManagerOpts::ReorgPolicyMode::BOUNDED &&
-            chainman.IndexOnHistoricalDeepFork(pblockindex)) {
+            chainman.IsDeepHeavierRewriteBranch(pblockindex)) {
             throw JSONRPCError(RPC_VERIFY_ERROR,
-                               "reconsiderblock cannot activate the historical deep fork under -reorgpolicy=bounded");
+                               "reconsiderblock cannot activate a deep heavier rewrite under -reorgpolicy=bounded");
         }
         const bool was_parked =
             chainman.FindParkedReorgBranchRoot(pblockindex) != nullptr;

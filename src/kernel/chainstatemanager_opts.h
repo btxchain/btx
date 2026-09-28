@@ -245,18 +245,29 @@ enum class BoundedReorgDecision : uint8_t {
     PARK_PROTECTED_ANCESTOR,
 };
 
-//! First block of the heavier chain a warn-only node followed for 3461
-//! blocks on 2026-09-27, forking after height 228145. Bounded mode parks
-//! this root so a fresh node does not sync that island. The block is not
-//! marked failed. `-reorgpolicy=legacy` does not park it.
-[[nodiscard]] inline uint256 HistoricalDeepForkRoot()
+//! A heavier chain that is strictly shorter than another valid chain, and
+//! whose fork from that taller chain is deeper than the recovery ceiling,
+//! is the same shape as the 3461-block rewrite (taller tip 231606, heavier
+//! tip 231288, fork 228145). Bounded mode parks that heavier branch when
+//! both header chains are visible. It does not park the taller chain, and
+//! it does not apply when the heavier chain is also the tallest. This is
+//! local policy, not a consensus failure and not a list of block hashes.
+[[nodiscard]] inline constexpr bool IsDeepHeavierRewrite(
+    int taller_height,
+    int heavier_height,
+    int fork_height,
+    uint32_t recovery_ceiling)
 {
-    return uint256::FromHex(
-               "8240c62e62b47fc675610908c03045c244de1dfc06246209830ba9d98468952c")
-        .value();
+    if (recovery_ceiling == 0) return false;
+    if (fork_height < 0 || taller_height <= fork_height || heavier_height <= fork_height) {
+        return false;
+    }
+    // Equal height is ordinary most-work. A heavier chain that is also
+    // the tallest stays the chain to follow.
+    if (heavier_height >= taller_height) return false;
+    const int disconnect{taller_height - fork_height};
+    return disconnect > static_cast<int>(recovery_ceiling);
 }
-
-inline constexpr int HISTORICAL_DEEP_FORK_HEIGHT{228146};
 
 [[nodiscard]] inline constexpr BoundedReorgDecision DecideBoundedReorg(
     int depth,

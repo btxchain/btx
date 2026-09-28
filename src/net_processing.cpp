@@ -1060,10 +1060,11 @@ struct Peer {
      *  This field must correlate with whether m_addr_known has been
      *  initialized.*/
     std::atomic_bool m_addr_relay_enabled{false};
-    /** Best-known block descends from the parked historical deep fork.
-     *  Address, transaction, and header-continuation relay skip this peer.
-     *  Not a protocol ban and not a consensus invalidity. */
-    std::atomic_bool m_on_historical_deep_fork{false};
+    /** Best-known block is on a parked deep heavier rewrite: a heavier
+     *  chain that would disconnect a taller chain by more than the recovery
+     *  ceiling. Address, transaction, and header-continuation relay skip
+     *  this peer. Not a protocol ban and not a consensus invalidity. */
+    std::atomic_bool m_on_deep_heavier_rewrite{false};
     /** Whether a getaddr request to this peer is outstanding. */
     bool m_getaddr_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
     /** Guards address sending timers. */
@@ -1256,8 +1257,8 @@ struct CNodeState {
     uint64_t m_keyed_netgroup{0};
     //! The best known block we know this peer has announced.
     const CBlockIndex* pindexBestKnownBlock{nullptr};
-    //! Best-known block is on the parked historical deep fork.
-    bool m_on_historical_deep_fork{false};
+    //! Best-known block is on a parked deep heavier rewrite.
+    bool m_on_deep_heavier_rewrite{false};
     //! The hash of the last unknown block this peer has announced.
     uint256 hashLastUnknownBlock{};
     //! Sticky-probe bound: beyond-best-header getheaders probes sent to this
@@ -1850,8 +1851,8 @@ private:
     bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window = false) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     void MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
-    /** Discovery relays ask peers for headers so a best-known block on the
-     *  parked historical fork can be excluded from ADDR introduction.
+    /** Discovery relays ask peers for headers so a best-known block on a
+     *  parked deep heavier rewrite can be excluded from ADDR introduction.
      *  Does not download bodies. */
     void MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -6064,12 +6065,12 @@ void PeerManagerImpl::UpdateBlockAvailability(NodeId nodeid, const uint256 &hash
     ProcessBlockAvailability(nodeid);
 
     const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
-    if (pindex && m_chainman.IndexOnHistoricalDeepFork(pindex)) {
+    if (pindex && m_chainman.IsDeepHeavierRewriteBranch(pindex)) {
         if (CNodeState* fork_state{State(nodeid)}) {
-            fork_state->m_on_historical_deep_fork = true;
+            fork_state->m_on_deep_heavier_rewrite = true;
         }
         if (PeerRef fork_peer{GetPeerRef(nodeid)}) {
-            fork_peer->m_on_historical_deep_fork.store(true, std::memory_order_relaxed);
+            fork_peer->m_on_deep_heavier_rewrite.store(true, std::memory_order_relaxed);
         }
     }
     if (pindex && pindex->nChainWork > 0) {
@@ -9514,7 +9515,7 @@ void PeerManagerImpl::RelayTransaction(const uint256& txid, const uint256& wtxid
     LOCK(m_peer_mutex);
         for(auto& it : m_peer_map) {
         Peer& peer = *it.second;
-        if (peer.m_on_historical_deep_fork.load(std::memory_order_relaxed)) continue;
+        if (peer.m_on_deep_heavier_rewrite.load(std::memory_order_relaxed)) continue;
         auto tx_relay = peer.GetTxRelay();
         if (!tx_relay) continue;
 
@@ -9575,7 +9576,7 @@ void PeerManagerImpl::RelayAddress(NodeId originator,
     LOCK(m_peer_mutex);
 
     for (auto& [id, peer] : m_peer_map) {
-        if (peer->m_on_historical_deep_fork.load(std::memory_order_relaxed)) continue;
+        if (peer->m_on_deep_heavier_rewrite.load(std::memory_order_relaxed)) continue;
         if (peer->m_addr_relay_enabled && id != originator && IsAddrCompatible(*peer, addr)) {
             uint64_t hashKey = CSipHasher(hasher).Write(id).Finalize();
             for (unsigned int i = 0; i < nRelayNodes; i++) {
@@ -10772,14 +10773,25 @@ void PeerManagerImpl::MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
     AssertLockHeld(g_msgproc_mutex);
     if (!m_chainman.IsDiscoveryRelay()) return;
     if (node.IsAddrFetchConn() || node.fDisconnect || node.fPauseSend) return;
-    if (peer.m_on_historical_deep_fork.load(std::memory_order_relaxed)) return;
-    // Peers still below the historical split cannot tell us which child
-    // is live, and walking their headers crowded out peers at the tip.
-    if (!node.IsManualConn() &&
-        peer.m_starting_height.load(std::memory_order_relaxed) <
-            kernel::HISTORICAL_DEEP_FORK_HEIGHT) {
-        m_background_headers_pending.erase(node.GetId());
-        return;
+    if (peer.m_on_deep_heavier_rewrite.load(std::memory_order_relaxed)) return;
+    // Peers more than the recovery ceiling behind our headers cannot name
+    // a competing tip, and walking them crowded out peers at the tip.
+    const int advertised{peer.m_starting_height.load(std::memory_order_relaxed)};
+    const int ceiling{static_cast<int>(m_chainman.m_options.reorg_recovery_max_depth)};
+    if (!node.IsManualConn()) {
+        int header_height{-1};
+        {
+            LOCK(cs_main);
+            if (m_chainman.m_best_header != nullptr) {
+                header_height = m_chainman.m_best_header->nHeight;
+            } else if (const CBlockIndex* tip{m_chainman.ActiveChain().Tip()}) {
+                header_height = tip->nHeight;
+            }
+        }
+        if (header_height >= 0 && advertised >= 0 && advertised + ceiling < header_height) {
+            m_background_headers_pending.erase(node.GetId());
+            return;
+        }
     }
 
     const auto now{NodeClock::now()};
@@ -10807,11 +10819,14 @@ void PeerManagerImpl::MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
         const CNodeState* state{State(node.GetId())};
         const CBlockIndex* const known{
             state != nullptr ? state->pindexBestKnownBlock : nullptr};
+        const bool on_rewrite{
+            known != nullptr && m_chainman.IsDeepHeavierRewriteBranch(known)};
+        const bool seen_near_claim{
+            known != nullptr && !on_rewrite && advertised >= 0 &&
+            known->nHeight + ceiling >= advertised};
         already_classified =
-            state == nullptr || state->m_on_historical_deep_fork ||
-            (known != nullptr &&
-             known->nHeight >= kernel::HISTORICAL_DEEP_FORK_HEIGHT &&
-             !m_chainman.IndexOnHistoricalDeepFork(known));
+            state == nullptr || state->m_on_deep_heavier_rewrite || on_rewrite ||
+            seen_near_claim;
         if (!already_classified) {
             const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
             const CBlockIndex* const start{known != nullptr ? known : tip};
@@ -13961,12 +13976,14 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
         // a stranded mirror can acquire the rest of the canonical headers.
         bool chase_more{true};
         if (m_chainman.IsDiscoveryRelay() &&
-            (peer.m_on_historical_deep_fork.load(std::memory_order_relaxed) ||
-             m_chainman.IndexOnHistoricalDeepFork(pindexLast))) {
+            peer.m_on_deep_heavier_rewrite.load(std::memory_order_relaxed)) {
             chase_more = false;
         }
         if (m_chainman.IsDiscoveryRelay() && chase_more) {
             LOCK(cs_main);
+            if (m_chainman.IsDeepHeavierRewriteBranch(pindexLast)) {
+                chase_more = false;
+            }
             const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
             // A peer whose headers are already on our chain and behind the
             // tip cannot name the fork. Do not walk that suffix.
@@ -14074,15 +14091,20 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     // A discovery relay indexes headers so it can tell which chain a peer
     // is on. It does not fetch bodies, run ExactReplay, or serve the chain.
     if (m_chainman.IsDiscoveryRelay()) {
-        if (m_chainman.IndexOnHistoricalDeepFork(pindexLast)) {
-            const bool first{!peer.m_on_historical_deep_fork.exchange(
+        bool on_rewrite{false};
+        {
+            LOCK(cs_main);
+            on_rewrite = m_chainman.IsDeepHeavierRewriteBranch(pindexLast);
+        }
+        if (on_rewrite) {
+            const bool first{!peer.m_on_deep_heavier_rewrite.exchange(
                 true, std::memory_order_relaxed)};
             WITH_LOCK(cs_main, if (CNodeState* fork_state{State(pfrom.GetId())}) {
-                fork_state->m_on_historical_deep_fork = true;
+                fork_state->m_on_deep_heavier_rewrite = true;
             });
             if (first) {
-                LogInfo("discovery relay: peer=%d is on the historical deep "
-                        "fork (header %s height %d); not advertising or "
+                LogInfo("discovery relay: peer=%d is on a deep heavier rewrite "
+                        "(header %s height %d); not advertising or "
                         "relaying to it\n",
                         pfrom.GetId(), pindexLast->GetBlockHash().ToString(),
                         pindexLast->nHeight);
@@ -17891,7 +17913,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // Store the new addresses
         std::vector<CAddress> vAddrOk;
         const bool historical_fork_peer{
-            peer->m_on_historical_deep_fork.load(std::memory_order_relaxed)};
+            peer->m_on_deep_heavier_rewrite.load(std::memory_order_relaxed)};
         const auto current_a_time{Now<NodeSeconds>()};
 
         // Update/increment addr rate limiting bucket.
@@ -21629,7 +21651,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             {
                 LOCK(m_peer_mutex);
                 for (const auto& [id, connected] : m_peer_map) {
-                    if (connected->m_on_historical_deep_fork.load(
+                    if (connected->m_on_deep_heavier_rewrite.load(
                             std::memory_order_relaxed)) {
                         on_historical_fork.insert(id);
                     }
@@ -21639,21 +21661,24 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 LOCK(cs_main);
                 for (const auto& [id, state] : m_node_states) {
                     const CBlockIndex* const known{state.pindexBestKnownBlock};
-                    if (state.m_on_historical_deep_fork ||
+                    if (state.m_on_deep_heavier_rewrite ||
                         (known != nullptr &&
-                         m_chainman.IndexOnHistoricalDeepFork(known))) {
+                         m_chainman.IsDeepHeavierRewriteBranch(known))) {
                         on_historical_fork.insert(id);
                         continue;
                     }
                     const auto height_it{starting_heights.find(id)};
                     const int32_t version_height{
                         height_it == starting_heights.end() ? -1 : height_it->second};
-                    const bool claims_above_fork{
-                        version_height >= kernel::HISTORICAL_DEEP_FORK_HEIGHT};
-                    const bool proven_below_or_other{
+                    const int our_height{m_chainman.m_best_header != nullptr
+                                             ? m_chainman.m_best_header->nHeight
+                                             : 0};
+                    const int ceiling{static_cast<int>(m_chainman.m_options.reorg_recovery_max_depth)};
+                    const bool claims_far_ahead{version_height > our_height + ceiling};
+                    const bool proven_not_rewrite{
                         known != nullptr &&
-                        known->nHeight >= kernel::HISTORICAL_DEEP_FORK_HEIGHT};
-                    if (claims_above_fork && !proven_below_or_other) {
+                        known->nHeight + ceiling >= version_height};
+                    if (claims_far_ahead && !proven_not_rewrite) {
                         unknown_above_fork.insert(id);
                     }
                 }
@@ -22667,8 +22692,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
     MaybeSendAddr(*pto, *peer, current_time);
 
     // Discovery relays introduce peers. Body sync stays off. A header
-    // probe classifies whether the peer's best block is the parked
-    // historical fork; that probe is the only cs_main work added here.
+    // probe classifies whether the peer's best block is a parked deep
+    // heavier rewrite; that probe is the only cs_main work added here.
     if (m_chainman.IsDiscoveryRelay()) {
         MaybeClassifyDiscoveryPeerChain(*pto, *peer);
         return true;
