@@ -425,7 +425,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_CXX_COMPILER_ID STREQUAL "G
   foreach(_btx_stdcxx_major 15 14)
     set(_btx_stdcxx "/usr/lib/gcc/${CMAKE_LIBRARY_ARCHITECTURE}/${_btx_stdcxx_major}/libstdc++.so")
     if(EXISTS "${_btx_stdcxx}")
-      target_link_libraries(btx-qt PRIVATE "${_btx_stdcxx}")
+      target_link_libraries(btx-qt "${_btx_stdcxx}")
       break()
     endif()
   endforeach()
