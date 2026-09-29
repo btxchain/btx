@@ -419,6 +419,18 @@ target_link_libraries(btx-qt
   bitcoin_node
 )
 
+# Distro Qt 6 is built with a newer libstdc++ than the GCC 13 release
+# toolchain. Link that libstdc++ into btx-qt only; btxd stays on GCC 13.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14)
+  foreach(_btx_stdcxx_major 15 14)
+    set(_btx_stdcxx "/usr/lib/gcc/${CMAKE_LIBRARY_ARCHITECTURE}/${_btx_stdcxx_major}/libstdc++.so")
+    if(EXISTS "${_btx_stdcxx}")
+      target_link_libraries(btx-qt PRIVATE "${_btx_stdcxx}")
+      break()
+    endif()
+  endforeach()
+endif()
+
 import_plugins(btx-qt)
 install_binary_component(btx-qt HAS_MANPAGE)
 if(WIN32)

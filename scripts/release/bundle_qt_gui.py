@@ -31,8 +31,6 @@ _HOST_SONAME_PREFIXES = (
     "librt.so",
     "libresolv.so",
     "libutil.so",
-    "libgcc_s.so",
-    "libstdc++.so",
     "ld-linux",
     "libGL.so",
     "libEGL.so",
@@ -205,6 +203,32 @@ def _info_plist(version: str) -> str:
 """
 
 
+def _is_homebrew(name: str) -> bool:
+    return name.startswith("/opt/homebrew") or name.startswith("/usr/local/opt") or "/Cellar/" in name
+
+
+def _rewrite_homebrew_ids(app: Path) -> None:
+    """macdeployqt leaves a plugin's own install id pointing at Homebrew.
+
+    dyld loads the plugin from the bundle directory, so the id is not a
+    runtime search path. Rewrite it so the shipped image does not name
+    Homebrew at all.
+    """
+    for path in app.rglob("*"):
+        if not path.is_file() or path.stat().st_size < 4:
+            continue
+        if path.read_bytes()[:4] != b"\xcf\xfa\xed\xfe":
+            continue
+        try:
+            output = subprocess.check_output(["otool", "-D", str(path)], text=True, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if len(lines) < 2 or not _is_homebrew(lines[1]):
+            continue
+        subprocess.check_call(["install_name_tool", "-id", f"@rpath/{path.name}", str(path)])
+
+
 def _macho_homebrew_loads(path: Path) -> list[str]:
     if path.stat().st_size < 4 or path.read_bytes()[:4] != b"\xcf\xfa\xed\xfe":
         return []
@@ -213,12 +237,13 @@ def _macho_homebrew_loads(path: Path) -> list[str]:
     except (OSError, subprocess.CalledProcessError):
         return []
     bad: list[str] = []
-    for line in output.splitlines()[1:]:
+    # The first dependency line is the install id, not a library the file loads.
+    for line in output.splitlines()[2:]:
         token = line.strip().split()
         if not token:
             continue
         name = token[0]
-        if name.startswith("/opt/homebrew") or name.startswith("/usr/local/opt") or "/Cellar/" in name:
+        if _is_homebrew(name):
             bad.append(name)
     return bad
 
@@ -233,6 +258,7 @@ def deploy_macos_qt_app(source_binary: Path, release_root: Path, version: str) -
     dest.chmod(0o755)
     (app / "Contents" / "Info.plist").write_text(_info_plist(version), encoding="utf-8")
     subprocess.check_call([str(_macdeployqt()), str(app), "-always-overwrite"])
+    _rewrite_homebrew_ids(app)
     offenders: list[str] = []
     for path in app.rglob("*"):
         if not path.is_file():
