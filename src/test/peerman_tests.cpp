@@ -24,6 +24,7 @@
 #include <node/warnings.h>
 #include <pow.h>
 #include <protocol.h>
+#include <scheduler.h>
 #include <script/script.h>
 #include <streams.h>
 #include <test/util/logging.h>
@@ -12981,6 +12982,92 @@ BOOST_AUTO_TEST_CASE(best_known_probe_is_rate_limited_and_skips_height_zero)
 
     NeutralizeUnconnectedHeaders(chainman);
     peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
+BOOST_AUTO_TEST_CASE(matmul_deferred_recovery_does_not_block_scheduler)
+{
+    auto& peerman{*Assert(m_node.peerman)};
+    auto& signals{*Assert(m_node.validation_signals)};
+    auto& scheduler{*Assert(m_node.scheduler)};
+
+    std::mutex gate_mu;
+    std::condition_variable gate_cv;
+    bool release{false};
+    int entries{0};
+    int finished{0};
+    struct ReleaseAndStop {
+        PeerManager& peerman;
+        std::mutex& gate_mu;
+        std::condition_variable& gate_cv;
+        bool& release;
+        ~ReleaseAndStop()
+        {
+            {
+                std::lock_guard<std::mutex> lock(gate_mu);
+                release = true;
+            }
+            gate_cv.notify_all();
+            peerman.StopBackgroundWorkers();
+        }
+    } guard{peerman, gate_mu, gate_cv, release};
+
+    peerman.InstallMatMulDeferredRecoveryOverrideForTest([&] {
+        std::unique_lock<std::mutex> lock(gate_mu);
+        ++entries;
+        gate_cv.notify_all();
+        gate_cv.wait(lock, [&] { return release; });
+        ++finished;
+        gate_cv.notify_all();
+    });
+    peerman.StartScheduledTasks(scheduler);
+
+    {
+        std::unique_lock<std::mutex> lock(gate_mu);
+        BOOST_REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds{3}, [&] {
+            return entries >= 1;
+        }));
+    }
+
+    auto order{std::make_shared<std::vector<int>>()};
+    auto pending{std::make_shared<std::atomic<int>>(2)};
+    auto done{std::make_shared<std::promise<void>>()};
+    auto record = [&](int id) {
+        signals.CallFunctionInValidationInterfaceQueue([order, pending, done, id] {
+            order->push_back(id);
+            if (pending->fetch_sub(1) == 1) done->set_value();
+        });
+    };
+    record(1);
+    record(2);
+    BOOST_REQUIRE(done->get_future().wait_for(std::chrono::seconds{1}) ==
+                  std::future_status::ready);
+    BOOST_REQUIRE_EQUAL(order->size(), 2U);
+    BOOST_CHECK_EQUAL((*order)[0], 1);
+    BOOST_CHECK_EQUAL((*order)[1], 2);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{2200});
+    {
+        std::lock_guard<std::mutex> lock(gate_mu);
+        BOOST_CHECK_EQUAL(entries, 1);
+        BOOST_CHECK_EQUAL(finished, 0);
+        release = true;
+    }
+    gate_cv.notify_all();
+    {
+        std::unique_lock<std::mutex> lock(gate_mu);
+        BOOST_REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds{2}, [&] {
+            return finished >= 2 && entries == 2;
+        }));
+        BOOST_CHECK_EQUAL(entries, 2);
+        BOOST_CHECK_EQUAL(finished, 2);
+    }
+    peerman.StopBackgroundWorkers();
+    std::this_thread::sleep_for(std::chrono::milliseconds{1500});
+    {
+        std::lock_guard<std::mutex> lock(gate_mu);
+        BOOST_CHECK_EQUAL(entries, 2);
+        BOOST_CHECK_EQUAL(finished, 2);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -73,6 +73,12 @@ checked:
   nominates the last connectable covered prefix. Activation joins that
   prefix and leaves the hole for ordinary catch-up. A consensus-mode
   signer still requires the complete path.
+- Deferred MatMul body recovery runs on one worker thread (`mmrecover`).
+  The validation scheduler only wakes it. Recovery used to call
+  `ActivateBestChain` on that scheduler and then wait for the same thread
+  to drain validation callbacks, so a long reorg advanced once every five
+  seconds. Callback order, the ten-callback drain threshold, and the
+  five-second stuck-subscriber timeout are unchanged.
 - A trusted mirror can keep requesting the next header page from a
   recognized authority after a solicited full batch, even when that
   prefix still has less work than the local tip. A solicited full

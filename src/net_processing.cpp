@@ -69,6 +69,7 @@
 #include <dandelion.h>
 #include <util/check.h>
 #include <util/strencodings.h>
+#include <util/thread.h>
 #include <util/time.h>
 #include <util/trace.h>
 #include <validation.h>
@@ -81,6 +82,7 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <ranges>
@@ -1588,6 +1590,11 @@ public:
     {
         RetryMatMulDeferredBodies();
     }
+    void InstallMatMulDeferredRecoveryOverrideForTest(std::function<void()> pass) override
+    {
+        std::lock_guard<std::mutex> lock(m_matmul_deferred_recovery_mutex);
+        m_matmul_deferred_recovery_override = std::move(pass);
+    }
     void PersistExactReplayVerdictAndRelayForTest(const uint256& hash) override
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main)
     {
@@ -2176,6 +2183,22 @@ private:
     void RetryMatMulDeferredBodies()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !NetEventsInterface::g_msgproc_mutex);
+    /** One coalesced recovery pass. Runs on mmrecover, not CScheduler. */
+    void RunMatMulDeferredRecoveryPass()
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !NetEventsInterface::g_msgproc_mutex);
+    void StartMatMulDeferredRecoveryWorker();
+    void StopMatMulDeferredRecoveryWorker();
+    void WakeMatMulDeferredRecoveryWorker();
+    void MatMulDeferredRecoveryLoop();
+    //! std::mutex, not Mutex: the worker waits on a condition_variable.
+    std::mutex m_matmul_deferred_recovery_mutex;
+    std::condition_variable m_matmul_deferred_recovery_cv;
+    bool m_matmul_deferred_recovery_stop{false};
+    bool m_matmul_deferred_recovery_started{false};
+    bool m_matmul_deferred_recovery_wake{false};
+    std::function<void()> m_matmul_deferred_recovery_override;
+    std::thread m_matmul_deferred_recovery_thread;
     /** Break a served-body-tip wedge: when the active-chain tip+1 body has been
      *  stuck in flight past BLOCK_ROOT_BODY_TIP_STUCK_S, re-request it BY HASH
      *  from peers advertising past our tip (they may hold the canonical body off
@@ -8966,13 +8989,99 @@ PeerManagerImpl::~PeerManagerImpl()
 void PeerManagerImpl::StopBackgroundWorkers()
 {
     m_stopping.store(true, std::memory_order_release);
-    // Stop the async verify worker FIRST: queued jobs are destroyed without
-    // running completions (their RAII slot captures release
-    // m_matmul_pending_verifications), in-flight jobs are joined. Call this
-    // from Shutdown while the validation scheduler is still running so
-    // ProcessBlockSync / ActivateBestChain can drain the queue.
+    // Stop recovery before the verify worker. An in-flight pass may still
+    // ActivateBestChain and drain the validation queue, so this join must
+    // happen while CScheduler is running. A later wake sees the stop flag.
+    StopMatMulDeferredRecoveryWorker();
+    // Queued verify jobs are destroyed without running completions (their
+    // RAII slot captures release m_matmul_pending_verifications); in-flight
+    // jobs are joined. Call this from Shutdown while the validation
+    // scheduler is still running so ProcessBlockSync / ActivateBestChain
+    // can drain the queue.
     if (m_matmul_verify_worker) m_matmul_verify_worker->Stop();
     StopHistoricalAttestationReverify();
+}
+
+void PeerManagerImpl::StartMatMulDeferredRecoveryWorker()
+{
+    std::lock_guard<std::mutex> lock(m_matmul_deferred_recovery_mutex);
+    if (m_matmul_deferred_recovery_started) return;
+    m_matmul_deferred_recovery_stop = false;
+    m_matmul_deferred_recovery_wake = false;
+    m_matmul_deferred_recovery_started = true;
+    m_matmul_deferred_recovery_thread = std::thread(
+        &util::TraceThread, "mmrecover", [this] { MatMulDeferredRecoveryLoop(); });
+}
+
+void PeerManagerImpl::StopMatMulDeferredRecoveryWorker()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_matmul_deferred_recovery_mutex);
+        m_matmul_deferred_recovery_stop = true;
+        if (!m_matmul_deferred_recovery_started) return;
+    }
+    m_matmul_deferred_recovery_cv.notify_all();
+    if (m_matmul_deferred_recovery_thread.joinable()) {
+        m_matmul_deferred_recovery_thread.join();
+    }
+    std::lock_guard<std::mutex> lock(m_matmul_deferred_recovery_mutex);
+    m_matmul_deferred_recovery_started = false;
+}
+
+void PeerManagerImpl::WakeMatMulDeferredRecoveryWorker()
+{
+    std::lock_guard<std::mutex> lock(m_matmul_deferred_recovery_mutex);
+    if (!m_matmul_deferred_recovery_started ||
+        m_matmul_deferred_recovery_stop ||
+        m_stopping.load(std::memory_order_acquire)) {
+        return;
+    }
+    m_matmul_deferred_recovery_wake = true;
+    m_matmul_deferred_recovery_cv.notify_one();
+}
+
+void PeerManagerImpl::MatMulDeferredRecoveryLoop()
+{
+    while (true) {
+        std::function<void()> override_pass;
+        {
+            std::unique_lock<std::mutex> lock(m_matmul_deferred_recovery_mutex);
+            m_matmul_deferred_recovery_cv.wait(lock, [&] {
+                return m_matmul_deferred_recovery_stop ||
+                       m_matmul_deferred_recovery_wake;
+            });
+            if (m_matmul_deferred_recovery_stop) return;
+            m_matmul_deferred_recovery_wake = false;
+            override_pass = m_matmul_deferred_recovery_override;
+        }
+        if (override_pass) {
+            override_pass();
+        } else {
+            RunMatMulDeferredRecoveryPass();
+        }
+    }
+}
+
+void PeerManagerImpl::RunMatMulDeferredRecoveryPass()
+{
+    RetryMatMulDeferredBodies();
+    if (m_stopping.load(std::memory_order_acquire)) return;
+    // Cadence hold leaves HAVE_DATA / HEADER_ONLY candidates in the
+    // index. ABC only re-runs on new messages unless we kick it as
+    // wall-clock raises the horizon. This stays off CScheduler: the
+    // kick can enter ActivateBestChain and wait on validation callbacks.
+    if (m_chainman.m_options.cadence_burst_max > 0) {
+        LOCK(cs_main);
+        const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+        const CBlockIndex* const best{m_chainman.m_best_header};
+        if (tip != nullptr && best != nullptr && best->nHeight > tip->nHeight) {
+            const int allowed{m_chainman.GetCadenceHoldAllowedHeight(tip, GetTime())};
+            if (allowed < std::numeric_limits<int>::max() &&
+                allowed > tip->nHeight) {
+                m_need_activate_best_chain = true;
+            }
+        }
+    }
 }
 
 void PeerManagerImpl::SetDandelionManager(Dandelion::DandelionManager* mgr)
@@ -8990,31 +9099,15 @@ void PeerManagerImpl::StartScheduledTasks(CScheduler& scheduler)
     scheduler.scheduleEvery([this] { this->CheckForStaleTipAndEvictPeers(); }, std::chrono::seconds{EXTRA_PEER_CHECK_INTERVAL});
 
     // The message handler holds g_msgproc_mutex across every SendMessages()
-    // call. Deferred ExactReplay must therefore be driven from the scheduler,
-    // where both global locks are absent, and re-enter ordinary admission plus
-    // the asynchronous verify worker. Running it from SendMessages turns one
-    // budget retry into a process-wide networking freeze.
+    // call. Deferred ExactReplay must therefore run where both global locks
+    // are absent. It must not run on CScheduler: ActivateBestChain waits for
+    // validation callbacks that only that same thread can drain.
     scheduler.scheduleEvery([this] {
         AutoFetchStuckTipRoot();
     }, std::chrono::seconds{20});
+    StartMatMulDeferredRecoveryWorker();
     scheduler.scheduleEvery([this] {
-        if (m_stopping.load(std::memory_order_acquire)) return;
-        RetryMatMulDeferredBodies();
-        // Cadence hold leaves HAVE_DATA / HEADER_ONLY candidates in the
-        // index. ABC only re-runs on new messages unless we kick it as
-        // wall-clock raises the horizon.
-        if (m_chainman.m_options.cadence_burst_max > 0) {
-            LOCK(cs_main);
-            const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
-            const CBlockIndex* const best{m_chainman.m_best_header};
-            if (tip != nullptr && best != nullptr && best->nHeight > tip->nHeight) {
-                const int allowed{m_chainman.GetCadenceHoldAllowedHeight(tip, GetTime())};
-                if (allowed < std::numeric_limits<int>::max() &&
-                    allowed > tip->nHeight) {
-                    m_need_activate_best_chain = true;
-                }
-            }
-        }
+        WakeMatMulDeferredRecoveryWorker();
     }, 1s);
 
     // schedule next run for 10-15 minutes in the future

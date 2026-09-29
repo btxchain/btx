@@ -340,10 +340,11 @@ public:
     bool ServeArchiveBlockGetData(std::atomic<bool>& interrupt) override = 0;
 
     /**
-     * Join the MatMul verify worker while the validation scheduler is still
-     * running. In-flight completions call ProcessBlockSync / ActivateBestChain,
-     * which drain the scheduler queue. Stopping the scheduler first deadlocks
-     * b-shutoff vs b-mmverify and skips PersistShieldedState.
+     * Join deferred-recovery and MatMul verify workers while the validation
+     * scheduler is still running. Recovery and in-flight completions call
+     * ProcessBlockSync / ActivateBestChain, which drain the scheduler queue.
+     * Stopping the scheduler first deadlocks shutdown against those workers
+     * and skips PersistShieldedState.
      */
     virtual void StopBackgroundWorkers() = 0;
 
@@ -401,9 +402,12 @@ public:
         const std::shared_ptr<const CBlock>& block,
         const CBlockIndex* pindex) = 0;
     /** Drive scheduler re-admission of a HAVE_DATA followed tip-child.
-     *  Production calls this from CScheduler, never from SendMessages
-     *  (g_msgproc_mutex). Tests must not hold that mutex. */
+     *  Production calls this from the mmrecover worker, never from
+     *  SendMessages (g_msgproc_mutex). Tests must not hold that mutex. */
     virtual void RetryMatMulDeferredBodiesForTest() = 0;
+    /** Replace only the mmrecover pass body. No RPC, P2P, or config exposure. */
+    virtual void InstallMatMulDeferredRecoveryOverrideForTest(
+        std::function<void()> pass) = 0;
     /** Issue 116: mint via PersistMatMulExactReplayVerdict (header-first /
      *  historical ExactReplay) and gossip MMATTEST without ProcessBlockSync.
      *  Only pushes a signature this process just produced. */

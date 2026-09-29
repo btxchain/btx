@@ -346,10 +346,11 @@ void Interrupt(NodeContext& node)
     for (auto* index : node.indexes) {
         index->Interrupt();
     }
-    // SIGTERM must stop mmverify before Shutdown() joins HTTP workers.
-    // Otherwise ActivateBestChain / preciousblock sitting in an HTTP thread
-    // waits forever on b-mmverify, StopHTTPServer never returns, and systemd
-    // SIGKILLs — skipping PersistShieldedState and forcing a fused rebuild.
+    // SIGTERM must stop mmrecover and mmverify before Shutdown() joins HTTP
+    // workers. Otherwise ActivateBestChain / preciousblock sitting in an HTTP
+    // thread waits forever on those workers, StopHTTPServer never returns,
+    // and systemd SIGKILLs — skipping PersistShieldedState and forcing a
+    // fused rebuild.
     matmul::v4::rc::GetRCCpuConfirmationQueue().Stop();
     if (node.peerman) node.peerman->StopBackgroundWorkers();
 }
@@ -379,9 +380,10 @@ void Shutdown(NodeContext& node)
     util::ThreadRename("shutoff");
     if (node.mempool) node.mempool->AddTransactionsUpdated(1);
 
-    // Stop mmverify before joining HTTP/RPC workers. Interrupt() already did
-    // this; calling it again is idempotent. Doing it here covers the path
-    // where Shutdown() runs without Interrupt() (failed init / Qt).
+    // Stop mmrecover and mmverify before joining HTTP/RPC workers.
+    // Interrupt() already did this; calling it again is idempotent. Doing it
+    // here covers the path where Shutdown() runs without Interrupt()
+    // (failed init / Qt). The validation scheduler is still running.
     matmul::v4::rc::GetRCCpuConfirmationQueue().Stop();
     if (node.peerman) node.peerman->StopBackgroundWorkers();
 
@@ -447,10 +449,10 @@ void Shutdown(NodeContext& node)
 
     if (node.background_init_thread.joinable()) node.background_init_thread.join();
     if (node.autoupdate) node.autoupdate->Stop();
-    // Join MatMul verify workers while the scheduler is still running.
-    // Completions call ProcessBlockSync → ActivateBestChain →
+    // Join mmrecover and MatMul verify workers while the scheduler is still
+    // running. Both can call ProcessBlockSync → ActivateBestChain →
     // TrySyncWithValidationInterfaceQueue. Stopping the scheduler first
-    // deadlocks b-shutoff against b-mmverify and skips PersistShieldedState.
+    // deadlocks shutdown against those workers and skips PersistShieldedState.
     if (node.peerman) node.peerman->StopBackgroundWorkers();
     // After everything has been shut down, but before things get flushed, stop the
     // the scheduler. After this point, SyncWithValidationInterfaceQueue() should not be called anymore
