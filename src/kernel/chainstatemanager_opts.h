@@ -134,6 +134,12 @@ inline constexpr uint32_t DEFAULT_CADENCE_BURST_MAX{3};
 //! still paces bodies on a live-tip dump). Matches discovery RECENT_HEIGHT_LAG.
 inline constexpr int MAX_UNAUTHENTICATED_HEADER_LEAD{72};
 
+//! Explicitly requested competing-header discovery needs room to learn a
+//! lower-difficulty branch BEFORE it has overtaken our work. This bounded
+//! index allowance is not authority to fetch bodies, spend replay resources,
+//! or reorganize. Unsolicited headers retain the smaller default above.
+inline constexpr int MAX_COMPETING_HEADER_DISCOVERY_LEAD{2048};
+
 inline constexpr ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgProtectionProfile profile)
 {
     switch (profile) {

@@ -15877,7 +15877,7 @@ static bool ContextualCheckBlock(const CBlock& block,
     return ContextualCheckBlockBodyOnly(block, state, chainman, pindexPrev);
 }
 
-bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
+bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, bool competing_header_discovery)
 {
     AssertLockHeld(cs_main);
 
@@ -15970,9 +15970,11 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "too-little-chainwork");
     }
     // Competing unauthenticated HEADER_ONLY flood: do not store towers
-    // farther than local-finality above the active tip. Not invalid —
-    // ProcessNewBlockHeaders stops the batch. Followed-chain dumps stay
-    // indexed so cadence hold can see them.
+    // farther than the admission allowance above the active tip. Explicitly
+    // requested fork discovery has a separate bounded allowance: requiring a
+    // lower-work prefix to be heavier before learning its suffix is circular.
+    // This affects header storage only; body acquisition and ExactReplay retain
+    // their existing gates. A limit stops the batch without an invalid verdict.
     if (hash != GetConsensus().hashGenesisBlock) {
         BlockMap::iterator mi_prev{m_blockman.m_block_index.find(block.hashPrevBlock)};
         if (mi_prev != m_blockman.m_block_index.end()) {
@@ -15990,7 +15992,9 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 if (kernel::UnauthenticatedHeaderLeadExceeded(
                         tip->nHeight, header_height, extends_tip,
                         attested_or_frontier, IsInitialBlockDownload(),
-                        kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
+                        competing_header_discovery
+                            ? kernel::MAX_COMPETING_HEADER_DISCOVERY_LEAD
+                            : kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
                         // Scope the assumeutxo header-ceiling exemption to a
                         // node that actually NEEDS it: acquisition-stale (or
                         // IBD, already exempt above). A healthy connecting
@@ -16129,14 +16133,15 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
 }
 
 // Exposed wrapper for AcceptBlockHeader
-bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex)
+bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex, bool competing_header_discovery)
 {
     AssertLockNotHeld(cs_main);
     {
         LOCK(cs_main);
         for (const CBlockHeader& header : headers) {
             CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
-            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked)};
+            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked,
+                                           competing_header_discovery)};
             CheckBlockIndex();
 
             if (!accepted) {

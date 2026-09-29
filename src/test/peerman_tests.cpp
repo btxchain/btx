@@ -12465,6 +12465,173 @@ BOOST_AUTO_TEST_CASE(background_headers_refresh_learns_quiet_competing_chain)
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
+BOOST_AUTO_TEST_CASE(background_headers_discovery_crosses_lower_work_lead_cap)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    ResetSharedPeermanFixture(m_node);
+    auto& chainman{*m_node.chainman};
+    auto& peerman{*m_node.peerman};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    connman.SetPeerConnectTimeout(std::chrono::hours{1});
+    const CBlockIndex* root{WITH_LOCK(cs_main, return chainman.ActiveTip())};
+    for (int i = 1; i <= 8; ++i) {
+        mineBlock(m_node, std::chrono::seconds{root->GetBlockTime() + i});
+    }
+    CBlockIndex* tip{WITH_LOCK(cs_main, return chainman.ActiveTip())};
+    CBlockIndex* known{MakePeermanHeaderChild(chainman, *root, 0xb1)};
+    // Model the production race: greater height does not yet mean greater
+    // cumulative work. Keep the anti-DoS authenticated-work floor unchanged.
+    const auto original_work{tip->nChainWork};
+    struct RestoreWork {
+        CBlockIndex& tip;
+        arith_uint256 work;
+        arith_uint256 authenticated_work;
+        ~RestoreWork()
+        {
+            LOCK(cs_main);
+            tip.nChainWork = work;
+            tip.nAuthenticatedChainWork = authenticated_work;
+        }
+    } restore{*tip, original_work, tip->nAuthenticatedChainWork};
+    WITH_LOCK(cs_main, tip->nChainWork += GetBlockProof(*tip) * 2010);
+
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    CNode peer{5830, nullptr, CAddress{}, 5830, 0, CAddress{}, "bounded-fork-discovery",
+               ConnectionType::MANUAL, false, 0};
+    connman.Handshake(peer, true, services, services, PROTOCOL_VERSION, true, known->nHeight);
+    struct FinalizePeer {
+        PeerManager& peerman;
+        CNode& peer;
+        ~FinalizePeer() { peerman.FinalizeNode(peer); }
+    } finalize{peerman, peer};
+    connman.FlushSendBuffer(peer);
+    auto receive = [&](const std::vector<CBlock>& headers) {
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+        peer.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(peer);
+        peer.fPauseSend = false;
+    };
+    receive({CBlock{known->GetBlockHeader()}});
+    connman.FlushSendBuffer(peer);
+    const int64_t connected{GetTime()};
+    // Drain handshake follow-ups on this null-socket fixture before testing
+    // a background send (queuing SENDHEADERS can set fPauseSend).
+    SetMockTime(std::chrono::seconds{connected + 299});
+    peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    connman.FlushSendBuffer(peer);
+    SetMockTime(std::chrono::seconds{connected + 300});
+    WITH_LOCK(cs_main, chainman.SetLastTipConnectMonoForTest(GetTime()));
+    peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    const auto locator{QueuedGetHeadersLocatorHashes(peer)};
+    BOOST_REQUIRE(!locator.empty());
+    BOOST_CHECK(locator.front() == known->GetBlockHash());
+    connman.FlushSendBuffer(peer);
+
+    // A full page must continue past +72 even while still lower-work, and
+    // pagination must retain only the bounded header-discovery permission.
+    std::vector<std::unique_ptr<CBlockIndex>> remote_indexes;
+    std::vector<uint256> remote_hashes(2056);
+    std::vector<CBlock> headers;
+    const CBlockIndex* prev{known};
+    for (size_t i = 0; i < remote_hashes.size(); ++i) {
+        CBlock block;
+        block.nVersion = VERSIONBITS_TOP_BITS;
+        block.hashPrevBlock = prev->GetBlockHash();
+        block.hashMerkleRoot = uint256::FromHex(strprintf("%064x", 0xc0 + i)).value();
+        block.nTime = prev->GetBlockTime() + 1;
+        block.nBits = prev->nBits;
+        BOOST_REQUIRE(MineHeaderForConsensus(block, prev->nHeight + 1,
+            chainman.GetConsensus(), 5'000'000, prev->GetMedianTimePast()));
+        headers.push_back(block);
+        remote_hashes[i] = block.GetHash();
+        auto index{std::make_unique<CBlockIndex>(block.GetBlockHeader())};
+        index->phashBlock = &remote_hashes[i];
+        index->pprev = const_cast<CBlockIndex*>(prev);
+        index->nHeight = prev->nHeight + 1;
+        index->nChainWork = prev->nChainWork + GetBlockProof(*index);
+        prev = index.get();
+        remote_indexes.push_back(std::move(index));
+    }
+    // Another outbound connection has no competing-discovery request. Its
+    // otherwise valid reply must still stop at the default 72-header limit.
+    {
+        CNode unsolicited{5831, nullptr, CAddress{}, 5831, 0, CAddress{},
+                          "unrequested-fork", ConnectionType::OUTBOUND_FULL_RELAY, false, 0};
+        connman.Handshake(unsolicited, true, services, services, PROTOCOL_VERSION, true, known->nHeight);
+        FinalizePeer finalize_unsolicited{peerman, unsolicited};
+        connman.FlushSendBuffer(unsolicited);
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(unsolicited,
+            NetMsg::Make(NetMsgType::HEADERS,
+                         TX_WITH_WITNESS(std::vector<CBlock>{headers.begin(), headers.begin() + 80}))));
+        unsolicited.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(unsolicited);
+        BOOST_CHECK(WITH_LOCK(cs_main,
+            return chainman.m_blockman.LookupBlockIndex(remote_hashes[78]) != nullptr));
+        BOOST_CHECK(WITH_LOCK(cs_main,
+            return chainman.m_blockman.LookupBlockIndex(remote_hashes[79]) == nullptr));
+    }
+    receive(std::vector<CBlock>{headers.begin(), headers.begin() + 2000});
+    const CBlockIndex* first{WITH_LOCK(cs_main,
+        return chainman.m_blockman.LookupBlockIndex(remote_hashes[1999]))};
+    BOOST_REQUIRE_MESSAGE(first != nullptr,
+        "solicited competing headers must be learned beyond tip+72 before they become heavier");
+    BOOST_CHECK_EQUAL(first->nHeight, tip->nHeight + 1993);
+    BOOST_CHECK_LT(first->nChainWork, tip->nChainWork);
+    BOOST_CHECK(!HasQueuedMessageType(peer, NetMsgType::GETDATA));
+    const auto continuation{QueuedGetHeadersLocatorHashes(peer)};
+    BOOST_REQUIRE(!continuation.empty());
+    BOOST_CHECK(continuation.front() == first->GetBlockHash());
+    connman.FlushSendBuffer(peer);
+
+    // The continuation inherits the request allowance for exactly one reply.
+    // The following unsolicited message cannot reuse it on this same socket.
+    receive({headers[2000]});
+    BOOST_REQUIRE(WITH_LOCK(cs_main,
+        return chainman.m_blockman.LookupBlockIndex(remote_hashes[2000]) != nullptr));
+    connman.FlushSendBuffer(peer);
+    receive({headers[2001]});
+    BOOST_CHECK(WITH_LOCK(cs_main,
+        return chainman.m_blockman.LookupBlockIndex(remote_hashes[2001]) == nullptr));
+    connman.FlushSendBuffer(peer);
+    SetMockTime(std::chrono::seconds{connected + 601});
+    WITH_LOCK(cs_main, chainman.SetLastTipConnectMonoForTest(GetTime()));
+    peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    BOOST_REQUIRE(HasQueuedMessageType(peer, NetMsgType::GETHEADERS));
+    connman.FlushSendBuffer(peer);
+
+    // Finish exactly at the separate 2048-header tracking ceiling. Learning
+    // the now-heavier terminal neither downloads a body nor activates it.
+    receive(std::vector<CBlock>{headers.begin() + 2001, headers.end() - 1});
+    const CBlockIndex* last{WITH_LOCK(cs_main,
+        return chainman.m_blockman.LookupBlockIndex(remote_hashes[2054]))};
+    BOOST_REQUIRE(last != nullptr);
+    BOOST_CHECK_EQUAL(last->nHeight, tip->nHeight + 2048);
+    BOOST_CHECK_GT(last->nChainWork, tip->nChainWork);
+    BOOST_CHECK((last->nStatus & (BLOCK_HAVE_DATA | BLOCK_EXACT_REPLAY_VERIFIED)) == 0);
+    BOOST_CHECK(!HasQueuedMessageType(peer, NetMsgType::GETDATA));
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return chainman.ActiveTip()), tip);
+    connman.FlushSendBuffer(peer);
+
+    SetMockTime(std::chrono::seconds{connected + 902});
+    WITH_LOCK(cs_main, chainman.SetLastTipConnectMonoForTest(GetTime()));
+    peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    BOOST_REQUIRE(HasQueuedMessageType(peer, NetMsgType::GETHEADERS));
+    connman.FlushSendBuffer(peer);
+    receive({headers.back()});
+    BOOST_CHECK(WITH_LOCK(cs_main,
+        return chainman.m_blockman.LookupBlockIndex(remote_hashes.back()) == nullptr));
+    BOOST_CHECK(!peer.fDisconnect);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return chainman.ActiveTip()), tip);
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
 BOOST_AUTO_TEST_CASE(background_headers_refresh_global_limit_and_fairness)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);

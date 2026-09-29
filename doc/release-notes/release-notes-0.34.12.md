@@ -56,6 +56,12 @@ checked:
   minutes, one across the node each 30 seconds). The locator starts at
   that peer's last known header. This discovers a competing chain. It
   does not download bodies or reorganize.
+- A solicited reply that continues that recorded competing header may be
+  indexed up to 2,048 blocks above the active tip, even while the indexed
+  prefix still has less work. Unsolicited headers stay at the 72-block
+  lead. The extra room is header storage only. Body fetch, ExactReplay,
+  and reorg depth are unchanged. A header at 2,049 above the tip is
+  deferred, not marked invalid.
 - A trusted mirror can keep requesting the next header page from a
   recognized authority after a solicited full batch, even when that
   prefix still has less work than the local tip. A solicited full

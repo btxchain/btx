@@ -1133,6 +1133,10 @@ struct Peer {
      *  (live 0.34.5: 171 getheaders/sec). HeadersSyncState continuations
      *  still clear it so IBD presync can walk. */
     NodeClock::time_point m_last_getheaders_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /** One reply may extend this explicitly requested competing anchor using
+     * the bounded header-only discovery allowance. Cleared by any replacement
+     * GETHEADERS or reply; unsolicited announcements cannot inherit it. */
+    uint256 m_competing_header_discovery_anchor GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
     /** Header-sync continuation anchor: height of the terminal header of the
      *  last solicited full-size HEADERS batch that we continued from with a
      *  send-window bypass. A bypassed continuation getheaders is only allowed
@@ -10867,13 +10871,24 @@ void PeerManagerImpl::MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
     const CBlockIndex* const known{state.pindexBestKnownBlock};
     const auto last_activity{std::max(
         peer.m_last_getheaders_sent, NodeClock::time_point{node.m_connected})};
+    // A taller competing header is outside HeaderSyncBackgroundRefreshNeeded:
+    // that helper leaves ahead peers to the urgent probe. The urgent probe
+    // starts at our tip, so it cannot continue a lower-work tower. Ask from
+    // the competing header itself.
+    const bool competing_ahead{
+        known != nullptr && tip != nullptr &&
+        known->IsValid(BLOCK_VALID_TREE) &&
+        known->nHeight > tip->nHeight &&
+        !m_chainman.ActiveChain().Contains(known) &&
+        known->GetAncestor(tip->nHeight) != tip};
     bool eligible{
         !node.IsInboundConn() && !node.IsAddrFetchConn() &&
         CanServeBlocks(peer) && !node.fPauseSend &&
         !m_chainman.m_blockman.LoadingBlocks() &&
         !m_chainman.IsInitialBlockDownload() &&
-        node::HeaderSyncBackgroundRefreshNeeded(
-            tip, known, peer.m_starting_height.load()) &&
+        (node::HeaderSyncBackgroundRefreshNeeded(
+             tip, known, peer.m_starting_height.load()) ||
+         competing_ahead) &&
         now - last_activity >= node::HEADER_SYNC_BACKGROUND_PEER_INTERVAL &&
         !PeerLowWorkHeadersSyncInBackoff(peer.m_addr, GetTime<std::chrono::microseconds>())};
     if (eligible) {
@@ -10895,6 +10910,11 @@ void PeerManagerImpl::MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
     // A newly connected lagging peer bootstraps through the normal locator.
     const CBlockIndex* const start{known != nullptr ? known : tip};
     if (MaybeSendGetHeaders(node, GetLocator(start), peer)) {
+        if (known != nullptr && !m_chainman.ActiveChain().Contains(known) &&
+            (known->nHeight < tip->nHeight ||
+             known->GetAncestor(tip->nHeight) != tip)) {
+            peer.m_competing_header_discovery_anchor = known->GetBlockHash();
+        }
         m_background_headers_last_sent = now;
         m_background_headers_last_peer = node.GetId();
         m_background_headers_pending.erase(node.GetId());
@@ -10920,6 +10940,7 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
     // accounting) but must not reopen the 2-minute window.
     if (bypass_send_window ||
         current_time - peer.m_last_getheaders_sent > HEADERS_RESPONSE_TIME) {
+        peer.m_competing_header_discovery_anchor.SetNull();
         MakeAndPushMessage(pfrom, NetMsgType::GETHEADERS, locator, uint256());
         peer.m_last_getheaders_sent = current_time;
         peer.m_last_getheaders_timestamp = current_time;
@@ -13575,6 +13596,8 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                                             std::vector<CBlockHeader>&& headers,
                                             bool via_compact_block)
 {
+    const uint256 discovery_anchor{
+        std::exchange(peer.m_competing_header_discovery_anchor, uint256{})};
     size_t nCount = headers.size();
     // All ordinary block-serving peers are eligible for the anti-DoS
     // low-work headers-sync mechanism. MatMul service bits are preferences,
@@ -13662,6 +13685,11 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     // headers cannot be a response to a getheaders request.
     const bool solicited_headers{
         peer.m_last_getheaders_timestamp != NodeClock::time_point{}};
+    const bool competing_header_discovery{
+        solicited_headers && !via_compact_block && !pfrom.IsInboundConn() &&
+        !pfrom.IsAddrFetchConn() && CanServeBlocks(peer) &&
+        !discovery_anchor.IsNull() &&
+        headers.front().hashPrevBlock == discovery_anchor};
     peer.m_last_getheaders_timestamp = {};
     peer.m_unconnecting_headers = 0;
 
@@ -13943,7 +13971,8 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
             ? m_chainman.m_best_header->GetBlockHash()
             : uint256{})};
     BlockValidationState state;
-    if (!m_chainman.ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, &pindexLast)) {
+    if (!m_chainman.ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true,
+                                         state, &pindexLast, competing_header_discovery)) {
         if (state.IsInvalid()) {
             if (!pfrom.IsInboundConn() && state.GetResult() == BlockValidationResult::BLOCK_CACHED_INVALID) {
                 LogWarning("%s (received from peer=%d). If this happens with all peers, consider database corruption (which -reindex may fix) or a consensus incompatibility.",
@@ -14043,7 +14072,9 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                         tip->nHeight, pindexLast->nHeight, extends_tip,
                         attested_or_frontier,
                         m_chainman.IsInitialBlockDownload(),
-                        kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
+                        competing_header_discovery
+                            ? kernel::MAX_COMPETING_HEADER_DISCOVERY_LEAD
+                            : kernel::MAX_UNAUTHENTICATED_HEADER_LEAD,
                         // Assumeutxo ceiling only for a node that needs the
                         // recovery path (acquisition-stale); a healthy node
                         // keeps the full anti-flood cap below the base.
@@ -14068,6 +14099,9 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
         if (chase_more &&
             MaybeSendGetHeaders(pfrom, GetLocator(pindexLast), peer,
                                 /*bypass_send_window=*/continuation_monotonic)) {
+            if (competing_header_discovery) {
+                peer.m_competing_header_discovery_anchor = pindexLast->GetBlockHash();
+            }
             peer.m_headers_continuation_height = std::max(
                 peer.m_headers_continuation_height, pindexLast->nHeight);
             LogDebug(BCLog::NET, "more getheaders (%d) to end to peer=%d (startheight:%d)\n",
@@ -22943,6 +22977,20 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 std::memory_order_relaxed);
         }
 
+        // A taller competing header is learned only when the locator
+        // starts on that header. A tip-anchored getheaders walks back to
+        // the fork and the reply then hits the ordinary 72-header cap.
+        const auto competing_discovery_index = [&]() -> const CBlockIndex* {
+            const CBlockIndex* const known{state.pindexBestKnownBlock};
+            if (known == nullptr || tip_for_headers == nullptr) return nullptr;
+            if (!known->IsValid(BLOCK_VALID_TREE)) return nullptr;
+            if (known->nHeight <= tip_for_headers->nHeight) return nullptr;
+            if (m_chainman.ActiveChain().Contains(known)) return nullptr;
+            if (known->GetAncestor(tip_for_headers->nHeight) == tip_for_headers) {
+                return nullptr;
+            }
+            return known;
+        };
         if (!state.fSyncStarted && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks() &&
             !node::HeaderSyncAdvertisedHeightUnusable(
                 tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
@@ -23006,7 +23054,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                          pto->GetId(), peer->m_starting_height.load());
             }
             if (may_claim_initial_sync_slot || near_tip_headers) {
-                const CBlockIndex* pindexStart = HeaderSyncGetHeadersAskIndex(m_chainman);
+                const CBlockIndex* const competing_discovery{competing_discovery_index()};
+                const CBlockIndex* pindexStart = competing_discovery != nullptr
+                    ? competing_discovery
+                    : HeaderSyncGetHeadersAskIndex(m_chainman);
                 /* If possible, start at the block preceding the currently
                    best known header.  This ensures that we always get a
                    non-empty list of headers back as long as the peer
@@ -23019,6 +23070,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                    would let the peer answer from the fork LCA. */
                 if (pindexStart != nullptr &&
                     MaybeSendGetHeaders(*pto, GetLocator(pindexStart), *peer)) {
+                    if (competing_discovery != nullptr) {
+                        peer->m_competing_header_discovery_anchor =
+                            competing_discovery->GetBlockHash();
+                    }
                     if (must_probe) {
                         m_best_known_probe_at[pto->GetId()] = current_time;
                         // Sticky-probe bound: charge the beyond-best budget
@@ -23090,6 +23145,17 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                      tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
                      state.pindexBestKnownBlock != nullptr ? "set" : "null");
         };
+        // A taller competing tower must be refreshed from its own header
+        // before the tip-anchored probe spends this peer's send window.
+        {
+            const CBlockIndex* const ahead{state.pindexBestKnownBlock};
+            if (ahead != nullptr && tip_for_headers != nullptr &&
+                ahead->nHeight > tip_for_headers->nHeight &&
+                !m_chainman.ActiveChain().Contains(ahead) &&
+                ahead->GetAncestor(tip_for_headers->nHeight) != tip_for_headers) {
+                MaybeRefreshBackgroundHeaders(*pto, *peer);
+            }
+        }
         if (must_probe && !m_chainman.m_blockman.LoadingBlocks() &&
             !pto->IsAddrFetchConn()) {
             if (PeerLowWorkHeadersSyncInBackoff(peer->m_addr, current_time)) {
@@ -23104,10 +23170,17 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     current_time - last_probe <= BEST_KNOWN_PROBE_INTERVAL) {
                     log_probe_declined("probe_interval");
                 } else {
-                    const CBlockIndex* start{HeaderSyncGetHeadersAskIndex(m_chainman)};
+                    const CBlockIndex* const competing_discovery{competing_discovery_index()};
+                    const CBlockIndex* start{competing_discovery != nullptr
+                        ? competing_discovery
+                        : HeaderSyncGetHeadersAskIndex(m_chainman)};
                     if (start == nullptr) {
                         log_probe_declined("no_locator_start");
                     } else if (MaybeSendGetHeaders(*pto, GetLocator(start), *peer)) {
+                        if (competing_discovery != nullptr) {
+                            peer->m_competing_header_discovery_anchor =
+                                competing_discovery->GetBlockHash();
+                        }
                         last_probe = current_time;
                         // Sticky-probe bound: charge the beyond-best budget
                         // when that override is what armed this probe.
