@@ -221,6 +221,11 @@ if command -v ldd >/dev/null 2>&1; then
     fi
   fi
 fi
+PLUGIN_DIR="$SELF_DIR/../lib/qt6/plugins"
+if [ -d "$PLUGIN_DIR" ]; then
+  QT_PLUGIN_PATH="$PLUGIN_DIR${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+  export QT_PLUGIN_PATH
+fi
 exec "$REAL" "$@"
 """
 
@@ -320,6 +325,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         required=True,
         choices=sorted(PLATFORM_CONFIGS.keys()),
         help="Canonical release platform id.",
+    )
+    parser.add_argument(
+        "--require-gui",
+        action="store_true",
+        help="Refuse to pack an archive that does not contain btx-qt and its Qt runtime.",
     )
     parser.add_argument("--btxd", required=True, help="Path to the btxd binary for this platform.")
     parser.add_argument("--btx-cli", required=True, help="Path to the btx-cli binary for this platform.")
@@ -461,6 +471,16 @@ def archive_filename(version: str, platform_id: str, override: str | None) -> st
     return f"btx-{version}-{config['triple']}{suffix}"
 
 
+def _load_qt_bundle():
+    script = Path(__file__).with_name("bundle_qt_gui.py")
+    spec = importlib.util.spec_from_file_location("bundle_qt_gui", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def stage_release_tree(
     *,
     version: str,
@@ -473,6 +493,7 @@ def stage_release_tree(
     metal_lib_dir: Path | None,
     source_root: Path,
     temp_root: Path,
+    require_gui: bool = False,
 ) -> tuple[Path, list[str]]:
     config = PLATFORM_CONFIGS[platform_id]
     release_root = temp_root / f"btx-{version}"
@@ -493,10 +514,35 @@ def stage_release_tree(
     ]
     verify_shipped_btxd(btxd_path)
     verify_shipped_cli(btx_cli_path)
-    for helper_path, _helper_name in binary_pairs[3:]:
+    qt_source = next((source for source, dest_name in binary_pairs if dest_name.startswith("btx-qt")), None)
+    if require_gui and qt_source is None:
+        raise FileNotFoundError(
+            "Release archive requires btx-qt next to btxd. Build with -DBUILD_GUI=ON "
+            "-DWITH_QT_VERSION=6 (Qt 6 on Linux, the host Qt on macOS) and pass --require-gui."
+        )
+    for helper_path, helper_name in binary_pairs[3:]:
+        # The macOS GUI is rewritten by macdeployqt into btx-qt.app. The build-tree
+        # binary still names Homebrew Qt; the deployed app is checked after that copy.
+        if helper_name.startswith("btx-qt") and platform_id.startswith("macos-"):
+            continue
         verify_shipped_helper(helper_path)
 
     for source, dest_name in binary_pairs:
+        if dest_name.startswith("btx-qt") and platform_id.startswith("macos-"):
+            qt_bundle = _load_qt_bundle()
+            app_binary = qt_bundle.deploy_macos_qt_app(source, release_root, version)
+            included.append(str(app_binary.relative_to(release_root)))
+            wrapper_path = bin_dir / dest_name
+            wrapper_path.write_text(
+                "#!/bin/sh\n"
+                "set -eu\n"
+                'SELF_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)\n'
+                'exec "$SELF_DIR/../btx-qt.app/Contents/MacOS/btx-qt" "$@"\n',
+                encoding="utf-8",
+            )
+            wrapper_path.chmod(0o755)
+            included.append(str(wrapper_path.relative_to(release_root)))
+            continue
         wrapper = wrapper_payload(dest_name.removesuffix(config["exe_suffix"]), platform_id)
         if wrapper is None:
             destination = bin_dir / dest_name
@@ -514,6 +560,8 @@ def stage_release_tree(
         destination.write_text(wrapper, encoding="utf-8")
         destination.chmod(0o755)
         included.append(str(destination.relative_to(release_root)))
+        if dest_name.startswith("btx-qt") and platform_id.startswith("linux-"):
+            _load_qt_bundle().bundle_linux_qt(real_destination, release_root / "lib")
 
     if "cuda" in platform_id:
         # libcublasLt and toolkit siblings live next to btxd.real ($ORIGIN).
@@ -648,6 +696,7 @@ def main(argv: list[str]) -> int:
             metal_lib_dir=Path(args.metal_lib_dir).expanduser().resolve() if args.metal_lib_dir else None,
             source_root=source_root,
             temp_root=temp_root,
+            require_gui=args.require_gui,
         )
         if PLATFORM_CONFIGS[args.platform_id]["archive_format"] == "zip":
             write_zip(archive_path, release_root)

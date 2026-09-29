@@ -73,9 +73,8 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.12rc1**
-(`CLIENT_VERSION_IS_RELEASE=false`). Last shipping tag is **v0.34.10**.
-Do not recut `v0.34.10`. See
+`CLIENT_VERSION` in this tree is **0.34.12**
+(`CLIENT_VERSION_IS_RELEASE=true`). Do not recut `v0.34.10`. See
 [release-notes-0.34.12.md](release-notes/release-notes-0.34.12.md).
 The `v0.34` tag and 0.34.0 seal remain the pool-close cut. 0.34.1 is
 withdrawn: it partitions nodes from mainnet. 0.34.2 is withdrawn for

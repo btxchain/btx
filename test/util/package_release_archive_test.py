@@ -109,6 +109,31 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                 self.assertIn("OPENSSL", wrapper_text)
                 self.assertIn("LIB_DIR", wrapper_text)
 
+    def test_require_gui_rejects_archive_without_btx_qt(self):
+        self._stub_ship_gate()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source_root = self._build_source_root(root)
+            btxd, btx_cli = self._write_binaries(root)
+            with self.assertRaises(FileNotFoundError):
+                self.module.main(
+                    [
+                        "--output-dir",
+                        str(root / "out"),
+                        "--version",
+                        "29.2",
+                        "--platform-id",
+                        "linux-x86_64",
+                        "--btxd",
+                        str(btxd),
+                        "--btx-cli",
+                        str(btx_cli),
+                        "--source-root",
+                        str(source_root),
+                        "--require-gui",
+                    ]
+                )
+
     def test_cuda_archive_names_match_release_platform_ids(self):
         self.assertEqual(
             self.module.archive_filename("0.33.0", "linux-x86_64-cuda12", None),

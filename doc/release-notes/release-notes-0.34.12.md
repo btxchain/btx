@@ -1,9 +1,9 @@
 # BTX 0.34.12rc1 — Available-chain recovery
 
-**Status:** release candidate. `CLIENT_VERSION` is **0.34.12** with
-`CLIENT_VERSION_RC=1` and `CLIENT_VERSION_IS_RELEASE=false`. `btxd -version`
-prints `v0.34.12rc1` plus a git suffix. P2P subversion is `/BTX:0.34.12/`.
-Last shipping tag remains **v0.34.10**. Do not recut `v0.34.10`.
+**Status:** release. `CLIENT_VERSION` is **0.34.12** with
+`CLIENT_VERSION_RC=0` and `CLIENT_VERSION_IS_RELEASE=true`. `btxd -version`
+prints `v0.34.12` when built from the `v0.34.12` tag. P2P subversion is
+`/BTX:0.34.12/`. Do not recut `v0.34.10`.
 
 Not a consensus change. ExactReplay arithmetic, chainwork, issuance, and
 bans are unchanged. An unavailable header tower is not marked invalid.
@@ -119,8 +119,11 @@ A CUDA archive must contain `libcublasLt` beside `btxd`. The driver does
 not provide that library. The packager refuses a CUDA cut that omits it.
 `libevent`, `libzmq5`, and `libgomp1` are host packages; the launch
 wrapper names the apt packages when they are missing. `btxd` is built
-with ZMQ. `btx-qt` is included when the GUI was built. The GUI needs Qt
-on the build machine; it is not a separate consensus binary.
+with ZMQ. Every published archive includes `btx-qt`. Linux archives
+carry the Qt libraries and platform plugin under `lib/` (`QT_PLUGIN_PATH`
+is set by the wrapper). The macOS archive carries a `btx-qt.app` whose
+Qt frameworks and plugins were copied in by `macdeployqt`, so a Mac
+without Homebrew can launch the GUI. `btx-qt` is not a consensus binary.
 
 ## What it does not do
 
