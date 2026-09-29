@@ -159,6 +159,12 @@ def bundle_linux_qt(qt_binary: Path, lib_dir: Path) -> None:
     plugin_dest.chmod(plugin_dest.stat().st_mode | 0o111)
     _set_rpath(plugin_dest, "$ORIGIN/../../../")
     _set_rpath(qt_binary, "$ORIGIN/../lib")
+    # Without this, Qt also searches the distro plugin directory and can load
+    # a system xcb plugin that does not see the bundled libxcb-cursor.
+    (qt_binary.parent / "qt.conf").write_text(
+        "[Paths]\nPrefix = ..\nPlugins = lib/qt6/plugins\nLibraries = lib\n",
+        encoding="utf-8",
+    )
 
 
 def _macdeployqt() -> Path:
@@ -259,6 +265,8 @@ def deploy_macos_qt_app(source_binary: Path, release_root: Path, version: str) -
     (app / "Contents" / "Info.plist").write_text(_info_plist(version), encoding="utf-8")
     subprocess.check_call([str(_macdeployqt()), str(app), "-always-overwrite"])
     _rewrite_homebrew_ids(app)
+    if shutil.which("codesign"):
+        subprocess.check_call(["codesign", "--force", "--deep", "--sign", "-", str(app)])
     offenders: list[str] = []
     for path in app.rglob("*"):
         if not path.is_file():
