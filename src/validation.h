@@ -1047,7 +1047,7 @@ private:
     const CBlockIndex* m_last_hysteresis_deferred_candidate GUARDED_BY(::cs_main){nullptr};
     uint32_t m_last_hysteresis_deferred_work_margin GUARDED_BY(::cs_main){0};
 
-    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& policy_parked, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
     bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 
     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -1256,10 +1256,19 @@ private:
     uint256 m_acquisition_last_replayed_root GUARDED_BY(::cs_main);
     unsigned m_acquisition_replay_burst GUARDED_BY(::cs_main){0};
     mutable std::optional<int> m_cadence_hold_logged_allowed GUARDED_BY(::cs_main);
-    //! Rate limit for the deepforkautoresolve verdict diagnostic in
-    //! DeepForkAutoResolveMayAct (at most one LogInfo line per interval,
-    //! except acted=1 verdicts, which always log).
-    mutable int64_t m_deep_fork_verdict_log_time_s GUARDED_BY(::cs_main){0};
+    struct DeepForkVerdictLogState {
+        uint256 candidate_hash{};
+        uint256 tip_hash{};
+        int reorg_depth{0};
+        uint16_t flags{0};
+        friend bool operator==(const DeepForkVerdictLogState&,
+                               const DeepForkVerdictLogState&) = default;
+    };
+    //! Last deepforkautoresolve verdict emitted. Hot fork-choice paths score
+    //! the same candidate repeatedly; unchanged state is not a new operator
+    //! event and must not produce a periodic heartbeat forever.
+    mutable std::optional<DeepForkVerdictLogState>
+        m_deep_fork_verdict_log_state GUARDED_BY(::cs_main);
     std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
     std::optional<node::BoundedReorgPolicyRecord> m_bounded_reorg GUARDED_BY(::cs_main);
     //! Monotonic time of the last forward better-chain connect. Zero until the
@@ -1276,6 +1285,23 @@ private:
     bool PersistBoundedReorgPolicy() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void EnsureBoundedAnchor() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void AdvanceBoundedAnchor(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** True when `index` carries the replay authority configured for this
+     *  node: local ExactReplay, or (only for a trusted Profile-1 mirror) a
+     *  current verified pin quorum / signed-frontier ancestry. This is an
+     *  authority predicate, not body validation. */
+    [[nodiscard]] bool IndexHasConfiguredReplayAuthority(
+        const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Body-present, transaction-valid, linked, and authorized under
+     *  IndexHasConfiguredReplayAuthority. Shared by acquisition ordering and
+     *  bounded migration so the two gates cannot disagree. */
+    [[nodiscard]] bool IndexHasRecoveryValidatedBody(
+        const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** On a trusted mirror, cap a registered header tower at the highest
+     *  ancestor covered by the current signed frontier. Consensus nodes keep
+     *  the full candidate and validate it by ExactReplay. */
+    [[nodiscard]] const CBlockIndex* AcquisitionEscapeAuthorityTip(
+        const CBlockIndex* candidate, const CBlockIndex* fork) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     [[nodiscard]] bool BoundedSuffixChecked(const CBlockIndex* candidate,
                                             const CBlockIndex* fork) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -1786,6 +1812,13 @@ public:
     //! taller chain deeper than the recovery ceiling. Requires both chains
     //! in the index. Not a consensus failure.
     [[nodiscard]] bool IsDeepHeavierRewriteBranch(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Authorize an automatic escape from a persisted reorg park. Bounded
+    //! mode owns the final decision regardless of which selector nominated
+    //! the candidate; legacy/observe modes retain their caller-specific
+    //! escape semantics.
+    [[nodiscard]] bool AutomaticParkEscapeAllowed(
+        const CBlockIndex* candidate, bool non_bounded_escape)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool UnparkReorgBranchContainingBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Remove stale persisted park roots that cannot safely apply to the current
@@ -1997,7 +2030,7 @@ public:
     //! acquiring while stale-stuck)? Unlike AcquisitionEscapeActive this does
     //! NOT require the block itself to out-work the tip -- a low mid-tower body
     //! is below the minority tip in work but is still on the tower (fetch,
-    //! parked-bypass, retain). ExactReplay / RC progress-lane / AcceptBlock
+    //! parked-bypass, retain). Replay-authority progress / AcceptBlock
     //! reverify must use FindAcquisitionEscapeFrontier, not this predicate:
     //! every LCA+1 sibling is parent-connectable, and covering them all fills
     //! the accelerator. Active-chain blocks and HEADER_ONLY / retained children
@@ -2008,16 +2041,21 @@ public:
     //! gate. Migration stays park/deepforkautoresolve-gated.
     [[nodiscard]] bool AcquisitionEscapeCoversBlock(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    //! Parent of `index` is already on the active chain or ExactReplay-verified
-    //! with data (and not FAILED). Shared by fetch lookahead and ExactReplay
-    //! admission so doomed-tower FAILED parents cannot spend GPU.
+    //! Parent of `index` is already on the active chain or has a fully
+    //! validated body under this node's configured replay authority (local
+    //! ExactReplay, or current signed-frontier authority on a trusted mirror).
+    //! Shared by fetch lookahead and replay admission so doomed-tower FAILED
+    //! parents cannot consume validation/download capacity.
     [[nodiscard]] bool AcquisitionEscapeParentConnectable(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Select one root-first frontier from the bounded registered towers.
     //! Prefer available bodies without pending CPU confirmation, then the
-    //! shallowest reorg (work breaks ties). Bound consecutive replay service
-    //! so a deeper ready fork also progresses. If none is ready, return the
-    //! heaviest frontier for fetching. Selection itself spends no turns.
+    //! shallowest reorg (work breaks ties). Consensus mode advances on local
+    //! ExactReplay; trusted-mirror mode advances on body validation covered by
+    //! the current signed frontier and never selects beyond that frontier.
+    //! Bound consecutive replay service so a deeper ready fork also progresses.
+    //! If none is ready, return the heaviest frontier for fetching. Selection
+    //! itself spends no turns.
     //! has_body supplements HAVE_DATA with retained or incoming body presence;
     //! it never changes ancestry, validation, or tower eligibility.
     [[nodiscard]] const CBlockIndex* FindAcquisitionEscapeFrontier(

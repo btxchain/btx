@@ -2729,11 +2729,13 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     bool trusted_mirror,
     bool signed_frontier_catch_up,
     bool unconnected_has_pin_quorum,
-    bool unconnected_exact_replay_verified)
+    bool unconnected_exact_replay_verified,
+    bool registered_heavier_acquisition = false)
 {
     if (trusted_mirror) {
         return TrustedMirrorKeepFetchingCoveredUnconnected(
-            signed_frontier_catch_up, unconnected_has_pin_quorum);
+            signed_frontier_catch_up || registered_heavier_acquisition,
+            unconnected_has_pin_quorum);
     }
     return unconnected_exact_replay_verified;
 }

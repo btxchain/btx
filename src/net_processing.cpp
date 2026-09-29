@@ -4063,7 +4063,11 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                 !m_matmul_block_lifecycle.IsActive(child->GetBlockHash()) &&
                 !m_chainman.ActiveChain().Contains(child)) {
                     if (m_chainman.IsOnParkedReorgBranch(child)) {
-                        (void)m_chainman.UnparkReorgBranchContainingBlock(child);
+                        if (m_chainman.AutomaticParkEscapeAllowed(
+                                child, /*non_bounded_escape=*/true)) {
+                            (void)m_chainman.UnparkReorgBranchContainingBlock(
+                                child);
+                        }
                     }
                     (void)m_chainman.NormalizeReorgRecovery(tip);
                     reverify_hash = child->GetBlockHash();
@@ -4088,8 +4092,11 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     // equal-work twin so the followed tip-child path never
                     // fired. Re-admit the attested sibling (LCA+1).
                     if (m_chainman.IsOnParkedReorgBranch(fork_child)) {
-                        (void)m_chainman.UnparkReorgBranchContainingBlock(
-                            fork_child);
+                        if (m_chainman.AutomaticParkEscapeAllowed(
+                                fork_child, /*non_bounded_escape=*/true)) {
+                            (void)m_chainman.UnparkReorgBranchContainingBlock(
+                                fork_child);
+                        }
                     }
                     (void)m_chainman.NormalizeReorgRecovery(tip);
                     reverify_hash = fork_child->GetBlockHash();
@@ -6460,6 +6467,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // hundreds and in_flight_global stuck at 2-3). Any peer on the already-
     // followed best-header chain may therefore fetch better/equal-work
     // non-parked branches; acceptance still requires M-of-N.
+    bool trusted_recovery_acquisition{false};
     if (node::matmul_trusted::IsTrustedMirror() && tip != nullptr &&
         state->pindexBestKnownBlock != nullptr) {
         const bool extends_tip{
@@ -6474,7 +6482,27 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                 state->pindexBestKnownBlock)};
             const bool short_reorg{TrustedMirrorShortTipReorg(
                 tip, state->pindexBestKnownBlock)};
-            if (parked) {
+            // A bounded-policy park forbids activation, not acquisition. Once
+            // the stale-tip escape has registered this strictly-heavier tower,
+            // permit root-first GETDATA only when the selected hole is on the
+            // peer's branch and cryptographically covered by the current
+            // signed frontier. This lets a trusted mirror acquire the bodies
+            // needed to make a bounded recovery decision without letting an
+            // arbitrary parked/header-only tower consume bandwidth or become
+            // activatable.
+            const CBlockIndex* const acquisition_frontier{
+                m_chainman.FindAcquisitionEscapeFrontier()};
+            trusted_recovery_acquisition =
+                parked && acquisition_frontier != nullptr &&
+                AcquisitionFetchEscapeActive(
+                    m_chainman, state->pindexBestKnownBlock) &&
+                state->pindexBestKnownBlock->nHeight >=
+                    acquisition_frontier->nHeight &&
+                state->pindexBestKnownBlock->GetAncestor(
+                    acquisition_frontier->nHeight) == acquisition_frontier &&
+                m_chainman.IndexIsCoveredBySignedFrontier(
+                    acquisition_frontier);
+            if (parked && !trusted_recovery_acquisition) {
                 log_skip("trusted_mirror_parked_reorg");
                 return;
             }
@@ -6486,7 +6514,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             // as followed, and do not let a recovery target on that fork
             // reopen download. Only the signer or a short tip-race reorg
             // may fetch a non-extending branch.
-            if (!is_authority && !short_reorg) {
+            if (!is_authority && !short_reorg &&
+                !trusted_recovery_acquisition) {
                 log_skip("trusted_mirror_not_short_reorg");
                 return;
             }
@@ -6504,15 +6533,16 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         state->pindexBestKnownBlock != nullptr &&
         m_chainman.IsOnParkedReorgBranch(state->pindexBestKnownBlock) &&
         !yield_to_this_peer &&
-        // RB-16: acquisition (fetch + full ExactReplay of a strictly-heavier
-        // stale tower) must proceed even when that tower's branch is PARKED --
+        // RB-16: acquisition (fetch + configured replay-authority validation
+        // of a strictly-heavier stale tower) must proceed even when that
+        // tower's branch is PARKED --
         // otherwise a restarted node that already parked the deep reorg can
         // never GETDATA the tower bodies and stays stuck below a known heavier
         // chain forever (live rtx6000: peers with best-known=201278 skipped
         // reason=followed-branch-parked, inflight=0, GPU idle). This exempts the
         // DOWNLOAD only; migration stays park/deepforkautoresolve-gated and
         // ConnectTip still refuses the parked reorg until a covered body's
-        // ExactReplay + the migration policy permit it. Bounded/self-guarded via
+        // validation + the migration policy permit it. Bounded/self-guarded via
         // AcquisitionFetchEscapeActive (stale + registered exempt tower; lead
         // measured at registration so a long stall cannot disarm the fetch).
         !AcquisitionFetchEscapeActive(m_chainman, state->pindexBestKnownBlock) &&
@@ -6731,6 +6761,16 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         have_data_unconnected &&
         (state->pindexLastCommonBlock->nStatus &
          BLOCK_EXACT_REPLAY_VERIFIED) != 0};
+    const bool continue_trusted_recovery_acquisition{
+        have_data_unconnected && trusted_recovery_acquisition &&
+        unconnected_pin_authority && root_first.lowest_missing != nullptr &&
+        state->pindexBestKnownBlock != nullptr &&
+        state->pindexBestKnownBlock->nHeight >=
+            root_first.lowest_missing->nHeight &&
+        state->pindexBestKnownBlock->GetAncestor(
+            root_first.lowest_missing->nHeight) == root_first.lowest_missing &&
+        m_chainman.IndexIsCoveredBySignedFrontier(
+            root_first.lowest_missing)};
     if (have_data_unconnected) {
         const auto now_kick{GetTime<std::chrono::microseconds>()};
         // Trusted mirrors wait for pin quorum (ConnectTip would defer).
@@ -6901,7 +6941,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                 node::matmul_trusted::IsTrustedMirror(),
                 IsSignedFrontierBodyCatchUp(),
                 unconnected_pin_authority,
-                unconnected_exact_replay)) {
+                unconnected_exact_replay,
+                continue_trusted_recovery_acquisition)) {
             log_skip("have_data_unconnected");
             return;
         }

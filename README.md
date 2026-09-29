@@ -37,9 +37,9 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.34.12** (`CLIENT_VERSION_BUILD=12`,
-`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`). Do not recut
-`v0.34.10` or `v0.34.9`.
+This working tree is **0.34.13rc1** (`CLIENT_VERSION_BUILD=13`,
+`CLIENT_VERSION_RC=1`, `CLIENT_VERSION_IS_RELEASE=false`). Shipping tag
+**v0.34.12**. Do not recut `v0.34.10` or `v0.34.9`.
 
 ## Start here
 
