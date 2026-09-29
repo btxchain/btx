@@ -2543,11 +2543,14 @@ BOOST_FIXTURE_TEST_CASE(chainstate_fmwc_yields_on_attested_suffix_with_header_on
 
 BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_rejoins_connectable_prefix_below_frontier_hole, TestChain100Setup)
 {
-    // A trusted mirror whose active tip has quorum must still be able to
-    // move onto the body-complete prefix of a heavier signed frontier when
-    // a header-only hole sits between that prefix and the frontier. The
-    // frontier itself stays unconnectable; the prefix below the hole does
-    // not.
+    // Live 2026-09-26: the mirror sat on an attested three-block fork while
+    // the current signed frontier was hundreds of blocks up a competing
+    // branch. Bodies through the competing branch's connectable prefix were
+    // present, followed by one HEADER_ONLY hole, and higher bodies (including
+    // the signed frontier) were present. FindUnique rejected the frontier as
+    // unconnectable, but the downloader also refused the hole because the
+    // active tip did not lead to the frontier. Rejoin only the covered,
+    // body-complete prefix so ordinary signed-frontier catch-up can resume.
     ChainstateManager& chainman = *Assert(m_node.chainman);
     Chainstate& chainstate = chainman.ActiveChainstate();
     auto& mode = const_cast<kernel::MatMulValidationMode&>(
@@ -2564,72 +2567,142 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_rejoins_connectable_prefix_bel
     } restore{mode, saved_mode};
     mode = kernel::MatMulValidationMode::TRUSTED;
 
-    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
-    CBlockIndex* parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
-    BOOST_REQUIRE(parent != nullptr);
+    const CScript active_script{
+        GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    CKey frontier_dest;
+    frontier_dest.MakeNewKey(/*fCompressed=*/true);
+    const CScript frontier_script{
+        GetScriptForDestination(PKHash(frontier_dest.GetPubKey()))};
+    CBlockIndex* const fork{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(fork != nullptr);
 
-    std::vector<CBlockIndex*> competing;
-    competing.reserve(8);
-    for (int i = 0; i < 8; ++i) {
-        const CBlock block{CreateAndProcessBlock({}, script)};
-        CBlockIndex* idx{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
-        BOOST_REQUIRE(idx != nullptr);
-        competing.push_back(idx);
-    }
-    for (int i = 7; i >= 0; --i) {
-        BlockValidationState state;
-        BOOST_REQUIRE(chainstate.InvalidateBlock(state, competing[i]));
-    }
-    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == parent);
+    auto build_branch = [&](const CScript& script, int count) {
+        std::vector<CBlockIndex*> branch;
+        branch.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            const CBlock block{CreateAndProcessBlock({}, script)};
+            CBlockIndex* const index{WITH_LOCK(::cs_main, {
+                return chainman.m_blockman.LookupBlockIndex(block.GetHash());
+            })};
+            BOOST_REQUIRE(index != nullptr);
+            branch.push_back(index);
+        }
+        return branch;
+    };
 
-    std::vector<CBlockIndex*> active;
-    active.reserve(3);
-    for (int i = 0; i < 3; ++i) {
-        const CBlock block{CreateAndProcessBlock({}, script)};
-        CBlockIndex* idx{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
-        BOOST_REQUIRE(idx != nullptr);
-        active.push_back(idx);
-    }
-    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == active.back());
+    const auto active{build_branch(active_script, 3)};
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, active.front()));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == fork);
+
+    const auto frontier_branch{build_branch(frontier_script, 8)};
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, frontier_branch.front()));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == fork);
     {
         LOCK(::cs_main);
-        // Clear the failure only after the shorter branch is the tip, and
-        // do not activate. The fifth competing block is the header-only
-        // hole. The four-block prefix below it has more work than the tip.
-        chainstate.ResetBlockFailureFlags(competing.front());
-        for (CBlockIndex* idx : competing) {
-            idx->nStatus &= ~BLOCK_FAILED_MASK;
-            BOOST_REQUIRE(idx->nStatus & BLOCK_HAVE_DATA);
-        }
-        competing[4]->nStatus &= ~BLOCK_HAVE_DATA;
-        competing[4]->nDataPos = 0;
-        competing[4]->nTx = 0;
+        chainstate.ResetBlockFailureFlags(active.front());
     }
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) ==
+                  active.back());
 
     CKey signer;
     signer.MakeNewKey(/*fCompressed=*/true);
+    const uint256 chain_id{uint256::ONE};
+    const uint256 replay_ctx{
+        uint256::FromHex(std::string(64, '9')).value()};
     matmul::trusted::StoreConfig config;
-    config.chain_id = uint256::ONE;
-    config.replay_authority_context = uint256::FromHex(std::string(64, 'd')).value();
+    config.chain_id = chain_id;
+    config.replay_authority_context = replay_ctx;
     config.trusted_signers = {signer.GetPubKey()};
     config.threshold = 1;
-    config.local_signer = signer;
     std::string error;
     BOOST_REQUIRE(node::matmul_trusted::Configure(
         std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
         std::chrono::milliseconds{50}, error));
-    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+
+    CBlockIndex* const hole{frontier_branch[5]};
+    CBlockIndex* const connectable_prefix{hole->pprev};
+    BOOST_REQUIRE(connectable_prefix == frontier_branch[4]);
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(frontier_branch.front());
+        BOOST_REQUIRE(hole->nStatus & BLOCK_HAVE_DATA);
+        // Model a never-downloaded body, not a pruned fully connected block.
+        // Keep the higher bodies but unlink their transaction counts and
+        // validation stages from the missing ancestor. ActivateBestChain runs
+        // CheckBlockIndex, so clearing HAVE_DATA alone is an invalid fixture.
+        hole->nStatus &= ~(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO | BLOCK_VALID_MASK);
+        hole->nStatus |= BLOCK_VALID_TREE;
+        hole->nTx = 0;
+        hole->nDataPos = 0;
+        hole->nUndoPos = 0;
+        hole->m_chain_tx_count = 0;
+        hole->nSequenceId = 0;
+        chainstate.setBlockIndexCandidates.erase(hole);
+        for (size_t i = 6; i < frontier_branch.size(); ++i) {
+            CBlockIndex* const index{frontier_branch[i]};
+            index->nStatus &= ~(BLOCK_HAVE_UNDO | BLOCK_VALID_MASK);
+            index->nStatus |= BLOCK_VALID_TRANSACTIONS;
+            index->nUndoPos = 0;
+            index->m_chain_tx_count = 0;
+            index->nSequenceId = 0;
+            chainstate.setBlockIndexCandidates.erase(index);
+            chainman.m_blockman.AddUnlinkedBlock(index);
+        }
+        BOOST_REQUIRE(frontier_branch.back()->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(connectable_prefix->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE_GT(connectable_prefix->nChainWork,
+                         active.back()->nChainWork);
+    }
+
+    BOOST_REQUIRE(InjectHistoricalAttestation(
+                      signer, chain_id, replay_ctx,
                       active.back()->GetBlockHash(), active.back()->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
-                      competing.back()->GetBlockHash(), competing.back()->nHeight) ==
+    BOOST_REQUIRE(InjectHistoricalAttestation(
+                      signer, chain_id, replay_ctx,
+                      frontier_branch.back()->GetBlockHash(),
+                      frontier_branch.back()->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
 
     {
         LOCK(::cs_main);
-        BOOST_REQUIRE(competing[3]->nChainWork > active.back()->nChainWork);
-        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), competing[3]);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip(), active.back());
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorum(
+            active.back()->GetBlockHash(), active.back()->nHeight));
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorum(
+            frontier_branch.back()->GetBlockHash(),
+            frontier_branch.back()->nHeight));
+        BOOST_REQUIRE(chainman.IndexIsCoveredBySignedFrontier(
+            connectable_prefix));
+        BOOST_REQUIRE(chainman.IndexIsCoveredBySignedFrontier(hole));
+        BOOST_REQUIRE_EQUAL(hole->nStatus & BLOCK_HAVE_DATA, 0);
+        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(),
+                          connectable_prefix);
+        BOOST_CHECK(chainman.IsAttestedAbandonForkCandidate(
+            connectable_prefix));
+        BOOST_CHECK_EQUAL(chainstate.FindMostWorkChainForTest(),
+                          connectable_prefix);
+    }
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), connectable_prefix);
+        BOOST_CHECK(chainman.IndexLeadsToSignedFrontier(connectable_prefix));
+        const auto frontier{chainman.GetSignedFrontierStatus()};
+        BOOST_CHECK(frontier.on_active_chain);
+        BOOST_CHECK_EQUAL(frontier.hash, frontier_branch.back()->GetBlockHash());
+        BOOST_CHECK_EQUAL(frontier.blocks_behind,
+                          frontier_branch.back()->nHeight - connectable_prefix->nHeight);
+        BOOST_CHECK(!chainstate.m_chain.Contains(frontier_branch.back()));
+        BOOST_CHECK_EQUAL(hole->nStatus & BLOCK_HAVE_DATA, 0);
+        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), nullptr);
     }
 }
 

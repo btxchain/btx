@@ -12780,9 +12780,18 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
             (idx->nStatus & BLOCK_FAILED_MASK)) {
             return;
         }
-        if (!(idx->nStatus & BLOCK_HAVE_DATA) ||
-            !idx->IsValid(BLOCK_VALID_TRANSACTIONS) ||
-            !idx->HaveNumChainTxs()) {
+        // A header-only signed frontier, or a downloaded body above a hole,
+        // has no connected chain-tx count. Requiring that on the nominated
+        // index returns before the connectable prefix is examined, so the
+        // mirror never joins the branch the frontier covers.
+        const bool source_on_signed_frontier_chain{
+            IndexIsOnSignedFrontierChain(idx)};
+        const bool source_body_usable{
+            (idx->nStatus & BLOCK_HAVE_DATA) != 0 &&
+            idx->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+            idx->HaveNumChainTxs()};
+        if (!source_body_usable &&
+            (!trusted_mirror || !source_on_signed_frontier_chain)) {
             return;
         }
         // A consensus signer's validated tip must not lose work solely
@@ -12802,55 +12811,49 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
                 /*lca_is_index=*/false)) {
             return;
         }
-        // In-memory quorum or signed-frontier coverage. Durable HasQuorum
-        // on every frontier hint was the live 25–60s ABC stall after
-        // accept-path path=frontier (512-hint window × LevelDB+verify).
-        if (!IndexHasTrustedMatMulAuthority(idx)) {
+        // Verify authority before deriving a lower candidate. The derived
+        // prefix is eligible only because a current, verified frontier covers
+        // it; an arbitrary HAVE_DATA prefix must never steer fork choice.
+        if (!IndexHasTrustedMatMulAuthority(idx)) return;
+
+        const CBlockIndex* path_lca{LastCommonAncestor(tip, idx)};
+        if (path_lca == nullptr ||
+            node::matmul_trusted::TrustedMirrorAttestedHintIsActiveAncestor(
+                /*on_active_chain=*/false, path_lca == idx)) {
             return;
         }
-        // HEADER_ONLY holes on the path to an attested HAVE_DATA frontier
-        // are unconnectable. Proposing the frontier itself made
-        // FindMostWorkChain erase+re-insert forever with cs_main held
-        // (PR 105 5302572644). A trusted mirror may still join the
-        // body-complete prefix below the lowest hole when that prefix
-        // sits on the current signed frontier. Consensus signers keep
-        // the all-or-nothing refusal.
-        {
-            const CBlockIndex* const path_lca{LastCommonAncestor(tip, idx)};
-            if (path_lca == nullptr ||
-                node::matmul_trusted::TrustedMirrorAttestedHintIsActiveAncestor(
-                    /*on_active_chain=*/false, path_lca == idx)) {
+        // Nominate only the maximal connectable prefix below a HEADER_ONLY
+        // hole. Once it is active, ordinary signed-frontier catch-up requests
+        // the next body. Consensus-mode signers keep the all-or-nothing rule.
+        const CBlockIndex* lowest_unconnectable{nullptr};
+        for (const CBlockIndex* walk{idx}; walk != path_lca; walk = walk->pprev) {
+            if (walk == nullptr || (walk->nStatus & BLOCK_FAILED_MASK) != 0) {
                 return;
             }
-            const CBlockIndex* lowest_unconnectable{nullptr};
-            for (const CBlockIndex* walk{idx};
-                 walk != nullptr && walk != path_lca; walk = walk->pprev) {
-                if (walk->nStatus & BLOCK_FAILED_MASK) return;
-                if (!(walk->nStatus & BLOCK_HAVE_DATA) ||
-                    !walk->IsValid(BLOCK_VALID_TRANSACTIONS) ||
-                    !walk->HaveNumChainTxs()) {
-                    lowest_unconnectable = walk;
-                }
-            }
-            if (lowest_unconnectable != nullptr) {
-                if (!trusted_mirror || !IndexIsOnSignedFrontierChain(idx)) {
-                    return;
-                }
-                const CBlockIndex* const prefix{lowest_unconnectable->pprev};
-                if (prefix == nullptr || prefix == path_lca || prefix == tip ||
-                    m_active_chainstate->m_chain.Contains(prefix) ||
-                    (prefix->nStatus & BLOCK_FAILED_MASK) ||
-                    !(prefix->nStatus & BLOCK_HAVE_DATA) ||
-                    !prefix->IsValid(BLOCK_VALID_TRANSACTIONS) ||
-                    !prefix->HaveNumChainTxs() ||
-                    !IndexIsOnSignedFrontierChain(prefix)) {
-                    return;
-                }
-                idx = prefix;
+            if (!(walk->nStatus & BLOCK_HAVE_DATA) ||
+                !walk->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                !walk->HaveNumChainTxs()) {
+                lowest_unconnectable = walk;
             }
         }
+        if (lowest_unconnectable != nullptr) {
+            if (!trusted_mirror || !source_on_signed_frontier_chain) return;
+            idx = lowest_unconnectable->pprev;
+            if (idx == nullptr || idx == path_lca || idx == tip ||
+                m_active_chainstate->m_chain.Contains(idx)) {
+                return;
+            }
+            if (!IndexHasTrustedMatMulAuthority(idx)) return;
+            path_lca = LastCommonAncestor(tip, idx);
+            if (path_lca == nullptr || path_lca == idx) return;
+        }
+        if (!(idx->nStatus & BLOCK_HAVE_DATA) ||
+            !idx->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+            !idx->HaveNumChainTxs()) {
+            return;
+        }
         {
-            const CBlockIndex* const lca{LastCommonAncestor(tip, idx)};
+            const CBlockIndex* const lca{path_lca};
             if (lca == nullptr) return;
             const int lca_depth{tip->nHeight - lca->nHeight};
             const bool attested_suffix{

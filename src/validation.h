@@ -1953,7 +1953,10 @@ public:
      * A unique attested HAVE_DATA index on the current signed-frontier
      * chain is eligible at any LCA depth. Short-reorg (1–6) still bounds
      * fossils off that chain. Live 2026-08-16: trusted archives sat 13–180
-     * unattested HAVE_DATA blocks off the attested suffix.
+     * unattested HAVE_DATA blocks off the attested suffix. If that frontier
+     * has a HEADER_ONLY hole, trusted mirrors return only its maximal
+     * body-complete covered prefix; consensus-mode signers still require the
+     * complete path.
      */
     const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

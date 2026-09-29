@@ -62,6 +62,17 @@ checked:
   lead. The extra room is header storage only. Body fetch, ExactReplay,
   and reorg depth are unchanged. A header at 2,049 above the tip is
   deferred, not marked invalid.
+- A trusted-mirror authority poll whose recorded header is an off-tip
+  competing terminal starts at that header and records it as the
+  discovery anchor, so that one reply can use the 2,048-header allowance.
+  Ordinary authority polls still step back one header. Failed and parked
+  branches are excluded. Header storage still does not fetch a body or
+  reorganize.
+- When the signed frontier itself is header-only, or blocks above a
+  missing body have no connected transaction count, a trusted mirror
+  nominates the last connectable covered prefix. Activation joins that
+  prefix and leaves the hole for ordinary catch-up. A consensus-mode
+  signer still requires the complete path.
 - A trusted mirror can keep requesting the next header page from a
   recognized authority after a solicited full batch, even when that
   prefix still has less work than the local tip. A solicited full

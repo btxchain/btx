@@ -1133,6 +1133,9 @@ struct Peer {
      *  (live 0.34.5: 171 getheaders/sec). HeadersSyncState continuations
      *  still clear it so IBD presync can walk. */
     NodeClock::time_point m_last_getheaders_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /** Last successful background-discovery getheaders. Ordinary probes must
+     *  not reset this clock, or a lagging fork never reaches its own locator. */
+    NodeClock::time_point m_last_background_headers_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** One reply may extend this explicitly requested competing anchor using
      * the bounded header-only discovery allowance. Cleared by any replacement
      * GETHEADERS or reply; unsolicited announcements cannot inherit it. */
@@ -6821,7 +6824,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                     IsMatMulBudgetDeferred(stuck_hash, now_for_diag)};
                 if (body_held) {
                     LogInfo("Convergence note: tip-critical block %s height=%d has "
-                            "been requested for %ds with no delivery -- BODY is "
+                            "remained the recovery root for %ds -- BODY is "
                             "retained / waiting for the verification job (deferred "
                             "store holds this hash). Not a network availability "
                             "stall.\n",
@@ -10869,8 +10872,10 @@ void PeerManagerImpl::MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
     const CNodeState& state{*State(node.GetId())};
     const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
     const CBlockIndex* const known{state.pindexBestKnownBlock};
-    const auto last_activity{std::max(
-        peer.m_last_getheaders_sent, NodeClock::time_point{node.m_connected})};
+    const auto last_activity{
+        peer.m_last_background_headers_sent.time_since_epoch().count() == 0
+            ? NodeClock::time_point{node.m_connected}
+            : peer.m_last_background_headers_sent};
     // A taller competing header is outside HeaderSyncBackgroundRefreshNeeded:
     // that helper leaves ahead peers to the urgent probe. The urgent probe
     // starts at our tip, so it cannot continue a lower-work tower. Ask from
@@ -10915,6 +10920,7 @@ void PeerManagerImpl::MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
              known->GetAncestor(tip->nHeight) != tip)) {
             peer.m_competing_header_discovery_anchor = known->GetBlockHash();
         }
+        peer.m_last_background_headers_sent = now;
         m_background_headers_last_sent = now;
         m_background_headers_last_peer = node.GetId();
         m_background_headers_pending.erase(node.GetId());
@@ -12172,23 +12178,58 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
         current_time - last < TRUSTED_MIRROR_AUTHORITY_HEADERS_INTERVAL) {
         return;
     }
-    const CBlockIndex* start{tip};
+    const CNodeState* const authority_state{State(pto.GetId())};
+    const CBlockIndex* const authority_known{
+        authority_state != nullptr ? authority_state->pindexBestKnownBlock
+                                   : nullptr};
+    const bool authority_peer{
+        IsTrustedMirrorAuthorityPeer(pto.GetId(), peer.m_their_services,
+                                     authority_known)};
+    // The authority scheduler runs before ordinary background refresh and
+    // can consume every two-minute GETHEADERS window. If its BestKnown is a
+    // competing prefix, starting from the active locator replays that fork
+    // only through active+72. Anchor this request at the competing terminal
+    // and give exactly that reply the header-only discovery provenance.
+    // Inbound peers, failed blocks, and locally parked branches stay out.
+    const bool competing_discovery{
+        authority_known != nullptr && authority_peer &&
+        !pto.IsInboundConn() && !pto.IsAddrFetchConn() &&
+        CanServeBlocks(peer) &&
+        !m_chainman.ActiveChain().Contains(authority_known) &&
+        !(authority_known->nStatus & BLOCK_FAILED_MASK) &&
+        !m_chainman.IsOnParkedReorgBranch(authority_known)};
+
+    const CBlockIndex* start{competing_discovery ? authority_known : tip};
     const CBlockIndex* best{m_chainman.m_best_header};
-    if (node::matmul_trusted::TrustedMirrorAuthorityHeadersFollowBest(
+    if (!competing_discovery &&
+        node::matmul_trusted::TrustedMirrorAuthorityHeadersFollowBest(
             tip_height, best != nullptr ? best->nHeight : -1,
             best != nullptr && best->nHeight >= tip_height &&
                 best->GetAncestor(tip_height) == tip)) {
         start = best;
     } else if (const CBlockIndex* claimed{m_chainman.m_best_claimed_header};
+               !competing_discovery &&
                node::matmul_trusted::TrustedMirrorAuthorityHeadersFollowBest(
                    tip_height, claimed != nullptr ? claimed->nHeight : -1,
                    claimed != nullptr && claimed->nHeight >= tip_height &&
                        claimed->GetAncestor(tip_height) == tip)) {
         start = claimed;
     }
-    if (start != nullptr && start->pprev) start = start->pprev;
+    // Ordinary polling steps back so an up-to-date peer returns headers.
+    // Competing discovery must start at the exact anchor: the first new
+    // header's prev-hash is the one-shot provenance check.
+    if (!competing_discovery && start != nullptr && start->pprev) {
+        start = start->pprev;
+    }
     if (!MaybeSendGetHeaders(pto, GetLocator(start), peer)) {
         return;
+    }
+    if (competing_discovery) {
+        peer.m_competing_header_discovery_anchor = start->GetBlockHash();
+        LogInfo("trusted mirror authority competing-header discovery peer=%d "
+                "anchor=%s height=%d tip=%d target=%d\n",
+                pto.GetId(), start->GetBlockHash().ToString(),
+                start->nHeight, tip_height, target_height);
     }
     last = current_time;
     LogDebug(
@@ -22977,6 +23018,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 std::memory_order_relaxed);
         }
 
+        // Authority polling otherwise loses the send window to the tip probe
+        // and never records a competing anchor. Give it the first chance.
+        MaybeRequestTrustedMirrorAuthorityHeaders(*pto, *peer, current_time);
+
         // A taller competing header is learned only when the locator
         // starts on that header. A tip-anchored getheaders walks back to
         // the fork and the reply then hits the ordinary 72-header cap.
@@ -23145,14 +23190,16 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                      tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
                      state.pindexBestKnownBlock != nullptr ? "set" : "null");
         };
-        // A taller competing tower must be refreshed from its own header
-        // before the tip-anchored probe spends this peer's send window.
+        // A competing tower, taller or still below the tip, must be refreshed
+        // from its own header before the tip-anchored probe spends this
+        // peer's send window.
         {
-            const CBlockIndex* const ahead{state.pindexBestKnownBlock};
-            if (ahead != nullptr && tip_for_headers != nullptr &&
-                ahead->nHeight > tip_for_headers->nHeight &&
-                !m_chainman.ActiveChain().Contains(ahead) &&
-                ahead->GetAncestor(tip_for_headers->nHeight) != tip_for_headers) {
+            const CBlockIndex* const known_fork{state.pindexBestKnownBlock};
+            if (known_fork != nullptr && tip_for_headers != nullptr &&
+                known_fork->IsValid(BLOCK_VALID_TREE) &&
+                !(known_fork->nStatus & BLOCK_FAILED_MASK) &&
+                !m_chainman.ActiveChain().Contains(known_fork) &&
+                known_fork->GetAncestor(tip_for_headers->nHeight) != tip_for_headers) {
                 MaybeRefreshBackgroundHeaders(*pto, *peer);
             }
         }

@@ -206,6 +206,10 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             "-matmultrustedwaitms=30000",
             f"-regtestreorgprotectionstartheight={REORG_PROTECTION_START}",
             "-reorgprotectionprofile=emergency",
+            # This test exercises the legacy role split: consensus parks,
+            # while a trusted mirror follows its authority across that depth.
+            # Bounded policy applies its independent ceiling to both roles.
+            "-reorgpolicy=legacy",
             # Keep the profile's PARK action explicit for the finality guard.
             "-parkdeepreorg=1",
             f"-maxreorgdepthpark={PARK_DEPTH}",

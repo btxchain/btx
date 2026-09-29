@@ -7,6 +7,7 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <consensus/merkle.h>
+#include <kernel/chainstatemanager_opts.h>
 #include <key.h>
 #include <matmul/trusted_exact_replay_attestation.h>
 #include <matmul/matmul_v4_rc_cpu_confirmation.h>
@@ -10088,11 +10089,11 @@ BOOST_AUTO_TEST_CASE(review_unavailable_tip_child_does_not_starve_unique_frontie
     node::matmul_trusted::ResetForTest();
 }
 
-BOOST_AUTO_TEST_CASE(competing_tower_getheaders_locator_starts_at_connected_tip)
+BOOST_AUTO_TEST_CASE(competing_tower_getheaders_locator_starts_at_known_competing_tip)
 {
-    // Long competing HEADER_ONLY tower: getheaders must start AT the
-    // connected tip, not tip->pprev. Starting at pprev lets a competing-only
-    // peer answer from the fork LCA and never advertise honest tip+1.
+    // The generic locator still stays at the connected tip for a long
+    // header-only tower. An explicit probe of a peer already known to follow
+    // that fork must instead advance from its terminal header.
     LOCK(NetEventsInterface::g_msgproc_mutex);
     node::matmul_trusted::ResetForTest();
     ResetSharedPeermanFixture(m_node);
@@ -10164,11 +10165,12 @@ BOOST_AUTO_TEST_CASE(competing_tower_getheaders_locator_starts_at_connected_tip)
     BOOST_CHECK(peerman.SendMessages(&peer));
     BOOST_REQUIRE_MESSAGE(HasQueuedMessageType(peer, NetMsgType::GETHEADERS),
                           "competing BestKnown above tip must keep probing "
-                          "getheaders from the connected tip");
+                          "getheaders from that peer's competing tip");
     const auto locator{QueuedGetHeadersLocatorHashes(peer)};
     BOOST_REQUIRE_MESSAGE(!locator.empty(),
                           "getheaders locator must not be empty");
-    BOOST_CHECK_EQUAL(locator.front(), tip_hash);
+    BOOST_CHECK_EQUAL(locator.front(), fork.back()->GetBlockHash());
+    BOOST_CHECK(locator.front() != tip_hash);
     BOOST_CHECK(locator.front() != pprev_hash);
 
     peerman.FinalizeNode(peer);
@@ -12461,6 +12463,189 @@ BOOST_AUTO_TEST_CASE(background_headers_refresh_learns_quiet_competing_chain)
     BOOST_CHECK((learned->nStatus & (BLOCK_HAVE_DATA | BLOCK_EXACT_REPLAY_VERIFIED)) == 0);
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return chainman.ActiveTip()), tip);
     peerman.FinalizeNode(peer);
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
+BOOST_AUTO_TEST_CASE(background_headers_refresh_lagging_fork_survives_ordinary_probes)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    ResetSharedPeermanFixture(m_node);
+    auto& chainman{*m_node.chainman};
+    auto& peerman{*m_node.peerman};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    connman.SetPeerConnectTimeout(std::chrono::hours{1});
+    const CBlockIndex* root{WITH_LOCK(cs_main, return chainman.ActiveTip())};
+    for (int i = 1; i <= 8; ++i) {
+        mineBlock(m_node, std::chrono::seconds{root->GetBlockTime() + i});
+    }
+    const CBlockIndex* tip{WITH_LOCK(cs_main, return chainman.ActiveTip())};
+    CBlockIndex* known{MakePeermanHeaderChild(chainman, *root, 0x72)};
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK_LIMITED | NODE_WITNESS)};
+    // VERSION claims progress, but the last received fork header is still
+    // below our tip. The ahead-peer locator exception cannot help this case.
+    CNode peer{5801, nullptr, CAddress{}, 5801, 0, CAddress{}, "lagging-fork",
+               ConnectionType::MANUAL, false, 0};
+    connman.Handshake(peer, true, services, services, PROTOCOL_VERSION, true,
+                      tip->nHeight + 20);
+    connman.FlushSendBuffer(peer);
+    auto receive_headers = [&](const std::vector<CBlock>& headers) {
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+        peer.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(peer);
+        connman.FlushSendBuffer(peer);
+        peer.fPauseSend = false;
+    };
+    receive_headers({CBlock{known->GetBlockHeader()}});
+    const int64_t connected{GetTime()};
+    auto probe = [&](int64_t offset, bool background, bool expect_request = true) {
+        SetMockTime(std::chrono::seconds{connected + offset});
+        peer.fPauseSend = false;
+        BOOST_CHECK(peerman.SendMessages(&peer));
+        const auto locator{QueuedGetHeadersLocatorHashes(peer)};
+        if (expect_request) {
+            BOOST_REQUIRE_MESSAGE(!locator.empty(), "missing request at +" << offset);
+            BOOST_CHECK_MESSAGE((locator.front() == known->GetBlockHash()) == background,
+                                "wrong discovery priority at +" << offset);
+        } else {
+            BOOST_CHECK_MESSAGE(locator.empty(), "send window reopened at +" << offset);
+        }
+        connman.FlushSendBuffer(peer);
+        peer.fPauseSend = false;
+        if (expect_request) receive_headers({});
+    };
+    // Processing the initial announcement already used this send window.
+    probe(0, false, false);
+    probe(121, false);
+    probe(242, false);
+    probe(300, false, false);
+    probe(362, false, false);
+    probe(363, true);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return chainman.ActiveTip()), tip);
+    BOOST_CHECK((known->nStatus & (BLOCK_HAVE_DATA | BLOCK_EXACT_REPLAY_VERIFIED)) == 0);
+    peerman.FinalizeNode(peer);
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
+BOOST_AUTO_TEST_CASE(trusted_authority_refresh_anchors_competing_discovery)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    ResetSharedPeermanFixture(m_node);
+    node::matmul_trusted::ResetForTest();
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    auto& chainman{*m_node.chainman};
+    auto& peerman{*m_node.peerman};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    connman.SetPeerConnectTimeout(std::chrono::hours{1});
+    const CBlockIndex* root{WITH_LOCK(cs_main, return chainman.ActiveTip())};
+    for (int i = 1; i <= 8; ++i) {
+        mineBlock(m_node, std::chrono::seconds{root->GetBlockTime() + i});
+    }
+    const CBlockIndex* tip{WITH_LOCK(cs_main, return chainman.ActiveTip())};
+    CBlockIndex* known{MakePeermanHeaderChild(chainman, *root, 0xa1)};
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    CNode authority{5820, nullptr, CAddress{}, 5820, 0, CAddress{},
+                    "trusted-competing-authority", ConnectionType::MANUAL,
+                    false, 0};
+    connman.Handshake(authority, true, services, services, PROTOCOL_VERSION,
+                      true, tip->nHeight + 80);
+    struct FinalizePeer {
+        PeerManager& peerman;
+        CNode& peer;
+        ~FinalizePeer() { peerman.FinalizeNode(peer); }
+    } finalize{peerman, authority};
+    connman.FlushSendBuffer(authority);
+
+    auto receive = [&](const std::vector<CBlock>& headers) {
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            authority,
+            NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+        authority.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(authority);
+        authority.fPauseSend = false;
+    };
+    receive({CBlock{known->GetBlockHeader()}});
+    connman.FlushSendBuffer(authority);
+    CNodeStateStats stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(authority.GetId(), stats));
+    BOOST_REQUIRE_EQUAL(stats.nSyncHeight, known->nHeight);
+
+    // The trusted-authority poll is due before the ordinary five-minute
+    // background refresh. It must start at this peer's validated competing
+    // terminal, not consume the shared send window with an active locator.
+    const int64_t connected{GetTime()};
+    SetMockTime(std::chrono::seconds{connected + 121});
+    authority.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&authority));
+    const auto locator{QueuedGetHeadersLocatorHashes(authority)};
+    BOOST_REQUIRE(!locator.empty());
+    BOOST_CHECK_EQUAL(locator.front(), known->GetBlockHash());
+    connman.FlushSendBuffer(authority);
+
+    // The reply is now explicitly anchored competing discovery and may cross
+    // the ordinary +72 admission cap. It remains header-only and does not move
+    // the active chain without bodies and normal validation.
+    std::vector<std::unique_ptr<CBlockIndex>> remote_indexes;
+    std::vector<uint256> remote_hashes(80);
+    std::vector<CBlock> headers;
+    const CBlockIndex* prev{known};
+    for (size_t i = 0; i < remote_hashes.size(); ++i) {
+        CBlock block;
+        block.nVersion = VERSIONBITS_TOP_BITS;
+        block.hashPrevBlock = prev->GetBlockHash();
+        block.hashMerkleRoot = uint256::FromHex(
+            strprintf("%064x", 0xd0 + i)).value();
+        block.nTime = prev->GetBlockTime() + 1;
+        block.nBits = prev->nBits;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            block, prev->nHeight + 1, chainman.GetConsensus(), 5'000'000,
+            prev->GetMedianTimePast()));
+        headers.push_back(block);
+        remote_hashes[i] = block.GetHash();
+        auto index{std::make_unique<CBlockIndex>(block.GetBlockHeader())};
+        index->phashBlock = &remote_hashes[i];
+        index->pprev = const_cast<CBlockIndex*>(prev);
+        index->nHeight = prev->nHeight + 1;
+        index->nChainWork = prev->nChainWork + GetBlockProof(*index);
+        prev = index.get();
+        remote_indexes.push_back(std::move(index));
+    }
+    receive(headers);
+    const CBlockIndex* learned{WITH_LOCK(
+        cs_main,
+        return chainman.m_blockman.LookupBlockIndex(remote_hashes.back()))};
+    BOOST_REQUIRE_MESSAGE(
+        learned != nullptr,
+        "trusted authority reply must cross active+72 from its competing anchor");
+    BOOST_CHECK_EQUAL(learned->nHeight, known->nHeight + 80);
+    BOOST_CHECK_GT(learned->nHeight - tip->nHeight,
+                   kernel::MAX_UNAUTHENTICATED_HEADER_LEAD);
+    BOOST_CHECK((learned->nStatus &
+                 (BLOCK_HAVE_DATA | BLOCK_EXACT_REPLAY_VERIFIED)) == 0);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return chainman.ActiveTip()), tip);
+
     NeutralizeUnconnectedHeaders(chainman);
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
