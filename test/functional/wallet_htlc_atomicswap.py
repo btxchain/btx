@@ -25,7 +25,7 @@ import copy
 import hashlib
 from decimal import Decimal
 
-from test_framework.messages import tx_from_hex
+from test_framework.messages import MAX_BIP125_RBF_SEQUENCE, tx_from_hex
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error
 from test_framework.bridge_utils import create_bridge_wallet, find_output, mine_block
@@ -176,6 +176,9 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
             claim_desc, {"txid": c_txid, "vout": c_vout},
             preimage.hex(), dest_addr, fee)
         assert_equal(built["complete"], True)
+        decoded_claim = node.decoderawtransaction(built["hex"])
+        assert_equal(decoded_claim["locktime"], 0)
+        assert_equal(decoded_claim["vin"][0]["sequence"], MAX_BIP125_RBF_SEQUENCE)
 
         # A witness revealed for one payout must not authorize a conflicting
         # transaction that redirects the same HTLC input.
@@ -239,8 +242,7 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
         assert_equal(early.get("complete"), True)
         decoded_early = node.decoderawtransaction(early["hex"])
         assert_equal(decoded_early["locktime"], refund_locktime)
-        if decoded_early["vin"][0]["sequence"] == 0xffffffff:
-            raise AssertionError("refund sequence must be non-final for CLTV")
+        assert_equal(decoded_early["vin"][0]["sequence"], MAX_BIP125_RBF_SEQUENCE)
         assert_raises_rpc_error(-26, None, node.sendrawtransaction, early["hex"])
 
         # Mine past the locktime, then refund.

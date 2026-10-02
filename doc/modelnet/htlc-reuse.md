@@ -31,7 +31,9 @@ a timeout of at least 1, and the claim key and refund key must differ.
 `buildhtlcrefund` with nLockTime L is accepted once the tip is at L and
 confirms in the following block. The claim path has no deadline: after
 the timeout, claim and refund can both be valid, and the spend that pays
-more confirms. Claim before the timeout, and stagger the two chains.
+more confirms. Both inputs signal replacement. The claim uses nLockTime
+0, so it can be mined immediately. Claim before the timeout, and stagger
+the two chains.
 
 HTLC success proves payment, not model correctness, safety, or usefulness.
 Default automatic spend is zero; a paid quote still requires an explicit

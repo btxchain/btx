@@ -11,6 +11,7 @@
 #include <shielded/view_grant.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
+#include <util/rbf.h>
 #include <wallet/bridge_wallet.h>
 #include <wallet/shielded_privacy.h>
 
@@ -760,7 +761,7 @@ BOOST_AUTO_TEST_CASE(bridge_refund_transaction_selects_refund_leaf)
                                                     1000);
     BOOST_REQUIRE(psbt.has_value());
     BOOST_CHECK(psbt->tx->nLockTime == plan->refund_lock_height);
-    BOOST_CHECK(psbt->tx->vin[0].nSequence == CTxIn::MAX_SEQUENCE_NONFINAL);
+    BOOST_CHECK(psbt->tx->vin[0].nSequence == MAX_BIP125_RBF_SEQUENCE);
     BOOST_CHECK(psbt->inputs[0].m_p2mr_leaf_script == plan->script_tree.refund_leaf_script);
 }
 

@@ -22,6 +22,7 @@
 #include <script/signingprovider.h>
 #include <univalue.h>
 #include <util/moneystr.h>
+#include <util/rbf.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
 #include <validation.h>
@@ -16442,6 +16443,7 @@ RPCHelpMan buildhtlcclaim()
         "The descriptor must be exactly mr(htlc_sha256(<SHA256>,<claimerPubkey>),refund(<locktime>,<senderPubkey>)).\n"
         "The claim leaf requires a 32-byte preimage. HASH160 htlc_tx() descriptors remain spendable for recovery of any pre-existing lock and cannot be used to derive a new address.\n"
         "The claim path has no timeout of its own. After the refund locktime, a claim and a refund of the same output can both be valid; the one that pays more is the one that confirms. Claim before the locktime, with margin for a reorg, and stagger the two chains' timeouts.\n"
+        "The claim input signals replacement and uses nLockTime 0, so it can be mined immediately and a higher fee can replace it.\n"
         "The wallet must hold the claimer's PQ private key to produce a transaction-bound claim signature.\n",
         {
             {"descriptor", RPCArg::Type::STR, RPCArg::Optional::NO, "The mr(...) HTLC descriptor (with or without #checksum)"},
@@ -16510,8 +16512,9 @@ RPCHelpMan buildhtlcclaim()
             CMutableTransaction mtx;
             mtx.version = CTransaction::CURRENT_VERSION;
             mtx.nLockTime = 0;
-            constexpr uint32_t sequence_final{0xffffffff};
-            mtx.vin.emplace_back(outpoint, CScript(), sequence_final);
+            // nLockTime 0 keeps the claim immediately mineable. The sequence
+            // signals replacement so a later higher fee can take its place.
+            mtx.vin.emplace_back(outpoint, CScript(), MAX_BIP125_RBF_SEQUENCE);
             mtx.vout.emplace_back(out_value, GetScriptForDestination(destination));
 
             PartiallySignedTransaction psbt(mtx);
@@ -16550,6 +16553,7 @@ RPCHelpMan buildhtlcrefund()
         "By default the descriptor must be exactly mr(htlc_sha256(<SHA256>,<claimerPubkey>),refund(<locktime>,<senderPubkey>)).\n"
         "The wallet must hold the sender's supported PQ private key (ML-DSA or SLH-DSA).\n"
         "A refund whose nLockTime is L is final in the first block after L: once the tip height (or MTP, for a time lock) is at L the refund can enter the mempool, and it confirms in block L+1, not in block L.\n"
+        "The refund input signals replacement and stays non-final, so the timeout still applies and a higher fee can replace it.\n"
         "After that point a claim of the same output can still be valid. Broadcast the refund promptly. The claim path has no timeout of its own.\n",
         {
             {"descriptor", RPCArg::Type::STR, RPCArg::Optional::NO, "The mr(...) HTLC descriptor (with or without #checksum)"},
@@ -16610,9 +16614,8 @@ RPCHelpMan buildhtlcrefund()
             CMutableTransaction mtx;
             mtx.version = CTransaction::CURRENT_VERSION;
             mtx.nLockTime = static_cast<uint32_t>(locktime);
-            // A non-final sequence is required for nLockTime to be enforced (and thus for CLTV to pass).
-            constexpr uint32_t max_sequence_nonfinal{0xfffffffe};
-            mtx.vin.emplace_back(outpoint, CScript(), max_sequence_nonfinal);
+            // Non-final so nLockTime is enforced, and low enough to signal replacement.
+            mtx.vin.emplace_back(outpoint, CScript(), MAX_BIP125_RBF_SEQUENCE);
             mtx.vout.emplace_back(out_value, GetScriptForDestination(destination));
 
             PartiallySignedTransaction psbt(mtx);

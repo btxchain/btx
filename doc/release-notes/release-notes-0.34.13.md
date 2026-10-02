@@ -37,7 +37,9 @@ is rejected, and the claim key and the refund key must be different.
 `buildhtlcclaim` notes that the claim path has no deadline: after the
 refund timeout, either spend can be valid and the one that pays more
 confirms. `buildhtlcrefund` notes that nLockTime L confirms in the
-following block, not in block L.
+following block, not in block L. Both spends signal replacement. The
+claim uses nLockTime 0, so it can still be mined immediately. The
+refund sequence stays non-final, so its timeout still applies.
 
 A CPU-only regtest node in the default consensus MatMul mode stops
 connecting blocks once ExactReplay is required. Startup says so.
