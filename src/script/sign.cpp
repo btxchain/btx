@@ -718,7 +718,8 @@ static bool ParseP2MRHTLCSha256LeafForSigning(Span<const unsigned char> script, 
     std::vector<unsigned char> sha256;
     PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
     std::vector<unsigned char> pubkey;
-    if (!ParseP2MRHTLCSha256Leaf(script, sha256, algo, pubkey)) return false;
+    if (!ParseP2MRHTLCSha256Leaf(script, sha256, algo, pubkey) &&
+        !ParseP2MRHTLCSha256LegacyLeaf(script, sha256, algo, pubkey)) return false;
     info.type = P2MRLeafType::HTLC_SHA256;
     info.htlc_sha256 = std::move(sha256);
     info.htlc_algo = algo;

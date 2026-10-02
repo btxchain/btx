@@ -3653,8 +3653,8 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
                 }
 
                 const auto timeout{ToIntegral<int64_t>(std::string_view(timeout_arg.data(), timeout_arg.size()))};
-                if (!timeout.has_value() || *timeout < 0 || *timeout > std::numeric_limits<uint32_t>::max()) {
-                    error = strprintf("mr(): refund timeout '%s' is not valid", std::string(timeout_arg.begin(), timeout_arg.end()));
+                if (!timeout.has_value() || *timeout < 1 || *timeout > std::numeric_limits<uint32_t>::max()) {
+                    error = strprintf("mr(): refund timeout '%s' is not valid (must be at least 1)", std::string(timeout_arg.begin(), timeout_arg.end()));
                     return false;
                 }
 
@@ -3800,6 +3800,28 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
         if (expr.size()) {
             error = strprintf("mr(): unexpected trailing token '%c'", expr[0]);
             return {};
+        }
+
+        const MRLeafSpec* claim_leaf{nullptr};
+        const MRLeafSpec* refund_leaf{nullptr};
+        for (const MRLeafSpec& leaf : leaf_specs) {
+            if (leaf.type == MRLeafType::HTLC_SHA256 || leaf.type == MRLeafType::HTLC_TX) {
+                claim_leaf = &leaf;
+            } else if (leaf.type == MRLeafType::REFUND) {
+                refund_leaf = &leaf;
+            }
+        }
+        if (claim_leaf != nullptr && refund_leaf != nullptr) {
+            const bool same_fixed = !claim_leaf->fixed_pubkey.empty() &&
+                                    claim_leaf->fixed_pubkey == refund_leaf->fixed_pubkey;
+            const bool same_provider = claim_leaf->fixed_pubkey.empty() &&
+                                       refund_leaf->fixed_pubkey.empty() &&
+                                       claim_leaf->provider_index >= 0 &&
+                                       claim_leaf->provider_index == refund_leaf->provider_index;
+            if (same_fixed || same_provider) {
+                error = "mr(): claim and refund keys must be distinct";
+                return {};
+            }
         }
 
         ret.emplace_back(std::make_unique<MRDescriptor>(std::move(providers), std::move(leaf_specs), std::move(leaf_exprs)));
@@ -4225,6 +4247,12 @@ bool CheckChecksum(Span<const char>& sp, bool require_checksum, std::string& err
     if (out_checksum) *out_checksum = std::move(checksum);
     sp = check_split[0];
     return true;
+}
+
+bool DescriptorIsRecoveryOnlyHtlc(std::string_view descriptor)
+{
+    if (descriptor.find("htlc_tx(") != std::string_view::npos) return true;
+    return descriptor.find("htlc(") != std::string_view::npos;
 }
 
 std::vector<std::unique_ptr<Descriptor>> Parse(const std::string& descriptor, FlatSigningProvider& out, std::string& error, bool require_checksum)

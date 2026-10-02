@@ -564,6 +564,29 @@ BOOST_AUTO_TEST_CASE(mr_descriptor_parses_sha256_htlc_leaf)
     BOOST_CHECK(scripts[0] == BuildP2MROutput(root));
 }
 
+BOOST_AUTO_TEST_CASE(mr_descriptor_rejects_immediate_refund_and_identical_keys)
+{
+    const std::vector<unsigned char> sha256 = MakePattern(uint256::size(), 0x71);
+    const std::vector<unsigned char> claimer = MakePattern(MLDSA44_PUBKEY_SIZE, 0x72);
+    const std::vector<unsigned char> sender = MakePattern(MLDSA44_PUBKEY_SIZE, 0x73);
+    FlatSigningProvider provider;
+    std::string error;
+    const std::string immediate = "mr(htlc_sha256(" + HexStr(sha256) + "," + HexStr(claimer) + "),refund(0," + HexStr(sender) + "))";
+    BOOST_CHECK(Parse(immediate, provider, error, /*require_checksum=*/false).empty());
+    BOOST_CHECK(error.find("refund timeout") != std::string::npos);
+
+    error.clear();
+    const std::string same_key = "mr(htlc_sha256(" + HexStr(sha256) + "," + HexStr(claimer) + "),refund(10," + HexStr(claimer) + "))";
+    BOOST_CHECK(Parse(same_key, provider, error, /*require_checksum=*/false).empty());
+    BOOST_CHECK(error.find("distinct") != std::string::npos);
+
+    error.clear();
+    const std::string ok = "mr(htlc_sha256(" + HexStr(sha256) + "," + HexStr(claimer) + "),refund(10," + HexStr(sender) + "))";
+    BOOST_CHECK(!Parse(ok, provider, error, /*require_checksum=*/false).empty());
+    BOOST_CHECK(DescriptorIsRecoveryOnlyHtlc("mr(htlc_tx(" + HexStr(MakePattern(uint160::size(), 0x01)) + "," + HexStr(claimer) + "))"));
+    BOOST_CHECK(!DescriptorIsRecoveryOnlyHtlc(ok));
+}
+
 BOOST_AUTO_TEST_CASE(mr_descriptor_model_htlc_sha256_alias_canonicalizes)
 {
     const std::vector<unsigned char> sha256 = MakePattern(uint256::size(), 0x63);
