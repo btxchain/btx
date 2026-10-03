@@ -642,32 +642,45 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         result.pushKV("automatic_spend_atoms", 0);
         return true;
     }
+    // btxd reads at most 256 KiB (MAX_RPC_BODY) of a helper reply and one signed
+    // record is ~14 KB, so listings page by size from "start" and report next_start.
+    auto list_page = [&](const std::map<std::string, SignedEnvelope>& map, const std::string* resource_ref) {
+        uint64_t start = 0;
+        if (a.exists("start") && !U64Field(a, "start", start, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "start");
+        constexpr size_t kPageBytes = 192 * 1024;
+        UniValue arr(UniValue::VARR);
+        size_t used = 0;
+        uint64_t index = 0;
+        bool more = false;
+        for (const auto& kv : map) {
+            if (resource_ref && PayloadOf(kv.second)["resource_ref"].get_str() != *resource_ref) continue;
+            if (index++ < start) continue;
+            UniValue row = EnvelopeToJson(kv.second);
+            if (!resource_ref) row.pushKV("id", kv.first);
+            const size_t bytes = row.write().size();
+            if (!arr.empty() && used + bytes > kPageBytes) {
+                more = true;
+                break;
+            }
+            used += bytes;
+            arr.push_back(row);
+        }
+        result = UniValue(UniValue::VOBJ);
+        result.pushKV("records", arr);
+        if (more) result.pushKV("next_start", start + arr.size());
+        result.pushKV("automatic_spend_atoms", 0);
+        return true;
+    };
     if (method == "listcomputeoffers" || method == "listcomputeagreements" || method == "listcomputejobs" || method == "listcomputereceipts") {
         const std::map<std::string, SignedEnvelope>* map = &m_offers;
         if (method.find("agreement") != std::string::npos) map = &m_agreements;
         else if (method.find("job") != std::string::npos) map = &m_jobs;
         else if (method.find("receipt") != std::string::npos) map = &m_receipts;
-        UniValue arr(UniValue::VARR);
-        for (const auto& kv : *map) {
-            UniValue row = EnvelopeToJson(kv.second);
-            row.pushKV("id", kv.first);
-            arr.push_back(row);
-        }
-        result = UniValue(UniValue::VOBJ);
-        result.pushKV("records", arr);
-        result.pushKV("automatic_spend_atoms", 0);
-        return true;
+        return list_page(*map, nullptr);
     }
     if (method == "getcomputeoffersforresource") {
         const std::string ref = a.exists("resource_ref") ? a["resource_ref"].get_str() : "";
-        UniValue arr(UniValue::VARR);
-        for (const auto& kv : m_offers) {
-            if (PayloadOf(kv.second)["resource_ref"].get_str() == ref) arr.push_back(EnvelopeToJson(kv.second));
-        }
-        result = UniValue(UniValue::VOBJ);
-        result.pushKV("records", arr);
-        result.pushKV("automatic_spend_atoms", 0);
-        return true;
+        return list_page(m_offers, &ref);
     }
     if (method == "quotecomputeaccess") {
         UniValue offer_copy;

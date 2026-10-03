@@ -157,6 +157,40 @@ class ModelnetComputeEconomyTest(BitcoinTestFramework):
             "now_ms": 1800,
         })
         assert_equal(verdict["valid"], True)
+        # ~14 KB per signed receipt: 25 receipts exceed the 256 KiB helper reply, so page.
+        page_offer = node.createcomputeoffer({
+            "offer": {**offer, "nonce": "page", "settlement": {**offer["settlement"], "required_p1e_microunits": 100}},
+            "now_ms": 1900,
+        })
+        page_agreement = node.issuecomputeagreement({
+            "offer_id": page_offer["offer_id"],
+            "subject_pubkey": pk,
+            "period_start_ms": 1900,
+            "period_end_ms": 9_000_000,
+            "now_ms": 1900,
+        })
+        for i in range(24):
+            page_job = node.createcomputejob({
+                "agreement_id": page_agreement["agreement_id"],
+                "subject_pubkey": pk,
+                "job_class": "REGTEST_DETERMINISTIC",
+                "credit_p1e_microunits": 1,
+                "input_commitment": f"page-{i}",
+                "executor_spec_commitment": "22",
+                "expires_at_ms": 8_000_000,
+                "nonce": f"page-{i}",
+                "now_ms": 1900,
+            })
+            page_result = node.submitcomputejobresult({"job_id": page_job["job_id"], "output_commitment": "33", "now_ms": 1900})
+            node.acceptcomputejobresult({"result_id": page_result["result_id"], "nonce": f"page-{i}", "now_ms": 1900})
+        seen, start = [], 0
+        while True:
+            page = node.listcomputereceipts({"start": start})
+            seen += [r["id"] for r in page["records"]]
+            if "next_start" not in page:
+                break
+            start = page["next_start"]
+        assert_equal(len(set(seen)), 25)
         assert_equal(node.listtransactions("*", 10), [])
         assert_equal(node.getcomputebalance({"agreement_id": agreement["agreement_id"], "now_ms": 1800})["automatic_spend_atoms"], 0)
 
