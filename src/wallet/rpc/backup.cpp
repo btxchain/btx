@@ -3143,6 +3143,9 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
             parse_opts.allow_p2tr_op_success = data["allow_op_success"].get_bool();
         }
         const bool active = data.exists("active") ? data["active"].get_bool() : false;
+        if (active && DescriptorIsRecoveryOnlyHtlc(descriptor)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "HASH160 htlc_tx() and legacy htlc() cannot be an active receive descriptor");
+        }
         const std::string label{LabelFromValue(data["label"])};
 
         // Parse descriptor string

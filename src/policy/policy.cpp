@@ -390,6 +390,7 @@ P2MRLeafType ParsePolicyP2MRLeafScript(Span<const unsigned char> leaf_script)
     std::vector<unsigned char> htlc_pubkey;
     PQAlgorithm htlc_algo{PQAlgorithm::ML_DSA_44};
     if (ParseP2MRHTLCSha256Leaf(leaf_script, htlc_hash, htlc_algo, htlc_pubkey) ||
+        ParseP2MRHTLCSha256LegacyLeaf(leaf_script, htlc_hash, htlc_algo, htlc_pubkey) ||
         ParseP2MRHTLCTxLeaf(leaf_script, htlc_hash, htlc_algo, htlc_pubkey)) {
         return HtlcLeafTypeForAlgo(htlc_algo);
     }

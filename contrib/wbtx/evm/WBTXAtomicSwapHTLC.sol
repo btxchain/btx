@@ -101,10 +101,12 @@ contract WBTXAtomicSwapHTLC is ReentrancyGuard {
     }
 
     /// @notice Claim with the preimage; reveals it on-chain for the BTX leg.
+    ///         The preimage must be 32 bytes, the same length the BTX SHA-256 claim leaf accepts.
     function claim(bytes32 id, bytes calldata preimage) external nonReentrant {
         Swap storage s = swaps[id];
         if (s.state != State.OPEN) revert NotOpen();
         if (block.timestamp >= s.timeout) revert Expired();
+        if (preimage.length != 32) revert BadPreimage();
         if (btxSha256(preimage) != s.hashlock) revert BadPreimage();
         s.state = State.CLAIMED;                              // effects before interaction
         IERC20(s.token).safeTransfer(s.recipient, s.amount);

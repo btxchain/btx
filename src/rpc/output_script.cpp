@@ -474,6 +474,9 @@ static RPCHelpMan deriveaddresses()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
             const std::string desc_str = request.params[0].get_str();
+            if (DescriptorIsRecoveryOnlyHtlc(desc_str)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "HASH160 htlc_tx() and legacy htlc() are recovery-only and cannot derive a new address");
+            }
             bool require_checksum = true;
             DescriptorParseOptions parse_opts;
 

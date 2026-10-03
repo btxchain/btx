@@ -2369,6 +2369,12 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         }
         execdata.m_tapleaf_hash_init = true;
 
+        if (P2MRClaimLeafPinsPreimageLength(script)) {
+            if (stack.empty() || stack.back().size() != 32) {
+                return set_error(serror, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
+            }
+        }
+
         exec_script = CScript(script.begin(), script.end());
         execdata.m_validation_weight_left = ::GetSerializeSize(witness.stack) + VALIDATION_WEIGHT_OFFSET;
         execdata.m_validation_weight_left_init = true;

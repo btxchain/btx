@@ -1313,6 +1313,35 @@ contract HTLCTest is Test {
         assertEq(htlc.btxSha256(pre), bytes32(hex"425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c"));
     }
 
+    function test_ClaimRequires32BytePreimage() public {
+        uint256[4] memory lengths = [uint256(0), 31, 32, 33];
+        for (uint256 i; i < lengths.length; i++) {
+            bytes memory pre = new bytes(lengths[i]);
+            for (uint256 j; j < pre.length; j++) pre[j] = 0x42;
+            bytes32 h = htlc.btxSha256(pre);
+            vm.startPrank(alice);
+            token.approve(address(htlc), 100e18);
+            bytes32 id = htlc.open(bob, address(token), 100e18, h, uint64(block.timestamp + 7 hours), bytes32(i));
+            vm.stopPrank();
+            uint256 bobAtClaim = token.balanceOf(bob);
+            if (lengths[i] == 32) {
+                vm.prank(bob);
+                htlc.claim(id, pre);
+                assertEq(token.balanceOf(bob), bobAtClaim + 100e18);
+                (,,,,,, WBTXAtomicSwapHTLC.State state) = htlc.swaps(id);
+                assertEq(uint256(state), uint256(WBTXAtomicSwapHTLC.State.CLAIMED));
+            } else {
+                vm.prank(bob);
+                vm.expectRevert(WBTXAtomicSwapHTLC.BadPreimage.selector);
+                htlc.claim(id, pre);
+                assertEq(token.balanceOf(bob), bobAtClaim);
+                (,,,,,, WBTXAtomicSwapHTLC.State state) = htlc.swaps(id);
+                assertEq(uint256(state), uint256(WBTXAtomicSwapHTLC.State.OPEN));
+                assertEq(token.balanceOf(address(htlc)) >= 100e18, true);
+            }
+        }
+    }
+
     function test_ClaimWithPreimage() public {
         bytes memory pre = new bytes(32);
         for (uint i; i < 32; i++) pre[i] = 0x42;

@@ -1550,6 +1550,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     // mirror, or a discovery relay that is not MatMul authority. Economic/SPV
     // still skip the required authority entirely and remain forbidden.
     const std::string matmul_validation_mode = args.GetArg("-matmulvalidation", "consensus");
+    if (chainparams.GetChainType() == ChainType::REGTEST && matmul_validation_mode == "consensus") {
+        LogInfo("regtest: -matmulvalidation=consensus requires ExactReplay before activation after the profile height. A CPU-only local test can set -matmulvalidation=economic. Transaction and script validation are unchanged.\n");
+    }
     if (chainparams.GetChainType() == ChainType::MAIN &&
         matmul_validation_mode != "consensus" &&
         matmul_validation_mode != "trusted" &&

@@ -405,7 +405,7 @@ std::vector<unsigned char> BuildP2MRHTLCTxLeaf(
     return std::vector<unsigned char>(script.begin(), script.end());
 }
 
-std::vector<unsigned char> BuildP2MRHTLCSha256Leaf(
+std::vector<unsigned char> BuildP2MRHTLCSha256LegacyLeaf(
     Span<const unsigned char> preimage_sha256,
     PQAlgorithm claimant_algo,
     Span<const unsigned char> claimant_pubkey)
@@ -414,6 +414,25 @@ std::vector<unsigned char> BuildP2MRHTLCSha256Leaf(
 
     CScript script;
     script << OP_SHA256
+           << std::vector<unsigned char>(preimage_sha256.begin(), preimage_sha256.end())
+           << OP_EQUALVERIFY;
+
+    const std::vector<unsigned char> checksig_script = BuildP2MRScript(claimant_algo, claimant_pubkey);
+    if (checksig_script.empty()) return {};
+    script.insert(script.end(), checksig_script.begin(), checksig_script.end());
+    return std::vector<unsigned char>(script.begin(), script.end());
+}
+
+std::vector<unsigned char> BuildP2MRHTLCSha256Leaf(
+    Span<const unsigned char> preimage_sha256,
+    PQAlgorithm claimant_algo,
+    Span<const unsigned char> claimant_pubkey)
+{
+    if (preimage_sha256.size() != uint256::size()) return {};
+
+    CScript script;
+    script << OP_SIZE << int64_t{32} << OP_EQUALVERIFY
+           << OP_SHA256
            << std::vector<unsigned char>(preimage_sha256.begin(), preimage_sha256.end())
            << OP_EQUALVERIFY;
 
@@ -478,7 +497,7 @@ bool ParseP2MRHTLCTxLeaf(
         script, /*transaction_bound=*/true, preimage_hash160, claimant_algo, claimant_pubkey);
 }
 
-bool ParseP2MRHTLCSha256Leaf(
+bool ParseP2MRHTLCSha256LegacyLeaf(
     Span<const unsigned char> script,
     std::vector<unsigned char>& preimage_sha256,
     PQAlgorithm& claimant_algo,
@@ -504,6 +523,48 @@ bool ParseP2MRHTLCSha256Leaf(
     preimage_sha256.assign(script.begin() + hash_offset, script.begin() + hash_offset + uint256::size());
     claimant_pubkey.assign(pubkey.begin(), pubkey.end());
     return true;
+}
+
+bool ParseP2MRHTLCSha256Leaf(
+    Span<const unsigned char> script,
+    std::vector<unsigned char>& preimage_sha256,
+    PQAlgorithm& claimant_algo,
+    std::vector<unsigned char>& claimant_pubkey)
+{
+    // OP_SIZE <32> OP_EQUALVERIFY OP_SHA256 <32-byte digest> OP_EQUALVERIFY <pubkey> OP_CHECKSIG_*
+    constexpr size_t hash_offset = 6; // OP_SIZE, PUSH1, 32, EQUALVERIFY, SHA256, PUSH32
+    constexpr size_t key_offset = 39;
+    if (script.size() <= key_offset) return false;
+    if (script[0] != static_cast<unsigned char>(OP_SIZE) ||
+        script[1] != 0x01 ||
+        script[2] != 32 ||
+        script[3] != static_cast<unsigned char>(OP_EQUALVERIFY) ||
+        script[4] != static_cast<unsigned char>(OP_SHA256) ||
+        script[5] != 0x20 ||
+        script[38] != static_cast<unsigned char>(OP_EQUALVERIFY)) {
+        return false;
+    }
+
+    Span<const unsigned char> pubkey;
+    size_t push_consumed{0};
+    if (!ParseP2MRAnyPubkeyPush(script, key_offset, claimant_algo, pubkey, push_consumed)) return false;
+    const size_t tail = key_offset + push_consumed;
+    if (script.size() != tail + 1) return false;
+    if (script[tail] != GetP2MRChecksigOpcode(claimant_algo)) return false;
+
+    preimage_sha256.assign(script.begin() + hash_offset, script.begin() + hash_offset + uint256::size());
+    claimant_pubkey.assign(pubkey.begin(), pubkey.end());
+    return true;
+}
+
+bool P2MRClaimLeafPinsPreimageLength(Span<const unsigned char> script)
+{
+    std::vector<unsigned char> hash;
+    std::vector<unsigned char> pubkey;
+    PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+    return ParseP2MRHTLCSha256Leaf(script, hash, algo, pubkey) ||
+           ParseP2MRHTLCSha256LegacyLeaf(script, hash, algo, pubkey) ||
+           ParseP2MRHTLCTxLeaf(script, hash, algo, pubkey);
 }
 
 std::vector<unsigned char> BuildP2MRRefundLeaf(
