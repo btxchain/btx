@@ -490,6 +490,11 @@ bool QualificationRegistry::Verify(const UniValue& challenge, const UniValue& re
         return false;
     }
     FileLock lock(fs::PathFromString(fs::PathToString(m_path) + ".lock"));
+    if (!lock.Ok()) {
+        err_code = "COMPUTE_CHALLENGE_INVALID";
+        err = "registry lock";
+        return false;
+    }
     if (!Load(err)) {
         m_healthy = false;
         m_error = err;
@@ -639,6 +644,11 @@ bool QualificationRegistry::Status(const std::string& challenge_id, int64_t now_
         return false;
     }
     FileLock lock(fs::PathFromString(fs::PathToString(m_path) + ".lock"));
+    if (!lock.Ok()) {
+        err_code = "COMPUTE_CHALLENGE_INVALID";
+        err = "registry lock";
+        return false;
+    }
     if (!Load(err)) {
         m_healthy = false;
         err_code = "COMPUTE_CHALLENGE_INVALID";

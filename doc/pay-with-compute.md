@@ -193,7 +193,7 @@ btx-cli -regtest redeemcomputequalification "$challenge" "$response"
 Economy calls take one JSON object named `request`:
 
 ```
-`now_ms` below is a regtest test clock. Mainnet and testnet ignore a caller clock and use local time.
+`now_ms` below is a regtest test clock. Mainnet and testnet reject a caller clock (`COMPUTE_RECORD_INVALID`) and use local time.
 
 btx-cli -regtest createcomputeoffer '{"offer": { ... }, "now_ms": 1000}'
 btx-cli -regtest issuecomputeagreement '{"offer_id":"...","subject_pubkey":"...","period_start_ms":1000,"period_end_ms":5000,"now_ms":1000}'

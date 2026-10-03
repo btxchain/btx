@@ -20,10 +20,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> None:
-    build = os.environ.get("BTX_BUILDDIR", str(ROOT / "build-gcc13"))
-    config = Path(build) / "test" / "config.ini"
-    if not config.is_file():
-        sys.exit(f"missing {config}; configure the existing build tree first")
+    build = os.environ.get("BTX_BUILDDIR", "")
+    if not build and (ROOT / "build" / "test" / "config.ini").is_file():
+        build = str(ROOT / "build")
+    config = Path(build) / "test" / "config.ini" if build else Path()
+    if not build or not config.is_file():
+        sys.exit("set BTX_BUILDDIR to a configured build tree")
     runner = Path(__file__).with_name("reference-job-runner.py")
     sample = subprocess.run(
         [sys.executable, str(runner)],
@@ -45,7 +47,7 @@ def main() -> None:
         sys.exit("job runner accepted a command")
     tests = [
         "rpc_compute_qualification.py",
-        "modelnet_compute_economy.py",
+        "feature_modelnet_compute_economy.py",
         "feature_pay_with_compute.py",
     ]
     for name in tests:

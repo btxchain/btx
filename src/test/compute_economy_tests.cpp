@@ -666,4 +666,87 @@ BOOST_AUTO_TEST_CASE(direct_compute_challenge_credits_once)
     modelnet::SetPwcQualificationRegistryPath("");
 }
 
+BOOST_AUTO_TEST_CASE(receipt_requires_allowed_mode_and_matching_job)
+{
+    const std::string profile = pwc::ProfileIdHex(pwc::ToyProfile());
+    const fs::path dir = m_path_root / "pwc-mode";
+    fs::create_directories(dir);
+    std::vector<unsigned char> pk;
+    WriteIdentity(dir, pk);
+    const std::string hex = HexStr(pk);
+    UniValue both = Offer(profile, hex, hex, hex, "PREPAID", 3'000'000, "REGTEST_DETERMINISTIC");
+    UniValue useful_only = both;
+    useful_only.pushKV("nonce", "useful-only");
+    UniValue settlement = useful_only["settlement"];
+    UniValue modes(UniValue::VARR);
+    modes.push_back("USEFUL_JOB_RECEIPTS");
+    settlement.pushKV("allowed_settlement_modes", modes);
+    useful_only.pushKV("settlement", settlement);
+
+    auto publish = [&](const UniValue& body) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("offer", body);
+        req.pushKV("now_ms", 1000);
+        return Call(dir, "regtest", "createcomputeoffer", req)["offer_id"];
+    };
+    const UniValue both_id = publish(both);
+    const UniValue useful_id = publish(useful_only);
+    auto agree = [&](const UniValue& offer_id, const char* nonce) {
+        UniValue agr(UniValue::VOBJ);
+        agr.pushKV("offer_id", offer_id);
+        agr.pushKV("subject_pubkey", hex);
+        agr.pushKV("period_start_ms", 1000);
+        agr.pushKV("period_end_ms", 9'000'000);
+        agr.pushKV("nonce", nonce);
+        agr.pushKV("now_ms", 1000);
+        return Call(dir, "regtest", "issuecomputeagreement", agr)["agreement_id"].get_str();
+    };
+    const std::string a1 = agree(both_id, "a1");
+    const std::string a2 = agree(both_id, "a2");
+    const std::string useful_a = agree(useful_id, "au");
+
+    UniValue unlabeled(UniValue::VOBJ);
+    unlabeled.pushKV("agreement_id", a1);
+    unlabeled.pushKV("subject_pubkey", hex);
+    unlabeled.pushKV("profile_id", profile);
+    unlabeled.pushKV("credited_p1e_microunits", 2'000'000);
+    unlabeled.pushKV("verification_method", "ISSUER_ACCEPTANCE");
+    unlabeled.pushKV("nonce", "bare");
+    unlabeled.pushKV("now_ms", 2000);
+    BOOST_CHECK(CallFail(dir, "regtest", "issuecomputereceipt", unlabeled, "COMPUTE_RECORD_INVALID"));
+
+    UniValue direct_useful(UniValue::VOBJ);
+    direct_useful.pushKV("agreement_id", useful_a);
+    direct_useful.pushKV("subject_pubkey", hex);
+    direct_useful.pushKV("profile_id", profile);
+    direct_useful.pushKV("credited_p1e_microunits", 1'000'000);
+    direct_useful.pushKV("verification_method", "DIRECT_COMPUTE");
+    direct_useful.pushKV("evidence_commitment", "not-a-challenge");
+    direct_useful.pushKV("nonce", "mode");
+    direct_useful.pushKV("now_ms", 2000);
+    BOOST_CHECK(CallFail(dir, "regtest", "issuecomputereceipt", direct_useful, "COMPUTE_RECORD_INVALID"));
+
+    UniValue job(UniValue::VOBJ);
+    job.pushKV("agreement_id", a1);
+    job.pushKV("subject_pubkey", hex);
+    job.pushKV("job_class", "REGTEST_DETERMINISTIC");
+    job.pushKV("credit_p1e_microunits", 1'000'000);
+    job.pushKV("input_commitment", "in");
+    job.pushKV("executor_spec_commitment", "22");
+    job.pushKV("expires_at_ms", 8'000'000);
+    job.pushKV("nonce", "job");
+    job.pushKV("now_ms", 2000);
+    const std::string job_id = Call(dir, "regtest", "createcomputejob", job)["job_id"].get_str();
+    UniValue crossed(UniValue::VOBJ);
+    crossed.pushKV("agreement_id", a2);
+    crossed.pushKV("job_id", job_id);
+    crossed.pushKV("subject_pubkey", hex);
+    crossed.pushKV("profile_id", profile);
+    crossed.pushKV("credited_p1e_microunits", 1'000'000);
+    crossed.pushKV("verification_method", "ISSUER_ACCEPTANCE");
+    crossed.pushKV("nonce", "cross");
+    crossed.pushKV("now_ms", 2100);
+    BOOST_CHECK(CallFail(dir, "regtest", "issuecomputereceipt", crossed, "COMPUTE_RECORD_INVALID"));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

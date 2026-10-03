@@ -268,6 +268,7 @@ class PayWithComputeTest(BitcoinTestFramework):
 
         self.restart_node(0)
         provider = self.nodes[0]
+        self.wait_until(lambda: provider.getmodelnetworkinfo().get("helper_ready"), timeout=30)
         bal = provider.getcomputebalance({"agreement_id": aid, "now_ms": 3600})
         assert_equal(bal["credited_p1e_microunits"], 3_000_000)
         assert_equal(bal["status"], "SATISFIED")

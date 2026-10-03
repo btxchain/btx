@@ -1007,6 +1007,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             beneficiary = jp["beneficiary_ref"].get_str();
             subject = jp["subject_pubkey"].get_str();
             method_name = jp["verification_method"].get_str();
+            if (method_name == "DIRECT_COMPUTE") return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "method");
             evidence = rp["output_commitment"].get_str();
             for (const auto& kv : m_receipts) {
                 const UniValue& rec = PayloadOf(kv.second);
@@ -1034,11 +1035,23 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             method_name = a.exists("verification_method") ? a["verification_method"].get_str() : "DIRECT_COMPUTE";
             evidence = a.exists("evidence_commitment") ? a["evidence_commitment"].get_str() : "";
             if (a.exists("result_id")) result_id = a["result_id"].get_str();
+            if (!job_id.empty()) {
+                const UniValue& jp = PayloadOf(m_jobs.at(job_id));
+                if (jp["agreement_id"].get_str() != agreement_id) {
+                    return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement");
+                }
+                if (method_name == "DIRECT_COMPUTE") return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "method");
+            } else if (method_name != "DIRECT_COMPUTE") {
+                return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "method");
+            }
             if (method_name == "DIRECT_COMPUTE") {
                 auto ait_pre = m_agreements.find(agreement_id);
                 if (ait_pre == m_agreements.end()) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement");
                 if (!ContainsKey(PayloadOf(ait_pre->second)["settlement"]["authorized_receipt_issuer_pubkeys"], me)) {
                     return Fail(err_code, err, "COMPUTE_UNAUTHORIZED_RECEIPT_ISSUER", "issuer");
+                }
+                if (!ContainsKey(PayloadOf(ait_pre->second)["settlement"]["allowed_settlement_modes"], "DIRECT_COMPUTE")) {
+                    return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "mode");
                 }
                 UniValue qual(UniValue::VOBJ);
                 qual.pushKV("challenge_id", evidence);
@@ -1066,6 +1079,10 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         if (ap["period_end_ms"].getInt<int64_t>() <= now_ms) return Fail(err_code, err, "COMPUTE_AGREEMENT_EXPIRED", "expired");
         if (subject != ap["subject_pubkey"].get_str()) return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "subject");
         if (profile_id != ap["settlement"]["profile_id"].get_str()) return Fail(err_code, err, "COMPUTE_PROFILE_MISMATCH", "profile");
+        const char* need_mode = job_id.empty() ? "DIRECT_COMPUTE" : "USEFUL_JOB_RECEIPTS";
+        if (!ContainsKey(ap["settlement"]["allowed_settlement_modes"], need_mode)) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "mode");
+        }
         if (!ContainsKey(ap["settlement"]["authorized_receipt_issuer_pubkeys"], me)) {
             return Fail(err_code, err, "COMPUTE_UNAUTHORIZED_RECEIPT_ISSUER", "issuer");
         }
@@ -1120,8 +1137,36 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             }
             auto jit = m_jobs.find(rp["job_id"].get_str());
             if (jit == m_jobs.end()) return Fail(err_code, err, "COMPUTE_RESULT_INVALID", "job");
-            if (PayloadOf(jit->second)["credit_p1e_microunits"].getInt<uint64_t>() != rp["credited_p1e_microunits"].getInt<uint64_t>()) {
+            const std::string method = rp.exists("verification_method") && rp["verification_method"].isStr()
+                ? rp["verification_method"].get_str() : "";
+            if (method == "DIRECT_COMPUTE") return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "method");
+            const UniValue& jp = PayloadOf(jit->second);
+            if (jp["agreement_id"].get_str() != rp["agreement_id"].get_str()) {
+                return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement");
+            }
+            if (jp["credit_p1e_microunits"].getInt<uint64_t>() != rp["credited_p1e_microunits"].getInt<uint64_t>()) {
                 return Fail(err_code, err, "COMPUTE_RECEIPT_CREDIT_MISMATCH", "credit");
+            }
+            if (!ContainsKey(ap["settlement"]["allowed_settlement_modes"], "USEFUL_JOB_RECEIPTS")) {
+                return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "mode");
+            }
+        } else {
+            const std::string method = rp.exists("verification_method") && rp["verification_method"].isStr()
+                ? rp["verification_method"].get_str() : "";
+            if (method != "DIRECT_COMPUTE" || !ContainsKey(ap["settlement"]["allowed_settlement_modes"], "DIRECT_COMPUTE")) {
+                return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "method");
+            }
+            const std::string evidence = rp.exists("evidence_commitment") && rp["evidence_commitment"].isStr()
+                ? rp["evidence_commitment"].get_str() : "";
+            for (const auto& kv : m_receipts) {
+                if (kv.first == env.record_id.Hex()) continue;
+                const UniValue& prior = PayloadOf(kv.second);
+                if (prior.exists("verification_method") && prior["verification_method"].isStr() &&
+                    prior["verification_method"].get_str() == "DIRECT_COMPUTE" &&
+                    prior.exists("evidence_commitment") && prior["evidence_commitment"].isStr() &&
+                    prior["evidence_commitment"].get_str() == evidence && !evidence.empty()) {
+                    return Fail(err_code, err, "COMPUTE_CHALLENGE_REDEEMED", "direct receipt");
+                }
             }
         }
         if (!Import(a, "ComputeReceipt", env, err_code, err)) return false;

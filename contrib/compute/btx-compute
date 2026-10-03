@@ -26,7 +26,7 @@ def binary(name: str) -> str:
     candidates = []
     if env:
         candidates.append(Path(env) / "bin" / name)
-    candidates.append(ROOT / "build-gcc13" / "bin" / name)
+    candidates.append(ROOT / "build" / "bin" / name)
     found = shutil.which(name)
     if found:
         candidates.append(Path(found))

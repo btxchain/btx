@@ -152,7 +152,7 @@ RPCHelpMan issuecomputequalification()
             if (!request.params[4].isNull()) in.max_elapsed_ms = request.params[4].getInt<uint64_t>();
             NodeContext& node = EnsureAnyNodeContext(request.context);
             ChainstateManager& chainman = EnsureChainman(node);
-            if (const CBlockIndex* tip = chainman.ActiveChain().Tip()) {
+            if (const CBlockIndex* tip = WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())) {
                 in.anchor_height = tip->nHeight;
                 in.anchor_hash = tip->GetBlockHash();
             }
