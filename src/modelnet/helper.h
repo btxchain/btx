@@ -81,6 +81,8 @@ struct HelperConfig {
     std::vector<std::string> peers;
     /** qBittorrent-style drop folder; empty = off. */
     fs::path watch_dir;
+    /** Pay With Compute chain name (main, test, regtest). Empty fails closed. */
+    std::string pwc_chain;
 };
 
 bool ParseHttpRequest(const std::string& raw, NativeRequest& req, std::string& err);

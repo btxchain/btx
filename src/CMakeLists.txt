@@ -646,6 +646,9 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_lt.cpp
   matmul/matmul_v4_lt_mx_exact.cpp
   matmul/matmul_v4_rc.cpp
+  matmul/compute_profile.cpp
+  matmul/compute_passport.cpp
+  matmul/compute_qualification.cpp
   matmul/matmul_v4_rc_accel_policy.cpp
   matmul/matmul_v4_rc_accelerator_scheduler.cpp
   matmul/trusted_exact_replay_attestation.cpp
@@ -2008,6 +2011,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   rpc/mempool.cpp
   rpc/mining.cpp
   rpc/matmul_trusted.cpp
+  rpc/compute.cpp
   rpc/net.cpp
   rpc/node.cpp
   rpc/resource_governor.cpp

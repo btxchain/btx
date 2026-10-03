@@ -380,6 +380,12 @@ const char* KnownRecordType(std::string_view type)
         "BountyEconomy",
         "RecoveryManifest",
         "ChainContext",
+        "ComputeOffer",
+        "ComputeAgreement",
+        "ComputeJob",
+        "ComputeJobResult",
+        "ComputeReceipt",
+        "ComputeAccessGrant",
     };
     for (const char* t : k) {
         if (type == t) return t;

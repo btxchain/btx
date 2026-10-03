@@ -53,6 +53,7 @@ add_library(bitcoin_modelnet STATIC
   search.cpp
   canonical_codec.cpp
   bounty.cpp
+  compute_economy.cpp
   bounty_eval.cpp
   file_stream.cpp
   direct_seed.cpp
