@@ -19,6 +19,8 @@
 #include <util/chaintype.h>
 #include <crypto/sha256.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
+#include <crypto/sha384.h>
+#include <matmul/compute_passport.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_production_canary.h>
@@ -129,6 +131,8 @@ struct Args {
     std::string backend{"cpu"};
     std::string out_path{"rc-report.json"};
     std::string source_revision; // optional tip provenance
+    std::string compute_profile;
+    std::string passport_out;
 };
 
 void PrintUsage(std::ostream& os)
@@ -163,6 +167,10 @@ void PrintUsage(std::ostream& os)
        << "  --public-evidence          replace host-derived device identifiers with a\n"
        << "                             stable public-evidence label\n"
        << "  --source-revision TIP      same-tip provenance for rc-gate\n"
+       << "  --compute-profile NAME     frozen PWC profile: btx-rc-p1e-v1 or\n"
+       << "                             btx-rc-p1e-toy-v1. Rejects --rounds.\n"
+       << "  --passport-out PATH        write a separate Compute Passport JSON.\n"
+       << "                             Does not alter the rc-report schema.\n"
        << "  --out PATH                 JSON output (default: rc-report.json)\n"
        << "  -h, --help                 this help\n";
 }
@@ -342,6 +350,14 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
             args.emit_frozen_headers = true;
         } else if (a == "--public-evidence") {
             args.public_evidence = true;
+        } else if (a == "--compute-profile") {
+            const char* v = need("--compute-profile");
+            if (!v) return false;
+            args.compute_profile = v;
+        } else if (a == "--passport-out") {
+            const char* v = need("--passport-out");
+            if (!v) return false;
+            args.passport_out = v;
         } else if (a == "--out") {
             const char* v = need("--out");
             if (!v) return false;
@@ -1075,6 +1091,26 @@ int main(int argc, char* argv[])
     if (args.help) {
         PrintUsage(std::cout);
         return 0;
+    }
+    if (!args.compute_profile.empty()) {
+        if (args.compute_profile == "btx-rc-p1e-v1") {
+            args.production = true;
+            args.base_production = true;
+            args.toy = false;
+            args.medium = false;
+        } else if (args.compute_profile == "btx-rc-p1e-toy-v1") {
+            args.toy = true;
+            args.production = false;
+            args.base_production = false;
+            args.medium = false;
+        } else {
+            std::cerr << "error: unknown --compute-profile " << args.compute_profile << "\n";
+            return 2;
+        }
+        if (args.rounds > 0 || args.coupled || args.medium) {
+            std::cerr << "error: frozen compute profile rejects --rounds and coupled/medium overrides\n";
+            return 2;
+        }
     }
 
     if (args.prove_winner_gkr) {
@@ -1906,8 +1942,62 @@ int main(int argc, char* argv[])
         std::cerr << "error: cannot write JSON to " << args.out_path << "\n";
         return 1;
     }
-    ofs << root.write(2) << "\n";
+    const std::string report_bytes = root.write(2) + "\n";
+    ofs << report_bytes;
     ofs.close();
+    if (!args.passport_out.empty()) {
+        std::string profile_name = args.compute_profile;
+        if (profile_name.empty()) {
+            if (args.base_production && args.rounds == 0) profile_name = "btx-rc-p1e-v1";
+            else if (args.toy && !args.medium && !args.production && args.rounds == 0) profile_name = "btx-rc-p1e-toy-v1";
+        }
+        pwc::PassportSamples samples;
+        samples.profile_name = profile_name;
+        std::string perr;
+        if (profile_name.empty() || !pwc::WallSecondsToMicros(episode_walls, samples.wall_us, perr)) {
+            std::cerr << "error: passport: " << (perr.empty() ? "profile is not a frozen P1E workload" : perr) << "\n";
+            return 2;
+        }
+        samples.generated_at_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::system_clock::now().time_since_epoch())
+                                      .count();
+        samples.backend_requested = args.backend;
+        samples.backend_resolved = backend_resolved;
+        samples.all_fully_accelerated = all_fully_accelerated;
+        samples.device_backend_present = acceleration_totals.device_backend_present;
+        samples.device_calls = acceleration_totals.device_calls;
+        samples.device_macs = acceleration_totals.device_macs;
+        samples.cpu_calls = acceleration_totals.cpu_calls;
+        samples.cpu_macs = acceleration_totals.cpu_macs;
+        samples.cpu_fallbacks = acceleration_totals.cpu_fallbacks;
+        samples.device_xof_calls = acceleration_totals.device_xof_calls;
+        samples.device_xof_fallbacks = acceleration_totals.device_xof_fallbacks;
+        samples.host_xof_calls = acceleration_totals.host_xof_calls;
+        samples.provider_family = args.public_evidence ? "public" : backend_resolved;
+        samples.runtime_identity = args.public_evidence ? "omitted" : "";
+        samples.native_fp4_available = selfqual.native_mxfp4_qualified;
+        samples.native_fp8_available = selfqual.native_fp8_qualified;
+        samples.resident_profile_support = true;
+        samples.embedded_source_revision = EmbeddedSourceRevision();
+        samples.embedded_source_dirty = EmbeddedSourceDirty();
+        unsigned char dig[48];
+        CSHA384()
+            .Write(reinterpret_cast<const unsigned char*>(report_bytes.data()), report_bytes.size())
+            .Finalize(dig);
+        samples.raw_report_digest = HexStr(std::vector<unsigned char>(dig, dig + 48));
+        UniValue passport;
+        if (!pwc::BuildPassport(samples, passport, perr)) {
+            std::cerr << "error: passport: " << perr << "\n";
+            return 2;
+        }
+        std::ofstream pofs(args.passport_out, std::ios::trunc);
+        if (!pofs) {
+            std::cerr << "error: cannot write passport to " << args.passport_out << "\n";
+            return 2;
+        }
+        pofs << passport.write(2) << "\n";
+        std::cout << "  passport:   " << args.passport_out << "\n";
+    }
 
     if (k_curve_measured) {
         std::cout << "  k_est:      " << k_est << " (StoreOnlyX0/StoreAll)\n";
