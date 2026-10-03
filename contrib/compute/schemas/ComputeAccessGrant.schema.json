@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "btx://pwc/ComputeAccessGrant/v1",
+  "title": "ComputeAccessGrant payload",
+  "type": "object",
+  "required": ["record_type", "schema_version", "agreement_id", "subject_pubkey", "resource_ref", "valid_from_ms", "valid_until_ms", "receipt_set_digest"],
+  "properties": {
+    "record_type": {"const": "compute_access_grant_v1"}
+  }
+}
