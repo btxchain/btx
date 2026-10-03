@@ -5636,31 +5636,33 @@ static bool TrustedMirrorMayDownloadIndex(
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (index == nullptr) return false;
-    // A same-height sibling of the tip is the other side of a just-mined
-    // race. Leaving it HEADER_ONLY waits on the 1-wide tip-child crawl
-    // (~2 min), which is longer than the majority's next block.
-    if (tip != nullptr && index != tip && index->pprev == tip->pprev &&
-        index->nHeight == tip->nHeight &&
-        (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
-        index->nChainWork >= tip->nChainWork) {
-        return false;
-    }
-    if (IndexIsShortReorgAttestedForkChild(chainman, tip, index)) return false;
-    if (chainman.IsAcquisitionEscapeFrontier(index)) return false;
-    if (chainman.IndexHasTrustedMatMulAuthority(index)) return false;
-    if (chainman.IndexIsOnSignedFrontierChain(index)) return false;
-    if (chainman.IndexIsAttestedChainTipChild(tip, index)) return false;
-    if (IndexIsFollowedTipChild(chainman, tip, index)) return false;
-    // Live 2026-08-15 (PR 105 comment 5302572644): HEADER_ONLY skip of
-    // tip-extending grandchildren froze getdata while the tip could not
-    // move. Immediate competing siblings stay suppressed, except the
-    // equal-work lost twin that miners already extended (live 2026-08-24
-    // 199295 8b5da5a5 / 199300 headers, select=root_header_only_skip).
-    if (node::matmul_trusted::TrustedMirrorIndexIsCatchUpSuffix(
-            tip != nullptr, true, index->nHeight,
-            tip != nullptr ? tip->nHeight : 0,
-            tip != nullptr && index->GetAncestor(tip->nHeight) == tip)) {
-        return false;
+    // A same-height sibling of the connected tip is not a download hole
+    // (F3). Quorum does not make it inflight. A pulled-ahead lost-twin
+    // or heavier-tower path below is what unsuppresses it.
+    const bool same_height_tip_sibling{
+        tip != nullptr && index != tip && index->pprev == tip->pprev &&
+        index->nHeight == tip->nHeight};
+    const bool already_header_only_skipped{
+        competing.count(index->GetBlockHash()) != 0 ||
+        followed_skip.count(index->GetBlockHash()) != 0};
+    if (!(same_height_tip_sibling && already_header_only_skipped)) {
+        if (IndexIsShortReorgAttestedForkChild(chainman, tip, index)) return false;
+        if (chainman.IsAcquisitionEscapeFrontier(index)) return false;
+        if (chainman.IndexHasTrustedMatMulAuthority(index)) return false;
+        if (chainman.IndexIsOnSignedFrontierChain(index)) return false;
+        if (chainman.IndexIsAttestedChainTipChild(tip, index)) return false;
+        if (IndexIsFollowedTipChild(chainman, tip, index)) return false;
+        // Live 2026-08-15 (PR 105 comment 5302572644): HEADER_ONLY skip of
+        // tip-extending grandchildren froze getdata while the tip could not
+        // move. Immediate competing siblings stay suppressed, except the
+        // equal-work lost twin that miners already extended (live 2026-08-24
+        // 199295 8b5da5a5 / 199300 headers, select=root_header_only_skip).
+        if (node::matmul_trusted::TrustedMirrorIndexIsCatchUpSuffix(
+                tip != nullptr, true, index->nHeight,
+                tip != nullptr ? tip->nHeight : 0,
+                tip != nullptr && index->GetAncestor(tip->nHeight) == tip)) {
+            return false;
+        }
     }
     if (IndexIsHeaderOnlyLostTwinPath(chainman, tip, index, peer_best_known)) {
         return false;
@@ -6183,35 +6185,6 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
     const CBlockIndex* const missing_honest_early{
         HeaderOnlyHonestTipChildToFetch(m_chainman, m_matmul_block_lifecycle)};
-    // The other side of a same-height race. Request it from a peer whose
-    // best-known chain contains it, without waiting for the 1-wide crawl
-    // of the sibling that already won the tip.
-    if (tip != nullptr && state->pindexBestKnownBlock != nullptr &&
-        state->pindexBestKnownBlock->nHeight >= tip->nHeight) {
-        const CBlockIndex* const sibling{
-            state->pindexBestKnownBlock->GetAncestor(tip->nHeight)};
-        if (sibling != nullptr && sibling != tip &&
-            sibling->pprev == tip->pprev &&
-            (sibling->nStatus & BLOCK_FAILED_MASK) == 0 &&
-            (sibling->nStatus & BLOCK_HAVE_DATA) == 0 &&
-            sibling->nChainWork >= tip->nChainWork &&
-            !m_matmul_block_lifecycle.HasRetainedBody(sibling->GetBlockHash()) &&
-            !IsBlockRequested(sibling->GetBlockHash()) &&
-            vBlocks.size() < count) {
-            vBlocks.push_back(sibling);
-            m_header_only_competing.erase(sibling->GetBlockHash());
-            m_header_only_followed_skip.erase(sibling->GetBlockHash());
-            static std::atomic<int64_t> s_last_twin_getdata_log{0};
-            const int64_t twin_log_s{GetTime()};
-            if (twin_log_s - s_last_twin_getdata_log.load(
-                                std::memory_order_relaxed) >= 15) {
-                s_last_twin_getdata_log.store(twin_log_s, std::memory_order_relaxed);
-                LogInfo("same-height twin GETDATA hash=%s height=%d peer=%d\n",
-                        sibling->GetBlockHash().ToString(), sibling->nHeight,
-                        peer.m_id);
-            }
-        }
-    }
     // Keep each branch root-first while the active child is missing, but
     // do not reclaim another branch's requests or invent a free peer slot.
     if (missing_honest_early != nullptr) {
@@ -7279,12 +7252,14 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                          state->pindexLastCommonBlock != nullptr
                              ? state->pindexLastCommonBlock->nHeight
                              : pindex->nHeight)))};
-                const bool immediate_tip_sibling{
-                    pindex != tip && pindex->pprev == tip->pprev &&
-                    pindex->nHeight == tip->nHeight &&
-                    (pindex->nStatus & BLOCK_FAILED_MASK) == 0 &&
-                    pindex->nChainWork >= tip->nChainWork};
-                if (!heavier_fork_hole && !immediate_tip_sibling) {
+                // Equal-work same-height twins stay out of inflight (F3).
+                // A lost twin whose competing headers have already pulled
+                // ahead is the exception: miners extended that fork, so
+                // the sibling body is the download hole.
+                const bool lost_twin_hole{
+                    IndexIsHeaderOnlyLostTwinPath(
+                        m_chainman, tip, pindex, state->pindexBestKnownBlock)};
+                if (!heavier_fork_hole && !lost_twin_hole) {
                     continue;
                 }
             }
@@ -21122,10 +21097,23 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // existed. Tip-move clears are unreachable if this hash
                     // is the followed tip-child that never connected. Allow
                     // FindNextBlocks to fetch it now that HasQuorum would
-                    // persist without GPU. Competing siblings without quorum
-                    // stay suppressed.
-                    m_header_only_competing.erase(hash);
-                    m_header_only_followed_skip.erase(hash);
+                    // persist without GPU. A same-height sibling of the
+                    // connected tip is not that hole: AdvanceLastCommon
+                    // drops it, and GETDATA waits for a descendant. Leave
+                    // its skip entry so a lone attested sibling cannot
+                    // occupy inflight.
+                    const CBlockIndex* const quorum_index{
+                        m_chainman.m_blockman.LookupBlockIndex(hash)};
+                    const CBlockIndex* const quorum_tip{m_chainman.ActiveTip()};
+                    const bool quorum_same_height_sibling{
+                        quorum_index != nullptr && quorum_tip != nullptr &&
+                        quorum_index != quorum_tip &&
+                        quorum_index->pprev == quorum_tip->pprev &&
+                        quorum_index->nHeight == quorum_tip->nHeight};
+                    if (!quorum_same_height_sibling) {
+                        m_header_only_competing.erase(hash);
+                        m_header_only_followed_skip.erase(hash);
+                    }
                     m_need_activate_best_chain = true;
                     // Quorum is the first point at which a trusted header can
                     // safely arm the shallow-race recovery barrier. Do this
