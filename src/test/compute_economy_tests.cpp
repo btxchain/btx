@@ -3,11 +3,13 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <matmul/compute_profile.h>
+#include <modelnet/bounty.h>
 #include <modelnet/compute_economy.h>
 #include <modelnet/identity.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/strencodings.h>
+#include <util/time.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -493,6 +495,39 @@ BOOST_AUTO_TEST_CASE(pro_rata_not_in_good_standing_before_period_start)
     BOOST_CHECK_EQUAL((bal["credited_p1e_microunits"].getInt<uint64_t>()), 0u);
     BOOST_CHECK_EQUAL(bal["status"].get_str(), "OPEN");
     BOOST_CHECK(CallFail(dir, "regtest", "issuecomputeaccessgrant", bal_req, "COMPUTE_NOT_SATISFIED"));
+}
+
+BOOST_AUTO_TEST_CASE(rejected_offer_import_is_not_stored)
+{
+    const std::string toy = pwc::ProfileIdHex(pwc::ToyProfile());
+    const fs::path dir = m_path_root / "pwc-main-import";
+    fs::create_directories(dir);
+    std::vector<unsigned char> pk;
+    WriteIdentity(dir, pk);
+    const std::string hex = HexStr(pk);
+    // now_ms is regtest-only, so this case runs on the wall clock.
+    const int64_t now = TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now());
+    // A correctly signed mainnet ComputeOffer that names the regtest-only toy profile.
+    std::vector<unsigned char> xpk, xsk;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(xpk, xsk, err));
+    const modelnet::NetworkId main_net = modelnet::PwcNetworkId("main");
+    UniValue payload = Offer(toy, HexStr(xpk), hex, hex, "PREPAID", 1000, "INFERENCE_BATCH");
+    payload.pushKV("expires_at_ms", now + 86'400'000);
+    payload.pushKV("network_id", main_net.Hex());
+    modelnet::SignedEnvelope env;
+    BOOST_REQUIRE(modelnet::BuildSignedEnvelope("ComputeOffer", main_net, xpk, xsk, payload, UniValue(UniValue::VNULL), env, err));
+    UniValue imp(UniValue::VOBJ);
+    imp.pushKV("envelope", modelnet::EnvelopeToJson(env));
+    BOOST_CHECK(CallFail(dir, "main", "importcomputeoffer", imp, "COMPUTE_TEST_PROFILE_DISABLED"));
+    // The rejected offer must not be stored or usable.
+    BOOST_CHECK_EQUAL(Call(dir, "main", "listcomputeoffers", UniValue(UniValue::VOBJ))["records"].size(), 0u);
+    UniValue agr(UniValue::VOBJ);
+    agr.pushKV("offer_id", env.record_id.Hex());
+    agr.pushKV("subject_pubkey", hex);
+    agr.pushKV("period_start_ms", now);
+    agr.pushKV("period_end_ms", now + 3'600'000);
+    BOOST_CHECK(CallFail(dir, "main", "issuecomputeagreement", agr, "COMPUTE_RECORD_INVALID"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -615,9 +615,12 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         return true;
     }
     if (method == "importcomputeoffer") {
+        // Validate before Import() writes the record, so a rejected offer is not stored.
+        SignedEnvelope parsed;
+        if (!EnvelopeFromJson(a.exists("envelope") ? a["envelope"] : a, parsed, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
+        if (!ValidOffer(PayloadOf(parsed), m_chain, err_code, err)) return false;
         SignedEnvelope env;
         if (!Import(a, "ComputeOffer", env, err_code, err)) return false;
-        if (!ValidOffer(PayloadOf(env), m_chain, err_code, err)) return false;
         result = EnvelopeToJson(env);
         result.pushKV("offer_id", env.record_id.Hex());
         result.pushKV("automatic_spend_atoms", 0);
