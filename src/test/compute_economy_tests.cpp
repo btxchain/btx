@@ -99,6 +99,33 @@ UniValue Offer(const std::string& profile, const std::string& issuer, const std:
     return offer;
 }
 
+// Satisfy `aid` in `dir` through createcomputejob -> submitcomputejobresult ->
+// acceptcomputejobresult. The local identity must be scheduler, subject and
+// receipt issuer. Returns the receipt.
+UniValue SettleByJob(const fs::path& dir, const UniValue& aid, const std::string& subject, uint64_t credit,
+                     const std::string& tag, int64_t t0)
+{
+    UniValue job(UniValue::VOBJ);
+    job.pushKV("agreement_id", aid);
+    job.pushKV("subject_pubkey", subject);
+    job.pushKV("job_class", "REGTEST_DETERMINISTIC");
+    job.pushKV("credit_p1e_microunits", credit);
+    job.pushKV("input_commitment", "in-" + tag);
+    job.pushKV("executor_spec_commitment", "regtest-runner");
+    job.pushKV("expires_at_ms", 4000);
+    job.pushKV("nonce", "job-" + tag);
+    job.pushKV("now_ms", t0);
+    UniValue res(UniValue::VOBJ);
+    res.pushKV("job_id", Call(dir, "regtest", "createcomputejob", job)["job_id"]);
+    res.pushKV("output_commitment", "out-" + tag);
+    res.pushKV("now_ms", t0 + 100);
+    UniValue acc(UniValue::VOBJ);
+    acc.pushKV("result_id", Call(dir, "regtest", "submitcomputejobresult", res)["result_id"]);
+    acc.pushKV("expected_output_commitment", "out-" + tag);
+    acc.pushKV("now_ms", t0 + 200);
+    return Call(dir, "regtest", "acceptcomputejobresult", acc);
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(compute_economy_tests, BasicTestingSetup)
@@ -395,6 +422,51 @@ BOOST_AUTO_TEST_CASE(reservation_job_cap_and_import_authorization)
     overflow.pushKV("nonce", "n65");
     overflow.pushKV("input_commitment", "c65");
     Call(dir3, "regtest", "createcomputejob", overflow);
+}
+
+BOOST_AUTO_TEST_CASE(grant_requires_agreement_issued_by_this_node)
+{
+    const std::string profile = pwc::ProfileIdHex(pwc::ToyProfile());
+    const fs::path provider = m_path_root / "own-provider";
+    const fs::path outsider = m_path_root / "own-outsider";
+    fs::create_directories(provider);
+    fs::create_directories(outsider);
+    std::vector<unsigned char> pk;
+    WriteIdentity(provider, pk);
+    WriteIdentity(outsider, pk);
+    const std::string xpk = HexStr(pk);
+    // The outsider writes its own offer and agreement for the provider's
+    // resource_ref, lists itself as scheduler and receipt issuer, and settles
+    // a useful job on its own node.
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("offer", Offer(profile, xpk, xpk, xpk, "PREPAID", 1000, "REGTEST_DETERMINISTIC"));
+    req.pushKV("now_ms", 1000);
+    UniValue agr(UniValue::VOBJ);
+    agr.pushKV("offer_id", Call(outsider, "regtest", "createcomputeoffer", req)["offer_id"]);
+    agr.pushKV("subject_pubkey", xpk);
+    agr.pushKV("period_start_ms", 1000);
+    agr.pushKV("period_end_ms", 5000);
+    agr.pushKV("now_ms", 1000);
+    const UniValue agreement = Call(outsider, "regtest", "issuecomputeagreement", agr);
+    const UniValue receipt = SettleByJob(outsider, agreement["agreement_id"], xpk, 1000, "d2", 1100);
+    UniValue gj(UniValue::VOBJ);
+    gj.pushKV("id", receipt["body"]["payload"]["job_id"]);
+    const UniValue job = Call(outsider, "regtest", "getcomputejob", gj);
+    // Agreement, job and receipt reach the provider through the import RPCs.
+    UniValue ia(UniValue::VOBJ);
+    ia.pushKV("envelope", agreement);
+    Call(provider, "regtest", "importcomputeagreement", ia);
+    UniValue ij(UniValue::VOBJ);
+    ij.pushKV("envelope", job);
+    ij.pushKV("now_ms", 1150);
+    Call(provider, "regtest", "importcomputejob", ij);
+    UniValue ir(UniValue::VOBJ);
+    ir.pushKV("envelope", receipt);
+    Call(provider, "regtest", "importcomputereceipt", ir);
+    UniValue g(UniValue::VOBJ);
+    g.pushKV("agreement_id", agreement["agreement_id"]);
+    g.pushKV("now_ms", 1400);
+    BOOST_CHECK(CallFail(provider, "regtest", "issuecomputeaccessgrant", g, "COMPUTE_RECORD_INVALID"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

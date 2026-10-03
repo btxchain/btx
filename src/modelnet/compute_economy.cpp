@@ -1109,6 +1109,13 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         const std::string agreement_id = a["agreement_id"].get_str();
         UniValue bal;
         if (!BalanceOf(agreement_id, now_ms, bal, err_code, err)) return false;
+        // Imported agreements carry their own issuer and receipt-issuer list.
+        // Only the identity that issued the agreement may grant access under it.
+        std::vector<unsigned char> pk, sk;
+        if (!LoadIdentity(pk, sk, err)) return Fail(err_code, err, "COMPUTE_SIGNING_IDENTITY_REQUIRED", err);
+        if (m_agreements.at(agreement_id).body["public_key_hex"].get_str() != HexStr(pk)) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement issuer");
+        }
         const std::string status = bal["status"].get_str();
         const UniValue& ap = PayloadOf(m_agreements.at(agreement_id));
         const std::string schedule = ap["settlement"]["schedule"].get_str();
