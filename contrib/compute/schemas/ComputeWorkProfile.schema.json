@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "btx://pwc/ComputeWorkProfile/v1",
+  "title": "Frozen compute work profile",
+  "type": "object",
+  "required": ["kind", "schema_version", "profile_name", "profile_id", "workload_family", "test_only", "unit_name", "microunits_per_episode"],
+  "properties": {
+    "profile_name": {"enum": ["btx-rc-p1e-v1", "btx-rc-p1e-toy-v1"]},
+    "unit_name": {"const": "P1E"},
+    "microunits_per_episode": {"const": 1000000},
+    "test_only": {"type": "boolean"}
+  }
+}
