@@ -53,9 +53,25 @@ manual and not the long essay.
 | Operators | [doc/modelnet/README.md](doc/modelnet/README.md) and [doc/btx-download-and-go.md](doc/btx-download-and-go.md) |
 | Essay | [doc/design/btx-decentralized-frontier-ai-lab.md](doc/design/btx-decentralized-frontier-ai-lab.md) |
 
+## Pay With Compute
+
+Pay With Compute lets a resource operator quote access in normalized BTX
+compute rather than money. The frozen Profile-1 ExactReplay workload is the
+common denominator: one P1E is one execution of `btx-rc-p1e-v1`, accounted in
+integer microunits. A Compute Passport estimates a machine. A fresh
+qualification proves that machine can do the work now. Useful jobs earn
+issuer-signed receipts. Those receipts satisfy one resource-specific
+agreement. An external service can verify the resulting access grant.
+
+There is no transferable compute token and no automatic BTX spend. P1E does
+not measure every AI workload. HBM, KV cache, low-precision throughput, and
+fabric stay in the passport's capability vector. Details:
+[doc/pay-with-compute.md](doc/pay-with-compute.md).
+
 ## Table of Contents
 
 - [Start here](#start-here)
+- [Pay With Compute](#pay-with-compute)
 - [Current release — v0.34.9](#current-release--v0349)
 - [This tree — 0.34.11](#this-tree--03411)
 - [This tree — 0.34.10](#this-tree--03410)

@@ -14,6 +14,13 @@ The longer argument is
 (15 September 2026 revised essay). That essay is a strategic analysis, not a
 consensus spec.
 
+## Pay With Compute
+
+A resource can be offered for contributed compute instead of a cash payment.
+BTX measures that compute with a frozen Profile-1 workload, records accepted
+work as a receipt, and lets the provider issue an access grant. There is no
+second token. Start at [doc/pay-with-compute.md](doc/pay-with-compute.md).
+
 ## What 0.34.7 is
 
 BTX **v0.34.7** is a **decentralized frontier AI lab without a corporate
