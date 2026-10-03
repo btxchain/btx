@@ -36,14 +36,14 @@ def binary(name: str) -> str:
     sys.exit(f"missing {name}; set BTX_BUILDDIR")
 
 
-def cli(args, method, payload=None):
+def cli(args, method, *payloads):
     cmd = [args.btx_cli or binary("btx-cli")]
     if args.regtest:
         cmd.append("-regtest")
     if args.datadir:
         cmd.append(f"-datadir={args.datadir}")
     cmd.append(method)
-    if payload is not None:
+    for payload in payloads:
         cmd.append(payload if isinstance(payload, str) else json.dumps(payload))
     subprocess.check_call(cmd)
 
@@ -104,7 +104,7 @@ def main() -> None:
         subprocess.check_call(cmd)
     elif args.cmd == "solve-qualification":
         challenge = json.loads(Path(args.challenge).read_text(encoding="utf-8"))
-        cli(args, "solvecomputequalification", json.dumps(challenge))
+        cli(args, "solvecomputequalification", json.dumps(challenge), args.backend)
     elif args.cmd == "quote":
         cli(args, "quotecomputeaccess", Path(args.request).read_text(encoding="utf-8"))
     elif args.cmd == "verify-record":

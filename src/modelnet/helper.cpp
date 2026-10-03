@@ -10133,6 +10133,7 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
 int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
 {
     SetPwcChain(cfg.pwc_chain);
+    SetPwcQualificationRegistryPath(cfg.qualification_file);
     std::signal(SIGPIPE, SIG_IGN);
     std::atomic<bool> local_stop{false};
     if (!stop) stop = &local_stop;

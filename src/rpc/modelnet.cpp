@@ -2043,7 +2043,7 @@ PWC_RPC(getcomputebalance, "Derive an agreement balance from its receipts.")
 PWC_RPC(issuecomputeaccessgrant, "Issue a non-transferable access grant when the agreement is eligible.")
 PWC_RPC(importcomputeaccessgrant, "Import a signed ComputeAccessGrant.")
 PWC_RPC(getcomputeaccessgrant, "Fetch a local ComputeAccessGrant.")
-PWC_RPC(verifycomputeaccessgrant, "Check a ComputeAccessGrant signature, subject, resource, and window.")
+PWC_RPC(verifycomputeaccessgrant, "Check a ComputeAccessGrant signature, trusted issuer, subject, resource, and window.")
 PWC_RPC(getcomputesigningidentity, "Return the local application signing identity. Not a wallet key.")
 #undef PWC_RPC
 

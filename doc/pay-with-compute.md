@@ -77,9 +77,13 @@ Toy units do not settle mainnet agreements. There is no toy-to-production ratio.
 `issuecomputequalification` binds a fresh random nonce, the subject digest,
 the profile, the episode count (1 through 16), an expiry, and an anchor.
 Each episode header is derived from the challenge id and the episode index.
-The solver and the issuer both run the real ExactReplay implementation for
-that frozen profile. Any digest mismatch fails. Sampled acceptance is not
-used. Client wall time is advisory. The issuer's observed elapsed time, from
+The solver runs the real ExactReplay implementation for that frozen profile.
+`cpu` uses the integer reference. `auto`, `cuda`, `hip`, `metal`, and
+`ascend` run `RecomputeResidentCurriculumAccelerated` only after that device
+self-qualifies; otherwise the solve is rejected. The issuer always
+recomputes on the CPU reference. Any digest mismatch fails. Sampled
+acceptance is not used. Client wall time is advisory. The issuer's observed
+elapsed time, from
 issue to redeem, is the conservative rate. A challenge redeems once.
 `<netdir>/compute_qualifications.dat` persists that fact across restart.
 A corrupt registry is quarantined and is not reset, so a redeemed challenge
@@ -147,7 +151,10 @@ not convert. Duty cycle 0 is rejected. The estimate is advisory.
 When the agreement is satisfied, or pro-rata and in good standing, the issuer
 may sign a **ComputeAccessGrant**. It is subject-bound, resource-bound, and
 time-bound. An external service checks it with `verifycomputeaccessgrant` or
-`contrib/compute/reference-access-gate.py`. The grant does not acquire a
+`contrib/compute/reference-access-gate.py`. Verification requires
+`trusted_issuer_pubkey`, the resource provider's application public key, and
+rejects a grant signed by anyone else. `now_ms` is accepted only on regtest.
+The grant does not acquire a
 model, does not authorize local execution, and does not move BTX.
 
 ## Trust and safety
@@ -186,6 +193,8 @@ btx-cli -regtest redeemcomputequalification "$challenge" "$response"
 Economy calls take one JSON object named `request`:
 
 ```
+`now_ms` below is a regtest test clock. Mainnet and testnet ignore a caller clock and use local time.
+
 btx-cli -regtest createcomputeoffer '{"offer": { ... }, "now_ms": 1000}'
 btx-cli -regtest issuecomputeagreement '{"offer_id":"...","subject_pubkey":"...","period_start_ms":1000,"period_end_ms":5000,"now_ms":1000}'
 btx-cli -regtest createcomputejob '{"agreement_id":"...","subject_pubkey":"...","job_class":"REGTEST_DETERMINISTIC","credit_p1e_microunits":1000000,"input_commitment":"11","executor_spec_commitment":"22","expires_at_ms":4000,"now_ms":1500}'

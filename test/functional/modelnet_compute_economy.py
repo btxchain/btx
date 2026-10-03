@@ -151,6 +151,7 @@ class ModelnetComputeEconomyTest(BitcoinTestFramework):
         grant = node.issuecomputeaccessgrant({"agreement_id": agreement["agreement_id"], "now_ms": 1800})
         verdict = node.verifycomputeaccessgrant({
             "envelope": grant,
+            "trusted_issuer_pubkey": pk,
             "subject_pubkey": pk,
             "resource_ref": "urn:btx:pwc:demo-model",
             "now_ms": 1800,

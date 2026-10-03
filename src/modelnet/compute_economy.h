@@ -16,6 +16,7 @@ namespace modelnet {
 class ModelCatalog;
 
 void SetPwcChain(const std::string& chain);
+void SetPwcQualificationRegistryPath(const std::string& path);
 std::string PwcChain();
 NetworkId PwcNetworkId(const std::string& chain);
 

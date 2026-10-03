@@ -73,6 +73,7 @@ static void Usage()
         "                        (auto: wait for reachability; 1/true same wait;\n"
         "                        never advertise merely because the helper started)\n"
         "  -pwcchain=<name>      Pay With Compute chain binding (main, test, regtest)\n"
+        "  -computequalificationfile=<file>  redeemed qualification registry shared with btxd\n"
         "  -version              print helper and OpenSSL versions and exit\n"
         "  -help                 print this message\n";
 }
@@ -174,6 +175,7 @@ int main(int argc, char* argv[])
         else if (auto v = take("-modelpeer"); !v.empty()) cfg.peers.push_back(v);
         else if (auto v = take("-modelwatch"); !v.empty()) cfg.watch_dir = v.c_str();
         else if (auto v = take("-pwcchain"); !v.empty()) cfg.pwc_chain = v;
+        else if (auto v = take("-computequalificationfile"); !v.empty()) cfg.qualification_file = v;
         else if (a.rfind("-modelindex", 0) == 0) {
             std::cerr << "A2: -modelindex is not a helper argument; use addmodelindex RPC\n";
             return 1;

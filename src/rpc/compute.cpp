@@ -174,7 +174,7 @@ RPCHelpMan solvecomputequalification()
         "Solve a compute qualification locally with exact Profile-1 replay. Client timing is advisory.\n",
         {
             {"challenge", RPCArg::Type::STR, RPCArg::Optional::NO, "Challenge object", RPCArgOptions{.skip_type_check = true}},
-            {"backend", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Advisory label. Verification always recomputes exactly."},
+            {"backend", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "cpu, or auto/cuda/hip/metal/ascend. A device that is not self-qualified is rejected. The issuer recomputes on the CPU reference."},
             {"time_budget_ms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Stop before the next episode once this budget is exceeded"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
@@ -182,15 +182,11 @@ RPCHelpMan solvecomputequalification()
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             uint64_t budget = 0;
             if (!request.params[2].isNull()) budget = request.params[2].getInt<uint64_t>();
+            const std::string backend = request.params[1].isNull() ? "cpu" : request.params[1].get_str();
             UniValue response;
             std::string code, err;
-            if (!pwc::SolveQualification(request.params[0], budget, ProductionWorkEnabled(), response, code, err)) {
+            if (!pwc::SolveQualification(request.params[0], budget, ProductionWorkEnabled(), response, code, err, backend)) {
                 ThrowCode(code, err);
-            }
-            if (!request.params[1].isNull() && response.exists("solver_telemetry")) {
-                UniValue telemetry = response["solver_telemetry"];
-                telemetry.pushKV("backend_requested", request.params[1].get_str());
-                response.pushKV("solver_telemetry", telemetry);
             }
             return response;
         },

@@ -40,9 +40,13 @@ CBlockHeader EpisodeHeader(const std::array<unsigned char, 48>& challenge_id, ui
 
 bool IssueQualification(const QualificationFreshness& in, bool allow_test, UniValue& challenge, std::string& err_code, std::string& err);
 
-/** Local exact work. Production profile execution requires allow_production. */
+/** Local exact work. Production profile execution requires allow_production.
+ *  `backend` is cpu, or auto/cuda/hip/metal/ascend. A named device that is
+ *  not self-qualified fails closed. The issuer still recomputes on the CPU
+ *  reference. */
 bool SolveQualification(const UniValue& challenge, uint64_t time_budget_ms, bool allow_production,
-                        UniValue& response, std::string& err_code, std::string& err);
+                        UniValue& response, std::string& err_code, std::string& err,
+                        const std::string& backend = "cpu");
 
 class QualificationRegistry {
 public:

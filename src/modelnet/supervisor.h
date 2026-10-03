@@ -51,6 +51,7 @@ struct HelperLaunchConfig {
     std::vector<std::string> peers;
     std::string watch_dir;
     std::string pwc_chain{"regtest"};
+    std::string qualification_file;
     /** Operator set -modelrpcsocket: connect, do not spawn, do not kill. */
     bool external_socket{false};
     bool required{false};

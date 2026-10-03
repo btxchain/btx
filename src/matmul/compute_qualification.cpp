@@ -10,6 +10,7 @@
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <crypto/sha384.h>
+#include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc.h>
 #include <univalue.h>
 #include <util/fs_helpers.h>
@@ -195,7 +196,8 @@ bool IssueQualification(const QualificationFreshness& in, bool allow_test, UniVa
 }
 
 bool SolveQualification(const UniValue& challenge, uint64_t time_budget_ms, bool allow_production,
-                        UniValue& response, std::string& err_code, std::string& err)
+                        UniValue& response, std::string& err_code, std::string& err,
+                        const std::string& backend)
 {
     if (!challenge.isObject() || !challenge.exists("profile_name") || !challenge["profile_name"].isStr() ||
         !challenge.exists("challenge_id") || !challenge["challenge_id"].isStr() ||
@@ -228,6 +230,28 @@ bool SolveQualification(const UniValue& challenge, uint64_t time_budget_ms, bool
         err = "challenge_id";
         return false;
     }
+    std::string resolved_backend = "cpu";
+    matmul::v4::rc::RCExactReplayAcceleration accel;
+    bool use_device = false;
+    if (!backend.empty() && backend != "cpu") {
+        if (backend != "auto" && backend != "cuda" && backend != "hip" && backend != "metal" && backend != "ascend") {
+            err_code = "COMPUTE_BACKEND_UNAVAILABLE";
+            err = "backend";
+            return false;
+        }
+        const auto resolved = matmul_v4::accel::ResolveExactGemmBackendForRC();
+        const bool provider_ok = backend == "auto" || resolved.provider == backend;
+        if (!resolved.self_qualified || resolved.backend.gemm_s8s8 == nullptr || !provider_ok) {
+            err_code = "COMPUTE_BACKEND_UNAVAILABLE";
+            err = resolved.reason.empty() ? "self-qualification" : resolved.reason;
+            return false;
+        }
+        accel.gemm = resolved.backend;
+        accel.backend = resolved.provider;
+        accel.require_device = true;
+        use_device = true;
+        resolved_backend = resolved.provider;
+    }
     const auto started = std::chrono::steady_clock::now();
     UniValue episodes(UniValue::VARR);
     uint64_t wall_us = 0;
@@ -242,10 +266,13 @@ bool SolveQualification(const UniValue& challenge, uint64_t time_budget_ms, bool
         }
         const CBlockHeader header = EpisodeHeader(cid, i);
         const auto t0 = std::chrono::steady_clock::now();
-        const uint256 digest = matmul::v4::rc::RecomputeResidentCurriculumReference(header, profile->params, /*height=*/0);
+        const uint256 digest = use_device
+            ? matmul::v4::rc::RecomputeResidentCurriculumAccelerated(
+                  header, profile->params, /*height=*/0, {}, nullptr, nullptr, accel)
+            : matmul::v4::rc::RecomputeResidentCurriculumReference(header, profile->params, /*height=*/0);
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
         if (digest.IsNull()) {
-            err_code = "COMPUTE_DIGEST_MISMATCH";
+            err_code = use_device ? "COMPUTE_BACKEND_UNAVAILABLE" : "COMPUTE_DIGEST_MISMATCH";
             err = "null digest";
             return false;
         }
@@ -266,7 +293,10 @@ bool SolveQualification(const UniValue& challenge, uint64_t time_budget_ms, bool
     o.pushKV("episodes", episodes);
     UniValue advisory(UniValue::VOBJ);
     advisory.pushKV("untrusted", true);
-    advisory.pushKV("backend", "cpu");
+    advisory.pushKV("backend_requested", backend.empty() ? "cpu" : backend);
+    advisory.pushKV("backend", resolved_backend);
+    advisory.pushKV("backend_resolved", resolved_backend);
+    advisory.pushKV("issuer_uses_cpu_reference", true);
     advisory.pushKV("total_wall_us", wall_us);
     o.pushKV("solver_telemetry", advisory);
     if (o.write().size() > kMaxResponseBytes) {
@@ -628,7 +658,20 @@ bool QualificationRegistry::Status(const std::string& challenge_id, int64_t now_
     o.pushKV("status", status);
     o.pushKV("challenge_id", entry->id);
     o.pushKV("profile_id", entry->profile_id);
+    o.pushKV("subject_digest", entry->subject);
+    o.pushKV("episode_count", static_cast<int64_t>(entry->episode_count));
+    o.pushKV("issued_at_ms", entry->issued_at_ms);
+    o.pushKV("redeemed_at_ms", entry->redeemed_at_ms);
     o.pushKV("redeemed", entry->redeemed);
+    uint64_t rate = 0;
+    if (entry->redeemed && entry->redeemed_at_ms > entry->issued_at_ms) {
+        std::string code;
+        const WorkProfile* profile = FindWorkProfile(entry->profile_id, /*allow_test=*/true, code);
+        std::string rate_err;
+        const uint64_t elapsed_us = static_cast<uint64_t>(entry->redeemed_at_ms - entry->issued_at_ms) * 1000ull;
+        if (!profile || !MicrounitsPerHour(entry->episode_count, elapsed_us, rate, rate_err)) rate = 0;
+    }
+    o.pushKV("conservative_rate_p1e_microunits_per_hour", rate);
     out = std::move(o);
     return true;
 }
