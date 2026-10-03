@@ -23,6 +23,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 
 namespace modelnet {
@@ -1234,6 +1235,10 @@ const std::set<std::string>& Methods()
 bool DispatchBound(const fs::path& dir, const std::string& chain, const std::string& method, const UniValue& params,
                    UniValue& result, std::string& err_code, std::string& err)
 {
+    // btx-modeld answers unix RPC on several worker threads. The store's maps
+    // and its check-then-write settlement (one receipt per job) must not interleave.
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lock(mu);
     auto& st = Store();
     st.Bind(dir, chain);
     return st.Dispatch(method, params, result, err_code, err);

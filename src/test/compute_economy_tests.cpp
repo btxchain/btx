@@ -7,14 +7,17 @@
 #include <modelnet/compute_economy.h>
 #include <modelnet/identity.h>
 #include <test/util/setup_common.h>
+#include <tinyformat.h>
 #include <univalue.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <fstream>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -528,6 +531,69 @@ BOOST_AUTO_TEST_CASE(rejected_offer_import_is_not_stored)
     agr.pushKV("period_start_ms", now);
     agr.pushKV("period_end_ms", now + 3'600'000);
     BOOST_CHECK(CallFail(dir, "main", "issuecomputeagreement", agr, "COMPUTE_RECORD_INVALID"));
+}
+
+BOOST_AUTO_TEST_CASE(concurrent_accepts_settle_a_job_once)
+{
+    // btx-modeld answers unix RPC on more than one worker thread.
+    const std::string profile = pwc::ProfileIdHex(pwc::ToyProfile());
+    const fs::path dir = m_path_root / "pwc-race";
+    fs::create_directories(dir);
+    std::vector<unsigned char> pk;
+    WriteIdentity(dir, pk);
+    const std::string hex = HexStr(pk);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("offer", Offer(profile, hex, hex, hex, "PREPAID", 10'000'000, "REGTEST_DETERMINISTIC"));
+    req.pushKV("now_ms", 1000);
+    UniValue agr(UniValue::VOBJ);
+    agr.pushKV("offer_id", Call(dir, "regtest", "createcomputeoffer", req)["offer_id"]);
+    agr.pushKV("subject_pubkey", hex);
+    agr.pushKV("period_start_ms", 1000);
+    agr.pushKV("period_end_ms", 10'000'000);
+    agr.pushKV("now_ms", 1000);
+    const UniValue aid = Call(dir, "regtest", "issuecomputeagreement", agr)["agreement_id"];
+    constexpr int ROUNDS = 32;
+    for (int i = 0; i < ROUNDS; ++i) {
+        UniValue job(UniValue::VOBJ);
+        job.pushKV("agreement_id", aid);
+        job.pushKV("subject_pubkey", hex);
+        job.pushKV("job_class", "REGTEST_DETERMINISTIC");
+        job.pushKV("credit_p1e_microunits", 1000);
+        job.pushKV("input_commitment", strprintf("in-%d", i));
+        job.pushKV("executor_spec_commitment", "regtest-runner");
+        job.pushKV("expires_at_ms", 9'000'000);
+        job.pushKV("nonce", strprintf("job-%d", i));
+        job.pushKV("now_ms", 2000);
+        UniValue res(UniValue::VOBJ);
+        res.pushKV("job_id", Call(dir, "regtest", "createcomputejob", job)["job_id"]);
+        res.pushKV("output_commitment", strprintf("out-%d", i));
+        res.pushKV("now_ms", 2100);
+        const UniValue result_id = Call(dir, "regtest", "submitcomputejobresult", res)["result_id"];
+        // Two issuers' calls for the same result, released together.
+        std::atomic<int> ready{0};
+        auto accept = [&](int k) {
+            UniValue acc(UniValue::VOBJ);
+            acc.pushKV("result_id", result_id);
+            acc.pushKV("nonce", strprintf("r-%d-%d", i, k));
+            acc.pushKV("now_ms", 2200);
+            UniValue params(UniValue::VARR);
+            params.push_back(acc);
+            UniValue out;
+            std::string code, err;
+            ++ready;
+            while (ready.load() < 2) {}
+            modelnet::ComputeEconomySelfTestHook(dir, "regtest", "acceptcomputejobresult", params, out, code, err);
+        };
+        std::thread a(accept, 0), b(accept, 1);
+        a.join();
+        b.join();
+    }
+    UniValue bal_req(UniValue::VOBJ);
+    bal_req.pushKV("agreement_id", aid);
+    bal_req.pushKV("now_ms", 3000);
+    const UniValue bal = Call(dir, "regtest", "getcomputebalance", bal_req);
+    BOOST_CHECK_EQUAL((bal["valid_receipt_count"].getInt<uint64_t>()), uint64_t{ROUNDS});
+    BOOST_CHECK_EQUAL((bal["credited_p1e_microunits"].getInt<uint64_t>()), uint64_t{ROUNDS} * 1000);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
