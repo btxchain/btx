@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "btx://pwc/ComputeReceipt/v1",
+  "title": "ComputeReceipt payload",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["record_type", "schema_version", "network_id", "agreement_id", "subject_pubkey", "issuer_pubkey", "profile_id", "credited_p1e_microunits", "verification_method", "evidence_commitment", "accepted_at_ms", "nonce"],
+  "properties": {
+    "record_type": {"const": "compute_receipt_v1"},
+    "schema_version": {"const": 1},
+    "credited_p1e_microunits": {"type": "integer", "minimum": 1},
+    "job_id": {"type": "string"},
+    "result_id": {"type": "string"},
+    "beneficiary_ref": {"type": "string"}
+  }
+}

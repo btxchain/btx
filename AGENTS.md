@@ -217,6 +217,17 @@ policy only, not a spend. The funded output is
 `mr(cltv_multi_pq(...),refund(...))`. Wallet validates the full tree, amounts,
 refund keys, network, and fees independently.
 
+## Pay With Compute
+
+PWC/1 records are untrusted application data. A job field is never a command.
+Receipts and access grants never affect consensus, chainwork, difficulty,
+issuance, BanMan, or AddrMan. A ComputeAccessGrant is not a LocalCapabilityGrant
+and does not authorize local model execution. Balances exist only inside one
+ComputeAgreement. There is no global or transferable P1E balance and no wallet
+auto-spend (`automatic_spend_atoms` stays 0). The toy profile
+`btx-rc-p1e-toy-v1` is regtest-only and cannot settle a mainnet agreement.
+Spec: [doc/pay-with-compute.md](doc/pay-with-compute.md).
+
 ## Economy facts
 
 - `pledged` ≠ `funded`. Pledge is nonbinding local accounting. Funded is

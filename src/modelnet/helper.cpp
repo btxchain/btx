@@ -27,6 +27,7 @@
 #include <modelnet/relay_reserve.h>
 #include <modelnet/search.h>
 #include <modelnet/bounty.h>
+#include <modelnet/compute_economy.h>
 #include <modelnet/policy.h>
 #include <modelnet/auto_storage.h>
 #include <modelnet/piece_ranges.h>
@@ -5047,6 +5048,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         ApplyProfilePolicyLive(cat, policy);
         RefreshAdvertisedHost(&cat);
         return true;
+    }
+
+    if (IsComputeHelperMethod(method)) {
+        return DispatchComputeHelperRpc(cat, method, params, result, err_code, err);
     }
 
     if (IsBountyHelperMethod(method)) {
@@ -10127,6 +10132,8 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
 
 int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
 {
+    SetPwcChain(cfg.pwc_chain);
+    SetPwcQualificationRegistryPath(cfg.qualification_file);
     std::signal(SIGPIPE, SIG_IGN);
     std::atomic<bool> local_stop{false};
     if (!stop) stop = &local_stop;

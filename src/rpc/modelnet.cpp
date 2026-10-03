@@ -2008,6 +2008,45 @@ static RPCHelpMan signbountyrefund()
 }
 static RPCHelpMan submitbountyrefund() { return NamedBountySubmit("submitbountyrefund"); }
 
+#define PWC_RPC(fn, help)                                                                 \
+    static RPCHelpMan fn()                                                                \
+    {                                                                                     \
+        return ProxyOrLocal(#fn, help "\n",                                               \
+                            {{"request", RPCArg::Type::STR, RPCArg::Optional::OMITTED,    \
+                              "Pay With Compute request object",                          \
+                              RPCArgOptions{.skip_type_check = true}}});                 \
+    }
+
+PWC_RPC(createcomputeoffer, "Create a signed ComputeOffer. Access is priced in P1E, not money.")
+PWC_RPC(importcomputeoffer, "Import a signed ComputeOffer.")
+PWC_RPC(getcomputeoffer, "Fetch a local ComputeOffer by id.")
+PWC_RPC(listcomputeoffers, "List local ComputeOffers.")
+PWC_RPC(getcomputeoffersforresource, "List ComputeOffers for one resource_ref.")
+PWC_RPC(quotecomputeaccess, "Estimate how long a self-attested passport would take to meet an offer. Settlement still requires receipts.")
+PWC_RPC(issuecomputeagreement, "Freeze an offer into a subject-bound ComputeAgreement.")
+PWC_RPC(importcomputeagreement, "Import a signed ComputeAgreement.")
+PWC_RPC(getcomputeagreement, "Fetch a local ComputeAgreement.")
+PWC_RPC(listcomputeagreements, "List local ComputeAgreements.")
+PWC_RPC(createcomputejob, "Create a useful ComputeJob. The daemon does not execute it.")
+PWC_RPC(importcomputejob, "Import a signed ComputeJob.")
+PWC_RPC(getcomputejob, "Fetch a local ComputeJob.")
+PWC_RPC(listcomputejobs, "List local ComputeJobs.")
+PWC_RPC(submitcomputejobresult, "Submit a signed output commitment for a ComputeJob.")
+PWC_RPC(importcomputejobresult, "Import a signed ComputeJobResult.")
+PWC_RPC(getcomputejobresult, "Fetch a local ComputeJobResult.")
+PWC_RPC(acceptcomputejobresult, "Accept a job result and issue a receipt for the job's frozen credit.")
+PWC_RPC(issuecomputereceipt, "Issue a ComputeReceipt, including direct-compute settlement.")
+PWC_RPC(importcomputereceipt, "Import a signed ComputeReceipt bound to one agreement.")
+PWC_RPC(getcomputereceipt, "Fetch a local ComputeReceipt.")
+PWC_RPC(listcomputereceipts, "List local ComputeReceipts.")
+PWC_RPC(getcomputebalance, "Derive an agreement balance from its receipts.")
+PWC_RPC(issuecomputeaccessgrant, "Issue a non-transferable access grant when the agreement is eligible.")
+PWC_RPC(importcomputeaccessgrant, "Import a signed ComputeAccessGrant.")
+PWC_RPC(getcomputeaccessgrant, "Fetch a local ComputeAccessGrant.")
+PWC_RPC(verifycomputeaccessgrant, "Check a ComputeAccessGrant signature, trusted issuer, subject, resource, and window.")
+PWC_RPC(getcomputesigningidentity, "Return the local application signing identity. Not a wallet key.")
+#undef PWC_RPC
+
 void RegisterModelNetRPCCommands(CRPCTable& t)
 {
 #ifdef ENABLE_MODELNET
@@ -2314,6 +2353,34 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &preparebountyrefund},
         {"modelnet", &signbountyrefund},
         {"modelnet", &submitbountyrefund},
+        {"modelnet", &createcomputeoffer},
+        {"modelnet", &importcomputeoffer},
+        {"modelnet", &getcomputeoffer},
+        {"modelnet", &listcomputeoffers},
+        {"modelnet", &getcomputeoffersforresource},
+        {"modelnet", &quotecomputeaccess},
+        {"modelnet", &issuecomputeagreement},
+        {"modelnet", &importcomputeagreement},
+        {"modelnet", &getcomputeagreement},
+        {"modelnet", &listcomputeagreements},
+        {"modelnet", &createcomputejob},
+        {"modelnet", &importcomputejob},
+        {"modelnet", &getcomputejob},
+        {"modelnet", &listcomputejobs},
+        {"modelnet", &submitcomputejobresult},
+        {"modelnet", &importcomputejobresult},
+        {"modelnet", &getcomputejobresult},
+        {"modelnet", &acceptcomputejobresult},
+        {"modelnet", &issuecomputereceipt},
+        {"modelnet", &importcomputereceipt},
+        {"modelnet", &getcomputereceipt},
+        {"modelnet", &listcomputereceipts},
+        {"modelnet", &getcomputebalance},
+        {"modelnet", &issuecomputeaccessgrant},
+        {"modelnet", &importcomputeaccessgrant},
+        {"modelnet", &getcomputeaccessgrant},
+        {"modelnet", &verifycomputeaccessgrant},
+        {"modelnet", &getcomputesigningidentity},
     };
     for (const auto& c : commands) t.appendCommand(c.name, &c);
 #else

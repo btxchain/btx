@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The BTX developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://opensource.org/license/mit/.
+"""Worker-side Pay With Compute helper.
+
+Benchmark and passport commands call the real matmul-v4-rc-harness.
+They do not invent timings. The toy profile is REGTEST ONLY.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def binary(name: str) -> str:
+    env = os.environ.get("BTX_BUILDDIR")
+    candidates = []
+    if env:
+        candidates.append(Path(env) / "bin" / name)
+    candidates.append(ROOT / "build-gcc13" / "bin" / name)
+    found = shutil.which(name)
+    if found:
+        candidates.append(Path(found))
+    for cand in candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    sys.exit(f"missing {name}; set BTX_BUILDDIR")
+
+
+def cli(args, method, *payloads):
+    cmd = [args.btx_cli or binary("btx-cli")]
+    if args.regtest:
+        cmd.append("-regtest")
+    if args.datadir:
+        cmd.append(f"-datadir={args.datadir}")
+    cmd.append(method)
+    for payload in payloads:
+        cmd.append(payload if isinstance(payload, str) else json.dumps(payload))
+    subprocess.check_call(cmd)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="BTX Pay With Compute worker tool")
+    parser.add_argument("--regtest", action="store_true")
+    parser.add_argument("--datadir")
+    parser.add_argument("--btx-cli")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    profile = sub.add_parser("profile")
+    profile.add_argument("--name", required=True)
+
+    bench = sub.add_parser("benchmark")
+    bench.add_argument("--profile", required=True)
+    bench.add_argument("--backend", default="cpu")
+    bench.add_argument("--episodes", type=int, default=3)
+    bench.add_argument("--out", default="rc-report.json")
+    bench.add_argument("--passport-out")
+    bench.add_argument("--public-evidence", action="store_true")
+
+    passport = sub.add_parser("passport")
+    passport.add_argument("--profile", required=True)
+    passport.add_argument("--backend", default="cpu")
+    passport.add_argument("--episodes", type=int, default=3)
+    passport.add_argument("--passport-out", required=True)
+    passport.add_argument("--public-evidence", action="store_true")
+
+    solve = sub.add_parser("solve-qualification")
+    solve.add_argument("--challenge", required=True)
+    solve.add_argument("--backend", default="cpu")
+
+    quote = sub.add_parser("quote")
+    quote.add_argument("--request", required=True)
+
+    verify = sub.add_parser("verify-record")
+    verify.add_argument("--request", required=True)
+
+    job = sub.add_parser("run-regtest-job")
+    job.add_argument("--job", required=True)
+
+    args = parser.parse_args()
+    if args.cmd == "profile":
+        cli(args, "getcomputeworkprofile", args.name)
+    elif args.cmd in ("benchmark", "passport"):
+        harness = binary("matmul-v4-rc-harness")
+        out = getattr(args, "out", "rc-report.json")
+        passport_out = args.passport_out
+        cmd = [harness, "--compute-profile", args.profile, "--backend", args.backend,
+               "--episodes", str(args.episodes), "--out", out, "--public-evidence"]
+        if passport_out:
+            cmd += ["--passport-out", passport_out]
+        if args.profile == "btx-rc-p1e-v1":
+            print("production Profile-1 workload; this can take a long time", file=sys.stderr)
+        else:
+            print("REGTEST TEST ONLY toy profile", file=sys.stderr)
+        subprocess.check_call(cmd)
+    elif args.cmd == "solve-qualification":
+        challenge = json.loads(Path(args.challenge).read_text(encoding="utf-8"))
+        cli(args, "solvecomputequalification", json.dumps(challenge), args.backend)
+    elif args.cmd == "quote":
+        cli(args, "quotecomputeaccess", Path(args.request).read_text(encoding="utf-8"))
+    elif args.cmd == "verify-record":
+        cli(args, "verifycomputeaccessgrant", Path(args.request).read_text(encoding="utf-8"))
+    elif args.cmd == "run-regtest-job":
+        runner = Path(__file__).with_name("reference-job-runner.py")
+        subprocess.check_call([sys.executable, str(runner), args.job])
+
+
+if __name__ == "__main__":
+    main()

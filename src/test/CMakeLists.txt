@@ -79,6 +79,7 @@ add_executable(test_btx
   matmul_verify_worker_tests.cpp
   matmul_block_lifecycle_tests.cpp
   matmul_trusted_mirror_tests.cpp
+  compute_profile_tests.cpp
   matmul_rc_admission_tests.cpp
   trusted_exact_replay_attestation_tests.cpp
   trusted_utxo_snapshot_attestation_tests.cpp
@@ -546,6 +547,7 @@ target_compile_definitions(test_btx PRIVATE
 if(WITH_MODELNET)
   target_sources(test_btx PRIVATE
     modelnet_tests.cpp
+    compute_economy_tests.cpp
     modelnet_safety_tests.cpp
     modelnet_v11_negative_tests.cpp
     modelnet_funding_tests.cpp

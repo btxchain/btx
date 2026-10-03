@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "btx://pwc/ComputeJob/v1",
+  "title": "ComputeJob payload",
+  "type": "object",
+  "required": ["record_type", "schema_version", "agreement_id", "subject_pubkey", "job_class", "credit_p1e_microunits", "input_commitment", "executor_spec_commitment"],
+  "properties": {
+    "record_type": {"const": "compute_job_v1"},
+    "job_class": {"type": "string"},
+    "credit_p1e_microunits": {"type": "integer", "minimum": 1}
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "btx://pwc/ComputeJobResult/v1",
+  "title": "ComputeJobResult payload",
+  "type": "object",
+  "required": ["record_type", "schema_version", "job_id", "agreement_id", "subject_pubkey", "output_commitment"],
+  "properties": {
+    "record_type": {"const": "compute_job_result_v1"}
+  }
+}

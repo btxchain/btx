@@ -678,6 +678,9 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-matmulattestationsignerkey=<wif>", "UNSAFE/deprecated convenience form for the archive-validator WIF key; command lines may leak through process listings. Prefer -matmulattestationsignerkeyfile.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationserve", "Serve GETMMATTEST from the local attestation store (default: 1 when a local signing key is configured or when -matmulvalidation=trusted, otherwise 0). Trusted mirrors cache-and-forward signatures they have already accepted; they never SignAuthoritative. A local signer serves the live tip window to any peer. Archive / trusted-mirror catch-up peers may also receive cached or SignAuthoritative signatures for the active chain inside a short catch-up window; IBD historical scans stay ignored so they cannot saturate the signer uplink. Consensus signers may set this to 0 to isolate signing from public GETMMATTEST fan-in; newly signed attestations are still pushed to connected peers. Aggressive GETMMATTEST / MMATTEST (rate-limit exhaustion or historical scans of a signer) is penalized: the peer is disconnected and banned for 24h. When no signature is cached, a serving consensus signer with a local ExactReplay-success bit may regenerate its own statement; otherwise a rate-limited background ExactReplay may be queued for canonical Profile-1 blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulservicechallengefile=<file>", "Path to the persistent MatMul service challenge registry. Relative paths are resolved under the network datadir. Point multiple service nodes at the same shared file to let getmatmulservicechallenge issuance and redeemmatmulserviceproof redemption work across the cluster. (default: <netdir>/matmul_service_challenges.dat)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
+    argsman.AddArg("-computequalificationfile=<file>", "Path to the Pay With Compute qualification registry (default: <netdir>/compute_qualifications.dat). Relative paths resolve under the network datadir.", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
+    argsman.AddArg("-enablecomputetestprofiles", "Expose the regtest-only toy compute profile btx-rc-p1e-toy-v1 (default: 0). Refused outside regtest. Toy units cannot settle mainnet agreements.", ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-enablecomputeproductionwork", "Allow solvecomputequalification to execute the production Profile-1 workload locally (default: 0). The workload is large; leave this off unless a campaign is intended.", ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-matmulasyncverify", "Run the MatMul v4.4 ENC-DR reference recompute for P2P block deliveries on a bounded background worker pool instead of the network message thread (default: 1). Only effective on networks where the v4 fork height is set; verdicts are identical either way (the recompute is a pure function of the header) — this only changes WHICH thread computes them. Set to 0 to force the historical fully-synchronous path.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulrcheaderfirst", "Begin admitted near-tip RC ExactReplay from the immutable block header while compact/full block transactions transfer and validate (default: 1). The early verdict grants no chainwork; complete block validation remains authoritative.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulrcadmission", "Require a P2P-only Poseidon2 rcadmit ticket before an untrusted peer may consume an RC ExactReplay slot (default: 1). Local RPC and NoBan peers bypass this policy; no blockchain bytes are added.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -2189,6 +2192,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 
     if (args.GetBoolArg("-peerbloomfilters", DEFAULT_PEERBLOOMFILTERS))
         g_local_services = ServiceFlags(g_local_services | NODE_BLOOM);
+
+    if (args.GetBoolArg("-enablecomputetestprofiles", false) && chainparams.GetChainType() != ChainType::REGTEST) {
+        return InitError(Untranslated("-enablecomputetestprofiles can only be used with regtest"));
+    }
 
     const std::vector<std::string> test_options = args.GetArgs("-test");
     if (!test_options.empty()) {
@@ -4251,6 +4258,18 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             }
         }
         hcfg.watch_dir = args.GetArg("-modelwatch", "");
+        hcfg.pwc_chain = ChainTypeToString(args.GetChainType());
+        {
+            const std::string qarg = args.GetArg("-computequalificationfile", "");
+            fs::path qpath;
+            if (!qarg.empty()) {
+                const fs::path given = fs::PathFromString(qarg);
+                qpath = given.is_relative() ? args.GetDataDirNet() / given : given;
+            } else {
+                qpath = args.GetDataDirNet() / "compute_qualifications.dat";
+            }
+            hcfg.qualification_file = fs::PathToString(qpath);
+        }
         hcfg.relay = args.GetBoolArg("-modelrelay", false);
         {
             modelnet::HostMode parsed_host = modelnet::HostMode::OFF;

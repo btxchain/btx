@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "btx://pwc/ComputeOffer/v1",
+  "title": "ComputeOffer payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["record_type", "schema_version", "network_id", "issuer_pubkey", "created_at_ms", "expires_at_ms", "nonce", "resource_ref", "access", "settlement", "policy"],
+  "properties": {
+    "record_type": {"const": "compute_offer_v1"},
+    "schema_version": {"const": 1},
+    "network_id": {"type": "string", "minLength": 64, "maxLength": 64},
+    "issuer_pubkey": {"type": "string"},
+    "created_at_ms": {"type": "integer", "minimum": 0},
+    "expires_at_ms": {"type": "integer", "minimum": 0},
+    "nonce": {"type": "string", "maxLength": 128},
+    "resource_ref": {"type": "string", "maxLength": 512},
+    "access": {"type": "object"},
+    "settlement": {"type": "object"},
+    "policy": {
+      "type": "object",
+      "properties": {
+        "transferable": {"const": false},
+        "cash_redeemable": {"const": false},
+        "cross_agreement_credit": {"const": false},
+        "carryover": {"const": false}
+      }
+    }
+  }
+}
