@@ -469,4 +469,30 @@ BOOST_AUTO_TEST_CASE(grant_requires_agreement_issued_by_this_node)
     BOOST_CHECK(CallFail(provider, "regtest", "issuecomputeaccessgrant", g, "COMPUTE_RECORD_INVALID"));
 }
 
+BOOST_AUTO_TEST_CASE(pro_rata_not_in_good_standing_before_period_start)
+{
+    const std::string profile = pwc::ProfileIdHex(pwc::ToyProfile());
+    const fs::path dir = m_path_root / "pwc-prestart";
+    fs::create_directories(dir);
+    std::vector<unsigned char> pk;
+    WriteIdentity(dir, pk);
+    const std::string hex = HexStr(pk);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("offer", Offer(profile, hex, hex, hex, "PRO_RATA", 8'000'000, "REGTEST_DETERMINISTIC"));
+    req.pushKV("now_ms", 1000);
+    UniValue agr(UniValue::VOBJ);
+    agr.pushKV("offer_id", Call(dir, "regtest", "createcomputeoffer", req)["offer_id"]);
+    agr.pushKV("subject_pubkey", hex);
+    agr.pushKV("period_start_ms", 100'000'000);
+    agr.pushKV("period_end_ms", 200'000'000);
+    agr.pushKV("now_ms", 1000);
+    UniValue bal_req(UniValue::VOBJ);
+    bal_req.pushKV("agreement_id", Call(dir, "regtest", "issuecomputeagreement", agr)["agreement_id"]);
+    bal_req.pushKV("now_ms", 1000);
+    const UniValue bal = Call(dir, "regtest", "getcomputebalance", bal_req);
+    BOOST_CHECK_EQUAL((bal["credited_p1e_microunits"].getInt<uint64_t>()), 0u);
+    BOOST_CHECK_EQUAL(bal["status"].get_str(), "OPEN");
+    BOOST_CHECK(CallFail(dir, "regtest", "issuecomputeaccessgrant", bal_req, "COMPUTE_NOT_SATISFIED"));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

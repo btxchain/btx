@@ -486,7 +486,9 @@ bool ComputeStore::BalanceOf(const std::string& agreement_id, int64_t now_ms, Un
     if (m_cancelled.count(agreement_id)) status = "CANCELLED";
     else if (now_ms > end) status = "EXPIRED";
     else if (credited >= required) status = "SATISFIED";
-    else if (schedule == "PRO_RATA" && credited >= due) status = "IN_GOOD_STANDING";
+    // due is 0 before the period starts; that is not standing, or repeated
+    // 24h pro-rata grants would cover the time before the agreement begins.
+    else if (schedule == "PRO_RATA" && now_ms >= start && credited >= due) status = "IN_GOOD_STANDING";
     UniValue o(UniValue::VOBJ);
     o.pushKV("agreement_id", agreement_id);
     o.pushKV("required_p1e_microunits", required);
