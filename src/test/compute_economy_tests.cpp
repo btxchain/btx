@@ -2,7 +2,9 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <crypto/sha256.h>
 #include <matmul/compute_profile.h>
+#include <matmul/compute_qualification.h>
 #include <modelnet/bounty.h>
 #include <modelnet/compute_economy.h>
 #include <modelnet/identity.h>
@@ -594,6 +596,74 @@ BOOST_AUTO_TEST_CASE(concurrent_accepts_settle_a_job_once)
     const UniValue bal = Call(dir, "regtest", "getcomputebalance", bal_req);
     BOOST_CHECK_EQUAL((bal["valid_receipt_count"].getInt<uint64_t>()), uint64_t{ROUNDS});
     BOOST_CHECK_EQUAL((bal["credited_p1e_microunits"].getInt<uint64_t>()), uint64_t{ROUNDS} * 1000);
+}
+
+BOOST_AUTO_TEST_CASE(direct_compute_challenge_credits_once)
+{
+    const std::string profile = pwc::ProfileIdHex(pwc::ToyProfile());
+    const fs::path dir = m_path_root / "pwc-direct-once";
+    fs::create_directories(dir);
+    std::vector<unsigned char> pk;
+    WriteIdentity(dir, pk);
+    const std::string hex = HexStr(pk);
+    // One redeemed one-episode toy challenge for this subject.
+    pwc::QualificationFreshness in;
+    in.network = "regtest";
+    in.profile_name = "btx-rc-p1e-toy-v1";
+    CSHA256().Write(pk.data(), pk.size()).Finalize(in.subject.data());
+    in.issuer_nonce.fill(7);
+    in.issued_at_ms = 1'000;
+    in.expires_at_ms = 1'000'000;
+    in.episode_count = 1;
+    UniValue challenge, response, summary;
+    std::string code, err;
+    BOOST_REQUIRE(pwc::IssueQualification(in, true, challenge, code, err));
+    BOOST_REQUIRE(pwc::SolveQualification(challenge, 60000, false, response, code, err));
+    const fs::path qpath = m_path_root / "direct-once-qual.dat";
+    {
+        pwc::QualificationRegistry reg;
+        BOOST_REQUIRE(reg.Open(qpath, err));
+        BOOST_REQUIRE(reg.RememberIssued(challenge, code, err));
+        BOOST_REQUIRE(reg.Verify(challenge, response, true, 2'000, summary, code, err));
+    }
+    modelnet::SetPwcQualificationRegistryPath(fs::PathToString(qpath));
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("offer", Offer(profile, hex, hex, hex, "PREPAID", 3'000'000, "REGTEST_DETERMINISTIC"));
+    req.pushKV("now_ms", 1000);
+    const UniValue offer_id = Call(dir, "regtest", "createcomputeoffer", req)["offer_id"];
+    auto agreement = [&](const std::string& nonce) {
+        UniValue agr(UniValue::VOBJ);
+        agr.pushKV("offer_id", offer_id);
+        agr.pushKV("subject_pubkey", hex);
+        agr.pushKV("period_start_ms", 1000);
+        agr.pushKV("period_end_ms", 9'000'000);
+        agr.pushKV("nonce", nonce);
+        agr.pushKV("now_ms", 1000);
+        return Call(dir, "regtest", "issuecomputeagreement", agr)["agreement_id"];
+    };
+    const UniValue a1 = agreement("a1");
+    const UniValue a2 = agreement("a2");
+    auto direct = [&](const UniValue& aid, const std::string& nonce) {
+        UniValue rec(UniValue::VOBJ);
+        rec.pushKV("agreement_id", aid);
+        rec.pushKV("subject_pubkey", hex);
+        rec.pushKV("profile_id", profile);
+        rec.pushKV("credited_p1e_microunits", 1'000'000);
+        rec.pushKV("verification_method", "DIRECT_COMPUTE");
+        rec.pushKV("evidence_commitment", challenge["challenge_id"]);
+        rec.pushKV("nonce", nonce);
+        rec.pushKV("now_ms", 3000);
+        return rec;
+    };
+    Call(dir, "regtest", "issuecomputereceipt", direct(a1, "first"));
+    // The same redeemed challenge, again on the same agreement and on another one.
+    BOOST_CHECK(CallFail(dir, "regtest", "issuecomputereceipt", direct(a1, "second"), "COMPUTE_CHALLENGE_REDEEMED"));
+    BOOST_CHECK(CallFail(dir, "regtest", "issuecomputereceipt", direct(a2, "third"), "COMPUTE_CHALLENGE_REDEEMED"));
+    UniValue bal_req(UniValue::VOBJ);
+    bal_req.pushKV("agreement_id", a1);
+    bal_req.pushKV("now_ms", 3100);
+    BOOST_CHECK_EQUAL((Call(dir, "regtest", "getcomputebalance", bal_req)["credited_p1e_microunits"].getInt<uint64_t>()), 1'000'000u);
+    modelnet::SetPwcQualificationRegistryPath("");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

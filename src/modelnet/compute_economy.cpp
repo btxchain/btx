@@ -1048,6 +1048,15 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
                 }
                 const uint64_t expected = static_cast<uint64_t>(episodes) * 1000000ull;
                 if (credit != expected) return Fail(err_code, err, "COMPUTE_RECEIPT_CREDIT_MISMATCH", "qualification");
+                // One redeemed challenge backs one direct-compute receipt, on any agreement.
+                for (const auto& kv : m_receipts) {
+                    const UniValue& prior = PayloadOf(kv.second);
+                    if (prior.exists("verification_method") && prior["verification_method"].isStr() &&
+                        prior["verification_method"].get_str() == "DIRECT_COMPUTE" && prior.exists("evidence_commitment") &&
+                        prior["evidence_commitment"].isStr() && prior["evidence_commitment"].get_str() == evidence) {
+                        return Fail(err_code, err, "COMPUTE_CHALLENGE_REDEEMED", "direct receipt");
+                    }
+                }
             }
         }
         auto ait = m_agreements.find(agreement_id);
