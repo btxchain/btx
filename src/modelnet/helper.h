@@ -83,6 +83,8 @@ struct HelperConfig {
     fs::path watch_dir;
     /** Pay With Compute chain name (main, test, regtest). Empty fails closed. */
     std::string pwc_chain;
+    /** Absolute qualification registry shared with btxd. Empty skips redeemed checks. */
+    std::string qualification_file;
 };
 
 bool ParseHttpRequest(const std::string& raw, NativeRequest& req, std::string& err);

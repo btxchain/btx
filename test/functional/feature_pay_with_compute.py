@@ -38,7 +38,7 @@ def assert_code(fn, code):
     raise AssertionError(f"expected {code}")
 
 
-def offer_for(profile_id, issuer, schedulers, issuers, required, schedule, job_class="REGTEST_DETERMINISTIC"):
+def offer_for(profile_id, issuer, schedulers, issuers, required, schedule, job_class="REGTEST_DETERMINISTIC", qualification_required=False):
     return {
         "record_type": "compute_offer_v1",
         "schema_version": 1,
@@ -53,7 +53,7 @@ def offer_for(profile_id, issuer, schedulers, issuers, required, schedule, job_c
             "required_p1e_microunits": required,
             "schedule": schedule,
             "allowed_settlement_modes": ["USEFUL_JOB_RECEIPTS", "DIRECT_COMPUTE"],
-            "qualification_required": False,
+            "qualification_required": qualification_required,
             "allowed_job_classes": [job_class],
             "authorized_job_scheduler_pubkeys": schedulers,
             "authorized_receipt_issuer_pubkeys": issuers,
@@ -113,7 +113,7 @@ class PayWithComputeTest(BitcoinTestFramework):
         assert_equal(passport["p99_claimable"], False)
 
         created = provider.createcomputeoffer({
-            "offer": offer_for(pid, ppk, [ppk, spk], [ppk, spk], 3_000_000, "PREPAID"),
+            "offer": offer_for(pid, ppk, [ppk, spk], [ppk, spk], 3_000_000, "PREPAID", qualification_required=True),
             "now_ms": 1000,
         })
         quote = worker.quotecomputeaccess({
@@ -136,6 +136,23 @@ class PayWithComputeTest(BitcoinTestFramework):
         assert_equal(redeemed["demonstrated_p1e_microunits"], 1_000_000)
         assert_code(lambda: provider.redeemcomputequalification(challenge, response), "COMPUTE_CHALLENGE_REDEEMED")
 
+        forged = {
+            "offer_id": created["offer_id"],
+            "subject_pubkey": wpk,
+            "period_start_ms": 1000,
+            "period_end_ms": 9_000_000,
+            "now_ms": 2000,
+            "qualification": {
+                "method": "btx_compute_qualification_v1",
+                "challenge_id": "00" * 48,
+                "profile_id": pid,
+                "verified_at_ms": 2000,
+                "demonstrated_p1e_microunits": 1_000_000,
+                "conservative_rate_p1e_microunits_per_hour": 1,
+            },
+        }
+        assert_code(lambda: provider.issuecomputeagreement(forged), "COMPUTE_QUALIFICATION_REQUIRED")
+
         agreement = provider.issuecomputeagreement({
             "offer_id": created["offer_id"],
             "subject_pubkey": wpk,
@@ -153,6 +170,20 @@ class PayWithComputeTest(BitcoinTestFramework):
         })
         worker.importcomputeagreement({"envelope": agreement})
         aid = agreement["agreement_id"]
+        assert_code(
+            lambda: worker.createcomputejob({
+                "agreement_id": aid,
+                "subject_pubkey": wpk,
+                "job_class": "REGTEST_DETERMINISTIC",
+                "credit_p1e_microunits": 1_000_000,
+                "input_commitment": "not-a-scheduler",
+                "executor_spec_commitment": "regtest-runner",
+                "expires_at_ms": 8_000_000,
+                "nonce": "not-a-scheduler",
+                "now_ms": 2500,
+            }),
+            "COMPUTE_UNAUTHORIZED_SCHEDULER",
+        )
 
         def settle(credit, nonce, beneficiary=""):
             job = provider.createcomputejob({
@@ -167,14 +198,14 @@ class PayWithComputeTest(BitcoinTestFramework):
                 "nonce": nonce,
                 "now_ms": 3000,
             })
-            worker.importcomputejob({"envelope": job})
+            worker.importcomputejob({"envelope": job, "now_ms": 3000})
             output = det_commit(nonce)
             result = worker.submitcomputejobresult({
                 "job_id": job["job_id"],
                 "output_commitment": output,
                 "now_ms": 3100,
             })
-            provider.importcomputejobresult({"envelope": result})
+            provider.importcomputejobresult({"envelope": result, "now_ms": 3100})
             receipt = provider.acceptcomputejobresult({
                 "result_id": result["result_id"],
                 "expected_output_commitment": output,
@@ -199,6 +230,26 @@ class PayWithComputeTest(BitcoinTestFramework):
         assert_code(
             lambda: worker.verifycomputeaccessgrant({
                 "envelope": grant,
+                "subject_pubkey": wpk,
+                "resource_ref": "urn:btx:pwc:demo-model",
+                "now_ms": 3500,
+            }),
+            "COMPUTE_GRANT_INVALID",
+        )
+        assert_code(
+            lambda: worker.verifycomputeaccessgrant({
+                "envelope": grant,
+                "trusted_issuer_pubkey": wpk,
+                "subject_pubkey": wpk,
+                "resource_ref": "urn:btx:pwc:demo-model",
+                "now_ms": 3500,
+            }),
+            "COMPUTE_GRANT_INVALID",
+        )
+        assert_code(
+            lambda: worker.verifycomputeaccessgrant({
+                "envelope": grant,
+                "trusted_issuer_pubkey": ppk,
                 "subject_pubkey": ppk,
                 "resource_ref": "urn:btx:pwc:demo-model",
                 "now_ms": 3500,
@@ -208,6 +259,7 @@ class PayWithComputeTest(BitcoinTestFramework):
         worker.importcomputeaccessgrant({"envelope": grant})
         allowed = worker.verifycomputeaccessgrant({
             "envelope": grant,
+            "trusted_issuer_pubkey": ppk,
             "subject_pubkey": wpk,
             "resource_ref": "urn:btx:pwc:demo-model",
             "now_ms": 3500,
@@ -239,6 +291,30 @@ class PayWithComputeTest(BitcoinTestFramework):
         direct_response = worker.solvecomputequalification(direct_challenge, "cpu")
         direct_redeemed = provider.redeemcomputequalification(direct_challenge, direct_response)
         assert_equal(direct_redeemed["demonstrated_p1e_microunits"], 2_000_000)
+        assert_code(
+            lambda: provider.issuecomputereceipt({
+                "agreement_id": direct_agreement["agreement_id"],
+                "subject_pubkey": wpk,
+                "profile_id": pid,
+                "credited_p1e_microunits": 2_000_000,
+                "verification_method": "DIRECT_COMPUTE",
+                "evidence_commitment": "00" * 48,
+                "now_ms": 4100,
+            }),
+            "COMPUTE_QUALIFICATION_REQUIRED",
+        )
+        assert_code(
+            lambda: provider.issuecomputereceipt({
+                "agreement_id": direct_agreement["agreement_id"],
+                "subject_pubkey": wpk,
+                "profile_id": pid,
+                "credited_p1e_microunits": 1_000_000,
+                "verification_method": "DIRECT_COMPUTE",
+                "evidence_commitment": direct_challenge["challenge_id"],
+                "now_ms": 4100,
+            }),
+            "COMPUTE_RECEIPT_CREDIT_MISMATCH",
+        )
         provider.issuecomputereceipt({
             "agreement_id": direct_agreement["agreement_id"],
             "subject_pubkey": wpk,
@@ -277,11 +353,11 @@ class PayWithComputeTest(BitcoinTestFramework):
             "nonce": "clear-1",
             "now_ms": 5100,
         })
-        provider.importcomputejob({"envelope": job})
-        worker.importcomputejob({"envelope": job})
+        provider.importcomputejob({"envelope": job, "now_ms": 5100})
+        worker.importcomputejob({"envelope": job, "now_ms": 5100})
         output = det_commit("cleared")
         result = worker.submitcomputejobresult({"job_id": job["job_id"], "output_commitment": output, "now_ms": 5200})
-        scheduler.importcomputejobresult({"envelope": result})
+        scheduler.importcomputejobresult({"envelope": result, "now_ms": 5200})
         receipt = scheduler.acceptcomputejobresult({
             "result_id": result["result_id"],
             "expected_output_commitment": output,
@@ -313,6 +389,7 @@ class PayWithComputeTest(BitcoinTestFramework):
             "period_end_ms": 8000,
             "now_ms": 0,
         })
+        worker.importcomputeagreement({"envelope": pro})
         due = provider.getcomputebalance({"agreement_id": pro["agreement_id"], "now_ms": 2000})
         assert_equal(due["due_now_p1e_microunits"], 2_000_000)
         assert_equal(due["status"], "OPEN")
@@ -327,10 +404,10 @@ class PayWithComputeTest(BitcoinTestFramework):
             "nonce": "pace-1",
             "now_ms": 2000,
         })
-        worker.importcomputejob({"envelope": job})
+        worker.importcomputejob({"envelope": job, "now_ms": 2000})
         output = det_commit("pace-1")
         result = worker.submitcomputejobresult({"job_id": job["job_id"], "output_commitment": output, "now_ms": 2100})
-        provider.importcomputejobresult({"envelope": result})
+        provider.importcomputejobresult({"envelope": result, "now_ms": 2100})
         provider.acceptcomputejobresult({"result_id": result["result_id"], "expected_output_commitment": output, "now_ms": 2200})
         standing = provider.getcomputebalance({"agreement_id": pro["agreement_id"], "now_ms": 2000})
         assert_equal(standing["status"], "IN_GOOD_STANDING")
@@ -351,10 +428,10 @@ class PayWithComputeTest(BitcoinTestFramework):
             "nonce": "pace-2",
             "now_ms": 6100,
         })
-        worker.importcomputejob({"envelope": job})
+        worker.importcomputejob({"envelope": job, "now_ms": 6100})
         output = det_commit("pace-2")
         result = worker.submitcomputejobresult({"job_id": job["job_id"], "output_commitment": output, "now_ms": 6200})
-        provider.importcomputejobresult({"envelope": result})
+        provider.importcomputejobresult({"envelope": result, "now_ms": 6200})
         provider.acceptcomputejobresult({"result_id": result["result_id"], "expected_output_commitment": output, "now_ms": 6300})
         back = provider.getcomputebalance({"agreement_id": pro["agreement_id"], "now_ms": 6000})
         assert_equal(back["due_now_p1e_microunits"], 6_000_000)

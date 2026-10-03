@@ -22,18 +22,19 @@ def main() -> None:
     parser.add_argument("--datadir")
     parser.add_argument("--regtest", action="store_true")
     parser.add_argument("--grant", help="Path to a grant envelope JSON")
+    parser.add_argument("--trusted-issuer", help="Resource provider application public key")
     parser.add_argument("--subject")
     parser.add_argument("--resource")
     parser.add_argument("--right", action="append", default=[])
     parser.add_argument("--now-ms", type=int)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    if not args.grant:
+    if not args.grant or not args.trusted_issuer:
         out = {"permitted": False, "reason": "COMPUTE_GRANT_INVALID"}
         print(json.dumps(out) if args.json else "DENIED")
-        return
+        sys.exit(1)
     grant = json.loads(open(args.grant, encoding="utf-8").read())
-    req = {"envelope": grant}
+    req = {"envelope": grant, "trusted_issuer_pubkey": args.trusted_issuer}
     if args.subject:
         req["subject_pubkey"] = args.subject
     if args.resource:

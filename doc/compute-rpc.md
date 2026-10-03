@@ -14,7 +14,7 @@ Narrative: [pay-with-compute.md](pay-with-compute.md).
 | `getcomputeworkprofiles` | Production profiles. Toy profile only on regtest with `-enablecomputetestprofiles=1`. |
 | `getcomputeworkprofile "name-or-id"` | Canonical descriptor and profile id. |
 | `issuecomputequalification "subject" "profile" episode_count expires_in_s ( max_elapsed_ms )` | Fresh challenge. Subject is 32-byte hex. Episodes are 1..16. |
-| `solvecomputequalification challenge ( "backend" time_budget_ms )` | Local exact replay. Client timing is advisory. |
+| `solvecomputequalification challenge ( "backend" time_budget_ms )` | Local exact replay on `cpu`, or on a self-qualified `auto`/`cuda`/`hip`/`metal`/`ascend` backend. A device that is not self-qualified is rejected. Client timing is advisory. The issuer recomputes on the CPU reference. |
 | `verifycomputequalification challenge response` | Recompute. Does not redeem. |
 | `redeemcomputequalification challenge response` | Verify and mark single-use. |
 | `getcomputequalificationstatus "challenge_id"` | `unknown`, `issued`, `expired`, or `redeemed`. |

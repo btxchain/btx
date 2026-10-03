@@ -4259,6 +4259,17 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
         hcfg.watch_dir = args.GetArg("-modelwatch", "");
         hcfg.pwc_chain = ChainTypeToString(args.GetChainType());
+        {
+            const std::string qarg = args.GetArg("-computequalificationfile", "");
+            fs::path qpath;
+            if (!qarg.empty()) {
+                const fs::path given = fs::PathFromString(qarg);
+                qpath = given.is_relative() ? args.GetDataDirNet() / given : given;
+            } else {
+                qpath = args.GetDataDirNet() / "compute_qualifications.dat";
+            }
+            hcfg.qualification_file = fs::PathToString(qpath);
+        }
         hcfg.relay = args.GetBoolArg("-modelrelay", false);
         {
             modelnet::HostMode parsed_host = modelnet::HostMode::OFF;

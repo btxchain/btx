@@ -12,6 +12,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <fstream>
+#include <string>
 
 namespace {
 
@@ -199,6 +200,7 @@ BOOST_AUTO_TEST_CASE(prepaid_useful_job_reaches_grant_and_restart)
     const UniValue grant = Call(dir, "regtest", "issuecomputeaccessgrant", grant_req);
     UniValue verify(UniValue::VOBJ);
     verify.pushKV("envelope", grant);
+    verify.pushKV("trusted_issuer_pubkey", hex);
     verify.pushKV("subject_pubkey", hex);
     verify.pushKV("resource_ref", "urn:btx:pwc:demo-model");
     verify.pushKV("now_ms", 2300);
@@ -245,8 +247,154 @@ BOOST_AUTO_TEST_CASE(pro_rata_and_rejects)
     const std::string main_hex = HexStr(main_pk);
     UniValue main_req(UniValue::VOBJ);
     main_req.pushKV("offer", Offer(profile, main_hex, main_hex, main_hex, "PREPAID", 1000, "INFERENCE_BATCH"));
-    main_req.pushKV("now_ms", 1);
     BOOST_CHECK(CallFail(maindir, "main", "createcomputeoffer", main_req, "COMPUTE_TEST_PROFILE_DISABLED"));
+    main_req.pushKV("now_ms", 1);
+    BOOST_CHECK(CallFail(maindir, "main", "createcomputeoffer", main_req, "COMPUTE_RECORD_INVALID"));
+}
+
+BOOST_AUTO_TEST_CASE(reservation_job_cap_and_import_authorization)
+{
+    const fs::path dir = m_path_root / "pwc-c";
+    fs::create_directories(dir);
+    std::vector<unsigned char> pk;
+    WriteIdentity(dir, pk);
+    const std::string hex = HexStr(pk);
+    const std::string profile = pwc::ProfileIdHex(pwc::ToyProfile());
+    std::vector<unsigned char> other_pk, other_sk;
+    std::string gen_err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(other_pk, other_sk, gen_err));
+    const std::string other = HexStr(other_pk);
+
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("offer", Offer(profile, hex, other, hex, "PREPAID", 2000000, "REGTEST_DETERMINISTIC"));
+    req.pushKV("now_ms", 1000);
+    const UniValue created = Call(dir, "regtest", "createcomputeoffer", req);
+    UniValue mutated = created;
+    std::string sig = mutated["signature"].get_str();
+    sig.back() = sig.back() == 'a' ? 'b' : 'a';
+    mutated.pushKV("signature", sig);
+    UniValue bad_import(UniValue::VOBJ);
+    bad_import.pushKV("envelope", mutated);
+    bad_import.pushKV("now_ms", 1000);
+    BOOST_CHECK(CallFail(dir, "regtest", "importcomputeoffer", bad_import, "COMPUTE_SIGNATURE_INVALID"));
+
+    UniValue agr(UniValue::VOBJ);
+    agr.pushKV("offer_id", created["offer_id"].get_str());
+    agr.pushKV("subject_pubkey", hex);
+    agr.pushKV("period_start_ms", 1000);
+    agr.pushKV("period_end_ms", 9'000'000);
+    agr.pushKV("now_ms", 1000);
+    const std::string agreement_id = Call(dir, "regtest", "issuecomputeagreement", agr)["agreement_id"].get_str();
+    UniValue denied(UniValue::VOBJ);
+    denied.pushKV("agreement_id", agreement_id);
+    denied.pushKV("subject_pubkey", hex);
+    denied.pushKV("job_class", "REGTEST_DETERMINISTIC");
+    denied.pushKV("credit_p1e_microunits", 1000000);
+    denied.pushKV("input_commitment", "nope");
+    denied.pushKV("executor_spec_commitment", "22");
+    denied.pushKV("expires_at_ms", 8'000'000);
+    denied.pushKV("now_ms", 1100);
+    BOOST_CHECK(CallFail(dir, "regtest", "createcomputejob", denied, "COMPUTE_UNAUTHORIZED_SCHEDULER"));
+
+    const fs::path dir2 = m_path_root / "pwc-d";
+    fs::create_directories(dir2);
+    std::vector<unsigned char> pk2;
+    WriteIdentity(dir2, pk2);
+    const std::string hex2 = HexStr(pk2);
+    UniValue req2(UniValue::VOBJ);
+    req2.pushKV("offer", Offer(profile, hex2, hex2, hex2, "PREPAID", 2000000, "REGTEST_DETERMINISTIC"));
+    req2.pushKV("now_ms", 1000);
+    const std::string offer2 = Call(dir2, "regtest", "createcomputeoffer", req2)["offer_id"].get_str();
+    UniValue agr2(UniValue::VOBJ);
+    agr2.pushKV("offer_id", offer2);
+    agr2.pushKV("subject_pubkey", hex2);
+    agr2.pushKV("period_start_ms", 1000);
+    agr2.pushKV("period_end_ms", 9'000'000);
+    agr2.pushKV("now_ms", 1000);
+    const std::string aid2 = Call(dir2, "regtest", "issuecomputeagreement", agr2)["agreement_id"].get_str();
+
+    auto make_job = [&](uint64_t credit, const std::string& nonce, int64_t now) {
+        UniValue job(UniValue::VOBJ);
+        job.pushKV("agreement_id", aid2);
+        job.pushKV("subject_pubkey", hex2);
+        job.pushKV("job_class", "REGTEST_DETERMINISTIC");
+        job.pushKV("credit_p1e_microunits", credit);
+        job.pushKV("input_commitment", nonce);
+        job.pushKV("executor_spec_commitment", "22");
+        job.pushKV("expires_at_ms", 8'000'000);
+        job.pushKV("nonce", nonce);
+        job.pushKV("now_ms", now);
+        return job;
+    };
+    const UniValue first = Call(dir2, "regtest", "createcomputejob", make_job(1000000, "a", 1200));
+    UniValue result_req(UniValue::VOBJ);
+    result_req.pushKV("job_id", first["job_id"].get_str());
+    result_req.pushKV("output_commitment", "out-a");
+    result_req.pushKV("now_ms", 1300);
+    const UniValue result = Call(dir2, "regtest", "submitcomputejobresult", result_req);
+    UniValue accept(UniValue::VOBJ);
+    accept.pushKV("result_id", result["result_id"].get_str());
+    accept.pushKV("expected_output_commitment", "out-a");
+    accept.pushKV("now_ms", 1400);
+    Call(dir2, "regtest", "acceptcomputejobresult", accept);
+    BOOST_CHECK(CallFail(dir2, "regtest", "createcomputejob", make_job(1500000, "too-big", 1500), "COMPUTE_CREDIT_OVERFLOW"));
+    Call(dir2, "regtest", "createcomputejob", make_job(1000000, "fits", 1500));
+
+    const fs::path dir3 = m_path_root / "pwc-e";
+    fs::create_directories(dir3);
+    std::vector<unsigned char> pk3;
+    WriteIdentity(dir3, pk3);
+    const std::string hex3 = HexStr(pk3);
+    UniValue req3(UniValue::VOBJ);
+    req3.pushKV("offer", Offer(profile, hex3, hex3, hex3, "PREPAID", 128, "REGTEST_DETERMINISTIC"));
+    req3.pushKV("now_ms", 1000);
+    const std::string offer3 = Call(dir3, "regtest", "createcomputeoffer", req3)["offer_id"].get_str();
+    UniValue agr3(UniValue::VOBJ);
+    agr3.pushKV("offer_id", offer3);
+    agr3.pushKV("subject_pubkey", hex3);
+    agr3.pushKV("period_start_ms", 1000);
+    agr3.pushKV("period_end_ms", 9'000'000);
+    agr3.pushKV("now_ms", 1000);
+    const std::string aid3 = Call(dir3, "regtest", "issuecomputeagreement", agr3)["agreement_id"].get_str();
+    std::string first_job;
+    for (int i = 0; i < 64; ++i) {
+        UniValue job(UniValue::VOBJ);
+        job.pushKV("agreement_id", aid3);
+        job.pushKV("subject_pubkey", hex3);
+        job.pushKV("job_class", "REGTEST_DETERMINISTIC");
+        job.pushKV("credit_p1e_microunits", 1);
+        job.pushKV("input_commitment", "c" + std::to_string(i));
+        job.pushKV("executor_spec_commitment", "22");
+        job.pushKV("expires_at_ms", 8'000'000);
+        job.pushKV("nonce", "n" + std::to_string(i));
+        job.pushKV("now_ms", 2000);
+        const UniValue made = Call(dir3, "regtest", "createcomputejob", job);
+        if (i == 0) first_job = made["job_id"].get_str();
+    }
+    UniValue overflow(UniValue::VOBJ);
+    overflow.pushKV("agreement_id", aid3);
+    overflow.pushKV("subject_pubkey", hex3);
+    overflow.pushKV("job_class", "REGTEST_DETERMINISTIC");
+    overflow.pushKV("credit_p1e_microunits", 1);
+    overflow.pushKV("input_commitment", "c64");
+    overflow.pushKV("executor_spec_commitment", "22");
+    overflow.pushKV("expires_at_ms", 8'000'000);
+    overflow.pushKV("nonce", "n64");
+    overflow.pushKV("now_ms", 2000);
+    BOOST_CHECK(CallFail(dir3, "regtest", "createcomputejob", overflow, "COMPUTE_RECORD_INVALID"));
+    UniValue settle_req(UniValue::VOBJ);
+    settle_req.pushKV("job_id", first_job);
+    settle_req.pushKV("output_commitment", "done");
+    settle_req.pushKV("now_ms", 2100);
+    const UniValue settled = Call(dir3, "regtest", "submitcomputejobresult", settle_req);
+    UniValue settle_accept(UniValue::VOBJ);
+    settle_accept.pushKV("result_id", settled["result_id"].get_str());
+    settle_accept.pushKV("expected_output_commitment", "done");
+    settle_accept.pushKV("now_ms", 2200);
+    Call(dir3, "regtest", "acceptcomputejobresult", settle_accept);
+    overflow.pushKV("nonce", "n65");
+    overflow.pushKV("input_commitment", "c65");
+    Call(dir3, "regtest", "createcomputejob", overflow);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

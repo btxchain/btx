@@ -10,7 +10,9 @@
 #include <modelnet/identity.h>
 #include <crypto/sha256.h>
 #include <crypto/sha384.h>
+#include <matmul/compute_passport.h>
 #include <matmul/compute_profile.h>
+#include <matmul/compute_qualification.h>
 #include <univalue.h>
 #include <util/fs_helpers.h>
 #include <util/strencodings.h>
@@ -27,6 +29,7 @@ namespace modelnet {
 namespace {
 
 std::string g_chain;
+std::string g_qual_path;
 
 int64_t WallMs()
 {
@@ -500,6 +503,68 @@ bool ComputeStore::BalanceOf(const std::string& agreement_id, int64_t now_ms, Un
     return true;
 }
 
+std::string SubjectDigestHex(const std::string& pubkey_hex)
+{
+    const auto pk = ParseHex(pubkey_hex);
+    CSHA256 hasher;
+    hasher.Write(pk.data(), pk.size());
+    unsigned char out[32];
+    hasher.Finalize(out);
+    return HexStr(std::vector<unsigned char>(out, out + 32));
+}
+
+std::string SignerOf(const SignedEnvelope& env)
+{
+    if (!env.body.exists("public_key_hex") || !env.body["public_key_hex"].isStr()) return {};
+    return env.body["public_key_hex"].get_str();
+}
+
+bool ConfirmRedeemedQualification(const UniValue& qual, const UniValue& settlement, const std::string& subject_pubkey,
+                                  int64_t now_ms, uint32_t& episodes, std::string& err_code, std::string& err)
+{
+    episodes = 0;
+    if (!qual.isObject() || !qual.exists("challenge_id") || !qual["challenge_id"].isStr()) {
+        return Fail(err_code, err, "COMPUTE_QUALIFICATION_REQUIRED", "qualification");
+    }
+    if (g_qual_path.empty()) return Fail(err_code, err, "COMPUTE_QUALIFICATION_REQUIRED", "registry");
+    pwc::QualificationRegistry reg;
+    std::string open_err;
+    if (!reg.Open(fs::PathFromString(g_qual_path), open_err)) {
+        return Fail(err_code, err, "COMPUTE_CHALLENGE_INVALID", open_err);
+    }
+    UniValue st;
+    if (!reg.Status(qual["challenge_id"].get_str(), now_ms, st, err_code, err)) return false;
+    if (!st.exists("status") || st["status"].get_str() != "redeemed") {
+        return Fail(err_code, err, "COMPUTE_QUALIFICATION_REQUIRED", "not redeemed");
+    }
+    if (!st.exists("profile_id") || st["profile_id"].get_str() != settlement["profile_id"].get_str()) {
+        return Fail(err_code, err, "COMPUTE_PROFILE_MISMATCH", "qualification");
+    }
+    if (!st.exists("subject_digest") || st["subject_digest"].get_str() != SubjectDigestHex(subject_pubkey)) {
+        return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "qualification");
+    }
+    if (settlement.exists("max_qualification_age_ms")) {
+        uint64_t max_age = 0;
+        if (!U64Field(settlement, "max_qualification_age_ms", max_age, err)) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
+        }
+        const int64_t redeemed_at = st["redeemed_at_ms"].getInt<int64_t>();
+        if (now_ms < redeemed_at || static_cast<uint64_t>(now_ms - redeemed_at) > max_age) {
+            return Fail(err_code, err, "COMPUTE_QUALIFICATION_REQUIRED", "age");
+        }
+    }
+    if (settlement.exists("optional_min_rate_p1e_microunits_per_hour")) {
+        uint64_t min_rate = 0;
+        if (!U64Field(settlement, "optional_min_rate_p1e_microunits_per_hour", min_rate, err)) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
+        }
+        const uint64_t rate = st["conservative_rate_p1e_microunits_per_hour"].getInt<uint64_t>();
+        if (rate < min_rate) return Fail(err_code, err, "COMPUTE_RATE_TOO_LOW", "qualification");
+    }
+    episodes = static_cast<uint32_t>(st["episode_count"].getInt<int64_t>());
+    return episodes > 0 || Fail(err_code, err, "COMPUTE_QUALIFICATION_REQUIRED", "episodes");
+}
+
 bool ContainsKey(const UniValue& arr, const std::string& key)
 {
     if (!arr.isArray()) return false;
@@ -515,7 +580,11 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
     std::string lerr;
     if (!Load(lerr)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", lerr);
     const UniValue& a = Arg0(params);
-    const int64_t now_ms = a.exists("now_ms") ? a["now_ms"].getInt<int64_t>() : WallMs();
+    int64_t now_ms = WallMs();
+    if (a.exists("now_ms")) {
+        if (m_chain != "regtest") return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "now_ms");
+        if (!I64Field(a, "now_ms", now_ms, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
+    }
 
     if (method == "getcomputesigningidentity") {
         std::vector<unsigned char> pk, sk;
@@ -665,9 +734,16 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         payload.pushKV("settlement", op["settlement"]);
         payload.pushKV("access", op["access"]);
         payload.pushKV("policy", op["policy"]);
-        if (a.exists("qualification")) payload.pushKV("qualification", a["qualification"]);
-        else if (op["settlement"].exists("qualification_required") && op["settlement"]["qualification_required"].isTrue()) {
-            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "qualification");
+        const bool qual_required = op["settlement"].exists("qualification_required") && op["settlement"]["qualification_required"].isTrue();
+        if (qual_required) {
+            if (!a.exists("qualification")) return Fail(err_code, err, "COMPUTE_QUALIFICATION_REQUIRED", "qualification");
+            uint32_t episodes = 0;
+            if (!ConfirmRedeemedQualification(a["qualification"], op["settlement"], a["subject_pubkey"].get_str(), now_ms, episodes, err_code, err)) {
+                return false;
+            }
+            payload.pushKV("qualification", a["qualification"]);
+        } else if (a.exists("qualification")) {
+            payload.pushKV("qualification", a["qualification"]);
         }
         payload.pushKV("issued_at_ms", now_ms);
         payload.pushKV("nonce", a.exists("nonce") ? a["nonce"].get_str() : HexStr(std::vector<unsigned char>(16, 1)));
@@ -683,6 +759,34 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
     if (method == "importcomputeagreement") {
         SignedEnvelope env;
         if (!Import(a, "ComputeAgreement", env, err_code, err)) return false;
+        const UniValue& ap = PayloadOf(env);
+        if (!ap.exists("subject_pubkey") || !ap["subject_pubkey"].isStr() || !HexKey(ap["subject_pubkey"].get_str())) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "subject");
+        }
+        if (!ap.exists("settlement") || !ap["settlement"].isObject() || !ap["settlement"].exists("profile_id") || !ap["settlement"]["profile_id"].isStr()) {
+            return Fail(err_code, err, "COMPUTE_PROFILE_UNKNOWN", "profile");
+        }
+        if (!ProfileOk(ap["settlement"]["profile_id"].get_str(), m_chain, err_code)) {
+            return Fail(err_code, err, err_code.c_str(), "profile");
+        }
+        if (ap.exists("policy") && !PolicyClosed(ap["policy"], err_code)) return false;
+        int64_t start = 0, end = 0;
+        if (!I64Field(ap, "period_start_ms", start, err) || !I64Field(ap, "period_end_ms", end, err) || end <= start) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "period");
+        }
+        if (ap.exists("qualification") && ap["qualification"].isObject() && ap["qualification"].exists("profile_id") &&
+            ap["qualification"]["profile_id"].get_str() != ap["settlement"]["profile_id"].get_str()) {
+            return Fail(err_code, err, "COMPUTE_PROFILE_MISMATCH", "qualification");
+        }
+        auto offer = m_offers.find(ap["offer_id"].get_str());
+        if (offer != m_offers.end()) {
+            const UniValue& op = PayloadOf(offer->second);
+            if (SignerOf(env) != SignerOf(offer->second)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "issuer");
+            if (op["resource_ref"].get_str() != ap["resource_ref"].get_str()) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "resource");
+            if (op["settlement"]["profile_id"].get_str() != ap["settlement"]["profile_id"].get_str()) {
+                return Fail(err_code, err, "COMPUTE_PROFILE_MISMATCH", "profile");
+            }
+        }
         result = EnvelopeToJson(env);
         result.pushKV("agreement_id", env.record_id.Hex());
         result.pushKV("automatic_spend_atoms", 0);
@@ -710,10 +814,23 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         if (!BalanceOf(a["agreement_id"].get_str(), now_ms, bal, err_code, err)) return false;
         const uint64_t reserved = bal["outstanding_reserved_p1e_microunits"].getInt<uint64_t>();
         const uint64_t required = bal["required_p1e_microunits"].getInt<uint64_t>();
-        if (reserved > required || credit > required - reserved) return Fail(err_code, err, "COMPUTE_CREDIT_OVERFLOW", "reservation");
+        const uint64_t credited = bal["credited_p1e_microunits"].getInt<uint64_t>();
+        const uint64_t remaining = credited >= required ? 0 : required - credited;
+        if (remaining == 0 || reserved > remaining || credit > remaining - reserved) {
+            return Fail(err_code, err, "COMPUTE_CREDIT_OVERFLOW", "reservation");
+        }
         uint64_t outstanding = 0;
         for (const auto& kv : m_jobs) {
-            if (PayloadOf(kv.second)["agreement_id"].get_str() == a["agreement_id"].get_str()) ++outstanding;
+            const UniValue& jp = PayloadOf(kv.second);
+            if (jp["agreement_id"].get_str() != a["agreement_id"].get_str()) continue;
+            bool settled = false;
+            for (const auto& rec : m_receipts) {
+                const UniValue& rp = PayloadOf(rec.second);
+                if (rp.exists("job_id") && rp["job_id"].isStr() && rp["job_id"].get_str() == kv.first) settled = true;
+            }
+            int64_t exp = 0;
+            if (settled || !I64Field(jp, "expires_at_ms", exp, err) || exp < now_ms) continue;
+            ++outstanding;
         }
         if (outstanding >= 64) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "too many jobs");
         UniValue payload(UniValue::VOBJ);
@@ -743,6 +860,41 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
     }
     if (method == "importcomputejob") {
         SignedEnvelope env;
+        const UniValue rec = a.exists("envelope") ? a["envelope"] : a;
+        if (!EnvelopeFromJson(rec, env, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
+        if (!VerifySignedEnvelope(env, m_network, err)) {
+            if (err.find("network") != std::string::npos) return Fail(err_code, err, "COMPUTE_NETWORK_MISMATCH", err);
+            return Fail(err_code, err, "COMPUTE_SIGNATURE_INVALID", err);
+        }
+        const UniValue& jp = PayloadOf(env);
+        if (m_jobs.count(env.record_id.Hex()) == 0) {
+            auto it = m_agreements.find(jp["agreement_id"].get_str());
+            if (it == m_agreements.end()) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement");
+            const UniValue& ap = PayloadOf(it->second);
+            if (m_cancelled.count(jp["agreement_id"].get_str())) return Fail(err_code, err, "COMPUTE_AGREEMENT_CANCELLED", "cancelled");
+            if (ap["period_end_ms"].getInt<int64_t>() <= now_ms) return Fail(err_code, err, "COMPUTE_AGREEMENT_EXPIRED", "expired");
+            if (jp["expires_at_ms"].getInt<int64_t>() <= now_ms) return Fail(err_code, err, "COMPUTE_JOB_EXPIRED", "job");
+            if (!ContainsKey(ap["settlement"]["authorized_job_scheduler_pubkeys"], SignerOf(env))) {
+                return Fail(err_code, err, "COMPUTE_UNAUTHORIZED_SCHEDULER", "scheduler");
+            }
+            if (jp["subject_pubkey"].get_str() != ap["subject_pubkey"].get_str()) return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "subject");
+            if (jp["profile_id"].get_str() != ap["settlement"]["profile_id"].get_str()) return Fail(err_code, err, "COMPUTE_PROFILE_MISMATCH", "profile");
+            if (!KnownJobClass(jp["job_class"].get_str(), m_chain == "regtest")) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "class");
+            if (ap["settlement"].exists("allowed_job_classes") && !ContainsKey(ap["settlement"]["allowed_job_classes"], jp["job_class"].get_str())) {
+                return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "class");
+            }
+            uint64_t credit = 0;
+            if (!U64Field(jp, "credit_p1e_microunits", credit, err) || credit == 0) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "credit");
+            UniValue bal;
+            if (!BalanceOf(jp["agreement_id"].get_str(), now_ms, bal, err_code, err)) return false;
+            const uint64_t reserved = bal["outstanding_reserved_p1e_microunits"].getInt<uint64_t>();
+            const uint64_t required = bal["required_p1e_microunits"].getInt<uint64_t>();
+            const uint64_t credited = bal["credited_p1e_microunits"].getInt<uint64_t>();
+            const uint64_t remaining = credited >= required ? 0 : required - credited;
+            if (remaining == 0 || reserved > remaining || credit > remaining - reserved) {
+                return Fail(err_code, err, "COMPUTE_CREDIT_OVERFLOW", "reservation");
+            }
+        }
         if (!Import(a, "ComputeJob", env, err_code, err)) return false;
         result = EnvelopeToJson(env);
         result.pushKV("job_id", env.record_id.Hex());
@@ -778,6 +930,24 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
     }
     if (method == "importcomputejobresult") {
         SignedEnvelope env;
+        const UniValue rec = a.exists("envelope") ? a["envelope"] : a;
+        if (!EnvelopeFromJson(rec, env, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
+        if (!VerifySignedEnvelope(env, m_network, err)) {
+            if (err.find("network") != std::string::npos) return Fail(err_code, err, "COMPUTE_NETWORK_MISMATCH", err);
+            return Fail(err_code, err, "COMPUTE_SIGNATURE_INVALID", err);
+        }
+        const UniValue& rp = PayloadOf(env);
+        auto jit = m_jobs.find(rp["job_id"].get_str());
+        if (jit == m_jobs.end()) return Fail(err_code, err, "COMPUTE_RESULT_INVALID", "job");
+        const UniValue& jp = PayloadOf(jit->second);
+        if (jp["expires_at_ms"].getInt<int64_t>() <= now_ms) return Fail(err_code, err, "COMPUTE_JOB_EXPIRED", "job");
+        if (SignerOf(env) != jp["subject_pubkey"].get_str() || rp["subject_pubkey"].get_str() != jp["subject_pubkey"].get_str()) {
+            return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "subject");
+        }
+        if (rp["agreement_id"].get_str() != jp["agreement_id"].get_str()) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement");
+        if (!rp.exists("output_commitment") || !rp["output_commitment"].isStr() || rp["output_commitment"].get_str().empty()) {
+            return Fail(err_code, err, "COMPUTE_RESULT_INVALID", "output");
+        }
         if (!Import(a, "ComputeJobResult", env, err_code, err)) return false;
         result = EnvelopeToJson(env);
         result.pushKV("result_id", env.record_id.Hex());
@@ -804,7 +974,9 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             auto jit = m_jobs.find(rp["job_id"].get_str());
             if (jit == m_jobs.end()) return Fail(err_code, err, "COMPUTE_RESULT_INVALID", "job");
             const UniValue& jp = PayloadOf(jit->second);
-            if (rp["subject_pubkey"].get_str() != jp["subject_pubkey"].get_str()) return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "subject");
+            if (rp["subject_pubkey"].get_str() != jp["subject_pubkey"].get_str() || SignerOf(rit->second) != jp["subject_pubkey"].get_str()) {
+                return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "subject");
+            }
             if (a.exists("expected_output_commitment") && a["expected_output_commitment"].get_str() != rp["output_commitment"].get_str()) {
                 return Fail(err_code, err, "COMPUTE_RESULT_INVALID", "output");
             }
@@ -843,6 +1015,21 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             method_name = a.exists("verification_method") ? a["verification_method"].get_str() : "DIRECT_COMPUTE";
             evidence = a.exists("evidence_commitment") ? a["evidence_commitment"].get_str() : "";
             if (a.exists("result_id")) result_id = a["result_id"].get_str();
+            if (method_name == "DIRECT_COMPUTE") {
+                auto ait_pre = m_agreements.find(agreement_id);
+                if (ait_pre == m_agreements.end()) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement");
+                if (!ContainsKey(PayloadOf(ait_pre->second)["settlement"]["authorized_receipt_issuer_pubkeys"], me)) {
+                    return Fail(err_code, err, "COMPUTE_UNAUTHORIZED_RECEIPT_ISSUER", "issuer");
+                }
+                UniValue qual(UniValue::VOBJ);
+                qual.pushKV("challenge_id", evidence);
+                uint32_t episodes = 0;
+                if (!ConfirmRedeemedQualification(qual, PayloadOf(ait_pre->second)["settlement"], subject, now_ms, episodes, err_code, err)) {
+                    return false;
+                }
+                const uint64_t expected = static_cast<uint64_t>(episodes) * 1000000ull;
+                if (credit != expected) return Fail(err_code, err, "COMPUTE_RECEIPT_CREDIT_MISMATCH", "qualification");
+            }
         }
         auto ait = m_agreements.find(agreement_id);
         if (ait == m_agreements.end()) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement");
@@ -961,6 +1148,19 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
     }
     if (method == "importcomputeaccessgrant") {
         SignedEnvelope env;
+        const UniValue rec = a.exists("envelope") ? a["envelope"] : a;
+        if (!EnvelopeFromJson(rec, env, err)) return Fail(err_code, err, "COMPUTE_GRANT_INVALID", err);
+        if (!VerifySignedEnvelope(env, m_network, err)) return Fail(err_code, err, "COMPUTE_SIGNATURE_INVALID", err);
+        const UniValue& gp = PayloadOf(env);
+        auto ait = m_agreements.find(gp["agreement_id"].get_str());
+        if (ait == m_agreements.end()) return Fail(err_code, err, "COMPUTE_GRANT_INVALID", "agreement");
+        const UniValue& ap = PayloadOf(ait->second);
+        if (SignerOf(env) != SignerOf(ait->second)) return Fail(err_code, err, "COMPUTE_GRANT_INVALID", "issuer");
+        if (gp["subject_pubkey"].get_str() != ap["subject_pubkey"].get_str()) return Fail(err_code, err, "COMPUTE_GRANT_INVALID", "subject");
+        if (gp["resource_ref"].get_str() != ap["resource_ref"].get_str()) return Fail(err_code, err, "COMPUTE_GRANT_INVALID", "resource");
+        if (gp["valid_until_ms"].getInt<int64_t>() < gp["valid_from_ms"].getInt<int64_t>()) {
+            return Fail(err_code, err, "COMPUTE_GRANT_INVALID", "window");
+        }
         if (!Import(a, "ComputeAccessGrant", env, err_code, err)) return false;
         result = EnvelopeToJson(env);
         result.pushKV("grant_id", env.record_id.Hex());
@@ -980,6 +1180,10 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         }
         if (!VerifySignedEnvelope(env, m_network, err)) return Fail(err_code, err, "COMPUTE_SIGNATURE_INVALID", err);
         const UniValue& gp = PayloadOf(env);
+        if (!a.exists("trusted_issuer_pubkey") || !a["trusted_issuer_pubkey"].isStr() ||
+            a["trusted_issuer_pubkey"].get_str() != SignerOf(env)) {
+            return Fail(err_code, err, "COMPUTE_GRANT_INVALID", "trusted issuer");
+        }
         if (a.exists("subject_pubkey") && a["subject_pubkey"].get_str() != gp["subject_pubkey"].get_str()) {
             return Fail(err_code, err, "COMPUTE_GRANT_INVALID", "subject");
         }
@@ -1026,6 +1230,7 @@ bool DispatchBound(const fs::path& dir, const std::string& chain, const std::str
 } // namespace
 
 void SetPwcChain(const std::string& chain) { g_chain = chain; }
+void SetPwcQualificationRegistryPath(const std::string& path) { g_qual_path = path; }
 std::string PwcChain() { return g_chain; }
 
 NetworkId PwcNetworkId(const std::string& chain)
