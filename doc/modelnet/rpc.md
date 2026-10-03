@@ -16,6 +16,11 @@ as a global census.
 [first-run.md](first-run.md). Local generate: [generate.md](generate.md). CLI:
 [../../contrib/modelnet/btx-model](../../contrib/modelnet/btx-model).
 
+Pay With Compute economy methods (`createcomputeoffer`, `getcomputebalance`,
+`issuecomputeaccessgrant`, and the rest of the catalogue) are documented in
+[../compute-rpc.md](../compute-rpc.md). They are application records. They do
+not spend BTX.
+
 **User id:** `IdFromUser` / `ResolveUserId` accept a canonical `btx://`, a
 hex digest, `share.copy_text` (first `btx://` token), or a local **alias**.
 The URI has no query string.

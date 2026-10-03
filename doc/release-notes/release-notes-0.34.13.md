@@ -23,6 +23,27 @@ parent is not yet connected. Consensus mode stays exact-only. Manual
 deep-reorg authority, park depth, and the 72-block recovery ceiling are
 unchanged.
 
+## Pay With Compute
+
+0.34.13rc1 adds PWC/1, an off-consensus way to quote access in frozen
+Profile-1 compute (`btx-rc-p1e-v1`) instead of money. One P1E is one
+ExactReplay episode of that profile, accounted as 1,000,000 integer
+`p1e_microunits`. A Compute Passport is self-attested performance evidence.
+A fresh qualification challenge is exact, single-use, and replay-protected.
+Useful jobs produce issuer-signed receipts. Balances are derived inside one
+ComputeAgreement. PREPAID and PRO_RATA schedules are both supported. An
+agreement can name a third-party scheduler and receipt issuer so contributed
+work can benefit a different project. The resulting ComputeAccessGrant is an
+application entitlement, not a LocalCapabilityGrant and not a wallet
+authority.
+
+This does not change block validity, headers, chainwork, difficulty,
+activation heights, issuance, wallet balances, or `automatic_spend_atoms`.
+The regtest toy profile `btx-rc-p1e-toy-v1` cannot settle a mainnet agreement.
+The existing MatMul service challenge is unchanged. There is no transferable
+compute token and no remote inference endpoint. This remains a release
+candidate: `CLIENT_VERSION_IS_RELEASE=false`.
+
 ## P2MR HTLC
 
 Thanks to **bs1812** for a private review of the SHA-256 HTLC

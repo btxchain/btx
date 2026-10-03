@@ -134,7 +134,8 @@ a timer expired. Arbitrary advertised models stay off. Catalog contacts
 After a positive storage budget, demand-seed is the default
 (`getmodelpolicy` / [modelnet/propagation.md](modelnet/propagation.md)).
 
-Catalogue and semantics: [modelnet/rpc.md](modelnet/rpc.md). Peer HTTP
+Catalogue and semantics: [modelnet/rpc.md](modelnet/rpc.md). Pay With Compute
+qualification and economy methods: [compute-rpc.md](compute-rpc.md). Peer HTTP
 (` /btx-model/2/`): [modelnet/http.md](modelnet/http.md). Isolation from
 BanMan, AddrMan, fork choice, ExactReplay, and issuance:
 [modelnet/isolation.md](modelnet/isolation.md).
