@@ -37,9 +37,9 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.34.13rc1** (`CLIENT_VERSION_BUILD=13`,
-`CLIENT_VERSION_RC=1`, `CLIENT_VERSION_IS_RELEASE=false`). Shipping tag
-**v0.34.12**. Do not recut `v0.34.10` or `v0.34.9`.
+This working tree is **0.34.13** (`CLIENT_VERSION_BUILD=13`,
+`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
+**v0.34.13**. Do not recut `v0.34.12`, `v0.34.10`, or `v0.34.9`.
 
 ## Start here
 
@@ -72,7 +72,8 @@ fabric stay in the passport's capability vector. Details:
 
 - [Start here](#start-here)
 - [Pay With Compute](#pay-with-compute)
-- [Current release — v0.34.9](#current-release--v0349)
+- [Current release — v0.34.13](#current-release--v03413)
+- [Earlier shipping line — v0.34.9](#earlier-shipping-line--v0349)
 - [This tree — 0.34.11](#this-tree--03411)
 - [This tree — 0.34.10](#this-tree--03410)
 - [Get a node](#get-a-node)
@@ -104,9 +105,30 @@ fabric stay in the passport's capability vector. Details:
 
 ---
 
-## Current release — v0.34.9
+## Current release — v0.34.13
 
-**Shipping tag is v0.34.9.** `CLIENT_VERSION_IS_RELEASE=true`. Seal and freeze
+**Shipping tag is v0.34.13.** `CLIENT_VERSION_IS_RELEASE=true`.
+`btxd -version` prints `v0.34.13`. P2P subversion is `/BTX:0.34.13/`.
+Do not recut `v0.34.12`.
+
+This release keeps the 0.34.10 monetary baseline. It is not a change to
+ExactReplay arithmetic, chainwork, difficulty, issuance, or wallet
+balances. `automatic_spend_atoms` stays 0.
+
+Trusted mirrors on `-reorgpolicy=bounded` retry activation once when the
+stall window opens and a heavier header is already known. A no-progress
+park still yields instead of livelocking selection. Pay With Compute
+(PWC/1) is an off-consensus access ledger: qualification, receipts, and
+grants do not move BTX. New `htlc_sha256` claim leaves require a 32-byte
+preimage.
+
+Notes: [doc/release-notes/release-notes-0.34.13.md](doc/release-notes/release-notes-0.34.13.md).
+Archives: [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA 12/13, macOS arm64 Metal.
+
+## Earlier shipping line — v0.34.9
+
+**v0.34.9** was the previous long-lived shipping tag.
+`CLIENT_VERSION_IS_RELEASE=true` on that tag. Seal and freeze
 hashes are written when a tag is sealed (see
 [doc/release-process.md](doc/release-process.md)). The previous monetary tag is
 **v0.34** (seal `dc46dee2`, freeze `ecfaa6c9`). Epoch A Profile 1 ExactReplay is
@@ -145,13 +167,13 @@ Use `loadtxoutset`, not `loadtxoutsetattested`. Do not mine on parent
 
 ## This tree — 0.34.12
 
-This tree is **0.34.12rc1** on the 0.34.10 monetary baseline. It does not
+0.34.12 was the previous release candidate line on the 0.34.10 monetary baseline. It does not
 change ExactReplay consensus, issuance, or fork choice. A heavier header
 tower that has no body cannot hold the only recovery slot, a silent peer
 cannot keep that body from other peers, and a cancelled replay of an
 already-retained body is retried without a new admission ticket.
-`btxd -version` prints `v0.34.12rc1` plus a git suffix. P2P subversion is
-`/BTX:0.34.12/`. Last shipping tag **v0.34.10** is not recut.
+That line printed `v0.34.12rc1` plus a git suffix. P2P subversion was
+`/BTX:0.34.12/`. Tag **v0.34.12** stays where it was cut.
 
 Notes: [doc/release-notes/release-notes-0.34.11.md](doc/release-notes/release-notes-0.34.11.md).
 

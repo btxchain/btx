@@ -6,7 +6,7 @@ ExactReplay workload `btx-rc-p1e-v1`. Accounting uses integer
 **p1e_microunits**. 1 P1E = 1,000,000 microunits. There is no dollar peg, no
 transferable compute token, and no automatic BTX spend.
 
-This is an application layer on BTX 0.34.13rc1. It does not change block
+This is an application layer on BTX 0.34.13. It does not change block
 validity, chainwork, difficulty, issuance, activation heights, or wallets.
 `automatic_spend_atoms` stays 0. A ComputeAccessGrant is not a
 LocalCapabilityGrant and is not permission to execute local model code.

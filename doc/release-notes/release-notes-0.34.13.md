@@ -1,9 +1,10 @@
-# BTX 0.34.13rc1 — Trusted-mirror bounded recovery
+# BTX 0.34.13 — Trusted-mirror bounded recovery
 
-**Status:** release candidate. `CLIENT_VERSION` is **0.34.13** with
-`CLIENT_VERSION_RC=1` and `CLIENT_VERSION_IS_RELEASE=false`. P2P
-subversion is `/BTX:0.34.13/`. The bounded-recovery work below is not a
-consensus change. The HTLC claim leaf is.
+**Status:** release. `CLIENT_VERSION` is **0.34.13** with
+`CLIENT_VERSION_RC=0` and `CLIENT_VERSION_IS_RELEASE=true`. `btxd -version`
+prints `v0.34.13`. P2P subversion is `/BTX:0.34.13/`. Do not recut
+`v0.34.12`. The bounded-recovery work below is not a consensus change.
+The HTLC claim leaf is.
 
 A trusted mirror on `-reorgpolicy=bounded` could livelock when an
 authenticated competing prefix was deeper than the normal park depth of
@@ -13,7 +14,7 @@ selection ran immediately. A separate stall left the mirror unable to
 request the next missing body, because acquisition treated ExactReplay as
 the only usable authority and a trusted mirror does not set that bit.
 
-0.34.13rc1 makes automatic unpark follow the bounded transition decision.
+0.34.13 makes automatic unpark follow the bounded transition decision.
 A no-progress policy park yields instead of retrying the same selection
 while `cs_main` is held. Trusted-mirror recovery accepts a body that is
 transaction-valid and covered by the current signed frontier. Only that
@@ -25,7 +26,7 @@ unchanged.
 
 ## Pay With Compute
 
-0.34.13rc1 adds PWC/1, an off-consensus way to quote access in frozen
+0.34.13 adds PWC/1, an off-consensus way to quote access in frozen
 Profile-1 compute (`btx-rc-p1e-v1`) instead of money. One P1E is one
 ExactReplay episode of that profile, accounted as 1,000,000 integer
 `p1e_microunits`. A Compute Passport is self-attested performance evidence.
@@ -41,8 +42,8 @@ This does not change block validity, headers, chainwork, difficulty,
 activation heights, issuance, wallet balances, or `automatic_spend_atoms`.
 The regtest toy profile `btx-rc-p1e-toy-v1` cannot settle a mainnet agreement.
 The existing MatMul service challenge is unchanged. There is no transferable
-compute token and no remote inference endpoint. This remains a release
-candidate: `CLIENT_VERSION_IS_RELEASE=false`.
+compute token and no remote inference endpoint. This is the shipping
+tree: `CLIENT_VERSION_IS_RELEASE=true`.
 
 ## P2MR HTLC
 
