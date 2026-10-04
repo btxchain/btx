@@ -137,8 +137,11 @@ locally and cannot exceed the remaining obligation.
 ceil(required * elapsed / period_length)
 ```
 
-with elapsed clamped to the agreement window. There is no hidden grace. A
-pro-rata grant window is at most 24 hours and never past the agreement end.
+Elapsed before `period_start_ms` is not standing: due work is zero then, and
+a grant is refused (`COMPUTE_NOT_SATISFIED`) until the period has started.
+After the start, elapsed is clamped to the agreement window. There is no
+hidden grace. A pro-rata grant window is at most 24 hours, begins no earlier
+than the check time, and never runs past the agreement end.
 A prepaid grant may cover the remaining agreement period.
 
 `quotecomputeaccess` estimates full-duty and calendar time from a passport
