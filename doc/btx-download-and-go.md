@@ -300,6 +300,10 @@ for historical chunking, fees, and stuck-transaction recovery.
 
 ## 3. Self-custody mining and useful-work APIs
 
+Pay With Compute is separate from mining. It quotes access in Profile-1
+compute units and never spends the wallet. See
+[pay-with-compute.md](pay-with-compute.md).
+
 For idle-time solo mining after a `--preset miner` install, hand the installed
 binary paths and generated config directly into the helper scripts instead of
 assuming `btxd` / `btx-cli` are already on `PATH`:

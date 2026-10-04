@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "btx://pwc/ComputePassport/v1",
+  "title": "Self-attested Compute Passport",
+  "type": "object",
+  "required": ["kind", "schema_version", "profile_id", "profile_name", "sample_count", "p1e_microunits_per_hour", "p99_claimable", "self_attested"],
+  "properties": {
+    "kind": {"const": "compute_passport_v1"},
+    "schema_version": {"const": 1},
+    "self_attested": {"const": true},
+    "p99_claimable": {"type": "boolean"},
+    "p1e_microunits_per_hour": {"type": "integer", "minimum": 0},
+    "test_only": {"type": "boolean"}
+  }
+}

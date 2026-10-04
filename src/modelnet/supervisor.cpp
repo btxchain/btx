@@ -126,6 +126,8 @@ std::vector<std::string> BuildHelperArgv(const HelperLaunchConfig& cfg)
     if (cfg.upload_bps > 0) argv.push_back("-modeluploadlimit=" + std::to_string(cfg.upload_bps));
     if (!cfg.watch_dir.empty()) argv.push_back("-modelwatch=" + cfg.watch_dir);
     if (cfg.relay) argv.push_back("-modelrelay");
+    if (!cfg.pwc_chain.empty()) argv.push_back("-pwcchain=" + cfg.pwc_chain);
+    if (!cfg.qualification_file.empty()) argv.push_back("-computequalificationfile=" + cfg.qualification_file);
     if (cfg.host_mode == HostMode::AUTO) argv.push_back("-modelhost=auto");
     else if (cfg.host_mode == HostMode::ON) argv.push_back("-modelhost=1");
     return argv;
