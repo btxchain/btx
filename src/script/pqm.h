@@ -126,10 +126,22 @@ std::vector<unsigned char> BuildP2MRHTLCTxLeaf(
 /** Transaction-bound SHA-256 HTLC claim leaf (the 0.34.6+ swap path).
  *
  *  Witness stack (bottom→top): <tx_sig> <32-byte preimage>.
- *  Script: OP_SHA256 <32-byte digest> OP_EQUALVERIFY <pubkey> OP_CHECKSIG_*.
+ *  Script: OP_SIZE 32 OP_EQUALVERIFY OP_SHA256 <32-byte digest> OP_EQUALVERIFY
+ *  <pubkey> OP_CHECKSIG_*.
  *  A 256-bit hashlock gives ~128 bits of Grover preimage margin; HASH160 does not.
+ *  The length check is part of the leaf, matching the 32-byte preimage the
+ *  wallet and relay policy already require.
  */
 std::vector<unsigned char> BuildP2MRHTLCSha256Leaf(
+    Span<const unsigned char> preimage_sha256,
+    PQAlgorithm claimant_algo,
+    Span<const unsigned char> claimant_pubkey);
+
+/** Previous SHA-256 claim leaf, without the length check in the script.
+ *  Spend-only, so an output funded before the length check was added can
+ *  still be claimed with a 32-byte preimage. Do not use for new locks.
+ */
+std::vector<unsigned char> BuildP2MRHTLCSha256LegacyLeaf(
     Span<const unsigned char> preimage_sha256,
     PQAlgorithm claimant_algo,
     Span<const unsigned char> claimant_pubkey);
@@ -151,6 +163,17 @@ bool ParseP2MRHTLCSha256Leaf(
     std::vector<unsigned char>& preimage_sha256,
     PQAlgorithm& claimant_algo,
     std::vector<unsigned char>& claimant_pubkey);
+
+bool ParseP2MRHTLCSha256LegacyLeaf(
+    Span<const unsigned char> script,
+    std::vector<unsigned char>& preimage_sha256,
+    PQAlgorithm& claimant_algo,
+    std::vector<unsigned char>& claimant_pubkey);
+
+/** True for a transaction-bound HTLC claim leaf whose preimage must be
+ *  exactly 32 bytes. The current SHA-256 leaf also checks that in-script.
+ */
+bool P2MRClaimLeafPinsPreimageLength(Span<const unsigned char> script);
 
 std::vector<unsigned char> BuildP2MRRefundLeaf(
     int64_t timeout,

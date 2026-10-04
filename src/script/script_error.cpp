@@ -127,6 +127,8 @@ std::string ScriptErrorString(const ScriptError serror)
             return "Invalid OP_CHECKTEMPLATEVERIFY hash size";
         case SCRIPT_ERR_CTV_HASH_MISMATCH:
             return "OP_CHECKTEMPLATEVERIFY hash mismatch";
+        case SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE:
+            return "Invalid HTLC preimage size";
         case SCRIPT_ERR_OP_CODESEPARATOR:
             return "Using OP_CODESEPARATOR in non-witness script";
         case SCRIPT_ERR_SIG_FINDANDDELETE:

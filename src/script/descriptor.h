@@ -13,6 +13,7 @@
 #include <array>
 #include <optional>
 #include <set>
+#include <string_view>
 #include <vector>
 
 using ExtPubKeyMap = std::unordered_map<uint32_t, CExtPubKey>;
@@ -241,6 +242,12 @@ struct Descriptor {
  * else is wrong, an empty vector is returned.
  */
 std::vector<std::unique_ptr<Descriptor>> Parse(const std::string& descriptor, FlatSigningProvider& out, std::string& error, bool require_checksum = false);
+
+/** True for HASH160 `htlc_tx()` and legacy replayable `htlc()` descriptors.
+ *  Those remain parseable so an existing lock can be spent. They must not
+ *  be used to derive a new receive address or as an active wallet descriptor.
+ */
+bool DescriptorIsRecoveryOnlyHtlc(std::string_view descriptor);
 
 struct DescriptorParseOptions {
     /** Allow P2MR-only OP_SUCCESS opcodes inside tapscript descriptors (unsafe). */

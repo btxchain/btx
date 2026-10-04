@@ -95,6 +95,8 @@ upgrade/init bug, (5) access-control/message-auth, (6) infinite-approval/fronten
 - **ReentrancyGuard** + CEI; **timeout sanity bounds** (`MIN/MAX_TIMEOUT`, min 6h).
 - **Hash domain** `SHA-256(preimage)` matches BTX `OP_SHA256` exactly (verified:
   preimage `0x42…42` → `425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c`).
+- **32-byte preimage.** `claim` reverts on every other length before the hash check, so the EVM
+  leg cannot be taken with a secret the BTX SHA-256 claim leaf will reject.
 
 ## 3. Design decisions (explicit, not by omission)
 

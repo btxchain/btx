@@ -22,6 +22,7 @@
 #include <script/signingprovider.h>
 #include <univalue.h>
 #include <util/moneystr.h>
+#include <util/rbf.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
 #include <validation.h>
@@ -16303,6 +16304,52 @@ struct HtlcDescriptorLeaves {
     return out;
 }
 
+// An output funded before the claim leaf pinned the preimage length commits
+// to the previous leaf. Rebuild that two-leaf tree so the same descriptor
+// can still spend it. New descriptors expand to the length-checked leaf.
+[[nodiscard]] bool ApplyLegacySha256ClaimLeaf(HtlcDescriptorLeaves& leaves)
+{
+    if (!leaves.has_htlc_sha256 || !leaves.has_refund || leaves.leaf_count != 2 ||
+        leaves.htlc_pubkey.empty() || leaves.refund_leaf_script.empty()) {
+        return false;
+    }
+    PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+    if (leaves.htlc_pubkey.size() == SLHDSA128S_PUBKEY_SIZE) {
+        algo = PQAlgorithm::SLH_DSA_128S;
+    } else if (leaves.htlc_pubkey.size() != MLDSA44_PUBKEY_SIZE) {
+        return false;
+    }
+    const std::vector<unsigned char> legacy_leaf = BuildP2MRHTLCSha256LegacyLeaf(
+        leaves.htlc_sha256, algo, leaves.htlc_pubkey);
+    if (legacy_leaf.empty()) return false;
+
+    const uint256 htlc_hash = ComputeP2MRLeafHash(P2MR_LEAF_VERSION, legacy_leaf);
+    const uint256 refund_hash = ComputeP2MRLeafHash(P2MR_LEAF_VERSION, leaves.refund_leaf_script);
+    const uint256 root = ComputeP2MRMerkleRoot({htlc_hash, refund_hash});
+
+    CScript script_pub_key;
+    script_pub_key << OP_2 << ToByteVector(root);
+    leaves.script_pub_key = script_pub_key;
+    leaves.merkle_root = root;
+    leaves.htlc_leaf_script = legacy_leaf;
+
+    leaves.htlc_control_block.assign(1, P2MR_LEAF_VERSION);
+    leaves.htlc_control_block.insert(leaves.htlc_control_block.end(), refund_hash.begin(), refund_hash.end());
+    leaves.refund_control_block.assign(1, P2MR_LEAF_VERSION);
+    leaves.refund_control_block.insert(leaves.refund_control_block.end(), htlc_hash.begin(), htlc_hash.end());
+    return true;
+}
+
+[[nodiscard]] HtlcDescriptorLeaves MatchHtlcDescriptorOrThrow(HtlcDescriptorLeaves leaves, const CTxOut& prev_txout)
+{
+    if (prev_txout.scriptPubKey == leaves.script_pub_key) return leaves;
+    HtlcDescriptorLeaves legacy = leaves;
+    if (ApplyLegacySha256ClaimLeaf(legacy) && prev_txout.scriptPubKey == legacy.script_pub_key) {
+        return legacy;
+    }
+    throw JSONRPCError(RPC_INVALID_PARAMETER, "Outpoint scriptPubKey does not match the descriptor");
+}
+
 void RequireExactHtlcDescriptor(const HtlcDescriptorLeaves& leaves)
 {
     if (leaves.has_legacy_htlc) {
@@ -16394,7 +16441,9 @@ RPCHelpMan buildhtlcclaim()
         "buildhtlcclaim",
         "\nBuild, sign, and finalize a transaction that claims a P2MR HTLC output by revealing the preimage.\n"
         "The descriptor must be exactly mr(htlc_sha256(<SHA256>,<claimerPubkey>),refund(<locktime>,<senderPubkey>)).\n"
-        "HASH160 htlc_tx() descriptors remain spendable for recovery of any pre-existing lock.\n"
+        "The claim leaf requires a 32-byte preimage. HASH160 htlc_tx() descriptors remain spendable for recovery of any pre-existing lock and cannot be used to derive a new address.\n"
+        "The claim path has no timeout of its own. After the refund locktime, a claim and a refund of the same output can both be valid; the one that pays more is the one that confirms. Claim before the locktime, with margin for a reorg, and stagger the two chains' timeouts.\n"
+        "The claim input signals replacement and uses nLockTime 0, so it can be mined immediately and a higher fee can replace it.\n"
         "The wallet must hold the claimer's PQ private key to produce a transaction-bound claim signature.\n",
         {
             {"descriptor", RPCArg::Type::STR, RPCArg::Optional::NO, "The mr(...) HTLC descriptor (with or without #checksum)"},
@@ -16456,33 +16505,32 @@ RPCHelpMan buildhtlcclaim()
 
             const COutPoint outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
             const CTxOut prev_txout = GetOutpointTxOutOrThrow(*pwallet, outpoint);
-            if (prev_txout.scriptPubKey != leaves.script_pub_key) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "Outpoint scriptPubKey does not match the descriptor");
-            }
+            const HtlcDescriptorLeaves matched = MatchHtlcDescriptorOrThrow(leaves, prev_txout);
             const CAmount out_value = prev_txout.nValue - fee;
             if (out_value <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee exceeds the funding amount");
 
             CMutableTransaction mtx;
             mtx.version = CTransaction::CURRENT_VERSION;
             mtx.nLockTime = 0;
-            constexpr uint32_t sequence_final{0xffffffff};
-            mtx.vin.emplace_back(outpoint, CScript(), sequence_final);
+            // nLockTime 0 keeps the claim immediately mineable. The sequence
+            // signals replacement so a later higher fee can take its place.
+            mtx.vin.emplace_back(outpoint, CScript(), MAX_BIP125_RBF_SEQUENCE);
             mtx.vout.emplace_back(out_value, GetScriptForDestination(destination));
 
             PartiallySignedTransaction psbt(mtx);
             PSBTInput& input = psbt.inputs[0];
             input.witness_utxo = prev_txout;
-            input.m_p2mr_merkle_root = leaves.merkle_root;
-            input.m_p2mr_leaf_script = leaves.htlc_leaf_script;
-            input.m_p2mr_control_block = leaves.htlc_control_block;
-            if (leaves.has_htlc_sha256) {
-                input.sha256_preimages[uint256{leaves.htlc_sha256}] = preimage;
+            input.m_p2mr_merkle_root = matched.merkle_root;
+            input.m_p2mr_leaf_script = matched.htlc_leaf_script;
+            input.m_p2mr_control_block = matched.htlc_control_block;
+            if (matched.has_htlc_sha256) {
+                input.sha256_preimages[uint256{matched.htlc_sha256}] = preimage;
             } else {
-                input.hash160_preimages[uint160{leaves.htlc_hash160}] = preimage;
+                input.hash160_preimages[uint160{matched.htlc_hash160}] = preimage;
             }
 
             bool complete{false};
-            const CTransactionRef tx = SignFinalizeHtlcPsbtOrThrow(pwallet, std::move(psbt), leaves.htlc_pubkey, "claimer", complete, "HTLC claim");
+            const CTransactionRef tx = SignFinalizeHtlcPsbtOrThrow(pwallet, std::move(psbt), matched.htlc_pubkey, "claimer", complete, "HTLC claim");
 
             DataStream ss;
             ss << TX_WITH_WITNESS(*tx);
@@ -16491,8 +16539,8 @@ RPCHelpMan buildhtlcclaim()
             out.pushKV("complete", complete);
             out.pushKV("txid", tx->GetHash().GetHex());
             out.pushKV("selected_path", "claim");
-            out.pushKV("leaf_script", HexStr(leaves.htlc_leaf_script));
-            out.pushKV("merkle_root", leaves.merkle_root.GetHex());
+            out.pushKV("leaf_script", HexStr(matched.htlc_leaf_script));
+            out.pushKV("merkle_root", matched.merkle_root.GetHex());
             return out;
         }};
 }
@@ -16503,8 +16551,10 @@ RPCHelpMan buildhtlcrefund()
         "buildhtlcrefund",
         "\nBuild, sign, and finalize a transaction that refunds a P2MR HTLC output via the timeout (CLTV) path.\n"
         "By default the descriptor must be exactly mr(htlc_sha256(<SHA256>,<claimerPubkey>),refund(<locktime>,<senderPubkey>)).\n"
-        "The wallet must hold the sender's supported PQ private key (ML-DSA or SLH-DSA). The spend is only valid once the active chain\n"
-        "height/MTP is at or beyond <locktime>.\n",
+        "The wallet must hold the sender's supported PQ private key (ML-DSA or SLH-DSA).\n"
+        "A refund whose nLockTime is L is final in the first block after L: once the tip height (or MTP, for a time lock) is at L the refund can enter the mempool, and it confirms in block L+1, not in block L.\n"
+        "The refund input signals replacement and stays non-final, so the timeout still applies and a higher fee can replace it.\n"
+        "After that point a claim of the same output can still be valid. Broadcast the refund promptly. The claim path has no timeout of its own.\n",
         {
             {"descriptor", RPCArg::Type::STR, RPCArg::Optional::NO, "The mr(...) HTLC descriptor (with or without #checksum)"},
             {"prevout", RPCArg::Type::OBJ, RPCArg::Optional::NO, "The HTLC funding outpoint to spend",
@@ -16557,29 +16607,26 @@ RPCHelpMan buildhtlcrefund()
 
             const COutPoint outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
             const CTxOut prev_txout = GetOutpointTxOutOrThrow(*pwallet, outpoint);
-            if (prev_txout.scriptPubKey != leaves.script_pub_key) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "Outpoint scriptPubKey does not match the descriptor");
-            }
+            const HtlcDescriptorLeaves matched = MatchHtlcDescriptorOrThrow(leaves, prev_txout);
             const CAmount out_value = prev_txout.nValue - fee;
             if (out_value <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee exceeds the funding amount");
 
             CMutableTransaction mtx;
             mtx.version = CTransaction::CURRENT_VERSION;
             mtx.nLockTime = static_cast<uint32_t>(locktime);
-            // A non-final sequence is required for nLockTime to be enforced (and thus for CLTV to pass).
-            constexpr uint32_t max_sequence_nonfinal{0xfffffffe};
-            mtx.vin.emplace_back(outpoint, CScript(), max_sequence_nonfinal);
+            // Non-final so nLockTime is enforced, and low enough to signal replacement.
+            mtx.vin.emplace_back(outpoint, CScript(), MAX_BIP125_RBF_SEQUENCE);
             mtx.vout.emplace_back(out_value, GetScriptForDestination(destination));
 
             PartiallySignedTransaction psbt(mtx);
             PSBTInput& input = psbt.inputs[0];
             input.witness_utxo = prev_txout;
-            input.m_p2mr_merkle_root = leaves.merkle_root;
-            input.m_p2mr_leaf_script = leaves.refund_leaf_script;
-            input.m_p2mr_control_block = leaves.refund_control_block;
+            input.m_p2mr_merkle_root = matched.merkle_root;
+            input.m_p2mr_leaf_script = matched.refund_leaf_script;
+            input.m_p2mr_control_block = matched.refund_control_block;
 
             bool complete{false};
-            const CTransactionRef tx = SignFinalizeHtlcPsbtOrThrow(pwallet, std::move(psbt), leaves.refund_pubkey, "sender", complete, "HTLC refund");
+            const CTransactionRef tx = SignFinalizeHtlcPsbtOrThrow(pwallet, std::move(psbt), matched.refund_pubkey, "sender", complete, "HTLC refund");
 
             DataStream ss;
             ss << TX_WITH_WITNESS(*tx);
@@ -16588,9 +16635,9 @@ RPCHelpMan buildhtlcrefund()
             out.pushKV("complete", complete);
             out.pushKV("txid", tx->GetHash().GetHex());
             out.pushKV("selected_path", "refund");
-            out.pushKV("leaf_script", HexStr(leaves.refund_leaf_script));
+            out.pushKV("leaf_script", HexStr(matched.refund_leaf_script));
             out.pushKV("locktime", static_cast<int64_t>(mtx.nLockTime));
-            out.pushKV("merkle_root", leaves.merkle_root.GetHex());
+            out.pushKV("merkle_root", matched.merkle_root.GetHex());
             return out;
         }};
 }

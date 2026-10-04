@@ -15,6 +15,7 @@
 #include <shielded/bundle.h>
 #include <streams.h>
 #include <util/check.h>
+#include <util/rbf.h>
 #include <wallet/shielded_privacy.h>
 
 #include <algorithm>
@@ -480,7 +481,9 @@ BuildStructuredBridgeDisclosurePayloadForSize(const BridgeViewGrantRequest& requ
     CMutableTransaction mtx;
     mtx.version = CTransaction::CURRENT_VERSION;
     mtx.nLockTime = use_refund_path ? plan.refund_lock_height : 0;
-    const uint32_t sequence = use_refund_path ? CTxIn::MAX_SEQUENCE_NONFINAL : CTxIn::SEQUENCE_FINAL;
+    // The success path stays final: its sequence is committed by the template hash.
+    // The refund path stays non-final so the timeout applies, and signals replacement.
+    const uint32_t sequence = use_refund_path ? MAX_BIP125_RBF_SEQUENCE : CTxIn::SEQUENCE_FINAL;
     mtx.vin.emplace_back(prevout, CScript(), sequence);
     mtx.vout = plan.transparent_outputs;
     mtx.shielded_bundle = plan.shielded_bundle;

@@ -9637,6 +9637,19 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
         return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
                            ": shutdown interrupt");
     }
+    // A signed-frontier ancestor may already have a transaction-valid body
+    // from an earlier admission/restart without a durable per-block trusted
+    // bit. Bounded recovery may use the CURRENT verified frontier as its
+    // authority, but once the block is actually connected, persist that
+    // provenance and refresh authenticated chainwork exactly as ordinary
+    // trusted admission does. Never synthesize this bit on consensus+pin or
+    // without live authority coverage.
+    if (covered_fast_path &&
+        !m_chainman.PersistMatMulTrustedReplayAttestation(
+            pindexNew->GetBlockHash())) {
+        return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
+                           ": unable to persist trusted replay authority");
+    }
     // Read block from disk.
     const auto time_1{SteadyClock::now()};
     std::shared_ptr<const CBlock> pthisBlock;
@@ -9897,6 +9910,20 @@ CBlockIndex* Chainstate::FindMostWorkChain()
     // (live public CPU archive headers=191013) is not walked under cs_main.
     if (node::matmul_trusted::IsTrustedMirror() && m_chain.Tip() != nullptr) {
         const CBlockIndex* const tip{m_chain.Tip()};
+        // A trusted authority may nominate a lower-work competing prefix for
+        // acquisition, but bounded policy remains the authority for lifting a
+        // persisted park. Without this prefilter FindMostWorkChain repeatedly
+        // unparked the same depth-7 authority prefix that
+        // ActivateBestChainStep immediately parked again (100% CPU, cs_main /
+        // RPC starvation). AcquisitionEscape remains independent and can keep
+        // fetching / validating the parked tower root-first under the node's
+        // configured replay authority.
+        if (unique_abandon != nullptr &&
+            m_chainman.IsOnParkedReorgBranch(unique_abandon) &&
+            !m_chainman.AutomaticParkEscapeAllowed(
+                unique_abandon, /*non_bounded_escape=*/true)) {
+            unique_abandon = nullptr;
+        }
         auto covered_connectable = [&](CBlockIndex* cand) -> CBlockIndex* {
             if (cand == nullptr || cand == tip) return nullptr;
             if ((cand->nStatus & BLOCK_FAILED_MASK) != 0) return nullptr;
@@ -9944,6 +9971,16 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 covered = hit;
             }
         }
+        if (covered != nullptr &&
+            m_chainman.m_options.reorg_policy ==
+                ChainstateManager::Options::ReorgPolicyMode::BOUNDED) {
+            if (m_chainman.IsOnParkedReorgBranch(covered) &&
+                (!m_chainman.AutomaticParkEscapeAllowed(
+                     covered, /*non_bounded_escape=*/false) ||
+                 !m_chainman.UnparkReorgBranchContainingBlock(covered))) {
+                covered = nullptr;
+            }
+        }
         if (covered != nullptr) {
             restore_hysteresis_deferred_candidates();
             setBlockIndexCandidates.insert(covered);
@@ -9959,7 +9996,9 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             unique_abandon->HaveNumChainTxs() &&
             m_chainman.IndexHasTrustedMatMulAuthority(unique_abandon)) {
             if (m_chainman.IsOnParkedReorgBranch(unique_abandon) &&
-                !m_chainman.UnparkReorgBranchContainingBlock(unique_abandon)) {
+                (!m_chainman.AutomaticParkEscapeAllowed(
+                     unique_abandon, /*non_bounded_escape=*/true) ||
+                 !m_chainman.UnparkReorgBranchContainingBlock(unique_abandon))) {
                 unique_abandon = nullptr;
             } else {
                 restore_hysteresis_deferred_candidates();
@@ -10112,7 +10151,8 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 m_chainman.m_options.reorg_policy !=
                     ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
                 m_chainman.DeepForkAutoResolveMayUnpark(pindexNew)};
-            if ((!authority_escape && !deep_fork_escape) ||
+            if (!m_chainman.AutomaticParkEscapeAllowed(
+                    pindexNew, authority_escape || deep_fork_escape) ||
                 !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
                 skipped_this_call.insert(pindexNew);
                 setBlockIndexCandidates.erase(pindexNew);
@@ -10504,7 +10544,7 @@ int ChainstateManager::TrustedMirrorExactReplayInvocationsForTest() const
  *          state.IsError() set so ActivateBestChain can stop without
  *          busy-looping the same pindexMostWork or treating the miss as fatal.
  */
-bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace)
+bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, bool& policy_parked, ConnectTrace& connectTrace)
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
@@ -10669,6 +10709,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 if (m_chain.Tip() != nullptr) {
                     setBlockIndexCandidates.insert(m_chain.Tip());
                 }
+                policy_parked = true;
                 fInvalidFound = true;
                 return true;
             }
@@ -11013,7 +11054,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
     CBlockIndex *pindexNewTip = nullptr;
     bool exited_ibd{false};
     bool attempted_step{false};
-    bool retryable_matmul_deferred{false};
+    bool activation_deferred{false};
     do {
         // Drain the validation queue without holding m_chainstate_mutex. Syncing
         // while that mutex is held deadlocks against net-thread ActivateBestChain
@@ -11091,13 +11132,14 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 }
 
                 bool fInvalidFound = false;
+                bool policy_parked = false;
                 std::shared_ptr<const CBlock> nullBlockPtr;
                 // BlockConnected signals must be sent for the original role;
                 // in case snapshot validation is completed during ActivateBestChainStep, the
                 // result of GetRole() changes from BACKGROUND to NORMAL.
                const ChainstateRole chainstate_role{this->GetRole()};
                 CBlockIndex* const tip_before_step{m_chain.Tip()};
-                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, connectTrace)) {
+                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, policy_parked, connectTrace)) {
                     // A system error occurred
                     return false;
                 }
@@ -11124,7 +11166,17 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                                pindexMostWork->GetBlockHash().ToString(),
                                state.ToString());
                     state = BlockValidationState();
-                    retryable_matmul_deferred = true;
+                    activation_deferred = true;
+                    break;
+                }
+
+                // Policy parking is not intrinsic invalidity. Yield after the
+                // no-progress park so a selector/policy disagreement cannot
+                // immediately reselect, unpark and re-park the same branch
+                // while monopolizing cs_main. Genuine invalid-block discovery
+                // retains the existing same-call fallback below.
+                if (policy_parked && m_chain.Tip() == tip_before_step) {
+                    activation_deferred = true;
                     break;
                 }
 
@@ -11154,7 +11206,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     LogWarning("ActivateBestChain: no progress toward %s; "
                                "stopping activation so RPC/net can complete\n",
                                pindexMostWork->GetBlockHash().ToString());
-                    retryable_matmul_deferred = true;
+                    activation_deferred = true;
                     break;
                 }
             } while (!m_chain.Tip() || (starting_tip && CBlockIndexWorkComparator()(m_chain.Tip(), starting_tip)));
@@ -11223,7 +11275,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
         // iteration (see attempted_step above). This trailing check still
         // lets the first step run so LoadChainTip can connect genesis.
         if (m_chainman.m_interrupt) break;
-        if (retryable_matmul_deferred) break;
+        if (activation_deferred) break;
     } while (pindexNewTip != pindexMostWork);
 
     m_chainman.CheckBlockIndex();
@@ -11550,19 +11602,19 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     // Deterministic layers (quorum, attested abandon, shallow recovery,
     // operator invalidate) keep priority inside MayAct; armed losing-tip
     // deferral keeps priority here.
-    const bool bounded_recovery{
-        m_chainman.m_options.reorg_policy == ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
-        m_chainman.AssessAutomaticTransition(pindex) == kernel::BoundedReorgDecision::BOUNDED_RECOVERY};
+    const bool bounded_mode{
+        m_chainman.m_options.reorg_policy ==
+        ChainstateManager::Options::ReorgPolicyMode::BOUNDED};
+    const bool non_bounded_escape{
+        !bounded_mode && m_chainman.DeepForkAutoResolveMayUnpark(pindex)};
     if (parked && !defer_losing &&
-        (bounded_recovery ||
-         (m_chainman.m_options.reorg_policy != ChainstateManager::Options::ReorgPolicyMode::BOUNDED &&
-          m_chainman.DeepForkAutoResolveMayUnpark(pindex))) &&
+        m_chainman.AutomaticParkEscapeAllowed(pindex, non_bounded_escape) &&
         m_chainman.UnparkReorgBranchContainingBlock(pindex)) {
         LogWarning("%s: auto-unparked deep-fork branch hash=%s height=%d "
-                   "(deepforkautoresolve: suffix fully ExactReplay-verified; "
-                   "header-only/partially-verified towers stay parked)\n",
+                   "(%s; header-only/partially-verified towers stay parked)\n",
                    __func__, pindex->GetBlockHash().ToString(),
-                   pindex->nHeight);
+                   pindex->nHeight,
+                   bounded_mode ? "bounded-recovery: checked suffix and transition" : "deepforkautoresolve: suffix fully ExactReplay-verified");
         parked = false;
     }
     if (parked || defer_losing) {
@@ -12062,25 +12114,67 @@ bool ChainstateManager::AcquisitionEscapeCoversBlock(const CBlockIndex* index) c
             break;
         }
     }
-    // Rate-limited diagnostic: tower coverage, not ExactReplay admission.
-    // ExactReplay uses FindAcquisitionEscapeFrontier.
-    static std::atomic<int64_t> s_last_log{0};
-    const int64_t now_s{GetTime()};
-    if (now_s - s_last_log.load(std::memory_order_relaxed) >= 5) {
-        s_last_log.store(now_s, std::memory_order_relaxed);
-        const int extends_tip{
-            (tip != nullptr && index->nHeight >= tip->nHeight &&
-             index->GetAncestor(tip->nHeight) == tip)
-                ? 1
-                : 0};
-        LogPrintf("acquisition-escape CoversBlock hash=%s height=%d covered=%d "
-                  "towers=%d extends_tip=%d\n",
-                  index->GetBlockHash().ToString(), index->nHeight,
-                  covered ? 1 : 0,
-                  static_cast<int>(m_acquisition_exempt_towers.size()),
-                  extends_tip);
-    }
+    // Coverage is a hot read-only predicate, not an acquisition or validation
+    // state transition. Tower registration/replacement, replay progress and
+    // eviction are logged by their mutating call sites; logging every repeated
+    // coverage query obscured those events during a stalled recovery.
     return covered;
+}
+
+bool ChainstateManager::IndexHasConfiguredReplayAuthority(
+    const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return false;
+    }
+    if ((index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) {
+        return true;
+    }
+    // Trusted Profile-1 explicitly delegates ExactReplay to the configured
+    // signer quorum. Keep the substitution scoped to that role and era: a
+    // consensus node (including consensus+pin) must still carry the local
+    // ExactReplay bit, and historical/non-attested profiles retain their
+    // existing validation path.
+    return m_options.matmul_validation_mode ==
+               kernel::MatMulValidationMode::TRUSTED &&
+           node::matmul_trusted::IsTrustedMirror() &&
+           GetConsensus().IsMatMulTrustedReplayAttestationActive(
+               index->nHeight) &&
+           IndexHasTrustedMatMulAuthority(index);
+}
+
+bool ChainstateManager::IndexHasRecoveryValidatedBody(
+    const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    return index != nullptr &&
+           (index->nStatus & (BLOCK_FAILED_MASK | BLOCK_HAVE_DATA)) ==
+               BLOCK_HAVE_DATA &&
+           index->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+           index->HaveNumChainTxs() &&
+           IndexHasConfiguredReplayAuthority(index);
+}
+
+const CBlockIndex* ChainstateManager::AcquisitionEscapeAuthorityTip(
+    const CBlockIndex* candidate, const CBlockIndex* fork) const
+{
+    AssertLockHeld(::cs_main);
+    if (candidate == nullptr || fork == nullptr) return nullptr;
+    if (m_options.matmul_validation_mode !=
+            kernel::MatMulValidationMode::TRUSTED ||
+        !node::matmul_trusted::IsTrustedMirror()) {
+        return candidate;
+    }
+    // A trusted mirror cannot independently ExactReplay a missing Profile-1
+    // body. Acquire only the prefix cryptographically covered by the current
+    // highest signed frontier. Header descendants above it remain indexed but
+    // consume no body bandwidth until a newer quorum extends the frontier.
+    for (const CBlockIndex* walk{candidate}; walk != nullptr && walk != fork;
+         walk = walk->pprev) {
+        if (IndexIsCoveredBySignedFrontier(walk)) return walk;
+    }
+    return nullptr;
 }
 
 bool ChainstateManager::AcquisitionEscapeParentConnectable(const CBlockIndex* index) const
@@ -12090,8 +12184,7 @@ bool ChainstateManager::AcquisitionEscapeParentConnectable(const CBlockIndex* in
     if ((index->pprev->nStatus & BLOCK_FAILED_MASK) != 0) return false;
     if (m_active_chainstate == nullptr) return false;
     return m_active_chainstate->m_chain.Contains(index->pprev) ||
-           ((index->pprev->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
-            (index->pprev->nStatus & BLOCK_HAVE_DATA) != 0);
+           IndexHasRecoveryValidatedBody(index->pprev);
 }
 
 const CBlockIndex* ChainstateManager::FindAcquisitionEscapeFrontier(
@@ -12118,14 +12211,18 @@ const CBlockIndex* ChainstateManager::FindAcquisitionEscapeFrontier(
         if (best->GetAncestor(tip->nHeight) == tip) continue;
         const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(best)};
         if (fork == nullptr) continue;
+        const CBlockIndex* const authority_tip{
+            AcquisitionEscapeAuthorityTip(best, fork)};
+        if (authority_tip == nullptr) continue;
         const CBlockIndex* lowest{nullptr};
         bool failed{false};
-        for (const CBlockIndex* walk{best}; walk != fork; walk = walk->pprev) {
+        for (const CBlockIndex* walk{authority_tip}; walk != fork;
+             walk = walk->pprev) {
             if (walk->nStatus & BLOCK_FAILED_MASK) {
                 failed = true;
                 break;
             }
-            if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0) lowest = walk;
+            if (!IndexHasRecoveryValidatedBody(walk)) lowest = walk;
         }
         if (failed || lowest == nullptr ||
             !AcquisitionEscapeParentConnectable(lowest) ||
@@ -12237,11 +12334,14 @@ bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
         const CBlockIndex* const cand_fork{
             m_active_chainstate->m_chain.FindFork(cand)};
         if (cand_fork == nullptr) return false;
+        const CBlockIndex* const authority_tip{
+            AcquisitionEscapeAuthorityTip(cand, cand_fork)};
+        if (authority_tip == nullptr) return false;
         const CBlockIndex* lowest{nullptr};
-        for (const CBlockIndex* walk{cand}; walk != nullptr && walk != cand_fork;
-             walk = walk->pprev) {
+        for (const CBlockIndex* walk{authority_tip};
+             walk != nullptr && walk != cand_fork; walk = walk->pprev) {
             if (walk->nStatus & BLOCK_FAILED_MASK) return false;
-            if ((walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0) lowest = walk;
+            if (!IndexHasRecoveryValidatedBody(walk)) lowest = walk;
         }
         return lowest != nullptr &&
                AcquisitionEscapeParentConnectable(lowest) &&
@@ -12271,8 +12371,8 @@ bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
         m_acquisition_exempt_towers.emplace(root, candidate);
         LogPrintf("acquisition-escape: exempting heavier competing tower "
                   "fork_root=%s from header-lead/last-common caps (tip stale, "
-                  "candidate work > tip); fetch + full ExactReplay to acquire, "
-                  "migration still park/deepforkautoresolve-gated\n",
+                  "candidate work > tip); fetch + configured replay-authority "
+                  "validation to acquire, migration still policy-gated\n",
                   root.ToString());
         return true;
     }
@@ -12456,6 +12556,18 @@ bool ChainstateManager::ParkReorgBranch(CBlockIndex* branch_root)
     LogWarning("%s: parked local reorg branch root hash=%s height=%d\n",
                __func__, root_hash.ToString(), branch_root->nHeight);
     return true;
+}
+
+bool ChainstateManager::AutomaticParkEscapeAllowed(
+    const CBlockIndex* candidate, bool non_bounded_escape)
+{
+    AssertLockHeld(::cs_main);
+    if (candidate == nullptr) return false;
+    if (m_options.reorg_policy != Options::ReorgPolicyMode::BOUNDED) {
+        return non_bounded_escape;
+    }
+    return AssessAutomaticTransition(candidate) ==
+           kernel::BoundedReorgDecision::BOUNDED_RECOVERY;
 }
 
 bool ChainstateManager::UnparkReorgBranchContainingBlock(const CBlockIndex* pindex)
@@ -13038,16 +13150,32 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
     DeepForkAutoResolveVerdict v;
     const auto finish = [&](bool acted) {
         v.acted = acted;
-        // Rate-limited operator diagnostic: whenever a DEEP candidate is
-        // scored (in_scope), show exactly which observation gates hold so a
-        // live node explains why it does or does not migrate. acted=1
-        // verdicts are rare and decisive; always log those.
+        // State-oriented operator diagnostic. Fork-choice scores the same
+        // candidate from several hot paths; an unchanged time-based heartbeat
+        // hid useful recovery events and made a livelock look like periodic
+        // work. Log a new candidate/tip/verdict state, while decisive acted=1
+        // verdicts remain unconditional.
         if (v.in_scope && candidate != nullptr) {
-            constexpr int64_t VERDICT_LOG_INTERVAL_S{30};
-            const int64_t log_now_s{GetTime()};
-            if (acted || log_now_s - m_deep_fork_verdict_log_time_s >=
-                             VERDICT_LOG_INTERVAL_S) {
-                m_deep_fork_verdict_log_time_s = log_now_s;
+            const CBlockIndex* const log_tip{
+                m_active_chainstate != nullptr ? m_active_chainstate->m_chain.Tip() : nullptr};
+            const uint16_t flags{static_cast<uint16_t>(
+                static_cast<uint16_t>(v.enabled) << 0 |
+                static_cast<uint16_t>(v.in_scope) << 1 |
+                static_cast<uint16_t>(v.heavier) << 2 |
+                static_cast<uint16_t>(v.no_deterministic_tiebreak) << 3 |
+                static_cast<uint16_t>(v.candidate_usable) << 4 |
+                static_cast<uint16_t>(v.seen_live) << 5 |
+                static_cast<uint16_t>(v.sustained) << 6 |
+                static_cast<uint16_t>(v.suffix_exact_replayed) << 7 |
+                static_cast<uint16_t>(v.acted) << 8)};
+            const DeepForkVerdictLogState log_state{
+                candidate->GetBlockHash(),
+                log_tip != nullptr ? log_tip->GetBlockHash() : uint256{},
+                v.reorg_depth,
+                flags};
+            if (acted || !m_deep_fork_verdict_log_state.has_value() ||
+                *m_deep_fork_verdict_log_state != log_state) {
+                m_deep_fork_verdict_log_state = log_state;
                 const char* const acted_path{
                     !acted ? "-"
                            : (v.seen_live && v.sustained ? "seen_live"
@@ -13733,11 +13861,16 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
         return true;
     }
 
-    if (FindParkedReorgBranchRoot(best_recovery) != nullptr &&
-        !UnparkReorgBranchContainingBlock(best_recovery)) {
-        LogError("%s: failed to atomically unpark authenticated recovery branch %s\n",
-                 __func__, best_recovery->GetBlockHash().ToString());
-        return false;
+    if (FindParkedReorgBranchRoot(best_recovery) != nullptr) {
+        if (!AutomaticParkEscapeAllowed(
+                best_recovery, /*non_bounded_escape=*/true)) {
+            return true;
+        }
+        if (!UnparkReorgBranchContainingBlock(best_recovery)) {
+            LogError("%s: failed to atomically unpark authenticated recovery branch %s\n",
+                     __func__, best_recovery->GetBlockHash().ToString());
+            return false;
+        }
     }
     for (Chainstate* chainstate : GetAll()) {
         chainstate->TryAddBlockIndexCandidate(
@@ -13960,10 +14093,7 @@ bool ChainstateManager::BoundedSuffixChecked(const CBlockIndex* candidate,
     const arith_uint256 need{tip->nChainWork + (GetBlockProof(*tip) * 2)};
     if (candidate->nChainWork < need) return false;
     for (const CBlockIndex* walk{candidate}; walk != nullptr && walk != fork; walk = walk->pprev) {
-        if ((walk->nStatus & BLOCK_HAVE_DATA) == 0 ||
-            (walk->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 ||
-            !walk->IsValid(BLOCK_VALID_TRANSACTIONS) ||
-            !walk->HaveNumChainTxs()) {
+        if (!IndexHasRecoveryValidatedBody(walk)) {
             return false;
         }
     }

@@ -1885,7 +1885,8 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::WeakSubjectivityBootstrapHeight;
     using node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundHeaders;
     using node::matmul_trusted::TrustedMirrorSeedRaisesBestKnown;
-    // Mainnet: checkpoint 219000, AssumeUTXO 219000 → ceiling 219000.
+    // Mainnet: checkpoint stays 219000; the 228000 snapshot is the higher pin,
+    // so the bootstrap ceiling is that snapshot height.
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 199299), 199299);
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 0), 186000);
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(0, 61010), 61010);
@@ -1893,7 +1894,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         WeakSubjectivityBootstrapHeight(
             Params().Checkpoints().GetHeight(),
             Params().HighestAssumeutxoHeight()),
-        219000);
+        228000);
     // Fresh mirror tip=0 must ingest HEADERS (the 2026-08-26 deadlock).
     BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundHeaders(
         /*ignore_non_authority_block=*/true, /*tip_height=*/0,
@@ -2458,6 +2459,18 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!KeepFetchingWhileUnconnectedHaveData(
         true, /*catch_up=*/true, /*pin=*/false, /*exact=*/true));
     BOOST_CHECK(KeepFetchingWhileUnconnectedHaveData(true, true, true, false));
+    // A registered, stale, strictly-heavier acquisition has an off-chain
+    // signed frontier by definition. It may slide the download window only
+    // while the unconnected parent remains covered by current pin authority.
+    BOOST_CHECK(KeepFetchingWhileUnconnectedHaveData(
+        true, /*catch_up=*/false, /*pin=*/true, /*exact=*/false,
+        /*registered_heavier_acquisition=*/true));
+    BOOST_CHECK(!KeepFetchingWhileUnconnectedHaveData(
+        true, /*catch_up=*/false, /*pin=*/false, /*exact=*/true,
+        /*registered_heavier_acquisition=*/true));
+    BOOST_CHECK(!KeepFetchingWhileUnconnectedHaveData(
+        true, /*catch_up=*/false, /*pin=*/true, /*exact=*/false,
+        /*registered_heavier_acquisition=*/false));
     using node::matmul_trusted::PinMayDenyAttestedChainTipChild;
     using node::matmul_trusted::ConsensusMinerMayFetchCompetingShortReorg;
     BOOST_CHECK(!PinMayDenyAttestedChainTipChild(
