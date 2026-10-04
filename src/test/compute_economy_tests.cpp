@@ -747,6 +747,11 @@ BOOST_AUTO_TEST_CASE(receipt_requires_allowed_mode_and_matching_job)
     crossed.pushKV("nonce", "cross");
     crossed.pushKV("now_ms", 2100);
     BOOST_CHECK(CallFail(dir, "regtest", "issuecomputereceipt", crossed, "COMPUTE_RECORD_INVALID"));
+    UniValue direct_job = job;
+    direct_job.pushKV("verification_method", "DIRECT_COMPUTE");
+    direct_job.pushKV("nonce", "direct-job");
+    direct_job.pushKV("input_commitment", "direct-in");
+    BOOST_CHECK(CallFail(dir, "regtest", "createcomputejob", direct_job, "COMPUTE_RECORD_INVALID"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -29,6 +29,28 @@ using node::NodeContext;
 
 namespace {
 
+bool AnchorOnActiveChain(const UniValue& challenge, ChainstateManager& chainman, std::string& err)
+{
+    if (!challenge.isObject() || !challenge.exists("anchor_hash") || !challenge["anchor_hash"].isStr() ||
+        !challenge.exists("anchor_height") || !challenge["anchor_height"].isNum()) {
+        err = "anchor";
+        return false;
+    }
+    const auto hash = uint256::FromHex(challenge["anchor_hash"].get_str());
+    if (!hash) {
+        err = "anchor";
+        return false;
+    }
+    const int height = challenge["anchor_height"].getInt<int>();
+    const bool on_chain = WITH_LOCK(::cs_main, {
+        const CBlockIndex* at = chainman.ActiveChain()[height];
+        return at != nullptr && at->GetBlockHash() == *hash;
+    });
+    if (!on_chain) err = "anchor";
+    return on_chain;
+}
+
+
 bool TestProfilesEnabled()
 {
     if (gArgs.GetChainType() != ChainType::REGTEST) return false;
@@ -208,6 +230,10 @@ RPCHelpMan verifycomputequalification()
             std::string code, err, reg_err;
             UniValue out;
             auto& reg = Registry().Get(reg_err);
+            NodeContext& node = EnsureAnyNodeContext(request.context);
+            if (!AnchorOnActiveChain(request.params[0], EnsureChainman(node), err)) {
+                ThrowCode("COMPUTE_CHALLENGE_INVALID", err);
+            }
             if (!reg.Verify(request.params[0], request.params[1], /*redeem=*/false, NowMs(), out, code, err)) {
                 ThrowCode(code, err.empty() ? reg_err : err);
             }
@@ -231,6 +257,10 @@ RPCHelpMan redeemcomputequalification()
             std::string code, err, reg_err;
             UniValue out;
             auto& reg = Registry().Get(reg_err);
+            NodeContext& node = EnsureAnyNodeContext(request.context);
+            if (!AnchorOnActiveChain(request.params[0], EnsureChainman(node), err)) {
+                ThrowCode("COMPUTE_CHALLENGE_INVALID", err);
+            }
             if (!reg.Verify(request.params[0], request.params[1], /*redeem=*/true, NowMs(), out, code, err)) {
                 ThrowCode(code, err.empty() ? reg_err : err);
             }

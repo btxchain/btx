@@ -126,6 +126,10 @@ BOOST_AUTO_TEST_CASE(toy_qualification_solves_verifies_and_rejects_replay)
     BOOST_REQUIRE(reg.Open(path, err));
     BOOST_REQUIRE(reg.RememberIssued(challenge, code, err));
     UniValue summary;
+    UniValue swapped = challenge;
+    swapped.pushKV("anchor_hash", std::string(64, 'a'));
+    BOOST_CHECK(!reg.Verify(swapped, response, false, 2'000, summary, code, err));
+    BOOST_CHECK_EQUAL(code, "COMPUTE_CHALLENGE_INVALID");
     BOOST_REQUIRE(reg.Verify(challenge, response, false, 2'000, summary, code, err));
     BOOST_CHECK(summary["valid"].get_bool());
     BOOST_CHECK_EQUAL((summary["demonstrated_p1e_microunits"].getInt<uint64_t>()), 1000000u);

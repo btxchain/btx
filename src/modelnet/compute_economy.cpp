@@ -852,6 +852,13 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             ++outstanding;
         }
         if (outstanding >= 64) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "too many jobs");
+        const std::string job_method = a.exists("verification_method") && a["verification_method"].isStr()
+                                           ? a["verification_method"].get_str()
+                                           : "ISSUER_ACCEPTANCE";
+        if (job_method != "ISSUER_ACCEPTANCE" ||
+            !ContainsKey(ap["settlement"]["allowed_settlement_modes"], "USEFUL_JOB_RECEIPTS")) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "method");
+        }
         UniValue payload(UniValue::VOBJ);
         payload.pushKV("record_type", "compute_job_v1");
         payload.pushKV("schema_version", 1);
@@ -864,7 +871,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         payload.pushKV("input_commitment", a["input_commitment"]);
         payload.pushKV("executor_spec_commitment", a["executor_spec_commitment"]);
         payload.pushKV("result_schema_commitment", a.exists("result_schema_commitment") ? a["result_schema_commitment"] : a["input_commitment"]);
-        payload.pushKV("verification_method", a.exists("verification_method") ? a["verification_method"].get_str() : "ISSUER_ACCEPTANCE");
+        payload.pushKV("verification_method", job_method);
         payload.pushKV("issued_at_ms", now_ms);
         payload.pushKV("expires_at_ms", a["expires_at_ms"]);
         payload.pushKV("nonce", a.exists("nonce") ? a["nonce"].get_str() : HexStr(std::vector<unsigned char>(16, 2)));
@@ -899,6 +906,13 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             if (jp["subject_pubkey"].get_str() != ap["subject_pubkey"].get_str()) return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "subject");
             if (jp["profile_id"].get_str() != ap["settlement"]["profile_id"].get_str()) return Fail(err_code, err, "COMPUTE_PROFILE_MISMATCH", "profile");
             if (!KnownJobClass(jp["job_class"].get_str(), m_chain == "regtest")) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "class");
+            const std::string job_method = jp.exists("verification_method") && jp["verification_method"].isStr()
+                                               ? jp["verification_method"].get_str()
+                                               : "";
+            if (job_method != "ISSUER_ACCEPTANCE" ||
+                !ContainsKey(ap["settlement"]["allowed_settlement_modes"], "USEFUL_JOB_RECEIPTS")) {
+                return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "method");
+            }
             if (ap["settlement"].exists("allowed_job_classes") && !ContainsKey(ap["settlement"]["allowed_job_classes"], jp["job_class"].get_str())) {
                 return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "class");
             }

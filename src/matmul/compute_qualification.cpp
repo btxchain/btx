@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <set>
 
 #ifndef WIN32
@@ -57,6 +58,74 @@ bool Hex48(const std::string& hex, std::array<unsigned char, 48>& out)
     auto parsed = ParseHex(hex);
     if (parsed.size() != 48) return false;
     std::memcpy(out.data(), parsed.data(), 48);
+    return true;
+}
+
+bool Hex32(const std::string& hex, std::array<unsigned char, 32>& out)
+{
+    if (hex.size() != 64) return false;
+    auto parsed = ParseHex(hex);
+    if (parsed.size() != 32) return false;
+    std::memcpy(out.data(), parsed.data(), 32);
+    return true;
+}
+
+/** The presented object must be the issued challenge. The id covers the anchor. */
+bool PresentedChallengeMatchesId(const UniValue& challenge, std::string& err)
+{
+    if (!challenge.isObject() || !challenge.exists("network") || !challenge["network"].isStr() ||
+        !challenge.exists("profile_name") || !challenge["profile_name"].isStr() ||
+        !challenge.exists("challenge_id") || !challenge["challenge_id"].isStr() ||
+        !challenge.exists("subject_digest") || !challenge["subject_digest"].isStr() ||
+        !challenge.exists("issuer_nonce") || !challenge["issuer_nonce"].isStr() ||
+        !challenge.exists("issued_at_ms") || !challenge["issued_at_ms"].isNum() ||
+        !challenge.exists("expires_at_ms") || !challenge["expires_at_ms"].isNum() ||
+        !challenge.exists("episode_count") || !challenge["episode_count"].isNum() ||
+        !challenge.exists("anchor_height") || !challenge["anchor_height"].isNum() ||
+        !challenge.exists("anchor_hash") || !challenge["anchor_hash"].isStr()) {
+        err = "challenge id";
+        return false;
+    }
+    QualificationFreshness in;
+    in.network = challenge["network"].get_str();
+    in.profile_name = challenge["profile_name"].get_str();
+    if (!Hex32(challenge["subject_digest"].get_str(), in.subject) ||
+        !Hex32(challenge["issuer_nonce"].get_str(), in.issuer_nonce)) {
+        err = "challenge id";
+        return false;
+    }
+    in.issued_at_ms = challenge["issued_at_ms"].getInt<int64_t>();
+    in.expires_at_ms = challenge["expires_at_ms"].getInt<int64_t>();
+    const int64_t episodes = challenge["episode_count"].getInt<int64_t>();
+    if (episodes < 0 || episodes > static_cast<int64_t>(kQualEpisodeMax)) {
+        err = "challenge id";
+        return false;
+    }
+    in.episode_count = static_cast<uint32_t>(episodes);
+    const int64_t height = challenge["anchor_height"].getInt<int64_t>();
+    if (height < 0 || height > std::numeric_limits<int32_t>::max()) {
+        err = "challenge id";
+        return false;
+    }
+    in.anchor_height = static_cast<int32_t>(height);
+    const auto anchor = uint256::FromHex(challenge["anchor_hash"].get_str());
+    if (!anchor) {
+        err = "challenge id";
+        return false;
+    }
+    in.anchor_hash = *anchor;
+    if (challenge.exists("max_elapsed_ms")) {
+        if (!challenge["max_elapsed_ms"].isNum()) {
+            err = "challenge id";
+            return false;
+        }
+        in.max_elapsed_ms = challenge["max_elapsed_ms"].getInt<uint64_t>();
+    }
+    std::array<unsigned char, 48> got{};
+    if (!Hex48(challenge["challenge_id"].get_str(), got) || got != ChallengeId(in)) {
+        err = "challenge id";
+        return false;
+    }
     return true;
 }
 
@@ -504,6 +573,10 @@ bool QualificationRegistry::Verify(const UniValue& challenge, const UniValue& re
     if (!challenge.isObject() || !response.isObject()) {
         err_code = "COMPUTE_CHALLENGE_INVALID";
         err = "object";
+        return false;
+    }
+    if (!PresentedChallengeMatchesId(challenge, err)) {
+        err_code = "COMPUTE_CHALLENGE_INVALID";
         return false;
     }
     const std::string id = challenge["challenge_id"].get_str();

@@ -76,6 +76,8 @@ Toy units do not settle mainnet agreements. There is no toy-to-production ratio.
 
 `issuecomputequalification` binds a fresh random nonce, the subject digest,
 the profile, the episode count (1 through 16), an expiry, and an anchor.
+Verify and redeem recompute that challenge id, and they accept it only while
+the anchor block is still on this node's active chain.
 Each episode header is derived from the challenge id and the episode index.
 The solver runs the real ExactReplay implementation for that frozen profile.
 `cpu` uses the integer reference. `auto`, `cuda`, `hip`, `metal`, and
