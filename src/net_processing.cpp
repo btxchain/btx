@@ -2199,6 +2199,9 @@ private:
     bool m_matmul_deferred_recovery_wake{false};
     std::function<void()> m_matmul_deferred_recovery_override;
     std::thread m_matmul_deferred_recovery_thread;
+    /** True once this process has observed the stall window closed. The next
+     *  open, with a heavier header already known, gets one activation retry. */
+    bool m_bounded_stall_seen_closed{false};
     /** Break a served-body-tip wedge: when the active-chain tip+1 body has been
      *  stuck in flight past BLOCK_ROOT_BODY_TIP_STUCK_S, re-request it BY HASH
      *  from peers advertising past our tip (they may hold the canonical body off
@@ -9096,6 +9099,34 @@ void PeerManagerImpl::RunMatMulDeferredRecoveryPass()
                 allowed > tip->nHeight) {
                 m_need_activate_best_chain = true;
             }
+        }
+    }
+    // A no-progress park returns so selection cannot livelock on cs_main.
+    // Nothing else re-enters ActivateBestChain when the stall window later
+    // opens and every winning body is already on disk. One retry, on the
+    // rising edge, from this worker (not CScheduler: ABC drains validation
+    // callbacks that the scheduler thread itself would have to run).
+    bool retry_bounded_stall{false};
+    if (m_chainman.m_options.reorg_policy == ChainstateManager::Options::ReorgPolicyMode::BOUNDED) {
+        LOCK(cs_main);
+        const ChainstateManager::BoundedReorgStatus status{m_chainman.GetBoundedReorgStatus()};
+        if (!status.stall_armed) {
+            m_bounded_stall_seen_closed = true;
+        } else if (m_bounded_stall_seen_closed) {
+            const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+            const CBlockIndex* const best{m_chainman.m_best_header};
+            if (tip != nullptr && best != nullptr && best->nChainWork > tip->nChainWork) {
+                m_bounded_stall_seen_closed = false;
+                retry_bounded_stall = true;
+                LogInfo("bounded stall window opened at progress age %ds; retrying activation toward %s\n",
+                        status.progress_age_s, best->GetBlockHash().ToString());
+            }
+        }
+    }
+    if (retry_bounded_stall && !m_stopping.load(std::memory_order_acquire)) {
+        BlockValidationState state;
+        if (!m_chainman.ActiveChainstate().ActivateBestChain(state, nullptr)) {
+            LogDebug(BCLog::VALIDATION, "bounded stall activation retry failed (%s)\n", state.ToString());
         }
     }
 }
