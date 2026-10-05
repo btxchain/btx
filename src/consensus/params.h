@@ -960,8 +960,9 @@ struct Params {
     /** First block height at which SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 is a
      *  consensus rule (32-byte preimage for every transaction-bound P2MR HTLC
      *  claim leaf). Before it the rule is standard policy only, which matches
-     *  v0.34.12 consensus. int32 max means "not scheduled". Choose the mainnet
-     *  height only after scanning the chain for spends the rule would reject. */
+     *  v0.34.12 consensus. Mainnet activates at block 243954, about five days
+     *  after header tip 239154 on 2026-10-05 (4800 blocks at 90 seconds).
+     *  int32 max means "not scheduled" on networks other than mainnet. */
     int32_t nP2MRHTLCPreimage32Height{std::numeric_limits<int32_t>::max()};
     /** Maximum shielded verification cost units per block (consensus rule).
      *  SMILE v2: Each spend costs ~100 units; each output ~15 units.

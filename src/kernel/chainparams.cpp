@@ -175,6 +175,10 @@ static constexpr int64_t kRCEpochAAsertRescaleDen{1};
 // Keep all three Epoch-A heights bound to this single constant so that a later
 // update cannot create a digest-only v4/BMX4C interval.
 static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
+// Security consensus fixes. Header tip was 239154 on 2026-10-05. Five days
+// at the 90-second target is 4800 blocks, so enforcement starts at 243954.
+// Below this height, consensus stays compatible with the previous release.
+static constexpr int32_t BTX_SECURITY_ACTIVATION_HEIGHT{243'954};
 // Height-gated ASERT dump floor + half-life lengthening. Hard fork in
 // GetNextWorkRequired (bad-diffbits is exact match). Historical powLimit is
 // never mutated.
@@ -805,6 +809,9 @@ public:
         consensus.nMatMulV4Height = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
         consensus.nMatMulBMX4CHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
         consensus.nMatMulRCHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
+        // 32-byte HTLC preimage rule. Policy before this height, consensus at
+        // and after it. See BTX_SECURITY_ACTIVATION_HEIGHT.
+        consensus.nP2MRHTLCPreimage32Height = BTX_SECURITY_ACTIVATION_HEIGHT;
         consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
         consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         consensus.nMaxReorgDepth = 12;
