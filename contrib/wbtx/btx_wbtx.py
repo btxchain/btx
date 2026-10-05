@@ -53,18 +53,12 @@ End-to-end swap flow (BTX leg of a trustless BTX<->EVM atomic swap)::
         current_btx_height=current_btx_height,
         min_block_seconds=fastest_plausible_block_seconds,
         reorg_margin_blocks=reorg_margin_blocks,
-    )  # descriptor() performs a static ordering check
-    desc = add_checksum(rpc, leg.descriptor())   # mr(htlc_sha256(h256,claimer),refund(lt,sender))
+    )  # descriptor() performs a static ordering check only
+    # REQUIRED immediately before funding. Rechecks the live tip and returns the
+    # checksummed descriptor. Does not broadcast.
+    desc = leg.ready_to_fund(rpc)                # mr(htlc_sha256(h256,claimer),refund(lt,sender))#checksum
     addr = swap_address(rpc, desc)               # the single P2MR lock address
     import_watch(rpc_wallet, desc)               # so the wallet indexes deposits to it
-    # REQUIRED right before funding broadcast: re-check against the live tip height/time.
-    assert_timeout_ordering_at_tip(
-        rpc,
-        btx_refund_height=btx_refund_height,
-        evm_timeout_unix=evm_timeout_unix,
-        min_block_seconds=fastest_plausible_block_seconds,
-        reorg_margin_blocks=reorg_margin_blocks,
-    )
     # ... funder pays `addr`; funder also opens/claims the short EVM leg with the same hashlock ...
 
     dep = find_deposits(rpc_wallet, addr)[0]
@@ -172,6 +166,10 @@ def check_timeout_ordering(
     A too-large interval can falsely accept unsafe cross-leg configs.
     Returns the estimated BTX refund unix timestamp when valid; otherwise raises ValueError.
     """
+    if type(btx_refund_height) is int and btx_refund_height >= LOCKTIME_THRESHOLD:
+        raise ValueError(
+            "btx_refund_height must be a block height; this helper compares it with an EVM unix deadline and cannot take a timestamp"
+        )
     require_block_height_locktime(btx_refund_height, "btx_refund_height")
     if btx_refund_height <= 0:
         raise ValueError("btx_refund_height must be a positive absolute BTX block height")
@@ -242,7 +240,12 @@ def assert_timeout_ordering_at_tip(
 
 @dataclass
 class HtlcLeg:
-    """Parameters of the BTX HTLC leg of a swap."""
+    """Parameters of the BTX HTLC leg of a swap.
+
+    descriptor() runs the static timeout check only. Immediately before sending
+    funds, call ready_to_fund(rpc). That rechecks timeout ordering at the live
+    tip and returns the checksummed descriptor. It does not broadcast.
+    """
     claimer_pubkey: str    # recipient's ML-DSA hex (or pk_slh(...)): claims with preimage + their sig
     sender_pubkey: str     # funder's ML-DSA hex (or pk_slh(...)): refunds after locktime
     preimage_sha256_hex: str
@@ -256,8 +259,8 @@ class HtlcLeg:
     def descriptor(self) -> str:
         """The (checksum-less) mr() descriptor; add checksum via add_checksum(rpc, ...).
 
-        This runs the static timeout check. Before moving funds, callers MUST re-run
-        assert_timeout_ordering_at_tip(...) against the live tip.
+        This runs the static timeout check. descriptor() alone is the static
+        check. Immediately before sending funds, call ready_to_fund(rpc).
         """
         check_timeout_ordering(
             btx_refund_height=self.refund_locktime,
@@ -269,6 +272,24 @@ class HtlcLeg:
         )
         return (f"mr(htlc_sha256({self.preimage_sha256_hex},{self.claimer_pubkey}),"
                 f"refund({self.refund_locktime},{self.sender_pubkey}))")
+
+    def ready_to_fund(self, rpc: "Rpc") -> str:
+        """Recheck timeout ordering at the live tip and return the checksummed descriptor.
+
+        This is the function to call immediately before funding. It does not broadcast.
+        """
+        assert_timeout_ordering_at_tip(
+            rpc,
+            btx_refund_height=self.refund_locktime,
+            evm_timeout_unix=self.evm_timeout_unix,
+            min_block_seconds=self.min_block_seconds,
+            reorg_margin_blocks=self.reorg_margin_blocks,
+        )
+        # The live check is the one that matters here. descriptor() would
+        # re-apply the stored now_unix and height, which can be stale.
+        descriptor = (f"mr(htlc_sha256({self.preimage_sha256_hex},{self.claimer_pubkey}),"
+                      f"refund({self.refund_locktime},{self.sender_pubkey}))")
+        return add_checksum(rpc, descriptor)
 
 
 def add_checksum(rpc: Rpc, descriptor: str) -> str:

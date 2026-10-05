@@ -195,6 +195,23 @@ class WalletHtlcFixesTest(BitcoinTestFramework):
         self.record("F6.2 buildhtlcclaim refuses a fee above -maxtxfee", e is not None and "maxtxfee" in e, (e or "built")[:80])
         e = self.rpc_error(sender.buildhtlcrefund, d6, op6, dest_s, L6, sats - 1)
         self.record("F6.3 buildhtlcrefund refuses a dust output", e is not None and "dust" in e, (e or "built")[:80])
+        e = self.rpc_error(claimer.buildhtlcclaim, d6, op6, pre6.hex(), dest_c, FEE, {"min_confirmations": 0})
+        self.record("F8.1 min_confirmations of 0 is rejected", e is not None and "at least 1" in e, (e or "built")[:90])
+        e = self.rpc_error(claimer.buildhtlcclaim, d6, op6, pre6.hex(), dest_c, FEE, {"min_confirmations": 2})
+        self.record("F8.2 min_confirmations waits for the caller-chosen depth", e is not None and "will not be revealed yet" in e, (e or "built")[:90])
+        e = self.rpc_error(claimer.buildhtlcclaim, d6, op6, pre6.hex(), dest_c, FEE, {"min_confirmations": 100000})
+        self.record("F8.3 a confirmation wait that reaches the refund height is refused", e is not None and "would make the refund path final" in e, (e or "built")[:90])
+        e = self.rpc_error(claimer.buildhtlcclaim, d6, op6, pre6.hex(), dest_c, FEE, {"allow_unconfirmed_funding": True, "min_confirmations": 1})
+        self.record("F8.4 allow_unconfirmed_funding cannot be combined with min_confirmations", e is not None and "cannot be combined" in e, (e or "built")[:90])
+        past = self.desc(f"mr(htlc_sha256({sha256(pre6).hex()},{cpk}),refund(500000000,{spk}))")
+        e = self.rpc_error(node.deriveaddresses, past)
+        self.record("F9.1 deriveaddresses refuses a refund timestamp that is already past", e is not None and "already in the past" in e, (e or "derived")[:90])
+        watched = claimer.importdescriptors([{"desc": past, "timestamp": "now", "active": False}])[0]
+        self.record("F9.2 a watch-only import of a matured refund timestamp still succeeds", watched.get("success") is True, str(watched)[:90])
+        active = claimer.importdescriptors([{"desc": past, "timestamp": "now", "active": True}])[0]
+        self.record("F9.3 an active import of a past refund timestamp is refused", active.get("success") is False and "already in the past" in active.get("error", {}).get("message", ""), str(active)[:120])
+        future = self.desc(f"mr(htlc_sha256({sha256(pre6).hex()},{cpk}),refund(2000000000,{spk}))")
+        self.record("F9.4 a future refund timestamp still derives an address", len(node.deriveaddresses(future)) == 1)
 
         # ================================================= F7 generateblock on an invalid block
         good6 = claimer.buildhtlcclaim(d6, op6, pre6.hex(), dest_c, FEE)

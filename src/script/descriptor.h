@@ -250,6 +250,12 @@ std::vector<std::unique_ptr<Descriptor>> Parse(const std::string& descriptor, Fl
  */
 bool DescriptorIsRecoveryOnlyHtlc(std::string_view descriptor);
 
+/** True when descriptor contains a refund() whose locktime is a Unix timestamp
+ *  ( >= 500000000 ) that is already <= now. Height locktimes and future
+ *  timestamps return false. error is set when true. Checksum after '#' is ignored.
+ */
+bool HtlcRefundTimestampIsPast(std::string_view descriptor, int64_t now, std::string& error);
+
 struct DescriptorParseOptions {
     /** Allow P2MR-only OP_SUCCESS opcodes inside tapscript descriptors (unsafe). */
     bool allow_p2tr_op_success{false};

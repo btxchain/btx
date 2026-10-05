@@ -4291,6 +4291,44 @@ bool DescriptorIsRecoveryOnlyHtlc(std::string_view descriptor)
     return descriptor.find("htlc(") != std::string_view::npos;
 }
 
+bool HtlcRefundTimestampIsPast(std::string_view descriptor, int64_t now, std::string& error)
+{
+    error.clear();
+    const auto hash = descriptor.find('#');
+    if (hash != std::string_view::npos) {
+        descriptor = descriptor.substr(0, hash);
+    }
+
+    constexpr std::string_view token{"refund("};
+    size_t search = 0;
+    while (search < descriptor.size()) {
+        const auto found = descriptor.find(token, search);
+        if (found == std::string_view::npos) break;
+        search = found + token.size();
+        if (found > 0) {
+            const char prev = descriptor[found - 1];
+            const bool ident = (prev >= '0' && prev <= '9') ||
+                               (prev >= 'A' && prev <= 'Z') ||
+                               (prev >= 'a' && prev <= 'z') ||
+                               prev == '_';
+            if (ident) continue;
+        }
+        size_t end = search;
+        while (end < descriptor.size() && descriptor[end] != ',' && descriptor[end] != ')') {
+            ++end;
+        }
+        const auto timeout = ToIntegral<int64_t>(descriptor.substr(search, end - search));
+        // LOCKTIME_THRESHOLD (script.h): Unix time, not a block height.
+        if (timeout.has_value() &&
+            *timeout >= static_cast<int64_t>(LOCKTIME_THRESHOLD) &&
+            *timeout <= now) {
+            error = "HTLC refund timestamp is already in the past and cannot be used for a new address or an active descriptor";
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<std::unique_ptr<Descriptor>> Parse(const std::string& descriptor, FlatSigningProvider& out, std::string& error, bool require_checksum)
 {
     return Parse(descriptor, out, error, require_checksum, DescriptorParseOptions{});

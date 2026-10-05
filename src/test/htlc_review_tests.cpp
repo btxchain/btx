@@ -514,4 +514,16 @@ BOOST_AUTO_TEST_CASE(review_recovery_only_guard)
     BOOST_CHECK(!DescriptorIsRecoveryOnlyHtlc("mr(model_htlc_sha256(" + H32 + "," + C + "))"));
 }
 
+BOOST_AUTO_TEST_CASE(review_refund_timestamp_past)
+{
+    std::string error;
+    constexpr int64_t now = 1790000000;
+    BOOST_CHECK(HtlcRefundTimestampIsPast("refund(500000000)", now, error));
+    BOOST_CHECK_EQUAL(error, "HTLC refund timestamp is already in the past and cannot be used for a new address or an active descriptor");
+    BOOST_CHECK(!HtlcRefundTimestampIsPast("refund(2000000000)", now, error));
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(!HtlcRefundTimestampIsPast("refund(144)", now, error));
+    BOOST_CHECK(error.empty());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
