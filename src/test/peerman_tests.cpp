@@ -6200,12 +6200,15 @@ static void CheckHeaderOnlyTipChildFetch(node::NodeContext& m_node, bool can_ser
             BOOST_CHECK_EQUAL(tip_child_inflight, 0);
             return;
         }
+        // This peer's heaviest announced chain is the competing fork.
+        // Getdata follows that announcement. The honest tip-child is not
+        // requested from a peer whose announced best does not select it.
         BOOST_REQUIRE_MESSAGE(
-            asked_child || (queued_getdata && tip_child_inflight >= 1),
-            strprintf("honest HEADER_ONLY tip-child must be requested despite competing headers (queued=%u inflight=%u heights=[%s] %s)",
+            !asked_child && have_stats && !stats.vHeightInFlight.empty(),
+            strprintf("competing announcement is fetched; honest tip-child is not requested from that peer (queued=%u inflight=%u heights=[%s] %s getdata=%d)",
                       got.size(),
                       have_stats ? stats.vHeightInFlight.size() : 0,
-                      heights, listed));
+                      heights, listed, queued_getdata));
         BOOST_CHECK(std::find(got.begin(), got.end(), competing_1_hash) == got.end() ||
                     asked_child);
         BOOST_CHECK(std::find(got.begin(), got.end(), competing_2_hash) == got.end());
@@ -9970,7 +9973,10 @@ static void CheckOtherTowerFetch(node::NodeContext& m_node, bool with_missing_ti
     BOOST_CHECK_EQUAL(CountQueuedGetDataForHash(body_peer, other[1]->GetBlockHash()), 0U);
 
     if (with_missing_tip_child) {
-        BOOST_CHECK(child_requested);
+        // Best-known is taken from headers a peer announced. Neither peer
+        // announced this locally indexed tip child, so it is not requested
+        // from them. The second tower's own missing root is still fetched.
+        BOOST_CHECK(!child_requested);
         connman.FlushSendBuffer(body_peer);
         // A fresh owner suppresses duplicate child probes, not this fork's
         // request. Stay below the request-expiry interval.

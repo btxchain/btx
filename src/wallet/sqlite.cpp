@@ -126,6 +126,9 @@ static void ConfigureDatabaseSecurity(sqlite3* db)
 
     // Keep PRAGMA in sync with db_config where supported by the runtime.
     SetPragma(db, "trusted_schema", "OFF", "Failed to set trusted_schema pragma");
+    // Overwrite freed pages. Encrypting a PQ seed erases the plaintext row;
+    // without this, SQLite can leave that row in a free page.
+    SetPragma(db, "secure_delete", "ON", "Failed to enable secure_delete");
 }
 
 Mutex SQLiteDatabase::g_sqlite_mutex;

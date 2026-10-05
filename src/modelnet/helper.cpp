@@ -88,6 +88,10 @@
 #include <ctime>
 #include <cstdlib>
 #include <fstream>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#include <unistd.h>
+#endif
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -1645,7 +1649,7 @@ static QueryDedupe g_search_dedupe;
 static bool g_search_bound{false};
 static FeedStore g_feed;
 static CampaignIndex g_campaigns;
-static std::mutex g_campaign_mu;
+static std::recursive_mutex g_campaign_mu;
 static std::mutex g_receipts_mu;
 static std::map<std::string, FundingObservation> g_chain_obs;
 static bool g_feed_loaded{false};
@@ -1773,7 +1777,6 @@ void EnsureEconomy(ModelCatalog& cat)
     EnsureSearchBound();
     const fs::path dir = HelperDir(cat);
     if (g_feed_loaded && dir == g_econ_dir) return;
-    g_campaigns.Clear();
     g_chain_obs.clear();
     g_feed = FeedStore();
     g_econ_dir = dir;
@@ -1787,11 +1790,13 @@ void EnsureEconomy(ModelCatalog& cat)
     }
     (void)g_feed.Load(ConnNowMs(), err);
     std::vector<ReleaseCampaign> local;
-    if (LoadCampaigns(dir, local, err)) {
-        for (const auto& c : local) g_campaigns.Put(c, err);
-    }
+    const bool loaded_campaigns = LoadCampaigns(dir, local, err);
     {
-        std::lock_guard<std::mutex> lock(g_campaign_mu);
+        std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+        g_campaigns.Clear();
+        if (loaded_campaigns) {
+            for (const auto& c : local) g_campaigns.Put(c, err);
+        }
         LoadLocalReleases(dir, local);
     }
 }
@@ -1801,7 +1806,12 @@ void PersistEconomy(ModelCatalog& cat)
     std::string err;
     (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", err);
     (void)g_feed.Save(err);
-    (void)SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+    std::vector<ReleaseCampaign> camps;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+        camps = g_campaigns.List();
+    }
+    (void)SaveCampaigns(HelperDir(cat), camps, err);
 }
 
 bool ReadCatalogBytes(ModelCatalog& cat, const CatalogEntry& e, std::vector<unsigned char>& out, std::string& err)
@@ -1863,7 +1873,7 @@ FundingObservation ObservationFromHit(const SearchHit& h, const ReleaseCampaign*
 
 ModelEconomyEntry EconomyForHit(const SearchHit& h, ModelCatalog* cat = nullptr)
 {
-    std::lock_guard<std::mutex> lock(g_campaign_mu);
+    std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
     const ReleaseCampaign* c = g_campaigns.GetByModel(h.rec.model_id);
     if (!c && !h.rec.release_id.empty()) c = g_campaigns.GetByReleaseHex(h.rec.release_id);
     return ComposeEconomyEntry(h, c, ObservationFromHit(h, c, cat));
@@ -1877,7 +1887,10 @@ UniValue EconomyCard(const SearchHit& h)
 void AfterIndexPut(const ModelSearchRecord& rec, int64_t now_ms)
 {
     g_feed.NoteSearchRecord(rec, now_ms);
-    g_campaigns.IngestFromSearchRecord(rec);
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+        g_campaigns.IngestFromSearchRecord(rec);
+    }
     if (BoundModelEventJournal()) {
         ObserveResult ores;
         std::string jerr;
@@ -2009,7 +2022,7 @@ bool PlaintextServeAllowed(ModelCatalog& cat, const CatalogEntry& entry)
     EnsureEconomy(cat);
     const ReleaseCampaign* c = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_campaign_mu);
+        std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
         c = CampaignForEntry(entry);
         if (!c) return true;
         if (DistinctCiphertextObject(*c, entry)) return true;
@@ -6917,7 +6930,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         const auto hits = g_search_idx.Search(q, ConnNowMs());
         UniValue arr(UniValue::VARR);
         if (method == "getrecentreleases") {
-            for (const auto& c : g_campaigns.List()) {
+            const std::vector<ReleaseCampaign> camps = [&] {
+                std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+                return g_campaigns.List();
+            }();
+            for (const auto& c : camps) {
                 SearchHit h;
                 if (const auto* r = g_search_idx.Get(c.model_id)) h.rec = *r;
                 else {
@@ -7668,7 +7685,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             // would be gated until the next restart and served after it. While
             // local_releases.json is damaged every campaign is gated anyway,
             // so the id is only kept in memory and the damaged file is left.
-            std::lock_guard<std::mutex> lock(g_campaign_mu);
+            std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
             g_local_releases.insert(c.release_id.Hex());
             if (!g_local_releases_untrusted && !SaveLocalReleases(HelperDir(cat))) {
                 g_local_releases.erase(c.release_id.Hex());
@@ -7678,8 +7695,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
         }
         std::string cerr;
-        g_campaigns.Put(c, cerr);
-        SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+            g_campaigns.Put(c, cerr);
+            SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+        }
         {
             CatalogEntry plain;
             if (cat.Find(c.model_id, plain) && !PlaintextServeAllowed(cat, plain)) {
@@ -7735,18 +7755,27 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             Digest48 id;
             SearchHit h;
             const Digest48 user = ResolveUserId(Arg(0).get_str(), err);
-            const ReleaseCampaign* c = g_campaigns.GetByRelease(user);
-            if (!c) c = g_campaigns.GetByModel(user);
-            if (!c && Digest48::FromHex(Arg(0).get_str(), id, err)) c = g_campaigns.GetByRelease(id);
-            if (!c) {
+            ReleaseCampaign camp;
+            bool found{false};
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+                const ReleaseCampaign* c = g_campaigns.GetByRelease(user);
+                if (!c) c = g_campaigns.GetByModel(user);
+                if (!c && Digest48::FromHex(Arg(0).get_str(), id, err)) c = g_campaigns.GetByRelease(id);
+                if (c) {
+                    camp = *c;
+                    found = true;
+                }
+            }
+            if (!found) {
                 err_code = "NOT_FOUND";
                 err = "unknown release";
                 return false;
             }
-            if (const auto* rec = g_search_idx.Get(c->model_id)) h.rec = *rec;
-            else h.rec.model_id = c->model_id;
-            auto e = ComposeEconomyEntry(h, c, ObservationFromHit(h, c, &cat));
-            UniValue one = CampaignToJson(*c);
+            if (const auto* rec = g_search_idx.Get(camp.model_id)) h.rec = *rec;
+            else h.rec.model_id = camp.model_id;
+            auto e = ComposeEconomyEntry(h, &camp, ObservationFromHit(h, &camp, &cat));
+            UniValue one = CampaignToJson(camp);
             one.pushKV("lifecycle_state", ModelLifecycleName(e.lifecycle));
             one.pushKV("remaining_atoms", e.remaining_atoms);
             if (e.funded_percent_known) one.pushKV("funded_percent", MilliToDisplayPercent(e.funded_percent_milli));
@@ -7755,7 +7784,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             one.pushKV("ciphertext_available", e.ciphertext_available);
             arr.push_back(one);
         } else {
-            for (const auto& c : g_campaigns.List()) arr.push_back(CampaignToJson(c));
+            const std::vector<ReleaseCampaign> camps = [&] {
+                std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+                return g_campaigns.List();
+            }();
+            for (const auto& c : camps) arr.push_back(CampaignToJson(c));
         }
         result.pushKV("campaigns", arr);
         result.pushKV("automatic_spend_atoms", 0);
@@ -7774,7 +7807,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err = "amount_atoms";
             return false;
         }
-        std::lock_guard<std::mutex> camp_lock(g_campaign_mu);
+        std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
         auto* c = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(id));
         if (!c) {
             err_code = "NOT_FOUND";
@@ -7810,8 +7843,17 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
         }
-        ReleaseCampaign* c = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(id));
-        if (!c) c = const_cast<ReleaseCampaign*>(g_campaigns.GetByModel(id));
+        ReleaseCampaign camp;
+        bool have_camp = false;
+        {
+            std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
+            const ReleaseCampaign* found = g_campaigns.GetByRelease(id);
+            if (!found) found = g_campaigns.GetByModel(id);
+            if (found) {
+                camp = *found;
+                have_camp = true;
+            }
+        }
         if (method == "claimmodelrelease" && params.isArray() && params.size() > 1 && Arg(1).isStr()) {
             const auto secret = TryParseHex<unsigned char>(Arg(1).get_str());
             if (!secret || secret->size() != 32) {
@@ -7819,35 +7861,47 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err = "secret must be 32 bytes hex";
                 return false;
             }
-            if (!c) {
+            if (!have_camp) {
                 err_code = "NOT_FOUND";
                 err = "unknown release";
                 return false;
             }
-            if (ReleaseHash(Span<const unsigned char>{secret->data(), secret->size()}) != c->key_hash) {
+            if (ReleaseHash(Span<const unsigned char>{secret->data(), secret->size()}) != camp.key_hash) {
                 err_code = "INVALID_PARAMETER";
                 err = "secret does not match SHA-256 key_hash";
                 return false;
             }
-            c->secret_disclosed = true;
             ModelSearchRecord rec;
-            if (const auto* sr = g_search_idx.Get(c->model_id)) rec = *sr;
-            rec.model_id = c->model_id;
-            rec.release_id = c->release_id.Hex();
+            {
+                std::lock_guard<std::mutex> slock(g_search_mu);
+                if (const auto* sr = g_search_idx.Get(camp.model_id)) rec = *sr;
+            }
+            rec.model_id = camp.model_id;
+            rec.release_id = camp.release_id.Hex();
             rec.release_state = "SECRET_DISCLOSED";
-            g_feed.NoteUnlock(c->model_id, c->release_id.Hex(), rec, ConnNowMs());
+            g_feed.NoteUnlock(camp.model_id, camp.release_id.Hex(), rec, ConnNowMs());
             {
                 FeedEvent fe;
                 fe.event_type = FeedEventType::MODEL_UNLOCKED;
-                fe.model_id = c->model_id;
-                fe.release_id = c->release_id.Hex();
+                fe.model_id = camp.model_id;
+                fe.release_id = camp.release_id.Hex();
                 fe.rec = rec;
                 LiveObserveFeed(fe);
             }
+            auto commit_unlock = [&](bool plaintext_verified) {
+                std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
+                auto* live = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(camp.release_id));
+                if (!live) live = const_cast<ReleaseCampaign*>(g_campaigns.GetByModel(camp.model_id));
+                if (!live) return;
+                live->secret_disclosed = true;
+                if (plaintext_verified) live->plaintext_verified = true;
+                camp = *live;
+                SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+            };
             CatalogEntry local;
-            Digest48 cid = c->ciphertext_artifact_id.IsNull() ? c->artifact_id : c->ciphertext_artifact_id;
+            Digest48 cid = camp.ciphertext_artifact_id.IsNull() ? camp.artifact_id : camp.ciphertext_artifact_id;
             bool unlocked = false;
-            if (!cid.IsNull() && (cat.Find(cid, local) || cat.Find(c->model_id, local))) {
+            if (!cid.IsNull() && (cat.Find(cid, local) || cat.Find(camp.model_id, local))) {
                 std::vector<unsigned char> wrapped;
                 if (ReadCatalogBytes(cat, local, wrapped, err) &&
                     LooksLikeBtxEnc2(Span<const unsigned char>{wrapped.data(), wrapped.size()})) {
@@ -7861,8 +7915,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                         }
                         CatalogEntry pub;
                         if (cat.ImportPath(fs::PathToString(tmp), /*pin=*/true, pub, err)) {
-                            c->plaintext_verified = true;
                             unlocked = true;
+                            commit_unlock(true);
                             DemandSeedIfDownloadable(cat, pub.model_id, err);
                             result.pushKV("plaintext_model_id", pub.model_id.Hex());
                             result.pushKV("plaintext_artifact_id", pub.artifact_id.Hex());
@@ -7870,22 +7924,23 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                         fs::remove(tmp);
                     }
                 } else {
-                    DemandSeedIfDownloadable(cat, local.model_id, err);
                     unlocked = true;
+                    commit_unlock(false);
+                    DemandSeedIfDownloadable(cat, local.model_id, err);
                 }
             }
-            SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+            if (!camp.secret_disclosed) commit_unlock(false);
             PersistEconomy(cat);
             result.pushKV("secret_disclosed", true);
             result.pushKV("secret_retained", false);
             result.pushKV("unlocked_locally", unlocked);
-            result.pushKV("plaintext_verified", c->plaintext_verified);
-            result.pushKV("lifecycle_state", c->plaintext_verified ? "PUBLIC_RELEASED" : "SECRET_DISCLOSED");
+            result.pushKV("plaintext_verified", camp.plaintext_verified);
+            result.pushKV("lifecycle_state", camp.plaintext_verified ? "PUBLIC_RELEASED" : "SECRET_DISCLOSED");
             return true;
         }
-        if (c && method == "refundmodelrelease") {
-            result.pushKV("release_id", c->release_id.Hex());
-            result.pushKV("refund_height", static_cast<int64_t>(c->refund_height));
+        if (have_camp && method == "refundmodelrelease") {
+            result.pushKV("release_id", camp.release_id.Hex());
+            result.pushKV("refund_height", static_cast<int64_t>(camp.refund_height));
         }
         CatalogEntry e;
         if (!id.IsNull() && cat.Find(id, e)) {
@@ -8538,13 +8593,23 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             opts.pushKV("auto_pay", false);
             const std::string rid = Arg(0).get_str();
             Digest48 id;
-            const ReleaseCampaign* c = nullptr;
-            if (Digest48::FromHex(rid, id, err)) c = g_campaigns.GetByRelease(id);
-            if (!c) c = g_campaigns.GetByModel(IdFromUser(rid, err));
-            if (c) {
-                opts.pushKV("release_id", c->release_id.Hex());
-                opts.pushKV("key_hash", c->key_hash.Hex());
-                opts.pushKV("refund_height", static_cast<int64_t>(c->refund_height));
+            const Digest48 model_id = IdFromUser(rid, err);
+            ReleaseCampaign camp;
+            bool have_camp = false;
+            {
+                std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
+                const ReleaseCampaign* c = nullptr;
+                if (Digest48::FromHex(rid, id, err)) c = g_campaigns.GetByRelease(id);
+                if (!c) c = g_campaigns.GetByModel(model_id);
+                if (c) {
+                    camp = *c;
+                    have_camp = true;
+                }
+            }
+            if (have_camp) {
+                opts.pushKV("release_id", camp.release_id.Hex());
+                opts.pushKV("key_hash", camp.key_hash.Hex());
+                opts.pushKV("refund_height", static_cast<int64_t>(camp.refund_height));
                 opts.pushKV("hashlock_algorithm", "SHA256");
                 opts.pushKV("assurance", "KEY_RELEASE_ONLY");
             }
@@ -8594,19 +8659,25 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err_code = "INVALID_PARAMETER";
                 return false;
             }
-            auto* c = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(id));
-            if (!c) {
-                err_code = "NOT_FOUND";
-                err = "unknown release";
-                return false;
+            std::string output_script;
+            {
+                // g_search_mu is already held. Campaign lock is taken second.
+                std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
+                auto* c = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(id));
+                if (!c) {
+                    err_code = "NOT_FOUND";
+                    err = "unknown release";
+                    return false;
+                }
+                if (Arg(0).exists("output_script") && Arg(0)["output_script"].isStr()) {
+                    c->output_script_hex = ToLower(Arg(0)["output_script"].get_str());
+                }
+                output_script = c->output_script_hex;
+                SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
             }
-            if (Arg(0).exists("output_script") && Arg(0)["output_script"].isStr()) {
-                c->output_script_hex = ToLower(Arg(0)["output_script"].get_str());
-            }
-            SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
             result.pushKV("accepted", true);
             result.pushKV("release_id", rid);
-            result.pushKV("output_script", c->output_script_hex);
+            result.pushKV("output_script", output_script);
             return true;
         }
         if (method == "ingestchainfundingobservation") {
@@ -8644,6 +8715,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             g_chain_obs[rid] = f;
             Digest48 id;
             if (Digest48::FromHex(rid, id, err)) {
+                // g_search_mu is already held. Campaign lock is taken second.
+                std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
                 if (auto* c = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(id))) {
                     c->funded_atoms = f.confirmed_funded_atoms;
                     if (f.chain_height_known) c->latest_funding_height = f.chain_height;
@@ -8664,14 +8737,25 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
-            const ReleaseCampaign* c = g_campaigns.GetByRelease(id);
-            if (!c) c = g_campaigns.GetByModel(id);
-            if (!c && !Arg(0).get_str().empty()) c = g_campaigns.GetByReleaseHex(Arg(0).get_str());
+            ReleaseCampaign camp;
+            bool have_camp = false;
+            {
+                // g_search_mu is already held. Campaign lock is taken second.
+                std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
+                const ReleaseCampaign* c = g_campaigns.GetByRelease(id);
+                if (!c) c = g_campaigns.GetByModel(id);
+                if (!c && !Arg(0).get_str().empty()) c = g_campaigns.GetByReleaseHex(Arg(0).get_str());
+                if (c) {
+                    camp = *c;
+                    have_camp = true;
+                }
+            }
+            const ReleaseCampaign* cp = have_camp ? &camp : nullptr;
             SearchHit h;
-            Digest48 mid = c ? c->model_id : id;
+            Digest48 mid = cp ? cp->model_id : id;
             if (const auto* rec = g_search_idx.Get(mid)) h.rec = *rec;
             else h.rec.model_id = mid;
-            auto e = ComposeEconomyEntry(h, c, ObservationFromHit(h, c, &cat));
+            auto e = ComposeEconomyEntry(h, cp, ObservationFromHit(h, cp, &cat));
             result = method == "getmodelreleaseeconomics" ? EconomyReleaseJson(e) : EconomyEntryToJson(e);
             result.pushKV("schema_version", ECONOMY_SCHEMA_VERSION);
             result.pushKV("lifecycle_state", ModelLifecycleName(e.lifecycle));
@@ -8685,7 +8769,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 else ++unrel;
             }
             FeedCoverage cov;
-            result = g_feed.StatusJson(pub, static_cast<int>(g_campaigns.Size()), unrel, unlocked, cov);
+            int ncamps = 0;
+            {
+                std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
+                ncamps = static_cast<int>(g_campaigns.Size());
+            }
+            result = g_feed.StatusJson(pub, ncamps, unrel, unlocked, cov);
             result.pushKV("feed_sequence", static_cast<int64_t>(g_feed.Sequence()));
             return true;
         }
@@ -8695,7 +8784,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             q.filters.fundable_only = true;
             if (!Arg(0).isObject() || !Arg(0).exists("sort")) q.sort = SearchSort::NEARLY_FUNDED;
             std::vector<ModelEconomyEntry> camp;
-            for (const auto& c : g_campaigns.List()) {
+            const std::vector<ReleaseCampaign> camps = [&] {
+                std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+                return g_campaigns.List();
+            }();
+            for (const auto& c : camps) {
                 SearchHit h;
                 if (const auto* rec = g_search_idx.Get(c.model_id)) h.rec = *rec;
                 else {
@@ -8755,14 +8848,23 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
-            const ReleaseCampaign* c = g_campaigns.GetByRelease(id);
-            if (!c) c = g_campaigns.GetByModel(id);
-            if (!c) c = g_campaigns.GetByReleaseHex(Arg(0).get_str());
+            ReleaseCampaign camp;
+            bool have_camp = false;
+            {
+                std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
+                const ReleaseCampaign* c = g_campaigns.GetByRelease(id);
+                if (!c) c = g_campaigns.GetByModel(id);
+                if (!c) c = g_campaigns.GetByReleaseHex(Arg(0).get_str());
+                if (c) {
+                    camp = *c;
+                    have_camp = true;
+                }
+            }
             Digest48 cid;
-            if (c) {
-                cid = c->ciphertext_artifact_id.IsNull() ? c->artifact_id : c->ciphertext_artifact_id;
-                result.pushKV("release_id", c->release_id.Hex());
-                result.pushKV("key_hash", c->key_hash.Hex());
+            if (have_camp) {
+                cid = camp.ciphertext_artifact_id.IsNull() ? camp.artifact_id : camp.ciphertext_artifact_id;
+                result.pushKV("release_id", camp.release_id.Hex());
+                result.pushKV("key_hash", camp.key_hash.Hex());
             } else {
                 cid = id;
             }
@@ -8773,7 +8875,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
             result.pushKV("ciphertext_artifact_id", cid.Hex());
             CatalogEntry local;
-            if (cat.Find(cid, local) || (c && cat.Find(c->model_id, local))) {
+            if (cat.Find(cid, local) || (have_camp && cat.Find(camp.model_id, local))) {
                 std::vector<unsigned char> bytes;
                 if (ReadCatalogBytes(cat, local, bytes, err) &&
                     LooksLikeBtxEnc2(Span<const unsigned char>{bytes.data(), bytes.size()})) {
@@ -8895,7 +8997,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         if (fq.mode == FeedMode::NEARLY_FUNDED || fq.mode == FeedMode::FUNDED_AWAITING_RELEASE) {
             items.clear();
             std::vector<ModelEconomyEntry> camp;
-            for (const auto& c : g_campaigns.List()) {
+            const std::vector<ReleaseCampaign> camps = [&] {
+                std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+                return g_campaigns.List();
+            }();
+            for (const auto& c : camps) {
                 SearchHit h;
                 if (const auto* rec = g_search_idx.Get(c.model_id)) h.rec = *rec;
                 else {
@@ -10399,6 +10505,16 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
 
 int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
 {
+#if defined(__linux__)
+    // btxd sets this when it spawns the helper. If btxd crashes, the kernel
+    // delivers SIGTERM so the helper does not keep the model port.
+    if (std::getenv("BTX_HELPER_PARENT_WATCH") != nullptr) {
+        if (prctl(PR_SET_PDEATHSIG, SIGTERM) == 0 && getppid() == 1) {
+            std::cerr << "btx-modeld: parent already exited\n";
+            return 1;
+        }
+    }
+#endif
     SetPwcChain(cfg.pwc_chain);
     SetPwcQualificationRegistryPath(cfg.qualification_file);
     std::signal(SIGPIPE, SIG_IGN);

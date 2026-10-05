@@ -316,7 +316,10 @@ bool HelperSupervisor::SpawnLocked(std::string& err)
         err = "refusing to spawn helper with wallet material in argv";
         return false;
     }
-    const auto env_s = SanitizeHelperEnv(environ);
+    auto env_s = SanitizeHelperEnv(environ);
+    // The helper exits if this process dies, so a crash does not leave it
+    // holding the model port. A manually started btx-modeld does not set this.
+    env_s.emplace_back("BTX_HELPER_PARENT_WATCH=1");
     std::vector<char*> argv;
     std::vector<char*> envp;
     argv.reserve(argv_s.size() + 1);

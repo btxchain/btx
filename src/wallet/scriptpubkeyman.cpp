@@ -2893,6 +2893,7 @@ bool DescriptorScriptPubKeyMan::UnlockPQSeeds(const CKeyingMaterial& master_key)
         if (!entry.second.empty()) memory_cleanse(entry.second.data(), entry.second.size());
     }
     if (!plaintext_seed && !plaintext_map) return true;
+    LogPrintf("Encrypting PQ descriptor seeds. An older wallet build that only reads plaintext seed records can open this wallet but cannot spend from it.\n");
     return WritePQSeeds(batch, &master_key);
 }
 

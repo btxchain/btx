@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # HTLC hardening review (second pass): mixed-version regtest checks.
 # Local review only. Two private regtest nodes connected only to each other on 127.0.0.1.
-"""Mixed-version checks between a v0.34.12 node (node0) and a v0.34.13 node (node1).
+"""Mixed-version checks between a v0.34.12 node (node0) and a v0.34.14 node (node1).
 
 X1 (F1)  node0 mines a block with a legacy SHA-256 HTLC claim that reveals a 33-byte
          preimage. node1 rejects the block and the two chains split. The split ends
          only when the node1 side has more work.
 X2 (F3)  the same htlc_sha256() descriptor derives different addresses on the two
-         versions, and a v0.34.12 claimer cannot claim a lock funded at the v0.34.13
+         versions, and a v0.34.12 claimer cannot claim a lock funded at the v0.34.14
          address.
-X3 (N1)  a claim of a v0.34.13 (OP_SIZE) lock is non-standard on v0.34.12: it is not
+X3 (N1)  a claim of a v0.34.14 (OP_SIZE) lock is non-standard on v0.34.12: it is not
          accepted to node0's mempool, is not relayed to it, and node0 does not mine it.
          node0 still accepts a block that contains it.
 
@@ -79,7 +79,7 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
 
     def setup_network(self):
         # Connected in run_test after the initial chain is mined: during a fast
-        # bulk generation 0.34.13 disconnects 0.34.12 for "unconnecting headers".
+        # bulk generation 0.34.14 disconnects 0.34.12 for "unconnecting headers".
         self.setup_nodes()
 
     # ------------------------------------------------------------ helpers
@@ -110,10 +110,10 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
         old, new = self.nodes
         self.log.info(f"node0 version {old.getnetworkinfo()['subversion']}, node1 version {new.getnetworkinfo()['subversion']}")
         assert "0.34.12" in old.getnetworkinfo()["subversion"]
-        assert "0.34.13" in new.getnetworkinfo()["subversion"]
+        assert "0.34.14" in new.getnetworkinfo()["subversion"]
 
         ow, omine = create_bridge_wallet(self, old, wallet_name="old_w", amount=Decimal("12"))
-        # node1 (0.34.13) makes the outbound connection: it does not download
+        # node1 (0.34.14) makes the outbound connection: it does not download
         # blocks from the inbound 0.34.12 peer during initial sync.
         self.connect_nodes(1, 0)
         self.wait_same_tip(timeout=300)
@@ -144,8 +144,8 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
         d_pub = self.desc(old, f"mr(htlc_sha256({h33},{cpk_old}),refund({L},{spk_old}))")
         legacy_addr = old.deriveaddresses(d_pub)[0]
         new_addr_same_desc = new.deriveaddresses(d_pub)[0]
-        self.log.info(f"same descriptor: 0.34.12 address {legacy_addr}, 0.34.13 address {new_addr_same_desc}")
-        self.record("X2.1 the same htlc_sha256() descriptor derives different addresses on 0.34.12 and 0.34.13",
+        self.log.info(f"same descriptor: 0.34.12 address {legacy_addr}, 0.34.14 address {new_addr_same_desc}")
+        self.record("X2.1 the same htlc_sha256() descriptor derives different addresses on 0.34.12 and 0.34.14",
                     legacy_addr != new_addr_same_desc, "FINDING F3 confirmed across versions" if legacy_addr != new_addr_same_desc else "")
 
         # Import the claim descriptor with the claimer's PRIVATE ranged key so walletprocesspsbt can sign.
@@ -174,7 +174,7 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
         r_new = new.testmempoolaccept([claim_hex])[0]
         self.record("X1.1 both mempools refuse the 33-byte claim (policy)",
                     not r_old["allowed"] and not r_new["allowed"],
-                    f"0.34.12: {r_old.get('reject-reason')}; 0.34.13: {r_new.get('reject-reason')}")
+                    f"0.34.12: {r_old.get('reject-reason')}; 0.34.14: {r_new.get('reject-reason')}")
 
         base_h = old.getblockcount()
         base_hash = old.getbestblockhash()
@@ -192,18 +192,18 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
         self.wait_until(new_marked_invalid, timeout=60)
         with open(new.debug_log_path, encoding="utf-8", errors="replace") as f:
             reasons = [l.strip() for l in f if split_hash[:16] in l or "Invalid HTLC preimage size" in l]
-        self.record("X1.3 0.34.13 rejects the same block as invalid",
+        self.record("X1.3 0.34.14 rejects the same block as invalid",
                     new.getbestblockhash() == base_hash and new_marked_invalid(),
                     (reasons[-1][-140:] if reasons else ""))
 
         self.mine(old, 2, omine)
         time.sleep(3)
-        self.record("X1.4 chains split: 0.34.12 builds on its block, 0.34.13 stays behind",
+        self.record("X1.4 chains split: 0.34.12 builds on its block, 0.34.14 stays behind",
                     old.getblockcount() == base_h + 3 and new.getblockcount() == base_h
                     and new.getbestblockhash() == base_hash,
-                    f"0.34.12 tip h={old.getblockcount()}, 0.34.13 tip h={new.getblockcount()}")
+                    f"0.34.12 tip h={old.getblockcount()}, 0.34.14 tip h={new.getblockcount()}")
 
-        # The 0.34.13 side now mines more blocks than the 0.34.12 side has.
+        # The 0.34.14 side now mines more blocks than the 0.34.12 side has.
         new_mine = nw.getnewaddress(address_type="p2mr")
         for _ in range(5):
             self.mine(new, 1, new_mine)
@@ -232,7 +232,7 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
         v2, _ = find_output(new, f2, new_fmt_addr, nw)
         assert_raises_rpc_error(-8, "does not match", oc.buildhtlcclaim, d2, {"txid": f2, "vout": v2},
                                 pre32.hex(), oc.getnewaddress(address_type="p2mr"), FEE)
-        self.record("X2.2 a 0.34.12 claimer cannot claim a lock funded at the 0.34.13 address",
+        self.record("X2.2 a 0.34.12 claimer cannot claim a lock funded at the 0.34.14 address",
                     True, "buildhtlcclaim: Outpoint scriptPubKey does not match the descriptor")
 
         # ============================================ X3: N1 new-leaf claim is non-standard on 0.34.12
@@ -249,9 +249,9 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
         claim3 = nw.buildhtlcclaim(d3, {"txid": f3, "vout": v3}, pre3.hex(), nw.getnewaddress(address_type="p2mr"), FEE)
         r_new = new.testmempoolaccept([claim3["hex"]])[0]
         r_old = old.testmempoolaccept([claim3["hex"]])[0]
-        self.record("X3.1 a claim of a 0.34.13 lock is standard on 0.34.13 but NOT on 0.34.12",
+        self.record("X3.1 a claim of a 0.34.14 lock is standard on 0.34.14 but NOT on 0.34.12",
                     r_new["allowed"] and not r_old["allowed"],
-                    f"0.34.13 allowed={r_new['allowed']}; 0.34.12: {r_old.get('reject-reason')}")
+                    f"0.34.14 allowed={r_new['allowed']}; 0.34.12: {r_old.get('reject-reason')}")
         txid3 = new.sendrawtransaction(claim3["hex"])
         time.sleep(5)
         self.record("X3.2 the claim is not relayed into the 0.34.12 mempool",
@@ -264,11 +264,11 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
         self.mine(new, 1, new_mine)
         self.wait_same_tip()
         blk = new.getblock(new.getbestblockhash())
-        self.record("X3.4 a 0.34.13 miner includes it and 0.34.12 accepts that block",
+        self.record("X3.4 a 0.34.14 miner includes it and 0.34.12 accepts that block",
                     txid3 in blk["tx"] and old.getbestblockhash() == new.getbestblockhash())
 
-        # ============================================ X4: wallet written by 0.34.12, loaded by 0.34.13
-        # 0.34.12 accepts refund(0) and the same key in the claim and refund leaves. 0.34.13
+        # ============================================ X4: wallet written by 0.34.12, loaded by 0.34.14
+        # 0.34.12 accepts refund(0) and the same key in the claim and refund leaves. 0.34.14
         # rejects both descriptors at parse time, including when it loads them from a wallet file.
         hx = sha256(b"x4").hex()
         k1 = self.pq_pubkey(ow)
@@ -292,7 +292,7 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
                 new.unloadwallet(wname)
             except Exception as e:  # noqa: BLE001
                 loaded, err4 = False, str(e)[:160]
-            self.record(f"X4 0.34.13 loads a 0.34.12 wallet that imported {wname[3:]} HTLC descriptor",
+            self.record(f"X4 0.34.14 loads a 0.34.12 wallet that imported {wname[3:]} HTLC descriptor",
                         loaded, err4 or "loaded")
 
         self.log.info("==== SUMMARY ====")

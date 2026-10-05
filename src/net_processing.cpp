@@ -4346,11 +4346,14 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                          /*is_retained_retry=*/true);
             return;
     }
+    // The body is already retained. Replay it locally when its source
+    // disconnected. Waiting until the retention TTL drops the only copy.
     LogDebug(BCLog::NET,
-             "Deferring budget-deferred body %s (source peer=%d gone) until admission\n",
+             "Replaying retained body %s locally; source peer=%d is gone\n",
              candidate_hash.ToString(), candidate.source_peer);
-    RefreshMatMulDeferredBodyRetry(
-        candidate_hash, "deferred source gone; replay stays budgeted");
+    ProcessBlockSync(/*nodeid=*/-1, /*node=*/nullptr, candidate.block,
+                     candidate.force_processing, candidate.min_pow_checked,
+                     /*post_process=*/nullptr);
 }
 
 bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash, uint64_t keyed_netgroup) const
@@ -16205,11 +16208,14 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // Ordinary duplicate deliveries cannot claim this exemption. Keep the
     // original force_processing value for the separate AcceptBlock gates;
     // pending slots, source/global budgets and ExactReplay still apply.
-    // A requested body and a scheduler retry both pass RC admission.
-    // Only an inbound catch-up push of the active tip skips a fresh ticket.
-    const bool ticket_exempt = catchup_inbound_push;
-    (void)is_retained_retry;
-    (void)retained_retry;
+    // A body this node already requested, and a scheduler retry of a body it
+    // already retained, both pass RC admission without a fresh ticket. An
+    // inbound catch-up push of the active tip does too. An unsolicited push
+    // still needs a ticket, unless it is the unique followed tip-child
+    // (persisted below). Without the retained retry, a held tip-child ages
+    // out and is fetched again, still without a ticket.
+    const bool ticket_exempt =
+        catchup_inbound_push || requested_body || (is_retained_retry && retained_retry);
     std::optional<node::RCAdmissionTicket> accepted_ticket;
     const auto restore_accepted_ticket = [&] {
         if (!accepted_ticket) return;
@@ -16270,19 +16276,16 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             const auto action{node::ClassifyTicketlessRCBody(
                 followed_historical_hole, tip_child, persist_without_gpu)};
             if (action == node::TicketlessRCBodyAction::PersistWithoutGpu) {
-                // Followed bodies stay on the budgeted retry path. They
-                // are retained until a ticket or a scheduled retry, and
-                // are not classified NO_RECOMPUTE.
+                // The unique followed tip-child, or a followed historical
+                // hole. Persist it so AcceptBlock can ExactReplay. Holding
+                // it for a ticket that never arrives is how a node that is
+                // merely behind stops. Competing siblings do not take this
+                // action.
                 LogDebug(BCLog::NET,
-                         "Retaining ticketless followed-chain %s hash=%s from "
-                         "peer=%d until budgeted rcadmit\n",
+                         "Persisting ticketless followed-chain %s hash=%s from "
+                         "peer=%d without waiting for rcadmit\n",
                          source, block_hash.ToString(), node.GetId());
-                admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
-                admission.is_ibd = is_ibd;
-                admission.encdr_profile = exact_encdr_profile;
-                admission.rc_profile = rc_profile;
-                admission.reference_height = exact_reference_height;
-                admission.work_units = work;
+                admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
                 admission.retain_as_requested = true;
                 maybe_request_attestations_without_gpu();
                 return true;
@@ -16831,8 +16834,9 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         ReadStatus status = partialBlock.FillBlock(*pblock, block_transactions.txn,
                                                    /*segwit_active=*/DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT));
         if (status == READ_STATUS_INVALID) {
-            InsertHeaderOnlySkipHash(m_structural_download_skip,
-                                     block_transactions.blockhash);
+            // The txn message did not match this compact block. Another peer
+            // can still provide the block. A mutated full body is recorded
+            // later, from BlockChecked, and that skip stays.
             RemoveBlockRequest(block_transactions.blockhash, pfrom.GetId()); // Reset in-flight state in case Misbehaving does not result in a disconnect
             Misbehaving(peer, "invalid compact block/non-matching block transactions");
             return;
@@ -19268,8 +19272,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 PartiallyDownloadedBlock& partialBlock = *(*queuedBlockIt)->partialBlock;
                 ReadStatus status = partialBlock.InitData(cmpctblock, vExtraTxnForCompact);
                 if (status == READ_STATUS_INVALID) {
-                    InsertHeaderOnlySkipHash(m_structural_download_skip,
-                                             pindex->GetBlockHash());
+                    // A malformed compact block is this peer's message, not
+                    // proof the block is bad. Do not stop other peers from
+                    // serving the same header.
                     RemoveBlockRequest(pindex->GetBlockHash(), pfrom.GetId()); // Reset in-flight state in case Misbehaving does not result in a disconnect
                     Misbehaving(*peer, "invalid compact block");
                     return;
@@ -19324,8 +19329,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // Malformed compact blocks should be punished even when this is an
                     // optimistic reconstruction path and not an active download slot.
                     if (status == READ_STATUS_INVALID) {
-                        InsertHeaderOnlySkipHash(m_structural_download_skip,
-                                                 cmpctblock.header.GetHash());
                         Misbehaving(*peer, "invalid compact block");
                     }
                     return;
@@ -19337,8 +19340,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 if (status == READ_STATUS_OK) {
                     fBlockReconstructed = true;
                 } else if (status == READ_STATUS_INVALID) {
-                    InsertHeaderOnlySkipHash(m_structural_download_skip,
-                                             cmpctblock.header.GetHash());
+                    Misbehaving(*peer, "invalid compact block");
                 }
             }
         } else {
