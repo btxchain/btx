@@ -5082,25 +5082,21 @@ ExactReplayVerifyResult ConfirmDeviceMismatches(
     result.ok = false;
     result.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
     result.failure_kind = RCExactReplayFailureKind::UnconfirmedDigestMismatch;
-    // A qualified, fully accelerated device is the consensus check. Its
-    // digest either matches the header or the block is invalid. A portable
-    // CPU replay is not a referee for that miss, on this architecture or
-    // any later one.
-    if (qualified_device && result.fully_accelerated &&
-        result.cpu_gemm_calls == 0 && result.cpu_gemm_fallbacks == 0 &&
-        result.device_gemm_calls != 0 && !result.digest.IsNull()) {
-        result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
-        result.failure_kind = RCExactReplayFailureKind::None;
-        result.acceleration_failure.clear();
-        result.operator_recovery.clear();
-        result.note = "ExactReplay: qualified device digest mismatch is a consensus rejection";
-        return result;
-    }
+    // A qualified GPU digest that disagrees with an untrusted header is a
+    // retryable local failure, not a consensus rejection. Portable CPU, when
+    // the operator enabled it, runs only on the confirmation queue.
+    const bool gpu_only_mismatch{
+        result.fully_accelerated && result.cpu_gemm_calls == 0 &&
+        result.cpu_gemm_fallbacks == 0 && result.device_gemm_calls != 0 &&
+        !result.digest.IsNull()};
     if (!GetRCExactReplayCpuConfirmation()) {
-        // An unqualified or incomplete device is not a consensus authority.
         // Leave the block retryable. Do not invent a CPU verdict for it.
-        result.acceleration_failure = "cpu_confirmation_disabled_unqualified_device";
-        result.note = "ExactReplay: mismatch lacks qualified device authority; block remains retryable";
+        result.acceleration_failure = (qualified_device && gpu_only_mismatch)
+            ? "qualified_device_digest_mismatch_retryable"
+            : "cpu_confirmation_disabled_unqualified_device";
+        result.note = (qualified_device && gpu_only_mismatch)
+            ? "ExactReplay: qualified device digest mismatch is a retryable local failure"
+            : "ExactReplay: mismatch lacks qualified device authority; block remains retryable";
         return result;
     }
     // Value captures contain only replay context and results, never a GPU
@@ -5108,6 +5104,12 @@ ExactReplayVerifyResult ConfirmDeviceMismatches(
     auto confirm = [header, params, height,
                     target_copy = target ? std::optional<arith_uint256>{*target} : std::nullopt,
                     result, device_digests = std::move(device_digests)]() mutable {
+        if (GetRCAcceleratorScheduler().CurrentThreadOwnsLease()) {
+            result.acceleration_failure = "portable_replay_retained_accelerator_lease";
+            result.note = "ExactReplay: portable confirmation refused while the accelerator lease is held; block remains retryable";
+            result.adjudication = RCExactReplayAdjudication::IndependentProvidersInconclusive;
+            return result;
+        }
         const auto start{std::chrono::steady_clock::now()};
         RCExactReplayAccelerationStats stats;
         RCExactReplayAcceleration cpu;
@@ -5162,7 +5164,23 @@ ExactReplayVerifyResult ConfirmDeviceMismatches(
         return confirmations->Submit(RCCpuConfirmationKey(header, params, height, target, profile),
                                      header.GetHash(), result, std::move(confirm));
     }
-    // Synchronous seam for existing deterministic oracle tests only.
+    // Never run portable CPU on the calling thread while it holds the
+    // process-wide accelerator lease, and never inline it for a qualified
+    // GPU miss. Operator confirmation is the queue above. The remaining
+    // inline call is unqualified diagnostic auto-fallback only.
+    if (GetRCAcceleratorScheduler().CurrentThreadOwnsLease() ||
+        (qualified_device && gpu_only_mismatch)) {
+        result.acceleration_failure =
+            GetRCAcceleratorScheduler().CurrentThreadOwnsLease()
+                ? "portable_replay_retained_accelerator_lease"
+                : "qualified_device_digest_mismatch_retryable";
+        result.note = GetRCAcceleratorScheduler().CurrentThreadOwnsLease()
+            ? "ExactReplay: refusing inline portable CPU while the accelerator lease is held; block remains retryable"
+            : "ExactReplay: qualified device digest mismatch stays retryable until operator-triggered portable confirmation";
+        result.operator_recovery =
+            "retry, or enable -matmulrcconfirmcpu so portable confirmation runs off the accelerator lease";
+        return result;
+    }
     return confirm();
 }
 
@@ -5274,12 +5292,10 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
             if (!header.matmul_digest.IsNull() &&
                 acceleration.require_device &&
                 acceleration_stats.device_calls != 0) {
-                // Single-provider strict replay still does not CPU-confirm
-                // here: that would skip independently canaried GPU
-                // alternates. VerifyStrictWithAlternates tries those first,
-                // then confirms with portable CPU ExactReplay (the 0.34.7
-                // oracle) so a CUDA-only node cannot leave a false header
-                // retryable forever.
+                // Single-provider strict replay does not CPU-confirm here.
+                // VerifyStrictWithAlternates may try another GPU. A remaining
+                // digest mismatch stays retryable unless the operator queued
+                // portable confirmation. This thread does not run that CPU.
                 out.outcome =
                     ExactReplayVerifyOutcome::LocalAcceleratorFailure;
                 out.failure_kind =
@@ -5636,18 +5652,36 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
                 if (RCProductionProviderCapabilitiesIndependent(
                         previous.capability, candidate.capability) &&
                     previous.result.digest == result.digest) {
+                    // Two GPUs agreeing against an untrusted header is still
+                    // an unconfirmed digest. It stays retryable. Portable CPU
+                    // runs only when the operator queue is attached.
                     result.ok = false;
-                    result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
-                    result.failure_kind = RCExactReplayFailureKind::None;
-                    result.adjudication =
-                        RCExactReplayAdjudication::IndependentDigestConfirmed;
-                    result.adjudicating_provider = candidate.provider;
-                    result.device_mismatch_retried = true;
-                    result.device_mismatch_confirmed = true;
-                    result.acceleration_failure.clear();
+                    result.outcome =
+                        ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+                    result.failure_kind =
+                        RCExactReplayFailureKind::UnconfirmedDigestMismatch;
+                    result.adjudication = RCExactReplayAdjudication::
+                        IndependentProvidersInconclusive;
+                    result.adjudicating_provider.clear();
+                    result.device_mismatch_retried = false;
+                    result.device_mismatch_confirmed = false;
+                    result.acceleration_failure =
+                        "independent_device_digest_mismatch_retryable";
                     result.note =
-                        "ExactReplay: digest mismatch confirmed by independent provider";
+                        "ExactReplay: independent GPU digest mismatch vs untrusted header remains retryable";
                     apply_aggregate(result);
+                    if (confirmations != nullptr &&
+                        GetRCExactReplayCpuConfirmation()) {
+                        std::vector<uint256> device_digests;
+                        device_digests.push_back(previous.result.digest);
+                        device_digests.push_back(result.digest);
+                        return ConfirmDeviceMismatches(
+                            header, params, height, target, profile, result,
+                            std::move(device_digests),
+                            !previous.capability.IsNull() ||
+                                !candidate.capability.IsNull(),
+                            confirmations);
+                    }
                     return result;
                 }
             }
@@ -5697,9 +5731,24 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
         apply_aggregate(result);
         std::vector<uint256> device_digests;
         for (const auto& mismatch : mismatches) device_digests.push_back(mismatch.result.digest);
-        return ConfirmDeviceMismatches(
-            header, params, height, target, profile, result, std::move(device_digests),
-            !mismatches.front().capability.IsNull(), confirmations);
+        // Operator-triggered portable confirmation is queued off this thread.
+        // A null queue must not inline CPU ExactReplay on a body-holding lease.
+        if (confirmations != nullptr) {
+            return ConfirmDeviceMismatches(
+                header, params, height, target, profile, result, std::move(device_digests),
+                !mismatches.front().capability.IsNull(), confirmations);
+        }
+        result.ok = false;
+        result.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+        result.failure_kind = RCExactReplayFailureKind::UnconfirmedDigestMismatch;
+        result.device_mismatch_confirmed = false;
+        result.device_mismatch_retried = false;
+        result.acceleration_failure = mismatches.front().capability.IsNull()
+            ? "device_digest_mismatch_unconfirmed"
+            : "qualified_device_digest_mismatch_retryable";
+        result.note =
+            "ExactReplay: GPU digest mismatch vs untrusted header remains retryable until operator-triggered portable confirmation";
+        return result;
     }
 
     if (last_failure.has_value()) {

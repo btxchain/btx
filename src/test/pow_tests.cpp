@@ -5726,4 +5726,32 @@ BOOST_AUTO_TEST_CASE(ReduceRescaleRatioToU32_exact_and_rejects)
     BOOST_CHECK(!ReduceRescaleRatioToU32(int64_t{4'294'967'311LL} /*prime>2^32*/, int64_t{4'294'967'357LL} /*prime>2^32*/, n, d));
 }
 
+BOOST_AUTO_TEST_CASE(matmul_digest_below_target_does_not_authenticate_work)
+{
+    CBlockHeader header;
+    const Consensus::Params params{};
+    BOOST_CHECK(!MatMulDigestBelowTargetAuthenticatesWork(header, params));
+    header.matmul_digest = uint256::ONE;
+    BOOST_CHECK(!MatMulDigestBelowTargetAuthenticatesWork(header, params));
+}
+
+BOOST_AUTO_TEST_CASE(qualified_gpu_digest_mismatch_is_retryable_not_consensus)
+{
+    BOOST_CHECK(MatMulQualifiedGpuDigestMismatchIsRetryable(
+        true, /*device_gemm_calls=*/1, /*cpu_gemm_calls=*/0,
+        /*cpu_gemm_fallbacks=*/0, /*committed_digest_null=*/false,
+        /*digest_equals_commitment=*/false, /*portable_confirmation_ran=*/false));
+    BOOST_CHECK(!MatMulQualifiedGpuDigestMismatchIsRetryable(
+        true, 1, 0, 0, /*committed_digest_null=*/true, false, false));
+    BOOST_CHECK(!MatMulQualifiedGpuDigestMismatchIsRetryable(
+        true, 1, 0, 0, false, /*digest_equals_commitment=*/true, false));
+    BOOST_CHECK(!MatMulQualifiedGpuDigestMismatchIsRetryable(
+        true, 1, /*cpu_gemm_calls=*/4, 0, false, false,
+        /*portable_confirmation_ran=*/true));
+    BOOST_CHECK(!MatMulQualifiedGpuDigestMismatchIsRetryable(
+        /*fully_accelerated=*/false, 1, 0, 0, false, false, false));
+    BOOST_CHECK(!MatMulQualifiedGpuDigestMismatchIsRetryable(
+        true, /*device_gemm_calls=*/0, 0, 0, false, false, false));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

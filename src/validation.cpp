@@ -12547,7 +12547,8 @@ void ChainstateManager::MaybeParkDeepHeavierRewrite(CBlockIndex* index, bool par
     // on that chain. A tip below the fork still follows the taller chain.
     if (tip != nullptr && IsDeepHeavierRewriteBranch(tip)) return;
     if (m_tallest_header != nullptr && !IsDeepHeavierRewriteBranch(m_tallest_header) &&
-        !IsOnParkedReorgBranch(m_tallest_header)) {
+        !IsOnParkedReorgBranch(m_tallest_header) &&
+        !Phase1OnlyMatMulHeaderMustNotLead(*m_tallest_header)) {
         SetBestHeader(m_tallest_header);
     }
 }
@@ -13838,12 +13839,14 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
         m_reorg_recovery = std::move(record);
         if (mode == static_cast<uint8_t>(
                         node::ReorgRecoveryRecord::Mode::TRUSTED_AUTHORITY) &&
-            !BlockIndexDescends(m_best_header, recovery_root)) {
+            !BlockIndexDescends(m_best_header, recovery_root) &&
+            !Phase1OnlyMatMulHeaderMustNotLead(*candidate)) {
             // The quorum itself is the current authority decision. The first
             // valid MMATTEST may arrive after this header was learned from a
             // then-unproven peer, so the header-follow path may not previously
             // have selected it. Make the durable recovery target the followed
             // target now; later authority headers can extend it normally.
+            // A Phase-1-only header is not that target.
             SetBestHeader(const_cast<CBlockIndex*>(candidate));
         }
         LogWarning("%s: armed automatic %s recovery at fork=%s initial_depth=%d recovery_root=%s authenticated_tip=%s\n",
@@ -14005,7 +14008,9 @@ bool ChainstateManager::NormalizeReorgRecovery(const CBlockIndex* active_tip)
         }
         return true;
     }
-    if (trusted_record && !BlockIndexDescends(m_best_header, recovery_root)) {
+    if (trusted_record && !BlockIndexDescends(m_best_header, recovery_root) &&
+        authenticated_tip != nullptr &&
+        !Phase1OnlyMatMulHeaderMustNotLead(*authenticated_tip)) {
         // Reconstruct the followed authority target on restart from the
         // durable, current-config-reverified quorum record.
         SetBestHeader(const_cast<CBlockIndex*>(authenticated_tip));
@@ -14306,6 +14311,7 @@ void ChainstateManager::RefreshAuthenticatedChainWork(CBlockIndex& index)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         AssertLockHeld(::cs_main);
         if (candidate.nStatus & BLOCK_FAILED_MASK) return;
+        if (Phase1OnlyMatMulHeaderMustNotLead(candidate)) return;
         NoteAuthenticatedRecoveryCandidate(&candidate);
         if (m_best_header == nullptr ||
             PreferMostWorkHeader(*m_best_header, candidate)) {
@@ -14367,6 +14373,7 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
             EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
             AssertLockHeld(::cs_main);
             if (candidate.nStatus & BLOCK_FAILED_MASK) return;
+            if (Phase1OnlyMatMulHeaderMustNotLead(candidate)) return;
             NoteAuthenticatedRecoveryCandidate(&candidate);
             if (m_best_header == nullptr ||
                 PreferMostWorkHeader(*m_best_header, candidate)) {
@@ -15139,6 +15146,11 @@ bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* p
     // "not trusted" (=> the recompute runs).
     if (m_untrusted_epoch_revalidation) return false;
     if (AssumedValidBlock().IsNull() || m_best_header == nullptr || pindex_self == nullptr) return false;
+    // Phase-1 (digest <= nBits) is not a reason to skip ExactReplay.
+    if (Phase1OnlyMatMulHeaderMustNotLead(*pindex_self) ||
+        Phase1OnlyMatMulHeaderMustNotLead(*m_best_header)) {
+        return false;
+    }
     const auto av_it = m_blockman.m_block_index.find(AssumedValidBlock());
     if (av_it == m_blockman.m_block_index.end()) return false;
     if (av_it->second.GetAncestor(nHeight) != pindex_self) return false;
@@ -16193,6 +16205,15 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     CBlockIndex* const prev_best{m_best_header};
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
+    // AddToBlockIndex writes m_best_header through its reference when
+    // PreferMostWorkHeader ranks this header's claimed nChainWork higher.
+    // min_pow_checked only means Phase-1 (digest <= compact nBits) already
+    // passed. At/after nMatMulPhase1HeaderNotMostWorkHeight that is not
+    // authenticated work, so undo the promotion. nChainWork is unchanged.
+    if (pindex != nullptr && m_best_header == pindex &&
+        Phase1OnlyMatMulHeaderMustNotLead(*pindex)) {
+        m_best_header = prev_best;
+    }
     MaybeParkDeepHeavierRewrite(pindex);
     // Stamp the victim-relative first-seen tip height ONCE, on first index
     // creation, for the local -deepforkautoresolve policy. Memory-only; never
@@ -16236,9 +16257,10 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                     failed, IsOnParkedReorgBranch(pindex),
                     pindex->nChainWork > tip->nChainWork,
                     pindex->nHeight >= tip->nHeight)};
-            if (heavier_disconnected) {
+            if (heavier_disconnected && !Phase1OnlyMatMulHeaderMustNotLead(*pindex)) {
                 SetBestHeader(pindex);
-            } else if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
+            } else if (!Phase1OnlyMatMulHeaderMustNotLead(*pindex) &&
+                       node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
                     .extends_active_tip_chain = extends_tip,
                     .on_parked_reorg_branch = IsOnParkedReorgBranch(pindex),
                     .candidate_height = pindex->nHeight,
@@ -17416,7 +17438,8 @@ bool ChainstateManager::LoadBlockIndex()
                 !(m_options.reorg_policy == Options::ReorgPolicyMode::BOUNDED &&
                   (IsOnParkedReorgBranch(pindex) || IsDeepHeavierRewriteBranch(pindex)))) {
                 MaybeUpdateBestClaimedHeader(pindex);
-                if (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, *pindex)) {
+                if (!Phase1OnlyMatMulHeaderMustNotLead(*pindex) &&
+                    (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, *pindex))) {
                     SetBestHeader(pindex);
                 }
             }
@@ -23258,7 +23281,8 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
             claimed->nHeight >= tip->nHeight)) {
         return;
     }
-    if (claimed->nChainWork > m_best_header->nChainWork) {
+    if (claimed->nChainWork > m_best_header->nChainWork &&
+        !Phase1OnlyMatMulHeaderMustNotLead(*claimed)) {
         SetBestHeader(claimed);
     }
 }
@@ -23288,7 +23312,8 @@ void ChainstateManager::RecalculateBestHeader()
             // Download locators must rank by nChainWork. The 6-block unauth
             // allowance left m_best_header on the connected tip while a
             // 944-deep more-work headers-only suffix sat in the index.
-            if (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, entry.second)) {
+            if (!Phase1OnlyMatMulHeaderMustNotLead(entry.second) &&
+                (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, entry.second))) {
                 SetBestHeader(&entry.second);
             }
         }
@@ -23368,7 +23393,8 @@ void ChainstateManager::RecalculateBestHeader()
                 (fork != nullptr && fork != active_tip)
                     ? active_tip->nHeight - fork->nHeight
                     : 0};
-            if (kernel::ShallowHeaderWorkMayLeadAutoRecovery(
+            if (!Phase1OnlyMatMulHeaderMustNotLead(candidate) &&
+                kernel::ShallowHeaderWorkMayLeadAutoRecovery(
                     depth, park_depth,
                     candidate.nChainWork > active_tip->nChainWork)) {
                 if (shallow_header_work_best == nullptr ||
@@ -23391,6 +23417,7 @@ void ChainstateManager::RecalculateBestHeader()
             }
         }
         if (!has_authority_ancestor) continue;
+        if (Phase1OnlyMatMulHeaderMustNotLead(candidate)) continue;
         if (authority_best == nullptr ||
             CBlockIndexWorkComparator()(authority_best, &candidate)) {
             authority_best = &candidate;
@@ -23405,7 +23432,8 @@ void ChainstateManager::RecalculateBestHeader()
             }
             if ((candidate.nStatus & BLOCK_FAILED_MASK) ||
                 IsOnParkedReorgBranch(&candidate) ||
-                !BlockIndexDescends(&candidate, attested_frontier)) {
+                !BlockIndexDescends(&candidate, attested_frontier) ||
+                Phase1OnlyMatMulHeaderMustNotLead(candidate)) {
                 continue;
             }
             if (candidate.nHeight > followed->nHeight ||

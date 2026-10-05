@@ -970,6 +970,14 @@ struct Params {
      *  after header tip 239154 on 2026-10-05 (4846 blocks at 90 seconds).
      *  int32 max means "not scheduled" on networks other than mainnet. */
     int32_t nP2MRHTLCPreimage32Height{std::numeric_limits<int32_t>::max()};
+    /** At and after this height, a MatMul header whose only proof check is
+     *  Phase-1 (digest <= compact nBits) is not authenticated work. It must
+     *  not become m_best_header, must not win most-work header selection, and
+     *  must not cause ExactReplay to be skipped. nChainWork of blocks already
+     *  indexed below the height is left unchanged, matching 0.34.12/0.34.13.
+     *  The struct default is int32 max. Mainnet sets
+     *  BTX_SECURITY_ACTIVATION_HEIGHT (block 244000). */
+    int32_t nMatMulPhase1HeaderNotMostWorkHeight{std::numeric_limits<int32_t>::max()};
     /** Maximum shielded verification cost units per block (consensus rule).
      *  SMILE v2: Each spend costs ~100 units; each output ~15 units.
      *  Budget: 1042 × 230 = 240,000. Size (24MB) is the binding constraint.

@@ -1637,6 +1637,31 @@ BOOST_AUTO_TEST_CASE(
     outer = {};
 }
 
+BOOST_AUTO_TEST_CASE(rc_portable_mismatch_replay_refuses_held_accelerator_lease)
+{
+    auto& scheduler{rc::GetRCAcceleratorScheduler()};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    CBlockHeader header{MakeRCHeader(0x4c45415345)};
+    std::atomic_bool cancelled{false};
+    auto lease{scheduler.Acquire(
+        rc::RCAcceleratorScheduler::Priority::TipValidation,
+        &cancelled, "portable-mismatch-must-not-hold-lease")};
+    BOOST_REQUIRE(lease);
+    BOOST_REQUIRE(scheduler.CurrentThreadOwnsLease());
+    rc::RCExactReplayAccelerationStats stats;
+    rc::RCExactReplayAcceleration acceleration;
+    acceleration.backend = "cpu_device_mismatch_retry";
+    acceleration.stats = &stats;
+    const uint256 refused{rc::RecomputeResidentCurriculumAccelerated(
+        header, params, 0, {}, nullptr, nullptr, acceleration)};
+    BOOST_CHECK(refused.IsNull());
+    BOOST_CHECK_EQUAL(stats.first_failure,
+                      "portable_replay_retained_accelerator_lease");
+    BOOST_CHECK_EQUAL(stats.cpu_calls, 0U);
+    lease = {};
+    BOOST_CHECK(!scheduler.CurrentThreadOwnsLease());
+}
+
 BOOST_AUTO_TEST_CASE(rc_strict_alternate_registry_requires_canary_capability)
 {
     rc::ClearRCExactReplayAlternateProviders();
@@ -1893,10 +1918,13 @@ BOOST_AUTO_TEST_CASE(rc_cpu_confirmation_opt_out_requires_qualified_exact_comple
     const auto capability{rc::IssueRCProductionProviderCapabilityForTest(acceleration.backend, backend, MakeReplayCapabilityEpoch(params, header.matmul_dim))};
     BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({.backend = backend, .provider = acceleration.backend, .capability = capability}));
     const auto rejected{rc::VerifyBoundedExactReplayWithAccelerationForTest(header, params, 0, acceleration, nullptr, &queue)};
-    BOOST_CHECK(rejected.outcome == rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK(rejected.outcome == rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(rejected.failure_kind == rc::RCExactReplayFailureKind::UnconfirmedDigestMismatch);
+    BOOST_CHECK_EQUAL(rejected.acceleration_failure, "qualified_device_digest_mismatch_retryable");
     BOOST_CHECK_EQUAL(rejected.digest, digest);
     BOOST_CHECK_EQUAL(rejected.cpu_gemm_calls, 0U);
     BOOST_CHECK(!rejected.device_mismatch_retried);
+    BOOST_CHECK(!rejected.device_mismatch_confirmed);
     BOOST_CHECK(!queue.Pending(header.GetHash()));
     BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
     // Execution failure is not a mismatch, even with confirmation disabled.
@@ -1932,17 +1960,15 @@ BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_cpu_confirms_invalid_not_quarantined
             header, params, 0, healthy)};
     BOOST_CHECK(!rejected.ok);
     BOOST_CHECK(rejected.outcome ==
-                rc::ExactReplayVerifyOutcome::InvalidConsensus);
+                rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
     BOOST_CHECK(rejected.failure_kind ==
-                rc::RCExactReplayFailureKind::None);
-    BOOST_CHECK(rejected.adjudication ==
-                rc::RCExactReplayAdjudication::IndependentDigestConfirmed);
-    BOOST_CHECK(rejected.device_mismatch_confirmed);
-    BOOST_CHECK(rejected.device_mismatch_retried);
-    BOOST_CHECK_EQUAL(rejected.adjudicating_provider,
-                      "cpu_device_mismatch_retry");
+                rc::RCExactReplayFailureKind::UnconfirmedDigestMismatch);
+    BOOST_CHECK_EQUAL(rejected.acceleration_failure,
+                      "device_digest_mismatch_unconfirmed");
+    BOOST_CHECK(!rejected.device_mismatch_confirmed);
+    BOOST_CHECK(!rejected.device_mismatch_retried);
     BOOST_CHECK_EQUAL(rejected.digest, honest_digest);
-    BOOST_CHECK_GT(rejected.cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(rejected.cpu_gemm_calls, 0U);
     BOOST_CHECK(!rejected.fully_accelerated);
     BOOST_CHECK_EQUAL(rejected.provider_attempts, 1U);
     BOOST_CHECK_EQUAL(rejected.independent_provider_attempts, 0U);
@@ -2012,12 +2038,13 @@ BOOST_AUTO_TEST_CASE(rc_strict_independent_same_digest_rejects_false_header)
             header, params, 0, primary)};
     BOOST_CHECK(!rejected.ok);
     BOOST_CHECK(rejected.outcome ==
-                rc::ExactReplayVerifyOutcome::InvalidConsensus);
+                rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
     BOOST_CHECK(rejected.failure_kind ==
-                rc::RCExactReplayFailureKind::None);
-    BOOST_CHECK(rejected.adjudication ==
-                rc::RCExactReplayAdjudication::IndependentDigestConfirmed);
-    BOOST_CHECK(rejected.device_mismatch_confirmed);
+                rc::RCExactReplayFailureKind::UnconfirmedDigestMismatch);
+    BOOST_CHECK_EQUAL(rejected.acceleration_failure,
+                      "independent_device_digest_mismatch_retryable");
+    BOOST_CHECK(!rejected.device_mismatch_confirmed);
+    BOOST_CHECK_EQUAL(rejected.cpu_gemm_calls, 0U);
     BOOST_CHECK_EQUAL(rejected.provider_attempts, 2U);
     BOOST_CHECK_EQUAL(rejected.independent_provider_attempts, 1U);
     BOOST_CHECK(!rejected.provider_quarantined);
@@ -2160,13 +2187,13 @@ BOOST_AUTO_TEST_CASE(rc_strict_same_callback_cannot_masquerade_as_independent)
             header, params, 0, primary)};
     BOOST_CHECK(!rejected.ok);
     BOOST_CHECK(rejected.outcome ==
-                rc::ExactReplayVerifyOutcome::InvalidConsensus);
-    BOOST_CHECK(rejected.adjudication ==
-                rc::RCExactReplayAdjudication::IndependentDigestConfirmed);
-    BOOST_CHECK(rejected.device_mismatch_confirmed);
-    BOOST_CHECK_EQUAL(rejected.adjudicating_provider,
-                      "cpu_device_mismatch_retry");
-    BOOST_CHECK_GT(rejected.cpu_gemm_calls, 0U);
+                rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(rejected.failure_kind ==
+                rc::RCExactReplayFailureKind::UnconfirmedDigestMismatch);
+    BOOST_CHECK_EQUAL(rejected.acceleration_failure,
+                      "qualified_device_digest_mismatch_retryable");
+    BOOST_CHECK(!rejected.device_mismatch_confirmed);
+    BOOST_CHECK_EQUAL(rejected.cpu_gemm_calls, 0U);
     BOOST_CHECK_EQUAL(rejected.provider_attempts, 1U);
     BOOST_CHECK_EQUAL(rejected.independent_provider_attempts, 0U);
     BOOST_CHECK(!rejected.provider_quarantined);
@@ -2513,18 +2540,16 @@ BOOST_AUTO_TEST_CASE(rc_strict_faulty_device_cpu_recovers_honest_header)
     const auto recovered{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
             header, params, 0, faulty)};
-    BOOST_CHECK(recovered.ok);
-    BOOST_CHECK(recovered.outcome == rc::ExactReplayVerifyOutcome::Valid);
-    BOOST_CHECK(recovered.adjudication ==
-                rc::RCExactReplayAdjudication::IndependentHeaderRecovered);
-    BOOST_CHECK_EQUAL(recovered.adjudicating_provider,
-                      "cpu_device_mismatch_retry");
+    BOOST_CHECK(!recovered.ok);
+    BOOST_CHECK(recovered.outcome ==
+                rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(recovered.failure_kind ==
+                rc::RCExactReplayFailureKind::UnconfirmedDigestMismatch);
     BOOST_CHECK_EQUAL(recovered.acceleration_failure,
-                      "device_digest_mismatch_cpu_recovered");
-    BOOST_CHECK(recovered.device_mismatch_retried);
+                      "device_digest_mismatch_unconfirmed");
+    BOOST_CHECK(!recovered.device_mismatch_retried);
     BOOST_CHECK(!recovered.device_mismatch_confirmed);
-    BOOST_CHECK_EQUAL(recovered.digest, honest_digest);
-    BOOST_CHECK_GT(recovered.cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(recovered.cpu_gemm_calls, 0U);
     BOOST_CHECK(!recovered.fully_accelerated);
     BOOST_CHECK(!recovered.provider_quarantined);
     BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);

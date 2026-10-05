@@ -813,6 +813,10 @@ public:
         // and after it. See BTX_SECURITY_ACTIVATION_HEIGHT.
         consensus.nP2MRHTLCPreimage32Height = BTX_SECURITY_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryProofVerifyCostHeight = BTX_SECURITY_ACTIVATION_HEIGHT;
+        // Phase-1 (digest <= compact nBits) does not authenticate MatMul work
+        // at or after this height. Header promotion and ExactReplay trust use
+        // the same flag day. nChainWork below it is not recomputed.
+        consensus.nMatMulPhase1HeaderNotMostWorkHeight = BTX_SECURITY_ACTIVATION_HEIGHT;
         consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
         consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         consensus.nMaxReorgDepth = 12;

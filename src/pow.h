@@ -216,6 +216,21 @@ uint256 DeterministicMatMulSeedV3(const CBlockHeader& block, uint32_t height, in
     int32_t block_height,
     std::optional<int64_t> parent_median_time_past = std::nullopt);
 bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::Params& params);
+/** Digest <= compact nBits is CheckMatMulProofOfWork_Phase1 only. It does not
+ *  authenticate MatMul work, credit nChainWork, or skip ExactReplay. */
+[[nodiscard]] bool MatMulDigestBelowTargetAuthenticatesWork(
+    const CBlockHeader& block, const Consensus::Params& params) noexcept;
+/** True when a fully accelerated GPU digest disagrees with the committed
+ *  header and no portable CPU confirmation has run. That miss is a retryable
+ *  local failure, not authenticated consensus invalidity. */
+[[nodiscard]] bool MatMulQualifiedGpuDigestMismatchIsRetryable(
+    bool fully_accelerated,
+    uint64_t device_gemm_calls,
+    uint64_t cpu_gemm_calls,
+    uint64_t cpu_gemm_fallbacks,
+    bool committed_digest_null,
+    bool digest_equals_commitment,
+    bool portable_confirmation_ran) noexcept;
 /** Validate the immutable MatMul-ASERT schedule parameters (ratios, ordering,
  *  branch-collision freedom). Purely a function of @p params -- @p next_height is
  *  used only for log context. Called both at chain-parameter construction

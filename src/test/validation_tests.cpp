@@ -492,6 +492,9 @@ BOOST_AUTO_TEST_CASE(recovery_proof_verify_cost_consensus_gate_defaults_unset)
     const auto mainnet = CreateChainParams(args, ChainType::MAIN);
     BOOST_CHECK_EQUAL(mainnet->GetConsensus().nShieldedRecoveryProofVerifyCostHeight, 244'000);
     BOOST_CHECK_EQUAL(mainnet->GetConsensus().nP2MRHTLCPreimage32Height, 244'000);
+    BOOST_CHECK_EQUAL(mainnet->GetConsensus().nMatMulPhase1HeaderNotMostWorkHeight, 244'000);
+    BOOST_CHECK_EQUAL(CreateChainParams(args, ChainType::REGTEST)->GetConsensus().nMatMulPhase1HeaderNotMostWorkHeight,
+                      std::numeric_limits<int32_t>::max());
 }
 
 BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_and_expires_at_v03212_height)
