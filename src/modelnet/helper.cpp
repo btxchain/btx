@@ -1855,6 +1855,89 @@ std::string OriginRateNetgroup(const NativeRequest& req)
     return req.peer_addr.empty() ? "pq1" : req.peer_addr;
 }
 
+uint64_t FreeGrantChargeBytes(const CatalogEntry& entry, uint32_t file_index, uint32_t piece_index, bool whole_file)
+{
+    if (file_index >= entry.core.files.size()) return 1;
+    const uint64_t file_size = entry.core.files[file_index].size;
+    if (whole_file) return file_size == 0 ? 1 : file_size;
+    if (file_size == 0) return 1;
+    const uint64_t start = static_cast<uint64_t>(piece_index) * PIECE_SIZE;
+    if (start >= file_size) return 1;
+    const uint64_t n = std::min<uint64_t>(PIECE_SIZE, file_size - start);
+    return n == 0 ? 1 : n;
+}
+
+const ReleaseCampaign* CampaignForEntry(const CatalogEntry& entry)
+{
+    if (const ReleaseCampaign* by_model = g_campaigns.GetByModel(entry.model_id)) return by_model;
+    for (const auto& camp : g_campaigns.List()) {
+        if (camp.model_id == entry.model_id || camp.artifact_id == entry.artifact_id ||
+            (!camp.ciphertext_artifact_id.IsNull() &&
+             (camp.ciphertext_artifact_id == entry.artifact_id || camp.ciphertext_artifact_id == entry.model_id))) {
+            return g_campaigns.GetByRelease(camp.release_id);
+        }
+    }
+    return nullptr;
+}
+
+bool DistinctCiphertextObject(const ReleaseCampaign& c, const CatalogEntry& entry)
+{
+    if (c.ciphertext_artifact_id.IsNull() || c.ciphertext_artifact_id == c.artifact_id) return false;
+    return entry.artifact_id == c.ciphertext_artifact_id || entry.model_id == c.ciphertext_artifact_id;
+}
+
+bool ServedPrefixIsCiphertext(ModelCatalog& cat, const CatalogEntry& entry)
+{
+    if (entry.core.files.empty()) return false;
+    std::vector<unsigned char> bytes;
+    std::vector<Digest48> proof;
+    uint64_t file_size = 0;
+    std::string err;
+    if (!cat.GetVerifiedPiece(entry.artifact_id, 0, 0, bytes, proof, file_size, err)) return false;
+    return LooksLikeBtxEnc2(Span<const unsigned char>{bytes.data(), bytes.size()});
+}
+
+/** downloadable_now=false withholds the plaintext bytes. A distinct ciphertext object may stay seeded. */
+bool PlaintextServeAllowed(ModelCatalog& cat, const CatalogEntry& entry)
+{
+    EnsureEconomy(cat);
+    const ReleaseCampaign* c = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_campaign_mu);
+        c = CampaignForEntry(entry);
+        if (!c) return true;
+        if (DistinctCiphertextObject(*c, entry)) return true;
+        SearchHit h;
+        h.rec.model_id = c->model_id;
+        h.rec.artifact_id = c->artifact_id;
+        h.rec.release_id = c->release_id.Hex();
+        if (c->plaintext_verified) h.rec.release_state = "PUBLIC_RELEASED";
+        else if (c->secret_disclosed) h.rec.release_state = "SECRET_DISCLOSED";
+        else h.rec.release_state = "FUNDING";
+        const ReleaseCampaign camp = *c;
+        const auto econ = ComposeEconomyEntry(h, &camp, ObservationFromHit(h, &camp, &cat));
+        if (econ.downloadable_now) return true;
+    }
+    return ServedPrefixIsCiphertext(cat, entry);
+}
+
+bool DemandSeedIfDownloadable(ModelCatalog& cat, const Digest48& id, std::string& err)
+{
+    CatalogEntry e;
+    if (!cat.Find(id, e)) {
+        err = "unknown model";
+        return false;
+    }
+    if (!PlaintextServeAllowed(cat, e)) {
+        if (e.seeded) {
+            std::string uerr;
+            (void)cat.Seed(e.model_id, false, uerr);
+        }
+        return true;
+    }
+    return cat.ApplyDemandSeed(id, err);
+}
+
 bool CheckFreeGrantEntitlement(const ModelCatalog& cat, const NativeRequest& req, const CatalogEntry& entry,
                                uint32_t file_index, uint32_t piece_index, bool whole_file, uint32_t n_pieces,
                                UniValue& gbody, NativeResponse& resp)
@@ -1916,7 +1999,9 @@ bool CheckFreeGrantEntitlement(const ModelCatalog& cat, const NativeRequest& req
         resp.body = JsonError("ENTITLEMENT", "piece not in grant range");
         return false;
     }
-    if (!VerifyHostedFreeGrant(HelperDir(cat), *payload, *sig, presented, now, use_key, gbody, gerr, /*record_use=*/true)) {
+    const uint64_t charge = FreeGrantChargeBytes(entry, file_index, piece_index, whole_file);
+    if (!VerifyHostedFreeGrant(HelperDir(cat), *payload, *sig, presented, now, use_key, gbody, gerr,
+                               /*record_use=*/true, charge)) {
         resp.status = 403;
         resp.body = JsonError("ENTITLEMENT", gerr.empty() ? "invalid FreeGrant" : gerr);
         return false;
@@ -2064,6 +2149,11 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             resp.body = JsonError("NOT_FOUND", "not seeded");
             return true;
         }
+        if (!PlaintextServeAllowed(cat, entry)) {
+            resp.status = 404;
+            resp.body = JsonError("NOT_FOUND", "not seeded");
+            return true;
+        }
         UniValue gbody;
         if (!CheckFreeGrantEntitlement(cat, req, entry, file_index, piece_index, /*whole_file=*/false, 0, gbody, resp)) {
             return true;
@@ -2183,6 +2273,11 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             resp.body = JsonError("NOT_FOUND", "no file");
             return true;
         }
+        if (!PlaintextServeAllowed(cat, entry)) {
+            resp.status = 404;
+            resp.body = JsonError("NOT_FOUND", "not seeded");
+            return true;
+        }
         const uint64_t file_size = entry.core.files[file_index].size;
         const uint32_t n_pieces = file_size == 0 ? 1u : static_cast<uint32_t>((file_size + PIECE_SIZE - 1) / PIECE_SIZE);
         UniValue gbody;
@@ -2246,6 +2341,15 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
                 if (m.exists("complete") && !m["complete"].get_bool()) continue;
                 if (m.exists("model_id") && m["model_id"].isStr() && GlobalSafety().SubjectBlocked(m["model_id"].get_str())) continue;
                 if (m.exists("artifact_id") && m["artifact_id"].isStr() && GlobalSafety().SubjectBlocked(m["artifact_id"].get_str())) continue;
+                if (m.exists("artifact_id") && m["artifact_id"].isStr()) {
+                    Digest48 aid;
+                    std::string aerr;
+                    CatalogEntry served;
+                    if (Digest48::FromHex(m["artifact_id"].get_str(), aid, aerr) && cat.Find(aid, served) &&
+                        !PlaintextServeAllowed(cat, served)) {
+                        continue;
+                    }
+                }
                 UniValue one = m;
                 if (one.exists("files") && one["files"].isArray()) {
                     UniValue files(UniValue::VARR);
@@ -2641,9 +2745,36 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             return true;
         }
         FeedQuery fq;
-        if (body.exists("mode")) ParseFeedMode(body["mode"].get_str(), fq.mode);
-        if (body.exists("limit")) fq.limit = body["limit"].getInt<int>();
-        if (body.exists("cursor")) fq.cursor = body["cursor"].get_str();
+        if (body.exists("mode")) {
+            if (!body["mode"].isStr()) {
+                resp.status = 400;
+                resp.body = JsonError("BAD_JSON", "mode");
+                return true;
+            }
+            ParseFeedMode(body["mode"].get_str(), fq.mode);
+        }
+        if (body.exists("limit")) {
+            if (!body["limit"].isNum()) {
+                resp.status = 400;
+                resp.body = JsonError("BAD_JSON", "limit");
+                return true;
+            }
+            try {
+                fq.limit = body["limit"].getInt<int>();
+            } catch (const std::exception&) {
+                resp.status = 400;
+                resp.body = JsonError("BAD_JSON", "limit");
+                return true;
+            }
+        }
+        if (body.exists("cursor")) {
+            if (!body["cursor"].isStr()) {
+                resp.status = 400;
+                resp.body = JsonError("BAD_JSON", "cursor");
+                return true;
+            }
+            fq.cursor = body["cursor"].get_str();
+        }
         fq.scope = SearchScope::LOCAL;
         std::lock_guard<std::mutex> lock(g_search_mu);
         std::string next;
@@ -3411,7 +3542,7 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                 }
                 if (RetrieveFreeFromPeer(cat, pq, host, port, model_id, rerr, &job->cancel, pinfile, &job->progress, extras)) {
                     std::string seed_err;
-                    cat.ApplyDemandSeed(model_id, seed_err);
+                    DemandSeedIfDownloadable(cat, model_id, seed_err);
                     CatalogEntry got;
                     UniValue r(UniValue::VOBJ);
                     r.pushKV("schema_version", 2);
@@ -6802,6 +6933,14 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err = derr;
             return false;
         }
+        if (method == "seedmodel") {
+            CatalogEntry seeded_entry;
+            if (cat.Find(id, seeded_entry) && !PlaintextServeAllowed(cat, seeded_entry)) {
+                err_code = "NOT_DOWNLOADABLE";
+                err = "release plaintext is not downloadable";
+                return false;
+            }
+        }
         if (!cat.Seed(id, method == "seedmodel", err)) {
             err_code = "NOT_FOUND";
             return false;
@@ -7023,7 +7162,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 cat.Find(r.digest, local);
             }
             if (!local.incomplete) {
-                cat.ApplyDemandSeed(local.model_id, err);
+                DemandSeedIfDownloadable(cat, local.model_id, err);
                 cat.Find(r.digest, local);
                 result.pushKV("plan", "FREE");
                 result.pushKV("status", "local");
@@ -7140,7 +7279,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             if (pq.Ready() && SplitHostPort(ep, host, port) &&
                 RetrieveFreeFromPeer(cat, pq, host, port, r.digest, err, stop,
                                      cat.Store().Root().parent_path() / "tls" / "pins.json")) {
-                cat.ApplyDemandSeed(r.digest, err);
+                DemandSeedIfDownloadable(cat, r.digest, err);
                 CatalogEntry got;
                 result.pushKV("plan", "FREE");
                 result.pushKV("status", "retrieved");
@@ -7420,6 +7559,13 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         std::string cerr;
         g_campaigns.Put(c, cerr);
         SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+        {
+            CatalogEntry plain;
+            if (cat.Find(c.model_id, plain) && !PlaintextServeAllowed(cat, plain)) {
+                std::string uerr;
+                (void)cat.Seed(plain.model_id, false, uerr);
+            }
+        }
         g_feed.NoteCampaign(c, ConnNowMs());
         LiveObserveCampaign(c, FeedEventType::RELEASE_CAMPAIGN_CREATED);
         bool published_search = false;
@@ -7596,14 +7742,14 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                         if (cat.ImportPath(fs::PathToString(tmp), /*pin=*/true, pub, err)) {
                             c->plaintext_verified = true;
                             unlocked = true;
-                            cat.ApplyDemandSeed(pub.model_id, err);
+                            DemandSeedIfDownloadable(cat, pub.model_id, err);
                             result.pushKV("plaintext_model_id", pub.model_id.Hex());
                             result.pushKV("plaintext_artifact_id", pub.artifact_id.Hex());
                         }
                         fs::remove(tmp);
                     }
                 } else {
-                    cat.ApplyDemandSeed(local.model_id, err);
+                    DemandSeedIfDownloadable(cat, local.model_id, err);
                     unlocked = true;
                 }
             }
@@ -7622,7 +7768,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         CatalogEntry e;
         if (!id.IsNull() && cat.Find(id, e)) {
-            cat.ApplyDemandSeed(e.model_id, err);
+            DemandSeedIfDownloadable(cat, e.model_id, err);
             result.pushKV("seeded", cat.Find(id, e) && e.seeded);
         }
         return true;
@@ -8514,7 +8660,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     result.pushKV("verified_ciphertext", true);
                     result.pushKV("plaintext_unavailable", true);
                     if (cat.Policy().allow_encrypted) {
-                        cat.ApplyDemandSeed(local.model_id, err);
+                        DemandSeedIfDownloadable(cat, local.model_id, err);
                         result.pushKV("seeded_ciphertext", true);
                     }
                     return true;
@@ -10126,7 +10272,7 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
     if (!SplitHostPort(pick.peer, host, port)) return;
     if (!cat.EnforceQuota(pick.bytes, err)) return;
     if (RetrieveFreeFromPeer(cat, pq, host, port, pick.model_id, err, stop, pinfile)) {
-        cat.ApplyDemandSeed(pick.model_id, err);
+        DemandSeedIfDownloadable(cat, pick.model_id, err);
     }
 }
 
@@ -10264,7 +10410,12 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
                     pq1_jobs.pop();
                 }
                 if (job.fd < 0) continue;
-                HandlePq1Fd(job.fd, cat, pq, stop, pinfile, job.netgroup, job.peer_addr);
+                try {
+                    HandlePq1Fd(job.fd, cat, pq, stop, pinfile, job.netgroup, job.peer_addr);
+                } catch (const std::exception&) {
+                    // A malformed request must not terminate btx-modeld.
+                } catch (...) {
+                }
                 GlobalConnLimits().ReleaseInbound(job.netgroup);
             }
         });

@@ -256,7 +256,41 @@ bool EncodeGrantEnvelope(const SignedFreeGrant& g, std::vector<unsigned char>& o
     return !out.empty();
 }
 
-bool RedeemGrantUseUnlocked(UniValue& store, const std::string& nonce_hex, const std::string& use_key, std::string& err)
+bool GrantUseConflicts(const UniValue& arr, const std::string& use_key, std::string& err)
+{
+    const bool file_all = use_key.find(":all") != std::string::npos;
+    const std::string file_prefix = use_key.substr(0, use_key.find(':'));
+    for (const auto& v : arr.getValues()) {
+        if (!v.isStr()) continue;
+        const std::string& have = v.get_str();
+        if (have == use_key) {
+            // A redemption is single-use. Retrying the same piece must not
+            // serve the bytes again without a new grant.
+            err = "replay";
+            return true;
+        }
+        if (file_all && have.rfind(file_prefix + ":", 0) == 0) {
+            err = "replay";
+            return true;
+        }
+        if (!file_all && have == file_prefix + ":all") {
+            err = "replay";
+            return true;
+        }
+    }
+    return false;
+}
+
+uint64_t RedeemedBytes(const UniValue& store, const std::string& nonce_hex)
+{
+    if (!store.exists("redeemed_bytes") || !store["redeemed_bytes"].isObject()) return 0;
+    const UniValue& bytes = store["redeemed_bytes"];
+    if (!bytes.exists(nonce_hex) || !bytes[nonce_hex].isNum()) return 0;
+    return bytes[nonce_hex].getInt<uint64_t>();
+}
+
+bool RedeemGrantUseUnlocked(UniValue& store, const std::string& nonce_hex, const std::string& use_key,
+                            uint64_t redeem_bytes, uint64_t maximum_bytes, std::string& err)
 {
     if (nonce_hex.size() != 64 || use_key.empty()) {
         err = "grant_nonce";
@@ -264,31 +298,25 @@ bool RedeemGrantUseUnlocked(UniValue& store, const std::string& nonce_hex, const
     }
     UniValue used = store.exists("uses") ? store["uses"] : UniValue(UniValue::VOBJ);
     UniValue arr = used.exists(nonce_hex) ? used[nonce_hex] : UniValue(UniValue::VARR);
-    const auto file_all = use_key.find(":all") != std::string::npos;
-    const std::string file_prefix = use_key.substr(0, use_key.find(':'));
-    for (const auto& v : arr.getValues()) {
-        if (!v.isStr()) continue;
-        const std::string& have = v.get_str();
-        if (have == use_key) {
-            // Same piece GET on the same nonce is an HTTP retry, not a second spend.
-            return true;
-        }
-        if (file_all && have.rfind(file_prefix + ":", 0) == 0) {
-            err = "replay";
-            return false;
-        }
-        if (!file_all && have == file_prefix + ":all") {
-            err = "replay";
-            return false;
-        }
-    }
+    if (GrantUseConflicts(arr, use_key, err)) return false;
     if (arr.size() >= FREE_GRANT_MAX_USES) {
         err = "grant use cap";
+        return false;
+    }
+    const uint64_t already = RedeemedBytes(store, nonce_hex);
+    if (maximum_bytes > 0 &&
+        (redeem_bytes > maximum_bytes || already > maximum_bytes - redeem_bytes)) {
+        err = "maximum_bytes";
         return false;
     }
     arr.push_back(use_key);
     used.pushKV(nonce_hex, arr);
     store.pushKV("uses", used);
+    UniValue bytes = store.exists("redeemed_bytes") && store["redeemed_bytes"].isObject()
+                         ? store["redeemed_bytes"]
+                         : UniValue(UniValue::VOBJ);
+    bytes.pushKV(nonce_hex, already + redeem_bytes);
+    store.pushKV("redeemed_bytes", bytes);
     return true;
 }
 
@@ -300,7 +328,8 @@ bool VerifyHostedFreeGrant(const fs::path& helper_dir,
                            const std::string& use_key,
                            UniValue& body,
                            std::string& err,
-                           bool record_use)
+                           bool record_use,
+                           uint64_t redeem_bytes)
 {
     std::vector<unsigned char> host_pk, host_sk;
     Digest48 signer_id;
@@ -313,14 +342,22 @@ bool VerifyHostedFreeGrant(const fs::path& helper_dir,
     }
     std::lock_guard<std::mutex> lock(g_grant_store_mu);
     if (!VerifyFreeGrant(payload, sig, host_pk, now, {}, body, err)) return false;
-    if (!record_use) return true;
+    uint64_t maximum_bytes = 0;
+    if (body.exists("maximum_bytes") && body["maximum_bytes"].isNum()) {
+        maximum_bytes = body["maximum_bytes"].getInt<uint64_t>();
+    }
     UniValue store;
     if (!ReadObj(helper_dir / "grant_redeems.json", store)) {
         err = "grant redeem store";
         return false;
     }
-    const std::string nonce = body["grant_nonce"].get_str();
-    if (!RedeemGrantUseUnlocked(store, nonce, use_key, err)) return false;
+    const std::string nonce = body.exists("grant_nonce") && body["grant_nonce"].isStr() ? body["grant_nonce"].get_str() : "";
+    UniValue used = store.exists("uses") && store["uses"].isObject() ? store["uses"] : UniValue(UniValue::VOBJ);
+    UniValue arr = used.exists(nonce) ? used[nonce] : UniValue(UniValue::VARR);
+    if (!arr.isArray()) arr = UniValue(UniValue::VARR);
+    if (GrantUseConflicts(arr, use_key, err)) return false;
+    if (!record_use) return true;
+    if (!RedeemGrantUseUnlocked(store, nonce, use_key, redeem_bytes, maximum_bytes, err)) return false;
     return WriteObj(helper_dir / "grant_redeems.json", store, err);
 }
 

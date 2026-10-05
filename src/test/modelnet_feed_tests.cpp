@@ -5,11 +5,15 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 #include <modelnet/feed.h>
 #include <modelnet/identity.h>
+#include <modelnet/release.h>
 #include <modelnet/search.h>
 #include <test/util/setup_common.h>
+#include <univalue.h>
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
+
+#include <fstream>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_feed_tests, BasicTestingSetup)
 
@@ -120,6 +124,135 @@ BOOST_AUTO_TEST_CASE(econ_feed_newest_order)
     const auto items = feed.Query(q, 3, next);
     BOOST_REQUIRE_GE(items.size(), 2);
     BOOST_CHECK_EQUAL(items[0].rec.display_name, "B");
+}
+
+BOOST_AUTO_TEST_CASE(feed_load_skips_malformed_objects)
+{
+    using namespace modelnet;
+    const fs::path p = m_args.GetDataDirBase() / "feed-malformed.json";
+    {
+        FeedStore feed;
+        feed.SetPath(p);
+        ModelSearchRecord r;
+        r.model_id.data[0] = 9;
+        r.display_name = "KeepMe";
+        r.canonical_name = "KeepMe";
+        r.published_at = 50;
+        BOOST_CHECK(feed.NoteSearchRecord(r, 10));
+        std::string err;
+        BOOST_CHECK(feed.Save(err));
+    }
+    std::ifstream in(p);
+    std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    UniValue saved;
+    BOOST_REQUIRE(saved.read(raw));
+    BOOST_REQUIRE(saved["events"].isArray());
+    UniValue events = saved["events"];
+
+    UniValue bad_id(UniValue::VOBJ);
+    bad_id.pushKV("event_id", 1);
+    bad_id.pushKV("event_type", "MODEL_PUBLISHED");
+    events.push_back(bad_id);
+
+    UniValue bad_type(UniValue::VOBJ);
+    bad_type.pushKV("event_id", "bad-type");
+    bad_type.pushKV("event_type", 3);
+    events.push_back(bad_type);
+
+    UniValue bad_seq(UniValue::VOBJ);
+    bad_seq.pushKV("event_id", "bad-seq");
+    bad_seq.pushKV("sequence", "nope");
+    events.push_back(bad_seq);
+
+    UniValue bad_bool(UniValue::VOBJ);
+    bad_bool.pushKV("event_id", "bad-bool");
+    bad_bool.pushKV("signed_record", "yes");
+    events.push_back(bad_bool);
+
+    UniValue bad_rec(UniValue::VOBJ);
+    bad_rec.pushKV("event_id", "bad-record");
+    UniValue rec(UniValue::VOBJ);
+    rec.pushKV("type", "btx-model-search-v1");
+    rec.pushKV("model_id", 12);
+    rec.pushKV("display_name", false);
+    bad_rec.pushKV("record", rec);
+    events.push_back(bad_rec);
+
+    UniValue bad_camp(UniValue::VOBJ);
+    bad_camp.pushKV("event_id", "bad-campaign");
+    UniValue camp(UniValue::VOBJ);
+    camp.pushKV("release_id", 5);
+    camp.pushKV("target_atoms", "x");
+    bad_camp.pushKV("campaign", camp);
+    events.push_back(bad_camp);
+
+    events.push_back("not-an-object");
+
+    UniValue huge;
+    BOOST_REQUIRE(huge.read("{\"sequence\":9999999999999999999}"));
+    UniValue bad_range(UniValue::VOBJ);
+    bad_range.pushKV("event_id", "bad-range");
+    bad_range.pushKV("sequence", huge["sequence"]);
+    events.push_back(bad_range);
+
+    UniValue neu(UniValue::VOBJ);
+    neu.pushKV("schema_version", 3);
+    neu.pushKV("sequence", "bad");
+    neu.pushKV("events", events);
+    {
+        std::ofstream out(p, std::ios::trunc);
+        out << neu.write() << "\n";
+    }
+
+    FeedStore loaded;
+    loaded.SetPath(p);
+    std::string err;
+    bool ok = false;
+    BOOST_CHECK_NO_THROW(ok = loaded.Load(20, err));
+    BOOST_CHECK(ok);
+    FeedQuery q;
+    std::string next;
+    const auto items = loaded.Query(q, 20, next);
+    BOOST_REQUIRE_EQUAL(items.size(), 1);
+    BOOST_CHECK_EQUAL(items[0].rec.display_name, "KeepMe");
+    for (const auto& ev : items) {
+        BOOST_CHECK_NE(ev.event_id, "bad-type");
+        BOOST_CHECK_NE(ev.event_id, "bad-seq");
+        BOOST_CHECK_NE(ev.event_id, "bad-bool");
+        BOOST_CHECK_NE(ev.event_id, "bad-record");
+        BOOST_CHECK_NE(ev.event_id, "bad-campaign");
+        BOOST_CHECK_NE(ev.event_id, "bad-range");
+    }
+
+    {
+        std::ofstream out(p, std::ios::trunc);
+        out << "{\"sequence\":1,\"events\":{\"event_id\":\"x\"}}\n";
+    }
+    FeedStore broken;
+    broken.SetPath(p);
+    BOOST_CHECK_NO_THROW(ok = broken.Load(20, err));
+    BOOST_CHECK(ok);
+    BOOST_CHECK_EQUAL(broken.Size(), 0);
+
+    UniValue filters(UniValue::VOBJ);
+    filters.pushKV("family", 1);
+    UniValue bad_query(UniValue::VOBJ);
+    bad_query.pushKV("limit", "nope");
+    bad_query.pushKV("cursor", false);
+    bad_query.pushKV("filters", filters);
+    SearchQuery sq;
+    bool rejected = false;
+    BOOST_CHECK_NO_THROW(rejected = !ParseSearchQuery(bad_query, sq, err));
+    BOOST_CHECK(rejected);
+    ModelSearchRecord parsed;
+    rejected = false;
+    BOOST_CHECK_NO_THROW(rejected = !SearchRecordFromJson(rec, parsed, err));
+    BOOST_CHECK(rejected);
+    ReleaseCampaign parsed_campaign;
+    rejected = false;
+    BOOST_CHECK_NO_THROW(rejected = !CampaignFromJson(camp, parsed_campaign, err));
+    BOOST_CHECK(rejected);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -11,7 +11,9 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <exception>
 #include <fstream>
+#include <iostream>
 
 namespace modelnet {
 namespace {
@@ -151,6 +153,57 @@ UniValue CampaignToJson(const ReleaseCampaign& c)
     return o;
 }
 
+namespace {
+
+void LogSkippedCampaign(const std::string& why)
+{
+    std::cerr << "btx-modeld: skipped malformed feed object (" << why << ")\n";
+}
+
+bool CampaignTypeFail(std::string& err, const std::string& why)
+{
+    err = why;
+    LogSkippedCampaign(why);
+    return false;
+}
+
+bool CampaignStr(const UniValue& o, const char* k, std::string& dst, std::string& err, bool required)
+{
+    if (!o.exists(k)) {
+        if (required) {
+            err = k;
+            return false;
+        }
+        return true;
+    }
+    if (!o[k].isStr()) return CampaignTypeFail(err, std::string(k) + " type");
+    dst = o[k].get_str();
+    return true;
+}
+
+template <typename Int>
+bool CampaignInt(const UniValue& o, const char* k, Int& dst, std::string& err)
+{
+    if (!o.exists(k)) return true;
+    if (!o[k].isNum()) return CampaignTypeFail(err, std::string(k) + " type");
+    try {
+        dst = o[k].getInt<Int>();
+    } catch (const std::exception&) {
+        return CampaignTypeFail(err, std::string(k) + " range");
+    }
+    return true;
+}
+
+bool CampaignBool(const UniValue& o, const char* k, bool& dst, std::string& err)
+{
+    if (!o.exists(k)) return true;
+    if (!o[k].isBool()) return CampaignTypeFail(err, std::string(k) + " type");
+    dst = o[k].get_bool();
+    return true;
+}
+
+} // namespace
+
 bool CampaignFromJson(const UniValue& o, ReleaseCampaign& c, std::string& err)
 {
     c = {};
@@ -158,35 +211,60 @@ bool CampaignFromJson(const UniValue& o, ReleaseCampaign& c, std::string& err)
         err = "object";
         return false;
     }
-    if (!o.exists("release_id") || !Digest48::FromHex(o["release_id"].get_str(), c.release_id, err)) return false;
-    if (o.exists("model_id") && !o["model_id"].get_str().empty() &&
-        !Digest48::FromHex(o["model_id"].get_str(), c.model_id, err)) return false;
-    if (o.exists("artifact_id") && !o["artifact_id"].get_str().empty() &&
-        !Digest48::FromHex(o["artifact_id"].get_str(), c.artifact_id, err)) return false;
-    if (o.exists("ciphertext_artifact_id") && !o["ciphertext_artifact_id"].get_str().empty() &&
-        !Digest48::FromHex(o["ciphertext_artifact_id"].get_str(), c.ciphertext_artifact_id, err)) {
-        return false;
+    ReleaseCampaign parsed;
+    try {
+        std::string release_id;
+        if (!CampaignStr(o, "release_id", release_id, err, true)) return false;
+        if (!Digest48::FromHex(release_id, parsed.release_id, err)) return false;
+        std::string hex;
+        if (!CampaignStr(o, "model_id", hex, err, false)) return false;
+        if (!hex.empty() && !Digest48::FromHex(hex, parsed.model_id, err)) return false;
+        hex.clear();
+        if (!CampaignStr(o, "artifact_id", hex, err, false)) return false;
+        if (!hex.empty() && !Digest48::FromHex(hex, parsed.artifact_id, err)) return false;
+        hex.clear();
+        if (!CampaignStr(o, "ciphertext_artifact_id", hex, err, false)) return false;
+        if (!hex.empty() && !Digest48::FromHex(hex, parsed.ciphertext_artifact_id, err)) return false;
+        hex.clear();
+        if (!CampaignStr(o, "key_hash", hex, err, false)) return false;
+        if (!hex.empty() && !Hash32::FromHex(hex, parsed.key_hash, err)) return false;
+        if (!CampaignInt(o, "target_atoms", parsed.target_atoms, err) ||
+            !CampaignInt(o, "pledged_atoms", parsed.pledged_atoms, err) ||
+            !CampaignInt(o, "funded_atoms", parsed.funded_atoms, err) ||
+            !CampaignInt(o, "refund_height", parsed.refund_height, err) ||
+            !CampaignInt(o, "latest_funding_height", parsed.latest_funding_height, err) ||
+            !CampaignInt(o, "campaign_created_at", parsed.campaign_created_at, err) ||
+            !CampaignBool(o, "frozen", parsed.frozen, err) ||
+            !CampaignBool(o, "secret_disclosed", parsed.secret_disclosed, err) ||
+            !CampaignBool(o, "plaintext_verified", parsed.plaintext_verified, err) ||
+            !CampaignStr(o, "assurance", parsed.assurance, err, false) ||
+            !CampaignStr(o, "hashlock_algorithm", parsed.hashlock_algorithm, err, false)) {
+            return false;
+        }
+        if (o.exists("output_script")) {
+            if (!o["output_script"].isStr()) return CampaignTypeFail(err, "output_script type");
+            parsed.output_script_hex = ToLower(o["output_script"].get_str());
+        }
+        if (o.exists("pubkey")) {
+            if (!o["pubkey"].isStr()) return CampaignTypeFail(err, "pubkey type");
+            parsed.pubkey = ParseHex(o["pubkey"].get_str());
+        }
+        if (o.exists("signature")) {
+            if (!o["signature"].isStr()) return CampaignTypeFail(err, "signature type");
+            parsed.sig = ParseHex(o["signature"].get_str());
+        }
+    } catch (const std::exception& ex) {
+        c = {};
+        return CampaignTypeFail(err, ex.what());
+    } catch (...) {
+        c = {};
+        return CampaignTypeFail(err, "malformed campaign");
     }
-    if (o.exists("key_hash") && !o["key_hash"].get_str().empty() &&
-        !Hash32::FromHex(o["key_hash"].get_str(), c.key_hash, err)) return false;
-    c.target_atoms = o.exists("target_atoms") ? o["target_atoms"].getInt<int64_t>() : 0;
-    c.pledged_atoms = o.exists("pledged_atoms") ? o["pledged_atoms"].getInt<int64_t>() : 0;
-    c.funded_atoms = o.exists("funded_atoms") ? o["funded_atoms"].getInt<int64_t>() : 0;
-    c.refund_height = o.exists("refund_height") ? o["refund_height"].getInt<uint32_t>() : 0;
-    c.latest_funding_height = o.exists("latest_funding_height") ? o["latest_funding_height"].getInt<uint32_t>() : 0;
-    c.campaign_created_at = o.exists("campaign_created_at") ? o["campaign_created_at"].getInt<int64_t>() : 0;
-    c.frozen = o.exists("frozen") && o["frozen"].get_bool();
-    c.secret_disclosed = o.exists("secret_disclosed") && o["secret_disclosed"].get_bool();
-    c.plaintext_verified = o.exists("plaintext_verified") && o["plaintext_verified"].get_bool();
-    if (o.exists("assurance")) c.assurance = o["assurance"].get_str();
-    if (o.exists("hashlock_algorithm")) c.hashlock_algorithm = o["hashlock_algorithm"].get_str();
-    if (o.exists("output_script") && o["output_script"].isStr()) c.output_script_hex = ToLower(o["output_script"].get_str());
-    if (o.exists("pubkey")) c.pubkey = ParseHex(o["pubkey"].get_str());
-    if (o.exists("signature")) c.sig = ParseHex(o["signature"].get_str());
-    c.signed_ok = !c.sig.empty();
-    if (c.ciphertext_artifact_id.IsNull()) c.ciphertext_artifact_id = c.artifact_id;
-    if (c.hashlock_algorithm.empty()) c.hashlock_algorithm = "SHA256";
-    if (c.assurance.empty()) c.assurance = "KEY_RELEASE_ONLY";
+    parsed.signed_ok = !parsed.sig.empty();
+    if (parsed.ciphertext_artifact_id.IsNull()) parsed.ciphertext_artifact_id = parsed.artifact_id;
+    if (parsed.hashlock_algorithm.empty()) parsed.hashlock_algorithm = "SHA256";
+    if (parsed.assurance.empty()) parsed.assurance = "KEY_RELEASE_ONLY";
+    c = std::move(parsed);
     return true;
 }
 
@@ -199,10 +277,36 @@ bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::
     std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     UniValue o;
     if (!o.read(raw) || !o.isObject() || !o.exists("campaigns")) return true;
-    for (const auto& cj : o["campaigns"].getValues()) {
-        ReleaseCampaign c;
-        if (!CampaignFromJson(cj, c, err)) return false;
-        out.push_back(c);
+    if (!o["campaigns"].isArray()) {
+        LogSkippedCampaign("campaigns type");
+        return true;
+    }
+    try {
+        for (const auto& cj : o["campaigns"].getValues()) {
+            ReleaseCampaign c;
+            std::string ierr;
+            try {
+                if (!CampaignFromJson(cj, c, ierr)) {
+                    LogSkippedCampaign(ierr.empty() ? "campaign" : ierr);
+                    continue;
+                }
+            } catch (const std::exception& ex) {
+                LogSkippedCampaign(ex.what());
+                continue;
+            } catch (...) {
+                LogSkippedCampaign("campaign");
+                continue;
+            }
+            out.push_back(std::move(c));
+        }
+    } catch (const std::exception& ex) {
+        LogSkippedCampaign(ex.what());
+        err = ex.what();
+        return true;
+    } catch (...) {
+        err = "campaigns";
+        LogSkippedCampaign(err);
+        return true;
     }
     return true;
 }

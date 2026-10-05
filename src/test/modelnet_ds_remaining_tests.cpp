@@ -812,9 +812,9 @@ BOOST_AUTO_TEST_CASE(v11_free_01_identity_only_no_wallet)
     BOOST_CHECK_EQUAL(replay_err, "replay");
 }
 
-BOOST_AUTO_TEST_CASE(free_grant_piece_get_retry_is_idempotent)
+BOOST_AUTO_TEST_CASE(free_grant_redemption_is_single_use)
 {
-    const fs::path tmp = m_path_root / "grant-piece-idempotent";
+    const fs::path tmp = m_path_root / "grant-piece-single-use";
     std::string err;
     std::vector<unsigned char> pk, sk;
     modelnet::Digest48 signer_id;
@@ -833,20 +833,32 @@ BOOST_AUTO_TEST_CASE(free_grant_piece_get_retry_is_idempotent)
     UniValue body;
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
     BOOST_REQUIRE_MESSAGE(
-        modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:p4", body, err, true),
+        modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:p4", body, err, true, 1),
         err);
+    err.clear();
+    BOOST_CHECK(!modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:p4", body, err, true, 1));
+    BOOST_CHECK_EQUAL(err, "replay");
     err.clear();
     BOOST_REQUIRE_MESSAGE(
-        modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:p4", body, err, true),
+        modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:p5", body, err, true, 1),
         err);
     err.clear();
-    BOOST_REQUIRE_MESSAGE(
-        modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:p5", body, err, true),
-        err);
-    err.clear();
-    BOOST_CHECK(!modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:all", body, err, true));
+    BOOST_CHECK(!modelnet::VerifyHostedFreeGrant(tmp, grant.payload, grant.signature, pk, now, "f5:all", body, err, true, 1));
     BOOST_CHECK_EQUAL(err, "replay");
     BOOST_CHECK_GT(modelnet::FREE_GRANT_MAX_USES, 1175u);
+
+    modelnet::FreeGrantParams capped = p;
+    capped.maximum_bytes = 100;
+    capped.grant_nonce = {};
+    modelnet::SignedFreeGrant limited;
+    BOOST_REQUIRE_MESSAGE(modelnet::IssueFreeGrant(capped, sk, pk, limited, err), err);
+    err.clear();
+    BOOST_REQUIRE_MESSAGE(
+        modelnet::VerifyHostedFreeGrant(tmp, limited.payload, limited.signature, pk, now, "f5:p0", body, err, true, 100),
+        err);
+    err.clear();
+    BOOST_CHECK(!modelnet::VerifyHostedFreeGrant(tmp, limited.payload, limited.signature, pk, now, "f5:p1", body, err, true, 1));
+    BOOST_CHECK_EQUAL(err, "maximum_bytes");
 }
 
 BOOST_AUTO_TEST_CASE(getmodel_incomplete_replica_is_not_local)
