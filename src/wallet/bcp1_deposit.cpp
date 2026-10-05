@@ -13,8 +13,10 @@
 #include <wallet/transaction.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <map>
 #include <utility>
+#include <vector>
 
 namespace wallet {
 namespace {
@@ -26,6 +28,8 @@ struct DepositObservation {
     int last_confirmed_height{-1};
     int last_confirmations{0};
     bool saw_disconnect{false};
+    //! Monotonic insertion order. Cap eviction drops the smallest values.
+    uint64_t insert_seq{0};
 };
 
 struct DepositCacheKey {
@@ -40,17 +44,110 @@ struct DepositCacheKey {
 };
 
 std::map<DepositCacheKey, DepositObservation> g_deposit_obs GUARDED_BY(g_bcp1_deposit_cache_mutex);
+uint64_t g_reorg_obs_seq GUARDED_BY(g_bcp1_deposit_cache_mutex){0};
+
+//! Keep an observation only while a reorg of its confirming block is still inside
+//! the wallet's settlement window. Older entries are expired.
+[[nodiscard]] unsigned int ReorgObservationWindow(const CWallet& wallet)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    return std::max(wallet.GetReorgSafetyDepth(), wallet.GetReorgHoldBlocks());
+}
+
+[[nodiscard]] bool TxidInWallet(const CWallet& wallet, const uint256& txid)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    return wallet.mapWallet.find(txid) != wallet.mapWallet.end();
+}
+
+//! Wallet-relevant means the tx is already in mapWallet, or this transaction
+//! spends or creates an output the wallet owns.
+[[nodiscard]] bool TxRelevantForReorgObservation(const CWallet& wallet, const CTransaction& tx)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    if (TxidInWallet(wallet, tx.GetHash().ToUint256())) return true;
+    if (wallet.IsFromMe(tx)) return true;
+    return wallet.IsMine(tx);
+}
+
+void RememberConfirmed(const CWallet& wallet, const uint256& txid, const uint256& block_hash, int height, int confirmations)
+    EXCLUSIVE_LOCKS_REQUIRED(g_bcp1_deposit_cache_mutex);
+void RememberDisconnect(const CWallet& wallet, const uint256& txid, const uint256& block_hash, int height)
+    EXCLUSIVE_LOCKS_REQUIRED(g_bcp1_deposit_cache_mutex);
+
+void PruneReorgObservations(const CWallet& wallet, int tip_height)
+    EXCLUSIVE_LOCKS_REQUIRED(g_bcp1_deposit_cache_mutex, wallet.cs_wallet)
+{
+    const unsigned int window = ReorgObservationWindow(wallet);
+    std::vector<DepositCacheKey> drop;
+    std::vector<std::pair<uint64_t, DepositCacheKey>> ranked;
+    for (const auto& [key, obs] : g_deposit_obs) {
+        if (key.wallet != &wallet) continue;
+        bool expired = false;
+        if (window > 0 && tip_height >= 0 && obs.last_confirmed_height >= 0) {
+            const int64_t age = static_cast<int64_t>(tip_height) - static_cast<int64_t>(obs.last_confirmed_height);
+            expired = age >= static_cast<int64_t>(window);
+        }
+        if (expired) {
+            drop.push_back(key);
+            continue;
+        }
+        ranked.emplace_back(obs.insert_seq, key);
+    }
+    for (const DepositCacheKey& key : drop) {
+        g_deposit_obs.erase(key);
+    }
+    if (ranked.size() <= MAX_REORG_OBSERVATIONS_PER_WALLET) return;
+    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
+    const size_t excess = ranked.size() - MAX_REORG_OBSERVATIONS_PER_WALLET;
+    for (size_t i = 0; i < excess; ++i) {
+        g_deposit_obs.erase(ranked[i].second);
+    }
+}
+
+void StoreConfirmed(const CWallet& wallet, const uint256& block_hash, int height, const std::vector<uint256>& txids)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    LOCK(g_bcp1_deposit_cache_mutex);
+    for (const uint256& txid : txids) {
+        RememberConfirmed(wallet, txid, block_hash, height, /*confirmations=*/1);
+    }
+    PruneReorgObservations(wallet, height);
+}
+
+void StoreDisconnected(const CWallet& wallet, const uint256& block_hash, int height, const std::vector<uint256>& txids)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    LOCK(g_bcp1_deposit_cache_mutex);
+    for (const uint256& txid : txids) {
+        RememberDisconnect(wallet, txid, block_hash, height);
+    }
+    PruneReorgObservations(wallet, height);
+}
 
 [[nodiscard]] DepositCacheKey MakeKey(const CWallet& wallet, const uint256& txid)
 {
     return DepositCacheKey{&wallet, txid};
 }
 
+DepositObservation& EnsureObservation(const CWallet& wallet, const uint256& txid)
+    EXCLUSIVE_LOCKS_REQUIRED(g_bcp1_deposit_cache_mutex)
+{
+    const DepositCacheKey key = MakeKey(wallet, txid);
+    const auto existing = g_deposit_obs.find(key);
+    if (existing != g_deposit_obs.end()) return existing->second;
+    DepositObservation created;
+    created.insert_seq = ++g_reorg_obs_seq;
+    return g_deposit_obs.emplace(key, created).first->second;
+}
+
 void RememberConfirmed(const CWallet& wallet, const uint256& txid, const uint256& block_hash, int height, int confirmations)
     EXCLUSIVE_LOCKS_REQUIRED(g_bcp1_deposit_cache_mutex)
 {
     if (block_hash.IsNull() || height < 0) return;
-    DepositObservation& obs = g_deposit_obs[MakeKey(wallet, txid)];
+    DepositObservation& obs = EnsureObservation(wallet, txid);
     obs.last_confirmed_block = block_hash;
     obs.last_confirmed_height = height;
     obs.last_confirmations = confirmations;
@@ -60,7 +157,7 @@ void RememberConfirmed(const CWallet& wallet, const uint256& txid, const uint256
 void RememberDisconnect(const CWallet& wallet, const uint256& txid, const uint256& block_hash, int height)
     EXCLUSIVE_LOCKS_REQUIRED(g_bcp1_deposit_cache_mutex)
 {
-    DepositObservation& obs = g_deposit_obs[MakeKey(wallet, txid)];
+    DepositObservation& obs = EnsureObservation(wallet, txid);
     if (obs.last_confirmed_block.IsNull() && !block_hash.IsNull()) {
         obs.last_confirmed_block = block_hash;
         obs.last_confirmed_height = height;
@@ -526,33 +623,98 @@ std::vector<DepositEventType> EventsForDepositTransition(const std::optional<Dep
 
 void NoteBlockDisconnected(const CWallet& wallet, const uint256& block_hash, int height)
 {
-    NoteBlockDisconnected(wallet, block_hash, height, {});
+    NoteBlockDisconnected(wallet, block_hash, height, std::vector<uint256>{});
 }
 
 void NoteBlockDisconnected(const CWallet& wallet, const uint256& block_hash, int height,
                             const std::vector<uint256>& txids)
 {
-    LOCK(g_bcp1_deposit_cache_mutex);
-    for (auto& [key, obs] : g_deposit_obs) {
-        if (key.wallet != &wallet) continue;
-        if (!block_hash.IsNull() && obs.last_confirmed_block == block_hash) {
-            obs.saw_disconnect = true;
-        } else if (height >= 0 && obs.last_confirmed_height == height) {
-            obs.saw_disconnect = true;
+    LOCK(wallet.cs_wallet);
+    std::vector<uint256> relevant;
+    relevant.reserve(txids.size());
+    for (const uint256& txid : txids) {
+        if (TxidInWallet(wallet, txid)) relevant.push_back(txid);
+    }
+    {
+        LOCK(g_bcp1_deposit_cache_mutex);
+        for (auto& [key, obs] : g_deposit_obs) {
+            if (key.wallet != &wallet) continue;
+            if (!block_hash.IsNull() && obs.last_confirmed_block == block_hash) {
+                obs.saw_disconnect = true;
+            } else if (height >= 0 && obs.last_confirmed_height == height) {
+                obs.saw_disconnect = true;
+            }
         }
     }
-    for (const uint256& txid : txids) {
-        RememberDisconnect(wallet, txid, block_hash, height);
+    StoreDisconnected(wallet, block_hash, height, relevant);
+}
+
+void NoteBlockDisconnected(const CWallet& wallet, const uint256& block_hash, int height,
+                            const std::vector<CTransactionRef>& txs)
+{
+    LOCK(wallet.cs_wallet);
+    std::vector<uint256> relevant;
+    relevant.reserve(txs.size());
+    for (const CTransactionRef& tx : txs) {
+        if (!tx) continue;
+        if (!TxRelevantForReorgObservation(wallet, *tx)) continue;
+        relevant.push_back(tx->GetHash().ToUint256());
     }
+    {
+        LOCK(g_bcp1_deposit_cache_mutex);
+        for (auto& [key, obs] : g_deposit_obs) {
+            if (key.wallet != &wallet) continue;
+            if (!block_hash.IsNull() && obs.last_confirmed_block == block_hash) {
+                obs.saw_disconnect = true;
+            } else if (height >= 0 && obs.last_confirmed_height == height) {
+                obs.saw_disconnect = true;
+            }
+        }
+    }
+    StoreDisconnected(wallet, block_hash, height, relevant);
 }
 
 void NoteBlockConnected(const CWallet& wallet, const uint256& block_hash, int height,
                         const std::vector<uint256>& txids)
 {
-    LOCK(g_bcp1_deposit_cache_mutex);
+    LOCK(wallet.cs_wallet);
+    std::vector<uint256> relevant;
+    relevant.reserve(txids.size());
     for (const uint256& txid : txids) {
-        RememberConfirmed(wallet, txid, block_hash, height, /*confirmations=*/1);
+        if (TxidInWallet(wallet, txid)) relevant.push_back(txid);
     }
+    StoreConfirmed(wallet, block_hash, height, relevant);
+}
+
+void NoteBlockConnected(const CWallet& wallet, const uint256& block_hash, int height,
+                        const std::vector<CTransactionRef>& txs)
+{
+    LOCK(wallet.cs_wallet);
+    std::vector<uint256> relevant;
+    relevant.reserve(txs.size());
+    for (const CTransactionRef& tx : txs) {
+        if (!tx) continue;
+        if (!TxRelevantForReorgObservation(wallet, *tx)) continue;
+        relevant.push_back(tx->GetHash().ToUint256());
+    }
+    StoreConfirmed(wallet, block_hash, height, relevant);
+}
+
+size_t CountDepositObservations(const CWallet& wallet)
+{
+    LOCK(g_bcp1_deposit_cache_mutex);
+    size_t count = 0;
+    for (const auto& [key, obs] : g_deposit_obs) {
+        (void)obs;
+        if (key.wallet == &wallet) ++count;
+    }
+    return count;
+}
+
+bool DepositReorgCacheContains(const CWallet& wallet, const uint256& txid)
+{
+    LOCK(g_bcp1_deposit_cache_mutex);
+    return g_deposit_obs.find(MakeKey(wallet, txid)) != g_deposit_obs.end();
 }
 
 void ForgetWalletDepositObservations(const CWallet& wallet)

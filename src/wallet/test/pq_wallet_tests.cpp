@@ -22,6 +22,7 @@
 #include <script/sign.h>
 #include <script/solver.h>
 #include <shielded/smile2/ct_proof.h>
+#include <streams.h>
 #include <sync.h>
 #include <test/util/shielded_v2_egress_fixture.h>
 #include <test/util/setup_common.h>
@@ -41,6 +42,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <map>
@@ -1247,6 +1249,110 @@ BOOST_AUTO_TEST_CASE(pq_seed_survives_descriptor_import_roundtrip)
             BOOST_CHECK(std::equal(db_seed.begin(), db_seed.end(), pq_seed.begin()));
             memory_cleanse(db_seed.data(), db_seed.size());
         }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(encrypted_import_persists_pq_seed_as_ciphertext)
+{
+    // Importing a pqhd() descriptor into an already-encrypted wallet must not
+    // leave a raw WALLETDESCRIPTORPQSEED / WALLETDESCRIPTORPQSEEDMAP record.
+    // Reloading that wallet and unlocking it must still recover the seed.
+    const std::array<unsigned char, 32> pq_seed = MakePQSeed(0xC3);
+    auto w_desc = GeneratePQWalletDescriptor(pq_seed, /*internal=*/false);
+    BOOST_REQUIRE(w_desc.descriptor);
+
+    FlatSigningProvider dummy_provider;
+    std::string priv_str;
+    BOOST_REQUIRE(w_desc.descriptor->ToPrivateString(dummy_provider, priv_str));
+
+    FlatSigningProvider import_keys;
+    std::string parse_error;
+    auto reparsed = Parse(priv_str, import_keys, parse_error, /*require_checksum=*/false);
+    BOOST_REQUIRE_MESSAGE(!reparsed.empty(), "Failed to re-parse private descriptor: " + parse_error);
+
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    uint256 desc_id;
+    {
+        LOCK(wallet->cs_wallet);
+        wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet->SetWalletFlag(WALLET_FLAG_BLANK_WALLET);
+        wallet->m_keypool_size = 2;
+        BOOST_REQUIRE(wallet->EncryptWallet("encrypt"));
+        BOOST_REQUIRE(wallet->Unlock("encrypt"));
+
+        WalletDescriptor import_desc{std::move(reparsed[0]),
+                                     static_cast<uint64_t>(GetTime()),
+                                     /*range_start=*/0, /*range_end=*/2, /*next_index=*/0};
+        auto* spkm = wallet->AddWalletDescriptor(import_desc, import_keys, "", /*internal=*/false);
+        BOOST_REQUIRE(spkm != nullptr);
+        desc_id = spkm->GetID();
+
+        WalletBatch batch(wallet->GetDatabase());
+        std::vector<unsigned char> plain_seed;
+        BOOST_CHECK(!batch.ReadPQDescriptorSeed(desc_id, plain_seed));
+        if (!plain_seed.empty()) memory_cleanse(plain_seed.data(), plain_seed.size());
+
+        std::vector<std::pair<std::array<unsigned char, 4>, std::vector<unsigned char>>> plain_map;
+        const bool have_plain_map = batch.ReadPQDescriptorSeedMap(desc_id, plain_map);
+        BOOST_CHECK(!have_plain_map || plain_map.empty());
+        for (auto& entry : plain_map) {
+            if (!entry.second.empty()) memory_cleanse(entry.second.data(), entry.second.size());
+        }
+
+        uint256 iv;
+        std::vector<unsigned char> crypted_seed;
+        BOOST_REQUIRE(batch.ReadCryptedPQDescriptorSeed(desc_id, iv, crypted_seed));
+        BOOST_CHECK_GT(crypted_seed.size(), pq_seed.size());
+        BOOST_CHECK(std::search(crypted_seed.begin(), crypted_seed.end(), pq_seed.begin(), pq_seed.end()) == crypted_seed.end());
+        memory_cleanse(crypted_seed.data(), crypted_seed.size());
+
+        uint256 map_iv;
+        std::vector<unsigned char> crypted_map;
+        BOOST_REQUIRE(batch.ReadCryptedPQDescriptorSeedMap(desc_id, map_iv, crypted_map));
+        BOOST_CHECK_GT(crypted_map.size(), pq_seed.size());
+        BOOST_CHECK(std::search(crypted_map.begin(), crypted_map.end(), pq_seed.begin(), pq_seed.end()) == crypted_map.end());
+        memory_cleanse(crypted_map.data(), crypted_map.size());
+
+        bool saw_crypted_seed{false};
+        bool saw_crypted_map{false};
+        for (const auto& [key, value] : GetMockableDatabase(*wallet).m_records) {
+            (void)value;
+            DataStream key_stream{};
+            key_stream.write(key);
+            std::string type;
+            key_stream >> type;
+            BOOST_CHECK(type != DBKeys::WALLETDESCRIPTORPQSEED);
+            BOOST_CHECK(type != DBKeys::WALLETDESCRIPTORPQSEEDMAP);
+            if (type == DBKeys::WALLETDESCRIPTORPQSEEDCRYPT) saw_crypted_seed = true;
+            if (type == DBKeys::WALLETDESCRIPTORPQSEEDMAPCRYPT) saw_crypted_map = true;
+        }
+        BOOST_CHECK(saw_crypted_seed);
+        BOOST_CHECK(saw_crypted_map);
+    }
+
+    const auto records = GetMockableDatabase(*wallet).m_records;
+    auto loaded = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase(records));
+    BOOST_REQUIRE_EQUAL(loaded->LoadWallet(), DBErrors::LOAD_OK);
+    {
+        LOCK(loaded->cs_wallet);
+        auto* spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(loaded->GetScriptPubKeyMan(desc_id));
+        BOOST_REQUIRE(spkm != nullptr);
+        LOCK(spkm->cs_desc_man);
+        const WalletDescriptor loaded_desc = spkm->GetWalletDescriptor();
+        BOOST_REQUIRE(loaded_desc.descriptor);
+        BOOST_CHECK(!loaded_desc.descriptor->ExtractPQSeed().has_value());
+    }
+    BOOST_REQUIRE(loaded->Unlock("encrypt"));
+    {
+        LOCK(loaded->cs_wallet);
+        auto* spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(loaded->GetScriptPubKeyMan(desc_id));
+        BOOST_REQUIRE(spkm != nullptr);
+        LOCK(spkm->cs_desc_man);
+        const WalletDescriptor loaded_desc = spkm->GetWalletDescriptor();
+        BOOST_REQUIRE(loaded_desc.descriptor);
+        const auto recovered = loaded_desc.descriptor->ExtractPQSeed();
+        BOOST_REQUIRE(recovered.has_value());
+        BOOST_CHECK(*recovered == pq_seed);
     }
 }
 

@@ -2165,12 +2165,7 @@ void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& b
             }
         }
 
-        std::vector<uint256> connected_txids;
-        connected_txids.reserve(block.data->vtx.size());
-        for (const auto& ptx : block.data->vtx) {
-            connected_txids.push_back(ptx->GetHash().ToUint256());
-        }
-        NoteBlockConnected(*this, block.hash, block.height, connected_txids);
+        NoteBlockConnected(*this, block.hash, block.height, block.data->vtx);
 
         // Persist the locator only after all transparent and shielded state for
         // this block has been processed.
@@ -2483,12 +2478,7 @@ void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
             }
         }
 
-        std::vector<uint256> disconnected_txids;
-        disconnected_txids.reserve(block.data->vtx.size());
-        for (const auto& ptx : block.data->vtx) {
-            disconnected_txids.push_back(ptx->GetHash().ToUint256());
-        }
-        NoteBlockDisconnected(*this, block.hash, block.height, disconnected_txids);
+        NoteBlockDisconnected(*this, block.hash, block.height, block.data->vtx);
 
         if (m_shielded_wallet) {
             LOCK(m_shielded_wallet->cs_shielded);
@@ -5354,6 +5344,12 @@ bool CWallet::Unlock(const CKeyingMaterial& vMasterKeyIn)
                 return false;
             }
         }
+        for (const auto& spk_man_pair : m_spk_managers) {
+            auto* desc_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man_pair.second.get());
+            if (desc_spkm != nullptr && !desc_spkm->UnlockPQSeeds(vMasterKeyIn)) {
+                return false;
+            }
+        }
         vMasterKey = vMasterKeyIn;
     }
     NotifyStatusChanged(this);
@@ -6002,7 +5998,7 @@ ScriptPubKeyMan* CWallet::AddWalletDescriptor(WalletDescriptor& desc, const Flat
     // Save the descriptor to DB
     spk_man->WriteDescriptor();
 
-    // Persist PQ seeds from the descriptor's pqhd() providers.  Seeds are
+    // Persist PQ seeds from the descriptor's pqhd() providers. Seeds are
     // embedded in the parsed providers but lost during WalletDescriptor
     // serialization (which uses the fingerprint-only public form).
     //
@@ -6010,24 +6006,17 @@ ScriptPubKeyMan* CWallet::AddWalletDescriptor(WalletDescriptor& desc, const Flat
     // seeds, we persist ALL seeds keyed by fingerprint via the seed map.
     // For single-seed descriptors we also write the legacy single-seed entry
     // for backward compatibility.
+    //
+    // An encrypted wallet stores those records as ciphertext, matching crypted
+    // key records. Raw WALLETDESCRIPTORPQSEED / WALLETDESCRIPTORPQSEEDMAP
+    // records are not written while the wallet has encryption keys.
     auto all_seeds = desc.descriptor->ExtractAllPQSeeds();
     if (!all_seeds.empty()) {
         WalletBatch batch(GetDatabase());
-        // Write the seed map (fingerprint → seed) for full multi-seed support.
-        std::vector<std::pair<std::array<unsigned char, 4>, std::vector<unsigned char>>> seed_map;
-        seed_map.reserve(all_seeds.size());
-        for (const auto& [fp, seed] : all_seeds) {
-            seed_map.emplace_back(fp, std::vector<unsigned char>(seed.begin(), seed.end()));
-        }
-        if (!batch.WritePQDescriptorSeedMap(spk_man->GetID(), seed_map)) {
-            WalletLogPrintf("Warning: failed to persist PQ seed map for descriptor %s\n",
-                            desc.descriptor->ToString());
-        }
-        // Also write the legacy single-seed entry for backward compatibility.
-        std::vector<unsigned char> seed_vec(all_seeds[0].second.begin(), all_seeds[0].second.end());
-        if (!batch.WritePQDescriptorSeed(spk_man->GetID(), seed_vec)) {
-            WalletLogPrintf("Warning: failed to persist PQ seed for descriptor %s\n",
-                            desc.descriptor->ToString());
+        if (!spk_man->PersistPQSeeds(batch)) {
+            WalletLogPrintf("Failed to persist PQ descriptor seeds for descriptor id %s\n",
+                            spk_man->GetID().ToString());
+            return nullptr;
         }
     }
 
