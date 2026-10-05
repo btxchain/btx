@@ -10,6 +10,7 @@
 #include <modelnet/auto_storage.h>
 #include <modelnet/catalog.h>
 #include <modelnet/generate.h>
+#include <modelnet/qualification.h>
 #include <modelnet/helper.h>
 #include <modelnet/hcp.h>
 #include <modelnet/piece_ranges.h>
@@ -43,6 +44,18 @@ std::vector<unsigned char> TinySafeTensors(unsigned char tag)
 {
     const std::string json = "{\"__metadata__\":{\"t\":\"" + std::to_string(static_cast<int>(tag)) + "\"}}";
     std::vector<unsigned char> st(8 + json.size(), 0);
+    WriteLE64(st.data(), json.size());
+    std::memcpy(st.data() + 8, json.data(), json.size());
+    return st;
+}
+
+std::vector<unsigned char> TinyExl3()
+{
+    const std::string json =
+        "{\"model.layers.0.mlp.trellis\":{\"dtype\":\"U16\",\"shape\":[1],\"data_offsets\":[0,2]},"
+        "\"model.layers.0.mlp.suh\":{\"dtype\":\"F16\",\"shape\":[1],\"data_offsets\":[2,4]},"
+        "\"model.layers.0.mlp.svh\":{\"dtype\":\"F16\",\"shape\":[1],\"data_offsets\":[4,6]}}";
+    std::vector<unsigned char> st(8 + json.size() + 6, 0);
     WriteLE64(st.data(), json.size());
     std::memcpy(st.data() + 8, json.data(), json.size());
     return st;
@@ -844,6 +857,7 @@ BOOST_AUTO_TEST_CASE(host_generate_profile_cuda_smoke_is_not_generate)
 {
     ::unsetenv("BTX_MODEL_GENERATE");
     ::unsetenv("BTX_LLAMA_CLI");
+    ::unsetenv("BTX_EXL3_CLI");
     ::unsetenv("BTX_MODEL_CUDA_LOADER");
     const fs::path tmp = m_path_root / "host-profile";
     modelnet::ModelCatalog cat{tmp, 8 << 20};
@@ -1056,6 +1070,7 @@ BOOST_AUTO_TEST_CASE(generatemodel_missing_adapter_is_not_run)
 {
     ::unsetenv("BTX_MODEL_GENERATE");
     ::unsetenv("BTX_LLAMA_CLI");
+    ::unsetenv("BTX_EXL3_CLI");
     const fs::path tmp = m_path_root / "gen-no-adapter";
     modelnet::ModelCatalog cat{tmp, 8 << 20};
     const fs::path src = tmp / "src";
@@ -1085,6 +1100,161 @@ BOOST_AUTO_TEST_CASE(generatemodel_missing_adapter_is_not_run)
     BOOST_CHECK_EQUAL(err, "no_generate_adapter");
     ::unsetenv("BTX_MODEL_GENERATE");
     ::unsetenv("BTX_LLAMA_CLI");
+}
+
+BOOST_AUTO_TEST_CASE(exl3_is_safetensors_container_and_fail_closes_without_its_cli)
+{
+    modelnet::QualReport plain;
+    const auto plain_bytes = TinySafeTensors(0x11);
+    BOOST_CHECK(modelnet::QualifyBytes("model.safetensors", plain_bytes, plain) == modelnet::QualResult::STRUCTURE_VERIFIED);
+    BOOST_CHECK(!plain.exl3);
+
+    const auto exl3 = TinyExl3();
+    modelnet::QualReport exl3_report;
+    BOOST_CHECK(modelnet::QualifyBytes("model.exl3", exl3, exl3_report) == modelnet::QualResult::STRUCTURE_VERIFIED);
+    BOOST_CHECK(exl3_report.exl3);
+    BOOST_CHECK(modelnet::JsonDeclaresExl3("{\"quant_method\":\"exl3\"}"));
+    BOOST_CHECK(modelnet::JsonDeclaresExl3("{\"quantization_config\":{\"quant_method\":\"exl3\"}}"));
+    BOOST_CHECK(!modelnet::JsonDeclaresExl3("{\"quant_method\":\"EXL3\"}"));
+    std::string nulled = "{\"quant_method\":\"exl3\"}";
+    nulled.push_back('\0');
+    BOOST_CHECK(!modelnet::JsonDeclaresExl3(nulled));
+
+    const fs::path root = m_path_root / "exl3";
+    fs::create_directories(root);
+    const fs::path weights = root / "weights";
+    fs::create_directories(weights);
+    {
+        std::ofstream out(weights / "model.exl3", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(exl3.data()), static_cast<std::streamsize>(exl3.size()));
+        std::ofstream cfg(weights / "config.json");
+        cfg << "{\"architectures\":[\"LlamaForCausalLM\"]}\n";
+    }
+    modelnet::QualReport file_report;
+    BOOST_CHECK(modelnet::QualifyFile(fs::PathToString(weights / "model.exl3"), file_report) == modelnet::QualResult::STRUCTURE_VERIFIED);
+    BOOST_CHECK(file_report.exl3);
+    BOOST_CHECK(modelnet::WeightFileIsExl3(fs::PathToString(weights / "model.exl3")));
+
+    const auto inspected = modelnet::InspectCheckoutForGenerate(weights);
+    BOOST_CHECK(inspected.format == modelnet::GenerateFormat::Exl3);
+    BOOST_CHECK_EQUAL(inspected.architecture, "LlamaForCausalLM");
+
+    modelnet::HostGenerateProfile llama_only;
+    llama_only.llama_cli = true;
+    llama_only.llama_cli_path = "/bin/true";
+    llama_only.generate_adapter = true;
+    llama_only.generate_adapter_path = "/bin/false";
+    std::string reason;
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(inspected, llama_only, reason));
+    BOOST_CHECK_EQUAL(reason, "no_exl3_backend");
+    BOOST_CHECK(modelnet::PickGenerateAdapter(inspected, llama_only).empty());
+
+    modelnet::HostGenerateProfile exl3_host = llama_only;
+    exl3_host.exl3_cli = true;
+    exl3_host.exl3_cli_path = "/bin/true";
+    reason.clear();
+    BOOST_CHECK(modelnet::ArtifactCompatibleWithHost(inspected, exl3_host, reason));
+    BOOST_CHECK_EQUAL(modelnet::PickGenerateAdapter(inspected, exl3_host), "/bin/true");
+
+    const fs::path custom = root / "custom";
+    fs::create_directories(custom);
+    {
+        std::ofstream out(custom / "model.exl3", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(exl3.data()), static_cast<std::streamsize>(exl3.size()));
+        std::ofstream cfg(custom / "config.json");
+        cfg << "{\"auto_map\":{\"AutoModel\":\"local\"}}\n";
+    }
+    const auto custom_view = modelnet::InspectCheckoutForGenerate(custom);
+    BOOST_CHECK(custom_view.format == modelnet::GenerateFormat::Exl3);
+    BOOST_CHECK_EQUAL(custom_view.architecture, "custom_auto_map");
+    reason.clear();
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(custom_view, exl3_host, reason));
+    BOOST_CHECK_EQUAL(reason, "custom_code");
+
+    const fs::path declared = root / "declared";
+    fs::create_directories(declared);
+    {
+        const auto st = TinySafeTensors(0x12);
+        std::ofstream out(declared / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        std::ofstream q(declared / "quantization_config.json");
+        q << "{\"quant_method\":\"exl3\"}\n";
+    }
+    const auto declared_view = modelnet::InspectCheckoutForGenerate(declared);
+    BOOST_CHECK(declared_view.exl3_declared);
+    BOOST_CHECK(declared_view.format == modelnet::GenerateFormat::Exl3);
+    reason.clear();
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(declared_view, llama_only, reason));
+    BOOST_CHECK_EQUAL(reason, "no_exl3_backend");
+
+    const fs::path pickle = root / "pickle.exl3";
+    {
+        std::ofstream out(pickle, std::ios::binary);
+        const unsigned char magic[] = {0x80, 0x04, 0x95, 0x00};
+        out.write(reinterpret_cast<const char*>(magic), 4);
+    }
+    modelnet::QualReport pickle_report;
+    BOOST_CHECK(modelnet::QualifyFile(fs::PathToString(pickle), pickle_report) == modelnet::QualResult::REJECTED_UNSAFE_FORMAT);
+    const auto pickle_view = modelnet::InspectCheckoutForGenerate(pickle);
+    BOOST_CHECK(pickle_view.format == modelnet::GenerateFormat::Unsafe);
+    reason.clear();
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(pickle_view, exl3_host, reason));
+    BOOST_CHECK_EQUAL(reason, "unsafe_format");
+
+    const fs::path gguf_name = root / "not-really.exl3";
+    {
+        std::ofstream out(gguf_name, std::ios::binary);
+        out << "GGUF";
+        out.write("\0\0\0\0", 4);
+    }
+    const auto gguf_view = modelnet::InspectCheckoutForGenerate(gguf_name);
+    BOOST_CHECK(gguf_view.format == modelnet::GenerateFormat::None);
+    modelnet::QualReport gguf_report;
+    BOOST_CHECK(modelnet::QualifyFile(fs::PathToString(gguf_name), gguf_report) != modelnet::QualResult::STRUCTURE_VERIFIED);
+
+    const fs::path mixed = root / "mixed";
+    fs::create_directories(mixed);
+    {
+        std::ofstream ex(mixed / "model.exl3", std::ios::binary);
+        ex.write(reinterpret_cast<const char*>(exl3.data()), static_cast<std::streamsize>(exl3.size()));
+        std::ofstream gg(mixed / "model.gguf", std::ios::binary);
+        gg << "not-a-real-gguf";
+    }
+    BOOST_CHECK(modelnet::InspectCheckoutForGenerate(mixed).format == modelnet::GenerateFormat::Gguf);
+
+    const fs::path cat_dir = root / "catalog";
+    modelnet::Digest48 model_id;
+    {
+        modelnet::ModelCatalog cat{cat_dir, 8 << 20};
+        modelnet::CatalogEntry imported;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(weights), true, imported, err), err);
+        BOOST_CHECK_EQUAL(imported.core.format_profile, 1);
+        BOOST_CHECK_EQUAL(imported.weight_format, "exl3");
+        model_id = imported.model_id;
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", "previewmodelimport");
+        UniValue params(UniValue::VARR);
+        params.push_back(fs::PathToString(weights));
+        rpc.pushKV("params", params);
+        UniValue preview;
+        std::string code;
+        BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, preview, code, err), err);
+        BOOST_CHECK_EQUAL(preview["format"].get_str(), "exl3");
+    }
+    {
+        modelnet::ModelCatalog again{cat_dir, 8 << 20};
+        modelnet::CatalogEntry loaded;
+        BOOST_REQUIRE(again.Find(model_id, loaded));
+        BOOST_CHECK_EQUAL(loaded.weight_format, "exl3");
+        BOOST_CHECK_EQUAL(loaded.core.format_profile, 1);
+    }
+    {
+        modelnet::ModelCatalog cat{root / "reject-pickle", 8 << 20};
+        modelnet::CatalogEntry imported;
+        std::string err;
+        BOOST_CHECK(!cat.ImportPath(fs::PathToString(pickle), true, imported, err));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

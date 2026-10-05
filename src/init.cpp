@@ -652,7 +652,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-modelpeer=<host:port>", "Model-plane bootstrap contact passed to the owned helper (repeatable). Alias: -modelseednode.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelseednode=<host:port>", "Alias of -modelpeer.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modeluploadlimit=<bps>", "Aggregate model upload cap. auto = governor ceiling. 0 = connection ceilings only.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-modelwatch=<dir>", "Auto-host GGUF/SafeTensors dropped in this directory (watch-folder analog). Empty = off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelwatch=<dir>", "Auto-host GGUF/SafeTensors/EXL3 dropped in this directory (watch-folder analog). Empty = off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
     argsman.AddArg("-resourcegovernor=<mode>", "Local resource governor: auto, performance, balanced, eco, manual, or off to deny all governed work including mining (default: auto). There is no ungoverned mining mode. Never consensus.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-automining", "When mining is enabled, only run it while the governor reports spare accelerator capacity (default: 0). Does not enable mining by itself except together with -gen or an explicit miner.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);

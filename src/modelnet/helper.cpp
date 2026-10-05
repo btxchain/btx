@@ -864,18 +864,29 @@ ModelSearchRecord DraftSearchFromCatalog(const CatalogEntry& e)
     rec.record_version = 2;
     rec.release_state = "PUBLIC";
     uint64_t bytes = 0;
-    bool saw_gguf = false, saw_st = false;
+    bool saw_gguf = false, saw_st = false, saw_exl3_ext = false;
     for (const auto& f : e.core.files) {
         bytes += f.size;
         const auto lower = ToLower(f.path);
         if (lower.ends_with(".gguf")) saw_gguf = true;
-        if (lower.ends_with(".safetensors")) saw_st = true;
+        if (lower.ends_with(".safetensors") || lower.ends_with(".exl3")) saw_st = true;
+        if (lower.ends_with(".exl3")) saw_exl3_ext = true;
     }
     rec.size_bytes = bytes;
     rec.file_count = static_cast<int>(e.core.files.size());
-    if (saw_gguf && !saw_st) rec.format = "gguf";
-    else if (saw_st) rec.format = "safetensors";
+    if (e.weight_format == "exl3" || e.weight_format == "gguf" || e.weight_format == "safetensors") {
+        rec.format = e.weight_format;
+    } else if (saw_exl3_ext && !saw_gguf) {
+        rec.format = "exl3";
+    } else if (saw_gguf && !saw_st) {
+        rec.format = "gguf";
+    } else if (saw_st) {
+        rec.format = "safetensors";
+    }
     rec.quantization = InferQuantizationFromLabel(e.label);
+    if (rec.format == "exl3" && rec.quantization.empty()) {
+        rec.quantization = "EXL3";
+    }
     rec.family = InferFamilyFromLabel(e.label);
     rec.architecture = rec.family;
     if (!rec.format.empty()) rec.tags.push_back(rec.format);
@@ -4296,7 +4307,7 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
                 skip_obj(fs::PathToString(ent.path()), "temp suffix");
                 continue;
             }
-            if (lower.ends_with(".gguf") || lower.ends_with(".safetensors")) consider(ent.path());
+            if (lower.ends_with(".gguf") || lower.ends_with(".safetensors") || lower.ends_with(".exl3")) consider(ent.path());
         } else if (ent.is_directory()) {
             std::vector<std::pair<fs::path, std::string>> files;
             std::string perr;
@@ -4304,7 +4315,7 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
                 bool has_weights = false;
                 for (const auto& f : files) {
                     const auto lower = ToLower(f.second);
-                    if (lower.ends_with(".gguf") || lower.ends_with(".safetensors")) has_weights = true;
+                    if (lower.ends_with(".gguf") || lower.ends_with(".safetensors") || lower.ends_with(".exl3")) has_weights = true;
                 }
                 if (has_weights) consider(ent.path());
                 else skip_obj(fs::PathToString(ent.path()), "no weight files");
@@ -5820,7 +5831,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 "openmodelshare",
             }));
             result.pushKV("automatic_spend_atoms", 0);
-            result.pushKV("note", "this path is a share card, not weights; getmodel retrieves, hostmodel hosts a GGUF/SafeTensors directory");
+            result.pushKV("note", "this path is a share card, not weights; getmodel retrieves, hostmodel hosts a GGUF/SafeTensors/EXL3 directory");
             if (!token.empty()) {
                 UniValue greq(UniValue::VOBJ);
                 greq.pushKV("method", "getmodel");
@@ -5857,14 +5868,23 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             return false;
         }
         uint64_t bytes = 0;
-        bool saw_gguf = false, saw_st = false;
+        bool saw_gguf = false, saw_st = false, saw_exl3 = false;
         UniValue filej(UniValue::VARR);
         for (const auto& f : files) {
             const uint64_t sz = fs::is_regular_file(f.first) ? static_cast<uint64_t>(fs::file_size(f.first)) : 0;
             bytes += sz;
             const auto lower = ToLower(f.second);
             if (lower.ends_with(".gguf")) saw_gguf = true;
-            if (lower.ends_with(".safetensors")) saw_st = true;
+            if (lower.ends_with(".safetensors") || lower.ends_with(".exl3")) saw_st = true;
+            if ((lower.ends_with(".safetensors") || lower.ends_with(".exl3")) &&
+                WeightFileIsExl3(fs::PathToString(f.first))) {
+                saw_exl3 = true;
+            }
+            const std::string base = ToLower(fs::PathToString(fs::PathFromString(f.second).filename()));
+            if ((base == "config.json" || base == "quantization_config.json") &&
+                FileDeclaresExl3(fs::PathToString(f.first))) {
+                saw_exl3 = true;
+            }
             UniValue o(UniValue::VOBJ);
             o.pushKV("path", f.second);
             o.pushKV("bytes", sz);
@@ -5880,7 +5900,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("would_fit", cat.QuotaBytes() > 0 && cat.UsedBytes() + bytes <= cat.QuotaBytes());
         result.pushKV("remaining_bytes", cat.QuotaBytes() > cat.UsedBytes() ? cat.QuotaBytes() - cat.UsedBytes() : 0);
         result.pushKV("one_liner", (cat.QuotaBytes() > 0 && cat.UsedBytes() + bytes <= cat.QuotaBytes()) ? ("hostmodel " + path) : "would not fit quota");
-        result.pushKV("format", saw_gguf && !saw_st ? "gguf" : (saw_st ? "safetensors" : ""));
+        const std::string preview_format = saw_gguf && !saw_st ? "gguf"
+                                            : (saw_exl3 && !saw_gguf ? "exl3"
+                                               : (saw_st ? "safetensors" : ""));
+        result.pushKV("format", preview_format);
         result.pushKV("family", InferFamilyFromLabel(label));
         result.pushKV("quantization", InferQuantizationFromLabel(label));
         result.pushKV("files", filej);
@@ -8219,6 +8242,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             result.pushKV("architecture", art.architecture);
             result.pushKV("format", art.format == GenerateFormat::Gguf ? "gguf" :
                                     art.format == GenerateFormat::SafeTensors ? "safetensors" :
+                                    art.format == GenerateFormat::Exl3 ? "exl3" :
                                     art.format == GenerateFormat::Unsafe ? "unsafe" : "none");
             result.pushKV("host", HostGenerateProfileJson(host));
             result.pushKV("generated", false);
