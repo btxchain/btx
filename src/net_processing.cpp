@@ -4347,11 +4347,10 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
             return;
     }
     LogDebug(BCLog::NET,
-             "Replaying budget-deferred body %s locally (source peer=%d gone)\n",
+             "Deferring budget-deferred body %s (source peer=%d gone) until admission\n",
              candidate_hash.ToString(), candidate.source_peer);
-    ProcessBlockSync(candidate.source_peer, /*node=*/nullptr, candidate.block,
-                     candidate.force_processing, candidate.min_pow_checked,
-                     /*post_process=*/nullptr);
+    RefreshMatMulDeferredBodyRetry(
+        candidate_hash, "deferred source gone; replay stays budgeted");
 }
 
 bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash, uint64_t keyed_netgroup) const
@@ -15756,6 +15755,15 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                 exact_recompute_required = false;
                                 persist_heavier_competing_fork = true;
                             } else if (indexed != nullptr && tip != nullptr &&
+                                       CatchUpFarBehind(m_chainman, peer_best) &&
+                                       indexed->GetAncestor(tip->nHeight) == tip &&
+                                       !(m_chainman.m_best_header != nullptr &&
+                                         m_chainman.m_best_header->GetAncestor(tip->nHeight) == tip &&
+                                         indexed->nHeight <= m_chainman.m_best_header->nHeight &&
+                                         m_chainman.m_best_header->GetAncestor(indexed->nHeight) == indexed)) {
+                                // A same-height twin while this node is behind
+                                // stays on the budgeted ExactReplay path.
+                            } else if (indexed != nullptr && tip != nullptr &&
                                        node::matmul_trusted::PersistFollowedSuffixBodyWithoutGpu(
                                            node::matmul_trusted::IsTrustedMirror(),
                                            indexed->GetAncestor(tip->nHeight) == tip,
@@ -16197,12 +16205,11 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // Ordinary duplicate deliveries cannot claim this exemption. Keep the
     // original force_processing value for the separate AcceptBlock gates;
     // pending slots, source/global budgets and ExactReplay still apply.
-    // A requested body still passes RC admission. Only an inbound
-    // catch-up push of the active tip, or a scheduler retry of a body
-    // this node already retained, skips a fresh ticket.
-    const bool ticket_exempt =
-        catchup_inbound_push ||
-        (is_retained_retry && retained_retry);
+    // A requested body and a scheduler retry both pass RC admission.
+    // Only an inbound catch-up push of the active tip skips a fresh ticket.
+    const bool ticket_exempt = catchup_inbound_push;
+    (void)is_retained_retry;
+    (void)retained_retry;
     std::optional<node::RCAdmissionTicket> accepted_ticket;
     const auto restore_accepted_ticket = [&] {
         if (!accepted_ticket) return;

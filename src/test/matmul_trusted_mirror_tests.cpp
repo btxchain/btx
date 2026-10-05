@@ -2218,10 +2218,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
         true, /*archive_getdata_pending=*/false, true, false, true,
         false));
-    // Outbound miners are Preferred in msghand order; they must still skip.
-    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
+    // Outbound and manual peers keep their block and header turn.
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
         true, true, /*this_peer_inbound=*/false, false, true, false));
-    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
         true, true, false, /*this_peer_manual=*/true, true, false));
     // Convergence regression: a behind CONSENSUS verifier (serve=0 GPU
     // attestor) must NEVER be skipped while a signer serves archive GETDATA,

@@ -12470,10 +12470,29 @@ void ChainstateManager::NotifyCadenceHold(const bilingual_str& alarm, int allowe
 
 namespace {
 
+bool ParkInputIsBodyAuthenticated(const CBlockIndex* index)
+{
+    if (index == nullptr) return false;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    if (!index->IsValid(BLOCK_VALID_TREE)) return false;
+    const bool body_or_replay{
+        (index->nStatus & BLOCK_HAVE_DATA) != 0 ||
+        (index->nStatus & (BLOCK_EXACT_REPLAY_VERIFIED | BLOCK_TRUSTED_REPLAY_ATTESTED)) != 0};
+    if (body_or_replay && index->nAuthenticatedChainWork > 0) return true;
+    // Before MatMul, authenticated work and claimed work are the same value.
+    return index->nAuthenticatedChainWork == index->nChainWork && index->nChainWork > 0;
+}
+
 const CBlockIndex* DeepRewriteChild(const CBlockIndex* taller, const CBlockIndex* heavier, uint32_t ceiling)
 {
     if (taller == nullptr || heavier == nullptr || taller == heavier) return nullptr;
-    if (!(heavier->nChainWork > taller->nChainWork)) return nullptr;
+    if (!ParkInputIsBodyAuthenticated(taller) || !ParkInputIsBodyAuthenticated(heavier)) return nullptr;
+    const bool authenticated_heavier{
+        heavier->nAuthenticatedChainWork > taller->nAuthenticatedChainWork};
+    const bool pre_matmul_heavier{
+        heavier->nAuthenticatedChainWork == heavier->nChainWork &&
+        heavier->nChainWork > taller->nChainWork};
+    if (!authenticated_heavier && !pre_matmul_heavier) return nullptr;
     const CBlockIndex* fork{LastCommonAncestor(taller, heavier)};
     if (fork == nullptr) return nullptr;
     if (!kernel::IsDeepHeavierRewrite(taller->nHeight, heavier->nHeight, fork->nHeight, ceiling)) {
@@ -12509,13 +12528,34 @@ void ChainstateManager::MaybeParkDeepHeavierRewrite(CBlockIndex* index, bool par
 {
     AssertLockHeld(::cs_main);
     if (m_options.reorg_policy != Options::ReorgPolicyMode::BOUNDED) return;
-    if (index != nullptr && index->IsValid(BLOCK_VALID_TREE) &&
-        (index->nStatus & BLOCK_FAILED_MASK) == 0) {
+    const bool trackers_stale{
+        (m_tallest_header != nullptr && !ParkInputIsBodyAuthenticated(m_tallest_header)) ||
+        (m_heaviest_header != nullptr && !ParkInputIsBodyAuthenticated(m_heaviest_header))};
+    if (trackers_stale) {
+        m_tallest_header = nullptr;
+        m_heaviest_header = nullptr;
+        for (auto& entry : m_blockman.m_block_index) {
+            CBlockIndex* candidate{&entry.second};
+            if (!ParkInputIsBodyAuthenticated(candidate)) continue;
+            if (m_tallest_header == nullptr || candidate->nHeight > m_tallest_header->nHeight ||
+                (candidate->nHeight == m_tallest_header->nHeight &&
+                 candidate->nAuthenticatedChainWork > m_tallest_header->nAuthenticatedChainWork)) {
+                m_tallest_header = candidate;
+            }
+            if (m_heaviest_header == nullptr ||
+                candidate->nAuthenticatedChainWork > m_heaviest_header->nAuthenticatedChainWork) {
+                m_heaviest_header = candidate;
+            }
+        }
+    }
+    if (index != nullptr && ParkInputIsBodyAuthenticated(index)) {
         if (m_tallest_header == nullptr || index->nHeight > m_tallest_header->nHeight ||
-            (index->nHeight == m_tallest_header->nHeight && index->nChainWork > m_tallest_header->nChainWork)) {
+            (index->nHeight == m_tallest_header->nHeight &&
+             index->nAuthenticatedChainWork > m_tallest_header->nAuthenticatedChainWork)) {
             m_tallest_header = index;
         }
-        if (m_heaviest_header == nullptr || index->nChainWork > m_heaviest_header->nChainWork) {
+        if (m_heaviest_header == nullptr ||
+            index->nAuthenticatedChainWork > m_heaviest_header->nAuthenticatedChainWork) {
             m_heaviest_header = index;
         }
     }

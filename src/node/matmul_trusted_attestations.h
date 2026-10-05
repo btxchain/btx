@@ -2154,6 +2154,9 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     if (!local_signer || !archive_getdata_pending) return false;
     if (this_is_archive_serve_target) return false;
     if (!this_peer_handshake_complete) return false;
+    // A self-advertised archive backlog must not skip ordinary outbound
+    // block and header ingest. Inbound miners still wait.
+    if (!this_peer_inbound || this_peer_manual) return false;
     return true;
 }
 
