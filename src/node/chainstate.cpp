@@ -166,7 +166,10 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // disk, rebalance the coins caches to desired levels based
     // on the condition of each chainstate.
     chainman.MaybeRebalanceCaches();
-    chainman.AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune();
+    // A retuned pool-credit gate must not clear BLOCK_FAILED_* on every
+    // shielded block below it. Those marks can record real invalidity, and
+    // startup reconsideration made the gate permissive. reconsiderblock
+    // remains available to an operator.
 
     return {ChainstateLoadStatus::SUCCESS, {}};
 }

@@ -812,6 +812,7 @@ public:
         // 32-byte HTLC preimage rule. Policy before this height, consensus at
         // and after it. See BTX_SECURITY_ACTIVATION_HEIGHT.
         consensus.nP2MRHTLCPreimage32Height = BTX_SECURITY_ACTIVATION_HEIGHT;
+        consensus.nShieldedRecoveryProofVerifyCostHeight = BTX_SECURITY_ACTIVATION_HEIGHT;
         consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
         consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         consensus.nMaxReorgDepth = 12;

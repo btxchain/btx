@@ -3451,7 +3451,12 @@ enum class PersistedShieldedMetadataSyncMode {
     AssertLockHeld(::cs_main);
     if (&chainstate != &chainstate.m_chainman.ActiveChainstate()) return true;
     if (!chainstate.m_chainman.HasShieldedState()) return true;
-    if (chainstate.m_from_snapshot_blockhash) return true;
+    // A snapshot base is not an audit exemption. Callers invoke this only
+    // when the blocks needed to rebuild are present. The appendix
+    // (nullifiers, anchors, account registry, pool balance) must then match
+    // the chain. LoadShieldedSnapshotSection still refuses an appendix that
+    // does not match the height's shielded-state commitment unless the
+    // operator set -allowunpinnedshieldedsnapshot.
 
     // One fused genesis->tip walk replaces the previous four independent rebuild passes.
     ShieldedChainDerivedRebuildResult rebuilt;
@@ -8280,7 +8285,16 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 break;
             }
 
-            const auto shielded_usage = GetShieldedResourceUsage(bundle);
+            auto shielded_usage = GetShieldedResourceUsage(bundle);
+            // Spend-path recovery proofs always contribute to policy weight.
+            // The consensus budget counts them from
+            // nShieldedRecoveryProofVerifyCostHeight (mainnet block 244000),
+            // so earlier blocks keep the previous zero charge.
+            if (!params.GetConsensus().IsShieldedRecoveryProofVerifyCostActive(pindex->nHeight) &&
+                bundle.HasV2Bundle() &&
+                bundle.GetTransactionFamily() == shielded::v2::V2_SPEND_PATH_RECOVERY) {
+                shielded_usage.verify_units = 0;
+            }
             // Consensus rule: enforce per-block shielded verification cost limit.
             // Prevents adversarial blocks that take excessive time to validate.
             nBlockShieldedVerifyCost += shielded_usage.verify_units;

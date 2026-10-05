@@ -1209,6 +1209,14 @@ ShieldedResourceUsage GetShieldedResourceUsage(const CShieldedBundle& bundle)
     case shielded::v2::V2_SPEND_PATH_RECOVERY: {
         const auto& payload =
             std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle.payload);
+        // VerifySpendPathRecoveryProof runs VerifyMatRiCTProof. A singleton
+        // ring does not make that work free. Charge a direct spend per input
+        // so policy weight and, once nShieldedRecoveryProofVerifyCostHeight
+        // is set, the block budget see the proof. ConnectBlock drops this
+        // charge before that height so historical blocks stay valid.
+        usage.verify_units =
+            static_cast<uint64_t>(payload.spends.size()) * SHIELDED_VERIFY_UNITS_PER_DIRECT_SPEND +
+            static_cast<uint64_t>(payload.outputs.size()) * SHIELDED_VERIFY_UNITS_PER_DIRECT_OUTPUT;
         usage.scan_units = payload.outputs.size();
         usage.tree_update_units = payload.spends.size() + payload.outputs.size();
         break;

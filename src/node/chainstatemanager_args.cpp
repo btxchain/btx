@@ -151,9 +151,10 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
             return util::Error{Untranslated(strprintf(
                 "Invalid -reorgpolicy value (%s), expected bounded, observe, or legacy", *policy))};
         }
-    } else {
-        opts.reorg_policy = kernel::ChainstateManagerOpts::ReorgPolicyMode::BOUNDED;
     }
+    // Unset -reorgpolicy stays LEGACY (the Options default). Bounded mode's
+    // recovery ceiling permanently parks an ExactReplay-verified deeper
+    // fork, and BTX has no finality gadget, so that ceiling is opt-in.
     if (auto value{args.GetIntArg("-reorgnormaldepth")}) {
         if (*value < 1 || *value > 999) {
             return util::Error{Untranslated(strprintf(

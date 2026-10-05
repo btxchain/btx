@@ -912,6 +912,12 @@ struct Params {
      *  sets an explicit flag-day. See IsShieldedPoolDisabled. */
     int32_t nShieldedPoolDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSpendPathRecoveryActivationHeight{std::numeric_limits<int32_t>::max()};
+    /** First height at which a spend-path recovery proof's MatRiCT work
+     *  counts toward nMaxBlockShieldedVerifyCost. Before it, consensus keeps
+     *  the historical zero charge so already-accepted blocks stay valid.
+     *  Policy weight counts the proof at every height. The struct default is
+     *  int32 max. Mainnet sets BTX_SECURITY_ACTIVATION_HEIGHT (block 244000). */
+    int32_t nShieldedRecoveryProofVerifyCostHeight{std::numeric_limits<int32_t>::max()};
     /** C-002 shielded proof + SLH-DSA/FIPS-205 activation height. Mainnet default
      *  remains 123,000; regtest may lower this to exercise boundary behavior
      *  without mining 123k blocks. Keep the default in sync with
@@ -1396,6 +1402,12 @@ struct Params {
         return height >= 0 &&
             nShieldedSpendPathRecoveryActivationHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedSpendPathRecoveryActivationHeight;
+    }
+    bool IsShieldedRecoveryProofVerifyCostActive(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedRecoveryProofVerifyCostHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedRecoveryProofVerifyCostHeight;
     }
     bool IsShieldedC002Active(int32_t height) const
     {

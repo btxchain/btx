@@ -329,7 +329,7 @@ class BTXAgentSetupTest(unittest.TestCase):
             self.assertEqual(summary["faststart_conf"], str(datadir / "faststart" / "faststart.conf"))
             self.assertEqual(errors.getvalue(), "boot progress\nbootstrap warning\n")
 
-    def test_preset_uses_release_snapshot_manifest_url_for_remote_release(self):
+    def test_preset_bootstraps_from_verified_snapshot_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             archive_path = self._build_fake_archive(root)
@@ -404,10 +404,14 @@ class BTXAgentSetupTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             command = recorded_runs[0]
-            self.assertIn(
-                "--snapshot-manifest=https://github.com/example/btx/releases/download/v29.2/snapshot.manifest.json",
-                command,
-            )
+            manifest_args = [arg for arg in command if arg.startswith("--snapshot-manifest=")]
+            self.assertEqual(len(manifest_args), 1)
+            manifest_used = manifest_args[0].split("=", 1)[1]
+            self.assertFalse(manifest_used.startswith("http://") or manifest_used.startswith("https://"))
+            used_path = pathlib.Path(manifest_used)
+            self.assertTrue(used_path.is_file())
+            self.assertEqual(used_path.name, "snapshot.manifest.json")
+            self.assertEqual(used_path.read_bytes(), snapshot_manifest_path.read_bytes())
 
     def test_miner_json_summary_includes_direct_helper_commands(self):
         with tempfile.TemporaryDirectory() as tmpdir:
