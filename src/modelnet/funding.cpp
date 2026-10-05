@@ -707,6 +707,11 @@ bool BuildClaimOrRefund(const std::string& method, const UniValue& params, UniVa
     }
     if (in.descriptor.empty() && !in.key_hash_hex.empty() && !in.claimant.empty() &&
         !in.refund_pubkey.empty() && in.refund_height > 0) {
+        if (in.refund_height >= LOCKTIME_THRESHOLD) {
+            err_code = "INVALID_PARAMETER";
+            err = "refund_height must be a block height below 500000000 (larger values are a Unix time to CLTV)";
+            return false;
+        }
         in.descriptor = HtlcSha256Descriptor(ToLower(in.key_hash_hex), in.claimant, in.refund_height, in.refund_pubkey);
     }
     if (in.descriptor.empty()) {

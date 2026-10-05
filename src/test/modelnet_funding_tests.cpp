@@ -132,6 +132,20 @@ BOOST_AUTO_TEST_CASE(build_htlc_sha256_descriptor)
     BOOST_CHECK(q.descriptor.find("htlc_tx(") == std::string::npos);
     BOOST_CHECK(q.descriptor.find("htlc_sha256_tx") == std::string::npos);
     BOOST_CHECK(!q.output_script.empty());
+
+    q.refund_height = LOCKTIME_THRESHOLD;
+    BOOST_CHECK(!wallet::BuildHtlcSha256Descriptor(q, err));
+    BOOST_CHECK(err.find("block height") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(freeze_model_funding_rejects_timestamp_refund)
+{
+    modelnet::FrozenModelFunding in = SampleFrozenFunding();
+    in.refund_height = LOCKTIME_THRESHOLD;
+    modelnet::FrozenModelFunding out;
+    std::string err;
+    BOOST_CHECK(!modelnet::FreezeModelFunding(in, out, err));
+    BOOST_CHECK(err.find("block height") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(quote_mutation_requires_fresh_prepare)

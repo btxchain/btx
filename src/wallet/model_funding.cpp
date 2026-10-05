@@ -191,8 +191,8 @@ bool BuildHtlcSha256Descriptor(FrozenFundingQuote& q, std::string& err)
         err = "key_hash, claimant pubkey, and refund_pubkey are required";
         return false;
     }
-    if (q.refund_height == 0) {
-        err = "refund_height must be a positive CLTV height";
+    if (q.refund_height == 0 || q.refund_height >= LOCKTIME_THRESHOLD) {
+        err = "refund_height must be a block height below 500000000 (larger values are a Unix time to CLTV)";
         return false;
     }
     modelnet::Hash32 key_hash;
