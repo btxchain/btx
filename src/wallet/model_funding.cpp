@@ -203,14 +203,8 @@ bool ExpandHtlcSha256Descriptor(const std::string& descriptor, CScript& script_p
             ++sha256_leaves;
             continue;
         }
-        bool refund{false};
-        for (size_t i = 0; i + 1 < kv.first.size(); ++i) {
-            if (kv.first[i] == OP_CHECKLOCKTIMEVERIFY && kv.first[i + 1] == OP_DROP) {
-                refund = true;
-                break;
-            }
-        }
-        if (!refund) {
+        int64_t refund_lock{0};
+        if (!ParseP2MRRefundLeaf(kv.first, refund_lock, algo, pk)) {
             err = "descriptor must be exactly one htlc_sha256 leaf and one refund leaf";
             return false;
         }

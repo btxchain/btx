@@ -1074,6 +1074,11 @@ static DBErrors LoadDescriptorWalletRecords(CWallet* pwallet, DatabaseBatch& bat
             strErr = strprintf("%s\nDetails: %s", strErr, details);
             return DBErrors::UNKNOWN_DESCRIPTOR;
         }
+        // A 3+ leaf mr() stored by 0.34.12/0.34.13 has the ID of its old flat
+        // rendering. Keep that ID so its records still match.
+        if (id != desc.id && desc.descriptor && LegacyFlatMRDescriptorID(*desc.descriptor) == id) {
+            desc.id = id;
+        }
         DescriptorScriptPubKeyMan& spkm = pwallet->LoadDescriptorScriptPubKeyMan(id, desc);
 
         // Prior to doing anything with this spkm, verify ID compatibility

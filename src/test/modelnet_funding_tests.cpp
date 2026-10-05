@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <test/util/setup_common.h>
 #include <pqkey.h>
 #include <modelnet/catalog.h>
@@ -158,6 +160,31 @@ BOOST_AUTO_TEST_CASE(expand_rejects_an_extra_spend_leaf)
     std::string canonical, err;
     BOOST_CHECK(!wallet::ExpandHtlcSha256Descriptor(extra, script, canonical, err));
     BOOST_CHECK(err.find("exactly one") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(expand_rejects_pk_leaf_whose_key_bytes_contain_cltv_drop)
+{
+    // The refund-leaf check scanned bytes for OP_CHECKLOCKTIMEVERIFY OP_DROP,
+    // so a plain key leaf (no timelock) whose key bytes contain 0xb1 0x75 counted as a refund leaf.
+    const wallet::FrozenFundingQuote q = SampleQuote();
+    std::vector<unsigned char> key = MakePattern(MLDSA44_PUBKEY_SIZE, 0x41);
+    key[100] = 0xb1;
+    key[101] = 0x75;
+    const std::string pk_leaf = "mr(htlc_sha256(" + q.key_hash_hex + "," + q.claimant_key + ")," + HexStr(key) + ")";
+    CScript script;
+    std::string canonical, err;
+    BOOST_CHECK(!wallet::ExpandHtlcSha256Descriptor(pk_leaf, script, canonical, err));
+    BOOST_CHECK_MESSAGE(err.find("exactly one") != std::string::npos, err);
+    // The real two-leaf lock still expands.
+    const std::string good = "mr(htlc_sha256(" + q.key_hash_hex + "," + q.claimant_key + "),refund(" +
+                             std::to_string(q.refund_height) + "," + q.refund_key + "))";
+    err.clear();
+    BOOST_CHECK_MESSAGE(wallet::ExpandHtlcSha256Descriptor(good, script, canonical, err), err);
+    // A refund leaf whose key bytes contain b175 is still a refund leaf.
+    const std::string good_b175 = "mr(htlc_sha256(" + q.key_hash_hex + "," + q.claimant_key + "),refund(" +
+                                  std::to_string(q.refund_height) + "," + HexStr(key) + "))";
+    err.clear();
+    BOOST_CHECK_MESSAGE(wallet::ExpandHtlcSha256Descriptor(good_b175, script, canonical, err), err);
 }
 
 BOOST_AUTO_TEST_CASE(quote_mutation_requires_fresh_prepare)

@@ -580,6 +580,44 @@ std::vector<unsigned char> BuildP2MRRefundLeaf(
     return std::vector<unsigned char>(script.begin(), script.end());
 }
 
+bool ParseP2MRRefundLeaf(
+    Span<const unsigned char> script,
+    int64_t& locktime,
+    PQAlgorithm& sender_algo,
+    std::vector<unsigned char>& sender_pubkey)
+{
+    const CScript s(script.begin(), script.end());
+    CScript::const_iterator pc = s.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> push;
+    if (!s.GetOp(pc, opcode, push)) return false;
+    int64_t value{0};
+    if (opcode >= OP_1 && opcode <= OP_16) {
+        value = CScript::DecodeOP_N(opcode);
+    } else if (opcode > OP_0 && opcode <= OP_PUSHDATA4) {
+        try {
+            value = CScriptNum(push, /*fRequireMinimal=*/true, /*nMaxNumSize=*/5).GetInt64();
+        } catch (const scriptnum_error&) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    if (value < 1) return false;
+    const size_t key_offset = static_cast<size_t>(pc - s.begin()) + 2;
+    if (key_offset > script.size()) return false;
+    Span<const unsigned char> pubkey;
+    size_t push_consumed{0};
+    PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+    if (!ParseP2MRAnyPubkeyPush(script, key_offset, algo, pubkey, push_consumed)) return false;
+    const std::vector<unsigned char> rebuilt = BuildP2MRRefundLeaf(value, algo, pubkey);
+    if (rebuilt.empty() || !std::equal(rebuilt.begin(), rebuilt.end(), script.begin(), script.end())) return false;
+    locktime = value;
+    sender_algo = algo;
+    sender_pubkey.assign(pubkey.begin(), pubkey.end());
+    return true;
+}
+
 std::vector<unsigned char> BuildP2MRAtomicSwapLeaf(
     const uint256& ctv_hash,
     PQAlgorithm spender_algo,

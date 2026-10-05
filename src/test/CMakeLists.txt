@@ -551,6 +551,8 @@ if(WITH_MODELNET)
     modelnet_tests.cpp
     compute_economy_tests.cpp
     compute_economy_review_tests.cpp
+    pwc_v03414_review_tests.cpp
+    modelnet_v03414_review_tests.cpp
     modelnet_safety_tests.cpp
     modelnet_v11_negative_tests.cpp
     modelnet_funding_tests.cpp

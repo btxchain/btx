@@ -1362,6 +1362,10 @@ static RPCHelpMan exportmodelrecovery()
             }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
+            // The object also carries output_script, address, claimant, refund_pubkey and
+            // notes. Without the leading elision every successful call failed the result
+            // type check ("Internal bug detected").
+            {RPCResult::Type::ELISION, "", "public recovery fields (output_script, address, keys, notes)"},
             {RPCResult::Type::NUM, "schema_version", "2"},
             {RPCResult::Type::STR, "descriptor", "Public descriptor"},
             {RPCResult::Type::STR, "key_hash", "SHA-256 hashlock"},

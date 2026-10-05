@@ -822,8 +822,15 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         return true;
     }
     if (method == "importcomputeagreement") {
+        // Validate before Import() writes the record, so a refused agreement is
+        // not stored (and listed, and reloaded) anyway.
         SignedEnvelope env;
-        if (!Import(a, "ComputeAgreement", env, err_code, err)) return false;
+        if (!EnvelopeFromJson(a.exists("envelope") ? a["envelope"] : a, env, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
+        if (!VerifySignedEnvelope(env, m_network, err)) {
+            if (err.find("network") != std::string::npos) return Fail(err_code, err, "COMPUTE_NETWORK_MISMATCH", err);
+            return Fail(err_code, err, "COMPUTE_SIGNATURE_INVALID", err);
+        }
+        if (StrOf(env.body, "record_type") != "ComputeAgreement") return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "type");
         const UniValue& ap = PayloadOf(env);
         if (!ap.exists("subject_pubkey") || !ap["subject_pubkey"].isStr() || !HexKey(ap["subject_pubkey"].get_str())) {
             return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "subject");
@@ -843,15 +850,16 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             ap["qualification"]["profile_id"].get_str() != ap["settlement"]["profile_id"].get_str()) {
             return Fail(err_code, err, "COMPUTE_PROFILE_MISMATCH", "qualification");
         }
-        auto offer = m_offers.find(ap["offer_id"].get_str());
+        auto offer = m_offers.find(StrOf(ap, "offer_id"));
         if (offer != m_offers.end()) {
             const UniValue& op = PayloadOf(offer->second);
             if (SignerOf(env) != SignerOf(offer->second)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "issuer");
-            if (op["resource_ref"].get_str() != ap["resource_ref"].get_str()) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "resource");
+            if (StrOf(op, "resource_ref") != StrOf(ap, "resource_ref")) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "resource");
             if (op["settlement"]["profile_id"].get_str() != ap["settlement"]["profile_id"].get_str()) {
                 return Fail(err_code, err, "COMPUTE_PROFILE_MISMATCH", "profile");
             }
         }
+        if (!Import(a, "ComputeAgreement", env, err_code, err)) return false;
         result = EnvelopeToJson(env);
         result.pushKV("agreement_id", env.record_id.Hex());
         result.pushKV("automatic_spend_atoms", 0);
@@ -1256,6 +1264,12 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
                 std::string st_code, st_err;
                 if (reg.Open(fs::PathFromString(g_qual_path), open_err) && reg.Status(evidence, now_ms, st, st_code, st_err) &&
                     StrOf(st, "status") != "unknown") {
+                    // Work this node verified backs credit only on an agreement this
+                    // node signed. On a foreign agreement it buys no grant here and
+                    // would only consume the challenge before the honest receipt.
+                    std::vector<unsigned char> own_pk, own_sk;
+                    if (!LoadIdentity(own_pk, own_sk, err)) return Fail(err_code, err, "COMPUTE_SIGNING_IDENTITY_REQUIRED", err);
+                    if (SignerOf(ait->second) != HexStr(own_pk)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement issuer");
                     if (StrOf(st, "status") != "redeemed") return Fail(err_code, err, "COMPUTE_QUALIFICATION_REQUIRED", "not redeemed");
                     if (StrOf(st, "subject_digest") != SubjectDigestHex(ap["subject_pubkey"].get_str())) {
                         return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "qualification");

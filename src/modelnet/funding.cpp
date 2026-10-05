@@ -168,14 +168,8 @@ bool ExpandHtlcDescriptor(const std::string& descriptor, CScript& script_pubkey,
             ++sha256_leaves;
             continue;
         }
-        bool refund{false};
-        for (size_t i = 0; i + 1 < kv.first.size(); ++i) {
-            if (kv.first[i] == OP_CHECKLOCKTIMEVERIFY && kv.first[i + 1] == OP_DROP) {
-                refund = true;
-                break;
-            }
-        }
-        if (!refund) {
+        int64_t refund_lock{0};
+        if (!ParseP2MRRefundLeaf(kv.first, refund_lock, algo, pk)) {
             err = "descriptor must be exactly one htlc_sha256 leaf and one refund leaf";
             return false;
         }
@@ -459,14 +453,13 @@ bool Prepare(ModelCatalog& cat, const UniValue& params, UniValue& result, std::s
     CScript script;
     std::string canonical;
     std::string expand_err;
+    // Pay the descriptor FreezeModelFunding just fingerprinted. A caller-supplied
+    // descriptor that does not expand to that same lock is not a substitute.
     const std::string with_checksum = AddChecksum(frozen.descriptor);
     if (!ExpandHtlcDescriptor(with_checksum, script, canonical, expand_err)) {
-        expand_err.clear();
-        if (in.descriptor.empty() || !ExpandHtlcDescriptor(in.descriptor, script, canonical, expand_err)) {
-            err_code = "INVALID_PARAMETER";
-            err = expand_err.empty() ? "HTLC descriptor did not expand to one htlc_sha256 leaf and one refund leaf" : expand_err;
-            return false;
-        }
+        err_code = "INVALID_PARAMETER";
+        err = expand_err.empty() ? "HTLC descriptor did not expand to one htlc_sha256 leaf and one refund leaf" : expand_err;
+        return false;
     }
     frozen.descriptor = canonical;
 

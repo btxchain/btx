@@ -302,4 +302,9 @@ std::unique_ptr<Descriptor> InferDescriptor(const CScript& script, const Signing
 */
 uint256 DescriptorID(const Descriptor& desc);
 
+/** The ID 0.34.12/0.34.13 gave an mr() descriptor with 3 or more leaves: the
+ *  hash of its flat "mr(A,B,C)" rendering. nullopt when the rendering has no
+ *  brace tree (the ID did not change). Used only to load such wallets. */
+std::optional<uint256> LegacyFlatMRDescriptorID(const Descriptor& desc);
+
 #endif // BITCOIN_SCRIPT_DESCRIPTOR_H

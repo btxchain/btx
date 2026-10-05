@@ -4,6 +4,7 @@
 
 #include <modelnet/free_grant.h>
 
+#include <logging.h>
 #include <modelnet/identity.h>
 #include <random.h>
 #include <util/strencodings.h>
@@ -14,6 +15,7 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <unordered_map>
 
 namespace modelnet {
 namespace {
@@ -53,14 +55,85 @@ bool ReadObj(const fs::path& path, UniValue& out)
 
 bool WriteObj(const fs::path& path, const UniValue& obj, std::string& err)
 {
+    // Write a sibling and rename it over the store, so a crash or a short
+    // write never leaves a half file that refuses every later grant.
     TryCreateDirectories(path.parent_path());
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) {
+    const fs::path tmp = fs::PathFromString(fs::PathToString(path) + ".tmp");
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) {
+            err = "write " + fs::PathToString(path);
+            return false;
+        }
+        out << obj.write() << "\n";
+        out.flush();
+        if (!out) {
+            err = "write " + fs::PathToString(path);
+            return false;
+        }
+    }
+    if (!RenameOver(tmp, path)) {
         err = "write " + fs::PathToString(path);
         return false;
     }
-    out << obj.write() << "\n";
     return true;
+}
+
+/** Read a grant store (grant_redeems.json or grant_nonces.json). An unparsable
+ *  store (an older in-place write cut short) is moved aside to .quarantine and
+ *  replaced by an empty one. Both stores are bounded (redeems by the 600 s
+ *  grant lifetime, nonces by kGrantNonceCap), so the rename is cheap. Every
+ *  grant expires within FREE_GRANT_LIFETIME_S, so at most one lifetime of
+ *  uses can repeat, and a re-issued nonce still meets its recorded uses. */
+bool ReadOrQuarantine(const fs::path& path, UniValue& out)
+{
+    if (ReadObj(path, out)) return true;
+    const fs::path q = fs::PathFromString(fs::PathToString(path) + ".quarantine");
+    std::error_code ec;
+    fs::rename(path, q, ec);
+    if (ec) {
+        LogPrintf("btx-modeld: %s is unreadable and cannot be moved aside: %s\n", fs::PathToString(path), ec.message());
+        out = UniValue(UniValue::VOBJ);
+        return false;
+    }
+    LogPrintf("btx-modeld: %s was unreadable; moved to %s and started empty\n", fs::PathToString(path), fs::PathToString(q));
+    out = UniValue(UniValue::VOBJ);
+    return true;
+}
+
+/** Drop the uses of grants that have expired: an expired grant never verifies
+ *  again, so its record only grows the file that every piece GET rewrites. */
+void PruneExpiredUses(UniValue& store, int64_t now)
+{
+    const UniValue empty(UniValue::VOBJ);
+    const UniValue& exp = store.exists("expires_at") && store["expires_at"].isObject() ? store["expires_at"] : empty;
+    const UniValue& used = store.exists("uses") && store["uses"].isObject() ? store["uses"] : empty;
+    const UniValue& bytes = store.exists("redeemed_bytes") && store["redeemed_bytes"].isObject() ? store["redeemed_bytes"] : empty;
+    // Index once: UniValue key lookup is linear, so per-nonce exists()/[] on a
+    // large store would make this quadratic.
+    std::unordered_map<std::string, const UniValue*> exp_by, bytes_by;
+    for (size_t i = 0; i < exp.getKeys().size(); ++i) exp_by.emplace(exp.getKeys()[i], &exp.getValues()[i]);
+    for (size_t i = 0; i < bytes.getKeys().size(); ++i) bytes_by.emplace(bytes.getKeys()[i], &bytes.getValues()[i]);
+    UniValue kept_used(UniValue::VOBJ), kept_bytes(UniValue::VOBJ), kept_exp(UniValue::VOBJ);
+    for (size_t i = 0; i < used.getKeys().size(); ++i) {
+        const std::string& nonce = used.getKeys()[i];
+        int64_t until = now + FREE_GRANT_LIFETIME_S; // no record (older store): keep one lifetime
+        const auto e = exp_by.find(nonce);
+        if (e != exp_by.end() && e->second->isNum()) {
+            try {
+                until = e->second->getInt<int64_t>();
+            } catch (...) {
+            }
+        }
+        if (until < now) continue;
+        kept_used.pushKVEnd(nonce, used.getValues()[i]);
+        const auto bb = bytes_by.find(nonce);
+        if (bb != bytes_by.end()) kept_bytes.pushKVEnd(nonce, *bb->second);
+        kept_exp.pushKVEnd(nonce, until);
+    }
+    store.pushKV("uses", std::move(kept_used));
+    store.pushKV("redeemed_bytes", std::move(kept_bytes));
+    store.pushKV("expires_at", std::move(kept_exp));
 }
 
 } // namespace
@@ -347,7 +420,7 @@ bool VerifyHostedFreeGrant(const fs::path& helper_dir,
         maximum_bytes = body["maximum_bytes"].getInt<uint64_t>();
     }
     UniValue store;
-    if (!ReadObj(helper_dir / "grant_redeems.json", store)) {
+    if (!ReadOrQuarantine(helper_dir / "grant_redeems.json", store)) {
         err = "grant redeem store";
         return false;
     }
@@ -358,6 +431,19 @@ bool VerifyHostedFreeGrant(const fs::path& helper_dir,
     if (GrantUseConflicts(arr, use_key, err)) return false;
     if (!record_use) return true;
     if (!RedeemGrantUseUnlocked(store, nonce, use_key, redeem_bytes, maximum_bytes, err)) return false;
+    {
+        UniValue exp = store.exists("expires_at") && store["expires_at"].isObject() ? store["expires_at"] : UniValue(UniValue::VOBJ);
+        int64_t until = now + FREE_GRANT_LIFETIME_S;
+        if (body.exists("expires_at") && body["expires_at"].isNum()) {
+            try {
+                until = body["expires_at"].getInt<int64_t>();
+            } catch (...) {
+            }
+        }
+        exp.pushKV(nonce, until);
+        store.pushKV("expires_at", exp);
+    }
+    PruneExpiredUses(store, now);
     return WriteObj(helper_dir / "grant_redeems.json", store, err);
 }
 
@@ -369,11 +455,11 @@ bool ConsumeGrantNonce(const fs::path& helper_dir, const std::string& nonce_hex,
     }
     std::lock_guard<std::mutex> lock(g_grant_store_mu);
     UniValue store;
-    if (!ReadObj(helper_dir / "grant_nonces.json", store)) {
+    if (!ReadOrQuarantine(helper_dir / "grant_nonces.json", store)) {
         err = "grant nonce store";
         return false;
     }
-    UniValue arr = store.exists("nonces") ? store["nonces"] : UniValue(UniValue::VARR);
+    UniValue arr = store.exists("nonces") && store["nonces"].isArray() ? store["nonces"] : UniValue(UniValue::VARR);
     for (const auto& n : arr.getValues()) {
         if (n.isStr() && n.get_str() == nonce_hex) {
             err = "replay";
@@ -389,7 +475,13 @@ bool ConsumeGrantNonce(const fs::path& helper_dir, const std::string& nonce_hex,
     }
     kept.push_back(nonce_hex);
     store.pushKV("nonces", kept);
-    const uint64_t seq = store.exists("sequence") ? store["sequence"].getInt<uint64_t>() + 1 : 1;
+    uint64_t seq = 1;
+    if (store.exists("sequence") && store["sequence"].isNum()) {
+        try {
+            seq = store["sequence"].getInt<uint64_t>() + 1;
+        } catch (...) {
+        }
+    }
     store.pushKV("sequence", seq);
     sequence = seq;
     return WriteObj(helper_dir / "grant_nonces.json", store, err);

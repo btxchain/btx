@@ -3831,6 +3831,15 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
             const auto backup_arg = Expr(expr);
             if (!parse_backup_tree(parse_backup_tree, backup_arg, providers, leaf_specs, leaf_exprs)) return {};
         }
+        // 0.34.12 and 0.34.13 rendered an mr() with 3 or more leaves as the flat
+        // "mr(A,B,C)", which is not valid syntax, and stored it in wallets in that
+        // form. Accept it when loading a stored descriptor only. The script tree
+        // depends only on the leaf order, so A,B,C is the same tree as A,{B,C}.
+        while (!options.new_descriptor_rules && expr.size() && expr[0] == ',') {
+            Const(",", expr);
+            const auto extra_arg = Expr(expr);
+            if (!parse_backup_tree(parse_backup_tree, extra_arg, providers, leaf_specs, leaf_exprs)) return {};
+        }
         if (expr.size()) {
             error = strprintf("mr(): unexpected trailing token '%c'", expr[0]);
             return {};
@@ -4365,6 +4374,22 @@ std::string AddChecksum(const std::string& str) { return str + "#" + DescriptorC
 std::unique_ptr<Descriptor> InferDescriptor(const CScript& script, const SigningProvider& provider)
 {
     return InferScript(script, ParseScriptContext::TOP, provider);
+}
+
+std::optional<uint256> LegacyFlatMRDescriptorID(const Descriptor& desc)
+{
+    std::string desc_str = desc.ToString(/*compat_format=*/true);
+    const auto hash_pos = desc_str.rfind('#');
+    if (hash_pos != std::string::npos) desc_str.resize(hash_pos);
+    if (desc_str.rfind("mr(", 0) != 0 || desc_str.find('{') == std::string::npos) return std::nullopt;
+    std::string flat;
+    for (char c : desc_str) {
+        if (c != '{' && c != '}') flat += c;
+    }
+    const std::string legacy = AddChecksum(flat);
+    uint256 id;
+    CSHA256().Write((const unsigned char*)legacy.data(), legacy.size()).Finalize(id.begin());
+    return id;
 }
 
 uint256 DescriptorID(const Descriptor& desc)

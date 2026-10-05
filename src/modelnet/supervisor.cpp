@@ -331,6 +331,16 @@ bool HelperSupervisor::SpawnLocked(std::string& err)
         err = "posix_spawn_file_actions_init";
         return false;
     }
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+    // Do not leak btxd's descriptors (P2P/RPC listen sockets, datadir locks,
+    // log files) into the helper. A leaked listen socket outlives a crashed
+    // btxd in the orphaned helper and blocks btxd from binding on restart.
+    if (posix_spawn_file_actions_addclosefrom_np(&actions, 3) != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        err = "posix_spawn_file_actions_addclosefrom_np";
+        return false;
+    }
+#endif
     pid_t pid = -1;
     const int rc = posix_spawn(&pid, fs::PathToString(m_cfg.helper_exe).c_str(), &actions, nullptr, argv.data(), envp.data());
     posix_spawn_file_actions_destroy(&actions);

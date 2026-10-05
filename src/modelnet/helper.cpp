@@ -1650,6 +1650,102 @@ static std::mutex g_receipts_mu;
 static std::map<std::string, FundingObservation> g_chain_obs;
 static bool g_feed_loaded{false};
 static fs::path g_econ_dir;
+/** Release ids this node created with createmodelrelease. Only these gate the
+ *  serving of plaintext: campaigns also arrive from unsigned peer search
+ *  records, and one of those must not switch off a public model. Guarded by
+ *  g_campaign_mu. */
+static std::set<std::string> g_local_releases;
+/** Set when local_releases.json exists but cannot be read or parsed. The gate
+ *  then fails closed: every campaign withholds plaintext, as before the
+ *  local-release filter existed. The damaged file is left in place for the
+ *  operator and is not overwritten. Guarded by g_campaign_mu. */
+static bool g_local_releases_untrusted{false};
+
+fs::path LocalReleasesPath(const fs::path& dir) { return dir / "local_releases.json"; }
+
+/** Write g_local_releases atomically (tmp + rename). Returns false, and logs,
+ *  on any failure. Never overwrites a file that failed to parse. */
+bool SaveLocalReleases(const fs::path& dir)
+{
+    const fs::path path = LocalReleasesPath(dir);
+    if (g_local_releases_untrusted) {
+        LogPrintf("btx-modeld: %s is damaged; not overwriting it (plaintext of every release campaign is withheld until it is repaired)\n",
+                  fs::PathToString(path));
+        return false;
+    }
+    UniValue arr(UniValue::VARR);
+    for (const auto& id : g_local_releases) arr.push_back(id);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("release_ids", arr);
+    const fs::path tmp = fs::PathFromString(fs::PathToString(path) + ".tmp");
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (out) {
+            out << o.write() << "\n";
+            out.flush();
+        }
+        if (!out) {
+            LogPrintf("btx-modeld: cannot write %s\n", fs::PathToString(tmp));
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        LogPrintf("btx-modeld: cannot rename %s to %s: %s\n", fs::PathToString(tmp), fs::PathToString(path), ec.message());
+        return false;
+    }
+    return true;
+}
+
+void LoadLocalReleases(const fs::path& dir, const std::vector<ReleaseCampaign>& loaded)
+{
+    g_local_releases.clear();
+    g_local_releases_untrusted = false;
+    const fs::path path = LocalReleasesPath(dir);
+    // Present unless it is positively absent: a status error counts as present
+    // (and then fails to read), so the gate fails closed.
+    std::error_code ec;
+    const auto st = std::filesystem::status(path, ec);
+    const bool present = ec ? ec != std::errc::no_such_file_or_directory : fs::exists(st);
+    if (present) {
+        std::ifstream in(path);
+        std::string raw;
+        if (in) raw.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue o;
+        bool ok = in && o.read(raw) && o.isObject() && o.exists("release_ids") && o["release_ids"].isArray();
+        if (ok) {
+            for (const auto& v : o["release_ids"].getValues()) {
+                if (!v.isStr()) {
+                    ok = false;
+                    break;
+                }
+                g_local_releases.insert(v.get_str());
+            }
+        }
+        if (!ok) {
+            // Fail closed: do not guess which campaigns are local.
+            g_local_releases.clear();
+            g_local_releases_untrusted = true;
+            LogPrintf("btx-modeld: %s exists but cannot be read; withholding plaintext of every release campaign until it is repaired\n",
+                      fs::PathToString(path));
+        }
+        return;
+    }
+    // Upgrade from v0.34.14: campaigns.json does not say which campaigns are
+    // local. A local campaign is signed with this helper's identity when one
+    // exists; a campaign ingested from a search record never carries a key.
+    for (const auto& c : loaded) {
+        if (!c.pubkey.empty() && !c.sig.empty()) g_local_releases.insert(c.release_id.Hex());
+    }
+    (void)SaveLocalReleases(dir);
+}
+
+/** True when campaign `release_id` gates plaintext on this node. */
+bool CampaignIsLocal(const std::string& release_id)
+{
+    return g_local_releases_untrusted || g_local_releases.count(release_id) > 0;
+}
 static std::unique_ptr<S3PieceStore> g_cloud;
 static CloudStoreConfig g_cloud_cfg;
 static DirectSeedAdmissionState g_direct_seed_admit;
@@ -1693,6 +1789,10 @@ void EnsureEconomy(ModelCatalog& cat)
     std::vector<ReleaseCampaign> local;
     if (LoadCampaigns(dir, local, err)) {
         for (const auto& c : local) g_campaigns.Put(c, err);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_campaign_mu);
+        LoadLocalReleases(dir, local);
     }
 }
 
@@ -1869,8 +1969,14 @@ uint64_t FreeGrantChargeBytes(const CatalogEntry& entry, uint32_t file_index, ui
 
 const ReleaseCampaign* CampaignForEntry(const CatalogEntry& entry)
 {
-    if (const ReleaseCampaign* by_model = g_campaigns.GetByModel(entry.model_id)) return by_model;
+    // Only a release this node created withholds its plaintext. A campaign
+    // learned from a peer's (unsigned) search record may name any model or
+    // artifact id.
+    if (const ReleaseCampaign* by_model = g_campaigns.GetByModel(entry.model_id)) {
+        if (CampaignIsLocal(by_model->release_id.Hex())) return by_model;
+    }
     for (const auto& camp : g_campaigns.List()) {
+        if (!CampaignIsLocal(camp.release_id.Hex())) continue;
         if (camp.model_id == entry.model_id || camp.artifact_id == entry.artifact_id ||
             (!camp.ciphertext_artifact_id.IsNull() &&
              (camp.ciphertext_artifact_id == entry.artifact_id || camp.ciphertext_artifact_id == entry.model_id))) {
@@ -7554,6 +7660,21 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                         c.signed_ok = true;
                     }
                 }
+            }
+        }
+        {
+            // Record the release as local BEFORE it exists anywhere else. If
+            // the marker cannot be saved the release is refused: otherwise it
+            // would be gated until the next restart and served after it. While
+            // local_releases.json is damaged every campaign is gated anyway,
+            // so the id is only kept in memory and the damaged file is left.
+            std::lock_guard<std::mutex> lock(g_campaign_mu);
+            g_local_releases.insert(c.release_id.Hex());
+            if (!g_local_releases_untrusted && !SaveLocalReleases(HelperDir(cat))) {
+                g_local_releases.erase(c.release_id.Hex());
+                err_code = "INTERNAL";
+                err = "cannot save local_releases.json; release not created";
+                return false;
             }
         }
         std::string cerr;
