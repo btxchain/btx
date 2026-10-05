@@ -83,6 +83,27 @@ const UniValue& Arg0(const UniValue& params)
     return empty;
 }
 
+/** A string field, or empty when it is absent or not a string. Stored records
+ *  are iterated on every settlement, so a wrong type must not throw. */
+std::string StrOf(const UniValue& o, const char* key)
+{
+    if (!o.isObject() || !o.exists(key) || !o[key].isStr()) return {};
+    return o[key].get_str();
+}
+
+/** One stored record, as written and as listed, stays well under the 256 KiB
+ *  helper reply cap so get/list of any record can always be answered. */
+constexpr size_t kMaxRecordJsonBytes = 128 * 1024;
+
+bool LowerHex(const std::string& s, size_t len)
+{
+    if (s.size() != len) return false;
+    for (char c : s) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
 bool HexKey(const std::string& hex)
 {
     if (hex.size() != MLDSA44_PK * 2) return false;
@@ -261,6 +282,10 @@ bool ComputeStore::WriteEnvelope(const SignedEnvelope& env, std::string& err)
     fs::create_directories(dir);
     const fs::path dest = dir / fs::PathFromString(env.record_id.Hex() + ".json");
     const std::string bytes = EnvelopeToJson(env).write();
+    if (bytes.size() > kMaxRecordJsonBytes) {
+        err = "COMPUTE_RECORD_INVALID";
+        return false;
+    }
     if (fs::exists(dest)) {
         std::ifstream in(dest);
         std::string prev((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -440,7 +465,9 @@ bool ComputeStore::BalanceOf(const std::string& agreement_id, int64_t now_ms, Un
     std::set<std::string> settled_jobs;
     for (const auto& kv : m_receipts) {
         const UniValue& rp = PayloadOf(kv.second);
-        if (!rp.exists("agreement_id") || rp["agreement_id"].get_str() != agreement_id) continue;
+        // A field of the wrong type must skip this record. get_str() would throw
+        // and stop the balance of every agreement on the node.
+        if (StrOf(rp, "agreement_id") != agreement_id) continue;
         uint64_t credit = 0;
         if (!U64Field(rp, "credited_p1e_microunits", credit, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "credit");
         if (!AddU64(credited, credit)) return Fail(err_code, err, "COMPUTE_CREDIT_OVERFLOW", "sum");
@@ -459,7 +486,7 @@ bool ComputeStore::BalanceOf(const std::string& agreement_id, int64_t now_ms, Un
     uint64_t reserved = 0;
     for (const auto& kv : m_jobs) {
         const UniValue& jp = PayloadOf(kv.second);
-        if (jp["agreement_id"].get_str() != agreement_id) continue;
+        if (StrOf(jp, "agreement_id") != agreement_id) continue;
         if (settled_jobs.count(kv.first)) continue;
         int64_t exp = 0;
         if (!I64Field(jp, "expires_at_ms", exp, err)) continue;
@@ -620,6 +647,11 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         SignedEnvelope parsed;
         if (!EnvelopeFromJson(a.exists("envelope") ? a["envelope"] : a, parsed, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
         if (!ValidOffer(PayloadOf(parsed), m_chain, err_code, err)) return false;
+        // The payload names its issuer. It must be the key that signed it, or a
+        // listing shows another provider's name on this offer.
+        if (StrOf(PayloadOf(parsed), "issuer_pubkey").empty() || StrOf(PayloadOf(parsed), "issuer_pubkey") != SignerOf(parsed)) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "issuer");
+        }
         SignedEnvelope env;
         if (!Import(a, "ComputeOffer", env, err_code, err)) return false;
         result = EnvelopeToJson(env);
@@ -629,7 +661,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
     }
     if (method == "getcomputeoffer" || method == "getcomputeagreement" || method == "getcomputejob" ||
         method == "getcomputejobresult" || method == "getcomputereceipt" || method == "getcomputeaccessgrant") {
-        const std::string id = a.exists("id") ? a["id"].get_str() : "";
+        const std::string id = (a.exists("id") && a["id"].isStr()) ? a["id"].get_str() : "";
         const std::map<std::string, SignedEnvelope>* map = &m_offers;
         if (method.find("agreement") != std::string::npos) map = &m_agreements;
         else if (method.find("jobresult") != std::string::npos) map = &m_results;
@@ -653,7 +685,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         uint64_t index = 0;
         bool more = false;
         for (const auto& kv : map) {
-            if (resource_ref && PayloadOf(kv.second)["resource_ref"].get_str() != *resource_ref) continue;
+            if (resource_ref && StrOf(PayloadOf(kv.second), "resource_ref") != *resource_ref) continue;
             if (index++ < start) continue;
             UniValue row = EnvelopeToJson(kv.second);
             if (!resource_ref) row.pushKV("id", kv.first);
@@ -679,6 +711,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         return list_page(*map, nullptr);
     }
     if (method == "getcomputeoffersforresource") {
+        if (a.exists("resource_ref") && !a["resource_ref"].isStr()) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "resource");
         const std::string ref = a.exists("resource_ref") ? a["resource_ref"].get_str() : "";
         return list_page(m_offers, &ref);
     }
@@ -742,14 +775,27 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         const UniValue& op = PayloadOf(it->second);
         if (op["expires_at_ms"].getInt<int64_t>() <= now_ms) return Fail(err_code, err, "COMPUTE_OFFER_EXPIRED", "offer");
         if (!HexKey(a["subject_pubkey"].get_str())) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "subject");
+        {
+            // An agreement freezes this node's own offer. An imported offer carries
+            // someone else's scheduler and receipt-issuer lists; signing it here
+            // would let those keys earn this node's access grant.
+            std::vector<unsigned char> own_pk, own_sk;
+            if (!LoadIdentity(own_pk, own_sk, err)) return Fail(err_code, err, "COMPUTE_SIGNING_IDENTITY_REQUIRED", err);
+            if (SignerOf(it->second) != HexStr(own_pk)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "offer issuer");
+        }
+        int64_t period_start = 0, period_end = 0;
+        if (!I64Field(a, "period_start_ms", period_start, err) || !I64Field(a, "period_end_ms", period_end, err) ||
+            period_end <= period_start) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "period");
+        }
         UniValue payload(UniValue::VOBJ);
         payload.pushKV("record_type", "compute_agreement_v1");
         payload.pushKV("schema_version", 1);
         payload.pushKV("offer_id", offer_id);
         payload.pushKV("subject_pubkey", a["subject_pubkey"].get_str());
         payload.pushKV("resource_ref", op["resource_ref"]);
-        payload.pushKV("period_start_ms", a["period_start_ms"]);
-        payload.pushKV("period_end_ms", a["period_end_ms"]);
+        payload.pushKV("period_start_ms", period_start);
+        payload.pushKV("period_end_ms", period_end);
         payload.pushKV("settlement", op["settlement"]);
         payload.pushKV("access", op["access"]);
         payload.pushKV("policy", op["policy"]);
@@ -829,6 +875,11 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         }
         uint64_t credit = 0;
         if (!U64Field(a, "credit_p1e_microunits", credit, err) || credit == 0) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "credit");
+        // A job whose expiry is not an integer is never counted as reserved and
+        // can never be settled; refuse it like importcomputejob does.
+        int64_t job_expires = 0;
+        if (!I64Field(a, "expires_at_ms", job_expires, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "expiry");
+        if (job_expires <= now_ms) return Fail(err_code, err, "COMPUTE_JOB_EXPIRED", "job");
         UniValue bal;
         if (!BalanceOf(a["agreement_id"].get_str(), now_ms, bal, err_code, err)) return false;
         const uint64_t reserved = bal["outstanding_reserved_p1e_microunits"].getInt<uint64_t>();
@@ -841,7 +892,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         uint64_t outstanding = 0;
         for (const auto& kv : m_jobs) {
             const UniValue& jp = PayloadOf(kv.second);
-            if (jp["agreement_id"].get_str() != a["agreement_id"].get_str()) continue;
+            if (StrOf(jp, "agreement_id") != a["agreement_id"].get_str()) continue;
             bool settled = false;
             for (const auto& rec : m_receipts) {
                 const UniValue& rp = PayloadOf(rec.second);
@@ -873,7 +924,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         payload.pushKV("result_schema_commitment", a.exists("result_schema_commitment") ? a["result_schema_commitment"] : a["input_commitment"]);
         payload.pushKV("verification_method", job_method);
         payload.pushKV("issued_at_ms", now_ms);
-        payload.pushKV("expires_at_ms", a["expires_at_ms"]);
+        payload.pushKV("expires_at_ms", job_expires);
         payload.pushKV("nonce", a.exists("nonce") ? a["nonce"].get_str() : HexStr(std::vector<unsigned char>(16, 2)));
         SignedEnvelope env;
         if (!Sign("ComputeJob", payload, env, err_code, err)) return false;
@@ -1025,7 +1076,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             evidence = rp["output_commitment"].get_str();
             for (const auto& kv : m_receipts) {
                 const UniValue& rec = PayloadOf(kv.second);
-                if (rec.exists("job_id") && rec["job_id"].get_str() == job_id) return Fail(err_code, err, "COMPUTE_JOB_ALREADY_SETTLED", "job");
+                if (StrOf(rec, "job_id") == job_id) return Fail(err_code, err, "COMPUTE_JOB_ALREADY_SETTLED", "job");
             }
         } else {
             agreement_id = a["agreement_id"].get_str();
@@ -1038,7 +1089,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
                 }
                 job_id = a["job_id"].get_str();
                 for (const auto& kv : m_receipts) {
-                    if (PayloadOf(kv.second).exists("job_id") && PayloadOf(kv.second)["job_id"].get_str() == job_id) {
+                    if (StrOf(PayloadOf(kv.second), "job_id") == job_id) {
                         return Fail(err_code, err, "COMPUTE_JOB_ALREADY_SETTLED", "job");
                     }
                 }
@@ -1051,7 +1102,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             if (a.exists("result_id")) result_id = a["result_id"].get_str();
             if (!job_id.empty()) {
                 const UniValue& jp = PayloadOf(m_jobs.at(job_id));
-                if (jp["agreement_id"].get_str() != agreement_id) {
+                if (StrOf(jp, "agreement_id") != agreement_id) {
                     return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "agreement");
                 }
                 if (method_name == "DIRECT_COMPUTE") return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "method");
@@ -1141,11 +1192,20 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         if (!ContainsKey(ap["settlement"]["authorized_receipt_issuer_pubkeys"], issuer)) {
             return Fail(err_code, err, "COMPUTE_UNAUTHORIZED_RECEIPT_ISSUER", "issuer");
         }
+        // Every stored receipt is re-read on each settlement and balance call.
+        // A field of the wrong type must be refused here, not thrown on later.
+        uint64_t imported_credit = 0;
+        if (!U64Field(rp, "credited_p1e_microunits", imported_credit, err) || imported_credit == 0) {
+            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "credit");
+        }
+        for (const char* k : {"job_id", "result_id", "verification_method", "evidence_commitment", "beneficiary_ref"}) {
+            if (rp.exists(k) && !rp[k].isStr()) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", k);
+        }
         if (rp.exists("job_id") && rp["job_id"].isStr() && !rp["job_id"].get_str().empty()) {
             for (const auto& kv : m_receipts) {
                 if (kv.first == env.record_id.Hex()) continue;
                 const UniValue& other = PayloadOf(kv.second);
-                if (other.exists("job_id") && other["job_id"].get_str() == rp["job_id"].get_str()) {
+                if (StrOf(other, "job_id") == rp["job_id"].get_str()) {
                     return Fail(err_code, err, "COMPUTE_JOB_ALREADY_SETTLED", "job");
                 }
             }
@@ -1170,16 +1230,43 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             if (method != "DIRECT_COMPUTE" || !ContainsKey(ap["settlement"]["allowed_settlement_modes"], "DIRECT_COMPUTE")) {
                 return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "method");
             }
-            const std::string evidence = rp.exists("evidence_commitment") && rp["evidence_commitment"].isStr()
-                ? rp["evidence_commitment"].get_str() : "";
+            const std::string evidence = StrOf(rp, "evidence_commitment");
+            // A direct-compute receipt names one redeemed challenge (48-byte id,
+            // lower-case hex as issued) and credits whole episodes of it. Without
+            // this an empty or invented evidence string skips the one-challenge,
+            // one-receipt rule and can carry any credit.
+            if (!LowerHex(evidence, 96)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "evidence");
+            if (imported_credit % pwc::P1E_MICROUNITS != 0 || imported_credit / pwc::P1E_MICROUNITS > pwc::kQualEpisodeMax) {
+                return Fail(err_code, err, "COMPUTE_RECEIPT_CREDIT_MISMATCH", "direct credit");
+            }
             for (const auto& kv : m_receipts) {
                 if (kv.first == env.record_id.Hex()) continue;
                 const UniValue& prior = PayloadOf(kv.second);
-                if (prior.exists("verification_method") && prior["verification_method"].isStr() &&
-                    prior["verification_method"].get_str() == "DIRECT_COMPUTE" &&
-                    prior.exists("evidence_commitment") && prior["evidence_commitment"].isStr() &&
-                    prior["evidence_commitment"].get_str() == evidence && !evidence.empty()) {
+                if (StrOf(prior, "verification_method") == "DIRECT_COMPUTE" && StrOf(prior, "evidence_commitment") == evidence) {
                     return Fail(err_code, err, "COMPUTE_CHALLENGE_REDEEMED", "direct receipt");
+                }
+            }
+            // When the challenge was issued by this node's btxd, hold the receipt
+            // to what was actually redeemed. A challenge from another issuer is
+            // not visible here and rests on the listed receipt issuer.
+            if (!g_qual_path.empty()) {
+                pwc::QualificationRegistry reg;
+                std::string open_err;
+                UniValue st;
+                std::string st_code, st_err;
+                if (reg.Open(fs::PathFromString(g_qual_path), open_err) && reg.Status(evidence, now_ms, st, st_code, st_err) &&
+                    StrOf(st, "status") != "unknown") {
+                    if (StrOf(st, "status") != "redeemed") return Fail(err_code, err, "COMPUTE_QUALIFICATION_REQUIRED", "not redeemed");
+                    if (StrOf(st, "subject_digest") != SubjectDigestHex(ap["subject_pubkey"].get_str())) {
+                        return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "qualification");
+                    }
+                    if (StrOf(st, "profile_id") != ap["settlement"]["profile_id"].get_str()) {
+                        return Fail(err_code, err, "COMPUTE_PROFILE_MISMATCH", "qualification");
+                    }
+                    if (!st["episode_count"].isNum() ||
+                        imported_credit != static_cast<uint64_t>(st["episode_count"].getInt<int64_t>()) * pwc::P1E_MICROUNITS) {
+                        return Fail(err_code, err, "COMPUTE_RECEIPT_CREDIT_MISMATCH", "qualification");
+                    }
                 }
             }
         }
@@ -1210,11 +1297,20 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         if (!ok) {
             return Fail(err_code, err, status == "OPEN" ? "COMPUTE_NOT_SATISFIED" : "COMPUTE_NOT_IN_GOOD_STANDING", status);
         }
+        // A grant covers only time inside the agreement. A pro-rata grant is
+        // refused before the period starts, even when the units are already
+        // credited; a prepaid grant issued early starts at period_start_ms.
+        const int64_t period_start = ap["period_start_ms"].getInt<int64_t>();
+        if (schedule == "PRO_RATA" && now_ms < period_start) {
+            return Fail(err_code, err, "COMPUTE_NOT_SATISFIED", "period not started");
+        }
+        const int64_t valid_from = std::max(now_ms, period_start);
         int64_t until = ap["period_end_ms"].getInt<int64_t>();
         if (schedule == "PRO_RATA") {
             const int64_t cap = now_ms + 24LL * 60 * 60 * 1000;
             if (cap < until) until = cap;
         }
+        if (until < valid_from) return Fail(err_code, err, "COMPUTE_NOT_IN_GOOD_STANDING", "window");
         UniValue payload(UniValue::VOBJ);
         payload.pushKV("record_type", "compute_access_grant_v1");
         payload.pushKV("schema_version", 1);
@@ -1228,7 +1324,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         payload.pushKV("credited_p1e_microunits", bal["credited_p1e_microunits"]);
         payload.pushKV("receipt_set_digest", bal["receipt_set_digest"]);
         payload.pushKV("issued_at_ms", now_ms);
-        payload.pushKV("valid_from_ms", now_ms);
+        payload.pushKV("valid_from_ms", valid_from);
         payload.pushKV("valid_until_ms", until);
         payload.pushKV("nonce", a.exists("nonce") ? a["nonce"].get_str() : HexStr(std::vector<unsigned char>(16, 5)));
         SignedEnvelope env;
@@ -1274,6 +1370,13 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         }
         if (!VerifySignedEnvelope(env, m_network, err)) return Fail(err_code, err, "COMPUTE_SIGNATURE_INVALID", err);
         const UniValue& gp = PayloadOf(env);
+        // Only a ComputeAccessGrant is a grant. The trusted issuer also signs
+        // offers, agreements and receipts; none of them may pass as access.
+        if (StrOf(env.body, "record_type") != "ComputeAccessGrant" || StrOf(gp, "record_type") != "compute_access_grant_v1" ||
+            !gp.exists("valid_from_ms") || !gp["valid_from_ms"].isNum() || !gp.exists("valid_until_ms") || !gp["valid_until_ms"].isNum() ||
+            StrOf(gp, "subject_pubkey").empty() || StrOf(gp, "resource_ref").empty() || StrOf(gp, "agreement_id").empty()) {
+            return Fail(err_code, err, "COMPUTE_GRANT_INVALID", "record type");
+        }
         if (!a.exists("trusted_issuer_pubkey") || !a["trusted_issuer_pubkey"].isStr() ||
             a["trusted_issuer_pubkey"].get_str() != SignerOf(env)) {
             return Fail(err_code, err, "COMPUTE_GRANT_INVALID", "trusted issuer");
