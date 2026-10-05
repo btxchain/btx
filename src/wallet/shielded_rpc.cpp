@@ -6017,6 +6017,11 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
     if (height <= 0 || height > std::numeric_limits<uint32_t>::max()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "refund_lock_height must be a positive absolute height");
     }
+    // CLTV reads a value at or above 500000000 as a Unix time. A "height" of
+    // 500000001 is a 1985 timestamp, so the refund would be spendable at once.
+    if (height >= LOCKTIME_THRESHOLD) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "refund_lock_height must be a block height below 500000000 (larger values are a Unix time to CLTV)");
+    }
     const uint32_t refund_lock_height = static_cast<uint32_t>(height);
     if (!shielded::IsValidRefundLockHeight(refund_lock_height)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "refund_lock_height is outside the valid range");
@@ -16178,7 +16183,10 @@ struct HtlcDescriptorLeaves {
                                          std::vector<unsigned char>& pubkey_out)
 {
     PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
-    return ParseP2MRHTLCSha256Leaf(script, sha256_out, algo, pubkey_out);
+    // The pre-0.34.13 leaf (htlc_sha256_legacy()) is the same contract without
+    // the in-script length check; the 32-byte preimage is checked below.
+    return ParseP2MRHTLCSha256Leaf(script, sha256_out, algo, pubkey_out) ||
+           ParseP2MRHTLCSha256LegacyLeaf(script, sha256_out, algo, pubkey_out);
 }
 
 // True only for the transaction-bound HASH160 htlc_tx() leaf.
@@ -16363,10 +16371,43 @@ void RequireExactHtlcDescriptor(const HtlcDescriptorLeaves& leaves)
             RPC_INVALID_PARAMETER,
             "Atomic-swap descriptor must contain exactly one htlc_sha256() leaf (or recovery htlc_tx()) and one refund() leaf, with no extra paths");
     }
+    // The descriptor parser compares key expressions; this compares the keys
+    // the descriptor actually expanded to (for example pqhd() vs the same key in hex).
+    if (leaves.htlc_pubkey == leaves.refund_pubkey) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Atomic-swap descriptor: claim and refund keys must be distinct");
+    }
 }
 
-// Look up the value + scriptPubKey of a confirmed/mempool outpoint via the chain UTXO view.
-[[nodiscard]] CTxOut GetOutpointTxOutOrThrow(CWallet& wallet, const COutPoint& outpoint)
+// The CLTV value of a canonical refund() leaf.
+[[nodiscard]] std::optional<int64_t> RefundLeafLocktime(const std::vector<unsigned char>& refund_leaf)
+{
+    const CScript script(refund_leaf.begin(), refund_leaf.end());
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> push;
+    if (!script.GetOp(pc, opcode, push)) return std::nullopt;
+    if (opcode >= OP_1 && opcode <= OP_16) return CScript::DecodeOP_N(opcode);
+    try {
+        return CScriptNum(push, /*fRequireMinimal=*/true, /*nMaxNumSize=*/5).GetInt64();
+    } catch (const scriptnum_error&) {
+        return std::nullopt;
+    }
+}
+
+// Refuse output values relay would drop, and fees above -maxtxfee.
+void CheckHtlcSpendOutputOrThrow(CWallet& wallet, const CTxOut& out, CAmount fee)
+{
+    if (IsDust(out, wallet.chain().relayDustFee())) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "fee leaves a dust output; lower the fee");
+    }
+    if (fee > wallet.m_default_max_tx_fee) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("fee %s exceeds -maxtxfee %s", FormatMoney(fee), FormatMoney(wallet.m_default_max_tx_fee)));
+    }
+}
+
+// Look up a confirmed/mempool outpoint via the chain UTXO view. A coin that is
+// only in the mempool has a height above the tip.
+[[nodiscard]] Coin GetOutpointCoinOrThrow(CWallet& wallet, const COutPoint& outpoint)
 {
     std::map<COutPoint, Coin> coins;
     coins[outpoint]; // request this outpoint
@@ -16375,7 +16416,12 @@ void RequireExactHtlcDescriptor(const HtlcDescriptorLeaves& leaves)
     if (it == coins.end() || it->second.IsSpent()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Outpoint not found in the UTXO set (unconfirmed, spent, or unknown)");
     }
-    return it->second.out;
+    return it->second;
+}
+
+[[nodiscard]] CTxOut GetOutpointTxOutOrThrow(CWallet& wallet, const COutPoint& outpoint)
+{
+    return GetOutpointCoinOrThrow(wallet, outpoint).out;
 }
 
 // Collect the wallet's PQ private key for `leaf_pubkey` from whichever descriptor manager holds it.
@@ -16442,6 +16488,8 @@ RPCHelpMan buildhtlcclaim()
         "\nBuild, sign, and finalize a transaction that claims a P2MR HTLC output by revealing the preimage.\n"
         "The descriptor must be exactly mr(htlc_sha256(<SHA256>,<claimerPubkey>),refund(<locktime>,<senderPubkey>)).\n"
         "The claim leaf requires a 32-byte preimage. HASH160 htlc_tx() descriptors remain spendable for recovery of any pre-existing lock and cannot be used to derive a new address.\n"
+        "A lock funded before 0.34.13 can be named with htlc_sha256_legacy() in place of htlc_sha256(), so a wallet can import and watch it.\n"
+        "By default the claim is refused while the funding output is unconfirmed or once the refund path is already final; see options.\n"
         "The claim path has no timeout of its own. After the refund locktime, a claim and a refund of the same output can both be valid; the one that pays more is the one that confirms. Claim before the locktime, with margin for a reorg, and stagger the two chains' timeouts.\n"
         "The claim input signals replacement and uses nLockTime 0, so it can be mined immediately and a higher fee can replace it.\n"
         "The wallet must hold the claimer's PQ private key to produce a transaction-bound claim signature.\n",
@@ -16455,6 +16503,11 @@ RPCHelpMan buildhtlcclaim()
             {"preimage", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The HTLC preimage (SHA-256 must equal the descriptor hashlock; HASH160 for recovery htlc_tx() locks)"},
             {"destination", RPCArg::Type::STR, RPCArg::Optional::NO, "Address that receives the claimed funds"},
             {"fee", RPCArg::Type::NUM, RPCArg::Optional::NO, "Absolute fee in satoshis"},
+            {"options", RPCArg::Type::OBJ_NAMED_PARAMS, RPCArg::Optional::OMITTED, "",
+                {
+                    {"allow_unconfirmed_funding", RPCArg::Type::BOOL, RPCArg::Default{false}, "Claim a funding output that is only in the mempool. Unsafe: the funder can replace the funding transaction after seeing the preimage."},
+                    {"allow_late_claim", RPCArg::Type::BOOL, RPCArg::Default{false}, "Claim even though the refund path is already final. Unsafe: the sender can refund here after seeing the preimage."},
+                }},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -16485,6 +16538,13 @@ RPCHelpMan buildhtlcclaim()
             const CAmount fee = request.params[4].getInt<int64_t>();
             if (fee < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee must be non-negative");
 
+            const UniValue options = request.params[5].isNull() ? UniValue{UniValue::VOBJ} : request.params[5].get_obj();
+            RPCTypeCheckObj(options, {{"allow_unconfirmed_funding", UniValueType(UniValue::VBOOL)},
+                                      {"allow_late_claim", UniValueType(UniValue::VBOOL)}},
+                            /*fAllowNull=*/true, /*fStrict=*/true);
+            const bool allow_unconfirmed = options.exists("allow_unconfirmed_funding") && options["allow_unconfirmed_funding"].get_bool();
+            const bool allow_late = options.exists("allow_late_claim") && options["allow_late_claim"].get_bool();
+
             const HtlcDescriptorLeaves leaves = ParseHtlcDescriptorOrThrow(descriptor);
             RequireExactHtlcDescriptor(leaves);
 
@@ -16504,10 +16564,38 @@ RPCHelpMan buildhtlcclaim()
             }
 
             const COutPoint outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
-            const CTxOut prev_txout = GetOutpointTxOutOrThrow(*pwallet, outpoint);
+            const Coin prev_coin = GetOutpointCoinOrThrow(*pwallet, outpoint);
+            const CTxOut& prev_txout = prev_coin.out;
             const HtlcDescriptorLeaves matched = MatchHtlcDescriptorOrThrow(leaves, prev_txout);
             const CAmount out_value = prev_txout.nValue - fee;
             if (out_value <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee exceeds the funding amount");
+            CheckHtlcSpendOutputOrThrow(*pwallet, CTxOut{out_value, GetScriptForDestination(destination)}, fee);
+
+            // The claim reveals the preimage. Refuse to reveal it while the
+            // funder can still undo the funding, or once the refund is final.
+            int tip_height{-1};
+            int64_t tip_mtp{0};
+            {
+                LOCK(pwallet->cs_wallet);
+                tip_height = pwallet->GetLastBlockHeight();
+                CHECK_NONFATAL(pwallet->chain().findBlock(pwallet->GetLastBlockHash(), interfaces::FoundBlock().mtpTime(tip_mtp)));
+            }
+            if (!allow_unconfirmed && static_cast<int64_t>(prev_coin.nHeight) > tip_height) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "HTLC funding output is unconfirmed: the funder can still replace it after seeing the preimage. "
+                                   "Wait for confirmations, or pass {\"allow_unconfirmed_funding\": true}");
+            }
+            const std::optional<int64_t> refund_locktime = RefundLeafLocktime(matched.refund_leaf_script);
+            if (!allow_late && refund_locktime.has_value()) {
+                const bool time_lock = *refund_locktime >= LOCKTIME_THRESHOLD;
+                const bool refund_final = time_lock ? *refund_locktime < tip_mtp : *refund_locktime <= tip_height;
+                if (refund_final) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                        "The refund path is already final (refund locktime %d, tip %s %d). Revealing the preimage now lets the sender "
+                        "refund here and still use the preimage on the other chain. Pass {\"allow_late_claim\": true} to claim anyway",
+                        *refund_locktime, time_lock ? "median time" : "height", time_lock ? tip_mtp : int64_t{tip_height}));
+                }
+            }
 
             CMutableTransaction mtx;
             mtx.version = CTransaction::CURRENT_VERSION;
@@ -16610,6 +16698,7 @@ RPCHelpMan buildhtlcrefund()
             const HtlcDescriptorLeaves matched = MatchHtlcDescriptorOrThrow(leaves, prev_txout);
             const CAmount out_value = prev_txout.nValue - fee;
             if (out_value <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee exceeds the funding amount");
+            CheckHtlcSpendOutputOrThrow(*pwallet, CTxOut{out_value, GetScriptForDestination(destination)}, fee);
 
             CMutableTransaction mtx;
             mtx.version = CTransaction::CURRENT_VERSION;

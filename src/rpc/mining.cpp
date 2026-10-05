@@ -5956,6 +5956,16 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
         LogWarning("GenerateBlock: ProcessNewBlock rejected block %s\n", block_out->GetHash().GetHex());
         throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
     }
+    // ProcessNewBlock returns true once the block is stored, even when
+    // connecting it then fails. Report that instead of returning its hash.
+    {
+        LOCK(chainman.GetMutex());
+        const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(block_out->GetHash());
+        if (pindex == nullptr || (pindex->nStatus & BLOCK_FAILED_MASK)) {
+            LogWarning("GenerateBlock: block %s failed validation\n", block_out->GetHash().GetHex());
+            throw JSONRPCError(RPC_VERIFY_ERROR, strprintf("block %s was rejected by validation (see debug.log)", block_out->GetHash().GetHex()));
+        }
+    }
     LogDebug(BCLog::MINING, "GenerateBlock: block %s accepted successfully\n", block_out->GetHash().GetHex());
 
     return true;

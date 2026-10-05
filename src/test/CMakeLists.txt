@@ -351,6 +351,8 @@ add_executable(test_btx
   pq_descriptor_tests.cpp
   pq_multisig_descriptor_tests.cpp
   script_htlc_templates_tests.cpp
+  htlc_fixes_tests.cpp
+  htlc_review_tests.cpp
   pq_keyderivation_tests.cpp
   descriptor_pqhd_tests.cpp
   pq_phase4_tests.cpp

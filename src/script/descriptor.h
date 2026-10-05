@@ -243,15 +243,21 @@ struct Descriptor {
  */
 std::vector<std::unique_ptr<Descriptor>> Parse(const std::string& descriptor, FlatSigningProvider& out, std::string& error, bool require_checksum = false);
 
-/** True for HASH160 `htlc_tx()` and legacy replayable `htlc()` descriptors.
- *  Those remain parseable so an existing lock can be spent. They must not
- *  be used to derive a new receive address or as an active wallet descriptor.
+/** True for HASH160 `htlc_tx()`, legacy replayable `htlc()` and pre-0.34.13
+ *  `htlc_sha256_legacy()` descriptors. Those remain parseable so an existing
+ *  lock can be watched and spent. They must not be used to derive a new
+ *  receive address or as an active wallet descriptor.
  */
 bool DescriptorIsRecoveryOnlyHtlc(std::string_view descriptor);
 
 struct DescriptorParseOptions {
     /** Allow P2MR-only OP_SUCCESS opcodes inside tapscript descriptors (unsafe). */
     bool allow_p2tr_op_success{false};
+    /** Apply the rules added for new HTLC descriptors in 0.34.13: refund()
+     *  timeout of at least 1, distinct claim and refund keys. Loading a wallet
+     *  sets this to false, so a descriptor imported by an older version (which
+     *  accepted both) still loads and its coins stay visible. */
+    bool new_descriptor_rules{true};
 };
 
 std::vector<std::unique_ptr<Descriptor>> Parse(const std::string& descriptor, FlatSigningProvider& out, std::string& error, bool require_checksum, const DescriptorParseOptions& options);

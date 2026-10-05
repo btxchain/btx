@@ -2399,6 +2399,8 @@ public:
         }
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = opts.mldsa_disable_height.value_or(std::numeric_limits<int32_t>::max());
+        // Regtest enforces the HTLC 32-byte preimage rule from genesis unless overridden.
+        consensus.nP2MRHTLCPreimage32Height = opts.p2mr_htlc_preimage32_height.value_or(0);
         consensus.nRuleChangeActivationThreshold = 108; // 75% for testchains
         consensus.nMinerConfirmationWindow = 144; // Faster than normal for regtest (144 instead of 2016)
 
@@ -2507,7 +2509,8 @@ public:
             opts.reorg_protection_start_height.has_value() ||
             opts.empty_block_subsidy_penalty_height.has_value() ||
             opts.empty_block_subsidy_penalty_end_height.has_value() ||
-            opts.mldsa_disable_height.has_value();
+            opts.mldsa_disable_height.has_value() ||
+            opts.p2mr_htlc_preimage32_height.has_value();
 
         for (const auto& [dep, height] : opts.activation_heights) {
             switch (dep) {

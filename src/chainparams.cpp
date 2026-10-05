@@ -289,6 +289,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.empty_block_subsidy_penalty_end_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestemptyblocksubsidypenaltyendheight");
     }
+    if (args.IsArgSet("-regtesthtlcpreimage32height")) {
+        options.p2mr_htlc_preimage32_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtesthtlcpreimage32height");
+    }
     if (args.IsArgSet("-regtestmatmulbindingheight")) {
         options.matmul_binding_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulbindingheight");

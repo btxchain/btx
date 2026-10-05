@@ -168,6 +168,12 @@ enum : uint32_t {
     // P2MR) is unaffected.
     SCRIPT_VERIFY_REJECT_LEGACY_SIGS = (1U << 25),
 
+    // Require exactly 32 bytes as the top witness stack item when a P2MR
+    // script-path spend executes a transaction-bound HTLC claim leaf (SHA-256,
+    // legacy SHA-256 or HASH160 htlc_tx). Standard policy from the start;
+    // consensus only from Consensus::Params::nP2MRHTLCPreimage32Height.
+    SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 = (1U << 26),
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER

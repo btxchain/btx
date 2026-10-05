@@ -7719,6 +7719,12 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
         flags |= SCRIPT_VERIFY_REJECT_LEGACY_SIGS;
     }
 
+    // 32-byte preimage for P2MR HTLC claim leaves: a soft fork, enforced from
+    // its activation height only, so blocks below it validate as in v0.34.12.
+    if (block_index.nHeight >= consensusparams.nP2MRHTLCPreimage32Height) {
+        flags |= SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32;
+    }
+
     return flags;
 }
 

@@ -192,6 +192,7 @@ public:
         std::optional<uint32_t> genesis_bits{};
         std::optional<int32_t> genesis_version{};
         std::optional<int32_t> mldsa_disable_height{};
+        std::optional<int32_t> p2mr_htlc_preimage32_height{};
         std::optional<int32_t> shielded_tx_binding_activation_height{};
         std::optional<int32_t> shielded_bridge_tag_activation_height{};
         std::optional<int32_t> shielded_smile_rice_codec_disable_height{};

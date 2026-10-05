@@ -83,6 +83,7 @@ add_executable(fuzz
   parse_script.cpp
   parse_univalue.cpp
   pq_descriptor_parse.cpp
+  htlc_leaf_parse.cpp
   pq_merkle.cpp
   pq_script_verify.cpp
   partially_downloaded_block.cpp

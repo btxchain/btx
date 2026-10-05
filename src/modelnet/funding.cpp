@@ -18,6 +18,7 @@
 #include <tinyformat.h>
 #include <uint256.h>
 #include <util/fs.h>
+#include <util/rbf.h>
 #include <util/strencodings.h>
 
 #include <addresstype.h>
@@ -736,6 +737,12 @@ bool BuildClaimOrRefund(const std::string& method, const UniValue& params, UniVa
             err = "preimage must be hex";
             return false;
         }
+        // Same rule as buildhtlcclaim and the claim leaf.
+        if (preimage->size() != 32) {
+            err_code = "INVALID_PARAMETER";
+            err = "preimage must be exactly 32 bytes";
+            return false;
+        }
         const Hash32 got = Sha256(*preimage);
         std::string want = in.key_hash_hex;
         if (want.empty()) {
@@ -753,10 +760,32 @@ bool BuildClaimOrRefund(const std::string& method, const UniValue& params, UniVa
         }
         result.pushKV("key_hash", got.Hex());
         result.pushKV("preimage_checked", true);
-    } else if (in.refund_height == 0) {
-        err_code = "INVALID_PARAMETER";
-        err = "refund_height required";
-        return false;
+    } else {
+        // The refund nLockTime must satisfy the descriptor's CLTV, with the
+        // same lock type. Default to it when refund_height is not given.
+        std::optional<int64_t> cltv;
+        const auto pos = in.descriptor.find("refund(");
+        if (pos != std::string::npos) {
+            const auto start = pos + 7;
+            const auto comma = in.descriptor.find(',', start);
+            if (comma != std::string::npos) cltv = ToIntegral<int64_t>(in.descriptor.substr(start, comma - start));
+        }
+        if (in.refund_height == 0 && cltv.has_value() && *cltv > 0 && *cltv <= std::numeric_limits<uint32_t>::max()) {
+            in.refund_height = static_cast<uint32_t>(*cltv);
+        }
+        if (in.refund_height == 0) {
+            err_code = "INVALID_PARAMETER";
+            err = "refund_height required";
+            return false;
+        }
+        if (cltv.has_value()) {
+            const bool same_type = (*cltv < LOCKTIME_THRESHOLD) == (in.refund_height < LOCKTIME_THRESHOLD);
+            if (!same_type || in.refund_height < *cltv) {
+                err_code = "INVALID_PARAMETER";
+                err = "refund_height must be at least the descriptor refund() locktime, with the same lock type";
+                return false;
+            }
+        }
     }
 
     COutPoint prev;
@@ -795,12 +824,13 @@ bool BuildClaimOrRefund(const std::string& method, const UniValue& params, UniVa
 
     CMutableTransaction mtx;
     mtx.version = 2;
-    uint32_t sequence = CTxIn::SEQUENCE_FINAL;
+    // As buildhtlcclaim/buildhtlcrefund: both signal replacement, and the
+    // refund stays non-final so its nLockTime applies.
+    const uint32_t sequence = MAX_BIP125_RBF_SEQUENCE;
     if (claim) {
         mtx.nLockTime = 0;
     } else {
         mtx.nLockTime = in.refund_height;
-        sequence = CTxIn::SEQUENCE_FINAL - 1;
     }
     mtx.vin.emplace_back(prev, CScript(), sequence);
     mtx.vout.emplace_back(amount - fee, dest);
