@@ -15136,6 +15136,20 @@ void SetMatMulExactReplayUnderReleasedCsMainHookForTest(
     g_matmul_exact_replay_under_released_cs_main_hook = std::move(hook);
 }
 
+bool ChainstateManager::Phase1OnlyMatMulHeaderMustNotLead(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    const Consensus::Params& params{GetConsensus()};
+    if (!params.fMatMulPOW) return false;
+    if (index.nHeight < params.nMatMulPhase1HeaderNotMostWorkHeight) return false;
+    if ((index.nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_TRANSACTIONS) return false;
+    if ((index.nStatus & (BLOCK_EXACT_REPLAY_VERIFIED | BLOCK_TRUSTED_REPLAY_ATTESTED)) != 0) {
+        return false;
+    }
+    // Digest <= compact nBits is Phase-1 only. It does not authenticate work.
+    return !MatMulDigestBelowTargetAuthenticatesWork(index.GetBlockHeader(), params);
+}
+
 bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* pindex_self, int nHeight) const
 {
     AssertLockHeld(::cs_main);
@@ -23442,7 +23456,9 @@ void ChainstateManager::RecalculateBestHeader()
                 followed = &candidate;
             }
         }
-        SetBestHeader(followed);
+        if (!Phase1OnlyMatMulHeaderMustNotLead(*followed)) {
+            SetBestHeader(followed);
+        }
     }
     if (shallow_header_work_best != nullptr) {
         SetBestHeader(shallow_header_work_best);

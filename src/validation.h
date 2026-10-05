@@ -9,7 +9,6 @@
 #include <arith_uint256.h>
 #include <attributes.h>
 #include <chain.h>
-#include <pow.h>
 #include <checkqueue.h>
 #include <coins.h>
 #include <consensus/amount.h>
@@ -2388,17 +2387,7 @@ public:
      *  ExactReplay / trusted-attestation bit, is not Phase-1-only.
      *  This does not rewrite nChainWork. */
     [[nodiscard]] bool Phase1OnlyMatMulHeaderMustNotLead(const CBlockIndex& index) const
-        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
-    {
-        const Consensus::Params& params{GetConsensus()};
-        if (!params.fMatMulPOW) return false;
-        if (index.nHeight < params.nMatMulPhase1HeaderNotMostWorkHeight) return false;
-        if ((index.nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_TRANSACTIONS) return false;
-        if ((index.nStatus & (BLOCK_EXACT_REPLAY_VERIFIED | BLOCK_TRUSTED_REPLAY_ATTESTED)) != 0) {
-            return false;
-        }
-        return !MatMulDigestBelowTargetAuthenticatesWork(index.GetBlockHeader(), params);
-    }
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Remember the heaviest header that still extends ActiveTip(). */
     void MaybeUpdateBestExtendingHeader(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
