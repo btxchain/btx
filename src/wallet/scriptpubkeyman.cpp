@@ -7,10 +7,15 @@
 #include <logging.h>
 #include <node/types.h>
 #include <outputtype.h>
+#include <random.h>
+#include <span>
 #include <script/descriptor.h>
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/solver.h>
+#include <span.h>
+#include <streams.h>
+#include <support/cleanse.h>
 #include <util/bip32.h>
 #include <util/check.h>
 #include <util/strencodings.h>
@@ -2365,6 +2370,9 @@ bool DescriptorScriptPubKeyMan::Encrypt(const CKeyingMaterial& master_key, Walle
         batch->WriteCryptedDescriptorKey(GetID(), pubkey, crypted_secret);
     }
     m_map_keys.clear();
+    if (batch == nullptr || !WritePQSeeds(*batch, &master_key)) {
+        return false;
+    }
     return true;
 }
 
@@ -2649,9 +2657,11 @@ bool DescriptorScriptPubKeyMan::SetupPQDescriptorGeneration(WalletBatch& batch, 
 
     m_wallet_descriptor = GeneratePQWalletDescriptor(pq_seed, internal);
 
-    // Store PQ seed for this descriptor (no ECDSA key needed)
-    std::vector<unsigned char> seed_vec(pq_seed.begin(), pq_seed.end());
-    if (!batch.WritePQDescriptorSeed(GetID(), seed_vec)) {
+    // Store the PQ seed encrypted when this wallet already has a master key.
+    if (!m_wallet_descriptor.descriptor || !m_wallet_descriptor.descriptor->ExtractPQSeed().has_value()) {
+        throw std::runtime_error(std::string(__func__) + ": PQ descriptor is missing its seed");
+    }
+    if (!PersistPQSeeds(batch)) {
         throw std::runtime_error(std::string(__func__) + ": writing PQ descriptor seed failed");
     }
     if (!batch.WriteDescriptor(GetID(), m_wallet_descriptor)) {
@@ -2663,6 +2673,227 @@ bool DescriptorScriptPubKeyMan::SetupPQDescriptorGeneration(WalletBatch& batch, 
 
     m_storage.UnsetBlankWalletFlag(batch);
     return true;
+}
+
+namespace {
+
+std::string PQDescriptorSeedPurpose(const uint256& desc_id)
+{
+    return "pqdescriptorseed:" + desc_id.ToString();
+}
+
+std::string PQDescriptorSeedMapPurpose(const uint256& desc_id)
+{
+    return "pqdescriptorseedmap:" + desc_id.ToString();
+}
+
+} // namespace
+
+bool DescriptorScriptPubKeyMan::PersistPQSeeds(WalletBatch& batch)
+{
+    LOCK(cs_desc_man);
+    return WritePQSeeds(batch, nullptr);
+}
+
+bool DescriptorScriptPubKeyMan::WritePQSeeds(WalletBatch& batch, const CKeyingMaterial* encryption_key)
+{
+    AssertLockHeld(cs_desc_man);
+    const uint256 desc_id = m_wallet_descriptor.id;
+
+    std::vector<std::pair<std::array<unsigned char, 4>, std::vector<unsigned char>>> seed_map;
+    if (m_wallet_descriptor.descriptor) {
+        const auto extracted = m_wallet_descriptor.descriptor->ExtractAllPQSeeds();
+        seed_map.reserve(extracted.size());
+        for (const auto& [fingerprint, seed] : extracted) {
+            seed_map.emplace_back(fingerprint, std::vector<unsigned char>(seed.begin(), seed.end()));
+        }
+    }
+    if (seed_map.empty()) {
+        batch.ReadPQDescriptorSeedMap(desc_id, seed_map);
+    }
+
+    std::vector<unsigned char> legacy;
+    if (!seed_map.empty() && seed_map[0].second.size() == 32) {
+        legacy = seed_map[0].second;
+    } else if (!batch.ReadPQDescriptorSeed(desc_id, legacy) || legacy.size() != 32) {
+        legacy.clear();
+    }
+
+    struct SeedCleaner {
+        std::vector<std::pair<std::array<unsigned char, 4>, std::vector<unsigned char>>>& seed_map;
+        std::vector<unsigned char>& legacy;
+        ~SeedCleaner()
+        {
+            for (auto& entry : seed_map) {
+                if (!entry.second.empty()) memory_cleanse(entry.second.data(), entry.second.size());
+            }
+            if (!legacy.empty()) memory_cleanse(legacy.data(), legacy.size());
+        }
+    } cleaner{seed_map, legacy};
+
+    if (seed_map.empty() && legacy.empty()) {
+        return true;
+    }
+
+    const bool encrypt = encryption_key != nullptr || m_storage.HasEncryptionKeys();
+    if (encrypt) {
+        if (encryption_key == nullptr && m_storage.IsLocked()) {
+            return false;
+        }
+
+        const auto encrypt_and_store = [&](const CKeyingMaterial& key) {
+            std::optional<CryptedPQBlob> map_blob;
+            std::optional<CryptedPQBlob> seed_blob;
+            if (!seed_map.empty()) {
+                DataStream plain_stream{};
+                plain_stream << seed_map;
+                std::vector<unsigned char> plain(plain_stream.size());
+                std::copy(UCharCast(plain_stream.data()), UCharCast(plain_stream.data() + plain_stream.size()), plain.begin());
+                memory_cleanse(plain_stream.data(), plain_stream.size());
+                plain_stream.clear();
+
+                CryptedPQBlob blob;
+                blob.iv = GetRandHash();
+                if (!EncryptAuthenticatedSecret(key, std::span<const unsigned char>{plain.data(), plain.size()}, blob.iv, blob.ciphertext, PQDescriptorSeedMapPurpose(desc_id))) {
+                    memory_cleanse(plain.data(), plain.size());
+                    return false;
+                }
+                memory_cleanse(plain.data(), plain.size());
+                map_blob = std::move(blob);
+            }
+            if (legacy.size() == 32) {
+                CryptedPQBlob blob;
+                blob.iv = GetRandHash();
+                if (!EncryptAuthenticatedSecret(key, std::span<const unsigned char>{legacy.data(), legacy.size()}, blob.iv, blob.ciphertext, PQDescriptorSeedPurpose(desc_id))) {
+                    return false;
+                }
+                seed_blob = std::move(blob);
+            }
+            if (map_blob && !batch.WriteCryptedPQDescriptorSeedMap(desc_id, map_blob->iv, map_blob->ciphertext)) {
+                return false;
+            }
+            if (seed_blob && !batch.WriteCryptedPQDescriptorSeed(desc_id, seed_blob->iv, seed_blob->ciphertext)) {
+                return false;
+            }
+            // Drop any plaintext record that did not have a ciphertext counterpart.
+            if (!map_blob) batch.ErasePQDescriptorSeedMap(desc_id);
+            if (!seed_blob) batch.ErasePQDescriptorSeed(desc_id);
+            if (map_blob) m_crypted_pq_seed_map = std::move(map_blob);
+            if (seed_blob) m_crypted_pq_seed = std::move(seed_blob);
+            return true;
+        };
+
+        if (encryption_key != nullptr) {
+            return encrypt_and_store(*encryption_key);
+        }
+        return m_storage.WithEncryptionKey(encrypt_and_store);
+    }
+
+    bool ok = true;
+    if (!seed_map.empty()) {
+        ok = batch.WritePQDescriptorSeedMap(desc_id, seed_map);
+    }
+    if (ok && legacy.size() == 32) {
+        ok = batch.WritePQDescriptorSeed(desc_id, legacy);
+    }
+    if (!ok) return false;
+    batch.EraseCryptedPQDescriptorSeedMap(desc_id);
+    batch.EraseCryptedPQDescriptorSeed(desc_id);
+    m_crypted_pq_seed_map.reset();
+    m_crypted_pq_seed.reset();
+    return true;
+}
+
+void DescriptorScriptPubKeyMan::LoadCryptedPQSeed(const uint256& iv, std::vector<unsigned char> ciphertext)
+{
+    LOCK(cs_desc_man);
+    if (ciphertext.empty()) return;
+    m_crypted_pq_seed = CryptedPQBlob{iv, std::move(ciphertext)};
+}
+
+void DescriptorScriptPubKeyMan::LoadCryptedPQSeedMap(const uint256& iv, std::vector<unsigned char> ciphertext)
+{
+    LOCK(cs_desc_man);
+    if (ciphertext.empty()) return;
+    m_crypted_pq_seed_map = CryptedPQBlob{iv, std::move(ciphertext)};
+}
+
+bool DescriptorScriptPubKeyMan::UnlockPQSeeds(const CKeyingMaterial& master_key)
+{
+    LOCK(cs_desc_man);
+    if (!m_wallet_descriptor.descriptor) {
+        return !m_crypted_pq_seed && !m_crypted_pq_seed_map;
+    }
+
+    const uint256 desc_id = m_wallet_descriptor.id;
+    std::vector<std::pair<std::array<unsigned char, 4>, std::vector<unsigned char>>> seed_map;
+    std::vector<unsigned char> legacy;
+    std::vector<unsigned char> map_plain;
+    std::vector<unsigned char> seed_plain;
+    struct PlainCleaner {
+        std::vector<std::pair<std::array<unsigned char, 4>, std::vector<unsigned char>>>& seed_map;
+        std::vector<unsigned char>& legacy;
+        std::vector<unsigned char>& map_plain;
+        std::vector<unsigned char>& seed_plain;
+        ~PlainCleaner()
+        {
+            for (auto& entry : seed_map) {
+                if (!entry.second.empty()) memory_cleanse(entry.second.data(), entry.second.size());
+            }
+            if (!legacy.empty()) memory_cleanse(legacy.data(), legacy.size());
+            if (!map_plain.empty()) memory_cleanse(map_plain.data(), map_plain.size());
+            if (!seed_plain.empty()) memory_cleanse(seed_plain.data(), seed_plain.size());
+        }
+    } cleaner{seed_map, legacy, map_plain, seed_plain};
+
+    if (m_crypted_pq_seed_map) {
+        bool authenticated = false;
+        if (!DecryptAuthenticatedSecret(master_key, std::span<const unsigned char>{m_crypted_pq_seed_map->ciphertext.data(), m_crypted_pq_seed_map->ciphertext.size()}, m_crypted_pq_seed_map->iv, map_plain, PQDescriptorSeedMapPurpose(desc_id), &authenticated) || !authenticated) {
+            return false;
+        }
+        try {
+            DataStream stream{MakeByteSpan(map_plain)};
+            stream >> seed_map;
+            memory_cleanse(stream.data(), stream.size());
+        } catch (const std::exception&) {
+            return false;
+        }
+        for (const auto& entry : seed_map) {
+            if (entry.second.size() != 32) return false;
+        }
+    }
+    if (m_crypted_pq_seed) {
+        bool authenticated = false;
+        if (!DecryptAuthenticatedSecret(master_key, std::span<const unsigned char>{m_crypted_pq_seed->ciphertext.data(), m_crypted_pq_seed->ciphertext.size()}, m_crypted_pq_seed->iv, seed_plain, PQDescriptorSeedPurpose(desc_id), &authenticated) || !authenticated || seed_plain.size() != 32) {
+            return false;
+        }
+        legacy = seed_plain;
+    }
+
+    if (!seed_map.empty()) {
+        for (const auto& [fingerprint, seed] : seed_map) {
+            m_wallet_descriptor.descriptor->InjectPQSeedByFingerprint(fingerprint, seed);
+        }
+    } else if (legacy.size() == 32) {
+        m_wallet_descriptor.descriptor->InjectPQSeed(legacy);
+    }
+
+    if (!m_storage.HasEncryptionKeys()) return true;
+
+    // A seed written before encryption, or by a path that missed the crypted record,
+    // is rewritten here and the raw record is removed. This does not run when no
+    // plaintext record exists, so unlock does not rotate ciphertext every time.
+    WalletBatch batch(m_storage.GetDatabase());
+    std::vector<unsigned char> stored_seed;
+    std::vector<std::pair<std::array<unsigned char, 4>, std::vector<unsigned char>>> stored_map;
+    const bool plaintext_seed = batch.ReadPQDescriptorSeed(desc_id, stored_seed);
+    const bool plaintext_map = batch.ReadPQDescriptorSeedMap(desc_id, stored_map) && !stored_map.empty();
+    if (!stored_seed.empty()) memory_cleanse(stored_seed.data(), stored_seed.size());
+    for (auto& entry : stored_map) {
+        if (!entry.second.empty()) memory_cleanse(entry.second.data(), entry.second.size());
+    }
+    if (!plaintext_seed && !plaintext_map) return true;
+    return WritePQSeeds(batch, &master_key);
 }
 
 bool DescriptorScriptPubKeyMan::IsHDEnabled() const

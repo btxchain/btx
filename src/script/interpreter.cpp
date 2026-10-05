@@ -2369,7 +2369,7 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         }
         execdata.m_tapleaf_hash_init = true;
 
-        if (P2MRClaimLeafPinsPreimageLength(script)) {
+        if ((flags & SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32) && P2MRClaimLeafPinsPreimageLength(script)) {
             if (stack.empty() || stack.back().size() != 32) {
                 return set_error(serror, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
             }

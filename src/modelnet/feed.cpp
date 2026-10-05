@@ -9,7 +9,9 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <exception>
 #include <fstream>
+#include <iostream>
 
 namespace modelnet {
 
@@ -395,40 +397,163 @@ bool FeedStore::Save(std::string& err) const
     return true;
 }
 
+namespace {
+
+void LogSkippedFeed(const std::string& why)
+{
+    std::cerr << "btx-modeld: skipped malformed feed object (" << why << ")\n";
+}
+
+bool FeedTypeFail(std::string& err, const std::string& why)
+{
+    err = why;
+    return false;
+}
+
+bool JsonTypeError(const std::string& err)
+{
+    return err.find(" type") != std::string::npos || err.find(" range") != std::string::npos ||
+           err.find("malformed") != std::string::npos;
+}
+
+bool FeedStr(const UniValue& o, const char* k, std::string& dst, std::string& err)
+{
+    if (!o.exists(k)) return true;
+    if (!o[k].isStr()) return FeedTypeFail(err, std::string(k) + " type");
+    dst = o[k].get_str();
+    return true;
+}
+
+template <typename Int>
+bool FeedInt(const UniValue& o, const char* k, Int& dst, std::string& err)
+{
+    if (!o.exists(k)) return true;
+    if (!o[k].isNum()) return FeedTypeFail(err, std::string(k) + " type");
+    try {
+        dst = o[k].getInt<Int>();
+    } catch (const std::exception&) {
+        return FeedTypeFail(err, std::string(k) + " range");
+    }
+    return true;
+}
+
+bool FeedEventFromJson(const UniValue& ej, FeedEvent& ev, std::string& err)
+{
+    ev = {};
+    if (!ej.isObject()) return FeedTypeFail(err, "event type");
+    try {
+        if (!FeedStr(ej, "event_id", ev.event_id, err)) return false;
+        if (ej.exists("event_type")) {
+            if (!ej["event_type"].isStr()) return FeedTypeFail(err, "event_type type");
+            ParseFeedEventType(ej["event_type"].get_str(), ev.event_type);
+        }
+        if (!FeedInt(ej, "observed_at", ev.observed_at, err) ||
+            !FeedInt(ej, "published_at", ev.published_at, err) ||
+            !FeedInt(ej, "first_seen_at", ev.first_seen_at, err)) {
+            return false;
+        }
+        if (ej.exists("model_id")) {
+            if (!ej["model_id"].isStr()) return FeedTypeFail(err, "model_id type");
+            if (!ej["model_id"].get_str().empty()) {
+                Digest48::FromHex(ej["model_id"].get_str(), ev.model_id, err);
+            }
+        }
+        if (!FeedStr(ej, "release_id", ev.release_id, err)) return false;
+        int64_t sequence = 0;
+        int sources = ev.sources_observed;
+        if (!FeedInt(ej, "sequence", sequence, err) || !FeedInt(ej, "sources_observed", sources, err)) return false;
+        if (ej.exists("sequence")) {
+            if (sequence < 0) return FeedTypeFail(err, "sequence range");
+            ev.sequence = static_cast<uint64_t>(sequence);
+        }
+        if (ej.exists("sources_observed")) ev.sources_observed = sources;
+        if (ej.exists("signed_record")) {
+            if (!ej["signed_record"].isBool()) return FeedTypeFail(err, "signed_record type");
+            ev.signed_record = ej["signed_record"].get_bool();
+        }
+        if (ej.exists("record")) {
+            if (!ej["record"].isObject()) return FeedTypeFail(err, "record type");
+            std::string rerr;
+            if (!SearchRecordFromJson(ej["record"], ev.rec, rerr) && JsonTypeError(rerr)) {
+                return FeedTypeFail(err, rerr);
+            }
+        }
+        if (ej.exists("campaign")) {
+            if (!ej["campaign"].isObject()) return FeedTypeFail(err, "campaign type");
+            std::string cerr;
+            if (!CampaignFromJson(ej["campaign"], ev.campaign, cerr)) {
+                if (JsonTypeError(cerr)) return FeedTypeFail(err, cerr);
+            } else {
+                ev.has_campaign = true;
+            }
+        }
+        return true;
+    } catch (const std::exception& ex) {
+        return FeedTypeFail(err, ex.what());
+    } catch (...) {
+        return FeedTypeFail(err, "malformed feed event");
+    }
+}
+
+} // namespace
+
 bool FeedStore::Load(int64_t now_ms, std::string& err)
 {
     if (m_path.empty() || !fs::exists(m_path)) return true;
     m_by_id.clear();
     m_seq = 0;
-    std::ifstream in(m_path);
-    std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    UniValue o;
-    if (!o.read(raw) || !o.isObject() || !o.exists("events")) return true;
-    if (o.exists("sequence")) m_seq = o["sequence"].getInt<int64_t>();
-    for (const auto& ej : o["events"].getValues()) {
-        FeedEvent ev;
-        if (ej.exists("event_id")) ev.event_id = ej["event_id"].get_str();
-        if (ej.exists("event_type")) ParseFeedEventType(ej["event_type"].get_str(), ev.event_type);
-        if (ej.exists("observed_at")) ev.observed_at = ej["observed_at"].getInt<int64_t>();
-        if (ej.exists("published_at")) ev.published_at = ej["published_at"].getInt<int64_t>();
-        if (ej.exists("first_seen_at")) ev.first_seen_at = ej["first_seen_at"].getInt<int64_t>();
-        if (ej.exists("model_id") && !ej["model_id"].get_str().empty()) {
-            Digest48::FromHex(ej["model_id"].get_str(), ev.model_id, err);
+    try {
+        std::ifstream in(m_path);
+        std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue o;
+        if (!o.read(raw) || !o.isObject() || !o.exists("events")) return true;
+        if (!o["events"].isArray()) {
+            LogSkippedFeed("events type");
+            err = "events type";
+            return true;
         }
-        if (ej.exists("release_id")) ev.release_id = ej["release_id"].get_str();
-        if (ej.exists("sequence")) ev.sequence = ej["sequence"].getInt<int64_t>();
-        if (ej.exists("sources_observed")) ev.sources_observed = ej["sources_observed"].getInt<int>();
-        ev.signed_record = ej.exists("signed_record") && ej["signed_record"].get_bool();
-        if (ej.exists("record")) SearchRecordFromJson(ej["record"], ev.rec, err);
-        if (ej.exists("campaign")) {
-            CampaignFromJson(ej["campaign"], ev.campaign, err);
-            ev.has_campaign = true;
+        if (o.exists("sequence")) {
+            if (!o["sequence"].isNum()) {
+                LogSkippedFeed("sequence type");
+            } else {
+                try {
+                    const int64_t seq = o["sequence"].getInt<int64_t>();
+                    if (seq >= 0) m_seq = static_cast<uint64_t>(seq);
+                    else LogSkippedFeed("sequence range");
+                } catch (const std::exception& ex) {
+                    LogSkippedFeed(std::string("sequence ") + ex.what());
+                }
+            }
         }
-        if (ev.sequence > m_seq) m_seq = ev.sequence;
-        m_by_id[ev.event_id] = std::move(ev);
+        for (const auto& ej : o["events"].getValues()) {
+            FeedEvent ev;
+            std::string eerr;
+            try {
+                if (!FeedEventFromJson(ej, ev, eerr) || ev.event_id.empty()) {
+                    LogSkippedFeed(eerr.empty() ? "event" : eerr);
+                    continue;
+                }
+            } catch (const std::exception& ex) {
+                LogSkippedFeed(ex.what());
+                continue;
+            } catch (...) {
+                LogSkippedFeed("event");
+                continue;
+            }
+            if (ev.sequence > m_seq) m_seq = ev.sequence;
+            m_by_id[ev.event_id] = std::move(ev);
+        }
+        Expire(now_ms);
+        return true;
+    } catch (const std::exception& ex) {
+        err = ex.what();
+        LogSkippedFeed(err);
+        return true;
+    } catch (...) {
+        err = "feed document";
+        LogSkippedFeed(err);
+        return true;
     }
-    Expire(now_ms);
-    return true;
 }
 
 UniValue FeedPageJson(const std::vector<FeedEvent>& items, const std::vector<ModelEconomyEntry>& entries,

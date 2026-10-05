@@ -2785,13 +2785,9 @@ BOOST_AUTO_TEST_CASE(signed_frontier_catchup_prefers_archive_not_miner)
                   CAddress{}, /*addrNameIn=*/"frontier-archive",
                   ConnectionType::OUTBOUND_FULL_RELAY,
                   /*inbound_onion=*/false, /*network_key=*/0};
-    // Handshake() itself calls SendMessages (test/util/net.cpp). Miner first
-    // would run FindNextBlocksToDownload while CountCapableSignedFrontierBodySources
-    // is still 0: MaybeSeedBestKnownFromHeaderTower seeds the miner
-    // (net_processing.cpp:11100, CanServeBlocks), catch_up_spread is true
-    // (kAhead=33), prefer_active is false (net_processing.cpp:5846-5848),
-    // and the miner keeps leftover in-flight. Establish the archive as a
-    // counted capable source first.
+    // Handshake() itself calls SendMessages (test/util/net.cpp). Establish
+    // the archive and let it announce the frontier headers before the miner
+    // so BestKnown comes from those headers.
     connman.Handshake(archive, /*successfully_connected=*/true,
                       archive_services, archive_services, PROTOCOL_VERSION,
                       /*relay_txs=*/true,
@@ -8271,31 +8267,50 @@ BOOST_AUTO_TEST_CASE(archive_getdata_worker_serves_block_without_double_send)
     CNode archive{/*id=*/502, /*sock=*/nullptr, CAddress{},
                   /*nKeyedNetGroupIn=*/1, /*nLocalHostNonceIn=*/0,
                   CAddress{}, /*addrNameIn=*/"archive-serve-archive",
-                  ConnectionType::INBOUND,
+                  ConnectionType::MANUAL,
                   /*inbound_onion=*/false, /*network_key=*/0};
+    CNode stranger{/*id=*/503, /*sock=*/nullptr, CAddress{},
+                   /*nKeyedNetGroupIn=*/2, /*nLocalHostNonceIn=*/0,
+                   CAddress{}, /*addrNameIn=*/"archive-serve-stranger",
+                   ConnectionType::INBOUND,
+                   /*inbound_onion=*/false, /*network_key=*/0};
     connman.Handshake(miner, /*successfully_connected=*/true, miner_services,
                       miner_services, PROTOCOL_VERSION, /*relay_txs=*/true);
     connman.Handshake(archive, /*successfully_connected=*/true,
                       archive_services, archive_services, PROTOCOL_VERSION,
                       /*relay_txs=*/true);
+    connman.Handshake(stranger, /*successfully_connected=*/true,
+                      archive_services, archive_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
     connman.AddTestNode(miner);
     connman.AddTestNode(archive);
+    connman.AddTestNode(stranger);
     connman.FlushSendBuffer(miner);
     connman.FlushSendBuffer(archive);
+    connman.FlushSendBuffer(stranger);
+    BOOST_CHECK(archive.HasArchiveOrMirrorService());
+    BOOST_CHECK(!stranger.HasArchiveOrMirrorService());
+    CNodeStateStats stranger_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(stranger.GetId(), stranger_stats));
+    BOOST_CHECK((stranger_stats.their_services & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
+                NODE_MATMUL_ATTESTATION_ARCHIVE);
     struct FinalizePeers {
         PeerManager& peerman;
         ConnmanTestMsg& connman;
         CNode& miner;
         CNode& archive;
+        CNode& stranger;
         ~FinalizePeers()
         {
             peerman.FinalizeNode(miner);
             peerman.FinalizeNode(archive);
+            peerman.FinalizeNode(stranger);
             connman.RemoveTestNode(miner);
             connman.RemoveTestNode(archive);
+            connman.RemoveTestNode(stranger);
             connman.SetArchiveBlockServeRunningForTest(false);
         }
-    } finalize{peerman, connman, miner, archive};
+    } finalize{peerman, connman, miner, archive, stranger};
 
     std::vector<CInv> inv{{MSG_BLOCK | MSG_WITNESS_FLAG, tip_hash}};
 
@@ -8330,6 +8345,17 @@ BOOST_AUTO_TEST_CASE(archive_getdata_worker_serves_block_without_double_send)
     (void)connman.ProcessMessagesOnce(archive);
     BOOST_CHECK(!peerman.ServeArchiveBlockGetData(interrupt));
     BOOST_CHECK_EQUAL(CountQueuedMessageType(archive, NetMsgType::BLOCK), 1U);
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(miner, NetMsgType::BLOCK), 1U);
+
+    // An inbound stranger's self-advertised archive bit stays on the
+    // one-BLOCK msghand path and is not drained by the archive worker.
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        stranger, NetMsg::Make(NetMsgType::GETDATA, inv)));
+    stranger.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(stranger);
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(stranger, NetMsgType::BLOCK), 1U);
+    BOOST_CHECK(!peerman.ServeArchiveBlockGetData(interrupt));
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(stranger, NetMsgType::BLOCK), 1U);
     BOOST_CHECK_EQUAL(CountQueuedMessageType(miner, NetMsgType::BLOCK), 1U);
 }
 
@@ -9033,10 +9059,9 @@ BOOST_AUTO_TEST_CASE(pindex_last_common_behind_tip_advances_and_does_not_rereque
 BOOST_AUTO_TEST_CASE(live_shape_199300_converges_toward_199328)
 {
     // VERSION heights are the live numbers (199301 / 199303 / 199328).
-    // The local chain is the regtest tip standing in for 199300; we feed
-    // +1 / +3 / +28 real headers. Convergence is m_best_header plus
-    // handshake-seeded BestKnown = min(VERSION, tower), not per-peer
-    // delivered-header counts (MaybeSeedBestKnownFromHeaderTower).
+    // The local chain is the regtest tip standing in for 199300. BestKnown
+    // stays unset until each peer announces headers; it is not
+    // min(VERSION, m_best_header).
     LOCK(NetEventsInterface::g_msgproc_mutex);
     ResetSharedPeermanFixture(m_node);
     ChainstateManager& chainman{*Assert(m_node.chainman)};
@@ -9061,9 +9086,8 @@ BOOST_AUTO_TEST_CASE(live_shape_199300_converges_toward_199328)
         connman.Handshake(node, /*successfully_connected=*/true, services,
                           services, PROTOCOL_VERSION, /*relay_txs=*/true,
                           starting);
-        // Handshake's final SendMessages already seeded BestKnown =
-        // min(VERSION, m_best_header) and may have queued GETHEADERS /
-        // GETDATA. Do not FlushSendBuffer here — inspect first.
+        // Handshake may queue GETHEADERS. It must not seed BestKnown or
+        // GETDATA from VERSION height plus the local header tower.
     };
     CNode p301{/*id=*/4001, /*sock=*/nullptr, CAddress{}, 4001, 0, CAddress{},
                "live-199301", ConnectionType::OUTBOUND_FULL_RELAY, false, 0};
@@ -9076,22 +9100,17 @@ BOOST_AUTO_TEST_CASE(live_shape_199300_converges_toward_199328)
     handshake(p328, 199328);
 
     const int32_t tower_h{local_199300->nHeight + 28};
-    auto seeded = [&](int32_t version) {
-        return std::min(version, tower_h);
-    };
     CNodeStateStats s301, s303, s328;
     BOOST_REQUIRE(peerman.GetNodeStateStats(p301.GetId(), s301));
     BOOST_REQUIRE(peerman.GetNodeStateStats(p303.GetId(), s303));
     BOOST_REQUIRE(peerman.GetNodeStateStats(p328.GetId(), s328));
-    BOOST_CHECK_EQUAL(s301.nSyncHeight, seeded(199301));
-    BOOST_CHECK_EQUAL(s303.nSyncHeight, seeded(199303));
-    BOOST_CHECK_EQUAL(s328.nSyncHeight, seeded(199328));
+    BOOST_CHECK_EQUAL(s301.nSyncHeight, -1);
+    BOOST_CHECK_EQUAL(s303.nSyncHeight, -1);
+    BOOST_CHECK_EQUAL(s328.nSyncHeight, -1);
     BOOST_CHECK_EQUAL(
         WITH_LOCK(::cs_main, return chainman.m_best_header->nHeight), tower_h);
-    BOOST_CHECK(
-        HasQueuedMessageType(p328, NetMsgType::GETHEADERS) ||
-        HasQueuedMessageType(p328, NetMsgType::GETDATA) ||
-        !s328.vHeightInFlight.empty());
+    BOOST_CHECK(!HasQueuedMessageType(p328, NetMsgType::GETDATA));
+    BOOST_CHECK(s328.vHeightInFlight.empty());
 
     connman.FlushSendBuffer(p328);
     connman.FlushSendBuffer(p301);
@@ -9113,12 +9132,10 @@ BOOST_AUTO_TEST_CASE(live_shape_199300_converges_toward_199328)
     BOOST_REQUIRE(peerman.GetNodeStateStats(p301.GetId(), s301));
     BOOST_REQUIRE(peerman.GetNodeStateStats(p303.GetId(), s303));
     BOOST_REQUIRE(peerman.GetNodeStateStats(p328.GetId(), s328));
-    // Header processing only raises BestKnown. Seeding already set each
-    // peer to min(VERSION, tower) = tower here, so delivered-header counts
-    // are not the convergence signal.
-    BOOST_CHECK_GE(s301.nSyncHeight, seeded(199301));
-    BOOST_CHECK_GE(s303.nSyncHeight, seeded(199303));
-    BOOST_CHECK_GE(s328.nSyncHeight, seeded(199328));
+    // BestKnown is the headers that peer announced, not the VERSION height.
+    BOOST_CHECK_EQUAL(s301.nSyncHeight, local_199300->nHeight + 1);
+    BOOST_CHECK_EQUAL(s303.nSyncHeight, local_199300->nHeight + 3);
+    BOOST_CHECK_EQUAL(s328.nSyncHeight, local_199300->nHeight + 28);
     BOOST_CHECK_EQUAL(
         WITH_LOCK(::cs_main, return chainman.m_best_header->nHeight),
         local_199300->nHeight + 28);
@@ -10860,11 +10877,8 @@ BOOST_AUTO_TEST_CASE(withdrawn_deep_tower_snaps_last_common_to_tip)
 
 BOOST_AUTO_TEST_CASE(header_tower_seeds_best_known_without_duplicate_headers)
 {
-    // A live consensus-archive node 2026-08-29: buffer pool ready, deferred-replay gone, but
-    // inflight=0 / block_recv=0. m_best_header=199801, 6 peers advertise
-    // above tip, selector asked peer=29 at 199386 (already_at_peer_best).
-    // Headers are already in the index — do not wait for a duplicate
-    // HEADERS batch to set BestKnown.
+    // VERSION height plus the local m_best_header must not become BestKnown
+    // or a GETDATA source. BestKnown follows headers that peer announces.
     LOCK(NetEventsInterface::g_msgproc_mutex);
     node::matmul_trusted::ResetForTest();
     ResetSharedPeermanFixture(m_node);
@@ -10927,13 +10941,11 @@ BOOST_AUTO_TEST_CASE(header_tower_seeds_best_known_without_duplicate_headers)
                           services, services, PROTOCOL_VERSION,
                           /*relay_txs=*/true,
                           /*starting_height=*/tower.back()->nHeight);
-        // Seeding + stalled-tower GETDATA fire on Handshake's final
-        // SendMessages. Inspect before FlushSendBuffer drains the wire.
         getdata += CountQueuedGetDataForHash(*ahead.back(),
                                              tower.front()->GetBlockHash());
         CNodeStateStats st;
         BOOST_REQUIRE(peerman.GetNodeStateStats(ahead.back()->GetId(), st));
-        BOOST_CHECK_EQUAL(st.nSyncHeight, tower.back()->nHeight);
+        BOOST_CHECK_EQUAL(st.nSyncHeight, -1);
         if (!st.vHeightInFlight.empty()) ++inflight_peers;
         connman.FlushSendBuffer(*ahead.back());
     }
@@ -10943,13 +10955,25 @@ BOOST_AUTO_TEST_CASE(header_tower_seeds_best_known_without_duplicate_headers)
     BOOST_CHECK(peerman.SendMessages(&at_tip));
     BOOST_CHECK_EQUAL(
         CountQueuedGetDataForHash(at_tip, tower.front()->GetBlockHash()), 0U);
+    BOOST_CHECK_EQUAL(getdata, 0U);
+    BOOST_CHECK_EQUAL(inflight_peers, 0);
 
-    BOOST_REQUIRE_MESSAGE(getdata > 0 || inflight_peers > 0,
-                          "peers advertising the HEADER_ONLY tower must be "
-                          "GETDATA sources without a duplicate HEADERS batch");
-    BOOST_REQUIRE_MESSAGE(inflight_peers > 0,
-                          "inflight must become nonzero once the selector "
-                          "targets the header tower");
+    std::vector<CBlock> announced;
+    announced.reserve(tower.size());
+    {
+        LOCK(::cs_main);
+        for (CBlockIndex* idx : tower) {
+            announced.emplace_back(idx->GetBlockHeader());
+        }
+    }
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        *ahead.front(),
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(announced))));
+    ahead.front()->fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(*ahead.front());
+    CNodeStateStats announced_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(ahead.front()->GetId(), announced_stats));
+    BOOST_CHECK_EQUAL(announced_stats.nSyncHeight, tower.back()->nHeight);
 
     peerman.FinalizeNode(at_tip);
     for (auto& peer : ahead) peerman.FinalizeNode(*peer);

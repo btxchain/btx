@@ -716,6 +716,14 @@ BOOST_AUTO_TEST_CASE(spend_path_recovery_bundle_roundtrip_and_payload_digest_are
     bundle.payload = payload;
     bundle.header.payload_digest = ComputeSpendPathRecoveryPayloadDigest(payload);
 
+    CShieldedBundle shielded;
+    shielded.v2_bundle = bundle;
+    const auto recovery_usage = GetShieldedResourceUsage(shielded);
+    // Two direct spends (100) and two outputs (15). Recovery proofs are
+    // MatRiCT verifications and must not report zero verify units.
+    BOOST_CHECK_EQUAL(recovery_usage.verify_units, 230U);
+    BOOST_CHECK_EQUAL(GetShieldedVerifyCost(shielded), 230U);
+
     BOOST_REQUIRE(bundle.IsValid());
 
     DataStream ss{};

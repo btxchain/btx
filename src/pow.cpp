@@ -3756,6 +3756,31 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
     if (!bnTarget) return false;
     if (UintToArith256(block.matmul_digest) > *bnTarget) return false;
 
+    // Digest <= compact nBits is this precheck only. Callers must not treat
+    // a pass as authenticated PoW that credits nChainWork or skips ExactReplay.
+    return true;
+}
+
+bool MatMulDigestBelowTargetAuthenticatesWork(const CBlockHeader&,
+                                              const Consensus::Params&) noexcept
+{
+    return false;
+}
+
+bool MatMulQualifiedGpuDigestMismatchIsRetryable(
+    bool fully_accelerated,
+    uint64_t device_gemm_calls,
+    uint64_t cpu_gemm_calls,
+    uint64_t cpu_gemm_fallbacks,
+    bool committed_digest_null,
+    bool digest_equals_commitment,
+    bool portable_confirmation_ran) noexcept
+{
+    if (portable_confirmation_ran || committed_digest_null || digest_equals_commitment) {
+        return false;
+    }
+    if (!fully_accelerated || device_gemm_calls == 0) return false;
+    if (cpu_gemm_calls != 0 || cpu_gemm_fallbacks != 0) return false;
     return true;
 }
 
@@ -4672,6 +4697,20 @@ MatMulRCValidationOutcome CheckMatMulProofOfWork_RCOutcome(
     if (!replay.ok) {
         switch (replay.outcome) {
         case matmul::v4::rc::ExactReplayVerifyOutcome::InvalidConsensus:
+            // A qualified GPU-only digest mismatch is a retryable local
+            // failure. Null commitments, over-target digests, and operator
+            // portable-CPU confirmations stay consensus-invalid.
+            if (MatMulQualifiedGpuDigestMismatchIsRetryable(
+                    replay.fully_accelerated,
+                    replay.device_gemm_calls,
+                    replay.cpu_gemm_calls,
+                    replay.cpu_gemm_fallbacks,
+                    replay.digest.IsNull(),
+                    replay.digest == header.matmul_digest,
+                    replay.device_mismatch_retried && replay.cpu_gemm_calls != 0)) {
+                return finish(
+                    MatMulRCValidationOutcome::LOCAL_ACCELERATOR_FAILURE);
+            }
             return finish(invalid);
         case matmul::v4::rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure:
             return finish(

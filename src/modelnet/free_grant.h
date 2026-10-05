@@ -73,7 +73,9 @@ bool VerifyFreeGrant(Span<const unsigned char> payload,
                      UniValue& body,
                      std::string& err);
 
-/** Verify against this helper's service identity and mark `use_key` redeemed. */
+/** Verify against this helper's service identity and mark `use_key` redeemed.
+ *  A redemption is single-use. `redeem_bytes` is charged against the grant's
+ *  `maximum_bytes` only when `record_use` is true. */
 bool VerifyHostedFreeGrant(const fs::path& helper_dir,
                            Span<const unsigned char> payload,
                            Span<const unsigned char> sig,
@@ -82,7 +84,8 @@ bool VerifyHostedFreeGrant(const fs::path& helper_dir,
                            const std::string& use_key,
                            UniValue& body,
                            std::string& err,
-                           bool record_use = true);
+                           bool record_use = true,
+                           uint64_t redeem_bytes = 0);
 
 bool RejectExpiredTamperedReplay(Span<const unsigned char> payload,
                                   Span<const unsigned char> sig,

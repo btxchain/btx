@@ -319,7 +319,7 @@ BOOST_AUTO_TEST_CASE(legacy_htlc_sha256_spend_requires_32_byte_preimage)
     CScript script_pubkey;
     script_pubkey << OP_2 << std::vector<unsigned char>(root.begin(), root.end());
 
-    auto spend = [&](const std::vector<unsigned char>& preimage) {
+    auto spend = [&](const std::vector<unsigned char>& preimage, unsigned int flags) {
         CScriptWitness witness;
         witness.stack.push_back(std::vector<unsigned char>(MLDSA44_SIGNATURE_SIZE, 0x01));
         witness.stack.push_back(preimage);
@@ -327,15 +327,23 @@ BOOST_AUTO_TEST_CASE(legacy_htlc_sha256_spend_requires_32_byte_preimage)
         witness.stack.push_back({P2MR_LEAF_VERSION});
         ScriptError err = SCRIPT_ERR_OK;
         const P2MRTemplateChecker checker{/*locktime_ok=*/true};
-        const bool ok = VerifyScript(CScript(), script_pubkey, &witness, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS, checker, &err);
+        const bool ok = VerifyScript(CScript(), script_pubkey, &witness, flags, checker, &err);
         return std::pair<bool, ScriptError>{ok, err};
     };
 
-    const auto bad = spend(preimage64);
+    constexpr unsigned int base_flags{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS};
+    constexpr unsigned int pinned_flags{base_flags | SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32};
+
+    const auto bad = spend(preimage64, pinned_flags);
     BOOST_CHECK(!bad.first);
     BOOST_CHECK_EQUAL(bad.second, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
 
-    const auto good = spend(preimage32);
+    // Before the activation height the length rule is policy only: the
+    // pre-check does not run and the spend fails or passes on the script alone.
+    const auto unpinned = spend(preimage64, base_flags);
+    BOOST_CHECK(unpinned.second != SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
+
+    const auto good = spend(preimage32, pinned_flags);
     BOOST_CHECK(good.first);
     BOOST_CHECK_EQUAL(good.second, SCRIPT_ERR_OK);
 }

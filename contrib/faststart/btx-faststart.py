@@ -384,7 +384,34 @@ def wait_for_rpc_ready(cli_cmd: list[str], timeout_secs: int) -> None:
     raise TimeoutError("Timed out waiting for btxd RPC to become ready")
 
 
+def reject_unsafe_snapshot_filename(filename: str) -> str:
+    """Accept only a single path component.
+
+    Absolute names and parent-directory components escape the faststart
+    directory when joined, and they are rejected before download or replace.
+    """
+    if not isinstance(filename, str) or filename == "" or filename.strip() != filename:
+        raise ValueError("Snapshot filename must be a non-empty bare name")
+    if "/" in filename or "\\" in filename or "\x00" in filename or filename in {".", ".."}:
+        raise ValueError(
+            "Snapshot filename must not be absolute or contain parent-directory components: "
+            f"{filename!r}"
+        )
+    path = Path(filename)
+    if path.is_absolute() or path.parts != (filename,):
+        raise ValueError(
+            "Snapshot filename must not be absolute or contain parent-directory components: "
+            f"{filename!r}"
+        )
+    return filename
+
+
 def download_snapshot(url: str, destination: Path, expected_sha256: str | None) -> Path:
+    reject_unsafe_snapshot_filename(destination.name)
+    if any(part == ".." for part in destination.parts):
+        raise ValueError(
+            f"Snapshot destination must not contain parent-directory components: {destination}"
+        )
     ensure_parent(destination)
     tmp_fd, tmp_name = tempfile.mkstemp(prefix=destination.name + ".", suffix=".partial", dir=str(destination.parent))
     tmp_path = Path(tmp_name)
@@ -423,7 +450,7 @@ def snapshot_from_args(args: argparse.Namespace) -> tuple[str, str | None, str, 
         snapshot_url = args.snapshot_url
         snapshot_sha256 = args.snapshot_sha256
         snapshot_name = args.snapshot_name or Path(urllib.parse.urlparse(snapshot_url).path).name or "snapshot.dat"
-        return snapshot_url, snapshot_sha256, snapshot_name, {}
+        return snapshot_url, snapshot_sha256, reject_unsafe_snapshot_filename(snapshot_name), {}
 
     manifest_source = args.snapshot_manifest or os.environ.get("BTX_FASTSTART_SNAPSHOT_MANIFEST")
     if not manifest_source:
@@ -441,6 +468,8 @@ def snapshot_from_args(args: argparse.Namespace) -> tuple[str, str | None, str, 
     entry = resolve_manifest_entry(manifest, args.chain)
     snapshot_url = entry.get("url") or entry.get("asset_url")
     snapshot_filename = entry.get("filename") or entry.get("published_name")
+    if snapshot_filename:
+        snapshot_filename = reject_unsafe_snapshot_filename(snapshot_filename)
 
     # If the manifest entry has a filename but no explicit url, derive the
     # url from the manifest's own source location + the filename. This
@@ -476,7 +505,7 @@ def snapshot_from_args(args: argparse.Namespace) -> tuple[str, str | None, str, 
             else f"Snapshot manifest entry for '{args.chain}' is missing url"
         )
     snapshot_sha256 = entry.get("sha256") or entry.get("snapshot_sha256")
-    snapshot_name = (
+    snapshot_name = reject_unsafe_snapshot_filename(
         snapshot_filename
         or Path(urllib.parse.urlparse(snapshot_url).path).name
         or "snapshot.dat"

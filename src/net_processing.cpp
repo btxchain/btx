@@ -1521,6 +1521,7 @@ public:
             LOCK(cs_main);
             m_header_only_competing.clear();
             m_header_only_followed_skip.clear();
+            m_structural_download_skip.clear();
             m_background_headers_pending.clear();
             m_background_headers_last_peer = -1;
             m_background_headers_last_sent = {};
@@ -2305,6 +2306,11 @@ private:
      *  m_header_only_competing: competing siblings stay GPU-protected
      *  independently of followed-hole skip. */
     std::set<uint256> m_header_only_followed_skip GUARDED_BY(cs_main);
+    /** Block hashes whose body failed a structural check (BLOCK_MUTATED /
+     *  merkle / compact reconstruction). Not persisted as BLOCK_FAILED, so
+     *  without this set a same-height sibling is fetched again on every
+     *  headers pass. Cleared when the active tip moves. */
+    std::set<uint256> m_structural_download_skip GUARDED_BY(cs_main);
     /** Recent signer-authenticated proof delivered by a peer. A valid
      * signature authorizes routing only on the branch containing its exact
      * block hash; it is not a bearer token for arbitrary future forks. */
@@ -2957,7 +2963,8 @@ private:
         LOCKS_EXCLUDED(cs_main);
 
     /** Process compact block txns  */
-    void ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions)
+    void ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions,
+                                 bool credit_body_source = true)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex);
 
     /**
@@ -4340,11 +4347,10 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
             return;
     }
     LogDebug(BCLog::NET,
-             "Replaying budget-deferred body %s locally (source peer=%d gone)\n",
+             "Deferring budget-deferred body %s (source peer=%d gone) until admission\n",
              candidate_hash.ToString(), candidate.source_peer);
-    ProcessBlockSync(candidate.source_peer, /*node=*/nullptr, candidate.block,
-                     candidate.force_processing, candidate.min_pow_checked,
-                     /*post_process=*/nullptr);
+    RefreshMatMulDeferredBodyRetry(
+        candidate_hash, "deferred source gone; replay stays budgeted");
 }
 
 bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash, uint64_t keyed_netgroup) const
@@ -5635,10 +5641,17 @@ static bool TrustedMirrorMayDownloadIndex(
     const CBlockIndex* index,
     const std::set<uint256>& competing,
     const std::set<uint256>& followed_skip,
-    const CBlockIndex* peer_best_known = nullptr)
+    const CBlockIndex* peer_best_known = nullptr,
+    const std::set<uint256>* structural_skip = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (index == nullptr) return false;
+    // A body that already failed a structural check stays skipped. Quorum,
+    // frontier, and tip-extension exceptions do not re-request it.
+    if (structural_skip != nullptr &&
+        structural_skip->count(index->GetBlockHash()) != 0) {
+        return true;
+    }
     // A same-height sibling of the connected tip is not a download hole
     // (F3). Quorum does not make it inflight. A pulled-ahead lost-twin
     // or heavier-tower path below is what unsuppresses it.
@@ -6198,7 +6211,6 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                                         /*only_honest_extending_suffix=*/true,
                                         /*only_peer=*/std::nullopt,
                                         /*only_descendants_of=*/missing_honest_early);
-        count = std::min(count, 1U);
     }
 
     vBlocks.reserve(vBlocks.size() + count);
@@ -6610,18 +6622,28 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // never have — unless they are manual/noban or the GPU/frontier source.
     // Fresh IBD (nobody has served) keeps the work-only gate.
     {
-        bool any_served{false};
+        bool proven_peer_has_room{false};
+        const CBlockIndex* const ours{state->pindexBestKnownBlock};
         for (const auto& [id, st] : m_node_states) {
-            if (st.m_has_served_block) {
-                any_served = true;
+            if (id == peer.m_id || !st.m_has_served_block) continue;
+            if (st.vBlocksInFlight.size() >=
+                static_cast<size_t>(MAX_BLOCKS_IN_TRANSIT_PER_PEER)) {
+                continue;
+            }
+            if (ours != nullptr && st.pindexBestKnownBlock != nullptr &&
+                st.pindexBestKnownBlock->GetAncestor(ours->nHeight) == ours) {
+                proven_peer_has_room = true;
                 break;
             }
         }
+        // A prior useful body is a preference. It excludes this peer only
+        // while some other proven peer still has a slot and already
+        // advertises this chain. Otherwise fall back.
         if (node::HeaderSyncSkipPeerWithoutBodyAvailability(
                 state->m_has_served_block,
                 state->m_manual || state->m_noban,
                 this_peer_frontier_source || this_peer_gpu,
-                any_served)) {
+                proven_peer_has_room)) {
             log_skip("no_body_availability");
             return;
         }
@@ -6683,7 +6705,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         !IsHeaderOnlyFetchSuppressed(m_chainman, tip, root_first.lowest_missing,
                                      m_header_only_competing,
                                      m_header_only_followed_skip,
-                                     state->pindexBestKnownBlock) &&
+                                     state->pindexBestKnownBlock,
+                                     &m_structural_download_skip) &&
         !m_matmul_block_lifecycle.HasRetainedBody(root_first.lowest_missing->GetBlockHash()) &&
         node::matmul_trusted::CanonicalFirstHoleMayReassign(
             IsBlockRequested(root_first.lowest_missing->GetBlockHash()),
@@ -6799,7 +6822,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         } else if (IsHeaderOnlyFetchSuppressed(m_chainman, tip, root_first.lowest_missing,
                                                m_header_only_competing,
                                                m_header_only_followed_skip,
-                                               state->pindexBestKnownBlock)) {
+                                               state->pindexBestKnownBlock,
+                                               &m_structural_download_skip)) {
             select_reason = "root_header_only_skip";
         } else {
             select_reason = root_first.clamped ? "clamped_request_root" : "request_root";
@@ -7277,7 +7301,8 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             if (IsHeaderOnlyFetchSuppressed(m_chainman, tip, pindex,
                                            m_header_only_competing,
                                            m_header_only_followed_skip,
-                                           state->pindexBestKnownBlock)) {
+                                           state->pindexBestKnownBlock,
+                                           &m_structural_download_skip)) {
                 continue;
             }
 
@@ -9532,6 +9557,7 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
         if (pindexNew == m_chainman.ActiveTip()) {
             m_header_only_competing.clear();
             m_header_only_followed_skip.clear();
+            m_structural_download_skip.clear();
         }
         // Historical catch-up still suppresses INV floods. Age-only IBD
         // (stalled tip older than -maxtipage) must announce: fInitialDownload
@@ -9588,6 +9614,9 @@ void PeerManagerImpl::BlockChecked(const CBlock& block, const BlockValidationSta
         it != mapBlockSource.end() &&
         State(it->second.first)) {
             MaybePunishNodeForBlock(/*nodeid=*/ it->second.first, state, /*via_compact_block=*/ !it->second.second);
+    }
+    if (state.GetResult() == BlockValidationResult::BLOCK_MUTATED) {
+        InsertHeaderOnlySkipHash(m_structural_download_skip, hash);
     }
     // Check that:
     // 1. The block is valid
@@ -10215,6 +10244,17 @@ CTransactionRef PeerManagerImpl::FindTxForGetData(const Peer::TxRelay& tx_relay,
     return {};
 }
 
+/** Archive/mirror GETDATA drain and worker fast path. A VERSION service bit
+ *  from an inbound stranger is not enough: the peer must be outbound, manual,
+ *  or NoBan. Untrusted peers stay on the one-BLOCK-per-call cap. */
+[[nodiscard]] static bool PeerMayUseArchiveMirrorFastPath(const CNode& node)
+{
+    if (!node.HasArchiveOrMirrorService()) return false;
+    if (!node.IsInboundConn()) return true;
+    return node.IsManualConn() ||
+           node.HasPermission(NetPermissionFlags::NoBan);
+}
+
 void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
 {
     AssertLockNotHeld(cs_main);
@@ -10288,10 +10328,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
     // queued bodies until pause/interrupt so 16 GETDATAs are not serialized
     // at one msghand lap (~45s) each. When ArchiveBlockServe is running,
     // leave archive block invs queued for that worker (msghand stays on TX).
-    const bool drain_archive_blocks{
-        node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
-            pfrom.IsManualConn() || !pfrom.IsInboundConn(),
-            pfrom.HasArchiveOrMirrorService())};
+    const bool drain_archive_blocks{PeerMayUseArchiveMirrorFastPath(pfrom)};
     const bool consensus_catchup_serve{
         pfrom.m_consensus_catchup_serve.load(std::memory_order_relaxed)};
     // adv5/E-6: the consensus-catchup flag is one-header-cheap, so its serve
@@ -10356,7 +10393,7 @@ bool PeerManagerImpl::ServeArchiveBlockGetData(std::atomic<bool>& interrupt)
     std::vector<NodeId> ids;
     m_connman.ForEachNode([&](CNode* pnode) {
         if (pnode == nullptr) return;
-        if (!pnode->HasArchiveOrMirrorService()) return;
+        if (!PeerMayUseArchiveMirrorFastPath(*pnode)) return;
         if (!pnode->m_has_getdata_requests.load()) return;
         ids.push_back(pnode->GetId());
     });
@@ -10927,6 +10964,7 @@ void PeerManagerImpl::MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
     const int ceiling{static_cast<int>(m_chainman.m_options.reorg_recovery_max_depth)};
     if (!node.IsManualConn()) {
         int header_height{-1};
+        bool drop_far_peer{false};
         {
             LOCK(cs_main);
             if (m_chainman.m_best_header != nullptr) {
@@ -10934,11 +10972,12 @@ void PeerManagerImpl::MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
             } else if (const CBlockIndex* tip{m_chainman.ActiveChain().Tip()}) {
                 header_height = tip->nHeight;
             }
+            if (header_height >= 0 && advertised >= 0 && advertised + ceiling < header_height) {
+                m_background_headers_pending.erase(node.GetId());
+                drop_far_peer = true;
+            }
         }
-        if (header_height >= 0 && advertised >= 0 && advertised + ceiling < header_height) {
-            m_background_headers_pending.erase(node.GetId());
-            return;
-        }
+        if (drop_far_peer) return;
     }
 
     const auto now{NodeClock::now()};
@@ -10947,6 +10986,7 @@ void PeerManagerImpl::MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
     // chains on its own; this interval only starts the next peer's walk.
     constexpr auto classify_gap{std::chrono::seconds{2}};
     if (!manual) {
+        LOCK(cs_main);
         m_background_headers_pending.insert(node.GetId());
         if (now - m_background_headers_last_sent < classify_gap) return;
         auto next{m_background_headers_pending.upper_bound(
@@ -10982,6 +11022,7 @@ void PeerManagerImpl::MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
     }
     if (already_classified || locator.vHave.empty()) {
         if (!manual) {
+            LOCK(cs_main);
             m_background_headers_pending.erase(node.GetId());
             m_background_headers_last_peer = node.GetId();
         }
@@ -10994,11 +11035,13 @@ void PeerManagerImpl::MaybeClassifyDiscoveryPeerChain(CNode& node, Peer& peer)
     if (MaybeSendGetHeaders(node, locator, peer,
                             /*bypass_send_window=*/manual && first_probe)) {
         if (!manual) {
+            LOCK(cs_main);
             m_background_headers_last_sent = now;
             m_background_headers_last_peer = node.GetId();
             m_background_headers_pending.erase(node.GetId());
         }
     } else if (!manual) {
+        LOCK(cs_main);
         m_background_headers_pending.erase(node.GetId());
         m_background_headers_last_peer = node.GetId();
     }
@@ -11220,10 +11263,14 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
             root_first_order, proven_body_source, one_wide,
             static_cast<unsigned int>(MAX_BLOCKS_IN_TRANSIT_PER_PEER),
             CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER)};
-        // Competing-header recovery must not fill this peer's window before
-        // SendMessages can append a spare-slot probe for the missing child.
-        if (HeaderOnlyHonestTipChildToFetch(m_chainman, m_matmul_block_lifecycle) !=
-            nullptr) {
+        // A missing tip child narrows this peer only when that peer's
+        // announced header chain contains the child. Other peers keep
+        // their own window.
+        const CBlockIndex* const missing_honest_direct{
+            HeaderOnlyHonestTipChildToFetch(m_chainman, m_matmul_block_lifecycle)};
+        if (missing_honest_direct != nullptr &&
+            last_header.GetAncestor(missing_honest_direct->nHeight) ==
+                missing_honest_direct) {
             fetch_cap = std::min(fetch_cap, CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER);
         }
         std::vector<const CBlockIndex*> vToFetch;
@@ -11241,7 +11288,8 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                     !IsHeaderOnlyFetchSuppressed(m_chainman, tip_for_work, pindexWalk,
                                                  m_header_only_competing,
                                                  m_header_only_followed_skip,
-                                                 &last_header) &&
+                                                 &last_header,
+                                                 &m_structural_download_skip) &&
                     !m_matmul_block_lifecycle.HasRetainedBody(pindexWalk->GetBlockHash()) &&
                     !IsMatMulRCBodyDeferred(pindexWalk->GetBlockHash(),
                                             nodestate->m_keyed_netgroup) &&
@@ -11266,7 +11314,8 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                         !IsHeaderOnlyFetchSuppressed(m_chainman, tip_for_work, pindexWalk,
                                                      m_header_only_competing,
                                                      m_header_only_followed_skip,
-                                                     &last_header) &&
+                                                     &last_header,
+                                                     &m_structural_download_skip) &&
                         !m_matmul_block_lifecycle.HasRetainedBody(pindexWalk->GetBlockHash()) &&
                         !IsMatMulRCBodyDeferred(pindexWalk->GetBlockHash(),
                                                 nodestate->m_keyed_netgroup) &&
@@ -12017,7 +12066,8 @@ void PeerManagerImpl::MaybeFollowTrustedMirrorAuthorityHeader(
             .from_authority_peer = from_authority,
             .extends_active_tip_chain = extends_tip,
             .better_work_reorg_candidate =
-                header.nChainWork >= tip->nChainWork && &header != tip,
+                TrustAdjustedWork(header) >= TrustAdjustedWork(*tip) &&
+                &header != tip,
             .on_parked_reorg_branch =
                 m_chainman.IsOnParkedReorgBranch(&header),
             .short_tip_reorg = TrustedMirrorShortTipReorg(tip, &header),
@@ -12048,93 +12098,10 @@ void PeerManagerImpl::MaybeSeedGpuSignedFrontierBestKnown(
     NodeId peer_id, CNodeState& state)
 {
     AssertLockHeld(cs_main);
-    if (m_chainman.IsDiscoveryRelay()) return;
-    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
-    if (tip == nullptr) return;
-    const auto st{m_chainman.GetSignedFrontierStatus()};
-    const CBlockIndex* seed{nullptr};
-    if (st.hash_known) {
-        const CBlockIndex* const frontier{
-            m_chainman.m_blockman.LookupBlockIndex(st.hash)};
-        if (frontier != nullptr && frontier->nHeight > tip->nHeight &&
-            frontier->GetAncestor(tip->nHeight) == tip) {
-            seed = frontier;
-        }
-    }
-    if (seed == nullptr) {
-        for (const CBlockIndex* p{m_chainman.m_best_header}; p != nullptr;
-             p = p->pprev) {
-            if (p->nHeight <= tip->nHeight) break;
-            if (p->GetAncestor(tip->nHeight) == tip &&
-                m_chainman.IndexIsCoveredBySignedFrontier(p)) {
-                seed = p;
-                break;
-            }
-        }
-    }
-    // RecalculateBestHeader now follows the HEADER_ONLY suffix of the active
-    // tip even when HasQuorumInMemory is empty (archive restart). The signed
-    // frontier hash is often still unknown or not yet in the index, so the
-    // coverage walk above finds nothing and BestKnown stays unset — GETDATA
-    // never starts (live 2026-08-17: headers=191690, sent_getdata=0). Seed
-    // from m_best_header only when no in-index frontier exists; a current
-    // frontier at the tip must not pull unattested miner children (190630).
-    if (seed == nullptr) {
-        const bool frontier_in_index{
-            st.hash_known &&
-            m_chainman.m_blockman.LookupBlockIndex(st.hash) != nullptr};
-        const CBlockIndex* best{m_chainman.m_best_header};
-        if (!frontier_in_index && best != nullptr &&
-            best->nHeight > tip->nHeight &&
-            best->GetAncestor(tip->nHeight) == tip) {
-            seed = best;
-        }
-    }
-    const bool extends{
-        seed != nullptr && seed->nHeight > tip->nHeight &&
-        seed->GetAncestor(tip->nHeight) == tip};
-    const bool best_known_usable{
-        state.pindexBestKnownBlock != nullptr &&
-        state.pindexBestKnownBlock->nHeight > tip->nHeight &&
-        state.pindexBestKnownBlock->GetAncestor(tip->nHeight) == tip};
-    if (!node::matmul_trusted::SeedTrustedMirrorGpuBestKnownFromFrontier(
-            IsSignedFrontierBodyCatchUp() || extends,
-            best_known_usable,
-            extends,
-            seed != nullptr ? seed->nHeight : -1,
-            tip->nHeight,
-            node::matmul_trusted::SignedFrontierVersionHandshakeComplete(
-                state.m_starting_height),
-            node::matmul_trusted::SignedFrontierMaySeedBestKnownFromFrontier(
-                state.m_manual || state.m_noban, !state.m_inbound,
-                state.m_matmul_attestation_archive ||
-                    state.m_matmul_trusted_mirror,
-                state.m_starting_height, tip->nHeight))) {
-        return;
-    }
-    // Issue 124 / MendeMatthias 2026-08-26: do not assign BestKnown
-    // unconditionally. A fresh trusted mirror dropped non-authority HEADERS,
-    // BestKnown stayed null, and this seed was the local signed-frontier
-    // height (2000) while peers advertised 199300+. That pinned the download
-    // target forever (peer_best_ahead == best_header_ahead, in_flight=0,
-    // stall once a minute). Only fill a null or RAISE. Never pin a higher
-    // peer BestKnown down to a lower local frontier.
-    if (state.pindexBestKnownBlock != nullptr &&
-        seed->nHeight <= state.pindexBestKnownBlock->nHeight) {
-        return;
-    }
-    if (!node::matmul_trusted::TrustedMirrorSeedRaisesBestKnown(
-            state.pindexBestKnownBlock != nullptr,
-            state.pindexBestKnownBlock != nullptr
-                ? state.pindexBestKnownBlock->nHeight
-                : -1,
-            seed->nHeight)) {
-        return;
-    }
-    state.pindexBestKnownBlock = seed;
-    LogInfo("Seeded GPU peer=%d best-known to signed frontier height=%d "
-            "(tip=%d HEADER_ONLY catch-up)\n",
-            peer_id, seed->nHeight, tip->nHeight);
+    // Best-known is set only from headers this peer announced.
+    // VERSION height and the local signed frontier are not that announcement.
+    (void)peer_id;
+    (void)state;
 }
 
 void PeerManagerImpl::MaybeSeedLocalSignerLostTwinBestKnown(
@@ -12183,73 +12150,22 @@ void PeerManagerImpl::MaybeSeedLocalSignerLostTwinBestKnown(
             fork_child_occupied)) {
         return;
     }
-    state.pindexBestKnownBlock = claimed;
-    LogInfo("Seeded local-signer peer=%d best-known to claimed-work fork "
-            "height=%d (lost-twin recovery, tip=%d)\n",
-            peer_id, claimed->nHeight, tip->nHeight);
+    // VERSION height plus the global claimed header is not an announcement
+    // from this peer. BestKnown stays unset until that peer sends headers.
+    (void)peer_id;
 }
 
 void PeerManagerImpl::MaybeSeedBestKnownFromHeaderTower(
     NodeId peer_id, CNodeState& state, const Peer& peer)
 {
     AssertLockHeld(cs_main);
-    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
-    const CBlockIndex* const best{m_chainman.m_best_header};
-    if (tip == nullptr || best == nullptr) return;
-    // V4/RB-11: the LOCAL header tower is a fetch TARGET, not proof this peer
-    // holds those blocks. Only fabricate a tower BestKnown for a peer that can
-    // actually serve bodies (CanServeBlocks / GPU authority / manual / noban).
-    // Seeding an arbitrary inbound peer that merely advertised VERSION>tip
-    // misdirected GETDATA to a peer without the block and poisoned
-    // mining-guard peer-height visibility (a VERSION sybil looked like it held
-    // our tower). Real body sources still get seeded so catch-up starts.
-    const bool peer_may_serve_bodies{
-        node::matmul_trusted::StalledTowerFetchPeerMayServeBodies(
-            PeerIsGpuAuthority(peer_id, state),
-            CanServeBlocks(peer),
-            /*version_handshake_complete=*/peer.m_starting_height.load() >= 0,
-            state.m_manual, state.m_noban)};
-    if (!peer_may_serve_bodies) return;
-    const int starting{
-        state.m_starting_height >= 0 ? state.m_starting_height
-                                     : peer.m_starting_height.load()};
-    const int known{
-        state.pindexBestKnownBlock != nullptr
-            ? state.pindexBestKnownBlock->nHeight
-            : -1};
-    const bool extends{
-        best->nHeight >= tip->nHeight &&
-        best->GetAncestor(tip->nHeight) == tip};
-    const bool heavier{best->nChainWork > tip->nChainWork};
-    // Locators already refuse a long competing HEADER_ONLY tower (lead >
-    // HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD). Seeding must match: a
-    // withdrawn 33c834f8 tower (rtx6000: m_best_header=199801 vs tip=199394)
-    // must not become BestKnown. LastCommonAncestor then pinned
-    // last_common at 199312 (82 behind) and FindNextBlocks walked competing
-    // twins of bodies we already have. Short lost-twin forks (lead ≤ 6)
-    // still seed.
-    const bool seed_from_tower{
-        extends ||
-        node::HeaderSyncChaseHeavierCompetingLocator(
-            /*extends_active_tip=*/false, heavier, best->nHeight,
-            tip->nHeight)};
-    if (!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
-            tip->nHeight, starting, known, best->nHeight, seed_from_tower)) {
-        return;
-    }
-    const int32_t seed_h{node::HeaderSyncSeedBestKnownHeight(
-        tip->nHeight, starting, best->nHeight)};
-    if (seed_h < 0) return;
-    const CBlockIndex* const seed{best->GetAncestor(seed_h)};
-    if (seed == nullptr || seed->nHeight <= tip->nHeight) return;
-    state.pindexBestKnownBlock = seed;
-    LogInfo("Seeded peer=%d best-known to header-tower height=%d "
-            "(tip=%d m_best_header=%d advertised=%d)\n",
-            peer_id, seed->nHeight, tip->nHeight, best->nHeight, starting);
-    // Do not wait for an inbound BLOCK/HEADERS to run the GETDATA walk.
-    m_connman.WakeMessageHandler();
+    // Best-known follows headers this peer announced via
+    // UpdateBlockAvailability. A global m_best_header plus VERSION height
+    // is not that announcement.
+    (void)peer_id;
+    (void)state;
+    (void)peer;
 }
-
 void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
     CNode& pto, Peer& peer, std::chrono::microseconds current_time)
 {
@@ -15839,6 +15755,15 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                 exact_recompute_required = false;
                                 persist_heavier_competing_fork = true;
                             } else if (indexed != nullptr && tip != nullptr &&
+                                       CatchUpFarBehind(m_chainman, peer_best) &&
+                                       indexed->GetAncestor(tip->nHeight) == tip &&
+                                       !(m_chainman.m_best_header != nullptr &&
+                                         m_chainman.m_best_header->GetAncestor(tip->nHeight) == tip &&
+                                         indexed->nHeight <= m_chainman.m_best_header->nHeight &&
+                                         m_chainman.m_best_header->GetAncestor(indexed->nHeight) == indexed)) {
+                                // A same-height twin while this node is behind
+                                // stays on the budgeted ExactReplay path.
+                            } else if (indexed != nullptr && tip != nullptr &&
                                        node::matmul_trusted::PersistFollowedSuffixBodyWithoutGpu(
                                            node::matmul_trusted::IsTrustedMirror(),
                                            indexed->GetAncestor(tip->nHeight) == tip,
@@ -16280,10 +16205,11 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // Ordinary duplicate deliveries cannot claim this exemption. Keep the
     // original force_processing value for the separate AcceptBlock gates;
     // pending slots, source/global budgets and ExactReplay still apply.
-    const bool ticket_exempt =
-        catchup_inbound_push ||
-        (requested_body && is_ibd) ||
-        ((requested_body || is_retained_retry) && retained_retry);
+    // A requested body and a scheduler retry both pass RC admission.
+    // Only an inbound catch-up push of the active tip skips a fresh ticket.
+    const bool ticket_exempt = catchup_inbound_push;
+    (void)is_retained_retry;
+    (void)retained_retry;
     std::optional<node::RCAdmissionTicket> accepted_ticket;
     const auto restore_accepted_ticket = [&] {
         if (!accepted_ticket) return;
@@ -16344,16 +16270,19 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             const auto action{node::ClassifyTicketlessRCBody(
                 followed_historical_hole, tip_child, persist_without_gpu)};
             if (action == node::TicketlessRCBodyAction::PersistWithoutGpu) {
-                // Historical holes always persist. Followed tip-children
-                // persist so AcceptBlock ExactReplays without an rcadmit
-                // ticket (catch-up). Competing siblings keep retain /
-                // HEADER_ONLY. Trusted mirrors persist a pin-covered
-                // hash and wait for quorum at ConnectTip.
+                // Followed bodies stay on the budgeted retry path. They
+                // are retained until a ticket or a scheduled retry, and
+                // are not classified NO_RECOMPUTE.
                 LogDebug(BCLog::NET,
-                         "Persisting ticketless followed-chain %s hash=%s from "
-                         "peer=%d for AcceptBlock ExactReplay\n",
+                         "Retaining ticketless followed-chain %s hash=%s from "
+                         "peer=%d until budgeted rcadmit\n",
                          source, block_hash.ToString(), node.GetId());
-                admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+                admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
+                admission.is_ibd = is_ibd;
+                admission.encdr_profile = exact_encdr_profile;
+                admission.rc_profile = rc_profile;
+                admission.reference_height = exact_reference_height;
+                admission.work_units = work;
                 admission.retain_as_requested = true;
                 maybe_request_attestations_without_gpu();
                 return true;
@@ -16832,7 +16761,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     if (post_process) post_process();
 }
 
-void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions)
+void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions, bool credit_body_source)
 {
     std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
     bool fBlockRead{false};
@@ -16902,6 +16831,8 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         ReadStatus status = partialBlock.FillBlock(*pblock, block_transactions.txn,
                                                    /*segwit_active=*/DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT));
         if (status == READ_STATUS_INVALID) {
+            InsertHeaderOnlySkipHash(m_structural_download_skip,
+                                     block_transactions.blockhash);
             RemoveBlockRequest(block_transactions.blockhash, pfrom.GetId()); // Reset in-flight state in case Misbehaving does not result in a disconnect
             Misbehaving(peer, "invalid compact block/non-matching block transactions");
             return;
@@ -16980,6 +16911,9 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         if (useful_owned_delivery) {
             LOCK(cs_main);
             if (CNodeState* nodestate = State(pfrom.GetId())) {
+                if (credit_body_source) {
+                    nodestate->m_has_served_block = true;
+                }
                 nodestate->m_block_download_timeout_count = 0;
                 // #7 resilience: a delivered body clears body-silence demotion.
                 nodestate->m_frontier_body_silence_count = 0;
@@ -17197,7 +17131,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         pfrom.m_has_all_wanted_services = HasAllDesirableServiceFlags(nServices);
         peer->m_their_services = nServices;
-        pfrom.m_nServices.store(nServices, std::memory_order_relaxed);
+        ServiceFlags stored_services{nServices};
+        if (pfrom.IsInboundConn() && !pfrom.IsManualConn() &&
+            !pfrom.HasPermission(NetPermissionFlags::NoBan)) {
+            stored_services = static_cast<ServiceFlags>(
+                static_cast<uint64_t>(nServices) &
+                ~static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE |
+                                       NODE_MATMUL_TRUSTED_MIRROR));
+        }
+        pfrom.m_nServices.store(static_cast<uint64_t>(stored_services),
+                                std::memory_order_relaxed);
         pfrom.SetAddrLocal(addrMe);
         peer->m_starting_height = starting_height;
 
@@ -17973,10 +17916,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         ShouldIgnoreNonAuthorityInboundBlock(pfrom)};
     const bool this_gpu{
         pfrom.IsManualConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)};
-    const bool this_archive_target{
-        node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
-            pfrom.IsManualConn() || !pfrom.IsInboundConn(),
-            pfrom.HasArchiveOrMirrorService())};
+    const bool this_archive_target{PeerMayUseArchiveMirrorFastPath(pfrom)};
     const bool drop_miner_ingest{
         node::matmul_trusted::TrustedSignerDropMinerIngestWhileGetData(
             node::matmul_trusted::HasLocalSigner(),
@@ -18406,9 +18346,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             ProcessGetData(pfrom, *peer, interruptMsgProc);
             pfrom.m_has_getdata_requests.store(!peer->m_getdata_requests.empty());
         }
-        if (node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
-                pfrom.IsManualConn() || !pfrom.IsInboundConn(),
-                pfrom.HasArchiveOrMirrorService()) &&
+        if (PeerMayUseArchiveMirrorFastPath(pfrom) &&
             node::matmul_trusted::HasLocalSigner() &&
             pfrom.m_has_getdata_requests.load()) {
             m_connman.SetGetDataServePending(true);
@@ -19086,7 +19024,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         WITH_LOCK(cs_main, NoteInFlightRequestPayload(
                                pfrom.GetId(), cmpctblock.header.GetHash(),
                                payload_bytes));
-        NotePeerServedBlockBody(pfrom.GetId());
 
         // Ignore while importing, but free any in-flight slot for this hash.
         if (m_chainman.m_blockman.LoadingBlocks()) {
@@ -19262,6 +19199,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // below)
         std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
         bool fBlockReconstructed = false;
+        bool solicited_compact{false};
 
         {
         LOCK(cs_main);
@@ -19292,6 +19230,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
             range_flight.first++;
         }
+        solicited_compact = requested_block_from_this_peer;
 
         if (pindex->nChainWork <= m_chainman.ActiveChain().Tip()->nChainWork || // We know something better
                 pindex->nTx != 0) { // We had this block at some point, but pruned it
@@ -19329,6 +19268,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 PartiallyDownloadedBlock& partialBlock = *(*queuedBlockIt)->partialBlock;
                 ReadStatus status = partialBlock.InitData(cmpctblock, vExtraTxnForCompact);
                 if (status == READ_STATUS_INVALID) {
+                    InsertHeaderOnlySkipHash(m_structural_download_skip,
+                                             pindex->GetBlockHash());
                     RemoveBlockRequest(pindex->GetBlockHash(), pfrom.GetId()); // Reset in-flight state in case Misbehaving does not result in a disconnect
                     Misbehaving(*peer, "invalid compact block");
                     return;
@@ -19383,6 +19324,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // Malformed compact blocks should be punished even when this is an
                     // optimistic reconstruction path and not an active download slot.
                     if (status == READ_STATUS_INVALID) {
+                        InsertHeaderOnlySkipHash(m_structural_download_skip,
+                                                 cmpctblock.header.GetHash());
                         Misbehaving(*peer, "invalid compact block");
                     }
                     return;
@@ -19393,6 +19336,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                                              /*segwit_active=*/DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT));
                 if (status == READ_STATUS_OK) {
                     fBlockReconstructed = true;
+                } else if (status == READ_STATUS_INVALID) {
+                    InsertHeaderOnlySkipHash(m_structural_download_skip,
+                                             cmpctblock.header.GetHash());
                 }
             }
         } else {
@@ -19413,7 +19359,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (fProcessBLOCKTXN) {
             BlockTransactions txn;
             txn.blockhash = blockhash;
-            return ProcessCompactBlockTxns(pfrom, *peer, txn);
+            return ProcessCompactBlockTxns(pfrom, *peer, txn, solicited_compact);
         }
 
         if (fRevertToHeaderProcessing) {
@@ -19527,7 +19473,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         const size_t blocktxn_payload{resp.txn.empty() ? size_t{0} : payload_bytes};
         WITH_LOCK(cs_main, NoteInFlightRequestPayload(
                                pfrom.GetId(), resp.blockhash, blocktxn_payload));
-        if (!resp.txn.empty()) NotePeerServedBlockBody(pfrom.GetId());
 
         if (m_chainman.IsDiscoveryRelay()) {
             WITH_LOCK(cs_main, RemoveBlockRequest(resp.blockhash, pfrom.GetId()));
@@ -20665,11 +20610,33 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             note_ignored("historical_not_served");
             return;
         }
-        // Charge a serve token only when we actually push MMATTEST.
-        // not_canonical / not_validated / empty / reverify probes do not
-        // take a serve token (live 2026-08-15: those probes starved the
-        // attested-tip serve) but they do count toward the hammer-ban
-        // budget so a flood of free probes is disconnectable.
+        // One logical GETMMATTEST/GETMMATPQ consumes one serve token before
+        // any attestation bytes are emitted. A rate-limit miss keeps the
+        // hammer strikes; success clears them only after the token is spent.
+        bool logical_token_spent{false};
+        bool logical_rate_limited{false};
+        auto ensure_logical_token = [&]() {
+            if (logical_token_spent) return true;
+            if (logical_rate_limited) return false;
+            if (!node::matmul_trusted::GetMmAttestConsumeRequestToken(
+                    live_window,
+                    peer->m_matmul_attestation_request_tokens,
+                    peer->m_matmul_attestation_historical_request_tokens)) {
+                logical_rate_limited = true;
+                note_ignored("rate_limited");
+                LogDebug(BCLog::NET,
+                         "Ignoring rate-limited getmmattest from peer=%d live=%d\n",
+                         pfrom.GetId(), live_window);
+                return false;
+            }
+            logical_token_spent = true;
+            return true;
+        };
+        auto finish_logical = [&]() {
+            if (logical_token_spent) {
+                peer->m_matmul_protocol_ignored = 0;
+            }
+        };
         auto push_mmattest =
             [&](std::vector<matmul::trusted::ExactReplayAttestation> attestations,
                 const char* reason) {
@@ -20681,19 +20648,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         "empty", block_hash, height, pfrom.GetId());
                     return;
                 }
-                if (!node::matmul_trusted::GetMmAttestConsumeRequestToken(
-                        live_window,
-                        peer->m_matmul_attestation_request_tokens,
-                        peer->m_matmul_attestation_historical_request_tokens)) {
-                    note_ignored("rate_limited");
-                    LogDebug(BCLog::NET,
-                             "Ignoring rate-limited getmmattest from peer=%d live=%d\n",
-                             pfrom.GetId(), live_window);
-                    return;
-                }
+                if (!ensure_logical_token()) return;
                 MakeAndPushMessage(
                     pfrom, NetMsgType::MMATTEST, attestations);
-                peer->m_matmul_protocol_ignored = 0;
                 MaybeLogAttestationServe(
                     reason, block_hash, height, pfrom.GetId());
             };
@@ -20706,9 +20663,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     attestations.resize(MATMUL_PQ_ATTESTATIONS_PER_MESSAGE);
                 }
                 if (attestations.empty()) return;
+                if (!ensure_logical_token()) return;
                 MakeAndPushMessage(
                     pfrom, NetMsgType::MMATTESTPQ, attestations);
-                peer->m_matmul_protocol_ignored = 0;
                 MaybeLogAttestationServe(reason, block_hash, height,
                                          pfrom.GetId());
             };
@@ -20721,6 +20678,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 push_mmattest(std::move(existing), serve_reason);
             }
             push_mmattestpq(std::move(existing_pq), serve_reason);
+            finish_logical();
             return;
         }
         const bool catchup_regen{
@@ -20737,10 +20695,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // while the parent was still tip, so GETMMATTEST regenerated
             // signatures for the loser and the winner. Mirrors that
             // connected the loser then refused to reorg (quorum tip).
-            // Only sign hashes already on the active chain.
-            // Catch-up regen (live 2026-08-17): empty cache after signer
-            // restart; SignAuthoritative without ExactReplay.
-            if ((locally_exact || catchup_regen) && on_active_chain) {
+            // Only sign hashes already on the active chain that this
+            // node has ExactReplayed. A catch-up cache miss is not a
+            // signature.
+            if (locally_exact && on_active_chain) {
                 if (!node::matmul_trusted::GetMmAttestHasRequestToken(
                         live_window,
                         peer->m_matmul_attestation_request_tokens,
@@ -20771,81 +20729,34 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     (void)m_chainman.PersistMatMulTrustedReplayAttestation(
                         block_hash);
                 }
-                serve_reason = locally_exact ? "regenerated" : "catchup_regen";
+                serve_reason = "regenerated";
             } else if (locally_exact) {
                 MaybeLogAttestationServe(
                     "competing_sibling", block_hash, height,
                     pfrom.GetId());
             } else if (header.has_value() && on_active_chain) {
-                bool covered{false};
-                {
-                    LOCK(cs_main);
-                    const CBlockIndex* const idx{
-                        m_chainman.m_blockman.LookupBlockIndex(block_hash)};
-                    covered =
-                        node::matmul_trusted::HistoricalExactReplayCoveredByPinQuorum(
-                            node::matmul_trusted::IsTrustedMirror(),
-                            node::matmul_trusted::HasQuorum(
-                                block_hash, height),
-                            idx != nullptr &&
-                                m_chainman.IndexIsCoveredBySignedFrontier(
-                                    idx));
-                }
-                if (covered) {
-                    if (!node::matmul_trusted::GetMmAttestHasRequestToken(
-                        live_window,
-                        peer->m_matmul_attestation_request_tokens,
-                        peer->m_matmul_attestation_historical_request_tokens)) {
-                        note_ignored("rate_limited");
-                        LogDebug(BCLog::NET,
-                                 "Ignoring rate-limited getmmattest from peer=%d\n",
-                                 pfrom.GetId());
-                        return;
-                    }
-                    matmul::trusted::ExactReplayAttestation produced;
-                    const auto result{
-                        node::matmul_trusted::SignAuthoritative(
-                            block_hash, height, &produced)};
-                    if (!node::matmul_trusted::SignAuthoritativeServesGetMmAttest(result)) {
-                        MaybeLogAttestationServe(
-                            "sign_failed", block_hash, height,
-                            pfrom.GetId());
-                        LogWarning(
-                            "Unable to sign historical MatMul attestation "
-                            "block=%s height=%d result=%s\n",
-                            block_hash.ToString(), height,
-                            matmul::trusted::AddResultName(result));
-                        return;
-                    }
-                    if (node::matmul_trusted::IsTrustedMirror()) {
-                        LOCK(cs_main);
-                        (void)m_chainman.PersistMatMulTrustedReplayAttestation(
-                            block_hash);
-                    }
-                    serve_reason = "attested_no_replay";
-                } else {
-                    const auto admit{MaybeQueueHistoricalAttestationReverify(
-                        block_hash, height, *header)};
-                    if (admit ==
-                        node::matmul_trusted::HistoricalReverifyAdmit::Allow) {
-                        MaybeLogAttestationServe(
-                            "reverify_queued", block_hash, height,
-                            pfrom.GetId());
-                        return;
-                    }
-                    if (node::matmul_trusted::HistoricalReverifyAdmitIsDeferral(
-                            admit)) {
-                        MaybeLogAttestationServe(
-                            admit == node::matmul_trusted::
-                                         HistoricalReverifyAdmit::LiveGpuBusy
-                                ? "reverify_live_gpu"
-                                : "reverify_deferred",
-                            block_hash, height, pfrom.GetId());
-                        return;
-                    }
-                    note_ignored("reverify_rate_limited");
+                // Pin coverage is not a substitute for local ExactReplay.
+                const auto admit{MaybeQueueHistoricalAttestationReverify(
+                    block_hash, height, *header)};
+                if (admit ==
+                    node::matmul_trusted::HistoricalReverifyAdmit::Allow) {
+                    MaybeLogAttestationServe(
+                        "reverify_queued", block_hash, height,
+                        pfrom.GetId());
                     return;
                 }
+                if (node::matmul_trusted::HistoricalReverifyAdmitIsDeferral(
+                        admit)) {
+                    MaybeLogAttestationServe(
+                        admit == node::matmul_trusted::
+                                     HistoricalReverifyAdmit::LiveGpuBusy
+                            ? "reverify_live_gpu"
+                            : "reverify_deferred",
+                        block_hash, height, pfrom.GetId());
+                    return;
+                }
+                note_ignored("reverify_rate_limited");
+                return;
             } else {
                 note_ignored("not_validated");
                 return;
@@ -20856,6 +20767,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             node::matmul_trusted::Get(block_hash, height), serve_reason);
         push_mmattestpq(
             node::matmul_trusted::GetPq(block_hash, height), serve_reason);
+        finish_logical();
         return;
     }
 
@@ -21662,7 +21574,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         pfrom.nRecvBlockMessages.fetch_add(1, std::memory_order_relaxed);
         WITH_LOCK(cs_main, NoteInFlightRequestPayload(
                                pfrom.GetId(), pblock->GetHash(), payload_bytes));
-        NotePeerServedBlockBody(pfrom.GetId());
 
         if (m_chainman.IsDiscoveryRelay()) {
             WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), pfrom.GetId()));
@@ -21734,6 +21645,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             RemoveBlockRequest(hash, pfrom.GetId());
             if (useful_owned_delivery) {
                 if (CNodeState* nodestate = State(pfrom.GetId())) {
+                    nodestate->m_has_served_block = true;
                     nodestate->m_block_download_timeout_count = 0;
                     // #7 resilience: a delivered body clears body-silence demotion.
                     nodestate->m_frontier_body_silence_count = 0;
@@ -22321,10 +22233,7 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
     const bool ignore_non_authority{ShouldIgnoreNonAuthorityInboundBlock(*pfrom)};
     const bool this_gpu{
         pfrom->IsManualConn() || pfrom->HasPermission(NetPermissionFlags::NoBan)};
-    const bool this_archive{
-        node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
-            pfrom->IsManualConn() || !pfrom->IsInboundConn(),
-            pfrom->HasArchiveOrMirrorService())};
+    const bool this_archive{PeerMayUseArchiveMirrorFastPath(*pfrom)};
     const bool defer_miner_getdata{
         ignore_non_authority &&
         !node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData(
@@ -24121,8 +24030,13 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             peer->m_starting_height.load(),
             state.pindexBestKnownBlock != nullptr
                 ? state.pindexBestKnownBlock->nHeight : -1)};
-        const bool may_probe_tip_child{
+        const bool peer_contains_tip_child{
             missing_honest_tip_child != nullptr &&
+            state.pindexBestKnownBlock != nullptr &&
+            state.pindexBestKnownBlock->GetAncestor(
+                missing_honest_tip_child->nHeight) == missing_honest_tip_child};
+        const bool may_probe_tip_child{
+            peer_contains_tip_child &&
             can_request_blocks_from_peer && peer_may_serve_bodies &&
             !m_chainman.m_blockman.LoadingBlocks() && !pto->IsAddrFetchConn() &&
             PeerMaySignedFrontierCatchUpGetData(*peer, state) &&

@@ -477,6 +477,26 @@ BOOST_AUTO_TEST_CASE(ds3_unpinned_shielded_snapshot_fails_closed_by_default)
     BOOST_CHECK_EQUAL(DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT, false);
 }
 
+BOOST_AUTO_TEST_CASE(recovery_proof_verify_cost_consensus_gate_defaults_unset)
+{
+    Consensus::Params consensus;
+    BOOST_CHECK_EQUAL(consensus.nShieldedRecoveryProofVerifyCostHeight,
+                      std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!consensus.IsShieldedRecoveryProofVerifyCostActive(88'000));
+    BOOST_CHECK(!consensus.IsShieldedRecoveryProofVerifyCostActive(std::numeric_limits<int32_t>::max()));
+    consensus.nShieldedRecoveryProofVerifyCostHeight = 90'000;
+    BOOST_CHECK(!consensus.IsShieldedRecoveryProofVerifyCostActive(89'999));
+    BOOST_CHECK(consensus.IsShieldedRecoveryProofVerifyCostActive(90'000));
+
+    ArgsManager args;
+    const auto mainnet = CreateChainParams(args, ChainType::MAIN);
+    BOOST_CHECK_EQUAL(mainnet->GetConsensus().nShieldedRecoveryProofVerifyCostHeight, 244'000);
+    BOOST_CHECK_EQUAL(mainnet->GetConsensus().nP2MRHTLCPreimage32Height, 244'000);
+    BOOST_CHECK_EQUAL(mainnet->GetConsensus().nMatMulPhase1HeaderNotMostWorkHeight, 244'000);
+    BOOST_CHECK_EQUAL(CreateChainParams(args, ChainType::REGTEST)->GetConsensus().nMatMulPhase1HeaderNotMostWorkHeight,
+                      std::numeric_limits<int32_t>::max());
+}
+
 BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_and_expires_at_v03212_height)
 {
     // DS-4 hardening: the unshield velocity cap must activate no later than the sunset height, so the

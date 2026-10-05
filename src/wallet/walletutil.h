@@ -97,7 +97,11 @@ public:
     {
         std::string error;
         FlatSigningProvider keys;
-        auto descs = Parse(str, keys, error, true);
+        // A stored descriptor was valid when it was imported. Do not apply
+        // rules added later for new descriptors, or the wallet will not load.
+        DescriptorParseOptions options;
+        options.new_descriptor_rules = false;
+        auto descs = Parse(str, keys, error, true, options);
         if (descs.empty()) {
             throw std::ios_base::failure("Invalid descriptor: " + error);
         }

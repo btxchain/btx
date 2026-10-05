@@ -167,11 +167,27 @@ std::vector<DepositEventType> EventsForDepositTransition(const std::optional<Dep
 void NoteBlockDisconnected(const CWallet& wallet, const uint256& block_hash, int height);
 void NoteBlockDisconnected(const CWallet& wallet, const uint256& block_hash, int height,
                           const std::vector<uint256>& txids);
+void NoteBlockDisconnected(const CWallet& wallet, const uint256& block_hash, int height,
+                          const std::vector<CTransactionRef>& txs);
 void NoteBlockConnected(const CWallet& wallet, const uint256& block_hash, int height,
                         const std::vector<uint256>& txids);
+void NoteBlockConnected(const CWallet& wallet, const uint256& block_hash, int height,
+                        const std::vector<CTransactionRef>& txs);
 
 void ForgetWalletDepositObservations(const CWallet& wallet);
 void ResetDepositObservationCache();
+
+/**
+ * Fixed cap on reorg observations retained for one wallet.
+ * When a disconnect would exceed this, the oldest inserted txid is evicted.
+ */
+inline constexpr size_t MAX_REORG_OBSERVATIONS_PER_WALLET{4096};
+
+/** Retained reorg-observation entries for this wallet. */
+size_t CountDepositObservations(const CWallet& wallet);
+
+/** True when this txid is still retained in the wallet reorg observation cache. */
+bool DepositReorgCacheContains(const CWallet& wallet, const uint256& txid);
 
 /** JSON events for -walletdepositnotify. Empty when the tx has no wallet deposits. */
 std::vector<UniValue> DepositNotifyEventsForTx(const CWallet& wallet, const uint256& txid, bool inserted_new)

@@ -175,6 +175,10 @@ static constexpr int64_t kRCEpochAAsertRescaleDen{1};
 // Keep all three Epoch-A heights bound to this single constant so that a later
 // update cannot create a digest-only v4/BMX4C interval.
 static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
+// Security consensus fixes. Header tip was 239154 on 2026-10-05. Block
+// 244000 is 4846 blocks later, about five days at the 90-second target.
+// Below this height, consensus stays compatible with the previous release.
+static constexpr int32_t BTX_SECURITY_ACTIVATION_HEIGHT{244'000};
 // Height-gated ASERT dump floor + half-life lengthening. Hard fork in
 // GetNextWorkRequired (bad-diffbits is exact match). Historical powLimit is
 // never mutated.
@@ -805,6 +809,14 @@ public:
         consensus.nMatMulV4Height = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
         consensus.nMatMulBMX4CHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
         consensus.nMatMulRCHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
+        // 32-byte HTLC preimage rule. Policy before this height, consensus at
+        // and after it. See BTX_SECURITY_ACTIVATION_HEIGHT.
+        consensus.nP2MRHTLCPreimage32Height = BTX_SECURITY_ACTIVATION_HEIGHT;
+        consensus.nShieldedRecoveryProofVerifyCostHeight = BTX_SECURITY_ACTIVATION_HEIGHT;
+        // Phase-1 (digest <= compact nBits) does not authenticate MatMul work
+        // at or after this height. Header promotion and ExactReplay trust use
+        // the same flag day. nChainWork below it is not recomputed.
+        consensus.nMatMulPhase1HeaderNotMostWorkHeight = BTX_SECURITY_ACTIVATION_HEIGHT;
         consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
         consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         consensus.nMaxReorgDepth = 12;
@@ -2399,6 +2411,8 @@ public:
         }
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = opts.mldsa_disable_height.value_or(std::numeric_limits<int32_t>::max());
+        // Regtest enforces the HTLC 32-byte preimage rule from genesis unless overridden.
+        consensus.nP2MRHTLCPreimage32Height = opts.p2mr_htlc_preimage32_height.value_or(0);
         consensus.nRuleChangeActivationThreshold = 108; // 75% for testchains
         consensus.nMinerConfirmationWindow = 144; // Faster than normal for regtest (144 instead of 2016)
 
@@ -2507,7 +2521,8 @@ public:
             opts.reorg_protection_start_height.has_value() ||
             opts.empty_block_subsidy_penalty_height.has_value() ||
             opts.empty_block_subsidy_penalty_end_height.has_value() ||
-            opts.mldsa_disable_height.has_value();
+            opts.mldsa_disable_height.has_value() ||
+            opts.p2mr_htlc_preimage32_height.has_value();
 
         for (const auto& [dep, height] : opts.activation_heights) {
             switch (dep) {

@@ -14,7 +14,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <exception>
 #include <fstream>
+#include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -422,6 +425,67 @@ UniValue SearchRecordToJson(const ModelSearchRecord& r)
     return o;
 }
 
+namespace {
+
+void LogSkippedJson(const std::string& why)
+{
+    std::cerr << "btx-modeld: skipped malformed json object (" << why << ")\n";
+}
+
+bool FailJson(std::string& err, const std::string& why)
+{
+    err = why;
+    LogSkippedJson(why);
+    return false;
+}
+
+bool ReadStr(const UniValue& o, const char* k, std::string& dst, std::string& err)
+{
+    if (!o.exists(k)) return true;
+    if (!o[k].isStr()) return FailJson(err, std::string(k) + " type");
+    dst = o[k].get_str();
+    return true;
+}
+
+template <typename Int>
+bool ReadInt(const UniValue& o, const char* k, Int& dst, std::string& err)
+{
+    if (!o.exists(k)) return true;
+    if (!o[k].isNum()) return FailJson(err, std::string(k) + " type");
+    try {
+        dst = o[k].getInt<Int>();
+    } catch (const std::exception&) {
+        return FailJson(err, std::string(k) + " range");
+    }
+    return true;
+}
+
+bool ReadStrList(const UniValue& o, const char* k, std::vector<std::string>& dst, std::string& err)
+{
+    if (!o.exists(k)) return true;
+    if (!o[k].isArray()) return FailJson(err, std::string(k) + " type");
+    for (const auto& a : o[k].getValues()) {
+        if (a.isStr()) dst.push_back(a.get_str());
+    }
+    return true;
+}
+
+bool ReadDigestField(const UniValue& o, const char* k, Digest48& dst, std::string& err, bool required)
+{
+    if (!o.exists(k)) {
+        if (required) {
+            err = k;
+            return false;
+        }
+        return true;
+    }
+    if (!o[k].isStr()) return FailJson(err, std::string(k) + " type");
+    if (o[k].get_str().empty()) return !required;
+    return Digest48::FromHex(o[k].get_str(), dst, err);
+}
+
+} // namespace
+
 bool SearchRecordFromJson(const UniValue& o, ModelSearchRecord& r, std::string& err)
 {
     r = {};
@@ -429,183 +493,249 @@ bool SearchRecordFromJson(const UniValue& o, ModelSearchRecord& r, std::string& 
         err = "object";
         return false;
     }
-    if (o.exists("type") && o["type"].get_str() != "btx-model-search-v1" &&
-        o["type"].get_str() != "btx-model-search-v2") {
-        err = "unknown record type";
-        return false;
-    }
-    if (o.exists("record_version")) r.record_version = o["record_version"].getInt<int>();
-    if (o.exists("model_id") && !Digest48::FromHex(o["model_id"].get_str(), r.model_id, err)) return false;
-    if (o.exists("artifact_id") && !o["artifact_id"].get_str().empty() &&
-        !Digest48::FromHex(o["artifact_id"].get_str(), r.artifact_id, err)) return false;
-    auto S = [&](const char* k, std::string& dst) {
-        if (o.exists(k)) dst = o[k].get_str();
-    };
-    S("uri", r.btx_uri);
-    S("canonical_name", r.canonical_name);
-    S("display_name", r.display_name);
-    S("publisher_display_name", r.publisher_display_name);
-    S("family", r.family);
-    S("architecture", r.architecture);
-    S("format", r.format);
-    S("quantization", r.quantization);
-    S("short_description", r.short_description);
-    S("release_id", r.release_id);
-    S("release_state", r.release_state);
-    S("assurance", r.assurance);
-    if (o.exists("publisher_identity") && !o["publisher_identity"].get_str().empty()) {
-        if (!Digest48::FromHex(o["publisher_identity"].get_str(), r.publisher_identity, err)) return false;
-    }
-    if (o.exists("signer_id") && !o["signer_id"].get_str().empty()) {
-        if (!Digest48::FromHex(o["signer_id"].get_str(), r.signer_id, err)) return false;
-    }
-    if (o.exists("aliases") && o["aliases"].isArray()) {
-        for (const auto& a : o["aliases"].getValues()) {
-            if (a.isStr()) r.aliases.push_back(a.get_str());
+    ModelSearchRecord parsed;
+    try {
+        if (o.exists("type")) {
+            if (!o["type"].isStr()) return FailJson(err, "type type");
+            const std::string ty = o["type"].get_str();
+            if (ty != "btx-model-search-v1" && ty != "btx-model-search-v2") {
+                err = "unknown record type";
+                return false;
+            }
         }
-    }
-    if (o.exists("languages") && o["languages"].isArray()) {
-        for (const auto& a : o["languages"].getValues()) {
-            if (a.isStr()) r.languages.push_back(a.get_str());
+        if (!ReadInt(o, "record_version", parsed.record_version, err)) return false;
+        if (!ReadDigestField(o, "model_id", parsed.model_id, err, false)) return false;
+        if (!ReadDigestField(o, "artifact_id", parsed.artifact_id, err, false)) return false;
+        if (!ReadStr(o, "uri", parsed.btx_uri, err) ||
+            !ReadStr(o, "canonical_name", parsed.canonical_name, err) ||
+            !ReadStr(o, "display_name", parsed.display_name, err) ||
+            !ReadStr(o, "publisher_display_name", parsed.publisher_display_name, err) ||
+            !ReadStr(o, "family", parsed.family, err) ||
+            !ReadStr(o, "architecture", parsed.architecture, err) ||
+            !ReadStr(o, "format", parsed.format, err) ||
+            !ReadStr(o, "quantization", parsed.quantization, err) ||
+            !ReadStr(o, "short_description", parsed.short_description, err) ||
+            !ReadStr(o, "release_id", parsed.release_id, err) ||
+            !ReadStr(o, "release_state", parsed.release_state, err) ||
+            !ReadStr(o, "assurance", parsed.assurance, err)) {
+            return false;
         }
-    }
-    if (o.exists("modalities") && o["modalities"].isArray()) {
-        for (const auto& a : o["modalities"].getValues()) {
-            if (a.isStr()) r.modalities.push_back(a.get_str());
+        if (!ReadDigestField(o, "publisher_identity", parsed.publisher_identity, err, false)) return false;
+        if (!ReadDigestField(o, "signer_id", parsed.signer_id, err, false)) return false;
+        if (!ReadStrList(o, "aliases", parsed.aliases, err) ||
+            !ReadStrList(o, "languages", parsed.languages, err) ||
+            !ReadStrList(o, "modalities", parsed.modalities, err) ||
+            !ReadStrList(o, "tags", parsed.tags, err)) {
+            return false;
         }
-    }
-    if (o.exists("tags") && o["tags"].isArray()) {
-        for (const auto& a : o["tags"].getValues()) {
-            if (a.isStr()) r.tags.push_back(a.get_str());
+        int64_t size_bytes = 0;
+        int64_t metadata_sequence = 1;
+        int64_t refund_height = 0;
+        if (!ReadInt(o, "size_bytes", size_bytes, err) ||
+            !ReadInt(o, "file_count", parsed.file_count, err) ||
+            !ReadInt(o, "parameter_count", parsed.parameter_count, err) ||
+            !ReadInt(o, "published_at", parsed.published_at, err) ||
+            !ReadInt(o, "updated_at", parsed.updated_at, err) ||
+            !ReadInt(o, "metadata_sequence", metadata_sequence, err) ||
+            !ReadInt(o, "expires_at", parsed.expires_at, err) ||
+            !ReadInt(o, "release_target_atoms", parsed.release_target_atoms, err) ||
+            !ReadInt(o, "refund_height", refund_height, err) ||
+            !ReadInt(o, "campaign_created_at", parsed.campaign_created_at, err)) {
+            return false;
         }
+        if (size_bytes < 0 || metadata_sequence < 0 || refund_height < 0 ||
+            refund_height > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+            return FailJson(err, "numeric range");
+        }
+        if (o.exists("size_bytes")) parsed.size_bytes = static_cast<uint64_t>(size_bytes);
+        if (o.exists("metadata_sequence")) parsed.metadata_sequence = static_cast<uint64_t>(metadata_sequence);
+        if (o.exists("refund_height")) parsed.refund_height = static_cast<uint32_t>(refund_height);
+        if (o.exists("key_hash")) {
+            if (!o["key_hash"].isStr()) return FailJson(err, "key_hash type");
+            if (!o["key_hash"].get_str().empty() &&
+                !Hash32::FromHex(o["key_hash"].get_str(), parsed.key_hash, err)) {
+                return false;
+            }
+        }
+        if (!ReadDigestField(o, "ciphertext_artifact_id", parsed.ciphertext_artifact_id, err, false)) return false;
+        if (o.exists("tombstone")) {
+            if (!o["tombstone"].isBool()) return FailJson(err, "tombstone type");
+            parsed.tombstone = o["tombstone"].get_bool();
+        }
+        if (o.exists("pubkey")) {
+            if (!o["pubkey"].isStr()) return FailJson(err, "pubkey type");
+            parsed.pubkey = ParseHex(o["pubkey"].get_str());
+        }
+        if (o.exists("signature")) {
+            if (!o["signature"].isStr()) return FailJson(err, "signature type");
+            parsed.sig = ParseHex(o["signature"].get_str());
+        }
+        parsed.signed_ok = false;
+        if (!ReadStr(o, "object_kind", parsed.object_kind, err) ||
+            !ReadStr(o, "bounty_id", parsed.bounty_id, err) ||
+            !ReadStr(o, "description", parsed.description, err) ||
+            !ReadStr(o, "network_id", parsed.network_id, err)) {
+            return false;
+        }
+        if (parsed.object_kind.empty()) parsed.object_kind = "MODEL";
+    } catch (const std::exception& ex) {
+        return FailJson(err, ex.what());
+    } catch (...) {
+        return FailJson(err, "malformed json object");
     }
-    if (o.exists("size_bytes")) r.size_bytes = o["size_bytes"].getInt<int64_t>();
-    if (o.exists("file_count")) r.file_count = o["file_count"].getInt<int>();
-    if (o.exists("parameter_count")) r.parameter_count = o["parameter_count"].getInt<int64_t>();
-    if (o.exists("published_at")) r.published_at = o["published_at"].getInt<int64_t>();
-    if (o.exists("updated_at")) r.updated_at = o["updated_at"].getInt<int64_t>();
-    if (o.exists("metadata_sequence")) r.metadata_sequence = o["metadata_sequence"].getInt<int64_t>();
-    if (o.exists("expires_at")) r.expires_at = o["expires_at"].getInt<int64_t>();
-    if (o.exists("release_target_atoms")) r.release_target_atoms = o["release_target_atoms"].getInt<int64_t>();
-    if (o.exists("refund_height")) r.refund_height = static_cast<uint32_t>(o["refund_height"].getInt<int64_t>());
-    if (o.exists("campaign_created_at")) r.campaign_created_at = o["campaign_created_at"].getInt<int64_t>();
-    if (o.exists("key_hash") && o["key_hash"].isStr() && !o["key_hash"].get_str().empty()) {
-        if (!Hash32::FromHex(o["key_hash"].get_str(), r.key_hash, err)) return false;
-    }
-    if (o.exists("ciphertext_artifact_id") && o["ciphertext_artifact_id"].isStr() &&
-        !o["ciphertext_artifact_id"].get_str().empty()) {
-        if (!Digest48::FromHex(o["ciphertext_artifact_id"].get_str(), r.ciphertext_artifact_id, err)) return false;
-    }
-    if (o.exists("tombstone")) r.tombstone = o["tombstone"].get_bool();
-    if (o.exists("pubkey")) r.pubkey = ParseHex(o["pubkey"].get_str());
-    if (o.exists("signature")) r.sig = ParseHex(o["signature"].get_str());
-    r.signed_ok = false;
-    if (o.exists("object_kind") && o["object_kind"].isStr()) r.object_kind = o["object_kind"].get_str();
-    if (o.exists("bounty_id") && o["bounty_id"].isStr()) r.bounty_id = o["bounty_id"].get_str();
-    if (o.exists("description") && o["description"].isStr()) r.description = o["description"].get_str();
-    if (o.exists("network_id") && o["network_id"].isStr()) r.network_id = o["network_id"].get_str();
+    r = std::move(parsed);
     return ValidateSearchRecord(r, err);
 }
 
 bool ParseSearchQuery(const UniValue& o, SearchQuery& q, std::string& err)
 {
     q = {};
-    if (o.isStr()) {
-        q.text = o.get_str();
-        return true;
-    }
-    if (!o.isObject()) {
-        err = "query object";
-        return false;
-    }
-    if (o.exists("text")) q.text = o["text"].get_str();
-    else if (o.exists("query")) q.text = o["query"].get_str();
-    if (o.exists("format") && !o.exists("filters")) q.filters.format = o["format"].get_str();
-    if (o.write().size() > SEARCH_QUERY_BYTES_MAX) {
-        err = "query too large";
-        return false;
-    }
-    if (o.exists("limit")) q.limit = o["limit"].getInt<int>();
-    if (q.limit <= 0) q.limit = 50;
-    if (q.limit > static_cast<int>(SEARCH_PAGE_MAX)) q.limit = SEARCH_PAGE_MAX;
-    if (o.exists("offset")) q.offset = o["offset"].getInt<int>();
-    if (o.exists("cursor")) q.cursor = o["cursor"].get_str();
-    if (o.exists("scope") && !ParseSearchScope(o["scope"].get_str(), q.scope)) {
-        err = "bad scope";
-        return false;
-    }
-    if (o.exists("sort") && !ParseSearchSort(o["sort"].get_str(), q.sort)) {
-        err = "bad sort";
-        return false;
-    }
-    UniValue filters_obj(UniValue::VOBJ);
-    if (o.exists("filters") && o["filters"].isObject()) {
-        filters_obj = o["filters"];
-    } else if (o.exists("filter") && o["filter"].isObject()) {
-        filters_obj = o["filter"];
-    }
-    if (filters_obj.isObject() && !filters_obj.getKeys().empty()) {
-        const UniValue& f = filters_obj;
-        auto FS = [&](const char* k, std::string& dst) {
-            if (f.exists(k)) dst = f[k].get_str();
+    try {
+        if (o.isStr()) {
+            q.text = o.get_str();
+            return true;
+        }
+        if (!o.isObject()) {
+            err = "query object";
+            return false;
+        }
+        auto bad = [&](const std::string& why) {
+            q = {};
+            return FailJson(err, why);
         };
-        FS("publisher_id", q.filters.publisher_id);
-        FS("publisher_name", q.filters.publisher_name);
-        FS("family", q.filters.family);
-        FS("architecture", q.filters.architecture);
-        FS("format", q.filters.format);
-        FS("quantization", q.filters.quantization);
-        FS("object_kind", q.filters.object_kind);
-        if (f.exists("min_size_bytes")) q.filters.min_size_bytes = f["min_size_bytes"].getInt<int64_t>();
-        if (f.exists("max_size_bytes")) q.filters.max_size_bytes = f["max_size_bytes"].getInt<int64_t>();
-        if (f.exists("min_parameters")) q.filters.min_parameters = f["min_parameters"].getInt<int64_t>();
-        if (f.exists("max_parameters")) q.filters.max_parameters = f["max_parameters"].getInt<int64_t>();
-        if (f.exists("license") && f["license"].isStr()) q.filters.license = f["license"].get_str();
-        if (f.exists("public_only")) q.filters.public_only = f["public_only"].get_bool();
-        if (f.exists("min_provider_count")) q.filters.min_provider_count = f["min_provider_count"].getInt<int>();
-        if (f.exists("pinned")) q.filters.pinned = f["pinned"].get_bool();
-        if (f.exists("seeded")) q.filters.seeded = f["seeded"].get_bool();
-        if (f.exists("locally_verified")) q.filters.locally_verified = f["locally_verified"].get_bool();
-        if (f.exists("funding_only")) q.filters.funding_only = f["funding_only"].get_bool();
-        if (f.exists("released_only")) q.filters.released_only = f["released_only"].get_bool();
-        if (f.exists("unreleased_only")) q.filters.unreleased_only = f["unreleased_only"].get_bool();
-        if (f.exists("fundable_only")) q.filters.fundable_only = f["fundable_only"].get_bool();
-        if (f.exists("refund_available")) q.filters.refund_available = f["refund_available"].get_bool();
-        if (f.exists("ciphertext_available")) q.filters.ciphertext_available = f["ciphertext_available"].get_bool();
-        if (f.exists("min_funded_percent")) q.filters.min_funded_percent = f["min_funded_percent"].getInt<int64_t>();
-        if (f.exists("max_funded_percent")) q.filters.max_funded_percent = f["max_funded_percent"].getInt<int64_t>();
-        if (f.exists("max_remaining_atoms")) q.filters.max_remaining_atoms = f["max_remaining_atoms"].getInt<int64_t>();
-        if (f.exists("release_created_after")) q.filters.release_created_after = f["release_created_after"].getInt<int64_t>();
-        if (f.exists("release_created_before")) q.filters.release_created_before = f["release_created_before"].getInt<int64_t>();
-        if (f.exists("unlocked_after")) q.filters.unlocked_after = f["unlocked_after"].getInt<int64_t>();
-        if (f.exists("min_ciphertext_provider_count")) {
-            q.filters.min_ciphertext_provider_count = f["min_ciphertext_provider_count"].getInt<int>();
+        auto take_str = [&](const UniValue& src, const char* k, std::string& dst) -> bool {
+            if (!src.exists(k)) return true;
+            if (!src[k].isStr()) return bad(std::string(k) + " type");
+            dst = src[k].get_str();
+            return true;
+        };
+        auto take_i64 = [&](const UniValue& src, const char* k, int64_t& dst) -> bool {
+            if (!src.exists(k)) return true;
+            if (!src[k].isNum()) return bad(std::string(k) + " type");
+            try {
+                dst = src[k].getInt<int64_t>();
+            } catch (const std::exception&) {
+                return bad(std::string(k) + " range");
+            }
+            return true;
+        };
+        auto take_int = [&](const UniValue& src, const char* k, int& dst) -> bool {
+            if (!src.exists(k)) return true;
+            if (!src[k].isNum()) return bad(std::string(k) + " type");
+            try {
+                dst = src[k].getInt<int>();
+            } catch (const std::exception&) {
+                return bad(std::string(k) + " range");
+            }
+            return true;
+        };
+        auto take_bool = [&](const UniValue& src, const char* k, bool& dst) -> bool {
+            if (!src.exists(k)) return true;
+            if (!src[k].isBool()) return bad(std::string(k) + " type");
+            dst = src[k].get_bool();
+            return true;
+        };
+        if (o.exists("text")) {
+            if (!take_str(o, "text", q.text)) return false;
+        } else if (o.exists("query")) {
+            if (!take_str(o, "query", q.text)) return false;
         }
-        if (f.exists("lifecycle_state") && f["lifecycle_state"].isArray()) {
-            for (const auto& x : f["lifecycle_state"].getValues()) {
-                if (x.isStr()) q.filters.lifecycle_state.push_back(x.get_str());
+        if (o.exists("format") && !o.exists("filters")) {
+            if (!take_str(o, "format", q.filters.format)) return false;
+        }
+        if (o.write().size() > SEARCH_QUERY_BYTES_MAX) {
+            err = "query too large";
+            q = {};
+            return false;
+        }
+        if (!take_int(o, "limit", q.limit)) return false;
+        if (q.limit <= 0) q.limit = 50;
+        if (q.limit > static_cast<int>(SEARCH_PAGE_MAX)) q.limit = SEARCH_PAGE_MAX;
+        if (!take_int(o, "offset", q.offset)) return false;
+        if (!take_str(o, "cursor", q.cursor)) return false;
+        if (o.exists("scope")) {
+            if (!o["scope"].isStr()) return bad("scope type");
+            if (!ParseSearchScope(o["scope"].get_str(), q.scope)) {
+                err = "bad scope";
+                return false;
             }
         }
-        if (f.exists("state") && f["state"].isStr()) {
-            q.filters.lifecycle_state.push_back(f["state"].get_str());
-        }
-        if (f.exists("modalities") && f["modalities"].isArray()) {
-            for (const auto& x : f["modalities"].getValues()) {
-                if (x.isStr()) q.filters.modalities.push_back(x.get_str());
+        if (o.exists("sort")) {
+            if (!o["sort"].isStr()) return bad("sort type");
+            if (!ParseSearchSort(o["sort"].get_str(), q.sort)) {
+                err = "bad sort";
+                return false;
             }
         }
-        if (f.exists("language") && f["language"].isArray()) {
-            for (const auto& x : f["language"].getValues()) {
-                if (x.isStr()) q.filters.language.push_back(x.get_str());
+        UniValue filters_obj(UniValue::VOBJ);
+        if (o.exists("filters") && o["filters"].isObject()) {
+            filters_obj = o["filters"];
+        } else if (o.exists("filter") && o["filter"].isObject()) {
+            filters_obj = o["filter"];
+        }
+        if (filters_obj.isObject() && !filters_obj.getKeys().empty()) {
+            const UniValue& f = filters_obj;
+            if (!take_str(f, "publisher_id", q.filters.publisher_id) ||
+                !take_str(f, "publisher_name", q.filters.publisher_name) ||
+                !take_str(f, "family", q.filters.family) ||
+                !take_str(f, "architecture", q.filters.architecture) ||
+                !take_str(f, "format", q.filters.format) ||
+                !take_str(f, "quantization", q.filters.quantization) ||
+                !take_str(f, "object_kind", q.filters.object_kind)) {
+                return false;
+            }
+            if (f.exists("license") && f["license"].isStr()) q.filters.license = f["license"].get_str();
+            if (!take_i64(f, "min_size_bytes", q.filters.min_size_bytes) ||
+                !take_i64(f, "max_size_bytes", q.filters.max_size_bytes) ||
+                !take_i64(f, "min_parameters", q.filters.min_parameters) ||
+                !take_i64(f, "max_parameters", q.filters.max_parameters) ||
+                !take_bool(f, "public_only", q.filters.public_only) ||
+                !take_int(f, "min_provider_count", q.filters.min_provider_count) ||
+                !take_bool(f, "pinned", q.filters.pinned) ||
+                !take_bool(f, "seeded", q.filters.seeded) ||
+                !take_bool(f, "locally_verified", q.filters.locally_verified) ||
+                !take_bool(f, "funding_only", q.filters.funding_only) ||
+                !take_bool(f, "released_only", q.filters.released_only) ||
+                !take_bool(f, "unreleased_only", q.filters.unreleased_only) ||
+                !take_bool(f, "fundable_only", q.filters.fundable_only) ||
+                !take_bool(f, "refund_available", q.filters.refund_available) ||
+                !take_bool(f, "ciphertext_available", q.filters.ciphertext_available) ||
+                !take_i64(f, "min_funded_percent", q.filters.min_funded_percent) ||
+                !take_i64(f, "max_funded_percent", q.filters.max_funded_percent) ||
+                !take_i64(f, "max_remaining_atoms", q.filters.max_remaining_atoms) ||
+                !take_i64(f, "release_created_after", q.filters.release_created_after) ||
+                !take_i64(f, "release_created_before", q.filters.release_created_before) ||
+                !take_i64(f, "unlocked_after", q.filters.unlocked_after) ||
+                !take_int(f, "min_ciphertext_provider_count", q.filters.min_ciphertext_provider_count)) {
+                return false;
+            }
+            auto take_list = [&](const char* k, std::vector<std::string>& dst) -> bool {
+                if (!f.exists(k)) return true;
+                if (!f[k].isArray()) return bad(std::string(k) + " type");
+                for (const auto& x : f[k].getValues()) {
+                    if (x.isStr()) dst.push_back(x.get_str());
+                }
+                return true;
+            };
+            if (!take_list("lifecycle_state", q.filters.lifecycle_state)) return false;
+            if (f.exists("state")) {
+                if (!f["state"].isStr()) return bad("state type");
+                q.filters.lifecycle_state.push_back(f["state"].get_str());
+            }
+            if (!take_list("modalities", q.filters.modalities) ||
+                !take_list("language", q.filters.language) ||
+                !take_list("tags", q.filters.tags)) {
+                return false;
             }
         }
-        if (f.exists("tags") && f["tags"].isArray()) {
-            for (const auto& x : f["tags"].getValues()) {
-                if (x.isStr()) q.filters.tags.push_back(x.get_str());
-            }
-        }
+        return true;
+    } catch (const std::exception& ex) {
+        q = {};
+        return FailJson(err, ex.what());
+    } catch (...) {
+        q = {};
+        return FailJson(err, "malformed query");
     }
-    return true;
 }
 
 UniValue AppliedFiltersJson(const SearchFilters& f)
@@ -1143,18 +1273,51 @@ bool SearchIndex::Save(const fs::path& path, std::string& err) const
 bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
 {
     if (!fs::exists(path)) return true;
-    std::ifstream in(path);
-    std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    UniValue o;
-    if (!o.read(raw) || !o.isObject() || !o.exists("records")) return true;
-    for (const auto& recj : o["records"].getValues()) {
-        ModelSearchRecord rec;
-        std::string ierr;
-        if (!SearchRecordFromJson(recj, rec, ierr)) continue;
-        (void)Put(rec, now_ms, err);
+    try {
+        std::ifstream in(path);
+        std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue o;
+        if (!o.read(raw) || !o.isObject() || !o.exists("records")) return true;
+        if (!o["records"].isArray()) {
+            LogSkippedJson("records type");
+            return true;
+        }
+        for (const auto& recj : o["records"].getValues()) {
+            ModelSearchRecord rec;
+            std::string ierr;
+            try {
+                if (!SearchRecordFromJson(recj, rec, ierr)) continue;
+            } catch (const std::exception& ex) {
+                LogSkippedJson(ex.what());
+                continue;
+            } catch (...) {
+                LogSkippedJson("record");
+                continue;
+            }
+            (void)Put(rec, now_ms, err);
+        }
+        if (o.exists("sequence")) {
+            if (!o["sequence"].isNum()) {
+                LogSkippedJson("sequence type");
+            } else {
+                try {
+                    const int64_t seq = o["sequence"].getInt<int64_t>();
+                    if (seq >= 0) m_seq = std::max(m_seq, static_cast<uint64_t>(seq));
+                } catch (const std::exception& ex) {
+                    LogSkippedJson(std::string("sequence ") + ex.what());
+                }
+            }
+        }
+        return true;
+    } catch (const std::exception& ex) {
+        err = ex.what();
+        LogSkippedJson(err);
+        return true;
+    } catch (...) {
+        err = "search index";
+        LogSkippedJson(err);
+        return true;
     }
-    if (o.exists("sequence")) m_seq = std::max(m_seq, static_cast<uint64_t>(o["sequence"].getInt<int64_t>()));
-    return true;
 }
 
 void SearchIndex::Clear()
@@ -1200,10 +1363,43 @@ SearchRequest ParseSearchRequest(const UniValue& o, std::string& err)
         err = "object";
         return r;
     }
-    if (o.exists("query_id")) r.query_id = o["query_id"].get_str();
-    if (o.exists("ttl")) r.ttl = o["ttl"].getInt<int>();
+    if (o.exists("query_id")) {
+        if (!o["query_id"].isStr()) {
+            err = "query_id type";
+            LogSkippedJson(err);
+            return r;
+        }
+        r.query_id = o["query_id"].get_str();
+    }
+    if (o.exists("ttl")) {
+        if (!o["ttl"].isNum()) {
+            err = "ttl type";
+            LogSkippedJson(err);
+            return r;
+        }
+        try {
+            r.ttl = o["ttl"].getInt<int>();
+        } catch (const std::exception&) {
+            err = "ttl range";
+            LogSkippedJson(err);
+            return r;
+        }
+    }
     if (r.ttl > SEARCH_TTL_MAX) r.ttl = SEARCH_TTL_MAX;
-    if (o.exists("limit")) r.limit = o["limit"].getInt<int>();
+    if (o.exists("limit")) {
+        if (!o["limit"].isNum()) {
+            err = "limit type";
+            LogSkippedJson(err);
+            return r;
+        }
+        try {
+            r.limit = o["limit"].getInt<int>();
+        } catch (const std::exception&) {
+            err = "limit range";
+            LogSkippedJson(err);
+            return r;
+        }
+    }
     if (o.exists("text") && o["text"].isStr()) r.text_terms = TokenizeSearch(o["text"].get_str());
     if (o.exists("text_terms") && o["text_terms"].isArray()) {
         for (const auto& t : o["text_terms"].getValues()) {

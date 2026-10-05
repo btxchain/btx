@@ -912,6 +912,12 @@ struct Params {
      *  sets an explicit flag-day. See IsShieldedPoolDisabled. */
     int32_t nShieldedPoolDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSpendPathRecoveryActivationHeight{std::numeric_limits<int32_t>::max()};
+    /** First height at which a spend-path recovery proof's MatRiCT work
+     *  counts toward nMaxBlockShieldedVerifyCost. Before it, consensus keeps
+     *  the historical zero charge so already-accepted blocks stay valid.
+     *  Policy weight counts the proof at every height. The struct default is
+     *  int32 max. Mainnet sets BTX_SECURITY_ACTIVATION_HEIGHT (block 244000). */
+    int32_t nShieldedRecoveryProofVerifyCostHeight{std::numeric_limits<int32_t>::max()};
     /** C-002 shielded proof + SLH-DSA/FIPS-205 activation height. Mainnet default
      *  remains 123,000; regtest may lower this to exercise boundary behavior
      *  without mining 123k blocks. Keep the default in sync with
@@ -957,6 +963,21 @@ struct Params {
     uint256 nShieldedRecoveryExitFrozenRoot{};
     uint32_t nShieldedSettlementAnchorMaturity{6};
     int32_t nMLDSADisableHeight{std::numeric_limits<int32_t>::max()};
+    /** First block height at which SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 is a
+     *  consensus rule (32-byte preimage for every transaction-bound P2MR HTLC
+     *  claim leaf). Before it the rule is standard policy only, which matches
+     *  v0.34.12 consensus. Mainnet activates at block 244000, about five days
+     *  after header tip 239154 on 2026-10-05 (4846 blocks at 90 seconds).
+     *  int32 max means "not scheduled" on networks other than mainnet. */
+    int32_t nP2MRHTLCPreimage32Height{std::numeric_limits<int32_t>::max()};
+    /** At and after this height, a MatMul header whose only proof check is
+     *  Phase-1 (digest <= compact nBits) is not authenticated work. It must
+     *  not become m_best_header, must not win most-work header selection, and
+     *  must not cause ExactReplay to be skipped. nChainWork of blocks already
+     *  indexed below the height is left unchanged, matching 0.34.12/0.34.13.
+     *  The struct default is int32 max. Mainnet sets
+     *  BTX_SECURITY_ACTIVATION_HEIGHT (block 244000). */
+    int32_t nMatMulPhase1HeaderNotMostWorkHeight{std::numeric_limits<int32_t>::max()};
     /** Maximum shielded verification cost units per block (consensus rule).
      *  SMILE v2: Each spend costs ~100 units; each output ~15 units.
      *  Budget: 1042 × 230 = 240,000. Size (24MB) is the binding constraint.
@@ -1389,6 +1410,12 @@ struct Params {
         return height >= 0 &&
             nShieldedSpendPathRecoveryActivationHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedSpendPathRecoveryActivationHeight;
+    }
+    bool IsShieldedRecoveryProofVerifyCostActive(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedRecoveryProofVerifyCostHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedRecoveryProofVerifyCostHeight;
     }
     bool IsShieldedC002Active(int32_t height) const
     {

@@ -816,10 +816,17 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // full work here, keeping nAuthenticatedChainWork == nChainWork identical.
     UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
-    // Prefer authenticated work for best-header selection, with a bounded
-    // unauth allowance so a short competing headers-only suffix can displace a
-    // losing tip for chase (matching net_processing peer decisions).
-    if (best_header == nullptr || PreferMostWorkHeader(*best_header, *pindexNew)) {
+    // A MatMul header that has only passed the compact-target precheck is
+    // not most-work. Promotion waits until the body raises validity.
+    const Consensus::Params& consensus{GetConsensus()};
+    const bool phase1_must_not_lead{
+        consensus.fMatMulPOW &&
+        pindexNew->nHeight >= consensus.nMatMulPhase1HeaderNotMostWorkHeight &&
+        (pindexNew->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS &&
+        (pindexNew->nStatus & (BLOCK_EXACT_REPLAY_VERIFIED | BLOCK_TRUSTED_REPLAY_ATTESTED)) == 0 &&
+        !MatMulDigestBelowTargetAuthenticatesWork(block, consensus)};
+    if (!phase1_must_not_lead &&
+        (best_header == nullptr || PreferMostWorkHeader(*best_header, *pindexNew))) {
         best_header = pindexNew;
     }
 

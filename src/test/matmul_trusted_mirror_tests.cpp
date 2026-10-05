@@ -2163,7 +2163,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::MsghandPeerIsArchiveServeTarget;
     BOOST_CHECK(!MsghandPeerIsArchiveServeTarget(/*manual_or_outbound=*/true, false));
     BOOST_CHECK(MsghandPeerIsArchiveServeTarget(true, /*archive_or_mirror_service=*/true));
-    BOOST_CHECK(MsghandPeerIsArchiveServeTarget(false, /*archive_or_mirror_service=*/true));
+    BOOST_CHECK(!MsghandPeerIsArchiveServeTarget(false, /*archive_or_mirror_service=*/true));
     BOOST_CHECK(!MsghandPeerIsArchiveServeTarget(false, false));
     using node::matmul_trusted::MsghandPreferArchiveLiveGetData;
     BOOST_CHECK(MsghandPreferArchiveLiveGetData(/*live_getdata=*/true, /*is_archive_serve_target=*/true));
@@ -2218,10 +2218,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
         true, /*archive_getdata_pending=*/false, true, false, true,
         false));
-    // Outbound miners are Preferred in msghand order; they must still skip.
-    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
+    // Outbound and manual peers keep their block and header turn.
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
         true, true, /*this_peer_inbound=*/false, false, true, false));
-    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
         true, true, false, /*this_peer_manual=*/true, true, false));
     // Convergence regression: a behind CONSENSUS verifier (serve=0 GPU
     // attestor) must NEVER be skipped while a signer serves archive GETDATA,

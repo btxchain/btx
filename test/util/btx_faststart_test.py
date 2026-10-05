@@ -459,6 +459,37 @@ class BTXFaststartTest(unittest.TestCase):
         self.assertEqual(snapshot_name, "snapshot.dat")
         self.assertEqual(snapshot_entry["filename"], "snapshot.dat")
 
+    def test_snapshot_filename_rejects_absolute_and_parent_components(self):
+        for unsafe in ("/tmp/evil.dat", "../evil.dat", "dir/snapshot.dat", "..", "foo/../../etc/passwd"):
+            with self.assertRaisesRegex(ValueError, "parent-directory|absolute"):
+                self.module.reject_unsafe_snapshot_filename(unsafe)
+        self.assertEqual(self.module.reject_unsafe_snapshot_filename("snapshot.dat"), "snapshot.dat")
+
+        args = argparse.Namespace(
+            snapshot_url=None,
+            snapshot_sha256=None,
+            snapshot_name=None,
+            snapshot_manifest=None,
+            chain="main",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = pathlib.Path(tmpdir) / "snapshot.manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "chain": "main",
+                        "url": "https://example.invalid/snapshot.dat",
+                        "sha256": "ab" * 32,
+                        "filename": "../snapshot.dat",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args.snapshot_manifest = str(manifest_path)
+            with self.assertRaisesRegex(ValueError, "parent-directory|absolute"):
+                self.module.snapshot_from_args(args)
+
     def test_main_skips_loadtxoutset_when_snapshot_is_already_superseded(self):
         original_run = self.module.subprocess.run
         original_snapshot_from_args = self.module.snapshot_from_args

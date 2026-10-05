@@ -759,12 +759,13 @@ struct ChainstateManagerOpts {
     //! at test speed; production mainnet emergency sets DEFAULT_CADENCE_BURST_MAX
     //! via -cadenceburstmax / ApplyArgsManOptions.
     uint32_t cadence_burst_max{0};
-    //! Local automatic-reorg policy. LEGACY keeps the previous park /
-    //! deep-fork-auto-resolve behavior. OBSERVE reports the bounded decision
-    //! and still follows LEGACY. BOUNDED enforces the normal window and the
-    //! hard recovery ceiling. The struct default is LEGACY so unit tests that
-    //! construct Options directly keep today's behavior; ApplyArgsManOptions
-    //! selects BOUNDED when -reorgpolicy is unset.
+    //! Local automatic-reorg policy. LEGACY keeps park and
+    //! deep-fork auto-resolve, including activation of an ExactReplay-verified
+    //! deeper fork. OBSERVE reports the bounded decision and still follows
+    //! LEGACY. BOUNDED enforces the normal window and the hard recovery
+    //! ceiling. The struct default and an unset -reorgpolicy are LEGACY.
+    //! Bounded mode is opt-in: BTX has no finality gadget, so that ceiling
+    //! is not the unattended default.
     enum class ReorgPolicyMode : uint8_t {
         LEGACY = 0,
         OBSERVE = 1,

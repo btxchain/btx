@@ -2380,11 +2380,21 @@ public:
         MaybeUpdateBestExtendingHeader(pindex);
     }
 
+    /** Phase-1 (digest <= compact nBits) is not most-work at/after
+     *  nMatMulPhase1HeaderNotMostWorkHeight. Below that height the
+     *  0.34.12/0.34.13 promotion stands. A body that reached
+     *  BLOCK_VALID_TRANSACTIONS, or a header that already carries an
+     *  ExactReplay / trusted-attestation bit, is not Phase-1-only.
+     *  This does not rewrite nChainWork. */
+    [[nodiscard]] bool Phase1OnlyMatMulHeaderMustNotLead(const CBlockIndex& index) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Remember the heaviest header that still extends ActiveTip(). */
     void MaybeUpdateBestExtendingHeader(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
         AssertLockHeld(::cs_main);
         if (pindex == nullptr || (pindex->nStatus & BLOCK_FAILED_MASK)) return;
+        if (Phase1OnlyMatMulHeaderMustNotLead(*pindex)) return;
         const CBlockIndex* const tip{ActiveChain().Tip()};
         if (tip == nullptr || pindex->nHeight <= tip->nHeight) return;
         if (pindex->GetAncestor(tip->nHeight) != tip) return;

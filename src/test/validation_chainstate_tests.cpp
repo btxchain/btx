@@ -6418,4 +6418,99 @@ BOOST_FIXTURE_TEST_CASE(invalid_branch_cleanup_manual_reconsider_preserves_repla
     chainman.CheckBlockIndex();
 }
 
+BOOST_FIXTURE_TEST_CASE(phase1_only_header_does_not_become_best_header_at_security_height, TestChain100Setup)
+{
+    // One activation height: mainnet uses BTX_SECURITY_ACTIVATION_HEIGHT
+    // (244000), the same flag day as the other security fields. Regtest
+    // stays unset until this test assigns that field. Below the height a
+    // Phase-1 header still becomes m_best_header. At and after it, a header
+    // whose only proof check is digest <= nBits does not.
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    const int32_t saved_height{consensus.nMatMulPhase1HeaderNotMostWorkHeight};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t saved;
+        ~Restore() { consensus.nMatMulPhase1HeaderNotMostWorkHeight = saved; }
+    } restore{consensus, saved_height};
+
+    const auto mainnet{CreateChainParams(*m_node.args, ChainType::MAIN)};
+    BOOST_CHECK_EQUAL(mainnet->GetConsensus().nMatMulPhase1HeaderNotMostWorkHeight, 244'000);
+    BOOST_CHECK_EQUAL(mainnet->GetConsensus().nMatMulPhase1HeaderNotMostWorkHeight,
+                      mainnet->GetConsensus().nP2MRHTLCPreimage32Height);
+    BOOST_CHECK_EQUAL(saved_height, std::numeric_limits<int32_t>::max());
+
+    const CScript script{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    CBlockIndex* tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    const int32_t activation{tip->nHeight + 2};
+    consensus.nMatMulPhase1HeaderNotMostWorkHeight = activation;
+
+    const CBlock below_block{CreateBlock({}, script, chainstate)};
+    BlockValidationState below_state;
+    const CBlockIndex* below_pub{nullptr};
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+        {{below_block.GetBlockHeader()}}, /*min_pow_checked=*/true, below_state, &below_pub));
+    CBlockIndex* below{const_cast<CBlockIndex*>(below_pub)};
+    BOOST_REQUIRE(below != nullptr);
+    arith_uint256 below_work;
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_LT(below->nHeight, activation);
+        BOOST_CHECK(!chainman.Phase1OnlyMatMulHeaderMustNotLead(*below));
+        BOOST_CHECK_EQUAL(chainman.m_best_header, below);
+        BOOST_CHECK(below->nChainWork > tip->nChainWork);
+        below_work = below->nChainWork;
+    }
+
+    const auto child_of = [&](const CBlockIndex* parent) {
+        CBlockHeader header{below_block.GetBlockHeader()};
+        header.hashPrevBlock = parent->GetBlockHash();
+        header.nTime = parent->nTime + 1;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            header, static_cast<uint32_t>(parent->nHeight + 1), consensus,
+            5'000'000, parent->GetMedianTimePast()));
+        return header;
+    };
+
+    const CBlockHeader at_header{child_of(below)};
+    BlockValidationState at_state;
+    const CBlockIndex* at_pub{nullptr};
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+        {{at_header}}, /*min_pow_checked=*/true, at_state, &at_pub));
+    CBlockIndex* at_index{const_cast<CBlockIndex*>(at_pub)};
+    BOOST_REQUIRE(at_index != nullptr);
+    BOOST_REQUIRE(at_index->GetBlockHash() == at_header.GetHash());
+
+    const CBlockHeader after_header{child_of(at_index)};
+    BlockValidationState after_state;
+    const CBlockIndex* after_pub{nullptr};
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+        {{after_header}}, /*min_pow_checked=*/true, after_state, &after_pub));
+    CBlockIndex* after_index{const_cast<CBlockIndex*>(after_pub)};
+    BOOST_REQUIRE(after_index != nullptr);
+
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(at_index->nHeight, activation);
+        BOOST_CHECK_GT(after_index->nHeight, activation);
+        BOOST_CHECK(chainman.Phase1OnlyMatMulHeaderMustNotLead(*at_index));
+        BOOST_CHECK(chainman.Phase1OnlyMatMulHeaderMustNotLead(*after_index));
+        BOOST_CHECK_EQUAL(chainman.m_best_header, below);
+        BOOST_CHECK(chainman.m_best_header != at_index);
+        BOOST_CHECK(chainman.m_best_header != after_index);
+        BOOST_CHECK(chainman.m_best_header_extending_tip != at_index);
+        BOOST_CHECK(chainman.m_best_header_extending_tip != after_index);
+        BOOST_CHECK(below->nChainWork == below_work);
+        BOOST_CHECK(at_index->nChainWork > below_work);
+        BOOST_CHECK(after_index->nChainWork > at_index->nChainWork);
+        chainman.RecalculateBestHeader();
+        BOOST_CHECK_EQUAL(chainman.m_best_header, below);
+        BOOST_CHECK(below->nChainWork == below_work);
+        BOOST_CHECK(chainman.m_best_header != at_index);
+        BOOST_CHECK(chainman.m_best_header != after_index);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 
 #include <consensus/params.h>
 #include <crypto/common.h>
@@ -2468,6 +2469,20 @@ uint256 RecomputeResidentCurriculumAccelerated(
     RCEpisodeTiming* out_timing,
     const RCExactReplayAcceleration& acceleration)
 {
+    // Portable mismatch confirmation must not run on a thread that still holds
+    // the process-wide accelerator lease (body-holding ExactReplay). Returning
+    // a null digest leaves the header retryable.
+    if (acceleration.backend == "cpu_device_mismatch_retry" &&
+        GetRCAcceleratorScheduler().CurrentThreadOwnsLease()) {
+        if (acceleration.stats != nullptr) {
+            *acceleration.stats = RCExactReplayAccelerationStats{};
+            acceleration.stats->backend = acceleration.backend;
+            acceleration.stats->require_device = acceleration.require_device;
+            acceleration.stats->first_failure =
+                "portable_replay_retained_accelerator_lease";
+        }
+        return uint256{};
+    }
     if (acceleration.stats != nullptr) {
         *acceleration.stats = RCExactReplayAccelerationStats{};
         acceleration.stats->backend = acceleration.backend;

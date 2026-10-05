@@ -37,9 +37,9 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.34.13** (`CLIENT_VERSION_BUILD=13`,
+This working tree is **0.34.14** (`CLIENT_VERSION_BUILD=14`,
 `CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
-**v0.34.13**. Do not recut `v0.34.12`, `v0.34.10`, or `v0.34.9`.
+**v0.34.14**. Do not recut `v0.34.13`, `v0.34.12`, `v0.34.10`, or `v0.34.9`.
 
 ## Start here
 
@@ -72,7 +72,8 @@ fabric stay in the passport's capability vector. Details:
 
 - [Start here](#start-here)
 - [Pay With Compute](#pay-with-compute)
-- [Current release — v0.34.13](#current-release--v03413)
+- [Current release — v0.34.14](#current-release--v03414)
+- [Previous release — v0.34.13](#previous-release--v03413)
 - [Earlier shipping line — v0.34.9](#earlier-shipping-line--v0349)
 - [This tree — 0.34.11](#this-tree--03411)
 - [This tree — 0.34.10](#this-tree--03410)
@@ -105,10 +106,40 @@ fabric stay in the passport's capability vector. Details:
 
 ---
 
-## Current release — v0.34.13
+## Current release — v0.34.14
 
-**Shipping tag is v0.34.13.** `CLIENT_VERSION_IS_RELEASE=true`.
-`btxd -version` prints `v0.34.13`. P2P subversion is `/BTX:0.34.13/`.
+**Shipping tag is v0.34.14.** `CLIENT_VERSION_IS_RELEASE=true`.
+`btxd -version` prints `v0.34.14`. P2P subversion is `/BTX:0.34.14/`.
+Do not recut `v0.34.13` or `v0.34.12`.
+
+Three consensus checks begin at mainnet block 244000. Below that height,
+those checks stay compatible with 0.34.12. Standard policy, snapshot
+bootstrap, wallet storage, and model-host behavior apply on the first run
+of this binary.
+
+- A 32-byte HTLC preimage is standard policy now and a consensus rule from
+  block 244000.
+- Recovery-proof verification joins the shielded block budget at 244000.
+- From block 244000, a MatMul header that has only passed the compact-target
+  precheck cannot become the best header. A body that passes full
+  transaction validation can still lead. A qualified GPU digest mismatch
+  stays a retryable local failure.
+- Snapshot bootstrap uses the checksum-verified local manifest and rejects
+  unsafe filenames.
+- An unset `-reorgpolicy` stays legacy. Nodes that want the 0.34.13 hard
+  ceiling set `-reorgpolicy=bounded`.
+- Each free-grant use is consumed once. A release that is not downloadable
+  is not seeded or served as plaintext.
+- Encrypted wallets store PQ descriptor seeds as ciphertext.
+- Park and catch-up attestation signatures require body-authenticated work.
+
+Notes: [doc/release-notes/release-notes-0.34.14.md](doc/release-notes/release-notes-0.34.14.md).
+Archives: [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA 13, macOS arm64 Metal.
+
+## Previous release — v0.34.13
+
+**Shipping tag was v0.34.13.** `CLIENT_VERSION_IS_RELEASE=true`.
+`btxd -version` printed `v0.34.13`. P2P subversion was `/BTX:0.34.13/`.
 Do not recut `v0.34.12`.
 
 This release keeps the 0.34.10 monetary baseline. It is not a change to

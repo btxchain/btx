@@ -1662,6 +1662,7 @@ enum class MRLeafType {
     HTLC,
     HTLC_TX,
     HTLC_SHA256,
+    HTLC_SHA256_LEGACY,
     REFUND,
     CTV_ONLY,
     CTV_CHECKSIG,
@@ -1691,6 +1692,9 @@ struct MRLeafSpec {
     PQAlgorithm csfs_algo{PQAlgorithm::ML_DSA_44};
     int csfs_provider_index{-1};
     std::vector<unsigned char> csfs_fixed_pubkey;
+
+    //! Key expression as written, for the claim/refund distinct-key check.
+    std::string primary_key_expr;
 };
 
 std::vector<unsigned char> DummyP2MRPubkey(PQAlgorithm algo)
@@ -1705,6 +1709,7 @@ bool LeafUsesPrimaryKey(const MRLeafSpec& leaf)
     return leaf.type == MRLeafType::CHECKSIG ||
            leaf.type == MRLeafType::HTLC_TX ||
            leaf.type == MRLeafType::HTLC_SHA256 ||
+           leaf.type == MRLeafType::HTLC_SHA256_LEGACY ||
            leaf.type == MRLeafType::REFUND ||
            leaf.type == MRLeafType::CTV_CHECKSIG ||
            leaf.type == MRLeafType::CSFS_VERIFY_CHECKSIG;
@@ -1751,6 +1756,8 @@ std::vector<unsigned char> BuildP2MRLeafScript(
         return BuildP2MRHTLCTxLeaf(leaf.htlc_hash160, leaf.algo, primary_pubkey);
     case MRLeafType::HTLC_SHA256:
         return BuildP2MRHTLCSha256Leaf(leaf.htlc_sha256, leaf.algo, primary_pubkey);
+    case MRLeafType::HTLC_SHA256_LEGACY:
+        return BuildP2MRHTLCSha256LegacyLeaf(leaf.htlc_sha256, leaf.algo, primary_pubkey);
     case MRLeafType::REFUND:
         return BuildP2MRRefundLeaf(leaf.locktime, leaf.algo, primary_pubkey);
     case MRLeafType::CTV_ONLY:
@@ -1888,6 +1895,7 @@ static std::optional<int64_t> GetP2MRLeafMaxSatSize(const MRLeafSpec& leaf, int6
     case MRLeafType::HTLC:
     case MRLeafType::HTLC_TX:
     case MRLeafType::HTLC_SHA256:
+    case MRLeafType::HTLC_SHA256_LEGACY:
     case MRLeafType::CSFS_ONLY:
     case MRLeafType::CSFS_VERIFY_CHECKSIG:
         return {};
@@ -1918,12 +1926,27 @@ static std::optional<int64_t> GetP2MRLeafMaxSatElems(const MRLeafSpec& leaf)
     case MRLeafType::HTLC:
     case MRLeafType::HTLC_TX:
     case MRLeafType::HTLC_SHA256:
+    case MRLeafType::HTLC_SHA256_LEGACY:
     case MRLeafType::CSFS_ONLY:
         return 4;
     case MRLeafType::CSFS_VERIFY_CHECKSIG:
         return 5;
     }
     assert(false);
+}
+
+// mr() takes a primary leaf and one optional backup argument; three or more
+// leaves must be written as a brace tree. The script tree depends only on the
+// leaf order, so render the backup leaves right-nested: A / A,B / A,{B,C} /
+// A,{B,{C,D}}. A flat "A,B,C" does not parse.
+std::string JoinMRLeafExprs(const std::vector<std::string>& leaves)
+{
+    if (leaves.empty()) return "";
+    std::string tail = leaves.back();
+    for (size_t i = leaves.size() - 1; i-- > 1;) {
+        tail = "{" + leaves[i] + "," + tail + "}";
+    }
+    return leaves.size() == 1 ? leaves[0] : leaves[0] + "," + tail;
 }
 
 class MRDescriptor final : public DescriptorImpl
@@ -1935,12 +1958,7 @@ private:
 protected:
     std::string ToStringExtra() const override
     {
-        std::string ret;
-        for (size_t i = 0; i < m_leaf_exprs.size(); ++i) {
-            if (i) ret += ",";
-            ret += m_leaf_exprs[i];
-        }
-        return ret;
+        return JoinMRLeafExprs(m_leaf_exprs);
     }
 
     bool ToStringHelper(const SigningProvider* arg, std::string& out, const StringType type, const DescriptorCache* cache = nullptr) const override
@@ -1980,9 +1998,10 @@ protected:
             return true;
         };
 
-        std::string ret = "mr(";
+        std::vector<std::string> leaf_strings;
+        std::string ret;
         for (size_t i = 0; i < m_leaf_specs.size(); ++i) {
-            if (i) ret += ",";
+            ret.clear();
             const auto& leaf = m_leaf_specs[i];
             std::string key_expr;
             std::string csfs_key_expr;
@@ -2055,6 +2074,10 @@ protected:
                 if (!render_key(leaf.algo, leaf.provider_index, leaf.fixed_pubkey, key_expr)) return false;
                 ret += strprintf("htlc_sha256(%s,%s)", HexStr(leaf.htlc_sha256), key_expr);
                 break;
+            case MRLeafType::HTLC_SHA256_LEGACY:
+                if (!render_key(leaf.algo, leaf.provider_index, leaf.fixed_pubkey, key_expr)) return false;
+                ret += strprintf("htlc_sha256_legacy(%s,%s)", HexStr(leaf.htlc_sha256), key_expr);
+                break;
             case MRLeafType::REFUND:
                 if (!render_key(leaf.algo, leaf.provider_index, leaf.fixed_pubkey, key_expr)) return false;
                 ret += strprintf("refund(%lld,%s)", static_cast<long long>(leaf.locktime), key_expr);
@@ -2076,9 +2099,9 @@ protected:
                 ret += strprintf("csfs_pk(%s,%s)", csfs_key_expr, key_expr);
                 break;
             }
+            leaf_strings.push_back(ret);
         }
-        ret += ")";
-        out = std::move(ret);
+        out = "mr(" + JoinMRLeafExprs(leaf_strings) + ")";
         return true;
     }
 
@@ -3593,11 +3616,14 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
                 spec.algo = claimant_key.algo;
                 spec.provider_index = claimant_key.provider_index;
                 spec.fixed_pubkey = std::move(claimant_key.fixed_pubkey);
+                spec.primary_key_expr = claimant_key.rendered;
                 return append_leaf(std::move(spec), strprintf("htlc_tx(%s,%s)", hash_hex, claimant_key.rendered), leaf_specs, leaf_exprs);
             }
 
             leaf_expr = arg;
-            if (Func("htlc_sha256", leaf_expr) || Func("model_htlc_sha256", leaf_expr)) {
+            const bool legacy_sha256_leaf = Func("htlc_sha256_legacy", leaf_expr);
+            if (!legacy_sha256_leaf) leaf_expr = arg;
+            if (legacy_sha256_leaf || Func("htlc_sha256", leaf_expr) || Func("model_htlc_sha256", leaf_expr)) {
                 const auto hash_arg = Expr(leaf_expr);
                 if (hash_arg.empty()) {
                     error = "mr(): htlc_sha256() missing sha256 argument";
@@ -3623,12 +3649,16 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
                 if (!parse_mr_key(claimant_arg, providers, claimant_key)) return false;
 
                 MRLeafSpec spec;
-                spec.type = MRLeafType::HTLC_SHA256;
+                // htlc_sha256_legacy() is the claim leaf without the in-script
+                // OP_SIZE check that htlc_sha256() expanded to before 0.34.13.
+                // It exists so a wallet can watch and spend such a lock.
+                spec.type = legacy_sha256_leaf ? MRLeafType::HTLC_SHA256_LEGACY : MRLeafType::HTLC_SHA256;
                 spec.htlc_sha256 = std::move(sha256);
                 spec.algo = claimant_key.algo;
                 spec.provider_index = claimant_key.provider_index;
                 spec.fixed_pubkey = std::move(claimant_key.fixed_pubkey);
-                return append_leaf(std::move(spec), strprintf("htlc_sha256(%s,%s)", hash_hex, claimant_key.rendered), leaf_specs, leaf_exprs);
+                spec.primary_key_expr = claimant_key.rendered;
+                return append_leaf(std::move(spec), strprintf("%s(%s,%s)", legacy_sha256_leaf ? "htlc_sha256_legacy" : "htlc_sha256", hash_hex, claimant_key.rendered), leaf_specs, leaf_exprs);
             }
 
             leaf_expr = arg;
@@ -3653,7 +3683,10 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
                 }
 
                 const auto timeout{ToIntegral<int64_t>(std::string_view(timeout_arg.data(), timeout_arg.size()))};
-                if (!timeout.has_value() || *timeout < 1 || *timeout > std::numeric_limits<uint32_t>::max()) {
+                // refund(0) is refused for new descriptors only. A wallet that
+                // imported one before 0.34.13 must still load (see options).
+                const int64_t min_timeout{options.new_descriptor_rules ? 1 : 0};
+                if (!timeout.has_value() || *timeout < min_timeout || *timeout > std::numeric_limits<uint32_t>::max()) {
                     error = strprintf("mr(): refund timeout '%s' is not valid (must be at least 1)", std::string(timeout_arg.begin(), timeout_arg.end()));
                     return false;
                 }
@@ -3667,6 +3700,7 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
                 spec.algo = signer_key.algo;
                 spec.provider_index = signer_key.provider_index;
                 spec.fixed_pubkey = std::move(signer_key.fixed_pubkey);
+                spec.primary_key_expr = signer_key.rendered;
                 return append_leaf(std::move(spec), strprintf("refund(%lld,%s)", static_cast<long long>(*timeout), signer_key.rendered), leaf_specs, leaf_exprs);
             }
 
@@ -3802,25 +3836,26 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
             return {};
         }
 
-        const MRLeafSpec* claim_leaf{nullptr};
-        const MRLeafSpec* refund_leaf{nullptr};
-        for (const MRLeafSpec& leaf : leaf_specs) {
-            if (leaf.type == MRLeafType::HTLC_SHA256 || leaf.type == MRLeafType::HTLC_TX) {
-                claim_leaf = &leaf;
-            } else if (leaf.type == MRLeafType::REFUND) {
-                refund_leaf = &leaf;
-            }
-        }
-        if (claim_leaf != nullptr && refund_leaf != nullptr) {
-            const bool same_fixed = !claim_leaf->fixed_pubkey.empty() &&
-                                    claim_leaf->fixed_pubkey == refund_leaf->fixed_pubkey;
-            const bool same_provider = claim_leaf->fixed_pubkey.empty() &&
-                                       refund_leaf->fixed_pubkey.empty() &&
-                                       claim_leaf->provider_index >= 0 &&
-                                       claim_leaf->provider_index == refund_leaf->provider_index;
-            if (same_fixed || same_provider) {
-                error = "mr(): claim and refund keys must be distinct";
-                return {};
+        // Every claim leaf against every refund leaf. Each key expression gets
+        // its own provider, so compare fixed keys by value and key expressions
+        // by their text. A pqhd() key written once as pqhd() and once as hex is
+        // only visible after expansion; buildhtlcclaim/buildhtlcrefund check
+        // the expanded keys. Wallet loading skips this (see options).
+        if (options.new_descriptor_rules) {
+            for (const MRLeafSpec& claim : leaf_specs) {
+                if (claim.type != MRLeafType::HTLC_SHA256 && claim.type != MRLeafType::HTLC_SHA256_LEGACY &&
+                    claim.type != MRLeafType::HTLC_TX) {
+                    continue;
+                }
+                for (const MRLeafSpec& refund : leaf_specs) {
+                    if (refund.type != MRLeafType::REFUND) continue;
+                    const bool same_fixed = !claim.fixed_pubkey.empty() && claim.fixed_pubkey == refund.fixed_pubkey;
+                    const bool same_expr = !claim.primary_key_expr.empty() && claim.primary_key_expr == refund.primary_key_expr;
+                    if (same_fixed || same_expr) {
+                        error = "mr(): claim and refund keys must be distinct";
+                        return {};
+                    }
+                }
             }
         }
 
@@ -4252,6 +4287,7 @@ bool CheckChecksum(Span<const char>& sp, bool require_checksum, std::string& err
 bool DescriptorIsRecoveryOnlyHtlc(std::string_view descriptor)
 {
     if (descriptor.find("htlc_tx(") != std::string_view::npos) return true;
+    if (descriptor.find("htlc_sha256_legacy(") != std::string_view::npos) return true;
     return descriptor.find("htlc(") != std::string_view::npos;
 }
 

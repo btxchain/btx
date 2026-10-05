@@ -612,8 +612,21 @@ private:
     KeyMap m_map_keys GUARDED_BY(cs_desc_man);
     CryptedKeyMap m_map_crypted_keys GUARDED_BY(cs_desc_man);
 
+    //! Encrypted PQ descriptor seed material. Plaintext seeds are not kept in these records.
+    struct CryptedPQBlob {
+        uint256 iv;
+        std::vector<unsigned char> ciphertext;
+    };
+    std::optional<CryptedPQBlob> m_crypted_pq_seed GUARDED_BY(cs_desc_man);
+    std::optional<CryptedPQBlob> m_crypted_pq_seed_map GUARDED_BY(cs_desc_man);
+
     //! keeps track of whether Unlock has run a thorough check before
     bool m_decryption_thoroughly_checked = false;
+
+    //! Write PQ seeds currently embedded in the descriptor.
+    //! When encryption_key is null, an encrypted wallet uses its unlocked master key.
+    //! Plaintext WALLETDESCRIPTORPQSEED records are written only for unencrypted wallets.
+    bool WritePQSeeds(WalletBatch& batch, const CKeyingMaterial* encryption_key) EXCLUSIVE_LOCKS_REQUIRED(cs_desc_man);
 
     //! Number of pre-generated keys/scripts (part of the look-ahead process, used to detect payments)
     int64_t m_keypool_size GUARDED_BY(cs_desc_man){DEFAULT_KEYPOOL_SIZE};
@@ -682,6 +695,15 @@ public:
 
     //! Setup descriptors from a PQ master seed (no ECDSA key involved)
     bool SetupPQDescriptorGeneration(WalletBatch& batch, Span<const unsigned char> pq_seed, bool internal);
+
+    //! Persist PQ seeds from the descriptor. Encrypted wallets store only ciphertext.
+    bool PersistPQSeeds(WalletBatch& batch);
+
+    //! Decrypt PQ seed ciphertext loaded from an encrypted wallet and inject it.
+    bool UnlockPQSeeds(const CKeyingMaterial& master_key);
+
+    void LoadCryptedPQSeed(const uint256& iv, std::vector<unsigned char> ciphertext);
+    void LoadCryptedPQSeedMap(const uint256& iv, std::vector<unsigned char> ciphertext);
 
     bool HavePrivateKeys() const override;
     bool HasPrivKey(const CKeyID& keyid) const EXCLUSIVE_LOCKS_REQUIRED(cs_desc_man);

@@ -1180,5 +1180,112 @@ BOOST_AUTO_TEST_CASE(finalizeexternalsign_accepts_valid_software_signature)
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
 
+BOOST_AUTO_TEST_CASE(reorg_observation_cache_keeps_wallet_txs_only)
+{
+    ResetDepositObservationCache();
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    BOOST_CHECK_EQUAL(wallet->LoadWallet(), DBErrors::LOAD_OK);
+    LOCK(wallet->cs_wallet);
+    wallet->m_keypool_size = 1;
+    wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    wallet->SetupDescriptorScriptPubKeyMans();
+
+    const auto dest = wallet->GetNewDestination(OutputType::P2MR, "");
+    BOOST_REQUIRE(dest);
+    const CScript owned_script = GetScriptForDestination(*dest);
+
+    CMutableTransaction parent;
+    parent.nLockTime = 1;
+    parent.vout.emplace_back(COIN, owned_script);
+    const uint256 parent_txid = parent.GetHash().ToUint256();
+    wallet->mapWallet.emplace(std::piecewise_construct,
+                              std::forward_as_tuple(parent_txid),
+                              std::forward_as_tuple(MakeTransactionRef(std::move(parent)), TxStateInactive{}));
+
+    CMutableTransaction foreign;
+    foreign.nLockTime = 2;
+    foreign.vout.emplace_back(COIN, CScript() << OP_TRUE);
+    const uint256 foreign_txid = foreign.GetHash().ToUint256();
+
+    NoteBlockConnected(*wallet, uint256{1}, /*height=*/1, std::vector<uint256>{parent_txid, foreign_txid, uint256{8}});
+    BOOST_CHECK_EQUAL(CountDepositObservations(*wallet), 1U);
+
+    CMutableTransaction pays_wallet;
+    pays_wallet.nLockTime = 3;
+    pays_wallet.vout.emplace_back(2 * COIN, owned_script);
+    const uint256 pay_txid = pays_wallet.GetHash().ToUint256();
+    BOOST_CHECK_EQUAL(wallet->mapWallet.count(pay_txid), 0U);
+
+    CMutableTransaction spends_wallet;
+    spends_wallet.nLockTime = 4;
+    spends_wallet.vin.emplace_back(COutPoint{Txid::FromUint256(parent_txid), 0});
+    spends_wallet.vout.emplace_back(COIN / 2, CScript() << OP_TRUE);
+    const uint256 spend_txid = spends_wallet.GetHash().ToUint256();
+    BOOST_CHECK_EQUAL(wallet->mapWallet.count(spend_txid), 0U);
+
+    NoteBlockConnected(*wallet, uint256{2}, /*height=*/2, std::vector<CTransactionRef>{
+        MakeTransactionRef(std::move(pays_wallet)),
+        MakeTransactionRef(std::move(spends_wallet)),
+        MakeTransactionRef(std::move(foreign)),
+    });
+    BOOST_CHECK_EQUAL(CountDepositObservations(*wallet), 3U);
+
+    NoteBlockDisconnected(*wallet, uint256{9}, /*height=*/9, std::vector<uint256>{foreign_txid, uint256{10}});
+    BOOST_CHECK_EQUAL(CountDepositObservations(*wallet), 3U);
+
+    const unsigned int window = std::max(wallet->GetReorgSafetyDepth(), wallet->GetReorgHoldBlocks());
+    BOOST_REQUIRE_GT(window, 0U);
+    const int expire_height = 2 + static_cast<int>(window);
+    NoteBlockConnected(*wallet, uint256{11}, expire_height, std::vector<uint256>{});
+    BOOST_CHECK_EQUAL(CountDepositObservations(*wallet), 0U);
+
+    ResetDepositObservationCache();
+}
+
+BOOST_AUTO_TEST_CASE(reorg_observation_cache_caps_and_evicts_oldest)
+{
+    ResetDepositObservationCache();
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    LOCK(wallet->cs_wallet);
+
+    const size_t extra = 5;
+    const size_t wallet_tx_count = MAX_REORG_OBSERVATIONS_PER_WALLET + extra;
+    std::vector<uint256> inserted;
+    std::vector<CTransactionRef> block_txs;
+    inserted.reserve(wallet_tx_count);
+    block_txs.reserve(wallet_tx_count + 1);
+    for (size_t i = 0; i < wallet_tx_count; ++i) {
+        CMutableTransaction tx;
+        tx.nLockTime = static_cast<uint32_t>(i + 1);
+        tx.vout.emplace_back(COIN, CScript() << OP_TRUE);
+        const uint256 txid = tx.GetHash().ToUint256();
+        const CTransactionRef ref = MakeTransactionRef(std::move(tx));
+        wallet->mapWallet.emplace(std::piecewise_construct,
+                                  std::forward_as_tuple(txid),
+                                  std::forward_as_tuple(ref, TxStateInactive{}));
+        inserted.push_back(txid);
+        block_txs.push_back(ref);
+    }
+
+    CMutableTransaction unrelated;
+    unrelated.nLockTime = 0;
+    unrelated.vout.emplace_back(COIN, CScript() << OP_RETURN);
+    const uint256 unrelated_txid = unrelated.GetHash().ToUint256();
+    BOOST_CHECK(wallet->mapWallet.count(unrelated_txid) == 0);
+    block_txs.push_back(MakeTransactionRef(std::move(unrelated)));
+
+    NoteBlockDisconnected(*wallet, uint256{42}, /*height=*/20, block_txs);
+
+    BOOST_CHECK_EQUAL(CountDepositObservations(*wallet), MAX_REORG_OBSERVATIONS_PER_WALLET);
+    BOOST_CHECK(!DepositReorgCacheContains(*wallet, unrelated_txid));
+    for (size_t i = 0; i < extra; ++i) {
+        BOOST_CHECK(!DepositReorgCacheContains(*wallet, inserted[i]));
+    }
+    BOOST_CHECK(DepositReorgCacheContains(*wallet, inserted[extra]));
+    BOOST_CHECK(DepositReorgCacheContains(*wallet, inserted.back()));
+
+    ResetDepositObservationCache();
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 } // namespace wallet

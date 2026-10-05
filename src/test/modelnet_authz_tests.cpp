@@ -7,6 +7,7 @@
 #include <modelnet/free_grant.h>
 #include <modelnet/helper.h>
 #include <modelnet/identity.h>
+#include <modelnet/resource_uri.h>
 #include <modelnet/model_nat.h>
 #include <modelnet/records.h>
 #include <modelnet/relay_reserve.h>
@@ -248,6 +249,138 @@ BOOST_AUTO_TEST_CASE(grant_issue_ignores_client_ttl)
     const int64_t expires = gj["expires_at"].getInt<int64_t>();
     BOOST_CHECK_NE(issued, 1);
     BOOST_CHECK_LE(expires - issued, modelnet::FREE_GRANT_LIFETIME_S);
+}
+
+BOOST_AUTO_TEST_CASE(grant_issue_rate_is_not_bypassed_by_replay)
+{
+    const fs::path tmp = m_path_root / "authz-grant-rate";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat);
+    const std::string peer = fs::PathToString(tmp);
+
+    int issued = 0;
+    int limited = 0;
+    for (int i = 0; i < 33; ++i) {
+        modelnet::NativeRequest nreq;
+        nreq.method = "POST";
+        nreq.path = "/btx-model/2/ext/free/grant";
+        nreq.peer_addr = peer;
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("model_id", imported.model_id.Hex());
+        req.pushKV("first_piece", 0);
+        req.pushKV("piece_count", 1);
+        nreq.body = req.write();
+        modelnet::NativeResponse nresp;
+        BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+        if (nresp.status == 200) ++issued;
+        if (nresp.status == 429) ++limited;
+    }
+    BOOST_CHECK_EQUAL(issued, 32);
+    BOOST_CHECK_EQUAL(limited, 1);
+}
+
+BOOST_AUTO_TEST_CASE(encrypted_release_plaintext_not_served_while_not_downloadable)
+{
+    const fs::path tmp = m_path_root / "authz-release-plaintext";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat);
+
+    std::string uri;
+    std::string err;
+    BOOST_REQUIRE(modelnet::EncodeResource(modelnet::ResourceKind::MODEL, imported.model_id, uri, err));
+    unsigned char secret[32];
+    for (int i = 0; i < 32; ++i) secret[i] = static_cast<unsigned char>(i + 9);
+    UniValue params(UniValue::VARR);
+    params.push_back(uri);
+    params.push_back(HexStr(Span{secret, 32}));
+    params.push_back(100000);
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "createmodelrelease");
+    rpc.pushKV("params", params);
+    UniValue created;
+    std::string code;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, created, code, err), err);
+    BOOST_CHECK(created.exists("release_id"));
+
+    rpc = UniValue(UniValue::VOBJ);
+    rpc.pushKV("method", "getmodeleconomyentry");
+    UniValue econ_params(UniValue::VARR);
+    econ_params.push_back(imported.model_id.Hex());
+    rpc.pushKV("params", econ_params);
+    UniValue econ;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, econ, code, err), err);
+    BOOST_REQUIRE(econ.exists("downloadable_now") && econ["downloadable_now"].isBool());
+    BOOST_CHECK(!econ["downloadable_now"].get_bool());
+
+    modelnet::CatalogEntry after;
+    BOOST_REQUIRE(cat.Find(imported.model_id, after));
+    BOOST_CHECK(!after.seeded);
+
+    UniValue seed_params(UniValue::VARR);
+    seed_params.push_back(imported.model_id.Hex());
+    rpc = UniValue(UniValue::VOBJ);
+    rpc.pushKV("method", "seedmodel");
+    rpc.pushKV("params", seed_params);
+    UniValue seeded;
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat, rpc, seeded, code, err));
+    BOOST_CHECK_EQUAL(code, "NOT_DOWNLOADABLE");
+
+    BOOST_REQUIRE(cat.Seed(imported.model_id, true, err));
+    modelnet::NativeRequest nreq;
+    nreq.method = "POST";
+    nreq.path = "/btx-model/2/ext/free/grant";
+    nreq.peer_addr = "h8-plaintext-serve";
+    UniValue greq(UniValue::VOBJ);
+    greq.pushKV("model_id", imported.model_id.Hex());
+    greq.pushKV("first_piece", 0);
+    greq.pushKV("piece_count", 1);
+    nreq.body = greq.write();
+    modelnet::NativeResponse nresp;
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_REQUIRE_EQUAL(nresp.status, 200);
+    UniValue gj;
+    BOOST_REQUIRE(gj.read(nresp.body));
+
+    nreq = {};
+    nreq.method = "GET";
+    nreq.path = "/btx-model/2/transfers/" + imported.artifact_id.Hex() + "/pieces/0/0";
+    nreq.headers = {
+        {"X-BTX-Grant-Payload", gj["payload_hex"].get_str()},
+        {"X-BTX-Grant-Sig", gj["sig_hex"].get_str()},
+        {"X-BTX-Grant-Pubkey", gj["pubkey_hex"].get_str()},
+    };
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_CHECK_EQUAL(nresp.status, 404);
+    BOOST_CHECK(!nresp.binary);
+    BOOST_CHECK(nresp.body.find("NOT_FOUND") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(ext_feed_malformed_fields_do_not_throw)
+{
+    const fs::path tmp = m_path_root / "authz-feed-types";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    auto reject = [&](const std::string& body) {
+        modelnet::NativeRequest req;
+        req.method = "POST";
+        req.path = "/btx-model/2/ext/feed";
+        req.body = body;
+        modelnet::NativeResponse resp;
+        BOOST_CHECK_NO_THROW(modelnet::HandleNativeRequest(cat, req, resp));
+        BOOST_CHECK_EQUAL(resp.status, 400);
+        BOOST_CHECK(resp.body.find("BAD_JSON") != std::string::npos);
+    };
+    reject("{\"mode\":1}");
+    reject("{\"limit\":\"nope\"}");
+    reject("{\"cursor\":false}");
+    reject("{\"limit\":9999999999999999999}");
+
+    modelnet::NativeRequest ok;
+    ok.method = "POST";
+    ok.path = "/btx-model/2/ext/feed";
+    ok.body = "{}";
+    modelnet::NativeResponse resp;
+    BOOST_CHECK_NO_THROW(modelnet::HandleNativeRequest(cat, ok, resp));
+    BOOST_CHECK_EQUAL(resp.status, 200);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
