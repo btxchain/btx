@@ -2020,17 +2020,14 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return queued_getdata || inflight_getdata_requests;
 }
 
-/** Only peers that advertised ARCHIVE/MIRROR. Live GPU attestor 2026-08-16T16:33:
- *  treating every outbound as this drained historical BLOCK to addrman
- *  peers at height 185000 (sent_block≈50KB) while public CPU archive inbound mirror
- *  got the same ~50KB and 1 body / ~46s. `manual_or_outbound` is kept so
- *  call sites stay explicit; it must not grant serve-target status. */
+/** Archive/mirror block drain is for a manual or outbound peer that
+ *  also advertises the service. A VERSION bit on an inbound stranger
+ *  stays on the one-block-per-visit path. */
 [[nodiscard]] inline bool MsghandPeerIsArchiveServeTarget(
     bool manual_or_outbound,
     bool archive_or_mirror_service)
 {
-    (void)manual_or_outbound;
-    return archive_or_mirror_service;
+    return manual_or_outbound && archive_or_mirror_service;
 }
 
 /** Only archive/GPU GETDATA is Preferred / sets the serve-pending latch.

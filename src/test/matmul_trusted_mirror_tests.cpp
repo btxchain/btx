@@ -2163,7 +2163,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::MsghandPeerIsArchiveServeTarget;
     BOOST_CHECK(!MsghandPeerIsArchiveServeTarget(/*manual_or_outbound=*/true, false));
     BOOST_CHECK(MsghandPeerIsArchiveServeTarget(true, /*archive_or_mirror_service=*/true));
-    BOOST_CHECK(MsghandPeerIsArchiveServeTarget(false, /*archive_or_mirror_service=*/true));
+    BOOST_CHECK(!MsghandPeerIsArchiveServeTarget(false, /*archive_or_mirror_service=*/true));
     BOOST_CHECK(!MsghandPeerIsArchiveServeTarget(false, false));
     using node::matmul_trusted::MsghandPreferArchiveLiveGetData;
     BOOST_CHECK(MsghandPreferArchiveLiveGetData(/*live_getdata=*/true, /*is_archive_serve_target=*/true));
