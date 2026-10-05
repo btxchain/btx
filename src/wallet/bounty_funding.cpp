@@ -10,9 +10,12 @@
 #include <core_io.h>
 #include <crypto/sha256.h>
 #include <hash.h>
+#include <interfaces/chain.h>
 #include <key_io.h>
 #include <modelnet/bounty.h>
 #include <modelnet/types.h>
+#include <optional>
+#include <policy/policy.h>
 #include <pqkey.h>
 #include <primitives/transaction.h>
 #include <psbt.h>
@@ -496,6 +499,21 @@ bool IsBountyRefundLeaf(const std::vector<unsigned char>& script, std::vector<un
     return true;
 }
 
+std::optional<int64_t> RefundLeafLocktime(const std::vector<unsigned char>& refund_leaf)
+{
+    const CScript script(refund_leaf.begin(), refund_leaf.end());
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    std::vector<unsigned char> push;
+    if (!script.GetOp(pc, opcode, push)) return std::nullopt;
+    if (opcode >= OP_1 && opcode <= OP_16) return CScript::DecodeOP_N(opcode);
+    try {
+        return CScriptNum(push, /*fRequireMinimal=*/true, /*nMaxNumSize=*/5).GetInt64();
+    } catch (const scriptnum_error&) {
+        return std::nullopt;
+    }
+}
+
 bool KeyBytesFromNormalized(const std::string& n, std::vector<unsigned char>& out, std::string& err)
 {
     if (n.rfind("pk_slh(", 0) == 0) {
@@ -660,8 +678,11 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
         err = "height range; timestamps >=500000000 rejected";
         return false;
     }
-    int64_t fee = plan.fee_atoms;
-    if (fee <= 0) fee = 1'000'000;
+    if (plan.fee_atoms <= 0) {
+        err = "fee_atoms required";
+        return false;
+    }
+    const int64_t fee = plan.fee_atoms;
     if (plan.fee_reserve_atoms > 0 && fee > plan.fee_reserve_atoms) {
         err = "reserve exceeded";
         return false;
@@ -746,7 +767,29 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
         err = "outpoint not found in the UTXO set (unconfirmed, spent, or unknown)";
         return false;
     }
-    const CTxOut prev_txout = it->second.out;
+    const Coin& prev_coin = it->second;
+    if (claim && static_cast<int64_t>(prev_coin.nHeight) > tip) {
+        err = "funding output is unconfirmed; refusing to reveal the preimage";
+        return false;
+    }
+    if (claim) {
+        const std::optional<int64_t> refund_lock = RefundLeafLocktime(refund_leaf);
+        if (!refund_lock.has_value()) {
+            err = "refund leaf locktime";
+            return false;
+        }
+        int64_t tip_mtp{0};
+        const bool time_lock = *refund_lock >= LOCKTIME_THRESHOLD;
+        if (time_lock) {
+            wallet.chain().findBlock(wallet.GetLastBlockHash(), interfaces::FoundBlock().mtpTime(tip_mtp));
+        }
+        const bool refund_final = time_lock ? *refund_lock < tip_mtp : *refund_lock <= tip;
+        if (refund_final) {
+            err = "refund path is already final; refusing to reveal the preimage";
+            return false;
+        }
+    }
+    const CTxOut prev_txout = prev_coin.out;
     if (prev_txout.scriptPubKey != plan.output_script) {
         err = "outpoint scriptPubKey does not match the descriptor";
         return false;
@@ -759,6 +802,15 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
     const CAmount out_value = prev_txout.nValue - fee;
     if (out_value <= 0) {
         err = "fee exceeds the funding amount";
+        return false;
+    }
+    const CTxOut spend_out{out_value, GetScriptForDestination(dest)};
+    if (IsDust(spend_out, wallet.chain().relayDustFee())) {
+        err = "fee leaves a dust output";
+        return false;
+    }
+    if (fee > wallet.m_default_max_tx_fee) {
+        err = "fee exceeds -maxtxfee";
         return false;
     }
 

@@ -3,6 +3,7 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <test/util/setup_common.h>
+#include <pqkey.h>
 #include <modelnet/catalog.h>
 #include <modelnet/crypto.h>
 #include <modelnet/helper.h>
@@ -146,6 +147,17 @@ BOOST_AUTO_TEST_CASE(freeze_model_funding_rejects_timestamp_refund)
     std::string err;
     BOOST_CHECK(!modelnet::FreezeModelFunding(in, out, err));
     BOOST_CHECK(err.find("block height") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(expand_rejects_an_extra_spend_leaf)
+{
+    const wallet::FrozenFundingQuote q = SampleQuote();
+    const std::string extra = "mr(" + q.claimant_key + ",{htlc_sha256(" + q.key_hash_hex + "," + q.claimant_key +
+                              "),refund(" + std::to_string(q.refund_height) + "," + q.refund_key + ")})";
+    CScript script;
+    std::string canonical, err;
+    BOOST_CHECK(!wallet::ExpandHtlcSha256Descriptor(extra, script, canonical, err));
+    BOOST_CHECK(err.find("exactly one") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(quote_mutation_requires_fresh_prepare)
@@ -306,7 +318,9 @@ BOOST_AUTO_TEST_CASE(helper_prepare_sign_submit_claim_refund_implemented)
 {
     const fs::path tmp = m_args.GetDataDirBase() / "helper-funding";
     modelnet::ModelCatalog cat{tmp, 1 << 20};
-    const modelnet::FrozenModelFunding sample = SampleFrozenFunding();
+    modelnet::FrozenModelFunding sample = SampleFrozenFunding();
+    sample.claimant = HexStr(std::vector<unsigned char>(MLDSA44_PUBKEY_SIZE, 0x21));
+    sample.refund_pubkey = HexStr(std::vector<unsigned char>(MLDSA44_PUBKEY_SIZE, 0x31));
     UniValue opts(UniValue::VOBJ);
     opts.pushKV("key_hash", sample.key_hash_hex);
     opts.pushKV("claimant", sample.claimant);
@@ -321,7 +335,6 @@ BOOST_AUTO_TEST_CASE(helper_prepare_sign_submit_claim_refund_implemented)
     UniValue inputs(UniValue::VARR);
     inputs.push_back(in0);
     opts.pushKV("inputs", inputs);
-    opts.pushKV("output_script", "51"); // OP_TRUE; skip descriptor expand
     UniValue req(UniValue::VOBJ);
     UniValue params(UniValue::VARR);
     params.push_back(opts);
