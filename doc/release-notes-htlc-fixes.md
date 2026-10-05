@@ -9,7 +9,7 @@ P2MR HTLC fixes
   Below that height blocks validate exactly as in 0.34.12. 0.34.13 enforced
   the rule from genesis with no activation, so a block that 0.34.12 accepts
   could split 0.34.13 nodes from the rest of the network. Mainnet activates
-  the rule at block 243954, about five days after header tip 239154 on
+  the rule at block 244000, about five days after header tip 239154 on
   2026-10-05. Regtest enforces from height 0; `-regtesthtlcpreimage32height=<n>`
   overrides.
 - Correction to the 0.34.13 notes: the new `htlc_sha256` leaf's `OP_SIZE 32`
