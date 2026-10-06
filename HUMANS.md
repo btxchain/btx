@@ -105,12 +105,12 @@ path. Machine sequences belong in [AGENTS.md](AGENTS.md).
 
 ### 1. Run the current line
 
-The shipping tag is **v0.34.14**. `CLIENT_VERSION_IS_RELEASE=true`. For a
+The shipping tag is **v0.34.15**. `CLIENT_VERSION_IS_RELEASE=true`. For a
 validating node that becomes useful without waiting for a full historical
 sync, the fast-start snapshot is **assumeutxo-219000**.
 
 Install and first-run: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
-Notes: [doc/release-notes/release-notes-0.34.14.md](doc/release-notes/release-notes-0.34.14.md).
+Notes: [doc/release-notes/release-notes-0.34.15.md](doc/release-notes/release-notes-0.34.15.md).
 
 End-to-end host / search / retrieve / run / bounty:
 [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md).

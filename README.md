@@ -37,9 +37,9 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.34.14** (`CLIENT_VERSION_BUILD=14`,
+This working tree is **0.34.15** (`CLIENT_VERSION_BUILD=15`,
 `CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
-**v0.34.14**. Do not recut `v0.34.13`, `v0.34.12`, `v0.34.10`, or `v0.34.9`.
+**v0.34.15**. Do not recut `v0.34.14`, `v0.34.13`, `v0.34.12`, or `v0.34.10`.
 
 ## Start here
 
@@ -72,8 +72,9 @@ fabric stay in the passport's capability vector. Details:
 
 - [Start here](#start-here)
 - [Pay With Compute](#pay-with-compute)
-- [Current release — v0.34.14](#current-release--v03414)
-- [Previous release — v0.34.13](#previous-release--v03413)
+- [Current release — v0.34.15](#current-release--v03415)
+- [Previous release — v0.34.14](#previous-release--v03414)
+- [Earlier release — v0.34.13](#earlier-release--v03413)
 - [Earlier shipping line — v0.34.9](#earlier-shipping-line--v0349)
 - [This tree — 0.34.11](#this-tree--03411)
 - [This tree — 0.34.10](#this-tree--03410)
@@ -106,10 +107,29 @@ fabric stay in the passport's capability vector. Details:
 
 ---
 
-## Current release — v0.34.14
+## Current release — v0.34.15
 
-**Shipping tag is v0.34.14.** `CLIENT_VERSION_IS_RELEASE=true`.
-`btxd -version` prints `v0.34.14`. P2P subversion is `/BTX:0.34.14/`.
+**Shipping tag is v0.34.15.** `CLIENT_VERSION_IS_RELEASE=true`.
+`btxd -version` prints `v0.34.15`. P2P subversion is `/BTX:0.34.15/`.
+Do not recut `v0.34.14` or `v0.34.13`.
+
+Miner work remains the only consensus. The 0.34.14 activation height
+stays mainnet block 244000, and an unset `-reorgpolicy` stays legacy.
+A unique followed tip-child is ExactReplayed without waiting for a fresh
+rcadmit ticket. EXL3 weights can be hosted beside GGUF and are generated
+only through `BTX_EXL3_CLI`. HTLC callers can choose claim confirmation
+depth, and a new lock whose refund time is already past is refused.
+A trusted mirror asks for headers when its signer names a block it has
+not seen, and it does not hold a pre-activation body for an attestation
+that will not be requested.
+
+Notes: [doc/release-notes/release-notes-0.34.15.md](doc/release-notes/release-notes-0.34.15.md).
+Archives: [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA 13, macOS arm64 Metal.
+
+## Previous release — v0.34.14
+
+**Shipping tag was v0.34.14.** `CLIENT_VERSION_IS_RELEASE=true`.
+`btxd -version` printed `v0.34.14`. P2P subversion was `/BTX:0.34.14/`.
 Do not recut `v0.34.13` or `v0.34.12`.
 
 Three consensus checks begin at mainnet block 244000. Below that height,
@@ -136,7 +156,7 @@ of this binary.
 Notes: [doc/release-notes/release-notes-0.34.14.md](doc/release-notes/release-notes-0.34.14.md).
 Archives: [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA 13, macOS arm64 Metal.
 
-## Previous release — v0.34.13
+## Earlier release — v0.34.13
 
 **Shipping tag was v0.34.13.** `CLIENT_VERSION_IS_RELEASE=true`.
 `btxd -version` printed `v0.34.13`. P2P subversion was `/BTX:0.34.13/`.
