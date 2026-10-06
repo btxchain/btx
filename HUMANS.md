@@ -284,10 +284,10 @@ disagreement about evaluation does not change the monetary base.
 | Default | Meaning |
 |---|---|
 | Free-first retrieve | Public models come from willing peers at zero price when supply exists. |
-| Local generate | After acquire, `generatemodel` runs on this host when GGUF+llama.cpp or allowlisted SafeTensors+`BTX_MODEL_GENERATE` match. CUDA smoke is not generate. BTX does not sell prompts. |
+| Local generate | After acquire, `generatemodel` runs on this host when GGUF+llama.cpp, allowlisted SafeTensors+`BTX_MODEL_GENERATE`, or EXL3+`BTX_EXL3_CLI` match. CUDA smoke is not generate. BTX does not sell prompts. |
 | Zero default spend | Automatic BTX spend is zero. Paid actions need a fresh, explicit confirmation. |
 | No central account | No BTX-operated login, email gate, or compulsory identity to retrieve public models. |
-| Fresh storage | Payload storage starts at zero until you allocate a budget. Unsolicited fetch of arbitrary advertised models stays off. |
+| Fresh storage | Payload storage defaults to `-modelstorage=auto` (bounded 10% of the model-store filesystem, 32 GiB–512 GiB, never below the free-space reserve); `-modelstorage=0` stores no payload. FREE catalogs of your `-modelpeer` / `addmodelnode` / PEX contacts are followed into spare quota (`-modelfollowpeers=0` disables). Unsolicited fetch of arbitrary advertised models stays off. |
 
 You can use public models without becoming an investor. Monetary demand
 belongs where people **choose** to commit capital: release campaigns, bounty

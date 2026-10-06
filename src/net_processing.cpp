@@ -15687,7 +15687,9 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                        TrustedMirrorRetainGpuBodyAwaitingAttestation(
                                            node::matmul_trusted::IsTrustedMirror(),
                                            from_gpu_attestor,
-                                           /*has_quorum=*/false)) {
+                                           /*has_quorum=*/false,
+                                           params.IsMatMulTrustedReplayAttestationActive(
+                                               exact_reference_height))) {
                             exact_recompute_required = false;
                             request_attestations_without_gpu = true;
                             persist_gpu_body_awaiting_attestation = true;
@@ -20936,8 +20938,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                                     locator = GetLocator(start);
                                 }
                             }
+                            // The two-minute getheaders window is for duplicate
+                            // probes. A trusted signer naming a block we have
+                            // never seen means that answer is already stale:
+                            // waiting it out leaves the mirror at the previous
+                            // header until the window expires.
                             if (!locator.vHave.empty() &&
-                                MaybeSendGetHeaders(pfrom, locator, *peer)) {
+                                MaybeSendGetHeaders(
+                                    pfrom, locator, *peer,
+                                    /*bypass_send_window=*/true)) {
                                 LogDebug(
                                     BCLog::NET,
                                     "mmattest for unknown block=%s height=%d "

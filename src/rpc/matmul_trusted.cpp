@@ -364,7 +364,8 @@ RPCHelpMan getmatmultrustedstatus()
                 "warning",
                 node::matmul_trusted::TrustedMirrorIsSingleKeyAuthority(
                     node::matmul_trusted::IsTrustedMirror(),
-                    node::matmul_trusted::TrustedSigners().size(),
+                    node::matmul_trusted::TrustedSigners().size() +
+                        node::matmul_trusted::TrustedPqSigners().size(),
                     node::matmul_trusted::Threshold())
                     ? "Single-key trusted mirror: the attestation quorum replaces ExactReplay. A stolen WIF can make this node accept MatMul-invalid blocks. Mainnet requires M=2 unless -allowsinglekeytrustedmirror=1."
                     : (node::matmul_trusted::IsTrustedMirror()
@@ -768,6 +769,8 @@ RPCHelpMan getfinalityinfo()
                 {RPCResult::Type::BOOL, "trusted_mirror", ""},
                 {RPCResult::Type::ARR, "trusted_signer_pubkeys", "Configured compressed secp256k1 pubkeys this node currently trusts",
                     {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "trusted_pq_signer_pubkeys", "Configured ML-DSA-44 public keys this node currently trusts. Counted in N independently of secp pin members.",
+                    {{RPCResult::Type::STR_HEX, "", "ML-DSA-44 pubkey hex"}}},
                 {RPCResult::Type::NUM, "threshold", "Configured pin M. 0 when unconfigured."},
                 {RPCResult::Type::NUM, "unblocked_pin_members", ""},
                 {RPCResult::Type::BOOL, "pin_quorum_reachable", ""},
@@ -1048,7 +1051,8 @@ RPCHelpMan getfinalityinfo()
             }
             if (node::matmul_trusted::TrustedMirrorIsSingleKeyAuthority(
                     node::matmul_trusted::IsTrustedMirror(),
-                    node::matmul_trusted::TrustedSigners().size(),
+                    node::matmul_trusted::TrustedSigners().size() +
+                        node::matmul_trusted::TrustedPqSigners().size(),
                     node::matmul_trusted::Threshold())) {
                 warnings.push_back("single_key_trusted_authority");
             }
@@ -1061,7 +1065,8 @@ RPCHelpMan getfinalityinfo()
                         node::matmul_trusted::IsTrustedMirror(),
                         node::matmul_trusted::HasLocalSigner(),
                         signer_in_pin,
-                        node::matmul_trusted::TrustedSigners().size(),
+                        node::matmul_trusted::TrustedSigners().size() +
+                            node::matmul_trusted::TrustedPqSigners().size(),
                         node::matmul_trusted::Threshold())) {
                     warnings.push_back("collocated_signer_pin");
                 }
@@ -1298,9 +1303,12 @@ void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
     };
     for (const auto& command : commands) {
         table.appendCommand(command.name, &command);
+        // Documented aliases, bound by name so a command inserted above
+        // cannot retarget them.
+        if (command.name == "getmatmulattestations") {
+            table.appendCommand("exportmatmulattestations", &command);
+        } else if (command.name == "submitmatmulattestations") {
+            table.appendCommand("importmatmulattestations", &command);
+        }
     }
-    table.appendCommand(
-        "exportmatmulattestations", &commands[4]);
-    table.appendCommand(
-        "importmatmulattestations", &commands[5]);
 }

@@ -1096,7 +1096,9 @@ void RPCResult::ToSections(Sections& sections, const OuterType outer_type, const
         return;
     }
     case Type::ANY: {
-        NONFATAL_UNREACHABLE(); // Only for testing
+        // Any JSON value; its description says what it holds.
+        sections.PushSection({indent + maybe_key + "..." + maybe_separator, Description("json value")});
+        return;
     }
     case Type::NONE: {
         sections.PushSection({indent + "null" + maybe_separator, Description("json null")});
@@ -1313,8 +1315,8 @@ std::string RPCArg::ToStringObj(const bool oneline) const
     case Type::OBJ:
     case Type::OBJ_NAMED_PARAMS:
     case Type::OBJ_USER_KEYS:
-        // Currently unused, so avoid writing dead code
-        NONFATAL_UNREACHABLE();
+        // NOLINTNEXTLINE(misc-no-recursion)
+        return res + ToString(oneline);
     } // no default case, so the compiler can warn about missing cases
     NONFATAL_UNREACHABLE();
 }

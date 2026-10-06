@@ -1804,10 +1804,18 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         }
         unblocked_pin_members += trusted_pq_signers.size() +
                                  (pq_seeds_pin ? 1 : 0);
-        if (unblocked_pin_members < static_cast<size_t>(trusted_threshold)) {
+        // A local secp WIF seeds the pin in FinalizeConfiguration, as counted
+        // in preliminary_signer_capacity above. Its pubkey is not known before
+        // ECC_Start (it may already be pinned, or blocked), so it only lifts
+        // this refusal: the AttestationStore constructor re-checks the
+        // blocklist against the finalized pin and still refuses start if the
+        // seeded key is blocked. The spare-member warning keeps the known count.
+        const size_t unblocked_pin_capacity{
+            unblocked_pin_members + (secp_seeds_pin ? 1 : 0)};
+        if (unblocked_pin_capacity < static_cast<size_t>(trusted_threshold)) {
             return InitError(strprintf(
                 _("-matmulattestationblocklist leaves %u unblocked pin member(s), below -matmultrustedthreshold=%d. Fail-closed: add another independent signer or remove a blocked key before start."),
-                unblocked_pin_members, trusted_threshold));
+                unblocked_pin_capacity, trusted_threshold));
         }
         if (unblocked_pin_members == static_cast<size_t>(trusted_threshold) &&
             chainparams.GetChainType() == ChainType::MAIN) {
