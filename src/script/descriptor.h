@@ -250,6 +250,12 @@ std::vector<std::unique_ptr<Descriptor>> Parse(const std::string& descriptor, Fl
  */
 bool DescriptorIsRecoveryOnlyHtlc(std::string_view descriptor);
 
+/** True when descriptor contains a refund() whose locktime is a Unix timestamp
+ *  ( >= 500000000 ) that is already <= now. Height locktimes and future
+ *  timestamps return false. error is set when true. Checksum after '#' is ignored.
+ */
+bool HtlcRefundTimestampIsPast(std::string_view descriptor, int64_t now, std::string& error);
+
 struct DescriptorParseOptions {
     /** Allow P2MR-only OP_SUCCESS opcodes inside tapscript descriptors (unsafe). */
     bool allow_p2tr_op_success{false};
@@ -295,5 +301,10 @@ std::unique_ptr<Descriptor> InferDescriptor(const CScript& script, const Signing
 *   This is not part of BIP 380, not guaranteed to be interoperable and should not be exposed to the user.
 */
 uint256 DescriptorID(const Descriptor& desc);
+
+/** The ID 0.34.12/0.34.13 gave an mr() descriptor with 3 or more leaves: the
+ *  hash of its flat "mr(A,B,C)" rendering. nullopt when the rendering has no
+ *  brace tree (the ID did not change). Used only to load such wallets. */
+std::optional<uint256> LegacyFlatMRDescriptorID(const Descriptor& desc);
 
 #endif // BITCOIN_SCRIPT_DESCRIPTOR_H

@@ -3146,6 +3146,10 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
         if (active && DescriptorIsRecoveryOnlyHtlc(descriptor)) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "HASH160 htlc_tx(), legacy htlc() and htlc_sha256_legacy() cannot be an active receive descriptor");
         }
+        std::string error;
+        if (active && HtlcRefundTimestampIsPast(descriptor, GetTime(), error)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, error);
+        }
         const std::string label{LabelFromValue(data["label"])};
 
         // Parse descriptor string
@@ -3154,7 +3158,6 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
             keys.AddMasterKey(mk);
         }
 
-        std::string error;
         auto parsed_descs = Parse(descriptor, keys, error, /* require_checksum = */ true, parse_opts);
         if (parsed_descs.empty()) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, error);

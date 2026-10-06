@@ -46,6 +46,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "getnetworkhashps", 0, "nblocks" },
     { "getnetworkhashps", 1, "height" },
     { "getdifficultyhealth", 0, "window_blocks" },
+    { "preparereorg", 1, "max_disconnect" },
     { "getmatmulchallengeprofile", 0, "target_solve_time_s" },
     { "getmatmulchallengeprofile", 1, "validation_overhead_s" },
     { "getmatmulchallengeprofile", 2, "propagation_overhead_s" },

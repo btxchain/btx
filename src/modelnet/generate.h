@@ -18,15 +18,19 @@ enum class GenerateFormat : uint8_t {
     SafeTensors = 1,
     Gguf = 2,
     Unsafe = 3,
+    /** SafeTensors container with an EXL3 trellis group or an exl3 quant declaration. */
+    Exl3 = 4,
 };
 
 struct HostGenerateProfile {
     bool llama_cli{false};
     bool generate_adapter{false};
     bool cuda_loader{false};
+    bool exl3_cli{false};
     std::string llama_cli_path;
     std::string generate_adapter_path;
     std::string cuda_loader_path;
+    std::string exl3_cli_path;
 };
 
 struct ArtifactGenerateView {
@@ -35,6 +39,8 @@ struct ArtifactGenerateView {
     std::string config_path;
     std::string weights_path;
     bool pickle_or_executable{false};
+    /** quantization_config or config.json said quant_method exl3. Not sufficient alone. */
+    bool exl3_declared{false};
 };
 
 /** Operator env only. Does not probe the network or pip. */

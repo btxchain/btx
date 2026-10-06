@@ -2590,11 +2590,14 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!IsTrustedMirrorMsghandCatchUp(false, true, 0, 112));
     using node::matmul_trusted::TrustedMirrorRetainGpuBodyAwaitingAttestation;
     BOOST_CHECK(TrustedMirrorRetainGpuBodyAwaitingAttestation(
-        true, /*from_gpu_attestor=*/true, /*has_quorum=*/false));
+        true, /*from_gpu_attestor=*/true, /*has_quorum=*/false,
+        /*attestation_active=*/true));
     BOOST_CHECK(!TrustedMirrorRetainGpuBodyAwaitingAttestation(
-        true, true, /*has_quorum=*/true));
+        true, true, /*has_quorum=*/true, /*attestation_active=*/true));
     BOOST_CHECK(!TrustedMirrorRetainGpuBodyAwaitingAttestation(
-        true, /*from_gpu_attestor=*/false, false));
+        true, /*from_gpu_attestor=*/false, false, true));
+    BOOST_CHECK(!TrustedMirrorRetainGpuBodyAwaitingAttestation(
+        true, true, false, /*attestation_active=*/false));
     BOOST_CHECK_EQUAL(
         node::matmul_trusted::GPU_RETAIN_ATTESTATION_RETRY.count(), 2);
 }

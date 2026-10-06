@@ -32,7 +32,10 @@ FileRole RoleFromRelPath(const std::string& rel, bool& skip)
         skip = true;
         return FileRole::WEIGHTS;
     }
-    if (lower.ends_with(".safetensors") || lower.ends_with(".gguf") || lower.ends_with(".btxenc")) return FileRole::WEIGHTS;
+    if (lower.ends_with(".safetensors") || lower.ends_with(".gguf") || lower.ends_with(".exl3") ||
+        lower.ends_with(".btxenc")) {
+        return FileRole::WEIGHTS;
+    }
     if (lower.find("tokenizer") != std::string::npos || lower == "vocab.json" ||
         lower == "merges.txt" || lower == "special_tokens_map.json") {
         return FileRole::TOKENIZER;
@@ -455,6 +458,7 @@ bool ModelCatalog::PersistLocked(std::string& err)
         o.pushKV("seeding_started_at", m.seeding_started_at);
         o.pushKV("incomplete", m.incomplete);
         o.pushKV("format_profile", m.core.format_profile);
+        if (!m.weight_format.empty()) o.pushKV("weight_format", m.weight_format);
         o.pushKV("execution_profile", m.core.execution_profile);
         o.pushKV("config_sha384", m.core.config_sha384.Hex());
         o.pushKV("tokenizer_sha384", m.core.tokenizer_sha384.Hex());
@@ -521,6 +525,10 @@ bool ModelCatalog::LoadLocked(std::string& err)
         if (o.exists("incomplete")) e.incomplete = o["incomplete"].get_bool();
         e.core.version = 2;
         e.core.format_profile = static_cast<uint16_t>(o["format_profile"].getInt<int>());
+        if (o.exists("weight_format") && o["weight_format"].isStr()) {
+            const std::string fmt = o["weight_format"].get_str();
+            if (fmt == "exl3" || fmt == "gguf" || fmt == "safetensors") e.weight_format = fmt;
+        }
         e.core.execution_profile = static_cast<uint16_t>(o["execution_profile"].getInt<int>());
         if (!Digest48::FromHex(o["config_sha384"].get_str(), e.core.config_sha384, err)) return false;
         if (!Digest48::FromHex(o["tokenizer_sha384"].get_str(), e.core.tokenizer_sha384, err)) return false;
@@ -609,7 +617,7 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     bool has_weights = false;
     for (const auto& file : files) {
         const auto lower = ToLower(file.second);
-        if (lower.ends_with(".gguf") || lower.ends_with(".safetensors")) {
+        if (lower.ends_with(".gguf") || lower.ends_with(".safetensors") || lower.ends_with(".exl3")) {
             has_weights = true;
             break;
         }
@@ -636,7 +644,7 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     } cleanup{m_store, staging, commit_staging};
 
     std::vector<CoreFile> cores;
-    bool saw_st = false, saw_gguf = false;
+    bool saw_st = false, saw_gguf = false, saw_exl3 = false;
     QualReport last_qual;
     uint32_t file_index = 0;
     for (const auto& [p, rel] : files) {
@@ -644,11 +652,22 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
         if (!ImportRegularFile(m_store, staging, file_index, p, rel, cf, &last_qual, err)) {
             return false;
         }
-        if (ToLower(rel).ends_with(".safetensors")) saw_st = true;
-        if (ToLower(rel).ends_with(".gguf")) saw_gguf = true;
+        const auto lower_rel = ToLower(rel);
+        if (lower_rel.ends_with(".safetensors") || lower_rel.ends_with(".exl3")) saw_st = true;
+        if (lower_rel.ends_with(".gguf")) saw_gguf = true;
+        if (last_qual.exl3) saw_exl3 = true;
+        const std::string base = ToLower(fs::PathToString(fs::PathFromString(rel).filename()));
+        if ((base == "config.json" || base == "quantization_config.json") &&
+            FileDeclaresExl3(fs::PathToString(p))) {
+            saw_exl3 = true;
+        }
         cores.push_back(cf);
         ++file_index;
     }
+    std::string weight_format;
+    if (saw_exl3 && !saw_gguf) weight_format = "exl3";
+    else if (saw_gguf && !saw_st) weight_format = "gguf";
+    else if (saw_st) weight_format = "safetensors";
 
     ModelCore mc;
     mc.version = 2;
@@ -708,6 +727,7 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     out.core = std::move(mc);
     out.artifact = std::move(ac);
     out.source_path = path;
+    out.weight_format = weight_format;
     out.imported_at = GetTime();
     out.completed_at = out.imported_at;
     out.last_access_at = out.imported_at;

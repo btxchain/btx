@@ -91,13 +91,22 @@ RCEpisodeParams MakeEpochScaledMedium(const RCEpisodeParams& live)
     }
     const auto cpu = matmul::v4::lt::ExactGemmS8S8(L, R, k, k, k);
     std::vector<int32_t> device;
-    bool ok = false;
+    // A call that returns false or throws is not a wrong result. Say which,
+    // but keep the "mismatch" token: the production canary files any reason
+    // containing it as digest_mismatch, and that verdict does not change.
+    const char* call_failure = nullptr;
     try {
-        ok = backend.gemm_s8s8(L, R, k, k, k, device) && device == cpu;
+        if (!backend.gemm_s8s8(L, R, k, k, k, device)) {
+            call_failure = "(call_returned_false)";
+        }
     } catch (...) {
-        ok = false;
+        call_failure = "(call_threw)";
     }
-    if (!ok) {
+    if (call_failure != nullptr) {
+        reason = std::string{"gemm_s8s8_mismatch_vs_cpu_exactgemm"} + call_failure;
+        return false;
+    }
+    if (device != cpu) {
         reason = "gemm_s8s8_mismatch_vs_cpu_exactgemm";
         return false;
     }

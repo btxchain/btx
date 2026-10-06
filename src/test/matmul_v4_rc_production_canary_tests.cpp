@@ -15,6 +15,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -564,6 +565,129 @@ BOOST_AUTO_TEST_CASE(selfqual_gemm_mismatch_gate_preserves_deficit_reason)
     BOOST_CHECK_EQUAL(st.deficit_reason, "gemm_s8s8_mismatch_vs_cpu_exactgemm");
 
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+}
+
+// The 32x32x32 direct GEMM probe has three ways to fail: gemm_s8s8 returns
+// false, it throws, or it returns different bytes. The reason must say which,
+// while admission, the gate and the canary verdict stay exactly as they were.
+BOOST_AUTO_TEST_CASE(selfqual_direct_gemm_probe_reason_names_the_failure)
+{
+    namespace lt = matmul::v4::lt;
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+
+    const lt::ExactGemmBackend::S32S8Fn exact_s32s8 =
+        +[](const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+            uint32_t rows, uint32_t inner, uint32_t cols,
+            std::vector<int32_t>& out) -> bool {
+        out = lt::ExactGemmS32S8(L, R, rows, inner, cols);
+        return true;
+    };
+    lt::ExactGemmBackend declined;
+    declined.gemm_s8s8 = +[](const std::vector<int8_t>&, const std::vector<int8_t>&,
+                             uint32_t, uint32_t, uint32_t,
+                             std::vector<int32_t>&) -> bool { return false; };
+    declined.gemm_s32s8 = exact_s32s8;
+    lt::ExactGemmBackend threw;
+    threw.gemm_s8s8 = +[](const std::vector<int8_t>&, const std::vector<int8_t>&,
+                          uint32_t, uint32_t, uint32_t,
+                          std::vector<int32_t>&) -> bool {
+        throw std::runtime_error("unit test: device call failed");
+    };
+    threw.gemm_s32s8 = exact_s32s8;
+    lt::ExactGemmBackend wrong;
+    wrong.gemm_s8s8 = +[](const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                          uint32_t rows, uint32_t inner, uint32_t cols,
+                          std::vector<int32_t>& out) -> bool {
+        out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+        out.at(0) ^= 1;
+        return true;
+    };
+    wrong.gemm_s32s8 = exact_s32s8;
+    lt::ExactGemmBackend exact;
+    exact.gemm_s8s8 = +[](const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                          uint32_t rows, uint32_t inner, uint32_t cols,
+                          std::vector<int32_t>& out) -> bool {
+        out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+        return true;
+    };
+    exact.gemm_s32s8 = exact_s32s8;
+
+    Consensus::Params consensus{Params().GetConsensus()};
+    consensus.nMatMulRCHeight = 500'000;
+    consensus.nMatMulRCProfile = 1;
+    consensus.fMatMulRCUseToyDims = false;
+    consensus.nMatMulV4Dimension = 4096;
+
+    const std::string legacy{"gemm_s8s8_mismatch_vs_cpu_exactgemm"};
+    struct FailingCase {
+        const char* label;
+        lt::ExactGemmBackend backend;
+    };
+    const FailingCase failing[] = {
+        {"unit_test_s8s8_declined", declined},
+        {"unit_test_s8s8_threw", threw},
+        {"unit_test_s8s8_wrong_bytes", wrong},
+    };
+    std::vector<std::string> reasons;
+    for (const FailingCase& c : failing) {
+        BOOST_TEST_MESSAGE("direct GEMM probe case " << c.label);
+        const auto st{rc::ProbeRCSelfQual(c.backend)};
+        BOOST_CHECK(!st.mining_accelerator_ok);
+        BOOST_CHECK(!st.exact_gemm_backend_ok);
+        BOOST_CHECK(!rc::HasPassedRCSelfQual());
+        BOOST_CHECK_EQUAL(rc::GetLastRCSelfQualDeficitReason(), st.deficit_reason);
+        BOOST_CHECK_EQUAL(st.deficit_reason.rfind(legacy, 0), 0U);
+        BOOST_CHECK(!rc::RCAcceleratorAdmissible(c.backend));
+        const auto gated{matmul_v4::accel::GateExactGemmWithRCSelfQualCached(
+            c.backend, c.label, /*epoch=*/-1)};
+        BOOST_CHECK(gated.gemm_s8s8 == nullptr);
+        BOOST_CHECK(gated.gemm_s32s8 == nullptr);
+
+        rc::ResetRCProductionCanaryForTest();
+        matmul_v4::accel::ResolvedRCExactGemm fake;
+        fake.requested = "cuda";
+        fake.provider = "cpu";
+        fake.reason = st.deficit_reason;
+        fake.policy = "ProductionPreferred";
+        fake.qualification_scope = "none";
+        fake.device_requested = true;
+        fake.self_qualified = false;
+        fake.automatic_policy_eligible = false;
+        matmul_v4::accel::SetLastRCExactGemmResolutionForTest(fake);
+        const auto status{rc::RunRCProductionStartupCanary(
+            "cpu", {}, consensus, consensus.nMatMulRCHeight)};
+        BOOST_CHECK(status.outcome == rc::RCProductionCanaryOutcome::DigestMismatch);
+        BOOST_CHECK_EQUAL(
+            rc::RCProductionCanaryOutcomeName(status.outcome), "digest_mismatch");
+        BOOST_CHECK_EQUAL(status.reason, st.deficit_reason);
+        BOOST_CHECK(!status.attempted);
+        BOOST_CHECK(!status.passed);
+        BOOST_CHECK(!status.activation_ready);
+
+        reasons.push_back(st.deficit_reason);
+    }
+
+    BOOST_REQUIRE_EQUAL(reasons.size(), 3U);
+    BOOST_CHECK_EQUAL(reasons[0], legacy + "(call_returned_false)");
+    BOOST_CHECK_EQUAL(reasons[1], legacy + "(call_threw)");
+    BOOST_CHECK_EQUAL(reasons[2], legacy);
+    BOOST_CHECK_NE(reasons[0], reasons[1]);
+    BOOST_CHECK_NE(reasons[0], reasons[2]);
+    BOOST_CHECK_NE(reasons[1], reasons[2]);
+
+    const auto ok{rc::ProbeRCSelfQual(exact)};
+    BOOST_CHECK(ok.mining_accelerator_ok);
+    BOOST_CHECK(ok.exact_gemm_backend_ok);
+    BOOST_CHECK(ok.deficit_reason.empty());
+    BOOST_CHECK(rc::HasPassedRCSelfQual());
+    BOOST_CHECK(rc::GetLastRCSelfQualDeficitReason().empty());
+    const auto kept{matmul_v4::accel::GateExactGemmWithRCSelfQualCached(
+        exact, "unit_test_s8s8_exact", /*epoch=*/-1)};
+    BOOST_CHECK(kept.gemm_s8s8 == exact.gemm_s8s8);
+
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCSelfQualCacheForTest();
 }
 
 BOOST_AUTO_TEST_CASE(lookup_treats_unknown_class_as_absence_not_duplicate)

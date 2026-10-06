@@ -18,7 +18,7 @@ evm/WBTXBridge.sol           Model A: federation lock-and-mint, HARDENED — EIP
                              replay guard, mint circuit-breaker + guardian veto, redeem refund lifecycle,
                              timelock governance; pluggable IAttestationVerifier (+ ECDSAMultisigVerifier
                              v1, upgradeable to a zk verifier).
-evm/WBTXAtomicSwapHTLC.sol   Model B: trustless HTLC, hashlock = RIPEMD160(SHA256(preimage)) (BTX-compatible),
+evm/WBTXAtomicSwapHTLC.sol   Model B: trustless HTLC, hashlock = SHA256(preimage) (same 32-byte digest as BTX),
                              SafeERC20 + exact-amount custody check, squat-proof swap id (requested amount bound),
                              disjoint claim/refund windows, watchtower-callable refunds, reentrancy-guarded.
 test/WBTX.t.sol              Foundry suite (replay, EIP-712, threshold, circuit-breaker,
@@ -101,8 +101,8 @@ preimage extraction. See the module docstring for an end-to-end example.
   and enforce it with `check_timeout_ordering(...)` before deriving/funding the descriptor.
 - **Swap id + amount integrity (Model B).** `computeId` binds the requested `amount`, and `open()` now
   enforces `received == amount`; fee-on-transfer / underfunded tokens are rejected with `AmountMismatch`.
-- **Hash-domain agreement.** Both chains MUST use `RIPEMD160(SHA256(preimage))`. A mismatch silently
-  breaks atomicity. The contract and SDK enforce this; do not substitute keccak256/sha256-only.
+- **Hash-domain agreement.** Both chains MUST use SHA-256 of one 32-byte preimage. A mismatch
+  silently breaks atomicity. The contract and SDK enforce this; do not substitute keccak256 or HASH160.
 - **Replay/finality binding (Model A).** The mint statement binds `{evmChainId, bridgeId, btxTxid, vout,
   btxBlockHash, btxBlockHeight, attestedHeight, to, amountSat, deadline}`; signatures are chain/bridge/
   deposit/recipient/amount specific, finality-depth enforceable, and time-bounded.

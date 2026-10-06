@@ -44,6 +44,8 @@ struct CatalogEntry {
     int64_t useful_bytes_received{0};
     int64_t seeding_started_at{0};
     bool incomplete{false};
+    /** Search label. Empty on catalogs written before EXL3 detection; not part of the core hash. */
+    std::string weight_format;
 };
 
 class ModelCatalog {

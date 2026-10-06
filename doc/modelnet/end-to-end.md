@@ -97,7 +97,7 @@ Unix `getmodel` is **async**: first reply is `status=running` + `job_id`.
 Poll `getmodeljob` / `ls` until complete. `FREE_ONLY` never becomes paid
 because a timer expired. Paid modes return `APPROVAL_REQUIRED` in this tree.
 
-Watch folder: drop GGUF/SafeTensors into `-modelwatch=` and `watch-scan`. A
+Watch folder: drop GGUF/SafeTensors/EXL3 into `-modelwatch=` and `watch-scan`. A
 dropped `.btx` is opened and starts `FREE_ONLY` retrieve (quota applies to
 the model, not the card bytes). That folder is **not** a publisher follow.
 
@@ -107,6 +107,8 @@ the model, not the card bytes). That folder is **not** a publisher follow.
 export BTX_MODEL_GENERATE="$PWD/contrib/modelnet/generate_local.py"
 # GGUF only, extra:
 # export BTX_LLAMA_CLI=/path/to/llama-cli
+# EXL3 only (not llama.cpp):
+# export BTX_EXL3_CLI=/path/to/exl3-generate
 # optional GPU hold (SafeTensors; not generate):
 # export BTX_MODEL_CUDA_LOADER="$PWD/contrib/modelnet/cuda_safetensors_load"
 

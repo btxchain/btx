@@ -77,6 +77,25 @@ namespace {
 
 constexpr uint64_t MAX_ST_HEADER = 8ULL << 20;
 constexpr uint64_t MAX_TENSORS = 200000;
+bool KeyEndsWith(const std::string& key, const char* suffix)
+{
+    const size_t n = std::strlen(suffix);
+    return key.size() >= n && key.compare(key.size() - n, n, suffix) == 0;
+}
+
+bool HeaderKeysAreExl3(const UniValue& header)
+{
+    bool su = false;
+    bool sv = false;
+    bool trellis = false;
+    for (const auto& key : header.getKeys()) {
+        if (key == "__metadata__") continue;
+        if (KeyEndsWith(key, ".trellis")) trellis = true;
+        if (KeyEndsWith(key, ".suh") || KeyEndsWith(key, ".su")) su = true;
+        if (KeyEndsWith(key, ".svh") || KeyEndsWith(key, ".sv")) sv = true;
+    }
+    return su && sv && trellis;
+}
 
 QualResult QualifySafeTensors(Span<const unsigned char> header_and_maybe_body, uint64_t file_size, QualReport& report)
 {
@@ -161,9 +180,12 @@ QualResult QualifySafeTensors(Span<const unsigned char> header_and_maybe_body, u
         report.result = QualResult::INVALID_MODEL;
         return report.result;
     }
+    report.exl3 = HeaderKeysAreExl3(header);
     report.result = QualResult::STRUCTURE_VERIFIED;
     report.level = AdmissionLevel::STRUCTURE_VERIFIED;
-    report.detail = "safetensors structure ok; not a claim of safety or usefulness";
+    report.detail = report.exl3
+                        ? "exl3 safetensors structure ok; not a claim of safety or usefulness"
+                        : "safetensors structure ok; not a claim of safety or usefulness";
     return report.result;
 }
 
@@ -201,6 +223,42 @@ QualResult QualifyGGUF(Span<const unsigned char> bytes, QualReport& report)
 
 } // namespace
 
+bool JsonDeclaresExl3(const std::string& body)
+{
+    if (body.empty() || body.size() > 64 * 1024) return false;
+    if (body.find('\0') != std::string::npos) return false;
+    UniValue o;
+    if (!o.read(body) || !o.isObject()) return false;
+    const auto method_is = [](const UniValue& q) {
+        return q.isObject() && q.exists("quant_method") && q["quant_method"].isStr() &&
+               q["quant_method"].get_str() == "exl3";
+    };
+    if (method_is(o)) return true;
+    if (o.exists("quantization_config")) return method_is(o["quantization_config"]);
+    return false;
+}
+
+bool WeightFileIsExl3(const std::string& path)
+{
+    QualReport report;
+    if (QualifyFile(path, report) != QualResult::STRUCTURE_VERIFIED) return false;
+    return report.exl3;
+}
+
+bool FileDeclaresExl3(const std::string& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    in.seekg(0, std::ios::end);
+    const std::streamoff sz = in.tellg();
+    if (sz <= 0 || static_cast<uint64_t>(sz) > 64 * 1024) return false;
+    in.seekg(0);
+    std::string body(static_cast<size_t>(sz), '\0');
+    in.read(body.data(), sz);
+    if (static_cast<std::streamoff>(in.gcount()) != sz) return false;
+    return JsonDeclaresExl3(body);
+}
+
 QualResult QualifyBytes(const std::string& filename_hint, Span<const unsigned char> bytes, QualReport& report)
 {
     report = {};
@@ -211,13 +269,14 @@ QualResult QualifyBytes(const std::string& filename_hint, Span<const unsigned ch
         return report.result;
     }
     const auto lower = ToLower(filename_hint);
+    const bool exl3_name = lower.ends_with(".exl3");
     if (bytes.size() >= 8 && std::memcmp(bytes.data(), "BTXENC2", 7) == 0) {
         report.result = QualResult::ENCRYPTED_UNQUALIFIED;
         report.level = AdmissionLevel::ENCRYPTED_UNQUALIFIED;
         report.detail = "ciphertext only; not a plaintext model check";
         return report.result;
     }
-    if (lower.ends_with(".safetensors") || (bytes.size() >= 8 && bytes[0] < 8 && bytes[1] == 0)) {
+    if (exl3_name || lower.ends_with(".safetensors") || (bytes.size() >= 8 && bytes[0] < 8 && bytes[1] == 0)) {
         return QualifySafeTensors(bytes, bytes.size(), report);
     }
     if (lower.ends_with(".gguf") || (bytes.size() >= 4 && std::memcmp(bytes.data(), "GGUF", 4) == 0)) {
@@ -271,11 +330,12 @@ QualResult QualifyFile(const std::string& path, QualReport& report)
         report.detail = "ciphertext only; not a plaintext model check";
         return report.result;
     }
-    if (lower.ends_with(".gguf") || (prefix.size() >= 4 && std::memcmp(magic, "GGUF", 4) == 0)) {
+    const bool exl3_name = lower.ends_with(".exl3");
+    if (!exl3_name && (lower.ends_with(".gguf") || (prefix.size() >= 4 && std::memcmp(magic, "GGUF", 4) == 0))) {
         std::vector<unsigned char> head(prefix.begin(), prefix.end());
         return QualifyGGUF(head, report);
     }
-    if (lower.ends_with(".safetensors") || (prefix.size() >= 2 && magic[1] == 0)) {
+    if (exl3_name || lower.ends_with(".safetensors") || (prefix.size() >= 2 && magic[1] == 0)) {
         if (file_size < 8) {
             report.result = QualResult::INVALID_MODEL;
             report.detail = "truncated safetensors";

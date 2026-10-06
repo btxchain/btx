@@ -968,8 +968,9 @@ struct Params {
      *  claim leaf). Before it the rule is standard policy only, which matches
      *  v0.34.12 consensus. Mainnet activates at block 244000, about five days
      *  after header tip 239154 on 2026-10-05 (4846 blocks at 90 seconds).
-     *  int32 max means "not scheduled" on networks other than mainnet. */
-    int32_t nP2MRHTLCPreimage32Height{std::numeric_limits<int32_t>::max()};
+     *  Every network other than mainnet enforces it from genesis, matching
+     *  0.34.13. Mainnet overrides this to block 244000. */
+    int32_t nP2MRHTLCPreimage32Height{0};
     /** At and after this height, a MatMul header whose only proof check is
      *  Phase-1 (digest <= compact nBits) is not authenticated work. It must
      *  not become m_best_header, must not win most-work header selection, and

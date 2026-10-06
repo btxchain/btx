@@ -15,6 +15,7 @@
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <script/descriptor.h>
+#include <script/pqm.h>
 #include <script/interpreter.h>
 #include <script/signingprovider.h>
 #include <span.h>
@@ -182,6 +183,37 @@ bool ExpandHtlcSha256Descriptor(const std::string& descriptor, CScript& script_p
         return false;
     }
     script_pubkey = scripts[0];
+    int witver{-1};
+    std::vector<unsigned char> program;
+    if (!script_pubkey.IsWitnessProgram(witver, program) || witver != 2 || program.size() != uint256::size()) {
+        err = "descriptor must expand to a P2MR htlc_sha256 output";
+        return false;
+    }
+    P2MRSpendData spend;
+    if (!out.GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spend) || spend.scripts.size() != 2) {
+        err = "descriptor must be exactly one htlc_sha256 leaf and one refund leaf";
+        return false;
+    }
+    int sha256_leaves{0};
+    int refund_leaves{0};
+    for (const auto& kv : spend.scripts) {
+        std::vector<unsigned char> hash, pk;
+        PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+        if (ParseP2MRHTLCSha256Leaf(kv.first, hash, algo, pk)) {
+            ++sha256_leaves;
+            continue;
+        }
+        int64_t refund_lock{0};
+        if (!ParseP2MRRefundLeaf(kv.first, refund_lock, algo, pk)) {
+            err = "descriptor must be exactly one htlc_sha256 leaf and one refund leaf";
+            return false;
+        }
+        ++refund_leaves;
+    }
+    if (sha256_leaves != 1 || refund_leaves != 1) {
+        err = "descriptor must be exactly one htlc_sha256 leaf and one refund leaf";
+        return false;
+    }
     return true;
 }
 
@@ -191,8 +223,8 @@ bool BuildHtlcSha256Descriptor(FrozenFundingQuote& q, std::string& err)
         err = "key_hash, claimant pubkey, and refund_pubkey are required";
         return false;
     }
-    if (q.refund_height == 0) {
-        err = "refund_height must be a positive CLTV height";
+    if (q.refund_height == 0 || q.refund_height >= LOCKTIME_THRESHOLD) {
+        err = "refund_height must be a block height below 500000000 (larger values are a Unix time to CLTV)";
         return false;
     }
     modelnet::Hash32 key_hash;

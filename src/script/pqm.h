@@ -180,6 +180,15 @@ std::vector<unsigned char> BuildP2MRRefundLeaf(
     PQAlgorithm sender_algo,
     Span<const unsigned char> sender_pubkey);
 
+/** True iff script is exactly BuildP2MRRefundLeaf(locktime, algo, pubkey) for some
+ *  locktime >= 1, i.e. <locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP <pubkey> OP_CHECKSIG*.
+ *  Parsed by opcode, not by scanning bytes, so key bytes cannot fake it. */
+bool ParseP2MRRefundLeaf(
+    Span<const unsigned char> script,
+    int64_t& locktime,
+    PQAlgorithm& sender_algo,
+    std::vector<unsigned char>& sender_pubkey);
+
 std::vector<unsigned char> BuildP2MRAtomicSwapLeaf(
     const uint256& ctv_hash,
     PQAlgorithm spender_algo,

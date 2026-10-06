@@ -495,6 +495,14 @@ BOOST_AUTO_TEST_CASE(recovery_proof_verify_cost_consensus_gate_defaults_unset)
     BOOST_CHECK_EQUAL(mainnet->GetConsensus().nMatMulPhase1HeaderNotMostWorkHeight, 244'000);
     BOOST_CHECK_EQUAL(CreateChainParams(args, ChainType::REGTEST)->GetConsensus().nMatMulPhase1HeaderNotMostWorkHeight,
                       std::numeric_limits<int32_t>::max());
+    // Non-mainnet networks enforce the 32-byte preimage rule from genesis.
+    // Mainnet stays at 244000. A zero-initialized params object matches that.
+    Consensus::Params preimage_default;
+    BOOST_CHECK_EQUAL(preimage_default.nP2MRHTLCPreimage32Height, 0);
+    BOOST_CHECK_EQUAL(CreateChainParams(args, ChainType::TESTNET)->GetConsensus().nP2MRHTLCPreimage32Height, 0);
+    BOOST_CHECK_EQUAL(CreateChainParams(args, ChainType::TESTNET4)->GetConsensus().nP2MRHTLCPreimage32Height, 0);
+    BOOST_CHECK_EQUAL(CreateChainParams(args, ChainType::SIGNET)->GetConsensus().nP2MRHTLCPreimage32Height, 0);
+    BOOST_CHECK_EQUAL(CreateChainParams(args, ChainType::REGTEST)->GetConsensus().nP2MRHTLCPreimage32Height, 0);
 }
 
 BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_and_expires_at_v03212_height)

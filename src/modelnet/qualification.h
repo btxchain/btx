@@ -34,7 +34,17 @@ struct QualReport {
     AdmissionLevel level{AdmissionLevel::FAILED};
     uint64_t header_bytes{0};
     uint64_t tensor_count{0};
+    /** True when a structure-verified SafeTensors header is an EXL3 tensor group. */
+    bool exl3{false};
 };
+
+/** True when JSON declares quant_method "exl3" at the top or under quantization_config.
+ *  Bounded caller input. Does not interpret any other field. */
+bool JsonDeclaresExl3(const std::string& body);
+/** Header-only. False unless the file is a structure-verified EXL3 SafeTensors container. */
+bool WeightFileIsExl3(const std::string& path);
+/** At most 64 KiB. False for any other quant_method, a huge file, or unreadable JSON. */
+bool FileDeclaresExl3(const std::string& path);
 
 /**
  * Optional CUDA runtime observation. Defaults match `-modelruntimecheck=0` and
@@ -57,7 +67,9 @@ struct QualRuntimeOpts {
 /** Default ExactReplay / mining device. Qualification never auto-selects this. */
 constexpr int DEFAULT_MINING_GPU_INDEX = 0;
 
-/** Static SafeTensors / GGUF checks. Never executes Pickle, .pt, Python, or CUDA kernels. */
+/** Static SafeTensors / EXL3 / GGUF checks. Never executes Pickle, .pt, Python, or CUDA kernels.
+ *  EXL3 is a SafeTensors container whose header names a trellis group. A .exl3
+ *  name is not accepted unless those bytes qualify. */
 QualResult QualifyBytes(const std::string& filename_hint, Span<const unsigned char> bytes, QualReport& report);
 /** Header-only file qualification. Does not load a multi-gigabyte artifact into RAM. Never CUDA. */
 QualResult QualifyFile(const std::string& path, QualReport& report);

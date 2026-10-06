@@ -271,9 +271,10 @@ CUDA kernel on loaded bytes. It still does not start a network inference
 server (`inference=false`, `remote_inference=false`). `unloadmodel`
 SIGTERMs the loader child only (never production `btxd`).
 `generatemodel` is local one-shot text generate when the replica matches
-this host profile: GGUF plus `BTX_LLAMA_CLI`, or an allowlisted
+this host profile: GGUF plus `BTX_LLAMA_CLI`, an allowlisted
 SafeTensors `architectures[]` plus `BTX_MODEL_GENERATE` (typically
-`contrib/modelnet/generate_local.py`). Unknown architectures, pickle
+`contrib/modelnet/generate_local.py`), or EXL3 plus `BTX_EXL3_CLI`.
+Unknown architectures, pickle
 `.pt`/`.pkl`/`.so`, and missing adapters fail closed
 (`INCOMPATIBLE_HOST_PROFILE` / `NOT_RUN`). CUDA `--hold --smoke` is not
 generate; `getmodelhostprofile` reports `cuda_smoke_is_not_generate`.

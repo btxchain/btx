@@ -365,9 +365,9 @@ contrib/modelnet/btx-model unload NAME        # helper-spawned CUDA loader only
 `unloadmodel` SIGTERMs that child only (never production `btxd`).
 
 `generatemodel` is local one-shot text when the replica matches this host
-profile: GGUF + `BTX_LLAMA_CLI`, or an allowlisted SafeTensors architecture +
-`BTX_MODEL_GENERATE` (typically `contrib/modelnet/generate_local.py`).
-Unknown architectures, pickle, and missing adapters fail closed. CUDA smoke
+profile: GGUF + `BTX_LLAMA_CLI`, an allowlisted SafeTensors architecture +
+`BTX_MODEL_GENERATE` (typically `contrib/modelnet/generate_local.py`), or
+EXL3 + `BTX_EXL3_CLI`. Unknown architectures, pickle, and missing adapters fail closed. CUDA smoke
 is **not** generate. Full contract: [generate.md](generate.md).
 
 BTX does not expose a network inference server. Optional object-store backing

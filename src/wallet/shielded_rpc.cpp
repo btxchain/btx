@@ -16490,6 +16490,7 @@ RPCHelpMan buildhtlcclaim()
         "The claim leaf requires a 32-byte preimage. HASH160 htlc_tx() descriptors remain spendable for recovery of any pre-existing lock and cannot be used to derive a new address.\n"
         "A lock funded before 0.34.13 can be named with htlc_sha256_legacy() in place of htlc_sha256(), so a wallet can import and watch it.\n"
         "By default the claim is refused while the funding output is unconfirmed or once the refund path is already final; see options.\n"
+        "The caller may set min_confirmations, and the default of 1 does not add extra delay.\n"
         "The claim path has no timeout of its own. After the refund locktime, a claim and a refund of the same output can both be valid; the one that pays more is the one that confirms. Claim before the locktime, with margin for a reorg, and stagger the two chains' timeouts.\n"
         "The claim input signals replacement and uses nLockTime 0, so it can be mined immediately and a higher fee can replace it.\n"
         "The wallet must hold the claimer's PQ private key to produce a transaction-bound claim signature.\n",
@@ -16507,6 +16508,7 @@ RPCHelpMan buildhtlcclaim()
                 {
                     {"allow_unconfirmed_funding", RPCArg::Type::BOOL, RPCArg::Default{false}, "Claim a funding output that is only in the mempool. Unsafe: the funder can replace the funding transaction after seeing the preimage."},
                     {"allow_late_claim", RPCArg::Type::BOOL, RPCArg::Default{false}, "Claim even though the refund path is already final. Unsafe: the sender can refund here after seeing the preimage."},
+                    {"min_confirmations", RPCArg::Type::NUM, RPCArg::Default{1}, "Wait until the funding output has at least this many confirmations before revealing the preimage. Refused when waiting that long would reach a height-locked refund. 0 is rejected. Do not combine with allow_unconfirmed_funding."},
                 }},
         },
         RPCResult{
@@ -16540,10 +16542,21 @@ RPCHelpMan buildhtlcclaim()
 
             const UniValue options = request.params[5].isNull() ? UniValue{UniValue::VOBJ} : request.params[5].get_obj();
             RPCTypeCheckObj(options, {{"allow_unconfirmed_funding", UniValueType(UniValue::VBOOL)},
-                                      {"allow_late_claim", UniValueType(UniValue::VBOOL)}},
+                                      {"allow_late_claim", UniValueType(UniValue::VBOOL)},
+                                      {"min_confirmations", UniValueType(UniValue::VNUM)}},
                             /*fAllowNull=*/true, /*fStrict=*/true);
             const bool allow_unconfirmed = options.exists("allow_unconfirmed_funding") && options["allow_unconfirmed_funding"].get_bool();
             const bool allow_late = options.exists("allow_late_claim") && options["allow_late_claim"].get_bool();
+            if (allow_unconfirmed && options.exists("min_confirmations")) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "allow_unconfirmed_funding cannot be combined with min_confirmations");
+            }
+            int64_t min_confirmations{1};
+            if (options.exists("min_confirmations")) {
+                min_confirmations = options["min_confirmations"].getInt<int64_t>();
+                if (min_confirmations < 1) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "min_confirmations must be at least 1");
+                }
+            }
 
             const HtlcDescriptorLeaves leaves = ParseHtlcDescriptorOrThrow(descriptor);
             RequireExactHtlcDescriptor(leaves);
@@ -16580,7 +16593,11 @@ RPCHelpMan buildhtlcclaim()
                 tip_height = pwallet->GetLastBlockHeight();
                 CHECK_NONFATAL(pwallet->chain().findBlock(pwallet->GetLastBlockHash(), interfaces::FoundBlock().mtpTime(tip_mtp)));
             }
-            if (!allow_unconfirmed && static_cast<int64_t>(prev_coin.nHeight) > tip_height) {
+            const int64_t coin_height{static_cast<int64_t>(prev_coin.nHeight)};
+            const int64_t confirmations{coin_height > tip_height ? int64_t{0} : static_cast<int64_t>(tip_height) - coin_height + 1};
+            // Default depth is one confirmation. Keep the historical unconfirmed
+            // refusal ahead of the late-claim check when that is still the rule.
+            if (!allow_unconfirmed && confirmations == 0 && min_confirmations == 1) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER,
                                    "HTLC funding output is unconfirmed: the funder can still replace it after seeing the preimage. "
                                    "Wait for confirmations, or pass {\"allow_unconfirmed_funding\": true}");
@@ -16595,6 +16612,22 @@ RPCHelpMan buildhtlcclaim()
                         "refund here and still use the preimage on the other chain. Pass {\"allow_late_claim\": true} to claim anyway",
                         *refund_locktime, time_lock ? "median time" : "height", time_lock ? tip_mtp : int64_t{tip_height}));
                 }
+                // Height locks only. A time lock is not converted into a block estimate.
+                if (!time_lock && coin_height <= tip_height) {
+                    const int64_t extra{min_confirmations - 1};
+                    const bool depth_reaches_refund{extra >= *refund_locktime || coin_height >= *refund_locktime - extra};
+                    if (depth_reaches_refund) {
+                        const int64_t depth_tip{CheckedAdd(coin_height, extra).value_or(std::numeric_limits<int64_t>::max())};
+                        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                            "Waiting for min_confirmations %d would make the refund path final (requested depth is reached at height %d, refund locktime %d). Lower min_confirmations or raise the refund height",
+                            min_confirmations, depth_tip, *refund_locktime));
+                    }
+                }
+            }
+            if (!allow_unconfirmed && confirmations < min_confirmations) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                    "HTLC funding output has %d confirmations but min_confirmations is %d. The preimage will not be revealed yet",
+                    confirmations, min_confirmations));
             }
 
             CMutableTransaction mtx;

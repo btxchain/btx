@@ -652,7 +652,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-modelpeer=<host:port>", "Model-plane bootstrap contact passed to the owned helper (repeatable). Alias: -modelseednode.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelseednode=<host:port>", "Alias of -modelpeer.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modeluploadlimit=<bps>", "Aggregate model upload cap. auto = governor ceiling. 0 = connection ceilings only.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-modelwatch=<dir>", "Auto-host GGUF/SafeTensors dropped in this directory (watch-folder analog). Empty = off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelwatch=<dir>", "Auto-host GGUF/SafeTensors/EXL3 dropped in this directory (watch-folder analog). Empty = off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
     argsman.AddArg("-resourcegovernor=<mode>", "Local resource governor: auto, performance, balanced, eco, manual, or off to deny all governed work including mining (default: auto). There is no ungoverned mining mode. Never consensus.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-automining", "When mining is enabled, only run it while the governor reports spare accelerator capacity (default: 0). Does not enable mining by itself except together with -gen or an explicit miner.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -663,7 +663,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-governorcooldownseconds=<n>", "Seconds after a mining pause before resume is considered (default: 10).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-discoveryrelayhideaddr=<ip>", "Do not learn, GETADDR, or getnodeaddresses this IP. Repeatable. Use on discovery relays and trusted archives to hide GPU attestor addresses that advertise CONSENSUS without ARCHIVE (serve=0). Relays InitError if -addnode/-connect/-seednode targets a hidden address.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: strict-device on a chain with a finite RC activation height, auto-fallback while RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-matmulrcconfirmcpu", "Diagnostic only. A qualified device digest mismatch is a consensus rejection and is never sent here (default: 0). With 1, an unqualified or incomplete device mismatch may still queue a background portable CPU ExactReplay. Execution failures remain retryable. Does not disable explicit cpu-diagnostic or auto-fallback execution.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulrcconfirmcpu", "Diagnostic only (default: 0). A qualified device digest mismatch stays a retryable local failure and is not a consensus rejection, so a faulty GPU cannot permanently reject an honest block. With 1, that mismatch may queue a background portable CPU ExactReplay off the accelerator lease. Execution failures remain retryable. Does not disable explicit cpu-diagnostic or auto-fallback execution.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowunverifiablematmulconsensus", "Allow consensus-mode catch-up ExactReplay when the local device did not self-qualify (startup canary / production goldens miss). Startup still warns and withholds NODE_MATMUL_CONSENSUS. Mining stays fail-closed. Catch-up still fully ExactReplays every body before ConnectTip, on the available CUDA/Metal GEMM if present, otherwise on CPU. Without this flag a canary miss zeros the GEMM and digest_requests stays 0 (a live consensus-archive node: buffer_pool_uninitialized). Do not treat this as skipping ExactReplay.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted unless -matmultrustedpqpubkey is set. Mainnet trusted mirrors require at least 2 independent signers and M=2 (a 1-of-1 quorum is ExactReplay skip authority). Pass -allowsinglekeytrustedmirror=1 only as an explicit transition override. ML-DSA-44 pin members from -matmultrustedpqpubkey count toward N independently.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpqpubkey=<hex>", "ML-DSA-44 (1312-byte) public key trusted to attest successful Profile-1 ExactReplay. Repeat for additional independent pin members; each must be distinct. Counted in N alongside -matmultrustedpubkey. Does not change consensus ExactReplay: only trusted mirrors skip GPU on pin quorum. Empty keeps the live secp pin.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1804,10 +1804,18 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         }
         unblocked_pin_members += trusted_pq_signers.size() +
                                  (pq_seeds_pin ? 1 : 0);
-        if (unblocked_pin_members < static_cast<size_t>(trusted_threshold)) {
+        // A local secp WIF seeds the pin in FinalizeConfiguration, as counted
+        // in preliminary_signer_capacity above. Its pubkey is not known before
+        // ECC_Start (it may already be pinned, or blocked), so it only lifts
+        // this refusal: the AttestationStore constructor re-checks the
+        // blocklist against the finalized pin and still refuses start if the
+        // seeded key is blocked. The spare-member warning keeps the known count.
+        const size_t unblocked_pin_capacity{
+            unblocked_pin_members + (secp_seeds_pin ? 1 : 0)};
+        if (unblocked_pin_capacity < static_cast<size_t>(trusted_threshold)) {
             return InitError(strprintf(
                 _("-matmulattestationblocklist leaves %u unblocked pin member(s), below -matmultrustedthreshold=%d. Fail-closed: add another independent signer or remove a blocked key before start."),
-                unblocked_pin_members, trusted_threshold));
+                unblocked_pin_capacity, trusted_threshold));
         }
         if (unblocked_pin_members == static_cast<size_t>(trusted_threshold) &&
             chainparams.GetChainType() == ChainType::MAIN) {

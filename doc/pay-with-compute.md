@@ -88,8 +88,13 @@ acceptance is not used. Client wall time is advisory. The issuer's observed
 elapsed time, from
 issue to redeem, is the conservative rate. A challenge redeems once.
 `<netdir>/compute_qualifications.dat` persists that fact across restart.
-A corrupt registry is quarantined and is not reset, so a redeemed challenge
-cannot be replayed by deleting the issuer's memory. `-computequalificationfile`
+The registry is an allowlist: only a challenge this issuer recorded can be
+redeemed. A corrupt registry is moved aside to `.quarantine` and qualification
+stops until restart; the next start begins an empty registry, in which every
+earlier challenge reads `unknown` and cannot be redeemed, so deleting the
+issuer's memory never replays a challenge. When the registry is full, the
+oldest redeemed and expired entries are dropped for the same reason.
+`-computequalificationfile`
 may point at another file. Relative paths stay under the network datadir.
 
 Production solve is off unless `-enablecomputeproductionwork=1`. The toy
@@ -109,11 +114,19 @@ rights. Settlement names one profile id, an integer requirement, `PREPAID` or
 Useful-job receipts are the preferred mode: the work can be useful to someone.
 Direct compute is available for qualification, small admission, and bootstrap,
 but the issuer repeats the same work and that work is not otherwise useful.
+A direct-compute receipt names one challenge id (48 bytes, lower-case hex) and
+credits whole episodes of it, 1 to 16 P1E. One challenge backs one receipt. An
+imported direct-compute receipt whose challenge this node issued must match
+what was redeemed (subject, profile, episode count); one whose challenge was
+issued elsewhere rests on the listed receipt issuer.
 PWC/1 policy is closed: not transferable, not cash-redeemable, no
 cross-agreement credit, and no carryover.
 
 A **ComputeAgreement** freezes those terms for one subject public key. Later
-edits to the offer do not rewrite the agreement. Schedulers and receipt
+edits to the offer do not rewrite the agreement. A node issues agreements only
+under offers its own identity signed; an imported offer can be read and quoted
+but not frozen into an agreement, and an imported offer whose `issuer_pubkey`
+is not its signer is rejected. Schedulers and receipt
 issuers are explicit key lists. A third party can assign work whose
 `beneficiary_ref` names a different model, then sign a receipt that credits
 this agreement only. An unlisted key cannot schedule or receipt. There is no
@@ -142,9 +155,11 @@ ceil(required * elapsed / period_length)
 Elapsed before `period_start_ms` is not standing: due work is zero then, and
 a grant is refused (`COMPUTE_NOT_SATISFIED`) until the period has started.
 After the start, elapsed is clamped to the agreement window. There is no
-hidden grace. A pro-rata grant window is at most 24 hours, begins no earlier
-than the check time, and never runs past the agreement end.
-A prepaid grant may cover the remaining agreement period.
+hidden grace. A pro-rata grant is refused before the period starts even when
+the units are already credited. A pro-rata grant window is at most 24 hours,
+begins no earlier than the check time, and never runs past the agreement end.
+A prepaid grant may cover the remaining agreement period; one issued before
+the agreement starts is valid from `period_start_ms`, not from the check time.
 
 `quotecomputeaccess` estimates full-duty and calendar time from a passport
 rate and a duty cycle in basis points (10000 = 100%). Profile mismatch does
@@ -158,7 +173,8 @@ may sign a **ComputeAccessGrant**. It is subject-bound, resource-bound, and
 time-bound. An external service checks it with `verifycomputeaccessgrant` or
 `contrib/compute/reference-access-gate.py`. Verification requires
 `trusted_issuer_pubkey`, the resource provider's application public key, and
-rejects a grant signed by anyone else. `now_ms` is accepted only on regtest.
+rejects a grant signed by anyone else, and any other record type (an offer,
+agreement or receipt) signed by that key. `now_ms` is accepted only on regtest.
 The grant does not acquire a
 model, does not authorize local execution, and does not move BTX.
 
@@ -171,7 +187,9 @@ across networks. Unknown profiles, toy profiles on mainnet, expired offers,
 expired jobs, unauthorized issuers, credit mismatches, and overflows fail
 closed with stable `COMPUTE_*` codes. Job fields are data. The daemons do not
 call a shell. Public passports omit host identity. Qualification episode
-counts, JSON sizes, outstanding jobs, and registry size are bounded. The
+counts, JSON sizes (one stored record is at most 128 KiB, so any record can be
+fetched or listed through the 256 KiB helper reply), outstanding jobs, and
+registry size are bounded. The
 caller picks a registered profile. The profile, not the request, chooses the
 matrix dimensions.
 

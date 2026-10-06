@@ -21,16 +21,23 @@ RPC catalogue: [rpc.md](rpc.md). Adapter: [../../contrib/modelnet/generate_local
 |---|---|---|
 | **GGUF** | `BTX_LLAMA_CLI` executable, **or** `BTX_MODEL_GENERATE` | llama.cpp, or `generate_local.py` wrapping it |
 | **Allowlisted SafeTensors** | `BTX_MODEL_GENERATE` pointing at a stdin-JSON adapter | typically `generate_local.py` (`transformers`, `local_files_only=True`) |
+| **EXL3** | `BTX_EXL3_CLI` executable | same stdin JSON contract as `BTX_MODEL_GENERATE` (`--dir`, `--max-new-tokens`). Not llama.cpp and not the SafeTensors adapter. |
 
 Allowlisted `config.json` `architectures[]` include Llama, Mistral, Mixtral,
 Qwen2/Qwen3, Gemma, Phi, GPT-2 / GPT-Neo, Bloom, Granite / GraniteMoe /
 **GraniteMoeHybrid**, Mamba, and a short related set. `custom_auto_map` and
 unknown class names fail closed (`unknown_architecture`).
 
-Pickle / `.pt` / `.pkl` / `.so` fail closed (`unsafe_format`). Missing
-weights fail closed (`no_weights`). SafeTensors without an adapter fails
-closed (`no_generate_adapter`). GGUF without llama.cpp or a generate adapter
-fails closed (`no_gguf_backend`).
+Pickle / `.pt` / `.pkl` / `.so` fail closed (`unsafe_format`). A `.exl3`
+name is not accepted unless the bytes are a SafeTensors container; pickle
+magic and a GGUF payload under that name fail closed. Missing weights fail
+closed (`no_weights`). SafeTensors without an adapter fails closed
+(`no_generate_adapter`). GGUF without llama.cpp or a generate adapter fails
+closed (`no_gguf_backend`). EXL3 without `BTX_EXL3_CLI` fails closed
+(`no_exl3_backend`). `auto_map` without a known architecture fails closed
+(`custom_code`). A `quant_method: exl3` declaration is not handed to the
+generic SafeTensors loader. Search label `weight_format=exl3` is not part
+of the model-core hash (`format_profile` stays 1, the SafeTensors container).
 
 CUDA xor-smoke (`BTX_MODEL_CUDA_LOADER --hold --smoke`) is **not** generate.
 `getmodelhostprofile` sets `cuda_smoke_is_not_generate=true`. `generatemodel`
@@ -43,6 +50,7 @@ adapter runs (never production `btxd`).
 |---|---|
 | `BTX_MODEL_GENERATE` | Executable adapter. Helper writes one JSON line on stdin (`prompt`, `max_new_tokens`) and expects one JSON line on stdout (`ok`, `text`, `backend`). |
 | `BTX_LLAMA_CLI` | GGUF path when no generate adapter is set. Helper runs `-m` `-p` `-n` `--no-display-prompt`. |
+| `BTX_EXL3_CLI` | EXL3 only. Helper `exec`s the executable with `--dir <checkout> --max-new-tokens N` and writes the prompt JSON on stdin. No shell and no `trust_remote_code`. |
 | `BTX_MODEL_CUDA_LOADER` | Optional resident smoke on `loadmodel`. Not used as a generate backend. |
 | `BTX_LLAMA_NGL` | Optional offload layers for `generate_local.py` GGUF path (default `99`). |
 | `BTX_GENERATE_TIMEOUT_S` | Optional adapter timeout for `generate_local.py` (default `600`). |
@@ -59,6 +67,8 @@ Replica must be **complete** (`getmodel` `FREE_ONLY` first if it is a share).
 export BTX_MODEL_GENERATE="$PWD/contrib/modelnet/generate_local.py"
 # GGUF also:
 # export BTX_LLAMA_CLI=/path/to/llama-cli
+# EXL3 only (not llama.cpp):
+# export BTX_EXL3_CLI=/path/to/exl3-generate
 
 contrib/modelnet/btx-model host-profile
 contrib/modelnet/btx-model path NAME          # checkout / usable_runtime_root
@@ -77,7 +87,7 @@ Success flags: `generated=true`, `local_generate=true`, `compatible=true`,
 `inference=false`, `remote_inference=false`, `network_server=false`.
 Incompatible unix replies use `error.code=INCOMPATIBLE_HOST_PROFILE` and
 `error.message` is the reason (`unknown_architecture`, `no_generate_adapter`,
-`unsafe_format`, …).
+`no_exl3_backend`, `custom_code`, `unsafe_format`, …).
 
 Prompt max **64 KiB**. `max_new_tokens` is clamped **1..512** (default 32).
 

@@ -524,6 +524,29 @@ bool QualificationRegistry::RememberIssued(const UniValue& challenge, std::strin
                     }),
                     m_entries.end());
     if (m_entries.size() >= kQualRegistryMax) {
+        // Redeemed entries were never dropped, so the registry filled for good
+        // after kQualRegistryMax redemptions. Dropping the oldest redeemed and
+        // expired entries is safe: Verify() refuses an id it does not know, so a
+        // dropped challenge reads "unknown" and can never be redeemed again.
+        std::vector<size_t> evictable;
+        for (size_t i = 0; i < m_entries.size(); ++i) {
+            if (m_entries[i].redeemed && m_entries[i].expires_at_ms < now) evictable.push_back(i);
+        }
+        std::sort(evictable.begin(), evictable.end(), [&](size_t l, size_t r) {
+            return m_entries[l].redeemed_at_ms < m_entries[r].redeemed_at_ms;
+        });
+        const size_t need = m_entries.size() - kQualRegistryMax + 1;
+        if (evictable.size() >= need) {
+            std::set<size_t> drop(evictable.begin(), evictable.begin() + need);
+            std::vector<Entry> kept;
+            kept.reserve(m_entries.size() - need);
+            for (size_t i = 0; i < m_entries.size(); ++i) {
+                if (!drop.count(i)) kept.push_back(std::move(m_entries[i]));
+            }
+            m_entries = std::move(kept);
+        }
+    }
+    if (m_entries.size() >= kQualRegistryMax) {
         err_code = "COMPUTE_CHALLENGE_INVALID";
         err = "registry full";
         return false;

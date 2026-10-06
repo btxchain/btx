@@ -633,7 +633,7 @@ static RPCHelpMan setmodelalias()
 
 static RPCHelpMan scanmodelwatch()
 {
-    return ProxyOrLocal("scanmodelwatch", "Scan -modelwatch directory: host new GGUF/SafeTensors and FREE_ONLY retrieve dropped .btx share cards. Idempotent.\n",
+    return ProxyOrLocal("scanmodelwatch", "Scan -modelwatch directory: host new GGUF/SafeTensors/EXL3 and FREE_ONLY retrieve dropped .btx share cards. Idempotent.\n",
                         {{"dir", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "override watch dir for this scan"}});
 }
 
@@ -803,7 +803,7 @@ static RPCHelpMan unpinmodel()
 
 static RPCHelpMan qualifymodel()
 {
-    return ProxyOrLocal("qualifymodel", "Static SafeTensors/GGUF check. Never a usefulness or safety claim.\n",
+    return ProxyOrLocal("qualifymodel", "Static SafeTensors/EXL3/GGUF check. A .exl3 name is accepted only when the bytes are SafeTensors. Never a usefulness or safety claim.\n",
                         {{"path", RPCArg::Type::STR, RPCArg::Optional::NO, "filesystem path"}});
 }
 
@@ -918,7 +918,7 @@ static RPCHelpMan unloadmodel()
 static RPCHelpMan generatemodel()
 {
     return ProxyOrLocal("generatemodel",
-                        "Local one-shot generate for a complete replica whose format/architecture matches this host profile (GGUF+llama.cpp or allowlisted SafeTensors+BTX_MODEL_GENERATE). Fail-closed if incompatible or the adapter is missing. Never a network inference server. automatic_spend_atoms=0.\n",
+                        "Local one-shot generate for a complete replica whose format/architecture matches this host profile (GGUF+llama.cpp, allowlisted SafeTensors+BTX_MODEL_GENERATE, or EXL3+BTX_EXL3_CLI). EXL3 is not sent to llama.cpp. Fail-closed if incompatible or the adapter is missing. Never a network inference server. automatic_spend_atoms=0.\n",
                         {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "btx:// URI or digest48"},
                          {"opts", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "generate options", {
                             {"prompt", RPCArg::Type::STR, RPCArg::Optional::NO, "prompt text"},
@@ -1362,6 +1362,10 @@ static RPCHelpMan exportmodelrecovery()
             }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
+            // The object also carries output_script, address, claimant, refund_pubkey and
+            // notes. Without the leading elision every successful call failed the result
+            // type check ("Internal bug detected").
+            {RPCResult::Type::ELISION, "", "public recovery fields (output_script, address, keys, notes)"},
             {RPCResult::Type::NUM, "schema_version", "2"},
             {RPCResult::Type::STR, "descriptor", "Public descriptor"},
             {RPCResult::Type::STR, "key_hash", "SHA-256 hashlock"},

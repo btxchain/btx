@@ -62,8 +62,8 @@ Conceptual background: [search.md](search.md), [directory.md](directory.md),
 | `exportmodelpath` | Verified local checkout (`path` / `usable_runtime_root`); hardlink from `source_path` when SHA-384 still matches; never starts a network server |
 | `loadmodel` | Materialize checkout; inventory SafeTensors; optional `BTX_MODEL_CUDA_LOADER --hold --smoke`. `inference=false` |
 | `unloadmodel` | SIGTERM helper-spawned CUDA loader only |
-| `generatemodel` | Local one-shot generate if host profile matches. Fail-closed unknown arch / pickle / missing adapter |
-| `getmodelhostprofile` | What this helper can generate (`BTX_MODEL_GENERATE` / `BTX_LLAMA_CLI`). CUDA smoke is not generate |
+| `generatemodel` | Local one-shot generate if host profile matches (GGUF, allowlisted SafeTensors, or EXL3). Fail-closed unknown arch / pickle / missing adapter |
+| `getmodelhostprofile` | What this helper can generate (`BTX_MODEL_GENERATE` / `BTX_LLAMA_CLI` / `BTX_EXL3_CLI`). CUDA smoke is not generate |
 | `seedmodel` / `unseedmodel` | Manual serve / stop. Default `seed=auto` already seeds after import/`getmodel`. Prefer `unhostmodel` to unpin+unseed together |
 | `qualifymodel` | Structure only |
 | `getmodel` | `FREE_ONLY` retrieve (URI, digest48, **alias**, or `copy_text`); demand-seeds when `seed=auto` |

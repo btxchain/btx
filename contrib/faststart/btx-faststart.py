@@ -495,6 +495,11 @@ def snapshot_from_args(args: argparse.Namespace) -> tuple[str, str | None, str, 
             local_snapshot = manifest_path.parent / snapshot_filename
             if local_snapshot.exists():
                 snapshot_url = local_snapshot.resolve().as_uri()
+    # A verified local copy of a release manifest (btx-agent-setup cache) has
+    # no sibling snapshot. The caller names the release asset base instead.
+    asset_base = getattr(args, "snapshot_asset_base", None)
+    if not snapshot_url and snapshot_filename and asset_base:
+        snapshot_url = asset_base.rstrip("/") + "/" + snapshot_filename
 
     if not snapshot_url:
         raise KeyError(
@@ -695,6 +700,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--btx-cli", default=os.environ.get("BTX_FASTSTART_CLI", "btx-cli"), help="Path to btx-cli")
     parser.add_argument("--snapshot-url", default=os.environ.get("BTX_FASTSTART_SNAPSHOT_URL"), help="Direct snapshot URL")
     parser.add_argument("--snapshot-sha256", default=os.environ.get("BTX_FASTSTART_SNAPSHOT_SHA256"), help="Expected snapshot SHA256")
+    parser.add_argument(
+        "--snapshot-asset-base",
+        default=os.environ.get("BTX_FASTSTART_SNAPSHOT_ASSET_BASE"),
+        help="Release asset base used to locate a manifest's snapshot filename when the manifest has no url and is a local copy",
+    )
     parser.add_argument(
         "--snapshot-manifest",
         default=os.environ.get("BTX_FASTSTART_SNAPSHOT_MANIFEST"),

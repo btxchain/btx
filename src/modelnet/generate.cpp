@@ -3,11 +3,13 @@
 // file COPYING or https://opensource.org/license/mit/.
 //
 // Local generate matching: SafeTensors architectures this tree will attempt
-// with BTX_MODEL_GENERATE, and GGUF with BTX_LLAMA_CLI. No remote endpoints,
-// no trust_remote_code, no spend. execution_profile is identity, not a PASS.
+// with BTX_MODEL_GENERATE, GGUF with BTX_LLAMA_CLI, and EXL3 with
+// BTX_EXL3_CLI. No remote endpoints, no trust_remote_code, no spend.
+// execution_profile is identity, not a PASS. EXL3 is never sent to llama.cpp.
 
 #include <modelnet/generate.h>
 
+#include <modelnet/qualification.h>
 #include <util/fs.h>
 
 #include <algorithm>
@@ -109,19 +111,40 @@ void WalkCheckout(const fs::path& dir, int depth, ArtifactGenerateView& v)
             return;
         }
         if (EndsWithLower(name, ".gguf") && v.format != GenerateFormat::Unsafe) {
+            const bool replace = v.weights_path.empty() || v.format != GenerateFormat::Gguf;
             v.format = GenerateFormat::Gguf;
-            if (v.weights_path.empty()) v.weights_path = fs::PathToString(p);
+            if (replace) v.weights_path = fs::PathToString(p);
         }
-        if (EndsWithLower(name, ".safetensors") && v.format != GenerateFormat::Unsafe &&
+        const bool weight_container = EndsWithLower(name, ".safetensors") || EndsWithLower(name, ".exl3");
+        if (weight_container && v.format != GenerateFormat::Unsafe &&
             v.format != GenerateFormat::Gguf) {
-            v.format = GenerateFormat::SafeTensors;
-            if (v.weights_path.empty()) v.weights_path = fs::PathToString(p);
+            const std::string path = fs::PathToString(p);
+            QualReport report;
+            const QualResult qr = QualifyFile(path, report);
+            if (EndsWithLower(name, ".exl3") && qr == QualResult::REJECTED_UNSAFE_FORMAT) {
+                v.pickle_or_executable = true;
+                v.format = GenerateFormat::Unsafe;
+                return;
+            }
+            if (qr == QualResult::STRUCTURE_VERIFIED && report.exl3) {
+                v.format = GenerateFormat::Exl3;
+            } else if (v.format != GenerateFormat::Exl3 && EndsWithLower(name, ".safetensors")) {
+                v.format = GenerateFormat::SafeTensors;
+            }
+            if (v.weights_path.empty() && v.format != GenerateFormat::None) {
+                v.weights_path = path;
+            }
         }
-        if (LowerCopy(name) == "config.json" && v.architecture.empty()) {
+        const std::string lower_name = LowerCopy(name);
+        if (lower_name == "quantization_config.json" && FileDeclaresExl3(fs::PathToString(p))) {
+            v.exl3_declared = true;
+        }
+        if (lower_name == "config.json" && v.architecture.empty()) {
             std::ifstream in(p);
             std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (body.size() <= 64 * 1024 && JsonDeclaresExl3(body)) v.exl3_declared = true;
             UniValue cfg;
-            if (cfg.read(body) && cfg.isObject()) {
+            if (body.size() <= 64 * 1024 && cfg.read(body) && cfg.isObject()) {
                 v.architecture = FirstArchitecture(cfg);
                 v.config_path = fs::PathToString(p);
             }
@@ -165,6 +188,13 @@ HostGenerateProfile ProbeHostGenerateProfile()
             p.cuda_loader_path = e;
         }
     }
+    if (const char* e = std::getenv("BTX_EXL3_CLI")) {
+        const fs::path path = fs::PathFromString(e);
+        if (IsExecutableFile(path)) {
+            p.exl3_cli = true;
+            p.exl3_cli_path = e;
+        }
+    }
     return p;
 }
 
@@ -175,24 +205,28 @@ UniValue HostGenerateProfileJson(const HostGenerateProfile& p)
     o.pushKV("llama_cli", p.llama_cli);
     o.pushKV("generate_adapter", p.generate_adapter);
     o.pushKV("cuda_loader", p.cuda_loader);
+    o.pushKV("exl3_cli", p.exl3_cli);
     UniValue formats(UniValue::VARR);
     if (p.generate_adapter) formats.push_back("safetensors");
     if (p.llama_cli || p.generate_adapter) formats.push_back("gguf");
+    if (p.exl3_cli) formats.push_back("exl3");
     o.pushKV("formats", formats);
     UniValue backends(UniValue::VARR);
     if (p.generate_adapter) backends.push_back("BTX_MODEL_GENERATE");
     if (p.llama_cli) backends.push_back("llama.cpp");
+    if (p.exl3_cli) backends.push_back("BTX_EXL3_CLI");
     if (p.cuda_loader) backends.push_back("safetensors-cuda-smoke");
     o.pushKV("backends", backends);
-    o.pushKV("can_generate", p.generate_adapter || p.llama_cli);
+    o.pushKV("can_generate", p.generate_adapter || p.llama_cli || p.exl3_cli);
     o.pushKV("cuda_smoke_is_not_generate", true);
     o.pushKV("trust_remote_code", false);
     o.pushKV("remote_inference", false);
     o.pushKV("automatic_spend_atoms", 0);
     o.pushKV("execution_profile_unqualified", 0);
     o.pushKV("note",
-             "Local generate only for host-compatible GGUF (BTX_LLAMA_CLI) or "
-             "allowlisted SafeTensors architectures (BTX_MODEL_GENERATE). "
+             "Local generate only for host-compatible GGUF (BTX_LLAMA_CLI), "
+             "allowlisted SafeTensors architectures (BTX_MODEL_GENERATE), or "
+             "EXL3 (BTX_EXL3_CLI). EXL3 is not sent to llama.cpp. "
              "CUDA --hold --smoke is not a generate. Granite hybrid is not GGUF.");
     return o;
 }
@@ -206,9 +240,21 @@ ArtifactGenerateView InspectCheckoutForGenerate(const fs::path& checkout)
         if (EndsWithLower(name, ".gguf")) {
             v.format = GenerateFormat::Gguf;
             v.weights_path = fs::PathToString(checkout);
-        } else if (EndsWithLower(name, ".safetensors")) {
-            v.format = GenerateFormat::SafeTensors;
+        } else if (EndsWithLower(name, ".exl3") || EndsWithLower(name, ".safetensors")) {
             v.weights_path = fs::PathToString(checkout);
+            QualReport report;
+            const QualResult qr = QualifyFile(v.weights_path, report);
+            if (EndsWithLower(name, ".exl3") && qr == QualResult::REJECTED_UNSAFE_FORMAT) {
+                v.format = GenerateFormat::Unsafe;
+                v.pickle_or_executable = true;
+            } else if (qr == QualResult::STRUCTURE_VERIFIED && report.exl3) {
+                v.format = GenerateFormat::Exl3;
+            } else if (EndsWithLower(name, ".safetensors")) {
+                v.format = GenerateFormat::SafeTensors;
+            } else {
+                v.format = GenerateFormat::None;
+                v.weights_path.clear();
+            }
         } else if (EndsWithLower(name, ".pt") || EndsWithLower(name, ".pkl")) {
             v.format = GenerateFormat::Unsafe;
             v.pickle_or_executable = true;
@@ -216,6 +262,9 @@ ArtifactGenerateView InspectCheckoutForGenerate(const fs::path& checkout)
         return v;
     }
     WalkCheckout(checkout, 0, v);
+    if (v.exl3_declared && v.format == GenerateFormat::SafeTensors) {
+        v.format = GenerateFormat::Exl3;
+    }
     return v;
 }
 
@@ -236,6 +285,17 @@ bool ArtifactCompatibleWithHost(const ArtifactGenerateView& art,
         reason = "no_gguf_backend";
         return false;
     }
+    if (art.format == GenerateFormat::Exl3) {
+        if (art.architecture == "custom_auto_map") {
+            reason = "custom_code";
+            return false;
+        }
+        if (!host.exl3_cli) {
+            reason = "no_exl3_backend";
+            return false;
+        }
+        return true;
+    }
     if (!SafeTensorsArchitectureIsHostCompatible(art.architecture)) {
         reason = art.architecture.empty() ? "missing_architecture" : "unknown_architecture";
         return false;
@@ -249,7 +309,9 @@ bool ArtifactCompatibleWithHost(const ArtifactGenerateView& art,
 
 std::string PickGenerateAdapter(const ArtifactGenerateView& art, const HostGenerateProfile& host)
 {
-    (void)art;
+    if (art.format == GenerateFormat::Exl3) {
+        return host.exl3_cli ? host.exl3_cli_path : std::string{};
+    }
     if (host.generate_adapter) return host.generate_adapter_path;
     return {};
 }

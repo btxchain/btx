@@ -60,6 +60,10 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
             f"-matmultrustedpubkey={self.signer_pub}",
             "-matmultrustedthreshold=1",
             "-matmultrustedwaitms=30000",
+            # Not a model-network test. Without this, every node's btx-modeld
+            # helper binds the default PQ1 port and the losers print the bind
+            # failure to stderr, which the exact stderr checks below compare.
+            "-modelnet=0",
         ]
         archive = common + [
             "-matmulvalidation=consensus",
@@ -114,7 +118,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
             ],
             expected_msg=(
                 INLINE_SIGNER_WARNING
-                + "\nError: Only an independent MatMul consensus validator can load an attestation signing key; remove -matmulattestationsignerkeyfile/-matmulattestationsignerkey from non-consensus nodes."
+                + "\nError: Only an independent MatMul consensus validator can load an attestation signing key; remove -matmulattestationsignerkeyfile/-matmulattestationsignerkey/-matmulattestationsignerpqfile from non-consensus nodes."
             ),
         )
         # Cache-and-forward GETMMATTEST is the archive role. Serving must not
@@ -159,6 +163,11 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         # Mainnet warns for this topology but does not impose a 2-of-2 floor.
         self.start_node(2, self.mirror_args)
 
+        # The archive may dial in, but a trusted mirror only fetches bodies
+        # from a manual peer or from its own outbound archive connection.
+        # An inbound-only link drops those bodies, so the restarted mirror
+        # never leaves genesis.
+        self.connect_nodes(2, 0)
         self.connect_nodes(0, 2)
 
         archive_services = archive.getnetworkinfo()["localservicesnames"]
@@ -311,6 +320,11 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         old_height = mirror_b.getblockcount()
         self.stop_node(2, expected_stderr=TRUST_WARNING.format(1))
         self.start_node(2, self.insufficient_quorum_args)
+        # Headers from an inbound archive are dropped once the tip is past
+        # the weak-subjectivity bootstrap. The mirror has to dial out to
+        # learn the next header; the unsatisfiable quorum still leaves the
+        # body unconnected.
+        self.connect_nodes(2, 0)
         self.connect_nodes(0, 2)
         self.generate(archive, 1, sync_fun=self.no_op)
         self.wait_until(
@@ -332,6 +346,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         self.log.info("Restoring a satisfiable quorum retries the same block")
         self.stop_node(2, expected_stderr=TRUST_WARNING.format(2))
         self.start_node(2, self.mirror_args)
+        self.connect_nodes(2, 0)
         self.connect_nodes(0, 2)
         self.wait_until(
             lambda: mirror_b.getbestblockhash()

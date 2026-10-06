@@ -19,6 +19,7 @@
 #include <univalue.h>
 #include <util/check.h>
 #include <util/strencodings.h>
+#include <util/time.h>
 
 #include <cstdint>
 #include <memory>
@@ -477,6 +478,10 @@ static RPCHelpMan deriveaddresses()
             if (DescriptorIsRecoveryOnlyHtlc(desc_str)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "HASH160 htlc_tx(), legacy htlc() and htlc_sha256_legacy() are recovery-only and cannot derive a new address");
             }
+            std::string error;
+            if (HtlcRefundTimestampIsPast(desc_str, GetTime(), error)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, error);
+            }
             bool require_checksum = true;
             DescriptorParseOptions parse_opts;
 
@@ -505,7 +510,6 @@ static RPCHelpMan deriveaddresses()
             }
 
             FlatSigningProvider key_provider;
-            std::string error;
             auto descs = Parse(desc_str, key_provider, error, require_checksum, parse_opts);
             if (descs.empty()) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, error);

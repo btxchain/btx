@@ -6,6 +6,7 @@
 
 #include <modelnet/crypto.h>
 #include <random.h>
+#include <script/script.h>
 #include <tinyformat.h>
 #include <util/strencodings.h>
 
@@ -328,8 +329,8 @@ bool FreezeModelFunding(const FrozenModelFunding& in, FrozenModelFunding& out, s
         err = "claimant and refund_pubkey required";
         return false;
     }
-    if (in.refund_height == 0) {
-        err = "refund_height";
+    if (in.refund_height == 0 || in.refund_height >= LOCKTIME_THRESHOLD) {
+        err = "refund_height must be a block height below 500000000 (larger values are a Unix time to CLTV)";
         return false;
     }
     out.key_hash_hex = ToLower(in.key_hash_hex);

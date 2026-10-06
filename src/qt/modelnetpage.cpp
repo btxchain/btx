@@ -1091,9 +1091,9 @@ QString WatchFolderHintText(const QString& watch_dir)
         configured = QString::fromStdString(gArgs.GetArg("-modelwatch", ""));
     }
     if (configured.isEmpty()) {
-        return QObject::tr("Watch folder: not set. Start btxd with -modelwatch=<dir> to auto-host new GGUF or SafeTensors files (scanmodelwatch). This is a filesystem drop folder, not a publisher watch. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.");
+        return QObject::tr("Watch folder: not set. Start btxd with -modelwatch=<dir> to auto-host new GGUF, SafeTensors, or EXL3 files (scanmodelwatch). This is a filesystem drop folder, not a publisher watch. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.");
     }
-    return QObject::tr("Watch folder: %1 (-modelwatch). New GGUF/SafeTensors are auto-hosted; scanmodelwatch is idempotent. This is a filesystem drop folder, not a publisher watch. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.")
+    return QObject::tr("Watch folder: %1 (-modelwatch). New GGUF/SafeTensors/EXL3 are auto-hosted; scanmodelwatch is idempotent. This is a filesystem drop folder, not a publisher watch. This page does not auto-getmodel or spend. automatic_spend_atoms stays 0.")
         .arg(configured);
 }
 
@@ -1117,6 +1117,7 @@ ModelNetPage::ModelNetPage(QWidget *parent) :
     ui->formatCombo->addItem(tr("Any"), QString());
     ui->formatCombo->addItem(QStringLiteral("GGUF"), QStringLiteral("GGUF"));
     ui->formatCombo->addItem(tr("SafeTensors"), QStringLiteral("SafeTensors"));
+    ui->formatCombo->addItem(QStringLiteral("EXL3"), QStringLiteral("exl3"));
 
     connect(ui->refreshButton, &QPushButton::clicked, this, &ModelNetPage::refresh);
     connect(ui->copyUriButton, &QPushButton::clicked, this, &ModelNetPage::copyOpenedUri);
@@ -2216,7 +2217,7 @@ void ModelNetPage::onImportModel()
         path = ui->importPathEdit->text().trimmed();
     }
     if (path.isEmpty()) {
-        ui->publishOutput->setPlainText(tr("Choose a local GGUF or SafeTensors path to import."));
+        ui->publishOutput->setPlainText(tr("Choose a local GGUF, SafeTensors, or EXL3 path to import."));
         return;
     }
     const bool looks_share =

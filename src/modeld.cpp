@@ -59,7 +59,7 @@ static void Usage()
         "  -modelpreserverare     fetch qualified under-replicated models into spare quota\n"
         "  -modelfollowpeers=0|1  follow FREE catalogs of -modelpeer / PEX contacts (default 1)\n"
         "  -modeluploadlimit=<bps>  aggregate serving cap (0 = connection ceilings only)\n"
-        "  -modelwatch=<dir>    auto-host GGUF/SafeTensors dropped in this directory\n"
+        "  -modelwatch=<dir>    auto-host GGUF/SafeTensors/EXL3 dropped in this directory\n"
         "  -modelallowencrypted   allow preserve-rare of unqualified ciphertext\n"
         "  -modelbind=<ip:port>  PQ1 TLS listen address (empty = unix RPC only)\n"
         "  -modelrpcsocket=<path> unix JSON-RPC socket\n"

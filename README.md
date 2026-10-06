@@ -37,9 +37,9 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.34.14** (`CLIENT_VERSION_BUILD=14`,
+This working tree is **0.34.15** (`CLIENT_VERSION_BUILD=15`,
 `CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
-**v0.34.14**. Do not recut `v0.34.13`, `v0.34.12`, `v0.34.10`, or `v0.34.9`.
+**v0.34.15**. Do not recut `v0.34.14`, `v0.34.13`, `v0.34.12`, or `v0.34.10`.
 
 ## Start here
 
@@ -72,8 +72,9 @@ fabric stay in the passport's capability vector. Details:
 
 - [Start here](#start-here)
 - [Pay With Compute](#pay-with-compute)
-- [Current release — v0.34.14](#current-release--v03414)
-- [Previous release — v0.34.13](#previous-release--v03413)
+- [Current release — v0.34.15](#current-release--v03415)
+- [Previous release — v0.34.14](#previous-release--v03414)
+- [Earlier release — v0.34.13](#earlier-release--v03413)
 - [Earlier shipping line — v0.34.9](#earlier-shipping-line--v0349)
 - [This tree — 0.34.11](#this-tree--03411)
 - [This tree — 0.34.10](#this-tree--03410)
@@ -106,10 +107,29 @@ fabric stay in the passport's capability vector. Details:
 
 ---
 
-## Current release — v0.34.14
+## Current release — v0.34.15
 
-**Shipping tag is v0.34.14.** `CLIENT_VERSION_IS_RELEASE=true`.
-`btxd -version` prints `v0.34.14`. P2P subversion is `/BTX:0.34.14/`.
+**Shipping tag is v0.34.15.** `CLIENT_VERSION_IS_RELEASE=true`.
+`btxd -version` prints `v0.34.15`. P2P subversion is `/BTX:0.34.15/`.
+Do not recut `v0.34.14` or `v0.34.13`.
+
+Miner work remains the only consensus. The 0.34.14 activation height
+stays mainnet block 244000, and an unset `-reorgpolicy` stays legacy.
+A unique followed tip-child is ExactReplayed without waiting for a fresh
+rcadmit ticket. EXL3 weights can be hosted beside GGUF and are generated
+only through `BTX_EXL3_CLI`. HTLC callers can choose claim confirmation
+depth, and a new lock whose refund time is already past is refused.
+A trusted mirror asks for headers when its signer names a block it has
+not seen, and it does not hold a pre-activation body for an attestation
+that will not be requested.
+
+Notes: [doc/release-notes/release-notes-0.34.15.md](doc/release-notes/release-notes-0.34.15.md).
+Archives: [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA 13, macOS arm64 Metal.
+
+## Previous release — v0.34.14
+
+**Shipping tag was v0.34.14.** `CLIENT_VERSION_IS_RELEASE=true`.
+`btxd -version` printed `v0.34.14`. P2P subversion was `/BTX:0.34.14/`.
 Do not recut `v0.34.13` or `v0.34.12`.
 
 Three consensus checks begin at mainnet block 244000. Below that height,
@@ -136,7 +156,7 @@ of this binary.
 Notes: [doc/release-notes/release-notes-0.34.14.md](doc/release-notes/release-notes-0.34.14.md).
 Archives: [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA 13, macOS arm64 Metal.
 
-## Previous release — v0.34.13
+## Earlier release — v0.34.13
 
 **Shipping tag was v0.34.13.** `CLIENT_VERSION_IS_RELEASE=true`.
 `btxd -version` printed `v0.34.13`. P2P subversion was `/BTX:0.34.13/`.
@@ -233,7 +253,7 @@ and are not recut.
 | **Host / share / retrieve** | `hostmodel` demand-seeds. `.btx` magnet analog and `btx://` retrieve `FREE_ONLY`. Unix `getmodel` is async (`status=running` + `job_id`). |
 | **Checkout** | `exportmodelpath` rebuilds files under `checkout/<artifact>/` and hardlinks from `source_path` when SHA-384 still matches. |
 | **Load** | `loadmodel` inventories SafeTensors. Optional `BTX_MODEL_CUDA_LOADER --hold --smoke` keeps tensors resident. `unloadmodel` SIGTERMs that child only. Never a network inference server. |
-| **Generate** | `generatemodel` / `getmodelhostprofile`: GGUF + `BTX_LLAMA_CLI`, or allowlisted SafeTensors + `BTX_MODEL_GENERATE`. Unknown arch / pickle fail closed. CUDA smoke is **not** generate. |
+| **Generate** | `generatemodel` / `getmodelhostprofile`: GGUF + `BTX_LLAMA_CLI`, allowlisted SafeTensors + `BTX_MODEL_GENERATE`, or EXL3 + `BTX_EXL3_CLI`. EXL3 is not sent to llama.cpp. Unknown arch / pickle / custom code fail closed. CUDA smoke is **not** generate. |
 | **Assumeutxo persist** | Pre-attestation historical hole bodies can persist without GETMMATTEST ([#163](https://github.com/btxchain/btx/issues/163)). |
 
 Operator walkthrough: [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md),
@@ -288,7 +308,7 @@ Bounties: [doc/bounties.md](doc/bounties.md). Nothing below spends BTX.
 # 0. Helper (packaged btxd starts btx-modeld; or standalone:)
 contrib/modelnet/btx-model doctor
 
-# 1. Host a GGUF or SafeTensors path (pin + signed search card + demand-seed)
+# 1. Host a GGUF, SafeTensors, or EXL3 path (pin + signed search card + demand-seed)
 contrib/modelnet/btx-model host /path/to/model.gguf
 contrib/modelnet/btx-model ls
 contrib/modelnet/btx-model show NAME
@@ -301,6 +321,7 @@ contrib/modelnet/btx-model share NAME
 contrib/modelnet/btx-model search
 contrib/modelnet/btx-model search "coding agent" --scope NETWORK
 contrib/modelnet/btx-model search --format gguf --fits --sort size_asc
+contrib/modelnet/btx-model search --format exl3
 btx-cli searchbounties
 
 # 4. Retrieve free (unix getmodel is async: status=running + job_id)
@@ -309,9 +330,10 @@ contrib/modelnet/btx-model get ./model.btx
 contrib/modelnet/btx-model get 'btx://…'
 contrib/modelnet/btx-model ls --incomplete
 
-# 5. Run locally when this host matches (GGUF+llama.cpp or allowlisted ST+adapter)
+# 5. Run locally when this host matches (GGUF+llama.cpp, allowlisted ST+adapter, or EXL3+BTX_EXL3_CLI)
 export BTX_MODEL_GENERATE="$PWD/contrib/modelnet/generate_local.py"
 # export BTX_LLAMA_CLI=/path/to/llama-cli          # GGUF
+# export BTX_EXL3_CLI=/path/to/exl3-generate       # EXL3 only; same stdin JSON contract, not llama.cpp
 # export BTX_MODEL_CUDA_LOADER=...cuda_safetensors_load  # optional hold; not generate
 contrib/modelnet/btx-model path NAME
 contrib/modelnet/btx-model host-profile
@@ -349,8 +371,8 @@ artifact, run it **locally** and help preserve it.
 Inference is **local after acquire**. After pieces are complete,
 `exportmodelpath` rebuilds a checkout; `loadmodel` may keep SafeTensors
 resident on a GPU; `generatemodel` produces tokens only when the replica
-matches this host profile (GGUF+llama.cpp or allowlisted SafeTensors+
-`BTX_MODEL_GENERATE`). Unknown architectures and pickle fail closed.
+matches this host profile (GGUF+llama.cpp, allowlisted SafeTensors+
+`BTX_MODEL_GENERATE`, or EXL3+`BTX_EXL3_CLI`). Unknown architectures, pickle, and custom code fail closed. EXL3 is not sent to llama.cpp.
 CUDA `--hold --smoke` is not generate. BTX is not a remote inference
 marketplace. Ordinary free retrieval does not require buying BTX.
 Research markets use the money; they do not redefine consensus. A popular

@@ -2318,13 +2318,16 @@ inline constexpr int CATCHUP_CAPABLE_BODY_SILENCE_DEMOTE{3};
 
 /** GPU-attestor body without local quorum: persist, GETMMATTEST, do not
  *  HEADER_ONLY-drop (live re-getdata then 102s timeout). Connect only
- *  once attestation covers the hash. */
+ *  once attestation covers the hash. Before the attestation epoch there
+ *  is nothing to wait for, so a pre-activation body is not retained. */
 [[nodiscard]] inline bool TrustedMirrorRetainGpuBodyAwaitingAttestation(
     bool trusted_mirror,
     bool from_gpu_attestor,
-    bool has_quorum)
+    bool has_quorum,
+    bool attestation_active)
 {
-    return trusted_mirror && from_gpu_attestor && !has_quorum;
+    return trusted_mirror && from_gpu_attestor && !has_quorum &&
+           attestation_active;
 }
 
 /** Retry delay after retaining a GPU body that still lacks quorum.

@@ -3831,6 +3831,15 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
             const auto backup_arg = Expr(expr);
             if (!parse_backup_tree(parse_backup_tree, backup_arg, providers, leaf_specs, leaf_exprs)) return {};
         }
+        // 0.34.12 and 0.34.13 rendered an mr() with 3 or more leaves as the flat
+        // "mr(A,B,C)", which is not valid syntax, and stored it in wallets in that
+        // form. Accept it when loading a stored descriptor only. The script tree
+        // depends only on the leaf order, so A,B,C is the same tree as A,{B,C}.
+        while (!options.new_descriptor_rules && expr.size() && expr[0] == ',') {
+            Const(",", expr);
+            const auto extra_arg = Expr(expr);
+            if (!parse_backup_tree(parse_backup_tree, extra_arg, providers, leaf_specs, leaf_exprs)) return {};
+        }
         if (expr.size()) {
             error = strprintf("mr(): unexpected trailing token '%c'", expr[0]);
             return {};
@@ -4291,6 +4300,44 @@ bool DescriptorIsRecoveryOnlyHtlc(std::string_view descriptor)
     return descriptor.find("htlc(") != std::string_view::npos;
 }
 
+bool HtlcRefundTimestampIsPast(std::string_view descriptor, int64_t now, std::string& error)
+{
+    error.clear();
+    const auto hash = descriptor.find('#');
+    if (hash != std::string_view::npos) {
+        descriptor = descriptor.substr(0, hash);
+    }
+
+    constexpr std::string_view token{"refund("};
+    size_t search = 0;
+    while (search < descriptor.size()) {
+        const auto found = descriptor.find(token, search);
+        if (found == std::string_view::npos) break;
+        search = found + token.size();
+        if (found > 0) {
+            const char prev = descriptor[found - 1];
+            const bool ident = (prev >= '0' && prev <= '9') ||
+                               (prev >= 'A' && prev <= 'Z') ||
+                               (prev >= 'a' && prev <= 'z') ||
+                               prev == '_';
+            if (ident) continue;
+        }
+        size_t end = search;
+        while (end < descriptor.size() && descriptor[end] != ',' && descriptor[end] != ')') {
+            ++end;
+        }
+        const auto timeout = ToIntegral<int64_t>(descriptor.substr(search, end - search));
+        // LOCKTIME_THRESHOLD (script.h): Unix time, not a block height.
+        if (timeout.has_value() &&
+            *timeout >= static_cast<int64_t>(LOCKTIME_THRESHOLD) &&
+            *timeout <= now) {
+            error = "HTLC refund timestamp is already in the past and cannot be used for a new address or an active descriptor";
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<std::unique_ptr<Descriptor>> Parse(const std::string& descriptor, FlatSigningProvider& out, std::string& error, bool require_checksum)
 {
     return Parse(descriptor, out, error, require_checksum, DescriptorParseOptions{});
@@ -4327,6 +4374,22 @@ std::string AddChecksum(const std::string& str) { return str + "#" + DescriptorC
 std::unique_ptr<Descriptor> InferDescriptor(const CScript& script, const SigningProvider& provider)
 {
     return InferScript(script, ParseScriptContext::TOP, provider);
+}
+
+std::optional<uint256> LegacyFlatMRDescriptorID(const Descriptor& desc)
+{
+    std::string desc_str = desc.ToString(/*compat_format=*/true);
+    const auto hash_pos = desc_str.rfind('#');
+    if (hash_pos != std::string::npos) desc_str.resize(hash_pos);
+    if (desc_str.rfind("mr(", 0) != 0 || desc_str.find('{') == std::string::npos) return std::nullopt;
+    std::string flat;
+    for (char c : desc_str) {
+        if (c != '{' && c != '}') flat += c;
+    }
+    const std::string legacy = AddChecksum(flat);
+    uint256 id;
+    CSHA256().Write((const unsigned char*)legacy.data(), legacy.size()).Finalize(id.begin());
+    return id;
 }
 
 uint256 DescriptorID(const Descriptor& desc)

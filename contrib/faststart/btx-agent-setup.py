@@ -787,6 +787,7 @@ def main(argv: list[str]) -> int:
             f"--btxd={btxd_path}",
             f"--btx-cli={btx_cli_path}",
             f"--snapshot-manifest={snapshot_manifest_path}",
+            f"--snapshot-asset-base={asset_base}",
         ]
         if args.matmul_service_challenge_file:
             faststart_cmd.append(

@@ -13,6 +13,7 @@
 #include <modelnet/transfer.h>
 #include <primitives/transaction.h>
 #include <script/descriptor.h>
+#include <script/pqm.h>
 #include <script/script.h>
 #include <script/signingprovider.h>
 #include <tinyformat.h>
@@ -147,6 +148,37 @@ bool ExpandHtlcDescriptor(const std::string& descriptor, CScript& script_pubkey,
         return false;
     }
     script_pubkey = scripts[0];
+    int witver{-1};
+    std::vector<unsigned char> program;
+    if (!script_pubkey.IsWitnessProgram(witver, program) || witver != 2 || program.size() != uint256::size()) {
+        err = "descriptor must expand to a P2MR htlc_sha256 output";
+        return false;
+    }
+    P2MRSpendData spend;
+    if (!out.GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spend) || spend.scripts.size() != 2) {
+        err = "descriptor must be exactly one htlc_sha256 leaf and one refund leaf";
+        return false;
+    }
+    int sha256_leaves{0};
+    int refund_leaves{0};
+    for (const auto& kv : spend.scripts) {
+        std::vector<unsigned char> hash, pk;
+        PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+        if (ParseP2MRHTLCSha256Leaf(kv.first, hash, algo, pk)) {
+            ++sha256_leaves;
+            continue;
+        }
+        int64_t refund_lock{0};
+        if (!ParseP2MRRefundLeaf(kv.first, refund_lock, algo, pk)) {
+            err = "descriptor must be exactly one htlc_sha256 leaf and one refund leaf";
+            return false;
+        }
+        ++refund_leaves;
+    }
+    if (sha256_leaves != 1 || refund_leaves != 1) {
+        err = "descriptor must be exactly one htlc_sha256 leaf and one refund leaf";
+        return false;
+    }
     return true;
 }
 
@@ -421,20 +453,15 @@ bool Prepare(ModelCatalog& cat, const UniValue& params, UniValue& result, std::s
     CScript script;
     std::string canonical;
     std::string expand_err;
+    // Pay the descriptor FreezeModelFunding just fingerprinted. A caller-supplied
+    // descriptor that does not expand to that same lock is not a substitute.
     const std::string with_checksum = AddChecksum(frozen.descriptor);
-    if (ExpandHtlcDescriptor(with_checksum, script, canonical, expand_err)) {
-        frozen.descriptor = canonical;
-    } else if (!in.descriptor.empty() && ExpandHtlcDescriptor(in.descriptor, script, canonical, expand_err)) {
-        frozen.descriptor = canonical;
-    } else if (const UniValue* v = FindField(options, {"output_script"})) {
-        if (!v->isStr() || !IsHex(v->get_str())) {
-            err_code = "INVALID_PARAMETER";
-            err = "output_script must be hex";
-            return false;
-        }
-        const auto raw = ParseHex(v->get_str());
-        script = CScript(raw.begin(), raw.end());
+    if (!ExpandHtlcDescriptor(with_checksum, script, canonical, expand_err)) {
+        err_code = "INVALID_PARAMETER";
+        err = expand_err.empty() ? "HTLC descriptor did not expand to one htlc_sha256 leaf and one refund leaf" : expand_err;
+        return false;
     }
+    frozen.descriptor = canonical;
 
     std::string unsigned_hex;
     uint256 unsigned_txid;
@@ -707,6 +734,11 @@ bool BuildClaimOrRefund(const std::string& method, const UniValue& params, UniVa
     }
     if (in.descriptor.empty() && !in.key_hash_hex.empty() && !in.claimant.empty() &&
         !in.refund_pubkey.empty() && in.refund_height > 0) {
+        if (in.refund_height >= LOCKTIME_THRESHOLD) {
+            err_code = "INVALID_PARAMETER";
+            err = "refund_height must be a block height below 500000000 (larger values are a Unix time to CLTV)";
+            return false;
+        }
         in.descriptor = HtlcSha256Descriptor(ToLower(in.key_hash_hex), in.claimant, in.refund_height, in.refund_pubkey);
     }
     if (in.descriptor.empty()) {
