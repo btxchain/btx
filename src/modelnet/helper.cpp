@@ -414,8 +414,8 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         err = "BTX_MODEL_GENERATE is not a regular file";
         return false;
     }
-    int inpipe[2];
-    int outpipe[2];
+    int inpipe[2] = {-1, -1};
+    int outpipe[2] = {-1, -1};
     if (pipe(inpipe) != 0) {
         err = "generate pipe";
         return false;
@@ -436,12 +436,21 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         return false;
     }
     if (pid == 0) {
+#if defined(__linux__)
+        // Match the helper's parent-death watch so a crashed parent cannot
+        // leave the adapter running. A new process group lets the timeout
+        // signal the adapter and any process it forks.
+        if (prctl(PR_SET_PDEATHSIG, SIGTERM) == 0 && getppid() == 1) _exit(127);
+#endif
+        // Failure leaves the child in the helper's group; the timeout then
+        // signals the pid directly. Do not skip exec.
+        setpgid(0, 0);
         close(inpipe[1]);
         close(outpipe[0]);
         if (dup2(inpipe[0], STDIN_FILENO) < 0) _exit(127);
         if (dup2(outpipe[1], STDOUT_FILENO) < 0) _exit(127);
-        close(inpipe[0]);
-        close(outpipe[1]);
+        if (inpipe[0] != STDIN_FILENO) close(inpipe[0]);
+        if (outpipe[1] != STDOUT_FILENO) close(outpipe[1]);
         const std::string exe_s = fs::PathToString(exe);
         const std::string dir_s = fs::PathToString(dir);
         const std::string n_s = std::to_string(max_new_tokens);
@@ -449,33 +458,180 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         execv(exe_s.c_str(), const_cast<char* const*>(argv));
         _exit(127);
     }
+    setpgid(pid, pid);
     close(inpipe[0]);
+    inpipe[0] = -1;
     close(outpipe[1]);
+    outpipe[1] = -1;
+
+    // Same bound as the documented BTX_GENERATE_TIMEOUT_S default. The 1 MiB
+    // stdout cap still stops a child that streams without a newline.
+    constexpr int kTimeoutMs = 600 * 1000;
+    constexpr size_t kStdoutCap = 1024 * 1024;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kTimeoutMs);
+    auto remaining_ms = [&]() -> int {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return 0;
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        if (ms > kTimeoutMs) ms = kTimeoutMs;
+        return static_cast<int>(ms);
+    };
+    auto set_nonblock = [](int fd) {
+        const int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    };
+    set_nonblock(inpipe[1]);
+    set_nonblock(outpipe[0]);
+    auto close_parent = [&]() {
+        if (inpipe[1] >= 0) {
+            close(inpipe[1]);
+            inpipe[1] = -1;
+        }
+        if (outpipe[0] >= 0) {
+            close(outpipe[0]);
+            outpipe[0] = -1;
+        }
+    };
+    auto signal_child = [&](int sig) {
+        if (kill(-pid, sig) != 0) kill(pid, sig);
+    };
+    auto reap = [&](bool kill_now) -> int {
+        int st = 0;
+        bool got = false;
+        auto try_reap = [&]() -> bool {
+            for (;;) {
+                const pid_t w = waitpid(pid, &st, WNOHANG);
+                if (w == pid) {
+                    got = true;
+                    return true;
+                }
+                if (w < 0) {
+                    if (errno == EINTR) continue;
+                    return got;
+                }
+                return false;
+            }
+        };
+        if (!kill_now) {
+            while (!try_reap()) {
+                if (remaining_ms() <= 0) break;
+                usleep(50 * 1000);
+            }
+        }
+        if (got) return st;
+        signal_child(SIGTERM);
+        const auto grace = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        while (!try_reap() && std::chrono::steady_clock::now() < grace) {
+            usleep(20 * 1000);
+        }
+        if (!got) {
+            signal_child(SIGKILL);
+            for (;;) {
+                const pid_t w = waitpid(pid, &st, 0);
+                if (w == pid) {
+                    got = true;
+                    break;
+                }
+                if (w < 0 && errno != EINTR) break;
+            }
+        }
+        if (!got) st = 0x7f;
+        return st;
+    };
+
     UniValue req(UniValue::VOBJ);
     req.pushKV("prompt", prompt);
     req.pushKV("max_new_tokens", max_new_tokens);
     const std::string body = req.write() + "\n";
-    if (::write(inpipe[1], body.data(), body.size()) < 0) {
-        close(inpipe[1]);
-        close(outpipe[0]);
-        kill(pid, SIGTERM);
-        int st = 0;
-        waitpid(pid, &st, 0);
-        err = "generate stdin";
-        return false;
+    size_t off = 0;
+    while (off < body.size()) {
+        const int left = remaining_ms();
+        if (left <= 0) {
+            close_parent();
+            reap(true);
+            err = "generate adapter timeout";
+            return false;
+        }
+        pollfd pfd{};
+        pfd.fd = inpipe[1];
+        pfd.events = POLLOUT;
+        const int pr = poll(&pfd, 1, left);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            close_parent();
+            reap(true);
+            err = "generate stdin";
+            return false;
+        }
+        if (pr == 0) {
+            close_parent();
+            reap(true);
+            err = "generate adapter timeout";
+            return false;
+        }
+        const size_t chunk = std::min<size_t>(body.size() - off, 4096);
+        const ssize_t n = ::write(inpipe[1], body.data() + off, chunk);
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            close_parent();
+            reap(true);
+            err = "generate stdin";
+            return false;
+        }
+        if (n == 0) continue;
+        off += static_cast<size_t>(n);
     }
     close(inpipe[1]);
+    inpipe[1] = -1;
+
     std::string stdout_s;
     char buf[4096];
-    ssize_t nread = 0;
-    while ((nread = ::read(outpipe[0], buf, sizeof(buf))) > 0) {
+    bool timed_out = false;
+    bool hit_cap = false;
+    while (stdout_s.find('\n') == std::string::npos) {
+        const int left = remaining_ms();
+        if (left <= 0) {
+            timed_out = true;
+            break;
+        }
+        pollfd pfd{};
+        pfd.fd = outpipe[0];
+        pfd.events = POLLIN;
+        const int pr = poll(&pfd, 1, left);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) {
+            timed_out = true;
+            break;
+        }
+        const ssize_t nread = ::read(outpipe[0], buf, sizeof(buf));
+        if (nread < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            break;
+        }
+        if (nread == 0) break;
         stdout_s.append(buf, static_cast<size_t>(nread));
         if (stdout_s.find('\n') != std::string::npos) break;
-        if (stdout_s.size() > 1024 * 1024) break;
+        if (stdout_s.size() > kStdoutCap) {
+            hit_cap = true;
+            break;
+        }
     }
     close(outpipe[0]);
-    int st = 0;
-    waitpid(pid, &st, 0);
+    outpipe[0] = -1;
+    // No complete line: the child is still inside the deadline or already over
+    // a limit. Kill and reap now. Waiting out the rest of the window would
+    // leave a silent adapter attached to this RPC.
+    if (stdout_s.find('\n') == std::string::npos) {
+        reap(true);
+        if (timed_out) err = "generate adapter timeout";
+        else if (hit_cap) err = "generate adapter output limit";
+        else err = "generate adapter output";
+        return false;
+    }
+    const int st = reap(false);
     const size_t nl = stdout_s.find('\n');
     const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
     if (!out.read(line) || !out.isObject()) {

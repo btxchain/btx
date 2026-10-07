@@ -395,7 +395,31 @@ public:
      *  the ExactReplay deferral path so the guard is testable in CUDA-off builds. */
     virtual bool RetainMatMulBodyForTest(
         const std::shared_ptr<const CBlock>& block,
-        bool pin_progress = false, NodeId source_peer = -1) = 0;
+        bool pin_progress = false, NodeId source_peer = -1,
+        bool force_processing = false) = 0;
+    /** True when download selection would skip this hash because a prior
+     *  structural failure was recorded for every peer. */
+    [[nodiscard]] virtual bool HeaderFetchSuppressedForTest(const uint256& hash) const = 0;
+    /** Production compact-block decode rejection: punish that peer and drop
+     *  its in-flight request. Must not suppress the hash for every peer. */
+    virtual void RejectCompactBlockForTest(NodeId peer_id, const uint256& hash) = 0;
+    /** Drive BlockChecked. A BLOCK_MUTATED result must not enter the
+     *  node-global structural skip. */
+    virtual void BlockCheckedForTest(const CBlock& block, const BlockValidationState& state) = 0;
+    struct MatMulSourceVerifySnapshot {
+        uint32_t address_rc_verifications{0};
+        uint32_t netgroup_rc_verifications{0};
+        uint32_t rc_pending{0};
+        uint64_t caller_thread_block_sync{0};
+    };
+    [[nodiscard]] virtual MatMulSourceVerifySnapshot MatMulSourceVerifySnapshotForTest(
+        const CNetAddr& address, uint64_t netgroup) const = 0;
+    struct BlockSourceSnapshot {
+        bool present{false};
+        NodeId peer{-1};
+        bool punishable{false};
+    };
+    [[nodiscard]] virtual BlockSourceSnapshot BlockSourceForTest(const uint256& hash) const = 0;
     /** Issue #130 regression: invoke the real BlockConnected callback with a
      *  chosen block index, to simulate a stale async callback after a reorg. */
     virtual void SimulateBlockConnectedForTest(
