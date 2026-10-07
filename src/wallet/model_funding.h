@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace wallet {
 class CWallet;
@@ -52,9 +53,14 @@ UniValue ExportModelRecoveryJson(const FrozenFundingQuote& q);
 bool CreateUnsignedFunding(CWallet& wallet, FrozenFundingQuote& q, std::string& err);
 bool SignFrozenFunding(CWallet& wallet, CMutableTransaction& mtx, bool& complete, std::string& err);
 
-/** Local wallet+chain view of a campaign HTLC. Not a remote peer claim. Never returns secrets. */
+/** Local wallet+chain view of a campaign HTLC. Not a remote peer claim. Never returns secrets.
+ *  Matches P2MR scripts and recorded funding outpoints. A scan that finds nothing
+ *  leaves confirmed_known false (it is not a known zero). */
 UniValue ObserveReleaseFunding(CWallet& wallet, const std::string& key_hash_hex, uint32_t refund_height,
                                const std::string& output_script_hex = {});
+UniValue ObserveReleaseFunding(const std::vector<CWallet*>& wallets, const std::string& key_hash_hex,
+                               uint32_t refund_height, const std::vector<CScript>& output_scripts,
+                               const std::vector<COutPoint>& funding_outpoints);
 
 } // namespace wallet
 

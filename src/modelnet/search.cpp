@@ -932,8 +932,9 @@ UniValue SearchResultCard(const SearchHit& h)
     for (const auto& a : h.rec.aliases) al.push_back(a);
     o.pushKV("aliases", al);
     UniValue pub(UniValue::VOBJ);
-    pub.pushKV("id", h.rec.publisher_identity.Hex());
-    pub.pushKV("display_name", h.rec.publisher_display_name);
+    // A null identity is absent. Do not render it as 96 zero hex.
+    if (!h.rec.publisher_identity.IsNull()) pub.pushKV("id", h.rec.publisher_identity.Hex());
+    if (!h.rec.publisher_display_name.empty()) pub.pushKV("display_name", h.rec.publisher_display_name);
     o.pushKV("publisher", pub);
     o.pushKV("family", h.rec.family);
     o.pushKV("architecture", h.rec.architecture);

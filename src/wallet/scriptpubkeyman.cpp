@@ -10,6 +10,7 @@
 #include <random.h>
 #include <span>
 #include <script/descriptor.h>
+#include <script/pqm.h>
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/solver.h>
@@ -275,6 +276,18 @@ bool IsP2MRChecksigAddOpcode(opcodetype opcode)
 
 void ExtractP2MRLeafPQPubkeys(Span<const unsigned char> script, std::set<std::vector<unsigned char>, ShortestVectorFirstComparator>& out_pubkeys)
 {
+    // htlc_sha256 / htlc_sha256_legacy / htlc_tx claim leaves put the claimant
+    // pubkey after the hashlock, not in the checksig/multisig layout below.
+    std::vector<unsigned char> hashlock;
+    std::vector<unsigned char> claim_pubkey;
+    PQAlgorithm claim_algo{PQAlgorithm::ML_DSA_44};
+    if (ParseP2MRHTLCSha256Leaf(script, hashlock, claim_algo, claim_pubkey) ||
+        ParseP2MRHTLCSha256LegacyLeaf(script, hashlock, claim_algo, claim_pubkey) ||
+        ParseP2MRHTLCTxLeaf(script, hashlock, claim_algo, claim_pubkey)) {
+        if (!claim_pubkey.empty()) out_pubkeys.insert(std::move(claim_pubkey));
+        return;
+    }
+
     // CTV and timelocked leaves prepend a fixed script prefix before the
     // checksig/multisig body. Skip that prefix so signer-only wallets can
     // recover the PQ pubkeys from the selected PSBT leaf script.
@@ -796,9 +809,9 @@ bool LegacyDataSPKM::CanProvide(const CScript& script, SignatureData& sigdata)
     }
 }
 
-bool LegacyScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo, bool slhdsa_fips205) const
+bool LegacyScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo, bool slhdsa_fips205, bool adjust_timelocks, P2MRTimelockAdjustment* timelock_adjustment) const
 {
-    return ::SignTransaction(tx, this, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205);
+    return ::SignTransaction(tx, this, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205, adjust_timelocks, timelock_adjustment);
 }
 
 SigningResult LegacyScriptPubKeyMan::SignMessage(const MessageSignatureFormat format, const std::string& message, const CTxDestination& address, std::string& str_sig) const
@@ -811,8 +824,9 @@ SigningResult LegacyScriptPubKeyMan::SignMessage(const MessageSignatureFormat fo
     return SignMessageBIP322(format, this, message, address, str_sig);
 }
 
-std::optional<PSBTError> LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205) const
+std::optional<PSBTError> LegacyScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205, bilingual_str* error_detail) const
 {
+    (void)error_detail;
     if (n_signed) {
         *n_signed = 0;
     }
@@ -3102,7 +3116,7 @@ bool DescriptorScriptPubKeyMan::CanProvide(const CScript& script, SignatureData&
     return IsMine(script);
 }
 
-bool DescriptorScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo, bool slhdsa_fips205) const
+bool DescriptorScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo, bool slhdsa_fips205, bool adjust_timelocks, P2MRTimelockAdjustment* timelock_adjustment) const
 {
     std::unique_ptr<FlatSigningProvider> keys = std::make_unique<FlatSigningProvider>();
     for (const auto& coin_pair : coins) {
@@ -3113,7 +3127,7 @@ bool DescriptorScriptPubKeyMan::SignTransaction(CMutableTransaction& tx, const s
         keys->Merge(std::move(*coin_keys));
     }
 
-    return ::SignTransaction(tx, keys.get(), coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205);
+    return ::SignTransaction(tx, keys.get(), coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205, adjust_timelocks, timelock_adjustment);
 }
 
 SigningResult DescriptorScriptPubKeyMan::SignMessage(const MessageSignatureFormat format, const std::string& message, const CTxDestination& address, std::string& str_sig) const
@@ -3132,8 +3146,9 @@ SigningResult DescriptorScriptPubKeyMan::SignMessage(const MessageSignatureForma
     return SignMessageBIP322(format, keys.get(), message, address, str_sig);
 }
 
-std::optional<PSBTError> DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205) const
+std::optional<PSBTError> DescriptorScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbtx, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205, bilingual_str* error_detail) const
 {
+    (void)error_detail;
     if (n_signed) {
         *n_signed = 0;
     }

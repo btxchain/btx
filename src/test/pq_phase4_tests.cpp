@@ -741,6 +741,31 @@ BOOST_AUTO_TEST_CASE(psbt_csv_multisig_finalize_rejects_unsatisfied_sequence)
     BOOST_CHECK(!FinalizePSBT(psbt));
 }
 
+BOOST_AUTO_TEST_CASE(psbt_sha256_preimage_must_match_key)
+{
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vout.emplace_back(1, CScript() << OP_TRUE);
+    PartiallySignedTransaction psbt(tx);
+    const std::vector<unsigned char> preimage(32, 0x11);
+    uint256 digest;
+    CSHA256().Write(preimage.data(), preimage.size()).Finalize(digest.begin());
+    psbt.inputs[0].sha256_preimages.emplace(digest, preimage);
+
+    DataStream good{};
+    good << psbt;
+    PartiallySignedTransaction decoded;
+    BOOST_CHECK_NO_THROW(good >> decoded);
+    BOOST_CHECK(decoded.inputs[0].sha256_preimages.count(digest) == 1);
+
+    psbt.inputs[0].sha256_preimages.clear();
+    psbt.inputs[0].sha256_preimages.emplace(uint256::ONE, preimage);
+    DataStream bad{};
+    bad << psbt;
+    PartiallySignedTransaction rejected;
+    BOOST_CHECK_THROW(bad >> rejected, std::ios_base::failure);
+}
+
 BOOST_AUTO_TEST_CASE(psbt_fill_signature_data_populates_p2mr_fields)
 {
     PSBTInput input;

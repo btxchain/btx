@@ -463,6 +463,50 @@ def absolute_path(value: str | Path) -> Path:
     return Path(os.path.abspath(Path(value).expanduser()))
 
 
+def find_faststart_script(install_dir: Path, btxd_path: Path) -> Path:
+    """Find btx-faststart.py for --preset.
+
+    A copy next to this setup script is used when it is present. Otherwise
+    the script is taken from beside the installed binaries (including
+    contrib/faststart shipped in the release tree) or from PATH. A
+    script-only copy of this installer can bootstrap from the archive or
+    from PATH without a sibling btx-faststart.py.
+    """
+    beside_script = SCRIPT_DIR / "btx-faststart.py"
+    if beside_script.is_file():
+        return beside_script
+
+    candidates = [
+        btxd_path.parent / "btx-faststart.py",
+        btxd_path.parent.parent / "contrib" / "faststart" / "btx-faststart.py",
+        install_dir / "contrib" / "faststart" / "btx-faststart.py",
+    ]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            key = candidate.resolve()
+        except OSError:
+            key = candidate
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file():
+            return candidate
+
+    if install_dir.is_dir():
+        packaged = sorted(path for path in install_dir.rglob("btx-faststart.py") if path.is_file())
+        if packaged:
+            return packaged[0]
+
+    on_path = shutil.which("btx-faststart.py")
+    if on_path:
+        return Path(on_path)
+
+    raise FileNotFoundError(
+        "could not find btx-faststart.py beside this script, on PATH, or next to the installed binaries"
+    )
+
+
 def run_logged_subprocess(cmd: list[str], *, json_mode: bool) -> None:
     if not json_mode:
         subprocess.run(cmd, check=True)
@@ -778,9 +822,10 @@ def main(argv: list[str]) -> int:
             raise KeyError("verified snapshot manifest is required to bootstrap")
         datadir = absolute_path(args.datadir)
         faststart_conf = datadir / "faststart" / "faststart.conf"
+        faststart_script = find_faststart_script(install_dir, btxd_path)
         faststart_cmd = [
             sys.executable,
-            str(SCRIPT_DIR / "btx-faststart.py"),
+            str(faststart_script),
             args.preset,
             f"--chain={args.chain}",
             f"--datadir={datadir}",

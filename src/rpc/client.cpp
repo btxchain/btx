@@ -19,12 +19,26 @@ public:
     int paramIdx;           //!< 0-based idx of param to convert
     std::string paramName;  //!< parameter name
     bool also_string{false}; //!< The parameter is also a string
+    //! RPC type is an object. A JSON object string is parsed; an arbitrary
+    //! string stays a string and is not treated as an object.
+    bool json_object{false};
+};
+
+struct RPCConversion
+{
+    bool also_string{false};
+    bool json_object{false};
 };
 
 // clang-format off
 /**
  * Specify a (method, idx, name) here if the argument is a non-string RPC
  * argument and needs to be converted from JSON.
+ *
+ * A parameter marked json_object (RPC type object) parses a positional or
+ * named JSON object string into an object. Any other string, including JSON
+ * that is not an object, stays a string. Unlisted parameters stay strings
+ * even when their text looks like a JSON object.
  *
  * @note Parameter indexes start from 0.
  */
@@ -82,6 +96,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "acceptcomputejobresult", 0, "request" },
     { "issuecomputereceipt", 0, "request" },
     { "importcomputereceipt", 0, "request" },
+    { "verifycomputereceipt", 0, "request" },
     { "getcomputereceipt", 0, "request" },
     { "listcomputereceipts", 0, "request" },
     { "getcomputebalance", 0, "request" },
@@ -251,6 +266,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "createrawtransaction", 2, "locktime" },
     { "createrawtransaction", 3, "replaceable" },
     { "decoderawtransaction", 1, "iswitness" },
+    { "getctvtemplatehash", 1, "nIn" },
     { "signrawtransactionwithkey", 1, "privkeys" },
     { "signrawtransactionwithkey", 2, "prevtxs" },
     { "signrawtransactionwithwallet", 1, "prevtxs" },
@@ -641,6 +657,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "exportmodelindex", 0, "query" },
     { "importmodelindex", 0, "snapshot" },
     { "importmodel", 1, "options" },
+    { "hostmodel", 1, "options", /*also_string=*/false, /*json_object=*/true },
     { "createmodelrelease", 0, "body" },
     { "pledgemodelrelease", 1, "amount_atoms" },
     { "resolveresource", 0, "query" },
@@ -794,11 +811,29 @@ static UniValue Parse(std::string_view raw, bool also_string)
     return parsed;
 }
 
+/** Parse arg_value for one conversion-table entry.
+ *  json_object: a JSON object string becomes an object. Any other string,
+ *  including JSON that is not an object, stays a string.
+ *  A missing entry means the RPC parameter is a string; do not parse it.
+ */
+static UniValue ConvertArg(std::string_view arg_value, const RPCConversion* conv)
+{
+    if (conv == nullptr) {
+        return arg_value;
+    }
+    if (conv->json_object) {
+        UniValue parsed;
+        if (parsed.read(arg_value) && parsed.isObject()) return parsed;
+        return arg_value;
+    }
+    return Parse(arg_value, conv->also_string);
+}
+
 class CRPCConvertTable
 {
 private:
-    std::map<std::pair<std::string, int>, bool> members;
-    std::map<std::pair<std::string, std::string>, bool> membersByName;
+    std::map<std::pair<std::string, int>, RPCConversion> members;
+    std::map<std::pair<std::string, std::string>, RPCConversion> membersByName;
 
 public:
     CRPCConvertTable();
@@ -806,29 +841,26 @@ public:
     /** Return arg_value as UniValue, and first parse it if it is a non-string parameter */
     UniValue ArgToUniValue(std::string_view arg_value, const std::string& method, int param_idx)
     {
-        const auto& it = members.find({method, param_idx});
-        if (it != members.end()) {
-            return Parse(arg_value, it->second);
-        }
-        return arg_value;
+        const auto it = members.find({method, param_idx});
+        if (it == members.end()) return ConvertArg(arg_value, nullptr);
+        return ConvertArg(arg_value, &it->second);
     }
 
     /** Return arg_value as UniValue, and first parse it if it is a non-string parameter */
     UniValue ArgToUniValue(std::string_view arg_value, const std::string& method, const std::string& param_name)
     {
-        const auto& it = membersByName.find({method, param_name});
-        if (it != membersByName.end()) {
-            return Parse(arg_value, it->second);
-        }
-        return arg_value;
+        const auto it = membersByName.find({method, param_name});
+        if (it == membersByName.end()) return ConvertArg(arg_value, nullptr);
+        return ConvertArg(arg_value, &it->second);
     }
 };
 
 CRPCConvertTable::CRPCConvertTable()
 {
     for (const auto& cp : vRPCConvertParams) {
-        members.emplace(std::make_pair(cp.methodName, cp.paramIdx), cp.also_string);
-        membersByName.emplace(std::make_pair(cp.methodName, cp.paramName), cp.also_string);
+        const RPCConversion conv{cp.also_string, cp.json_object};
+        members.emplace(std::make_pair(cp.methodName, cp.paramIdx), conv);
+        membersByName.emplace(std::make_pair(cp.methodName, cp.paramName), conv);
     }
 }
 

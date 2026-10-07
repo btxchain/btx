@@ -13014,6 +13014,75 @@ BOOST_AUTO_TEST_CASE(best_known_probe_is_rate_limited_and_skips_height_zero)
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
+BOOST_AUTO_TEST_CASE(non_ibd_direct_tip_extension_getheaders_without_requeue)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    const auto saved_time{GetTime<std::chrono::seconds>()};
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    if (tip->nHeight == 0) {
+        mineBlock(m_node, std::chrono::seconds{tip->GetBlockTime() + 1});
+        tip = WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip());
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE_GT(tip->nHeight, 0);
+    }
+    // Fresh tip: not initial block download, same shape as -maxtipage at
+    // an ancient genesis. The handshake getheaders then spends the
+    // 2-minute send window before the burst INV.
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode behind{/*id=*/5420, /*sock=*/nullptr, CAddress{},
+                 /*nKeyedNetGroupIn=*/5420, /*nLocalHostNonceIn=*/0,
+                 CAddress{}, /*addrNameIn=*/"c23-direct-tip",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(behind, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight);
+    const bool handshake_getheaders{
+        HasQueuedMessageType(behind, NetMsgType::GETHEADERS)};
+    connman.FlushSendBuffer(behind);
+    if (!handshake_getheaders) {
+        behind.fPauseSend = false;
+        BOOST_CHECK(peerman.SendMessages(&behind));
+        BOOST_REQUIRE_MESSAGE(
+            HasQueuedMessageType(behind, NetMsgType::GETHEADERS),
+            "precondition: one getheaders must already have spent the send window");
+        connman.FlushSendBuffer(behind);
+    }
+    behind.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&behind));
+    BOOST_REQUIRE_EQUAL(CountQueuedMessageType(behind, NetMsgType::GETHEADERS), 0U);
+
+    auto inv_unknown = [&](unsigned char tag) {
+        const uint256 hash{uint256::FromHex(
+            std::string(62, 'a') + strprintf("%02x", tag)).value()};
+        std::vector<CInv> inv{{MSG_BLOCK, hash}};
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            behind, NetMsg::Make(NetMsgType::INV, inv)));
+        behind.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(behind);
+    };
+    inv_unknown(0x01);
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedMessageType(behind, NetMsgType::GETHEADERS) >= 1U,
+        "non-IBD peer at our tip must getheaders on a direct-extension INV "
+        "without waiting HEADERS_RESPONSE_TIME");
+    connman.FlushSendBuffer(behind);
+    inv_unknown(0x02);
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(behind, NetMsgType::GETHEADERS), 0U);
+    peerman.FinalizeNode(behind);
+    SetMockTime(saved_time);
+}
+
 BOOST_AUTO_TEST_CASE(matmul_deferred_recovery_does_not_block_scheduler)
 {
     auto& peerman{*Assert(m_node.peerman)};

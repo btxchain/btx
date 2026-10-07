@@ -589,6 +589,16 @@ struct PSBTInput
                     std::vector<unsigned char> preimage;
                     s >> preimage;
 
+                    // BIP174: the value must SHA256 to the key. A mismatched
+                    // entry is not a preimage record.
+                    uint256 digest;
+                    CSHA256 hasher;
+                    if (!preimage.empty()) hasher.Write(preimage.data(), preimage.size());
+                    hasher.Finalize(digest.begin());
+                    if (digest != hash) {
+                        throw std::ios_base::failure("SHA256 preimage does not match the key");
+                    }
+
                     // Add to preimages list
                     sha256_preimages.emplace(hash, std::move(preimage));
                     break;
@@ -1498,5 +1508,20 @@ bool FinalizeAndExtractPSBT(PartiallySignedTransaction& psbtx, CMutableTransacti
 [[nodiscard]] bool DecodeBase64PSBT(PartiallySignedTransaction& decoded_psbt, const std::string& base64_psbt, std::string& error);
 //! Decode a raw (binary blob) PSBT into a PartiallySignedTransaction
 [[nodiscard]] bool DecodeRawPSBT(PartiallySignedTransaction& decoded_psbt, Span<const std::byte> raw_psbt, std::string& error);
+
+/** Caller selection of one P2MR leaf. Set index or script, not both. */
+struct P2MRLeafSelection {
+    uint256 txid;
+    uint32_t vout{0};
+    std::optional<uint32_t> index;
+    std::vector<unsigned char> script;
+};
+
+/**
+ * Write a selected leaf onto the matching input.
+ * An index is resolved against the descriptor's ordered leaves.
+ * A script is stored directly; the control block is filled when provider knows it.
+ */
+[[nodiscard]] bool ApplyP2MRLeafSelections(PartiallySignedTransaction& psbt, const std::vector<P2MRLeafSelection>& selections, const SigningProvider* provider, bilingual_str& error);
 
 #endif // BITCOIN_PSBT_H

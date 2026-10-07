@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # HTLC hardening review (second pass): mixed-version regtest checks.
 # Local review only. Two private regtest nodes connected only to each other on 127.0.0.1.
-"""Mixed-version checks between a v0.34.12 node (node0) and a v0.34.14 node (node1).
+"""Mixed-version checks between a v0.34.12 node (node0) and the btxd under test (node1).
 
 X1 (F1)  node0 mines a block with a legacy SHA-256 HTLC claim that reveals a 33-byte
          preimage. node1 rejects the block and the two chains split. The split ends
@@ -21,7 +21,9 @@ Run (ports stay inside 28443-28499):
 
 import hashlib
 import os
+import re
 import shutil
+import subprocess
 import time
 from decimal import Decimal
 
@@ -50,6 +52,21 @@ COMMON_ARGS = [
 
 def sha256(b):
     return hashlib.sha256(b).digest()
+
+
+def version_reported_by_binary(path):
+    """(dotted, numeric) from `btxd -version`.
+
+    dotted is the first major.minor.build on the first line. numeric is the
+    getnetworkinfo version encoding of that triple.
+    """
+    out = subprocess.check_output([path, "-version"], text=True, stderr=subprocess.STDOUT)
+    line = out.splitlines()[0] if out else ""
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", line)
+    if not match:
+        raise AssertionError(f"no version in {path} -version output: {line!r}")
+    major, minor, build = (int(match.group(i)) for i in (1, 2, 3))
+    return f"{major}.{minor}.{build}", major * 10000 + minor * 100 + build
 
 
 class HtlcMixedVersionTest(BitcoinTestFramework):
@@ -110,7 +127,10 @@ class HtlcMixedVersionTest(BitcoinTestFramework):
         old, new = self.nodes
         self.log.info(f"node0 version {old.getnetworkinfo()['subversion']}, node1 version {new.getnetworkinfo()['subversion']}")
         assert "0.34.12" in old.getnetworkinfo()["subversion"]
-        assert "0.34.14" in new.getnetworkinfo()["subversion"]
+        new_dotted, new_numeric = version_reported_by_binary(self.options.bitcoind)
+        new_info = new.getnetworkinfo()
+        assert new_dotted in new_info["subversion"], (new_dotted, new_info["subversion"])
+        assert_equal(new_info["version"], new_numeric)
 
         ow, omine = create_bridge_wallet(self, old, wallet_name="old_w", amount=Decimal("12"))
         # node1 (0.34.14) makes the outbound connection: it does not download

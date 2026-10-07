@@ -1882,6 +1882,26 @@ FundingObservation ObservationFromHit(const SearchHit& h, const ReleaseCampaign*
     return f;
 }
 
+/** Copy size and file count from the local catalog when the search record left them empty.
+ *  Does not invent a publisher. */
+void FillKnownCatalogFields(ModelCatalog& cat, SearchHit& h)
+{
+    if (h.rec.size_bytes > 0 && h.rec.file_count > 0) return;
+    CatalogEntry e;
+    bool found = false;
+    if (!h.rec.model_id.IsNull() && cat.Find(h.rec.model_id, e)) found = true;
+    else if (!h.rec.artifact_id.IsNull() && cat.Find(h.rec.artifact_id, e)) found = true;
+    if (!found) return;
+    if (h.rec.size_bytes == 0) {
+        uint64_t bytes = 0;
+        for (const auto& f : e.core.files) bytes += f.size;
+        if (bytes > 0) h.rec.size_bytes = bytes;
+    }
+    if (h.rec.file_count == 0 && !e.core.files.empty()) {
+        h.rec.file_count = static_cast<int>(e.core.files.size());
+    }
+}
+
 ModelEconomyEntry EconomyForHit(const SearchHit& h, ModelCatalog* cat = nullptr)
 {
     std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
@@ -6983,6 +7003,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     h.rec.refund_height = c.refund_height;
                 }
                 if (h.rec.release_id.empty()) h.rec.release_id = c.release_id.Hex();
+                FillKnownCatalogFields(cat, h);
                 auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat));
                 if (Arg(0).isObject() && Arg(0).exists("scope") && ToUpper(Arg(0)["scope"].get_str()) == "LOCAL") {
                     // keep
@@ -7747,14 +7768,45 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         LiveObserveCampaign(c, FeedEventType::RELEASE_CAMPAIGN_CREATED);
         bool published_search = false;
         std::string search_record_id;
+        std::string publish_error;
         const bool want_pub = !options.exists("publish_search_record") || options["publish_search_record"].get_bool();
         if (want_pub && (options.exists("searchable_metadata") || options.exists("display_name") || options.exists("short_description"))) {
+            // Start from the signed catalog record when one exists, then overlay the
+            // caller's name. An unsigned replacement is refused ("unsigned cannot
+            // override signed"), which used to leave the file name on the card.
             ModelSearchRecord rec;
+            bool had_prev = false;
+            uint64_t prev_seq = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_search_mu);
+                if (const auto* prev = g_search_idx.Get(c.model_id)) {
+                    rec = *prev;
+                    had_prev = true;
+                    prev_seq = prev->metadata_sequence;
+                }
+            }
+            if (!had_prev) {
+                CatalogEntry drafted;
+                if (cat.Find(c.model_id, drafted)) rec = DraftSearchFromCatalog(drafted);
+            }
             if (options.exists("searchable_metadata") && options["searchable_metadata"].isObject()) {
-                SearchRecordFromJson(options["searchable_metadata"], rec, err);
+                ModelSearchRecord meta;
+                std::string merr;
+                if (SearchRecordFromJson(options["searchable_metadata"], meta, merr)) {
+                    if (!meta.family.empty()) rec.family = meta.family;
+                    if (!meta.architecture.empty()) rec.architecture = meta.architecture;
+                    if (!meta.format.empty()) rec.format = meta.format;
+                    if (!meta.quantization.empty()) rec.quantization = meta.quantization;
+                    if (!meta.tags.empty()) rec.tags = meta.tags;
+                    if (!meta.languages.empty()) rec.languages = meta.languages;
+                    if (!meta.aliases.empty()) rec.aliases = meta.aliases;
+                    if (!options.exists("display_name") && !meta.display_name.empty()) rec.display_name = meta.display_name;
+                    if (!options.exists("short_description") && !meta.short_description.empty()) rec.short_description = meta.short_description;
+                    if (rec.canonical_name.empty() && !meta.canonical_name.empty()) rec.canonical_name = meta.canonical_name;
+                }
             }
             rec.model_id = c.model_id;
-            rec.artifact_id = c.artifact_id;
+            if (rec.artifact_id.IsNull()) rec.artifact_id = c.artifact_id;
             rec.release_id = c.release_id.Hex();
             rec.release_state = "FUNDING";
             rec.release_target_atoms = c.target_atoms;
@@ -7763,15 +7815,46 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             rec.campaign_created_at = c.campaign_created_at;
             rec.ciphertext_artifact_id = c.ciphertext_artifact_id;
             rec.assurance = "KEY_RELEASE_ONLY";
-            if (options.exists("display_name")) rec.display_name = options["display_name"].get_str();
-            if (options.exists("short_description")) rec.short_description = options["short_description"].get_str();
+            // Explicit display_name wins over the file name already on the record.
+            if (options.exists("display_name") && options["display_name"].isStr() &&
+                !options["display_name"].get_str().empty()) {
+                rec.display_name = options["display_name"].get_str();
+            }
+            if (options.exists("short_description") && options["short_description"].isStr() &&
+                !options["short_description"].get_str().empty()) {
+                rec.short_description = options["short_description"].get_str();
+            }
             if (rec.canonical_name.empty()) rec.canonical_name = rec.display_name;
-            rec.published_at = c.campaign_created_at;
-            std::lock_guard<std::mutex> lock(g_search_mu);
-            if (g_search_idx.Put(rec, ConnNowMs(), err)) {
-                AfterIndexPut(rec, ConnNowMs());
-                published_search = true;
-                search_record_id = rec.model_id.Hex();
+            if (rec.published_at == 0) rec.published_at = c.campaign_created_at;
+            {
+                CatalogEntry sized;
+                if (cat.Find(c.model_id, sized)) {
+                    if (rec.artifact_id.IsNull()) rec.artifact_id = sized.artifact_id;
+                    if (rec.size_bytes == 0) {
+                        uint64_t bytes = 0;
+                        for (const auto& f : sized.core.files) bytes += f.size;
+                        rec.size_bytes = bytes;
+                    }
+                    if (rec.file_count == 0) rec.file_count = static_cast<int>(sized.core.files.size());
+                }
+            }
+            rec.metadata_sequence = had_prev ? prev_seq + 1 : (rec.metadata_sequence == 0 ? 1 : rec.metadata_sequence);
+            rec.sig.clear();
+            rec.signed_ok = false;
+            rec.tombstone = false;
+            std::string serr;
+            if (!SignSearchRecordWithDefaultIdentity(HelperDir(cat), rec, serr)) {
+                publish_error = serr.empty() ? "could not sign search record" : serr;
+            } else {
+                std::lock_guard<std::mutex> lock(g_search_mu);
+                std::string perr;
+                if (!g_search_idx.Put(rec, ConnNowMs(), perr)) {
+                    publish_error = perr;
+                } else {
+                    AfterIndexPut(rec, ConnNowMs());
+                    published_search = true;
+                    search_record_id = rec.model_id.Hex();
+                }
             }
         }
         PersistEconomy(cat);
@@ -7779,6 +7862,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("secret_retained", false);
         result.pushKV("search_record_id", search_record_id);
         result.pushKV("publish_state", published_search ? "published" : "local_campaign_only");
+        if (!publish_error.empty()) result.pushKV("publish_error", publish_error);
         result.pushKV("lifecycle_state", "FUNDING");
         result.pushKV("automatic_spend_atoms", 0);
         return true;
@@ -8665,7 +8749,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "getmodeleconomyentry" || method == "getmodelreleaseeconomics" || method == "getmodelfeed" ||
         method == "getreleasefeed" || method == "getmodelfeedstatus" || method == "getmodelfeedsequence" ||
         method == "getfundablemodels" || method == "getrecentlyunlockedmodels" || method == "cacheencryptedmodel" ||
-        method == "ingestchainfundingobservation" || method == "setreleaseoutputscript") {
+        method == "ingestchainfundingobservation" || method == "setreleaseoutputscript" ||
+        method == "recordmodelfundingoutpoint") {
         EnsureSearchBound();
         EnsureEconomy(cat);
         std::unique_lock<std::mutex> lock(g_search_mu);
@@ -8717,6 +8802,76 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             result.pushKV("output_script", output_script);
             return true;
         }
+        if (method == "recordmodelfundingoutpoint") {
+            if (!Arg(0).isObject()) {
+                err_code = "INVALID_PARAMETER";
+                err = "funding outpoint object";
+                return false;
+            }
+            const UniValue& o = Arg(0);
+            if (!o.exists("txid") || !o["txid"].isStr() || !o.exists("vout") || !o["vout"].isNum()) {
+                err_code = "INVALID_PARAMETER";
+                err = "txid and vout required";
+                return false;
+            }
+            const std::string txid = ToLower(o["txid"].get_str());
+            const int64_t vout64 = o["vout"].getInt<int64_t>();
+            if (txid.size() != 64 || vout64 < 0 || vout64 > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                err_code = "INVALID_PARAMETER";
+                err = "txid or vout";
+                return false;
+            }
+            std::string release_id;
+            std::string key_hash;
+            if (o.exists("release_id") && o["release_id"].isStr()) release_id = ToLower(o["release_id"].get_str());
+            if (o.exists("key_hash") && o["key_hash"].isStr()) key_hash = ToLower(o["key_hash"].get_str());
+            std::string script;
+            if (o.exists("output_script") && o["output_script"].isStr()) script = ToLower(o["output_script"].get_str());
+            int64_t amount = 0;
+            if (o.exists("amount_atoms") && o["amount_atoms"].isNum()) amount = o["amount_atoms"].getInt<int64_t>();
+            std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
+            ReleaseCampaign* live = nullptr;
+            if (!release_id.empty()) {
+                Digest48 id;
+                std::string derr;
+                if (Digest48::FromHex(release_id, id, derr)) {
+                    live = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(id));
+                }
+            }
+            if (!live && key_hash.size() == 64) {
+                for (const auto& camp : g_campaigns.List()) {
+                    if (ToLower(camp.key_hash.Hex()) == key_hash) {
+                        live = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(camp.release_id));
+                        break;
+                    }
+                }
+            }
+            if (!live) {
+                err_code = "NOT_FOUND";
+                err = "unknown release";
+                return false;
+            }
+            bool have = false;
+            for (const auto& fp : live->funding_outpoints) {
+                if (fp.txid == txid && fp.vout == static_cast<uint32_t>(vout64)) have = true;
+            }
+            if (!have) {
+                ReleaseFundingOutpoint fp;
+                fp.txid = txid;
+                fp.vout = static_cast<uint32_t>(vout64);
+                fp.output_script_hex = script;
+                fp.amount_atoms = amount;
+                live->funding_outpoints.push_back(fp);
+            }
+            if (live->output_script_hex.empty() && !script.empty()) live->output_script_hex = script;
+            SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+            result.pushKV("accepted", true);
+            result.pushKV("release_id", live->release_id.Hex());
+            result.pushKV("txid", txid);
+            result.pushKV("vout", vout64);
+            if (!script.empty()) result.pushKV("output_script", script);
+            return true;
+        }
         if (method == "ingestchainfundingobservation") {
             if (!Arg(0).isObject()) {
                 err_code = "INVALID_PARAMETER";
@@ -8728,6 +8883,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 !o.exists("funding_source") || o["funding_source"].get_str() != "CHAIN_OBSERVATION") {
                 result.pushKV("accepted", false);
                 result.pushKV("note", "remote unsigned funding claims are not ingested as confirmed");
+                return true;
+            }
+            const int64_t claimed = o.exists("confirmed_funded_atoms") && o["confirmed_funded_atoms"].isNum()
+                                        ? o["confirmed_funded_atoms"].getInt<int64_t>()
+                                        : 0;
+            if (claimed <= 0) {
+                // A scan that matched nothing is not a known zero.
+                result.pushKV("accepted", false);
+                result.pushKV("note", "confirmed funding of zero is not ingested");
                 return true;
             }
             FundingObservation f;
@@ -8836,6 +9000,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     h.rec.key_hash = c.key_hash;
                     h.rec.refund_height = c.refund_height;
                 }
+                FillKnownCatalogFields(cat, h);
                 auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat));
                 if (!e.fundable_now) continue;
                 if (!MatchesEconomyFilters(e, q.filters)) continue;
@@ -9997,6 +10162,18 @@ bool JsonLeaksPrivateLocalState(const UniValue& v)
         }
     }
     return false;
+}
+
+bool HelperRefusalFromError(const std::string& err, std::string& code, std::string& message)
+{
+    code.clear();
+    message.clear();
+    UniValue o;
+    if (!o.read(err) || !o.isObject()) return false;
+    if (!o.exists("code") || !o["code"].isStr() || !o.exists("message") || !o["message"].isStr()) return false;
+    code = o["code"].get_str();
+    message = o["message"].get_str();
+    return !code.empty();
 }
 
 bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err)

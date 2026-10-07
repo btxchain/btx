@@ -347,3 +347,98 @@ void SignTransactionResultToJSON(CMutableTransaction& mtx, bool complete, const 
         result.pushKV("errors", std::move(vErrors));
     }
 }
+
+void AppendTimelockAdjustment(UniValue& result, const P2MRTimelockAdjustment& adjustment)
+{
+    if (!adjustment.changed) return;
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("txid_before", adjustment.txid_before.GetHex());
+    obj.pushKV("txid_after", adjustment.txid_after.GetHex());
+    obj.pushKV("locktime_before", static_cast<int64_t>(adjustment.locktime_before));
+    obj.pushKV("locktime_after", static_cast<int64_t>(adjustment.locktime_after));
+    obj.pushKV("version_before", adjustment.version_before);
+    obj.pushKV("version_after", adjustment.version_after);
+    UniValue sequences(UniValue::VARR);
+    for (const auto& [vin, before, after] : adjustment.sequences) {
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("vin", static_cast<int>(vin));
+        entry.pushKV("nsequence_before", static_cast<int64_t>(before));
+        entry.pushKV("nsequence_after", static_cast<int64_t>(after));
+        sequences.push_back(std::move(entry));
+    }
+    obj.pushKV("sequences", std::move(sequences));
+    result.pushKV("timelock_adjustment", std::move(obj));
+}
+
+void ParseP2MRLeafValue(const UniValue& value, std::optional<uint32_t>& index, std::vector<unsigned char>& script)
+{
+    index.reset();
+    script.clear();
+    if (value.isNum()) {
+        const int leaf = value.getInt<int>();
+        if (leaf < 0) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "p2mr_leaf index must be non-negative");
+        }
+        index = static_cast<uint32_t>(leaf);
+        return;
+    }
+    if (value.isStr()) {
+        if (!IsHex(value.get_str())) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "p2mr_leaf script must be hex");
+        }
+        script = ParseHex(value.get_str());
+        if (script.empty()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "p2mr_leaf script is empty");
+        }
+        return;
+    }
+    throw JSONRPCError(RPC_INVALID_PARAMETER, "p2mr_leaf must be a leaf index or a leaf script hex");
+}
+
+static P2MRLeafSelection LeafSelectionFromOutpoint(const uint256& txid, uint32_t vout, const UniValue& leaf)
+{
+    P2MRLeafSelection selection;
+    selection.txid = txid;
+    selection.vout = vout;
+    ParseP2MRLeafValue(leaf, selection.index, selection.script);
+    return selection;
+}
+
+std::vector<P2MRLeafSelection> ParseInputsP2MRLeaves(const UniValue& inputs_in)
+{
+    std::vector<P2MRLeafSelection> selections;
+    if (inputs_in.isNull()) return selections;
+    const UniValue inputs = inputs_in.get_array();
+    for (unsigned int idx = 0; idx < inputs.size(); ++idx) {
+        const UniValue& input = inputs[idx];
+        const UniValue& o = input.get_obj();
+        if (!o.exists("p2mr_leaf")) continue;
+        selections.push_back(LeafSelectionFromOutpoint(ParseHashO(o, "txid"), o["vout"].getInt<uint32_t>(), o["p2mr_leaf"]));
+    }
+    return selections;
+}
+
+std::vector<P2MRLeafSelection> ParseP2MRLeafMap(const UniValue& leaf_map)
+{
+    std::vector<P2MRLeafSelection> selections;
+    if (leaf_map.isNull()) return selections;
+    if (!leaf_map.isObject()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "p2mr_leaf must be an object of txid:vout keys");
+    }
+    for (const std::string& key : leaf_map.getKeys()) {
+        const auto colon = key.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= key.size()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "p2mr_leaf key must be txid:vout");
+        }
+        const auto txid = uint256::FromHex(key.substr(0, colon));
+        if (!txid) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "p2mr_leaf key must be txid:vout");
+        }
+        uint32_t vout{0};
+        if (!ParseUInt32(key.substr(colon + 1), &vout)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "p2mr_leaf key must be txid:vout");
+        }
+        selections.push_back(LeafSelectionFromOutpoint(*txid, vout, leaf_map[key]));
+    }
+    return selections;
+}

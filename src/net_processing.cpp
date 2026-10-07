@@ -1135,6 +1135,10 @@ struct Peer {
      *  (live 0.34.5: 171 getheaders/sec). HeadersSyncState continuations
      *  still clear it so IBD presync can walk. */
     NodeClock::time_point m_last_getheaders_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /** Last getheaders sent because a non-IBD peer at or below our tip
+     *  announced a block we do not have. One extra send per
+     *  HEADERS_RESPONSE_TIME; connecting replies must not clear it. */
+    NodeClock::time_point m_direct_tip_extension_getheaders_at GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** Last successful background-discovery getheaders. Ordinary probes must
      *  not reset this clock, or a lagging fork never reaches its own locator. */
     NodeClock::time_point m_last_background_headers_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
@@ -1864,6 +1868,11 @@ private:
      * bound it themselves (see Peer::m_headers_continuation_height).
      */
     bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window = false) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    /** One extra getheaders when a non-IBD peer, directly behind on our
+     *  chain, announces a block during the ordinary send window. Peers that
+     *  already advertised above our tip, height-0 advertisers once we are
+     *  past genesis, and competing forks stay on HEADERS_RESPONSE_TIME. */
+    bool MayBypassHeadersWindowForDirectTipExtension(const Peer& peer, NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     void MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     /** Discovery relays ask peers for headers so a best-known block on a
@@ -9513,8 +9522,23 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
             // behind never sees those bodies unless it GETDATAs. Push the
             // next honest body on our chain so work leaves the box without
             // waiting for a human addnode.
+            // Walk from the last header we already offered on this chain.
+            // pindexBestKnownBlock stays put until the peer proves it, so a
+            // burst otherwise resends the same height on every new block.
+            const CBlockIndex* cursor{state.pindexBestKnownBlock};
+            if (state.pindexBestHeaderSent != nullptr &&
+                state.pindexBestHeaderSent->nHeight > cursor->nHeight &&
+                pindex->GetAncestor(state.pindexBestHeaderSent->nHeight) ==
+                    state.pindexBestHeaderSent &&
+                state.pindexBestHeaderSent->GetAncestor(cursor->nHeight) ==
+                    cursor) {
+                cursor = state.pindexBestHeaderSent;
+            }
+            if (cursor->nHeight >= pindex->nHeight) {
+                return;
+            }
             const CBlockIndex* const next{
-                pindex->GetAncestor(state.pindexBestKnownBlock->nHeight + 1)};
+                pindex->GetAncestor(cursor->nHeight + 1)};
             if (next != nullptr && (next->nStatus & BLOCK_HAVE_DATA) != 0) {
                 CBlock next_block;
                 const CBlock* send{nullptr};
@@ -11114,6 +11138,43 @@ void PeerManagerImpl::MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
                 node.GetId(), known != nullptr ? known->nHeight : -1,
                 peer.m_starting_height.load(), tip->nHeight);
     }
+}
+
+bool PeerManagerImpl::MayBypassHeadersWindowForDirectTipExtension(const Peer& peer, NodeId nodeid)
+{
+    AssertLockHeld(cs_main);
+    // Age-only IBD (ancient tip, no -maxtipage) already catch-up fetches.
+    // Do not open this hole for arbitrary IBD peers.
+    if (m_chainman.IsInitialBlockDownload()) return false;
+    const auto now{NodeClock::now()};
+    if (peer.m_direct_tip_extension_getheaders_at != NodeClock::time_point{} &&
+        now - peer.m_direct_tip_extension_getheaders_at <= HEADERS_RESPONSE_TIME) {
+        return false;
+    }
+    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+    if (tip == nullptr) return false;
+    const int advertised{peer.m_starting_height.load(std::memory_order_relaxed)};
+    // VERSION above our tip is the ordinary best-known probe
+    // (best_known_probe_is_rate_limited_and_skips_height_zero). A connecting
+    // header must not make an unknown INV skip HEADERS_RESPONSE_TIME.
+    if (advertised < 0 || advertised > tip->nHeight) return false;
+    if (tip->nHeight > 0 && advertised == 0) return false;
+    const CNodeState* const state{State(nodeid)};
+    const CBlockIndex* const known{state != nullptr ? state->pindexBestKnownBlock : nullptr};
+    if (known == nullptr) return true;
+    if (known->nStatus & BLOCK_FAILED_MASK) return false;
+    if (m_chainman.ActiveChain().Contains(known)) {
+        return known->nHeight <= tip->nHeight;
+    }
+    // Honest-body push can index the next header before the active height
+    // moves. That header still builds on our tip. A fork that does not is
+    // a competing sibling and stays header-only.
+    if (known->GetAncestor(tip->nHeight) != tip) return false;
+    if (known->nHeight <= tip->nHeight) {
+        const CBlockIndex* const active_at{m_chainman.ActiveChain()[known->nHeight]};
+        if (active_at != nullptr && active_at != known) return false;
+    }
+    return true;
 }
 
 bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window)
@@ -18302,8 +18363,23 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // use if we turned on sync with all peers).
             CNodeState& state{*Assert(State(pfrom.GetId()))};
             if (state.fSyncStarted || (!peer->m_inv_triggered_getheaders_before_sync && *best_block != m_last_block_inv_triggering_headers_sync)) {
-                const bool sent_getheaders{
+                // A burst longer than MAX_BLOCKS_TO_ANNOUNCE is announced as
+                // one tip INV. The handshake already spent HEADERS_RESPONSE_TIME,
+                // so a non-IBD peer at our height otherwise sits ~2 minutes
+                // before it can ask for the unique extension (C23: 100 blocks,
+                // ~113s, then one jump). One extra getheaders per that window.
+                const bool direct_tip_extension{
+                    MayBypassHeadersWindowForDirectTipExtension(*peer, pfrom.GetId())};
+                bool sent_getheaders{
                     MaybeSendGetHeaders(pfrom, GetLocator(HeaderSyncLocatorIndex(m_chainman)), *peer)};
+                if (!sent_getheaders && direct_tip_extension) {
+                    sent_getheaders = MaybeSendGetHeaders(
+                        pfrom, GetLocator(HeaderSyncLocatorIndex(m_chainman)), *peer,
+                        /*bypass_send_window=*/true);
+                }
+                if (sent_getheaders && direct_tip_extension) {
+                    peer->m_direct_tip_extension_getheaders_at = NodeClock::now();
+                }
                 if (sent_getheaders) {
                     const CBlockIndex* locator_start{HeaderSyncLocatorIndex(m_chainman)};
                     LogDebug(BCLog::NET, "getheaders (%d) %s to peer=%d\n",

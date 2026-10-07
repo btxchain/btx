@@ -21,6 +21,9 @@ def main() -> None:
     parser.add_argument("--btx-cli", default="btx-cli")
     parser.add_argument("--datadir")
     parser.add_argument("--regtest", action="store_true")
+    parser.add_argument("--rpcuser")
+    parser.add_argument("--rpcpassword")
+    parser.add_argument("--rpcport")
     parser.add_argument("--grant", help="Path to a grant envelope JSON")
     parser.add_argument("--trusted-issuer", help="Resource provider application public key")
     parser.add_argument("--subject")
@@ -46,6 +49,12 @@ def main() -> None:
         cmd.append("-regtest")
     if args.datadir:
         cmd.append(f"-datadir={args.datadir}")
+    if args.rpcuser is not None:
+        cmd.append(f"-rpcuser={args.rpcuser}")
+    if args.rpcpassword is not None:
+        cmd.append(f"-rpcpassword={args.rpcpassword}")
+    if args.rpcport is not None:
+        cmd.append(f"-rpcport={args.rpcport}")
     cmd += ["verifycomputeaccessgrant", json.dumps(req)]
     proc = subprocess.run(cmd, check=False, text=True, capture_output=True)
     if proc.returncode != 0:
