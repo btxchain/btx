@@ -3834,6 +3834,22 @@ UniValue MakeShareObject(const std::string& uri, const ModelSearchRecord& rec)
     return s;
 }
 
+/** Alias lookup. The caller already holds g_search_mu. That mutex is not
+ *  recursive, so ResolveUserId must not be used under it: a 64-hex id is not
+ *  a 48-byte model id and falls through to FindByAlias. */
+static Digest48 ResolveUserIdLocked(const std::string& s, std::string& err)
+{
+    Digest48 id = IdFromUser(s, err);
+    if (!id.IsNull()) {
+        err.clear();
+        return id;
+    }
+    err.clear();
+    if (const auto* rec = g_search_idx.FindByAlias(s)) return rec->model_id;
+    err = "unknown id or alias";
+    return {};
+}
+
 Digest48 ResolveUserId(const std::string& s, std::string& err)
 {
     EnsureSearchBound();
@@ -3842,11 +3858,8 @@ Digest48 ResolveUserId(const std::string& s, std::string& err)
         err.clear();
         return id;
     }
-    err.clear();
     std::lock_guard<std::mutex> lock(g_search_mu);
-    if (const auto* rec = g_search_idx.FindByAlias(s)) return rec->model_id;
-    err = "unknown id or alias";
-    return {};
+    return ResolveUserIdLocked(s, err);
 }
 
 bool LoadShareText(const fs::path& p, std::string& text, std::string& err)
@@ -8760,7 +8773,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err_code = "INVALID_PARAMETER";
                 return false;
             }
-            const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+            const Digest48 id = ResolveUserIdLocked(Arg(0).get_str(), err);
             ReleaseCampaign camp;
             bool have_camp = false;
             {
@@ -8871,7 +8884,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err = "release_id or model id required";
                 return false;
             }
-            const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+            const Digest48 id = ResolveUserIdLocked(Arg(0).get_str(), err);
             ReleaseCampaign camp;
             bool have_camp = false;
             {
