@@ -2261,6 +2261,13 @@ private:
     /** Retained body whose source is gone. Reserves a pending slot, charges
      *  the stored address, netgroup, and global verification budgets, then
      *  enqueues the bounded worker. Never ExactReplay on the caller. */
+    /** True when the deferred store holds an unverified ancestor of `index`
+     *  that was refused for capacity. That ancestor is made retryable and
+     *  `index` must not take the single RC job. Local scheduling only. */
+    bool HoldRCJobForLowerAncestor(const CBlockIndex* index, uint32_t work,
+                                   const Consensus::Params& params)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     void DispatchDisconnectedRetainedMatMulBody(
         const uint256& hash,
         const node::MatMulBlockLifecycle::RetainedBody& candidate)
@@ -7713,6 +7720,14 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 // GETDATA here: that suppressed independent sources. Per-peer
                 // skip below stays netgroup-keyed for hashes we do not hold.
                 if (m_matmul_block_lifecycle.HasRetainedBody(deferred_hash)) {
+                    continue;
+                }
+                // A body evicted moments ago under capacity pressure is not
+                // missing. Asking for it again makes the store evict another
+                // one to take it. The progress body is never evicted, so it
+                // is never held back here.
+                if (m_matmul_block_lifecycle.WasEvictedRecently(
+                        deferred_hash, MATMUL_BUDGET_DEFER_COOLDOWN)) {
                     continue;
                 }
                 // Budget defers pace concurrent verifies. When the download
@@ -13617,6 +13632,19 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         followed_tip_child_hash != header.GetHash() &&
         (m_matmul_block_lifecycle.HasRetainedBody(followed_tip_child_hash) ||
          IsMatMulRCBodyDeferred(followed_tip_child_hash))};
+    // Yield to any lower unverified ancestor waiting on capacity, not only
+    // the direct tip-child. Covers tip+2 while tip+1 is still cooling down.
+    if (!authenticated_tip_child &&
+        WITH_LOCK(cs_main, return HoldRCJobForLowerAncestor(
+                               &index, work, params))) {
+        m_matmul_rc_speculative_pending.fetch_sub(
+            1, std::memory_order_relaxed);
+        LogDebug(BCLog::NET,
+                 "matmul: header-first ExactReplay for hash=%s height=%d "
+                 "held for a lower unverified ancestor peer=%d\n",
+                 header.GetHash().ToString(), index.nHeight, node.GetId());
+        return;
+    }
     bool reserved{false};
     if (!followed_tip_child_held || authenticated_tip_child) {
         reserved = ReserveMatMulRCVerificationSlot(
@@ -15447,6 +15475,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 const uint32_t work = rc ? MatMulRCWorkUnits(cons, encdr->height)
                                         : MatMulEncDrWorkUnits(cons, encdr->height);
                 bool reserved{false};
+                bool hold_for_lower_ancestor{false};
                 if (rc) {
                     // Same #163 skip as AdmitMatMulBlockVerification: a
                     // non-tip-child RC body must not consume cap=1 while the
@@ -15476,6 +15505,11 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                                     m_chainman, m_matmul_block_lifecycle)}) {
                             followed_tip_child_hash = followed_child->GetBlockHash();
                         }
+                        if (!direct_authenticated_tip_child &&
+                            !acquisition_covered && covered_index != nullptr) {
+                            hold_for_lower_ancestor = HoldRCJobForLowerAncestor(
+                                covered_index, work, cons);
+                        }
                     }
                     const bool followed_tip_child_held{
                         !followed_tip_child_hash.IsNull() &&
@@ -15485,7 +15519,9 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                          IsMatMulRCBodyDeferred(followed_tip_child_hash))};
                     const bool progress_lane{
                         direct_authenticated_tip_child || acquisition_covered};
-                    if (!followed_tip_child_held || direct_authenticated_tip_child) {
+                    if ((!followed_tip_child_held ||
+                         direct_authenticated_tip_child) &&
+                        !hold_for_lower_ancestor) {
                         reserved = ReserveMatMulRCVerificationSlot(
                             m_matmul_rc_pending_verifications, cons,
                             encdr->height, work, progress_lane);
@@ -15877,6 +15913,36 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
     ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
     release_verdict_pin();
     release_assumevalid_trust_pin();
+}
+
+bool PeerManagerImpl::HoldRCJobForLowerAncestor(
+    const CBlockIndex* index, uint32_t work,
+    const Consensus::Params& params)
+{
+    AssertLockHeld(cs_main);
+    if (index == nullptr) return false;
+    const auto lower{
+        m_matmul_block_lifecycle.CapacityDeferredBodiesBelow(index->nHeight)};
+    for (const auto& deferred : lower) {
+        const CBlockIndex* const cand{
+            m_chainman.m_blockman.LookupBlockIndex(deferred.first)};
+        if (cand == nullptr) continue;
+        if ((cand->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
+        if (index->GetAncestor(cand->nHeight) != cand) continue;
+        if (CanStartMatMulRCVerification(
+                m_matmul_rc_pending_verifications.load(
+                    std::memory_order_relaxed),
+                work, params, index->nHeight)) {
+            m_matmul_block_lifecycle.WakeNow(deferred.first);
+        }
+        LogDebug(BCLog::NET,
+                 "matmul: hash=%s height=%d waits for its unverified ancestor "
+                 "%s height=%d, which is retained and capacity-deferred\n",
+                 index->GetBlockHash().ToString(), index->nHeight,
+                 deferred.first.ToString(), cand->nHeight);
+        return true;
+    }
+    return false;
 }
 
 bool PeerManagerImpl::AdmitMatMulBlockVerification(
@@ -16854,9 +16920,18 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
          IsMatMulRCBodyDeferred(followed_tip_child_hash))};
     const bool progress_lane{
         direct_authenticated_tip_child || acquisition_covered};
+    bool hold_for_lower_ancestor{false};
+    if (rc_profile && !direct_authenticated_tip_child) {
+        LOCK(cs_main);
+        const CBlockIndex* const covered{
+            m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+        hold_for_lower_ancestor =
+            HoldRCJobForLowerAncestor(covered, work, params);
+    }
     bool reserved{false};
     if (rc_profile) {
-        if (!followed_tip_child_held || direct_authenticated_tip_child) {
+        if ((!followed_tip_child_held || direct_authenticated_tip_child) &&
+            !hold_for_lower_ancestor) {
             reserved = ReserveMatMulRCVerificationSlot(
                 m_matmul_rc_pending_verifications, params,
                 exact_reference_height, work, progress_lane);
@@ -16871,7 +16946,14 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             UnmarkMatMulAsyncVerification(*lifecycle_token);
         }
         restore_accepted_ticket();
-        LogInfo(
+        if (hold_for_lower_ancestor) {
+            LogDebug(BCLog::NET,
+                     "Holding the RC verification job for a lower unverified "
+                     "ancestor: deferring %s hash=%s height=%d peer=%d\n",
+                     source, block_hash.ToString(), exact_reference_height,
+                     node.GetId());
+        } else {
+            LogInfo(
             "Deferring peer=%d: MatMul pending verification cap reached (%s) "
             "diag: rc_profile=%d tip_child_lane=%d work=%u rc_pending=%u "
             "encdr_pending=%u rc_cap=%u encdr_cap=%u ref_height=%d\n",
@@ -16882,6 +16964,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             EffectiveMatMulRCMaxPendingVerifications(params, exact_reference_height),
             EffectiveMatMulMaxPendingVerifications(params, exact_reference_height),
             exact_reference_height);
+        }
         // An admitted speculative header or a slow full replay can occupy the
         // complete pending cap (RC or EncDr). A later honest body is not
         // evidence of abuse: the cap is ours, not proof of peer misbehavior,

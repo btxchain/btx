@@ -282,6 +282,106 @@ BOOST_AUTO_TEST_CASE(capacity_release_wakes_only_capacity_deferred_tip_child)
     BOOST_CHECK(lifecycle.NextRetry(parent, now + 60s));
 }
 
+BOOST_AUTO_TEST_CASE(capacity_deferred_bodies_below_lists_lowest_first_and_wake_now_is_uncounted)
+{
+    using RetryCause = node::MatMulBlockLifecycle::RetryCause;
+
+    node::MatMulBlockLifecycle lifecycle{4, 400, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    BOOST_CHECK(lifecycle.CapacityDeferredBodiesBelow(1000).empty());
+
+    auto retain = [&](uint32_t nonce, int32_t height, RetryCause cause) {
+        auto body{Body(nonce, 50, now + 60s)};
+        body.reference_height = height;
+        body.retry_cause = cause;
+        const uint256 hash{uint256::FromHex(
+            std::string(60, '0') + strprintf("%04x", nonce)).value()};
+        BOOST_REQUIRE(lifecycle.Retain(hash, std::move(body), now));
+        return hash;
+    };
+    const uint256 h_105{retain(31, 105, RetryCause::RC_PENDING_CAPACITY)};
+    const uint256 h_101{retain(32, 101, RetryCause::RC_PENDING_CAPACITY)};
+    const uint256 h_103{retain(33, 103, RetryCause::TIMER_OR_AUTHORITY)};
+
+    const auto below_110{lifecycle.CapacityDeferredBodiesBelow(110)};
+    BOOST_REQUIRE_EQUAL(below_110.size(), 2U);
+    BOOST_CHECK(below_110[0].first == h_101);
+    BOOST_CHECK_EQUAL(below_110[0].second, 101);
+    BOOST_CHECK(below_110[1].first == h_105);
+    BOOST_REQUIRE_EQUAL(lifecycle.CapacityDeferredBodiesBelow(105).size(), 1U);
+    BOOST_CHECK(lifecycle.CapacityDeferredBodiesBelow(101).empty());
+
+    BOOST_REQUIRE(lifecycle.WakeNow(h_101, now + 1s));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(h_101), 0U);
+    BOOST_REQUIRE(lifecycle.WakeNow(h_101, now + 2s));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(h_101), 0U);
+
+    const auto token{lifecycle.Begin(h_101, now + 3s)};
+    BOOST_REQUIRE(token);
+    BOOST_CHECK_EQUAL(lifecycle.CapacityDeferredBodiesBelow(110).size(), 1U);
+    BOOST_CHECK(!lifecycle.WakeNow(h_101, now + 3s));
+    lifecycle.Terminal(*token);
+    lifecycle.TerminalRetained(h_101);
+    lifecycle.TerminalRetained(h_105);
+    BOOST_CHECK(lifecycle.CapacityDeferredBodiesBelow(110).empty());
+    BOOST_CHECK(!lifecycle.WakeNow(h_105, now + 4s));
+    (void)h_103;
+}
+
+BOOST_AUTO_TEST_CASE(per_source_eviction_leaves_a_recent_tombstone)
+{
+    node::MatMulBlockLifecycle lifecycle{8, 800, 10min, 10min,
+                                         /*max_retained_count_per_source=*/1};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 first{uint256::FromHex(std::string(63, '0') + "d").value()};
+    const uint256 second{uint256::FromHex(std::string(63, '0') + "e").value()};
+    BOOST_REQUIRE(lifecycle.Retain(first, Body(41, 50, now + 60s, /*source_netgroup=*/7), now));
+    BOOST_CHECK(!lifecycle.WasEvictedRecently(first, 60s, now));
+    BOOST_REQUIRE(lifecycle.Retain(second, Body(42, 50, now + 60s, /*source_netgroup=*/7), now + 1s));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(first));
+    BOOST_CHECK(lifecycle.HasRetainedBody(second));
+    BOOST_CHECK(lifecycle.WasEvictedRecently(first, 60s, now + 1s));
+    BOOST_CHECK(lifecycle.WasEvictedRecently(first, 60s, now + 61s));
+    BOOST_CHECK(!lifecycle.WasEvictedRecently(first, 60s, now + 62s));
+    BOOST_CHECK(!lifecycle.WasEvictedRecently(second, 60s, now + 1s));
+    BOOST_REQUIRE(lifecycle.Retain(first, Body(41, 50, now + 60s, /*source_netgroup=*/9), now + 2s));
+    BOOST_CHECK(!lifecycle.WasEvictedRecently(first, 60s, now + 2s));
+}
+
+BOOST_AUTO_TEST_CASE(capacity_evicts_the_farthest_body_first)
+{
+    node::MatMulBlockLifecycle lifecycle{3, 300, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    auto retain = [&](char suffix, int32_t height, std::chrono::seconds age) {
+        auto body{Body(50, 50, now + 60s, /*source_netgroup=*/5)};
+        body.reference_height = height;
+        const uint256 hash{uint256::FromHex(std::string(63, '0') + suffix).value()};
+        BOOST_REQUIRE(lifecycle.Retain(hash, std::move(body), now - age));
+        return hash;
+    };
+    const uint256 low{retain('1', 101, 30s)};
+    const uint256 mid{retain('2', 105, 20s)};
+    const uint256 far{retain('3', 140, 10s)};
+    const uint256 next{retain('4', 103, 0s)};
+    BOOST_CHECK(lifecycle.HasRetainedBody(low));
+    BOOST_CHECK(lifecycle.HasRetainedBody(mid));
+    BOOST_CHECK(lifecycle.HasRetainedBody(next));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(far));
+    const uint256 twin{retain('5', 105, 0s)};
+    BOOST_CHECK(lifecycle.HasRetainedBody(twin));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(mid));
+    BOOST_CHECK(lifecycle.HasRetainedBody(low));
+    auto pinned{Body(51, 50, now + 60s, /*source_netgroup=*/5)};
+    pinned.reference_height = 200;
+    pinned.pin_progress = true;
+    const uint256 pin{uint256::FromHex(std::string(63, '0') + "6").value()};
+    BOOST_REQUIRE(lifecycle.Retain(pin, std::move(pinned), now));
+    BOOST_CHECK(lifecycle.HasRetainedBody(pin));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(twin));
+    BOOST_CHECK(lifecycle.HasRetainedBody(low));
+}
+
 BOOST_AUTO_TEST_CASE(capacity_does_not_evict_active_generation)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};

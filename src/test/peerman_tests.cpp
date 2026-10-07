@@ -5971,6 +5971,169 @@ BOOST_AUTO_TEST_CASE(unsolicited_retained_tip_child_retries_without_rcadmit)
     CheckConsensusBehindCompetingHeaders(m_node, false, false, false, true);
 }
 
+// A followed tip-child whose only source disconnected must not stay held
+// until MATMUL_DEFERRED_BODY_MAX_AGE while FindNextBlocksToDownload skips the
+// hash for every other peer (root_retained_body). It is connected, or released
+// for re-fetch.
+static void CheckTipChildNotHeldAfterSourceDisconnects(node::NodeContext& m_node,
+                                                       bool retain_directly)
+{
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ResetGlobalMatMulRCBudgetForTest();
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        m_node.chainman->m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+    ActivateRcAtTip(consensus, *tip);
+    consensus.nMatMulRCMaxPendingVerifications = 1;
+    consensus.nMatMulRCPeerVerifyBudgetPerMin = 16;
+    consensus.nMatMulRCGlobalVerifyBudgetPerMin = 16;
+
+    std::atomic<int> replayed{0};
+    SetMatMulExactReplayUnderReleasedCsMainHookForTest([&]() -> std::optional<bool> {
+        replayed.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    });
+    struct Cleanup {
+        node::NodeContext& node;
+        PeerManager& peerman;
+        ~Cleanup()
+        {
+            SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+            NeutralizeUnconnectedHeaders(*Assert(node.chainman));
+            peerman.ResetMatMulVerifyAdmissionForTest();
+        }
+    } cleanup{m_node, peerman};
+
+    CBlock followed{MineTipChild(m_node, *tip, /*extra_time=*/0)};
+    const uint256 followed_hash{followed.GetHash()};
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode peer{/*id=*/247,
+               /*sock=*/nullptr,
+               CAddress{PeermanTestService(0x2f00007f), NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0x2f,
+               /*nLocalHostNonceIn=*/0,
+               CAddress{},
+               /*addrNameIn=*/"ticketless-source-gone",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(peer);
+    connman.FlushSendBuffer(peer);
+    bool peer_finalized{false};
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        bool& done;
+        ~FinalizePeer()
+        {
+            if (done) return;
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, peer, peer_finalized};
+
+    // Header first. Then either the requested body arrives without RCADMIT,
+    // or the body is already retained from this peer.
+    std::vector<CBlock> headers{CBlock{followed.GetBlockHeader()}};
+    peer.fPauseSend = false;
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    connman.FlushSendBuffer(peer);
+    if (retain_directly) {
+        // The body is already held for the scheduler, with this peer as its
+        // source (as after a ticketless or budget-deferred delivery).
+        BOOST_REQUIRE(peerman.RetainMatMulBodyForTest(
+            std::make_shared<const CBlock>(followed), /*pin_progress=*/true,
+            peer.GetId()));
+        BOOST_REQUIRE(peerman.HasMatMulRetainedBodyForTest(followed_hash));
+    } else {
+        peer.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            peer, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(followed))));
+        peer.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(peer);
+    }
+
+    const auto connected = [&] {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(followed_hash)};
+        return idx != nullptr && m_node.chainman->ActiveChain().Contains(idx);
+    };
+    const bool held_before{peerman.HasMatMulRetainedBodyForTest(followed_hash)};
+    BOOST_TEST_MESSAGE("retained before disconnect=" << held_before
+                       << " connected=" << connected());
+
+    // The only source disconnects before the scheduler retries.
+    peerman.FinalizeNode(peer);
+    connman.RemoveTestNode(peer);
+    peer_finalized = true;
+
+    {
+        REVERSE_LOCK(msgproc_lock);
+        peerman.RetryMatMulDeferredBodiesForTest();
+        (void)PeermanWaitFor([&] {
+            return connected() ||
+                   !peerman.HasMatMulRetainedBodyForTest(followed_hash);
+        }, std::chrono::milliseconds{5000});
+    }
+    BOOST_CHECK_MESSAGE(
+        connected() || !peerman.HasMatMulRetainedBodyForTest(followed_hash),
+        "followed tip-child stays retained after its only source disconnected "
+        "(root_retained_body until MATMUL_DEFERRED_BODY_MAX_AGE)");
+
+    if (connected()) {
+        CBlockIndex* idx{WITH_LOCK(::cs_main,
+            return m_node.chainman->m_blockman.LookupBlockIndex(followed_hash))};
+        BlockValidationState invalidate_state;
+        (void)m_node.chainman->ActiveChainstate().InvalidateBlock(
+            invalidate_state, idx);
+    }
+}
+
+// The requested body arrives without RCADMIT, then its source disconnects.
+BOOST_AUTO_TEST_CASE(ticketless_tip_child_not_held_after_source_disconnects)
+{
+    CheckTipChildNotHeldAfterSourceDisconnects(m_node, /*retain_directly=*/false);
+}
+
+// The body is already retained when its source disconnects: the scheduler
+// retry must replay it locally (no source to charge), not defer it.
+BOOST_AUTO_TEST_CASE(retained_tip_child_not_held_after_source_disconnects)
+{
+    CheckTipChildNotHeldAfterSourceDisconnects(m_node, /*retain_directly=*/true);
+}
+
 BOOST_AUTO_TEST_CASE(cpu_pending_active_tip_child_does_not_reserve_gpu_admission)
 {
     CheckConsensusBehindCompetingHeaders(m_node, true, true);
