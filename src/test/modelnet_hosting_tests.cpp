@@ -61,6 +61,29 @@ std::vector<unsigned char> TinyExl3()
     return st;
 }
 
+fs::path WriteExl3Checkout(const fs::path& dir, const char* config_json)
+{
+    fs::create_directories(dir);
+    const auto exl3 = TinyExl3();
+    {
+        std::ofstream out(dir / "model.exl3", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(exl3.data()), static_cast<std::streamsize>(exl3.size()));
+    }
+    if (config_json != nullptr) {
+        std::ofstream cfg(dir / "config.json");
+        cfg << config_json;
+    }
+    return dir;
+}
+
+modelnet::HostGenerateProfile Exl3CliHost()
+{
+    modelnet::HostGenerateProfile host;
+    host.exl3_cli = true;
+    host.exl3_cli_path = "/bin/true";
+    return host;
+}
+
 fs::path WriteTinyModel(const fs::path& dir, unsigned char tag)
 {
     fs::create_directories(dir);
@@ -1179,10 +1202,13 @@ BOOST_AUTO_TEST_CASE(exl3_is_safetensors_container_and_fail_closes_without_its_c
         out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
         std::ofstream q(declared / "quantization_config.json");
         q << "{\"quant_method\":\"exl3\"}\n";
+        std::ofstream cfg(declared / "config.json");
+        cfg << "{\"architectures\":[\"LlamaForCausalLM\"]}\n";
     }
     const auto declared_view = modelnet::InspectCheckoutForGenerate(declared);
     BOOST_CHECK(declared_view.exl3_declared);
     BOOST_CHECK(declared_view.format == modelnet::GenerateFormat::Exl3);
+    BOOST_CHECK_EQUAL(declared_view.architecture, "LlamaForCausalLM");
     reason.clear();
     BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(declared_view, llama_only, reason));
     BOOST_CHECK_EQUAL(reason, "no_exl3_backend");
@@ -1255,6 +1281,83 @@ BOOST_AUTO_TEST_CASE(exl3_is_safetensors_container_and_fail_closes_without_its_c
         std::string err;
         BOOST_CHECK(!cat.ImportPath(fs::PathToString(pickle), true, imported, err));
     }
+}
+
+BOOST_AUTO_TEST_CASE(exl3_missing_architecture_is_not_host_compatible)
+{
+    const fs::path dir = WriteExl3Checkout(m_path_root / "exl3-allowlist" / "missing", "{}\n");
+    const auto view = modelnet::InspectCheckoutForGenerate(dir);
+    BOOST_CHECK(view.format == modelnet::GenerateFormat::Exl3);
+    BOOST_CHECK(view.architecture.empty());
+    BOOST_CHECK(!modelnet::SafeTensorsArchitectureIsHostCompatible(view.architecture));
+    const auto host = Exl3CliHost();
+    std::string reason;
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(view, host, reason));
+    BOOST_CHECK_EQUAL(reason, "missing_architecture");
+}
+
+BOOST_AUTO_TEST_CASE(exl3_unknown_architecture_is_not_host_compatible)
+{
+    const fs::path dir = WriteExl3Checkout(m_path_root / "exl3-allowlist" / "unknown",
+                                           "{\"architectures\":[\"UnrecognizedForCausalLM\"]}\n");
+    const auto view = modelnet::InspectCheckoutForGenerate(dir);
+    BOOST_CHECK(view.format == modelnet::GenerateFormat::Exl3);
+    BOOST_CHECK_EQUAL(view.architecture, "UnrecognizedForCausalLM");
+    BOOST_CHECK(!modelnet::SafeTensorsArchitectureIsHostCompatible(view.architecture));
+    const auto host = Exl3CliHost();
+    std::string reason;
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(view, host, reason));
+    BOOST_CHECK_EQUAL(reason, "unknown_architecture");
+}
+
+BOOST_AUTO_TEST_CASE(exl3_unknown_architecture_with_auto_map_is_custom_code)
+{
+    const fs::path dir = WriteExl3Checkout(
+        m_path_root / "exl3-allowlist" / "unknown-auto-map",
+        "{\"architectures\":[\"UnrecognizedForCausalLM\"],\"auto_map\":{\"AutoModel\":\"local\"}}\n");
+    const auto view = modelnet::InspectCheckoutForGenerate(dir);
+    BOOST_CHECK(view.format == modelnet::GenerateFormat::Exl3);
+    BOOST_CHECK_EQUAL(view.architecture, "custom_auto_map");
+    const auto host = Exl3CliHost();
+    std::string reason;
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(view, host, reason));
+    BOOST_CHECK_EQUAL(reason, "custom_code");
+
+    const fs::path hidden = WriteExl3Checkout(
+        m_path_root / "exl3-allowlist" / "allowlisted-auto-map",
+        "{\"architectures\":[\"LlamaForCausalLM\"],\"auto_map\":{\"AutoModel\":\"local\"}}\n");
+    const auto hidden_view = modelnet::InspectCheckoutForGenerate(hidden);
+    BOOST_CHECK_EQUAL(hidden_view.architecture, "custom_auto_map");
+    reason.clear();
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(hidden_view, host, reason));
+    BOOST_CHECK_EQUAL(reason, "custom_code");
+}
+
+BOOST_AUTO_TEST_CASE(exl3_auto_map_alone_is_custom_code)
+{
+    const fs::path dir = WriteExl3Checkout(m_path_root / "exl3-allowlist" / "auto-map",
+                                           "{\"auto_map\":{\"AutoModel\":\"local\"}}\n");
+    const auto view = modelnet::InspectCheckoutForGenerate(dir);
+    BOOST_CHECK(view.format == modelnet::GenerateFormat::Exl3);
+    BOOST_CHECK_EQUAL(view.architecture, "custom_auto_map");
+    const auto host = Exl3CliHost();
+    std::string reason;
+    BOOST_CHECK(!modelnet::ArtifactCompatibleWithHost(view, host, reason));
+    BOOST_CHECK_EQUAL(reason, "custom_code");
+}
+
+BOOST_AUTO_TEST_CASE(exl3_allowlisted_architecture_with_cli_is_compatible)
+{
+    const fs::path dir = WriteExl3Checkout(m_path_root / "exl3-allowlist" / "llama",
+                                           "{\"architectures\":[\"LlamaForCausalLM\"]}\n");
+    const auto view = modelnet::InspectCheckoutForGenerate(dir);
+    BOOST_CHECK(view.format == modelnet::GenerateFormat::Exl3);
+    BOOST_CHECK_EQUAL(view.architecture, "LlamaForCausalLM");
+    BOOST_CHECK(modelnet::SafeTensorsArchitectureIsHostCompatible(view.architecture));
+    const auto host = Exl3CliHost();
+    std::string reason;
+    BOOST_CHECK(modelnet::ArtifactCompatibleWithHost(view, host, reason));
+    BOOST_CHECK_EQUAL(modelnet::PickGenerateAdapter(view, host), "/bin/true");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

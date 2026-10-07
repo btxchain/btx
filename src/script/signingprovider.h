@@ -55,6 +55,8 @@ struct P2MRSpendData
 {
     /** Map from leaf script to one or more control blocks for that script. */
     std::map<std::vector<unsigned char>, std::set<std::vector<unsigned char>, ShortestVectorFirstComparator>> scripts;
+    /** Leaf scripts in descriptor order. Index selection uses this, not map order. */
+    std::vector<std::vector<unsigned char>> ordered_leaf_scripts;
     void Merge(P2MRSpendData other);
 };
 

@@ -43,6 +43,12 @@ std::vector<unsigned char> Sha256Bytes(Span<const unsigned char> data)
     return {hash.begin(), hash.end()};
 }
 
+std::vector<unsigned char> Hash160Bytes(Span<const unsigned char> data)
+{
+    const uint160 hash = Hash160(data);
+    return {hash.begin(), hash.end()};
+}
+
 bool EvalP2MRScript(const CScript& script, std::vector<std::vector<unsigned char>>& stack, const BaseSignatureChecker& checker, ScriptExecutionData& execdata, ScriptError& serror)
 {
     constexpr unsigned int flags = SCRIPT_VERIFY_NULLFAIL | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
@@ -301,51 +307,88 @@ BOOST_AUTO_TEST_CASE(htlc_sha256_leaf_rejects_other_preimage_length)
     BOOST_CHECK_EQUAL(serror, SCRIPT_ERR_EQUALVERIFY);
 }
 
-BOOST_AUTO_TEST_CASE(legacy_htlc_sha256_spend_requires_32_byte_preimage)
+BOOST_AUTO_TEST_CASE(unpinned_htlc_leaves_accept_non32_preimage_under_flag)
 {
     CPQKey oracle_key;
     oracle_key.MakeNewKey(PQAlgorithm::ML_DSA_44);
     BOOST_REQUIRE(oracle_key.IsValid());
 
-    const std::vector<unsigned char> preimage32(32, 0x11);
-    const std::vector<unsigned char> preimage64(64, 0x22);
-    const std::vector<unsigned char> legacy_bytes = BuildP2MRHTLCSha256LegacyLeaf(
-        Sha256Bytes(preimage32), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
-    BOOST_REQUIRE(!legacy_bytes.empty());
-    BOOST_CHECK(P2MRClaimLeafPinsPreimageLength(legacy_bytes));
+    constexpr unsigned int base_flags{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS};
+    constexpr unsigned int pinned_flags{base_flags | SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32};
+    const P2MRTemplateChecker checker{/*locktime_ok=*/true};
 
-    const uint256 leaf_hash = ComputeP2MRLeafHash(P2MR_LEAF_VERSION, legacy_bytes);
-    const uint256 root = ComputeP2MRMerkleRoot({leaf_hash});
-    CScript script_pubkey;
-    script_pubkey << OP_2 << std::vector<unsigned char>(root.begin(), root.end());
-
-    auto spend = [&](const std::vector<unsigned char>& preimage, unsigned int flags) {
+    auto spend = [&](const std::vector<unsigned char>& leaf, const std::vector<unsigned char>& preimage, unsigned int flags) {
+        const uint256 leaf_hash = ComputeP2MRLeafHash(P2MR_LEAF_VERSION, leaf);
+        const uint256 root = ComputeP2MRMerkleRoot({leaf_hash});
+        CScript script_pubkey;
+        script_pubkey << OP_2 << std::vector<unsigned char>(root.begin(), root.end());
         CScriptWitness witness;
         witness.stack.push_back(std::vector<unsigned char>(MLDSA44_SIGNATURE_SIZE, 0x01));
         witness.stack.push_back(preimage);
-        witness.stack.push_back(legacy_bytes);
+        witness.stack.push_back(leaf);
         witness.stack.push_back({P2MR_LEAF_VERSION});
         ScriptError err = SCRIPT_ERR_OK;
-        const P2MRTemplateChecker checker{/*locktime_ok=*/true};
         const bool ok = VerifyScript(CScript(), script_pubkey, &witness, flags, checker, &err);
         return std::pair<bool, ScriptError>{ok, err};
     };
 
-    constexpr unsigned int base_flags{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS};
-    constexpr unsigned int pinned_flags{base_flags | SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32};
+    const std::vector<unsigned char> preimage32(32, 0x11);
+    const std::vector<unsigned char> preimage64(64, 0x22);
+    const std::vector<unsigned char> preimage20(20, 0x33);
 
-    const auto bad = spend(preimage64, pinned_flags);
-    BOOST_CHECK(!bad.first);
-    BOOST_CHECK_EQUAL(bad.second, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
+    // Legacy SHA-256: no OP_SIZE in the committed script. A matching preimage
+    // of any length is consensus-valid with the 32-byte flag set.
+    const std::vector<unsigned char> legacy64 = BuildP2MRHTLCSha256LegacyLeaf(
+        Sha256Bytes(preimage64), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    BOOST_REQUIRE(!legacy64.empty());
+    BOOST_CHECK(!P2MRClaimLeafPinsPreimageLength(legacy64));
+    const auto legacy_pinned = spend(legacy64, preimage64, pinned_flags);
+    BOOST_CHECK(legacy_pinned.first);
+    BOOST_CHECK_EQUAL(legacy_pinned.second, SCRIPT_ERR_OK);
+    const auto legacy_base = spend(legacy64, preimage64, base_flags);
+    BOOST_CHECK(legacy_base.first);
+    BOOST_CHECK_EQUAL(legacy_base.second, SCRIPT_ERR_OK);
 
-    // Before the activation height the length rule is policy only: the
-    // pre-check does not run and the spend fails or passes on the script alone.
-    const auto unpinned = spend(preimage64, base_flags);
-    BOOST_CHECK(unpinned.second != SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
+    const std::vector<unsigned char> legacy32 = BuildP2MRHTLCSha256LegacyLeaf(
+        Sha256Bytes(preimage32), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    const auto legacy32_ok = spend(legacy32, preimage32, pinned_flags);
+    BOOST_CHECK(legacy32_ok.first);
+    BOOST_CHECK_EQUAL(legacy32_ok.second, SCRIPT_ERR_OK);
 
-    const auto good = spend(preimage32, pinned_flags);
-    BOOST_CHECK(good.first);
-    BOOST_CHECK_EQUAL(good.second, SCRIPT_ERR_OK);
+    // HASH160 htlc_tx: same rule. The digest matches; the length is not pinned.
+    const std::vector<unsigned char> tx20 = BuildP2MRHTLCTxLeaf(
+        Hash160Bytes(preimage20), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    BOOST_REQUIRE(!tx20.empty());
+    BOOST_CHECK(!P2MRClaimLeafPinsPreimageLength(tx20));
+    const auto tx_pinned = spend(tx20, preimage20, pinned_flags);
+    BOOST_CHECK(tx_pinned.first);
+    BOOST_CHECK_EQUAL(tx_pinned.second, SCRIPT_ERR_OK);
+
+    const std::vector<unsigned char> tx64 = BuildP2MRHTLCTxLeaf(
+        Hash160Bytes(preimage64), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    const auto tx64_pinned = spend(tx64, preimage64, pinned_flags);
+    BOOST_CHECK(tx64_pinned.first);
+    BOOST_CHECK_EQUAL(tx64_pinned.second, SCRIPT_ERR_OK);
+
+    // New htlc_sha256 leaf embeds OP_SIZE 32 OP_EQUALVERIFY. A matching
+    // non-32-byte preimage fails under the flag (defense in depth for this
+    // format only) and without it (the committed script).
+    const std::vector<unsigned char> pinned_leaf = BuildP2MRHTLCSha256Leaf(
+        Sha256Bytes(preimage64), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    BOOST_REQUIRE(!pinned_leaf.empty());
+    BOOST_CHECK(P2MRClaimLeafPinsPreimageLength(pinned_leaf));
+    const auto pinned_flag = spend(pinned_leaf, preimage64, pinned_flags);
+    BOOST_CHECK(!pinned_flag.first);
+    BOOST_CHECK_EQUAL(pinned_flag.second, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
+    const auto pinned_script = spend(pinned_leaf, preimage64, base_flags);
+    BOOST_CHECK(!pinned_script.first);
+    BOOST_CHECK_EQUAL(pinned_script.second, SCRIPT_ERR_EQUALVERIFY);
+
+    const std::vector<unsigned char> pinned32 = BuildP2MRHTLCSha256Leaf(
+        Sha256Bytes(preimage32), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    const auto pinned32_ok = spend(pinned32, preimage32, pinned_flags);
+    BOOST_CHECK(pinned32_ok.first);
+    BOOST_CHECK_EQUAL(pinned32_ok.second, SCRIPT_ERR_OK);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

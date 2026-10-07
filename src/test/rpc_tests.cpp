@@ -695,6 +695,30 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_modelnet_methods)
     BOOST_CHECK(RPCConvertValues("inspectbountyaward", {"{}"})[0].isObject());
     BOOST_CHECK(RPCConvertValues("preparebountyrefund", {"{}"})[0].isObject());
     BOOST_CHECK(RPCConvertValues("signbountyfunding", {"{}"})[0].isObject());
+
+    // hostmodel options is an object. A JSON object string is parsed for that
+    // parameter only. An arbitrary string stays a string, and a string
+    // parameter whose text looks like JSON is not treated as an object.
+    const UniValue host_pos = RPCConvertValues("hostmodel", {"/tmp/model.safetensors", R"({"publish":false})"});
+    BOOST_CHECK(host_pos[0].isStr());
+    BOOST_CHECK(host_pos[1].isObject());
+    BOOST_CHECK_EQUAL(host_pos[1]["publish"].get_bool(), false);
+    const UniValue host_plain = RPCConvertValues("hostmodel", {"/tmp/model.safetensors", "publish-false"});
+    BOOST_CHECK(host_plain[1].isStr());
+    BOOST_CHECK_EQUAL(host_plain[1].get_str(), "publish-false");
+    const UniValue host_array = RPCConvertValues("hostmodel", {"/tmp/model.safetensors", "[]"});
+    BOOST_CHECK(host_array[1].isStr());
+    const UniValue host_path_json = RPCConvertValues("hostmodel", {R"({"publish":false})"});
+    BOOST_CHECK(host_path_json[0].isStr());
+    const UniValue host_named = RPCConvertNamedValues("hostmodel", {R"(path=/tmp/model.safetensors)", R"(options={"publish":false})"});
+    BOOST_CHECK(host_named["options"].isObject());
+    BOOST_CHECK_EQUAL(host_named["options"]["publish"].get_bool(), false);
+    const UniValue host_named_plain = RPCConvertNamedValues("hostmodel", {R"(options=not-an-object)"});
+    BOOST_CHECK(host_named_plain["options"].isStr());
+
+    const UniValue receipt = RPCConvertValues("verifycomputereceipt", {R"({"type":"ComputeReceipt"})"});
+    BOOST_CHECK(receipt[0].isObject());
+    BOOST_CHECK_EQUAL(receipt[0]["type"].get_str(), "ComputeReceipt");
 }
 
 BOOST_AUTO_TEST_CASE(rpc_getblockstats_calculate_percentiles_by_weight)

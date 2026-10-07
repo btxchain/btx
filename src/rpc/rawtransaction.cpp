@@ -31,6 +31,8 @@
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
+#include <script/ctv.h>
+#include <script/interpreter.h>
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/signingprovider.h>
@@ -219,6 +221,7 @@ static std::vector<RPCArg> CreateTxDoc()
                         {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction id"},
                         {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "The output number"},
                         {"sequence", RPCArg::Type::NUM, RPCArg::DefaultHint{"depends on the value of the 'replaceable' and 'locktime' arguments"}, "The sequence number"},
+                        {"p2mr_leaf", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "P2MR leaf script hex, or a leaf index. createpsbt stores a hex script and rejects an index. walletcreatefundedpsbt resolves an index against the wallet descriptor.", RPCArgOptions{.skip_type_check = true}},
                     },
                 },
             },
@@ -249,7 +252,7 @@ static std::vector<RPCArg> CreateTxDoc()
 
 // Update PSBT with information from the mempool, the UTXO set, the txindex, and the provided descriptors.
 // Optionally, sign the inputs that we can using information from the descriptors.
-PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std::any& context, const HidingSigningProvider& provider, int sighash_type, const std::optional<std::vector<CTransactionRef>>& prev_txs, bool finalize)
+PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std::any& context, const HidingSigningProvider& provider, int sighash_type, const std::optional<std::vector<CTransactionRef>>& prev_txs, bool finalize, const std::vector<P2MRLeafSelection>& leaf_selections = {}, bool report_unsigned_p2mr = false)
 {
     const NodeContext& node_context = EnsureAnyNodeContext(context);
 
@@ -337,6 +340,13 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
         }
     }
 
+    {
+        bilingual_str leaf_error;
+        if (!ApplyP2MRLeafSelections(psbtx, leaf_selections, &provider, leaf_error)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, leaf_error.original);
+        }
+    }
+
     const PrecomputedTransactionData& txdata = PrecomputePSBTData(psbtx);
 
     for (unsigned int i = 0; i < psbtx.tx->vin.size(); ++i) {
@@ -357,6 +367,33 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
     }
 
     RemoveUnnecessaryTransactions(psbtx, /*sighash_type=*/1);
+
+    if (report_unsigned_p2mr) {
+        for (unsigned int i = 0; i < psbtx.inputs.size(); ++i) {
+            const PSBTInput& input = psbtx.inputs.at(i);
+            if (PSBTInputSigned(input)) continue;
+            CScript script;
+            if (!input.witness_utxo.IsNull()) {
+                script = input.witness_utxo.scriptPubKey;
+            } else if (input.non_witness_utxo && psbtx.tx->vin.at(i).prevout.n < input.non_witness_utxo->vout.size()) {
+                script = input.non_witness_utxo->vout[psbtx.tx->vin.at(i).prevout.n].scriptPubKey;
+            }
+            int witver{0};
+            std::vector<unsigned char> program;
+            if (!script.IsWitnessProgram(witver, program) || program.size() != 32) continue;
+            P2MRSpendData spend;
+            if (!provider.GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spend)) continue;
+            std::map<std::vector<unsigned char>, std::vector<unsigned char>> preimages;
+            for (const auto& [hash, preimage] : input.sha256_preimages) {
+                preimages.emplace(std::vector<unsigned char>(hash.begin(), hash.end()), preimage);
+            }
+            bilingual_str why;
+            const size_t leaf_count = spend.ordered_leaf_scripts.empty() ? spend.scripts.size() : spend.ordered_leaf_scripts.size();
+            if (ExplainUnsignedP2MRInput(input.m_p2mr_leaf_script, leaf_count, preimages, !input.m_p2mr_pq_sigs.empty(), why)) {
+                throw JSONRPCError(RPC_TRANSACTION_ERROR, why.original);
+            }
+        }
+    }
 
     return psbtx;
 }
@@ -900,6 +937,7 @@ static RPCHelpMan signrawtransactionwithkey()
             "       \"NONE|ANYONECANPAY\"\n"
             "       \"SINGLE|ANYONECANPAY\"\n"
                     },
+                    {"adjust_timelocks", RPCArg::Type::BOOL, RPCArg::Default{false}, "Unused while this RPC is disabled. When signing is available, true raises nSequence, nLockTime, and version to satisfy a selected csv, cltv, or refund leaf and returns timelock_adjustment. False refuses and names the required value."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1824,6 +1862,11 @@ static RPCHelpMan createpsbt()
         psbtx.outputs.emplace_back();
     }
 
+    bilingual_str leaf_error;
+    if (!ApplyP2MRLeafSelections(psbtx, ParseInputsP2MRLeaves(request.params[0]), /*provider=*/nullptr, leaf_error)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, leaf_error.original);
+    }
+
     // Serialize the PSBT
     DataStream ssTx{};
     ssTx << psbtx;
@@ -1916,6 +1959,11 @@ static RPCHelpMan utxoupdatepsbt()
                 {"prevtxs", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "An array of dependant serialized transactions as hex", {
                     {"", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "A serialized previous transaction in hex"},
                 }},
+                {"p2mr_leaf", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::OMITTED, "Map of \"txid:vout\" to a P2MR leaf index or leaf-script hex. A single-leaf descriptor still fills the leaf when this is omitted.",
+                    {
+                        {"txid:vout", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Leaf index or leaf script hex", RPCArgOptions{.skip_type_check = true}},
+                    },
+                },
             },
             RPCResult {
                     RPCResult::Type::STR, "", "The base64-encoded partially signed transaction with inputs updated"
@@ -1940,13 +1988,16 @@ static RPCHelpMan utxoupdatepsbt()
     }
 
     // We don't actually need private keys further on; hide them as a precaution.
+    const std::vector<P2MRLeafSelection> leaf_selections = request.params[3].isNull() ? std::vector<P2MRLeafSelection>{} : ParseP2MRLeafMap(request.params[3]);
     const PartiallySignedTransaction& psbtx = ProcessPSBT(
         request.params[0].get_str(),
         request.context,
         HidingSigningProvider(&provider, /*hide_secret=*/true, /*hide_origin=*/false),
         /*sighash_type=*/SIGHASH_ALL,
         /*prev_txs=*/prev_txns,
-        /*finalize=*/false);
+        /*finalize=*/false,
+        leaf_selections,
+        /*report_unsigned_p2mr=*/false);
 
     DataStream ssTx{};
     ssTx << psbtx;
@@ -2189,6 +2240,11 @@ RPCHelpMan descriptorprocesspsbt()
                             {"prevtxs", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "An array of dependant serialized transactions as hex", {
                                 {"", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "A serialized previous transaction in hex"},
                             }},
+                            {"p2mr_leaf", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::OMITTED, "Map of \"txid:vout\" to a P2MR leaf index or leaf-script hex. Required before signing when the descriptor has more than one leaf.",
+                                {
+                                    {"txid:vout", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Leaf index or leaf script hex", RPCArgOptions{.skip_type_check = true}},
+                                },
+                            },
                         },
                     RPCArgOptions{.oneline_description="options"}},
                     {"bip32derivs", RPCArg::Type::BOOL, RPCArg::Default{true}, "for backwards compatibility", RPCArgOptions{.hidden=true}},
@@ -2221,6 +2277,7 @@ RPCHelpMan descriptorprocesspsbt()
     bool finalize = true;
     int sighash_type = ParseSighashString(NullUniValue); // Use ParseSighashString default
     std::vector<CTransactionRef> prev_txns;
+    std::vector<P2MRLeafSelection> leaf_selections;
     if (request.params[2].isStr() || request.params[2].isNull()) {
         // Old style positional parameters
         sighash_type = ParseSighashString(request.params[2]);
@@ -2235,6 +2292,7 @@ RPCHelpMan descriptorprocesspsbt()
                 {"finalize", UniValueType(UniValue::VBOOL)},
                 {"prevtxs", UniValueType(UniValue::VARR)},
                 {"sighashtype", UniValueType(UniValue::VSTR)},
+                {"p2mr_leaf", UniValueType(UniValue::VOBJ)},
             },
             true, true);
         if (options.exists("bip32derivs")) {
@@ -2249,6 +2307,9 @@ RPCHelpMan descriptorprocesspsbt()
         if (options.exists("sighashtype")) {
             sighash_type = ParseSighashString(options["sighashtype"]);
         }
+        if (options.exists("p2mr_leaf")) {
+            leaf_selections = ParseP2MRLeafMap(options["p2mr_leaf"]);
+        }
         if (request.params.size() > 3) {
             // Same behaviour as too many args passed normally
             throw std::runtime_error(self.ToString());
@@ -2261,7 +2322,9 @@ RPCHelpMan descriptorprocesspsbt()
         HidingSigningProvider(&provider, /*hide_secret=*/false, !bip32derivs),
         sighash_type,
         /*prev_txs=*/prev_txns,
-        finalize);
+        finalize,
+        leaf_selections,
+        /*report_unsigned_p2mr=*/true);
 
     const bool slhdsa_fips205 = SlhdsaFips205ForNextBlock(request.context);
 
@@ -2300,12 +2363,73 @@ RPCHelpMan descriptorprocesspsbt()
     };
 }
 
+static RPCHelpMan getctvtemplatehash()
+{
+    return RPCHelpMan{"getctvtemplatehash",
+                "\nReturn the OP_CHECKTEMPLATEVERIFY template hash of a raw transaction.\n"
+                "The hash is the 32-byte digest a ctv() leaf commits to, in descriptor byte order.\n"
+                "It commits to nVersion, nLockTime, the input nSequence vector, and the outputs.\n"
+                "A relative delay is committed by setting nSequence on this template. This RPC does not\n"
+                "add a consensus rule or a standard leaf type. A custom CSV-plus-CTV leaf is not a\n"
+                "standard descriptor; csv_ctv() stays refused.\n",
+                {
+                    {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The raw transaction hex."},
+                    {"nIn", RPCArg::Type::NUM, RPCArg::Default{0}, "Input index the template hash commits to."},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "hash", "CTV template hash (ctv() byte order)"},
+                        {RPCResult::Type::NUM, "nIn", "Input index used"},
+                    }
+                },
+                RPCExamples{
+                    HelpExampleCli("getctvtemplatehash", "\"hexstring\"")
+            + HelpExampleCli("getctvtemplatehash", "\"hexstring\" 0")
+            + HelpExampleRpc("getctvtemplatehash", "\"hexstring\", 0")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    (void)self;
+    CMutableTransaction mtx;
+    if (!DecodeHexTx(mtx, request.params[0].get_str())) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    }
+    if (mtx.vin.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Transaction has no inputs");
+    }
+
+    int64_t n_in = 0;
+    if (!request.params[1].isNull()) {
+        n_in = request.params[1].getInt<int64_t>();
+    }
+    if (n_in < 0 || static_cast<uint64_t>(n_in) >= mtx.vin.size()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Input index out of range");
+    }
+    const uint32_t input_index = static_cast<uint32_t>(n_in);
+
+    // force precomputes sequence and output hashes for a template that has
+    // no witness. This is the same hash OP_CHECKTEMPLATEVERIFY checks.
+    CTransaction tx{mtx};
+    PrecomputedTransactionData txdata;
+    txdata.Init(tx, std::vector<CTxOut>{}, /*force=*/true);
+    const uint256 hash = ComputeCTVHash(tx, input_index, txdata);
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("hash", HexStr(hash));
+    result.pushKV("nIn", n_in);
+    return result;
+},
+    };
+}
+
 void RegisterRawTransactionRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"rawtransactions", &getrawtransaction},
         {"rawtransactions", &createrawtransaction},
         {"rawtransactions", &decoderawtransaction},
+        {"rawtransactions", &getctvtemplatehash},
         {"rawtransactions", &decodescript},
         {"rawtransactions", &combinerawtransaction},
         {"rawtransactions", &signrawtransactionwithkey},

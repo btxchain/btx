@@ -17,6 +17,7 @@
 #include <script/signingprovider.h>
 #include <script/solver.h>
 #include <uint256.h>
+#include <util/strencodings.h>
 #include <util/translation.h>
 #include <util/vector.h>
 
@@ -1183,6 +1184,25 @@ static bool SignP2MR(const SigningProvider& provider,
     }
     if (sigdata.p2mr_spenddata.scripts.empty()) return false;
 
+    // Preferred checksig leaves first. The script map is ordered by bytes, and
+    // an SLH-DSA leaf sorts before ML-DSA. Signing that leaf first computes a
+    // signature that is thrown away when the preferred leaf succeeds.
+    using ScriptMap = std::decay_t<decltype(sigdata.p2mr_spenddata.scripts)>;
+    std::vector<const ScriptMap::value_type*> leaf_order;
+    std::vector<const ScriptMap::value_type*> deferred_leaves;
+    leaf_order.reserve(sigdata.p2mr_spenddata.scripts.size());
+    for (const auto& entry : sigdata.p2mr_spenddata.scripts) {
+        P2MRLeafInfo info;
+        const bool preferred_checksig =
+            ExtractP2MRLeafInfo(entry.first, info) &&
+            (info.type == P2MRLeafType::CHECKSIG ||
+             info.type == P2MRLeafType::CLTV_CHECKSIG ||
+             info.type == P2MRLeafType::CTV_CHECKSIG) &&
+            info.algo == preferred_algo;
+        (preferred_checksig ? leaf_order : deferred_leaves).push_back(&entry);
+    }
+    leaf_order.insert(leaf_order.end(), deferred_leaves.begin(), deferred_leaves.end());
+
     bool have_best{false};
     int best_priority{0};
     std::vector<valtype> best_result;
@@ -1201,7 +1221,9 @@ static bool SignP2MR(const SigningProvider& provider,
         }
     };
 
-    for (const auto& [script, controls] : sigdata.p2mr_spenddata.scripts) {
+    for (const auto* entry : leaf_order) {
+        const auto& script = entry->first;
+        const auto& controls = entry->second;
         if (controls.empty()) continue;
         if (!sigdata.p2mr_leaf_script.empty() && script != sigdata.p2mr_leaf_script) continue;
 
@@ -1376,7 +1398,15 @@ static bool SignP2MR(const SigningProvider& provider,
         }
         case P2MRLeafType::HTLC_SHA256: {
             const auto it_pre = sigdata.sha256_preimages.find(leaf_info.htlc_sha256);
-            if (it_pre == sigdata.sha256_preimages.end()) continue;
+            // A missing or non-32-byte preimage stays unsigned. Callers treat that
+            // as an input error instead of a zero-signature success.
+            if (it_pre == sigdata.sha256_preimages.end() || it_pre->second.size() != 32) continue;
+            uint256 preimage_digest;
+            CSHA256().Write(it_pre->second.data(), it_pre->second.size()).Finalize(preimage_digest.begin());
+            if (leaf_info.htlc_sha256.size() != preimage_digest.size() ||
+                !std::equal(leaf_info.htlc_sha256.begin(), leaf_info.htlc_sha256.end(), preimage_digest.begin())) {
+                continue;
+            }
 
             std::vector<unsigned char> sig;
             if (!CreateP2MRScriptSig(
@@ -1914,7 +1944,9 @@ bool HandleP2MRTimelockedTransaction(CMutableTransaction& tx,
                                         tx_time_based == *required_cltv_time_based;
         if (!locktime_satisfied) {
             if (!allow_mutation) {
-                error = Untranslated("Selected P2MR CLTV leaf requires a different transaction locktime");
+                error = Untranslated(strprintf(
+                    "Selected P2MR CLTV leaf requires nLockTime >= %u",
+                    *required_cltv_locktime));
                 return false;
             }
             tx.nLockTime = *required_cltv_locktime;
@@ -1923,7 +1955,9 @@ bool HandleP2MRTimelockedTransaction(CMutableTransaction& tx,
         for (const unsigned int input_index : cltv_inputs) {
             if (tx.vin[input_index].nSequence == CTxIn::SEQUENCE_FINAL) {
                 if (!allow_mutation) {
-                    error = Untranslated("Selected P2MR CLTV leaf requires a non-final input sequence");
+                    error = Untranslated(strprintf(
+                        "Selected P2MR CLTV leaf requires nSequence <= %u",
+                        static_cast<uint32_t>(CTxIn::MAX_SEQUENCE_NONFINAL)));
                     return false;
                 }
                 tx.vin[input_index].nSequence = CTxIn::MAX_SEQUENCE_NONFINAL;
@@ -1942,7 +1976,9 @@ bool HandleP2MRTimelockedTransaction(CMutableTransaction& tx,
     for (const auto& [input_index, required_sequence] : csv_inputs) {
         if (!CheckP2MRCSVSequence(tx.vin[input_index].nSequence, required_sequence)) {
             if (!allow_mutation) {
-                error = Untranslated("Selected P2MR CSV leaf requires a different input sequence");
+                error = Untranslated(strprintf(
+                    "Selected P2MR CSV leaf requires nSequence >= %u",
+                    required_sequence));
                 return false;
             }
             tx.vin[input_index].nSequence = required_sequence;
@@ -2000,7 +2036,69 @@ bool IsSegWitOutput(const SigningProvider& provider, const CScript& script)
     return false;
 }
 
-bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, const std::map<COutPoint, Coin>& coins, int nHashType, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo, bool slhdsa_fips205)
+void RecordP2MRTimelockAdjustment(const CMutableTransaction& before, const CMutableTransaction& after, P2MRTimelockAdjustment& out)
+{
+    out.txid_before = CTransaction(before).GetHash();
+    out.txid_after = CTransaction(after).GetHash();
+    out.locktime_before = before.nLockTime;
+    out.locktime_after = after.nLockTime;
+    out.version_before = before.version;
+    out.version_after = after.version;
+    out.changed = out.txid_before != out.txid_after || out.locktime_before != out.locktime_after || out.version_before != out.version_after;
+    out.sequences.clear();
+    const size_t n_in = std::min(before.vin.size(), after.vin.size());
+    for (size_t i = 0; i < n_in; ++i) {
+        if (before.vin[i].nSequence != after.vin[i].nSequence) {
+            out.sequences.emplace_back(static_cast<unsigned int>(i), before.vin[i].nSequence, after.vin[i].nSequence);
+            out.changed = true;
+        }
+    }
+}
+
+namespace {
+
+bool Sha256PreimageMatches(const uint256& hash, const std::vector<unsigned char>& preimage)
+{
+    if (preimage.size() != 32) return false;
+    uint256 digest;
+    CSHA256().Write(preimage.data(), preimage.size()).Finalize(digest.begin());
+    return digest == hash;
+}
+
+} // namespace
+
+bool ExplainUnsignedP2MRInput(const std::vector<unsigned char>& leaf_script,
+                              size_t known_leaf_count,
+                              const std::map<std::vector<unsigned char>, std::vector<unsigned char>>& sha256_preimages,
+                              bool produced_p2mr_signature,
+                              bilingual_str& error)
+{
+    if (produced_p2mr_signature) return false;
+    if (leaf_script.empty() && known_leaf_count > 1) {
+        error = Untranslated("multi-leaf P2MR input: no leaf selected");
+        return true;
+    }
+    if (leaf_script.empty()) return false;
+
+    std::vector<unsigned char> hashlock;
+    std::vector<unsigned char> pubkey;
+    PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+    if (!ParseP2MRHTLCSha256Leaf(leaf_script, hashlock, algo, pubkey) &&
+        !ParseP2MRHTLCSha256LegacyLeaf(leaf_script, hashlock, algo, pubkey)) {
+        return false;
+    }
+    uint256 hash;
+    if (hashlock.size() != hash.size()) return false;
+    std::copy(hashlock.begin(), hashlock.end(), hash.begin());
+    const auto it = sha256_preimages.find(hashlock);
+    if (it != sha256_preimages.end() && Sha256PreimageMatches(hash, it->second)) return false;
+    error = Untranslated(strprintf(
+        "htlc_sha256 claim leaf requires the 32-byte preimage whose SHA256 is %s",
+        HexStr(hashlock)));
+    return true;
+}
+
+bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, const std::map<COutPoint, Coin>& coins, int nHashType, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo, bool slhdsa_fips205, bool adjust_timelocks, P2MRTimelockAdjustment* timelock_adjustment)
 {
     bool fHashSingle = ((nHashType & ~SIGHASH_ANYONECANPAY) == SIGHASH_SINGLE);
 
@@ -2042,10 +2140,17 @@ bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, 
 
     bilingual_str timelock_error;
     if (!CheckP2MRTimelockedTransaction(CTransaction{mtx}, p2mr_timelocked_inputs, timelock_error)) {
-        if (TransactionHasExistingSignatures(mtx) || !PrepareP2MRTimelockedTransaction(mtx, p2mr_timelocked_inputs, timelock_error)) {
+        const bool existing = TransactionHasExistingSignatures(mtx);
+        if (existing || !adjust_timelocks) {
             AssignP2MRTimelockError(p2mr_timelocked_inputs, timelock_error, input_errors);
             return false;
         }
+        const CMutableTransaction before{mtx};
+        if (!PrepareP2MRTimelockedTransaction(mtx, p2mr_timelocked_inputs, timelock_error)) {
+            AssignP2MRTimelockError(p2mr_timelocked_inputs, timelock_error, input_errors);
+            return false;
+        }
+        if (timelock_adjustment) RecordP2MRTimelockAdjustment(before, mtx, *timelock_adjustment);
     }
 
     // Use CTransaction for the constant parts of the
@@ -2091,6 +2196,18 @@ bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, 
         }
 
         UpdateInput(txin, sigdata);
+
+        bilingual_str p2mr_error;
+        if (ExplainUnsignedP2MRInput(sigdata.p2mr_leaf_script,
+                                     sigdata.p2mr_spenddata.ordered_leaf_scripts.empty()
+                                         ? sigdata.p2mr_spenddata.scripts.size()
+                                         : sigdata.p2mr_spenddata.ordered_leaf_scripts.size(),
+                                     sigdata.sha256_preimages,
+                                     !sigdata.p2mr_script_sigs.empty(),
+                                     p2mr_error)) {
+            input_errors[i] = p2mr_error;
+            continue;
+        }
 
         // amount must be specified for valid segwit signature
         if (amount == MAX_MONEY && !txin.scriptWitness.IsNull()) {

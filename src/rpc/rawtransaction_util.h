@@ -7,6 +7,7 @@
 
 #include <addresstype.h>
 #include <consensus/amount.h>
+#include <psbt.h>
 #include <map>
 #include <optional>
 #include <string>
@@ -30,6 +31,16 @@ class SigningProvider;
  */
 void SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, const std::map<COutPoint, Coin>& coins, const UniValue& hashType, UniValue& result);
 void SignTransactionResultToJSON(CMutableTransaction& mtx, bool complete, const std::map<COutPoint, Coin>& coins, const std::map<int, bilingual_str>& input_errors, UniValue& result, const std::optional<CAmount>& inputs_amount_sum);
+void AppendTimelockAdjustment(UniValue& result, const P2MRTimelockAdjustment& adjustment);
+
+/** Read one p2mr_leaf value: a non-negative index, or a hex leaf script. */
+void ParseP2MRLeafValue(const UniValue& value, std::optional<uint32_t>& index, std::vector<unsigned char>& script);
+
+/** Optional p2mr_leaf field on each input object. Inputs without the field are skipped. */
+std::vector<P2MRLeafSelection> ParseInputsP2MRLeaves(const UniValue& inputs);
+
+/** Updater map {"txid:vout": <index or leaf-script hex>}. */
+std::vector<P2MRLeafSelection> ParseP2MRLeafMap(const UniValue& leaf_map);
 
 /**
   * Parse a prevtxs UniValue array and get the map of coins from it

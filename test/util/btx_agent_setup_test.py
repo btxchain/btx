@@ -93,12 +93,16 @@ class BTXAgentSetupTest(unittest.TestCase):
             self.assertIn(wrapper, signed_paths)
             self.assertIn(real_binary, signed_paths)
 
-    def _build_fake_archive(self, root: pathlib.Path) -> pathlib.Path:
+    def _build_fake_archive(self, root: pathlib.Path, *, extra_files: dict[str, str] | None = None) -> pathlib.Path:
         package_root = root / "package"
         bin_dir = package_root / "btx-29.2" / "bin"
         bin_dir.mkdir(parents=True)
         (bin_dir / "btxd").write_text("#!/bin/sh\n", encoding="utf-8")
         (bin_dir / "btx-cli").write_text("#!/bin/sh\n", encoding="utf-8")
+        for relpath, text in (extra_files or {}).items():
+            path = package_root / "btx-29.2" / relpath
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
 
         archive_path = root / "btx-29.2-x86_64-linux-gnu.tar.gz"
         with tarfile.open(archive_path, "w:gz") as archive:
@@ -328,6 +332,100 @@ class BTXAgentSetupTest(unittest.TestCase):
             self.assertEqual(summary["datadir"], str(datadir))
             self.assertEqual(summary["faststart_conf"], str(datadir / "faststart" / "faststart.conf"))
             self.assertEqual(errors.getvalue(), "boot progress\nbootstrap warning\n")
+
+    def test_preset_finds_faststart_beside_binaries_and_on_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            script_only = root / "script-only"
+            script_only.mkdir()
+            install = root / "install"
+            bin_dir = install / "btx-29.2" / "bin"
+            bin_dir.mkdir(parents=True)
+            btxd = bin_dir / "btxd"
+            btxd.write_text("#!/bin/sh\n", encoding="utf-8")
+            beside_bin = bin_dir / "btx-faststart.py"
+            beside_bin.write_text("# beside bin\n", encoding="utf-8")
+            original_dir = self.module.SCRIPT_DIR
+            try:
+                self.module.SCRIPT_DIR = script_only
+                self.assertEqual(self.module.find_faststart_script(install, btxd), beside_bin)
+
+                beside_bin.unlink()
+                packaged = install / "btx-29.2" / "contrib" / "faststart" / "btx-faststart.py"
+                packaged.parent.mkdir(parents=True)
+                packaged.write_text("# packaged\n", encoding="utf-8")
+                self.assertEqual(self.module.find_faststart_script(install, btxd), packaged)
+
+                packaged.unlink()
+                on_path = root / "path" / "btx-faststart.py"
+                on_path.parent.mkdir()
+                on_path.write_text("# path\n", encoding="utf-8")
+                with mock.patch.object(self.module.shutil, "which", return_value=str(on_path)):
+                    self.assertEqual(self.module.find_faststart_script(install, btxd), on_path)
+
+                with mock.patch.object(self.module.shutil, "which", return_value=None):
+                    with self.assertRaises(FileNotFoundError):
+                        self.module.find_faststart_script(install, btxd)
+            finally:
+                self.module.SCRIPT_DIR = original_dir
+
+    def test_script_only_preset_uses_installed_faststart_and_snapshot_base(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            archive_path = self._build_fake_archive(
+                root,
+                extra_files={"bin/btx-faststart.py": "# installed faststart\n"},
+            )
+            manifest_path = self._write_manifest(root, archive_path)
+            install_dir = root / "install"
+            datadir = root / "datadir"
+            script_only = root / "script-only"
+            script_only.mkdir()
+            recorded: list[list[str]] = []
+            original_dir = self.module.SCRIPT_DIR
+            original_run = self.module.subprocess.run
+            try:
+                self.module.SCRIPT_DIR = script_only
+
+                def fake_run(cmd, check, **kwargs):
+                    recorded.append(list(cmd))
+                    class Result:
+                        returncode = 0
+                        stdout = ""
+                        stderr = ""
+                    return Result()
+
+                self.module.subprocess.run = fake_run
+                with contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = self.module.main(
+                        [
+                            "--release-manifest",
+                            str(manifest_path),
+                            "--allow-unsigned-release",
+                            "--platform",
+                            "linux-x86_64",
+                            "--install-dir",
+                            str(install_dir),
+                            "--preset",
+                            "service",
+                            "--chain",
+                            "regtest",
+                            "--datadir",
+                            str(datadir),
+                            "--no-start-daemon",
+                        ]
+                    )
+            finally:
+                self.module.SCRIPT_DIR = original_dir
+                self.module.subprocess.run = original_run
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(recorded), 1)
+            command = recorded[0]
+            self.assertTrue(command[1].endswith("bin/btx-faststart.py"))
+            self.assertTrue(pathlib.Path(command[1]).is_file())
+            self.assertNotEqual(pathlib.Path(command[1]).parent, script_only)
+            self.assertTrue(any(arg.startswith("--snapshot-asset-base=") for arg in command))
 
     def test_preset_bootstraps_from_verified_snapshot_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:

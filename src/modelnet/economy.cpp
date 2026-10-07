@@ -265,7 +265,9 @@ ModelEconomyEntry ComposeEconomyEntry(const SearchHit& h, const ReleaseCampaign*
     e.result_type = ResultTypeFrom(e.lifecycle, h.local);
 
     const int64_t confirmed = fund.confirmed_known ? fund.confirmed_funded_atoms : 0;
-    e.value_known = fund.confirmed_known && e.has_campaign && e.campaign.target_atoms > 0;
+    // A scan that found nothing is not a known zero. confirmed_known with a
+    // zero total stays unknown so cards cannot claim chain-backed funding of 0.
+    e.value_known = fund.confirmed_known && confirmed > 0 && e.has_campaign && e.campaign.target_atoms > 0;
     if (e.value_known) {
         e.remaining_atoms = RemainingAtoms(e.campaign.target_atoms, confirmed);
         e.funded_percent_known = FundedPercentMilli(confirmed, e.campaign.target_atoms, e.funded_percent_milli);
@@ -489,6 +491,18 @@ UniValue EconomyReleaseJson(const ModelEconomyEntry& e)
     rel.pushKV("ciphertext_artifact_id", e.campaign.ciphertext_artifact_id.IsNull() ? e.campaign.artifact_id.Hex()
                                                                                        : e.campaign.ciphertext_artifact_id.Hex());
     if (!e.campaign.output_script_hex.empty()) rel.pushKV("output_script", e.campaign.output_script_hex);
+    if (!e.campaign.funding_outpoints.empty()) {
+        UniValue outs(UniValue::VARR);
+        for (const auto& fp : e.campaign.funding_outpoints) {
+            UniValue one(UniValue::VOBJ);
+            one.pushKV("txid", fp.txid);
+            one.pushKV("vout", static_cast<int64_t>(fp.vout));
+            if (!fp.output_script_hex.empty()) one.pushKV("output_script", fp.output_script_hex);
+            if (fp.amount_atoms > 0) one.pushKV("amount_atoms", fp.amount_atoms);
+            outs.push_back(one);
+        }
+        rel.pushKV("funding_outpoints", outs);
+    }
     rel.pushKV("ciphertext_providers_observed", e.fund.ciphertext_providers_observed);
     rel.pushKV("funding_source", e.fund.funding_source.empty() ? "UNKNOWN" : e.fund.funding_source);
     rel.pushKV("helper_observation", e.fund.funding_source != "CHAIN_OBSERVATION");
@@ -530,8 +544,9 @@ UniValue EconomyEntryToJson(const ModelEconomyEntry& e)
     o.pushKV("model", model);
 
     UniValue pub(UniValue::VOBJ);
-    pub.pushKV("id", e.hit.rec.publisher_identity.Hex());
-    pub.pushKV("display_name", e.hit.rec.publisher_display_name);
+    // A null identity is absent. Do not render it as 96 zero hex.
+    if (!e.hit.rec.publisher_identity.IsNull()) pub.pushKV("id", e.hit.rec.publisher_identity.Hex());
+    if (!e.hit.rec.publisher_display_name.empty()) pub.pushKV("display_name", e.hit.rec.publisher_display_name);
     pub.pushKV("metadata_verified", e.hit.rec.signed_ok);
     o.pushKV("publisher", pub);
     o.pushKV("lifecycle", EconomyLifecycleJson(e));
@@ -613,6 +628,10 @@ void ApplyChainObservationJson(UniValue& card, const UniValue& obs)
             const int64_t confirmed = obs.exists("confirmed_funded_atoms") ? obs["confirmed_funded_atoms"].getInt<int64_t>() : 0;
             const int64_t pending = obs.exists("pending_funded_atoms") ? obs["pending_funded_atoms"].getInt<int64_t>() : 0;
             const int64_t target = rel.exists("target_atoms") ? rel["target_atoms"].getInt<int64_t>() : 0;
+            if (confirmed <= 0) {
+                // Do not paint a miss, or a zero total, as chain-backed funding.
+                rel.pushKV("value_known", false);
+            } else {
             rel.pushKV("confirmed_funded_atoms", confirmed);
             rel.pushKV("pending_funded_atoms", pending);
             rel.pushKV("funded_atoms", confirmed);
@@ -627,6 +646,7 @@ void ApplyChainObservationJson(UniValue& card, const UniValue& obs)
                     rel.pushKV("funded_percent", MilliToDisplayPercent(milli));
                     rel.pushKV("funded_percent_milli", milli);
                 }
+            }
             }
         }
         if (obs.exists("wallet_contributor")) rel.pushKV("wallet_local_state", obs["wallet_contributor"].get_bool());

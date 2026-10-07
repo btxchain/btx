@@ -243,7 +243,7 @@ private:
     bool WriteEnvelope(const SignedEnvelope& env, std::string& err);
     bool LoadIdentity(std::vector<unsigned char>& pk, std::vector<unsigned char>& sk, std::string& err) const;
     bool Sign(const std::string& type, const UniValue& payload, SignedEnvelope& env, std::string& err_code, std::string& err);
-    bool Import(const UniValue& obj, const std::string& expect_type, SignedEnvelope& env, std::string& err_code, std::string& err);
+    bool Import(const UniValue& obj, const std::string& expect_type, SignedEnvelope& env, std::string& err_code, std::string& err, bool persist = true);
     bool BalanceOf(const std::string& agreement_id, int64_t now_ms, UniValue& out, std::string& err_code, std::string& err);
 };
 
@@ -384,7 +384,7 @@ bool ComputeStore::Sign(const std::string& type, const UniValue& payload, Signed
     return true;
 }
 
-bool ComputeStore::Import(const UniValue& obj, const std::string& expect_type, SignedEnvelope& env, std::string& err_code, std::string& err)
+bool ComputeStore::Import(const UniValue& obj, const std::string& expect_type, SignedEnvelope& env, std::string& err_code, std::string& err, bool persist)
 {
     if (m_corrupt) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "store");
     const UniValue rec = obj.exists("envelope") ? obj["envelope"] : obj;
@@ -407,6 +407,7 @@ bool ComputeStore::Import(const UniValue& obj, const std::string& expect_type, S
         }
         return true;
     }
+    if (!persist) return true;
     if (!WriteEnvelope(env, err)) return Fail(err_code, err, err.c_str(), err);
     map[id] = env;
     return true;
@@ -1182,7 +1183,8 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         result.pushKV("automatic_spend_atoms", 0);
         return true;
     }
-    if (method == "importcomputereceipt") {
+    if (method == "importcomputereceipt" || method == "verifycomputereceipt") {
+        const bool persist = method == "importcomputereceipt";
         SignedEnvelope env;
         const UniValue rec = a.exists("envelope") ? a["envelope"] : a;
         if (!EnvelopeFromJson(rec, env, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
@@ -1284,10 +1286,23 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
                 }
             }
         }
-        if (!Import(a, "ComputeReceipt", env, err_code, err)) return false;
+        if (!Import(a, "ComputeReceipt", env, err_code, err, persist)) return false;
         result = EnvelopeToJson(env);
         result.pushKV("receipt_id", env.record_id.Hex());
         result.pushKV("automatic_spend_atoms", 0);
+        if (!persist) {
+            const UniValue& shown = PayloadOf(env);
+            result.pushKV("accepted", true);
+            result.pushKV("persisted", false);
+            if (shown.exists("agreement_id")) result.pushKV("agreement_id", shown["agreement_id"]);
+            if (shown.exists("subject_pubkey")) result.pushKV("subject_pubkey", shown["subject_pubkey"]);
+            if (shown.exists("profile_id")) result.pushKV("profile_id", shown["profile_id"]);
+            if (shown.exists("credited_p1e_microunits")) result.pushKV("credited_p1e_microunits", shown["credited_p1e_microunits"]);
+            if (shown.exists("verification_method")) result.pushKV("verification_method", shown["verification_method"]);
+            if (shown.exists("evidence_commitment")) result.pushKV("evidence_commitment", shown["evidence_commitment"]);
+            if (shown.exists("job_id")) result.pushKV("job_id", shown["job_id"]);
+            if (shown.exists("result_id")) result.pushKV("result_id", shown["result_id"]);
+        }
         return true;
     }
     if (method == "getcomputebalance") {
@@ -1423,7 +1438,7 @@ const std::set<std::string>& Methods()
         "quotecomputeaccess", "issuecomputeagreement", "importcomputeagreement", "getcomputeagreement", "listcomputeagreements",
         "createcomputejob", "importcomputejob", "getcomputejob", "listcomputejobs",
         "submitcomputejobresult", "importcomputejobresult", "getcomputejobresult",
-        "acceptcomputejobresult", "issuecomputereceipt", "importcomputereceipt", "getcomputereceipt", "listcomputereceipts",
+        "acceptcomputejobresult", "issuecomputereceipt", "importcomputereceipt", "verifycomputereceipt", "getcomputereceipt", "listcomputereceipts",
         "getcomputebalance", "issuecomputeaccessgrant", "importcomputeaccessgrant", "getcomputeaccessgrant", "verifycomputeaccessgrant",
         "getcomputesigningidentity",
     };

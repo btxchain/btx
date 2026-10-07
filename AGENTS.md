@@ -73,7 +73,7 @@ Read-only needs no mandate. Funding, evaluation **execution**, claim, refund, an
 any spend path require **explicit user approval** **or** a **finite** wallet
 `AgentMandate` (`createagentmandate` / `getagentmandate` / `revokeagentmandate`).
 
-A valid mandate is owner-only local policy. Helper never stores it. Required
+A valid mandate is owner-only local policy, and the bounty helper loads and dumps it. Required
 shape: [contrib/modelnet/bounty/schemas/AgentMandate.schema.json](contrib/modelnet/bounty/schemas/AgentMandate.schema.json).
 
 | Constraint | Rule |

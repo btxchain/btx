@@ -13,8 +13,8 @@
 // preimage pre-check), policy and the wallet all rely on:
 //  - a parser accepts only the exact script its builder would produce;
 //  - no script is accepted by more than one claim-leaf parser;
-//  - P2MRClaimLeafPinsPreimageLength() is exactly "one of the three
-//    transaction-bound claim parsers accepts".
+//  - P2MRClaimLeafPinsPreimageLength() is exactly the new length-pinned
+//    SHA-256 parser (OP_SIZE 32). Legacy SHA-256 and HASH160 htlc_tx do not pin.
 FUZZ_TARGET(htlc_leaf_parse)
 {
     FuzzedDataProvider provider(buffer.data(), buffer.size());
@@ -32,5 +32,5 @@ FUZZ_TARGET(htlc_leaf_parse)
     if (p_old) assert(BuildP2MRHTLCSha256LegacyLeaf(h2, a2, k2) == script);
     if (p_tx) assert(BuildP2MRHTLCTxLeaf(h3, a3, k3) == script);
     if (p_csfs) assert(BuildP2MRHTLCLeaf(h4, a4, k4) == script);
-    assert(P2MRClaimLeafPinsPreimageLength(script) == (p_new || p_old || p_tx));
+    assert(P2MRClaimLeafPinsPreimageLength(script) == p_new);
 }

@@ -9,8 +9,10 @@
 #include <node/types.h>
 #include <policy/policy.h>
 #include <script/signingprovider.h>
+#include <tinyformat.h>
 #include <util/check.h>
 #include <util/strencodings.h>
+#include <util/translation.h>
 
 namespace {
 bool IsDefinedP2MRSighashType(const uint8_t hash_type)
@@ -318,6 +320,12 @@ void PSBTInput::FromSignatureData(const SignatureData& sigdata)
         if (m_p2mr_leaf_script.empty() && m_p2mr_control_block.empty()) {
             m_p2mr_leaf_script = sigdata.p2mr_leaf_script;
             m_p2mr_control_block = sigdata.p2mr_control_block;
+            m_p2mr_leaf_version = P2MR_LEAF_VERSION;
+        }
+    } else if (!m_p2mr_leaf_script.empty() && m_p2mr_control_block.empty()) {
+        const auto selected = sigdata.p2mr_spenddata.scripts.find(m_p2mr_leaf_script);
+        if (selected != sigdata.p2mr_spenddata.scripts.end() && !selected->second.empty()) {
+            m_p2mr_control_block = *selected->second.begin();
             m_p2mr_leaf_version = P2MR_LEAF_VERSION;
         }
     } else if (m_p2mr_leaf_script.empty() && m_p2mr_control_block.empty() && sigdata.p2mr_spenddata.scripts.size() == 1) {
@@ -768,4 +776,106 @@ uint32_t PartiallySignedTransaction::GetVersion() const
         return *m_version;
     }
     return 0;
+}
+
+namespace {
+
+CScript PrevoutScript(const PartiallySignedTransaction& psbt, unsigned int index)
+{
+    const PSBTInput& input = psbt.inputs.at(index);
+    if (!input.witness_utxo.IsNull()) return input.witness_utxo.scriptPubKey;
+    if (input.non_witness_utxo) {
+        const uint32_t n = psbt.tx->vin.at(index).prevout.n;
+        if (n < input.non_witness_utxo->vout.size()) return input.non_witness_utxo->vout[n].scriptPubKey;
+    }
+    return {};
+}
+
+bool FillP2MRControlBlock(PSBTInput& input, const CScript& prev_script, const SigningProvider* provider, bilingual_str& error)
+{
+    if (input.m_p2mr_leaf_script.empty() || !input.m_p2mr_control_block.empty() || !provider) return true;
+    int witver{0};
+    std::vector<unsigned char> program;
+    if (!prev_script.IsWitnessProgram(witver, program) || program.size() != 32) return true;
+    P2MRSpendData spend;
+    if (!provider->GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spend)) return true;
+    const auto selected = spend.scripts.find(input.m_p2mr_leaf_script);
+    if (selected == spend.scripts.end() || selected->second.empty()) {
+        error = Untranslated("p2mr_leaf is not a leaf of this output");
+        return false;
+    }
+    input.m_p2mr_control_block = *selected->second.begin();
+    input.m_p2mr_leaf_version = P2MR_LEAF_VERSION;
+    return true;
+}
+
+} // namespace
+
+bool ApplyP2MRLeafSelections(PartiallySignedTransaction& psbt, const std::vector<P2MRLeafSelection>& selections, const SigningProvider* provider, bilingual_str& error)
+{
+    if (selections.empty()) return true;
+    for (const P2MRLeafSelection& choice : selections) {
+        if (choice.index.has_value() == !choice.script.empty()) {
+            error = Untranslated("p2mr_leaf must be a leaf index or a leaf script, not both");
+            return false;
+        }
+        int found = -1;
+        for (unsigned int i = 0; i < psbt.tx->vin.size(); ++i) {
+            const COutPoint& prev = psbt.tx->vin[i].prevout;
+            if (prev.hash == choice.txid && prev.n == choice.vout) {
+                if (found >= 0) {
+                    error = Untranslated("p2mr_leaf matches more than one input");
+                    return false;
+                }
+                found = static_cast<int>(i);
+            }
+        }
+        if (found < 0) {
+            error = Untranslated("p2mr_leaf does not match an input");
+            return false;
+        }
+        PSBTInput& input = psbt.inputs.at(found);
+        if (!input.m_p2mr_pq_sigs.empty()) {
+            error = Untranslated("cannot change p2mr leaf after a signature exists");
+            return false;
+        }
+        const CScript prev_script = PrevoutScript(psbt, static_cast<unsigned int>(found));
+        input.m_p2mr_control_block.clear();
+        if (choice.index.has_value()) {
+            if (!provider) {
+                error = Untranslated("p2mr_leaf index requires a descriptor that knows the leaves; pass the leaf script hex instead");
+                return false;
+            }
+            if (prev_script.empty()) {
+                error = Untranslated("p2mr_leaf index requires the previous output");
+                return false;
+            }
+            int witver{0};
+            std::vector<unsigned char> program;
+            if (!prev_script.IsWitnessProgram(witver, program) || program.size() != 32) {
+                error = Untranslated("p2mr_leaf index requires a P2MR previous output");
+                return false;
+            }
+            P2MRSpendData spend;
+            if (!provider->GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spend) || spend.ordered_leaf_scripts.empty()) {
+                error = Untranslated("p2mr_leaf index requires the output descriptor");
+                return false;
+            }
+            if (*choice.index >= spend.ordered_leaf_scripts.size()) {
+                error = Untranslated(strprintf("p2mr_leaf index %u is past the last leaf", *choice.index));
+                return false;
+            }
+            input.m_p2mr_leaf_script = spend.ordered_leaf_scripts[*choice.index];
+            input.m_p2mr_leaf_version = P2MR_LEAF_VERSION;
+            const auto selected = spend.scripts.find(input.m_p2mr_leaf_script);
+            if (selected != spend.scripts.end() && !selected->second.empty()) {
+                input.m_p2mr_control_block = *selected->second.begin();
+            }
+        } else {
+            input.m_p2mr_leaf_script = choice.script;
+            input.m_p2mr_leaf_version = P2MR_LEAF_VERSION;
+            if (!FillP2MRControlBlock(input, prev_script, provider, error)) return false;
+        }
+    }
+    return true;
 }

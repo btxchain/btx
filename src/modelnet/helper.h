@@ -130,6 +130,10 @@ fs::path UnixRpcListenPath(const fs::path& requested);
 
 bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err);
 
+/** True when `err` is a helper application refusal (`{"code","message"}`).
+ *  Transport failures (connect, write, non-JSON reply) return false. */
+bool HelperRefusalFromError(const std::string& err, std::string& code, std::string& message);
+
 /** Ordinary unix RPC replies: 120s. Long methods (import/host/get/wait/scan) keep 24h. */
 int UnixRpcReplyTimeoutMs(const std::string& method);
 

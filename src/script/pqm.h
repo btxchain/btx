@@ -137,9 +137,9 @@ std::vector<unsigned char> BuildP2MRHTLCSha256Leaf(
     PQAlgorithm claimant_algo,
     Span<const unsigned char> claimant_pubkey);
 
-/** Previous SHA-256 claim leaf, without the length check in the script.
- *  Spend-only, so an output funded before the length check was added can
- *  still be claimed with a 32-byte preimage. Do not use for new locks.
+/** Previous SHA-256 claim leaf. The script is OP_SHA256 <digest>
+ *  OP_EQUALVERIFY with no OP_SIZE pin, so a matching preimage of any length
+ *  stays consensus-valid. Spend-only. Do not use for new locks.
  */
 std::vector<unsigned char> BuildP2MRHTLCSha256LegacyLeaf(
     Span<const unsigned char> preimage_sha256,
@@ -170,8 +170,12 @@ bool ParseP2MRHTLCSha256LegacyLeaf(
     PQAlgorithm& claimant_algo,
     std::vector<unsigned char>& claimant_pubkey);
 
-/** True for a transaction-bound HTLC claim leaf whose preimage must be
- *  exactly 32 bytes. The current SHA-256 leaf also checks that in-script.
+/** True only for the current SHA-256 claim leaf, whose bytecode commits
+ *  OP_SIZE 32 OP_EQUALVERIFY. Legacy SHA-256 and HASH160 htlc_tx leaves are
+ *  not included: they have no length pin, and a matching preimage of any
+ *  length stays consensus-valid. SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 uses this
+ *  as defense in depth for the new format; that leaf's own script rejects a
+ *  non-32-byte preimage with or without the flag.
  */
 bool P2MRClaimLeafPinsPreimageLength(Span<const unsigned char> script);
 

@@ -801,6 +801,19 @@ static std::chrono::microseconds BlockDownloadSpacingTimeout(
     return node::BlockDownloadTimeoutRespectFloor(computed, floor, cap);
 }
 
+// Declared here so the anonymous-namespace peer manager can reserve a slot
+// before these functions are defined. A declaration inside that namespace
+// would be a different function and fail to link.
+static bool ReserveMatMulVerificationSlot(std::atomic<uint32_t>& pending_verifications,
+                                          const Consensus::Params& params,
+                                          int32_t reference_height,
+                                          uint32_t work_units);
+static bool ReserveMatMulRCVerificationSlot(std::atomic<uint32_t>& pending_verifications,
+                                            const Consensus::Params& params,
+                                            int32_t reference_height,
+                                            uint32_t work_units,
+                                            bool authenticated_tip_child);
+
 // Internal stuff
 namespace {
 /** Return the canonical byte length of the cache sketch committed by `header`.
@@ -1135,6 +1148,16 @@ struct Peer {
      *  (live 0.34.5: 171 getheaders/sec). HeadersSyncState continuations
      *  still clear it so IBD presync can walk. */
     NodeClock::time_point m_last_getheaders_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /** Unknown attested hashes for which this peer was already sent a
+     *  bypass GETHEADERS. One outstanding request per hash until that
+     *  request is answered, expires, or the header is indexed. A replay
+     *  that does not send must not touch the getheaders clocks above. */
+    std::map<uint256, NodeClock::time_point> m_unknown_attested_header_requests
+        GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    /** Last getheaders sent because a non-IBD peer at or below our tip
+     *  announced a block we do not have. One extra send per
+     *  HEADERS_RESPONSE_TIME; connecting replies must not clear it. */
+    NodeClock::time_point m_direct_tip_extension_getheaders_at GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** Last successful background-discovery getheaders. Ordinary probes must
      *  not reset this clock, or a lagging fork never reaches its own locator. */
     NodeClock::time_point m_last_background_headers_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
@@ -1565,12 +1588,14 @@ public:
     }
     bool RetainMatMulBodyForTest(
         const std::shared_ptr<const CBlock>& block,
-        bool pin_progress, NodeId source_peer) override
+        bool pin_progress, NodeId source_peer,
+        bool force_processing) override
     {
         node::MatMulBlockLifecycle::RetainedBody body;
         body.block = block;
         body.bytes = 1;
         body.pin_progress = pin_progress;
+        body.force_processing = force_processing;
         if (source_peer != -1) {
             const auto source{m_connman.GetNodeRef(source_peer)};
             if (!source) return false;
@@ -1579,6 +1604,47 @@ public:
             body.source_netgroup = source->nKeyedNetGroup;
         }
         return m_matmul_block_lifecycle.Retain(block->GetHash(), std::move(body));
+    }
+    bool HeaderFetchSuppressedForTest(const uint256& hash) const override;
+    void RejectCompactBlockForTest(NodeId peer_id, const uint256& hash) override
+    {
+        PeerRef peer{GetPeerRef(peer_id)};
+        if (!peer) return;
+        LOCK(cs_main);
+        RejectCompactBlockFromPeer(hash, *peer, peer_id);
+    }
+    void BlockCheckedForTest(const CBlock& block, const BlockValidationState& state) override
+    {
+        BlockChecked(block, state);
+    }
+    MatMulSourceVerifySnapshot MatMulSourceVerifySnapshotForTest(
+        const CNetAddr& address, uint64_t netgroup) const override
+    {
+        MatMulSourceVerifySnapshot out;
+        out.rc_pending = m_matmul_rc_pending_verifications.load(std::memory_order_relaxed);
+        out.caller_thread_block_sync =
+            m_disconnected_retry_caller_sync.load(std::memory_order_relaxed);
+        const auto sum_rc = [](const MatMulPeerVerificationBudget& budget) {
+            return budget.expensive_rc_verifications_this_minute +
+                   budget.rc_progress_verifications_this_minute;
+        };
+        UniqueLock lock(m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex", __FILE__, __LINE__);
+        if (const auto it{m_matmul_addr_budgets.find(address)};
+            it != m_matmul_addr_budgets.end()) {
+            out.address_rc_verifications = sum_rc(it->second.budget);
+        }
+        if (const auto it{m_matmul_netgroup_budgets.find(netgroup)};
+            it != m_matmul_netgroup_budgets.end()) {
+            out.netgroup_rc_verifications = sum_rc(it->second.budget);
+        }
+        return out;
+    }
+    BlockSourceSnapshot BlockSourceForTest(const uint256& hash) const override
+    {
+        LOCK(cs_main);
+        const auto it{mapBlockSource.find(hash)};
+        if (it == mapBlockSource.end()) return {};
+        return {.present = true, .peer = it->second.first, .punishable = it->second.second};
     }
     void SimulateBlockConnectedForTest(
         const std::shared_ptr<const CBlock>& block,
@@ -1684,7 +1750,7 @@ private:
      *   verification must leave this false and retain the bounded global cap.
      */
     bool ConsumeMatMulVerificationBudgetForPeer(
-        const Peer& peer,
+        const CNetAddr& address,
         uint64_t keyed_netgroup,
         const Consensus::Params& params,
         uint32_t verification_count,
@@ -1864,6 +1930,11 @@ private:
      * bound it themselves (see Peer::m_headers_continuation_height).
      */
     bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window = false) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    /** One extra getheaders when a non-IBD peer, directly behind on our
+     *  chain, announces a block during the ordinary send window. Peers that
+     *  already advertised above our tip, height-0 advertisers once we are
+     *  past genesis, and competing forks stay on HEADERS_RESPONSE_TIME. */
+    bool MayBypassHeadersWindowForDirectTipExtension(const Peer& peer, NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     void MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     /** Discovery relays ask peers for headers so a best-known block on a
@@ -2103,6 +2174,9 @@ private:
     std::atomic<uint32_t> m_matmul_pending_verifications{0};
     /** ENC_RC full-episode recomputes -- separate from EncDr/LT pending counter. */
     std::atomic<uint32_t> m_matmul_rc_pending_verifications{0};
+    /** ProcessBlockSync entries from the disconnected retained-body retry
+     *  thread. That path must not reach ProcessNewBlock. */
+    std::atomic<uint64_t> m_disconnected_retry_caller_sync{0};
     /** WP-7 / C5: bounded off-thread worker pool for the v4.4 ENC-DR reference
      *  recompute. nullptr = feature off (ALWAYS nullptr while nMatMulV4Height ==
      *  INT32_MAX, or with -matmulasyncverify=0), in which case ProcessBlock is
@@ -2184,6 +2258,25 @@ private:
     void RetryMatMulDeferredBodies()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !NetEventsInterface::g_msgproc_mutex);
+    /** Retained body whose source is gone. Reserves a pending slot, charges
+     *  the stored address, netgroup, and global verification budgets, then
+     *  enqueues the bounded worker. Never ExactReplay on the caller. */
+    /** True when the deferred store holds an unverified ancestor of `index`
+     *  that was refused for capacity. That ancestor is made retryable and
+     *  `index` must not take the single RC job. Local scheduling only. */
+    bool HoldRCJobForLowerAncestor(const CBlockIndex* index, uint32_t work,
+                                   const Consensus::Params& params)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    void DispatchDisconnectedRetainedMatMulBody(
+        const uint256& hash,
+        const node::MatMulBlockLifecycle::RetainedBody& candidate)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
+                                 !NetEventsInterface::g_msgproc_mutex);
+    /** Punish this peer and clear its in-flight compact-block request.
+     *  Does not record the hash in m_structural_download_skip. */
+    void RejectCompactBlockFromPeer(const uint256& hash, Peer& peer, NodeId node_id)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** One coalesced recovery pass. Runs on mmrecover, not CScheduler. */
     void RunMatMulDeferredRecoveryPass()
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
@@ -2306,10 +2399,13 @@ private:
      *  m_header_only_competing: competing siblings stay GPU-protected
      *  independently of followed-hole skip. */
     std::set<uint256> m_header_only_followed_skip GUARDED_BY(cs_main);
-    /** Block hashes whose body failed a structural check (BLOCK_MUTATED /
-     *  merkle / compact reconstruction). Not persisted as BLOCK_FAILED, so
-     *  without this set a same-height sibling is fetched again on every
-     *  headers pass. Cleared when the active tip moves. */
+    /** Block hashes whose body failed a permanent structural check that is
+     *  not stored as BLOCK_FAILED. Cleared when the active tip moves.
+     *  BLOCK_MUTATED and compact-block decode failures are intentionally
+     *  absent: matrix_c_data is outside the header hash, and a compact
+     *  decode failure is one peer's message. An honest body with the same
+     *  hash must still be requested. Header-only and followed-hole
+     *  suppression stay in the sets above. */
     std::set<uint256> m_structural_download_skip GUARDED_BY(cs_main);
     /** Recent signer-authenticated proof delivered by a peer. A valid
      * signature authorizes routing only on the branch containing its exact
@@ -3905,6 +4001,214 @@ static void MaybeWakeRetainedChildForVerifiedForkParent(
     }
 }
 
+namespace {
+thread_local int g_disconnected_retained_retry_depth{0};
+
+struct DisconnectedRetainedRetryGuard {
+    DisconnectedRetainedRetryGuard() { ++g_disconnected_retained_retry_depth; }
+    ~DisconnectedRetainedRetryGuard() { --g_disconnected_retained_retry_depth; }
+    DisconnectedRetainedRetryGuard(const DisconnectedRetainedRetryGuard&) = delete;
+    DisconnectedRetainedRetryGuard& operator=(const DisconnectedRetainedRetryGuard&) = delete;
+};
+} // namespace
+
+void PeerManagerImpl::RejectCompactBlockFromPeer(const uint256& hash, Peer& peer, NodeId node_id)
+{
+    AssertLockHeld(cs_main);
+    // A malformed compact block is this peer's message, not proof that no
+    // valid body exists for the header. Punish this peer and clear its
+    // in-flight request. Do not insert the hash into the node-global
+    // structural skip: another peer may still serve an honest body.
+    RemoveBlockRequest(hash, node_id);
+    Misbehaving(peer, "invalid compact block");
+}
+
+void PeerManagerImpl::DispatchDisconnectedRetainedMatMulBody(
+    const uint256& hash,
+    const node::MatMulBlockLifecycle::RetainedBody& candidate)
+{
+    // Ticket exemption (is_retained_retry) is not a resource exemption.
+    // force_processing is forwarded only to the worker's post-verify
+    // ProcessNewBlock so a requested body is still validated there. It does
+    // not reserve a slot, charge a budget, or run ExactReplay on this thread.
+    if (!candidate.block) {
+        RefreshMatMulDeferredBodyRetry(hash, "disconnected source missing body");
+        return;
+    }
+    if (!m_matmul_verify_worker) {
+        RefreshMatMulDeferredBodyRetry(hash, "disconnected source has no bounded worker");
+        return;
+    }
+    std::optional<ChainstateManager::MatMulEncDrClassifyResult> encdr;
+    bool progress_lane{false};
+    {
+        LOCK(cs_main);
+        encdr = m_chainman.ClassifyMatMulEncDrRecompute(*candidate.block);
+        const CBlockIndex* tip{m_chainman.ActiveTip()};
+        progress_lane = tip != nullptr &&
+                        candidate.block->hashPrevBlock == tip->GetBlockHash();
+    }
+    if (!encdr) {
+        RefreshMatMulDeferredBodyRetry(hash, "disconnected source has no bounded recompute");
+        return;
+    }
+    const Consensus::Params& params{m_chainparams.GetConsensus()};
+    const int32_t height{encdr->height};
+    const bool rc{params.IsMatMulRCFamilyActive(height)};
+    uint32_t work{candidate.work_units != 0
+                      ? candidate.work_units
+                      : (rc ? MatMulRCWorkUnits(params, height)
+                            : MatMulEncDrWorkUnits(params, height))};
+    const uint64_t observed_epoch{rc
+                                      ? m_matmul_rc_capacity_epoch.load(std::memory_order_acquire)
+                                      : m_matmul_encdr_capacity_epoch.load(std::memory_order_acquire)};
+    const auto capacity_cause{rc
+                                  ? node::MatMulBlockLifecycle::RetryCause::RC_PENDING_CAPACITY
+                                  : node::MatMulBlockLifecycle::RetryCause::ENCDR_PENDING_CAPACITY};
+    bool reserved{false};
+    if (rc) {
+        reserved = ReserveMatMulRCVerificationSlot(
+            m_matmul_rc_pending_verifications, params, height, work,
+            /*authenticated_tip_child=*/progress_lane);
+    } else {
+        reserved = ReserveMatMulVerificationSlot(
+            m_matmul_pending_verifications, params, height, work);
+    }
+    if (!reserved) {
+        RefreshMatMulDeferredBodyRetry(
+            hash, "disconnected source pending slot unavailable",
+            capacity_cause, observed_epoch);
+        return;
+    }
+    std::optional<ScopedMatMulPendingVerification> held;
+    held.emplace(rc ? m_matmul_rc_pending_verifications : m_matmul_pending_verifications,
+                 work,
+                 rc ? &m_matmul_rc_capacity_epoch : &m_matmul_encdr_capacity_epoch);
+    bool global_exhausted{false};
+    auto retry_delay{std::chrono::steady_clock::duration{MATMUL_BUDGET_DEFER_COOLDOWN}};
+    const auto charged_at{std::chrono::steady_clock::now()};
+    if (!ConsumeMatMulVerificationBudgetForPeer(
+            candidate.source_address, candidate.source_netgroup, params, work,
+            charged_at, candidate.is_ibd, height, global_exhausted,
+            /*rc_recompute=*/rc, /*header_batch=*/false, &retry_delay,
+            /*authenticated_chain_progress=*/progress_lane && rc)) {
+        held.reset();
+        RefreshMatMulDeferredBodyRetry(
+            hash, "disconnected source verification budget unavailable");
+        return;
+    }
+    MatMulRCVerificationBudgetDebit debit{
+        .verification_count = work,
+        .charged_at = charged_at,
+        .refundable = true,
+    };
+    const auto refund_charge = [&] {
+        if (!rc) return;
+        RefundMatMulRCVerificationBudgetForPeer(
+            candidate.source_address, candidate.source_netgroup, debit);
+    };
+    auto token{MarkMatMulAsyncVerification(hash)};
+    if (!token) {
+        refund_charge();
+        held.reset();
+        RefreshMatMulDeferredBodyRetry(hash, "disconnected source already pending");
+        return;
+    }
+    const NodeId source_id{static_cast<NodeId>(candidate.source_peer)};
+    {
+        LOCK(cs_main);
+        mapBlockSource[hash] = std::make_pair(source_id, candidate.source_punishable);
+        PinMatMulBlockSource(hash);
+    }
+    auto source_pin{std::make_shared<MatMulBlockSourcePin>(*this, hash)};
+    auto slot{std::make_shared<ScopedMatMulPendingVerification>(std::move(*held))};
+    held.reset();
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    std::vector<std::shared_ptr<void>> resources;
+    resources.push_back(source_pin);
+    const std::weak_ptr<MatMulBlockSourcePin> source_pin_weak{source_pin};
+    if (!m_matmul_block_lifecycle.Queue(
+            *token, std::static_pointer_cast<void>(slot), cancelled,
+            std::move(resources))) {
+        refund_charge();
+        if (auto pin{source_pin_weak.lock()}) pin->Release();
+        UnmarkMatMulAsyncVerification(*token);
+        RefreshMatMulDeferredBodyRetry(hash, "disconnected source lifecycle queue failed");
+        return;
+    }
+    const bool force_processing{candidate.force_processing};
+    const bool min_pow_checked{candidate.min_pow_checked};
+    const auto block{candidate.block};
+    node::MatMulVerifyWorker::Job job{
+        .block = block,
+        .height = height,
+        .parent_median_time_past = encdr->parent_median_time_past,
+        .completion =
+            [this, source_id, block, hash, force_processing, min_pow_checked, token, source_pin_weak](bool encdr_ok) mutable {
+                if (token) {
+                    (void)m_matmul_block_lifecycle.Completing(*token);
+                }
+                if (encdr_ok) {
+                    matmul::trusted::ExactReplayAttestation produced;
+                    {
+                        LOCK(cs_main);
+                        (void)m_chainman.PersistMatMulExactReplayVerdict(hash, &produced);
+                    }
+                    RelayLocalExactReplayAttestation(std::move(produced));
+                }
+                PinMatMulEncDrVerdict(hash, encdr_ok);
+                // Worker thread: the pending slot and budgets were taken
+                // before enqueue. ProcessNewBlock consumes the pinned verdict.
+                ProcessBlockSync(source_id, /*node=*/nullptr, block,
+                                 force_processing, min_pow_checked,
+                                 /*post_process=*/nullptr, token);
+                UnpinMatMulEncDrVerdict(hash);
+                if (auto pin{source_pin_weak.lock()}) pin->Release();
+                if (token) UnmarkMatMulAsyncVerification(*token);
+            },
+        .retryable_failure =
+            [this, hash, token, source_pin_weak]() mutable {
+                RefreshMatMulDeferredBodyRetry(
+                    hash, "disconnected source retryable accelerator failure");
+                if (auto pin{source_pin_weak.lock()}) pin->Release();
+                if (token) {
+                    (void)m_matmul_block_lifecycle.Retry(*token, MATMUL_BUDGET_DEFER_COOLDOWN);
+                } else {
+                    UnmarkMatMulAsyncVerification(hash);
+                }
+            },
+        .on_started =
+            [this, token] {
+                if (token) (void)m_matmul_block_lifecycle.Start(*token);
+            },
+        .priority = progress_lane
+                        ? node::MatMulVerifyWorker::Priority::AuthenticatedTipChild
+                        : node::MatMulVerifyWorker::Priority::Background,
+        .cancelled = cancelled,
+        .retained_body_bytes = ::GetSerializeSize(TX_WITH_WITNESS(*block)),
+    };
+    const auto enqueue_result{m_matmul_verify_worker->Enqueue(job)};
+    if (enqueue_result == node::MatMulVerifyWorker::EnqueueResult::Enqueued ||
+        enqueue_result == node::MatMulVerifyWorker::EnqueueResult::Joined) {
+        if (enqueue_result == node::MatMulVerifyWorker::EnqueueResult::Joined && token) {
+            (void)m_matmul_block_lifecycle.Start(*token);
+        }
+        debit.refundable = false;
+        LogDebug(BCLog::NET,
+                 "Queued disconnected retained body %s peer=%d netgroup=%llu\n",
+                 hash.ToString(), source_id,
+                 static_cast<unsigned long long>(candidate.source_netgroup));
+        return;
+    }
+    refund_charge();
+    if (job.retryable_failure) {
+        job.retryable_failure();
+    } else {
+        UnmarkMatMulAsyncVerification(*token);
+        if (auto pin{source_pin_weak.lock()}) pin->Release();
+    }
+}
+
 void PeerManagerImpl::RetryMatMulDeferredBodies()
 {
     AssertLockNotHeld(cs_main);
@@ -4259,7 +4563,7 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
              m_matmul_block_lifecycle.HasRetainedBody(priority_child->GetBlockHash()))};
         // NextRetry may fall back to another retained body. Do not let that
         // bypass active-tip priority or root-first selection, including when
-        // its source disconnected and retry uses ProcessBlockSync.
+        // its source disconnected and retry uses the bounded worker.
         if (index != nullptr && (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
             m_chainman.AcquisitionEscapeCoversBlock(index) &&
             (ready_tip_child || index != FindLowestUnverifiedAcquiredBody(
@@ -4346,14 +4650,15 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                          /*is_retained_retry=*/true);
             return;
     }
-    // The body is already retained. Replay it locally when its source
-    // disconnected. Waiting until the retention TTL drops the only copy.
-    LogDebug(BCLog::NET,
-             "Replaying retained body %s locally; source peer=%d is gone\n",
-             candidate_hash.ToString(), candidate.source_peer);
-    ProcessBlockSync(/*nodeid=*/-1, /*node=*/nullptr, candidate.block,
-                     candidate.force_processing, candidate.min_pow_checked,
-                     /*post_process=*/nullptr);
+    // Source gone, disconnecting, or netgroup mismatch. A retained body is
+    // not permission to ExactReplay on this thread. Ticket exemption does
+    // not skip the pending slot or verification budgets. force_processing
+    // is not a bypass: if the slot or budget is unavailable, refresh and
+    // return.
+    {
+        DisconnectedRetainedRetryGuard guard;
+        DispatchDisconnectedRetainedMatMulBody(candidate_hash, candidate);
+    }
 }
 
 bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash, uint64_t keyed_netgroup) const
@@ -5706,6 +6011,16 @@ static bool TrustedMirrorMayDownloadIndex(
     }
     return competing.count(index->GetBlockHash()) != 0 ||
            followed_skip.count(index->GetBlockHash()) != 0;
+}
+
+bool PeerManagerImpl::HeaderFetchSuppressedForTest(const uint256& hash) const
+{
+    LOCK(cs_main);
+    const CBlockIndex* index{m_chainman.m_blockman.LookupBlockIndex(hash)};
+    return IsHeaderOnlyFetchSuppressed(
+        m_chainman, m_chainman.ActiveTip(), index,
+        m_header_only_competing, m_header_only_followed_skip,
+        nullptr, &m_structural_download_skip);
 }
 
 [[nodiscard]] static bool InsertHeaderOnlySkipHash(std::set<uint256>& hashes,
@@ -7407,6 +7722,14 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 if (m_matmul_block_lifecycle.HasRetainedBody(deferred_hash)) {
                     continue;
                 }
+                // A body evicted moments ago under capacity pressure is not
+                // missing. Asking for it again makes the store evict another
+                // one to take it. The progress body is never evicted, so it
+                // is never held back here.
+                if (m_matmul_block_lifecycle.WasEvictedRecently(
+                        deferred_hash, MATMUL_BUDGET_DEFER_COOLDOWN)) {
+                    continue;
+                }
                 // Budget defers pace concurrent verifies. When the download
                 // map is empty they must not block the only needed body —
                 // that is the production idle stall (in_flight_global=0
@@ -8379,7 +8702,7 @@ void PeerManagerImpl::MaybeExpireMatMulSourceBudgets(std::chrono::steady_clock::
 }
 
 bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
-    const Peer& peer,
+    const CNetAddr& address,
     uint64_t keyed_netgroup,
     const Consensus::Params& params,
     uint32_t verification_count,
@@ -8435,8 +8758,8 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
         }
         LogDebug(BCLog::NET,
                  "Authenticated-chain MatMul progress lane: pacing per-minute "
-                 "RC rate counters peer=%s scale=%u backlog=%d\n",
-                 peer.m_addr.ToStringAddr(), progress_scale, behind);
+                 "RC rate counters address=%s scale=%u backlog=%d\n",
+                 address.ToStringAddr(), progress_scale, behind);
     }
     auto allow_idle_catchup = [&]() -> bool {
         if (m_matmul_pending_verifications.load(std::memory_order_relaxed) != 0 ||
@@ -8444,15 +8767,15 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
             return false;
         }
         LogDebug(BCLog::NET,
-                 "Idle MatMul catch-up: allowing verify despite exhausted budget peer=%s\n",
-                 peer.m_addr.ToStringAddr());
+                 "Idle MatMul catch-up: allowing verify despite exhausted budget address=%s\n",
+                 address.ToStringAddr());
         global_exhausted = false;
         return true;
     };
     {
         UniqueLock lock(m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex", __FILE__, __LINE__);
         MaybeExpireMatMulSourceBudgets(now);
-        auto& budget_state = m_matmul_addr_budgets[peer.m_addr];
+        auto& budget_state = m_matmul_addr_budgets[address];
         budget_state.last_update = now;
         if (rc_recompute) {
             auto& netgroup_state{
@@ -8553,8 +8876,8 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                     *retry_delay = ClampMatMulBudgetDeferredDelay(
                         GlobalMatMulRCBudgetRetryDelay(now));
                 }
-                LogDebug(BCLog::NET, "Global RC verify budget exhausted (%u/min), deferring peer %s\n",
-                         global_budget, peer.m_addr.ToStringAddr());
+                LogDebug(BCLog::NET, "Global RC verify budget exhausted (%u/min), deferring address %s\n",
+                         global_budget, address.ToStringAddr());
                 if (allow_idle_catchup()) return true;
                 return false;
             }
@@ -8596,8 +8919,8 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                 source_window_start = saved_window_start;
                 source_count = saved_count;
                 global_exhausted = true;
-                LogDebug(BCLog::NET, "Global Phase2 budget exhausted (%u/min), deferring peer %s\n",
-                         global_budget, peer.m_addr.ToStringAddr());
+                LogDebug(BCLog::NET, "Global Phase2 budget exhausted (%u/min), deferring address %s\n",
+                         global_budget, address.ToStringAddr());
                 if (allow_idle_catchup()) return true;
                 return false;
             }
@@ -9513,8 +9836,23 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
             // behind never sees those bodies unless it GETDATAs. Push the
             // next honest body on our chain so work leaves the box without
             // waiting for a human addnode.
+            // Walk from the last header we already offered on this chain.
+            // pindexBestKnownBlock stays put until the peer proves it, so a
+            // burst otherwise resends the same height on every new block.
+            const CBlockIndex* cursor{state.pindexBestKnownBlock};
+            if (state.pindexBestHeaderSent != nullptr &&
+                state.pindexBestHeaderSent->nHeight > cursor->nHeight &&
+                pindex->GetAncestor(state.pindexBestHeaderSent->nHeight) ==
+                    state.pindexBestHeaderSent &&
+                state.pindexBestHeaderSent->GetAncestor(cursor->nHeight) ==
+                    cursor) {
+                cursor = state.pindexBestHeaderSent;
+            }
+            if (cursor->nHeight >= pindex->nHeight) {
+                return;
+            }
             const CBlockIndex* const next{
-                pindex->GetAncestor(state.pindexBestKnownBlock->nHeight + 1)};
+                pindex->GetAncestor(cursor->nHeight + 1)};
             if (next != nullptr && (next->nStatus & BLOCK_HAVE_DATA) != 0) {
                 CBlock next_block;
                 const CBlock* send{nullptr};
@@ -9618,9 +9956,11 @@ void PeerManagerImpl::BlockChecked(const CBlock& block, const BlockValidationSta
         State(it->second.first)) {
             MaybePunishNodeForBlock(/*nodeid=*/ it->second.first, state, /*via_compact_block=*/ !it->second.second);
     }
-    if (state.GetResult() == BlockValidationResult::BLOCK_MUTATED) {
-        InsertHeaderOnlySkipHash(m_structural_download_skip, hash);
-    }
+    // BLOCK_MUTATED is not a permanent header failure. matrix_c_data and
+    // other body-only fields are outside the header hash, so an honest
+    // body with this hash must remain downloadable from another peer.
+    // Compact-block decode failures are punished on the sending peer
+    // only; they are not recorded in m_structural_download_skip either.
     // Check that:
     // 1. The block is valid
     // 2. We're not in historical catch-up IBD (age-only IBD still HB-relays)
@@ -10729,6 +11069,7 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
         if (result.success) {
             peer.m_last_getheaders_timestamp = {};
             peer.m_last_getheaders_sent = {};
+            peer.m_unknown_attested_header_requests.clear();
         }
         if (result.request_more) {
             auto locator = peer.m_headers_sync->NextHeadersRequestLocator();
@@ -11114,6 +11455,43 @@ void PeerManagerImpl::MaybeRefreshBackgroundHeaders(CNode& node, Peer& peer)
                 node.GetId(), known != nullptr ? known->nHeight : -1,
                 peer.m_starting_height.load(), tip->nHeight);
     }
+}
+
+bool PeerManagerImpl::MayBypassHeadersWindowForDirectTipExtension(const Peer& peer, NodeId nodeid)
+{
+    AssertLockHeld(cs_main);
+    // Age-only IBD (ancient tip, no -maxtipage) already catch-up fetches.
+    // Do not open this hole for arbitrary IBD peers.
+    if (m_chainman.IsInitialBlockDownload()) return false;
+    const auto now{NodeClock::now()};
+    if (peer.m_direct_tip_extension_getheaders_at != NodeClock::time_point{} &&
+        now - peer.m_direct_tip_extension_getheaders_at <= HEADERS_RESPONSE_TIME) {
+        return false;
+    }
+    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+    if (tip == nullptr) return false;
+    const int advertised{peer.m_starting_height.load(std::memory_order_relaxed)};
+    // VERSION above our tip is the ordinary best-known probe
+    // (best_known_probe_is_rate_limited_and_skips_height_zero). A connecting
+    // header must not make an unknown INV skip HEADERS_RESPONSE_TIME.
+    if (advertised < 0 || advertised > tip->nHeight) return false;
+    if (tip->nHeight > 0 && advertised == 0) return false;
+    const CNodeState* const state{State(nodeid)};
+    const CBlockIndex* const known{state != nullptr ? state->pindexBestKnownBlock : nullptr};
+    if (known == nullptr) return true;
+    if (known->nStatus & BLOCK_FAILED_MASK) return false;
+    if (m_chainman.ActiveChain().Contains(known)) {
+        return known->nHeight <= tip->nHeight;
+    }
+    // Honest-body push can index the next header before the active height
+    // moves. That header still builds on our tip. A fork that does not is
+    // a competing sibling and stays header-only.
+    if (known->GetAncestor(tip->nHeight) != tip) return false;
+    if (known->nHeight <= tip->nHeight) {
+        const CBlockIndex* const active_at{m_chainman.ActiveChain()[known->nHeight]};
+        if (active_at != nullptr && active_at != known) return false;
+    }
+    return true;
 }
 
 bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, bool bypass_send_window)
@@ -13254,6 +13632,19 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         followed_tip_child_hash != header.GetHash() &&
         (m_matmul_block_lifecycle.HasRetainedBody(followed_tip_child_hash) ||
          IsMatMulRCBodyDeferred(followed_tip_child_hash))};
+    // Yield to any lower unverified ancestor waiting on capacity, not only
+    // the direct tip-child. Covers tip+2 while tip+1 is still cooling down.
+    if (!authenticated_tip_child &&
+        WITH_LOCK(cs_main, return HoldRCJobForLowerAncestor(
+                               &index, work, params))) {
+        m_matmul_rc_speculative_pending.fetch_sub(
+            1, std::memory_order_relaxed);
+        LogDebug(BCLog::NET,
+                 "matmul: header-first ExactReplay for hash=%s height=%d "
+                 "held for a lower unverified ancestor peer=%d\n",
+                 header.GetHash().ToString(), index.nHeight, node.GetId());
+        return;
+    }
     bool reserved{false};
     if (!followed_tip_child_held || authenticated_tip_child) {
         reserved = ReserveMatMulRCVerificationSlot(
@@ -13414,7 +13805,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                 m_chainman, CBlock{header}, /*requested=*/true);
         }
         if (!ConsumeMatMulVerificationBudgetForPeer(
-                peer, node.nKeyedNetGroup, params, work, charged_at,
+                peer.m_addr, node.nKeyedNetGroup, params, work, charged_at,
                 /*is_ibd=*/false, index.nHeight, global_exhausted,
                 /*rc_recompute=*/true, /*header_batch=*/false,
                 /*retry_delay=*/nullptr, progress_lane)) {
@@ -13791,6 +14182,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
         !discovery_anchor.IsNull() &&
         headers.front().hashPrevBlock == discovery_anchor};
     peer.m_last_getheaders_timestamp = {};
+    peer.m_unknown_attested_header_requests.clear();
     peer.m_unconnecting_headers = 0;
 
     // If the headers we received are already in memory and an ancestor of
@@ -14035,7 +14427,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
 
                     bool global_exhausted{false};
                     if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
-                            peer,
+                            peer.m_addr,
                             pfrom.nKeyedNetGroup,
                             consensus_params,
                             phase2_checks,
@@ -14759,7 +15151,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             }
         }
         if (ConsumeMatMulVerificationBudgetForPeer(
-                *peer, node.nKeyedNetGroup,
+                peer->m_addr, node.nKeyedNetGroup,
                 m_chainparams.GetConsensus(), matmul_admission.work_units,
                 charged_at, matmul_admission.is_ibd,
                 matmul_admission.reference_height, global_exhausted,
@@ -15083,6 +15475,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 const uint32_t work = rc ? MatMulRCWorkUnits(cons, encdr->height)
                                         : MatMulEncDrWorkUnits(cons, encdr->height);
                 bool reserved{false};
+                bool hold_for_lower_ancestor{false};
                 if (rc) {
                     // Same #163 skip as AdmitMatMulBlockVerification: a
                     // non-tip-child RC body must not consume cap=1 while the
@@ -15112,6 +15505,11 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                                     m_chainman, m_matmul_block_lifecycle)}) {
                             followed_tip_child_hash = followed_child->GetBlockHash();
                         }
+                        if (!direct_authenticated_tip_child &&
+                            !acquisition_covered && covered_index != nullptr) {
+                            hold_for_lower_ancestor = HoldRCJobForLowerAncestor(
+                                covered_index, work, cons);
+                        }
                     }
                     const bool followed_tip_child_held{
                         !followed_tip_child_hash.IsNull() &&
@@ -15121,7 +15519,9 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                          IsMatMulRCBodyDeferred(followed_tip_child_hash))};
                     const bool progress_lane{
                         direct_authenticated_tip_child || acquisition_covered};
-                    if (!followed_tip_child_held || direct_authenticated_tip_child) {
+                    if ((!followed_tip_child_held ||
+                         direct_authenticated_tip_child) &&
+                        !hold_for_lower_ancestor) {
                         reserved = ReserveMatMulRCVerificationSlot(
                             m_matmul_rc_pending_verifications, cons,
                             encdr->height, work, progress_lane);
@@ -15513,6 +15913,36 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
     ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
     release_verdict_pin();
     release_assumevalid_trust_pin();
+}
+
+bool PeerManagerImpl::HoldRCJobForLowerAncestor(
+    const CBlockIndex* index, uint32_t work,
+    const Consensus::Params& params)
+{
+    AssertLockHeld(cs_main);
+    if (index == nullptr) return false;
+    const auto lower{
+        m_matmul_block_lifecycle.CapacityDeferredBodiesBelow(index->nHeight)};
+    for (const auto& deferred : lower) {
+        const CBlockIndex* const cand{
+            m_chainman.m_blockman.LookupBlockIndex(deferred.first)};
+        if (cand == nullptr) continue;
+        if ((cand->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
+        if (index->GetAncestor(cand->nHeight) != cand) continue;
+        if (CanStartMatMulRCVerification(
+                m_matmul_rc_pending_verifications.load(
+                    std::memory_order_relaxed),
+                work, params, index->nHeight)) {
+            m_matmul_block_lifecycle.WakeNow(deferred.first);
+        }
+        LogDebug(BCLog::NET,
+                 "matmul: hash=%s height=%d waits for its unverified ancestor "
+                 "%s height=%d, which is retained and capacity-deferred\n",
+                 index->GetBlockHash().ToString(), index->nHeight,
+                 deferred.first.ToString(), cand->nHeight);
+        return true;
+    }
+    return false;
 }
 
 bool PeerManagerImpl::AdmitMatMulBlockVerification(
@@ -16490,9 +16920,18 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
          IsMatMulRCBodyDeferred(followed_tip_child_hash))};
     const bool progress_lane{
         direct_authenticated_tip_child || acquisition_covered};
+    bool hold_for_lower_ancestor{false};
+    if (rc_profile && !direct_authenticated_tip_child) {
+        LOCK(cs_main);
+        const CBlockIndex* const covered{
+            m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+        hold_for_lower_ancestor =
+            HoldRCJobForLowerAncestor(covered, work, params);
+    }
     bool reserved{false};
     if (rc_profile) {
-        if (!followed_tip_child_held || direct_authenticated_tip_child) {
+        if ((!followed_tip_child_held || direct_authenticated_tip_child) &&
+            !hold_for_lower_ancestor) {
             reserved = ReserveMatMulRCVerificationSlot(
                 m_matmul_rc_pending_verifications, params,
                 exact_reference_height, work, progress_lane);
@@ -16507,7 +16946,14 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             UnmarkMatMulAsyncVerification(*lifecycle_token);
         }
         restore_accepted_ticket();
-        LogInfo(
+        if (hold_for_lower_ancestor) {
+            LogDebug(BCLog::NET,
+                     "Holding the RC verification job for a lower unverified "
+                     "ancestor: deferring %s hash=%s height=%d peer=%d\n",
+                     source, block_hash.ToString(), exact_reference_height,
+                     node.GetId());
+        } else {
+            LogInfo(
             "Deferring peer=%d: MatMul pending verification cap reached (%s) "
             "diag: rc_profile=%d tip_child_lane=%d work=%u rc_pending=%u "
             "encdr_pending=%u rc_cap=%u encdr_cap=%u ref_height=%d\n",
@@ -16518,6 +16964,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             EffectiveMatMulRCMaxPendingVerifications(params, exact_reference_height),
             EffectiveMatMulMaxPendingVerifications(params, exact_reference_height),
             exact_reference_height);
+        }
         // An admitted speculative header or a slow full replay can occupy the
         // complete pending cap (RC or EncDr). A later honest body is not
         // evidence of abuse: the cap is ours, not proof of peer misbehavior,
@@ -16670,6 +17117,19 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     // SyncWithValidationInterfaceQueue. Holding cs_main here deadlocks against
     // the scheduler draining BlockConnected callbacks that need cs_main.
     AssertLockNotHeld(cs_main);
+    // Disconnected retained retry must not ExactReplay on its caller. The
+    // worker completion below runs with depth 0, after a slot and budget
+    // were already taken.
+    if (g_disconnected_retained_retry_depth > 0) {
+        m_disconnected_retry_caller_sync.fetch_add(1, std::memory_order_relaxed);
+        LogDebug(BCLog::NET,
+                 "Refusing caller-thread replay of retained body %s; source is disconnected\n",
+                 block->GetHash().ToString());
+        RefreshMatMulDeferredBodyRetry(
+            block->GetHash(), "disconnected source caller-thread replay refused");
+        if (post_process) post_process();
+        return;
+    }
     DrainMatMulPendingSourceUnpins();
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
@@ -16836,11 +17296,7 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         ReadStatus status = partialBlock.FillBlock(*pblock, block_transactions.txn,
                                                    /*segwit_active=*/DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT));
         if (status == READ_STATUS_INVALID) {
-            // The txn message did not match this compact block. Another peer
-            // can still provide the block. A mutated full body is recorded
-            // later, from BlockChecked, and that skip stays.
-            RemoveBlockRequest(block_transactions.blockhash, pfrom.GetId()); // Reset in-flight state in case Misbehaving does not result in a disconnect
-            Misbehaving(peer, "invalid compact block/non-matching block transactions");
+            RejectCompactBlockFromPeer(block_transactions.blockhash, peer, pfrom.GetId());
             return;
         } else if (status == READ_STATUS_FAILED) {
             if (first_in_flight) {
@@ -18302,8 +18758,23 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // use if we turned on sync with all peers).
             CNodeState& state{*Assert(State(pfrom.GetId()))};
             if (state.fSyncStarted || (!peer->m_inv_triggered_getheaders_before_sync && *best_block != m_last_block_inv_triggering_headers_sync)) {
-                const bool sent_getheaders{
+                // A burst longer than MAX_BLOCKS_TO_ANNOUNCE is announced as
+                // one tip INV. The handshake already spent HEADERS_RESPONSE_TIME,
+                // so a non-IBD peer at our height otherwise sits ~2 minutes
+                // before it can ask for the unique extension (C23: 100 blocks,
+                // ~113s, then one jump). One extra getheaders per that window.
+                const bool direct_tip_extension{
+                    MayBypassHeadersWindowForDirectTipExtension(*peer, pfrom.GetId())};
+                bool sent_getheaders{
                     MaybeSendGetHeaders(pfrom, GetLocator(HeaderSyncLocatorIndex(m_chainman)), *peer)};
+                if (!sent_getheaders && direct_tip_extension) {
+                    sent_getheaders = MaybeSendGetHeaders(
+                        pfrom, GetLocator(HeaderSyncLocatorIndex(m_chainman)), *peer,
+                        /*bypass_send_window=*/true);
+                }
+                if (sent_getheaders && direct_tip_extension) {
+                    peer->m_direct_tip_extension_getheaders_at = NodeClock::now();
+                }
                 if (sent_getheaders) {
                     const CBlockIndex* locator_start{HeaderSyncLocatorIndex(m_chainman)};
                     LogDebug(BCLog::NET, "getheaders (%d) %s to peer=%d\n",
@@ -19274,11 +19745,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 PartiallyDownloadedBlock& partialBlock = *(*queuedBlockIt)->partialBlock;
                 ReadStatus status = partialBlock.InitData(cmpctblock, vExtraTxnForCompact);
                 if (status == READ_STATUS_INVALID) {
-                    // A malformed compact block is this peer's message, not
-                    // proof the block is bad. Do not stop other peers from
-                    // serving the same header.
-                    RemoveBlockRequest(pindex->GetBlockHash(), pfrom.GetId()); // Reset in-flight state in case Misbehaving does not result in a disconnect
-                    Misbehaving(*peer, "invalid compact block");
+                    RejectCompactBlockFromPeer(pindex->GetBlockHash(), *peer, pfrom.GetId());
                     return;
                 } else if (status == READ_STATUS_FAILED) {
                     if (first_in_flight)  {
@@ -20886,23 +21353,33 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // node-wide relay allowance: valid public attestations are replayable
         // by anyone.
         bool wake_block_fetch{false};
+        // One GETHEADERS per unknown attested hash: duplicates inside this
+        // vector and later messages from this peer must not reset the
+        // send/answer clocks. A new hash may still bypass the window.
+        std::set<uint256> attested_headers_seen;
         for (const auto& attestation : received) {
             const uint256 hash{
                 attestation.statement.block_hash};
             int32_t expected_height{-1};
             bool known_profile1{false};
+            bool header_indexed{false};
             {
                 LOCK(cs_main);
                 const CBlockIndex* index{
                     m_chainman.m_blockman.LookupBlockIndex(hash)};
-                if (index != nullptr &&
-                    !(index->nStatus & BLOCK_FAILED_MASK)) {
-                    expected_height = index->nHeight;
-                    known_profile1 =
-                        m_chainparams.GetConsensus()
-                            .IsMatMulTrustedReplayAttestationActive(
-                                expected_height);
+                if (index != nullptr) {
+                    header_indexed = true;
+                    if (!(index->nStatus & BLOCK_FAILED_MASK)) {
+                        expected_height = index->nHeight;
+                        known_profile1 =
+                            m_chainparams.GetConsensus()
+                                .IsMatMulTrustedReplayAttestationActive(
+                                    expected_height);
+                    }
                 }
+            }
+            if (header_indexed) {
+                peer->m_unknown_attested_header_requests.erase(hash);
             }
             if (!known_profile1) {
                 const bool header_unknown{WITH_LOCK(cs_main,
@@ -20931,6 +21408,28 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                              node::matmul_trusted::IsAuthoritySigner(
                                  attestation.signer))};
                         if (authority_signer) {
+                            if (!attested_headers_seen.insert(hash).second) {
+                                LogDebug(
+                                    BCLog::NET,
+                                    "mmattest duplicate unknown block=%s "
+                                    "in one message; not requesting headers peer=%d\n",
+                                    hash.ToString(), pfrom.GetId());
+                                continue;
+                            }
+                            const auto requested{
+                                peer->m_unknown_attested_header_requests.find(hash)};
+                            if (requested != peer->m_unknown_attested_header_requests.end()) {
+                                const auto age{NodeClock::now() - requested->second};
+                                if (age <= HEADERS_RESPONSE_TIME) {
+                                    LogDebug(
+                                        BCLog::NET,
+                                        "mmattest replay of unknown block=%s "
+                                        "still inside headers window; not requesting peer=%d\n",
+                                        hash.ToString(), pfrom.GetId());
+                                    continue;
+                                }
+                                peer->m_unknown_attested_header_requests.erase(requested);
+                            }
                             CBlockLocator locator;
                             {
                                 LOCK(cs_main);
@@ -20942,11 +21441,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                             // probes. A trusted signer naming a block we have
                             // never seen means that answer is already stale:
                             // waiting it out leaves the mirror at the previous
-                            // header until the window expires.
+                            // header until the window expires. The bypass is
+                            // once per hash until that request is answered,
+                            // expires, or the header is indexed.
                             if (!locator.vHave.empty() &&
                                 MaybeSendGetHeaders(
                                     pfrom, locator, *peer,
                                     /*bypass_send_window=*/true)) {
+                                peer->m_unknown_attested_header_requests[hash] =
+                                    NodeClock::now();
                                 LogDebug(
                                     BCLog::NET,
                                     "mmattest for unknown block=%s height=%d "

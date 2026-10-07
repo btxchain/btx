@@ -562,9 +562,11 @@ bool P2MRClaimLeafPinsPreimageLength(Span<const unsigned char> script)
     std::vector<unsigned char> hash;
     std::vector<unsigned char> pubkey;
     PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
-    return ParseP2MRHTLCSha256Leaf(script, hash, algo, pubkey) ||
-           ParseP2MRHTLCSha256LegacyLeaf(script, hash, algo, pubkey) ||
-           ParseP2MRHTLCTxLeaf(script, hash, algo, pubkey);
+    // Only the leaf that commits OP_SIZE 32 OP_EQUALVERIFY. Legacy SHA-256
+    // (OP_SHA256 <digest> OP_EQUALVERIFY) and HASH160 htlc_tx have no length
+    // pin; classifying them here would make a matching non-32-byte preimage
+    // consensus-invalid after nP2MRHTLCPreimage32Height.
+    return ParseP2MRHTLCSha256Leaf(script, hash, algo, pubkey);
 }
 
 std::vector<unsigned char> BuildP2MRRefundLeaf(
