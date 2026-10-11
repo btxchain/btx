@@ -59,12 +59,18 @@ UniValue MinimalCore(const std::string& adapter_id = "llama.cpp")
     res.pushKV("id", Hex96('a'));
     UniValue resources(UniValue::VARR);
     resources.push_back(res);
+    UniValue file(UniValue::VOBJ);
+    file.pushKV("path", "model.gguf");
+    file.pushKV("sha384", Hex96('e'));
+    UniValue files(UniValue::VARR);
+    files.push_back(file);
     UniValue core(UniValue::VOBJ);
     core.pushKV("version", 2);
     core.pushKV("network", "REGTEST");
     core.pushKV("package_type", "MODEL");
     core.pushKV("label", "ahp-run");
     core.pushKV("resources", resources);
+    core.pushKV("files", files);
     core.pushKV("agent_handoff", ah);
     return core;
 }
@@ -89,6 +95,7 @@ UniValue ReadyReceipt(const UniValue& core, const std::string& leased = "/tmp/bt
     rec.pushKV("leased_path", leased);
     rec.pushKV("manifest_verified", true);
     rec.pushKV("file_bytes_verified", true);
+    rec.pushKV("stored_sha384", Hex96('e'));
     rec.pushKV("lease_id", "lease-1");
     rec.pushKV("runtime_executed", false);
     rec.pushKV("created_at_ms", "1");
@@ -192,6 +199,11 @@ BOOST_AUTO_TEST_CASE(ahp_run_01_plan_is_not_execution)
     UniValue unverified = receipt;
     unverified.pushKV("file_bytes_verified", false);
     BOOST_CHECK(!modelnet::PlanBtxRuntime(core, unverified, trusted, blocked, err_code, err));
+    BOOST_CHECK_EQUAL(err_code, "MODEL_BYTES_UNVERIFIED");
+
+    UniValue echoed = receipt;
+    echoed.pushKV("stored_sha384", Hex96('0'));
+    BOOST_CHECK(!modelnet::PlanBtxRuntime(core, echoed, trusted, blocked, err_code, err));
     BOOST_CHECK_EQUAL(err_code, "MODEL_BYTES_UNVERIFIED");
 
     UniValue no_lease = receipt;

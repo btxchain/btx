@@ -177,15 +177,37 @@ class ModelnetBountyLifecycleTest(BitcoinTestFramework):
             raise AssertionError(f"{method} failed for a reason other than timelock: {exc.error}") from exc
         raise AssertionError(f"{method} must fail closed before locktime")
 
+    def _sign_leaf(self, wallet, sign_method, opts, prep):
+        """prepare* returns unsigned hex and complete=false. sign* adds the wallet signature."""
+        if prep.get("complete"):
+            raise AssertionError(f"prepare must not be complete: {prep}")
+        unsigned = prep.get("unsigned_hex")
+        if not unsigned:
+            raise AssertionError(f"prepare missing unsigned_hex: {prep}")
+        signed = getattr(wallet, sign_method)({**opts, "hex": unsigned, "unsigned_hex": unsigned})
+        hex_tx = signed.get("hex") or signed.get("signed_hex")
+        if not hex_tx or not signed.get("complete"):
+            raise AssertionError(f"{sign_method}: {signed}")
+        return signed, hex_tx
+
     def _fund_lot(self, funder, plan, funding_addr):
         prep = funder.preparebountyfunding(plan)
-        if not prep.get("unsigned_hex"):
+        if not prep.get("unsigned_hex") or not prep.get("unsigned_txid"):
             raise AssertionError(f"preparebountyfunding: {prep}")
         assert_equal(prep.get("automatic_spend"), 0)
-        insp = funder.inspectbountytransaction({**plan, "hex": prep["unsigned_hex"]})
+        bound = {
+            **plan,
+            "unsigned_hex": prep["unsigned_hex"],
+            "unsigned_txid": prep["unsigned_txid"],
+            "output_script": prep.get("output_script"),
+            "descriptor": prep.get("descriptor"),
+            "refund_key": prep.get("refund_key", plan.get("refund_key")),
+            "plan_id": prep.get("plan_id"),
+        }
+        insp = funder.inspectbountytransaction({**bound, "hex": prep["unsigned_hex"]})
         if not insp.get("escrow_output_present"):
             raise AssertionError(f"inspectbountytransaction: {insp}")
-        signed = funder.signbountyfunding({**plan, "hex": prep["unsigned_hex"], "plan_id": prep.get("plan_id")})
+        signed = funder.signbountyfunding({**bound, "hex": prep["unsigned_hex"]})
         if not signed.get("hex"):
             raise AssertionError(f"signbountyfunding: {signed}")
         decoded = funder.decoderawtransaction(signed["hex"])
@@ -292,9 +314,7 @@ class ModelnetBountyLifecycleTest(BitcoinTestFramework):
                 raise AssertionError(f"wrong-wallet award refused for the wrong reason: {exc.error}") from exc
 
         prep = council.preparebountyaward(spend_opts)
-        hex_award = prep.get("hex") or prep.get("signed_hex")
-        if not hex_award or not prep.get("complete"):
-            raise AssertionError(f"edge award: {prep}")
+        _signed, hex_award = self._sign_leaf(council, "signbountyaward", spend_opts, prep)
         self._submit_spend(council, "submitbountyaward", hex_award, funding_addr)
         try:
             council.preparebountyaward(spend_opts)
@@ -352,10 +372,8 @@ class ModelnetBountyLifecycleTest(BitcoinTestFramework):
 
         before = winner.getreceivedbyaddress(winner_addr)
         prep_claim = claimant.preparebountyclaim(claim_opts)
-        hex_claim = prep_claim.get("hex") or prep_claim.get("signed_hex")
-        if not hex_claim or not prep_claim.get("complete"):
-            raise AssertionError(f"preparebountyclaim: {prep_claim}")
         assert_equal(prep_claim.get("selected_path"), "claim")
+        prep_claim, hex_claim = self._sign_leaf(claimant, "signbountyclaim", claim_opts, prep_claim)
         decoded = claimant.decoderawtransaction(hex_claim)
         assert_equal(decoded["locktime"], 0)
         self._submit_spend(claimant, "submitbountyclaim", hex_claim, funding_addr)
@@ -389,10 +407,8 @@ class ModelnetBountyLifecycleTest(BitcoinTestFramework):
         while node.getblockcount() < refund_h2:
             self.generatetoaddress(node, 1, funding_addr)
         prep_refund = funder.preparebountyrefund(refund_opts)
-        hex_refund = prep_refund.get("hex") or prep_refund.get("signed_hex")
-        if not hex_refund or not prep_refund.get("complete"):
-            raise AssertionError(f"staged refund: {prep_refund}")
         assert_equal(prep_refund.get("selected_path"), "refund")
+        prep_refund, hex_refund = self._sign_leaf(funder, "signbountyrefund", refund_opts, prep_refund)
         before_refund = funder.getreceivedbyaddress(refund_dest)
         self._submit_spend(funder, "submitbountyrefund", hex_refund, funding_addr)
         after_refund = funder.getreceivedbyaddress(refund_dest)
@@ -492,11 +508,10 @@ class ModelnetBountyLifecycleTest(BitcoinTestFramework):
             self.generatetoaddress(node, 1, funding_addr)
 
         prep_award = council.preparebountyaward(spend_opts)
-        hex_award = prep_award.get("hex") or prep_award.get("signed_hex")
-        if not hex_award or not prep_award.get("complete"):
-            raise AssertionError(f"preparebountyaward: {prep_award}")
         assert_equal(prep_award.get("selected_path"), "award")
         assert_equal(prep_award.get("automatic_spend"), 0)
+        assert_equal(prep_award.get("complete"), False)
+        prep_award, hex_award = self._sign_leaf(council, "signbountyaward", spend_opts, prep_award)
         insp_award = council.inspectbountyaward({**spend_opts, "hex": hex_award})
         assert_equal(insp_award.get("selected_path"), "award")
         assert_equal(insp_award.get("timelock_enforced"), True)
@@ -542,10 +557,9 @@ class ModelnetBountyLifecycleTest(BitcoinTestFramework):
             self.generatetoaddress(node, 1, funding_addr)
 
         prep_refund = funder.preparebountyrefund(refund_opts)
-        hex_refund = prep_refund.get("hex") or prep_refund.get("signed_hex")
-        if not hex_refund or not prep_refund.get("complete"):
-            raise AssertionError(f"preparebountyrefund: {prep_refund}")
         assert_equal(prep_refund.get("selected_path"), "refund")
+        assert_equal(prep_refund.get("complete"), False)
+        prep_refund, hex_refund = self._sign_leaf(funder, "signbountyrefund", refund_opts, prep_refund)
         decoded_refund = funder.decoderawtransaction(hex_refund)
         assert_equal(decoded_refund["locktime"], refund_h)
         if decoded_refund["vin"][0]["sequence"] == 0xffffffff:

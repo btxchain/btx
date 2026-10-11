@@ -72,6 +72,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -107,17 +108,98 @@
 
 namespace modelnet {
 
+namespace {
+
+bool StickyWorldWritableDir(const fs::path& dir)
+{
+    const std::string s = fs::PathToString(dir);
+    return s == "/tmp" || s == "/var/tmp" || s == "/dev/shm";
+}
+
+bool LooksLikeTmpFallbackSock(const fs::path& sock)
+{
+    const std::string s = fs::PathToString(sock);
+    return s.find("/tmp/btx-md-") != std::string::npos || s.find("/var/tmp/btx-md-") != std::string::npos;
+}
+
+fs::path RuntimeSockDir()
+{
+    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
+    if (!xdg || xdg[0] != '/') return {};
+    return fs::PathFromString(xdg) / "btx-modeld";
+}
+
+} // namespace
+
 fs::path UnixRpcListenPath(const fs::path& requested)
 {
 #ifndef WIN32
     const std::string p = fs::PathToString(requested);
-    if (p.size() >= sizeof(sockaddr_un::sun_path)) {
-        unsigned char digest[32];
-        CSHA256().Write(UCharCast(p.data()), p.size()).Finalize(digest);
-        return fs::PathFromString(strprintf("/tmp/btx-md-%s.sock", HexStr(std::vector<unsigned char>(digest, digest + 8))));
-    }
-#endif
+    const bool too_long = p.size() >= sizeof(sockaddr_un::sun_path);
+    const bool sticky = StickyWorldWritableDir(requested.parent_path()) || LooksLikeTmpFallbackSock(requested);
+    if (!too_long && !sticky) return requested;
+    const fs::path dir = RuntimeSockDir();
+    if (dir.empty()) return requested;
+    unsigned char digest[32];
+    CSHA256().Write(UCharCast(p.data()), p.size()).Finalize(digest);
+    const fs::path sock = dir / fs::PathFromString(HexStr(std::vector<unsigned char>(digest, digest + 8)) + ".sock");
+    if (fs::PathToString(sock).size() >= sizeof(sockaddr_un::sun_path)) return requested;
+    return sock;
+#else
     return requested;
+#endif
+}
+
+bool UnixSocketSafeToAdopt(const fs::path& sock, std::string& err)
+{
+    err.clear();
+    if (LooksLikeTmpFallbackSock(sock) || StickyWorldWritableDir(sock.parent_path())) {
+        err = "tmp socket is not a helper";
+        return false;
+    }
+    const std::string p = fs::PathToString(sock);
+    struct stat st {};
+    if (::lstat(p.c_str(), &st) != 0) {
+        err = "socket missing";
+        return false;
+    }
+    if (!S_ISSOCK(st.st_mode) || S_ISLNK(st.st_mode)) {
+        err = S_ISLNK(st.st_mode) ? "socket symlink" : "not a socket";
+        return false;
+    }
+    if ((st.st_mode & S_IWOTH) != 0) {
+        err = "world-writable socket";
+        return false;
+    }
+    const std::string parent = fs::PathToString(sock.parent_path());
+    struct stat pst {};
+    if (parent.empty() || ::lstat(parent.c_str(), &pst) != 0 || !S_ISDIR(pst.st_mode) ||
+        (pst.st_mode & S_IWOTH) != 0) {
+        err = "socket directory is world-writable";
+        return false;
+    }
+    return true;
+}
+
+bool UnixConnectedPeerIsSelf(int fd, std::string& err)
+{
+    err.clear();
+#if defined(SO_PEERCRED)
+    struct ucred cred {};
+    socklen_t len = sizeof(cred);
+    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
+        err = "peercred";
+        return false;
+    }
+    if (cred.uid != static_cast<uid_t>(::getuid())) {
+        err = "peer uid";
+        return false;
+    }
+    return true;
+#else
+    (void)fd;
+    return true;
+#endif
 }
 
 namespace {
@@ -1165,8 +1247,30 @@ int ListenUnix(fs::path& path, std::string& err)
     path = UnixRpcListenPath(requested);
     std::string p = fs::PathToString(path);
     if (path != requested) {
-        LogPrintf("btx-modeld: unix RPC path length %zu exceeds sockaddr_un.sun_path; listening at %s\n",
-                  fs::PathToString(requested).size(), p);
+        LogPrintf("btx-modeld: unix RPC path %s is not a private sun_path; listening at %s\n",
+                  fs::PathToString(requested), p);
+    }
+    if (LooksLikeTmpFallbackSock(path) || StickyWorldWritableDir(path.parent_path())) {
+        err = "refusing helper socket in a world-writable directory";
+        return -1;
+    }
+    const fs::path parent = path.parent_path();
+    const std::string parent_s = fs::PathToString(parent);
+    try {
+        if (!parent_s.empty()) fs::create_directories(parent);
+    } catch (const fs::filesystem_error&) {
+        err = "unix dir mode";
+        return -1;
+    }
+    if (parent_s.empty() || ::chmod(parent_s.c_str(), 0700) != 0) {
+        err = "unix dir mode";
+        return -1;
+    }
+    struct stat pst {};
+    if (::lstat(parent_s.c_str(), &pst) != 0 || !S_ISDIR(pst.st_mode) || (pst.st_mode & 0777) != 0700 ||
+        pst.st_uid != static_cast<uid_t>(::getuid())) {
+        err = "unix dir not private";
+        return -1;
     }
     ::unlink(p.c_str());
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1182,9 +1286,15 @@ int ListenUnix(fs::path& path, std::string& err)
         return -1;
     }
     std::strncpy(addr.sun_path, p.c_str(), sizeof(addr.sun_path) - 1);
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listen(fd, 16) != 0) {
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         err = "unix bind/listen failed";
         close(fd);
+        return -1;
+    }
+    if (::fchmod(fd, 0600) != 0 || listen(fd, 16) != 0) {
+        err = "unix socket mode";
+        close(fd);
+        ::unlink(p.c_str());
         return -1;
     }
     return fd;
@@ -1938,6 +2048,7 @@ void IngestCatalogIntoSearch(ModelCatalog& cat)
         }
         if (m.exists("bytes")) r.size_bytes = m["bytes"].getInt<int64_t>();
         r.signed_ok = false;
+        r.local_catalog = true;
         err.clear();
         if (const auto* existing = g_search_idx.Get(r.model_id)) {
             if (existing->signed_ok || SearchRecordHasAuthoredMetadata(*existing)) {
@@ -2785,8 +2896,14 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             resp.body = JsonError("PROVIDER_TYPE", err);
             return true;
         }
+        std::string origin = req.peer_addr;
+        if (origin.empty()) origin = req.transport_pin;
+        if (origin.empty()) {
+            const std::string from = RequestHeader(req, "X-BTX-From");
+            origin = from.empty() ? "anonymous" : from;
+        }
         std::lock_guard<std::mutex> lock(g_swarm.conn_mu);
-        if (!g_swarm.providers.Put(rec, ConnNowMs(), err)) {
+        if (!g_swarm.providers.Put(rec, ConnNowMs(), err, origin)) {
             resp.status = 403;
             resp.body = JsonError("PROVIDER_REJECT", err);
             return true;
@@ -6361,7 +6478,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         lock.unlock();
         int index_queried = 0;
-        std::vector<UniValue> remote_records;
+        std::vector<std::pair<std::string, UniValue>> remote_records;
         std::vector<SearchHit> remote_hits;
         if (q.scope != SearchScope::LOCAL) {
             {
@@ -6397,7 +6514,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     else job.coverage.connected_peers_queried += 1;
                     if (reply.exists("records") && reply["records"].isArray()) {
                         for (const auto& recj : reply["records"].getValues()) {
-                            if (recj.isObject()) remote_records.push_back(recj);
+                            if (recj.isObject()) remote_records.emplace_back(ep, recj);
                         }
                     }
                     if (reply.exists("results") && reply["results"].isArray()) {
@@ -6416,11 +6533,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
         }
         lock.lock();
-        for (const auto& recj : remote_records) {
+        for (const auto& item : remote_records) {
             ModelSearchRecord rec;
             std::string ierr;
-            if (!SearchRecordFromJson(recj, rec, ierr)) continue;
-            if (g_search_idx.Put(rec, ConnNowMs(), ierr)) AfterIndexPut(rec, ConnNowMs());
+            if (!SearchRecordFromJson(item.second, rec, ierr)) continue;
+            if (!VerifySearchRecord(rec, ConnNowMs(), ierr)) continue;
+            if (g_search_idx.Put(rec, ConnNowMs(), ierr, item.first)) AfterIndexPut(rec, ConnNowMs());
         }
         MergeRemoteSearchHits(job, std::move(remote_hits));
         job.hits = g_search_idx.Search(q, ConnNowMs());
@@ -6650,8 +6768,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         for (const auto& recj : Arg(0)["records"].getValues()) {
             ModelSearchRecord rec;
             std::string ierr;
-            if (!SearchRecordFromJson(recj, rec, ierr) || !g_search_idx.Put(rec, ConnNowMs(), err)) ++bad;
-            else {
+            if (!SearchRecordFromJson(recj, rec, ierr) || !VerifySearchRecord(rec, ConnNowMs(), ierr) ||
+                !g_search_idx.Put(rec, ConnNowMs(), err)) {
+                ++bad;
+            } else {
                 AfterIndexPut(rec, ConnNowMs());
                 ++ok;
             }
@@ -8992,7 +9112,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                         for (const auto& recj : reply["records"].getValues()) {
                             ModelSearchRecord rec;
                             std::string ierr;
-                            if (SearchRecordFromJson(recj, rec, ierr) && g_search_idx.Put(rec, ConnNowMs(), ierr)) {
+                            if (SearchRecordFromJson(recj, rec, ierr) && VerifySearchRecord(rec, ConnNowMs(), ierr) &&
+                                g_search_idx.Put(rec, ConnNowMs(), ierr, ep)) {
                                 AfterIndexPut(rec, ConnNowMs());
                             }
                         }

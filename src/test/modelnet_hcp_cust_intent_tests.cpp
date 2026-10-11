@@ -142,6 +142,10 @@ BOOST_AUTO_TEST_CASE(hcp_intent_02_authorization_binds_intent)
     UniValue env;
     BOOST_REQUIRE(env.read(created.body));
     const std::string iid = env["body"]["intent_id"].get_str();
+    auto early = e->Handle(hcp_test::AuthReq(*e, "POST", "/finance/intents/" + iid + "/submit", tok));
+    BOOST_CHECK_EQUAL(early.status, 409);
+    BOOST_CHECK(early.body.find("INTENT_NOT_AUTHORIZED") != std::string::npos);
+    BOOST_CHECK(e->LastSignedTxHex().empty());
     UniValue bad(UniValue::VOBJ);
     bad.pushKV("expected_body_id", std::string(96, 'f'));
     auto auth = e->Handle(hcp_test::AuthReq(*e, "POST", "/finance/intents/" + iid + "/authorize", tok, &bad));

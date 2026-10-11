@@ -1113,13 +1113,16 @@ HcpHttpResponse HcpEngine::Impl::HandleCrl12Locked(const HcpHttpRequest& req)
         b.pushKV("expires_at", std::to_string(cfg.clock_ms + 3600000));
         UniValue chunks(UniValue::VARR);
         std::string payload;
+        int64_t csv_rows = 0;
         if (fmt == "CSV") {
             payload = "id,label\n";
             for (const auto& [aid, a] : crl12.assets) {
+                if (!Owned(a)) continue;
                 std::string lab = a.exists("label") ? a["label"].get_str() : aid;
                 std::string safe;
                 Crl12CsvSafe(lab, safe);
                 payload += aid + "," + safe + "\n";
+                ++csv_rows;
             }
         } else {
             payload = "{\"rows\":[]}\n";
@@ -1137,7 +1140,7 @@ HcpHttpResponse HcpEngine::Impl::HandleCrl12Locked(const HcpHttpRequest& req)
         ch.pushKV("length", static_cast<int64_t>(payload.size()));
         chunks.push_back(ch);
         b.pushKV("chunks", chunks);
-        b.pushKV("total_rows", static_cast<int64_t>(crl12.positions.size()));
+        b.pushKV("total_rows", fmt == "CSV" ? csv_rows : static_cast<int64_t>(crl12.positions.size()));
         b.pushKV("transfer_permission", false);
         b.pushKV("account", cr11.authed_account);
         crl12.exports[id] = b;

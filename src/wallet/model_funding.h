@@ -46,11 +46,21 @@ bool ParseFrozenFundingQuote(const UniValue& options, FrozenFundingQuote& q, std
 void MergeHelperCampaign(const UniValue& helper, const std::string& release_id, FrozenFundingQuote& q);
 bool DecodeFundingTxHex(const std::string& hex, CMutableTransaction& tx, std::string& err);
 bool MatchFrozenTemplate(const FrozenFundingQuote& frozen, const CMutableTransaction& tx, std::string& err);
+/**
+ * Rebuild mr(htlc_sha256, refund) from key_hash, claimant, refund pubkey, and
+ * refund_height. Caller output_script and unsigned_txid are ignored. Exactly
+ * one output must match that script and amount_atoms. Any other output is
+ * refused when change_wallet is null; otherwise it must be this wallet's change.
+ */
+bool MatchRebuiltHtlc(FrozenFundingQuote& q, const CMutableTransaction& tx, const CWallet* change_wallet, std::string& err);
+/** Mint a wallet refund key when omitted. A supplied key must already be signable here. */
+bool EnsureModelRefundKey(CWallet& wallet, FrozenFundingQuote& q, std::string& err);
 UniValue FrozenQuoteToJson(const FrozenFundingQuote& q);
 UniValue ExportModelRecoveryJson(const FrozenFundingQuote& q);
 
 bool CreateUnsignedFunding(CWallet& wallet, FrozenFundingQuote& q, std::string& err);
-bool SignFrozenFunding(CWallet& wallet, CMutableTransaction& mtx, bool& complete, std::string& err);
+/** Rechecks the refund key, rebuilds the HTLC, then signs. Does not trust caller script or txid. */
+bool SignFrozenFunding(CWallet& wallet, const FrozenFundingQuote& quote, CMutableTransaction& mtx, bool& complete, std::string& err);
 
 /** Local wallet+chain view of a campaign HTLC. Not a remote peer claim. Never returns secrets. */
 UniValue ObserveReleaseFunding(CWallet& wallet, const std::string& key_hash_hex, uint32_t refund_height,

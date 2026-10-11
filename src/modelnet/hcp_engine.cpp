@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -936,6 +937,9 @@ HcpHttpResponse HcpEngine::Impl::HandleLocked(const HcpHttpRequest& req)
         if (dit == devices.end() || !dit->second.paired || dit->second.revoked) {
             return Err(403, "DEVICE_NOT_PAIRED", device);
         }
+        if (dit->second.account.empty() || dit->second.account != account) {
+            return Err(403, "DEVICE_ACCOUNT", device);
+        }
         env.body.pushKV("device_id", device);
         env.body.pushKV("network", DemoNetwork());
         const std::string hid = RandId("handoff-");
@@ -997,6 +1001,10 @@ HcpHttpResponse HcpEngine::Impl::HandleLocked(const HcpHttpRequest& req)
         if (dis.status >= 400) return dis;
         if (!Auth(req, "devices:enroll", account, acode, false)) return Err(401, acode, acode);
         const std::string did = have_body && parsed.exists("device_id") ? parsed["device_id"].get_str() : RandId("device-");
+        auto existing = devices.find(did);
+        if (existing != devices.end() && existing->second.account != account) {
+            return Err(409, "DEVICE_ACCOUNT", did);
+        }
         Device d;
         d.account = account;
         d.challenge = RandId("pair-");
@@ -1196,15 +1204,21 @@ HcpHttpResponse HcpEngine::Impl::HandleLocked(const HcpHttpRequest& req)
             ParseAtomString(qit->second.body["expires_at_ms"].get_str(), exp, aerr);
             if (cfg.clock_ms >= exp) return Err(400, HCP_ERR_QUOTE_EXPIRED, "quote expired");
         }
-        const std::string pid = have_body && parsed.exists("policy_id") ? parsed["policy_id"].get_str() : "";
-        if (!pid.empty()) {
-            auto pit = policies.find(pid);
-            if (pit == policies.end() || pit->second.revoked) return Err(403, "POLICY_REVOKED", pid);
-            int64_t prin = 0;
-            ParseAtomString(amt["principal_atoms"].get_str(), prin, aerr);
-            if (pit->second.lifetime_spent + prin > pit->second.lifetime_principal && pit->second.lifetime_principal > 0) {
-                return Err(403, "LIFETIME_CAP", "lifetime");
-            }
+        const std::string pid = have_body && parsed.exists("policy_id") && parsed["policy_id"].isStr()
+                                    ? parsed["policy_id"].get_str()
+                                    : "";
+        if (pid.empty()) return Err(403, "POLICY_REQUIRED", "policy_id");
+        auto pit = policies.find(pid);
+        if (pit == policies.end()) return Err(403, "POLICY_NOT_FOUND", pid);
+        if (pit->second.revoked) return Err(403, "POLICY_REVOKED", pid);
+        if (pit->second.account.empty() || pit->second.account != account) {
+            return Err(403, "POLICY_ACCOUNT", pid);
+        }
+        const std::string action = have_body && parsed.exists("action") && parsed["action"].isStr()
+                                       ? parsed["action"].get_str()
+                                       : std::string(HCP_ACTION_FUND_RELEASE);
+        if (action.empty() || pit->second.actions.count(action) == 0) {
+            return Err(403, "POLICY_ACTION", action);
         }
         Account& acc = accounts[account];
         int64_t prin = 0, fee = 0;
@@ -1213,13 +1227,14 @@ HcpHttpResponse HcpEngine::Impl::HandleLocked(const HcpHttpRequest& req)
         int64_t svc = 0, tax = 0;
         ParseAtomString(amt["service_fee_atoms"].get_str(), svc, aerr);
         ParseAtomString(amt["tax_atoms"].get_str(), tax, aerr);
+        if (pit->second.lifetime_spent + prin > pit->second.lifetime_principal && pit->second.lifetime_principal > 0) {
+            return Err(403, "LIFETIME_CAP", "lifetime");
+        }
         if (acc.available < total) return Err(403, "INSUFFICIENT", "available");
         acc.available -= total;
         acc.held += total;
-        if (!pid.empty()) {
-            policies[pid].lifetime_spent += prin;
-            policies[pid].outstanding += total;
-        }
+        pit->second.lifetime_spent += prin;
+        pit->second.outstanding += total;
         HcpEnvelope env;
         env.object_type = HCP_TYPE_FINANCE_INTENT;
         env.body.pushKV("version", 1);
@@ -1233,15 +1248,15 @@ HcpHttpResponse HcpEngine::Impl::HandleLocked(const HcpHttpRequest& req)
         env.body.pushKV("quote_id", qid);
         env.body.pushKV("quote_body_id",
                          qid.empty() ? LabelDigest(std::string("HCP/quote/none|") + account) : quotes[qid].body_id.Hex());
-        env.body.pushKV("action", have_body && parsed.exists("action") ? parsed["action"].get_str() : HCP_ACTION_FUND_RELEASE);
+        env.body.pushKV("action", action);
         env.body.pushKV("terms_id", have_body && parsed.exists("terms_id") ?
                                           parsed["terms_id"].get_str() :
                                           LabelDigest(std::string("HCP/terms|") + account));
         env.body.pushKV("native_template_id",
                          LabelDigest(std::string("HCP/template|") + cfg.custody_backend + "|" + cfg.environment));
         env.body.pushKV("amounts", amt);
-        env.body.pushKV("policy_id", pid.empty() ? "policy-demo" : pid);
-        env.body.pushKV("policy_revision", pid.empty() ? "1" : std::to_string(policies[pid].revision));
+        env.body.pushKV("policy_id", pid);
+        env.body.pushKV("policy_revision", std::to_string(pit->second.revision));
         env.body.pushKV("refund_controller", "CEX_CUSTODIAL_KEY");
         env.body.pushKV("expires_at_ms", std::to_string(cfg.clock_ms + 600000));
         std::string serr;
@@ -1253,7 +1268,7 @@ HcpHttpResponse HcpEngine::Impl::HandleLocked(const HcpHttpRequest& req)
         in.quote_id = qid;
         in.terms_id = env.body["terms_id"].get_str();
         in.policy_id = pid;
-        in.policy_revision = pid.empty() ? 1 : policies[pid].revision;
+        in.policy_revision = pit->second.revision;
         in.principal = prin;
         in.fee_cap = fee;
         in.total = total;
@@ -1318,6 +1333,34 @@ HcpHttpResponse HcpEngine::Impl::HandleLocked(const HcpHttpRequest& req)
         if (!Auth(req, "intents:submit", account, acode, true)) return Err(401, acode, acode);
         auto it = intents.find(cap["intent_id"]);
         if (it == intents.end() || it->second.account != account) return Err(404, "NOT_FOUND", "intent");
+        // Submit does not authorize. An accepted or unknown intent returns the
+        // bytes already minted. CREATED cannot mint or become ACCEPTED.
+        if (it->second.unknown || it->second.state == "ACCEPTED") {
+            if (lease_owner != cfg.replica_id && it->second.fencing_owner != cfg.replica_id) {
+                return Err(409, HCP_ERR_FENCED, lease_owner);
+            }
+            if (it->second.signed_tx.empty()) {
+                return Err(409, "INTENT_NOT_AUTHORIZED", "signed bytes absent");
+            }
+            UniValue o(UniValue::VOBJ);
+            if (it->second.unknown) {
+                o.pushKV("state", HCP_ERR_BROADCAST_UNKNOWN);
+                o.pushKV("txid", it->second.txid);
+                o.pushKV("signed_tx_hex", HexStr(it->second.signed_tx));
+                o.pushKV("identical_dispatch_only", true);
+                return JsonStatus(202, o);
+            }
+            o.pushKV("operation_id", cap["intent_id"]);
+            o.pushKV("state", "ACCEPTED");
+            o.pushKV("funded", false);
+            o.pushKV("txid", it->second.txid);
+            o.pushKV("signed_tx_hex", HexStr(it->second.signed_tx));
+            o.pushKV("identical_dispatch_only", true);
+            return JsonStatus(202, o);
+        }
+        if (it->second.state != "AUTHORIZED") {
+            return Err(409, "INTENT_NOT_AUTHORIZED", "authorize before submit");
+        }
         if (lease_owner != cfg.replica_id && it->second.fencing_owner != cfg.replica_id) {
             return Err(409, HCP_ERR_FENCED, lease_owner);
         }
@@ -1841,7 +1884,11 @@ void HcpEngine::SetHostedPolicy(const UniValue& policy)
     std::lock_guard<std::mutex> lock(m->mu);
     Impl::Policy p;
     p.json = policy;
-    p.policy_id = policy.exists("policy_id") ? policy["policy_id"].get_str() : "policy-demo";
+    p.policy_id = policy.exists("policy_id") && policy["policy_id"].isStr() && !policy["policy_id"].get_str().empty()
+                      ? policy["policy_id"].get_str()
+                      : RandId("policy-");
+    if (policy.exists("account") && policy["account"].isStr()) p.account = policy["account"].get_str();
+    else if (policy.exists("account_ref") && policy["account_ref"].isStr()) p.account = policy["account_ref"].get_str();
     if (policy.exists("lifetime_principal_atoms")) {
         std::string e;
         ParseAtomString(policy["lifetime_principal_atoms"].get_str(), p.lifetime_principal, e);
@@ -3298,12 +3345,28 @@ int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket,
         if (select(fd + 1, &rf, nullptr, nullptr, &tv) <= 0) continue;
         int cfd = accept(fd, nullptr, nullptr);
         if (cfd < 0) continue;
+        timeval rcv_to{};
+        rcv_to.tv_sec = 2;
+        rcv_to.tv_usec = 0;
+        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
+        const int64_t body_limit = cfg.max_body_bytes > 0 ? cfg.max_body_bytes : 0;
+        const size_t accum_cap = static_cast<size_t>(body_limit) + 8192;
         std::string reqs;
         char buf[4096];
         size_t content_len = 0;
+        bool drop_client = false;
         for (;;) {
             ssize_t n = recv(cfd, buf, sizeof(buf), 0);
-            if (n <= 0) break;
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                drop_client = true;
+                break;
+            }
+            if (n == 0) break;
+            if (reqs.size() >= accum_cap || static_cast<size_t>(n) > accum_cap - reqs.size()) {
+                drop_client = true;
+                break;
+            }
             reqs.append(buf, static_cast<size_t>(n));
             auto blank = reqs.find("\r\n\r\n");
             if (blank == std::string::npos) continue;
@@ -3312,7 +3375,15 @@ int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket,
             if (cl != std::string::npos) {
                 content_len = static_cast<size_t>(std::strtoul(headers.c_str() + cl + 15, nullptr, 10));
             }
+            if (blank + 4 > accum_cap || content_len > accum_cap - (blank + 4)) {
+                drop_client = true;
+                break;
+            }
             if (reqs.size() >= blank + 4 + content_len) break;
+        }
+        if (drop_client) {
+            close(cfd);
+            continue;
         }
         HcpHttpRequest hr;
         hr.method = "GET";

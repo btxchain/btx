@@ -191,9 +191,28 @@ bool WantsExecution(const UniValue& core, const UniValue& receipt, const UniValu
     return false;
 }
 
-bool ReceiptVerified(const UniValue& receipt)
+bool CoreListsDigest(const UniValue& core, const std::string& hex)
+{
+    if (hex.size() != 96 || !core.isObject()) return false;
+    auto listed = [&](const char* field) {
+        if (!core.exists(field) || !core[field].isArray()) return false;
+        for (const auto& d : core[field].getValues()) {
+            if (!d.isObject() || !d.exists("sha384") || !d["sha384"].isStr()) continue;
+            if (d["sha384"].get_str() == hex) return true;
+        }
+        return false;
+    };
+    return listed("documents") || listed("files");
+}
+
+bool ReceiptVerified(const UniValue& receipt, const UniValue& stored_core)
 {
     if (!receipt.isObject()) return false;
+    // Caller-echoed booleans are not proof. The digest must be one stored on the package row.
+    const std::string stored = receipt.exists("stored_sha384") && receipt["stored_sha384"].isStr()
+                                   ? receipt["stored_sha384"].get_str()
+                                   : std::string{};
+    if (!CoreListsDigest(stored_core, stored)) return false;
     if (!BoolTrue(receipt, "file_bytes_verified")) return false;
     if (!BoolTrue(receipt, "manifest_verified")) return false;
     if (receipt.exists("model_bytes_verified") && !BoolTrue(receipt, "model_bytes_verified")) return false;
@@ -403,7 +422,7 @@ bool PlanBtxRuntime(const UniValue& core, const UniValue& receipt, const UniValu
     if (!core.isObject()) {
         return Fail(err_code, err, "NONCANONICAL_PAYLOAD", "core");
     }
-    if (!ReceiptVerified(receipt)) {
+    if (!ReceiptVerified(receipt, core)) {
         return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "receipt not verified");
     }
     out.leased_path = LeasedPathOf(receipt);

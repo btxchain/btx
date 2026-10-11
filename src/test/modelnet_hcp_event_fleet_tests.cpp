@@ -101,6 +101,34 @@ BOOST_AUTO_TEST_CASE(hcp_fleet_01_pair_exact_device)
     e->Handle(hcp_test::AuthReq(*e, "POST", "/devices/enroll", tok));
 }
 
+BOOST_AUTO_TEST_CASE(hcp_fleet_device_account_is_caller)
+{
+    auto e = hcp_test::Lab();
+    const std::string tok = hcp_test::Token(*e, hcp_test::AllScopes());
+    const std::string ver = "pkce-verifier-account-b-fleet";
+    const std::string ch = e->LabCreatePkceChallenge(ver);
+    const std::string code =
+        e->LabAuthorize("account-b", "client-demo", "https://app.example/cb", "state-b", ch, hcp_test::AllScopes());
+    UniValue tokj;
+    std::string err;
+    BOOST_REQUIRE(e->LabToken(code, ver, "https://app.example/cb", e->LabJkt(), "", tokj, err));
+    const std::string tok_b = tokj["access_token"].get_str();
+
+    UniValue steal(UniValue::VOBJ);
+    steal.pushKV("device_id", "device-demo");
+    auto en = e->Handle(hcp_test::AuthReq(*e, "POST", "/devices/enroll", tok_b, &steal));
+    BOOST_CHECK_EQUAL(en.status, 409);
+    BOOST_CHECK(en.body.find("DEVICE_ACCOUNT") != std::string::npos);
+    BOOST_CHECK(e->DevicePaired("device-demo"));
+
+    UniValue hand(UniValue::VOBJ);
+    hand.pushKV("device_id", "device-demo");
+    auto denied = e->Handle(hcp_test::AuthReq(*e, "POST", "/handoffs", tok_b, &hand));
+    BOOST_CHECK_EQUAL(denied.status, 403);
+    BOOST_CHECK(denied.body.find("DEVICE_ACCOUNT") != std::string::npos);
+    BOOST_CHECK_EQUAL(e->Handle(hcp_test::AuthReq(*e, "POST", "/handoffs", tok)).status, 201);
+}
+
 BOOST_AUTO_TEST_CASE(hcp_fleet_02_no_ambient_localhost_api)
 {
     auto e = hcp_test::Lab();

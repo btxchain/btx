@@ -74,6 +74,7 @@ BOOST_AUTO_TEST_CASE(econ_search_03_public_and_funding_mix)
     a.display_name = "PubCoder";
     a.short_description = "coding";
     a.release_state = "PUBLIC";
+    a.expires_at = 1'000'000'000;
     BOOST_REQUIRE(idx.Put(a, 1, err));
     ModelSearchRecord b;
     b.model_id.data[0] = 2;
@@ -83,6 +84,7 @@ BOOST_AUTO_TEST_CASE(econ_search_03_public_and_funding_mix)
     b.release_id = std::string(96, 'b');
     b.release_state = "FUNDING";
     b.release_target_atoms = 500;
+    b.expires_at = 1'000'000'000;
     BOOST_REQUIRE(idx.Put(b, 1, err));
     SearchQuery q;
     q.text = "coding";
@@ -146,6 +148,8 @@ BOOST_AUTO_TEST_CASE(econ_search_usecase_phrases)
         r.canonical_name = std::string("N") + std::to_string(tag);
         r.display_name = r.canonical_name;
         r.short_description = p[1];
+        r.expires_at = 1'000'000'000;
+        r.publisher_identity.data[0] = tag;
         BOOST_REQUIRE(idx.Put(r, 1, err));
         SearchQuery q;
         q.text = p[0];

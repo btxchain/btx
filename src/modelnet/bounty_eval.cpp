@@ -42,22 +42,42 @@ bool FileSha384(const fs::path& p, Digest48& out, uint64_t& size, std::string& e
     return true;
 }
 
-bool HarnessExists(const char* env)
+// Reject empty, absolute, and any name containing "..". The opened path is the
+// lexical normalization of a relative name that stays under root.
+bool EvalArtifactPath(const fs::path& root, const std::string& name, fs::path& out, std::string& err)
 {
-    const char* p = std::getenv(env);
-    if (!p || !*p) return false;
-    return fs::exists(fs::PathFromString(p)) && fs::is_regular_file(fs::PathFromString(p));
+    if (name.empty() || name.find("..") != std::string::npos) {
+        err = "path rejected";
+        return false;
+    }
+    const fs::path rel = fs::PathFromString(name);
+    if (rel.empty() || rel.is_absolute()) {
+        err = "path rejected";
+        return false;
+    }
+    const fs::path normal = rel.lexically_normal();
+    const std::string norm_s = fs::PathToString(normal);
+    if (normal.empty() || normal.is_absolute() || norm_s.empty() || norm_s.find("..") != std::string::npos) {
+        err = "path rejected";
+        return false;
+    }
+    const fs::path root_norm = root.lexically_normal();
+    const fs::path joined = (root_norm / normal).lexically_normal();
+    const fs::path rel_to = joined.lexically_relative(root_norm);
+    const std::string rel_s = fs::PathToString(rel_to);
+    if (rel_to.empty() || rel_s.empty() || rel_s.find("..") != std::string::npos) {
+        err = "path rejected";
+        return false;
+    }
+    out = joined;
+    return true;
 }
 
 } // namespace
 
 bool EvaluationProfileReady(const std::string& profile_id)
 {
-    if (profile_id == "EXACT_CHECKS") return true;
-    if (profile_id == "REPRODUCIBLE_BENCHMARK") return HarnessExists("BTX_BOUNTY_HARNESS_REPRO");
-    if (profile_id == "STATISTICAL_BENCHMARK") return HarnessExists("BTX_BOUNTY_HARNESS_STAT");
-    if (profile_id == "REVIEWED_RESEARCH") return HarnessExists("BTX_BOUNTY_HARNESS_REVIEW");
-    return false;
+    return profile_id == "EXACT_CHECKS";
 }
 
 bool PrepareEvaluation(const UniValue& spec, const UniValue& submission, const UniValue& resources,
@@ -108,7 +128,7 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
         return false;
     }
     const std::string profile = plan["profile_id"].get_str();
-    if (profile != "EXACT_CHECKS" && !EvaluationProfileReady(profile)) {
+    if (profile != "EXACT_CHECKS") {
         err = "unexecuted profile";
         return false;
     }
@@ -142,7 +162,12 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
                 Digest48 h;
                 uint64_t sz = 0;
                 std::string ferr;
-                if (!FileSha384(dir / fs::PathFromString(name), h, sz, ferr)) {
+                fs::path safe;
+                if (!EvalArtifactPath(dir, name, safe, ferr)) {
+                    t.pushKV("ok", false);
+                    t.pushKV("error", ferr);
+                    ok = false;
+                } else if (!FileSha384(safe, h, sz, ferr)) {
                     t.pushKV("ok", false);
                     t.pushKV("error", ferr);
                     ok = false;

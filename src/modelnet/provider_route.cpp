@@ -303,27 +303,46 @@ std::vector<RouteContact> RoutingTable::PersistSubset() const
     return out;
 }
 
-bool ProviderCache::Put(const ProviderRecord& r, int64_t now_ms, std::string& err)
+bool ProviderCache::Put(const ProviderRecord& r, int64_t now_ms, std::string& err, const std::string& origin)
 {
+    Expire(now_ms);
+    if (r.expiry_ms > now_ms && r.expiry_ms - now_ms > PROVIDER_TTL_MS) {
+        err = "expiry too far";
+        return false;
+    }
     if (!VerifyProviderRecord(r, now_ms, err)) return false;
+    const std::string key = origin.empty() ? "anonymous" : origin;
     auto& vec = m_by_resource[r.resource.Hex()];
     for (auto& prev : vec) {
-        if (prev.service_id == r.service_id) {
-            if (r.seq < prev.seq) {
+        if (prev.rec.service_id == r.service_id) {
+            if (r.seq < prev.rec.seq) {
                 err = "sequence rollback";
                 return false;
             }
-            prev = r;
+            prev.rec = r;
+            prev.origin = key;
             return true;
         }
     }
     size_t n = 0;
-    for (const auto& kv : m_by_resource) n += kv.second.size();
-    if (n >= m_cap) {
-        err = "cache cap";
+    int peer_n = 0;
+    for (const auto& kv : m_by_resource) {
+        for (const auto& slot : kv.second) {
+            ++n;
+            if (slot.origin == key) ++peer_n;
+        }
+    }
+    if (peer_n >= PROVIDER_PEER_LIVE_MAX) {
+        err = "peer quota";
+        if (vec.empty()) m_by_resource.erase(r.resource.Hex());
         return false;
     }
-    vec.push_back(r);
+    if (n >= m_cap) {
+        err = "cache cap";
+        if (vec.empty()) m_by_resource.erase(r.resource.Hex());
+        return false;
+    }
+    vec.push_back(CachedProvider{r, key});
     return true;
 }
 
@@ -332,8 +351,8 @@ std::vector<ProviderRecord> ProviderCache::Get(const Digest48& resource, int64_t
     std::vector<ProviderRecord> out;
     auto it = m_by_resource.find(resource.Hex());
     if (it == m_by_resource.end()) return out;
-    for (const auto& r : it->second) {
-        if (r.expiry_ms > now_ms) out.push_back(r);
+    for (const auto& slot : it->second) {
+        if (slot.rec.expiry_ms > now_ms) out.push_back(slot.rec);
     }
     return out;
 }
@@ -342,7 +361,7 @@ void ProviderCache::Expire(int64_t now_ms)
 {
     for (auto it = m_by_resource.begin(); it != m_by_resource.end();) {
         it->second.erase(std::remove_if(it->second.begin(), it->second.end(),
-                                         [&](const ProviderRecord& r) { return r.expiry_ms <= now_ms; }),
+                                         [&](const CachedProvider& slot) { return slot.rec.expiry_ms <= now_ms; }),
                          it->second.end());
         if (it->second.empty()) it = m_by_resource.erase(it);
         else ++it;
@@ -361,6 +380,7 @@ UniValue ProviderCache::StatusJson() const
     UniValue o(UniValue::VOBJ);
     o.pushKV("size", static_cast<int>(Size()));
     o.pushKV("authoritative", false);
+    o.pushKV("persisted", false);
     return o;
 }
 

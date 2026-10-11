@@ -1003,7 +1003,29 @@ UniValue DirectoryEntryJson(const SearchHit& h)
     return o;
 }
 
-bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& err)
+namespace {
+
+void PruneExpiredSearch(std::map<std::string, ModelSearchRecord>& by_model, int64_t now_ms)
+{
+    for (auto it = by_model.begin(); it != by_model.end();) {
+        const int64_t exp = it->second.expires_at;
+        if (exp > 0 && exp <= now_ms) it = by_model.erase(it);
+        else ++it;
+    }
+}
+
+std::string PublisherQuotaKey(const ModelSearchRecord& r, const std::string& transport_endpoint)
+{
+    if (!r.publisher_identity.IsNull()) return std::string("pub:") + r.publisher_identity.Hex();
+    if (!transport_endpoint.empty()) return std::string("ep:") + transport_endpoint;
+    return "anonymous";
+}
+
+constexpr int kPublisherQuota = 64;
+
+} // namespace
+
+bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& err, const std::string& transport_endpoint)
 {
     const bool has_sig = !r.sig.empty();
     bool verified = false;
@@ -1017,7 +1039,16 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
         verified = true;
     } else {
         if (!ValidateSearchRecord(r, err)) return false;
+        if (r.expires_at != 0 && r.expires_at <= now_ms) {
+            err = "expired";
+            return false;
+        }
+        if (!r.local_catalog && r.expires_at == 0) {
+            err = "unsigned expiry";
+            return false;
+        }
     }
+    PruneExpiredSearch(m_by_model, now_ms);
     const std::string key = r.model_id.Hex();
     auto it = m_by_model.find(key);
     if (it != m_by_model.end()) {
@@ -1049,17 +1080,18 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
         err = "index cap";
         return false;
     }
-    const std::string pub = r.publisher_identity.Hex();
-    if (!pub.empty() && !r.publisher_identity.IsNull()) {
-        if (m_pub_window[pub] > 64) {
+    if (!r.local_catalog && it == m_by_model.end()) {
+        const std::string qk = PublisherQuotaKey(r, transport_endpoint);
+        if (m_pub_window[qk] >= kPublisherQuota) {
             err = "publisher spam";
             return false;
         }
-        if (it == m_by_model.end()) m_pub_window[pub] += 1;
+        m_pub_window[qk] += 1;
     }
-    m_by_model[key] = r;
-    m_by_model[key].signed_ok = verified;
-    if (r.tombstone) m_by_model[key].tombstone = true;
+    ModelSearchRecord stored = r;
+    stored.signed_ok = verified;
+    if (r.tombstone) stored.tombstone = true;
+    m_by_model[key] = std::move(stored);
     ++m_seq;
     return true;
 }
@@ -1259,7 +1291,18 @@ UniValue SearchIndex::StatusJson() const
 
 bool SearchIndex::Save(const fs::path& path, std::string& err) const
 {
-    const UniValue snap = ExportSince(0, static_cast<int>(std::min(m_by_model.size(), size_t{100000})));
+    UniValue arr(UniValue::VARR);
+    for (const auto& kv : m_by_model) {
+        const ModelSearchRecord& rec = kv.second;
+        if (!rec.signed_ok && !rec.local_catalog) continue;
+        UniValue row = SearchRecordToJson(rec);
+        if (rec.local_catalog) row.pushKV("local_catalog", true);
+        arr.push_back(std::move(row));
+    }
+    UniValue snap(UniValue::VOBJ);
+    snap.pushKV("schema_version", 2);
+    snap.pushKV("sequence", static_cast<int64_t>(m_seq));
+    snap.pushKV("records", arr);
     fs::create_directories(path.parent_path());
     std::ofstream out(path, std::ios::trunc);
     if (!out) {
@@ -1287,6 +1330,10 @@ bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
             std::string ierr;
             try {
                 if (!SearchRecordFromJson(recj, rec, ierr)) continue;
+                if (recj.isObject() && recj.exists("local_catalog") && recj["local_catalog"].isBool() &&
+                    recj["local_catalog"].get_bool()) {
+                    rec.local_catalog = true;
+                }
             } catch (const std::exception& ex) {
                 LogSkippedJson(ex.what());
                 continue;

@@ -1131,10 +1131,13 @@ static RPCHelpMan preparemodelfunding()
             if (!wallet::ValidateFundingAmount(q.amount_atoms, err)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, err);
             }
+            auto pwallet = WalletForModelFunding(request);
+            if (!wallet::EnsureModelRefundKey(*pwallet, q, err)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, err);
+            }
             if (!wallet::BuildHtlcSha256Descriptor(q, err)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, err);
             }
-            auto pwallet = WalletForModelFunding(request);
             if (!wallet::CreateUnsignedFunding(*pwallet, q, err)) {
                 const bool funds = err.find("nsufficient") != std::string::npos;
                 throw JSONRPCError(funds ? RPC_WALLET_INSUFFICIENT_FUNDS : RPC_WALLET_ERROR, err);
@@ -1163,8 +1166,8 @@ static RPCHelpMan signmodelfunding()
     return RPCHelpMan{
         "signmodelfunding",
         "Validate and sign an exact frozen model-funding transaction through wallet policy.\n"
-        "Txid mutation or HTLC output-script change is rejected; run preparemodelfunding again.\n"
-        "Never auto_pay. Never broadcasts.\n",
+        "The HTLC script is rebuilt from key_hash, claimant, refund pubkey, and refund_height.\n"
+        "Caller unsigned_txid and output_script are not authorities. Never auto_pay. Never broadcasts.\n",
         {
             {"hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Unsigned (or partially signed) funding transaction hex"},
             {"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Frozen quote from preparemodelfunding", {
@@ -1212,12 +1215,11 @@ static RPCHelpMan signmodelfunding()
             if (!wallet::DecodeFundingTxHex(hex, mtx, err)) {
                 throw JSONRPCError(RPC_DESERIALIZATION_ERROR, err);
             }
-            if (!wallet::MatchFrozenTemplate(frozen, mtx, err)) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, err);
-            }
             auto pwallet = WalletForModelFunding(request);
             bool complete{false};
-            if (!wallet::SignFrozenFunding(*pwallet, mtx, complete, err)) {
+            // MatchFrozenTemplate only echoes caller unsigned_txid / output_script.
+            // SignFrozenFunding rebuilds the HTLC from the terms and rechecks the refund key.
+            if (!wallet::SignFrozenFunding(*pwallet, frozen, mtx, complete, err)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, err);
             }
             UniValue out(UniValue::VOBJ);
@@ -1643,7 +1645,7 @@ static RPCHelpMan preparebountyfunding()
         {
             {"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Funding plan", {
                 {"principal_atoms", RPCArg::Type::STR, RPCArg::Optional::NO, "Exact user-selected amount"},
-                {"refund_key", RPCArg::Type::STR, RPCArg::Optional::NO, "Contributor refund pubkey"},
+                {"refund_key", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Contributor refund pubkey. Omitted: this wallet generates one."},
                 {"fee_reserve_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Fee ceiling"},
                 {"council_keys", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Council pubkeys", {{"key", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "hex"}}},
                 {"threshold", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "m"},
@@ -1663,8 +1665,8 @@ static RPCHelpMan preparebountyfunding()
             if (!wallet::ParseBountyPlan(request.params[0], plan, err)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, err);
             }
-            if (plan.principal_atoms <= 0 || plan.refund_key.empty()) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "principal_atoms and refund_key are required from the user");
+            if (plan.principal_atoms <= 0) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "principal_atoms is required from the user");
             }
             auto pwallet = WalletForModelFunding(request);
             if (!wallet::PrepareBountyFunding(*pwallet, plan, err)) {
@@ -1698,8 +1700,9 @@ static RPCHelpMan inspectbountytransaction()
             CMutableTransaction tx;
             const std::string hex = o.exists("hex") ? o["hex"].get_str() : (o.exists("transaction") ? o["transaction"].get_str() : plan.unsigned_hex);
             if (!wallet::DecodeFundingTxHex(hex, tx, err)) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, err);
+            auto pwallet = WalletForModelFunding(request);
             UniValue out;
-            if (!wallet::InspectBountyTransaction(plan, tx, out, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            if (!wallet::InspectBountyTransaction(plan, tx, out, err, pwallet.get())) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
             return out;
 #else
             throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
@@ -1718,37 +1721,6 @@ static RPCHelpMan signbountyfunding()
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed"}}},
         RPCExamples{HelpExampleCli("signbountyfunding", "'{}'")},
-        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
-            (void)self;
-#ifdef ENABLE_WALLET
-            std::string err;
-            wallet::BountyEscrowPlan plan;
-            const UniValue& o = request.params[0];
-            if (!wallet::ParseBountyPlan(o, plan, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
-            CMutableTransaction tx;
-            if (!wallet::DecodeFundingTxHex(o.exists("hex") ? o["hex"].get_str() : plan.unsigned_hex, tx, err))
-                throw JSONRPCError(RPC_DESERIALIZATION_ERROR, err);
-            auto pwallet = WalletForModelFunding(request);
-            if (!wallet::SignBountyTransaction(*pwallet, plan, tx, err)) throw JSONRPCError(RPC_WALLET_ERROR, err);
-            UniValue out = wallet::BountyPlanToJson(plan);
-            out.pushKV("hex", EncodeHexTx(CTransaction(tx)));
-            out.pushKV("txid", tx.GetHash().GetHex());
-            return out;
-#else
-            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
-#endif
-        },
-    };
-}
-
-static RPCHelpMan NamedBountySign(const std::string& name)
-{
-    return RPCHelpMan{
-        name,
-        "SIGHASH_ALL only. Exact inspected fingerprint. No implicit ANYONECANPAY.\n",
-        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + hex", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
-        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed"}}},
-        RPCExamples{HelpExampleCli(name, "'{}'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
 #ifdef ENABLE_WALLET
@@ -1851,22 +1823,9 @@ static UniValue SignBountyLeafRpc(const JSONRPCRequest& request, wallet::BountyS
     wallet::BountyEscrowPlan plan;
     const UniValue& o = request.params[0];
     if (!wallet::ParseBountyPlan(o, plan, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
-    const std::string hex = o.exists("hex") ? o["hex"].get_str() :
-                            (!plan.signed_hex.empty() ? plan.signed_hex : plan.unsigned_hex);
-    if (!hex.empty()) {
-        CMutableTransaction tx;
-        if (wallet::DecodeFundingTxHex(hex, tx, err) && tx.vin.size() == 1 && !tx.vin[0].scriptWitness.IsNull()) {
-            UniValue insp;
-            if (!wallet::InspectBountySpend(plan, tx, insp, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
-            UniValue out = wallet::BountyPlanToJson(plan);
-            out.pushKV("hex", hex);
-            out.pushKV("txid", tx.GetHash().GetHex());
-            out.pushKV("complete", true);
-            return out;
-        }
-    }
     auto pwallet = WalletForModelFunding(request);
-    if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, path, err)) throw JSONRPCError(RPC_WALLET_ERROR, err);
+    // A caller-supplied witness is not a wallet signature and is not complete.
+    if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, path, err, /*sign=*/true)) throw JSONRPCError(RPC_WALLET_ERROR, err);
     return wallet::BountyPlanToJson(plan);
 }
 #endif
@@ -1877,7 +1836,7 @@ static RPCHelpMan preparebountyaward()
         "preparebountyaward",
         "Spend the funded two-leaf escrow via the CLTV council leaf after award_height. Helper policy is not a spend. automatic_spend_atoms stays 0.\n",
         {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + outpoint + destination", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
-        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed spend"}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "unsigned spend"}}},
         RPCExamples{HelpExampleCli("preparebountyaward", "'{}'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
@@ -1932,7 +1891,7 @@ static RPCHelpMan preparebountyclaim()
         "preparebountyclaim",
         "Spend a staged SHA-256 HTLC bounty lot by revealing a local secret_ref preimage. Preimage bytes are never accepted on the wire. automatic_spend_atoms stays 0.\n",
         {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + outpoint + destination + secret_ref", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
-        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed spend"}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "unsigned spend"}}},
         RPCExamples{HelpExampleCli("preparebountyclaim", "'{}'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
@@ -1958,7 +1917,7 @@ static RPCHelpMan preparebountyclaim()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, err);
             }
             auto pwallet = WalletForModelFunding(request);
-            if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, wallet::BountySpendPath::CLAIM, err)) {
+            if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, wallet::BountySpendPath::CLAIM, err, /*sign=*/false)) {
                 if (!plan.claim_preimage.empty()) {
                     memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
                     plan.claim_preimage.clear();
@@ -1972,7 +1931,52 @@ static RPCHelpMan preparebountyclaim()
         },
     };
 }
-static RPCHelpMan signbountyclaim() { return NamedBountySign("signbountyclaim"); }
+static RPCHelpMan signbountyclaim()
+{
+    return RPCHelpMan{
+        "signbountyclaim",
+        "SIGHASH_ALL staged HTLC claim of the funded escrow after inspection. A caller witness is not complete. Does not use the funding-input signer.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + outpoint + destination + secret_ref", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed"}}},
+        RPCExamples{HelpExampleCli("signbountyclaim", "'{}'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+#ifdef ENABLE_WALLET
+            std::string err;
+            wallet::BountyEscrowPlan plan;
+            const UniValue& o = request.params[0];
+            if (!wallet::ParseBountyPlan(o, plan, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            if (o.exists("secret") || o.exists("preimage") || o.exists("preimage_hex")) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "preimages are not accepted on the wire; use secret_ref");
+            }
+            if (!o.exists("secret_ref") || !o["secret_ref"].isStr()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "secret_ref is required");
+            }
+            if (plan.destination.empty()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "destination is required");
+            }
+            if (plan.prev_vout < 0 || plan.prev_txid.IsNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "funding outpoint is required (outpoint or prevout.txid/vout)");
+            }
+            plan.mode = "STAGED_RELEASE";
+            if (!wallet::LoadBountySecretRef(o["secret_ref"].get_str(), plan.claim_preimage, err)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            }
+            auto pwallet = WalletForModelFunding(request);
+            if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, wallet::BountySpendPath::CLAIM, err, /*sign=*/true)) {
+                if (!plan.claim_preimage.empty()) {
+                    memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
+                    plan.claim_preimage.clear();
+                }
+                throw JSONRPCError(RPC_WALLET_ERROR, err);
+            }
+            return wallet::BountyPlanToJson(plan);
+#else
+            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
+#endif
+        },
+    };
+}
 static RPCHelpMan submitbountyclaim() { return NamedBountySubmit("submitbountyclaim"); }
 static RPCHelpMan preparebountyrefund()
 {
@@ -1980,7 +1984,7 @@ static RPCHelpMan preparebountyrefund()
         "preparebountyrefund",
         "Spend the funded two-leaf escrow via the contributor refund() leaf after refund_height. Council and helper may be offline.\n",
         {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "plan + outpoint + destination", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
-        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "signed spend"}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "unsigned spend"}}},
         RPCExamples{HelpExampleCli("preparebountyrefund", "'{}'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;

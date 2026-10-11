@@ -13,6 +13,7 @@
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
+#include <fstream>
 #include <string>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_search_tests, BasicTestingSetup)
@@ -365,6 +366,10 @@ BOOST_AUTO_TEST_CASE(search_scale_unsigned_2k)
         r.model_id.data[2] = static_cast<unsigned char>((i >> 16) & 0xff);
         r.canonical_name = (i % 7 == 0) ? "Qwen Coder Scale" : ("Model " + std::to_string(i));
         r.display_name = r.canonical_name;
+        r.expires_at = 1'000'000'000;
+        r.publisher_identity.data[0] = static_cast<unsigned char>((i & 0xff) + 1);
+        r.publisher_identity.data[1] = static_cast<unsigned char>((i >> 8) & 0xff);
+        r.publisher_identity.data[2] = static_cast<unsigned char>((i >> 16) & 0xff);
         BOOST_REQUIRE(idx.Put(r, 1, err));
     }
     SearchQuery q;
@@ -468,6 +473,96 @@ BOOST_AUTO_TEST_CASE(search_exactreplay_isolation)
     using namespace modelnet;
     BOOST_CHECK(!SearchTouchesMonetaryConsensus());
     BOOST_CHECK(!ModelWorkMayStarveExactReplay());
+}
+
+BOOST_AUTO_TEST_CASE(search_unsigned_expiry_quota_and_save)
+{
+    using namespace modelnet;
+    std::string err;
+    SearchIndex idx;
+    ModelSearchRecord open;
+    open.model_id.data[0] = 1;
+    open.canonical_name = "open";
+    open.display_name = "open";
+    open.signed_ok = true;
+    BOOST_CHECK(!idx.Put(open, 1, err));
+    BOOST_CHECK_EQUAL(err, "unsigned expiry");
+    BOOST_CHECK(idx.Get(open.model_id) == nullptr);
+
+    ModelSearchRecord stale = open;
+    stale.model_id.data[0] = 2;
+    stale.expires_at = 5;
+    stale.signed_ok = true;
+    BOOST_CHECK(!idx.Put(stale, 10, err));
+    BOOST_CHECK_EQUAL(err, "expired");
+
+    ModelSearchRecord local = open;
+    local.model_id.data[0] = 3;
+    local.local_catalog = true;
+    local.signed_ok = true;
+    BOOST_REQUIRE(idx.Put(local, 1, err));
+    BOOST_CHECK(idx.Get(local.model_id)->local_catalog);
+    BOOST_CHECK(!idx.Get(local.model_id)->signed_ok);
+
+    ModelSearchRecord soon;
+    soon.model_id.data[0] = 4;
+    soon.canonical_name = "soon";
+    soon.display_name = "soon";
+    soon.expires_at = 50;
+    BOOST_REQUIRE(idx.Put(soon, 1, err));
+    ModelSearchRecord later;
+    later.model_id.data[0] = 5;
+    later.canonical_name = "later";
+    later.display_name = "later";
+    later.expires_at = 1'000'000'000;
+    BOOST_REQUIRE(idx.Put(later, 100, err));
+    BOOST_CHECK(idx.Get(soon.model_id) == nullptr);
+    BOOST_CHECK(idx.Get(later.model_id) != nullptr);
+
+    SearchIndex anon;
+    for (int i = 0; i < 64; ++i) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = static_cast<unsigned char>(i + 1);
+        r.canonical_name = "a" + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.expires_at = 1'000'000'000;
+        BOOST_REQUIRE_MESSAGE(anon.Put(r, 1, err), err);
+    }
+    ModelSearchRecord overflow;
+    overflow.model_id.data[1] = 1;
+    overflow.canonical_name = "overflow";
+    overflow.display_name = "overflow";
+    overflow.expires_at = 1'000'000'000;
+    BOOST_CHECK(!anon.Put(overflow, 1, err));
+    BOOST_CHECK_EQUAL(err, "publisher spam");
+    BOOST_REQUIRE_MESSAGE(anon.Put(overflow, 1, err, "203.0.113.9:29447"), err);
+    ModelSearchRecord again = overflow;
+    again.short_description = "same model";
+    BOOST_REQUIRE(anon.Put(again, 1, err, "203.0.113.9:29447"));
+
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    auto signed_rec = MakeRec("Kept", pk, sk, 9);
+    BOOST_REQUIRE(idx.Put(signed_rec, 1, err));
+    ModelSearchRecord peer = later;
+    peer.signed_ok = true;
+    BOOST_REQUIRE(idx.Put(peer, 100, err));
+    BOOST_CHECK(!idx.Get(peer.model_id)->signed_ok);
+
+    const fs::path path = m_path_root / "search-unsigned.json";
+    BOOST_REQUIRE(idx.Save(path, err));
+    std::ifstream in(path);
+    std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    BOOST_CHECK(raw.find("later") == std::string::npos);
+    BOOST_CHECK(raw.find("Kept") != std::string::npos);
+    BOOST_CHECK(raw.find("local_catalog") != std::string::npos);
+    SearchIndex loaded;
+    BOOST_REQUIRE(loaded.Load(path, 1, err));
+    BOOST_CHECK(loaded.Get(peer.model_id) == nullptr);
+    BOOST_CHECK(loaded.Get(local.model_id) != nullptr);
+    BOOST_CHECK(loaded.Get(local.model_id)->local_catalog);
+    BOOST_CHECK(!loaded.Get(local.model_id)->signed_ok);
+    BOOST_CHECK(loaded.Get(signed_rec.model_id)->signed_ok);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

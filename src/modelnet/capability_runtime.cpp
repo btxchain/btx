@@ -24,6 +24,7 @@
 #include <univalue.h>
 #include <util/fs.h>
 
+#include <cerrno>
 #include <cstdlib>
 #include <csignal>
 #include <cstdio>
@@ -393,18 +394,44 @@ bool SpawnCudaLoaderHold(const fs::path& loader, const fs::path& dir, pid_t& pid
 
 bool WriteTempSafeTensors(Span<const unsigned char> verified, fs::path& dir, std::string& err)
 {
-    dir = fs::temp_directory_path();
-    dir /= fs::PathFromString(std::string("btx-rt-") + std::to_string(::getpid()) + "-" + std::to_string(std::rand()));
-    fs::create_directories(dir);
-    fs::path st = dir;
-    st /= fs::PathFromString("model.safetensors");
-    std::ofstream out(st, std::ios::binary | std::ios::trunc);
-    if (!out) {
+    std::string tmpl = fs::PathToString(fs::temp_directory_path() / "btx-rt-XXXXXX");
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    if (::mkdtemp(buf.data()) == nullptr) {
+        err = "mkdtemp";
+        return false;
+    }
+    dir = fs::PathFromString(buf.data());
+    const fs::path st = dir / "model.safetensors";
+    std::error_code ec;
+    if (fs::is_symlink(st, ec)) {
+        err = "symlink";
+        fs::remove_all(dir, ec);
+        return false;
+    }
+    const int fd = ::open(st.c_str(), O_CREAT | O_EXCL | O_NOFOLLOW | O_WRONLY, 0600);
+    if (fd < 0) {
+        err = (errno == ELOOP) ? "symlink" : "write temp safetensors";
+        fs::remove_all(dir, ec);
+        return false;
+    }
+    size_t off = 0;
+    while (off < verified.size()) {
+        const ssize_t n = ::write(fd, verified.data() + off, verified.size() - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            err = "write temp safetensors";
+            ::close(fd);
+            fs::remove_all(dir, ec);
+            return false;
+        }
+        off += static_cast<size_t>(n);
+    }
+    if (::close(fd) != 0) {
         err = "write temp safetensors";
         return false;
     }
-    out.write(reinterpret_cast<const char*>(verified.data()), static_cast<std::streamsize>(verified.size()));
-    return static_cast<bool>(out);
+    return true;
 }
 
 } // namespace

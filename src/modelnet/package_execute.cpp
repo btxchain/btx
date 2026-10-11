@@ -60,6 +60,14 @@ bool EnsureParentsNoFollow(const fs::path& dest_file, std::string& err_code, std
     return true;
 }
 
+std::string StoredDigestFor(const ExecuteAcquisitionRequest& req, const std::string& rel)
+{
+    for (const auto& d : req.stored_digests) {
+        if (d.relative_path == rel && d.sha384_hex.size() == 96) return d.sha384_hex;
+    }
+    return {};
+}
+
 bool ReadAll(const std::string& path, std::string& bytes, std::string& err)
 {
     bytes.clear();
@@ -183,8 +191,14 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
         if (!seen.insert(f.relative_path).second) {
             return Fail(err_code, err, "OVERWRITE_REFUSED", "duplicate path");
         }
-        if (f.sha384_hex.size() != 96) {
-            return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "sha384");
+        const std::string expect = StoredDigestFor(req, f.relative_path);
+        if (expect.size() != 96) {
+            out.ready_state.clear();
+            out.json = UniValue(UniValue::VOBJ);
+            out.json.pushKV("manifest_verified", false);
+            out.json.pushKV("file_bytes_verified", false);
+            out.json.pushKV("state", "SELECTION_READY");
+            return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "no stored digest");
         }
         if (!f.source_path.empty()) {
             std::string bytes, rerr;
@@ -232,7 +246,8 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
         }
         if (fs::exists(dest) && !std::filesystem::is_directory(dest)) {
             std::string have, herr;
-            if (Sha384Path(dest_s, have, herr) && have == f.sha384_hex) {
+            const std::string expect = StoredDigestFor(req, f.relative_path);
+            if (Sha384Path(dest_s, have, herr) && have == expect) {
                 paths.push_back(dest_s);
                 continue;
             }
@@ -257,7 +272,8 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
         hasher.Write(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size());
         hasher.Finalize(d);
         const std::string got = HexStr(Span<const unsigned char>{d, CSHA384::OUTPUT_SIZE});
-        if (got != f.sha384_hex) {
+        const std::string expect = StoredDigestFor(req, f.relative_path);
+        if (got != expect) {
             release_on_fail();
             return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "source hash mismatch");
         }
@@ -266,7 +282,7 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
             return false;
         }
         std::string again;
-        if (!Sha384Path(dest_s, again, rerr) || again != f.sha384_hex) {
+        if (!Sha384Path(dest_s, again, rerr) || again != StoredDigestFor(req, f.relative_path)) {
             ::unlink(dest.c_str());
             release_on_fail();
             return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "post-write hash");
@@ -286,6 +302,7 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
     rec.pushKV("local_paths", paths);
     rec.pushKV("manifest_verified", true);
     rec.pushKV("file_bytes_verified", true);
+    if (!req.stored_digests.empty()) rec.pushKV("stored_sha384", req.stored_digests.front().sha384_hex);
     UniValue src(UniValue::VARR);
     src.push_back("LOCAL_DISK");
     rec.pushKV("source_classes_used", src);

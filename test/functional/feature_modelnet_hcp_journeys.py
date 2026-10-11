@@ -391,11 +391,23 @@ class ModelNetHcpJourneys(BitcoinTestFramework):
         assert st == 401
         assert self._ecode(replay) == "DPOP_BINDING"
 
+        ph = self._auth_headers(PORT_B, "POST", "/policies", token)
+        pol, st = self._http(
+            "POST",
+            f"http://127.0.0.1:{PORT_B}/policies",
+            {
+                "policy_id": "policy-j03",
+                "lifetime_principal_atoms": "10000000",
+                "allowed_actions": ["FUND_RELEASE"],
+            },
+            headers=ph,
+        )
+        assert st == 201
         ih = self._auth_headers(PORT_B, "POST", "/finance/intents", token)
         created, st = self._http(
             "POST",
             f"http://127.0.0.1:{PORT_B}/finance/intents",
-            {"client_operation_id": "j03-process", "quote_id": qid},
+            {"client_operation_id": "j03-process", "quote_id": qid, "policy_id": "policy-j03"},
             headers=ih,
         )
         assert st == 201
@@ -459,11 +471,23 @@ class ModelNetHcpJourneys(BitcoinTestFramework):
 
     def _j04_conversion_partial(self):
         token = self.token
+        ph = self._auth_headers(PORT_B, "POST", "/policies", token)
+        pol, st = self._http(
+            "POST",
+            f"http://127.0.0.1:{PORT_B}/policies",
+            {
+                "policy_id": "policy-j04",
+                "lifetime_principal_atoms": "10000000",
+                "allowed_actions": ["FUND_RELEASE"],
+            },
+            headers=ph,
+        )
+        assert st == 201
         ih = self._auth_headers(PORT_B, "POST", "/finance/intents", token)
         created, st = self._http(
             "POST",
             f"http://127.0.0.1:{PORT_B}/finance/intents",
-            {"client_operation_id": "j04-conv", "amounts": amounts("1000")},
+            {"client_operation_id": "j04-conv", "amounts": amounts("1000"), "policy_id": "policy-j04"},
             headers=ih,
         )
         assert st == 201

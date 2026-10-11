@@ -17,6 +17,7 @@ import json
 import os
 import re
 import socket
+import stat
 import sys
 import threading
 import time
@@ -47,17 +48,39 @@ def split_token_file(raw_path: str) -> tuple[str, int] | None:
     return m.group(1), int(m.group(2))
 
 
-def verified_file_bytes(digest_hex: str, file_index: int) -> bytes | None:
+READ_CHUNK = 1024 * 1024
+
+
+def verified_file_stat(digest_hex: str, file_index: int) -> tuple[Path, int] | None:
+    """Stat the verified file. Does not read it."""
     root = os.environ.get("BTX_BRIDGE_VERIFIED_DIR", "")
     if not root:
         return None
     path = Path(root) / digest_hex / str(file_index)
-    if not path.is_file():
+    try:
+        st = path.lstat()
+    except OSError:
         return None
-    data = path.read_bytes()
-    if not data:
+    if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or st.st_size <= 0:
         return None
-    return data
+    return path, st.st_size
+
+
+def read_span(path: Path, first: int, last: int) -> bytes:
+    """Read only [first, last] in chunks of at most 1 MiB."""
+    remaining = last - first + 1
+    if remaining <= 0:
+        return b""
+    chunks: list[bytes] = []
+    with path.open("rb") as fh:
+        fh.seek(first)
+        while remaining > 0:
+            block = fh.read(min(READ_CHUNK, remaining))
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+    return b"".join(chunks)
 
 
 def parse_range(headers, size: int) -> tuple[int, int] | None:
@@ -364,19 +387,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except Exception:
             self._send(400, {"error": "malformed URI", "note": NOTE})
             return
-        data = verified_file_bytes(resource.digest.hex(), file_index)
-        if not data:
+        located = verified_file_stat(resource.digest.hex(), file_index)
+        if located is None:
             self._send(409, {"error": "verified chunks required before emission", "public_download": True})
             return
-        rng = parse_range(self.headers, len(data))
-        if rng is None:
-            self._send(416, {"error": "invalid range"})
+        path, size = located
+        range_header = self.headers.get("Range")
+        if range_header:
+            rng = parse_range(self.headers, size)
+            if rng is None:
+                self._send(416, {"error": "invalid range"})
+                return
+            first, last = rng
+            status = 206
+        else:
+            first, last = 0, size - 1
+            status = 200
+        body = b"" if self.command == "HEAD" else read_span(path, first, last)
+        if self.command != "HEAD" and len(body) != (last - first + 1):
+            self._send(409, {"error": "verified chunks required before emission", "public_download": True})
             return
-        first, last = rng
-        body = data[first : last + 1]
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(last - first + 1))
+        if range_header:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (first, last, size))
         self.send_header("Content-Disposition", "attachment")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'none'")

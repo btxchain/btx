@@ -23,13 +23,18 @@
 #include <util/strencodings.h>
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
+#include <wallet/receive.h>
 #include <wallet/rpc/util.h>
+#include <wallet/scriptpubkeyman.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
 
 #include <initializer_list>
 #include <limits>
 #include <map>
+#include <mutex>
+#include <optional>
+#include <set>
 #include <tinyformat.h>
 #include <uint256.h>
 
@@ -52,7 +57,150 @@ bool ContainsForbiddenHtlcToken(const std::string& s)
            s.find("buildmodelhtlcclaim") != std::string::npos;
 }
 
+struct StoredFundingSkeleton {
+    CScript output_script;
+    uint256 unsigned_txid;
+    int64_t amount_atoms{0};
+};
+
+std::mutex g_funding_skeletons_mu;
+std::map<std::string, StoredFundingSkeleton> g_funding_skeletons;
+
+bool RefundKeyBytes(const std::string& normalized, std::vector<unsigned char>& out, std::string& err)
+{
+    if (normalized.rfind("pk_slh(", 0) == 0) {
+        const auto close = normalized.find(')');
+        if (close == std::string::npos) {
+            err = "PQ key";
+            return false;
+        }
+        out = ParseHex(normalized.substr(7, close - 7));
+        return out.size() == SLHDSA128S_PUBKEY_SIZE;
+    }
+    if (normalized.rfind("pqhd(", 0) == 0) {
+        err = "refund pubkey must be a concrete key this wallet can sign";
+        return false;
+    }
+    if (!IsHex(normalized)) {
+        err = "PQ key";
+        return false;
+    }
+    out = ParseHex(normalized);
+    return out.size() == MLDSA44_PUBKEY_SIZE || out.size() == SLHDSA128S_PUBKEY_SIZE;
+}
+
+bool WalletHoldsPQKey(CWallet& wallet, const std::vector<unsigned char>& pk)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    for (ScriptPubKeyMan* spk_man : wallet.GetAllScriptPubKeyMans()) {
+        auto* desc_man = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
+        if (desc_man == nullptr) continue;
+        std::unique_ptr<FlatSigningProvider> keys = desc_man->GetSigningProvider(Span<const unsigned char>{pk});
+        if (keys && keys->GetPQKey(pk) != nullptr) return true;
+    }
+    return false;
+}
+
+std::string FundingSkeletonKey(const CWallet& wallet, const FrozenFundingQuote& q)
+{
+    return strprintf("%p|%s|%s|%s|%s|%u|%d",
+                     static_cast<const void*>(&wallet),
+                     wallet.GetName(),
+                     q.key_hash_hex,
+                     q.claimant_key,
+                     q.refund_key,
+                     q.refund_height,
+                     q.amount_atoms);
+}
+
+void RememberFundingSkeleton(const CWallet& wallet, const FrozenFundingQuote& q)
+{
+    if (q.unsigned_txid.IsNull() || q.output_script.empty()) return;
+    StoredFundingSkeleton stored;
+    stored.output_script = q.output_script;
+    stored.unsigned_txid = q.unsigned_txid;
+    stored.amount_atoms = q.amount_atoms;
+    std::lock_guard<std::mutex> lock(g_funding_skeletons_mu);
+    g_funding_skeletons[FundingSkeletonKey(wallet, q)] = std::move(stored);
+}
+
+std::optional<StoredFundingSkeleton> LookupFundingSkeleton(const CWallet& wallet, const FrozenFundingQuote& q)
+{
+    std::lock_guard<std::mutex> lock(g_funding_skeletons_mu);
+    const auto it = g_funding_skeletons.find(FundingSkeletonKey(wallet, q));
+    if (it == g_funding_skeletons.end()) return std::nullopt;
+    return it->second;
+}
+
 } // namespace
+
+bool RequireModelRefundKey(CWallet& wallet, std::string& refund_key, std::string& err)
+{
+    if (refund_key.empty()) {
+        err = "refund pubkey is not a key this wallet can sign";
+        return false;
+    }
+    std::string normalized;
+    if (!NormalizePqDescriptorKey(refund_key, normalized, err)) return false;
+    refund_key = normalized;
+    std::vector<unsigned char> bytes;
+    if (!RefundKeyBytes(refund_key, bytes, err)) return false;
+    LOCK(wallet.cs_wallet);
+    if (!WalletHoldsPQKey(wallet, bytes)) {
+        err = "refund pubkey is not a key this wallet can sign";
+        return false;
+    }
+    return true;
+}
+
+bool GenerateWalletRefundKey(CWallet& wallet, std::string& refund_key, std::string& err)
+{
+    EnsureWalletIsUnlocked(wallet);
+    const auto dest = wallet.GetNewChangeDestination(OutputType::P2MR);
+    if (!dest) {
+        err = util::ErrorString(dest).original;
+        return false;
+    }
+    const CScript script = GetScriptForDestination(*dest);
+    std::string candidate;
+    {
+        LOCK(wallet.cs_wallet);
+        for (ScriptPubKeyMan* spk_man : wallet.GetAllScriptPubKeyMans()) {
+            auto* desc_man = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
+            if (desc_man == nullptr) continue;
+            std::unique_ptr<FlatSigningProvider> keys = desc_man->GetSigningProvider(script, /*include_private=*/true);
+            if (!keys) continue;
+            for (const auto& [pk, pq] : keys->pq_keys) {
+                (void)pq;
+                if (keys->GetPQKey(pk) == nullptr) continue;
+                if (!WalletHoldsPQKey(wallet, pk)) continue;
+                if (pk.size() == MLDSA44_PUBKEY_SIZE) {
+                    candidate = HexStr(pk);
+                    break;
+                }
+                if (pk.size() == SLHDSA128S_PUBKEY_SIZE) {
+                    candidate = strprintf("pk_slh(%s)", HexStr(pk));
+                    break;
+                }
+            }
+            if (!candidate.empty()) break;
+        }
+    }
+    if (candidate.empty()) {
+        err = "wallet could not generate a refund key it can sign";
+        return false;
+    }
+    refund_key = candidate;
+    return RequireModelRefundKey(wallet, refund_key, err);
+}
+
+bool EnsureModelRefundKey(CWallet& wallet, FrozenFundingQuote& q, std::string& err)
+{
+    if (q.refund_key.empty()) {
+        if (!GenerateWalletRefundKey(wallet, q.refund_key, err)) return false;
+    }
+    return RequireModelRefundKey(wallet, q.refund_key, err);
+}
 
 bool RejectForbiddenHtlc(const UniValue& options, std::string& err)
 {
@@ -438,10 +586,77 @@ UniValue ExportModelRecoveryJson(const FrozenFundingQuote& q)
     return o;
 }
 
+bool MatchRebuiltHtlc(FrozenFundingQuote& q, const CMutableTransaction& tx, const CWallet* change_wallet, std::string& err)
+{
+    // Terms are the authority. A caller-supplied output_script or unsigned_txid is discarded.
+    q.output_script.clear();
+    q.descriptor.clear();
+    if (!BuildHtlcSha256Descriptor(q, err)) return false;
+    if (!ValidateFundingAmount(q.amount_atoms, err)) return false;
+    int matches = 0;
+    for (const auto& out : tx.vout) {
+        if (out.scriptPubKey == q.output_script) {
+            if (out.nValue != q.amount_atoms) {
+                err = "HTLC output amount changed; run preparemodelfunding again";
+                return false;
+            }
+            ++matches;
+            continue;
+        }
+        if (change_wallet == nullptr) {
+            err = "unauthorized extra output";
+            return false;
+        }
+        LOCK(change_wallet->cs_wallet);
+        if (!OutputIsChange(*change_wallet, out)) {
+            err = "unauthorized extra output";
+            return false;
+        }
+    }
+    if (matches != 1) {
+        err = matches == 0 ? "HTLC output script missing or changed; run preparemodelfunding again"
+                           : "more than one HTLC output";
+        return false;
+    }
+    return true;
+}
+
+bool CompareStoredSkeleton(const CWallet& wallet, const FrozenFundingQuote& q, const CMutableTransaction& tx, std::string& err)
+{
+    const std::optional<StoredFundingSkeleton> stored = LookupFundingSkeleton(wallet, q);
+    if (!stored) {
+        // No prepare record in this process. The rebuilt script above is the authority;
+        // do not accept a skeleton whose script was only echoed by the caller.
+        return true;
+    }
+    if (stored->output_script != q.output_script || stored->amount_atoms != q.amount_atoms) {
+        err = "stored funding skeleton does not match rebuilt terms";
+        return false;
+    }
+    CMutableTransaction skeleton = tx;
+    for (auto& in : skeleton.vin) {
+        in.scriptSig.clear();
+        in.scriptWitness.SetNull();
+    }
+    if (skeleton.GetHash().ToUint256() != stored->unsigned_txid && tx.GetHash().ToUint256() != stored->unsigned_txid) {
+        err = "funding template txid mutated; run preparemodelfunding again";
+        return false;
+    }
+    return true;
+}
+
 bool CreateUnsignedFunding(CWallet& wallet, FrozenFundingQuote& q, std::string& err)
 {
     if (!ValidateFundingAmount(q.amount_atoms, err)) return false;
-    if (q.output_script.empty() && !BuildHtlcSha256Descriptor(q, err)) return false;
+    if (!EnsureModelRefundKey(wallet, q, err)) return false;
+    const CScript supplied = q.output_script;
+    q.output_script.clear();
+    q.descriptor.clear();
+    if (!BuildHtlcSha256Descriptor(q, err)) return false;
+    if (!supplied.empty() && supplied != q.output_script) {
+        err = "output_script does not match the derived htlc_sha256 script";
+        return false;
+    }
 
     CTxDestination dest;
     if (!ExtractDestination(q.output_script, dest)) {
@@ -474,11 +689,16 @@ bool CreateUnsignedFunding(CWallet& wallet, FrozenFundingQuote& q, std::string& 
         err = "wallet funded transaction is missing the frozen HTLC output";
         return false;
     }
+    RememberFundingSkeleton(wallet, q);
     return true;
 }
 
-bool SignFrozenFunding(CWallet& wallet, CMutableTransaction& mtx, bool& complete, std::string& err)
+bool SignFrozenFunding(CWallet& wallet, const FrozenFundingQuote& quote, CMutableTransaction& mtx, bool& complete, std::string& err)
 {
+    FrozenFundingQuote checked = quote;
+    if (!RequireModelRefundKey(wallet, checked.refund_key, err)) return false;
+    if (!MatchRebuiltHtlc(checked, mtx, &wallet, err)) return false;
+    if (!CompareStoredSkeleton(wallet, checked, mtx, err)) return false;
     EnsureWalletIsUnlocked(wallet);
     LOCK(wallet.cs_wallet);
     std::map<COutPoint, Coin> coins;

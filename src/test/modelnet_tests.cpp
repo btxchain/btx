@@ -39,6 +39,8 @@
 #include <crypto/sha384.h>
 #include <fstream>
 #ifndef WIN32
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #endif
 #include <openssl/bio.h>
@@ -970,7 +972,7 @@ BOOST_AUTO_TEST_CASE(helper_stop_interrupts_accept_loop)
     modelnet::HelperConfig cfg;
     cfg.modeldir = tmp;
     cfg.quota_bytes = 1 << 20;
-    cfg.rpc_socket = fs::PathFromString("/tmp/btx-md-stop-" + std::to_string(getpid()) + ".sock");
+    cfg.rpc_socket = tmp / "modeld.sock";
     ::unlink(fs::PathToString(cfg.rpc_socket).c_str());
     const int port = 39000 + (static_cast<int>(getpid()) % 500);
     cfg.bind = "127.0.0.1:" + std::to_string(port);
@@ -1010,7 +1012,7 @@ BOOST_AUTO_TEST_CASE(helper_unix_rpc_survives_peer_hup)
     modelnet::HelperConfig cfg;
     cfg.modeldir = tmp;
     cfg.quota_bytes = 1 << 20;
-    cfg.rpc_socket = fs::PathFromString("/tmp/btx-md-hup-" + std::to_string(getpid()) + ".sock");
+    cfg.rpc_socket = tmp / "modeld.sock";
     ::unlink(fs::PathToString(cfg.rpc_socket).c_str());
     const int port = 39500 + (static_cast<int>(getpid()) % 400);
     cfg.bind = "127.0.0.1:" + std::to_string(port);
@@ -1053,11 +1055,53 @@ BOOST_AUTO_TEST_CASE(unix_rpc_listen_path_hashes_overlong)
     BOOST_REQUIRE(longp.size() >= sizeof(sockaddr_un::sun_path));
     const fs::path mapped = modelnet::UnixRpcListenPath(fs::PathFromString(longp));
     const std::string m = fs::PathToString(mapped);
-    BOOST_CHECK_EQUAL(m.find("/tmp/btx-md-"), 0);
-    BOOST_CHECK(m.size() < sizeof(sockaddr_un::sun_path));
-    BOOST_CHECK_EQUAL(fs::PathToString(modelnet::UnixRpcListenPath(mapped)), m);
-    const fs::path shortp = fs::PathFromString("/tmp/btx-md-ok.sock");
-    BOOST_CHECK(modelnet::UnixRpcListenPath(shortp) == shortp);
+    BOOST_CHECK_EQUAL(m.find("/tmp/btx-md-"), std::string::npos);
+    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
+    if (xdg && xdg[0] == '/') {
+        BOOST_CHECK(m.find(std::string(xdg) + "/btx-modeld/") == 0);
+        BOOST_CHECK(m.size() < sizeof(sockaddr_un::sun_path));
+        BOOST_CHECK_EQUAL(fs::PathToString(modelnet::UnixRpcListenPath(mapped)), m);
+    } else {
+        BOOST_CHECK_EQUAL(m, longp);
+    }
+    const fs::path sticky = fs::PathFromString("/tmp/btx-md-ok.sock");
+    const fs::path sticky_mapped = modelnet::UnixRpcListenPath(sticky);
+    BOOST_CHECK(fs::PathToString(sticky_mapped).find("/tmp/btx-md-") == std::string::npos);
+    std::string err;
+    BOOST_CHECK(!modelnet::UnixSocketSafeToAdopt(sticky, err));
+    BOOST_CHECK(err.find("tmp") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(unix_socket_world_writable_is_not_a_helper)
+{
+    const fs::path dir = m_args.GetDataDirBase() / "sock-adopt";
+    fs::create_directories(dir);
+    BOOST_REQUIRE(::chmod(fs::PathToString(dir).c_str(), 0700) == 0);
+    const fs::path sock = dir / "helper.sock";
+    ::unlink(fs::PathToString(sock).c_str());
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    BOOST_REQUIRE(fd >= 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const std::string sp = fs::PathToString(sock);
+    BOOST_REQUIRE(sp.size() < sizeof(addr.sun_path));
+    std::strncpy(addr.sun_path, sp.c_str(), sizeof(addr.sun_path) - 1);
+    BOOST_REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    BOOST_REQUIRE(::listen(fd, 1) == 0);
+    BOOST_REQUIRE(::fchmod(fd, 0666) == 0);
+    std::string err;
+    BOOST_CHECK(!modelnet::UnixSocketSafeToAdopt(sock, err));
+    BOOST_CHECK(err.find("world-writable") != std::string::npos);
+    BOOST_REQUIRE(::fchmod(fd, 0600) == 0);
+    BOOST_CHECK(modelnet::UnixSocketSafeToAdopt(sock, err));
+
+    const int cli = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    BOOST_REQUIRE(cli >= 0);
+    BOOST_REQUIRE(::connect(cli, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    BOOST_CHECK(modelnet::UnixConnectedPeerIsSelf(cli, err));
+    ::close(cli);
+    ::close(fd);
+    ::unlink(sp.c_str());
 }
 
 BOOST_AUTO_TEST_CASE(helper_unix_rpc_connects_when_datadir_path_is_too_long)
@@ -1073,6 +1117,11 @@ BOOST_AUTO_TEST_CASE(helper_unix_rpc_connects_when_datadir_path_is_too_long)
     cfg.rpc_socket = long_dir / "modeld.sock";
     BOOST_REQUIRE(fs::PathToString(cfg.rpc_socket).size() >= lim);
     const fs::path mapped = modelnet::UnixRpcListenPath(cfg.rpc_socket);
+    BOOST_CHECK(fs::PathToString(mapped).find("/tmp/btx-md-") == std::string::npos);
+    if (mapped == cfg.rpc_socket) {
+        BOOST_CHECK(fs::PathToString(mapped).size() >= lim);
+        return;
+    }
     ::unlink(fs::PathToString(mapped).c_str());
     std::atomic<bool> stop{false};
     std::thread t;

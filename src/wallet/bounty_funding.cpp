@@ -31,6 +31,7 @@
 #include <util/strencodings.h>
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
+#include <wallet/receive.h>
 #include <wallet/rpc/util.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/spend.h>
@@ -91,6 +92,77 @@ bool ExpandDescriptor(const std::string& descriptor, CScript& script, std::strin
     }
     script = scripts[0];
     return true;
+}
+
+int CollectWalletPQKeys(CWallet& wallet, const std::vector<std::vector<unsigned char>>& pubkeys, FlatSigningProvider& provider);
+bool KeyBytesFromNormalized(const std::string& n, std::vector<unsigned char>& out, std::string& err);
+
+bool WalletCanSignRefundKey(CWallet& wallet, const std::string& refund_key, std::string& err)
+{
+    if (refund_key.empty()) {
+        err = "refund pubkey is not a key this wallet can sign";
+        return false;
+    }
+    std::string normalized;
+    if (!NormalizeKey(refund_key, normalized, err)) return false;
+    std::vector<unsigned char> bytes;
+    if (!KeyBytesFromNormalized(normalized, bytes, err)) return false;
+    FlatSigningProvider provider;
+    LOCK(wallet.cs_wallet);
+    if (CollectWalletPQKeys(wallet, {bytes}, provider) != 1) {
+        err = "refund pubkey is not a key this wallet can sign";
+        return false;
+    }
+    return true;
+}
+
+bool GenerateWalletRefundKey(CWallet& wallet, std::string& refund_key, std::string& err)
+{
+    EnsureWalletIsUnlocked(wallet);
+    const auto dest = wallet.GetNewChangeDestination(OutputType::P2MR);
+    if (!dest) {
+        err = util::ErrorString(dest).original;
+        return false;
+    }
+    const CScript script = GetScriptForDestination(*dest);
+    std::string candidate;
+    {
+        LOCK(wallet.cs_wallet);
+        for (ScriptPubKeyMan* spk_man : wallet.GetAllScriptPubKeyMans()) {
+            auto* desc_man = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
+            if (desc_man == nullptr) continue;
+            std::unique_ptr<FlatSigningProvider> keys = desc_man->GetSigningProvider(script, /*include_private=*/true);
+            if (!keys) continue;
+            for (const auto& [pk, pq] : keys->pq_keys) {
+                (void)pq;
+                if (keys->GetPQKey(pk) == nullptr) continue;
+                if (pk.size() == MLDSA44_PUBKEY_SIZE) {
+                    candidate = HexStr(pk);
+                    break;
+                }
+                if (pk.size() == SLHDSA128S_PUBKEY_SIZE) {
+                    candidate = strprintf("pk_slh(%s)", HexStr(pk));
+                    break;
+                }
+            }
+            if (!candidate.empty()) break;
+        }
+    }
+    if (candidate.empty()) {
+        err = "wallet could not generate a refund key it can sign";
+        return false;
+    }
+    refund_key = candidate;
+    return WalletCanSignRefundKey(wallet, refund_key, err);
+}
+
+bool EnsureWalletRefundKey(CWallet& wallet, std::string& refund_key, std::string& err)
+{
+    if (refund_key.empty()) return GenerateWalletRefundKey(wallet, refund_key, err);
+    std::string normalized;
+    if (!NormalizeKey(refund_key, normalized, err)) return false;
+    refund_key = normalized;
+    return WalletCanSignRefundKey(wallet, refund_key, err);
 }
 
 } // namespace
@@ -245,15 +317,27 @@ bool LoadBountySecretRef(const std::string& secret_ref, std::vector<unsigned cha
 
 bool PrepareBountyFunding(CWallet& wallet, BountyEscrowPlan& plan, std::string& err)
 {
-    if (plan.output_script.empty()) {
-        const bool staged = plan.mode == "STAGED_RELEASE" ||
-                            (!plan.hashlock_hex.empty() && !plan.claimant_key.empty());
-        if (staged) {
-            plan.mode = "STAGED_RELEASE";
-            if (!BuildStagedHtlcDescriptor(plan, err)) return false;
-        } else if (!BuildBountyEscrowDescriptor(plan, err)) {
-            return false;
-        }
+    // Always derive the two-leaf escrow. A caller output_script is accepted only
+    // when its bytes equal that script; it never selects where the principal goes.
+    const CScript supplied = plan.output_script;
+    plan.output_script.clear();
+    plan.descriptor.clear();
+    if (!EnsureWalletRefundKey(wallet, plan.refund_key, err)) return false;
+    const bool staged = plan.mode == "STAGED_RELEASE" ||
+                        (!plan.hashlock_hex.empty() && !plan.claimant_key.empty());
+    if (staged) {
+        plan.mode = "STAGED_RELEASE";
+        if (!BuildStagedHtlcDescriptor(plan, err)) return false;
+    } else if (!BuildBountyEscrowDescriptor(plan, err)) {
+        return false;
+    }
+    if (plan.output_script.empty() || !ExactTwoLeafTree(plan.descriptor, err)) {
+        if (err.empty()) err = "derived two-leaf script required";
+        return false;
+    }
+    if (!supplied.empty() && supplied != plan.output_script) {
+        err = "output_script does not match the derived two-leaf escrow";
+        return false;
     }
     if (plan.fee_reserve_atoms > 0 && plan.fee_atoms > plan.fee_reserve_atoms) {
         err = "reserve exceeded";
@@ -281,50 +365,90 @@ bool PrepareBountyFunding(CWallet& wallet, BountyEscrowPlan& plan, std::string& 
     return true;
 }
 
-bool InspectBountyTransaction(const BountyEscrowPlan& plan_in, const CMutableTransaction& tx, UniValue& out, std::string& err)
+bool InspectBountyTransaction(const BountyEscrowPlan& plan_in, const CMutableTransaction& tx, UniValue& out, std::string& err, const CWallet* change_wallet)
 {
     BountyEscrowPlan plan = plan_in;
-    if (plan.output_script.empty()) {
-        if (!plan.hashlock_hex.empty() && !plan.claimant_key.empty()) {
-            if (!BuildStagedHtlcDescriptor(plan, err)) return false;
-        } else if (!plan.council_keys.empty() && !plan.refund_key.empty()) {
-            if (!BuildBountyEscrowDescriptor(plan, err)) return false;
-        }
+    const CScript supplied = plan.output_script;
+    plan.output_script.clear();
+    plan.descriptor.clear();
+    const bool staged = plan.mode == "STAGED_RELEASE" ||
+                        (!plan.hashlock_hex.empty() && !plan.claimant_key.empty());
+    if (staged) {
+        if (!BuildStagedHtlcDescriptor(plan, err)) return false;
+    } else if (!BuildBountyEscrowDescriptor(plan, err)) {
+        return false;
+    }
+    if (plan.output_script.empty() || !ExactTwoLeafTree(plan.descriptor, err)) {
+        if (err.empty()) err = "derived two-leaf script required";
+        return false;
+    }
+    if (!supplied.empty() && supplied != plan.output_script) {
+        err = "output_script does not match the derived two-leaf escrow";
+        return false;
+    }
+    if (plan.principal_atoms <= 0) {
+        err = "principal_atoms required";
+        return false;
     }
     out.setObject();
     out.pushKV("inputs", static_cast<int>(tx.vin.size()));
     out.pushKV("outputs", static_cast<int>(tx.vout.size()));
-    bool found = false;
+    int found = 0;
     bool extra = false;
     for (const auto& vout : tx.vout) {
-        if (!plan.output_script.empty() && vout.scriptPubKey == plan.output_script) {
-            if (plan.principal_atoms > 0 && vout.nValue != plan.principal_atoms) {
+        if (vout.scriptPubKey == plan.output_script) {
+            if (vout.nValue != plan.principal_atoms) {
                 err = "principal changed";
                 return false;
             }
-            found = true;
-        } else if (!plan.output_script.empty()) {
+            ++found;
+            continue;
+        }
+        if (change_wallet != nullptr) {
+            LOCK(change_wallet->cs_wallet);
+            if (!OutputIsChange(*change_wallet, vout)) extra = true;
+        } else {
             extra = true;
         }
     }
-    if (!plan.output_script.empty() && !found) {
-        err = "escrow output missing or keys/heights mutated";
+    if (found != 1) {
+        err = found == 0 ? "escrow output missing or keys/heights mutated" : "more than one escrow output";
         return false;
     }
-    out.pushKV("escrow_output_present", found);
-    out.pushKV("unauthorized_extra_output", extra && found && tx.vout.size() > 2);
-    if (!plan.unsigned_txid.IsNull()) {
-        CMutableTransaction skel = tx;
-        for (auto& in : skel.vin) {
-            in.scriptSig.clear();
-            in.scriptWitness.SetNull();
+    if (extra) {
+        err = "unauthorized extra output";
+        return false;
+    }
+    uint256 expect = plan.unsigned_txid;
+    if (!plan.unsigned_hex.empty()) {
+        CMutableTransaction planned;
+        if (!DecodeHexTx(planned, plan.unsigned_hex, /*try_no_witness=*/true, /*try_witness=*/true)) {
+            err = "unsigned plan required";
+            return false;
         }
-        const uint256 skel_id = skel.GetHash().ToUint256();
-        if (skel_id != plan.unsigned_txid && tx.GetHash().ToUint256() != plan.unsigned_txid) {
+        const uint256 planned_id = planned.GetHash().ToUint256();
+        if (expect.IsNull()) expect = planned_id;
+        else if (expect != planned_id) {
             err = "transaction fingerprint mutated";
             return false;
         }
     }
+    if (expect.IsNull()) {
+        err = "unsigned plan required";
+        return false;
+    }
+    CMutableTransaction skel = tx;
+    for (auto& in : skel.vin) {
+        in.scriptSig.clear();
+        in.scriptWitness.SetNull();
+    }
+    const uint256 skel_id = skel.GetHash().ToUint256();
+    if (skel_id != expect && tx.GetHash().ToUint256() != expect) {
+        err = "transaction fingerprint mutated";
+        return false;
+    }
+    out.pushKV("escrow_output_present", true);
+    out.pushKV("unauthorized_extra_output", false);
     out.pushKV("descriptor", plan.descriptor);
     out.pushKV("sighash", "ALL");
     return true;
@@ -333,7 +457,8 @@ bool InspectBountyTransaction(const BountyEscrowPlan& plan_in, const CMutableTra
 bool SignBountyTransaction(CWallet& wallet, BountyEscrowPlan& plan, CMutableTransaction& tx, std::string& err)
 {
     UniValue insp;
-    if (!InspectBountyTransaction(plan, tx, insp, err)) return false;
+    if (!InspectBountyTransaction(plan, tx, insp, err, &wallet)) return false;
+    if (!WalletCanSignRefundKey(wallet, plan.refund_key, err)) return false;
     EnsureWalletIsUnlocked(wallet);
     LOCK(wallet.cs_wallet);
     std::map<COutPoint, Coin> coins;
@@ -632,7 +757,7 @@ bool InspectBountySpend(const BountyEscrowPlan& plan_in, const CMutableTransacti
     return true;
 }
 
-bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpendPath path, std::string& err)
+bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpendPath path, std::string& err, bool sign)
 {
     if (plan.output_script.empty() || plan.descriptor.empty()) {
         if (!plan.hashlock_hex.empty() && !plan.claimant_key.empty()) {
@@ -833,7 +958,7 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
         input.m_p2mr_leaf_script = award_leaf;
         input.m_p2mr_control_block = award_ctrl;
     }
-    if (claim) {
+    if (claim && sign) {
         uint256 digest;
         CSHA256().Write(plan.claim_preimage.data(), plan.claim_preimage.size()).Finalize(digest.begin());
         input.sha256_preimages[digest] = plan.claim_preimage;
@@ -906,6 +1031,22 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
         return false;
     }
 
+    UniValue insp;
+    if (!InspectBountySpend(plan, mtx, insp, err)) return false;
+    if (!sign) {
+        // Prepare RPCs stop here. The witness stays empty; complete is not implied.
+        plan.complete = false;
+        plan.signed_hex.clear();
+        plan.unsigned_hex = EncodeHexTx(CTransaction(mtx));
+        plan.unsigned_txid = mtx.GetHash().ToUint256();
+        if (plan.plan_id.empty()) plan.plan_id = plan.unsigned_txid.GetHex();
+        if (!plan.claim_preimage.empty()) {
+            memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
+            plan.claim_preimage.clear();
+        }
+        return true;
+    }
+
     const bool slhdsa_fips205 = wallet.SlhdsaFips205ForNextBlock();
     const PrecomputedTransactionData txdata = PrecomputePSBTData(psbt);
     const bool complete = SignPSBTInput(provider, psbt, /*index=*/0, &txdata, SIGHASH_ALL,
@@ -913,18 +1054,22 @@ bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpend
     plan.complete = complete;
     if (!complete) {
         err = "failed to sign/finalize bounty leaf spend; check locktime, destination, and that this wallet holds the required keys";
+        plan.complete = false;
         return false;
     }
     CMutableTransaction signed_mtx;
     if (!FinalizeAndExtractPSBT(psbt, signed_mtx, slhdsa_fips205)) {
         err = "failed to extract finalized bounty spend";
+        plan.complete = false;
         return false;
     }
-    UniValue insp;
-    if (!InspectBountySpend(plan, signed_mtx, insp, err)) return false;
+    if (!InspectBountySpend(plan, signed_mtx, insp, err)) {
+        plan.complete = false;
+        return false;
+    }
     plan.signed_hex = EncodeHexTx(CTransaction(signed_mtx));
-    plan.unsigned_hex = plan.signed_hex;
-    plan.unsigned_txid = signed_mtx.GetHash().ToUint256();
+    plan.unsigned_hex = EncodeHexTx(CTransaction(mtx));
+    plan.unsigned_txid = mtx.GetHash().ToUint256();
     if (plan.plan_id.empty()) plan.plan_id = plan.unsigned_txid.GetHex();
     if (!plan.claim_preimage.empty()) {
         memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
