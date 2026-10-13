@@ -44,6 +44,9 @@ public:
      *  (pure mode) rather than legacy round-3.x SPHINCS+. Set by the wallet from
      *  the target validation height at/after the C-002 activation. */
     virtual bool SlhdsaFips205() const { return false; }
+    /** Whether a selected htlc_sha256 claim leaf may be signed before its
+     *  preimage is known. Off unless the caller opts in. */
+    virtual bool HtlcPresign() const { return false; }
 };
 
 /** A signature creator for transactions. */
@@ -56,6 +59,7 @@ class MutableTransactionSignatureCreator : public BaseSignatureCreator
     const MutableTransactionSignatureChecker checker;
     const PrecomputedTransactionData* m_txdata;
     bool m_slhdsa_fips205{false};
+    bool m_htlc_presign{false};
 
 public:
     MutableTransactionSignatureCreator(const CMutableTransaction& tx LIFETIMEBOUND, unsigned int input_idx, const CAmount& amount, int hash_type);
@@ -68,6 +72,13 @@ public:
     /** Enable FIPS-205 SLH-DSA signing for this creator (set from the target
      *  validation height at/after the C-002 activation). */
     void SetSlhdsaFips205(bool enabled) { m_slhdsa_fips205 = enabled; }
+    bool HtlcPresign() const override { return m_htlc_presign; }
+    /** Sign a selected htlc_sha256 claim leaf that pins a 32-byte preimage
+     *  without that preimage. The leaf signature does not commit to the
+     *  preimage, so the input stays incomplete until a matching PSBT_IN_SHA256
+     *  entry is added and the PSBT is finalized. Callers allow this only with
+     *  SIGHASH_DEFAULT or SIGHASH_ALL. */
+    void SetHtlcPresign(bool enabled) { m_htlc_presign = enabled; }
 };
 
 /** A signature checker that accepts all signatures */
@@ -183,13 +194,15 @@ void RecordP2MRTimelockAdjustment(const CMutableTransaction& before, const CMuta
  * Why an unsigned P2MR input must not be reported as success.
  * produced_p2mr_signature is true when this signer stored a leaf signature.
  * known_leaf_count is the descriptor leaf count when known, otherwise 0.
+ * htlc_presign names why an opted-in presign of the claim leaf left it unsigned.
  * Returns true and sets error when the input must be rejected.
  */
 bool ExplainUnsignedP2MRInput(const std::vector<unsigned char>& leaf_script,
                               size_t known_leaf_count,
                               const std::map<std::vector<unsigned char>, std::vector<unsigned char>>& sha256_preimages,
                               bool produced_p2mr_signature,
-                              bilingual_str& error);
+                              bilingual_str& error,
+                              bool htlc_presign = false);
 
 /** Sign the CMutableTransaction.
  *  adjust_timelocks keeps the historical behavior of raising nSequence, nLockTime,

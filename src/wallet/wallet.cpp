@@ -3230,7 +3230,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint,
     return false;
 }
 
-std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bool& complete, int sighash_type, bool sign, bool bip32derivs, size_t * n_signed, bool finalize, bool adjust_timelocks, bilingual_str* error_detail, P2MRTimelockAdjustment* timelock_adjustment, const std::function<bool(PartiallySignedTransaction&, bilingual_str&)>& prepare) const
+std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bool& complete, int sighash_type, bool sign, bool bip32derivs, size_t * n_signed, bool finalize, bool adjust_timelocks, bilingual_str* error_detail, P2MRTimelockAdjustment* timelock_adjustment, const std::function<bool(PartiallySignedTransaction&, bilingual_str&)>& prepare, bool htlc_presign) const
 {
     if (n_signed) {
         *n_signed = 0;
@@ -3319,7 +3319,7 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
     // serializing expensive signing operations across concurrent RPC calls.
     for (ScriptPubKeyMan* spk_man : spk_mans) {
         int n_signed_this_spkm = 0;
-        const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize, slhdsa_fips205, error_detail)};
+        const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize, slhdsa_fips205, error_detail, htlc_presign)};
         if (error) {
             return error;
         }
@@ -3358,7 +3358,7 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
                 preimages.emplace(std::vector<unsigned char>(hash.begin(), hash.end()), preimage);
             }
             bilingual_str why;
-            if (!ExplainUnsignedP2MRInput(input.m_p2mr_leaf_script, leaf_count, preimages, !input.m_p2mr_pq_sigs.empty(), why)) {
+            if (!ExplainUnsignedP2MRInput(input.m_p2mr_leaf_script, leaf_count, preimages, !input.m_p2mr_pq_sigs.empty(), why, htlc_presign)) {
                 continue;
             }
             if (error_detail) *error_detail = std::move(why);

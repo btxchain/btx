@@ -443,6 +443,7 @@ BASE_SCRIPTS = [
     'wallet_bridge_refund_timeout.py --descriptors',
     'wallet_htlc_atomicswap.py --descriptors',
     'wallet_htlc_fixes.py --descriptors',
+    'wallet_htlc_presign.py --descriptors',
     'wallet_htlc_review.py --descriptors',
     'feature_htlc_preimage32_activation.py --descriptors',
     'wallet_otc_offer.py --descriptors',
