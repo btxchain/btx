@@ -23,6 +23,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import parse_qs, unquote, urlparse
 
 DISCLOSURE = {
@@ -66,21 +67,25 @@ def verified_file_stat(digest_hex: str, file_index: int) -> tuple[Path, int] | N
     return path, st.st_size
 
 
-def read_span(path: Path, first: int, last: int) -> bytes:
-    """Read only [first, last] in chunks of at most 1 MiB."""
-    remaining = last - first + 1
-    if remaining <= 0:
-        return b""
-    chunks: list[bytes] = []
-    with path.open("rb") as fh:
-        fh.seek(first)
-        while remaining > 0:
-            block = fh.read(min(READ_CHUNK, remaining))
-            if not block:
-                break
-            chunks.append(block)
-            remaining -= len(block)
-    return b"".join(chunks)
+def open_span(path: Path, first: int, last: int) -> BinaryIO | None:
+    """Open path at first, or None if the file no longer reaches last."""
+    fh = path.open("rb")
+    if os.fstat(fh.fileno()).st_size <= last:
+        fh.close()
+        return None
+    fh.seek(first)
+    return fh
+
+
+def copy_span(fh: BinaryIO, length: int, out) -> int:
+    """Copy length bytes to out in chunks of at most 1 MiB. Returns the bytes not copied."""
+    while length > 0:
+        block = fh.read(min(READ_CHUNK, length))
+        if not block:
+            break
+        out.write(block)
+        length -= len(block)
+    return length
 
 
 def parse_range(headers, size: int) -> tuple[int, int] | None:
@@ -403,24 +408,34 @@ class BridgeHandler(BaseHTTPRequestHandler):
         else:
             first, last = 0, size - 1
             status = 200
-        body = b"" if self.command == "HEAD" else read_span(path, first, last)
-        if self.command != "HEAD" and len(body) != (last - first + 1):
-            self._send(409, {"error": "verified chunks required before emission", "public_download": True})
-            return
-        self.send_response(status)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(last - first + 1))
-        if range_header:
-            self.send_header("Content-Range", "bytes %d-%d/%d" % (first, last, size))
-        self.send_header("Content-Disposition", "attachment")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'none'")
-        self.send_header("X-BTX-Web-Compatibility", WEB_COMPAT)
-        self.send_header("X-BTX-Cache-Key", "%s/f/%d" % (resource.uri, file_index))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
+        fh = None
         if self.command != "HEAD":
-            self.wfile.write(body)
+            # Open before the status line, so a file already shorter than its
+            # stat still gets the 409. The span is then streamed, not held.
+            fh = open_span(path, first, last)
+            if fh is None:
+                self._send(409, {"error": "verified chunks required before emission", "public_download": True})
+                return
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(last - first + 1))
+            if range_header:
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (first, last, size))
+            self.send_header("Content-Disposition", "attachment")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'none'")
+            self.send_header("X-BTX-Web-Compatibility", WEB_COMPAT)
+            self.send_header("X-BTX-Cache-Key", "%s/f/%d" % (resource.uri, file_index))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if fh is not None and copy_span(fh, last - first + 1, self.wfile) != 0:
+                # The file shrank after the headers went out. The body is short
+                # of Content-Length, so the connection must not be reused.
+                self.close_connection = True
+        finally:
+            if fh is not None:
+                fh.close()
 
     def _dispatch(self) -> None:
         ip = self.client_address[0] if self.client_address else "unknown"
