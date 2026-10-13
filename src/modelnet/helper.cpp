@@ -1291,7 +1291,10 @@ int ListenUnix(fs::path& path, std::string& err)
         close(fd);
         return -1;
     }
-    if (::fchmod(fd, 0600) != 0 || listen(fd, 16) != 0) {
+    // fchmod() on a bound AF_UNIX socket does not reach the path: Linux
+    // returns 0 and leaves the mode unchanged, macOS returns EINVAL. Set the
+    // mode on the path; the 0700 parent stays the access check.
+    if (::chmod(p.c_str(), 0600) != 0 || listen(fd, 16) != 0) {
         err = "unix socket mode";
         close(fd);
         ::unlink(p.c_str());
