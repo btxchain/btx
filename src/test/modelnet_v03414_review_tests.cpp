@@ -176,7 +176,10 @@ BOOST_AUTO_TEST_CASE(forged_campaign_record_does_not_stop_public_serving)
     ip.push_back(arg);
     BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), err);
     BOOST_TEST_MESSAGE("importmodelindex: " << out.write());
-    BOOST_CHECK_EQUAL(out["imported"].getInt<int>(), 1);
+    // Since af9020cd, importmodelindex verifies every record and refuses an
+    // unsigned one, so the forged record never reaches the index. The
+    // serving check below must still hold.
+    BOOST_CHECK_EQUAL(out["imported"].getInt<int>(), 0);
 
     UniValue gj2;
     BOOST_REQUIRE_EQUAL(Grant(cat, pub, "w1-peer-b", gj2), 200);
