@@ -73,8 +73,8 @@ public:
      *  validation height at/after the C-002 activation). */
     void SetSlhdsaFips205(bool enabled) { m_slhdsa_fips205 = enabled; }
     bool HtlcPresign() const override { return m_htlc_presign; }
-    /** Sign a selected htlc_sha256 claim leaf that pins a 32-byte preimage
-     *  without that preimage. The leaf signature does not commit to the
+    /** Sign a selected htlc_sha256 claim leaf (not htlc_sha256_legacy)
+     *  without its preimage. The leaf signature does not commit to the
      *  preimage, so the input stays incomplete until a matching PSBT_IN_SHA256
      *  entry is added and the PSBT is finalized. Callers allow this only with
      *  SIGHASH_DEFAULT or SIGHASH_ALL. */

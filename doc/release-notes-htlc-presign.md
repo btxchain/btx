@@ -9,11 +9,11 @@ Presigned HTLC claims
   `finalizepsbt`; no wallet is needed for that step. This lets a swap party
   hand a presigned claim to a watchtower.
 - The option needs `sign=true`, a selected leaf and `sighashtype` `DEFAULT` or
-  `ALL`. Only the claim leaf that pins a 32-byte preimage is presigned, not
-  `htlc_sha256_legacy`. Without the option nothing changes: the wallet still
-  refuses to sign the claim leaf without the preimage, and a `PSBT_IN_SHA256`
-  entry whose value does not hash to its key is still rejected when the PSBT
-  is read.
+  `ALL`. Only the `htlc_sha256` claim leaf is presigned, not the
+  recovery-only `htlc_sha256_legacy` leaf. Without the option nothing
+  changes: the wallet still refuses to sign the claim leaf without the
+  preimage, and a `PSBT_IN_SHA256` entry whose value does not hash to its key
+  is still rejected when the PSBT is read.
 - The presignature commits to the whole transaction. Anyone holding the
   presigned PSBT who learns the preimage can broadcast exactly that
   transaction, and no other.
