@@ -5971,12 +5971,17 @@ BOOST_AUTO_TEST_CASE(unsolicited_retained_tip_child_retries_without_rcadmit)
     CheckConsensusBehindCompetingHeaders(m_node, false, false, false, true);
 }
 
+//! Whether the disconnected-source retry has a bounded recompute to queue for
+//! the retained body (NEEDED), or why it has none.
+enum class SourceGoneRecompute { NEEDED, VERDICT_KNOWN, PRE_V4, NO_WORKER };
+
 // A followed tip-child whose only source disconnected must not stay held
 // until MATMUL_DEFERRED_BODY_MAX_AGE while FindNextBlocksToDownload skips the
 // hash for every other peer (root_retained_body). It is connected, or released
 // for re-fetch.
 static void CheckTipChildNotHeldAfterSourceDisconnects(node::NodeContext& m_node,
-                                                       bool retain_directly)
+                                                       bool retain_directly,
+                                                       SourceGoneRecompute why = SourceGoneRecompute::NEEDED)
 {
     WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
 
@@ -6005,7 +6010,9 @@ static void CheckTipChildNotHeldAfterSourceDisconnects(node::NodeContext& m_node
     BOOST_REQUIRE(tip != nullptr);
     SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
     peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
-    ActivateRcAtTip(consensus, *tip);
+    if (why != SourceGoneRecompute::PRE_V4) ActivateRcAtTip(consensus, *tip);
+    BOOST_REQUIRE_EQUAL(consensus.IsMatMulV4Active(tip->nHeight + 1),
+                        why != SourceGoneRecompute::PRE_V4);
     consensus.nMatMulRCMaxPendingVerifications = 1;
     consensus.nMatMulRCPeerVerifyBudgetPerMin = 16;
     consensus.nMatMulRCGlobalVerifyBudgetPerMin = 16;
@@ -6098,6 +6105,12 @@ static void CheckTipChildNotHeldAfterSourceDisconnects(node::NodeContext& m_node
     peerman.FinalizeNode(peer);
     connman.RemoveTestNode(peer);
     peer_finalized = true;
+    if (why == SourceGoneRecompute::VERDICT_KNOWN) {
+        // A header-first ExactReplay of this hash (another peer's RCADMIT)
+        // completes while the body is held: its completion persists the
+        // verdict, so the body needs no recompute.
+        peerman.PersistExactReplayVerdictAndRelayForTest(followed_hash);
+    }
 
     {
         REVERSE_LOCK(msgproc_lock);
@@ -6111,6 +6124,37 @@ static void CheckTipChildNotHeldAfterSourceDisconnects(node::NodeContext& m_node
         connected() || !peerman.HasMatMulRetainedBodyForTest(followed_hash),
         "followed tip-child stays retained after its only source disconnected "
         "(root_retained_body until MATMUL_DEFERRED_BODY_MAX_AGE)");
+
+    if (why != SourceGoneRecompute::NEEDED && !connected()) {
+        // Released for re-fetch: a connected peer that announces the block is
+        // asked for it.
+        CNode other{/*id=*/248,
+                    /*sock=*/nullptr,
+                    CAddress{PeermanTestService(0x3000007f), NODE_NETWORK},
+                    /*nKeyedNetGroupIn=*/0x30,
+                    /*nLocalHostNonceIn=*/0,
+                    CAddress{},
+                    /*addrNameIn=*/"tip-child-other-source",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false,
+                    /*network_key=*/0};
+        connman.Handshake(other, /*successfully_connected=*/true, services, services,
+                          PROTOCOL_VERSION, /*relay_txs=*/true,
+                          /*starting_height=*/tip->nHeight + 1);
+        connman.AddTestNode(other);
+        connman.FlushSendBuffer(other);
+        bool other_finalized{false};
+        FinalizePeer finalize_other{connman, peerman, other, other_finalized};
+        other.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            other, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+        other.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(other);
+        other.fPauseSend = false;
+        BOOST_CHECK(peerman.SendMessages(&other));
+        BOOST_CHECK_MESSAGE(CountQueuedGetDataForHash(other, followed_hash) > 0,
+                            "released tip-child is not requested from a connected peer");
+    }
 
     if (connected()) {
         CBlockIndex* idx{WITH_LOCK(::cs_main,
@@ -6132,6 +6176,34 @@ BOOST_AUTO_TEST_CASE(ticketless_tip_child_not_held_after_source_disconnects)
 BOOST_AUTO_TEST_CASE(retained_tip_child_not_held_after_source_disconnects)
 {
     CheckTipChildNotHeldAfterSourceDisconnects(m_node, /*retain_directly=*/true);
+}
+
+// The retained body needs no bounded recompute, so the disconnected-source
+// retry has nothing to queue. It must release the body for re-fetch, not
+// refresh it until the retention expiry.
+BOOST_AUTO_TEST_CASE(verified_retained_tip_child_released_after_source_disconnects)
+{
+    CheckTipChildNotHeldAfterSourceDisconnects(m_node, /*retain_directly=*/true,
+                                               SourceGoneRecompute::VERDICT_KNOWN);
+}
+
+BOOST_AUTO_TEST_CASE(pre_v4_retained_tip_child_released_after_source_disconnects)
+{
+    CheckTipChildNotHeldAfterSourceDisconnects(m_node, /*retain_directly=*/true,
+                                               SourceGoneRecompute::PRE_V4);
+}
+
+struct NoMatMulAsyncVerifySetup : public TestingSetup {
+    NoMatMulAsyncVerifySetup()
+        : TestingSetup{ChainType::REGTEST,
+                       TestOpts{.extra_args = {"-matmulasyncverify=0"}}} {}
+};
+
+BOOST_FIXTURE_TEST_CASE(no_worker_retained_tip_child_released_after_source_disconnects,
+                        NoMatMulAsyncVerifySetup)
+{
+    CheckTipChildNotHeldAfterSourceDisconnects(m_node, /*retain_directly=*/true,
+                                               SourceGoneRecompute::NO_WORKER);
 }
 
 BOOST_AUTO_TEST_CASE(cpu_pending_active_tip_child_does_not_reserve_gpu_admission)

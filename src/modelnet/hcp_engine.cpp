@@ -218,6 +218,14 @@ HcpHttpResponse Err(int status, const std::string& code, const std::string& msg)
     return r;
 }
 
+// A CR12 import chunk may carry up to HCP_CR12_MAX_STAGE_BYTES; every other
+// request is held to max_body_bytes. HandleLocked and RunHcpDaemon both size
+// the body with this test, so the daemon cannot drop a chunk the engine admits.
+bool IsCrl12StageRequest(const std::string& method, const std::string& path)
+{
+    return method == "POST" && path.find("/institutional/imports/chunks") != std::string::npos;
+}
+
 } // namespace
 
 struct HcpEngine::Impl {
@@ -679,9 +687,7 @@ HcpHttpResponse HcpEngine::Handle(const HcpHttpRequest& req)
 
 HcpHttpResponse HcpEngine::Impl::HandleLocked(const HcpHttpRequest& req)
 {
-    const bool crl12_stage = (req.method == "POST") &&
-                             (req.path == "/institutional/imports/chunks" ||
-                              req.path.find("/institutional/imports/chunks") != std::string::npos);
+    const bool crl12_stage = IsCrl12StageRequest(req.method, req.path);
     const int64_t body_cap = crl12_stage ? HCP_CR12_MAX_STAGE_BYTES : cfg.max_body_bytes;
     if (static_cast<int64_t>(req.body.size()) > body_cap) {
         return Err(413, "BODY_TOO_LARGE", "max_body_bytes");
@@ -3350,7 +3356,7 @@ int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket,
         rcv_to.tv_usec = 0;
         setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
         const int64_t body_limit = cfg.max_body_bytes > 0 ? cfg.max_body_bytes : 0;
-        const size_t accum_cap = static_cast<size_t>(body_limit) + 8192;
+        size_t accum_cap = static_cast<size_t>(body_limit) + 8192;
         std::string reqs;
         char buf[4096];
         size_t content_len = 0;
@@ -3374,6 +3380,15 @@ int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket,
             auto cl = headers.find("content-length:");
             if (cl != std::string::npos) {
                 content_len = static_cast<size_t>(std::strtoul(headers.c_str() + cl + 15, nullptr, 10));
+            }
+            // Read a CR12 import chunk as far as HandleLocked admits it.
+            const auto sp = reqs.find(' ');
+            const auto sp2 = sp < blank ? reqs.find(' ', sp + 1) : std::string::npos;
+            if (sp2 < blank) {
+                const std::string target = reqs.substr(sp + 1, sp2 - sp - 1);
+                if (IsCrl12StageRequest(reqs.substr(0, sp), target.substr(0, target.find('?')))) {
+                    accum_cap = std::max(accum_cap, static_cast<size_t>(HCP_CR12_MAX_STAGE_BYTES) + 8192);
+                }
             }
             if (blank + 4 > accum_cap || content_len > accum_cap - (blank + 4)) {
                 drop_client = true;

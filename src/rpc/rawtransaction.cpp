@@ -372,6 +372,8 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
         for (unsigned int i = 0; i < psbtx.inputs.size(); ++i) {
             const PSBTInput& input = psbtx.inputs.at(i);
             if (PSBTInputSigned(input)) continue;
+            // As in CWallet::FillPSBT: with a spent output missing, nothing can be signed.
+            if (input.m_p2mr_leaf_script.empty() && !txdata.m_spent_outputs_ready) continue;
             CScript script;
             if (!input.witness_utxo.IsNull()) {
                 script = input.witness_utxo.scriptPubKey;

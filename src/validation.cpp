@@ -10707,9 +10707,11 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                          ? _("Activating the uniquely authenticated shallow-race recovery branch.")
                          : _("Following the most-work chain (warn-only)."));
 
-            // Loud alarm on every deep reorg, regardless of action.
+            // Loud alarm on every deep reorg, regardless of action. update=true
+            // so the warnings entry and -alertnotify follow the latest alarm,
+            // not only the first one since startup.
             LogWarning("%s\n", alarm.original);
-            m_chainman.GetNotifications().warningSet(kernel::Warning::DEEP_REORG_DETECTED, alarm);
+            m_chainman.GetNotifications().warningSet(kernel::Warning::DEEP_REORG_DETECTED, alarm, /*update=*/true);
 
             if (park) {
                 CBlockIndex* branch_root = pindexMostWork;

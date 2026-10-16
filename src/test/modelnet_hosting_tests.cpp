@@ -24,12 +24,15 @@
 #include <modelnet/swarm.h>
 #include <span.h>
 #include <test/util/setup_common.h>
+#include <tinyformat.h>
 #include <univalue.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
+#include <util/syserror.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <cerrno>
 #include <cstring>
 #include <chrono>
 #include <cstdlib>
@@ -39,6 +42,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sched.h>
+#include <sys/wait.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_hosting_tests, BasicTestingSetup)
 
@@ -1024,6 +1033,150 @@ BOOST_AUTO_TEST_CASE(generatemodel_compatible_fake_adapter)
     BOOST_CHECK_EQUAL(result["execution_profile"].getInt<int>(), 0);
     ::unsetenv("BTX_MODEL_GENERATE");
 }
+
+#if defined(__linux__)
+namespace {
+
+bool WriteProcSelf(const char* name, const std::string& value)
+{
+    const int fd = ::open((std::string{"/proc/self/"} + name).c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    const bool ok = ::write(fd, value.data(), value.size()) == static_cast<ssize_t>(value.size());
+    ::close(fd);
+    return ok;
+}
+
+/** Make the next child of this single-threaded process pid 1 of a new PID
+ *  namespace. A privileged process can create one directly; anyone else
+ *  needs a user namespace, which maps only our own uid and gid. */
+bool EnterNewPidNamespace(std::string& why)
+{
+    if (::unshare(CLONE_NEWPID) == 0) return true;
+    const uid_t uid = ::geteuid();
+    const gid_t gid = ::getegid();
+    if (::unshare(CLONE_NEWUSER | CLONE_NEWPID) != 0) {
+        why = "unshare: " + SysErrorString(errno);
+        return false;
+    }
+    if (!WriteProcSelf("setgroups", "deny") ||
+        !WriteProcSelf("uid_map", strprintf("%u %u 1\n", uid, uid)) ||
+        !WriteProcSelf("gid_map", strprintf("%u %u 1\n", gid, gid))) {
+        why = "user namespace id map: " + SysErrorString(errno);
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(generatemodel_adapter_runs_when_helper_is_pid1)
+{
+    // A helper that is pid 1 of its PID namespace (a container entrypoint
+    // without an init) is a live parent, so its generate adapter must run.
+    // Run generatemodel as pid 1 of a new PID namespace; skip where the
+    // kernel or a sandbox does not allow one.
+    const fs::path tmp = m_path_root / "gen-pid1";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const fs::path src = tmp / "src";
+    fs::create_directories(src);
+    {
+        const auto st = TinySafeTensors(0x96);
+        std::ofstream out(src / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        std::ofstream cfg(src / "config.json");
+        cfg << "{\"architectures\":[\"LlamaForCausalLM\"],\"model_type\":\"llama\"}\n";
+    }
+    std::string err;
+    modelnet::CatalogEntry imported;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), true, imported, err), err);
+
+    // The adapter reports its parent's pid, which is 1 when the helper is pid 1.
+    const fs::path adapter = tmp / "fake-generate";
+    {
+        std::ofstream out(adapter);
+        out << "#!/usr/bin/env python3\n"
+               "import json, os, sys\n"
+               "req = json.loads(sys.stdin.readline() or '{}')\n"
+               "text = 'ppid=%d:%s' % (os.getppid(), req.get('prompt', ''))\n"
+               "print(json.dumps({\"ok\":True,\"generated\":True,\"text\":text,\"backend\":\"fake\"}), flush=True)\n";
+    }
+    ::chmod(fs::PathToString(adapter).c_str(), 0755);
+    BOOST_REQUIRE_EQUAL(::setenv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str(), 1), 0);
+    ::unsetenv("BTX_LLAMA_CLI");
+
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "generatemodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    params.push_back("hello-pid1");
+    rpc.pushKV("params", params);
+
+    // The forked side writes one report: the generated text, the error, or
+    // "skip: <reason>". Boost assertions stay in this process.
+    int report[2];
+    BOOST_REQUIRE_EQUAL(::pipe2(report, O_CLOEXEC), 0);
+    const pid_t runner = ::fork();
+    BOOST_REQUIRE(runner >= 0);
+    if (runner == 0) {
+        ::close(report[0]);
+        const auto send_report = [&](const std::string& s) {
+            [[maybe_unused]] const ssize_t n = ::write(report[1], s.data(), s.size());
+        };
+        std::string why;
+        if (!EnterNewPidNamespace(why)) {
+            send_report("skip: " + why);
+            ::_exit(0);
+        }
+        const pid_t init = ::fork();
+        if (init < 0) {
+            send_report("skip: fork in the new PID namespace: " + SysErrorString(errno));
+            ::_exit(0);
+        }
+        if (init == 0) {
+            std::string out;
+            try {
+                if (::getpid() != 1) {
+                    out = "skip: not pid 1 in the new PID namespace";
+                } else {
+                    UniValue result;
+                    std::string code;
+                    std::string gen_err;
+                    if (modelnet::DispatchHelperRpc(cat, rpc, result, code, gen_err)) {
+                        out = result["text"].get_str();
+                    } else {
+                        out = code + ": " + gen_err;
+                    }
+                }
+            } catch (const std::exception& e) {
+                out = std::string{"exception: "} + e.what();
+            }
+            send_report(out);
+            ::_exit(0);
+        }
+        int status = 0;
+        while (::waitpid(init, &status, 0) < 0 && errno == EINTR) {}
+        ::_exit(0);
+    }
+    ::close(report[1]);
+    std::string out;
+    char buf[256];
+    for (;;) {
+        const ssize_t n = ::read(report[0], buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        out.append(buf, static_cast<size_t>(n));
+    }
+    ::close(report[0]);
+    int status = 0;
+    while (::waitpid(runner, &status, 0) < 0 && errno == EINTR) {}
+    ::unsetenv("BTX_MODEL_GENERATE");
+    if (out.rfind("skip: ", 0) == 0) {
+        BOOST_TEST_MESSAGE("Skipping pid-1 generate adapter test: " + out.substr(6));
+        return;
+    }
+    BOOST_CHECK_EQUAL(out, "ppid=1:hello-pid1");
+}
+#endif // __linux__
 
 BOOST_AUTO_TEST_CASE(generatemodel_unknown_architecture_fail_closed)
 {

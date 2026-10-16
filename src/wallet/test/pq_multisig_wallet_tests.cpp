@@ -953,6 +953,47 @@ BOOST_AUTO_TEST_CASE(psbt_multileaf_requires_a_selected_leaf)
     BOOST_CHECK(!psbt.inputs[0].m_p2mr_control_block.empty());
 }
 
+BOOST_AUTO_TEST_CASE(psbt_multileaf_unsigned_while_a_spent_output_is_missing)
+{
+    // A watch-only 2-leaf (ML-DSA, SLH-DSA) address, the shape of a default wallet address.
+    const std::string descriptor = AddChecksum("mr(" + std::string(MLDSA44_PUBKEY_SIZE * 2, 'a') + ",pk_slh(" + std::string(SLHDSA128S_PUBKEY_SIZE * 2, 'b') + "))");
+    const auto wallet = CreateDescriptorWalletWithSingleImportedDescriptor(*this, descriptor, nullptr, /*disable_private_keys=*/true);
+
+    DescriptorScriptPubKeyMan* spk_man{nullptr};
+    for (ScriptPubKeyMan* man : wallet->GetAllScriptPubKeyMans()) {
+        spk_man = dynamic_cast<DescriptorScriptPubKeyMan*>(man);
+        if (spk_man) break;
+    }
+    BOOST_REQUIRE(spk_man);
+    const auto scripts = spk_man->GetScriptPubKeys();
+    BOOST_REQUIRE_EQUAL(scripts.size(), 1U);
+    const CScript script = *scripts.begin();
+
+    // Input 1 is another party's coin whose UTXO is not in the PSBT yet.
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{173}), 0});
+    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{174}), 0});
+    tx.vout.emplace_back(COIN, script);
+    PartiallySignedTransaction psbt(tx);
+    psbt.inputs[0].witness_utxo = CTxOut{COIN, script};
+
+    // A P2MR signature commits to every spent output, so nothing can be signed yet.
+    // The PSBT comes back incomplete instead of failing on the leaf choice.
+    bool complete = true;
+    bilingual_str detail;
+    const auto early = wallet->FillPSBT(psbt, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/false, /*n_signed=*/nullptr, /*finalize=*/false, /*adjust_timelocks=*/false, &detail);
+    BOOST_CHECK(!early.has_value());
+    BOOST_CHECK(!complete);
+    BOOST_CHECK(psbt.inputs[0].m_p2mr_pq_sigs.empty());
+
+    // With every spent output known, the unsigned input still needs a selected leaf.
+    psbt.inputs[1].witness_utxo = CTxOut{COIN, script};
+    const auto known = wallet->FillPSBT(psbt, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/false, /*n_signed=*/nullptr, /*finalize=*/false, /*adjust_timelocks=*/false, &detail);
+    BOOST_REQUIRE(known.has_value());
+    BOOST_CHECK(*known == common::PSBTError::P2MR_LEAF_UNSELECTED);
+    BOOST_CHECK(detail.original.find("no leaf selected") != std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(htlc_sha256_claim_psbt_signs_only_with_real_preimage)
 {
     const auto claim_seed = MakePQSeed(0x81);

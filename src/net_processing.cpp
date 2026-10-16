@@ -4035,8 +4035,20 @@ void PeerManagerImpl::DispatchDisconnectedRetainedMatMulBody(
         RefreshMatMulDeferredBodyRetry(hash, "disconnected source missing body");
         return;
     }
+    // With no bounded recompute to schedule, nothing processes this body
+    // while its source is gone, and download skips a retained hash.
+    // Refreshing it would hold the only copy until
+    // MATMUL_DEFERRED_BODY_MAX_AGE. Release it, so a connected peer can
+    // serve the block under that peer's own admission.
+    const auto release_for_refetch = [&](const char* reason) {
+        LogDebug(BCLog::NET,
+                 "Releasing retained body %s for re-fetch; source peer=%d is gone and %s\n",
+                 hash.ToString(), candidate.source_peer, reason);
+        EraseMatMulDeferredBody(hash);
+        ClearMatMulRCBodyDeferred(hash);
+    };
     if (!m_matmul_verify_worker) {
-        RefreshMatMulDeferredBodyRetry(hash, "disconnected source has no bounded worker");
+        release_for_refetch("there is no bounded worker");
         return;
     }
     std::optional<ChainstateManager::MatMulEncDrClassifyResult> encdr;
@@ -4049,7 +4061,9 @@ void PeerManagerImpl::DispatchDisconnectedRetainedMatMulBody(
                         candidate.block->hashPrevBlock == tip->GetBlockHash();
     }
     if (!encdr) {
-        RefreshMatMulDeferredBodyRetry(hash, "disconnected source has no bounded recompute");
+        // For example the ExactReplay verdict is already known (a header-first
+        // replay of this hash finished), or the height is below v4.
+        release_for_refetch("it needs no bounded recompute");
         return;
     }
     const Consensus::Params& params{m_chainparams.GetConsensus()};

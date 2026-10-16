@@ -29,6 +29,7 @@
 #include <uint256.h>
 #include <util/check.h>
 #include <util/mempressure.h>
+#include <util/string.h>
 #include <util/time.h>
 #include <validation.h>
 
@@ -1314,6 +1315,114 @@ BOOST_FIXTURE_TEST_CASE(chainstate_warn_profile_deep_reorg_follows_most_work, Te
             warning.original.find("Following the most-work chain") != std::string::npos;
     }
     BOOST_CHECK(saw_deep_reorg_warning);
+}
+
+//! Each deep-reorg alarm must reach the node's warning set, which feeds the
+//! "warnings" arrays of getblockchaininfo/getnetworkinfo/getmininginfo, the GUI
+//! status and -alertnotify. Set with the default update=false, only the first
+//! alarm since startup was kept: a later (deeper, or parked) reorg was logged,
+//! but the warning kept describing the first one. Drive two deep reorgs of
+//! different depth and require the one "Deep reorg detected" entry to describe
+//! the second.
+BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warning_reports_latest_event, TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& deep_reorg_action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& max_reorg_depth_warn = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_warn);
+    auto& max_reorg_depth_park = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
+    struct RestoreParams
+    {
+        Consensus::Params& consensus;
+        int32_t reorg_start_height;
+        kernel::DeepReorgAction& deep_reorg_action;
+        kernel::DeepReorgAction saved_deep_reorg_action;
+        std::optional<uint32_t>& warn_depth;
+        std::optional<uint32_t> saved_warn_depth;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
+        ~RestoreParams()
+        {
+            consensus.nReorgProtectionStartHeight = reorg_start_height;
+            deep_reorg_action = saved_deep_reorg_action;
+            warn_depth = saved_warn_depth;
+            park_depth = saved_park_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
+        }
+    } restore{consensus, consensus.nReorgProtectionStartHeight,
+              deep_reorg_action, deep_reorg_action,
+              max_reorg_depth_warn, max_reorg_depth_warn,
+              max_reorg_depth_park, max_reorg_depth_park,
+              hysteresis_work_margin, hysteresis_work_margin};
+    deep_reorg_action = kernel::DeepReorgAction::WARN;
+    consensus.nReorgProtectionStartHeight = 10;
+    max_reorg_depth_warn = 1;
+    max_reorg_depth_park = 1;
+    hysteresis_work_margin = 0;
+
+    // Fork depth+1 blocks below the tip, mine a depth-block competing branch
+    // (one block shorter than the original suffix), then re-enable the heavier
+    // original branch: a real cross-fork reorg that disconnects depth blocks.
+    // WARN follows most work. Returns the fork height.
+    const auto drive_deep_reorg = [&](int depth) {
+        CBlockIndex* invalidate_at{nullptr};
+        uint256 original_tip_hash;
+        int fork_height{0};
+        {
+            LOCK(::cs_main);
+            const CBlockIndex* tip{chainstate.m_chain.Tip()};
+            original_tip_hash = tip->GetBlockHash();
+            fork_height = tip->nHeight - depth - 1;
+            invalidate_at = chainstate.m_chain[fork_height + 1];
+        }
+        BOOST_REQUIRE(invalidate_at != nullptr);
+        BlockValidationState inval_state;
+        BOOST_REQUIRE(chainstate.InvalidateBlock(inval_state, invalidate_at));
+        for (int i{0}; i < depth; ++i) {
+            CreateAndProcessBlock({}, script_pub_key);
+        }
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE_EQUAL(chainstate.m_chain.Height(), fork_height + depth);
+            chainstate.ResetBlockFailureFlags(invalidate_at);
+        }
+        BlockValidationState state;
+        BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_tip_hash);
+        }
+        return fork_height;
+    };
+    const auto deep_reorg_warnings = [&] {
+        std::vector<std::string> found;
+        for (const bilingual_str& warning : m_node.warnings->GetMessages()) {
+            if (warning.original.find("Deep reorg detected") != std::string::npos) {
+                found.push_back(warning.original);
+            }
+        }
+        return found;
+    };
+
+    const int first_fork{drive_deep_reorg(/*depth=*/2)};
+    auto warnings{deep_reorg_warnings()};
+    BOOST_REQUIRE_EQUAL(warnings.size(), 1U);
+    BOOST_CHECK_MESSAGE(warnings[0].find("reorganize 2 blocks") != std::string::npos, warnings[0]);
+    BOOST_CHECK_MESSAGE(warnings[0].find("fork=" + util::ToString(first_fork) + ",") != std::string::npos, warnings[0]);
+
+    // A second, deeper reorg must replace the first alarm (one entry per
+    // warning id), not be dropped.
+    const int second_fork{drive_deep_reorg(/*depth=*/4)};
+    warnings = deep_reorg_warnings();
+    BOOST_REQUIRE_EQUAL(warnings.size(), 1U);
+    BOOST_CHECK_MESSAGE(warnings[0].find("reorganize 4 blocks") != std::string::npos, warnings[0]);
+    BOOST_CHECK_MESSAGE(warnings[0].find("fork=" + util::ToString(second_fork) + ",") != std::string::npos, warnings[0]);
 }
 
 //! FindMostWorkChain erases unattested competing HAVE_DATA tips from

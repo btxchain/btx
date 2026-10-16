@@ -1160,4 +1160,31 @@ BOOST_AUTO_TEST_CASE(ccoins_failed_flush_keeps_usage_balanced)
     BOOST_CHECK(cache.AccessCoin(outpoint) == coin);
 }
 
+BOOST_AUTO_TEST_CASE(ccoins_failed_sync_keeps_dirty_entries)
+{
+    // Same contract for Sync(): the base view's default BatchWrite() returns
+    // false without consuming the cursor, so the entry stays dirty and
+    // counted, and the cache stays usable. Sync() used to assert
+    // m_dirty_count == 0 before looking at the result, which aborted here
+    // (found by the coins_view fuzz target).
+    CCoinsView root;
+    CCoinsViewCacheTest cache{&root};
+    const COutPoint outpoint{Txid::FromUint256(m_rng.rand256()), m_rng.rand32()};
+    const Coin coin{CTxOut{1, CScript{} << m_rng.randbytes(CScriptBase::STATIC_SIZE + 1)}, 1, false};
+    cache.AddCoin(outpoint, Coin{coin}, /*possible_overwrite=*/false);
+    const size_t usage_before{cache.DynamicMemoryUsage()};
+    BOOST_CHECK_EQUAL(cache.GetDirtyCount(), 1U);
+
+    BOOST_CHECK(!cache.Sync());
+    BOOST_CHECK_EQUAL(cache.GetDirtyCount(), 1U);
+    BOOST_CHECK_EQUAL(cache.DynamicMemoryUsage(), usage_before);
+    cache.SelfTest();
+    BOOST_CHECK(cache.AccessCoin(outpoint) == coin);
+
+    // A failed Flush() after the failed Sync() keeps the same state too.
+    BOOST_CHECK(!cache.Flush());
+    BOOST_CHECK_EQUAL(cache.GetDirtyCount(), 1U);
+    cache.SelfTest();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

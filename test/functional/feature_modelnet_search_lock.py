@@ -2,22 +2,24 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
-"""A short id must not deadlock the model helper's search lock.
+"""A short id or an alias must not deadlock the model helper's search lock.
 
-getmodelreleaseeconomics and cacheencryptedmodel hold g_search_mu and then
-resolve the caller's id. A 64-hex value is not a 48-byte id, so resolution
-looks it up as an alias. That lookup used to lock the same non-recursive
-mutex again. The helper thread then stayed blocked: later search and
-economy calls timed out until the helper was killed.
+getmodelreleaseeconomics, cacheencryptedmodel, getmodeldirectoryentry and
+getmodelaliases hold g_search_mu and then resolve the caller's id. An alias,
+or a 64-hex value that is not a 48-byte id, is looked up as an alias. That
+lookup used to lock the same non-recursive mutex again. The helper thread
+then stayed blocked: later search and economy calls timed out until the
+helper was killed.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import get_datadir_path
+from test_framework.util import assert_equal, get_datadir_path
 
 MATMUL_OFF_ARGS = [
     "-regtestmatmulbindingheight=2147483647",
@@ -124,6 +126,32 @@ class ModelNetSearchLockTest(BitcoinTestFramework):
             raise AssertionError(f"getfundablemodels did not answer after the short id: {listed}")
         if self.modeld_proc.poll() is not None:
             raise AssertionError(f"btx-modeld exited {self.modeld_proc.returncode}")
+        self._check_alias_lookups(node, short_id)
+
+    def _check_alias_lookups(self, node, short_id):
+        src = Path(self.options.tmpdir) / "probe-weights.safetensors"
+        header = json.dumps({"w": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}}).encode()
+        header += b" " * (-len(header) % 8)
+        src.write_bytes(len(header).to_bytes(8, "little") + header + bytes(8))
+        node.importmodel(str(src))
+        model_id = node.listmodels()["models"][0]["model_id"]
+        alias = "lock-probe"
+        node.setmodelalias(model_id, alias)
+        replies = {}
+        for method in ("getmodelaliases", "getmodeldirectoryentry"):
+            for arg in (alias, short_id):
+                try:
+                    replies[method, arg] = getattr(node, method)(arg)
+                except JSONRPCException as exc:
+                    if exc.error.get("code") == -344 or "helper reply" in str(exc):
+                        raise AssertionError(f"{method}({arg!r}) wedged the helper: {exc}") from exc
+                    raise
+        aliases = replies["getmodelaliases", alias]["aliases"]
+        assert any(a["alias"] == alias and a["model_id"] == model_id for a in aliases), aliases
+        assert_equal(replies["getmodeldirectoryentry", alias]["model_id"], model_id)
+        searched = node.searchmodels({"text": "lock-probe", "scope": "LOCAL", "limit": 1})
+        if not isinstance(searched, dict):
+            raise AssertionError(f"searchmodels did not answer after the alias lookups: {searched}")
 
 
 if __name__ == "__main__":

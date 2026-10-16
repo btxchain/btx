@@ -639,6 +639,8 @@ private:
     mutable std::map<int32_t, FlatSigningProvider> m_map_signing_providers GUARDED_BY(cs_desc_man);
     // Cached FlatSigningProviders that include private keys (PQ key derivation is expensive).
     mutable std::map<int32_t, FlatSigningProvider> m_map_signing_providers_private GUARDED_BY(cs_desc_man);
+    // The same, expanded while the wallet was locked (may lack private keys); only used while locked.
+    mutable std::map<int32_t, FlatSigningProvider> m_map_signing_providers_private_locked GUARDED_BY(cs_desc_man);
     // Reverse map from PQ pubkey to descriptor index for O(1) lookup.
     mutable std::map<std::vector<unsigned char>, int32_t, ShortestVectorFirstComparator> m_map_pq_pubkey_to_index GUARDED_BY(cs_desc_man);
     // Fetch the SigningProvider for a given index and optionally include private keys. Called by the above functions.

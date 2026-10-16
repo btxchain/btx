@@ -26,7 +26,25 @@ struct FType {
     int n{0};
     std::vector<std::pair<std::string, FType>> members;
     std::shared_ptr<FType> elem;
+
+    // Declared here and defaulted below, once FType is complete. If they are
+    // implicit, clang with libstdc++ defines them while it instantiates
+    // std::pair<std::string, FType>, before that pair is complete, and the
+    // is_destructible check in std::vector fails.
+    FType();
+    FType(const FType&);
+    FType(FType&&) noexcept;
+    FType& operator=(const FType&);
+    FType& operator=(FType&&) noexcept;
+    ~FType();
 };
+
+FType::FType() = default;
+FType::FType(const FType&) = default;
+FType::FType(FType&&) noexcept = default;
+FType& FType::operator=(const FType&) = default;
+FType& FType::operator=(FType&&) noexcept = default;
+FType::~FType() = default;
 
 FType T_U(int bits)
 {

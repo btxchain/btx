@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/licenses/mit-license.php.
-"""Copy CUDA toolkit shared libraries next to a CUDA btxd and set RPATH $ORIGIN.
+"""Copy CUDA toolkit shared libraries next to a CUDA btxd and set RPATH $ORIGIN:$ORIGIN/../lib.
 
 libcublasLt is not provided by the NVIDIA driver. A CUDA release tarball
 that ships only btxd fails at launch with:
@@ -10,8 +10,10 @@ that ships only btxd fails at launch with:
     libcublasLt.so.13: cannot open shared object file
 
 This script copies the CUDA-toolkit DT_NEEDED libs (cublasLt and siblings)
-next to the binary and runs patchelf --set-rpath '$ORIGIN'. libcuda.so.* is
-left to the driver and is not bundled.
+next to the binary and runs patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib'.
+$ORIGIN finds the CUDA libraries; $ORIGIN/../lib keeps the packaged OpenSSL
+that the link-time RUNPATH pointed at, since --set-rpath replaces it.
+libcuda.so.* is left to the driver and is not bundled.
 
 Intended for native CUDA tarballs. Guix builds remain rpath-free; they must
 not call this.
@@ -68,7 +70,7 @@ def is_cuda_toolkit_lib(soname: str) -> bool:
 
 def patchelf_origin(path: Path) -> None:
     result = subprocess.run(
-        ["patchelf", "--force-rpath", "--set-rpath", "$ORIGIN", str(path)],
+        ["patchelf", "--force-rpath", "--set-rpath", "$ORIGIN:$ORIGIN/../lib", str(path)],
         capture_output=True,
         text=True,
         check=False,

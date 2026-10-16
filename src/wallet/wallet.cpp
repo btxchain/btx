@@ -3333,6 +3333,10 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
         for (unsigned int i = 0; i < psbtx.inputs.size(); ++i) {
             const PSBTInput& input = psbtx.inputs.at(i);
             if (PSBTInputSigned(input)) continue;
+            // A P2MR signature commits to every spent output. While another input's UTXO
+            // is missing (a multi-party PSBT the other parties have not updated yet),
+            // nothing can be signed, so the missing leaf choice is not the reason.
+            if (input.m_p2mr_leaf_script.empty() && !txdata.m_spent_outputs_ready) continue;
             CScript script;
             if (!input.witness_utxo.IsNull()) {
                 script = input.witness_utxo.scriptPubKey;

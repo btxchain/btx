@@ -972,8 +972,11 @@ BOOST_AUTO_TEST_CASE(helper_stop_interrupts_accept_loop)
     modelnet::HelperConfig cfg;
     cfg.modeldir = tmp;
     cfg.quota_bytes = 1 << 20;
-    cfg.rpc_socket = tmp / "modeld.sock";
-    ::unlink(fs::PathToString(cfg.rpc_socket).c_str());
+    // A socket under the test datadir does not fit in sun_path. Use a short
+    // private directory so the helper listens at the path this test polls.
+    char sock_dir[] = "/tmp/btx-sock-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(sock_dir) != nullptr);
+    cfg.rpc_socket = fs::PathFromString(sock_dir) / "modeld.sock";
     const int port = 39000 + (static_cast<int>(getpid()) % 500);
     cfg.bind = "127.0.0.1:" + std::to_string(port);
     std::atomic<bool> stop{false};
@@ -982,6 +985,7 @@ BOOST_AUTO_TEST_CASE(helper_stop_interrupts_accept_loop)
         stop.store(true);
         if (t.joinable()) t.join();
         ::unlink(fs::PathToString(cfg.rpc_socket).c_str());
+        ::rmdir(sock_dir);
     };
     t = std::thread([&] { modelnet::RunModelDaemon(cfg, &stop); });
     const auto t0 = std::chrono::steady_clock::now();
@@ -1012,8 +1016,11 @@ BOOST_AUTO_TEST_CASE(helper_unix_rpc_survives_peer_hup)
     modelnet::HelperConfig cfg;
     cfg.modeldir = tmp;
     cfg.quota_bytes = 1 << 20;
-    cfg.rpc_socket = tmp / "modeld.sock";
-    ::unlink(fs::PathToString(cfg.rpc_socket).c_str());
+    // A socket under the test datadir does not fit in sun_path. Use a short
+    // private directory so the helper listens at the path this test polls.
+    char sock_dir[] = "/tmp/btx-sock-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(sock_dir) != nullptr);
+    cfg.rpc_socket = fs::PathFromString(sock_dir) / "modeld.sock";
     const int port = 39500 + (static_cast<int>(getpid()) % 400);
     cfg.bind = "127.0.0.1:" + std::to_string(port);
     std::atomic<bool> stop{false};
@@ -1022,6 +1029,7 @@ BOOST_AUTO_TEST_CASE(helper_unix_rpc_survives_peer_hup)
         stop.store(true);
         if (t.joinable()) t.join();
         ::unlink(fs::PathToString(cfg.rpc_socket).c_str());
+        ::rmdir(sock_dir);
     };
     t = std::thread([&] { modelnet::RunModelDaemon(cfg, &stop); });
     const auto t0 = std::chrono::steady_clock::now();
@@ -1066,7 +1074,14 @@ BOOST_AUTO_TEST_CASE(unix_rpc_listen_path_hashes_overlong)
     }
     const fs::path sticky = fs::PathFromString("/tmp/btx-md-ok.sock");
     const fs::path sticky_mapped = modelnet::UnixRpcListenPath(sticky);
-    BOOST_CHECK(fs::PathToString(sticky_mapped).find("/tmp/btx-md-") == std::string::npos);
+    if (xdg && xdg[0] == '/') {
+        BOOST_CHECK(fs::PathToString(sticky_mapped).find("/tmp/btx-md-") == std::string::npos);
+    } else {
+        // Without XDG_RUNTIME_DIR there is no private directory to move it to,
+        // so the path comes back unchanged. ListenUnix() and
+        // UnixSocketSafeToAdopt() are what refuse it.
+        BOOST_CHECK_EQUAL(fs::PathToString(sticky_mapped), fs::PathToString(sticky));
+    }
     std::string err;
     BOOST_CHECK(!modelnet::UnixSocketSafeToAdopt(sticky, err));
     BOOST_CHECK(err.find("tmp") != std::string::npos);
@@ -1074,10 +1089,11 @@ BOOST_AUTO_TEST_CASE(unix_rpc_listen_path_hashes_overlong)
 
 BOOST_AUTO_TEST_CASE(unix_socket_world_writable_is_not_a_helper)
 {
-    const fs::path dir = m_args.GetDataDirBase() / "sock-adopt";
-    fs::create_directories(dir);
-    BOOST_REQUIRE(::chmod(fs::PathToString(dir).c_str(), 0700) == 0);
-    const fs::path sock = dir / "helper.sock";
+    // A socket under the test datadir does not fit in sun_path. mkdtemp()
+    // makes a short directory with mode 0700.
+    char sock_dir[] = "/tmp/btx-sock-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(sock_dir) != nullptr);
+    const fs::path sock = fs::PathFromString(sock_dir) / "helper.sock";
     ::unlink(fs::PathToString(sock).c_str());
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     BOOST_REQUIRE(fd >= 0);
@@ -1088,11 +1104,13 @@ BOOST_AUTO_TEST_CASE(unix_socket_world_writable_is_not_a_helper)
     std::strncpy(addr.sun_path, sp.c_str(), sizeof(addr.sun_path) - 1);
     BOOST_REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
     BOOST_REQUIRE(::listen(fd, 1) == 0);
-    BOOST_REQUIRE(::fchmod(fd, 0666) == 0);
+    // Set the mode on the path. fchmod() on the socket fd does not reach it:
+    // Linux returns 0 and changes nothing, macOS returns EINVAL.
+    BOOST_REQUIRE(::chmod(sp.c_str(), 0666) == 0);
     std::string err;
     BOOST_CHECK(!modelnet::UnixSocketSafeToAdopt(sock, err));
     BOOST_CHECK(err.find("world-writable") != std::string::npos);
-    BOOST_REQUIRE(::fchmod(fd, 0600) == 0);
+    BOOST_REQUIRE(::chmod(sp.c_str(), 0600) == 0);
     BOOST_CHECK(modelnet::UnixSocketSafeToAdopt(sock, err));
 
     const int cli = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1102,6 +1120,7 @@ BOOST_AUTO_TEST_CASE(unix_socket_world_writable_is_not_a_helper)
     ::close(cli);
     ::close(fd);
     ::unlink(sp.c_str());
+    ::rmdir(sock_dir);
 }
 
 BOOST_AUTO_TEST_CASE(helper_unix_rpc_connects_when_datadir_path_is_too_long)

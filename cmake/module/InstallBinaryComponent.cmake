@@ -35,22 +35,20 @@ endfunction()
 # relative path has to be a link-time DT_RUNPATH: patching the binary after
 # codesign invalidates the signature, and Ubuntu 24.04's libssl.so.3 does
 # not provide OPENSSL_3.2.0. The parent sets CMAKE_SKIP_INSTALL_RPATH, so
-# SKIP_INSTALL_RPATH must be turned back off or install drops the path.
-# BUILD_WITH_INSTALL_RPATH puts it on the build-tree binary the packager copies.
+# INSTALL_RPATH is never written; hand the path to the linker instead. The
+# packager copies the build-tree binary. BUILD_WITH_INSTALL_RPATH keeps CMake
+# from adding its own build-tree paths (a non-system OpenSSL prefix, say) to
+# that binary. Guix configures with CMAKE_SKIP_BUILD_RPATH and check-symbols
+# refuses any RUNPATH, so those binaries stay without one.
 function(btx_set_packaged_lib_runpath target_name)
-  if(NOT UNIX OR NOT TARGET ${target_name})
+  if(NOT UNIX OR NOT TARGET ${target_name} OR CMAKE_SKIP_BUILD_RPATH)
     return()
   endif()
   if(APPLE)
     # Mach-O has no $ORIGIN. @executable_path/../lib is the same bin/ -> lib/ hop.
-    set(_btx_runpath "@executable_path/../lib")
+    target_link_options(${target_name} PRIVATE "LINKER:-rpath,@executable_path/../lib")
   else()
-    set(_btx_runpath "\$ORIGIN/../lib")
+    target_link_options(${target_name} PRIVATE "LINKER:--enable-new-dtags,-rpath,\$ORIGIN/../lib")
   endif()
-  set_target_properties(${target_name} PROPERTIES
-    BUILD_RPATH "${_btx_runpath}"
-    INSTALL_RPATH "${_btx_runpath}"
-    BUILD_WITH_INSTALL_RPATH TRUE
-    SKIP_INSTALL_RPATH FALSE
-  )
+  set_target_properties(${target_name} PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
 endfunction()

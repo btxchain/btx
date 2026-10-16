@@ -304,8 +304,11 @@ bool CCoinsViewCache::Sync()
 {
     auto cursor{CoinsViewCacheCursor(cachedCoinsUsage, m_dirty_count, m_sentinel, cacheCoins, /*will_erase=*/false)};
     bool fOk = base->BatchWrite(cursor, hashBlock);
-    assert(m_dirty_count == 0);
     if (fOk) {
+        // Like Flush(): a base view that fails the write (the CCoinsView
+        // default returns false without walking the cursor) leaves the entries
+        // dirty, and m_dirty_count still counts them.
+        assert(m_dirty_count == 0);
         if (m_sentinel.second.Next() != &m_sentinel) {
             /* BatchWrite must clear flags of all entries */
             throw std::logic_error("Not all unspent flagged entries were cleared");

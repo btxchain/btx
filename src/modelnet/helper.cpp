@@ -505,6 +505,11 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         err = "generate pipe";
         return false;
     }
+#if defined(__linux__)
+    // The child compares its parent with this pid, not with 1: a helper that
+    // is itself pid 1 (a container entrypoint) is a live parent.
+    const pid_t parent = getpid();
+#endif
     const pid_t pid = fork();
     if (pid < 0) {
         close(inpipe[0]);
@@ -519,7 +524,7 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         // Match the helper's parent-death watch so a crashed parent cannot
         // leave the adapter running. A new process group lets the timeout
         // signal the adapter and any process it forks.
-        if (prctl(PR_SET_PDEATHSIG, SIGTERM) == 0 && getppid() == 1) _exit(127);
+        if (prctl(PR_SET_PDEATHSIG, SIGTERM) == 0 && getppid() != parent) _exit(127);
 #endif
         // Failure leaves the child in the helper's group; the timeout then
         // signals the pid directly. Do not skip exec.
@@ -1444,7 +1449,10 @@ int ListenUnix(fs::path& path, std::string& err)
         close(fd);
         return -1;
     }
-    if (::fchmod(fd, 0600) != 0 || listen(fd, 16) != 0) {
+    // fchmod() on a bound AF_UNIX socket does not reach the path: Linux
+    // returns 0 and leaves the mode unchanged, macOS returns EINVAL. Set the
+    // mode on the path; the 0700 parent stays the access check.
+    if (::chmod(p.c_str(), 0600) != 0 || listen(fd, 16) != 0) {
         err = "unix socket mode";
         close(fd);
         ::unlink(p.c_str());
@@ -7273,7 +7281,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             result.pushKV("global_complete", false);
             return true;
         }
-        const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+        const Digest48 id = ResolveUserIdLocked(Arg(0).get_str(), err);
         SearchHit h;
         const auto* r = g_search_idx.Get(id);
         if (r) h.rec = *r;
@@ -7354,7 +7362,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         };
         std::lock_guard<std::mutex> lock(g_search_mu);
         if (Arg(0).isStr() && !Arg(0).get_str().empty()) {
-            const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+            const Digest48 id = ResolveUserIdLocked(Arg(0).get_str(), err);
             if (const auto* r = g_search_idx.Get(id)) push_aliases(*r);
         } else {
             for (const auto& r : g_search_idx.All()) push_aliases(r);

@@ -3096,11 +3096,24 @@ std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetSigningProvid
         if (it_priv != m_map_signing_providers_private.end()) {
             return std::make_unique<FlatSigningProvider>(it_priv->second);
         }
+        if (m_storage.IsLocked()) {
+            auto it_locked = m_map_signing_providers_private_locked.find(index);
+            if (it_locked != m_map_signing_providers_private_locked.end()) {
+                return std::make_unique<FlatSigningProvider>(it_locked->second);
+            }
+        }
         FlatSigningProvider master_provider;
         master_provider.keys = GetKeys();
         m_wallet_descriptor.descriptor->ExpandPrivate(index, master_provider, *out_keys);
-        // Cache the fully-expanded provider (includes PQ private keys where available)
-        m_map_signing_providers_private[index] = *out_keys;
+        // Cache the fully-expanded provider (includes PQ private keys where available).
+        // While the wallet is locked GetKeys() is empty and, before the first unlock, the
+        // PQ seeds are not loaded, so the provider can lack private keys. Keep it apart:
+        // it must not be returned once the wallet is unlocked.
+        if (m_storage.IsLocked()) {
+            m_map_signing_providers_private_locked[index] = *out_keys;
+        } else {
+            m_map_signing_providers_private[index] = *out_keys;
+        }
     }
 
     return out_keys;
@@ -3373,6 +3386,7 @@ void DescriptorScriptPubKeyMan::SetCache(const DescriptorCache& cache)
     // Invalidate caches that depend on the descriptor cache
     m_map_signing_providers.clear();
     m_map_signing_providers_private.clear();
+    m_map_signing_providers_private_locked.clear();
     m_map_pq_pubkey_to_index.clear();
     std::set<CScript> new_spks;
     m_wallet_descriptor.cache = cache;
