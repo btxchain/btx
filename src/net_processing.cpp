@@ -20789,6 +20789,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
     // Model introduction is a bounded public-hint channel only. It must
     // never hold cs_main, fill monetary AddrMan, or stall validation.
+    // First-peer discovery is chainparams ModelDNSSeeds() (empty until a
+    // crawl publishes DNS names), resolved from init when -modelpeer is
+    // unset. This channel stays hint-only: not connecting, not spending.
     if (msg_type == NetMsgType::SENDMODELS || msg_type == NetMsgType::GETMDPEERS ||
         msg_type == NetMsgType::MDPEERS) {
 #ifdef ENABLE_MODELNET

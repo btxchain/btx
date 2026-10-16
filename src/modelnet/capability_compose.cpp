@@ -7,6 +7,7 @@
 // Coordinator must drop the placeholder copies in capability_exec.cpp.
 
 #include <modelnet/capability.h>
+#include <modelnet/admission_routes.h>
 
 #include <span.h>
 
@@ -269,6 +270,22 @@ bool ComposeRecipeAdapters(const CapabilityRecipe& recipe, Digest48& composition
         err_code = "NONCANONICAL_PAYLOAD";
         return false;
     }
+    if (!base.IsNull()) {
+        std::string admission_code;
+        if (!LivePathAllowed(base.Hex(), false, admission_code)) {
+            err_code = admission_code;
+            err = "admission denied";
+            return false;
+        }
+    }
+    for (const std::string& adapter : adapters) {
+        std::string admission_code;
+        if (!LivePathAllowed(adapter, false, admission_code)) {
+            err_code = admission_code;
+            err = "admission denied";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -277,6 +294,13 @@ bool PinResidentBase(const Digest48& base_id, Span<const unsigned char> bytes, s
     if (base_id.IsNull()) {
         err = "base id";
         return false;
+    }
+    {
+        std::string admission_code;
+        if (!LivePathAllowed(base_id.Hex(), false, admission_code)) {
+            err = admission_code;
+            return false;
+        }
     }
     std::lock_guard<std::mutex> lock(g_compose_mu);
     ResidentBase& r = g_resident[base_id.Hex()];
@@ -306,7 +330,15 @@ int ResidentAdapterAttachCount(const Digest48& base_id)
 bool ActivateAdapterOnResidentBase(const Digest48& base_id, const Digest48& adapter_id,
                                     const Digest48& adapter_base_binding, std::string& err_code, std::string& err)
 {
-    (void)adapter_id;
+    {
+        std::string admission_code;
+        if (!LivePathAllowed(base_id.Hex(), false, admission_code) ||
+            !LivePathAllowed(adapter_id.Hex(), false, admission_code)) {
+            err_code = admission_code;
+            err = "admission denied";
+            return false;
+        }
+    }
     if (!AttachExactBaseAdapter(base_id, adapter_base_binding, err_code, err)) return false;
     std::lock_guard<std::mutex> lock(g_compose_mu);
     auto it = g_resident.find(base_id.Hex());
@@ -323,6 +355,13 @@ bool BindSessionComposition(const std::string& session_id, const std::vector<std
     if (session_id.empty()) {
         err = "session";
         return false;
+    }
+    for (const std::string& adapter : adapters) {
+        std::string admission_code;
+        if (!LivePathAllowed(adapter, false, admission_code)) {
+            err = admission_code;
+            return false;
+        }
     }
     if (!ComposeLoraOrder(adapters, scales, composition_id, err)) return false;
     std::lock_guard<std::mutex> lock(g_compose_mu);
@@ -349,6 +388,19 @@ bool MergeAdapterRepresentation(const Digest48& base_id, const std::vector<unsig
 {
     merged_id = {};
     merged_bytes.clear();
+    {
+        std::string admission_code;
+        if (!LivePathAllowed(base_id.Hex(), false, admission_code)) {
+            err = admission_code;
+            return false;
+        }
+        for (const std::string& adapter : adapters) {
+            if (!LivePathAllowed(adapter, false, admission_code)) {
+                err = admission_code;
+                return false;
+            }
+        }
+    }
     UniValue base_obj(UniValue::VOBJ);
     base_obj.pushKV("base", base_id.Hex());
     base_obj.pushKV("merged", false);

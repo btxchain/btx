@@ -4,6 +4,7 @@
 
 #include <modelnet/catalog.h>
 
+#include <modelnet/admission_routes.h>
 #include <modelnet/crypto.h>
 #include <modelnet/piece_ranges.h>
 #include <modelnet/resource_uri.h>
@@ -98,6 +99,22 @@ bool AdmissionImpliesStructureVerified(AdmissionLevel a)
            v <= static_cast<uint8_t>(AdmissionLevel::SEEDING);
 }
 
+bool CatalogRouteAllows(const CatalogEntry& e, bool generate, std::string& admission)
+{
+    const bool hash_ok = e.bytes_verified || AdmissionImpliesBytesVerified(e.admission);
+    const auto allow = [&](const std::string& id) {
+        return generate ? RouteMayGenerate(id, hash_ok, admission) : RouteMayServe(id, hash_ok, admission);
+    };
+    if (!allow(e.model_id.Hex())) return false;
+    if (e.artifact_id != e.model_id && !allow(e.artifact_id.Hex())) return false;
+    return true;
+}
+
+void AssignRouteErr(const std::string& admission, std::string& err)
+{
+    err = admission.empty() ? std::string("BTX035_ADMISSION_DENIED") : admission;
+}
+
 } // namespace
 
 namespace {
@@ -141,6 +158,7 @@ UniValue CapabilitiesObject()
     c.pushKV("generatemodel", true);
     c.pushKV("getmodelhostprofile", true);
     c.pushKV("unhostmodel", true);
+    c.pushKV("removemodel", true);
     c.pushKV("removemodelalias", true);
     c.pushKV("openmodelshare", true);
     c.pushKV("seedmodel", true);
@@ -324,6 +342,11 @@ ModelCatalog::ModelCatalog(fs::path dir, uint64_t quota_bytes)
 
 void ModelCatalog::DemandSeedLocked(CatalogEntry& e)
 {
+    std::string admission;
+    if (!CatalogRouteAllows(e, false, admission)) {
+        e.seeded = false;
+        return;
+    }
     EnsureSafetyBound(m_dir);
     if (GlobalSafety().SubjectBlocked(e.model_id.Hex()) || GlobalSafety().SubjectBlocked(e.artifact_id.Hex())) {
         e.seeded = false;
@@ -432,6 +455,46 @@ bool ModelCatalog::EnforceQuota(uint64_t need_bytes, std::string& err)
         }
         return false;
     }
+    return PersistLocked(err);
+}
+
+bool ModelCatalog::TransferActive(const Digest48& model_id) const
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    for (const auto& m : m_models) {
+        if (m.model_id == model_id || m.artifact_id == model_id) {
+            return m_active_artifacts.count(m.artifact_id) > 0;
+        }
+    }
+    return false;
+}
+
+bool ModelCatalog::RemoveModel(const Digest48& model_id, Digest48& artifact_out, std::string& err)
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    const auto it = std::find_if(m_models.begin(), m_models.end(), [&](const CatalogEntry& m) {
+        return m.model_id == model_id || m.artifact_id == model_id;
+    });
+    if (it == m_models.end()) {
+        err = "unknown model";
+        return false;
+    }
+    const Digest48 artifact = it->artifact_id;
+    if (m_active_artifacts.count(artifact)) {
+        err = "model is in use; cancel its download or wait for the transfer to finish";
+        return false;
+    }
+    const auto sharing = std::count_if(m_models.begin(), m_models.end(), [&](const CatalogEntry& m) {
+        return m.artifact_id == artifact;
+    });
+    if (sharing == 1) {
+        if (!m_store.RemoveArtifact(artifact, err)) return false;
+        DropPieceTreeCache(artifact);
+    }
+    m_store.Unpin(it->model_id);
+    m_store.Unpin(artifact);
+    m_models.erase(it);
+    artifact_out = artifact;
     return PersistLocked(err);
 }
 
@@ -748,6 +811,11 @@ bool ModelCatalog::Seed(const Digest48& model_id, bool on, std::string& err)
     for (auto& m : m_models) {
         if (m.model_id == model_id) {
             if (on) {
+                std::string admission;
+                if (!CatalogRouteAllows(m, false, admission)) {
+                    AssignRouteErr(admission, err);
+                    return false;
+                }
                 EnsureSafetyBound(m_dir);
                 if (GlobalSafety().SubjectBlocked(m.model_id.Hex()) || GlobalSafety().SubjectBlocked(m.artifact_id.Hex())) {
                     err = "safety";
@@ -1029,6 +1097,28 @@ bool ModelCatalog::GetVerifiedPiece(const Digest48& artifact, uint32_t file_inde
                                       std::vector<unsigned char>& bytes, std::vector<Digest48>& proof,
                                       uint64_t& file_size, std::string& err) const
 {
+    bool known = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        for (const auto& m : m_models) {
+            if (!(m.artifact_id == artifact || m.model_id == artifact)) continue;
+            known = true;
+            std::string admission;
+            if (!CatalogRouteAllows(m, false, admission)) {
+                AssignRouteErr(admission, err);
+                return false;
+            }
+            break;
+        }
+    }
+    if (!known) {
+        std::string admission;
+        if (!RouteMayServe(artifact.Hex(), true, admission)) {
+            AssignRouteErr(admission, err);
+            return false;
+        }
+    }
+
     Digest48 pieces_root;
     std::vector<Digest48> cached_proof;
     bool have_tree = false;
@@ -1212,6 +1302,11 @@ bool ModelCatalog::MaterializeCheckout(const Digest48& model_or_artifact, const 
     CatalogEntry e;
     if (!Find(model_or_artifact, e)) {
         err = "not found";
+        return false;
+    }
+    std::string admission;
+    if (!CatalogRouteAllows(e, true, admission)) {
+        AssignRouteErr(admission, err);
         return false;
     }
     if (e.incomplete) {

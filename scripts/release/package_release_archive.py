@@ -85,18 +85,21 @@ PLATFORM_CONFIGS["linux-x86_64-cpu"] = dict(PLATFORM_CONFIGS["linux-x86_64"])
 PLATFORM_CONFIGS["linux-x86_64-cuda"] = dict(PLATFORM_CONFIGS["linux-x86_64-cuda12"])
 PLATFORM_CONFIGS["macos-arm64-metal"] = dict(PLATFORM_CONFIGS["macos-arm64"])
 SUPPORT_FILES = load_support_files()
-# Packaged next to btxd when present (0.34.7 Native Model Network + 0.34.8
-# first-run / hosted HCP / CRL planes + Metal probe).
+# GUI is optional unless --require-gui. Model helpers are a separate list:
+# present in the build means the archive must contain them; absent means a
+# logged skip (modelnet configured off), never a silent omission.
 OPTIONAL_SIBLING_BINARIES = (
     "btx-qt",
+)
+MODEL_HELPER_BINARIES = (
     "btx-modeld",
-    "btx-modelcheck",
-    "btx-open",
-    "btx-matmul-backend-info",
     "btx-hcpd",
     "btx-hosted",
+    "btx-open",
     "btx-capability",
     "btx-capabilityd",
+    "btx-modelcheck",
+    "btx-matmul-backend-info",
 )
 
 LINUX_WRAPPER = r"""#!/bin/sh
@@ -445,6 +448,37 @@ def resolve_optional_sibling_binaries(btxd_path: Path, exe_suffix: str) -> list[
     return found
 
 
+def resolve_model_helper_binaries(
+    btxd_path: Path, exe_suffix: str
+) -> tuple[list[tuple[Path, str]], list[str]]:
+    """Include model tools that the build actually produced.
+
+    CMake writes btxd and btx-matmul-backend-info in src/, and the modelnet
+    tools in src/modelnet/. A name in neither place is recorded as skipped.
+    That is not a package failure: modelnet may be configured off. The skip
+    is not added to included_paths.
+    """
+    found: list[tuple[Path, str]] = []
+    skipped: list[str] = []
+    search_dirs = (
+        btxd_path.parent,
+        btxd_path.parent / "modelnet",
+    )
+    for name in MODEL_HELPER_BINARIES:
+        filename = f"{name}{exe_suffix}"
+        match = next((directory / filename for directory in search_dirs if (directory / filename).is_file()), None)
+        if match is None:
+            skipped.append(name)
+            print(
+                f"package_release_archive: skip {name} "
+                "(absent from the build directory; not shipped)",
+                file=sys.stderr,
+            )
+            continue
+        found.append((match, filename))
+    return found, skipped
+
+
 def resolve_btx_util_path(explicit_path: Path | None, btxd_path: Path, btx_cli_path: Path, exe_suffix: str) -> Path:
     if explicit_path is not None:
         return ensure_input_file(explicit_path, "btx-util binary")
@@ -494,7 +528,7 @@ def stage_release_tree(
     source_root: Path,
     temp_root: Path,
     require_gui: bool = False,
-) -> tuple[Path, list[str]]:
+) -> tuple[Path, list[str], list[str]]:
     config = PLATFORM_CONFIGS[platform_id]
     release_root = temp_root / f"btx-{version}"
     included: list[str] = []
@@ -503,6 +537,9 @@ def stage_release_tree(
     libexec_dir = release_root / "libexec"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
+    model_helpers, skipped_binaries = resolve_model_helper_binaries(
+        btxd_path, config["exe_suffix"]
+    )
     binary_pairs = [
         (ensure_input_file(btxd_path, "btxd binary"), f"btxd{config['exe_suffix']}"),
         (ensure_input_file(btx_cli_path, "btx-cli binary"), f"btx-cli{config['exe_suffix']}"),
@@ -511,6 +548,7 @@ def stage_release_tree(
             f"btx-util{config['exe_suffix']}",
         ),
         *resolve_optional_sibling_binaries(btxd_path, config["exe_suffix"]),
+        *model_helpers,
     ]
     verify_shipped_btxd(btxd_path)
     verify_shipped_cli(btx_cli_path)
@@ -611,6 +649,10 @@ def stage_release_tree(
             metallib_by_name["matmul_accel_kernels.metallib"] = matmul_metallib_path
         if oracle_metallib_path is not None:
             metallib_by_name["oracle_accel_kernels.metallib"] = oracle_metallib_path
+        # Copy metallibs next to the real binary (libexec/btxd.real looks in
+        # <executable_dir>/metal/). Do not rewrite path strings inside the
+        # Mach-O: those paths are compile-time (BTX_*_METALLIB_PATH) and must
+        # already be final before codesign.
         metal_dir = libexec_dir / "metal"
         for dest_name, source_path in sorted(metallib_by_name.items()):
             source = ensure_input_file(source_path, dest_name)
@@ -619,6 +661,12 @@ def stage_release_tree(
             shutil.copy2(source, destination)
             destination.chmod(0o644)
             included.append(str(destination.relative_to(release_root)))
+        if metallib_by_name:
+            print(
+                "package_release_archive: copied Metal libraries to libexec/metal; "
+                "btxd was not rewritten",
+                file=sys.stderr,
+            )
 
     for relative_path in SUPPORT_FILES:
         source = ensure_input_file(source_root / relative_path, relative_path)
@@ -627,7 +675,7 @@ def stage_release_tree(
         shutil.copy2(source, destination)
         included.append(str(destination.relative_to(release_root)))
 
-    return release_root, sorted(included)
+    return release_root, sorted(included), skipped_binaries
 
 
 def normalized_tarinfo(tarinfo: tarfile.TarInfo, epoch: int) -> tarfile.TarInfo:
@@ -685,7 +733,7 @@ def main(argv: list[str]) -> int:
 
     with tempfile.TemporaryDirectory(prefix="btx-release-archive-") as temp_dir:
         temp_root = Path(temp_dir)
-        release_root, included_paths = stage_release_tree(
+        release_root, included_paths, skipped_binaries = stage_release_tree(
             version=args.version,
             platform_id=args.platform_id,
             btxd_path=Path(args.btxd).expanduser().resolve(),
@@ -710,6 +758,7 @@ def main(argv: list[str]) -> int:
             "platform_id": args.platform_id,
             "archive_format": PLATFORM_CONFIGS[args.platform_id]["archive_format"],
             "included_paths": included_paths,
+            "skipped_binaries": skipped_binaries,
         },
         sys.stdout,
         indent=2,

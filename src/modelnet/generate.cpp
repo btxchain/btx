@@ -9,6 +9,7 @@
 
 #include <modelnet/generate.h>
 
+#include <modelnet/admission_routes.h>
 #include <modelnet/qualification.h>
 #include <util/fs.h>
 
@@ -163,6 +164,14 @@ void WalkCheckout(const fs::path& dir, int depth, ArtifactGenerateView& v)
     }
 }
 
+bool GenerateRouteAllows(const std::string& model_id, std::string& reason)
+{
+    std::string admission;
+    if (RouteMayGenerate(model_id, true, admission)) return true;
+    reason = admission.empty() ? std::string("BTX035_ADMISSION_DENIED") : admission;
+    return false;
+}
+
 } // namespace
 
 bool SafeTensorsArchitectureIsHostCompatible(const std::string& architecture)
@@ -283,6 +292,7 @@ bool ArtifactCompatibleWithHost(const ArtifactGenerateView& art,
                                 const HostGenerateProfile& host,
                                 std::string& reason)
 {
+    if (!GenerateRouteAllows(art.weights_path, reason)) return false;
     if (art.pickle_or_executable || art.format == GenerateFormat::Unsafe) {
         reason = "unsafe_format";
         return false;
@@ -320,6 +330,8 @@ bool ArtifactCompatibleWithHost(const ArtifactGenerateView& art,
 
 std::string PickGenerateAdapter(const ArtifactGenerateView& art, const HostGenerateProfile& host)
 {
+    std::string denied;
+    if (!GenerateRouteAllows(art.weights_path, denied)) return {};
     if (art.format == GenerateFormat::Exl3) {
         return host.exl3_cli ? host.exl3_cli_path : std::string{};
     }

@@ -186,6 +186,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "getbalance", 1, "minconf" },
     { "getbalance", 2, "include_watchonly" },
     { "getbalance", 3, "avoid_reuse" },
+    { "getbalanceatheight", 0, "height" },
     { "getblockfrompeer", 1, "peer_id" },
     { "getblockfrompeer", 1, "nodeid" },
     { "getblockhash", 0, "height" },

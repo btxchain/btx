@@ -170,12 +170,8 @@ bool ParseP2MRHTLCSha256LegacyLeaf(
     PQAlgorithm& claimant_algo,
     std::vector<unsigned char>& claimant_pubkey);
 
-/** True only for the current SHA-256 claim leaf, whose bytecode commits
- *  OP_SIZE 32 OP_EQUALVERIFY. Legacy SHA-256 and HASH160 htlc_tx leaves are
- *  not included: they have no length pin, and a matching preimage of any
- *  length stays consensus-valid. SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 uses this
- *  as defense in depth for the new format; that leaf's own script rejects a
- *  non-32-byte preimage with or without the flag.
+/** True for a transaction-bound HTLC claim leaf whose preimage must be
+ *  exactly 32 bytes. The current SHA-256 leaf also checks that in-script.
  */
 bool P2MRClaimLeafPinsPreimageLength(Span<const unsigned char> script);
 

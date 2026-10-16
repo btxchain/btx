@@ -8,6 +8,7 @@
 #include <rpc/util.h>
 #include <script/script.h>
 #include <util/moneystr.h>
+#include <wallet/balance_watch.h>
 #include <wallet/coincontrol.h>
 #include <wallet/receive.h>
 #include <wallet/rpc/util.h>
@@ -470,6 +471,8 @@ RPCHelpMan getbalances()
                 {RPCResult::Type::BOOL, "chain_stale", "True when this wallet's node is frozen behind a known-heavier or much-longer header chain. Do not credit deposits from this view until false"},
                 {RPCResult::Type::NUM, "behind_best_header", "max(0, followed headers - connected blocks)"},
                 {RPCResult::Type::BOOL, "competing_heavier_header", "True when the followed header has more chainwork than the connected tip and is not on the same chain"},
+                {RPCResult::Type::BOOL, "watch_ready", "True when the balance watch has reached the chain tip and the wallet is not scanning"},
+                {RPCResult::Type::NUM, "blocks_behind", "Blocks the wallet is behind the chain tip when both heights are known, otherwise 0"},
                 RESULT_LAST_PROCESSED_BLOCK,
             }
             },
@@ -485,6 +488,10 @@ RPCHelpMan getbalances()
     // Make sure the results are valid at least up to the most recent block
     // the user could have gotten from another RPC command prior to now
     wallet.BlockUntilSyncedToCurrentChain();
+
+    // Read the watch before cs_wallet. Status asks the chain for its tip,
+    // and the chain lock is not taken while the wallet lock is held.
+    const BalanceWatchStatus watch{GetBalanceWatchStatus(wallet, wallet.chain())};
 
     LOCK(wallet.cs_wallet);
 
@@ -527,6 +534,8 @@ RPCHelpMan getbalances()
     balances.pushKV("settlement_reorg_hold_until_time", wallet.GetReorgHoldUntilTime());
     balances.pushKV("settlement_reorg_hold_remaining_seconds", wallet.GetReorgHoldRemainingSeconds());
     AppendChainStaleness(balances, wallet);
+    balances.pushKV("watch_ready", watch.ready);
+    balances.pushKV("blocks_behind", watch.blocks_behind);
     AppendLastProcessedBlock(balances, wallet);
     return balances;
 },

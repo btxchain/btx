@@ -26,6 +26,8 @@ add_executable(test_btx
   blockencodings_tests.cpp
   blockfilter_index_tests.cpp
   blockfilter_tests.cpp
+  lightwatch_tests.cpp
+  ../lightwatch.cpp
   cfilter_race_tests.cpp
   blockmanager_tests.cpp
   bloom_tests.cpp
@@ -581,6 +583,40 @@ if(WITH_MODELNET)
     modelnet_store2_tests.cpp
     modelnet_cloud_tests.cpp
     modelnet_bounty_tests.cpp
+    modelnet_035_codec_tests.cpp
+    modelnet_035_envver_tests.cpp
+    modelnet_035_identity_tests.cpp
+    modelnet_035_transport_tests.cpp
+    modelnet_035_git_tests.cpp
+    modelnet_035_workspace_tests.cpp
+    modelnet_035_research_tests.cpp
+    modelnet_035_admission_tests.cpp
+    modelnet_035_runtime_tests.cpp
+    modelnet_035_wan_tests.cpp
+    modelnet_035_route_tests.cpp
+    modelnet_035_workspace_git_tests.cpp
+    modelnet_035_discovery_tests.cpp
+    modelnet_035_training_tests.cpp
+    modelnet_035_launch_tests.cpp
+    modelnet_035_complete_tests.cpp
+    modelnet_035_disk_tests.cpp
+    modelnet_035_ancestry_tests.cpp
+    modelnet_035_session_tests.cpp
+    modelnet_035_grant_tests.cpp
+    modelnet_035_surface_tests.cpp
+    modelnet_035_lab_api_tests.cpp
+    modelnet_035_peer_route_tests.cpp
+    modelnet_035_e2e_gate_tests.cpp
+    modelnet_035_wire_limit_tests.cpp
+    modelnet_035_assurance_tests.cpp
+    modelnet_035_gateway_tests.cpp
+    modelnet_035_release_tests.cpp
+    modelnet_035_research_gate_tests.cpp
+    modelnet_035_store_tests.cpp
+    modelnet_035_wan_endpoint_tests.cpp
+    modelnet_035_remaining_tests.cpp
+    modelnet_035_journey_tests.cpp
+    modelnet_035_live_path_tests.cpp
     modelnet_submandate_tests.cpp
     modelnet_bounty_script_spend_tests.cpp
     modelnet_economy_tests.cpp

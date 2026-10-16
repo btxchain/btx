@@ -344,10 +344,19 @@ def verify_binary(path: Path) -> str:
 
 
 def packaged_openssl_libdir(path: Path) -> Path | None:
-    """libexec/*.real ships OpenSSL 3.x in ../lib (bin/btxd wrapper LD_LIBRARY_PATH)."""
-    if path.parent.name != "libexec" or not path.name.endswith(".real"):
+    """OpenSSL 3.x ships in <prefix>/lib for both archive layouts.
+
+    Old: libexec/<tool>.real, with the bin/ wrapper exporting LD_LIBRARY_PATH.
+    rc1: the ELF or Mach-O is directly in bin/, and libraries are in lib/.
+    """
+    prefix: Path | None = None
+    if path.parent.name == "libexec" and path.name.endswith(".real"):
+        prefix = path.parent.parent
+    elif path.parent.name == "bin":
+        prefix = path.parent.parent
+    if prefix is None:
         return None
-    libdir = path.parent.parent / "lib"
+    libdir = prefix / "lib"
     if (libdir / "libssl.so.3").is_file():
         return libdir
     return None

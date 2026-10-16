@@ -675,8 +675,8 @@ bool ModelStore::MaterializeFile(const Digest48& artifact, uint32_t file_index, 
         std::random_device rd;
         for (unsigned char& b : rnd) b = static_cast<unsigned char>(rd());
     }
-    const fs::path tmp = dest.parent_path() / fs::PathFromString(fs::PathToString(dest.filename()) + "." +
-                                                                 HexStr(Span<const unsigned char>{rnd, sizeof(rnd)}) + ".tmp");
+    const fs::path tmp = fs::path{dest.parent_path()} / fs::path{fs::PathFromString(
+        fs::PathToString(dest.filename()) + "." + HexStr(Span<const unsigned char>{rnd, sizeof(rnd)}) + ".tmp")};
     const std::string tmp_s = fs::PathToString(tmp);
     struct stat st {};
     if (::lstat(tmp_s.c_str(), &st) == 0) {

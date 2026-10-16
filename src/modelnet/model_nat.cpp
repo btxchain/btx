@@ -265,6 +265,47 @@ bool ValidateRelayConnect(const RelayConnectRequest& req, bool relay_enabled, st
     return true;
 }
 
+bool ModelDnsNameAllowed(const std::string& seed)
+{
+    if (seed.empty() || seed.size() > 253) return false;
+    std::string name = seed;
+    if (name.back() == '.') name.pop_back();
+    if (name.empty() || name.front() == '.' || name.back() == '.') return false;
+    bool has_alpha = false;
+    for (unsigned char c : name) {
+        if (c == '.') continue;
+        if (c >= '0' && c <= '9') continue;
+        if (c == '-') continue;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+            has_alpha = true;
+            continue;
+        }
+        return false;
+    }
+    return has_alpha;
+}
+
+std::vector<std::string> ModelContactsFromDnsSeeds(const std::vector<std::string>& seeds, uint16_t port,
+                                                   const ModelDnsLookup& lookup)
+{
+    std::vector<std::string> out;
+    if (!lookup || seeds.empty()) return out;
+    for (const auto& seed : seeds) {
+        std::string name = seed;
+        if (!name.empty() && name.back() == '.') name.pop_back();
+        if (!ModelDnsNameAllowed(name)) continue;
+        for (const auto& addr : lookup(name)) {
+            if (!addr.IsValid() || addr.IsBindAny() || addr.IsLocal()) continue;
+            if (addr.IsIPv6()) {
+                out.push_back("[" + addr.ToStringAddr() + "]:" + std::to_string(port));
+            } else {
+                out.push_back(addr.ToStringAddr() + ":" + std::to_string(port));
+            }
+        }
+    }
+    return out;
+}
+
 bool ValidateRendezvous(const std::string& endpoint, const std::string& expected_id,
                          const std::string& presented_id, std::string& err)
 {

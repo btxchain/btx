@@ -7,6 +7,7 @@
 #include <common/args.h>
 #include <modelnet/catalog.h>
 #include <modelnet/helper.h>
+#include <modelnet/research_rpc.h>
 #include <modelnet/bridge.h>
 #include <modelnet/economy.h>
 #include <modelnet/policy.h>
@@ -2131,6 +2132,42 @@ PWC_RPC(verifycomputeaccessgrant, "Check a ComputeAccessGrant signature, trusted
 PWC_RPC(getcomputesigningidentity, "Return the local application signing identity. Not a wallet key.")
 #undef PWC_RPC
 
+static RPCHelpMan lab035()
+{
+    return RPCHelpMan{
+        "lab035",
+        "Dispatch one local lab035 method. Research authority does not spend a wallet.\n",
+        {
+            {"method", RPCArg::Type::STR, RPCArg::Optional::NO, "lab035 method name"},
+            {"request", RPCArg::Type::STR, RPCArg::Optional::NO, "request object or JSON string", RPCArgOptions{.skip_type_check = true}},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "method result"}}},
+        RPCExamples{HelpExampleCli("lab035", "lab035.git.digest '{\"kind\":\"blob\",\"content\":\"a\"}'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+            std::string request_json;
+            if (request.params[1].isStr()) {
+                request_json = request.params[1].get_str();
+            } else if (request.params[1].isObject()) {
+                request_json = request.params[1].write();
+            } else {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "BTX035_INVALID_SCHEMA");
+            }
+            std::string response_json;
+            std::string err;
+            if (!modelnet::DispatchLab035(request.params[0].get_str(), request_json, response_json, err)) {
+                if (err.empty()) err = "BTX035_NOT_IMPLEMENTED";
+                throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            }
+            UniValue parsed;
+            if (!parsed.read(response_json) || !parsed.isObject() || parsed.empty()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "BTX035_INVALID_SCHEMA");
+            }
+            return parsed;
+        },
+    };
+}
+
 void RegisterModelNetRPCCommands(CRPCTable& t)
 {
 #ifdef ENABLE_MODELNET
@@ -2466,6 +2503,7 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &getcomputeaccessgrant},
         {"modelnet", &verifycomputeaccessgrant},
         {"modelnet", &getcomputesigningidentity},
+        {"modelnet", &lab035},
     };
     for (const auto& c : commands) t.appendCommand(c.name, &c);
 #else

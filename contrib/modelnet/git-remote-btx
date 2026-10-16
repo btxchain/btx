@@ -1,0 +1,682 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The BTX developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://opensource.org/license/mit/.
+"""Stock git remote helper for a local BTX ref journal.
+
+Commands on stdin: capabilities, list, option, push, connect. Stdout is
+protocol only. A push batch is parsed completely before any ref is
+accepted. An empty batch fails. Per-ref admission:
+
+  * a new ref must start at sequence 0 with an empty previous id
+  * the same sequence and the same id is BTX035_DUPLICATE
+  * the same sequence and a different id is BTX035_EQUIVOCATION
+  * a lower sequence is BTX035_ROLLBACK
+  * any sequence other than last+1, or last+1 with a different previous id,
+    is BTX035_GAP
+
+State is a file in the directory named by the remote URL. Accepted forms
+are btx://local/<dir>, a filesystem path, and btx::<repository-record-uri>.
+The inner record URI is a canonical kind-15 RECORD URI: lowercase, 91
+characters, no query and no fragment. Its journal directory is
+$BTX_GIT_STATE/<digest>. This process does not invoke a shell and does
+not create a transaction.
+
+connect git-upload-pack and connect git-receive-pack authorize the
+repository, the caller, and the permitted ref namespaces. The connect
+line is not an update list. A ticket with a ref update embedded is
+rejected. Stock Git then sends the push batch, and that batch is what
+the ref journal accepts.
+
+Push lines (one batch, then a blank line):
+
+    push <src>:<dst> <sequence> <record-id> <previous-or-dash>
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+LOCAL_PREFIX = "btx://local/"
+RECORD_PREFIX = "btx::"
+JOURNAL_NAME = "btx-ref-journal"
+HEX_ID = re.compile(r"[0-9a-f]{1,128}")
+U64 = re.compile(r"0|[1-9][0-9]{0,19}")
+U64_MAX = (1 << 64) - 1
+REF_BAD = re.compile(r"[;|&$`<>]")
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+RECORD_KIND = 15
+PERMITTED_NAMESPACES = ("refs/heads/", "refs/tags/")
+
+OPTIONS: dict[str, str] = {}
+
+
+class SessionAuth:
+    def __init__(self) -> None:
+        self.service = ""
+        self.repository = ""
+        self.caller = ""
+        self.namespaces: tuple[str, ...] = ()
+
+
+AUTH = SessionAuth()
+
+
+class StateError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def fail_url(message: str) -> None:
+    sys.stderr.write(f"error: {message}\n")
+    raise SystemExit(2)
+
+
+def _polymod(vals: list[int]) -> int:
+    chk = 1
+    for value in vals:
+        top = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ value
+        for index, generator in enumerate((0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)):
+            if (top >> index) & 1:
+                chk ^= generator
+    return chk
+
+
+def _convert(data: list[int], from_bits: int, to_bits: int, pad: bool) -> list[int]:
+    acc = 0
+    bits = 0
+    out: list[int] = []
+    max_v = (1 << to_bits) - 1
+    for value in data:
+        if value < 0 or value >> from_bits:
+            raise ValueError("bits")
+        acc = (acc << from_bits) | value
+        bits += from_bits
+        while bits >= to_bits:
+            bits -= to_bits
+            out.append((acc >> bits) & max_v)
+    if pad:
+        if bits:
+            out.append((acc << (to_bits - bits)) & max_v)
+    elif bits >= from_bits or ((acc << (to_bits - bits)) & max_v):
+        raise ValueError("padding")
+    return out
+
+
+def parse_record_uri(uri: str) -> str | None:
+    """Return the 96-hex digest of a canonical kind-15 RECORD URI."""
+    if uri != uri.lower() or "?" in uri or "#" in uri:
+        return None
+    if not uri.startswith("btx://") or len(uri) != 91:
+        return None
+    try:
+        vals = [CHARSET.index(char) for char in uri[6:]]
+    except ValueError:
+        return None
+    hrp = [ord(char) >> 5 for char in "btx"] + [0] + [ord(char) & 31 for char in "btx"]
+    if _polymod(hrp + vals) != 0x2BC830A3 or vals[0] != 1 or vals[1] != RECORD_KIND:
+        return None
+    try:
+        data = bytes(_convert(vals[2:-6], 5, 8, False))
+    except ValueError:
+        return None
+    if len(data) != 48:
+        return None
+    return data.hex()
+
+
+def record_state_directory(inner: str) -> Path:
+    if inner != inner.lower() or "?" in inner or "#" in inner:
+        fail_url("BTX035_URL")
+    digest = parse_record_uri(inner)
+    if digest is None:
+        fail_url("BTX035_URL")
+    root = os.environ.get("BTX_GIT_STATE", "")
+    if root == "" or "\x00" in root or "\n" in root or "\r" in root:
+        fail_url("BTX035_URL")
+    base = Path(root)
+    if any(part == ".." for part in base.parts):
+        fail_url("BTX035_URL")
+    return base / digest
+
+
+def state_directory(url: str) -> Path:
+    if url is None or "\x00" in url or "\n" in url or "\r" in url:
+        fail_url("BTX035_URL")
+    if url.startswith(RECORD_PREFIX):
+        return record_state_directory(url[len(RECORD_PREFIX) :])
+    if url.startswith("btx://"):
+        if not url.startswith(LOCAL_PREFIX):
+            fail_url("BTX035_URL")
+        raw = url[len(LOCAL_PREFIX) :]
+    else:
+        if url.startswith("-") or "://" in url:
+            fail_url("BTX035_URL")
+        raw = url
+    if raw == "" or raw == ".":
+        fail_url("BTX035_URL")
+    path = Path(raw)
+    if any(part == ".." for part in path.parts):
+        fail_url("BTX035_URL")
+    return path
+
+
+def valid_ref(ref: str) -> bool:
+    if not ref or ref.startswith("/") or ref.endswith("/"):
+        return False
+    if any(c in ref for c in " \t\r\n\0\\"):
+        return False
+    if REF_BAD.search(ref):
+        return False
+    parts = ref.split("/")
+    return all(part not in ("", ".", "..") for part in parts)
+
+
+def parse_u64(text: str) -> int | None:
+    if not U64.fullmatch(text):
+        return None
+    value = int(text)
+    if value > U64_MAX:
+        return None
+    return value
+
+
+def parse_id(text: str) -> str | None:
+    if text == "-" or not HEX_ID.fullmatch(text):
+        return None
+    return text
+
+
+def journal_path(directory: Path) -> Path:
+    return directory / JOURNAL_NAME
+
+
+def load_tips(directory: Path) -> dict[str, tuple[int, str]]:
+    path = journal_path(directory)
+    if not path.exists():
+        return {}
+    if not path.is_file():
+        raise StateError("BTX035_STATE")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "v1":
+        raise StateError("BTX035_STATE")
+    tips: dict[str, tuple[int, str]] = {}
+    for line in lines[1:]:
+        parts = line.split("\t")
+        if len(parts) != 3 or not valid_ref(parts[0]):
+            raise StateError("BTX035_STATE")
+        sequence = parse_u64(parts[1])
+        record_id = parse_id(parts[2])
+        if sequence is None or record_id is None or parts[0] in tips:
+            raise StateError("BTX035_STATE")
+        tips[parts[0]] = (sequence, record_id)
+    return tips
+
+
+def sha_path(directory: Path) -> Path:
+    return directory / "btx-git-sha"
+
+
+def load_shas(directory: Path) -> dict[str, str]:
+    path = sha_path(directory)
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        ref, sha = line.split("\t", 1)
+        out[ref] = sha
+    return out
+
+
+def save_shas(directory: Path, shas: dict[str, str]) -> None:
+    rows = [f"{ref}\t{shas[ref]}" for ref in sorted(shas)]
+    payload = ("\n".join(rows) + "\n") if rows else ""
+    temporary = directory / ".btx-git-sha.tmp"
+    temporary.write_text(payload, encoding="utf-8")
+    os.replace(temporary, sha_path(directory))
+
+
+def git_bytes(args: list[str], git_dir: str | None = None, data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+    cmd = ["git"]
+    if git_dir:
+        cmd.extend(["--git-dir", git_dir])
+    cmd.extend(args)
+    return subprocess.run(cmd, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+
+
+def object_record(git_dir: str, sha: str) -> str | None:
+    kind = git_bytes(["cat-file", "-t", sha], git_dir)
+    if kind.returncode != 0:
+        return None
+    kind_text = kind.stdout.decode("ascii", "replace").strip()
+    if kind_text not in {"blob", "tree", "commit", "tag"}:
+        return None
+    body = git_bytes(["cat-file", kind_text, sha], git_dir)
+    if body.returncode != 0:
+        return None
+    raw = body.stdout
+    prefix = f"{kind_text} {len(raw)}\0".encode("ascii")
+    return hashlib.sha384(prefix + raw).hexdigest()
+
+
+def resolve_stock(item: PushLine, tips: dict[str, tuple[int, str]]) -> str | None:
+    git_dir = os.environ.get("GIT_DIR", "")
+    if not git_dir or not item.src:
+        return "BTX035_PUSH_FORMAT"
+    rev = git_bytes(["rev-parse", "--verify", item.src], git_dir)
+    if rev.returncode != 0:
+        return "BTX035_PUSH_FORMAT"
+    sha = rev.stdout.decode("ascii", "replace").strip()
+    if len(sha) != 40:
+        return "BTX035_PUSH_FORMAT"
+    record = object_record(git_dir, sha)
+    if record is None:
+        return "BTX035_PUSH_FORMAT"
+    current = tips.get(item.dst or "")
+    if current is None:
+        item.sequence = 0
+        item.previous = ""
+    else:
+        item.sequence = current[0] + 1
+        item.previous = current[1]
+    item.record_id = record
+    item.git_sha = sha
+    return None
+
+
+def mirror_stock(directory: Path, item: PushLine) -> bool:
+    git_dir = os.environ.get("GIT_DIR", "")
+    bare = directory / "git-bare"
+    if not (bare / "HEAD").exists():
+        made = git_bytes(["init", "--bare", "-q", str(bare)])
+        if made.returncode != 0:
+            return False
+    fetched = git_bytes(["fetch", "--update-head-ok", git_dir, f"{item.src}:{item.dst}"], str(bare))
+    return fetched.returncode == 0
+
+
+def save_tips(directory: Path, tips: dict[str, tuple[int, str]]) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    rows = ["v1"]
+    for ref in sorted(tips):
+        sequence, record_id = tips[ref]
+        rows.append(f"{ref}\t{sequence}\t{record_id}")
+    payload = "\n".join(rows) + "\n"
+    temporary = directory / ".btx-ref-journal.tmp"
+    temporary.write_text(payload, encoding="utf-8")
+    os.replace(temporary, journal_path(directory))
+
+
+def admit(
+    tips: dict[str, tuple[int, str]],
+    ref: str,
+    sequence: int,
+    record_id: str,
+    previous: str,
+) -> str | None:
+    current = tips.get(ref)
+    if current is None:
+        if sequence == 0 and previous == "":
+            tips[ref] = (sequence, record_id)
+            return None
+        return "BTX035_GAP"
+    current_sequence, current_id = current
+    if sequence == current_sequence:
+        if record_id == current_id:
+            return "BTX035_DUPLICATE"
+        return "BTX035_EQUIVOCATION"
+    if sequence < current_sequence:
+        return "BTX035_ROLLBACK"
+    if sequence != current_sequence + 1 or previous != current_id:
+        return "BTX035_GAP"
+    tips[ref] = (sequence, record_id)
+    return None
+
+
+def write_block(text: str) -> None:
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def write_line(text: str) -> None:
+    write_block(text + "\n")
+
+
+def read_line() -> str | None:
+    line = sys.stdin.readline()
+    if line == "":
+        return None
+    if line.endswith("\n"):
+        line = line[:-1]
+    if line.endswith("\r"):
+        line = line[:-1]
+    return line
+
+
+def capabilities() -> None:
+    write_block("option\npush\nfetch\nlist\nconnect\n\n")
+
+
+def list_refs(directory: Path) -> None:
+    try:
+        tips = load_tips(directory)
+    except StateError as exc:
+        sys.stderr.write(f"error: {exc.code}\n")
+        write_block("\n")
+        return
+    shas = load_shas(directory)
+    lines = []
+    head_ref = "refs/heads/main" if "refs/heads/main" in shas else ("refs/heads/master" if "refs/heads/master" in shas else "")
+    if head_ref:
+        lines.append(f"@{head_ref} HEAD")
+    for ref, (sequence, record_id) in sorted(tips.items()):
+        sha = shas.get(ref)
+        if sha:
+            lines.append(f"{sha} {ref}")
+        else:
+            lines.append(f"? {ref} sequence:{sequence} id:{record_id}")
+    lines.append("")
+    write_block("\n".join(lines) + "\n")
+
+
+def set_option(line: str) -> None:
+    parts = line.split(" ", 2)
+    if len(parts) != 3 or parts[0] != "option" or parts[1] == "" or parts[2] == "":
+        write_line("error BTX035_OPTION")
+        return
+    name, value = parts[1], parts[2]
+    if name == "verbosity":
+        if parse_u64(value) is None:
+            write_line("error BTX035_OPTION")
+            return
+        OPTIONS[name] = value
+        write_line("ok")
+        return
+    if name in {"progress", "dry-run", "force", "atomic", "cloning"}:
+        if value not in {"true", "false"}:
+            write_line("error BTX035_OPTION")
+            return
+        OPTIONS[name] = value
+        write_line("ok")
+        return
+    write_line("unsupported")
+
+
+class PushLine:
+    def __init__(self, dst: str | None, sequence: int, record_id: str, previous: str, src: str = "", git_sha: str = "") -> None:
+        self.dst = dst
+        self.sequence = sequence
+        self.record_id = record_id
+        self.previous = previous
+        self.src = src
+        self.git_sha = git_sha
+
+
+def parse_push_line(line: str) -> tuple[PushLine | None, str | None]:
+    if line == "push":
+        return None, "BTX035_PUSH_EMPTY"
+    if not line.startswith("push "):
+        return None, "BTX035_PUSH_FORMAT"
+    parts = line.split(" ")
+    if len(parts) == 2 and parts[1].startswith(":"):
+        return None, "BTX035_PUSH_EMPTY"
+    if len(parts) == 2:
+        refspec = parts[1]
+        if refspec.startswith("+"):
+            refspec = refspec[1:]
+        if refspec.count(":") != 1:
+            return None, "BTX035_PUSH_FORMAT"
+        src, dst = refspec.split(":", 1)
+        if src == "" or dst == "":
+            return None, "BTX035_PUSH_EMPTY"
+        if not valid_ref(src) or not valid_ref(dst):
+            return None, "BTX035_PUSH_FORMAT"
+        return PushLine(dst, -1, "", "", src=src), None
+    if len(parts) != 5:
+        return None, "BTX035_PUSH_FORMAT"
+    refspec, sequence_text, record_text, previous_text = parts[1], parts[2], parts[3], parts[4]
+    if refspec.count(":") != 1:
+        return None, "BTX035_PUSH_FORMAT"
+    src, dst = refspec.split(":", 1)
+    if src == "" or dst == "":
+        return None, "BTX035_PUSH_EMPTY"
+    if not valid_ref(src) or not valid_ref(dst):
+        return None, "BTX035_PUSH_FORMAT"
+    sequence = parse_u64(sequence_text)
+    record_id = parse_id(record_text)
+    if sequence is None or record_id is None:
+        return None, "BTX035_PUSH_FORMAT"
+    if previous_text == "-":
+        previous = ""
+    else:
+        previous_id = parse_id(previous_text)
+        if previous_id is None:
+            return None, "BTX035_PUSH_FORMAT"
+        previous = previous_id
+    return PushLine(dst, sequence, record_id, previous), None
+
+
+def dst_of(line: str) -> str | None:
+    parts = line.split(" ")
+    if len(parts) < 2 or parts[0] != "push" or parts[1].count(":") != 1:
+        return None
+    dst = parts[1].split(":", 1)[1]
+    if not valid_ref(dst):
+        return None
+    return dst
+
+
+def status_line(dst: str | None, code: str | None) -> str:
+    if code is None:
+        if dst is None:
+            return "error BTX035_PUSH_FORMAT"
+        return f"ok {dst}"
+    if dst is None:
+        return f"error {code}"
+    return f"error {dst} {code}"
+
+
+def apply_push(directory: Path, lines: list[str]) -> None:
+    parsed: list[tuple[str, PushLine | None, str | None]] = []
+    for line in lines:
+        item, code = parse_push_line(line)
+        parsed.append((line, item, code))
+
+    if any(code is not None for _, _, code in parsed):
+        out: list[str] = []
+        for line, _item, code in parsed:
+            if code is None:
+                out.append(status_line(dst_of(line), "BTX035_REJECTED"))
+            else:
+                out.append(status_line(dst_of(line), code))
+        write_block("\n".join(out) + "\n\n")
+        return
+
+    try:
+        tips = load_tips(directory)
+    except StateError as exc:
+        write_block(f"error {exc.code}\n\n")
+        return
+
+    trial = dict(tips)
+    outcomes: list[tuple[str, str | None]] = []
+    failed = False
+    for _line, item, _code in parsed:
+        assert item is not None and item.dst is not None
+        if failed:
+            outcomes.append((item.dst, "BTX035_REJECTED"))
+            continue
+        if AUTH.service == "git-receive-pack" and not any(item.dst.startswith(ns) for ns in AUTH.namespaces):
+            failed = True
+            outcomes.append((item.dst, "BTX035_CONNECT"))
+            continue
+        if item.sequence < 0:
+            code = resolve_stock(item, trial)
+            if code is not None:
+                failed = True
+                outcomes.append((item.dst, code))
+                continue
+        code = admit(trial, item.dst, item.sequence, item.record_id, item.previous)
+        if code is not None:
+            failed = True
+            outcomes.append((item.dst, code))
+        else:
+            outcomes.append((item.dst, None))
+
+    if failed:
+        rendered = [status_line(dst, "BTX035_REJECTED" if code is None else code) for dst, code in outcomes]
+        write_block("\n".join(rendered) + "\n\n")
+        return
+
+    if OPTIONS.get("dry-run") == "true":
+        write_block("\n".join(status_line(dst, None) for dst, _code in outcomes) + "\n\n")
+        return
+
+    shas = load_shas(directory)
+    for _line, item, _code in parsed:
+        assert item is not None
+        if not item.git_sha:
+            continue
+        if not mirror_stock(directory, item):
+            write_block("error BTX035_STATE\n\n")
+            return
+        shas[item.dst or ""] = item.git_sha
+    try:
+        save_tips(directory, trial)
+        if any(item is not None and item.git_sha for _line, item, _code in parsed):
+            save_shas(directory, shas)
+    except OSError:
+        write_block("error BTX035_STATE\n\n")
+        return
+    write_block("\n".join(status_line(dst, None) for dst, _code in outcomes) + "\n\n")
+
+
+def apply_fetch(directory: Path, lines: list[str]) -> None:
+    git_dir = os.environ.get("GIT_DIR", "")
+    bare = directory / "git-bare"
+    shas = []
+    for line in lines:
+        parts = line.split(" ")
+        if len(parts) >= 2 and parts[0] == "fetch":
+            shas.append(parts[1])
+    if not shas or not git_dir or not bare.is_dir():
+        write_block("\n")
+        return
+    pack = git_bytes(["pack-objects", "--stdout", "--revs"], str(bare), ("\n".join(shas) + "\n").encode())
+    if pack.returncode != 0 or not pack.stdout:
+        sys.stderr.write("error: BTX035_FETCH\n")
+        write_block("\n")
+        return
+    indexed = git_bytes(["index-pack", "--stdin"], git_dir, pack.stdout)
+    if indexed.returncode != 0:
+        sys.stderr.write("error: BTX035_FETCH\n")
+    write_block("\n")
+
+
+def ref_update_embedded(extra: list[str]) -> bool:
+    if any(":" in part or part == "push" for part in extra):
+        return True
+    has_ref = False
+    has_seq = False
+    has_id = False
+    for part in extra:
+        if part == "-":
+            continue
+        if not has_seq and parse_u64(part) is not None:
+            has_seq = True
+            continue
+        if not has_id and parse_id(part) is not None:
+            has_id = True
+            continue
+        if valid_ref(part) or part.startswith("refs/"):
+            has_ref = True
+    return has_ref and has_seq and has_id
+
+
+def authorize_connect(line: str, repository: str, caller: str) -> str | None:
+    """Authorize a repository, caller, and ref namespaces. Not an update list."""
+    parts = line.split(" ")
+    if len(parts) < 2 or parts[0] != "connect" or any(part == "" for part in parts):
+        return "BTX035_CONNECT"
+    service = parts[1]
+    if service not in {"git-upload-pack", "git-receive-pack"}:
+        return "BTX035_CONNECT"
+    extra = parts[2:]
+    if extra:
+        if ref_update_embedded(extra):
+            return "BTX035_PUSH_FORMAT"
+        return "BTX035_CONNECT"
+    AUTH.service = service
+    AUTH.repository = repository
+    AUTH.caller = caller
+    AUTH.namespaces = PERMITTED_NAMESPACES
+    write_line("fallback")
+    return None
+
+
+def read_push_batch(first: str) -> list[str] | None:
+    batch = [first]
+    while True:
+        nxt = read_line()
+        if nxt is None or nxt == "":
+            return batch
+        batch.append(nxt)
+
+
+def serve(directory: Path, repository: str, caller: str) -> int:
+    while True:
+        line = read_line()
+        if line is None or line == "":
+            return 0
+        if line == "capabilities":
+            capabilities()
+            continue
+        if line == "list" or line == "list for-push":
+            list_refs(directory)
+            continue
+        if line == "option" or line.startswith("option "):
+            set_option(line)
+            continue
+        if line == "connect" or line.startswith("connect "):
+            code = authorize_connect(line, repository, caller)
+            if code is not None:
+                sys.stderr.write(f"error: {code}\n")
+                write_line(f"error {code}")
+                return 1
+            continue
+        if line == "push" or line.startswith("push "):
+            batch = read_push_batch(line)
+            if batch is None:
+                return 0
+            apply_push(directory, batch)
+            continue
+        if line == "fetch" or line.startswith("fetch "):
+            batch = read_push_batch(line)
+            if batch is None:
+                return 0
+            apply_fetch(directory, batch)
+            continue
+        sys.stderr.write("error: BTX035_COMMAND\n")
+        return 1
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) == 3:
+        caller, url = argv[1], argv[2]
+    elif len(argv) == 2:
+        caller, url = "origin", argv[1]
+    else:
+        fail_url("BTX035_URL")
+    directory = state_directory(url)
+    return serve(directory, url, caller)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

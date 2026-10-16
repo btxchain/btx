@@ -70,6 +70,9 @@ public:
     // See https://gcc.gnu.org/git/?p=gcc.git;a=commit;h=96e0367ead5d8dcac3bec2865582e76e2fbab190
     path& make_preferred() { std::filesystem::path::make_preferred(); return *this; }
     path filename() const { return std::filesystem::path::filename(); }
+    // parent_path() on the base class returns std::filesystem::path. On Apple
+    // clang that makes operator/ ambiguous with the wrapper overload.
+    path parent_path() const { return std::filesystem::path::parent_path(); }
 };
 
 static inline path u8path(const std::string& utf8_str)

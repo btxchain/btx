@@ -632,6 +632,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   init/common.cpp
   kernel/chainparams.cpp
   key.cpp
+  blockfilter.cpp
   key_io.cpp
   merkleblock.cpp
   matmul/field.cpp
@@ -1804,7 +1805,9 @@ function(add_legacy_target_alias alias_name target_name)
 endfunction()
 
 function(target_link_btx_linux_archive_group target)
-  if(UNIX AND NOT APPLE)
+  # MinGW ld is single-pass, same as GNU ld on Linux. The static archives
+  # refer to each other, so they have to be scanned as a group.
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_libraries(${target}
       -Wl,--start-group
       ${ARGN}
@@ -1823,7 +1826,7 @@ function(target_link_btx_linux_archive_group target)
     # libstdc++. A second distro .so.6 on the command line is dropped
     # (duplicate SONAME); --as-needed drops it too. The durable lever is
     # to not require DSO-internal undefs to resolve at our exe link.
-    if(WITH_ZMQ)
+    if(WITH_ZMQ AND UNIX AND NOT APPLE)
       target_link_options(${target} PRIVATE
         -Wl,--unresolved-symbols=ignore-in-shared-libs)
     endif()
@@ -1889,6 +1892,12 @@ if(WITH_MODELNET)
     set_property(TARGET OpenSSL::Crypto PROPERTY IMPORTED_GLOBAL TRUE)
   endif()
   add_subdirectory(modelnet)
+  # Model tools are created in that subdirectory (not via install_binary_component).
+  foreach(_btx_model_tool IN ITEMS btx-modeld btx-hcpd btx-hosted btx-open btx-capability btx-capabilityd btx-modelcheck)
+    if(TARGET ${_btx_model_tool})
+      btx_set_packaged_lib_runpath(${_btx_model_tool})
+    endif()
+  endforeach()
   list(APPEND BTX_NODE_ARCHIVES bitcoin_modelnet)
 endif()
 
@@ -1917,12 +1926,13 @@ if(ENABLE_WALLET)
       core_interface
       Boost::headers
     )
-    if(UNIX AND NOT APPLE)
+    if((UNIX AND NOT APPLE) OR MINGW)
       target_link_btx_linux_archive_group(btx-wallet ${BTX_NODE_WALLET_ARCHIVES})
     else()
       target_link_libraries(btx-wallet bitcoin_wallet)
     endif()
     install_binary_component(btx-wallet HAS_MANPAGE)
+    btx_set_packaged_lib_runpath(btx-wallet)
     add_legacy_binary_alias(btx-wallet bitcoin-wallet)
     add_legacy_target_alias(bitcoin-wallet btx-wallet)
   endif()
@@ -1936,7 +1946,6 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   banman.cpp
   bip324.cpp
   blockencodings.cpp
-  blockfilter.cpp
   consensus/tx_verify.cpp
   dandelion.cpp
   deploymentstatus.cpp
@@ -2057,6 +2066,7 @@ target_link_libraries(bitcoin_node
 if(WITH_MODELNET)
   target_sources(bitcoin_node PRIVATE rpc/modelnet.cpp)
   target_link_libraries(bitcoin_node PRIVATE bitcoin_modelnet)
+  target_compile_definitions(bitcoin_node PRIVATE BTX_WITH_MODELNET=1)
 endif()
 
 
@@ -2071,7 +2081,7 @@ if(BUILD_DAEMON)
   target_link_libraries(btxd
     core_interface
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     if(TARGET bitcoin_wallet)
       target_link_btx_linux_archive_group(btxd ${BTX_NODE_WALLET_ARCHIVES})
     else()
@@ -2084,6 +2094,7 @@ if(BUILD_DAEMON)
     )
   endif()
   install_binary_component(btxd HAS_MANPAGE)
+  btx_set_packaged_lib_runpath(btxd)
   add_legacy_binary_alias(btxd bitcoind)
   add_legacy_target_alias(bitcoind btxd)
 endif()
@@ -2097,7 +2108,7 @@ if(WITH_MULTIPROCESS AND BUILD_DAEMON)
     core_interface
     bitcoin_ipc
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     if(TARGET bitcoin_wallet)
       target_link_btx_linux_archive_group(btx-node ${BTX_NODE_WALLET_ARCHIVES})
     else()
@@ -2133,6 +2144,7 @@ endif()
 
 add_library(bitcoin_cli STATIC EXCLUDE_FROM_ALL
   compat/stdin.cpp
+  lightwatch.cpp
   rpc/client.cpp
 )
 target_link_libraries(bitcoin_cli
@@ -2153,12 +2165,13 @@ if(BUILD_CLI)
     libevent::core
     libevent::extra
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(btx-cli ${BTX_BASE_ARCHIVES})
   else()
     target_link_libraries(btx-cli bitcoin_common bitcoin_shielded)
   endif()
   install_binary_component(btx-cli HAS_MANPAGE)
+  btx_set_packaged_lib_runpath(btx-cli)
   add_legacy_binary_alias(btx-cli bitcoin-cli)
   add_legacy_target_alias(bitcoin-cli btx-cli)
 endif()
@@ -2174,7 +2187,7 @@ if(BUILD_TX)
   target_link_libraries(btx-tx
     core_interface
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(btx-tx ${BTX_BASE_ARCHIVES})
   else()
     target_link_libraries(btx-tx
@@ -2182,6 +2195,7 @@ if(BUILD_TX)
     )
   endif()
   install_binary_component(btx-tx HAS_MANPAGE)
+  btx_set_packaged_lib_runpath(btx-tx)
   add_legacy_binary_alias(btx-tx bitcoin-tx)
   add_legacy_target_alias(bitcoin-tx btx-tx)
 endif()
@@ -2194,7 +2208,7 @@ if(BUILD_UTIL)
   target_link_libraries(btx-util
     core_interface
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(btx-util ${BTX_BASE_ARCHIVES})
   else()
     target_link_libraries(btx-util
@@ -2202,19 +2216,31 @@ if(BUILD_UTIL)
     )
   endif()
   install_binary_component(btx-util HAS_MANPAGE)
+  btx_set_packaged_lib_runpath(btx-util)
   add_legacy_binary_alias(btx-util bitcoin-util)
   add_legacy_target_alias(bitcoin-util btx-util)
+
+  add_executable(btx-guardd btx-guardd.cpp modelnet/guard_machine.cpp)
+  target_include_directories(btx-guardd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(btx-guardd core_interface)
+  if((UNIX AND NOT APPLE) OR MINGW)
+    target_link_btx_linux_archive_group(btx-guardd ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(btx-guardd bitcoin_common)
+  endif()
+  install_binary_component(btx-guardd)
 
   add_executable(btx-matmul-backend-info btx-matmul-backend-info.cpp)
   target_link_libraries(btx-matmul-backend-info
     core_interface
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(btx-matmul-backend-info ${BTX_BASE_ARCHIVES})
   else()
     target_link_libraries(btx-matmul-backend-info bitcoin_common)
   endif()
   install_binary_component(btx-matmul-backend-info)
+  btx_set_packaged_lib_runpath(btx-matmul-backend-info)
 
   # NOTE: the legacy standalone MatMul benchmarks (btx-matmul-metal-bench,
   # btx-matmul-solve-bench, btx-matmul-cost-bench) were REMOVED — they measured
@@ -2233,7 +2259,7 @@ if(BUILD_UTIL)
   target_link_libraries(matmul-v4-rc-harness
     core_interface
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(matmul-v4-rc-harness ${BTX_BASE_ARCHIVES})
   else()
     target_link_libraries(matmul-v4-rc-harness
@@ -2255,7 +2281,7 @@ if(BUILD_UTIL)
     $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
   )
   target_link_libraries(matmul-v3-asert-calibration core_interface)
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(matmul-v3-asert-calibration ${BTX_BASE_ARCHIVES})
   else()
     target_link_libraries(matmul-v3-asert-calibration bitcoin_shielded)
@@ -2270,7 +2296,7 @@ if(BUILD_UTIL)
   target_link_libraries(matmul-v4-rc-verify-bakeoff
     core_interface
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(matmul-v4-rc-verify-bakeoff ${BTX_BASE_ARCHIVES})
   else()
     target_link_libraries(matmul-v4-rc-verify-bakeoff
@@ -2289,7 +2315,7 @@ if(BUILD_UTIL)
   target_link_libraries(matmul-v4-report
     core_interface
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(matmul-v4-report ${BTX_BASE_ARCHIVES})
   else()
     target_link_libraries(matmul-v4-report
@@ -2302,7 +2328,7 @@ if(BUILD_UTIL)
   target_link_libraries(btx-genesis
     core_interface
   )
-  if(UNIX AND NOT APPLE)
+  if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(btx-genesis ${BTX_BASE_ARCHIVES})
   else()
     target_link_libraries(btx-genesis

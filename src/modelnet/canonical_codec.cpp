@@ -4,6 +4,8 @@
 
 #include <modelnet/canonical_codec.h>
 
+#include <modelnet/crypto.h>
+#include <modelnet/identity.h>
 #include <crypto/sha384.h>
 #include <util/strencodings.h>
 
@@ -672,6 +674,266 @@ bool EnvelopeDigest(const UniValue& body, Digest48& id, std::string& err)
     CSHA384 hasher;
     hasher.Write(pre.data(), pre.size());
     hasher.Finalize(id.data.data());
+    return true;
+}
+
+namespace {
+
+bool LowerHex(const std::string& hex, size_t nchars)
+{
+    if (hex.size() != nchars) return false;
+    for (unsigned char c : hex) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+bool UintToken(const std::string& s)
+{
+    if (s.empty() || s.size() > 20) return false;
+    if (s == "0") return true;
+    if (s[0] == '0') return false;
+    return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
+}
+
+bool KnownV11Record(const std::string& record_type)
+{
+    static const char* names[] = {
+#include <modelnet/record_types_v11.inc>
+    };
+    for (const char* name : names) {
+        if (record_type == name) return true;
+    }
+    return false;
+}
+
+#include <modelnet/payload_schema_v11.inc>
+
+static_assert(sizeof(kV11PayloadRules) / sizeof(kV11PayloadRules[0]) == 74, "v1.1 payload schemas");
+
+bool ListedPayloadName(const char* const* names, const std::string& key)
+{
+    for (const char* const* name = names; *name != nullptr; ++name) {
+        if (key == *name) return true;
+    }
+    return false;
+}
+
+/** Required payload names for record_type. Unknown keys fail when the schema is closed. */
+bool PayloadSchemaV11(const UniValue& body, std::string& err)
+{
+    if (!body.isObject() || !body.exists("record_type") || !body["record_type"].isStr() ||
+        !body.exists("payload") || !body["payload"].isObject()) {
+        err = "BTX035_SCHEMA";
+        return false;
+    }
+    const std::string& record_type = body["record_type"].get_str();
+    const V11PayloadRule* rule = nullptr;
+    for (const V11PayloadRule& row : kV11PayloadRules) {
+        if (record_type == row.record_type) {
+            rule = &row;
+            break;
+        }
+    }
+    if (rule == nullptr || rule->required == nullptr) {
+        err = "BTX035_SCHEMA";
+        return false;
+    }
+    std::map<std::string, UniValue> kv;
+    body["payload"].getObjMap(kv);
+    for (const char* const* req = rule->required; *req != nullptr; ++req) {
+        if (!kv.count(*req)) {
+            err = "BTX035_SCHEMA";
+            return false;
+        }
+    }
+    if (rule->reject_unknown) {
+        for (const auto& item : kv) {
+            if (!ListedPayloadName(rule->required, item.first)) {
+                err = "BTX035_OBJECT_KEYS";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool BodyFieldsV11(const UniValue& body, std::string& err)
+{
+    static const char* keys[] = {
+        "envelope_version", "contract_revision", "record_type", "network_id", "realm_id",
+        "principal_id", "signer_id", "key_epoch", "public_key_hex", "delegation_id",
+        "created_ms", "expires_ms", "critical_extensions", "payload"};
+    std::map<std::string, UniValue> kv;
+    body.getObjMap(kv);
+    if (kv.size() != 14) {
+        err = "BTX035_OBJECT_KEYS";
+        return false;
+    }
+    for (const char* key : keys) {
+        if (!kv.count(key)) {
+            err = "BTX035_OBJECT_KEYS";
+            return false;
+        }
+    }
+    if (!body["contract_revision"].isStr() || body["contract_revision"].get_str() != "1.1.0") {
+        err = "BTX035_ENVELOPE_VERSION";
+        return false;
+    }
+    if (!body["record_type"].isStr() || !KnownV11Record(body["record_type"].get_str())) {
+        err = "BTX035_RECORD_TYPE";
+        return false;
+    }
+    if (!body["network_id"].isStr() || !LowerHex(body["network_id"].get_str(), 64) ||
+        !body["realm_id"].isStr() || !LowerHex(body["realm_id"].get_str(), 96) ||
+        !body["principal_id"].isStr() || !LowerHex(body["principal_id"].get_str(), 96) ||
+        !body["signer_id"].isStr() || !LowerHex(body["signer_id"].get_str(), 96) ||
+        !body["public_key_hex"].isStr() || !LowerHex(body["public_key_hex"].get_str(), 2624)) {
+        err = "BTX035_BINDING_INVALID";
+        return false;
+    }
+    if (!body["key_epoch"].isStr() || !UintToken(body["key_epoch"].get_str()) ||
+        !body["created_ms"].isStr() || !UintToken(body["created_ms"].get_str()) ||
+        !body["expires_ms"].isStr() || !UintToken(body["expires_ms"].get_str())) {
+        err = "BTX035_NONCANONICAL_INTEGER";
+        return false;
+    }
+    const UniValue& delegation = body["delegation_id"];
+    if (!(delegation.isNull() || (delegation.isStr() && LowerHex(delegation.get_str(), 96)))) {
+        err = "BTX035_BINDING_INVALID";
+        return false;
+    }
+    if (!body["critical_extensions"].isArray() || !body["critical_extensions"].empty()) {
+        err = "BTX035_OBJECT_KEYS";
+        return false;
+    }
+    if (!body["payload"].isObject()) {
+        err = "BTX035_OBJECT_KEYS";
+        return false;
+    }
+    return true;
+}
+
+bool DecodeHexFixed(const std::string& hex, size_t nbytes, std::vector<unsigned char>& out, std::string& err)
+{
+    if (hex.size() != nbytes * 2 || !IsHex(hex)) {
+        err = "BTX035_BINDING_INVALID";
+        return false;
+    }
+    out = ParseHex(hex);
+    if (out.size() != nbytes) {
+        err = "BTX035_BINDING_INVALID";
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool RecordPreimageV11(const UniValue& body, std::vector<unsigned char>& preimage, std::string& err)
+{
+    if (!body.isObject()) {
+        err = "BTX035_BINDING_INVALID";
+        return false;
+    }
+    if (!body.exists("envelope_version") || !body["envelope_version"].isNum() ||
+        body["envelope_version"].getValStr() != "2") {
+        err = "BTX035_ENVELOPE_VERSION";
+        return false;
+    }
+    if (!body.exists("network_id") || !body["network_id"].isStr() ||
+        !body.exists("realm_id") || !body["realm_id"].isStr()) {
+        err = "BTX035_BINDING_INVALID";
+        return false;
+    }
+    std::vector<unsigned char> network, realm;
+    if (!DecodeHexFixed(body["network_id"].get_str(), 32, network, err)) return false;
+    if (!DecodeHexFixed(body["realm_id"].get_str(), 48, realm, err)) return false;
+    std::vector<unsigned char> canon;
+    if (!CanonicalEncode(body, canon, err)) return false;
+    if (canon.size() > CANONICAL_MAX_ENVELOPE_V11) {
+        err = "BTX035_LIMIT_EXCEEDED";
+        return false;
+    }
+    static constexpr char kDomain[] = "BTX/035/SignedRecord/v1";
+    preimage.clear();
+    preimage.insert(preimage.end(), kDomain, kDomain + sizeof(kDomain));
+    preimage.insert(preimage.end(), network.begin(), network.end());
+    preimage.insert(preimage.end(), realm.begin(), realm.end());
+    preimage.insert(preimage.end(), canon.begin(), canon.end());
+    return true;
+}
+
+bool RecordIdV11(const UniValue& body, Digest48& id, std::string& err)
+{
+    std::vector<unsigned char> pre;
+    if (!RecordPreimageV11(body, pre, err)) return false;
+    CSHA384 hasher;
+    hasher.Write(pre.data(), pre.size());
+    hasher.Finalize(id.data.data());
+    return true;
+}
+
+bool VerifySignedEnvelopeV11(const UniValue& envelope, std::string& err)
+{
+    if (!envelope.isObject() || !envelope.exists("record_id") || !envelope["record_id"].isStr() ||
+        !envelope.exists("body") || !envelope["body"].isObject() ||
+        !envelope.exists("signature_hex") || !envelope["signature_hex"].isStr()) {
+        err = "BTX035_ENVELOPE";
+        return false;
+    }
+    {
+        std::map<std::string, UniValue> top;
+        envelope.getObjMap(top);
+        if (top.size() != 3) {
+            err = "BTX035_OBJECT_KEYS";
+            return false;
+        }
+    }
+    if (!LowerHex(envelope["record_id"].get_str(), 96) || !LowerHex(envelope["signature_hex"].get_str(), 4840)) {
+        err = "BTX035_BINDING_INVALID";
+        return false;
+    }
+    if (!BodyFieldsV11(envelope["body"], err)) return false;
+    if (!PayloadSchemaV11(envelope["body"], err)) return false;
+    std::vector<unsigned char> canon_env;
+    if (!CanonicalEncode(envelope, canon_env, err)) return false;
+    if (canon_env.size() > CANONICAL_MAX_ENVELOPE_V11) {
+        err = "BTX035_LIMIT_EXCEEDED";
+        return false;
+    }
+    const UniValue& body = envelope["body"];
+    Digest48 id;
+    if (!RecordIdV11(body, id, err)) return false;
+    if (id.Hex() != envelope["record_id"].get_str()) {
+        err = "BTX035_RECORD_ID";
+        return false;
+    }
+    if (!body.exists("public_key_hex") || !body["public_key_hex"].isStr() ||
+        !body.exists("signer_id") || !body["signer_id"].isStr()) {
+        err = "BTX035_KEY_LENGTH";
+        return false;
+    }
+    std::vector<unsigned char> pk;
+    if (!DecodeHexFixed(body["public_key_hex"].get_str(), MLDSA44_PK, pk, err)) {
+        err = "BTX035_KEY_LENGTH";
+        return false;
+    }
+    if (ResearchIdentityId(pk).Hex() != body["signer_id"].get_str()) {
+        err = "BTX035_SIGNER_ID";
+        return false;
+    }
+    std::vector<unsigned char> sig;
+    if (!DecodeHexFixed(envelope["signature_hex"].get_str(), MLDSA44_SIG, sig, err)) {
+        err = "BTX035_SIGNATURE";
+        return false;
+    }
+    std::vector<unsigned char> pre;
+    if (!RecordPreimageV11(body, pre, err)) return false;
+    if (!VerifyMlDsa44(pk, pre, sig)) {
+        err = "BTX035_SIGNATURE";
+        return false;
+    }
     return true;
 }
 

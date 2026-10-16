@@ -73,8 +73,9 @@ bool ParseModelStorage(const std::string& in, StorageMode& mode, uint64_t& fixed
 uint64_t DefaultFreeSpaceReserve(uint64_t capacity, const AutoStorageParams& p)
 {
     if (p.reserve_override > 0) return p.reserve_override;
-    const uint64_t tenth = capacity / 10;
-    return std::max(p.min_useful, tenth);
+    // About 10% of capacity. Raising this to min_useful (32 GiB) reserved half
+    // of a 64 GiB disk and more than the whole disk when capacity was under 32 GiB.
+    return capacity / 10;
 }
 
 AutoQuotaResult ComputeAutoQuota(const FsStats& fs, const AutoStorageParams& p)
@@ -84,15 +85,10 @@ AutoQuotaResult ComputeAutoQuota(const FsStats& fs, const AutoStorageParams& p)
     r.reserve_bytes = DefaultFreeSpaceReserve(fs.capacity, p);
     r.safe_available_bytes = fs.available > r.reserve_bytes ? fs.available - r.reserve_bytes : 0;
     const uint64_t max_auto = p.max_auto == 0 ? (512 * GIB) : p.max_auto;
+    // Target stays about 10% of capacity, then no higher than space above the
+    // reserve. Do not lift a smaller target up to min_useful.
     r.target_bytes = std::min(max_auto, fs.capacity / 10);
-    uint64_t effective = r.target_bytes;
-    if (effective < p.min_useful) {
-        if (r.safe_available_bytes >= p.min_useful) effective = p.min_useful;
-        else effective = r.safe_available_bytes;
-    } else {
-        effective = std::min(effective, r.safe_available_bytes);
-    }
-    r.effective_bytes = effective;
+    r.effective_bytes = std::min(r.target_bytes, r.safe_available_bytes);
     return r;
 }
 

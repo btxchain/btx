@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The BTX developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://opensource.org/license/mit/.
+"""Local lab035 planner.
+
+Subcommands plan a typed lab action and run path and flag checks in process.
+They do not contact peers, open a wallet, or spend.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+
+COMMANDS = {
+    "identity": {
+        "effect": "Plan a local research identity. The secret remains in process and is not returned.",
+        "authority": "OWNER_LOCAL",
+        "contacts_peers": False,
+        "required": [],
+        "echo": [],
+    },
+    "git": {
+        "effect": "Plan a strong local git snapshot for one repository path.",
+        "authority": "GIT_READ",
+        "contacts_peers": False,
+        "required": ["path"],
+        "echo": ["path"],
+    },
+    "workspace": {
+        "effect": "Plan a local workspace snapshot from one workspace path.",
+        "authority": "OWNER_LOCAL",
+        "contacts_peers": False,
+        "required": ["path"],
+        "echo": ["path"],
+    },
+    "research": {
+        "effect": "Plan a research read or publish for one topic. Executing a publish would contact peers; this planner does not.",
+        "authority": "SCOPE_READ",
+        "contacts_peers": True,
+        "required": ["topic"],
+        "echo": ["topic"],
+    },
+    "evidence": {
+        "effect": "Plan an evidence read from one local path.",
+        "authority": "RECORD_SCOPE",
+        "contacts_peers": False,
+        "required": ["path"],
+        "echo": ["path"],
+    },
+    "model": {
+        "effect": "Plan a model host or lineage check. Hosting still requires admission.",
+        "authority": "OWNER_LOCAL",
+        "contacts_peers": False,
+        "required": ["model"],
+        "echo": ["model"],
+    },
+    "agent": {
+        "effect": "Plan an agent lineage inspection for one agent id.",
+        "authority": "SCOPE_READ",
+        "contacts_peers": False,
+        "required": ["agent"],
+        "echo": ["agent"],
+    },
+    "realm": {
+        "effect": "Plan a realm status or policy check for one realm id.",
+        "authority": "OWNER_LOCAL",
+        "contacts_peers": False,
+        "required": ["realm"],
+        "echo": ["realm"],
+    },
+    "promotion": {
+        "effect": "Plan a promotion prepare or attest. Public export still needs explicit review and a closure id.",
+        "authority": "PROMOTION",
+        "contacts_peers": True,
+        "required": ["promotion"],
+        "echo": ["promotion"],
+    },
+    "channel": {
+        "effect": "Plan a channel publish or get. Executing a publish would contact peers; this planner does not.",
+        "authority": "CHANNEL_PUBLISH",
+        "contacts_peers": True,
+        "required": ["channel"],
+        "echo": ["channel"],
+    },
+    "rollout": {
+        "effect": "Plan a rollout start, pause, or status. Executing a rollout would contact peers; this planner does not.",
+        "authority": "ROLLOUT",
+        "contacts_peers": True,
+        "required": ["rollout"],
+        "echo": ["rollout"],
+    },
+    "bundle": {
+        "effect": "Plan a local bundle path check. Nothing is installed and nothing is spent.",
+        "authority": "OWNER_LOCAL",
+        "contacts_peers": False,
+        "required": ["path"],
+        "echo": ["path"],
+    },
+    "migration": {
+        "effect": "Plan a migration from one named plan. No wallet write is performed.",
+        "authority": "OWNER_LOCAL",
+        "contacts_peers": False,
+        "required": ["plan"],
+        "echo": ["plan"],
+    },
+    "status": {
+        "effect": "Report source commit, snapshot, signer, coverage, assurance, policy, disputes, replicas, and runtime generation.",
+        "authority": "LOCAL_READ",
+        "contacts_peers": False,
+        "required": [],
+        "echo": [],
+    },
+}
+
+WALLET_TOKENS = {
+    "sendtoaddress",
+    "sendmany",
+    "getbalance",
+    "walletpassphrase",
+    "dumpprivkey",
+    "importprivkey",
+}
+
+
+def path_problem(value: str) -> str | None:
+    """Return BTX035_PATH_UNSAFE when value is an unsafe path or shell token."""
+    if value is None or value.strip() == "":
+        return None
+    if "\x00" in value:
+        return "BTX035_PATH_UNSAFE"
+    if any(ch in value for ch in (";", "|", "&", "`", "$", "\n", "\r", "<", ">")):
+        return "BTX035_PATH_UNSAFE"
+    normalized = value.replace("\\", "/")
+    parts = normalized.split("/")
+    if any(part == ".." for part in parts):
+        return "BTX035_PATH_UNSAFE"
+    lower = normalized.lower()
+    if lower == "rpc" or lower.startswith("/rpc") or "/shell" in lower or lower.endswith("/sh") or lower.endswith("/bash"):
+        return "BTX035_PATH_UNSAFE"
+    if "/bin/" in lower or lower.startswith("/bin"):
+        return "BTX035_PATH_UNSAFE"
+    leaf = parts[-1].lower() if parts else lower
+    if leaf in WALLET_TOKENS or "wallet" in leaf:
+        return "BTX035_PATH_UNSAFE"
+    return None
+
+
+def parse_args(argv: list[str]) -> tuple[str | None, dict[str, str], bool, list[str]]:
+    as_json = False
+    command = None
+    flags: dict[str, str] = {}
+    positionals: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--json":
+            as_json = True
+        elif arg.startswith("--"):
+            key = arg[2:].replace("-", "_")
+            if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                flags[key] = argv[i + 1]
+                i += 1
+            else:
+                flags[key] = "true"
+        elif command is None:
+            command = arg
+        else:
+            positionals.append(arg)
+        i += 1
+    return command, flags, as_json, positionals
+
+
+def base_payload(command: str, spec: dict | None) -> dict:
+    payload = {
+        "command": command,
+        "automatic_spend_atoms": "0",
+        "contacts_peers": False if spec is None else bool(spec["contacts_peers"]),
+        "executed_peer_contact": False,
+        "planned": True,
+        "no_spend": True,
+    }
+    if spec is not None:
+        payload["effect"] = spec["effect"]
+        payload["required_authority"] = spec["authority"]
+    return payload
+
+
+def spend_requested(flags: dict[str, str], positionals: list[str]) -> bool:
+    if "spend" in flags or "wallet" in flags or "send" in flags:
+        return True
+    atoms = flags.get("automatic_spend_atoms")
+    if atoms is not None and atoms != "0":
+        return True
+    for positional in positionals:
+        if positional.lower() in WALLET_TOKENS or "wallet" in positional.lower():
+            return True
+    return False
+
+
+def status_fields(flags: dict[str, str]) -> dict[str, str]:
+    coverage = flags.get("coverage")
+    if coverage is None or coverage.strip() == "":
+        coverage = "gap"
+    return {
+        "source_commit": flags.get("source_commit") or "unknown",
+        "snapshot": flags.get("snapshot") or "unknown",
+        "signer": flags.get("signer") or "unknown",
+        "coverage": coverage,
+        "assurance": flags.get("assurance") or "unknown",
+        "policy": flags.get("policy") or "unknown",
+        "disputes": flags.get("disputes") or "unknown",
+        "replicas": flags.get("replicas") or "unknown",
+        "runtime_generation": flags.get("runtime_generation") or "unknown",
+    }
+
+
+def emit(payload: dict, as_json: bool, code: int) -> int:
+    if code != 0:
+        print(payload.get("error", "error"), file=sys.stderr)
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+    elif code == 0:
+        print(payload.get("effect", payload["command"]))
+    return code
+
+
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    command, flags, as_json, positionals = parse_args(argv)
+    if command is None or command not in COMMANDS:
+        name = command or "unknown"
+        payload = base_payload(name, None)
+        payload["error"] = "BTX035_ROUTE"
+        payload["contacts_peers"] = False
+        return emit(payload, as_json, 2)
+
+    spec = COMMANDS[command]
+    payload = base_payload(command, spec)
+    if spend_requested(flags, positionals):
+        payload["error"] = "BTX035_SCOPE_DENIED"
+        payload["automatic_spend_atoms"] = "0"
+        payload["contacts_peers"] = False
+        payload["executed_peer_contact"] = False
+        return emit(payload, as_json, 2)
+
+    for required in spec["required"]:
+        if required not in flags or flags[required].strip() == "":
+            payload["error"] = "BTX035_SCHEMA"
+            payload["missing"] = required
+            payload["checks"] = ["required_flags"]
+            return emit(payload, as_json, 2)
+
+    checked = []
+    for key, value in flags.items():
+        if key in {"automatic_spend_atoms", "trusted"}:
+            continue
+        problem = path_problem(value)
+        checked.append(key)
+        if problem == "BTX035_PATH_UNSAFE":
+            payload["error"] = "BTX035_PATH_UNSAFE"
+            payload["rejected_flag"] = key
+            payload["checks"] = ["required_flags", "path_safety"]
+            payload["path_safety"] = "rejected"
+            return emit(payload, as_json, 2)
+
+    payload["checks"] = ["required_flags", "path_safety", "no_spend"]
+    payload["path_safety"] = "ok" if checked else "not_applicable"
+    for key in spec["echo"]:
+        payload[key] = flags[key]
+    if command == "identity":
+        payload["secret_returned"] = False
+        payload["checks"] = ["required_flags", "path_safety", "no_secret_export", "no_spend"]
+    if command == "status":
+        payload.update(status_fields(flags))
+        payload["checks"] = ["required_flags", "path_safety", "coverage_reported", "no_spend"]
+        payload.pop("trusted", None)
+    return emit(payload, as_json, 0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -37,6 +37,49 @@
 // See https://learn.microsoft.com/en-us/windows/win32/api/winsock/ns-winsock-sockaddr#syntax
 #ifdef WIN32
 typedef u_short sa_family_t;
+// winnt/winuser define these as macros. The node uses them as identifiers.
+#ifdef STRICT
+#undef STRICT
+#endif
+#ifdef IGNORE
+#undef IGNORE
+#endif
+#ifdef ERROR
+#undef ERROR
+#endif
+#ifdef IN
+#undef IN
+#endif
+#ifdef OUT
+#undef OUT
+#endif
+#ifdef OPTIONAL
+#undef OPTIONAL
+#endif
+#ifdef DIFFERENCE
+#undef DIFFERENCE
+#endif
+#ifdef ABSOLUTE
+#undef ABSOLUTE
+#endif
+#ifdef RELATIVE
+#undef RELATIVE
+#endif
+#ifdef DELETE
+#undef DELETE
+#endif
+#ifdef interface
+#undef interface
+#endif
+#ifdef near
+#undef near
+#endif
+#ifdef far
+#undef far
+#endif
+#ifdef pascal
+#undef pascal
+#endif
 #endif
 
 // We map Linux / BSD error functions and codes, to the equivalent

@@ -120,6 +120,7 @@
 #include <uint256.h>
 
 #ifdef ENABLE_MODELNET
+#include <modelnet/model_nat.h>
 #include <modelnet/policy.h>
 #include <modelnet/profile.h>
 #include <modelnet/supervisor.h>
@@ -645,11 +646,11 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-modelbind=<ip:port>", "PQ1 listen address passed to the owned helper (default: 0.0.0.0:29447). Empty/0/off = unix RPC only. Does not advertise NODE_MODEL_HOST.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelstorage=<size>", "Model payload budget: auto (packaged default), 0, or 80GiB. AUTO sizes against the model-store filesystem.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelstorageautocap=<size>", "AUTO hard cap (default: 512GiB).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-modelfreespacereserve=<size>", "AUTO free-space reserve override (default: max(32GiB, 10% of filesystem capacity)).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelfreespacereserve=<size>", "AUTO free-space reserve override (default: about 10% of filesystem capacity; not raised to 32GiB).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelseed=auto|manual|off", "Demand-seed after intentional import/getmodel (default: auto).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelpreserverare", "Fetch qualified under-replicated public models into spare quota (default: 0).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelfollowpeers", "Follow FREE models announced by -modelpeer / addmodelnode / TTL'd PEX into spare quota (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-modelpeer=<host:port>", "Model-plane bootstrap contact passed to the owned helper (repeatable). Alias: -modelseednode.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelpeer=<host:port>", "Model-plane bootstrap contact passed to the owned helper (repeatable). When unset, resolve chainparams ModelDNSSeeds() (empty until a crawl publishes DNS names; no compiled-in host or address). Alias: -modelseednode. Monetary DNS seeds and MDPEERS hints are not dialed.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelseednode=<host:port>", "Alias of -modelpeer.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modeluploadlimit=<bps>", "Aggregate model upload cap. auto = governor ceiling. 0 = connection ceilings only.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelwatch=<dir>", "Auto-host GGUF/SafeTensors/EXL3 dropped in this directory (watch-folder analog). Empty = off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -4247,6 +4248,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         {
             const auto aliases = args.GetArgs("-modelseednode");
             hcfg.peers.insert(hcfg.peers.end(), aliases.begin(), aliases.end());
+        }
+        if (hcfg.peers.empty()) {
+            // First peer: DNS names from chainparams, currently empty. Does not
+            // dial monetary seeds or MDPEERS hints, and does not embed a host.
+            auto lookup = [](const std::string& name) {
+                return LookupHost(name, 16, /*fAllowLookup=*/true);
+            };
+            const auto found = modelnet::ModelContactsFromDnsSeeds(chainparams.ModelDNSSeeds(), modelnet::DEFAULT_MODEL_PORT, lookup);
+            hcfg.peers.insert(hcfg.peers.end(), found.begin(), found.end());
         }
         {
             std::string err;

@@ -4,6 +4,7 @@
 
 #include <modelnet/safety.h>
 
+#include <modelnet/admission_routes.h>
 #include <modelnet/types.h>
 #include <util/strencodings.h>
 
@@ -238,6 +239,11 @@ bool SafetyRegistry::PinPublisher(const std::string& publisher_id_hex, const std
         err = "publisher_id";
         return false;
     }
+    std::string admission;
+    if (!RouteMayServe(id, true, admission)) {
+        err = admission.empty() ? std::string("BTX035_ADMISSION_DENIED") : admission;
+        return false;
+    }
     std::lock_guard<std::mutex> lock(m_mu);
     if (!m_publishers.count(id) && m_publishers.size() >= MAX_SAFETY_PUBLISHERS) {
         err = "too many safety publishers";
@@ -362,8 +368,12 @@ bool SafetyRegistry::IngestSigned(const UniValue& body, const std::string& signe
 bool SafetyRegistry::SubjectBlocked(const std::string& hex_id) const
 {
     const std::string id = ToLower(hex_id);
-    std::lock_guard<std::mutex> lock(m_mu);
-    return m_deny.count(id) > 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        if (m_deny.count(id) > 0) return true;
+    }
+    std::string admission;
+    return !RouteMayServe(id, true, admission);
 }
 
 bool SafetyRegistry::SubjectQuarantined(const std::string& hex_id) const

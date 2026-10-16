@@ -19,6 +19,12 @@
 #include <limits>
 #include <optional>
 
+// Qt's qwindowdefs_win.h defines STRICT as an empty macro, which collides
+// with the profile enumerator below.
+#ifdef STRICT
+#undef STRICT
+#endif
+
 class CChainParams;
 class ValidationSignals;
 

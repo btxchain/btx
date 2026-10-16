@@ -4,6 +4,7 @@
 
 #include <modelnet/qualification.h>
 
+#include <modelnet/admission_routes.h>
 #include <crypto/common.h>
 #include <univalue.h>
 #include <util/strencodings.h>
@@ -515,6 +516,14 @@ QualResult RunIsolatedCudaQualKernel(int gpu_index, QualReport& report)
 
 QualResult QualifyRuntime(const std::string& path, const QualRuntimeOpts& opts, QualReport& report)
 {
+    std::string admission;
+    if (!RouteMayGenerate(path, true, admission)) {
+        report = {};
+        report.result = QualResult::INVALID_MODEL;
+        report.level = AdmissionLevel::FAILED;
+        report.detail = admission.empty() ? std::string("BTX035_ADMISSION_DENIED") : admission;
+        return report.result;
+    }
     const QualResult static_q = QualifyFile(path, report);
     if (static_q != QualResult::STRUCTURE_VERIFIED && static_q != QualResult::PROFILE_VERIFIED) {
         return static_q;

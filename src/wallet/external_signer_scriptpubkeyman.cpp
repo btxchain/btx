@@ -211,7 +211,7 @@ bool ExternalSignerScriptPubKeyMan::PopulateDerivedCache(uint32_t index, Descrip
 }
 
 // If sign is true, transaction must previously have been filled
-std::optional<PSBTError> ExternalSignerScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205, bilingual_str* error_detail) const
+std::optional<PSBTError> ExternalSignerScriptPubKeyMan::FillPSBT(PartiallySignedTransaction& psbt, const PrecomputedTransactionData& txdata, int sighash_type, bool sign, bool bip32derivs, int* n_signed, bool finalize, bool slhdsa_fips205, bilingual_str* error_detail, bool htlc_presign) const
 {
     if (!sign) {
         return DescriptorScriptPubKeyMan::FillPSBT(psbt, txdata, sighash_type, false, bip32derivs, n_signed, finalize, slhdsa_fips205, error_detail);

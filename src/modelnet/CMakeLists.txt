@@ -52,6 +52,43 @@ add_library(bitcoin_modelnet STATIC
   provider_route.cpp
   search.cpp
   canonical_codec.cpp
+  pq_delegation.cpp
+  pq_transport_binding.cpp
+  git_snapshot.cpp
+  workspace_journal.cpp
+  research_graph.cpp
+  training_evidence.cpp
+  model_admission.cpp
+  action_authority.cpp
+  realm_channel.cpp
+  admission_routes.cpp
+  workspace_git.cpp
+  research_index.cpp
+  training_profile.cpp
+  session_gate.cpp
+  capability_bridge.cpp
+  research_rpc.cpp
+  lab_api.cpp
+  lab_disk.cpp
+  lab_ancestry.cpp
+  lab_guard_client.cpp
+  lab_exchange.cpp
+  lab_peer.cpp
+  training_integer.cpp
+  training_launch.cpp
+  research_views.cpp
+  guard_machine.cpp
+  lab_journey.cpp
+  lab_wire.cpp
+  lab_assurance.cpp
+  lab_gateway.cpp
+  lab_release.cpp
+  lab_research_gate.cpp
+  lab_store.cpp
+  lab_remaining.cpp
+  migrate_035.cpp
+  model_panel.cpp
+  lab035_cli.cpp
   bounty.cpp
   compute_economy.cpp
   bounty_eval.cpp
@@ -144,6 +181,14 @@ target_include_directories(bitcoin_modelnet
   PUBLIC
     ${PROJECT_SOURCE_DIR}/src
 )
+if(WIN32)
+  # POSIX shims for the model plane. Linux and macOS keep the system headers.
+  target_include_directories(bitcoin_modelnet BEFORE PUBLIC
+    ${PROJECT_SOURCE_DIR}/src/compat/mingw)
+  target_compile_options(bitcoin_modelnet PRIVATE
+    "SHELL:-include ${PROJECT_SOURCE_DIR}/src/compat/mingw/posix_extra.h")
+  target_link_libraries(bitcoin_modelnet PUBLIC ws2_32)
+endif()
 
 set(_btx_crl12_schema "${PROJECT_SOURCE_DIR}/contrib/modelnet/crl12/schemas/CognitiveReserveLayer.schema.json")
 set(_btx_crl12_ops "${PROJECT_SOURCE_DIR}/contrib/modelnet/crl12/schemas/operations-v1.2.json")

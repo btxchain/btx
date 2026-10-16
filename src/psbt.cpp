@@ -580,7 +580,7 @@ PrecomputedTransactionData PrecomputePSBTData(const PartiallySignedTransaction& 
     return txdata;
 }
 
-bool SignPSBTInput(const SigningProvider& provider, PartiallySignedTransaction& psbt, int index, const PrecomputedTransactionData* txdata, int sighash,  SignatureData* out_sigdata, bool finalize, bool slhdsa_fips205)
+bool SignPSBTInput(const SigningProvider& provider, PartiallySignedTransaction& psbt, int index, const PrecomputedTransactionData* txdata, int sighash,  SignatureData* out_sigdata, bool finalize, bool slhdsa_fips205, bool htlc_presign)
 {
     PSBTInput& input = psbt.inputs.at(index);
     const CMutableTransaction& tx = *psbt.tx;
@@ -625,6 +625,8 @@ bool SignPSBTInput(const SigningProvider& provider, PartiallySignedTransaction& 
     } else {
         MutableTransactionSignatureCreator creator(tx, index, utxo.nValue, txdata, sighash);
         creator.SetSlhdsaFips205(slhdsa_fips205);
+        // A presigned claim must commit to every output: only SIGHASH_DEFAULT or SIGHASH_ALL.
+        creator.SetHtlcPresign(htlc_presign && (sighash == SIGHASH_DEFAULT || sighash == SIGHASH_ALL));
         sig_complete = ProduceSignature(provider, creator, utxo.scriptPubKey, sigdata);
     }
     // Verify that a witness signature was produced in case one was required.

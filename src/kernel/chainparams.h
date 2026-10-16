@@ -129,6 +129,12 @@ public:
     ChainType GetChainType() const { return m_chain_type; }
     /** Return the list of hostnames to look up for DNS seeds */
     const std::vector<std::string>& DNSSeeds() const { return vSeeds; }
+    /**
+     * Model-plane DNS introduction names. Empty until an ASN-diverse crawl
+     * fills this with DNS names. Not monetary vSeeds. Never an IP address
+     * and never an operator hostname. MDPEERS hints stay hint-only.
+     */
+    const std::vector<std::string>& ModelDNSSeeds() const { return vModelSeeds; }
     const std::vector<unsigned char>& Base58Prefix(Base58Type type) const { return base58Prefixes[type]; }
     const std::string& Bech32HRP() const { return bech32_hrp; }
     const std::vector<uint8_t>& FixedSeeds() const { return vFixedSeeds; }
@@ -301,6 +307,8 @@ protected:
     uint64_t m_assumed_blockchain_size;
     uint64_t m_assumed_chain_state_size;
     std::vector<std::string> vSeeds;
+    /** Model-plane DNS names. Default empty. See ModelDNSSeeds(). */
+    std::vector<std::string> vModelSeeds;
     std::vector<unsigned char> base58Prefixes[MAX_BASE58_TYPES];
     std::string bech32_hrp;
     ChainType m_chain_type;

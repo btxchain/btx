@@ -71,13 +71,23 @@ endif()
 set(LIBEVENT_LINKAGE "" CACHE INTERNAL "How Libevent was resolved (shared vs static path)")
 
 if(APPLE)
-  set(_event_search_dirs
+  # A depends build (make -C depends) installs static libevent under its
+  # prefix and hands it to us through the toolchain file; look there first.
+  # Homebrew paths stay as a fallback and are not required.
+  set(_event_prefix_dirs ${CMAKE_PREFIX_PATH} ${CMAKE_FIND_ROOT_PATH})
+  set(_event_search_dirs "")
+  set(_event_include_search "")
+  foreach(_p IN LISTS _event_prefix_dirs)
+    list(APPEND _event_search_dirs "${_p}/lib")
+    list(APPEND _event_include_search "${_p}/include")
+  endforeach()
+  list(APPEND _event_search_dirs
     /opt/homebrew/opt/libevent/lib
     /opt/homebrew/lib
     /usr/local/opt/libevent/lib
     /usr/local/lib
   )
-  set(_event_include_search
+  list(APPEND _event_include_search
     /opt/homebrew/opt/libevent/include
     /opt/homebrew/include
     /usr/local/opt/libevent/include
@@ -95,10 +105,11 @@ if(APPLE)
   endforeach()
   if(NOT _event_core_a OR NOT _event_extra_a OR NOT _event_pthreads_a OR NOT _event_inc)
     message(FATAL_ERROR
-      "macOS release builds require static libevent archives "
-      "(libevent_core.a, libevent_extra.a, libevent_pthreads.a) plus event2/event.h. "
-      "Homebrew: brew install libevent. Linking the dylibs puts /opt/homebrew load "
-      "commands in btxd/btx-cli and the tarball will not launch on a clean Mac.")
+      "macOS builds require static libevent archives "
+      "(libevent_core.a, libevent_extra.a, libevent_pthreads.a) plus event2/event.h "
+      "on CMAKE_PREFIX_PATH or CMAKE_FIND_ROOT_PATH (a depends/ prefix) or under "
+      "/usr/local. /opt/homebrew is searched and is not required. Linking the "
+      "dylibs puts absolute load commands in btxd/btx-cli.")
   endif()
   btx_import_macos_static_libevent(core "${_event_core_a}" "${_event_inc}")
   btx_import_macos_static_libevent(extra "${_event_extra_a}" "${_event_inc}")
@@ -116,6 +127,7 @@ if(APPLE)
   check_evhttp_connection_get_peer(libevent::extra)
   set(LIBEVENT_LINKAGE "static:${_event_core_a}" CACHE INTERNAL "How Libevent was resolved (shared vs static path)")
   message(STATUS "Libevent: macOS static ${_event_core_a}")
+  unset(_event_prefix_dirs)
   unset(_event_search_dirs)
   unset(_event_include_search)
   unset(_event_core_a)

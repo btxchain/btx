@@ -79,6 +79,22 @@ bool IsFullFileStreamGet(const std::string& method, const std::string& path)
     return true;
 }
 
+bool WholeFileStreamShouldFallBack(uint64_t file_bytes, uint64_t got_bytes, int64_t elapsed_ms, int64_t deadline_ms)
+{
+    if (file_bytes > FULL_FILE_STREAM_MAX_BYTES) return true;
+    if (file_bytes == 0) return false;
+    if (deadline_ms <= 0) return true;
+    if (elapsed_ms >= deadline_ms) return true;
+    if (got_bytes >= file_bytes) return false;
+    if (got_bytes == 0) {
+        // No sample yet. A silent stream must not consume the transfer deadline.
+        return elapsed_ms >= std::min<int64_t>(deadline_ms, 30000);
+    }
+    if (elapsed_ms <= 0) return false;
+    return static_cast<uint64_t>(elapsed_ms) * file_bytes >
+           static_cast<uint64_t>(deadline_ms) * got_bytes;
+}
+
 bool FullFileStreamHttpBodyCap(bool have_content_length, uint64_t content_length, size_t& read_cap, std::string& err)
 {
     read_cap = 0;

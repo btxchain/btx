@@ -1385,6 +1385,8 @@ RPCHelpMan getunconfirmedbalance();
 RPCHelpMan lockunspent();
 RPCHelpMan listlockunspent();
 RPCHelpMan getbalances();
+RPCHelpMan getbalancewatch();
+RPCHelpMan getbalanceatheight();
 RPCHelpMan listunspent();
 
 // encryption
@@ -1550,6 +1552,8 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &gettransaction},
         {"wallet", &getunconfirmedbalance},
         {"wallet", &getbalances},
+        {"wallet", &getbalancewatch},
+        {"wallet", &getbalanceatheight},
         {"wallet", &getwalletinfo},
         {"wallet", &importaddress},
         {"wallet", &importdescriptors},

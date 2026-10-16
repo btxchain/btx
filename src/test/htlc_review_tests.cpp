@@ -35,8 +35,9 @@ namespace {
 // Same script flags block validation uses once every deployment is active
 // (GetBlockScriptFlags: P2SH|WITNESS|TAPROOT|CTV|CSFS + DERSIG|CLTV|CSV|NULLDUMMY).
 // SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 is set by GetBlockScriptFlags from its
-// activation height. It is defense in depth for the new length-pinned
-// SHA-256 leaf only. These are the post-activation block flags.
+// activation height. It rejects a non-32-byte preimage on the new SHA-256
+// leaf, the legacy SHA-256 leaf, and the HASH160 htlc_tx leaf. These are
+// the post-activation block flags.
 constexpr unsigned int BLOCK_FLAGS =
     SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT |
     SCRIPT_VERIFY_CHECKTEMPLATEVERIFY | SCRIPT_VERIFY_CHECKSIGFROMSTACK |
@@ -288,10 +289,10 @@ BOOST_AUTO_TEST_CASE(review_annex_does_not_bypass_size_check)
     BOOST_TEST_MESSAGE("annex + 33-byte preimage -> " << ScriptErrorString(err));
 }
 
-// Legacy SHA-256 and HASH160 htlc_tx have no OP_SIZE pin. A matching preimage
-// of any length stays consensus-valid under SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32.
-// The flag must not turn those leaves into a consensus split with v0.34.12.
-BOOST_AUTO_TEST_CASE(review_legacy_leaves_accept_non32_preimage_under_flag)
+// Legacy SHA-256 and HASH160 htlc_tx have no OP_SIZE pin in the script.
+// With SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 set, a non-32-byte preimage is
+// consensus-invalid, matching v0.34.15. Without the flag the spend stays valid.
+BOOST_AUTO_TEST_CASE(review_legacy_leaves_reject_non32_preimage_under_flag)
 {
     const CPQKey claimer = NewKey();
     const CPQKey sender = NewKey();
@@ -304,7 +305,7 @@ BOOST_AUTO_TEST_CASE(review_legacy_leaves_accept_non32_preimage_under_flag)
         const Bytes leaf = c.sha
             ? BuildP2MRHTLCSha256LegacyLeaf(Sha256Bytes(c.preimage), PQAlgorithm::ML_DSA_44, claimer.GetPubKey())
             : BuildP2MRHTLCTxLeaf(Hash160Bytes(c.preimage), PQAlgorithm::ML_DSA_44, claimer.GetPubKey());
-        BOOST_CHECK(!P2MRClaimLeafPinsPreimageLength(leaf));
+        BOOST_CHECK(P2MRClaimLeafPinsPreimageLength(leaf));
         const HtlcTree t = MakeTree(leaf, BuildP2MRRefundLeaf(1000, PQAlgorithm::ML_DSA_44, sender.GetPubKey()));
         Spend s{t.spk};
         const Bytes sig = s.SignLeaf(claimer, t.claim_leaf);
@@ -331,15 +332,15 @@ BOOST_AUTO_TEST_CASE(review_legacy_leaves_accept_non32_preimage_under_flag)
             BOOST_CHECK_MESSAGE(exec_ok && stack.size() == 1 && (CScriptNum(stack.back(), true).GetInt64() == 1),
                                 c.name << ": leaf script should be satisfied, got " << ScriptErrorString(e2));
         }
-        // (b) Post-activation block flags, including the 32-byte flag: still valid.
+        // (b) Post-activation block flags, including the 32-byte flag: rejected.
         ScriptError err;
-        BOOST_CHECK_MESSAGE(s.Verify({sig, c.preimage, t.claim_leaf, t.claim_control}, err),
-                            c.name << ": matching non-32 preimage must stay consensus-valid, got " << ScriptErrorString(err));
-        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+        BOOST_CHECK_MESSAGE(!s.Verify({sig, c.preimage, t.claim_leaf, t.claim_control}, err),
+                            c.name << ": matching non-32 preimage must be consensus-invalid, got " << ScriptErrorString(err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
         // (c) The same witness is valid without the flag.
         BOOST_CHECK(s.Verify({sig, c.preimage, t.claim_leaf, t.claim_control}, err, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS));
         BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
-        BOOST_TEST_MESSAGE(c.name << ": accepted with and without SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32");
+        BOOST_TEST_MESSAGE(c.name << ": leaf satisfied; rejected only with SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32");
     }
 }
 
@@ -425,8 +426,8 @@ BOOST_AUTO_TEST_CASE(review_parser_strictness)
     BOOST_CHECK(!ParseP2MRHTLCSha256LegacyLeaf(cur, h, algo, pk));
     BOOST_CHECK(ParseP2MRHTLCSha256LegacyLeaf(leg, h, algo, pk));
     BOOST_CHECK(!ParseP2MRHTLCSha256Leaf(leg, h, algo, pk));
-    BOOST_CHECK(!P2MRClaimLeafPinsPreimageLength(leg));
-    BOOST_CHECK(!P2MRClaimLeafPinsPreimageLength(BuildP2MRHTLCTxLeaf(Bytes(20, 1), PQAlgorithm::ML_DSA_44, claimer.GetPubKey())));
+    BOOST_CHECK(P2MRClaimLeafPinsPreimageLength(leg));
+    BOOST_CHECK(P2MRClaimLeafPinsPreimageLength(BuildP2MRHTLCTxLeaf(Bytes(20, 1), PQAlgorithm::ML_DSA_44, claimer.GetPubKey())));
 
     Bytes extra = cur;
     extra.push_back(OP_NOP);

@@ -94,8 +94,12 @@ function Install-WingetPackage {
     if ($Override) {
         $args += @("--override", $Override)
     }
-    & $Winget @args
-    if ($LASTEXITCODE -ne 0) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $Winget @args *>&1 | Out-Host
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    if ($code -ne 0) {
         Fail "winget install failed for $Id"
     }
 }
@@ -204,8 +208,12 @@ function Ensure-Vcpkg {
 
     if (-not (Test-Path -LiteralPath $Root)) {
         Write-Step "Cloning standalone vcpkg to $Root"
-        & $Git clone https://github.com/microsoft/vcpkg.git $Root
-        if ($LASTEXITCODE -ne 0) {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & $Git clone https://github.com/microsoft/vcpkg.git $Root *>&1 | Out-Host
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $prev
+        if ($code -ne 0) {
             Fail "Failed to clone vcpkg into $Root"
         }
     }
@@ -216,8 +224,12 @@ function Ensure-Vcpkg {
 
     if (-not (Test-Path -LiteralPath $vcpkgExe)) {
         Write-Step "Bootstrapping vcpkg"
-        & cmd.exe /d /s /c "`"$bootstrap`" -disableMetrics"
-        if ($LASTEXITCODE -ne 0) {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & cmd.exe /d /s /c "`"$bootstrap`" -disableMetrics" *>&1 | Out-Host
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $prev
+        if ($code -ne 0) {
             Fail "vcpkg bootstrap failed"
         }
     }
@@ -286,9 +298,17 @@ function Invoke-BatchFile {
     try {
         Set-Content -LiteralPath $tempFile -Encoding Ascii -Value ($Lines -join "`r`n")
         Write-Step $Label
-        & cmd.exe /d /s /c "`"$tempFile`""
-        if ($LASTEXITCODE -ne 0) {
-            Fail "$Label failed with exit code $LASTEXITCODE"
+        $batchLog = Join-Path $env:TEMP "btx-windows-batch.log"
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & cmd.exe /d /s /c "`"$tempFile`" > `"$batchLog`" 2>&1"
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $prev
+        if (Test-Path -LiteralPath $batchLog) {
+            Get-Content -LiteralPath $batchLog -Tail 80 | ForEach-Object { Write-Output $_ }
+        }
+        if ($code -ne 0) {
+            Fail "$Label failed with exit code $code"
         }
     } finally {
         Remove-Item -LiteralPath $tempFile -ErrorAction SilentlyContinue
@@ -428,6 +448,7 @@ if ($BuildTests) {
 if ($BuildGui) {
     $features.Add("qt5")
 }
+$features.Add("zeromq")
 $manifestFeatures = ($features.ToArray() -join ";")
 
 $cudaRoot = $null
@@ -465,6 +486,7 @@ $cmakeArgs = @(
     "-DBUILD_TESTS=$buildTestsValue",
     "-DENABLE_WALLET=ON",
     "-DWITH_SQLITE=ON",
+    "-DWITH_ZMQ=ON",
     "-DBTX_ENABLE_CUDA_EXPERIMENTAL=$cudaValue",
     "-DWARN_INCOMPATIBLE_BDB=OFF"
 )
@@ -475,10 +497,12 @@ if ($EnableCudaExperimental) {
     $cmakeArgs += "-DCMAKE_CUDA_COMPILER=`"$nvcc`""
 }
 
+$cmakeBin = Split-Path -Parent $tools.CMake
 $configureLines = @(
     "@echo off",
     "setlocal enableextensions",
     "call `"$($tools.VsDevCmd)`" -arch=x64 -host_arch=x64 >nul || exit /b 1",
+    "set `"PATH=$cmakeBin;%PATH%`"",
     "set `"VCPKG_ROOT=$VcpkgRoot`"",
     ($cmakeArgs -join " ")
 )
@@ -488,14 +512,15 @@ $buildLines = @(
     "@echo off",
     "setlocal enableextensions",
     "call `"$($tools.VsDevCmd)`" -arch=x64 -host_arch=x64 >nul || exit /b 1",
-    "cmake --build `"$BuildDir`" --config $Configuration --parallel || exit /b 1"
+    "set `"PATH=$cmakeBin;%PATH%`"",
+    "`"$($tools.CMake)`" --build `"$BuildDir`" --config $Configuration --parallel || exit /b 1"
 )
 if ($Install) {
     if ([string]::IsNullOrWhiteSpace($InstallDir)) {
         Fail "InstallDir must be supplied when -Install is used."
     }
     $InstallDir = Resolve-NormalPath -Path $InstallDir -CreateDirectory
-    $buildLines += "cmake --install `"$BuildDir`" --config $Configuration --prefix `"$InstallDir`" || exit /b 1"
+    $buildLines += "`"$($tools.CMake)`" --install `"$BuildDir`" --config $Configuration --prefix `"$InstallDir`" || exit /b 1"
 }
 Invoke-BatchFile -Lines $buildLines -Label "Building BTX for Windows"
 

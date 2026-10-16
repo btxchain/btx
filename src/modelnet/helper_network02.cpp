@@ -4,6 +4,7 @@
 
 #include <modelnet/helper.h>
 
+#include <modelnet/admission_routes.h>
 #include <modelnet/bootstrap_distributor.h>
 #include <modelnet/bulk_controller.h>
 #include <modelnet/catalog.h>
@@ -359,6 +360,16 @@ bool ExecuteImport(ModelCatalog& cat, const UniValue& o, UniValue& result, std::
             err_code = "INVALID_PARAMETER";
             return false;
         }
+        {
+            std::string admission_code;
+            if (!LivePathAllowed(imported.model_id.Hex(), false, admission_code)) {
+                std::string uerr;
+                (void)cat.Seed(imported.model_id, false, uerr);
+                err_code = admission_code;
+                err = "admission denied";
+                return false;
+            }
+        }
         UniValue man;
         if (!cat.GetManifest(imported.model_id, man, err)) {
             err_code = "INTERNAL_ERROR";
@@ -431,18 +442,27 @@ bool ExecuteImport(ModelCatalog& cat, const UniValue& o, UniValue& result, std::
                     rels.push_back(spec.destination_path.empty() ? spec.source_path : spec.destination_path);
                 }
                 VerifiedManifest vm;
-                if (MakeVerifiedManifestFromStaged(coord->StagingDir(), rels, vm, perr) &&
-                    coord->AcceptVerifiedManifest(vm, perr)) {
-                    result = coord->StatusJson();
-                    result.pushKV("imported", true);
-                    result.pushKV("automatic_spend_atoms", 0);
-                    result.pushKV("wallet_required", false);
-                    result.pushKV("publisher_must_republish", false);
-                    result.pushKV("live_http", false);
-                    result.pushKV("authorship", "not implied by source integrity");
-                    result.pushKV("staged", true);
-                } else {
+                if (!MakeVerifiedManifestFromStaged(coord->StagingDir(), rels, vm, perr)) {
                     result.pushKV("accept_error", perr);
+                } else {
+                    std::string admission_code;
+                    if (!LivePathAllowed(vm.model_id.Hex(), false, admission_code)) {
+                        err_code = admission_code;
+                        err = "admission denied";
+                        return false;
+                    }
+                    if (!coord->AcceptVerifiedManifest(vm, perr)) {
+                        result.pushKV("accept_error", perr);
+                    } else {
+                        result = coord->StatusJson();
+                        result.pushKV("imported", true);
+                        result.pushKV("automatic_spend_atoms", 0);
+                        result.pushKV("wallet_required", false);
+                        result.pushKV("publisher_must_republish", false);
+                        result.pushKV("live_http", false);
+                        result.pushKV("authorship", "not implied by source integrity");
+                        result.pushKV("staged", true);
+                    }
                 }
             }
         }
@@ -1019,6 +1039,14 @@ bool DispatchNetwork02RpcOnce(ModelCatalog& cat, const std::string& method, cons
                     err_code = "UNSIGNED_PACKAGE";
                     err = "import requires a cryptographic signature; inspect remains available";
                     return false;
+                }
+                if (man["model_id"].isStr()) {
+                    std::string admission_code;
+                    if (!LivePathAllowed(man["model_id"].get_str(), false, admission_code)) {
+                        err_code = admission_code;
+                        err = "admission denied";
+                        return false;
+                    }
                 }
                 if (!cat.InstallFromManifest(man, err, /*complete=*/false)) {
                     err_code = "INVALID_PARAMETER";

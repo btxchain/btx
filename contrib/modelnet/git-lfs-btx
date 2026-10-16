@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The BTX developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://opensource.org/license/mit/.
+"""Custom Git LFS transfer helper.
+
+Newline-delimited JSON on stdin and stdout. Events are init, upload,
+download, and terminate. An upload must carry the SHA-256 oid, the byte
+length, and a sha384 field; both digests are checked against the same
+bytes. Objects are stored by oid under the state directory argument.
+A request path is never a shell command and never the storage key.
+Absolute paths and '..' are rejected. Mismatches produce an error event.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+OID_RE_LEN = 64
+SHA384_LEN = 96
+
+
+def emit(obj: dict) -> None:
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def emit_error(oid: str | None, code: str, message: str) -> None:
+    emit({"event": "error", "oid": oid, "error": {"code": code, "message": message}})
+
+
+def bad_request_path(value: object) -> bool:
+    if not isinstance(value, str) or value == "":
+        return True
+    if value.startswith("/") or value.startswith("\\") or value.startswith("~"):
+        return True
+    if "\x00" in value or "\n" in value or "\r" in value:
+        return True
+    parts = value.replace("\\", "/").split("/")
+    return any(part == ".." or part == "" for part in parts)
+
+
+def oid_name(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) != OID_RE_LEN:
+        return None
+    if value != value.lower() or any(char not in "0123456789abcdef" for char in value):
+        return None
+    return value
+
+
+def sha384_name(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) != SHA384_LEN:
+        return None
+    if value != value.lower() or any(char not in "0123456789abcdef" for char in value):
+        return None
+    return value
+
+
+def object_path(state: Path, oid: str) -> Path:
+    return state / oid
+
+
+def decode_bytes(value: object) -> bytes | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def handle_upload(state: Path, msg: dict) -> None:
+    oid = oid_name(msg.get("oid"))
+    claimed = msg.get("oid") if isinstance(msg.get("oid"), str) else None
+    if "path" in msg and bad_request_path(msg.get("path")):
+        emit_error(claimed, "BTX035_PATH", "absolute path or '..' rejected")
+        return
+    if oid is None:
+        emit_error(claimed, "BTX035_DIGEST", "oid is not a sha256")
+        return
+    raw = decode_bytes(msg.get("bytes"))
+    if raw is None:
+        emit_error(oid, "BTX035_FORMAT", "upload bytes missing")
+        return
+    size = msg.get("size")
+    if type(size) is not int or size < 0 or size != len(raw):
+        emit_error(oid, "BTX035_SIZE", "size mismatch")
+        return
+    if hashlib.sha256(raw).hexdigest() != oid:
+        emit_error(oid, "BTX035_DIGEST", "sha256 mismatch")
+        return
+    digest384 = sha384_name(msg.get("sha384"))
+    if digest384 is None or hashlib.sha384(raw).hexdigest() != digest384:
+        emit_error(oid, "BTX035_DIGEST", "sha384 mismatch")
+        return
+    state.mkdir(parents=True, exist_ok=True)
+    temporary = state / f".{oid}.tmp"
+    temporary.write_bytes(raw)
+    os.replace(temporary, object_path(state, oid))
+    emit({"event": "complete", "oid": oid, "size": size, "sha384": digest384})
+
+
+def handle_download(state: Path, msg: dict) -> None:
+    oid = oid_name(msg.get("oid"))
+    claimed = msg.get("oid") if isinstance(msg.get("oid"), str) else None
+    if "path" in msg and bad_request_path(msg.get("path")):
+        emit_error(claimed, "BTX035_PATH", "absolute path or '..' rejected")
+        return
+    if oid is None:
+        emit_error(claimed, "BTX035_DIGEST", "oid is not a sha256")
+        return
+    path = object_path(state, oid)
+    if not path.is_file():
+        emit_error(oid, "BTX035_MISSING", "missing content")
+        return
+    raw = path.read_bytes()
+    size = msg.get("size")
+    if type(size) is int and size != len(raw):
+        emit_error(oid, "BTX035_SIZE", "size mismatch")
+        return
+    emit(
+        {
+            "event": "complete",
+            "oid": oid,
+            "size": len(raw),
+            "sha384": hashlib.sha384(raw).hexdigest(),
+            "bytes": base64.b64encode(raw).decode("ascii"),
+        }
+    )
+
+
+def handle(state: Path, msg: object) -> bool:
+    if not isinstance(msg, dict):
+        emit_error(None, "BTX035_FORMAT", "event must be an object")
+        return True
+    event = msg.get("event")
+    if event == "terminate":
+        emit({"event": "terminate"})
+        return False
+    if event == "init":
+        emit({"event": "init"})
+        return True
+    if event == "upload":
+        handle_upload(state, msg)
+        return True
+    if event == "download":
+        handle_download(state, msg)
+        return True
+    emit_error(None, "BTX035_FORMAT", "unknown event")
+    return True
+
+
+def state_argument(argv: list[str]) -> Path | None:
+    if len(argv) != 2 or argv[1] == "":
+        return None
+    raw = argv[1]
+    if "\x00" in raw or "\n" in raw or "\r" in raw:
+        return None
+    path = Path(raw)
+    if any(part == ".." for part in path.parts):
+        return None
+    return path
+
+
+def main(argv: list[str]) -> int:
+    state = state_argument(argv)
+    if state is None:
+        emit_error(None, "BTX035_URL", "state directory rejected")
+        return 2
+    while True:
+        line = sys.stdin.readline()
+        if line == "":
+            return 0
+        if line.endswith("\n"):
+            line = line[:-1]
+        if line.endswith("\r"):
+            line = line[:-1]
+        if line == "":
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            emit_error(None, "BTX035_FORMAT", "invalid json")
+            continue
+        try:
+            if not handle(state, msg):
+                return 0
+        except Exception:
+            emit_error(None, "BTX035_FORMAT", "event failed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

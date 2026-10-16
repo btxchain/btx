@@ -4,6 +4,7 @@
 
 #include <modelnet/package_execute.h>
 
+#include <modelnet/admission_routes.h>
 #include <modelnet/package_install.h>
 #include <crypto/hex_base.h>
 #include <crypto/sha384.h>
@@ -171,6 +172,12 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
     }
     if (req.files.empty()) {
         return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "no verified local files");
+    }
+    for (const std::string& id : req.plan.resource_ids) {
+        std::string admission_code;
+        if (!LivePathAllowed(id, false, admission_code)) {
+            return Fail(err_code, err, admission_code.c_str(), "admission denied");
+        }
     }
     if (req.files.size() > ACQ_EXECUTE_MAX_FILES) {
         return Fail(err_code, err, "BUDGET_EXCEEDED", "too many files");

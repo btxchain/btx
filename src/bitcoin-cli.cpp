@@ -12,7 +12,10 @@
 #include <compat/compat.h>
 #include <compat/stdin.h>
 #include <consensus/amount.h>
+#include <lightwatch.h>
 #include <policy/feerate.h>
+#include <univalue.h>
+#include <util/fs.h>
 #include <rpc/client.h>
 #include <rpc/mining.h>
 #include <rpc/protocol.h>
@@ -113,6 +116,7 @@ static void SetupCliArgs(ArgsManager& argsman)
     argsman.AddArg("-stdinrpcpass", "Read RPC password from standard input as a single line. When combined with -stdin, the first line from standard input is used for the RPC password. When combined with -stdinwalletpassphrase or -stdinbundlepassphrase, -stdinrpcpass consumes the first line before those passphrases are read.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-stdinwalletpassphrase", "Read wallet passphrase from standard input as a single line for walletpassphrase(change), backupwalletbundle, or backupwalletbundlearchive. When combined with -stdin, the wallet passphrase line is consumed before any remaining stdin arguments.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-stdinbundlepassphrase", "Read wallet bundle archive passphrase from standard input as a single line for backupwalletbundlearchive or restorewalletbundlearchive. When combined with -stdin, the bundle passphrase line is consumed before any remaining stdin arguments.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-lightwatchdir=<dir>", "Directory for the lightweight watch state (default: <datadir>/lightwatch). The watch stores descriptors and matching outputs only.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 }
 
 std::optional<std::string> RpcWalletName(const ArgsManager& args)
@@ -179,6 +183,8 @@ static int AppInitRPC(int argc, char* argv[])
                 "  btx-cli getnewaddress                 # P2MR receive address\n"
                 "  btx-cli sendtoaddress <p2mr> 0.1      # explicit wallet send; never bitcoin:\n"
                 "  btx-cli -netinfo\n"
+                "  btx-cli lightwatch init \"pkh(...)\" 0\n"
+                "  btx-cli lightwatch sync\n"
                 "\n";
             strUsage += "\n" + gArgs.GetHelpMessage();
         }
@@ -1304,6 +1310,152 @@ static void SetGenerateToAddressArgs(const std::string& address, std::vector<std
     args.emplace(args.begin() + 1, address);
 }
 
+static fs::path LightWatchDir()
+{
+    const std::string dir = gArgs.GetArg("-lightwatchdir", "");
+    if (!dir.empty()) return fs::PathFromString(dir);
+    return gArgs.GetDataDirNet() / "lightwatch";
+}
+
+static fs::path LightWatchFile()
+{
+    return LightWatchDir() / "watch.txt";
+}
+
+static UniValue LightWatchRpc(const std::string& method, const std::vector<std::string>& args)
+{
+    DefaultRequestHandler handler;
+    const UniValue reply = ConnectAndCallRPC(&handler, method, args, /*rpcwallet=*/std::nullopt);
+    const UniValue& error = reply.find_value("error");
+    if (!error.isNull()) {
+        const UniValue message = error.find_value("message");
+        throw std::runtime_error(message.isStr() ? message.get_str() : error.write());
+    }
+    return reply.find_value("result");
+}
+
+static UniValue LightWatchStatusJson(const LightWatchStatus& status)
+{
+    UniValue descriptors(UniValue::VARR);
+    for (const std::string& descriptor : status.descriptors) descriptors.push_back(descriptor);
+    UniValue fetched(UniValue::VARR);
+    for (const LightWatchFetch& fetch : status.fetched) {
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("height", fetch.height);
+        entry.pushKV("block_hash", fetch.block_hash.GetHex());
+        fetched.push_back(std::move(entry));
+    }
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("ready", status.ready);
+    result.pushKV("chain_height", status.chain_height);
+    result.pushKV("wallet_height", status.wallet_height);
+    result.pushKV("blocks_behind", status.blocks_behind);
+    result.pushKV("start_height", status.start_height);
+    result.pushKV("shielded_foreign_watch", status.shielded_foreign_watch);
+    result.pushKV("shielded_omitted", status.shielded_omitted);
+    result.pushKV("fetched_total", status.fetched_total);
+    result.pushKV("descriptors", std::move(descriptors));
+    result.pushKV("fetched", std::move(fetched));
+    return result;
+}
+
+static int LightWatchCommand(const std::vector<std::string>& args, std::string& strPrint)
+{
+    if (args.empty() || args[0] == "help") {
+        strPrint =
+            "lightwatch init <descriptor> [start_height]\n"
+            "lightwatch add <descriptor>\n"
+            "lightwatch sync\n"
+            "lightwatch status\n"
+            "lightwatch balance\n"
+            "lightwatch balanceat <height>\n"
+            "lightwatch sendraw <hex>\n"
+            "\n"
+            "Walks compact block filters from a node and downloads a block only when the filter matches.\n"
+            "An amount is withheld with BTX_BALANCE_NOT_READY until that walk has reached the height.\n"
+            "The node must serve basic filters (-blockfilterindex=1). Private keys are refused.\n"
+            "sendraw relays an already signed transaction and does not sign.\n";
+        return EXIT_SUCCESS;
+    }
+    const std::string& command = args[0];
+    if (command == "sendraw") {
+        if (args.size() != 2) throw std::runtime_error("lightwatch sendraw requires one raw transaction hex");
+        const UniValue result = LightWatchRpc("sendrawtransaction", {args[1]});
+        strPrint = result.isStr() ? result.get_str() : result.write(2);
+        return EXIT_SUCCESS;
+    }
+
+    const fs::path file = LightWatchFile();
+    if (command == "init") {
+        if (args.size() < 2 || args.size() > 3) throw std::runtime_error("lightwatch init <descriptor> [start_height]");
+        if (fs::exists(file)) throw std::runtime_error("lightwatch state already exists");
+        int start{0};
+        if (args.size() == 3) {
+            const auto parsed = ToIntegral<int>(args[2]);
+            if (!parsed || *parsed < 0) throw std::runtime_error("invalid start_height");
+            start = *parsed;
+        }
+        LightWatch watch;
+        watch.SetStartHeight(start);
+        std::string error;
+        if (!watch.AddDescriptor(args[1], error, /*reset_progress=*/false)) {
+            throw std::runtime_error(error.empty() ? "BTX_LIGHTWATCH_DESCRIPTOR" : error);
+        }
+        if (!watch.Save(PathToString(file), error)) throw std::runtime_error(error);
+        strPrint = LightWatchStatusJson(watch.Status(-1)).write(2);
+        return EXIT_SUCCESS;
+    }
+
+    LightWatch watch;
+    std::string error;
+    if (!watch.Load(PathToString(file), error)) throw std::runtime_error(error.empty() ? "BTX_LIGHTWATCH_IO" : error);
+
+    if (command == "add") {
+        if (args.size() != 2) throw std::runtime_error("lightwatch add <descriptor>");
+        if (!watch.AddDescriptor(args[1], error)) throw std::runtime_error(error);
+        if (!watch.Save(PathToString(file), error)) throw std::runtime_error(error);
+        strPrint = LightWatchStatusJson(watch.Status(-1)).write(2);
+        return EXIT_SUCCESS;
+    }
+    if (command == "sync") {
+        if (!watch.Sync(LightWatchRpc, error)) throw std::runtime_error(error.empty() ? "BTX_FILTER_HEADER" : error);
+        if (!watch.Save(PathToString(file), error)) throw std::runtime_error(error);
+        const int tip = LightWatchRpc("getblockcount", {}).getInt<int>();
+        strPrint = LightWatchStatusJson(watch.Status(tip)).write(2);
+        return EXIT_SUCCESS;
+    }
+    if (command == "status" || command == "balance" || command == "balanceat") {
+        const int tip = LightWatchRpc("getblockcount", {}).getInt<int>();
+        if (command == "status") {
+            strPrint = LightWatchStatusJson(watch.Status(tip)).write(2);
+            return EXIT_SUCCESS;
+        }
+        int height = tip;
+        if (command == "balanceat") {
+            if (args.size() != 2) throw std::runtime_error("lightwatch balanceat <height>");
+            const auto parsed = ToIntegral<int>(args[1]);
+            if (!parsed || *parsed < 0) throw std::runtime_error("invalid height");
+            height = *parsed;
+        } else if (!watch.Status(tip).ready) {
+            strPrint = "BTX_BALANCE_NOT_READY";
+            return EXIT_FAILURE;
+        }
+        const LightWatchAmount amount = watch.BalanceAt(height);
+        if (!amount.ready) {
+            strPrint = "BTX_BALANCE_NOT_READY";
+            return EXIT_FAILURE;
+        }
+        UniValue result(UniValue::VOBJ);
+        result.pushKV("height", height);
+        result.pushKV("amount", ValueFromAmount(amount.amount));
+        result.pushKV("immature", ValueFromAmount(amount.immature));
+        result.pushKV("ready", true);
+        strPrint = result.write(2);
+        return EXIT_SUCCESS;
+    }
+    throw std::runtime_error("unknown lightwatch command");
+}
+
 static int CommandLineRPC(int argc, char *argv[])
 {
     std::string strPrint;
@@ -1444,7 +1596,9 @@ static int CommandLineRPC(int argc, char *argv[])
             method = args[0];
             args.erase(args.begin()); // Remove trailing method name from arguments vector
         }
-        if (nRet == 0) {
+        if (nRet == 0 && method == "lightwatch") {
+            nRet = LightWatchCommand(args, strPrint);
+        } else if (nRet == 0) {
             // Perform RPC call
             const std::optional<std::string> wallet_name{RpcWalletName(gArgs)};
             const UniValue reply = ConnectAndCallRPC(rh.get(), method, args, wallet_name);

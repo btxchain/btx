@@ -496,4 +496,35 @@ BOOST_AUTO_TEST_CASE(direct_seed_rate_and_netgroup_limits)
     BOOST_CHECK(err.find("netgroup") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(whole_file_fallback_keeps_a_piece_and_does_not_wait_out_the_deadline)
+{
+    using namespace modelnet;
+    constexpr int64_t deadline_ms = 600000;
+    const uint64_t file_bytes = FULL_FILE_STREAM_MAX_BYTES;
+    BOOST_CHECK(!WholeFileStreamShouldFallBack(file_bytes, 0, 0, deadline_ms));
+    // ~0.25 Mbit/s: 4 KiB in 128 ms cannot finish 64 MiB inside 600 s.
+    BOOST_CHECK(WholeFileStreamShouldFallBack(file_bytes, 4096, 128, deadline_ms));
+    // A fast sample still fits, so the whole-file shortcut may continue.
+    BOOST_CHECK(!WholeFileStreamShouldFallBack(file_bytes, 1ull << 20, 50, deadline_ms));
+    // Silence must not consume the transfer deadline.
+    BOOST_CHECK(WholeFileStreamShouldFallBack(file_bytes, 0, 30000, deadline_ms));
+    BOOST_CHECK(WholeFileStreamShouldFallBack(file_bytes, file_bytes / 2, deadline_ms, deadline_ms));
+
+    std::vector<unsigned char> piece(PIECE_SIZE, 0x44);
+    Digest48 artifact{};
+    artifact.data[0] = 0x64;
+    ModelStore live(Scratch(m_path_root, "live-fallback"), 64 << 20);
+    ModelStore q(Scratch(m_path_root, "q-fallback"), 64 << 20);
+    FileStreamHydration hyd(artifact, 0, PIECE_SIZE * 2, live, q);
+    std::string err;
+    BOOST_REQUIRE(hyd.Feed(Span<const unsigned char>{piece.data(), piece.size()}, err));
+    BOOST_CHECK_EQUAL(hyd.Progress().pieces_verified, 1U);
+    BOOST_CHECK(!hyd.Finish(err));
+    BOOST_CHECK(err.find("short") != std::string::npos);
+    BOOST_CHECK(q.HasPiece(artifact, 0, 0));
+    std::vector<unsigned char> kept;
+    BOOST_REQUIRE(q.GetPiece(artifact, 0, 0, kept, err));
+    BOOST_CHECK(kept == piece);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

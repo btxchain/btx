@@ -26,6 +26,7 @@ target_sources(test_btx
     wallet_crypto_tests.cpp
     wallet_rpc_tests.cpp
     wallet_tests.cpp
+    balance_watch_tests.cpp
     wallet_transaction_tests.cpp
     walletdb_tests.cpp
     walletload_tests.cpp

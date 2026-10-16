@@ -227,6 +227,15 @@ public:
     //! Return whether wallet-authored transactions for the next block require FIPS-205 SLH-DSA signatures.
     virtual bool slhdsaFips205ForNextBlock() = 0;
 
+    //! Proven-balance watch status. The GUI calls this in-process.
+    struct BalanceWatchUi
+    {
+        bool ready{false};
+        int chain_height{0};
+        int blocks_behind{0};
+    };
+    virtual BalanceWatchUi getBalanceWatchStatus() = 0;
+
     //! Get balances.
     virtual WalletBalances getBalances() = 0;
 

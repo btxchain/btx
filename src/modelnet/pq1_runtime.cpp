@@ -5,6 +5,7 @@
 #include <modelnet/pq1_runtime.h>
 
 #include <modelnet/crypto.h>
+#include <modelnet/session_gate.h>
 #include <modelnet/transport_pq.h>
 #include <univalue.h>
 #include <util/fs.h>
@@ -398,7 +399,8 @@ bool CheckOrStorePin(const fs::path& pinfile, const std::string& endpoint, const
     }
     obj.pushKV(endpoint, pin.Hex());
     fs::create_directories(pinfile.parent_path());
-    const fs::path tmp = pinfile.parent_path() / (pinfile.filename().native() + ".tmp");
+    const std::string tmp_name = fs::PathToString(pinfile.filename()) + ".tmp";
+    const fs::path tmp = pinfile.parent_path() / tmp_name.c_str();
     {
         std::ofstream out(tmp, std::ios::trunc);
         if (!out) {
@@ -536,10 +538,42 @@ bool ApplyHostileSslConf(SSL_CTX* ctx)
     return true;
 }
 
+bool CallerSuppliedClassicalToken(const std::string& supplied)
+{
+    if (supplied.empty()) return false;
+    std::string lower;
+    lower.reserve(supplied.size());
+    for (unsigned char c : supplied) {
+        lower.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : static_cast<char>(c));
+    }
+    static const char* kNames[] = {"x25519", "secp256r1", "ecdsa", "rsa"};
+    for (const char* name : kNames) {
+        if (lower.find(name) != std::string::npos) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 bool Pq1HostileConfCannotWeaken(std::string& err)
 {
+    // Reject only a caller-supplied classical token. An already-clean env with
+    // no such token keeps the pin success path below.
+    {
+        std::string tls = "TLSv1.3";
+        std::string group = "mlkem768";
+        std::string cipher = "TLS_AES_256_GCM_SHA384";
+        std::string sigalg = "mldsa44";
+        const bool classical = CallerSuppliedClassicalToken(err);
+        if (classical) {
+            tls = group = cipher = sigalg = err;
+        }
+        std::string profile_err;
+        if (!Pq1ProfileOrReject(tls, group, cipher, sigalg, profile_err) && classical) {
+            err = profile_err;
+            return false;
+        }
+    }
     Pq1InitOpenSsl();
     if (!Pq1OpenSslEnvIsClean()) {
         err = "OPENSSL_* env still set after sanitize";

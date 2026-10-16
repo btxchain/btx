@@ -20,6 +20,7 @@
 #include <util/check.h>
 #include <util/translation.h>
 #include <util/ui_change_type.h>
+#include <wallet/balance_watch.h>
 #include <wallet/coincontrol.h>
 #include <wallet/context.h>
 #include <wallet/dump.h>
@@ -456,6 +457,16 @@ public:
             result.unconfirmed_watch_only_balance = bal.m_watchonly_untrusted_pending;
             result.immature_watch_only_balance = bal.m_watchonly_immature;
         }
+        return result;
+    }
+    BalanceWatchUi getBalanceWatchStatus() override
+    {
+        BalanceWatchUi result;
+        if (!m_wallet->HaveChain()) return result;
+        const BalanceWatchStatus status = GetBalanceWatchStatus(*m_wallet, m_wallet->chain());
+        result.ready = status.ready;
+        result.chain_height = status.chain_height;
+        result.blocks_behind = status.blocks_behind;
         return result;
     }
     bool tryGetBalances(WalletBalances& balances, uint256& block_hash) override

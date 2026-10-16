@@ -41,6 +41,10 @@ This working tree is **0.34.15** (`CLIENT_VERSION_BUILD=15`,
 `CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
 **v0.34.15**. Do not recut `v0.34.14`, `v0.34.13`, `v0.34.12`, or `v0.34.10`.
 
+The private branch `private/btx-035/integration` also contains unpublished
+0.35 research gates. They are not a release and they do not change the
+version numbers above. Read [doc/modelnet/035/PRIVATE.md](doc/modelnet/035/PRIVATE.md).
+
 ## Start here
 
 This README is the **human** front door. It is not the agent operations

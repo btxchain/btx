@@ -8,7 +8,9 @@
 #include <netaddress.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <vector>
 
 namespace modelnet {
 
@@ -37,6 +39,14 @@ bool IsForbiddenRelayAddr(const CNetAddr& addr);
 bool IsForbiddenOutboundDialAddr(const CNetAddr& addr);
 bool IsForbiddenRelayEndpoint(const std::string& endpoint, std::string& err);
 bool SplitListenBind(const std::string& bind, std::string& host, uint16_t& port);
+
+/** DNS name only: rejects empty strings, IPv4/IPv6 literals, and anything that is not a hostname. */
+bool ModelDnsNameAllowed(const std::string& seed);
+
+/** Turn model-plane DNS seeds into host:port contacts. An empty seed list does not call `lookup`. */
+using ModelDnsLookup = std::function<std::vector<CNetAddr>(const std::string& dns_name)>;
+std::vector<std::string> ModelContactsFromDnsSeeds(const std::vector<std::string>& seeds, uint16_t port,
+                                                   const ModelDnsLookup& lookup);
 
 bool MappingWouldExposeControlPlane(uint16_t port);
 bool MayAdvertiseModelHost(bool operator_host, bool mapping_ok, bool loopback_only);

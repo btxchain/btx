@@ -45,6 +45,15 @@ inline constexpr size_t FULL_FILE_STREAM_HTTP_READ_CAP =
 bool IsFullFileStreamGet(const std::string& method, const std::string& path);
 
 /**
+ * A whole-file stream of at most FULL_FILE_STREAM_MAX_BYTES must not run until
+ * `deadline_ms` and then discard what arrived. Once a rate sample exists, return
+ * true when the file cannot finish inside the deadline so the caller keeps any
+ * complete pieces already stored and switches to piece GETs. With no bytes yet,
+ * return true after 30s rather than sitting on the full deadline.
+ */
+bool WholeFileStreamShouldFallBack(uint64_t file_bytes, uint64_t got_bytes, int64_t elapsed_ms, int64_t deadline_ms);
+
+/**
  * Fail-closed body cap for a FULL_FILE_STREAM_V1 GET response.
  * Missing or > FULL_FILE_STREAM_MAX_BYTES Content-Length is refused (no silent truncate).
  * On success, read_cap is header slack + advertised Content-Length.

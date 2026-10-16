@@ -199,11 +199,13 @@ bool ExpandLeaves(const Descriptor& desc, const FlatSigningProvider& keys, int p
 
 BOOST_FIXTURE_TEST_SUITE(htlc_fixes_tests, BasicTestingSetup)
 
-// Legacy SHA-256 and HASH160 htlc_tx leaves have no OP_SIZE pin. A matching
-// preimage of any length stays consensus-valid before and after the preimage
-// flag. The new htlc_sha256 leaf rejects a non-32-byte preimage through its
-// committed script, and the flag rejects that format before execution.
-BOOST_AUTO_TEST_CASE(fix_f1_legacy_preimage_length_stays_consensus_valid)
+// Legacy SHA-256 and HASH160 htlc_tx leaves have no OP_SIZE pin in the
+// script, so a matching preimage of any length is consensus-valid before the
+// preimage flag. With SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 set, v0.34.15
+// rejects a non-32-byte preimage on those leaves. The new htlc_sha256 leaf
+// still rejects a non-32-byte preimage through its committed script, and the
+// flag rejects that format before execution.
+BOOST_AUTO_TEST_CASE(fix_f1_legacy_preimage_length_matches_v03415)
 {
     const CPQKey claimer = NewKey();
     const CPQKey sender = NewKey();
@@ -221,14 +223,14 @@ BOOST_AUTO_TEST_CASE(fix_f1_legacy_preimage_length_stays_consensus_valid)
         const Bytes leaf = c.sha256
             ? BuildP2MRHTLCSha256LegacyLeaf(Sha256Bytes(c.preimage), PQAlgorithm::ML_DSA_44, claimer.GetPubKey())
             : BuildP2MRHTLCTxLeaf(Hash160Bytes(c.preimage), PQAlgorithm::ML_DSA_44, claimer.GetPubKey());
-        BOOST_CHECK(!P2MRClaimLeafPinsPreimageLength(leaf));
+        BOOST_CHECK(P2MRClaimLeafPinsPreimageLength(leaf));
         const HtlcTree t = MakeTree(leaf, refund_leaf);
         ScriptError err;
         BOOST_CHECK_MESSAGE(VerifyClaim(t, claimer, c.preimage, PRE_ACTIVATION_BLOCK_FLAGS, err),
                             c.name << ": pre-activation flags must accept, got " << ScriptErrorString(err));
-        BOOST_CHECK_MESSAGE(VerifyClaim(t, claimer, c.preimage, activated_flags, err),
-                            c.name << ": SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 must still accept a matching non-32 preimage, got " << ScriptErrorString(err));
-        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+        BOOST_CHECK_MESSAGE(!VerifyClaim(t, claimer, c.preimage, activated_flags, err),
+                            c.name << ": SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 must reject a non-32 preimage, got " << ScriptErrorString(err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
     }
 
     // 32-byte preimages pass under both flag sets.
@@ -457,7 +459,8 @@ BOOST_AUTO_TEST_CASE(fix_wallet_loads_descriptors_imported_by_older_versions)
 // Randomized mutation run over the HTLC leaf parsers (not coverage guided).
 // Invariants, on both trees: a parser accepts only the exact canonical script it
 // would build; no script is accepted by two claim parsers; the interpreter's
-// length pre-check matches only the new length-pinned SHA-256 parser.
+// length pre-check matches the new SHA-256 leaf, the legacy SHA-256 leaf, and
+// the HASH160 htlc_tx leaf.
 BOOST_AUTO_TEST_CASE(randomized_htlc_leaf_parser_mutations)
 {
     const char* env = std::getenv("HTLC_FUZZ_ITERS");
@@ -498,7 +501,7 @@ BOOST_AUTO_TEST_CASE(randomized_htlc_leaf_parser_mutations)
         if (p_old) BOOST_REQUIRE(BuildP2MRHTLCSha256LegacyLeaf(h2, a2, k2) == script);
         if (p_tx) BOOST_REQUIRE(BuildP2MRHTLCTxLeaf(h3, a3, k3) == script);
         if (p_csfs) BOOST_REQUIRE(BuildP2MRHTLCLeaf(h4, a4, k4) == script);
-        BOOST_REQUIRE_EQUAL(P2MRClaimLeafPinsPreimageLength(script), p_new);
+        BOOST_REQUIRE_EQUAL(P2MRClaimLeafPinsPreimageLength(script), p_new || p_old || p_tx);
         if (n_mut > 0 && (p_new || p_old || p_tx || p_csfs)) ++accepted_mutants;
     }
     BOOST_TEST_MESSAGE("leaf mutations: " << iters << " iterations, " << accepted_mutants << " mutants still parsed (all canonical)");

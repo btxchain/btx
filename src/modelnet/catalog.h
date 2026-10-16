@@ -85,6 +85,12 @@ public:
     bool ApplyDemandSeed(const Digest48& model_id, std::string& err);
     bool EnforceQuota(uint64_t need_bytes, std::string& err);
     bool PinModel(const Digest48& model_id, bool on, std::string& err);
+    /** True while this model's artifact is marked active (fetch or serve). */
+    bool TransferActive(const Digest48& model_id) const;
+    /** Delete a local model: its catalog entry and, unless another entry shares
+     *  it, its artifact directory. Refuses while the artifact is active and does
+     *  not unpin or unseed on that refusal. */
+    bool RemoveModel(const Digest48& model_id, Digest48& artifact_out, std::string& err);
     void SetQuotaBytes(uint64_t bytes);
     void BeginTransfer(const Digest48& artifact);
     void EndTransfer(const Digest48& artifact);

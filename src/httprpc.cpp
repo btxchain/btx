@@ -4,6 +4,10 @@
 
 #include <httprpc.h>
 
+#ifdef BTX_WITH_MODELNET
+#include <modelnet/lab_api.h>
+#endif
+
 #include <common/args.h>
 #include <crypto/hmac_sha256.h>
 #include <httpserver.h>
@@ -413,6 +417,32 @@ bool StartHTTPRPC(const std::any& context)
 
     auto handle_rpc = [context](HTTPRequest* req, const std::string&) { return HTTPReq_JSONRPC(context, req); };
     RegisterHTTPHandler("/", true, handle_rpc);
+#ifdef BTX_WITH_MODELNET
+    RegisterHTTPHandler("/btx-model/3/", false, [](HTTPRequest* req, const std::string&) {
+        if (req->GetRequestMethod() != HTTPRequest::POST || !req->GetPeer().IsLocal()) {
+            req->WriteReply(403, "BTX035_SCOPE_DENIED");
+            return true;
+        }
+        const std::string prefix = "/btx-model/3/";
+        std::string route = req->GetURI();
+        if (route.compare(0, prefix.size(), prefix) != 0) {
+            req->WriteReply(404, "BTX035_UNSUPPORTED");
+            return true;
+        }
+        route = route.substr(prefix.size());
+        const auto query = route.find('?');
+        if (query != std::string::npos) route.resize(query);
+        std::string response;
+        std::string err;
+        if (!modelnet::ServeLabPeer(route, req->ReadBody(), response, err)) {
+            req->WriteReply(400, err);
+            return true;
+        }
+        req->WriteHeader("Content-Type", "application/json");
+        req->WriteReply(200, response);
+        return true;
+    });
+#endif
     if (g_wallet_init_interface.HasWalletSupport()) {
         RegisterHTTPHandler("/wallet/", false, handle_rpc);
     }
@@ -432,6 +462,9 @@ void StopHTTPRPC()
 {
     LogDebug(BCLog::RPC, "Stopping HTTP RPC server\n");
     UnregisterHTTPHandler("/", true);
+#ifdef BTX_WITH_MODELNET
+    UnregisterHTTPHandler("/btx-model/3/", false);
+#endif
     if (g_wallet_init_interface.HasWalletSupport()) {
         UnregisterHTTPHandler("/wallet/", false);
     }

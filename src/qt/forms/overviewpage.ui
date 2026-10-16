@@ -352,6 +352,19 @@
             </item>
            </layout>
           </item>
+          <item>
+           <widget class="QLabel" name="labelBalanceWatch">
+            <property name="text">
+             <string notr="true">Balances not ready, 0 blocks behind</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="textInteractionFlags">
+             <set>Qt::LinksAccessibleByMouse|Qt::TextSelectableByKeyboard|Qt::TextSelectableByMouse</set>
+            </property>
+           </widget>
+          </item>
          </layout>
         </widget>
        </item>

@@ -231,6 +231,13 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
     ui->labelImmature->setVisible(showImmature || showWatchOnlyImmature);
     ui->labelImmatureText->setVisible(showImmature || showWatchOnlyImmature);
     ui->labelWatchImmature->setVisible(!walletModel->wallet().privateKeysDisabled() && showWatchOnlyImmature); // show watch-only immature balance
+
+    const interfaces::Wallet::BalanceWatchUi watch = walletModel->wallet().getBalanceWatchStatus();
+    if (watch.ready) {
+        ui->labelBalanceWatch->setText(tr("Balances proven through block %1").arg(watch.chain_height));
+    } else {
+        ui->labelBalanceWatch->setText(tr("Balances not ready, %1 blocks behind").arg(watch.blocks_behind));
+    }
 }
 
 // show/hide watch-only labels

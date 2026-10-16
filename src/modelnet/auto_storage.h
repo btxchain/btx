@@ -29,9 +29,10 @@ struct FsStats {
 };
 
 struct AutoStorageParams {
+    /** Historical floor. AUTO quota and the free-space reserve are not raised to this. */
     uint64_t min_useful{32 * GIB};
     uint64_t max_auto{512 * GIB};
-    /** 0 = max(min_useful, 10% of capacity). */
+    /** 0 = about 10% of capacity. Not max(min_useful, 10%). */
     uint64_t reserve_override{0};
 };
 

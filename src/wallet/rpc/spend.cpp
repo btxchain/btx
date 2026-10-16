@@ -1874,6 +1874,11 @@ RPCHelpMan walletprocesspsbt()
                                     {"txid:vout", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Leaf index or leaf script hex", RPCArgOptions{.skip_type_check = true}},
                                 },
                             },
+                            {"htlc_presign", RPCArg::Type::BOOL, RPCArg::Default{false}, "Sign a selected htlc_sha256 claim leaf before its preimage is known (for example for a watchtower).\n"
+                                "Select the claim leaf with p2mr_leaf. The leaf signature does not commit to the preimage: the PSBT stays incomplete,\n"
+                                "and whoever later adds the matching 32-byte preimage as PSBT_IN_SHA256 can finalize and broadcast this exact transaction.\n"
+                                "Requires sign=true and sighashtype DEFAULT or ALL. Only the claim leaf that pins a 32-byte preimage is presigned,\n"
+                                "not htlc_sha256_legacy. The claim has no timeout: a fixed-fee presigned claim must confirm before the refund height."},
                         },
                     RPCArgOptions{.oneline_description="options"}},
                     {"sighashtype", RPCArg::Type::STR, RPCArg::Default{"DEFAULT"}, "for backwards compatibility", RPCArgOptions{.hidden=true}},
@@ -1914,6 +1919,7 @@ RPCHelpMan walletprocesspsbt()
     bool bip32derivs = true;
     bool finalize = true;
     bool adjust_timelocks = false;
+    bool htlc_presign = false;
     std::vector<P2MRLeafSelection> leaf_selections;
     int nHashType = ParseSighashString(NullUniValue); // Use ParseSighashString default
     if (request.params[1].isBool() || request.params[1].isNull()) {
@@ -1933,10 +1939,14 @@ RPCHelpMan walletprocesspsbt()
                 {"sighashtype", UniValueType(UniValue::VSTR)},
                 {"adjust_timelocks", UniValueType(UniValue::VBOOL)},
                 {"p2mr_leaf", UniValueType(UniValue::VOBJ)},
+                {"htlc_presign", UniValueType(UniValue::VBOOL)},
             },
             true, true);
         if (options.exists("sign")) {
             sign = options["sign"].get_bool();
+        }
+        if (options.exists("htlc_presign")) {
+            htlc_presign = options["htlc_presign"].get_bool();
         }
         if (options.exists("bip32derivs")) {
             bip32derivs = options["bip32derivs"].get_bool();
@@ -1952,6 +1962,14 @@ RPCHelpMan walletprocesspsbt()
         }
         if (options.exists("p2mr_leaf")) {
             leaf_selections = ParseP2MRLeafMap(options["p2mr_leaf"]);
+        }
+        if (htlc_presign && !sign) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "htlc_presign requires sign=true");
+        }
+        if (htlc_presign && nHashType != SIGHASH_DEFAULT && nHashType != SIGHASH_ALL) {
+            // NONE, SINGLE or ANYONECANPAY would let whoever later holds the PSBT and the
+            // preimage redirect the claim or take part of it as fee.
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "htlc_presign requires sighashtype DEFAULT or ALL");
         }
         if (request.params.size() > 2) {
             // Same behaviour as too many args passed normally
@@ -1980,7 +1998,7 @@ RPCHelpMan walletprocesspsbt()
         [&](PartiallySignedTransaction& prepared, bilingual_str& leaf_error) {
             LOCK(wallet.cs_wallet);
             return ApplyWalletP2MRLeaves(wallet, prepared, leaf_selections, leaf_error);
-        })};
+        }, htlc_presign)};
     if (err) {
         ThrowPSBTError(*err, error_detail);
     }

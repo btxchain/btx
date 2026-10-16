@@ -841,6 +841,7 @@ public:
      * @param[in]  bip32derivs whether to fill in bip32 derivation information if available
      * @param[out] n_signed the number of inputs signed by this wallet
      * @param[in] finalize whether to create the final scriptSig or scriptWitness if possible
+     * @param[in] htlc_presign sign a selected htlc_sha256 claim leaf before its preimage is known
      * return error
      */
     std::optional<common::PSBTError> FillPSBT(PartiallySignedTransaction& psbtx,
@@ -853,7 +854,8 @@ public:
                   bool adjust_timelocks = true,
                   bilingual_str* error_detail = nullptr,
                   P2MRTimelockAdjustment* timelock_adjustment = nullptr,
-                  const std::function<bool(PartiallySignedTransaction&, bilingual_str&)>& prepare = {}) const;
+                  const std::function<bool(PartiallySignedTransaction&, bilingual_str&)>& prepare = {},
+                  bool htlc_presign = false) const;
 
     /**
      * Submit the transaction to the node's mempool and then relay to peers.
@@ -1206,6 +1208,12 @@ public:
     bool HasEncryptionKeys() const override;
     bool HaveCryptedKeys() const;
 
+    /** Get last block processed height. Returns -1 when no block has been processed. */
+    int GetLastBlockProcessedHeight() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_last_block_processed_height;
+    }
     /** Get last block processed height */
     int GetLastBlockHeight() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
     {

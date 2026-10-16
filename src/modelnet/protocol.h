@@ -15,6 +15,11 @@
 #include <string>
 #include <vector>
 
+// Windows headers define IGNORE as a macro.
+#ifdef IGNORE
+#undef IGNORE
+#endif
+
 namespace modelnet {
 
 constexpr uint16_t MODEL_PROTOCOL_VERSION = 2;

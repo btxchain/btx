@@ -10,8 +10,10 @@
 
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 namespace modelnet {
@@ -26,6 +28,12 @@ constexpr int PQ1_MAX_OUTBOUND = 8;
 /** One IPv4 buyer must be able to pipeline PQ1_INFLIGHT_PIECES. Still << MAX_INBOUND. */
 constexpr int PQ1_MAX_INBOUND_PER_NETGROUP = 8;
 constexpr int PQ1_INFLIGHT_PIECES = 8;
+/** Retrieve starts with this many pieces in flight per peer and adapts up to
+ *  PQ1_INFLIGHT_PIECES from the measured rate (see PQ1_INFLIGHT_BUDGET_S). */
+constexpr int PQ1_INFLIGHT_START = 2;
+/** Size the in-flight window so it drains in about this long at the measured
+ *  rate: half of PQ1_TRANSFER_MS, so a piece never races its own deadline. */
+constexpr int PQ1_INFLIGHT_BUDGET_S = 300;
 constexpr int PQ1_HANDSHAKE_MS = 10000;
 constexpr int PQ1_IDLE_MS = 30000;
 constexpr int PQ1_MAX_REQUESTS_PER_CONN = 32;
@@ -37,6 +45,10 @@ constexpr int PQ1_TRANSFER_MS = 600000;
 constexpr int PQ1_UNAUTH_HANDSHAKE_LIMIT = 4;
 constexpr int PQ1_UNAUTH_WINDOW_S = 60;
 constexpr int PQ1_PIECE_RETRIES = 8;
+/** A peer's 429 + Retry-After asks us to slow down, not to give up: waits allowed per piece or grant. */
+constexpr int PQ1_THROTTLE_WAITS = 120;
+/** Longest a serving worker paces one piece under -modeluploadlimit; well inside a fetcher's PQ1_TRANSFER_MS. */
+constexpr int64_t PQ1_SEED_PACE_MAX_MS = 120000;
 constexpr int PQ1_PEER_TRANSIENT_TRIES = 1024;
 constexpr int PQ1_PEER_RETRY_MS = 1000;
 constexpr uint64_t PQ1_RECONNECT_BYTES = 8ULL << 30;
@@ -76,7 +88,35 @@ public:
 
 ConnLimits& GlobalConnLimits();
 
-/** CLI used for ML-DSA-44 self-signed TLS files. Never Apple LibreSSL. */
+/** Milliseconds to wait so an upload of `nbytes` at `cap_bps` stays on the average
+ *  rate. The bucket may go into debt. Returns -1 when that wait would exceed
+ *  PQ1_SEED_PACE_MAX_MS; the caller then refuses without moving the bucket.
+ *  A cap below the piece size must still make progress: tokens never exceed
+ *  the cap, so requiring tokens >= nbytes refused every piece. */
+inline int64_t SeedPaceWaitMs(int64_t tokens, int64_t nbytes, int64_t cap_bps)
+{
+    if (cap_bps <= 0 || nbytes < 0) return -1;
+    const int64_t after = tokens - nbytes;
+    if (after >= 0) return 0;
+    const int64_t debt = -after;
+    if (debt > (std::numeric_limits<int64_t>::max() / 1000)) return -1;
+    const int64_t wait_ms = debt * 1000 / cap_bps;
+    if (wait_ms > PQ1_SEED_PACE_MAX_MS) return -1;
+    return wait_ms;
+}
+
+/** In-flight piece count that drains in about PQ1_INFLIGHT_BUDGET_S at `bytes_per_sec`. */
+inline int InflightWindowForRate(double bytes_per_sec, int pool_n)
+{
+    if (pool_n < 1) return 0;
+    if (bytes_per_sec < 0) bytes_per_sec = 0;
+    const int want = static_cast<int>(bytes_per_sec * static_cast<double>(PQ1_INFLIGHT_BUDGET_S) /
+                                       static_cast<double>(PIECE_SIZE));
+    return std::clamp(want, 1, pool_n);
+}
+
+/** CLI used for ML-DSA-44 self-signed TLS files. Never Apple LibreSSL.
+ *  Fetch-only start mints the certificate in-process and does not require this binary. */
 std::string OpensslBin();
 
 /** PQ-19: drop inherited OPENSSL_CONF / provider-module paths before SSL init. */

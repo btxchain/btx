@@ -31,7 +31,10 @@
 
 class CBlockHeader;
 
-#if defined(_MSC_VER)
+// MinGW ld does not pull [[gnu::weak]] definitions out of a static archive,
+// so the CPU stubs have to be ordinary symbols there. No device backend is
+// linked into the MinGW build, so nothing strong overrides them.
+#if defined(_MSC_VER) || defined(__MINGW32__)
 #define BTX_ACCEL_V4_WEAK
 #else
 #define BTX_ACCEL_V4_WEAK [[gnu::weak]]

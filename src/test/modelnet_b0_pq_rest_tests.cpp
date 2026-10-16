@@ -168,4 +168,21 @@ BOOST_AUTO_TEST_CASE(pq_22_v1_32byte_ids_not_padded)
     BOOST_CHECK_EQUAL(h.data.size(), 32U);
 }
 
+BOOST_AUTO_TEST_CASE(upload_pace_and_inflight_window)
+{
+    using modelnet::InflightWindowForRate;
+    using modelnet::PIECE_SIZE;
+    using modelnet::SeedPaceWaitMs;
+    BOOST_CHECK_EQUAL(SeedPaceWaitMs(100, 50, 10), 0);
+    // 4 MiB piece at 1 MiB/s from an empty bucket is 4 s, inside the pace cap.
+    BOOST_CHECK_EQUAL(SeedPaceWaitMs(0, static_cast<int64_t>(PIECE_SIZE), static_cast<int64_t>(1 << 20)), 4000);
+    // A cap so low that one piece cannot be repaid inside the fetcher deadline is a refuse, not a 429 storm.
+    BOOST_CHECK_EQUAL(SeedPaceWaitMs(0, static_cast<int64_t>(PIECE_SIZE), 1000), -1);
+
+    const double slow = 0.25e6 / 8.0;
+    BOOST_CHECK_EQUAL(InflightWindowForRate(slow, 8), 2);
+    BOOST_CHECK_EQUAL(InflightWindowForRate(1.0, 8), 1);
+    BOOST_CHECK_EQUAL(InflightWindowForRate(1.0e9, 8), 8);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

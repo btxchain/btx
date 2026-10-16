@@ -6,7 +6,11 @@
 // CACHE-01.., START-02/10/11/12 (library), SHARD-01..18 (no 13GiB unless env).
 
 #include <bitcoin-build-config.h> // IWYU pragma: keep
+#include <chainparams.h>
+#include <common/args.h>
 #include <crypto/common.h>
+#include <modelnet/model_nat.h>
+#include <netbase.h>
 #include <modelnet/auto_storage.h>
 #include <modelnet/catalog.h>
 #include <modelnet/generate.h>
@@ -130,8 +134,8 @@ BOOST_AUTO_TEST_CASE(cache_01_auto_quota_matrix)
         uint64_t min_eff;
         uint64_t max_eff;
     } rows[] = {
-        {128 * GIB, 80 * GIB, 24 * GIB, 40 * GIB},
-        {256 * GIB, 200 * GIB, 32 * GIB, 40 * GIB},
+        {128 * GIB, 80 * GIB, 10 * GIB, 16 * GIB},
+        {256 * GIB, 200 * GIB, 24 * GIB, 28 * GIB},
         {512 * GIB, 400 * GIB, 45 * GIB, 60 * GIB},
         {1024 * GIB, 800 * GIB, 90 * GIB, 120 * GIB},
         {2048 * GIB, 1536 * GIB, 180 * GIB, 230 * GIB},
@@ -145,8 +149,33 @@ BOOST_AUTO_TEST_CASE(cache_01_auto_quota_matrix)
         BOOST_CHECK_GE(q.effective_bytes, row.min_eff);
         BOOST_CHECK_LE(q.effective_bytes, row.max_eff);
         BOOST_CHECK_LE(q.effective_bytes, q.safe_available_bytes);
-        BOOST_CHECK_GE(q.reserve_bytes, 32 * GIB);
+        BOOST_CHECK_EQUAL(q.reserve_bytes, row.cap / 10);
+        BOOST_CHECK_LE(q.effective_bytes, row.cap / 10);
     }
+}
+
+BOOST_AUTO_TEST_CASE(cache_01_small_disk_is_not_raised_to_32gib)
+{
+    using modelnet::ComputeAutoQuota;
+    using modelnet::FsStats;
+    using modelnet::GIB;
+    modelnet::AutoStorageParams p;
+    FsStats small;
+    small.capacity = 16 * GIB;
+    small.available = 14 * GIB;
+    const auto a = ComputeAutoQuota(small, p);
+    BOOST_CHECK_EQUAL(a.target_bytes, small.capacity / 10);
+    BOOST_CHECK_EQUAL(a.effective_bytes, small.capacity / 10);
+    BOOST_CHECK_LT(a.effective_bytes, 32 * GIB);
+    BOOST_CHECK_LT(a.reserve_bytes, 32 * GIB);
+
+    FsStats disk64;
+    disk64.capacity = 64 * GIB;
+    disk64.available = 60 * GIB;
+    const auto b = ComputeAutoQuota(disk64, p);
+    BOOST_CHECK_EQUAL(b.effective_bytes, disk64.capacity / 10);
+    BOOST_CHECK_LT(b.effective_bytes * 2, disk64.capacity);
+    BOOST_CHECK_LT(b.reserve_bytes * 2, disk64.capacity);
 }
 
 BOOST_AUTO_TEST_CASE(cache_02_quota_shrinks_under_external_pressure)
@@ -1358,6 +1387,104 @@ BOOST_AUTO_TEST_CASE(exl3_allowlisted_architecture_with_cli_is_compatible)
     std::string reason;
     BOOST_CHECK(modelnet::ArtifactCompatibleWithHost(view, host, reason));
     BOOST_CHECK_EQUAL(modelnet::PickGenerateAdapter(view, host), "/bin/true");
+}
+
+BOOST_AUTO_TEST_CASE(mldsa_tls_identity_is_minted_in_process_mode_0600)
+{
+    const fs::path dir = m_path_root / "tls-mint";
+    fs::create_directories(dir);
+    const fs::path cert = dir / "cert.pem";
+    const fs::path key = dir / "key.pem";
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(modelnet::EnsureMlDsaTlsFiles(cert, key, err), err);
+    BOOST_CHECK(err.empty());
+    struct stat cst {};
+    struct stat kst {};
+    BOOST_REQUIRE(::stat(fs::PathToString(cert).c_str(), &cst) == 0);
+    BOOST_REQUIRE(::stat(fs::PathToString(key).c_str(), &kst) == 0);
+    BOOST_CHECK_EQUAL(cst.st_mode & 0777, 0600);
+    BOOST_CHECK_EQUAL(kst.st_mode & 0777, 0600);
+    const auto cert_bytes = ReadFileBytes(cert);
+    const auto key_bytes = ReadFileBytes(key);
+    const std::string cert_pem(cert_bytes.begin(), cert_bytes.end());
+    const std::string key_pem(key_bytes.begin(), key_bytes.end());
+    BOOST_CHECK(cert_pem.find("BEGIN CERTIFICATE") != std::string::npos);
+    BOOST_CHECK(key_pem.find("BEGIN") != std::string::npos);
+    BOOST_REQUIRE(modelnet::EnsureMlDsaTlsFiles(cert, key, err));
+    BOOST_CHECK(ReadFileBytes(key) == key_bytes);
+    BOOST_CHECK(ReadFileBytes(cert) == cert_bytes);
+}
+
+BOOST_AUTO_TEST_CASE(removemodel_checks_in_use_before_unpin_and_deletes_the_directory)
+{
+    const fs::path tmp = m_path_root / "remove-model";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x91, true);
+    const fs::path checkout = tmp / "checkout" / fs::PathFromString(imported.artifact_id.Hex());
+    std::string merr;
+    BOOST_REQUIRE_MESSAGE(cat.MaterializeCheckout(imported.model_id, checkout, merr), merr);
+    BOOST_CHECK(fs::is_directory(checkout));
+    const fs::path artifact_dir = cat.Store().Root() / "artifacts" / fs::PathFromString(imported.artifact_id.Hex());
+    BOOST_CHECK(fs::exists(artifact_dir));
+
+    cat.BeginTransfer(imported.artifact_id);
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "removemodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(imported.model_id.Hex());
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    std::string err;
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat, rpc, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IN_USE");
+    modelnet::CatalogEntry still;
+    BOOST_REQUIRE(cat.Find(imported.model_id, still));
+    BOOST_CHECK(still.pinned);
+    BOOST_CHECK(cat.Store().IsPinned(imported.model_id));
+    BOOST_CHECK(fs::exists(artifact_dir));
+    BOOST_CHECK(fs::is_directory(checkout));
+
+    cat.EndTransfer(imported.artifact_id);
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
+    BOOST_CHECK(result["removed"].get_bool());
+    BOOST_CHECK(result["checkout_removed"].get_bool());
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int>(), 0);
+    BOOST_CHECK(!cat.Find(imported.model_id, still));
+    BOOST_CHECK(!fs::exists(artifact_dir));
+    BOOST_CHECK(!fs::exists(checkout));
+}
+
+BOOST_AUTO_TEST_CASE(model_dns_seeds_stay_empty_and_reject_addresses)
+{
+    for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::REGTEST}) {
+        const auto params = CreateChainParams(ArgsManager{}, chain);
+        BOOST_REQUIRE(params);
+        BOOST_CHECK(params->ModelDNSSeeds().empty());
+    }
+    BOOST_CHECK(!modelnet::ModelDnsNameAllowed("192.0.2.10"));
+    BOOST_CHECK(!modelnet::ModelDnsNameAllowed("2001:db8::1"));
+    BOOST_CHECK(!modelnet::ModelDnsNameAllowed(""));
+    BOOST_CHECK(modelnet::ModelDnsNameAllowed("seed.example.invalid."));
+    int calls = 0;
+    const auto none = modelnet::ModelContactsFromDnsSeeds({}, modelnet::DEFAULT_MODEL_PORT, [&](const std::string&) {
+        ++calls;
+        return std::vector<CNetAddr>{};
+    });
+    BOOST_CHECK(none.empty());
+    BOOST_CHECK_EQUAL(calls, 0);
+    const auto doc = LookupHost("192.0.2.10", 1, false);
+    BOOST_REQUIRE_EQUAL(doc.size(), 1U);
+    int looked = 0;
+    const auto got = modelnet::ModelContactsFromDnsSeeds({"seed.example.invalid.", "192.0.2.10"}, modelnet::DEFAULT_MODEL_PORT,
+                                                         [&](const std::string& name) {
+                                                             ++looked;
+                                                             BOOST_CHECK_EQUAL(name, "seed.example.invalid");
+                                                             return doc;
+                                                         });
+    BOOST_CHECK_EQUAL(looked, 1);
+    BOOST_REQUIRE_EQUAL(got.size(), 1U);
+    BOOST_CHECK_EQUAL(got[0], "192.0.2.10:" + std::to_string(modelnet::DEFAULT_MODEL_PORT));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -1014,6 +1014,12 @@ public:
         vSeeds.emplace_back("node.btxchain.org.");
         vSeeds.emplace_back("node.btx.tools.");
 
+        // Model-plane first peer. Documented empty default: do not invent a
+        // seed operator, a hostname, or an address here. Monetary vSeeds above
+        // are not model contacts. init resolves this list only when -modelpeer
+        // is empty. MDPEERS on the monetary link stays hint-only (not connecting).
+        vModelSeeds.clear();
+
         // Fixed seeds are a DNS-failure fallback. They must be regenerated
         // from an ASN-diverse crawl (contrib/seeds); a two-entry subset of
         // the same DNS set is not a fallback. Do not add unpublished IPs

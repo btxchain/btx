@@ -22,6 +22,7 @@ add_library(bitcoin_wallet STATIC EXCLUDE_FROM_ALL
   rpc/backup.cpp
   rpc/bcp1.cpp
   rpc/coins.cpp
+  rpc/balance_watch.cpp
   rpc/encrypt.cpp
   rpc/labels.cpp
   rpc/signmessage.cpp
@@ -40,6 +41,7 @@ add_library(bitcoin_wallet STATIC EXCLUDE_FROM_ALL
   spend.cpp
   transaction.cpp
   wallet.cpp
+  balance_watch.cpp
   walletdb.cpp
   walletutil.cpp
   bcp1_package.cpp

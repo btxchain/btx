@@ -34,9 +34,9 @@ get_directory_property(precious_variables CACHE_VARIABLES)
 #=============================
 set(CLIENT_NAME "BTX")
 set(CLIENT_VERSION_MAJOR 0)
-set(CLIENT_VERSION_MINOR 34)
-set(CLIENT_VERSION_BUILD 15)
-set(CLIENT_VERSION_RC 0)
+set(CLIENT_VERSION_MINOR 35)
+set(CLIENT_VERSION_BUILD 0)
+set(CLIENT_VERSION_RC 1)
 set(CLIENT_VERSION_IS_RELEASE "true")
 set(COPYRIGHT_YEAR "2026")
 
@@ -436,6 +436,8 @@ if(WIN32)
     WIN32_LEAN_AND_MEAN
     NOMINMAX
   )
+  target_include_directories(core_interface BEFORE INTERFACE
+    ${PROJECT_SOURCE_DIR}/src/compat/mingw)
 
   if(MSVC)
     if(VCPKG_TARGET_TRIPLET MATCHES "-static")
