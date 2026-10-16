@@ -1877,8 +1877,8 @@ RPCHelpMan walletprocesspsbt()
                             {"htlc_presign", RPCArg::Type::BOOL, RPCArg::Default{false}, "Sign a selected htlc_sha256 claim leaf before its preimage is known (for example for a watchtower).\n"
                                 "Select the claim leaf with p2mr_leaf. The leaf signature does not commit to the preimage: the PSBT stays incomplete,\n"
                                 "and whoever later adds the matching 32-byte preimage as PSBT_IN_SHA256 can finalize and broadcast this exact transaction.\n"
-                                "Requires sign=true and sighashtype DEFAULT or ALL. Only the claim leaf that pins a 32-byte preimage is presigned,\n"
-                                "not htlc_sha256_legacy. The claim has no timeout: a fixed-fee presigned claim must confirm before the refund height."},
+                                "Requires sign=true and sighashtype DEFAULT or ALL. Only the htlc_sha256 claim leaf is presigned,\n"
+                                "not the recovery-only htlc_sha256_legacy leaf. The claim has no timeout: a fixed-fee presigned claim must confirm before the refund height."},
                         },
                     RPCArgOptions{.oneline_description="options"}},
                     {"sighashtype", RPCArg::Type::STR, RPCArg::Default{"DEFAULT"}, "for backwards compatibility", RPCArgOptions{.hidden=true}},

@@ -1167,6 +1167,17 @@ static int P2MRPriority(PQAlgorithm algo, PQAlgorithm preferred_algo, int prefer
     return algo == preferred_algo ? preferred_priority : non_preferred_priority;
 }
 
+/** The htlc_sha256 claim leaf with its own OP_SIZE 32 check, not the recovery-only
+ *  htlc_sha256_legacy leaf. Opt-in presign is limited to this leaf format, whatever
+ *  P2MRClaimLeafPinsPreimageLength covers for consensus. */
+static bool IsHTLCSha256ClaimLeaf(Span<const unsigned char> script)
+{
+    std::vector<unsigned char> hash;
+    std::vector<unsigned char> pubkey;
+    PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+    return ParseP2MRHTLCSha256Leaf(script, hash, algo, pubkey);
+}
+
 static bool SignP2MR(const SigningProvider& provider,
                      const BaseSignatureCreator& creator,
                      const WitnessV2P2MR& output,
@@ -1400,9 +1411,9 @@ static bool SignP2MR(const SigningProvider& provider,
             const auto it_pre = sigdata.sha256_preimages.find(leaf_info.htlc_sha256);
             if (it_pre == sigdata.sha256_preimages.end() && creator.HtlcPresign() &&
                 !sigdata.p2mr_leaf_script.empty() && script == sigdata.p2mr_leaf_script &&
-                P2MRClaimLeafPinsPreimageLength(script)) {
-                // Opt-in presign of the selected claim leaf that pins a 32-byte
-                // preimage (not htlc_sha256_legacy): store the leaf signature only.
+                IsHTLCSha256ClaimLeaf(script)) {
+                // Opt-in presign of the selected htlc_sha256 claim leaf (not
+                // htlc_sha256_legacy): store the leaf signature only.
                 // The input stays incomplete until the real preimage is added as
                 // PSBT_IN_SHA256 and the PSBT is finalized.
                 std::vector<unsigned char> sig;
@@ -2105,9 +2116,9 @@ bool ExplainUnsignedP2MRInput(const std::vector<unsigned char>& leaf_script,
     const auto it = sha256_preimages.find(hashlock);
     if (it != sha256_preimages.end() && Sha256PreimageMatches(hash, it->second)) return false;
     if (htlc_presign) {
-        error = Untranslated(P2MRClaimLeafPinsPreimageLength(leaf_script)
+        error = Untranslated(IsHTLCSha256ClaimLeaf(leaf_script)
             ? "htlc_presign: this wallet has no key for the selected htlc_sha256 claim leaf"
-            : "htlc_presign signs only the htlc_sha256 claim leaf that pins a 32-byte preimage, not htlc_sha256_legacy");
+            : "htlc_presign signs only the htlc_sha256 claim leaf, not htlc_sha256_legacy");
         return true;
     }
     error = Untranslated(strprintf(

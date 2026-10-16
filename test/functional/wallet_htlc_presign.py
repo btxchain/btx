@@ -195,7 +195,7 @@ class WalletHtlcPresignTest(BitcoinTestFramework):
         self.import_lock(claimer, self.checksummed(f"mr(htlc_sha256_legacy({legacy_hash.hex()},{claimer_key}),refund({lock},{refund_pk}))"))
         l_txid, l_vout, l_value = self.fund(legacy_addr)
         l_psbt, _ = self.claim_psbt(l_txid, l_vout, l_value, dest)
-        assert_raises_rpc_error(None, "htlc_presign signs only the htlc_sha256 claim leaf that pins a 32-byte preimage",
+        assert_raises_rpc_error(None, "htlc_presign signs only the htlc_sha256 claim leaf, not htlc_sha256_legacy",
                                 claimer.walletprocesspsbt, l_psbt,
                                 {"htlc_presign": True, "p2mr_leaf": {f"{l_txid}:{l_vout}": legacy_leaf.hex()}})
 
