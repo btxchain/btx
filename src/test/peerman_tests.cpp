@@ -5101,6 +5101,374 @@ BOOST_AUTO_TEST_CASE(rc_pending_cap_release_readmits_without_budget_wait)
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
+// A followed tip-child whose ExactReplay missed the per-minute RC verify
+// window must be re-admitted when that window refills, not after the flat
+// MATMUL_BUDGET_DEFER_COOLDOWN. ProcessBlock's budget-miss path retains the
+// body with the remaining window as its retry deadline; ending the lifecycle
+// attempt afterwards (release_admission_marker ->
+// UnmarkMatMulAsyncVerification -> MatMulBlockLifecycle::Retry(token, 60s))
+// rewrote that deadline to now + 60s, so a body whose window refilled seconds
+// later still waited a full minute with the verifier idle. Mainnet shape: one
+// pending job and one job per minute per source and globally
+// (consensus/params.h); regtest RC lifts all three, so no functional test
+// reaches this path.
+BOOST_AUTO_TEST_CASE(budget_deferred_tip_child_retries_at_window_refill)
+{
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ResetGlobalMatMulRCBudgetForTest();
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    struct Cleanup {
+        node::NodeContext& node;
+        PeerManager& peerman;
+        ~Cleanup()
+        {
+            NeutralizeUnconnectedHeaders(*Assert(node.chainman));
+            peerman.ResetMatMulVerifyAdmissionForTest();
+            ResetGlobalMatMulRCBudgetForTest();
+        }
+    } cleanup{m_node, peerman};
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        m_node.chainman->m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    // ExactReplay stand-in: valid and instant. Record when the job runs.
+    std::atomic<int> verify_calls{0};
+    std::mutex verify_mutex;
+    std::optional<std::chrono::steady_clock::time_point> first_verify_at;
+    peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            {
+                std::lock_guard<std::mutex> lock(verify_mutex);
+                if (!first_verify_at) first_verify_at = std::chrono::steady_clock::now();
+            }
+            ++verify_calls;
+            return true;
+        });
+    struct ClearOverride {
+        PeerManager& peerman;
+        ~ClearOverride() { peerman.InstallMatMulVerifyOverrideForTest({}); }
+    } clear_override{peerman};
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    int64_t mock_now{tip->GetBlockTime() + 1};
+    SetMockTime(std::chrono::seconds{mock_now});
+    peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+    ActivateRcAtTip(consensus, *tip);
+    const int32_t next_height{tip->nHeight + 1};
+    BOOST_REQUIRE(consensus.IsMatMulRCFamilyActive(next_height));
+    consensus.nMatMulRCMaxPendingVerifications = 1;
+    consensus.nMatMulRCGlobalVerifyBudgetPerMin = 1;
+    consensus.nMatMulRCPeerVerifyBudgetPerMin = 1;
+
+    // Mine and ticket the child before aging the window, so slow block
+    // assembly cannot use up the ~5 s left before the refill.
+    CBlock child{MineTipChild(m_node, *tip, /*extra_time=*/0)};
+    const uint256 child_hash{child.GetHash()};
+    const auto child_ticket{
+        GrindTicket(child.GetBlockHeader(), consensus.powLimit)};
+
+    // Exhaust the process-wide RC window as if another job had been charged
+    // 55 s ago: the window refills about 5 s from now.
+    const uint32_t global_units{
+        EffectiveMatMulRCGlobalVerifyBudgetPerMin(consensus, next_height)};
+    BOOST_REQUIRE(global_units > 0);
+    BOOST_REQUIRE(ConsumeGlobalMatMulRCBudget(
+        global_units, global_units,
+        std::chrono::steady_clock::now() - std::chrono::seconds{55}));
+    {
+        const auto remaining{
+            GlobalMatMulRCBudgetRetryDelay(std::chrono::steady_clock::now())};
+        BOOST_REQUIRE(remaining > std::chrono::seconds{0});
+        BOOST_REQUIRE(remaining <= std::chrono::seconds{6});
+    }
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    // Unique address and keyed netgroup: per-source windows outlive a case
+    // in this shared fixture.
+    CNode peer{/*id=*/231385,
+               /*sock=*/nullptr,
+               CAddress{LookupNumeric("203.0.113.85", Params().GetDefaultPort()),
+                        NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0x231385,
+               /*nLocalHostNonceIn=*/0,
+               CAddress{},
+               /*addrNameIn=*/"budget-refill-source",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(peer);
+    connman.FlushSendBuffer(peer);
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, peer};
+
+    const auto deliver = [&](CSerializedNetMsg&& msg)
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(peer, std::move(msg)));
+        peer.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(peer);
+        connman.FlushSendBuffer(peer);
+        peer.fPauseSend = false;
+    };
+
+    std::vector<CBlock> headers{CBlock{child.GetBlockHeader()}};
+    deliver(NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers)));
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+        BOOST_REQUIRE(idx != nullptr);
+        BOOST_REQUIRE(m_node.chainman->IndexIsFollowedTipChild(
+            m_node.chainman->ActiveTip(), idx));
+    }
+    peerman.SetConfiguredClaimedTipChildForTest(child_hash);
+    deliver(NetMsg::Make(NetMsgType::RCADMIT, child_ticket));
+    {
+        ASSERT_DEBUG_LOG("global MatMul verification budget exhausted");
+        deliver(NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(child)));
+    }
+    const auto refill_at{
+        std::chrono::steady_clock::now() +
+        GlobalMatMulRCBudgetRetryDelay(std::chrono::steady_clock::now())};
+    BOOST_CHECK(!peer.fDisconnect);
+    BOOST_REQUIRE(peerman.HasMatMulRetainedBodyForTest(child_hash));
+    BOOST_REQUIRE_EQUAL(verify_calls.load(), 0);
+    const auto connected = [&] {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+        return idx != nullptr && m_node.chainman->ActiveChain().Contains(idx);
+    };
+    BOOST_REQUIRE(!connected());
+
+    // Drive the retained-body scheduler once per second, with no further
+    // HEADERS/RCADMIT/BLOCK from any peer, so only the lifecycle retry can
+    // start the job. The scheduler is rate-limited on mockable
+    // GetTime<seconds>(); the lifecycle deadline and RC windows are on the
+    // real steady clock. The window refills about 5 s after the deferral;
+    // allow 15 ticks (about 22 s: 1 s sleep plus up to 0.5 s wait each), far
+    // below the 60 s cooldown.
+    std::atomic<int> readmissions{0};
+    bool ok{false};
+    {
+        DebugLogHelper count_readmissions(
+            "Re-admitting budget-deferred body " + child_hash.ToString(),
+            [&](const std::string* line) {
+                if (line != nullptr) ++readmissions;
+                return false;
+            });
+        REVERSE_LOCK(msgproc_lock);
+        for (int tick = 0; tick < 15 && !ok; ++tick) {
+            std::this_thread::sleep_for(std::chrono::seconds{1});
+            SetMockTime(std::chrono::seconds{++mock_now});
+            peerman.RetryMatMulDeferredBodiesForTest();
+            ok = PeermanWaitFor(connected, std::chrono::milliseconds{500});
+        }
+    }
+    BOOST_CHECK_MESSAGE(ok,
+        "budget-deferred followed tip-child was not re-admitted when the RC "
+        "verify window refilled");
+    BOOST_CHECK_MESSAGE(readmissions.load() >= 1,
+        "no retained-body re-admission within 15 scheduler ticks of the "
+        "deferral");
+    BOOST_CHECK(!peerman.HasMatMulRetainedBodyForTest(child_hash));
+    BOOST_CHECK(!peer.fDisconnect);
+    // The window still binds: exactly one ExactReplay job, and not before the
+    // refill (GlobalMatMulRCBudgetRetryDelay has whole-second resolution).
+    BOOST_CHECK_EQUAL(verify_calls.load(), ok ? 1 : 0);
+    {
+        std::lock_guard<std::mutex> lock(verify_mutex);
+        if (first_verify_at) {
+            BOOST_CHECK(*first_verify_at >= refill_at - std::chrono::seconds{1});
+        }
+    }
+
+    if (ok) {
+        CBlockIndex* idx{WITH_LOCK(::cs_main, {
+            return m_node.chainman->m_blockman.LookupBlockIndex(child_hash);
+        })};
+        BlockValidationState invalidate_state;
+        (void)m_node.chainman->ActiveChainstate().InvalidateBlock(
+            invalidate_state, idx);
+    }
+}
+
+// Companion guard: a per-source miss that no window refill can cure (here an
+// effective per-source budget of zero, so no window is open) must not be
+// re-admitted at the 1 s delay floor. Honouring the refill deadline must not
+// turn such a miss into an admit-defer-admit loop at 1 Hz; the retry falls
+// back to MATMUL_BUDGET_DEFER_COOLDOWN, as MatMulBudgetRefillRetryDelay does
+// for the global and pending-cap paths. At most one early re-admission (the
+// lifecycle's one-shot idle bypass) is allowed.
+BOOST_AUTO_TEST_CASE(budget_deferred_body_without_open_window_does_not_spin)
+{
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ResetGlobalMatMulRCBudgetForTest();
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    struct Cleanup {
+        node::NodeContext& node;
+        PeerManager& peerman;
+        ~Cleanup()
+        {
+            NeutralizeUnconnectedHeaders(*Assert(node.chainman));
+            peerman.ResetMatMulVerifyAdmissionForTest();
+            ResetGlobalMatMulRCBudgetForTest();
+        }
+    } cleanup{m_node, peerman};
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        m_node.chainman->m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    std::atomic<int> verify_calls{0};
+    peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            ++verify_calls;
+            return true;
+        });
+    struct ClearOverride {
+        PeerManager& peerman;
+        ~ClearOverride() { peerman.InstallMatMulVerifyOverrideForTest({}); }
+    } clear_override{peerman};
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    int64_t mock_now{tip->GetBlockTime() + 1};
+    SetMockTime(std::chrono::seconds{mock_now});
+    peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+    ActivateRcAtTip(consensus, *tip);
+    BOOST_REQUIRE(consensus.IsMatMulRCFamilyActive(tip->nHeight + 1));
+    consensus.nMatMulRCMaxPendingVerifications = 1;
+    consensus.nMatMulRCGlobalVerifyBudgetPerMin = 1;
+    // Zero per-source budget: every per-source check misses and restores its
+    // windows, so no refill time exists.
+    consensus.nMatMulRCPeerVerifyBudgetPerMin = 0;
+
+    CBlock child{MineTipChild(m_node, *tip, /*extra_time=*/0)};
+    const uint256 child_hash{child.GetHash()};
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode peer{/*id=*/231386,
+               /*sock=*/nullptr,
+               CAddress{LookupNumeric("203.0.113.86", Params().GetDefaultPort()),
+                        NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0x231386,
+               /*nLocalHostNonceIn=*/0,
+               CAddress{},
+               /*addrNameIn=*/"budget-no-window-source",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(peer);
+    connman.FlushSendBuffer(peer);
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, peer};
+
+    const auto deliver = [&](CSerializedNetMsg&& msg)
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(peer, std::move(msg)));
+        peer.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(peer);
+        connman.FlushSendBuffer(peer);
+        peer.fPauseSend = false;
+    };
+
+    std::vector<CBlock> headers{CBlock{child.GetBlockHeader()}};
+    deliver(NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers)));
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+        BOOST_REQUIRE(idx != nullptr);
+        BOOST_REQUIRE(m_node.chainman->IndexIsFollowedTipChild(
+            m_node.chainman->ActiveTip(), idx));
+    }
+    peerman.SetConfiguredClaimedTipChildForTest(child_hash);
+    deliver(NetMsg::Make(NetMsgType::RCADMIT,
+                         GrindTicket(child.GetBlockHeader(), consensus.powLimit)));
+    {
+        ASSERT_DEBUG_LOG("per-peer verification budget exhausted");
+        deliver(NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(child)));
+    }
+    BOOST_CHECK(!peer.fDisconnect);
+    BOOST_REQUIRE(peerman.HasMatMulRetainedBodyForTest(child_hash));
+
+    std::atomic<int> readmissions{0};
+    {
+        DebugLogHelper count_readmissions(
+            "Re-admitting budget-deferred body " + child_hash.ToString(),
+            [&](const std::string* line) {
+                if (line != nullptr) ++readmissions;
+                return false;
+            });
+        REVERSE_LOCK(msgproc_lock);
+        for (int tick = 0; tick < 5; ++tick) {
+            std::this_thread::sleep_for(std::chrono::seconds{1});
+            SetMockTime(std::chrono::seconds{++mock_now});
+            peerman.RetryMatMulDeferredBodiesForTest();
+        }
+    }
+    BOOST_CHECK_MESSAGE(readmissions.load() <= 1,
+        "per-source miss with no open window was re-admitted " +
+            std::to_string(readmissions.load()) + " times in 5 s");
+    BOOST_CHECK(peerman.HasMatMulRetainedBodyForTest(child_hash));
+    BOOST_CHECK_EQUAL(verify_calls.load(), 0);
+    BOOST_CHECK(!peer.fDisconnect);
+}
+
 // v0.34.2 network-wide deadlock (jarekpiot, independently confirmed on
 // <node>; dixonping asked for this exact shape). One linear tip-child,
 // no competing sibling at that height, active tip past the last attested

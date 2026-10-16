@@ -708,11 +708,19 @@ static std::chrono::steady_clock::duration MatMulRCSourceBudgetRetryDelay(
     const MatMulPeerVerificationBudget& keyed_netgroup_budget,
     std::chrono::steady_clock::time_point now)
 {
-    return ClampMatMulBudgetDeferredDelay(std::max({
+    const auto remaining{std::max({
         MatMulBudgetWindowRetryDelay(address_budget.rc_window_start, now),
         MatMulBudgetWindowRetryDelay(keyed_netgroup_budget.rc_window_start, now),
         MatMulBudgetWindowRetryDelay(address_budget.rc_progress_window_start, now),
-        MatMulBudgetWindowRetryDelay(keyed_netgroup_budget.rc_progress_window_start, now)}));
+        MatMulBudgetWindowRetryDelay(keyed_netgroup_budget.rc_progress_window_start, now)})};
+    // No open window: the miss is not a rate-window wait (for example an
+    // effective budget below the job's work units), so no refill will admit
+    // it. Use the cooldown, as MatMulBudgetRefillRetryDelay does, not the 1s
+    // floor, or a retry that honours this delay would spin at 1Hz.
+    if (remaining <= std::chrono::steady_clock::duration::zero()) {
+        return MATMUL_BUDGET_DEFER_COOLDOWN;
+    }
+    return ClampMatMulBudgetDeferredDelay(remaining);
 }
 
 static uint32_t LimitMatMulRCCatchupScaleToScheduler(uint32_t requested_scale)
@@ -15176,6 +15184,18 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 body_charged_netgroup = node.nKeyedNetGroup;
             }
             return true;
+        }
+        if (progress_lane) {
+            // End the lifecycle attempt before the body is retained below, as
+            // the pending-cap path in AdmitMatMulBlockVerification does.
+            // Ending it (MatMulBlockLifecycle::Retry with
+            // MATMUL_BUDGET_DEFER_COOLDOWN) sets the retry deadline to now +
+            // 60s; done after StoreMatMulDeferredBody, it replaced the refill
+            // delay computed here, so a followed-chain body whose window
+            // refilled in seconds still waited a full minute. The caller's
+            // later release_admission_marker() is then a no-op. Competing-lane
+            // bodies keep the 60s retry.
+            release_admission_marker();
         }
         if (global_exhausted) {
             // Hold this block off the download scheduler until the per-minute
