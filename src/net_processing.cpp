@@ -219,6 +219,13 @@ static constexpr int MATMUL_ATTESTATION_MISS_BACKOFF_MAX_EXP{6};
 /** Rate-limit authority getmmattest outcome logs (still LogDebug every time). */
 static constexpr auto MATMUL_ATTESTATION_SERVE_LOG_INTERVAL{2s};
 static constexpr auto MATMUL_TRUSTED_MIRROR_STALL_LOG_INTERVAL{30s};
+//! A trusted mirror whose tip has not moved while headers are ahead, and that
+//! has no peer advertising NODE_MATMUL_ATTESTATION_ARCHIVE (the bit for
+//! "answers GETMMATTEST"), warns after this long, then at most once per
+//! interval. Typical case: right after loadtxoutsetattested with only
+//! -matmulattestationserve=0 peers.
+static constexpr auto MATMUL_TRUSTED_NO_ATTESTATION_PEER_GRACE{60s};
+static constexpr auto MATMUL_TRUSTED_NO_ATTESTATION_PEER_LOG_INTERVAL{10min};
 //! Unconnecting header batches before we drop the peer. Bitcoin Core's
 //! nUnconnectingHeaders; restored after a header-flood / body-withhold
 //! orphan storm (operator ~48%).
@@ -2440,6 +2447,12 @@ private:
     //! Rate-limited stall diagnostics for trusted mirrors.
     std::chrono::steady_clock::time_point m_matmul_trusted_last_stall_log
         GUARDED_BY(cs_main){};
+    //! "No attestation-serving peer" diagnostics (mockable time, seconds).
+    std::chrono::seconds m_matmul_no_attestation_peer_since
+        GUARDED_BY(cs_main){0s};
+    int m_matmul_no_attestation_peer_tip_height GUARDED_BY(cs_main){-1};
+    std::chrono::seconds m_matmul_no_attestation_peer_last_log
+        GUARDED_BY(cs_main){0s};
     //! Count of distinct unattestable hashes observed (not repeat evaluations).
     uint64_t m_matmul_trusted_reject_unattestable
         GUARDED_BY(cs_main){0};
@@ -2909,6 +2922,8 @@ private:
                                           const CBlockIndex* index,
                                           const CBlockIndex* tip,
                                           bool tip_extending) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void MaybeLogNoAttestationServingPeer(std::chrono::seconds now)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void MaybeLogTrustedMirrorStall(int32_t tip_height)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -12082,6 +12097,67 @@ void PeerManagerImpl::MaybeLogTrustedMirrorStall(int32_t tip_height)
         static_cast<unsigned long long>(
             m_matmul_trusted_reject_unattestable));
     MaybeKickAbcForAttestedCatchUp();
+}
+
+void PeerManagerImpl::MaybeLogNoAttestationServingPeer(std::chrono::seconds now)
+{
+    AssertLockHeld(cs_main);
+    const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+    const CBlockIndex* best_header{m_chainman.m_best_header};
+    bool stuck{node::matmul_trusted::IsTrustedMirror() && tip != nullptr &&
+               best_header != nullptr && best_header->nHeight > tip->nHeight &&
+               m_chainparams.GetConsensus().IsMatMulTrustedReplayAttestationActive(
+                   tip->nHeight + 1)};
+    size_t peers{0};
+    if (stuck) {
+        const auto now_us{
+            std::chrono::duration_cast<std::chrono::microseconds>(now)};
+        for (const auto& [id, state] : m_node_states) {
+            ++peers;
+            // A peer that recently delivered a valid MMATTEST is serving us
+            // even if it does not advertise the archive bit.
+            const auto success{m_matmul_attestation_peer_success.find(id)};
+            const bool recent_success{
+                success != m_matmul_attestation_peer_success.end() &&
+                now_us >= success->second.seen_at &&
+                now_us - success->second.seen_at <=
+                    MATMUL_ATTESTATION_REQUEST_TTL};
+            if (state.m_matmul_attestation_archive || recent_success) {
+                stuck = false;
+                break;
+            }
+        }
+    }
+    if (!stuck) {
+        m_matmul_no_attestation_peer_since = 0s;
+        return;
+    }
+    if (m_matmul_no_attestation_peer_since == 0s ||
+        m_matmul_no_attestation_peer_tip_height != tip->nHeight) {
+        // Start the grace period, or restart it because the tip moved.
+        m_matmul_no_attestation_peer_since = now;
+        m_matmul_no_attestation_peer_tip_height = tip->nHeight;
+        return;
+    }
+    if (now - m_matmul_no_attestation_peer_since <
+        MATMUL_TRUSTED_NO_ATTESTATION_PEER_GRACE) {
+        return;
+    }
+    if (m_matmul_no_attestation_peer_last_log != 0s &&
+        now - m_matmul_no_attestation_peer_last_log <
+            MATMUL_TRUSTED_NO_ATTESTATION_PEER_LOG_INTERVAL) {
+        return;
+    }
+    m_matmul_no_attestation_peer_last_log = now;
+    LogWarning(
+        "matmul trusted mirror: no attestation-serving peer connected "
+        "(none of %u peer(s) advertises NODE_MATMUL_ATTESTATION_ARCHIVE or "
+        "delivered a valid attestation in the last minute); "
+        "tip_height=%d header_height=%d. Blocks above the tip need a signer "
+        "quorum, which this node can only fetch from a consensus signer or a "
+        "trusted mirror running with -matmulattestationserve=1. Connect one "
+        "(for example with -addnode).\n",
+        static_cast<unsigned>(peers), tip->nHeight, best_header->nHeight);
 }
 
 void PeerManagerImpl::MaybeEvictAttestationBackoff()
@@ -23049,6 +23125,7 @@ void PeerManagerImpl::CheckForStaleTipAndEvictPeers()
     auto now{GetTime<std::chrono::seconds>()};
 
     EvictExtraOutboundPeers(now);
+    MaybeLogNoAttestationServingPeer(now);
 
     if (now > m_stale_tip_check_time) {
         // Check whether our tip is stale, and if so, allow using an extra

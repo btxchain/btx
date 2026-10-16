@@ -63,6 +63,8 @@
 #include <node/blockstorage.h>
 #include <node/caches.h>
 #include <node/autoupdate.h>
+#include <node/attested_utxo_snapshot.h>
+#include <node/attested_utxo_snapshot_p2p.h>
 #include <node/chainstate.h>
 #include <node/chainstatemanager_args.h>
 #include <node/context.h>
@@ -745,6 +747,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-includeconf=<file>", "Specify additional configuration file, relative to the -datadir path (only useable from configuration file, not command line)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowignoredconf", strprintf("For backwards compatibility, treat an unused %s file in the datadir as a warning, not an error.", BITCOIN_CONF_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-loadblock=<file>", "Imports blocks from external file on startup", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-offerattestedutxosnapshot=<file>", "Offer this attested UTXO snapshot over P2P from startup, as the offerattestedutxosnapshot RPC does at runtime (an RPC offer is held in memory and is gone after a restart). Use with -offerattestedutxosnapshotmanifest. Relative paths resolve under the network datadir. The files get the same checks as the RPC; if a check fails the node starts without an offer and logs the reason.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-offerattestedutxosnapshotmanifest=<file>", "Signed manifest for -offerattestedutxosnapshot. Relative paths resolve under the network datadir.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-lowmem=<n>", strprintf("If system available memory falls below <n> MiB, flush caches (0 to disable, default: %s)", g_low_memory_threshold / 1024 / 1024), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxmempool=<n>", strprintf("Keep the transaction memory pool below <n> megabytes (default: %u)", DEFAULT_MAX_MEMPOOL_SIZE_MB), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxorphantx=<n>", strprintf("Keep at most <n> unconnectable transactions in memory (default: %u)", DEFAULT_MAX_ORPHAN_TRANSACTIONS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -2876,6 +2880,61 @@ static bool InitializeMatMulRCReadinessPostDaemon(
     return true;
 }
 
+/**
+ * Offer the attested UTXO snapshot named by -offerattestedutxosnapshot and
+ * -offerattestedutxosnapshotmanifest, with the same checks as the
+ * offerattestedutxosnapshot RPC. The offer itself is process-local, so this is
+ * how an offering host keeps serving across restarts.
+ */
+static bool OfferAttestedUTXOSnapshotAtStartup(NodeContext& node,
+                                               const ArgsManager& args,
+                                               std::string& error)
+{
+    const fs::path snapshot_arg{args.GetPathArg("-offerattestedutxosnapshot")};
+    const fs::path manifest_arg{args.GetPathArg("-offerattestedutxosnapshotmanifest")};
+    if (snapshot_arg.empty() || manifest_arg.empty()) {
+        error = "set both -offerattestedutxosnapshot and -offerattestedutxosnapshotmanifest";
+        return false;
+    }
+    if (!node.chainman || !node.peerman || !node.connman) {
+        error = "node is not fully initialized";
+        return false;
+    }
+    if (node.chainman->IsDiscoveryRelay()) {
+        error = "a discovery relay (-matmulvalidation=relay) does not serve snapshots";
+        return false;
+    }
+    const fs::path snapshot_path{AbsPathForConfigVal(args, snapshot_arg)};
+    const fs::path manifest_path{AbsPathForConfigVal(args, manifest_arg)};
+    node::AttestedUTXOSnapshotOffer offer;
+    if (!node::BuildAttestedUTXOSnapshotOfferFromFiles(
+            snapshot_path, manifest_path, node::ATTESTED_UTXO_SNAPSHOT_CHUNK_SIZE,
+            offer, error)) {
+        return false;
+    }
+    if (node::matmul_trusted::IsConfigured()) {
+        const auto verified{
+            node::matmul_trusted::VerifyUtxoSnapshotManifest(offer.manifest)};
+        if (verified != matmul::trusted::UtxoSnapshotVerifyResult::Valid) {
+            error = strprintf("manifest failed local quorum check: %s",
+                              matmul::trusted::UtxoSnapshotVerifyResultName(verified));
+            return false;
+        }
+    }
+    const int32_t height{offer.height};
+    const uint256 block_hash{offer.block_hash};
+    const uint32_t chunk_count{offer.chunk_count};
+    const size_t signatures{offer.manifest.signatures.size()};
+    if (!node.peerman->AttestedUTXOSnapshotCoordinator().OfferSnapshot(
+            std::move(offer), error)) {
+        return false;
+    }
+    LogInfo("Offering attested UTXO snapshot from -offerattestedutxosnapshot: "
+            "height=%d block=%s chunks=%u signatures=%u\n",
+            height, block_hash.ToString(), chunk_count, signatures);
+    return true;
+}
+
 bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 {
     const ArgsManager& args = *Assert(node.args);
@@ -3679,6 +3738,18 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     if (ShutdownRequested(node)) {
         return true;
+    }
+
+    // Re-offer a configured attested UTXO snapshot before the network starts,
+    // so the service bit is in our VERSION from the first connection.
+    if (args.IsArgSet("-offerattestedutxosnapshot") ||
+        args.IsArgSet("-offerattestedutxosnapshotmanifest")) {
+        std::string offer_error;
+        if (OfferAttestedUTXOSnapshotAtStartup(node, args, offer_error)) {
+            g_local_services = ServiceFlags(g_local_services | NODE_ATTESTED_UTXO_SNAPSHOT);
+        } else {
+            InitWarning(strprintf(_("Not offering the attested UTXO snapshot from -offerattestedutxosnapshot: %s"), offer_error));
+        }
     }
 
     // ********************************************************* Step 12: start node

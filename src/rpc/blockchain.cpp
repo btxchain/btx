@@ -4950,7 +4950,10 @@ static RPCHelpMan offerattestedutxosnapshot()
         "Advertise and serve an already-exported attested UTXO snapshot over P2P.\n"
         "Does not require this node to be a signer — any host holding the snapshot "
         "file and a quorum-complete manifest may offer it. Sets the "
-        "NODE_ATTESTED_UTXO_SNAPSHOT service bit while an offer is active.",
+        "NODE_ATTESTED_UTXO_SNAPSHOT service bit while an offer is active.\n"
+        "The offer is held in memory and is cleared when the node restarts. To "
+        "offer from startup, set -offerattestedutxosnapshot and "
+        "-offerattestedutxosnapshotmanifest.",
         {
             {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "Snapshot file path"},
             {"manifest_path", RPCArg::Type::STR, RPCArg::Optional::NO, "Manifest file path"},
