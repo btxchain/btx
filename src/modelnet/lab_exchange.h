@@ -5,11 +5,21 @@
 #ifndef BITCOIN_MODELNET_LAB_EXCHANGE_H
 #define BITCOIN_MODELNET_LAB_EXCHANGE_H
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace modelnet {
+
+/**
+ * Most objects one exchange manifest may carry, and most content bytes in one
+ * object. These are the lab store decoder's own hard limits (100000 rows,
+ * 1 MiB per string). The largest object the lab writes itself is the
+ * 10080-byte launch corpus blob.
+ */
+inline constexpr size_t MAX_EXCHANGE_OBJECTS = 100000;
+inline constexpr size_t MAX_EXCHANGE_OBJECT_BYTES = 1024 * 1024;
 
 struct ExchangeObject {
     std::string kind;
@@ -24,8 +34,13 @@ struct ExchangeObject {
  */
 bool WriteExchangeManifest(const std::vector<ExchangeObject>& objects, std::string& manifest_json, std::string& err);
 
-/** Verify every object and return the accepted rows. Does not trust the claimed digest. */
-bool VerifyExchangeManifest(const std::string& manifest_json, std::vector<ExchangeObject>& objects, std::string& err);
+/**
+ * Verify every object and return the accepted rows. Does not trust the claimed digest.
+ * More than `max_objects` objects, or an object with more than `max_object_bytes`
+ * of content, is BTX035_LIMIT_EXCEEDED.
+ */
+bool VerifyExchangeManifest(const std::string& manifest_json, std::vector<ExchangeObject>& objects, std::string& err,
+                            size_t max_objects = MAX_EXCHANGE_OBJECTS, size_t max_object_bytes = MAX_EXCHANGE_OBJECT_BYTES);
 
 /**
  * Ask 127.0.0.1:`port` for lab.snapshot_export over JSON-RPC and verify the

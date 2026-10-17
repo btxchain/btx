@@ -5,6 +5,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <atomic>
+#include <exception>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1161,6 +1162,81 @@ BOOST_AUTO_TEST_CASE(concurrent_calls_keep_the_store_consistent)
     for (auto& thread : threads) thread.join();
     const int failures = failure_count.load();
     BOOST_CHECK_EQUAL(failures, 0);
+    modelnet::ResetLabApi();
+}
+
+namespace {
+
+/** One lab call. Returns "OK", the lab error code, or "THREW" when the call threw. */
+std::string LabCode(const std::string& method, const UniValue& req)
+{
+    std::string response;
+    std::string err;
+    try {
+        if (modelnet::DispatchLab035(method, req.write(), response, err)) return "OK";
+    } catch (const std::exception&) {
+        return "THREW";
+    }
+    return err;
+}
+
+UniValue JsonNumber(const std::string& text)
+{
+    UniValue value;
+    value.setNumStr(text);
+    return value;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(lab_integer_params_outside_int_are_schema)
+{
+    modelnet::ResetLabApi();
+    UniValue frontier(UniValue::VOBJ);
+    frontier.pushKV("objective_id", std::string(96, 'e'));
+    frontier.pushKV("view", "RECENT");
+    frontier.pushKV("limit", 10);
+    frontier.pushKV("cursor", UniValue());
+    BOOST_CHECK_EQUAL(LabCode("lab.research_frontier", frontier), "OK");
+
+    UniValue context(UniValue::VOBJ);
+    context.pushKV("root_ids", UniValue(UniValue::VARR));
+    context.pushKV("relations", UniValue(UniValue::VARR));
+    context.pushKV("max_depth", 8);
+    context.pushKV("max_records", 16);
+    BOOST_CHECK_EQUAL(LabCode("lab.research_context", context), "OK");
+
+    UniValue source(UniValue::VOBJ);
+    source.pushKV("snapshot_ids", UniValue(UniValue::VARR));
+    source.pushKV("query_kind", "text");
+    source.pushKV("query", "q");
+    source.pushKV("limit", 5);
+    BOOST_CHECK_EQUAL(LabCode("lab.source_query", source), "OK");
+
+    // No call here connects: each port is refused first, and the dialer takes only
+    // the numeric loopback address, not "localhost".
+    UniValue pull(UniValue::VOBJ);
+    pull.pushKV("host", "localhost");
+    pull.pushKV("port", 65536);
+    pull.pushKV("rpc_user", "lab");
+    pull.pushKV("rpc_password", "lab");
+    pull.pushKV("repository_id", std::string(96, 'f'));
+    pull.pushKV("idempotency_key", "idempotency-bound-pull-range");
+    pull.pushKV("expected_state", UniValue());
+    BOOST_CHECK_EQUAL(LabCode("lab.snapshot_pull", pull), "BTX035_SCHEMA");
+
+    // Just outside int, and a fraction: each is BTX035_SCHEMA instead of a throw.
+    for (const std::string text : {"2147483648", "-2147483649", "1.5"}) {
+        frontier.pushKV("limit", JsonNumber(text));
+        BOOST_CHECK_EQUAL(LabCode("lab.research_frontier", frontier), "BTX035_SCHEMA");
+        context.pushKV("max_records", JsonNumber(text));
+        BOOST_CHECK_EQUAL(LabCode("lab.research_context", context), "BTX035_SCHEMA");
+        source.pushKV("limit", JsonNumber(text));
+        BOOST_CHECK_EQUAL(LabCode("lab.source_query", source), "BTX035_SCHEMA");
+        pull.pushKV("port", JsonNumber(text));
+        pull.pushKV("idempotency_key", "idempotency-bound-pull-" + text);
+        BOOST_CHECK_EQUAL(LabCode("lab.snapshot_pull", pull), "BTX035_SCHEMA");
+    }
     modelnet::ResetLabApi();
 }
 

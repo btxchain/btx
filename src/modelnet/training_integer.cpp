@@ -90,6 +90,7 @@ bool IntegerTrainer::Step(std::string& err)
 bool IntegerTrainer::Run(uint64_t steps, std::string& err)
 {
     if (steps == 0) return Fail(err, "BTX035_PROFILE");
+    if (steps > INTEGER_MAX_STEPS || m_state.step > INTEGER_MAX_STEPS - steps) return Fail(err, "BTX035_LIMIT_EXCEEDED");
     for (uint64_t i = 0; i < steps; ++i) {
         if (!Step(err)) return false;
     }

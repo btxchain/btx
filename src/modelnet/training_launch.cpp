@@ -502,12 +502,15 @@ bool DecodeLaunchLine(const std::string& line, std::string& trajectory_id, Launc
     if (parts.size() != 13 || parts[0] != "v2" || parts[1] != LAUNCH_PROFILE) return Fail(err, "BTX035_SCHEMA");
     trajectory_id = parts[2];
     if (trajectory_id.size() != 96) return Fail(err, "BTX035_SCHEMA");
+    // Both parsers refuse a value outside their type instead of wrapping.
     auto parse_u = [](const std::string& text, uint64_t& out) {
         if (text.empty() || (text.size() > 1 && text[0] == '0')) return false;
         uint64_t value = 0;
         for (char c : text) {
             if (c < '0' || c > '9') return false;
-            value = value * 10 + static_cast<uint64_t>(c - '0');
+            const uint64_t digit = static_cast<uint64_t>(c - '0');
+            if (value > (UINT64_MAX - digit) / 10) return false;
+            value = value * 10 + digit;
         }
         out = value;
         return true;
@@ -515,18 +518,29 @@ bool DecodeLaunchLine(const std::string& line, std::string& trajectory_id, Launc
     auto parse_i = [](const std::string& text, int64_t& out) {
         if (text.empty()) return false;
         size_t i = 0;
-        int sign = 1;
+        bool negative = false;
         if (text[0] == '-') {
-            sign = -1;
+            negative = true;
             i = 1;
         }
         if (i >= text.size()) return false;
-        int64_t value = 0;
+        uint64_t magnitude = 0;
         for (; i < text.size(); ++i) {
             if (text[i] < '0' || text[i] > '9') return false;
-            value = value * 10 + (text[i] - '0');
+            const uint64_t digit = static_cast<uint64_t>(text[i] - '0');
+            if (magnitude > (UINT64_MAX - digit) / 10) return false;
+            magnitude = magnitude * 10 + digit;
         }
-        out = value * sign;
+        const uint64_t most = static_cast<uint64_t>(INT64_MAX);
+        if (!negative) {
+            if (magnitude > most) return false;
+            out = static_cast<int64_t>(magnitude);
+        } else if (magnitude == most + 1) {
+            out = INT64_MIN;
+        } else {
+            if (magnitude > most) return false;
+            out = -static_cast<int64_t>(magnitude);
+        }
         return true;
     };
     if (!parse_u(parts[3], checkpoint.step) || !parse_u(parts[4], checkpoint.cursor) ||

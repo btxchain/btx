@@ -159,10 +159,11 @@ RecordState LoadRecord(const PeerView& view, const std::string& id, PeerRecord& 
     return RecordState::Ok;
 }
 
+/** True when `size` is over the cap. A cap that does not parse counts as exceeded. */
 bool LargerThan(size_t size, const std::string& maximum_bytes)
 {
     uint64_t cap = 0;
-    if (!ParseU64(maximum_bytes, cap)) return false;
+    if (!ParseU64(maximum_bytes, cap)) return true;
     return static_cast<uint64_t>(size) > cap;
 }
 

@@ -9,12 +9,14 @@
 #include <modelnet/research_rpc.h>
 #include <modelnet/research_views.h>
 #include <modelnet/training_integer.h>
+#include <span.h>
 #include <univalue.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <string>
+#include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_035_complete_tests, BasicTestingSetup)
 
@@ -48,6 +50,33 @@ BOOST_AUTO_TEST_CASE(integer_profile_replays_and_rejects_a_changed_cursor)
     BOOST_CHECK(resumed.Resume(prefix.State(), err));
     BOOST_CHECK(resumed.Run(IntegerDataset().size() - 4, err));
     BOOST_CHECK_EQUAL(resumed.State().state_hash, published.state_hash);
+}
+
+BOOST_AUTO_TEST_CASE(integer_trainer_refuses_steps_past_the_cap)
+{
+    using namespace modelnet;
+    std::string err;
+    IntegerTrainer over;
+    BOOST_CHECK(!over.Run(INTEGER_MAX_STEPS + 1, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
+    BOOST_CHECK_EQUAL(over.State().step, uint64_t{0});
+    BOOST_CHECK(over.Intervals().empty());
+
+    IntegerTrainer at_cap;
+    BOOST_REQUIRE(at_cap.Run(INTEGER_MAX_STEPS, err));
+    BOOST_CHECK_EQUAL(at_cap.State().step, INTEGER_MAX_STEPS);
+    BOOST_CHECK(IntegerTrainer::CheckState(at_cap.State(), err));
+
+    // The cap counts the steps already taken.
+    BOOST_CHECK(!at_cap.Run(1, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
+    BOOST_CHECK_EQUAL(at_cap.State().step, INTEGER_MAX_STEPS);
+
+    // A published state past the cap is refused before any replay.
+    IntegerState published = at_cap.State();
+    published.step = INTEGER_MAX_STEPS + 1;
+    BOOST_CHECK(!IntegerTrainer::CheckState(published, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
 }
 
 BOOST_AUTO_TEST_CASE(research_views_keep_negatives_and_drop_private_rows)
@@ -99,6 +128,41 @@ BOOST_AUTO_TEST_CASE(exchange_rejects_a_replaced_blob)
     BOOST_CHECK_EQUAL(err, "BTX035_ID_MISMATCH");
     BOOST_CHECK(!PullExchangeLoopback("10.0.0.8", 1, "u", "p", "repo", manifest, err));
     BOOST_CHECK_EQUAL(err, "BTX035_SCOPE_DENIED");
+}
+
+BOOST_AUTO_TEST_CASE(exchange_manifest_refuses_too_many_or_too_large_objects)
+{
+    using namespace modelnet;
+    const auto blob = [](const std::string& content) {
+        ExchangeObject object;
+        object.kind = "blob";
+        object.content = content;
+        std::string digest_err;
+        const std::vector<unsigned char> bytes(content.begin(), content.end());
+        BOOST_REQUIRE(GitObjectDigest("blob", Span<const unsigned char>{bytes.data(), bytes.size()}, object.digest, digest_err));
+        return object;
+    };
+    std::string err;
+    std::string manifest;
+    std::vector<ExchangeObject> verified;
+    BOOST_REQUIRE(WriteExchangeManifest({blob("a"), blob("b"), blob("c")}, manifest, err));
+    BOOST_CHECK(VerifyExchangeManifest(manifest, verified, err));
+    BOOST_CHECK_EQUAL(verified.size(), 3U);
+
+    // Small caps passed in, so the count check needs only three objects.
+    BOOST_CHECK(VerifyExchangeManifest(manifest, verified, err, 3, 1));
+    BOOST_CHECK(!VerifyExchangeManifest(manifest, verified, err, 2, 1));
+    BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
+    BOOST_REQUIRE(WriteExchangeManifest({blob("ab")}, manifest, err));
+    BOOST_CHECK(!VerifyExchangeManifest(manifest, verified, err, 3, 1));
+    BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
+
+    // The default object cap, at and one byte past MAX_EXCHANGE_OBJECT_BYTES.
+    BOOST_REQUIRE(WriteExchangeManifest({blob(std::string(MAX_EXCHANGE_OBJECT_BYTES, 'x'))}, manifest, err));
+    BOOST_CHECK(VerifyExchangeManifest(manifest, verified, err));
+    BOOST_REQUIRE(WriteExchangeManifest({blob(std::string(MAX_EXCHANGE_OBJECT_BYTES + 1, 'x'))}, manifest, err));
+    BOOST_CHECK(!VerifyExchangeManifest(manifest, verified, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
 }
 
 BOOST_AUTO_TEST_CASE(guard_permit_is_one_use_and_thirty_seconds)

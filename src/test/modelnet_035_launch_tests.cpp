@@ -7,6 +7,10 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
 BOOST_FIXTURE_TEST_SUITE(modelnet_035_launch_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(launch_corpus_and_tokenizer_are_frozen)
@@ -90,6 +94,53 @@ BOOST_AUTO_TEST_CASE(launch_profile_replays_and_a_continuation_names_its_parent)
     std::string bytes;
     BOOST_CHECK(EncodeLaunchArtifact(child, next.Weights(), bytes, err));
     BOOST_CHECK(bytes.find(LAUNCH_PROFILE) == 0 || bytes.find(std::string("v1|") + LAUNCH_PROFILE) == 0);
+}
+
+BOOST_AUTO_TEST_CASE(launch_line_numbers_outside_their_type_are_schema)
+{
+    using namespace modelnet;
+    std::string err;
+    LaunchTrainer trainer;
+    BOOST_REQUIRE(trainer.Run(2, err));
+    std::string line;
+    BOOST_REQUIRE(EncodeLaunchLine(std::string(96, 'a'), trainer.Checkpoint(), line, err));
+    // Replace one '|' field: 3 step, 4 cursor, 10 inherited_step, 11 hits, 12 miss_mass.
+    const auto with = [&line](size_t field, const std::string& value) {
+        std::vector<std::string> parts{std::string()};
+        for (char c : line) {
+            if (c == '|') {
+                parts.emplace_back();
+            } else {
+                parts.back().push_back(c);
+            }
+        }
+        BOOST_REQUIRE_EQUAL(parts.size(), 13U);
+        parts[field] = value;
+        std::string out = parts[0];
+        for (size_t i = 1; i < parts.size(); ++i) out += "|" + parts[i];
+        return out;
+    };
+    std::string id;
+    LaunchCheckpoint got;
+    BOOST_CHECK(DecodeLaunchLine(line, id, got, err));
+
+    // The ends of each type still decode.
+    BOOST_CHECK(DecodeLaunchLine(with(4, "18446744073709551615"), id, got, err));
+    BOOST_CHECK_EQUAL(got.cursor, UINT64_MAX);
+    BOOST_CHECK(DecodeLaunchLine(with(11, "9223372036854775807"), id, got, err));
+    BOOST_CHECK_EQUAL(got.hits, INT64_MAX);
+    BOOST_CHECK(DecodeLaunchLine(with(12, "-9223372036854775808"), id, got, err));
+    BOOST_CHECK_EQUAL(got.miss_mass, INT64_MIN);
+
+    // One past each type is BTX035_SCHEMA, not a wrapped value.
+    for (const size_t field : {size_t{3}, size_t{4}, size_t{10}}) {
+        BOOST_CHECK(!DecodeLaunchLine(with(field, "18446744073709551616"), id, got, err));
+        BOOST_CHECK_EQUAL(err, "BTX035_SCHEMA");
+    }
+    BOOST_CHECK(!DecodeLaunchLine(with(11, "9223372036854775808"), id, got, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_SCHEMA");
+    BOOST_CHECK(!DecodeLaunchLine(with(12, "-9223372036854775809"), id, got, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_SCHEMA");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -237,6 +237,7 @@ bool ReadTrains(const UniValue& obj, std::map<std::string, IntegerState>& out, s
             !ParseU64(cursor, state.cursor) || !ParseU64(step, state.step)) {
             return false;
         }
+        if (state.step > INTEGER_MAX_STEPS) return false;
         if (state.state_hash.size() != 96 || !HexEven(state.state_hash)) return false;
         if (!author.empty() && (author.size() != 96 || !HexEven(author))) return false;
         out.emplace(item.first, std::move(state));

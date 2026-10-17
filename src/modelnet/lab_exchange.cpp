@@ -123,7 +123,8 @@ bool WriteExchangeManifest(const std::vector<ExchangeObject>& objects, std::stri
     return true;
 }
 
-bool VerifyExchangeManifest(const std::string& manifest_json, std::vector<ExchangeObject>& objects, std::string& err)
+bool VerifyExchangeManifest(const std::string& manifest_json, std::vector<ExchangeObject>& objects, std::string& err,
+                            size_t max_objects, size_t max_object_bytes)
 {
     UniValue root;
     if (!root.read(manifest_json) || !root.isObject() || !root.exists("objects") || !root["objects"].isArray() ||
@@ -131,12 +132,14 @@ bool VerifyExchangeManifest(const std::string& manifest_json, std::vector<Exchan
         return Fail(err, "BTX035_SCHEMA");
     }
     objects.clear();
+    if (root["objects"].size() > max_objects) return Fail(err, "BTX035_LIMIT_EXCEEDED");
     for (size_t i = 0; i < root["objects"].size(); ++i) {
         const UniValue& row = root["objects"][i];
         if (!row.isObject() || !row.exists("kind") || !row["kind"].isStr() || !row.exists("digest") ||
             !row["digest"].isStr() || !row.exists("content") || !row["content"].isStr()) {
             return Fail(err, "BTX035_SCHEMA");
         }
+        if (row["content"].get_str().size() > max_object_bytes) return Fail(err, "BTX035_LIMIT_EXCEEDED");
         ExchangeObject object;
         object.kind = row["kind"].get_str();
         object.digest = row["digest"].get_str();

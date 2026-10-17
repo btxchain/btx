@@ -7,6 +7,7 @@
 
 #include <modelnet/training_evidence.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -55,6 +56,13 @@ const std::vector<IntegerExample>& IntegerDataset();
 /** SHA-384 of the canonical state line. */
 std::string IntegerStateHash(const IntegerState& state);
 
+/**
+ * Most steps one integer trainer runs, counting the steps of a resumed
+ * checkpoint. A lab run is IntegerDataset().size() == 8 steps; the cap
+ * matches LaunchTrainer's 4096.
+ */
+inline constexpr uint64_t INTEGER_MAX_STEPS = 4096;
+
 class IntegerTrainer {
 public:
     IntegerTrainer() = default;
@@ -65,7 +73,10 @@ public:
     /** One committed step. The first call starts from the zero state. */
     bool Step(std::string& err);
 
-    /** Run exactly `steps` updates from the current state. */
+    /**
+     * Run exactly `steps` updates from the current state. A total past
+     * INTEGER_MAX_STEPS is BTX035_LIMIT_EXCEEDED and runs nothing.
+     */
     bool Run(uint64_t steps, std::string& err);
 
     /**
@@ -81,7 +92,8 @@ public:
     /**
      * Recompute `published.step` updates. A cursor that is not the recomputed
      * cursor is BTX035_RNG. A weight, bias, or momentum mismatch is
-     * BTX035_ID_MISMATCH. An empty hash is BTX035_ID_MISMATCH.
+     * BTX035_ID_MISMATCH. An empty hash is BTX035_ID_MISMATCH. A step past
+     * INTEGER_MAX_STEPS is BTX035_LIMIT_EXCEEDED before any replay.
      */
     static bool CheckState(const IntegerState& published, std::string& err);
 
@@ -95,6 +107,13 @@ private:
  * A peer rehashes these bytes. The line is not a model-quality claim.
  */
 bool EncodeModelArtifact(const IntegerState& state, std::string& bytes, std::string& err);
+
+/**
+ * Most pieces one model may have; valid indexes are 0 to MODEL_MAX_PIECES - 1.
+ * At 32 bytes a piece this is 128 KiB. The lab's own model artifacts are one
+ * line of a few hundred bytes, and lab.artifact_acquire stops at this count.
+ */
+inline constexpr size_t MODEL_MAX_PIECES = 4096;
 
 /** Split into 32-byte chunks. The last chunk may be shorter. */
 bool SplitModelPieces(const std::string& bytes, std::vector<std::string>& pieces, std::string& err);

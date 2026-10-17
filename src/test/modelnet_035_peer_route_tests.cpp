@@ -228,6 +228,36 @@ BOOST_AUTO_TEST_CASE(peer_piece_over_maximum_bytes_limit_exceeded)
     BOOST_CHECK(response.empty());
 }
 
+BOOST_AUTO_TEST_CASE(peer_piece_unparseable_maximum_bytes_fails_closed)
+{
+    const std::string manifest(96, 'a');
+    const std::string digest(96, 'b');
+    FakeView view;
+    view.records[manifest] = modelnet::PeerRecord{true, false, "manifest"};
+    view.pieces[std::make_pair(digest, uint64_t{0})] = std::string("\x01\x02\x03\x04", 4);
+    UniValue resource(UniValue::VOBJ);
+    resource.pushKV("kind", "MODEL");
+    resource.pushKV("digest48", digest);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("resource", resource);
+    req.pushKV("manifest_id", manifest);
+    req.pushKV("piece_index", "0");
+    std::string response, err;
+
+    // UINT64_MAX is a valid cap.
+    req.pushKV("maximum_bytes", "18446744073709551615");
+    BOOST_CHECK(Call("artifacts/piece", req.write(), view, response, err));
+
+    // 20 digits past UINT64_MAX pass the decimal check but do not parse: refused, not unlimited.
+    req.pushKV("maximum_bytes", "18446744073709551616");
+    BOOST_CHECK(!Call("artifacts/piece", req.write(), view, response, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
+    BOOST_CHECK(response.empty());
+    req.pushKV("maximum_bytes", "99999999999999999999");
+    BOOST_CHECK(!Call("artifacts/piece", req.write(), view, response, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
+}
+
 BOOST_AUTO_TEST_CASE(peer_piece_hit_returns_hex)
 {
     const std::string manifest(96, 'a');
