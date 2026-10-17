@@ -177,6 +177,34 @@ BOOST_AUTO_TEST_CASE(hcp_gap_policy_and_export_are_account_scoped)
     auto owner = e->Handle(hcp_test::AuthReq(*e, "GET", "/policies/policy-pr157-a", tok_a));
     BOOST_REQUIRE_EQUAL(owner.status, 200);
 
+    modelnet::HcpHttpRequest bare = hcp_test::AuthReq(*e, "POST", "/finance/intents", tok_a, nullptr);
+    UniValue nobody(UniValue::VOBJ);
+    nobody.pushKV("client_operation_id", "gap-no-policy");
+    std::vector<unsigned char> raw;
+    BOOST_REQUIRE(modelnet::EncodePjson1(nobody, raw, err));
+    bare.body.assign(raw.begin(), raw.end());
+    auto missing_pol = e->Handle(bare);
+    BOOST_CHECK_EQUAL(missing_pol.status, 403);
+    BOOST_CHECK(missing_pol.body.find("POLICY_REQUIRED") != std::string::npos);
+    BOOST_CHECK_EQUAL(e->LifetimeSpent("policy-pr157-a"), 0);
+
+    UniValue foreign(UniValue::VOBJ);
+    foreign.pushKV("client_operation_id", "gap-foreign-policy");
+    foreign.pushKV("policy_id", "policy-pr157-a");
+    auto foreign_spend = e->Handle(hcp_test::AuthReq(*e, "POST", "/finance/intents", tok_b, &foreign));
+    BOOST_CHECK_EQUAL(foreign_spend.status, 403);
+    BOOST_CHECK(foreign_spend.body.find("POLICY_ACCOUNT") != std::string::npos);
+    BOOST_CHECK_EQUAL(e->LifetimeSpent("policy-pr157-a"), 0);
+
+    UniValue bad_act(UniValue::VOBJ);
+    bad_act.pushKV("client_operation_id", "gap-bad-action");
+    bad_act.pushKV("policy_id", "policy-pr157-a");
+    bad_act.pushKV("action", "CLAIM");
+    auto bad_action = e->Handle(hcp_test::AuthReq(*e, "POST", "/finance/intents", tok_a, &bad_act));
+    BOOST_CHECK_EQUAL(bad_action.status, 403);
+    BOOST_CHECK(bad_action.body.find("POLICY_ACTION") != std::string::npos);
+    BOOST_CHECK_EQUAL(e->LifetimeSpent("policy-pr157-a"), 0);
+
     auto ex = e->Handle(hcp_test::AuthReq(*e, "POST", "/exports", tok_a));
     BOOST_REQUIRE_EQUAL(ex.status, 202);
     UniValue man;

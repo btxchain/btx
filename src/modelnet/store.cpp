@@ -12,14 +12,19 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <regex>
 #include <limits>
 #include <system_error>
 #include <chrono>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace modelnet {
 namespace {
@@ -665,58 +670,83 @@ bool ModelStore::MaterializeFile(const Digest48& artifact, uint32_t file_index, 
         }
     }
     fs::create_directories(dest.parent_path());
-    fs::path tmp = dest.parent_path();
-    tmp /= fs::PathFromString(fs::PathToString(dest.filename()) + ".part");
+    unsigned char rnd[8];
     {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            err = "open dest";
+        std::random_device rd;
+        for (unsigned char& b : rnd) b = static_cast<unsigned char>(rd());
+    }
+    const fs::path tmp = dest.parent_path() / fs::PathFromString(fs::PathToString(dest.filename()) + "." +
+                                                                 HexStr(Span<const unsigned char>{rnd, sizeof(rnd)}) + ".tmp");
+    const std::string tmp_s = fs::PathToString(tmp);
+    struct stat st {};
+    if (::lstat(tmp_s.c_str(), &st) == 0) {
+        err = S_ISLNK(st.st_mode) ? "symlink" : "temp exists";
+        return false;
+    }
+    const int fd = ::open(tmp_s.c_str(), O_CREAT | O_EXCL | O_NOFOLLOW | O_WRONLY, 0600);
+    if (fd < 0) {
+        err = (errno == ELOOP) ? "symlink" : "open dest";
+        return false;
+    }
+    auto fail_tmp = [&](const char* why) {
+        err = why;
+        ::close(fd);
+        ::unlink(tmp_s.c_str());
+        return false;
+    };
+    CSHA384 hasher;
+    const uint64_t n = file_size == 0 ? 0 : (file_size + PIECE_SIZE - 1) / PIECE_SIZE;
+    uint64_t written = 0;
+    for (uint64_t i = 0; i < n; ++i) {
+        std::vector<unsigned char> bytes;
+        if (!GetPiece(artifact, file_index, static_cast<uint32_t>(i), bytes, err)) {
+            ::close(fd);
+            ::unlink(tmp_s.c_str());
             return false;
         }
-        CSHA384 hasher;
-        const uint64_t n = file_size == 0 ? 0 : (file_size + PIECE_SIZE - 1) / PIECE_SIZE;
-        uint64_t written = 0;
-        for (uint64_t i = 0; i < n; ++i) {
-            std::vector<unsigned char> bytes;
-            if (!GetPiece(artifact, file_index, static_cast<uint32_t>(i), bytes, err)) {
-                out.close();
-                fs::remove(tmp, ec);
-                return false;
-            }
-            if (bytes.empty()) {
-                err = "empty piece";
-                out.close();
-                fs::remove(tmp, ec);
-                return false;
-            }
-            hasher.Write(bytes.data(), bytes.size());
-            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-            if (!out) {
-                err = "write dest";
-                out.close();
-                fs::remove(tmp, ec);
-                return false;
-            }
-            written += bytes.size();
+        if (bytes.empty()) return fail_tmp("empty piece");
+        hasher.Write(bytes.data(), bytes.size());
+        size_t off = 0;
+        while (off < bytes.size()) {
+            const ssize_t w = ::write(fd, bytes.data() + off, bytes.size() - off);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) return fail_tmp("write dest");
+            off += static_cast<size_t>(w);
         }
-        out.close();
-        Digest48 got;
-        hasher.Finalize(got.data.data());
-        if (written != file_size) {
-            err = "materialize size mismatch";
-            fs::remove(tmp, ec);
-            return false;
-        }
-        if (got != expected_sha384) {
-            err = "file sha384 mismatch";
-            fs::remove(tmp, ec);
-            return false;
-        }
+        written += bytes.size();
+    }
+    if (::close(fd) != 0) {
+        err = "write dest";
+        ::unlink(tmp_s.c_str());
+        return false;
+    }
+    Digest48 got;
+    hasher.Finalize(got.data.data());
+    if (written != file_size) {
+        err = "materialize size mismatch";
+        ::unlink(tmp_s.c_str());
+        return false;
+    }
+    if (got != expected_sha384) {
+        err = "file sha384 mismatch";
+        ::unlink(tmp_s.c_str());
+        return false;
+    }
+    if (::lstat(tmp_s.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
+        err = "symlink";
+        ::unlink(tmp_s.c_str());
+        return false;
+    }
+    struct stat dst {};
+    if (::lstat(fs::PathToString(dest).c_str(), &dst) == 0 && S_ISLNK(dst.st_mode)) {
+        err = "dest is a symlink";
+        ::unlink(tmp_s.c_str());
+        return false;
     }
     fs::rename(tmp, dest, ec);
     if (ec) {
         err = "rename dest";
-        fs::remove(tmp, ec);
+        ::unlink(tmp_s.c_str());
         return false;
     }
     return true;

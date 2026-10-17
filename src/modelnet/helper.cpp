@@ -72,6 +72,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -107,17 +108,98 @@
 
 namespace modelnet {
 
+namespace {
+
+bool StickyWorldWritableDir(const fs::path& dir)
+{
+    const std::string s = fs::PathToString(dir);
+    return s == "/tmp" || s == "/var/tmp" || s == "/dev/shm";
+}
+
+bool LooksLikeTmpFallbackSock(const fs::path& sock)
+{
+    const std::string s = fs::PathToString(sock);
+    return s.find("/tmp/btx-md-") != std::string::npos || s.find("/var/tmp/btx-md-") != std::string::npos;
+}
+
+fs::path RuntimeSockDir()
+{
+    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
+    if (!xdg || xdg[0] != '/') return {};
+    return fs::PathFromString(xdg) / "btx-modeld";
+}
+
+} // namespace
+
 fs::path UnixRpcListenPath(const fs::path& requested)
 {
 #ifndef WIN32
     const std::string p = fs::PathToString(requested);
-    if (p.size() >= sizeof(sockaddr_un::sun_path)) {
-        unsigned char digest[32];
-        CSHA256().Write(UCharCast(p.data()), p.size()).Finalize(digest);
-        return fs::PathFromString(strprintf("/tmp/btx-md-%s.sock", HexStr(std::vector<unsigned char>(digest, digest + 8))));
-    }
-#endif
+    const bool too_long = p.size() >= sizeof(sockaddr_un::sun_path);
+    const bool sticky = StickyWorldWritableDir(requested.parent_path()) || LooksLikeTmpFallbackSock(requested);
+    if (!too_long && !sticky) return requested;
+    const fs::path dir = RuntimeSockDir();
+    if (dir.empty()) return requested;
+    unsigned char digest[32];
+    CSHA256().Write(UCharCast(p.data()), p.size()).Finalize(digest);
+    const fs::path sock = dir / fs::PathFromString(HexStr(std::vector<unsigned char>(digest, digest + 8)) + ".sock");
+    if (fs::PathToString(sock).size() >= sizeof(sockaddr_un::sun_path)) return requested;
+    return sock;
+#else
     return requested;
+#endif
+}
+
+bool UnixSocketSafeToAdopt(const fs::path& sock, std::string& err)
+{
+    err.clear();
+    if (LooksLikeTmpFallbackSock(sock) || StickyWorldWritableDir(sock.parent_path())) {
+        err = "tmp socket is not a helper";
+        return false;
+    }
+    const std::string p = fs::PathToString(sock);
+    struct stat st {};
+    if (::lstat(p.c_str(), &st) != 0) {
+        err = "socket missing";
+        return false;
+    }
+    if (!S_ISSOCK(st.st_mode) || S_ISLNK(st.st_mode)) {
+        err = S_ISLNK(st.st_mode) ? "socket symlink" : "not a socket";
+        return false;
+    }
+    if ((st.st_mode & S_IWOTH) != 0) {
+        err = "world-writable socket";
+        return false;
+    }
+    const std::string parent = fs::PathToString(sock.parent_path());
+    struct stat pst {};
+    if (parent.empty() || ::lstat(parent.c_str(), &pst) != 0 || !S_ISDIR(pst.st_mode) ||
+        (pst.st_mode & S_IWOTH) != 0) {
+        err = "socket directory is world-writable";
+        return false;
+    }
+    return true;
+}
+
+bool UnixConnectedPeerIsSelf(int fd, std::string& err)
+{
+    err.clear();
+#if defined(SO_PEERCRED)
+    struct ucred cred {};
+    socklen_t len = sizeof(cred);
+    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
+        err = "peercred";
+        return false;
+    }
+    if (cred.uid != static_cast<uid_t>(::getuid())) {
+        err = "peer uid";
+        return false;
+    }
+    return true;
+#else
+    (void)fd;
+    return true;
+#endif
 }
 
 namespace {
@@ -414,8 +496,8 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         err = "BTX_MODEL_GENERATE is not a regular file";
         return false;
     }
-    int inpipe[2];
-    int outpipe[2];
+    int inpipe[2] = {-1, -1};
+    int outpipe[2] = {-1, -1};
     if (pipe(inpipe) != 0) {
         err = "generate pipe";
         return false;
@@ -436,12 +518,21 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         return false;
     }
     if (pid == 0) {
+#if defined(__linux__)
+        // Match the helper's parent-death watch so a crashed parent cannot
+        // leave the adapter running. A new process group lets the timeout
+        // signal the adapter and any process it forks.
+        if (prctl(PR_SET_PDEATHSIG, SIGTERM) == 0 && getppid() == 1) _exit(127);
+#endif
+        // Failure leaves the child in the helper's group; the timeout then
+        // signals the pid directly. Do not skip exec.
+        setpgid(0, 0);
         close(inpipe[1]);
         close(outpipe[0]);
         if (dup2(inpipe[0], STDIN_FILENO) < 0) _exit(127);
         if (dup2(outpipe[1], STDOUT_FILENO) < 0) _exit(127);
-        close(inpipe[0]);
-        close(outpipe[1]);
+        if (inpipe[0] != STDIN_FILENO) close(inpipe[0]);
+        if (outpipe[1] != STDOUT_FILENO) close(outpipe[1]);
         const std::string exe_s = fs::PathToString(exe);
         const std::string dir_s = fs::PathToString(dir);
         const std::string n_s = std::to_string(max_new_tokens);
@@ -449,33 +540,180 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         execv(exe_s.c_str(), const_cast<char* const*>(argv));
         _exit(127);
     }
+    setpgid(pid, pid);
     close(inpipe[0]);
+    inpipe[0] = -1;
     close(outpipe[1]);
+    outpipe[1] = -1;
+
+    // Same bound as the documented BTX_GENERATE_TIMEOUT_S default. The 1 MiB
+    // stdout cap still stops a child that streams without a newline.
+    constexpr int kTimeoutMs = 600 * 1000;
+    constexpr size_t kStdoutCap = 1024 * 1024;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kTimeoutMs);
+    auto remaining_ms = [&]() -> int {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return 0;
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        if (ms > kTimeoutMs) ms = kTimeoutMs;
+        return static_cast<int>(ms);
+    };
+    auto set_nonblock = [](int fd) {
+        const int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    };
+    set_nonblock(inpipe[1]);
+    set_nonblock(outpipe[0]);
+    auto close_parent = [&]() {
+        if (inpipe[1] >= 0) {
+            close(inpipe[1]);
+            inpipe[1] = -1;
+        }
+        if (outpipe[0] >= 0) {
+            close(outpipe[0]);
+            outpipe[0] = -1;
+        }
+    };
+    auto signal_child = [&](int sig) {
+        if (kill(-pid, sig) != 0) kill(pid, sig);
+    };
+    auto reap = [&](bool kill_now) -> int {
+        int st = 0;
+        bool got = false;
+        auto try_reap = [&]() -> bool {
+            for (;;) {
+                const pid_t w = waitpid(pid, &st, WNOHANG);
+                if (w == pid) {
+                    got = true;
+                    return true;
+                }
+                if (w < 0) {
+                    if (errno == EINTR) continue;
+                    return got;
+                }
+                return false;
+            }
+        };
+        if (!kill_now) {
+            while (!try_reap()) {
+                if (remaining_ms() <= 0) break;
+                usleep(50 * 1000);
+            }
+        }
+        if (got) return st;
+        signal_child(SIGTERM);
+        const auto grace = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        while (!try_reap() && std::chrono::steady_clock::now() < grace) {
+            usleep(20 * 1000);
+        }
+        if (!got) {
+            signal_child(SIGKILL);
+            for (;;) {
+                const pid_t w = waitpid(pid, &st, 0);
+                if (w == pid) {
+                    got = true;
+                    break;
+                }
+                if (w < 0 && errno != EINTR) break;
+            }
+        }
+        if (!got) st = 0x7f;
+        return st;
+    };
+
     UniValue req(UniValue::VOBJ);
     req.pushKV("prompt", prompt);
     req.pushKV("max_new_tokens", max_new_tokens);
     const std::string body = req.write() + "\n";
-    if (::write(inpipe[1], body.data(), body.size()) < 0) {
-        close(inpipe[1]);
-        close(outpipe[0]);
-        kill(pid, SIGTERM);
-        int st = 0;
-        waitpid(pid, &st, 0);
-        err = "generate stdin";
-        return false;
+    size_t off = 0;
+    while (off < body.size()) {
+        const int left = remaining_ms();
+        if (left <= 0) {
+            close_parent();
+            reap(true);
+            err = "generate adapter timeout";
+            return false;
+        }
+        pollfd pfd{};
+        pfd.fd = inpipe[1];
+        pfd.events = POLLOUT;
+        const int pr = poll(&pfd, 1, left);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            close_parent();
+            reap(true);
+            err = "generate stdin";
+            return false;
+        }
+        if (pr == 0) {
+            close_parent();
+            reap(true);
+            err = "generate adapter timeout";
+            return false;
+        }
+        const size_t chunk = std::min<size_t>(body.size() - off, 4096);
+        const ssize_t n = ::write(inpipe[1], body.data() + off, chunk);
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            close_parent();
+            reap(true);
+            err = "generate stdin";
+            return false;
+        }
+        if (n == 0) continue;
+        off += static_cast<size_t>(n);
     }
     close(inpipe[1]);
+    inpipe[1] = -1;
+
     std::string stdout_s;
     char buf[4096];
-    ssize_t nread = 0;
-    while ((nread = ::read(outpipe[0], buf, sizeof(buf))) > 0) {
+    bool timed_out = false;
+    bool hit_cap = false;
+    while (stdout_s.find('\n') == std::string::npos) {
+        const int left = remaining_ms();
+        if (left <= 0) {
+            timed_out = true;
+            break;
+        }
+        pollfd pfd{};
+        pfd.fd = outpipe[0];
+        pfd.events = POLLIN;
+        const int pr = poll(&pfd, 1, left);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) {
+            timed_out = true;
+            break;
+        }
+        const ssize_t nread = ::read(outpipe[0], buf, sizeof(buf));
+        if (nread < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            break;
+        }
+        if (nread == 0) break;
         stdout_s.append(buf, static_cast<size_t>(nread));
         if (stdout_s.find('\n') != std::string::npos) break;
-        if (stdout_s.size() > 1024 * 1024) break;
+        if (stdout_s.size() > kStdoutCap) {
+            hit_cap = true;
+            break;
+        }
     }
     close(outpipe[0]);
-    int st = 0;
-    waitpid(pid, &st, 0);
+    outpipe[0] = -1;
+    // No complete line: the child is still inside the deadline or already over
+    // a limit. Kill and reap now. Waiting out the rest of the window would
+    // leave a silent adapter attached to this RPC.
+    if (stdout_s.find('\n') == std::string::npos) {
+        reap(true);
+        if (timed_out) err = "generate adapter timeout";
+        else if (hit_cap) err = "generate adapter output limit";
+        else err = "generate adapter output";
+        return false;
+    }
+    const int st = reap(false);
     const size_t nl = stdout_s.find('\n');
     const std::string line = nl == std::string::npos ? stdout_s : stdout_s.substr(0, nl);
     if (!out.read(line) || !out.isObject()) {
@@ -1165,8 +1403,30 @@ int ListenUnix(fs::path& path, std::string& err)
     path = UnixRpcListenPath(requested);
     std::string p = fs::PathToString(path);
     if (path != requested) {
-        LogPrintf("btx-modeld: unix RPC path length %zu exceeds sockaddr_un.sun_path; listening at %s\n",
-                  fs::PathToString(requested).size(), p);
+        LogPrintf("btx-modeld: unix RPC path %s is not a private sun_path; listening at %s\n",
+                  fs::PathToString(requested), p);
+    }
+    if (LooksLikeTmpFallbackSock(path) || StickyWorldWritableDir(path.parent_path())) {
+        err = "refusing helper socket in a world-writable directory";
+        return -1;
+    }
+    const fs::path parent = path.parent_path();
+    const std::string parent_s = fs::PathToString(parent);
+    try {
+        if (!parent_s.empty()) fs::create_directories(parent);
+    } catch (const fs::filesystem_error&) {
+        err = "unix dir mode";
+        return -1;
+    }
+    if (parent_s.empty() || ::chmod(parent_s.c_str(), 0700) != 0) {
+        err = "unix dir mode";
+        return -1;
+    }
+    struct stat pst {};
+    if (::lstat(parent_s.c_str(), &pst) != 0 || !S_ISDIR(pst.st_mode) || (pst.st_mode & 0777) != 0700 ||
+        pst.st_uid != static_cast<uid_t>(::getuid())) {
+        err = "unix dir not private";
+        return -1;
     }
     ::unlink(p.c_str());
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1182,9 +1442,15 @@ int ListenUnix(fs::path& path, std::string& err)
         return -1;
     }
     std::strncpy(addr.sun_path, p.c_str(), sizeof(addr.sun_path) - 1);
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listen(fd, 16) != 0) {
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         err = "unix bind/listen failed";
         close(fd);
+        return -1;
+    }
+    if (::fchmod(fd, 0600) != 0 || listen(fd, 16) != 0) {
+        err = "unix socket mode";
+        close(fd);
+        ::unlink(p.c_str());
         return -1;
     }
     return fd;
@@ -1882,6 +2148,26 @@ FundingObservation ObservationFromHit(const SearchHit& h, const ReleaseCampaign*
     return f;
 }
 
+/** Copy size and file count from the local catalog when the search record left them empty.
+ *  Does not invent a publisher. */
+void FillKnownCatalogFields(ModelCatalog& cat, SearchHit& h)
+{
+    if (h.rec.size_bytes > 0 && h.rec.file_count > 0) return;
+    CatalogEntry e;
+    bool found = false;
+    if (!h.rec.model_id.IsNull() && cat.Find(h.rec.model_id, e)) found = true;
+    else if (!h.rec.artifact_id.IsNull() && cat.Find(h.rec.artifact_id, e)) found = true;
+    if (!found) return;
+    if (h.rec.size_bytes == 0) {
+        uint64_t bytes = 0;
+        for (const auto& f : e.core.files) bytes += f.size;
+        if (bytes > 0) h.rec.size_bytes = bytes;
+    }
+    if (h.rec.file_count == 0 && !e.core.files.empty()) {
+        h.rec.file_count = static_cast<int>(e.core.files.size());
+    }
+}
+
 ModelEconomyEntry EconomyForHit(const SearchHit& h, ModelCatalog* cat = nullptr)
 {
     std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
@@ -1938,6 +2224,7 @@ void IngestCatalogIntoSearch(ModelCatalog& cat)
         }
         if (m.exists("bytes")) r.size_bytes = m["bytes"].getInt<int64_t>();
         r.signed_ok = false;
+        r.local_catalog = true;
         err.clear();
         if (const auto* existing = g_search_idx.Get(r.model_id)) {
             if (existing->signed_ok || SearchRecordHasAuthoredMetadata(*existing)) {
@@ -2785,8 +3072,14 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             resp.body = JsonError("PROVIDER_TYPE", err);
             return true;
         }
+        std::string origin = req.peer_addr;
+        if (origin.empty()) origin = req.transport_pin;
+        if (origin.empty()) {
+            const std::string from = RequestHeader(req, "X-BTX-From");
+            origin = from.empty() ? "anonymous" : from;
+        }
         std::lock_guard<std::mutex> lock(g_swarm.conn_mu);
-        if (!g_swarm.providers.Put(rec, ConnNowMs(), err)) {
+        if (!g_swarm.providers.Put(rec, ConnNowMs(), err, origin)) {
             resp.status = 403;
             resp.body = JsonError("PROVIDER_REJECT", err);
             return true;
@@ -3834,6 +4127,22 @@ UniValue MakeShareObject(const std::string& uri, const ModelSearchRecord& rec)
     return s;
 }
 
+/** Alias lookup. The caller already holds g_search_mu. That mutex is not
+ *  recursive, so ResolveUserId must not be used under it: a 64-hex id is not
+ *  a 48-byte model id and falls through to FindByAlias. */
+static Digest48 ResolveUserIdLocked(const std::string& s, std::string& err)
+{
+    Digest48 id = IdFromUser(s, err);
+    if (!id.IsNull()) {
+        err.clear();
+        return id;
+    }
+    err.clear();
+    if (const auto* rec = g_search_idx.FindByAlias(s)) return rec->model_id;
+    err = "unknown id or alias";
+    return {};
+}
+
 Digest48 ResolveUserId(const std::string& s, std::string& err)
 {
     EnsureSearchBound();
@@ -3842,11 +4151,8 @@ Digest48 ResolveUserId(const std::string& s, std::string& err)
         err.clear();
         return id;
     }
-    err.clear();
     std::lock_guard<std::mutex> lock(g_search_mu);
-    if (const auto* rec = g_search_idx.FindByAlias(s)) return rec->model_id;
-    err = "unknown id or alias";
-    return {};
+    return ResolveUserIdLocked(s, err);
 }
 
 bool LoadShareText(const fs::path& p, std::string& text, std::string& err)
@@ -6361,7 +6667,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         lock.unlock();
         int index_queried = 0;
-        std::vector<UniValue> remote_records;
+        std::vector<std::pair<std::string, UniValue>> remote_records;
         std::vector<SearchHit> remote_hits;
         if (q.scope != SearchScope::LOCAL) {
             {
@@ -6397,7 +6703,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     else job.coverage.connected_peers_queried += 1;
                     if (reply.exists("records") && reply["records"].isArray()) {
                         for (const auto& recj : reply["records"].getValues()) {
-                            if (recj.isObject()) remote_records.push_back(recj);
+                            if (recj.isObject()) remote_records.emplace_back(ep, recj);
                         }
                     }
                     if (reply.exists("results") && reply["results"].isArray()) {
@@ -6416,11 +6722,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
         }
         lock.lock();
-        for (const auto& recj : remote_records) {
+        for (const auto& item : remote_records) {
             ModelSearchRecord rec;
             std::string ierr;
-            if (!SearchRecordFromJson(recj, rec, ierr)) continue;
-            if (g_search_idx.Put(rec, ConnNowMs(), ierr)) AfterIndexPut(rec, ConnNowMs());
+            if (!SearchRecordFromJson(item.second, rec, ierr)) continue;
+            if (!VerifySearchRecord(rec, ConnNowMs(), ierr)) continue;
+            if (g_search_idx.Put(rec, ConnNowMs(), ierr, item.first)) AfterIndexPut(rec, ConnNowMs());
         }
         MergeRemoteSearchHits(job, std::move(remote_hits));
         job.hits = g_search_idx.Search(q, ConnNowMs());
@@ -6650,8 +6957,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         for (const auto& recj : Arg(0)["records"].getValues()) {
             ModelSearchRecord rec;
             std::string ierr;
-            if (!SearchRecordFromJson(recj, rec, ierr) || !g_search_idx.Put(rec, ConnNowMs(), err)) ++bad;
-            else {
+            if (!SearchRecordFromJson(recj, rec, ierr) || !VerifySearchRecord(rec, ConnNowMs(), ierr) ||
+                !g_search_idx.Put(rec, ConnNowMs(), err)) {
+                ++bad;
+            } else {
                 AfterIndexPut(rec, ConnNowMs());
                 ++ok;
             }
@@ -6970,6 +7279,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     h.rec.refund_height = c.refund_height;
                 }
                 if (h.rec.release_id.empty()) h.rec.release_id = c.release_id.Hex();
+                FillKnownCatalogFields(cat, h);
                 auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat));
                 if (Arg(0).isObject() && Arg(0).exists("scope") && ToUpper(Arg(0)["scope"].get_str()) == "LOCAL") {
                     // keep
@@ -7734,14 +8044,45 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         LiveObserveCampaign(c, FeedEventType::RELEASE_CAMPAIGN_CREATED);
         bool published_search = false;
         std::string search_record_id;
+        std::string publish_error;
         const bool want_pub = !options.exists("publish_search_record") || options["publish_search_record"].get_bool();
         if (want_pub && (options.exists("searchable_metadata") || options.exists("display_name") || options.exists("short_description"))) {
+            // Start from the signed catalog record when one exists, then overlay the
+            // caller's name. An unsigned replacement is refused ("unsigned cannot
+            // override signed"), which used to leave the file name on the card.
             ModelSearchRecord rec;
+            bool had_prev = false;
+            uint64_t prev_seq = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_search_mu);
+                if (const auto* prev = g_search_idx.Get(c.model_id)) {
+                    rec = *prev;
+                    had_prev = true;
+                    prev_seq = prev->metadata_sequence;
+                }
+            }
+            if (!had_prev) {
+                CatalogEntry drafted;
+                if (cat.Find(c.model_id, drafted)) rec = DraftSearchFromCatalog(drafted);
+            }
             if (options.exists("searchable_metadata") && options["searchable_metadata"].isObject()) {
-                SearchRecordFromJson(options["searchable_metadata"], rec, err);
+                ModelSearchRecord meta;
+                std::string merr;
+                if (SearchRecordFromJson(options["searchable_metadata"], meta, merr)) {
+                    if (!meta.family.empty()) rec.family = meta.family;
+                    if (!meta.architecture.empty()) rec.architecture = meta.architecture;
+                    if (!meta.format.empty()) rec.format = meta.format;
+                    if (!meta.quantization.empty()) rec.quantization = meta.quantization;
+                    if (!meta.tags.empty()) rec.tags = meta.tags;
+                    if (!meta.languages.empty()) rec.languages = meta.languages;
+                    if (!meta.aliases.empty()) rec.aliases = meta.aliases;
+                    if (!options.exists("display_name") && !meta.display_name.empty()) rec.display_name = meta.display_name;
+                    if (!options.exists("short_description") && !meta.short_description.empty()) rec.short_description = meta.short_description;
+                    if (rec.canonical_name.empty() && !meta.canonical_name.empty()) rec.canonical_name = meta.canonical_name;
+                }
             }
             rec.model_id = c.model_id;
-            rec.artifact_id = c.artifact_id;
+            if (rec.artifact_id.IsNull()) rec.artifact_id = c.artifact_id;
             rec.release_id = c.release_id.Hex();
             rec.release_state = "FUNDING";
             rec.release_target_atoms = c.target_atoms;
@@ -7750,15 +8091,46 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             rec.campaign_created_at = c.campaign_created_at;
             rec.ciphertext_artifact_id = c.ciphertext_artifact_id;
             rec.assurance = "KEY_RELEASE_ONLY";
-            if (options.exists("display_name")) rec.display_name = options["display_name"].get_str();
-            if (options.exists("short_description")) rec.short_description = options["short_description"].get_str();
+            // Explicit display_name wins over the file name already on the record.
+            if (options.exists("display_name") && options["display_name"].isStr() &&
+                !options["display_name"].get_str().empty()) {
+                rec.display_name = options["display_name"].get_str();
+            }
+            if (options.exists("short_description") && options["short_description"].isStr() &&
+                !options["short_description"].get_str().empty()) {
+                rec.short_description = options["short_description"].get_str();
+            }
             if (rec.canonical_name.empty()) rec.canonical_name = rec.display_name;
-            rec.published_at = c.campaign_created_at;
-            std::lock_guard<std::mutex> lock(g_search_mu);
-            if (g_search_idx.Put(rec, ConnNowMs(), err)) {
-                AfterIndexPut(rec, ConnNowMs());
-                published_search = true;
-                search_record_id = rec.model_id.Hex();
+            if (rec.published_at == 0) rec.published_at = c.campaign_created_at;
+            {
+                CatalogEntry sized;
+                if (cat.Find(c.model_id, sized)) {
+                    if (rec.artifact_id.IsNull()) rec.artifact_id = sized.artifact_id;
+                    if (rec.size_bytes == 0) {
+                        uint64_t bytes = 0;
+                        for (const auto& f : sized.core.files) bytes += f.size;
+                        rec.size_bytes = bytes;
+                    }
+                    if (rec.file_count == 0) rec.file_count = static_cast<int>(sized.core.files.size());
+                }
+            }
+            rec.metadata_sequence = had_prev ? prev_seq + 1 : (rec.metadata_sequence == 0 ? 1 : rec.metadata_sequence);
+            rec.sig.clear();
+            rec.signed_ok = false;
+            rec.tombstone = false;
+            std::string serr;
+            if (!SignSearchRecordWithDefaultIdentity(HelperDir(cat), rec, serr)) {
+                publish_error = serr.empty() ? "could not sign search record" : serr;
+            } else {
+                std::lock_guard<std::mutex> lock(g_search_mu);
+                std::string perr;
+                if (!g_search_idx.Put(rec, ConnNowMs(), perr)) {
+                    publish_error = perr;
+                } else {
+                    AfterIndexPut(rec, ConnNowMs());
+                    published_search = true;
+                    search_record_id = rec.model_id.Hex();
+                }
             }
         }
         PersistEconomy(cat);
@@ -7766,6 +8138,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("secret_retained", false);
         result.pushKV("search_record_id", search_record_id);
         result.pushKV("publish_state", published_search ? "published" : "local_campaign_only");
+        if (!publish_error.empty()) result.pushKV("publish_error", publish_error);
         result.pushKV("lifecycle_state", "FUNDING");
         result.pushKV("automatic_spend_atoms", 0);
         return true;
@@ -8652,7 +9025,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "getmodeleconomyentry" || method == "getmodelreleaseeconomics" || method == "getmodelfeed" ||
         method == "getreleasefeed" || method == "getmodelfeedstatus" || method == "getmodelfeedsequence" ||
         method == "getfundablemodels" || method == "getrecentlyunlockedmodels" || method == "cacheencryptedmodel" ||
-        method == "ingestchainfundingobservation" || method == "setreleaseoutputscript") {
+        method == "ingestchainfundingobservation" || method == "setreleaseoutputscript" ||
+        method == "recordmodelfundingoutpoint") {
         EnsureSearchBound();
         EnsureEconomy(cat);
         std::unique_lock<std::mutex> lock(g_search_mu);
@@ -8704,6 +9078,76 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             result.pushKV("output_script", output_script);
             return true;
         }
+        if (method == "recordmodelfundingoutpoint") {
+            if (!Arg(0).isObject()) {
+                err_code = "INVALID_PARAMETER";
+                err = "funding outpoint object";
+                return false;
+            }
+            const UniValue& o = Arg(0);
+            if (!o.exists("txid") || !o["txid"].isStr() || !o.exists("vout") || !o["vout"].isNum()) {
+                err_code = "INVALID_PARAMETER";
+                err = "txid and vout required";
+                return false;
+            }
+            const std::string txid = ToLower(o["txid"].get_str());
+            const int64_t vout64 = o["vout"].getInt<int64_t>();
+            if (txid.size() != 64 || vout64 < 0 || vout64 > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                err_code = "INVALID_PARAMETER";
+                err = "txid or vout";
+                return false;
+            }
+            std::string release_id;
+            std::string key_hash;
+            if (o.exists("release_id") && o["release_id"].isStr()) release_id = ToLower(o["release_id"].get_str());
+            if (o.exists("key_hash") && o["key_hash"].isStr()) key_hash = ToLower(o["key_hash"].get_str());
+            std::string script;
+            if (o.exists("output_script") && o["output_script"].isStr()) script = ToLower(o["output_script"].get_str());
+            int64_t amount = 0;
+            if (o.exists("amount_atoms") && o["amount_atoms"].isNum()) amount = o["amount_atoms"].getInt<int64_t>();
+            std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
+            ReleaseCampaign* live = nullptr;
+            if (!release_id.empty()) {
+                Digest48 id;
+                std::string derr;
+                if (Digest48::FromHex(release_id, id, derr)) {
+                    live = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(id));
+                }
+            }
+            if (!live && key_hash.size() == 64) {
+                for (const auto& camp : g_campaigns.List()) {
+                    if (ToLower(camp.key_hash.Hex()) == key_hash) {
+                        live = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(camp.release_id));
+                        break;
+                    }
+                }
+            }
+            if (!live) {
+                err_code = "NOT_FOUND";
+                err = "unknown release";
+                return false;
+            }
+            bool have = false;
+            for (const auto& fp : live->funding_outpoints) {
+                if (fp.txid == txid && fp.vout == static_cast<uint32_t>(vout64)) have = true;
+            }
+            if (!have) {
+                ReleaseFundingOutpoint fp;
+                fp.txid = txid;
+                fp.vout = static_cast<uint32_t>(vout64);
+                fp.output_script_hex = script;
+                fp.amount_atoms = amount;
+                live->funding_outpoints.push_back(fp);
+            }
+            if (live->output_script_hex.empty() && !script.empty()) live->output_script_hex = script;
+            SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+            result.pushKV("accepted", true);
+            result.pushKV("release_id", live->release_id.Hex());
+            result.pushKV("txid", txid);
+            result.pushKV("vout", vout64);
+            if (!script.empty()) result.pushKV("output_script", script);
+            return true;
+        }
         if (method == "ingestchainfundingobservation") {
             if (!Arg(0).isObject()) {
                 err_code = "INVALID_PARAMETER";
@@ -8715,6 +9159,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 !o.exists("funding_source") || o["funding_source"].get_str() != "CHAIN_OBSERVATION") {
                 result.pushKV("accepted", false);
                 result.pushKV("note", "remote unsigned funding claims are not ingested as confirmed");
+                return true;
+            }
+            const int64_t claimed = o.exists("confirmed_funded_atoms") && o["confirmed_funded_atoms"].isNum()
+                                        ? o["confirmed_funded_atoms"].getInt<int64_t>()
+                                        : 0;
+            if (claimed <= 0) {
+                // A scan that matched nothing is not a known zero.
+                result.pushKV("accepted", false);
+                result.pushKV("note", "confirmed funding of zero is not ingested");
                 return true;
             }
             FundingObservation f;
@@ -8760,7 +9213,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err_code = "INVALID_PARAMETER";
                 return false;
             }
-            const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+            const Digest48 id = ResolveUserIdLocked(Arg(0).get_str(), err);
             ReleaseCampaign camp;
             bool have_camp = false;
             {
@@ -8823,6 +9276,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     h.rec.key_hash = c.key_hash;
                     h.rec.refund_height = c.refund_height;
                 }
+                FillKnownCatalogFields(cat, h);
                 auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat));
                 if (!e.fundable_now) continue;
                 if (!MatchesEconomyFilters(e, q.filters)) continue;
@@ -8871,7 +9325,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err = "release_id or model id required";
                 return false;
             }
-            const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+            const Digest48 id = ResolveUserIdLocked(Arg(0).get_str(), err);
             ReleaseCampaign camp;
             bool have_camp = false;
             {
@@ -8992,7 +9446,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                         for (const auto& recj : reply["records"].getValues()) {
                             ModelSearchRecord rec;
                             std::string ierr;
-                            if (SearchRecordFromJson(recj, rec, ierr) && g_search_idx.Put(rec, ConnNowMs(), ierr)) {
+                            if (SearchRecordFromJson(recj, rec, ierr) && VerifySearchRecord(rec, ConnNowMs(), ierr) &&
+                                g_search_idx.Put(rec, ConnNowMs(), ierr, ep)) {
                                 AfterIndexPut(rec, ConnNowMs());
                             }
                         }
@@ -9984,6 +10439,18 @@ bool JsonLeaksPrivateLocalState(const UniValue& v)
         }
     }
     return false;
+}
+
+bool HelperRefusalFromError(const std::string& err, std::string& code, std::string& message)
+{
+    code.clear();
+    message.clear();
+    UniValue o;
+    if (!o.read(err) || !o.isObject()) return false;
+    if (!o.exists("code") || !o["code"].isStr() || !o.exists("message") || !o["message"].isStr()) return false;
+    code = o["code"].get_str();
+    message = o["message"].get_str();
+    return !code.empty();
 }
 
 bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err)

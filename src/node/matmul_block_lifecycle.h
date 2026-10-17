@@ -5,6 +5,7 @@
 #ifndef BITCOIN_NODE_MATMUL_BLOCK_LIFECYCLE_H
 #define BITCOIN_NODE_MATMUL_BLOCK_LIFECYCLE_H
 
+#include <logging.h>
 #include <netaddress.h>
 #include <primitives/block.h>
 #include <uint256.h>
@@ -449,8 +450,16 @@ public:
                 selected = it;
                 break;
             }
+            // The pinned progress body (followed tip-child / root-first
+            // first hole) outranks a floating band body even when the band
+            // body has waited longer, because only the progress body can
+            // move the tip.
             if (selected == m_entries.end() ||
-                entry.body->stored_at < selected->second.body->stored_at) {
+                (entry.body->pin_progress &&
+                 !selected->second.body->pin_progress) ||
+                (entry.body->pin_progress ==
+                     selected->second.body->pin_progress &&
+                 entry.body->stored_at < selected->second.body->stored_at)) {
                 selected = it;
             }
         }
@@ -708,6 +717,60 @@ public:
         return it != m_entries.end() && it->second.body.has_value();
     }
 
+    /** True when `hash` was capacity-evicted within `within`. Fetch uses
+     *  this so a body the store just dropped is not asked for again in the
+     *  same window, which would evict the body that replaced it. */
+    bool WasEvictedRecently(const uint256& hash, Clock::duration within,
+                            Clock::time_point now = Clock::now()) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_eviction_tombstones.find(hash)};
+        return it != m_eviction_tombstones.end() &&
+               now - it->second.tombstoned_at <= within;
+    }
+
+    /** Inactive retained bodies refused for RC pending capacity whose
+     *  reference height is strictly below `height`, lowest first. The
+     *  caller decides whether one is an unverified ancestor. */
+    std::vector<std::pair<uint256, int32_t>> CapacityDeferredBodiesBelow(
+        int32_t height) const
+    {
+        std::vector<std::pair<uint256, int32_t>> out;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const auto& item : m_entries) {
+            const Entry& entry{item.second};
+            if (!entry.body || IsActive(entry.state) ||
+                entry.terminal_on_connect) {
+                continue;
+            }
+            if (entry.body->retry_cause != RetryCause::RC_PENDING_CAPACITY) {
+                continue;
+            }
+            if (entry.body->reference_height >= height) continue;
+            out.emplace_back(item.first, entry.body->reference_height);
+        }
+        std::sort(out.begin(), out.end(),
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
+        return out;
+    }
+
+    /** Make one inactive retained body retryable now, without counting a
+     *  deferral. Admission uses this to hand a freed job to the ancestor
+     *  the chain is waiting on. */
+    bool WakeNow(const uint256& hash, Clock::time_point now = Clock::now())
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it == m_entries.end() || !it->second.body ||
+            IsActive(it->second.state) || it->second.terminal_on_connect) {
+            return false;
+        }
+        if (it->second.body->retry_not_before > now) {
+            it->second.body->retry_not_before = now;
+        }
+        return true;
+    }
+
     /** Snapshot the bounded retained children without running chain/index
      *  lookups under the lifecycle mutex. Retry deadlines do not remove a
      *  body's priority over later bodies that depend on it. */
@@ -926,38 +989,50 @@ private:
                              });
     }
 
+    // The body farthest above the tip goes first; equal heights fall back
+    // to oldest. Near-tip bodies are requested first, so oldest-first
+    // evicted the next connectable block to make room for a far one.
+    // Progress bodies stay protected.
+    static bool EvictsBefore(const RetainedBody& a, const RetainedBody& b)
+    {
+        if (a.reference_height != b.reference_height) {
+            return a.reference_height > b.reference_height;
+        }
+        return a.stored_at < b.stored_at;
+    }
+
     Map::iterator OldestEvictable(const uint256& protected_hash)
     {
-        auto oldest{m_entries.end()};
+        auto victim{m_entries.end()};
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             if (it->first == protected_hash || !it->second.body ||
                 IsActive(it->second.state) || it->second.body->pin_progress) {
                 continue;
             }
-            if (oldest == m_entries.end() ||
-                it->second.body->stored_at < oldest->second.body->stored_at) {
-                oldest = it;
+            if (victim == m_entries.end() ||
+                EvictsBefore(*it->second.body, *victim->second.body)) {
+                victim = it;
             }
         }
-        return oldest;
+        return victim;
     }
 
     Map::iterator OldestEvictableForSource(const uint256& protected_hash,
                                            uint64_t netgroup)
     {
-        auto oldest{m_entries.end()};
+        auto victim{m_entries.end()};
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             if (it->first == protected_hash || !it->second.body ||
                 IsActive(it->second.state) || it->second.body->pin_progress ||
                 it->second.body->source_netgroup != netgroup) {
                 continue;
             }
-            if (oldest == m_entries.end() ||
-                it->second.body->stored_at < oldest->second.body->stored_at) {
-                oldest = it;
+            if (victim == m_entries.end() ||
+                EvictsBefore(*it->second.body, *victim->second.body)) {
+                victim = it;
             }
         }
-        return oldest;
+        return victim;
     }
 
     size_t SourceCount(uint64_t netgroup) const
@@ -1058,6 +1133,12 @@ private:
             victim->second.body->idle_retry_bypass_available,
             victim->second.body->retry_wake_mask,
             now};
+        LogDebug(BCLog::NET,
+                 "Evicting retained MatMul body %s from netgroup %llu under "
+                 "capacity pressure\n",
+                 victim->first.ToString(),
+                 static_cast<unsigned long long>(
+                     victim->second.body->source_netgroup));
     }
     size_t m_retained_bytes{0};
     std::map<uint64_t, size_t> m_retained_count_by_source;

@@ -204,6 +204,15 @@ endif()
 # first — platform-dependent keygen. Do not "fix" this by reordering
 # sodium after PQC: that would steal ZMQ's Curve. Prefix SPHINCS+ and
 # slh_dsa TUs only.
+#
+# randombytes is the same collision class and was not covered by the
+# crypto_sign_* prefix. Both PQ cores and libsodium export it. On the
+# official macOS release, ld kept libsodium's randombytes, so ML-DSA
+# keygen ignored the supplied seed. On Linux the duplicate dropped the
+# SLH-DSA wrapper, so SLH signing fell through to /dev/urandom. Give each
+# scheme its own symbol. libsodium keeps randombytes for ZMQ and Ed25519.
+# The WASM build renames independently (btx_slhdsa_randombytes) because
+# it does not link these native wrappers.
 set(_btx_spx_rename
   crypto_sign_seed_keypair=btx_spx_crypto_sign_seed_keypair
   crypto_sign_keypair=btx_spx_crypto_sign_keypair
@@ -215,6 +224,7 @@ set(_btx_spx_rename
   crypto_sign_seedbytes=btx_spx_crypto_sign_seedbytes
   crypto_sign_open=btx_spx_crypto_sign_open
   crypto_sign=btx_spx_crypto_sign
+  randombytes=btx_spx_randombytes
 )
 set_source_files_properties(
   ${SLH_DSA_SOURCES}
@@ -222,7 +232,17 @@ set_source_files_properties(
   src/slh_dsa/keygen.c
   src/slh_dsa/sign.c
   src/slh_dsa/verify.c
+  src/slh_dsa/randombytes_custom.c
   PROPERTIES COMPILE_DEFINITIONS "${_btx_spx_rename}"
+)
+set_source_files_properties(
+  ${ML_DSA_SOURCES}
+  dilithium/ref/randombytes_custom.c
+  src/ml_dsa/utils.c
+  src/ml_dsa/keygen.c
+  src/ml_dsa/sign.c
+  src/ml_dsa/verify.c
+  PROPERTIES COMPILE_DEFINITIONS "randombytes=btx_mldsa_randombytes"
 )
 
 # PQ primitives are extremely compute-heavy; keep this target optimized even in

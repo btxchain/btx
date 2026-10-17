@@ -3,8 +3,8 @@
 // file COPYING or https://opensource.org/license/mit/.
 //
 // Local generate matching: SafeTensors architectures this tree will attempt
-// with BTX_MODEL_GENERATE, GGUF with BTX_LLAMA_CLI, and EXL3 with
-// BTX_EXL3_CLI. No remote endpoints, no trust_remote_code, no spend.
+// with BTX_MODEL_GENERATE, GGUF with BTX_LLAMA_CLI, and allowlisted EXL3
+// with BTX_EXL3_CLI. No remote endpoints, no trust_remote_code, no spend.
 // execution_profile is identity, not a PASS. EXL3 is never sent to llama.cpp.
 
 #include <modelnet/generate.h>
@@ -77,14 +77,20 @@ const char* kStArch[] = {
 std::string FirstArchitecture(const UniValue& cfg)
 {
     if (!cfg.isObject()) return {};
+    // auto_map is custom code on its own. An architectures[] entry must not hide it.
+    if (cfg.exists("auto_map")) return "custom_auto_map";
     if (cfg.exists("architectures") && cfg["architectures"].isArray() &&
         cfg["architectures"].size() > 0 && cfg["architectures"][0].isStr()) {
         return cfg["architectures"][0].get_str();
     }
-    if (cfg.exists("auto_map") && cfg["auto_map"].isObject()) {
-        return "custom_auto_map";
-    }
     return {};
+}
+
+std::string ArchitectureRejectReason(const std::string& architecture)
+{
+    if (architecture.empty()) return "missing_architecture";
+    if (LowerCopy(architecture) == "custom_auto_map") return "custom_code";
+    return "unknown_architecture";
 }
 
 void WalkCheckout(const fs::path& dir, int depth, ArtifactGenerateView& v)
@@ -139,14 +145,19 @@ void WalkCheckout(const fs::path& dir, int depth, ArtifactGenerateView& v)
         if (lower_name == "quantization_config.json" && FileDeclaresExl3(fs::PathToString(p))) {
             v.exl3_declared = true;
         }
-        if (lower_name == "config.json" && v.architecture.empty()) {
+        if (lower_name == "config.json") {
             std::ifstream in(p);
             std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             if (body.size() <= 64 * 1024 && JsonDeclaresExl3(body)) v.exl3_declared = true;
             UniValue cfg;
             if (body.size() <= 64 * 1024 && cfg.read(body) && cfg.isObject()) {
-                v.architecture = FirstArchitecture(cfg);
-                v.config_path = fs::PathToString(p);
+                const std::string arch = FirstArchitecture(cfg);
+                // A later or sibling config.json cannot hide auto_map, and an
+                // earlier architectures[] value cannot either.
+                if (arch == "custom_auto_map" || v.architecture.empty()) {
+                    v.architecture = arch;
+                    v.config_path = fs::PathToString(p);
+                }
             }
         }
     }
@@ -226,7 +237,7 @@ UniValue HostGenerateProfileJson(const HostGenerateProfile& p)
     o.pushKV("note",
              "Local generate only for host-compatible GGUF (BTX_LLAMA_CLI), "
              "allowlisted SafeTensors architectures (BTX_MODEL_GENERATE), or "
-             "EXL3 (BTX_EXL3_CLI). EXL3 is not sent to llama.cpp. "
+             "allowlisted EXL3 architectures (BTX_EXL3_CLI). EXL3 is not sent to llama.cpp. "
              "CUDA --hold --smoke is not a generate. Granite hybrid is not GGUF.");
     return o;
 }
@@ -286,8 +297,8 @@ bool ArtifactCompatibleWithHost(const ArtifactGenerateView& art,
         return false;
     }
     if (art.format == GenerateFormat::Exl3) {
-        if (art.architecture == "custom_auto_map") {
-            reason = "custom_code";
+        if (!SafeTensorsArchitectureIsHostCompatible(art.architecture)) {
+            reason = ArchitectureRejectReason(art.architecture);
             return false;
         }
         if (!host.exl3_cli) {
@@ -297,7 +308,7 @@ bool ArtifactCompatibleWithHost(const ArtifactGenerateView& art,
         return true;
     }
     if (!SafeTensorsArchitectureIsHostCompatible(art.architecture)) {
-        reason = art.architecture.empty() ? "missing_architecture" : "unknown_architecture";
+        reason = ArchitectureRejectReason(art.architecture);
         return false;
     }
     if (!host.generate_adapter) {

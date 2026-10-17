@@ -1052,17 +1052,8 @@ UniValue BountyStore::Capabilities() const
     UniValue profiles(UniValue::VARR);
     UniValue exact(UniValue::VOBJ);
     exact.pushKV("id", "EXACT_CHECKS");
-    exact.pushKV("ready", true);
+    exact.pushKV("ready", EvaluationProfileReady("EXACT_CHECKS"));
     profiles.push_back(exact);
-    auto maybe = [&](const char* id) {
-        UniValue p(UniValue::VOBJ);
-        p.pushKV("id", id);
-        p.pushKV("ready", EvaluationProfileReady(id));
-        profiles.push_back(p);
-    };
-    maybe("REPRODUCIBLE_BENCHMARK");
-    maybe("STATISTICAL_BENCHMARK");
-    maybe("REVIEWED_RESEARCH");
     o.pushKV("evaluation_profiles", profiles);
     o.pushKV("script_profile", "mr(cltv_multi_pq,refund) and mr(htlc_sha256,refund)");
     o.pushKV("n_max", BOUNTY_COUNCIL_MAX);
@@ -1683,7 +1674,20 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         const std::string job_id = a.exists("job_id") ? a["job_id"].get_str() : "";
         auto it = m_eval_jobs.find(job_id);
         if (it == m_eval_jobs.end()) return fail("NOT_FOUND", "job");
-        UniValue report = a.exists("report") ? a["report"] : it->second.exists("report") ? it->second["report"] : a;
+        const UniValue& job = it->second;
+        std::string profile;
+        if (job.exists("plan") && job["plan"].isObject() && job["plan"].exists("profile_id") &&
+            job["plan"]["profile_id"].isStr()) {
+            profile = job["plan"]["profile_id"].get_str();
+        }
+        if (profile != "EXACT_CHECKS") return fail("REJECTED", "profile");
+        if (!job.exists("report") || !job["report"].isObject()) return fail("REJECTED", "job report");
+        const UniValue& job_report = job["report"];
+        if (job_report.exists("profile_id") && job_report["profile_id"].isStr() &&
+            job_report["profile_id"].get_str() != "EXACT_CHECKS") {
+            return fail("REJECTED", "profile");
+        }
+        UniValue report = job_report;
         report.pushKV("job_id", job_id);
         report.pushKV("award_signature", false);
         SignedEnvelope env;

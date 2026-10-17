@@ -3147,7 +3147,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, std::optional<PQAlgorithm
     return SignTransaction(tx, coins, SIGHASH_DEFAULT, input_errors, /*inputs_amount_sum=*/nullptr, preferred_pq_signing_algo);
 }
 
-bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo) const
+bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo, bool adjust_timelocks, P2MRTimelockAdjustment* timelock_adjustment) const
 {
     // C-002 / FIPS-205: the transaction we are signing will be validated no
     // earlier than the next block. At/after the C-002 activation height, SLH-DSA
@@ -3162,7 +3162,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint,
     for (ScriptPubKeyMan* spk_man : GetAllScriptPubKeyMans()) {
         // spk_man->SignTransaction will return true if the transaction is complete,
         // so we can exit early and return true if that happens
-        if (spk_man->SignTransaction(tx, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205)) {
+        if (spk_man->SignTransaction(tx, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205, adjust_timelocks, timelock_adjustment)) {
             return true;
         }
     }
@@ -3219,7 +3219,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint,
             }
             if (!merged.pq_keys.empty()) {
                 input_errors.clear();
-                if (::SignTransaction(tx, &merged, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205)) {
+                if (::SignTransaction(tx, &merged, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205, adjust_timelocks, timelock_adjustment)) {
                     return true;
                 }
             }
@@ -3230,7 +3230,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint,
     return false;
 }
 
-std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bool& complete, int sighash_type, bool sign, bool bip32derivs, size_t * n_signed, bool finalize) const
+std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bool& complete, int sighash_type, bool sign, bool bip32derivs, size_t * n_signed, bool finalize, bool adjust_timelocks, bilingual_str* error_detail, P2MRTimelockAdjustment* timelock_adjustment, const std::function<bool(PartiallySignedTransaction&, bilingual_str&)>& prepare) const
 {
     if (n_signed) {
         *n_signed = 0;
@@ -3270,9 +3270,17 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
     const PrecomputedTransactionData probe_txdata = PrecomputePSBTData(psbtx);
 
     for (ScriptPubKeyMan* spk_man : spk_mans) {
-        const auto error{spk_man->FillPSBT(psbtx, probe_txdata, sighash_type, /*sign=*/false, bip32derivs, /*n_signed=*/nullptr, /*finalize=*/false, slhdsa_fips205)};
+        const auto error{spk_man->FillPSBT(psbtx, probe_txdata, sighash_type, /*sign=*/false, bip32derivs, /*n_signed=*/nullptr, /*finalize=*/false, slhdsa_fips205, error_detail)};
         if (error) {
             return error;
+        }
+    }
+
+    if (prepare) {
+        bilingual_str prepare_error;
+        if (!prepare(psbtx, prepare_error)) {
+            if (error_detail) *error_detail = std::move(prepare_error);
+            return PSBTError::P2MR_LEAF_UNSELECTED;
         }
     }
 
@@ -3287,9 +3295,21 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
 
     bilingual_str timelock_error;
     if (!CheckP2MRTimelockedTransaction(CTransaction{*psbtx.tx}, p2mr_timelocked_inputs, timelock_error)) {
-        if (PSBTHasExistingSignatures(psbtx) ||
-            !PrepareP2MRTimelockedTransaction(*psbtx.tx, p2mr_timelocked_inputs, timelock_error)) {
+        const bool existing = PSBTHasExistingSignatures(psbtx);
+        // Signing refuses a csv/cltv/refund mismatch unless the caller opts in.
+        // An update that is not signing leaves the fields alone when opt-in is off.
+        // A signature that is already present always refuses.
+        if (existing || (sign && !adjust_timelocks)) {
+            if (error_detail) *error_detail = timelock_error;
             return PSBTError::P2MR_TIMELOCK_MISMATCH;
+        }
+        if (adjust_timelocks) {
+            const CMutableTransaction before{*psbtx.tx};
+            if (!PrepareP2MRTimelockedTransaction(*psbtx.tx, p2mr_timelocked_inputs, timelock_error)) {
+                if (error_detail) *error_detail = timelock_error;
+                return PSBTError::P2MR_TIMELOCK_MISMATCH;
+            }
+            if (timelock_adjustment) RecordP2MRTimelockAdjustment(before, *psbtx.tx, *timelock_adjustment);
         }
     }
 
@@ -3299,13 +3319,50 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
     // serializing expensive signing operations across concurrent RPC calls.
     for (ScriptPubKeyMan* spk_man : spk_mans) {
         int n_signed_this_spkm = 0;
-        const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize, slhdsa_fips205)};
+        const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize, slhdsa_fips205, error_detail)};
         if (error) {
             return error;
         }
 
         if (n_signed) {
             (*n_signed) += n_signed_this_spkm;
+        }
+    }
+
+    if (sign) {
+        for (unsigned int i = 0; i < psbtx.inputs.size(); ++i) {
+            const PSBTInput& input = psbtx.inputs.at(i);
+            if (PSBTInputSigned(input)) continue;
+            CScript script;
+            if (!input.witness_utxo.IsNull()) {
+                script = input.witness_utxo.scriptPubKey;
+            } else if (input.non_witness_utxo && psbtx.tx->vin.at(i).prevout.n < input.non_witness_utxo->vout.size()) {
+                script = input.non_witness_utxo->vout[psbtx.tx->vin.at(i).prevout.n].scriptPubKey;
+            }
+            size_t leaf_count{0};
+            int witver{0};
+            std::vector<unsigned char> program;
+            if (script.IsWitnessProgram(witver, program) && program.size() == 32) {
+                for (ScriptPubKeyMan* spk_man : spk_mans) {
+                    auto* desc_spk_man = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
+                    if (!desc_spk_man) continue;
+                    const auto keys = desc_spk_man->GetSigningProvider(script, /*include_private=*/false);
+                    if (!keys) continue;
+                    P2MRSpendData spend;
+                    if (!keys->GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spend)) continue;
+                    leaf_count = std::max(leaf_count, spend.ordered_leaf_scripts.empty() ? spend.scripts.size() : spend.ordered_leaf_scripts.size());
+                }
+            }
+            std::map<std::vector<unsigned char>, std::vector<unsigned char>> preimages;
+            for (const auto& [hash, preimage] : input.sha256_preimages) {
+                preimages.emplace(std::vector<unsigned char>(hash.begin(), hash.end()), preimage);
+            }
+            bilingual_str why;
+            if (!ExplainUnsignedP2MRInput(input.m_p2mr_leaf_script, leaf_count, preimages, !input.m_p2mr_pq_sigs.empty(), why)) {
+                continue;
+            }
+            if (error_detail) *error_detail = std::move(why);
+            return input.m_p2mr_leaf_script.empty() ? PSBTError::P2MR_LEAF_UNSELECTED : PSBTError::P2MR_HTLC_PREIMAGE;
         }
     }
 

@@ -78,6 +78,7 @@ struct CExtKey;
 struct FlatSigningProvider;
 struct KeyOriginInfo;
 struct PartiallySignedTransaction;
+struct P2MRTimelockAdjustment;
 struct SignatureData;
 
 using LoadWalletFn = std::function<void(std::unique_ptr<interfaces::Wallet> wallet)>;
@@ -824,7 +825,7 @@ public:
     /** Fetch the inputs and sign with SIGHASH_ALL. */
     bool SignTransaction(CMutableTransaction& tx, std::optional<PQAlgorithm> preferred_pq_signing_algo = std::nullopt) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     /** Sign the tx given the input coins and sighash. */
-    bool SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum = nullptr, std::optional<PQAlgorithm> preferred_pq_signing_algo = std::nullopt) const;
+    bool SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum = nullptr, std::optional<PQAlgorithm> preferred_pq_signing_algo = std::nullopt, bool adjust_timelocks = true, P2MRTimelockAdjustment* timelock_adjustment = nullptr) const;
     SigningResult SignMessage(const MessageSignatureFormat format, const std::string& message, const CTxDestination& address, std::string& str_sig) const;
 
     /**
@@ -848,7 +849,11 @@ public:
                   bool sign = true,
                   bool bip32derivs = true,
                   size_t* n_signed = nullptr,
-                  bool finalize = true) const;
+                  bool finalize = true,
+                  bool adjust_timelocks = true,
+                  bilingual_str* error_detail = nullptr,
+                  P2MRTimelockAdjustment* timelock_adjustment = nullptr,
+                  const std::function<bool(PartiallySignedTransaction&, bilingual_str&)>& prepare = {}) const;
 
     /**
      * Submit the transaction to the node's mempool and then relay to peers.

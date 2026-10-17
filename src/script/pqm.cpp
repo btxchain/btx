@@ -562,6 +562,8 @@ bool P2MRClaimLeafPinsPreimageLength(Span<const unsigned char> script)
     std::vector<unsigned char> hash;
     std::vector<unsigned char> pubkey;
     PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+    // v0.34.15: SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32 pins 32 bytes on the new
+    // SHA-256 leaf, the legacy SHA-256 leaf, and the HASH160 htlc_tx leaf.
     return ParseP2MRHTLCSha256Leaf(script, hash, algo, pubkey) ||
            ParseP2MRHTLCSha256LegacyLeaf(script, hash, algo, pubkey) ||
            ParseP2MRHTLCTxLeaf(script, hash, algo, pubkey);

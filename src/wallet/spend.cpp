@@ -1652,13 +1652,28 @@ util::Result<CreatedTransactionResult> CreateTransaction(
         return util::Error{_("Transaction amounts must not be negative")};
     }
 
-    auto res = CreateTransactionInternal(wallet, vecSend, change_pos, coin_control, sign);
+    // The grouped comparison is discarded unless its fee is within
+    // -maxapsfee. Build both unsigned and sign only the one that is kept.
+    // Signing both spends a full PQ signature round on a transaction that
+    // is then thrown away.
+    const bool defer_sign = sign && wallet.m_max_aps_fee > -1 && !coin_control.m_avoid_partial_spends;
+    auto res = CreateTransactionInternal(wallet, vecSend, change_pos, coin_control, sign && !defer_sign);
     TRACEPOINT(coin_selection, normal_create_tx_internal,
            wallet.GetName().c_str(),
            bool(res),
            res ? res->fee : 0,
            res && res->change_pos.has_value() ? int32_t(*res->change_pos) : -1);
     if (!res) return res;
+    const auto sign_result = [&](const CreatedTransactionResult& chosen) -> util::Result<CreatedTransactionResult> {
+        CMutableTransaction mtx{*chosen.tx};
+        if (!wallet.SignTransaction(mtx, coin_control.m_preferred_pq_signing_algo)) {
+            return util::Error{_("Signing transaction failed")};
+        }
+        if (GetTransactionWeight(CTransaction{mtx}) > MAX_STANDARD_TX_WEIGHT) {
+            return util::Error{_("Transaction too large")};
+        }
+        return CreatedTransactionResult(MakeTransactionRef(std::move(mtx)), chosen.fee, chosen.change_pos, chosen.fee_calc);
+    };
     const auto& txr_ungrouped = *res;
     // try with avoidpartialspends unless it's enabled already
     if (txr_ungrouped.fee > 0 /* 0 means non-functional fee rate estimation */ && wallet.m_max_aps_fee > -1 && !coin_control.m_avoid_partial_spends) {
@@ -1671,7 +1686,7 @@ util::Result<CreatedTransactionResult> CreateTransaction(
             ExtractDestination(txr_ungrouped.tx->vout[*txr_ungrouped.change_pos].scriptPubKey, tmp_cc.destChange);
         }
 
-        auto txr_grouped = CreateTransactionInternal(wallet, vecSend, change_pos, tmp_cc, sign);
+        auto txr_grouped = CreateTransactionInternal(wallet, vecSend, change_pos, tmp_cc, /*sign=*/false);
         // if fee of this alternative one is within the range of the max fee, we use this one
         const bool use_aps{txr_grouped.has_value() ? (txr_grouped->fee <= txr_ungrouped.fee + wallet.m_max_aps_fee) : false};
         TRACEPOINT(coin_selection, aps_create_tx_internal,
@@ -1683,9 +1698,13 @@ util::Result<CreatedTransactionResult> CreateTransaction(
         if (txr_grouped) {
             wallet.WalletLogPrintf("Fee non-grouped = %lld, grouped = %lld, using %s\n",
                 txr_ungrouped.fee, txr_grouped->fee, use_aps ? "grouped" : "non-grouped");
-            if (use_aps) return txr_grouped;
         }
+        if (defer_sign) {
+            return sign_result(use_aps && txr_grouped ? *txr_grouped : txr_ungrouped);
+        }
+        if (use_aps && txr_grouped) return txr_grouped;
     }
+    if (defer_sign) return sign_result(txr_ungrouped);
     return res;
 }
 

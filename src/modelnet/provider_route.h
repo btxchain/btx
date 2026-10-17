@@ -20,6 +20,8 @@
 namespace modelnet {
 
 constexpr int64_t PROVIDER_TTL_MS = 60 * 60 * 1000;
+/** Live advertisements kept per transport peer or origin. Not chain truth. */
+constexpr int PROVIDER_PEER_LIVE_MAX = 4;
 constexpr size_t PROVIDER_MAX_ENDPOINTS = 8;
 constexpr size_t PROVIDER_MAX_RANGES = 32;
 constexpr size_t ROUTE_BUCKETS = Digest48::SIZE * 8; // 384 bit-prefix buckets, not 48 byte buckets
@@ -76,11 +78,19 @@ public:
 int RoutingBucketIndex(const Digest48& self, const Digest48& other);
 
 class ProviderCache {
-    std::map<std::string, std::vector<ProviderRecord>> m_by_resource;
+    struct CachedProvider {
+        ProviderRecord rec;
+        std::string origin;
+    };
+    std::map<std::string, std::vector<CachedProvider>> m_by_resource;
     size_t m_cap{256};
 
 public:
-    bool Put(const ProviderRecord& r, int64_t now_ms, std::string& err);
+    /**
+     * In-memory only. `origin` is the transport peer id, or a caller-supplied
+     * origin when the HTTP handler has no peer. Never persisted. Never authoritative.
+     */
+    bool Put(const ProviderRecord& r, int64_t now_ms, std::string& err, const std::string& origin = {});
     std::vector<ProviderRecord> Get(const Digest48& resource, int64_t now_ms) const;
     void Expire(int64_t now_ms);
     size_t Size() const;

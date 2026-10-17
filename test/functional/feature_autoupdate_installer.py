@@ -340,6 +340,9 @@ class Scenario:
                 "BTX_AUTOUPDATE_PID": str(self.target.pid),
                 "BTX_AUTOUPDATE_DATADIR": str(self.target_datadir),
                 "BTX_AUTOUPDATE": "1",
+                # The harness stubs openssl. The installer defaults to ml-dsa-44,
+                # which needs btx-util and a release pubkey this fixture does not have.
+                "BTX_AUTOUPDATE_PUBKEY_ALGO": "secp256k1",
                 "BTX_UPDATER_TEST_ALLOW_NON_BTXD_PID": "1",
                 "BTX_TEST_ACTION_LOG": str(self.action_log),
                 "BTX_TEST_PGREP_LOG": str(self.pgrep_log),
@@ -347,7 +350,7 @@ class Scenario:
             }
         )
         env.update(self.extra_env)
-        (self.tmp / "tmp").mkdir()
+        (self.tmp / "tmp").mkdir(exist_ok=True)
         return subprocess.run(
             [str(INSTALLER)],
             cwd=self.tmp,
@@ -700,6 +703,97 @@ def test_prebuilt_falls_back_to_source_when_disabled():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
+def _sha256_file(path):
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_pinned_manifest_ignores_url_and_version_overrides():
+    with Scenario(
+        "pinned-manifest",
+        {"BTX_AUTOUPDATE_PUBKEY_ALGO": "secp256k1"},
+    ) as scenario:
+        pinned_body = scenario.tmp / "pinned-version.txt"
+        pinned_sig = scenario.tmp / "pinned-version.txt.sig"
+        pinned_body.write_bytes((scenario.origin / "version.txt").read_bytes())
+        pinned_sig.write_bytes((scenario.origin / "version.txt.sig").read_bytes())
+        digest = _sha256_file(pinned_body)
+
+        # A later refetch of the published URL must not replace the pinned body.
+        replaced = json.loads(pinned_body.read_text(encoding="utf8"))
+        replaced["version"] = "1.0.0"
+        replaced["repo_url"] = "https://evil.example/not-the-repo"
+        replaced["release_tag"] = "evil-tag"
+        (scenario.origin / "version.txt").write_text(json.dumps(replaced), encoding="utf8")
+
+        scenario.extra_env.update(
+            {
+                "BTX_PINNED_MANIFEST_PATH": str(pinned_body),
+                "BTX_PINNED_MANIFEST_SIG_PATH": str(pinned_sig),
+                "BTX_PINNED_MANIFEST_SHA256": digest,
+                "BTX_MANIFEST_URL": "http://127.0.0.1:9/replaced-version.txt",
+                "BTX_MANIFEST_SIG_URL": "http://127.0.0.1:9/replaced-version.txt.sig",
+                "BTX_VERSION": "0.0.1",
+                "BTX_REPO_URL": "https://evil.example/not-the-repo",
+                "BTX_RELEASE_TAG": "evil-tag",
+            }
+        )
+        result = scenario.run_installer()
+        assert_success(result)
+        output = result.stdout + result.stderr
+        if "Version: 99.0.0" not in output:
+            raise AssertionError(f"pinned version was not used:\n{output}")
+        if "evil.example" in output or "evil-tag" in output or "Version: 0.0.1" in output:
+            raise AssertionError(f"caller override replaced the pinned manifest:\n{output}")
+        watermark = scenario.target_datadir / "autoupdate" / "highest-accepted-version"
+        if watermark.read_text(encoding="utf8").strip() != "99.0.0":
+            raise AssertionError(f"highest accepted version was not persisted: {watermark.read_text(encoding='utf8')!r}")
+
+        lower = json.loads(pinned_body.read_text(encoding="utf8"))
+        lower["version"] = "1.2.3"
+        lower_body = scenario.tmp / "pinned-lower.txt"
+        lower_sig = scenario.tmp / "pinned-lower.txt.sig"
+        lower_body.write_text(json.dumps(lower), encoding="utf8")
+        lower_sig.write_text("signature\n", encoding="utf8")
+        scenario.extra_env.update(
+            {
+                "BTX_PINNED_MANIFEST_PATH": str(lower_body),
+                "BTX_PINNED_MANIFEST_SIG_PATH": str(lower_sig),
+                "BTX_PINNED_MANIFEST_SHA256": _sha256_file(lower_body),
+            }
+        )
+        downgrade = scenario.run_installer()
+        assert_failure(downgrade)
+        if "lower than previously accepted" not in (downgrade.stdout + downgrade.stderr):
+            raise AssertionError(
+                f"expected a downgrade refusal; got:\n{downgrade.stdout}\n{downgrade.stderr}"
+            )
+
+
+def test_pinned_manifest_digest_mismatch_aborts():
+    with Scenario(
+        "pinned-digest",
+        {"BTX_AUTOUPDATE_PUBKEY_ALGO": "secp256k1"},
+    ) as scenario:
+        pinned_body = scenario.tmp / "pinned-version.txt"
+        pinned_sig = scenario.tmp / "pinned-version.txt.sig"
+        pinned_body.write_bytes((scenario.origin / "version.txt").read_bytes())
+        pinned_sig.write_bytes((scenario.origin / "version.txt.sig").read_bytes())
+        scenario.extra_env.update(
+            {
+                "BTX_PINNED_MANIFEST_PATH": str(pinned_body),
+                "BTX_PINNED_MANIFEST_SIG_PATH": str(pinned_sig),
+                "BTX_PINNED_MANIFEST_SHA256": "0" * 64,
+                "BTX_MANIFEST_URL": "http://127.0.0.1:9/replaced-version.txt",
+                "BTX_MANIFEST_SIG_URL": "http://127.0.0.1:9/replaced-version.txt.sig",
+            }
+        )
+        result = scenario.run_installer()
+        assert_failure(result)
+        if "digest does not match" not in (result.stdout + result.stderr):
+            raise AssertionError(f"expected a digest mismatch; got:\n{result.stdout}\n{result.stderr}")
+
+
 def test_unusable_prebuilt_falls_back_to_source_build():
     with Scenario("prebuilt-unusable", {"BTX_AUTO_RESTART": "1"}) as scenario:
         try:
@@ -738,6 +832,8 @@ def main():
         test_cuda12_prebuilt_is_preferred_over_generic_linux,
         test_prebuilt_falls_back_to_source_when_disabled,
         test_unusable_prebuilt_falls_back_to_source_build,
+        test_pinned_manifest_ignores_url_and_version_overrides,
+        test_pinned_manifest_digest_mismatch_aborts,
     ]
     for test in tests:
         test()

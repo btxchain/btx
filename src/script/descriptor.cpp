@@ -2291,6 +2291,7 @@ protected:
             level_indices = std::move(next_indices);
         }
 
+        spenddata.ordered_leaf_scripts = leaf_scripts;
         for (size_t i = 0; i < leaf_scripts.size(); ++i) {
             std::vector<unsigned char> control;
             control.reserve(P2MR_CONTROL_BASE_SIZE + merkle_paths[i].size() * P2MR_CONTROL_NODE_SIZE);
@@ -3650,15 +3651,17 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
 
                 MRLeafSpec spec;
                 // htlc_sha256_legacy() is the claim leaf without the in-script
-                // OP_SIZE check that htlc_sha256() expanded to before 0.34.13.
-                // It exists so a wallet can watch and spend such a lock.
-                spec.type = legacy_sha256_leaf ? MRLeafType::HTLC_SHA256_LEGACY : MRLeafType::HTLC_SHA256;
+                // length check. htlc_sha256() itself keeps the length-checked
+                // leaf. pre_03413_htlc_sha256 is set only when loading a wallet
+                // whose stored htlc_sha256() was expanded by 0.34.12.
+                const bool as_legacy = legacy_sha256_leaf || options.pre_03413_htlc_sha256;
+                spec.type = as_legacy ? MRLeafType::HTLC_SHA256_LEGACY : MRLeafType::HTLC_SHA256;
                 spec.htlc_sha256 = std::move(sha256);
                 spec.algo = claimant_key.algo;
                 spec.provider_index = claimant_key.provider_index;
                 spec.fixed_pubkey = std::move(claimant_key.fixed_pubkey);
                 spec.primary_key_expr = claimant_key.rendered;
-                return append_leaf(std::move(spec), strprintf("%s(%s,%s)", legacy_sha256_leaf ? "htlc_sha256_legacy" : "htlc_sha256", hash_hex, claimant_key.rendered), leaf_specs, leaf_exprs);
+                return append_leaf(std::move(spec), strprintf("%s(%s,%s)", as_legacy ? "htlc_sha256_legacy" : "htlc_sha256", hash_hex, claimant_key.rendered), leaf_specs, leaf_exprs);
             }
 
             leaf_expr = arg;
@@ -4390,6 +4393,53 @@ std::optional<uint256> LegacyFlatMRDescriptorID(const Descriptor& desc)
     uint256 id;
     CSHA256().Write((const unsigned char*)legacy.data(), legacy.size()).Finalize(id.begin());
     return id;
+}
+
+namespace {
+
+uint256 DescriptorIdFromString(const std::string& desc_str)
+{
+    uint256 id;
+    CSHA256().Write((const unsigned char*)desc_str.data(), desc_str.size()).Finalize(id.begin());
+    return id;
+}
+
+std::string ReplaceHtlcSha256LegacyName(std::string body)
+{
+    const std::string from{"htlc_sha256_legacy("};
+    const std::string to{"htlc_sha256("};
+    std::string out;
+    size_t pos{0};
+    while (pos < body.size()) {
+        const auto found = body.find(from, pos);
+        if (found == std::string::npos) {
+            out.append(body, pos, std::string::npos);
+            break;
+        }
+        out.append(body, pos, found - pos);
+        out += to;
+        pos = found + from.size();
+    }
+    return out;
+}
+
+} // namespace
+
+bool DescriptorMatchesStoredPre03413HtlcID(const Descriptor& desc, const uint256& id)
+{
+    std::string body = desc.ToString(/*compat_format=*/true);
+    const auto hash_pos = body.rfind('#');
+    if (hash_pos != std::string::npos) body.resize(hash_pos);
+    if (body.find("htlc_sha256_legacy(") == std::string::npos) return false;
+    body = ReplaceHtlcSha256LegacyName(std::move(body));
+    if (DescriptorIdFromString(AddChecksum(body)) == id) return true;
+    if (body.find('{') == std::string::npos) return false;
+    std::string flat;
+    flat.reserve(body.size());
+    for (char c : body) {
+        if (c != '{' && c != '}') flat += c;
+    }
+    return DescriptorIdFromString(AddChecksum(flat)) == id;
 }
 
 uint256 DescriptorID(const Descriptor& desc)

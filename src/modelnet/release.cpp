@@ -14,6 +14,7 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <limits>
 
 namespace modelnet {
 namespace {
@@ -132,6 +133,18 @@ UniValue CampaignToJson(const ReleaseCampaign& c)
     o.pushKV("artifact_id", c.artifact_id.Hex());
     o.pushKV("ciphertext_artifact_id", c.ciphertext_artifact_id.IsNull() ? c.artifact_id.Hex() : c.ciphertext_artifact_id.Hex());
     if (!c.output_script_hex.empty()) o.pushKV("output_script", c.output_script_hex);
+    if (!c.funding_outpoints.empty()) {
+        UniValue outs(UniValue::VARR);
+        for (const auto& fp : c.funding_outpoints) {
+            UniValue one(UniValue::VOBJ);
+            one.pushKV("txid", fp.txid);
+            one.pushKV("vout", static_cast<int64_t>(fp.vout));
+            if (!fp.output_script_hex.empty()) one.pushKV("output_script", fp.output_script_hex);
+            if (fp.amount_atoms > 0) one.pushKV("amount_atoms", fp.amount_atoms);
+            outs.push_back(one);
+        }
+        o.pushKV("funding_outpoints", outs);
+    }
     o.pushKV("key_hash", c.key_hash.Hex());
     o.pushKV("hashlock_algorithm", "SHA256");
     o.pushKV("assurance", c.assurance.empty() ? "KEY_RELEASE_ONLY" : c.assurance);
@@ -244,6 +257,29 @@ bool CampaignFromJson(const UniValue& o, ReleaseCampaign& c, std::string& err)
         if (o.exists("output_script")) {
             if (!o["output_script"].isStr()) return CampaignTypeFail(err, "output_script type");
             parsed.output_script_hex = ToLower(o["output_script"].get_str());
+        }
+        if (o.exists("funding_outpoints")) {
+            if (!o["funding_outpoints"].isArray()) return CampaignTypeFail(err, "funding_outpoints type");
+            for (const auto& fp : o["funding_outpoints"].getValues()) {
+                if (!fp.isObject() || !fp.exists("txid") || !fp["txid"].isStr() || !fp.exists("vout") || !fp["vout"].isNum()) {
+                    return CampaignTypeFail(err, "funding_outpoints type");
+                }
+                ReleaseFundingOutpoint one;
+                one.txid = ToLower(fp["txid"].get_str());
+                const int64_t vout = fp["vout"].getInt<int64_t>();
+                if (vout < 0 || vout > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                    return CampaignTypeFail(err, "funding_outpoints vout");
+                }
+                one.vout = static_cast<uint32_t>(vout);
+                if (fp.exists("output_script")) {
+                    if (!fp["output_script"].isStr()) return CampaignTypeFail(err, "funding_outpoints output_script");
+                    one.output_script_hex = ToLower(fp["output_script"].get_str());
+                }
+                if (fp.exists("amount_atoms") && fp["amount_atoms"].isNum()) {
+                    one.amount_atoms = fp["amount_atoms"].getInt<int64_t>();
+                }
+                parsed.funding_outpoints.push_back(std::move(one));
+            }
         }
         if (o.exists("pubkey")) {
             if (!o["pubkey"].isStr()) return CampaignTypeFail(err, "pubkey type");

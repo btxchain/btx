@@ -112,6 +112,10 @@ bilingual_str PSBTErrorString(PSBTError err)
             return Untranslated("Specified sighash value does not match value stored in PSBT");
         case PSBTError::P2MR_TIMELOCK_MISMATCH:
             return Untranslated("Selected P2MR timelock leaf requires different transaction locktime or sequence fields");
+        case PSBTError::P2MR_LEAF_UNSELECTED:
+            return Untranslated("multi-leaf P2MR input: no leaf selected");
+        case PSBTError::P2MR_HTLC_PREIMAGE:
+            return Untranslated("htlc_sha256 claim leaf requires the 32-byte preimage whose SHA256 matches the hashlock");
         case PSBTError::EXTERNAL_SIGNER_NOT_FOUND:
             return Untranslated("External signer not found");
         case PSBTError::EXTERNAL_SIGNER_FAILED:

@@ -121,14 +121,25 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop = nullptr);
 /**
  * Listen/connect path for helper unix RPC.
  *
- * Linux sockaddr_un.sun_path is 108 bytes. Datadir sockets under a long
- * tmpdir/regtest path exceed that; ListenUnix used to hash to
- * /tmp/btx-md-<sha256[:8]>.sock while btxd still connected to the original
- * path ("helper not ready"). Both sides must use this mapping.
+ * Linux sockaddr_un.sun_path is 108 bytes. A path that does not fit, or that
+ * would sit directly in a sticky world-writable directory, is remapped under
+ * XDG_RUNTIME_DIR/btx-modeld (mode 0700). There is no /tmp/btx-md-*.sock
+ * fallback. Both sides must use this mapping. A pre-created /tmp socket is
+ * not a running helper.
  */
 fs::path UnixRpcListenPath(const fs::path& requested);
 
+/** False for a missing socket, a /tmp path, or a world-writable socket or directory. */
+bool UnixSocketSafeToAdopt(const fs::path& sock, std::string& err);
+
+/** SO_PEERCRED uid matches this process. Platforms without SO_PEERCRED return true. */
+bool UnixConnectedPeerIsSelf(int fd, std::string& err);
+
 bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err);
+
+/** True when `err` is a helper application refusal (`{"code","message"}`).
+ *  Transport failures (connect, write, non-JSON reply) return false. */
+bool HelperRefusalFromError(const std::string& err, std::string& code, std::string& message);
 
 /** Ordinary unix RPC replies: 120s. Long methods (import/host/get/wait/scan) keep 24h. */
 int UnixRpcReplyTimeoutMs(const std::string& method);

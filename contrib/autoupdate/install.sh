@@ -15,6 +15,12 @@ BTX_MANIFEST_SIG_URL="${BTX_MANIFEST_SIG_URL:-}"
 BTX_VERSION="${BTX_VERSION:-}"
 BTX_REPO_URL="${BTX_REPO_URL:-}"
 BTX_RELEASE_TAG="${BTX_RELEASE_TAG:-}"
+# Populated by btxd with the manifest body and signature that Verify() accepted,
+# plus the SHA256 of that body. When BTX_PINNED_MANIFEST_PATH is set, those
+# files are the only manifest bytes this script reads.
+BTX_PINNED_MANIFEST_PATH="${BTX_PINNED_MANIFEST_PATH:-}"
+BTX_PINNED_MANIFEST_SIG_PATH="${BTX_PINNED_MANIFEST_SIG_PATH:-}"
+BTX_PINNED_MANIFEST_SHA256="${BTX_PINNED_MANIFEST_SHA256:-}"
 BTX_GIT_REF="${BTX_GIT_REF:-}"
 BTX_RELEASE_PUB="${BTX_RELEASE_PUB:-}"
 BTX_TRUSTED_ORIGIN="${BTX_TRUSTED_ORIGIN:-https://btx.dev}"
@@ -595,6 +601,152 @@ fetch_verified_manifest() {
   curl -fsSL "$(with_telemetry_query "$sig_url")" -o "$sig_path"
 
   verify_detached_signature "$manifest_path" "$sig_path" "$pub_path"
+}
+
+# Read the body and signature btxd already verified. BTX_MANIFEST_URL,
+# BTX_MANIFEST_SIG_URL, BTX_VERSION, BTX_REPO_URL, and BTX_RELEASE_TAG are not
+# consulted here.
+load_pinned_manifest() {
+  local manifest_path="$1"
+  local sig_path="$2"
+  local pub_path="$3"
+
+  [[ -n "$BTX_PINNED_MANIFEST_PATH" && -f "$BTX_PINNED_MANIFEST_PATH" ]] \
+    || die "pinned manifest file is missing"
+  [[ -n "$BTX_PINNED_MANIFEST_SIG_PATH" && -f "$BTX_PINNED_MANIFEST_SIG_PATH" ]] \
+    || die "pinned manifest signature file is missing"
+  [[ -n "$BTX_PINNED_MANIFEST_SHA256" ]] || die "pinned manifest digest is missing"
+
+  verify_sha256 "$BTX_PINNED_MANIFEST_PATH" "$BTX_PINNED_MANIFEST_SHA256" \
+    || die "pinned manifest digest does not match"
+  cp -- "$BTX_PINNED_MANIFEST_PATH" "$manifest_path" \
+    || die "unable to read pinned manifest"
+  cp -- "$BTX_PINNED_MANIFEST_SIG_PATH" "$sig_path" \
+    || die "unable to read pinned manifest signature"
+  verify_sha256 "$manifest_path" "$BTX_PINNED_MANIFEST_SHA256" \
+    || die "pinned manifest digest does not match"
+  verify_detached_signature "$manifest_path" "$sig_path" "$pub_path"
+}
+
+highest_accepted_version_file() {
+  if [[ -n "${BTX_AUTOUPDATE_DATADIR:-}" ]]; then
+    printf '%s\n' "${BTX_AUTOUPDATE_DATADIR}/autoupdate/highest-accepted-version"
+  elif [[ -n "${BTX_TARGET_DATADIR:-}" ]]; then
+    printf '%s\n' "${BTX_TARGET_DATADIR}/autoupdate/highest-accepted-version"
+  else
+    printf '%s\n' "${BTX_INSTALL_ROOT}/highest-accepted-version"
+  fi
+}
+
+# Exit 0 when candidate is strictly older than baseline, 1 when equal or newer,
+# 2 when either string is not a version. Ordering matches the node's
+# CompareAutoUpdateVersionStrings.
+version_compare_older() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+def parse_version(raw):
+    value = raw.strip()
+    if value[:1] in ("v", "V"):
+        value = value[1:]
+    if not value:
+        return None
+    parts = []
+    i = 0
+    for n in range(3):
+        if i >= len(value) or not value[i].isdigit():
+            return None
+        j = i
+        while j < len(value) and value[j].isdigit():
+            j += 1
+        num = int(value[i:j])
+        if num > 2_000_000_000:
+            return None
+        parts.append(num)
+        i = j
+        if n < 2:
+            if i >= len(value) or value[i] != ".":
+                return None
+            i += 1
+    if i >= len(value):
+        return (parts[0], parts[1], parts[2], 0)
+    marker = value[i]
+    if marker != "-" and marker != "+" and not marker.isalpha():
+        return None
+    if marker == "+":
+        return (parts[0], parts[1], parts[2], 0)
+    suffix = value[i:]
+    if suffix.startswith("-"):
+        suffix = suffix[1:]
+    if len(suffix) >= 2 and suffix[0] in "rR" and suffix[1] in "cC":
+        rest = suffix[2:]
+        if len(rest) > 9 or not rest.isdigit() or int(rest) <= 0:
+            return None
+        return (parts[0], parts[1], parts[2], int(rest))
+    return (parts[0], parts[1], parts[2], 1)
+
+def compare(local, remote):
+    lt = local[:3]
+    rt = remote[:3]
+    if rt > lt:
+        if local[3] == 0 and remote[3] > 0:
+            return -1
+        return 1
+    if rt < lt:
+        return -1
+    if local[3] == 0 and remote[3] == 0:
+        return 0
+    if local[3] == 0:
+        return -1
+    if remote[3] == 0:
+        return 1
+    if remote[3] != local[3]:
+        return 1 if remote[3] > local[3] else -1
+    return 0
+
+baseline = parse_version(sys.argv[1])
+candidate = parse_version(sys.argv[2])
+if baseline is None or candidate is None:
+    raise SystemExit(2)
+raise SystemExit(0 if compare(baseline, candidate) < 0 else 1)
+PY
+}
+
+enforce_highest_accepted_version() {
+  local version="$1"
+  local path highest status
+  path="$(highest_accepted_version_file)"
+  if [[ -f "$path" ]]; then
+    highest="$(tr -d '[:space:]' <"$path" || true)"
+    [[ -n "$highest" ]] || die "refusing manifest: highest accepted version state is unreadable"
+    set +e
+    version_compare_older "$highest" "$version"
+    status=$?
+    set -e
+    if [[ "$status" -eq 0 ]]; then
+      die "refusing manifest version ${version}: lower than previously accepted ${highest}"
+    fi
+    if [[ "$status" -ne 1 ]]; then
+      die "refusing manifest: unparseable version in highest-accepted check"
+    fi
+    set +e
+    version_compare_older "$version" "$highest"
+    status=$?
+    set -e
+    # status 0 means the stored version is older, so this manifest is newer.
+    if [[ "$status" -eq 1 ]]; then
+      return 0
+    fi
+    if [[ "$status" -ne 0 ]]; then
+      die "refusing manifest: unparseable version in highest-accepted check"
+    fi
+  fi
+  local dir tmp
+  dir="$(dirname "$path")"
+  mkdir -p "$dir" || die "unable to persist highest accepted version"
+  tmp="${path}.tmp.$$"
+  printf '%s\n' "$version" >"$tmp" || die "unable to persist highest accepted version"
+  mv -f "$tmp" "$path" || die "unable to persist highest accepted version"
 }
 
 ref_exists_remote() {
@@ -1325,7 +1477,11 @@ main() {
   local release_pub_path
   release_pub_path="$(resolve_release_pub_path)"
   stage "verify-manifest"
-  fetch_verified_manifest "$BTX_MANIFEST_URL" "$manifest_path" "$manifest_sig_path" "$release_pub_path"
+  if [[ -n "$BTX_PINNED_MANIFEST_PATH" ]]; then
+    load_pinned_manifest "$manifest_path" "$manifest_sig_path" "$release_pub_path"
+  else
+    fetch_verified_manifest "$BTX_MANIFEST_URL" "$manifest_path" "$manifest_sig_path" "$release_pub_path"
+  fi
 
   local manifest_json
   manifest_json="$(cat "$manifest_path")"
@@ -1339,13 +1495,17 @@ main() {
   expected_commit="$(printf '%s' "$manifest_json" | json_field git_commit)"
   expected_commit_sig_url="$(printf '%s' "$manifest_json" | json_field git_commit_sig_url)"
 
-  [[ -n "$BTX_VERSION" ]] && version="$BTX_VERSION"
-  [[ -n "$BTX_REPO_URL" ]] && repo_url="$BTX_REPO_URL"
-  [[ -n "$BTX_RELEASE_TAG" ]] && release_tag="$BTX_RELEASE_TAG"
+  # A pinned manifest's version, repo, and tag come from the verified body.
+  if [[ -z "$BTX_PINNED_MANIFEST_PATH" ]]; then
+    [[ -n "$BTX_VERSION" ]] && version="$BTX_VERSION"
+    [[ -n "$BTX_REPO_URL" ]] && repo_url="$BTX_REPO_URL"
+    [[ -n "$BTX_RELEASE_TAG" ]] && release_tag="$BTX_RELEASE_TAG"
+  fi
 
   [[ -n "$version" ]] || die "manifest did not contain a version"
   [[ -n "$repo_url" ]] || die "manifest did not contain repo_url"
   [[ -n "$script_url" ]] || die "manifest did not contain script_url"
+  enforce_highest_accepted_version "$version"
   BTX_STATUS_VERSION="$version"
 
   source_ref="${BTX_GIT_REF:-}"
@@ -1490,7 +1650,11 @@ main() {
     build_dir="$build_root/${cache_key}"
 
     bold "BTX source updater"
-    note "Manifest: $BTX_MANIFEST_URL"
+    if [[ -n "$BTX_PINNED_MANIFEST_PATH" ]]; then
+      note "Manifest: pinned ${BTX_PINNED_MANIFEST_PATH}"
+    else
+      note "Manifest: $BTX_MANIFEST_URL"
+    fi
     note "Version: $version"
     note "Source repo: $repo_url"
     note "Selected ref: $source_ref"

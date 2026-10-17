@@ -16,6 +16,7 @@
 #include <util/translation.h>
 #include <util/vector.h>
 #include <wallet/coincontrol.h>
+#include <wallet/scriptpubkeyman.h>
 #include <wallet/feebumper.h>
 #include <wallet/fees.h>
 #include <wallet/rpc/util.h>
@@ -33,6 +34,64 @@ using common::TransactionErrorString;
 using node::TransactionError;
 
 namespace wallet {
+namespace {
+
+RPCResult TimelockAdjustmentResult()
+{
+    return {RPCResult::Type::OBJ, "timelock_adjustment", /*optional=*/true,
+            "Present when adjust_timelocks rewrote nSequence, nLockTime, or version",
+            {
+                {RPCResult::Type::STR_HEX, "txid_before", "txid before the rewrite"},
+                {RPCResult::Type::STR_HEX, "txid_after", "txid after the rewrite"},
+                {RPCResult::Type::NUM, "locktime_before", "nLockTime before the rewrite"},
+                {RPCResult::Type::NUM, "locktime_after", "nLockTime after the rewrite"},
+                {RPCResult::Type::NUM, "version_before", "Transaction version before the rewrite"},
+                {RPCResult::Type::NUM, "version_after", "Transaction version after the rewrite"},
+                {RPCResult::Type::ARR, "sequences", "Inputs whose nSequence changed",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "vin", "Input index"},
+                        {RPCResult::Type::NUM, "nsequence_before", "nSequence before the rewrite"},
+                        {RPCResult::Type::NUM, "nsequence_after", "nSequence after the rewrite"},
+                    }},
+                }},
+            }};
+}
+
+void ThrowPSBTError(const common::PSBTError err, const bilingual_str& detail)
+{
+    if (!detail.original.empty()) {
+        throw JSONRPCError(RPC_TRANSACTION_ERROR, detail.original);
+    }
+    throw JSONRPCPSBTError(err);
+}
+
+bool ApplyWalletP2MRLeaves(const CWallet& wallet, PartiallySignedTransaction& psbt, const std::vector<P2MRLeafSelection>& selections, bilingual_str& error)
+{
+    if (selections.empty()) return true;
+    FlatSigningProvider merged;
+    for (unsigned int i = 0; i < psbt.tx->vin.size(); ++i) {
+        const PSBTInput& input = psbt.inputs.at(i);
+        CScript script;
+        if (!input.witness_utxo.IsNull()) {
+            script = input.witness_utxo.scriptPubKey;
+        } else if (input.non_witness_utxo && psbt.tx->vin[i].prevout.n < input.non_witness_utxo->vout.size()) {
+            script = input.non_witness_utxo->vout[psbt.tx->vin[i].prevout.n].scriptPubKey;
+        }
+        if (script.empty()) continue;
+        for (ScriptPubKeyMan* spk_man : wallet.GetAllScriptPubKeyMans()) {
+            auto* desc_spk_man = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
+            if (!desc_spk_man) continue;
+            std::unique_ptr<FlatSigningProvider> keys = desc_spk_man->GetSigningProvider(script, /*include_private=*/false);
+            if (keys) merged.Merge(std::move(*keys));
+        }
+    }
+    return ApplyP2MRLeafSelections(psbt, selections, &merged, error);
+}
+
+} // namespace
+
 std::vector<CRecipient> CreateRecipients(const std::vector<std::pair<CTxDestination, CAmount>>& outputs, const std::set<int>& subtract_fee_outputs)
 {
     std::vector<CRecipient> recipients;
@@ -1067,6 +1126,7 @@ RPCHelpMan signrawtransactionwithwallet()
             "       \"ALL|ANYONECANPAY\"\n"
             "       \"NONE|ANYONECANPAY\"\n"
             "       \"SINGLE|ANYONECANPAY\""},
+                    {"adjust_timelocks", RPCArg::Type::BOOL, RPCArg::Default{false}, "When true, raise nSequence, nLockTime, and version so a selected csv, cltv, or refund leaf can be signed, and return timelock_adjustment with the previous and new txid, nLockTime, version, and nSequence. When false, refuse instead of rewriting those fields. The error names the required value."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1090,6 +1150,7 @@ RPCHelpMan signrawtransactionwithwallet()
                                 {RPCResult::Type::STR, "error", "Verification or signing error related to the input"},
                             }},
                         }},
+                        TimelockAdjustmentResult(),
                     }
                 },
                 RPCExamples{
@@ -1129,14 +1190,17 @@ RPCHelpMan signrawtransactionwithwallet()
     ParsePrevouts(request.params[1], nullptr, coins);
 
     int nHashType = ParseSighashString(request.params[2]);
+    const bool adjust_timelocks = request.params[3].isNull() ? false : request.params[3].get_bool();
 
     // Script verification errors
     std::map<int, bilingual_str> input_errors;
     std::optional<CAmount> inputs_amount_sum;
+    P2MRTimelockAdjustment timelock_adjustment;
 
-    bool complete = pwallet->SignTransaction(mtx, coins, nHashType, input_errors, &inputs_amount_sum);
+    bool complete = pwallet->SignTransaction(mtx, coins, nHashType, input_errors, &inputs_amount_sum, /*preferred_pq_signing_algo=*/std::nullopt, adjust_timelocks, &timelock_adjustment);
     UniValue result(UniValue::VOBJ);
     SignTransactionResultToJSON(mtx, complete, coins, input_errors, result, inputs_amount_sum);
+    AppendTimelockAdjustment(result, timelock_adjustment);
     return result;
 },
     };
@@ -1804,6 +1868,12 @@ RPCHelpMan walletprocesspsbt()
                                 RPCArgOptions{.also_positional = true}},
                             {"bip32derivs", RPCArg::Type::BOOL, RPCArg::Default{true}, "Include BIP 32 derivation paths for public keys if we know them", RPCArgOptions{.also_positional = true}},
                             {"finalize", RPCArg::Type::BOOL, RPCArg::Default{true}, "Also finalize inputs if possible", RPCArgOptions{.also_positional = true}},
+                            {"adjust_timelocks", RPCArg::Type::BOOL, RPCArg::Default{false}, "When true, raise nSequence, nLockTime, and version so a selected csv, cltv, or refund leaf can be signed, and return timelock_adjustment with the previous and new txid, nLockTime, version, and nSequence. When false, refuse instead of rewriting those fields. The error names the required value."},
+                            {"p2mr_leaf", RPCArg::Type::OBJ_USER_KEYS, RPCArg::Optional::OMITTED, "Map of \"txid:vout\" to a P2MR leaf index or leaf-script hex. A single-leaf descriptor still fills the leaf when this is omitted. Signing a multi-leaf input with no leaf selected is an error.",
+                                {
+                                    {"txid:vout", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Leaf index or leaf script hex", RPCArgOptions{.skip_type_check = true}},
+                                },
+                            },
                         },
                     RPCArgOptions{.oneline_description="options"}},
                     {"sighashtype", RPCArg::Type::STR, RPCArg::Default{"DEFAULT"}, "for backwards compatibility", RPCArgOptions{.hidden=true}},
@@ -1816,6 +1886,7 @@ RPCHelpMan walletprocesspsbt()
                         {RPCResult::Type::STR, "psbt", "The base64-encoded partially signed transaction"},
                         {RPCResult::Type::BOOL, "complete", "If the transaction has a complete set of signatures"},
                         {RPCResult::Type::STR_HEX, "hex", /*optional=*/true, "The hex-encoded network transaction if complete"},
+                        TimelockAdjustmentResult(),
                     }
                 },
                 RPCExamples{
@@ -1842,6 +1913,8 @@ RPCHelpMan walletprocesspsbt()
     bool sign = true;
     bool bip32derivs = true;
     bool finalize = true;
+    bool adjust_timelocks = false;
+    std::vector<P2MRLeafSelection> leaf_selections;
     int nHashType = ParseSighashString(NullUniValue); // Use ParseSighashString default
     if (request.params[1].isBool() || request.params[1].isNull()) {
         // Old style positional parameters
@@ -1858,6 +1931,8 @@ RPCHelpMan walletprocesspsbt()
                 {"bip32derivs", UniValueType(UniValue::VBOOL)},
                 {"finalize", UniValueType(UniValue::VBOOL)},
                 {"sighashtype", UniValueType(UniValue::VSTR)},
+                {"adjust_timelocks", UniValueType(UniValue::VBOOL)},
+                {"p2mr_leaf", UniValueType(UniValue::VOBJ)},
             },
             true, true);
         if (options.exists("sign")) {
@@ -1871,6 +1946,12 @@ RPCHelpMan walletprocesspsbt()
         }
         if (options.exists("sighashtype")) {
             nHashType = ParseSighashString(options["sighashtype"]);
+        }
+        if (options.exists("adjust_timelocks")) {
+            adjust_timelocks = options["adjust_timelocks"].get_bool();
+        }
+        if (options.exists("p2mr_leaf")) {
+            leaf_selections = ParseP2MRLeafMap(options["p2mr_leaf"]);
         }
         if (request.params.size() > 2) {
             // Same behaviour as too many args passed normally
@@ -1893,9 +1974,15 @@ RPCHelpMan walletprocesspsbt()
 
     if (sign) EnsureWalletIsUnlocked(*pwallet);
 
-    const auto err{wallet.FillPSBT(psbtx, complete, nHashType, sign, bip32derivs, nullptr, finalize)};
+    bilingual_str error_detail;
+    P2MRTimelockAdjustment timelock_adjustment;
+    const auto err{wallet.FillPSBT(psbtx, complete, nHashType, sign, bip32derivs, nullptr, finalize, adjust_timelocks, &error_detail, &timelock_adjustment,
+        [&](PartiallySignedTransaction& prepared, bilingual_str& leaf_error) {
+            LOCK(wallet.cs_wallet);
+            return ApplyWalletP2MRLeaves(wallet, prepared, leaf_selections, leaf_error);
+        })};
     if (err) {
-        throw JSONRPCPSBTError(*err);
+        ThrowPSBTError(*err, error_detail);
     }
 
     UniValue result(UniValue::VOBJ);
@@ -1903,6 +1990,7 @@ RPCHelpMan walletprocesspsbt()
     ssTx << psbtx;
     result.pushKV("psbt", EncodeBase64(ssTx.str()));
     result.pushKV("complete", complete);
+    AppendTimelockAdjustment(result, timelock_adjustment);
     if (complete) {
         CMutableTransaction mtx;
         // Returns true if complete, which we already think it is.
@@ -1936,6 +2024,7 @@ RPCHelpMan walletcreatefundedpsbt()
                                         "including the weight of the outpoint and sequence number. "
                                         "Use the P2MR witness size for the chosen leaf (ML-DSA-44 or SLH-DSA-SHAKE-128s). "
                                         "On BTX weight equals serialized size (WITNESS_SCALE_FACTOR=1)."},
+                                    {"p2mr_leaf", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "P2MR leaf index or leaf-script hex. A single-leaf descriptor still fills the leaf when this is omitted.", RPCArgOptions{.skip_type_check = true}},
                                 },
                             },
                         },
@@ -2036,9 +2125,15 @@ RPCHelpMan walletcreatefundedpsbt()
     // Fill transaction with out data but don't sign
     bool bip32derivs = request.params[4].isNull() ? true : request.params[4].get_bool();
     bool complete = true;
-    const auto err{wallet.FillPSBT(psbtx, complete, 1, /*sign=*/false, /*bip32derivs=*/bip32derivs)};
+    const std::vector<P2MRLeafSelection> leaf_selections = ParseInputsP2MRLeaves(request.params[0]);
+    bilingual_str error_detail;
+    const auto err{wallet.FillPSBT(psbtx, complete, 1, /*sign=*/false, /*bip32derivs=*/bip32derivs, /*n_signed=*/nullptr, /*finalize=*/true, /*adjust_timelocks=*/true, &error_detail, /*timelock_adjustment=*/nullptr,
+        [&](PartiallySignedTransaction& prepared, bilingual_str& leaf_error) {
+            LOCK(wallet.cs_wallet);
+            return ApplyWalletP2MRLeaves(wallet, prepared, leaf_selections, leaf_error);
+        })};
     if (err) {
-        throw JSONRPCPSBTError(*err);
+        ThrowPSBTError(*err, error_detail);
     }
 
     // Serialize the PSBT

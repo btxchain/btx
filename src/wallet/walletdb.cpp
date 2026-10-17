@@ -1047,8 +1047,13 @@ static DBErrors LoadDescriptorWalletRecords(CWallet* pwallet, DatabaseBatch& bat
     int num_keys = 0;
     int num_ckeys= 0;
     int num_pq_seeds = 0;
+    // 0.34.12 client version is 100*34+12. Wallets it wrote expand htlc_sha256()
+    // to the length-unchecked claim leaf. Persist that reading so a later load,
+    // after VERSION is bumped, still watches the funded script.
+    static constexpr int PRE_03413_CLIENT_VERSION = 3412;
+    std::vector<std::pair<uint256, WalletDescriptor>> pre03413_htlc_rewrites;
     LoadResult desc_res = LoadRecords(pwallet, batch, DBKeys::WALLETDESCRIPTOR,
-        [&batch, &num_keys, &num_ckeys, &num_pq_seeds, &last_client] (CWallet* pwallet, DataStream& key, DataStream& value, std::string& strErr) {
+        [&batch, &num_keys, &num_ckeys, &num_pq_seeds, &last_client, &pre03413_htlc_rewrites] (CWallet* pwallet, DataStream& key, DataStream& value, std::string& strErr) {
         DBErrors result = DBErrors::LOAD_OK;
 
         uint256 id;
@@ -1078,6 +1083,29 @@ static DBErrors LoadDescriptorWalletRecords(CWallet* pwallet, DatabaseBatch& bat
         // rendering. Keep that ID so its records still match.
         if (id != desc.id && desc.descriptor && LegacyFlatMRDescriptorID(*desc.descriptor) == id) {
             desc.id = id;
+        }
+        if (id != desc.id && desc.descriptor && DescriptorMatchesStoredPre03413HtlcID(*desc.descriptor, id)) {
+            desc.id = id;
+        }
+        // A wallet last written by 0.34.12 stored htlc_sha256() for the
+        // length-unchecked claim leaf. Re-read it that way and keep the
+        // original descriptor id. The rewritten string is saved after the
+        // cursor finishes.
+        if (last_client > 0 && last_client <= PRE_03413_CLIENT_VERSION && desc.descriptor) {
+            const std::string stored = desc.descriptor->ToString();
+            if (stored.find("htlc_sha256(") != std::string::npos) {
+                DescriptorParseOptions options;
+                options.new_descriptor_rules = false;
+                options.pre_03413_htlc_sha256 = true;
+                FlatSigningProvider keys;
+                std::string parse_error;
+                auto rewritten = Parse(stored, keys, parse_error, /*require_checksum=*/true, options);
+                if (rewritten.size() == 1) {
+                    desc.descriptor = std::move(rewritten[0]);
+                    desc.id = id;
+                    pre03413_htlc_rewrites.emplace_back(id, desc);
+                }
+            }
         }
         DescriptorScriptPubKeyMan& spkm = pwallet->LoadDescriptorScriptPubKeyMan(id, desc);
 
@@ -1289,6 +1317,13 @@ static DBErrors LoadDescriptorWalletRecords(CWallet* pwallet, DatabaseBatch& bat
 
         return result;
     });
+
+    for (const auto& [desc_id, rewritten] : pre03413_htlc_rewrites) {
+        if (!batch.Write(std::make_pair(DBKeys::WALLETDESCRIPTOR, desc_id), rewritten)) {
+            pwallet->WalletLogPrintf("Failed to persist pre-0.34.13 htlc_sha256 descriptor reading\n");
+            return DBErrors::LOAD_FAIL;
+        }
+    }
 
     if (desc_res.m_result <= DBErrors::NONCRITICAL_ERROR) {
         // Only log if there are no critical errors

@@ -668,6 +668,12 @@ public:
                          const AutoUpdateManifest& manifest,
                          const std::vector<unsigned char>& script) override
     {
+        if (manifest.pinned_manifest_path.empty() ||
+            manifest.pinned_manifest_sig_path.empty() ||
+            !LooksLikeSHA256Hex(manifest.pinned_manifest_sha256)) {
+            LogDebug(BCLog::AUTOUPDATE, "Refusing to launch installer without a pinned verified manifest\n");
+            return false;
+        }
         try {
             fs::path update_dir = config.datadir / "autoupdate";
             fs::create_directories(update_dir);
@@ -724,6 +730,9 @@ private:
             {"BTX_AUTOUPDATE_SCRIPT_PATH", fs::PathToString(script_path)},
             {"BTX_AUTOUPDATE_DATADIR", fs::PathToString(config.datadir)},
             {"BTX_MANIFEST_URL", config.manifest_url},
+            {"BTX_PINNED_MANIFEST_PATH", manifest.pinned_manifest_path},
+            {"BTX_PINNED_MANIFEST_SIG_PATH", manifest.pinned_manifest_sig_path},
+            {"BTX_PINNED_MANIFEST_SHA256", manifest.pinned_manifest_sha256},
             {"BTX_TRUSTED_ORIGIN", config.trusted_origin},
             // Same release-signature scheme + key the node used, so the installer verifies the
             // manifest and signed source/commit with the SAME (post-quantum) scheme -- e.g. via
@@ -851,6 +860,93 @@ private:
 AutoUpdateStatus SilentStatusForVerifierFailure(bool missing_signature)
 {
     return missing_signature ? AutoUpdateStatus::UNSIGNED_MANIFEST : AutoUpdateStatus::BAD_SIGNATURE;
+}
+
+bool WriteExactFile(const fs::path& path, const std::vector<unsigned char>& bytes)
+{
+    const fs::path tmp = path + ".tmp";
+    {
+        std::ofstream out{tmp, std::ios::binary | std::ios::trunc};
+        if (!out.is_open()) return false;
+        if (!bytes.empty()) {
+            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        }
+        if (!out.good()) {
+            fs::remove(tmp);
+            return false;
+        }
+    }
+    if (!RenameOver(tmp, path)) {
+        fs::remove(tmp);
+        return false;
+    }
+    return true;
+}
+
+fs::path HighestAcceptedVersionPath(const fs::path& datadir)
+{
+    return datadir / "autoupdate" / "highest-accepted-version";
+}
+
+// Missing file → nullopt and corrupt=false. Unreadable or unparseable contents
+// set corrupt so the caller refuses rather than treating the floor as absent.
+std::optional<std::string> ReadHighestAcceptedVersion(const fs::path& datadir, bool& corrupt)
+{
+    corrupt = false;
+    const fs::path path = HighestAcceptedVersionPath(datadir);
+    std::ifstream in{path};
+    if (!in.is_open()) return std::nullopt;
+    std::string line;
+    if (!std::getline(in, line)) {
+        corrupt = true;
+        return std::nullopt;
+    }
+    line = TrimAscii(line);
+    if (line.empty() || !ParseAutoUpdateVersion(line)) {
+        corrupt = true;
+        return std::nullopt;
+    }
+    return line;
+}
+
+bool WriteHighestAcceptedVersion(const fs::path& datadir, std::string_view version)
+{
+    try {
+        fs::create_directories(datadir / "autoupdate");
+    } catch (const std::exception&) {
+        return false;
+    }
+    std::vector<unsigned char> bytes(version.begin(), version.end());
+    bytes.push_back('\n');
+    return WriteExactFile(HighestAcceptedVersionPath(datadir), bytes);
+}
+
+// Persist the exact bytes Verify() accepted. The content-addressed name keeps a
+// later poll from replacing the body an in-flight installer is reading.
+bool PinVerifiedAutoUpdateManifest(const fs::path& datadir,
+                                   const std::vector<unsigned char>& body,
+                                   const std::vector<unsigned char>& signature,
+                                   AutoUpdateManifest& manifest)
+{
+    const std::string digest = SHA256Hex(body);
+    if (!LooksLikeSHA256Hex(digest)) return false;
+    try {
+        fs::create_directories(datadir / "autoupdate");
+    } catch (const std::exception&) {
+        return false;
+    }
+    const fs::path body_path = datadir / "autoupdate" / fs::u8path("verified-manifest-" + digest + ".body");
+    const fs::path sig_path = datadir / "autoupdate" / fs::u8path("verified-manifest-" + digest + ".sig");
+    // btx-util verifyupdatesig decodes a newline-terminated lowercase hex
+    // signature before checking it. That is the exact signature Verify()
+    // accepted; the body file is the exact message bytes.
+    const std::string sig_text = HexStr(signature) + '\n';
+    const std::vector<unsigned char> sig_file(sig_text.begin(), sig_text.end());
+    if (!WriteExactFile(body_path, body) || !WriteExactFile(sig_path, sig_file)) return false;
+    manifest.pinned_manifest_path = fs::PathToString(body_path);
+    manifest.pinned_manifest_sig_path = fs::PathToString(sig_path);
+    manifest.pinned_manifest_sha256 = digest;
+    return true;
 }
 
 } // namespace
@@ -1087,7 +1183,7 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
         return result;
     }
 
-    const auto manifest = ParseManifest(manifest_fetch.body, config.manifest_url);
+    auto manifest = ParseManifest(manifest_fetch.body, config.manifest_url);
     if (!manifest) {
         result.status = AutoUpdateStatus::BAD_MANIFEST;
         return result;
@@ -1113,6 +1209,30 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
         return result;
     }
 
+    std::optional<std::string> highest_accepted;
+    if (!config.datadir.empty()) {
+        // Pin the verified body before any later decision so a refetch of the
+        // manifest URL cannot replace the bytes the installer will read.
+        if (!PinVerifiedAutoUpdateManifest(config.datadir, manifest_fetch.body, *signature, *manifest)) {
+            result.status = AutoUpdateStatus::LAUNCH_FAILED;
+            result.detail = "unable to pin verified manifest";
+            return result;
+        }
+        bool corrupt_highest{false};
+        highest_accepted = ReadHighestAcceptedVersion(config.datadir, corrupt_highest);
+        if (corrupt_highest) {
+            result.status = AutoUpdateStatus::BAD_MANIFEST;
+            result.detail = "highest accepted version state is unreadable";
+            return result;
+        }
+        if (highest_accepted &&
+            CompareAutoUpdateVersionStrings(*highest_accepted, manifest->version) < 0) {
+            result.status = AutoUpdateStatus::NOT_NEWER;
+            result.detail = "version lower than previously accepted";
+            return result;
+        }
+    }
+
     if (!AutoUpdateUrlMatchesTrustedOrigin(manifest->script_url, config.trusted_origin, config.dev_origin)) {
         result.status = AutoUpdateStatus::SCRIPT_ORIGIN_REJECTED;
         return result;
@@ -1121,6 +1241,16 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
     if (CompareAutoUpdateVersion(manifest->version) <= 0) {
         result.status = AutoUpdateStatus::NOT_NEWER;
         return result;
+    }
+
+    if (!config.datadir.empty()) {
+        const bool raise = !highest_accepted ||
+                           CompareAutoUpdateVersionStrings(*highest_accepted, manifest->version) > 0;
+        if (raise && !WriteHighestAcceptedVersion(config.datadir, manifest->version)) {
+            result.status = AutoUpdateStatus::LAUNCH_FAILED;
+            result.detail = "unable to persist highest accepted version";
+            return result;
+        }
     }
 
     // Staged/canary gate: the manifest is signed, so rollout_percent is trusted. Apply only if this
@@ -1152,6 +1282,15 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
 
     if (LooksLikeSHA256Hex(manifest->script_sha256) && SHA256Hex(script_fetch.body) != manifest->script_sha256) {
         result.status = AutoUpdateStatus::SCRIPT_HASH_MISMATCH;
+        return result;
+    }
+
+    if (!config.datadir.empty() &&
+        (manifest->pinned_manifest_path.empty() ||
+         manifest->pinned_manifest_sig_path.empty() ||
+         !LooksLikeSHA256Hex(manifest->pinned_manifest_sha256))) {
+        result.status = AutoUpdateStatus::LAUNCH_FAILED;
+        result.detail = "verified manifest was not pinned";
         return result;
     }
 

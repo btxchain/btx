@@ -22,7 +22,9 @@
 
 #ifndef WIN32
 #include <spawn.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __APPLE__
@@ -60,9 +62,35 @@ fs::path SelfExeDir()
 
 bool SocketReady(const fs::path& sock, std::string& err)
 {
+    const fs::path path = UnixRpcListenPath(sock);
+    if (!UnixSocketSafeToAdopt(path, err)) return false;
+#ifndef WIN32
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        err = "unix socket";
+        return false;
+    }
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const std::string p = fs::PathToString(path);
+    if (p.size() >= sizeof(addr.sun_path)) {
+        err = "unix path too long";
+        ::close(fd);
+        return false;
+    }
+    std::strncpy(addr.sun_path, p.c_str(), sizeof(addr.sun_path) - 1);
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        err = "helper unix connect failed";
+        ::close(fd);
+        return false;
+    }
+    const bool self = UnixConnectedPeerIsSelf(fd, err);
+    ::close(fd);
+    if (!self) return false;
+#endif
     UniValue result;
     UniValue params(UniValue::VARR);
-    return CallUnixRpc(sock, "getmodelnetworkinfo", params, result, err);
+    return CallUnixRpc(path, "getmodelnetworkinfo", params, result, err);
 }
 
 } // namespace
@@ -224,9 +252,8 @@ HelperSupervisor::HelperSupervisor(HelperLaunchConfig cfg, std::function<bool()>
     const fs::path requested = m_cfg.rpc_socket;
     m_cfg.rpc_socket = UnixRpcListenPath(requested);
     if (m_cfg.rpc_socket != requested) {
-        LogPrintf("model helper: unix RPC path %s (%zu bytes) exceeds sockaddr_un.sun_path; using %s\n",
-                  fs::PathToString(requested), fs::PathToString(requested).size(),
-                  fs::PathToString(m_cfg.rpc_socket));
+        LogPrintf("model helper: unix RPC path %s is not a private sun_path; using %s\n",
+                  fs::PathToString(requested), fs::PathToString(m_cfg.rpc_socket));
     }
     m_st.enabled = true;
     m_st.state = HelperState::STARTING;
@@ -302,6 +329,12 @@ bool HelperSupervisor::SpawnLocked(std::string& err)
     }
     fs::create_directories(m_cfg.modeldir);
     fs::create_directories(m_cfg.rpc_socket.parent_path());
+#ifndef WIN32
+    if (!m_cfg.modeldir.empty()) ::chmod(fs::PathToString(m_cfg.modeldir).c_str(), 0700);
+    if (!m_cfg.rpc_socket.parent_path().empty()) {
+        ::chmod(fs::PathToString(m_cfg.rpc_socket.parent_path()).c_str(), 0700);
+    }
+#endif
     std::string sock_err;
     if (!SocketReady(m_cfg.rpc_socket, sock_err)) {
         std::error_code rec;

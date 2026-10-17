@@ -314,6 +314,60 @@ BOOST_AUTO_TEST_CASE(fix_f3_legacy_sha256_descriptor)
     BOOST_CHECK(!ParseOk("mr(htlc_sha256_legacy(" + H + "," + C + "),refund(700," + C + "))", error));
 }
 
+// A wallet last written by 0.34.12 stored htlc_sha256() for the length-unchecked
+// claim leaf. Loading that string with the pre-0.34.13 flag watches the same
+// script, and the stored descriptor id still matches after the name is rewritten.
+BOOST_AUTO_TEST_CASE(pre_03413_htlc_sha256_loads_as_legacy_leaf)
+{
+    const std::string H = Pattern(32, 0x51);
+    const CPQKey claimer = NewKey();
+    const CPQKey sender = NewKey();
+    const CPQKey extra = NewKey();
+    const std::string C = HexStr(claimer.GetPubKey());
+    const std::string S = HexStr(sender.GetPubKey());
+    const std::string E = HexStr(extra.GetPubKey());
+    const std::string body = "mr(htlc_sha256(" + H + "," + C + "),refund(700," + S + "))";
+    const std::string checksummed = AddChecksum(body);
+
+    FlatSigningProvider keys;
+    std::string error;
+    DescriptorParseOptions legacy_options;
+    legacy_options.new_descriptor_rules = false;
+    legacy_options.pre_03413_htlc_sha256 = true;
+    const auto legacy = Parse(checksummed, keys, error, /*require_checksum=*/true, legacy_options);
+    BOOST_REQUIRE_MESSAGE(!legacy.empty(), error);
+    CScript legacy_spk;
+    std::vector<Bytes> legacy_leaves;
+    BOOST_REQUIRE(ExpandLeaves(*legacy[0], keys, 0, legacy_spk, legacy_leaves));
+    const HtlcTree expect = MakeTree(
+        BuildP2MRHTLCSha256LegacyLeaf(ParseHex(H), PQAlgorithm::ML_DSA_44, claimer.GetPubKey()),
+        BuildP2MRRefundLeaf(700, PQAlgorithm::ML_DSA_44, sender.GetPubKey()));
+    BOOST_CHECK(legacy_spk == expect.spk);
+    BOOST_CHECK(legacy[0]->ToString().find("htlc_sha256_legacy(") != std::string::npos);
+
+    FlatSigningProvider keys_now;
+    const auto current = Parse(checksummed, keys_now, error, true);
+    BOOST_REQUIRE(!current.empty());
+    BOOST_CHECK(DescriptorMatchesStoredPre03413HtlcID(*legacy[0], DescriptorID(*current[0])));
+    CScript current_spk;
+    std::vector<Bytes> current_leaves;
+    BOOST_REQUIRE(ExpandLeaves(*current[0], keys_now, 0, current_spk, current_leaves));
+    BOOST_CHECK(current_spk != legacy_spk);
+
+    const std::string flat = "mr(htlc_sha256(" + H + "," + C + "),refund(700," + S + ")," + E + ")";
+    BOOST_CHECK(!ParseOk(flat, error));
+    DescriptorParseOptions flat_options;
+    flat_options.new_descriptor_rules = false;
+    flat_options.pre_03413_htlc_sha256 = true;
+    FlatSigningProvider flat_keys;
+    const auto flat_legacy = Parse(AddChecksum(flat), flat_keys, error, true, flat_options);
+    BOOST_REQUIRE_MESSAGE(!flat_legacy.empty(), error);
+    uint256 flat_id;
+    const std::string flat_checksummed = AddChecksum(flat);
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(flat_checksummed.data()), flat_checksummed.size()).Finalize(flat_id.begin());
+    BOOST_CHECK(DescriptorMatchesStoredPre03413HtlcID(*flat_legacy[0], flat_id));
+}
+
 // F4: the modelnet claim/refund templates follow the 0.34.13 wallet rules.
 BOOST_AUTO_TEST_CASE(fix_f4_modelnet_claim_and_refund_templates)
 {

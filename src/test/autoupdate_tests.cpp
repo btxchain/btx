@@ -21,6 +21,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <utility>
@@ -663,6 +664,48 @@ BOOST_AUTO_TEST_CASE(pq_ml_dsa_signature_path_launches_and_rejects_tamper)
 // btxd can be driven against an HTTP server in a shell harness. A normal `test_btx` run (no env
 // vars) is a trivial no-op. This lets the PQ release-signature path be validated against the real
 // PythonAutoUpdateFetcher + DetachedScriptCommandRunner, not just the in-process verifier.
+BOOST_AUTO_TEST_CASE(pinned_manifest_bytes_are_kept_and_downgrade_is_refused)
+{
+    Harness h;
+    h.config.datadir = m_path_root;
+    h.AddManifest();
+    h.AddSignature();
+    h.AddScript();
+    const auto result = h.Run();
+    BOOST_CHECK(result.status == node::AutoUpdateStatus::LAUNCHED);
+    BOOST_REQUIRE(!h.runner.last_manifest.pinned_manifest_path.empty());
+    BOOST_REQUIRE(!h.runner.last_manifest.pinned_manifest_sig_path.empty());
+    BOOST_CHECK_EQUAL(h.runner.last_manifest.pinned_manifest_sha256, SHA256Hex(h.fetcher.replies[h.config.manifest_url].body));
+
+    std::ifstream body_in{h.runner.last_manifest.pinned_manifest_path, std::ios::binary};
+    const std::vector<unsigned char> pinned_body{
+        std::istreambuf_iterator<char>{body_in},
+        std::istreambuf_iterator<char>{}};
+    BOOST_CHECK(pinned_body == h.fetcher.replies[h.config.manifest_url].body);
+
+    std::ifstream sig_in{h.runner.last_manifest.pinned_manifest_sig_path, std::ios::binary};
+    const std::vector<unsigned char> pinned_sig{
+        std::istreambuf_iterator<char>{sig_in},
+        std::istreambuf_iterator<char>{}};
+    const std::string expected_sig = HexStr(h.verifier.last_signature) + "\n";
+    BOOST_CHECK(pinned_sig == std::vector<unsigned char>(expected_sig.begin(), expected_sig.end()));
+
+    std::ifstream mark_in{m_path_root / "autoupdate" / "highest-accepted-version"};
+    std::string marked;
+    std::getline(mark_in, marked);
+    BOOST_CHECK_EQUAL(marked, "99.0.0");
+
+    Harness older;
+    older.config.datadir = m_path_root;
+    older.AddManifest("98.0.0");
+    older.AddSignature();
+    older.AddScript();
+    const auto downgrade = older.Run();
+    BOOST_CHECK(downgrade.status == node::AutoUpdateStatus::NOT_NEWER);
+    BOOST_CHECK(downgrade.detail.find("previously accepted") != std::string::npos);
+    BOOST_CHECK_EQUAL(older.runner.calls, 0);
+}
+
 BOOST_AUTO_TEST_CASE(pq_e2e_artifact_generator)
 {
     const char* out_dir = std::getenv("BTX_AUTOUPDATE_E2E_DIR");

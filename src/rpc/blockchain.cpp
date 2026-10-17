@@ -4419,6 +4419,71 @@ bool ReadManifestFile(const fs::path& path,
     return true;
 }
 
+/** Deletes the temporary active-chain snapshot used only to build a statement. */
+struct ActiveChainSnapshotTemp {
+    fs::path path;
+    ~ActiveChainSnapshotTemp()
+    {
+        std::error_code ec;
+        fs::remove(path, ec);
+        fs::remove(path + ".coins", ec);
+    }
+};
+
+std::string SnapshotStatementMismatch(
+    const matmul::trusted::UtxoSnapshotStatement& caller,
+    const matmul::trusted::UtxoSnapshotStatement& local)
+{
+    std::string fields;
+    auto note = [&](bool differs, const char* name) {
+        if (!differs) return;
+        if (!fields.empty()) fields += ", ";
+        fields += name;
+    };
+    note(caller.version != local.version, "version");
+    note(caller.chain_id != local.chain_id, "chain_id");
+    note(caller.block_hash != local.block_hash, "block_hash");
+    note(caller.block_height != local.block_height, "block_height");
+    note(caller.hash_serialized != local.hash_serialized, "hash_serialized");
+    note(caller.coins_count != local.coins_count, "coins_count");
+    note(caller.m_chain_tx_count != local.m_chain_tx_count, "chain_tx_count");
+    note(caller.shielded_state_commitment != local.shielded_state_commitment,
+         "shielded_state_commitment");
+    note(caller.replay_authority_context != local.replay_authority_context,
+         "replay_authority_context");
+    note(caller.snapshot_file_size != local.snapshot_file_size, "snapshot_file_size");
+    note(caller.snapshot_file_hash != local.snapshot_file_hash, "snapshot_file_hash");
+    note(caller.snapshot_chunk_size != local.snapshot_chunk_size, "snapshot_chunk_size");
+    note(caller.snapshot_chunk_count != local.snapshot_chunk_count, "snapshot_chunk_count");
+    return fields;
+}
+
+/**
+ * Same statement dumptxoutsetattested emits: fields come from a snapshot of
+ * this node's already-validated active chain, not from the caller manifest.
+ */
+matmul::trusted::UtxoSnapshotStatement StatementFromActiveChainExport(
+    const node::AttestedUTXOSnapshotExportResult& exported,
+    const uint256& chain_id,
+    const uint256& replay_authority)
+{
+    matmul::trusted::UtxoSnapshotStatement statement;
+    statement.chain_id = chain_id;
+    statement.block_hash = exported.base_hash;
+    statement.block_height = exported.base_height;
+    statement.hash_serialized = exported.txoutset_hash;
+    statement.coins_count = exported.coins_written;
+    statement.m_chain_tx_count = exported.nchaintx;
+    statement.shielded_state_commitment = exported.shielded_state_pin;
+    statement.replay_authority_context = replay_authority;
+    statement.snapshot_file_size = exported.file_size;
+    statement.snapshot_file_hash = exported.file_hash;
+    statement.snapshot_chunk_size = node::ATTESTED_UTXO_SNAPSHOT_CHUNK_SIZE;
+    statement.snapshot_chunk_count = static_cast<uint32_t>(
+        1 + ((exported.file_size - 1) / statement.snapshot_chunk_size));
+    return statement;
+}
+
 } // namespace
 
 static RPCHelpMan dumptxoutsetattested()
@@ -4605,9 +4670,15 @@ static RPCHelpMan signutxosnapshotmanifest()
         "signutxosnapshotmanifest",
         "Append a local MatMul attestation signature to an attested UTXO "
         "snapshot manifest file.\n"
-        "Used to collect M-of-N signatures after dumptxoutsetattested. The "
-        "statement fields must already match this node's chain id and replay "
-        "authority context.",
+        "Used to collect M-of-N signatures after dumptxoutsetattested. This "
+        "call builds a statement from this node's already-validated active "
+        "chain, the same way dumptxoutsetattested does, and signs only when "
+        "every consensus field of the caller manifest equals that local "
+        "statement (block hash, height, hash_serialized, coins count, chain "
+        "tx count, shielded commitment, and snapshot file hash, plus the "
+        "remaining signed statement fields). If the local statement cannot "
+        "be built, or any field differs, the call returns an error and does "
+        "not sign. The caller snapshot file is not loaded as chain state.",
         {
             {"manifest_path", RPCArg::Type::STR, RPCArg::Optional::NO,
              "Path to the manifest file to update. If relative, prefixed by datadir."},
@@ -4626,6 +4697,7 @@ static RPCHelpMan signutxosnapshotmanifest()
 {
     EnsureNotWalletRestricted(request);
     NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
     const ArgsManager& args{EnsureArgsman(node)};
 
     if (!node::matmul_trusted::IsConfigured() ||
@@ -4633,6 +4705,29 @@ static RPCHelpMan signutxosnapshotmanifest()
         throw JSONRPCError(
             RPC_MISC_ERROR,
             "signutxosnapshotmanifest requires a configured MatMul attestation local signer");
+    }
+    const auto chain_id{node::matmul_trusted::ChainId()};
+    const auto authority{node::matmul_trusted::ReplayAuthorityContext()};
+    if (!chain_id || !authority) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Unable to build a local UTXO snapshot statement; refusing to sign");
+    }
+
+    {
+        LOCK(chainman.GetMutex());
+        const CBlockIndex* tip{chainman.ActiveChain().Tip()};
+        if (!tip) {
+            throw JSONRPCError(
+                RPC_MISC_ERROR,
+                "No active tip; refusing to sign a UTXO snapshot manifest");
+        }
+        if (chainman.GetConsensus().IsMatMulRCFamilyActive(tip->nHeight) &&
+            !(tip->nStatus & BLOCK_EXACT_REPLAY_VERIFIED)) {
+            throw JSONRPCError(
+                RPC_MISC_ERROR,
+                "Tip is not ExactReplay-verified; refusing to sign a UTXO snapshot manifest");
+        }
     }
 
     const fs::path manifest_path{
@@ -4643,7 +4738,53 @@ static RPCHelpMan signutxosnapshotmanifest()
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, error);
     }
 
-    auto signature{node::matmul_trusted::SignUtxoSnapshot(manifest.statement)};
+    // Rebuild the statement from the active chain. The caller snapshot is
+    // never opened and is never activated. The temporary body lives under
+    // the datadir and is removed before this call returns.
+    const fs::path tmp_dir{args.GetDataDirNet() / "utxo-snapshot-sign"};
+    try {
+        fs::create_directories(tmp_dir);
+    } catch (const std::filesystem::filesystem_error&) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Unable to build a local UTXO snapshot statement; refusing to sign");
+    }
+    const fs::path tmp_snapshot{
+        tmp_dir / fs::u8path(
+                      "active-chain-" +
+                      std::to_string(reinterpret_cast<uintptr_t>(&manifest)) + ".tmp")};
+    ActiveChainSnapshotTemp cleanup{tmp_snapshot};
+    FILE* file{fsbridge::fopen(tmp_snapshot, "wb")};
+    AutoFile afile{file};
+    if (afile.IsNull()) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Unable to build a local UTXO snapshot statement; refusing to sign");
+    }
+
+    node::AttestedUTXOSnapshotExportResult exported;
+    try {
+        exported = node::CreateAttestedUTXOSnapshot(
+            chainman.ActiveChainstate(), std::move(afile), tmp_snapshot, tmp_snapshot,
+            node.rpc_interruption_point);
+    } catch (const std::exception& e) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            strprintf("Unable to build a local UTXO snapshot statement; refusing to sign: %s",
+                      e.what()));
+    }
+
+    const matmul::trusted::UtxoSnapshotStatement local{
+        StatementFromActiveChainExport(exported, *chain_id, *authority)};
+    const std::string mismatch{SnapshotStatementMismatch(manifest.statement, local)};
+    if (!mismatch.empty()) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "Refusing to sign manifest: consensus fields do not match this node's active-chain statement (" +
+                mismatch + ")");
+    }
+
+    auto signature{node::matmul_trusted::SignUtxoSnapshot(local)};
     if (!signature) {
         throw JSONRPCError(
             RPC_MISC_ERROR,

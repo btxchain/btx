@@ -674,13 +674,40 @@ BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
     CMutableTransaction funding;
     funding.version = 2;
     funding.vout.emplace_back(escrow.principal_atoms, escrow.output_script);
-    funding.vout.emplace_back(1'000, CScript() << OP_RETURN << std::vector<unsigned char>{0x01});
+    escrow.unsigned_txid = funding.GetHash().ToUint256();
 
     UniValue insp;
-    BOOST_REQUIRE(InspectBountyTransaction(escrow, funding, insp, err));
+    BOOST_REQUIRE_MESSAGE(InspectBountyTransaction(escrow, funding, insp, err), err);
     BOOST_CHECK(insp["escrow_output_present"].get_bool());
     BOOST_CHECK_EQUAL(insp["sighash"].get_str(), "ALL");
     BOOST_CHECK(!insp["unauthorized_extra_output"].get_bool());
+
+    // Caller output_script is accepted only when it equals the derived script.
+    {
+        BountyEscrowPlan lied = escrow;
+        lied.output_script.clear();
+        lied.output_script << OP_TRUE;
+        UniValue bad;
+        BOOST_CHECK(!InspectBountyTransaction(lied, funding, bad, err));
+        BOOST_CHECK(err.find("output_script") != std::string::npos);
+    }
+    {
+        BountyEscrowPlan bare = escrow;
+        bare.unsigned_txid = uint256{};
+        bare.unsigned_hex.clear();
+        UniValue bad;
+        BOOST_CHECK(!InspectBountyTransaction(bare, funding, bad, err));
+        BOOST_CHECK(err.find("unsigned plan") != std::string::npos);
+    }
+    {
+        CMutableTransaction low = funding;
+        low.vout[0].nValue = escrow.principal_atoms - 1;
+        BountyEscrowPlan low_plan = escrow;
+        low_plan.unsigned_txid = low.GetHash().ToUint256();
+        UniValue bad;
+        BOOST_CHECK(!InspectBountyTransaction(low_plan, low, bad, err));
+        BOOST_CHECK(err.find("principal") != std::string::npos);
+    }
 
     // BOUNTY-WALLET-002: fail-closed when refund_key is substituted after the escrow script was built.
     {
@@ -693,13 +720,15 @@ BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
         BOOST_CHECK(err.find("mutated") != std::string::npos || err.find("missing") != std::string::npos);
     }
 
-    // BOUNTY-WALLET-004: flag unrelated outputs when more than two vouts are present.
+    // Unauthorized extra non-change output fails closed (no wallet to prove change).
     {
         CMutableTransaction triple = funding;
         triple.vout.emplace_back(2'000, CScript() << OP_RETURN << std::vector<unsigned char>{0x02});
+        BountyEscrowPlan extra_plan = escrow;
+        extra_plan.unsigned_txid = triple.GetHash().ToUint256();
         UniValue extra_insp;
-        BOOST_REQUIRE(InspectBountyTransaction(escrow, triple, extra_insp, err));
-        BOOST_CHECK(extra_insp["unauthorized_extra_output"].get_bool());
+        BOOST_CHECK(!InspectBountyTransaction(extra_plan, triple, extra_insp, err));
+        BOOST_CHECK(err.find("unauthorized") != std::string::npos);
     }
 
     {
@@ -908,6 +937,36 @@ BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
     miss_job.pushKV("plan", miss_plan);
     BOOST_CHECK(!RunEvaluationJob(miss_job, err) || !miss_job["pass"].get_bool());
 
+    {
+        std::ofstream outside(m_path_root / "outside-secret.txt", std::ios::binary);
+        outside << "secret";
+    }
+    UniValue escape_spec = spec;
+    UniValue esc_files(UniValue::VARR);
+    esc_files.push_back("../outside-secret.txt");
+    esc_files.push_back("/etc/passwd");
+    esc_files.push_back("");
+    escape_spec.pushKV("required_files", esc_files);
+    UniValue escape_plan;
+    BOOST_REQUIRE(PrepareEvaluation(escape_spec, sub, UniValue(UniValue::VOBJ), escape_plan, err));
+    UniValue escape_job(UniValue::VOBJ);
+    escape_job.pushKV("plan", escape_plan);
+    BOOST_REQUIRE(RunEvaluationJob(escape_job, err));
+    BOOST_CHECK(escape_job.exists("pass") && !escape_job["pass"].get_bool());
+    BOOST_REQUIRE_EQUAL(escape_job["report"]["tasks"].size(), 3U);
+    for (const auto& task : escape_job["report"]["tasks"].getValues()) {
+        BOOST_CHECK(task.exists("error") && task["error"].get_str().find("path") != std::string::npos);
+        BOOST_CHECK(!task.exists("sha384"));
+    }
+
+    UniValue other_job(UniValue::VOBJ);
+    UniValue other_plan(UniValue::VOBJ);
+    other_plan.pushKV("profile_id", "REPRODUCIBLE_BENCHMARK");
+    other_plan.pushKV("timeout_ms", static_cast<int64_t>(1000));
+    other_job.pushKV("plan", other_plan);
+    BOOST_CHECK(!RunEvaluationJob(other_job, err));
+    BOOST_CHECK(!other_job.exists("pass") || !other_job["pass"].isTrue());
+
     BOOST_CHECK(EvaluationProfileReady("EXACT_CHECKS"));
     BOOST_CHECK(!EvaluationProfileReady("REPRODUCIBLE_BENCHMARK"));
 
@@ -1077,6 +1136,7 @@ BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
     BOOST_REQUIRE(store.Dispatch("getbountycapabilities", UniValue(UniValue::VARR), result, code, err));
     BOOST_CHECK_EQUAL(result["trust_label"].get_str(), BOUNTY_TRUST_LABEL);
     BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(result["evaluation_profiles"].size(), 1U);
     bool exact_ready = false;
     for (const auto& p : result["evaluation_profiles"].getValues()) {
         if (p["id"].get_str() == "EXACT_CHECKS") exact_ready = p["ready"].get_bool();
@@ -1293,6 +1353,17 @@ BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
     pubj.push_back(pjo);
     BOOST_REQUIRE(store.Dispatch("publishbountyevaluation", pubj, result, code, err));
     BOOST_CHECK(!result["is_award"].get_bool());
+    UniValue forged(UniValue::VARR);
+    UniValue forged_o(UniValue::VOBJ);
+    forged_o.pushKV("job_id", job_id);
+    UniValue fake(UniValue::VOBJ);
+    fake.pushKV("pass", false);
+    fake.pushKV("profile_id", "REPRODUCIBLE_BENCHMARK");
+    forged_o.pushKV("report", fake);
+    forged.push_back(forged_o);
+    BOOST_REQUIRE(store.Dispatch("publishbountyevaluation", forged, result, code, err));
+    BOOST_CHECK(result["body"]["payload"]["pass"].get_bool());
+    BOOST_CHECK_EQUAL(result["body"]["payload"]["profile_id"].get_str(), "EXACT_CHECKS");
     UniValue ls(UniValue::VARR);
     ls.push_back(sid);
     BOOST_REQUIRE(store.Dispatch("listbountyevaluations", gs, result, code, err));

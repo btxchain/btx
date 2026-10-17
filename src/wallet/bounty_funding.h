@@ -57,9 +57,14 @@ bool BuildBountyEscrowDescriptor(BountyEscrowPlan& plan, std::string& err);
 bool BuildStagedHtlcDescriptor(BountyEscrowPlan& plan, std::string& err);
 bool ExactTwoLeafTree(const std::string& descriptor, std::string& err);
 bool PrepareBountyFunding(CWallet& wallet, BountyEscrowPlan& plan, std::string& err);
-/** Spend the funded two-leaf escrow: CLTV council award, or contributor refund. */
-bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpendPath path, std::string& err);
-bool InspectBountyTransaction(const BountyEscrowPlan& plan, const CMutableTransaction& tx, UniValue& out, std::string& err);
+/**
+ * Build a two-leaf escrow spend.
+ * sign=false (prepare RPCs): unsigned hex, complete=false, no SignPSBTInput.
+ * sign=true (signbountyaward / signbountyclaim / signbountyrefund): SignPSBTInput
+ * only after InspectBountySpend. A caller-supplied witness is not complete.
+ */
+bool PrepareBountyLeafSpend(CWallet& wallet, BountyEscrowPlan& plan, BountySpendPath path, std::string& err, bool sign = false);
+bool InspectBountyTransaction(const BountyEscrowPlan& plan, const CMutableTransaction& tx, UniValue& out, std::string& err, const CWallet* change_wallet = nullptr);
 bool InspectBountySpend(const BountyEscrowPlan& plan, const CMutableTransaction& tx, UniValue& out, std::string& err);
 bool SignBountyTransaction(CWallet& wallet, BountyEscrowPlan& plan, CMutableTransaction& tx, std::string& err);
 UniValue BountyPlanToJson(const BountyEscrowPlan& plan);

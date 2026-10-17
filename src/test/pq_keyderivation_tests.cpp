@@ -118,4 +118,46 @@ BOOST_AUTO_TEST_CASE(hkdf_intermediate_state_is_cleansed_on_destruct)
     BOOST_CHECK(std::all_of(storage.begin(), storage.end(), [](unsigned char byte) { return byte == 0; }));
 }
 
+extern "C" {
+void btx_mldsa_randombytes(unsigned char* out, size_t outlen);
+void btx_spx_randombytes(unsigned char* out, unsigned long long outlen);
+}
+
+BOOST_AUTO_TEST_CASE(randombytes_names_do_not_alias_libsodium)
+{
+    // Linking these symbols fails if the PQ cores still export randombytes
+    // and the linker resolves that name to libsodium. Key equality is the
+    // behavior the wallet depends on: the same seed must restore the same key.
+    unsigned char mldsa_byte{0};
+    unsigned char slh_byte{0};
+    btx_mldsa_randombytes(&mldsa_byte, 1);
+    btx_spx_randombytes(&slh_byte, 1);
+
+    const auto seed = MakeSeed(0x42);
+    const auto ml_first = pq::DerivePQKeyFromBIP39(seed, PQAlgorithm::ML_DSA_44, 0, 0, 0, 0);
+    const auto slh_first = pq::DerivePQKeyFromBIP39(seed, PQAlgorithm::SLH_DSA_128S, 0, 0, 0, 0);
+    const auto ml_second = pq::DerivePQKeyFromBIP39(seed, PQAlgorithm::ML_DSA_44, 0, 0, 0, 0);
+    const auto slh_second = pq::DerivePQKeyFromBIP39(seed, PQAlgorithm::SLH_DSA_128S, 0, 0, 0, 0);
+    BOOST_REQUIRE(ml_first.has_value());
+    BOOST_REQUIRE(slh_first.has_value());
+    BOOST_REQUIRE(ml_second.has_value());
+    BOOST_REQUIRE(slh_second.has_value());
+    BOOST_CHECK(ml_first->GetPubKey() == ml_second->GetPubKey());
+    BOOST_CHECK(slh_first->GetPubKey() == slh_second->GetPubKey());
+
+    const auto ml_other_path = pq::DerivePQKeyFromBIP39(seed, PQAlgorithm::ML_DSA_44, 0, 0, 0, 1);
+    const auto slh_other_seed = pq::DerivePQKeyFromBIP39(MakeSeed(0x43), PQAlgorithm::SLH_DSA_128S, 0, 0, 0, 0);
+    BOOST_REQUIRE(ml_other_path.has_value());
+    BOOST_REQUIRE(slh_other_seed.has_value());
+    BOOST_CHECK(ml_first->GetPubKey() != ml_other_path->GetPubKey());
+    BOOST_CHECK(slh_first->GetPubKey() != slh_other_seed->GetPubKey());
+
+    const auto ml_after_slh = pq::DerivePQKeyFromBIP39(seed, PQAlgorithm::ML_DSA_44, 0, 0, 0, 0);
+    const auto slh_after_ml = pq::DerivePQKeyFromBIP39(seed, PQAlgorithm::SLH_DSA_128S, 0, 0, 0, 0);
+    BOOST_REQUIRE(ml_after_slh.has_value());
+    BOOST_REQUIRE(slh_after_ml.has_value());
+    BOOST_CHECK(ml_first->GetPubKey() == ml_after_slh->GetPubKey());
+    BOOST_CHECK(slh_first->GetPubKey() == slh_after_ml->GetPubKey());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

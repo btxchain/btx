@@ -105,6 +105,22 @@ The chain is unusually well equipped for this. Verified against current
   (`contrib/wbtx/evm/WBTXAtomicSwapHTLC.sol`) shares the exact
   `SHA-256(preimage)` hashlock with the BTX `htlc_sha256()` leaf.
 
+A custom leaf `<delay> OP_CHECKSEQUENCEVERIFY OP_DROP <32-byte hash> OP_CHECKTEMPLATEVERIFY`
+is not a standard descriptor and is not a standard P2MR leaf (mempool
+`bad-witness-p2mr-leaf-script`). It can still be consensus-valid inside a
+mined block. `csv_ctv()` is refused; that refusal stays. The delay is
+committed by `nSequence` on the CTV template: `OP_CHECKTEMPLATEVERIFY`
+commits to every input `nSequence`, and BIP68 enforces that relative lock.
+The standard leaf for that template is `ctv(<hash>)`. `getctvtemplatehash`
+returns the template hash for a raw transaction the caller supplies (input
+index defaults to 0). It adds no consensus rule and no new standard leaf.
+
+The 32-byte preimage rule at block 244000 is enforced by BTX only. From that
+height a claim whose preimage is not 32 bytes is refused by BTX consensus.
+A counterparty script on another chain has to check the secret length
+itself. A longer preimage can satisfy that other script while BTX refuses
+the claim.
+
 What does **not** exist (and this design routes around): DLC/adaptor
 signatures/PTLC (PQ adaptor signatures for ML-DSA are research-grade), any
 per-account shielded balance proof, and any proof-of-reserves RPC.

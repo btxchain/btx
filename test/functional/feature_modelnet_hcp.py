@@ -384,8 +384,24 @@ class ModelNetHcpTest(BitcoinTestFramework):
 
             quote, st = self._auth(B, "POST", "/finance/quotes", token, {})
             assert st == 201
+            live, st = self._auth(
+                B,
+                "POST",
+                "/policies",
+                token,
+                {
+                    "policy_id": "policy-smoke-live",
+                    "lifetime_principal_atoms": "100000",
+                    "allowed_actions": ["FUND_RELEASE"],
+                },
+            )
+            assert st == 201
             created, st = self._auth(
-                B, "POST", "/finance/intents", token, {"client_operation_id": "smoke-g-intent"}
+                B,
+                "POST",
+                "/finance/intents",
+                token,
+                {"client_operation_id": "smoke-g-intent", "policy_id": "policy-smoke-live"},
             )
             assert st == 201
             iid = created["body"]["intent_id"]

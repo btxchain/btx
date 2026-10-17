@@ -16,6 +16,14 @@
 
 namespace modelnet {
 
+/** One confirmed-or-submitted htlc_sha256 funding output for a campaign. */
+struct ReleaseFundingOutpoint {
+    std::string txid;
+    uint32_t vout{0};
+    std::string output_script_hex;
+    int64_t amount_atoms{0};
+};
+
 /** Campaign coordination only. Monetary claim/refund uses 0.34.6 htlc_sha256 + buildhtlcclaim/buildhtlcrefund. */
 struct ReleaseCampaign {
     Digest48 release_id;
@@ -35,6 +43,7 @@ struct ReleaseCampaign {
     std::string hashlock_algorithm{"SHA256"};
     Digest48 ciphertext_artifact_id;
     std::string output_script_hex; // P2MR scriptPubKey; hashlock is not in the program bytes
+    std::vector<ReleaseFundingOutpoint> funding_outpoints; // recorded when submitmodelfunding succeeds
     std::vector<unsigned char> pubkey;
     std::vector<unsigned char> sig;
     bool signed_ok{false};

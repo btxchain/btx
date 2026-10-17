@@ -523,4 +523,47 @@ BOOST_AUTO_TEST_CASE(conn_quic_deferred_pq1_only)
     BOOST_CHECK(!result["classical_fallback"].get_bool());
 }
 
+BOOST_AUTO_TEST_CASE(provider_cache_expires_before_peer_quota)
+{
+    using namespace modelnet;
+    std::string err;
+    ProviderCache cache;
+    BOOST_CHECK(!cache.StatusJson()["authoritative"].get_bool());
+    BOOST_CHECK(!cache.StatusJson()["persisted"].get_bool());
+    const std::string origin = "203.0.113.9:29447";
+    for (int i = 0; i < PROVIDER_PEER_LIVE_MAX; ++i) {
+        std::vector<unsigned char> pk, sk;
+        Digest48 resource;
+        resource.data[0] = static_cast<unsigned char>(0x40 + i);
+        auto rec = SignedRecord(resource, 1, 100, origin, true, pk, sk);
+        BOOST_REQUIRE_MESSAGE(cache.Put(rec, 1, err, origin), err);
+    }
+    {
+        std::vector<unsigned char> pk, sk;
+        Digest48 resource;
+        resource.data[0] = 0x7f;
+        auto extra = SignedRecord(resource, 1, 100, origin, true, pk, sk);
+        BOOST_CHECK(!cache.Put(extra, 1, err, origin));
+        BOOST_CHECK_EQUAL(err, "peer quota");
+    }
+    {
+        std::vector<unsigned char> pk, sk;
+        Digest48 resource;
+        resource.data[1] = 0x11;
+        auto later = SignedRecord(resource, 1, 200 + PROVIDER_TTL_MS + 1, origin, true, pk, sk);
+        BOOST_CHECK(!cache.Put(later, 200, err, origin));
+        BOOST_CHECK_EQUAL(err, "expiry too far");
+        auto ok = SignedRecord(resource, 1, 200 + 1000, origin, true, pk, sk);
+        BOOST_REQUIRE_MESSAGE(cache.Put(ok, 200, err, origin), err);
+        BOOST_CHECK_EQUAL(cache.Get(resource, 200).size(), 1U);
+    }
+    {
+        std::vector<unsigned char> pk, sk;
+        Digest48 resource;
+        resource.data[2] = 0x22;
+        auto other = SignedRecord(resource, 1, 500, "198.51.100.8:29447", true, pk, sk);
+        BOOST_REQUIRE_MESSAGE(cache.Put(other, 200, err, "198.51.100.8:29447"), err);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

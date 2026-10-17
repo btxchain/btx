@@ -308,8 +308,9 @@ BOOST_AUTO_TEST_CASE(ahp_j08_offline_and_cancellation)
     ex.pushKV("verified_local_files", files);
     UniValue ready;
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, Rpc("executebtxacquisition", ex), ready, code, err), err);
-    BOOST_CHECK_EQUAL(ready["state"].get_str(), "MODEL_READY");
-    BOOST_CHECK(ready["file_bytes_verified"].get_bool());
+    BOOST_CHECK_EQUAL(ready["state"].get_str(), "SELECTION_READY");
+    BOOST_CHECK(!ready["file_bytes_verified"].get_bool());
+    BOOST_CHECK(!ready["manifest_verified"].get_bool());
     BOOST_CHECK(!ready["runtime_executed"].get_bool());
     BOOST_CHECK_EQUAL(ready["automatic_spend_atoms"].getInt<int>(), 0);
 

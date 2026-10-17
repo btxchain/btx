@@ -23,9 +23,16 @@ struct VerifiedLocalFile {
     std::string source_path;
 };
 
+/** Digest taken from the stored package or catalog row, not the request body. */
+struct StoredFileDigest {
+    std::string relative_path;
+    std::string sha384_hex;
+};
+
 struct ExecuteAcquisitionRequest {
     AcquisitionPlan plan;
     std::vector<VerifiedLocalFile> files;
+    std::vector<StoredFileDigest> stored_digests;
     CreditBroker* credit{nullptr};
     uint64_t reserve_bytes{0};
     bool hold_lease{true};

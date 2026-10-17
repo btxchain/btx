@@ -396,6 +396,9 @@ void P2MRSpendData::Merge(P2MRSpendData other)
     for (auto& [script, controls] : other.scripts) {
         scripts[script].merge(std::move(controls));
     }
+    if (ordered_leaf_scripts.empty()) {
+        ordered_leaf_scripts = std::move(other.ordered_leaf_scripts);
+    }
 }
 
 void TaprootBuilder::Insert(TaprootBuilder::NodeInfo&& node, int depth)

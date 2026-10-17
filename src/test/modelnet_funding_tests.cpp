@@ -222,6 +222,47 @@ BOOST_AUTO_TEST_CASE(quote_mutation_requires_fresh_prepare)
     BOOST_CHECK(err.find("output script") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(sign_rebuilds_htlc_and_ignores_caller_script)
+{
+    wallet::FrozenFundingQuote terms = SampleQuote();
+    std::string err;
+    BOOST_REQUIRE(wallet::BuildHtlcSha256Descriptor(terms, err));
+    const CScript real = terms.output_script;
+
+    CMutableTransaction good;
+    good.vout.emplace_back(terms.amount_atoms, real);
+    wallet::FrozenFundingQuote echoed = SampleQuote();
+    echoed.output_script.clear();
+    echoed.output_script << OP_TRUE;
+    echoed.unsigned_txid = uint256::ONE;
+    BOOST_CHECK_MESSAGE(wallet::MatchRebuiltHtlc(echoed, good, /*change_wallet=*/nullptr, err), err);
+    BOOST_CHECK(echoed.output_script == real);
+
+    CMutableTransaction attacker;
+    attacker.vout.emplace_back(terms.amount_atoms, CScript() << OP_TRUE);
+    wallet::FrozenFundingQuote attacker_quote = SampleQuote();
+    attacker_quote.output_script.clear();
+    attacker_quote.output_script << OP_TRUE;
+    attacker_quote.unsigned_txid = attacker.GetHash().ToUint256();
+    // MatchFrozenTemplate only echoes the caller script and txid.
+    BOOST_CHECK(wallet::MatchFrozenTemplate(attacker_quote, attacker, err));
+    BOOST_CHECK(!wallet::MatchRebuiltHtlc(attacker_quote, attacker, /*change_wallet=*/nullptr, err));
+    BOOST_CHECK(err.find("missing") != std::string::npos || err.find("changed") != std::string::npos ||
+                err.find("unauthorized") != std::string::npos);
+
+    CMutableTransaction extra = good;
+    extra.vout.emplace_back(1, CScript() << OP_RETURN << std::vector<unsigned char>{0x01});
+    wallet::FrozenFundingQuote extra_quote = SampleQuote();
+    BOOST_CHECK(!wallet::MatchRebuiltHtlc(extra_quote, extra, /*change_wallet=*/nullptr, err));
+    BOOST_CHECK(err.find("unauthorized") != std::string::npos);
+
+    CMutableTransaction low = good;
+    low.vout[0].nValue = terms.amount_atoms - 1;
+    wallet::FrozenFundingQuote low_quote = SampleQuote();
+    BOOST_CHECK(!wallet::MatchRebuiltHtlc(low_quote, low, /*change_wallet=*/nullptr, err));
+    BOOST_CHECK(err.find("amount") != std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(export_recovery_is_public_only)
 {
     wallet::FrozenFundingQuote q = SampleQuote();

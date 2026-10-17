@@ -103,8 +103,12 @@ BOOST_AUTO_TEST_CASE(hcp_j06_no_award_and_refund)
 
     UniValue pol(UniValue::VOBJ);
     pol.pushKV("policy_id", "j06-life");
+    pol.pushKV("account", "account-demo");
     pol.pushKV("lifetime_principal_atoms", "100000");
     pol.pushKV("refund_replenishes_lifetime", false);
+    UniValue acts(UniValue::VARR);
+    acts.push_back("FUND_RELEASE");
+    pol.pushKV("allowed_actions", acts);
     e->SetHostedPolicy(pol);
 
     const int64_t start_avail = e->AccountAvailable("account-demo");

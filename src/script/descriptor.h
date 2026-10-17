@@ -264,6 +264,11 @@ struct DescriptorParseOptions {
      *  sets this to false, so a descriptor imported by an older version (which
      *  accepted both) still loads and its coins stay visible. */
     bool new_descriptor_rules{true};
+    /** 0.34.12 expanded htlc_sha256() to the claim leaf without the in-script
+     *  length check. Set only while loading a wallet last written by that
+     *  version, so the stored descriptor still watches the funded script.
+     *  New descriptors leave this false and keep the length-checked leaf. */
+    bool pre_03413_htlc_sha256{false};
 };
 
 std::vector<std::unique_ptr<Descriptor>> Parse(const std::string& descriptor, FlatSigningProvider& out, std::string& error, bool require_checksum, const DescriptorParseOptions& options);
@@ -306,5 +311,10 @@ uint256 DescriptorID(const Descriptor& desc);
  *  hash of its flat "mr(A,B,C)" rendering. nullopt when the rendering has no
  *  brace tree (the ID did not change). Used only to load such wallets. */
 std::optional<uint256> LegacyFlatMRDescriptorID(const Descriptor& desc);
+
+/** True when id is the descriptor id 0.34.12 stored for this mr() before
+ *  htlc_sha256() grew an in-script length check. The current descriptor must
+ *  already render htlc_sha256_legacy(). Flat 3-leaf renderings are included. */
+bool DescriptorMatchesStoredPre03413HtlcID(const Descriptor& desc, const uint256& id);
 
 #endif // BITCOIN_SCRIPT_DESCRIPTOR_H

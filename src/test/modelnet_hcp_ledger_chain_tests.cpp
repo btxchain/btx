@@ -54,8 +54,12 @@ BOOST_AUTO_TEST_CASE(hcp_ledger_03_lifetime_limit)
     auto e = hcp_test::Lab(true);
     UniValue pol(UniValue::VOBJ);
     pol.pushKV("policy_id", "life-1");
+    pol.pushKV("account", "account-demo");
     pol.pushKV("lifetime_principal_atoms", "1000");
     pol.pushKV("refund_replenishes_lifetime", false);
+    UniValue acts(UniValue::VARR);
+    acts.push_back("FUND_RELEASE");
+    pol.pushKV("allowed_actions", acts);
     e->SetHostedPolicy(pol);
     const std::string tok = hcp_test::Token(*e, hcp_test::AllScopes());
     UniValue body(UniValue::VOBJ);
@@ -224,8 +228,12 @@ BOOST_AUTO_TEST_CASE(hcp_chain_07_refund_conditions)
 
     UniValue pol(UniValue::VOBJ);
     pol.pushKV("policy_id", "ch07-life");
+    pol.pushKV("account", "account-demo");
     pol.pushKV("lifetime_principal_atoms", "100000");
     pol.pushKV("refund_replenishes_lifetime", false);
+    UniValue acts(UniValue::VARR);
+    acts.push_back("FUND_RELEASE");
+    pol.pushKV("allowed_actions", acts);
     e->SetHostedPolicy(pol);
 
     const int64_t start_avail = e->AccountAvailable("account-demo");

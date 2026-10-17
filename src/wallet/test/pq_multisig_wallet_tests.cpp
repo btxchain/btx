@@ -865,6 +865,168 @@ BOOST_AUTO_TEST_CASE(psbt_updater_sets_leaf_for_rpc_style_imported_fixed_multisi
     BOOST_CHECK(!psbt.inputs[0].m_p2mr_control_block.empty());
 }
 
+BOOST_AUTO_TEST_CASE(psbt_signer_refuses_cltv_rewrite_unless_adjust_timelocks)
+{
+    const auto pq_seed = MakePQSeed(0x71);
+    const std::string receive_desc = AddChecksum(
+        "mr(cltv_multi_pq(700,2,"
+        + MakeP2MRKeyPathExprWithBranch(pq_seed, /*branch=*/0, /*internal=*/false) + ","
+        + MakeP2MRKeyPathExprWithBranch(pq_seed, /*branch=*/1, /*internal=*/false) + "))");
+    const std::string change_desc = AddChecksum(
+        "mr(cltv_multi_pq(700,2,"
+        + MakeP2MRKeyPathExprWithBranch(pq_seed, /*branch=*/0, /*internal=*/true) + ","
+        + MakeP2MRKeyPathExprWithBranch(pq_seed, /*branch=*/1, /*internal=*/true) + "))");
+    const auto wallet = CreateP2MRDescriptorWalletFromStrings(*this, receive_desc, change_desc);
+    const CTxDestination dest = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{171}), 0});
+    tx.vout.emplace_back(5 * COIN - 1000, GetScriptForDestination(dest));
+    PartiallySignedTransaction psbt(tx);
+    psbt.inputs[0].witness_utxo = CTxOut{5 * COIN, GetScriptForDestination(dest)};
+
+    bool complete = true;
+    bilingual_str detail;
+    const auto refused = wallet->FillPSBT(psbt, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/true, /*n_signed=*/nullptr, /*finalize=*/false, /*adjust_timelocks=*/false, &detail);
+    BOOST_REQUIRE(refused.has_value());
+    BOOST_CHECK(*refused == common::PSBTError::P2MR_TIMELOCK_MISMATCH);
+    BOOST_CHECK(detail.original.find("nLockTime >= 700") != std::string::npos);
+    BOOST_CHECK_EQUAL(psbt.tx->nLockTime, 0U);
+    BOOST_CHECK(psbt.inputs[0].m_p2mr_pq_sigs.empty());
+
+    P2MRTimelockAdjustment adjustment;
+    complete = true;
+    detail = {};
+    const auto adjusted = wallet->FillPSBT(psbt, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/true, /*n_signed=*/nullptr, /*finalize=*/false, /*adjust_timelocks=*/true, &detail, &adjustment);
+    BOOST_REQUIRE(!adjusted);
+    BOOST_CHECK(adjustment.changed);
+    BOOST_CHECK_EQUAL(adjustment.locktime_before, 0U);
+    BOOST_CHECK_EQUAL(adjustment.locktime_after, 700U);
+    BOOST_CHECK(adjustment.txid_before != adjustment.txid_after);
+    BOOST_CHECK_EQUAL(psbt.tx->nLockTime, 700U);
+}
+
+BOOST_AUTO_TEST_CASE(psbt_multileaf_requires_a_selected_leaf)
+{
+    const std::string claim = std::string(MLDSA44_PUBKEY_SIZE * 2, 'a');
+    const std::string refund = std::string(MLDSA44_PUBKEY_SIZE * 2, 'b');
+    const std::string hash = std::string(64, 'c');
+    const std::string descriptor = AddChecksum("mr(htlc_sha256(" + hash + "," + claim + "),refund(10," + refund + "))");
+    const auto wallet = CreateDescriptorWalletWithSingleImportedDescriptor(*this, descriptor, nullptr, /*disable_private_keys=*/true);
+
+    DescriptorScriptPubKeyMan* spk_man{nullptr};
+    for (ScriptPubKeyMan* man : wallet->GetAllScriptPubKeyMans()) {
+        spk_man = dynamic_cast<DescriptorScriptPubKeyMan*>(man);
+        if (spk_man) break;
+    }
+    BOOST_REQUIRE(spk_man);
+    const auto scripts = spk_man->GetScriptPubKeys();
+    BOOST_REQUIRE_EQUAL(scripts.size(), 1U);
+    const CScript script = *scripts.begin();
+
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{172}), 0});
+    tx.vout.emplace_back(COIN, script);
+    PartiallySignedTransaction psbt(tx);
+    psbt.inputs[0].witness_utxo = CTxOut{COIN, script};
+
+    bool complete = true;
+    bilingual_str detail;
+    const auto missing = wallet->FillPSBT(psbt, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/false, /*n_signed=*/nullptr, /*finalize=*/false, /*adjust_timelocks=*/false, &detail);
+    BOOST_REQUIRE(missing.has_value());
+    BOOST_CHECK(*missing == common::PSBTError::P2MR_LEAF_UNSELECTED);
+    BOOST_CHECK(detail.original.find("no leaf selected") != std::string::npos);
+    BOOST_CHECK(psbt.inputs[0].m_p2mr_pq_sigs.empty());
+
+    const auto provider = spk_man->GetSigningProvider(script, /*include_private=*/false);
+    BOOST_REQUIRE(provider);
+    P2MRLeafSelection choice;
+    choice.txid = tx.vin[0].prevout.hash;
+    choice.vout = 0;
+    choice.index = 0;
+    bilingual_str leaf_error;
+    BOOST_REQUIRE(ApplyP2MRLeafSelections(psbt, {choice}, provider.get(), leaf_error));
+    std::vector<unsigned char> hashlock;
+    std::vector<unsigned char> pubkey;
+    PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+    BOOST_CHECK(ParseP2MRHTLCSha256Leaf(psbt.inputs[0].m_p2mr_leaf_script, hashlock, algo, pubkey));
+    BOOST_CHECK(!psbt.inputs[0].m_p2mr_control_block.empty());
+}
+
+BOOST_AUTO_TEST_CASE(htlc_sha256_claim_psbt_signs_only_with_real_preimage)
+{
+    const auto claim_seed = MakePQSeed(0x81);
+    const auto refund_seed = MakePQSeed(0x82);
+    const std::vector<unsigned char> preimage(32, 0x44);
+    uint256 digest;
+    CSHA256().Write(preimage.data(), preimage.size()).Finalize(digest.begin());
+    const std::string claim_expr = MakeP2MRKeyPathExprWithBranch(claim_seed, /*branch=*/0, /*internal=*/false);
+    const std::string refund_expr = MakeP2MRKeyPathExprWithBranch(refund_seed, /*branch=*/0, /*internal=*/false);
+    const std::string htlc_receive = AddChecksum("mr(htlc_sha256(" + HexStr(digest) + "," + claim_expr + "),refund(10," + refund_expr + "))");
+    const std::string htlc_change = AddChecksum(
+        "mr(htlc_sha256(" + HexStr(digest) + "," + MakeP2MRKeyPathExprWithBranch(claim_seed, /*branch=*/0, /*internal=*/true) + "),refund(10," + MakeP2MRKeyPathExprWithBranch(refund_seed, /*branch=*/0, /*internal=*/true) + "))");
+    const auto coordinator = CreateP2MRDescriptorWalletFromStrings(*this, htlc_receive, htlc_change);
+    const auto signer = CreateP2MRDescriptorWalletFromStrings(
+        *this,
+        AddChecksum("mr(" + claim_expr + ")"),
+        AddChecksum("mr(" + MakeP2MRKeyPathExprWithBranch(claim_seed, /*branch=*/0, /*internal=*/true) + ")"));
+
+    const CTxDestination htlc_dest = *Assert(coordinator->GetNewDestination(OutputType::P2MR, ""));
+    const CScript htlc_script = GetScriptForDestination(htlc_dest);
+    DescriptorScriptPubKeyMan* coordinator_spk{nullptr};
+    for (ScriptPubKeyMan* man : coordinator->GetAllScriptPubKeyMans()) {
+        auto* desc = dynamic_cast<DescriptorScriptPubKeyMan*>(man);
+        if (desc && desc->GetSigningProvider(htlc_script, false)) {
+            coordinator_spk = desc;
+            break;
+        }
+    }
+    BOOST_REQUIRE(coordinator_spk);
+    const auto provider = coordinator_spk->GetSigningProvider(htlc_script, false);
+    BOOST_REQUIRE(provider);
+
+    const CTxDestination pay_dest = *Assert(signer->GetNewDestination(OutputType::P2MR, ""));
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{181}), 0});
+    tx.vout.emplace_back(COIN - 1000, GetScriptForDestination(pay_dest));
+    PartiallySignedTransaction psbt(tx);
+    psbt.inputs[0].witness_utxo = CTxOut{COIN, htlc_script};
+
+    P2MRLeafSelection choice;
+    choice.txid = tx.vin[0].prevout.hash;
+    choice.vout = 0;
+    choice.index = 0;
+    bilingual_str leaf_error;
+    BOOST_REQUIRE(ApplyP2MRLeafSelections(psbt, {choice}, provider.get(), leaf_error));
+
+    bool complete = true;
+    bilingual_str detail;
+    const auto missing = signer->FillPSBT(psbt, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/false, /*n_signed=*/nullptr, /*finalize=*/true, /*adjust_timelocks=*/false, &detail);
+    BOOST_REQUIRE(missing.has_value());
+    BOOST_CHECK(*missing == common::PSBTError::P2MR_HTLC_PREIMAGE);
+    BOOST_CHECK(detail.original.find(HexStr(digest)) != std::string::npos);
+    BOOST_CHECK(psbt.inputs[0].m_p2mr_pq_sigs.empty());
+
+    psbt.inputs[0].sha256_preimages.emplace(digest, std::vector<unsigned char>(32, 0x00));
+    complete = true;
+    detail = {};
+    const auto placeholder = signer->FillPSBT(psbt, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/false, /*n_signed=*/nullptr, /*finalize=*/true, /*adjust_timelocks=*/false, &detail);
+    BOOST_REQUIRE(placeholder.has_value());
+    BOOST_CHECK(*placeholder == common::PSBTError::P2MR_HTLC_PREIMAGE);
+    BOOST_CHECK(psbt.inputs[0].m_p2mr_pq_sigs.empty());
+
+    psbt.inputs[0].sha256_preimages[digest] = preimage;
+    complete = false;
+    detail = {};
+    const auto signed_ok = signer->FillPSBT(psbt, complete, SIGHASH_DEFAULT, /*sign=*/true, /*bip32derivs=*/false, /*n_signed=*/nullptr, /*finalize=*/true, /*adjust_timelocks=*/false, &detail);
+    BOOST_REQUIRE_MESSAGE(!signed_ok, detail.original);
+    BOOST_CHECK(complete);
+    // Finalizing writes the witness and drops the partial-signature map.
+    BOOST_CHECK(!psbt.inputs[0].final_script_witness.IsNull());
+    const auto& stack = psbt.inputs[0].final_script_witness.stack;
+    BOOST_CHECK(std::find(stack.begin(), stack.end(), preimage) != stack.end());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 } // namespace wallet

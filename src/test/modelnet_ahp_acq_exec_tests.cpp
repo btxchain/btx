@@ -38,6 +38,14 @@ std::string Sha384Of(const std::string& bytes)
     return HexStr(Span<const unsigned char>{d, CSHA384::OUTPUT_SIZE});
 }
 
+void RememberDigest(modelnet::ExecuteAcquisitionRequest& req, const std::string& path, const std::string& hex)
+{
+    modelnet::StoredFileDigest d;
+    d.relative_path = path;
+    d.sha384_hex = hex;
+    req.stored_digests.push_back(std::move(d));
+}
+
 struct CreditRestore {
     modelnet::CreditBroker& c;
     uint64_t ceil;
@@ -128,6 +136,7 @@ BOOST_AUTO_TEST_CASE(ahp_acq_06_concurrent_reservation_exhaustion)
     f.sha384_hex = Sha384Of(payload);
     f.source_path = fs::PathToString(src);
     req.files.push_back(f);
+    RememberDigest(req, f.relative_path, f.sha384_hex);
 
     modelnet::AcquisitionReceipt a, b;
     uint64_t ra = 0, rb = 0;
@@ -156,9 +165,10 @@ BOOST_AUTO_TEST_CASE(ahp_acq_07_stale_cache_reverify)
     req.plan = PlanTo(dest);
     modelnet::VerifiedLocalFile f;
     f.relative_path = "weights.gguf";
-    f.sha384_hex = Sha384Of(good);
+    f.sha384_hex = Sha384Of(bad);
     f.source_path = fs::PathToString(src);
     req.files.push_back(f);
+    RememberDigest(req, "weights.gguf", Sha384Of(good));
 
     modelnet::AcquisitionReceipt rec;
     uint64_t reserved = 0;
@@ -171,6 +181,18 @@ BOOST_AUTO_TEST_CASE(ahp_acq_07_stale_cache_reverify)
     BOOST_REQUIRE(modelnet::Sha384Path(fs::PathToString(dest / "weights.gguf"), got, err));
     BOOST_CHECK_EQUAL(got, Sha384Of(good));
     BOOST_CHECK(got != Sha384Of(bad));
+    BOOST_CHECK_EQUAL(rec.json["stored_sha384"].get_str(), Sha384Of(good));
+
+    modelnet::ExecuteAcquisitionRequest echoed = req;
+    echoed.stored_digests.clear();
+    echoed.files[0].sha384_hex = Sha384Of(good);
+    modelnet::AcquisitionReceipt denied;
+    BOOST_CHECK(!modelnet::ExecuteBtxAcquisition(echoed, denied, reserved, code, err));
+    BOOST_CHECK_EQUAL(code, "MODEL_BYTES_UNVERIFIED");
+    BOOST_CHECK_EQUAL(denied.json["state"].get_str(), "SELECTION_READY");
+    BOOST_CHECK(!denied.json["manifest_verified"].get_bool());
+    BOOST_CHECK(!denied.json["file_bytes_verified"].get_bool());
+    BOOST_CHECK(denied.ready_state != "MODEL_READY");
 }
 
 BOOST_AUTO_TEST_CASE(ahp_acq_08_multi_file_path_and_symlink)
@@ -195,6 +217,8 @@ BOOST_AUTO_TEST_CASE(ahp_acq_08_multi_file_path_and_symlink)
     fb.sha384_hex = Sha384Of(b);
     fb.source_path = fs::PathToString(srcdir / "b.bin");
     req.files = {fa, fb};
+    RememberDigest(req, fa.relative_path, fa.sha384_hex);
+    RememberDigest(req, fb.relative_path, fb.sha384_hex);
 
     modelnet::AcquisitionReceipt rec;
     uint64_t reserved = 0;
@@ -263,6 +287,7 @@ BOOST_AUTO_TEST_CASE(ahp_acq_10_cancel_releases_credit_and_idempotent_ready)
     f.sha384_hex = Sha384Of(payload);
     f.source_path = fs::PathToString(src);
     req.files.push_back(f);
+    RememberDigest(req, f.relative_path, f.sha384_hex);
     modelnet::AcquisitionReceipt rec;
     uint64_t reserved = 0;
     std::string code, err;
@@ -316,16 +341,16 @@ BOOST_AUTO_TEST_CASE(ahp_acq_helper_verified_local_model_ready)
     ex.pushKV("verified_local_files", files);
     result = UniValue(UniValue::VOBJ);
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, Rpc("executebtxacquisition", ex), result, code, err), err);
-    BOOST_CHECK_EQUAL(result["state"].get_str(), "MODEL_READY");
-    BOOST_CHECK(result["file_bytes_verified"].get_bool());
-    BOOST_CHECK(result["manifest_verified"].get_bool());
+    BOOST_CHECK_EQUAL(result["state"].get_str(), "SELECTION_READY");
+    BOOST_CHECK(!result["file_bytes_verified"].get_bool());
+    BOOST_CHECK(!result["manifest_verified"].get_bool());
     BOOST_CHECK(!result["runtime_executed"].get_bool());
     BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int>(), 0);
-    BOOST_CHECK_EQUAL(result["source_classes_used"][0].get_str(), "LOCAL_DISK");
+    BOOST_CHECK_EQUAL(result["error_code"].get_str(), "MODEL_BYTES_UNVERIFIED");
 
     result = UniValue(UniValue::VOBJ);
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, Rpc("executebtxacquisition", ex), result, code, err), err);
-    BOOST_CHECK_EQUAL(result["state"].get_str(), "MODEL_READY");
+    BOOST_CHECK_EQUAL(result["state"].get_str(), "SELECTION_READY");
 
     BOOST_REQUIRE(modelnet::DispatchHelperRpc(cat, Rpc("cancelbtxacquisition", ex), result, code, err));
     BOOST_CHECK(result["cancelled"].get_bool());
@@ -431,7 +456,9 @@ BOOST_AUTO_TEST_CASE(ahp_acq_10_execute_rpc_idempotency_conflict)
 
     UniValue first;
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, Rpc("executebtxacquisition", ex), first, code, err), err);
-    BOOST_CHECK_EQUAL(first["state"].get_str(), "MODEL_READY");
+    BOOST_CHECK_EQUAL(first["state"].get_str(), "SELECTION_READY");
+    BOOST_CHECK(!first["file_bytes_verified"].get_bool());
+    BOOST_CHECK(!first["manifest_verified"].get_bool());
     BOOST_REQUIRE(first.exists("job_id") && first["job_id"].isStr());
     const std::string job_id = first["job_id"].get_str();
     BOOST_CHECK_EQUAL(first["automatic_spend_atoms"].getInt<int>(), 0);
@@ -439,7 +466,7 @@ BOOST_AUTO_TEST_CASE(ahp_acq_10_execute_rpc_idempotency_conflict)
     UniValue replay;
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, Rpc("executebtxacquisition", ex), replay, code, err), err);
     BOOST_CHECK_EQUAL(replay["job_id"].get_str(), job_id);
-    BOOST_CHECK_EQUAL(replay["state"].get_str(), "MODEL_READY");
+    BOOST_CHECK_EQUAL(replay["state"].get_str(), "SELECTION_READY");
     BOOST_CHECK_EQUAL(replay["automatic_spend_atoms"].getInt<int>(), 0);
 
     UniValue other(UniValue::VOBJ);
@@ -468,9 +495,12 @@ BOOST_AUTO_TEST_CASE(ahp_acq_10_execute_rpc_idempotency_conflict)
     unique_key_conflict.pushKV("idempotency_key", "ahp-acq-10-execute-k2");
     unique_key_conflict.pushKV("verified_local_files", conflict_files);
     UniValue unique_conflicted;
-    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat, Rpc("executebtxacquisition", unique_key_conflict), unique_conflicted, code, err));
-    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
-    BOOST_CHECK_EQUAL(unique_conflicted["status"].get_str(), "REJECTED");
+    BOOST_REQUIRE_MESSAGE(
+        modelnet::DispatchHelperRpc(cat, Rpc("executebtxacquisition", unique_key_conflict), unique_conflicted, code, err),
+        err);
+    BOOST_CHECK_EQUAL(unique_conflicted["state"].get_str(), "SELECTION_READY");
+    BOOST_CHECK(!unique_conflicted["file_bytes_verified"].get_bool());
+    BOOST_CHECK(!unique_conflicted["manifest_verified"].get_bool());
     BOOST_CHECK_EQUAL(unique_conflicted["automatic_spend_atoms"].getInt<int>(), 0);
 }
 

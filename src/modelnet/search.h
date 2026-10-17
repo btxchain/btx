@@ -110,6 +110,8 @@ struct ModelSearchRecord {
     std::string network_id;
     bool signed_ok{false};
     bool tombstone{false};
+    /** Local catalog filename stub. Not accepted from peer JSON. */
+    bool local_catalog{false};
 };
 
 struct SearchFilters {
@@ -284,7 +286,12 @@ class SearchIndex {
     uint64_t m_seq{0};
 
 public:
-    bool Put(const ModelSearchRecord& r, int64_t now_ms, std::string& err);
+    /**
+     * `transport_endpoint` is the peer that offered the record. Null publisher
+     * identities share that key, or one "anonymous" bucket, at the same 64 limit.
+     */
+    bool Put(const ModelSearchRecord& r, int64_t now_ms, std::string& err,
+             const std::string& transport_endpoint = {});
     bool Tombstone(const Digest48& model_id, uint64_t seq, int64_t now_ms, std::string& err);
     const ModelSearchRecord* Get(const Digest48& model_id) const;
     const ModelSearchRecord* FindByAlias(const std::string& alias) const;

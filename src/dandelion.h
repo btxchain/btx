@@ -116,6 +116,12 @@ public:
 
     bool IsActive(int current_height) const;
 
+    /** Inventory must stay quiet while the transaction is still embargoed.
+     *  Pass IsInStemPool, not HaveStemTx. The bloom filter remains set after
+     *  fluff and is empty after a restart, so a bloom hit must not block the
+     *  persisted unbroadcast retry and must not keep a finished stem silent. */
+    static bool SuppressInventoryRelay(bool in_stempool) { return in_stempool; }
+
     std::optional<NodeId> GetRelayDestination(NodeId from_peer) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     size_t GetStemPoolSize() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

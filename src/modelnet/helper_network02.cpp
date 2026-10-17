@@ -82,7 +82,27 @@ struct AcqJob {
     UniValue receipt{UniValue::VOBJ};
     uint64_t reserved_bytes{0};
     std::string exec_fp;
+    /** path -> sha384 from the package row stored at plan time. Not the execute body. */
+    std::map<std::string, std::string> stored_sha384;
 };
+
+std::map<std::string, std::string> DigestsFromPackageCore(const UniValue& core)
+{
+    std::map<std::string, std::string> out;
+    if (!core.isObject()) return out;
+    auto take = [&](const char* field) {
+        if (!core.exists(field) || !core[field].isArray()) return;
+        for (const auto& d : core[field].getValues()) {
+            if (!d.isObject() || !d.exists("path") || !d["path"].isStr()) continue;
+            if (!d.exists("sha384") || !d["sha384"].isStr()) continue;
+            const std::string hex = d["sha384"].get_str();
+            if (hex.size() == 96) out[d["path"].get_str()] = hex;
+        }
+    };
+    take("documents");
+    take("files");
+    return out;
+}
 std::map<std::string, AcqJob> g_acq;
 
 struct StorageMigrationJournal {
@@ -1434,6 +1454,7 @@ bool DispatchNetwork02RpcOnce(ModelCatalog& cat, const std::string& method, cons
         std::lock_guard<std::mutex> lock(g_n02_mu);
         g_acq[plan.plan_id_hex].plan = plan;
         g_acq[plan.plan_id_hex].state = "PLANNED";
+        g_acq[plan.plan_id_hex].stored_sha384 = DigestsFromPackageCore(pkg.core);
         return true;
     }
     if (method == "executebtxacquisition") {
@@ -1472,6 +1493,12 @@ bool DispatchNetwork02RpcOnce(ModelCatalog& cat, const std::string& method, cons
                 return false;
             }
             ex_req.plan = it->second.plan;
+            for (const auto& kv : it->second.stored_sha384) {
+                StoredFileDigest d;
+                d.relative_path = kv.first;
+                d.sha384_hex = kv.second;
+                ex_req.stored_digests.push_back(std::move(d));
+            }
         }
         if (o.exists("verified_local_files") && o["verified_local_files"].isArray()) {
             have_files = true;

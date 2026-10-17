@@ -85,6 +85,12 @@ struct AutoUpdateManifest {
     // manifest omits it, preserving prior behavior. Because it lives in the signed manifest body it
     // cannot be tampered with to widen a rollout.
     int rollout_percent{100};
+    // Filled after Verify() succeeds with the exact body and signature that
+    // were checked, plus the SHA256 of that body. Empty when no datadir was
+    // available to pin the files.
+    std::string pinned_manifest_path;
+    std::string pinned_manifest_sig_path;
+    std::string pinned_manifest_sha256;
 };
 
 struct AutoUpdateFetchResult {

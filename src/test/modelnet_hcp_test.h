@@ -94,18 +94,43 @@ inline std::string Token(modelnet::HcpEngine& e, const std::vector<std::string>&
     return tok["access_token"].get_str();
 }
 
+inline void BindSpendPolicy(modelnet::HcpEngine& e, UniValue& body)
+{
+    if (body.exists("policy_id")) return;
+    const std::string cop = body.exists("client_operation_id") && body["client_operation_id"].isStr()
+                                ? body["client_operation_id"].get_str()
+                                : "spend";
+    const std::string policy_id = "policy-lab-" + cop;
+    UniValue pol(UniValue::VOBJ);
+    pol.pushKV("policy_id", policy_id);
+    pol.pushKV("account", "account-demo");
+    pol.pushKV("lifetime_principal_atoms", "1000000000");
+    UniValue acts(UniValue::VARR);
+    acts.push_back(std::string(modelnet::HCP_ACTION_FUND_RELEASE));
+    pol.pushKV("allowed_actions", acts);
+    e.SetHostedPolicy(pol);
+    body.pushKV("policy_id", policy_id);
+}
+
 inline modelnet::HcpHttpRequest AuthReq(modelnet::HcpEngine& e, const std::string& method, const std::string& path,
                                          const std::string& token, const UniValue* body = nullptr)
 {
+    UniValue owned;
+    const UniValue* encoded = body;
+    if (body && method == "POST" && path == "/finance/intents") {
+        owned = *body;
+        BindSpendPolicy(e, owned);
+        encoded = &owned;
+    }
     modelnet::HcpHttpRequest req;
     req.method = method;
     req.path = path;
     req.headers["authorization"] = "Bearer " + token;
     req.headers["dpop"] = e.LabDpop(method, e.Cfg().api_base + path, token);
-    if (body) {
+    if (encoded) {
         std::vector<unsigned char> raw;
         std::string err;
-        BOOST_REQUIRE(modelnet::EncodePjson1(*body, raw, err));
+        BOOST_REQUIRE(modelnet::EncodePjson1(*encoded, raw, err));
         req.body.assign(raw.begin(), raw.end());
     }
     return req;

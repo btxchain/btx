@@ -25,6 +25,7 @@ BOOST_AUTO_TEST_CASE(econ_release_01_searchable_unreleased)
     r.release_id = std::string(96, 'a');
     r.release_state = "FUNDING";
     r.release_target_atoms = 500 * COIN_ATOMS;
+    r.expires_at = 1'000'000'000;
     SearchIndex idx;
     std::string err;
     BOOST_REQUIRE(idx.Put(r, 1, err));

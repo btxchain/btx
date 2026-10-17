@@ -16,7 +16,10 @@
 #include <script/signingprovider.h>
 #include <uint256.h>
 
+#include <map>
 #include <optional>
+#include <tuple>
+#include <vector>
 
 class CKey;
 class CKeyID;
@@ -161,7 +164,38 @@ struct P2MRTimelockedInput {
 bool CheckP2MRTimelockedTransaction(const CTransaction& tx, Span<const P2MRTimelockedInput> inputs, bilingual_str& error);
 bool PrepareP2MRTimelockedTransaction(CMutableTransaction& tx, Span<const P2MRTimelockedInput> inputs, bilingual_str& error);
 
-/** Sign the CMutableTransaction */
-bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* provider, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum = nullptr, std::optional<PQAlgorithm> preferred_pq_signing_algo = std::nullopt, bool slhdsa_fips205 = false);
+/** Old and new transaction fields when a signer opts in to raising a P2MR timelock. */
+struct P2MRTimelockAdjustment {
+    bool changed{false};
+    uint256 txid_before;
+    uint256 txid_after;
+    uint32_t locktime_before{0};
+    uint32_t locktime_after{0};
+    int32_t version_before{0};
+    int32_t version_after{0};
+    /** Input index, previous nSequence, new nSequence. Only inputs that changed. */
+    std::vector<std::tuple<unsigned int, uint32_t, uint32_t>> sequences;
+};
+
+void RecordP2MRTimelockAdjustment(const CMutableTransaction& before, const CMutableTransaction& after, P2MRTimelockAdjustment& out);
+
+/**
+ * Why an unsigned P2MR input must not be reported as success.
+ * produced_p2mr_signature is true when this signer stored a leaf signature.
+ * known_leaf_count is the descriptor leaf count when known, otherwise 0.
+ * Returns true and sets error when the input must be rejected.
+ */
+bool ExplainUnsignedP2MRInput(const std::vector<unsigned char>& leaf_script,
+                              size_t known_leaf_count,
+                              const std::map<std::vector<unsigned char>, std::vector<unsigned char>>& sha256_preimages,
+                              bool produced_p2mr_signature,
+                              bilingual_str& error);
+
+/** Sign the CMutableTransaction.
+ *  adjust_timelocks keeps the historical behavior of raising nSequence, nLockTime,
+ *  and version to satisfy a selected csv/cltv/refund leaf before signing.
+ *  When false, a mismatch is an input error that names the required value.
+ */
+bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* provider, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum = nullptr, std::optional<PQAlgorithm> preferred_pq_signing_algo = std::nullopt, bool slhdsa_fips205 = false, bool adjust_timelocks = true, P2MRTimelockAdjustment* timelock_adjustment = nullptr);
 
 #endif // BITCOIN_SCRIPT_SIGN_H
