@@ -125,8 +125,16 @@ bool LooksLikeTmpFallbackSock(const fs::path& sock)
 fs::path RuntimeSockDir()
 {
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    if (!xdg || xdg[0] != '/') return {};
-    return fs::PathFromString(xdg) / "btx-modeld";
+    if (xdg && xdg[0] == '/') return fs::PathFromString(xdg) / "btx-modeld";
+#ifdef __APPLE__
+    // macOS sets no XDG_RUNTIME_DIR. The per-user temporary directory
+    // (/var/folders/.../T/) belongs to the user, is mode 0700, and is short
+    // enough for sun_path. ListenUnix() still makes btx-modeld/ 0700 inside it.
+    char tmp[1024];
+    const size_t n = ::confstr(_CS_DARWIN_USER_TEMP_DIR, tmp, sizeof(tmp));
+    if (n > 1 && n <= sizeof(tmp) && tmp[0] == '/') return fs::PathFromString(tmp) / "btx-modeld";
+#endif
+    return {};
 }
 
 } // namespace
