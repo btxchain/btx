@@ -4,17 +4,19 @@
 # file COPYING or https://opensource.org/license/mit/.
 """Every distinct deep-reorg alarm reaches the RPC warnings and -alertnotify.
 
-Chainstate::ActivateBestChainStep raises DEEP_REORG_DETECTED for every reorg
-it warns about or parks. The "Deep reorg detected" entry in the "warnings"
-arrays of getblockchaininfo, getnetworkinfo and getmininginfo must describe
-the latest alarm, and each distinct alarm must run -alertnotify once. An
-operator who looks after a parked deep reorg must not see an older, shallower,
-warn-only event instead. An identical repeat is logged, but it neither
-replaces the entry nor alerts again.
+Chainstate::ActivateBestChainStep raises DEEP_REORG_PARKED for every reorg it
+parks and DEEP_REORG_DETECTED for every other reorg it warns about. Each
+"Deep reorg detected" entry in the "warnings" arrays of getblockchaininfo,
+getnetworkinfo and getmininginfo must describe the latest alarm of its kind,
+and each distinct alarm must run -alertnotify once. An operator who looks
+after a parked deep reorg must not see an older, shallower, warn-only event
+instead, nor lose the park to a later warn-only event. An identical repeat is
+logged, but it neither replaces the entry nor alerts again.
 
 Event 1: a 2-block cross-fork reorg (warn depth 1, park depth 3): warn, follow.
 Event 1 again, between the same two tips: same alarm text, no new alert.
 Event 2: a 4-block cross-fork reorg: park, stay on the current tip.
+Event 3: a later 2-block cross-fork reorg: warn, follow; the park entry stays.
 """
 
 import os
@@ -58,6 +60,16 @@ class DeepReorgWarningTest(BitcoinTestFramework):
         assert_equal(found[0], found[1])
         assert_equal(found[0], found[2])
         return found[0]
+
+    def park_and_follow(self, node):
+        """The parked-reorg entry and the warn-only entry, picked by their text."""
+        warnings = self.deep_reorg_warnings(node)
+        assert_equal(len(warnings), 2)
+        park = [w for w in warnings if "Parking the branch" in w]
+        follow = [w for w in warnings if "Following the most-work chain" in w]
+        assert_equal(len(park), 1)
+        assert_equal(len(follow), 1)
+        return park[0], follow[0]
 
     def alerts(self):
         if not os.path.exists(self.alert_file):
@@ -107,17 +119,31 @@ class DeepReorgWarningTest(BitcoinTestFramework):
         self.generate(node, 5, sync_fun=self.no_op)
         _, competing, fork2, _ = self.cross_fork(node, 4)
         assert_equal(node.getbestblockhash(), competing)
-        warnings = self.deep_reorg_warnings(node)
-        assert_equal(len(warnings), 1)
-        self.log.info(f"warnings entry after event 2: {warnings[0]}")
-        assert "reorganize 4 blocks" in warnings[0] and f"fork={fork2}," in warnings[0], warnings[0]
-        assert "Parking the branch" in warnings[0], warnings[0]
+        # The park has its own entry; the event 1 entry is kept next to it.
+        park, follow = self.park_and_follow(node)
+        self.log.info(f"park entry after event 2: {park}")
+        assert "reorganize 4 blocks" in park and f"fork={fork2}," in park, park
+        assert "reorganize 2 blocks" in follow and f"fork={fork1}," in follow, follow
 
         # One alert per distinct alarm: event 1 and event 2, not the repeat.
         self.wait_until(lambda: len(self.alerts()) >= 2, timeout=10)
         alerts = self.alerts()
         assert_equal(len(alerts), 2)
         assert "Parking the branch" in alerts[1], alerts[1]
+
+        self.log.info("Event 3: a later 2-block reorg: warn and follow; the park entry stays")
+        self.generate(node, 5, sync_fun=self.no_op)
+        original, _, fork3, _ = self.cross_fork(node, 2)
+        assert_equal(node.getbestblockhash(), original)
+        park, follow = self.park_and_follow(node)
+        assert "reorganize 2 blocks" in follow and f"fork={fork3}," in follow, follow
+        assert "reorganize 4 blocks" in park and f"fork={fork2}," in park, park
+
+        self.wait_until(lambda: len(self.alerts()) >= 3, timeout=10)
+        alerts = self.alerts()
+        assert_equal(len(alerts), 3)
+        assert "Parking the branch" in alerts[1], alerts[1]
+        assert "Following the most-work chain" in alerts[2], alerts[2]
 
 
 if __name__ == '__main__':

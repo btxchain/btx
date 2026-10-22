@@ -10709,9 +10709,12 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
 
             // Loud alarm on every deep reorg, regardless of action. update=true
             // so the warnings entry and -alertnotify follow the latest alarm,
-            // not only the first one since startup.
+            // not only the first one since startup. A park has its own entry,
+            // so a later warn-only alarm does not hide it.
             LogWarning("%s\n", alarm.original);
-            m_chainman.GetNotifications().warningSet(kernel::Warning::DEEP_REORG_DETECTED, alarm, /*update=*/true);
+            m_chainman.GetNotifications().warningSet(
+                park ? kernel::Warning::DEEP_REORG_PARKED : kernel::Warning::DEEP_REORG_DETECTED,
+                alarm, /*update=*/true);
 
             if (park) {
                 CBlockIndex* branch_root = pindexMostWork;

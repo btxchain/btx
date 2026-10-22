@@ -5,6 +5,7 @@
 #include <modelnet/lab_wire.h>
 #include <univalue.h>
 #include <test/util/setup_common.h>
+#include <util/fs.h>
 #include <boost/test/unit_test.hpp>
 
 #include <cstdlib>
@@ -292,6 +293,29 @@ BOOST_AUTO_TEST_CASE(rev003_registry_kinds_and_resource_ref)
     BOOST_CHECK(modelnet::ParseResourceRef(Ref("MODEL", digest), out, err, SpecRoot()));
     BOOST_CHECK_EQUAL(out.kind, "MODEL");
     BOOST_CHECK(out.record_type.empty());
+}
+
+// A wire_kind that is a JSON number but not an int must fail the registry as
+// BTX035_SCHEMA, not throw out of LoadRegistry. 16 is the older range check.
+BOOST_AUTO_TEST_CASE(rev003_registry_wire_kind_outside_int)
+{
+    BOOST_REQUIRE(!m_path_root.empty());
+    const std::string path = fs::PathToString(m_path_root / "resource_registry.json");
+    for (const char* wire : {"1e3", "1.5", "2147483648", "-2147483649", "16"}) {
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out << "{\"resource_refs\":[{\"kind\":\"MODEL\",\"wire_kind\":" << wire
+                << "}],\"record_descriptors\":[],\"semantic_aliases\":{}}";
+            BOOST_REQUIRE(out.good());
+        }
+        std::string name;
+        std::string err;
+        bool ok = true;
+        BOOST_CHECK_NO_THROW(ok = modelnet::RegistryWireKind(path, 0, name, err));
+        BOOST_CHECK_MESSAGE(!ok, "wire_kind " << wire);
+        BOOST_CHECK(name.empty());
+        BOOST_CHECK_EQUAL(err, "BTX035_SCHEMA");
+    }
 }
 
 BOOST_AUTO_TEST_CASE(rev004_payload_topology)
