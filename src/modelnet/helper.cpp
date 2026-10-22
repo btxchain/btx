@@ -131,11 +131,40 @@ bool LooksLikeTmpFallbackSock(const fs::path& sock)
     return s.find("/tmp/btx-md-") != std::string::npos || s.find("/var/tmp/btx-md-") != std::string::npos;
 }
 
+#if !defined(WIN32) && !defined(__APPLE__)
+// Only `owner` (and root) can add entries: a real directory, not a symlink,
+// owned by `owner`, with no group or other write bit.
+bool OwnerOnlyDir(const fs::path& dir, uid_t owner)
+{
+    struct stat st {};
+    return ::lstat(fs::PathToString(dir).c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == owner &&
+           (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+#endif
+
 fs::path RuntimeSockDir()
 {
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    if (!xdg || xdg[0] != '/') return {};
-    return fs::PathFromString(xdg) / "btx-modeld";
+    if (xdg && xdg[0] == '/') return fs::PathFromString(xdg) / "btx-modeld";
+#ifdef __APPLE__
+    // macOS sets no XDG_RUNTIME_DIR. The per-user temporary directory
+    // (/var/folders/.../T/) belongs to the user, is mode 0700, and is short
+    // enough for sun_path. ListenUnix() still makes btx-modeld/ 0700 inside it.
+    char tmp[1024];
+    const size_t n = ::confstr(_CS_DARWIN_USER_TEMP_DIR, tmp, sizeof(tmp));
+    if (n > 1 && n <= sizeof(tmp) && tmp[0] == '/') return fs::PathFromString(tmp) / "btx-modeld";
+#elif !defined(WIN32)
+    // XDG_RUNTIME_DIR is often missing under cron, su, sudo and in
+    // containers. Use the login runtime directory it would have named, or
+    // /run for root. Nobody else can add entries to either, so btx-modeld/
+    // cannot be pre-created there by another user; ListenUnix() still makes
+    // it 0700 and checks its owner.
+    const uid_t uid = ::getuid();
+    const fs::path user_run = fs::PathFromString(strprintf("/run/user/%u", static_cast<unsigned>(uid)));
+    if (OwnerOnlyDir(user_run, uid)) return user_run / "btx-modeld";
+    if (uid == 0 && OwnerOnlyDir(fs::PathFromString("/run"), 0)) return fs::PathFromString("/run/btx-modeld");
+#endif
+    return {};
 }
 
 } // namespace
@@ -6612,6 +6641,17 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("link", link);
         if (params.isArray() && params.size() > 1 && Arg(1).isStr() && !Arg(1).get_str().empty()) {
             const fs::path outp = fs::PathFromString(Arg(1).get_str());
+            // The path is caller text (a UI, an agent, a script). Write a new
+            // file or replace a share file; never follow a symlink, never wait
+            // on a FIFO or a device, never truncate some other file.
+            std::error_code sec;
+            const fs::file_status st = fs::symlink_status(outp, sec);
+            std::string old_text, old_err;
+            if (fs::exists(st) && (!fs::is_regular_file(st) || !LoadShareText(outp, old_text, old_err))) {
+                err_code = "INVALID_PARAMETER";
+                err = "path exists and is not a share file";
+                return false;
+            }
             if (!outp.parent_path().empty()) fs::create_directories(outp.parent_path());
             std::ofstream f(outp, std::ios::trunc);
             if (!f) {

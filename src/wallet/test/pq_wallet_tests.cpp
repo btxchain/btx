@@ -968,6 +968,49 @@ BOOST_AUTO_TEST_CASE(p2mr_primary_estimator_covers_actual_weight)
     BOOST_CHECK_LT(estimated.weight - actual_weight, 5000);
 }
 
+BOOST_AUTO_TEST_CASE(p2mr_fee_sizing_counts_pq_sigops)
+{
+    // One SLH-DSA checksig costs 500 sigops, i.e. 10,000 vbytes under the
+    // default -bytespersigop, while the signed input weighs about 8,000. Fee
+    // sizing must cover the vsize the mempool charges, or the spend pays about
+    // 80% of the requested rate and is refused near the relay floor.
+    const auto seed = MakePQSeed(0x5f);
+    const std::string receive_desc = AddChecksum("mr(pk_slh(" + MakeP2MRKeyPathExpr(seed, /*internal=*/false) + "))");
+    const std::string change_desc = AddChecksum("mr(pk_slh(" + MakeP2MRKeyPathExpr(seed, /*internal=*/true) + "))");
+    const auto wallet = CreateP2MRDescriptorWalletFromStrings(*this, receive_desc, change_desc);
+
+    const CTxDestination from_dest = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+    const CTxDestination to_dest = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+    const COutPoint prevout{Txid::FromUint256(uint256{24}), 0};
+    const CAmount input_value{10 * COIN};
+    Coin prev_coin{CTxOut{input_value, GetScriptForDestination(from_dest)}, /*nHeight=*/1, /*fCoinBase=*/false};
+
+    CMutableTransaction tx;
+    tx.vin.emplace_back(prevout);
+    tx.vout.emplace_back(input_value - 20000, GetScriptForDestination(to_dest));
+
+    const int input_estimate = WITH_LOCK(wallet->cs_wallet,
+        return CalculateMaximumSignedInputSize(prev_coin.out, wallet.get(), /*coin_control=*/nullptr));
+    const TxSize estimated = CalculateMaximumSignedTxSize(CTransaction{tx}, wallet.get(), std::vector<CTxOut>{prev_coin.out});
+    BOOST_REQUIRE(estimated.vsize > 0);
+
+    BOOST_REQUIRE(SignAndCheckP2MRTransaction(wallet, tx, prev_coin));
+    BOOST_CHECK_EQUAL(SignedP2MRLeafOpcode(tx), static_cast<unsigned char>(OP_CHECKSIG_SLHDSA));
+
+    const CTransaction tx_signed{tx};
+    const int64_t sigops = CountWitnessSigOps(
+        tx.vin[0].scriptSig, prev_coin.out.scriptPubKey, &tx.vin[0].scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS);
+    BOOST_CHECK_EQUAL(sigops, VALIDATION_WEIGHT_PER_SLHDSA_SIGOP);
+    const int64_t weight = GetTransactionWeight(tx_signed);
+    const int64_t policy_vsize = GetVirtualTransactionSize(weight, sigops, DEFAULT_BYTES_PER_SIGOP);
+    // The sigop term, not the weight, sets this spend's vsize.
+    BOOST_CHECK_GT(policy_vsize, weight);
+    BOOST_CHECK_GE(estimated.vsize, policy_vsize);
+    BOOST_CHECK_LT(estimated.vsize - policy_vsize, 100);
+    BOOST_CHECK_GE(estimated.weight, weight);
+    BOOST_CHECK_GE(input_estimate, sigops * DEFAULT_BYTES_PER_SIGOP);
+}
+
 BOOST_AUTO_TEST_CASE(p2mr_transaction_weight_calculation)
 {
     const auto wallet = CreateP2MRDescriptorWallet(*this);

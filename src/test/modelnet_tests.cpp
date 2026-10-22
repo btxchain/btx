@@ -1064,9 +1064,31 @@ BOOST_AUTO_TEST_CASE(unix_rpc_listen_path_hashes_overlong)
     const fs::path mapped = modelnet::UnixRpcListenPath(fs::PathFromString(longp));
     const std::string m = fs::PathToString(mapped);
     BOOST_CHECK_EQUAL(m.find("/tmp/btx-md-"), std::string::npos);
+    std::string runtime_dir;
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    if (xdg && xdg[0] == '/') {
-        BOOST_CHECK(m.find(std::string(xdg) + "/btx-modeld/") == 0);
+    if (xdg && xdg[0] == '/') runtime_dir = xdg;
+#ifdef __APPLE__
+    // macOS has no XDG_RUNTIME_DIR; the helper uses the per-user temp dir.
+    char darwin_tmp[1024];
+    const size_t n = ::confstr(_CS_DARWIN_USER_TEMP_DIR, darwin_tmp, sizeof(darwin_tmp));
+    if (runtime_dir.empty() && n > 1 && n <= sizeof(darwin_tmp)) {
+        runtime_dir = darwin_tmp;
+        while (!runtime_dir.empty() && runtime_dir.back() == '/') runtime_dir.pop_back();
+    }
+#else
+    // Without XDG_RUNTIME_DIR: /run/user/<uid>, or /run for root, when only
+    // that user can write there.
+    const auto owner_only = [](const std::string& dir, uid_t owner) {
+        struct stat st {};
+        return ::lstat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == owner &&
+               (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+    };
+    const std::string user_run = strprintf("/run/user/%u", static_cast<unsigned>(::getuid()));
+    if (runtime_dir.empty() && owner_only(user_run, ::getuid())) runtime_dir = user_run;
+    if (runtime_dir.empty() && ::getuid() == 0 && owner_only("/run", 0)) runtime_dir = "/run";
+#endif
+    if (!runtime_dir.empty()) {
+        BOOST_CHECK(m.find(runtime_dir + "/btx-modeld/") == 0);
         BOOST_CHECK(m.size() < sizeof(sockaddr_un::sun_path));
         BOOST_CHECK_EQUAL(fs::PathToString(modelnet::UnixRpcListenPath(mapped)), m);
     } else {
@@ -1074,10 +1096,10 @@ BOOST_AUTO_TEST_CASE(unix_rpc_listen_path_hashes_overlong)
     }
     const fs::path sticky = fs::PathFromString("/tmp/btx-md-ok.sock");
     const fs::path sticky_mapped = modelnet::UnixRpcListenPath(sticky);
-    if (xdg && xdg[0] == '/') {
+    if (!runtime_dir.empty()) {
         BOOST_CHECK(fs::PathToString(sticky_mapped).find("/tmp/btx-md-") == std::string::npos);
     } else {
-        // Without XDG_RUNTIME_DIR there is no private directory to move it to,
+        // Without a per-user runtime directory there is nowhere private to move it to,
         // so the path comes back unchanged. ListenUnix() and
         // UnixSocketSafeToAdopt() are what refuse it.
         BOOST_CHECK_EQUAL(fs::PathToString(sticky_mapped), fs::PathToString(sticky));

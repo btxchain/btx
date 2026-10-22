@@ -15,8 +15,16 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <chrono>
 #include <string>
 #include <vector>
+
+#ifndef WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_035_complete_tests, BasicTestingSetup)
 
@@ -130,6 +138,34 @@ BOOST_AUTO_TEST_CASE(exchange_rejects_a_replaced_blob)
     BOOST_CHECK_EQUAL(err, "BTX035_SCOPE_DENIED");
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(loopback_peer_that_never_answers_times_out)
+{
+    using namespace modelnet;
+    // Nobody accepts on this socket: the kernel completes the handshake and keeps the request, and no answer comes.
+    const int listener = socket(AF_INET, SOCK_STREAM, 0);
+    BOOST_REQUIRE(listener >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    BOOST_REQUIRE_EQUAL(inet_pton(AF_INET, "127.0.0.1", &address.sin_addr), 1);
+    BOOST_REQUIRE_EQUAL(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+    BOOST_REQUIRE_EQUAL(listen(listener, 4), 0);
+    socklen_t length = sizeof(address);
+    BOOST_REQUIRE_EQUAL(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length), 0);
+    const uint16_t port = ntohs(address.sin_port);
+
+    std::string result;
+    std::string err;
+    const auto start = std::chrono::steady_clock::now();
+    BOOST_CHECK(!PeerRouteLoopback("127.0.0.1", port, "u", "p", "hello", "{}", result, err, std::chrono::milliseconds{300}));
+    BOOST_CHECK_EQUAL(err, "BTX035_TRANSPORT");
+    BOOST_CHECK(!LabCallLoopback("127.0.0.1", port, "u", "p", "lab.info", "{}", result, err, std::chrono::milliseconds{300}));
+    BOOST_CHECK_EQUAL(err, "BTX035_TRANSPORT");
+    BOOST_CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds{10});
+    close(listener);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(exchange_manifest_refuses_too_many_or_too_large_objects)
 {
     using namespace modelnet;
@@ -185,6 +221,39 @@ BOOST_AUTO_TEST_CASE(guard_permit_is_one_use_and_thirty_seconds)
     table.Pause();
     BOOST_CHECK(!table.Prepare("research.run", std::string(96, 'c'), 1, 1000, spend, err));
     BOOST_CHECK_EQUAL(err, "BTX035_PAUSED");
+}
+
+BOOST_AUTO_TEST_CASE(guard_table_is_bounded_and_drops_expired_permits)
+{
+    using namespace modelnet;
+    GuardTable table;
+    GuardPermit permit;
+    std::string err;
+    std::string first;
+    for (size_t i = 0; i < GuardTable::kMaxPermits; ++i) {
+        BOOST_REQUIRE(table.Prepare("research.run", std::string(96, 'a'), 1, 1000, permit, err));
+        if (i == 0) first = permit.secret;
+    }
+    BOOST_CHECK_EQUAL(table.Size(), GuardTable::kMaxPermits);
+
+    // Full, and nothing has expired yet: refuse and do not grow.
+    const int64_t last_live_ms = 1000 + GuardTable::kPermitTtlMs;
+    BOOST_CHECK(!table.Prepare("research.run", std::string(96, 'a'), 1, last_live_ms, permit, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
+    BOOST_CHECK_EQUAL(table.Size(), GuardTable::kMaxPermits);
+
+    // A consumed permit stays until it expires, so a second execute is still a replay.
+    std::string receipt;
+    BOOST_CHECK(table.Execute(first, last_live_ms, receipt, err));
+    BOOST_CHECK(!table.Execute(first, last_live_ms, receipt, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_REPLAY");
+
+    // Past the expiry, the next prepare drops the old rows and succeeds.
+    BOOST_CHECK(table.Prepare("research.run", std::string(96, 'a'), 1, last_live_ms + 1, permit, err));
+    BOOST_CHECK_EQUAL(table.Size(), 1U);
+    BOOST_CHECK(!table.Execute(first, last_live_ms + 1, receipt, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_PERMIT");
+    BOOST_CHECK(table.Execute(permit.secret, last_live_ms + 1, receipt, err));
 }
 
 BOOST_AUTO_TEST_CASE(fetch_ticket_exports_once_and_source_query_reads_the_bytes)

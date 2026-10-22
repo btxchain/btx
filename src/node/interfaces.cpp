@@ -823,6 +823,10 @@ public:
         if (!m_node.mempool) return CFeeRate{DUST_RELAY_TX_FEE};
         return m_node.mempool->m_opts.dust_relay_feerate;
     }
+    unsigned int bytesPerSigOp() override
+    {
+        return ::nBytesPerSigOp;
+    }
     bool havePruned() override
     {
         LOCK(::cs_main);

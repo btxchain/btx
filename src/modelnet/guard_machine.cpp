@@ -70,6 +70,17 @@ bool GuardTable::Prepare(const std::string& effect, const std::string& fingerpri
     if (effect.empty() || fingerprint.empty() || generation == 0) return Fail(err, "BTX035_PERMIT");
     if (NamesWallet(effect)) return Fail(err, "BTX035_SCOPE_DENIED");
     if (m_paused) return Fail(err, "BTX035_PAUSED");
+    if (m_by_secret.size() >= kMaxPermits) {
+        // Drop rows past their expiry. A consumed row stays until then, so a second execute is still BTX035_REPLAY.
+        for (auto it = m_by_secret.begin(); it != m_by_secret.end();) {
+            if (now_ms > it->second.not_after_ms) {
+                it = m_by_secret.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (m_by_secret.size() >= kMaxPermits) return Fail(err, "BTX035_LIMIT_EXCEEDED");
+    }
     const std::string secret = GuardRandomHex();
     if (secret.size() != 64) return Fail(err, "BTX035_PERMIT");
     if (m_by_secret.count(secret)) return Fail(err, "BTX035_REPLAY");

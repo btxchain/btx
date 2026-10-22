@@ -5,6 +5,7 @@
 #ifndef BITCOIN_MODELNET_GUARD_MACHINE_H
 #define BITCOIN_MODELNET_GUARD_MACHINE_H
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -26,10 +27,13 @@ struct GuardPermit {
  * Local action table shared by btxd and btx-guardd.
  * A permit lives at most 30 seconds. A second consume is BTX035_REPLAY.
  * Pause blocks execute until resume. Logical cancel does not invent a physical stop.
+ * The table holds at most kMaxPermits rows. When it is full, Prepare drops the rows past their
+ * expiry; if none has expired, Prepare is BTX035_LIMIT_EXCEEDED and the table does not grow.
  */
 class GuardTable {
 public:
     static constexpr int64_t kPermitTtlMs = 30000;
+    static constexpr size_t kMaxPermits = 1024;
 
     bool Prepare(const std::string& effect, const std::string& fingerprint, uint64_t generation, int64_t now_ms,
                  GuardPermit& out, std::string& err);
@@ -37,6 +41,7 @@ public:
     void Pause() { m_paused = true; }
     void Resume() { m_paused = false; }
     bool Paused() const { return m_paused; }
+    size_t Size() const { return m_by_secret.size(); }
 
 private:
     std::map<std::string, GuardPermit> m_by_secret;

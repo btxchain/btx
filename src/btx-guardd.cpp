@@ -5,6 +5,8 @@
 #include <modelnet/guard_machine.h>
 
 #include <chrono>
+#include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -16,10 +18,16 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 
 namespace {
+
+/** A request is one short line: PREPARE <effect> <fingerprint> <generation>, EXECUTE <secret>, PAUSE or RESUME. */
+constexpr size_t kMaxLineBytes = 4096;
+/** One client holds this single-threaded daemon for at most this long per request, well inside the node's 2 s timeout. */
+constexpr int64_t kRequestDeadlineMs = 1000;
 
 int64_t NowMs()
 {
@@ -34,6 +42,66 @@ void CloseSock(int fd)
 #else
     close(fd);
 #endif
+}
+
+void SetTimeouts(int fd, int64_t timeout_ms)
+{
+#ifdef _WIN32
+    const DWORD timeout = static_cast<DWORD>(timeout_ms);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+    timeval timeout{};
+    timeout.tv_sec = static_cast<time_t>(timeout_ms / 1000);
+    timeout.tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
+}
+
+bool SendAll(int fd, const std::string& bytes)
+{
+    size_t sent = 0;
+    while (sent < bytes.size()) {
+        const auto n = send(fd, bytes.data() + sent, bytes.size() - sent, 0);
+        if (n <= 0) return false;
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+/**
+ * Serve one client until it closes, a write fails, a line is longer than kMaxLineBytes,
+ * or a request takes longer than kRequestDeadlineMs.
+ */
+void ServeClient(modelnet::GuardTable& table, int client)
+{
+    using steady = std::chrono::steady_clock;
+    std::string pending;
+    char buf[1024];
+    auto deadline = steady::now() + std::chrono::milliseconds{kRequestDeadlineMs};
+    while (true) {
+        const int64_t left_ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - steady::now()).count();
+        if (left_ms <= 0) return;
+        SetTimeouts(client, left_ms);
+        const auto n = recv(client, buf, sizeof(buf), 0);
+        if (n <= 0) return;
+        std::size_t scan = pending.size();
+        pending.append(buf, buf + n);
+        std::size_t nl;
+        while ((nl = pending.find('\n', scan)) != std::string::npos && nl <= kMaxLineBytes) {
+            std::string line = pending.substr(0, nl);
+            pending.erase(0, nl + 1);
+            scan = 0;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!SendAll(client, modelnet::GuardHandleLine(table, line, NowMs()) + "\n")) return;
+            deadline = steady::now() + std::chrono::milliseconds{kRequestDeadlineMs};
+        }
+        if (pending.size() > kMaxLineBytes) {
+            SendAll(client, "ERR BTX035_LIMIT_EXCEEDED\n");
+            return;
+        }
+    }
 }
 
 } // namespace
@@ -54,6 +122,9 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+#else
+    // A client that resets the connection while a reply is written must not end the guard.
+    std::signal(SIGPIPE, SIG_IGN);
 #endif
     const int listen_fd = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
     if (listen_fd < 0) return 1;
@@ -69,21 +140,7 @@ int main(int argc, char** argv)
     while (true) {
         const int client = static_cast<int>(accept(listen_fd, nullptr, nullptr));
         if (client < 0) continue;
-        std::string pending;
-        char buf[1024];
-        while (true) {
-            const auto n = recv(client, buf, sizeof(buf), 0);
-            if (n <= 0) break;
-            pending.append(buf, buf + n);
-            std::size_t nl;
-            while ((nl = pending.find('\n')) != std::string::npos) {
-                std::string line = pending.substr(0, nl);
-                pending.erase(0, nl + 1);
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                const std::string reply = modelnet::GuardHandleLine(table, line, NowMs()) + "\n";
-                send(client, reply.data(), reply.size(), 0);
-            }
-        }
+        ServeClient(table, client);
         CloseSock(client);
     }
 }

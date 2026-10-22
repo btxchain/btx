@@ -512,6 +512,37 @@ BOOST_AUTO_TEST_CASE(start_03_explicit_missing_does_not_spawn)
     BOOST_CHECK(sup.Snapshot().managed_by_btxd);
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(start_socket_path_that_cannot_fit_does_not_spawn)
+{
+    // A runtime dir too long to shorten anything: the mapped path cannot fit.
+    const char* saved = std::getenv("XDG_RUNTIME_DIR");
+    const std::string saved_value = saved ? saved : "";
+    const fs::path long_dir = m_path_root / fs::PathFromString(std::string(120, 'r'));
+    ::setenv("XDG_RUNTIME_DIR", fs::PathToString(long_dir).c_str(), 1);
+    for (const bool required : {false, true}) {
+        modelnet::HelperLaunchConfig cfg;
+        cfg.helper_exe = fs::PathFromString("/bin/true");
+        cfg.modeldir = m_path_root / "modeldir";
+        cfg.rpc_socket = long_dir / "modelnet" / "modeld.sock";
+        cfg.required = required;
+        modelnet::HelperSupervisor sup(std::move(cfg));
+        std::string err;
+        BOOST_CHECK_EQUAL(sup.Start(err), !required);
+        BOOST_CHECK(err.find("over the") != std::string::npos);
+        BOOST_CHECK(err.find("XDG_RUNTIME_DIR") != std::string::npos);
+        BOOST_CHECK(sup.Snapshot().state == modelnet::HelperState::FAILED_RETRYING);
+        BOOST_CHECK(sup.Snapshot().pid <= 0);
+        BOOST_CHECK_EQUAL(sup.Snapshot().restart_count, 0);
+    }
+    if (saved) {
+        ::setenv("XDG_RUNTIME_DIR", saved_value.c_str(), 1);
+    } else {
+        ::unsetenv("XDG_RUNTIME_DIR");
+    }
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(start_10_argv_has_bind_not_wallet)
 {
     modelnet::HelperLaunchConfig cfg;
@@ -816,6 +847,57 @@ BOOST_AUTO_TEST_CASE(getmodel_opens_btx_share_file)
     BOOST_CHECK_EQUAL(result["status"].get_str(), "local");
     BOOST_CHECK(result["uri"].get_str().rfind("btx://", 0) == 0);
     BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(exportmodellink_writes_only_new_or_share_files)
+{
+    const fs::path tmp = m_path_root / "export-link-path";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x87, true);
+    const auto export_to = [&](const fs::path& p, std::string& code) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", "exportmodellink");
+        UniValue params(UniValue::VARR);
+        params.push_back(imported.model_id.Hex());
+        params.push_back(fs::PathToString(p));
+        rpc.pushKV("params", params);
+        UniValue result;
+        std::string err;
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    const auto text_of = [](const fs::path& p) {
+        const auto bytes = ReadFileBytes(p);
+        return std::string(bytes.begin(), bytes.end());
+    };
+    std::string code;
+
+    // A new file, then the same share file again.
+    const fs::path link = tmp / "granite.btx";
+    BOOST_CHECK(export_to(link, code));
+    BOOST_CHECK(export_to(link, code));
+    BOOST_CHECK(text_of(link).find("btx://") != std::string::npos);
+
+    // Any other existing file is left as it was.
+    const fs::path notes = tmp / "notes.txt";
+    std::ofstream{notes} << "keep me\n";
+    BOOST_CHECK(!export_to(notes, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK_EQUAL(text_of(notes), "keep me\n");
+
+    // A symlink is not followed, whether its target exists or not.
+    const fs::path victim = tmp / "victim.txt";
+    std::ofstream{victim} << "keep me\n";
+    fs::create_symlink(victim, tmp / "to-victim.btx");
+    BOOST_CHECK(!export_to(tmp / "to-victim.btx", code));
+    BOOST_CHECK_EQUAL(text_of(victim), "keep me\n");
+    fs::create_symlink(tmp / "missing.txt", tmp / "dangling.btx");
+    BOOST_CHECK(!export_to(tmp / "dangling.btx", code));
+    BOOST_CHECK(!fs::exists(tmp / "missing.txt"));
+
+    // A FIFO is refused instead of holding a worker until a reader opens it.
+    const fs::path fifo = tmp / "pipe.btx";
+    BOOST_REQUIRE(::mkfifo(fs::PathToString(fifo).c_str(), 0600) == 0);
+    BOOST_CHECK(!export_to(fifo, code));
 }
 
 BOOST_AUTO_TEST_CASE(hostmodel_share_card_retrieves_free_only)

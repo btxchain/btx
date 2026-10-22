@@ -5,6 +5,7 @@
 #ifndef BITCOIN_MODELNET_LAB_EXCHANGE_H
 #define BITCOIN_MODELNET_LAB_EXCHANGE_H
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -20,6 +21,13 @@ namespace modelnet {
  */
 inline constexpr size_t MAX_EXCHANGE_OBJECTS = 100000;
 inline constexpr size_t MAX_EXCHANGE_OBJECT_BYTES = 1024 * 1024;
+
+/**
+ * Longest one loopback lab call may wait for its peer, in total. The caller
+ * holds the lab lock for the whole call, so a peer that never answers must
+ * not hold it, or node shutdown, for longer than this.
+ */
+inline constexpr std::chrono::milliseconds LOOPBACK_DEADLINE{std::chrono::seconds{120}};
 
 struct ExchangeObject {
     std::string kind;
@@ -52,19 +60,22 @@ bool PullExchangeLoopback(const std::string& host, uint16_t port, const std::str
 
 /**
  * One JSON-RPC lab035 call to 127.0.0.1. Any other host is BTX035_SCOPE_DENIED.
- * result_json is the inner result object.
+ * result_json is the inner result object. No full answer within `deadline` is BTX035_TRANSPORT.
  */
 bool LabCallLoopback(const std::string& host, uint16_t port, const std::string& rpc_user,
                      const std::string& rpc_password, const std::string& method,
-                     const std::string& params_json, std::string& result_json, std::string& err);
+                     const std::string& params_json, std::string& result_json, std::string& err,
+                     std::chrono::milliseconds deadline = LOOPBACK_DEADLINE);
 
 /**
- * POST `body_json` to `http://127.0.0.1:port/btx-model/3/` + `route`.
- * A non-200 body that is a BTX035_* code is returned in `err`.
+ * POST `body_json` to `http://127.0.0.1:port/btx-model/3/` + `route` with the peer's RPC credential,
+ * which the route requires. A non-200 body that is a BTX035_* code is returned in `err`.
+ * No full answer within `deadline` is BTX035_TRANSPORT.
  */
 bool PeerRouteLoopback(const std::string& host, uint16_t port, const std::string& rpc_user,
                        const std::string& rpc_password, const std::string& route,
-                       const std::string& body_json, std::string& result_json, std::string& err);
+                       const std::string& body_json, std::string& result_json, std::string& err,
+                       std::chrono::milliseconds deadline = LOOPBACK_DEADLINE);
 
 struct LoopbackPeer {
     std::string host;

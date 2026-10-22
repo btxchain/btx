@@ -319,6 +319,9 @@ public:
     //! Relay dust fee setting (-dustrelayfee), reflecting lowest rate it's economical to spend.
     virtual CFeeRate relayDustFee() = 0;
 
+    //! Virtual bytes charged per sigop by relay policy (-bytespersigop).
+    virtual unsigned int bytesPerSigOp() = 0;
+
     //! Check if any block has been pruned.
     virtual bool havePruned() = 0;
 

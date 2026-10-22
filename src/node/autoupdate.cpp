@@ -26,6 +26,7 @@
 #include <cassert>
 #include <charconv>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <limits>
@@ -864,22 +865,21 @@ AutoUpdateStatus SilentStatusForVerifierFailure(bool missing_signature)
 
 bool WriteExactFile(const fs::path& path, const std::vector<unsigned char>& bytes)
 {
+    // Flush, sync and close before the rename. A buffered write that fails
+    // only at close (a full disk) or a crash before the data reaches the disk
+    // would otherwise leave an empty file under the final name.
     const fs::path tmp = path + ".tmp";
-    {
-        std::ofstream out{tmp, std::ios::binary | std::ios::trunc};
-        if (!out.is_open()) return false;
-        if (!bytes.empty()) {
-            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        }
-        if (!out.good()) {
-            fs::remove(tmp);
-            return false;
-        }
-    }
-    if (!RenameOver(tmp, path)) {
-        fs::remove(tmp);
+    FILE* file{fsbridge::fopen(tmp, "wb")};
+    if (!file) return false;
+    const bool written{bytes.empty() || fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{fclose(file) == 0};
+    if (!committed || !closed || !RenameOver(tmp, path)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
         return false;
     }
+    DirectoryCommit(path.parent_path());
     return true;
 }
 
@@ -1221,6 +1221,11 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
         bool corrupt_highest{false};
         highest_accepted = ReadHighestAcceptedVersion(config.datadir, corrupt_highest);
         if (corrupt_highest) {
+            // Refused, as the installer refuses it, but this does not clear on
+            // its own, so say it at the default level and not only under
+            // -debug=autoupdate.
+            LogWarning("Auto-update is paused: %s is empty or unreadable. Fix or remove it to resume (a missing file sets no floor).\n",
+                       fs::PathToString(HighestAcceptedVersionPath(config.datadir)));
             result.status = AutoUpdateStatus::BAD_MANIFEST;
             result.detail = "highest accepted version state is unreadable";
             return result;
@@ -1243,16 +1248,6 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
         return result;
     }
 
-    if (!config.datadir.empty()) {
-        const bool raise = !highest_accepted ||
-                           CompareAutoUpdateVersionStrings(*highest_accepted, manifest->version) > 0;
-        if (raise && !WriteHighestAcceptedVersion(config.datadir, manifest->version)) {
-            result.status = AutoUpdateStatus::LAUNCH_FAILED;
-            result.detail = "unable to persist highest accepted version";
-            return result;
-        }
-    }
-
     // Staged/canary gate: the manifest is signed, so rollout_percent is trusted. Apply only if this
     // node's stable cohort is within the rolled-out fraction; otherwise defer (not an error) and the
     // node will re-check on the normal interval as the operator widens the rollout.
@@ -1265,6 +1260,20 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
     if (config.require_script_hash && !LooksLikeSHA256Hex(manifest->script_sha256)) {
         result.status = AutoUpdateStatus::SCRIPT_HASH_MISSING;
         return result;
+    }
+
+    // Raise the floor only for a release this node takes: inside its rollout
+    // cohort and installable. A canary outside this cohort, or a manifest
+    // staged at 0%, must not make this node refuse a lower release that is
+    // rolled out to it later.
+    if (!config.datadir.empty()) {
+        const bool raise = !highest_accepted ||
+                           CompareAutoUpdateVersionStrings(*highest_accepted, manifest->version) > 0;
+        if (raise && !WriteHighestAcceptedVersion(config.datadir, manifest->version)) {
+            result.status = AutoUpdateStatus::LAUNCH_FAILED;
+            result.detail = "unable to persist highest accepted version";
+            return result;
+        }
     }
 
     if (!config.seamless) {

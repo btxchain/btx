@@ -23,6 +23,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 
@@ -42,6 +43,28 @@ void CloseSock(int fd)
 #else
     close(fd);
 #endif
+}
+
+/** Bound each connect, send and recv on a loopback lab socket by `timeout`. */
+void SetSocketTimeout(int fd, std::chrono::milliseconds timeout)
+{
+    if (timeout < std::chrono::milliseconds{1}) timeout = std::chrono::milliseconds{1};
+#ifdef _WIN32
+    const DWORD ms = static_cast<DWORD>(timeout.count());
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&ms), sizeof(ms));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&ms), sizeof(ms));
+#else
+    timeval tv{};
+    tv.tv_sec = static_cast<time_t>(timeout.count() / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((timeout.count() % 1000) * 1000);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+std::chrono::milliseconds Remaining(std::chrono::steady_clock::time_point end)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(end - std::chrono::steady_clock::now());
 }
 
 std::string EnvOrEmpty(const char* key)
@@ -75,6 +98,25 @@ void AppendPeerList(std::vector<std::string>& tokens, const std::string& list)
             start = i + 1;
         }
     }
+}
+
+/** Base64 of `user:password` for an HTTP Basic Authorization header. */
+std::string BasicCredential(const std::string& user, const std::string& password)
+{
+    const std::string raw = user + ":" + password;
+    static const char* kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string auth;
+    for (size_t i = 0; i < raw.size(); i += 3) {
+        const unsigned int a = static_cast<unsigned char>(raw[i]);
+        const unsigned int b = i + 1 < raw.size() ? static_cast<unsigned char>(raw[i + 1]) : 0;
+        const unsigned int c = i + 2 < raw.size() ? static_cast<unsigned char>(raw[i + 2]) : 0;
+        const unsigned int triple = (a << 16) | (b << 8) | c;
+        auth.push_back(kB64[(triple >> 18) & 63]);
+        auth.push_back(kB64[(triple >> 12) & 63]);
+        auth.push_back(i + 1 < raw.size() ? kB64[(triple >> 6) & 63] : '=');
+        auth.push_back(i + 2 < raw.size() ? kB64[triple & 63] : '=');
+    }
+    return auth;
 }
 
 // Loopback only. Does not dial DNS or any host other than 127.0.0.1.
@@ -156,7 +198,8 @@ bool VerifyExchangeManifest(const std::string& manifest_json, std::vector<Exchan
 
 bool LabCallLoopback(const std::string& host, uint16_t port, const std::string& rpc_user,
                      const std::string& rpc_password, const std::string& method,
-                     const std::string& params_json, std::string& result_json, std::string& err)
+                     const std::string& params_json, std::string& result_json, std::string& err,
+                     std::chrono::milliseconds deadline)
 {
     result_json.clear();
     std::string parsed_host;
@@ -176,21 +219,8 @@ bool LabCallLoopback(const std::string& host, uint16_t port, const std::string& 
     const std::string body = rpc_body.write();
     std::ostringstream request;
     request << "POST / HTTP/1.1\r\nHost: 127.0.0.1:" << port
-            << "\r\nAuthorization: Basic ";
-    const std::string raw = rpc_user + ":" + rpc_password;
-    static const char* kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string auth;
-    for (size_t i = 0; i < raw.size(); i += 3) {
-        const unsigned int a = static_cast<unsigned char>(raw[i]);
-        const unsigned int b = i + 1 < raw.size() ? static_cast<unsigned char>(raw[i + 1]) : 0;
-        const unsigned int c = i + 2 < raw.size() ? static_cast<unsigned char>(raw[i + 2]) : 0;
-        const unsigned int triple = (a << 16) | (b << 8) | c;
-        auth.push_back(kB64[(triple >> 18) & 63]);
-        auth.push_back(kB64[(triple >> 12) & 63]);
-        auth.push_back(i + 1 < raw.size() ? kB64[(triple >> 6) & 63] : '=');
-        auth.push_back(i + 2 < raw.size() ? kB64[triple & 63] : '=');
-    }
-    request << auth << "\r\nContent-Type: application/json\r\nContent-Length: " << body.size()
+            << "\r\nAuthorization: Basic " << BasicCredential(rpc_user, rpc_password)
+            << "\r\nContent-Type: application/json\r\nContent-Length: " << body.size()
             << "\r\nConnection: close\r\n\r\n"
             << body;
 
@@ -200,6 +230,8 @@ bool LabCallLoopback(const std::string& host, uint16_t port, const std::string& 
 #endif
     const int fd = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
     if (fd < 0) return Fail(err, "BTX035_TRANSPORT");
+    const auto end = std::chrono::steady_clock::now() + deadline;
+    SetSocketTimeout(fd, deadline);
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
@@ -224,6 +256,11 @@ bool LabCallLoopback(const std::string& host, uint16_t port, const std::string& 
     std::string response;
     char buf[4096];
     while (true) {
+        if (Remaining(end).count() <= 0) {
+            CloseSock(fd);
+            return Fail(err, "BTX035_TRANSPORT");
+        }
+        SetSocketTimeout(fd, Remaining(end));
         const auto n = recv(fd, buf, sizeof(buf), 0);
         if (n < 0) {
             CloseSock(fd);
@@ -255,7 +292,8 @@ bool LabCallLoopback(const std::string& host, uint16_t port, const std::string& 
 
 bool PeerRouteLoopback(const std::string& host, uint16_t port, const std::string& rpc_user,
                        const std::string& rpc_password, const std::string& route,
-                       const std::string& body_json, std::string& result_json, std::string& err)
+                       const std::string& body_json, std::string& result_json, std::string& err,
+                       std::chrono::milliseconds deadline)
 {
     result_json.clear();
     std::string parsed_host;
@@ -266,17 +304,18 @@ bool PeerRouteLoopback(const std::string& host, uint16_t port, const std::string
     }
     std::ostringstream request;
     request << "POST /btx-model/3/" << route << " HTTP/1.1\r\nHost: 127.0.0.1:" << port
+            << "\r\nAuthorization: Basic " << BasicCredential(rpc_user, rpc_password)
             << "\r\nContent-Type: application/json\r\nContent-Length: " << body_json.size()
             << "\r\nConnection: close\r\n\r\n"
             << body_json;
-    (void)rpc_user;
-    (void)rpc_password;
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return Fail(err, "BTX035_TRANSPORT");
 #endif
     const int fd = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
     if (fd < 0) return Fail(err, "BTX035_TRANSPORT");
+    const auto end = std::chrono::steady_clock::now() + deadline;
+    SetSocketTimeout(fd, deadline);
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
@@ -301,6 +340,11 @@ bool PeerRouteLoopback(const std::string& host, uint16_t port, const std::string
     std::string response;
     char buf[4096];
     while (true) {
+        if (Remaining(end).count() <= 0) {
+            CloseSock(fd);
+            return Fail(err, "BTX035_TRANSPORT");
+        }
+        SetSocketTimeout(fd, Remaining(end));
         const auto n = recv(fd, buf, sizeof(buf), 0);
         if (n < 0) {
             CloseSock(fd);

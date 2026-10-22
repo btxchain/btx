@@ -7,6 +7,7 @@
 #include <logging.h>
 #include <modelnet/helper.h>
 #include <modelnet/profile.h>
+#include <tinyformat.h>
 #include <univalue.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
@@ -601,6 +602,23 @@ bool HelperSupervisor::Start(std::string& err)
         // START-03: never start a spawn loop that could pick up a packaged substitute.
         return true;
     }
+#ifndef WIN32
+    if (const std::string sock = fs::PathToString(m_cfg.rpc_socket);
+        !m_cfg.external_socket && sock.size() >= sizeof(sockaddr_un::sun_path)) {
+        // UnixRpcListenPath() found no short private directory. The helper
+        // could never bind this path, so do not start a loop that respawns
+        // it every 15 seconds.
+        err = strprintf("helper socket path %s is %u bytes, over the %u-byte limit; set XDG_RUNTIME_DIR to a private directory or use a shorter -datadir",
+                        sock, sock.size(), sizeof(sockaddr_un::sun_path) - 1);
+        std::lock_guard<std::mutex> lock(m_mu);
+        m_st.state = HelperState::FAILED_RETRYING;
+        m_st.error = err;
+        m_st.managed_by_btxd = true;
+        if (m_cfg.required) return false;
+        LogPrintf("model helper: %s; monetary node continues\n", err);
+        return true;
+    }
+#endif
     m_stop.store(false);
     m_thread = std::thread([this] { Loop(); });
     if (m_cfg.required) {

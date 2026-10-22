@@ -8218,9 +8218,11 @@ RPCHelpMan z_sendtoaddress()
             std::optional<std::vector<ShieldedCoin>> conflict_selection;
             if (conflict_txid.has_value()) {
                 std::string conflict_error;
-                conflict_selection = WITH_LOCK(
-                    pwallet->m_shielded_wallet->cs_shielded,
-                    return pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error));
+                {
+                    // GetConflictSpendSelection() takes cs_wallet: lock it first.
+                    LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                    conflict_selection = pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error);
+                }
                 if (!conflict_selection.has_value()) {
                     throw JSONRPCError(
                         RPC_INVALID_PARAMETER,
@@ -8643,9 +8645,11 @@ RPCHelpMan z_sendmany()
             std::optional<std::vector<ShieldedCoin>> conflict_selection;
             if (conflict_txid.has_value()) {
                 std::string conflict_error;
-                conflict_selection = WITH_LOCK(
-                    pwallet->m_shielded_wallet->cs_shielded,
-                    return pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error));
+                {
+                    // GetConflictSpendSelection() takes cs_wallet: lock it first.
+                    LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                    conflict_selection = pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error);
+                }
                 if (!conflict_selection.has_value()) {
                     throw JSONRPCError(
                         RPC_INVALID_PARAMETER,

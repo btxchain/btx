@@ -102,6 +102,26 @@ std::shared_ptr<wallet::CWallet> WalletForModelFunding(const JSONRPCRequest& req
     return wallet::GetWalletForJSONRPCRequest(wallet_req);
 }
 
+/** Wallets a release card may be joined against for this caller. An -rpcauth
+ *  wallet restriction limits the join to the authorized wallet, and "-" to none.
+ *  Never throws. */
+std::vector<std::shared_ptr<wallet::CWallet>> WalletsForObservation(const JSONRPCRequest& request)
+{
+    try {
+        node::NodeContext& node = EnsureAnyNodeContext(request.context);
+        if (!node.wallet_loader || !node.wallet_loader->context()) return {};
+        JSONRPCRequest wallet_req = request;
+        node.wallet_loader->assignContextHACK(wallet_req.context);
+        wallet::WalletContext& context = wallet::EnsureWalletContext(wallet_req.context);
+        std::string authorized;
+        if (!GetWalletRestrictionFromJSONRPCRequest(request, authorized)) return wallet::GetWallets(context);
+        if (authorized == "-") return {};
+        if (auto w = wallet::GetWallet(context, authorized)) return {w};
+    } catch (...) {
+    }
+    return {};
+}
+
 wallet::FrozenFundingQuote QuoteFromRequest(const std::string& release_id, const UniValue& options)
 {
     wallet::FrozenFundingQuote q;
@@ -198,21 +218,10 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
                             }
                         }
                         if (kh.empty() && scripts.empty() && funding_ops.empty()) return;
+                        const std::vector<std::shared_ptr<wallet::CWallet>> held = WalletsForObservation(request);
                         std::vector<wallet::CWallet*> wallets;
-                        std::vector<std::shared_ptr<wallet::CWallet>> held;
-                        try {
-                            node::NodeContext& node = EnsureAnyNodeContext(request.context);
-                            if (node.wallet_loader && node.wallet_loader->context()) {
-                                JSONRPCRequest wallet_req = request;
-                                node.wallet_loader->assignContextHACK(wallet_req.context);
-                                wallet::WalletContext& context = wallet::EnsureWalletContext(wallet_req.context);
-                                held = wallet::GetWallets(context);
-                                for (const auto& w : held) {
-                                    if (w) wallets.push_back(w.get());
-                                }
-                            }
-                        } catch (...) {
-                            wallets.clear();
+                        for (const auto& w : held) {
+                            if (w) wallets.push_back(w.get());
                         }
                         if (wallets.empty()) return;
                         UniValue obs = wallet::ObserveReleaseFunding(wallets, kh, rh, scripts, funding_ops);
@@ -222,7 +231,11 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
                             obs.pushKV("release_id", card["release_id"].get_str());
                         }
                         modelnet::ApplyChainObservationJson(card, obs);
-                        if (obs.exists("confirmed_known") && obs["confirmed_known"].isTrue()) {
+                        // The helper keeps one shared view. A wallet-restricted
+                        // caller saw only part of the wallets: do not store that.
+                        std::string restriction;
+                        if (!GetWalletRestrictionFromJSONRPCRequest(request, restriction) &&
+                            obs.exists("confirmed_known") && obs["confirmed_known"].isTrue()) {
                             UniValue ingest_params(UniValue::VARR);
                             ingest_params.push_back(obs);
                             UniValue ign;
