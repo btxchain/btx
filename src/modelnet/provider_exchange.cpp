@@ -60,10 +60,18 @@ bool ParseProviderHint(const UniValue& obj, int64_t now_ms, int64_t ttl_ms, Prov
         out.availability_summary = obj["availability"].get_str().substr(0, 64);
     }
     int64_t expiry = now_ms + ttl_ms;
-    if (obj.exists("expiry") && obj["expiry"].isNum()) {
-        expiry = obj["expiry"].getInt<int64_t>();
-    } else if (obj.exists("ttl_ms") && obj["ttl_ms"].isNum()) {
-        expiry = now_ms + obj["ttl_ms"].getInt<int64_t>();
+    try {
+        if (obj.exists("expiry") && obj["expiry"].isNum()) {
+            expiry = obj["expiry"].getInt<int64_t>();
+        } else if (obj.exists("ttl_ms") && obj["ttl_ms"].isNum()) {
+            const int64_t peer_ttl = obj["ttl_ms"].getInt<int64_t>();
+            expiry = peer_ttl <= 0 ? now_ms : now_ms + std::min(peer_ttl, ttl_ms);
+        }
+    } catch (const std::exception&) {
+        // isNum() is also true for a number outside int64 or with a fraction,
+        // and getInt() throws for those. This is a peer's message.
+        err = "expiry range";
+        return false;
     }
     if (expiry > now_ms + ttl_ms) expiry = now_ms + ttl_ms;
     if (expiry <= now_ms) {
