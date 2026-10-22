@@ -230,6 +230,15 @@ contrib/modelnet/btx-model unhost qwen3-local
 
 `unhostmodel` does not delete catalog bytes. It is stop-seed + drop Keep.
 
+To **delete** a model's local pieces and its `exportmodelpath` checkout, use
+`removemodel` (refused with `IN_USE` while a retrieve for it is queued or
+running; never spends):
+
+```bash
+btx-cli removemodel 'qwen3-local'
+contrib/modelnet/btx-model rm qwen3-local
+```
+
 ## 3. Search
 
 The Models page default is a **network directory** (Latest), not a local-only
@@ -415,6 +424,7 @@ Never spends. No remote inference. Scratch helper socket only.
 | `pins [--type pinned\|seeded\|both]` | `listmodels` filtered to kept/served rows (`ipfs pin ls` analog) |
 | `alias` / `rm-alias` | `setmodelalias` / `getmodelaliases` / `removemodelalias` |
 | `unhost` | `unhostmodel` |
+| `rm` | `removemodel` (deletes the local pieces and the checkout) |
 | `bounty-draft` | `createbountydraft` (title string or `@file.json`); `--update` / `--delete` / `--validate` |
 | `watch-scan` | `scanmodelwatch` (`getmodelwatchstatus` is RPC-only). Filesystem folder, not publisher follow. |
 

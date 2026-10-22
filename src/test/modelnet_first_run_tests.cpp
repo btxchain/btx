@@ -22,6 +22,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <fstream>
@@ -692,6 +693,9 @@ BOOST_AUTO_TEST_CASE(unix_rpc_timeout_is_short_except_long_methods)
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("loadmodel"), 24 * 60 * 60 * 1000);
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("unloadmodel"), 24 * 60 * 60 * 1000);
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("generatemodel"), 24 * 60 * 60 * 1000);
+    // removemodel deletes every piece and the checkout of a model, which can
+    // take longer than the short reply window on a large model or slow disk.
+    BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("removemodel"), 24 * 60 * 60 * 1000);
 }
 
 BOOST_AUTO_TEST_CASE(unknown_helper_rpc_fails_immediately_method_not_found)
@@ -891,6 +895,17 @@ BOOST_AUTO_TEST_CASE(btxd_unknown_method_fails_immediately_without_helper)
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     BOOST_CHECK(threw);
     BOOST_CHECK_LT(elapsed_ms, 2000);
+}
+
+BOOST_AUTO_TEST_CASE(btxd_registers_removemodel_proxy)
+{
+    // #232: the helper answers removemodel, so btxd must proxy it as it does
+    // unhostmodel; without the table row btx-cli gets "Method not found".
+    CRPCTable table;
+    RegisterModelNetRPCCommands(table);
+    const auto names = table.listCommands();
+    BOOST_CHECK(std::find(names.begin(), names.end(), "unhostmodel") != names.end());
+    BOOST_CHECK(std::find(names.begin(), names.end(), "removemodel") != names.end());
 }
 
 BOOST_AUTO_TEST_CASE(setmodelprofile_live_host_auto_does_not_advertise_empty)

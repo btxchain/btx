@@ -2,9 +2,9 @@
 """btx-model — first-run unix JSON-RPC client for a scratch btx-modeld.
 
 Verbs: init, doctor, host, preview, search, get, pull, show, ls, files, path,
-open, share, transfers, check, pins, alias, rm-alias, unhost, link, bounty-draft
-(title, JSON, or @FILE), watch-scan, plus 0.34.9-dev cloud/follow/events/mirror/
-profile (fail closed if the helper lacks the method).
+open, share, transfers, check, pins, alias, rm-alias, unhost, rm, link,
+bounty-draft (title, JSON, or @FILE), watch-scan, plus 0.34.9-dev
+cloud/follow/events/mirror/profile (fail closed if the helper lacks the method).
 
 Human door: stderr one_liners / next hints. Agent door: stdout JSON; --json
 suppresses stderr extras. Dual-door docs: HUMANS.md vs AGENTS.md.
@@ -50,6 +50,7 @@ VERBS = (
     "alias",
     "rm-alias",
     "unhost",
+    "rm",
     "link",
     "bounty-draft",
     "watch-scan",
@@ -197,6 +198,9 @@ verbs:
   alias [ID [NAME]]              getmodelaliases / setmodelalias
   rm-alias ALIAS [ID]            removemodelalias (alias lives in the signed card)
   unhost NAME                    unhostmodel: unpin + unseed in one call
+  rm NAME                        removemodel: delete the local pieces and the
+                                 runnable checkout (refused while in use, or
+                                 when NAME fits more than one local model)
   link NAME [PATH|--out PATH] [--stdout] [--force]
                                  exportmodellink: .btx magnet analog
                                  (canonical uri + copy_text; never weights)
@@ -724,6 +728,22 @@ def _resolve_user(sock: str, ref: str) -> dict[str, Any]:
 
 def _target(resolved: dict[str, Any]) -> str:
     return str(resolved.get("uri") or resolved.get("model_id") or resolved.get("input") or "")
+
+
+def _local_ids_named(sock: str, ref: str) -> list[str]:
+    """Ids of LOCAL models that have ref as an alias, name, or label.
+
+    None of these is unique: every import of model.safetensors gets that name
+    and label, and one alias can sit on two models.
+    """
+    low = ref.strip().lower()
+    rows = _local_rows(sock)
+    local = {str(r.get("model_id") or "") for r in rows}
+    named = [(r.get("model_id"), [r.get("label"), r.get("name"), *(r.get("aliases") or [])]) for r in rows]
+    named += [(a.get("model_id"), [a.get("alias")]) for a in _alias_rows(sock)]
+    named += [(c.get("model_id"), [c.get("name"), *(c.get("aliases") or [])]) for c in _search_cards(sock)]
+    hits = {str(mid or "") for mid, names in named if any(str(n or "").strip().lower() == low for n in names)}
+    return sorted((hits & local) - {""})
 
 
 def _row_for(resolved: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1561,6 +1581,35 @@ def cmd_unhost(sock: str, args: list[str]) -> None:
         },
         "unhostmodel",
     )
+
+
+def cmd_rm(sock: str, args: list[str]) -> None:
+    """`ollama rm`: delete a local model's pieces and its runnable checkout.
+    unhost only stops serving; this frees the disk. The helper refuses with
+    IN_USE while a retrieve for the model is queued or running."""
+    if len(args) != 1:
+        _die("rm requires exactly one model name, alias, id, or btx:// URI", 2)
+    ref = args[0]
+    resolved = _resolve_user(sock, ref)
+    if resolved["how"] == "unresolved":
+        _die(f"rm {ref!r}: no local alias, model name, id, or btx:// URI; run 'btx-model ls'")
+    variants = [[ref], [_target(resolved)]]
+    if resolved["how"] in ("alias", "name", "label"):
+        # rm deletes, so a name that fits more than one model is refused, not
+        # resolved to the first match.
+        ids = _local_ids_named(sock, ref)
+        if len(ids) > 1:
+            _die(f"rm {ref!r}: {len(ids)} local models match; pass one model id: {', '.join(ids)}")
+        if not ids:
+            _die(f"rm {ref!r}: no local model has this alias, name, or label; run 'btx-model ls'")
+        variants = [[ids[0]]]
+    result, err = _rpc_any(sock, "removemodel", variants, timeout=GET_TIMEOUT_S)
+    if result is not None:
+        _print(result, "removemodel")
+        return
+    if _missing_method(err):
+        _die("rm: this helper has no removemodel; 'unhost' stops serving but keeps the bytes")
+    _die(f"removemodel: {_err_text(err)}")
 
 
 def cmd_link(sock: str, args: list[str]) -> None:
@@ -2729,6 +2778,7 @@ COMMANDS = {
     "alias": cmd_alias,
     "rm-alias": cmd_rm_alias,
     "unhost": cmd_unhost,
+    "rm": cmd_rm,
     "link": cmd_link,
     "bounty-draft": cmd_bounty_draft,
     "watch-scan": cmd_watch_scan,

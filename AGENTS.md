@@ -121,7 +121,7 @@ publisher watch ([doc/modelnet/watches.md](doc/modelnet/watches.md)).
 `generate`, `host-profile`, `preview`, `search`,
 `get`, `pull`, `show`, `ls` (`--incomplete`), `share`, `transfers`, `files`,
 `path`, `check`, `pins`, `pause`, `resume`, `alias`, `rm-alias`, `unhost`,
-`link`, `bounty-draft` (`--validate` / `--update` / `--delete`), `watch-scan`.
+`rm`, `link`, `bounty-draft` (`--validate` / `--update` / `--delete`), `watch-scan`.
 Fail closed if missing: `cloud add|test|status`,
 `follow publisher|collection`, `events`, `mirror`, `profile show|set`,
 `import-plan`, `fetch`, `resolve`, `verify`, `package`, `erasure`, `torrent-status`, `origin-offer`,
