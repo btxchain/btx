@@ -64,6 +64,8 @@ struct HelperConfig {
     uint64_t auto_cap_bytes{0};
     uint64_t free_space_reserve_bytes{0};
     std::string bind; // host:port; empty = unix RPC only
+    /** Ask the default gateway to map the PQ1 port (PCP, then NAT-PMP). btxd passes its -natpmp. */
+    bool natpmp{true};
     fs::path rpc_socket;
     fs::path tls_cert;
     fs::path tls_key;

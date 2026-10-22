@@ -144,6 +144,7 @@ std::vector<std::string> BuildHelperArgv(const HelperLaunchConfig& cfg)
     argv.push_back("-modelstorage=" + (cfg.storage_arg.empty() ? std::string("auto") : cfg.storage_arg));
     argv.push_back("-modelseed=" + (cfg.seed.empty() ? std::string("auto") : cfg.seed));
     if (!cfg.bind.empty()) argv.push_back("-modelbind=" + cfg.bind);
+    if (!cfg.bind.empty() && !cfg.natpmp) argv.push_back("-modelnatpmp=0");
     if (cfg.preserve_rare) argv.push_back("-modelpreserverare");
     if (!cfg.follow_peers) argv.push_back("-modelfollowpeers=0");
     for (const auto& peer : cfg.peers) {

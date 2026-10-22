@@ -62,6 +62,7 @@ static void Usage()
         "  -modelwatch=<dir>    auto-host GGUF/SafeTensors/EXL3 dropped in this directory\n"
         "  -modelallowencrypted   allow preserve-rare of unqualified ciphertext\n"
         "  -modelbind=<ip:port>  PQ1 TLS listen address (empty = unix RPC only)\n"
+        "  -modelnatpmp=0|1     map the PQ1 port with PCP/NAT-PMP (default 1)\n"
         "  -modelrpcsocket=<path> unix JSON-RPC socket\n"
         "  -modeltransport=pq1  only accepted value; anything else fail-closes\n"
         "  -modeltlscert=<file>  self-signed ML-DSA certificate\n"
@@ -168,6 +169,7 @@ int main(int argc, char* argv[])
                 return 1;
             }
         } else if (auto v = take("-modelbind"); !v.empty()) cfg.bind = v;
+        else if (auto v = take("-modelnatpmp"); !v.empty()) cfg.natpmp = !(v == "0" || v == "false" || v == "off");
         else if (auto v = take("-modelrpcsocket"); !v.empty()) cfg.rpc_socket = v.c_str();
         else if (auto v = take("-modeltransport"); !v.empty()) transport = v;
         else if (auto v = take("-modeltlscert"); !v.empty()) cfg.tls_cert = v.c_str();
