@@ -27,6 +27,7 @@
 #include <cassert>
 #include <charconv>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <limits>
@@ -866,22 +867,21 @@ AutoUpdateStatus SilentStatusForVerifierFailure(bool missing_signature)
 
 bool WriteExactFile(const fs::path& path, const std::vector<unsigned char>& bytes)
 {
+    // Flush, sync and close before the rename. A buffered write that fails
+    // only at close (a full disk) or a crash before the data reaches the disk
+    // would otherwise leave an empty file under the final name.
     const fs::path tmp = path + ".tmp";
-    {
-        std::ofstream out{tmp, std::ios::binary | std::ios::trunc};
-        if (!out.is_open()) return false;
-        if (!bytes.empty()) {
-            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        }
-        if (!out.good()) {
-            fs::remove(tmp);
-            return false;
-        }
-    }
-    if (!RenameOver(tmp, path)) {
-        fs::remove(tmp);
+    FILE* file{fsbridge::fopen(tmp, "wb")};
+    if (!file) return false;
+    const bool written{bytes.empty() || fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{fclose(file) == 0};
+    if (!committed || !closed || !RenameOver(tmp, path)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
         return false;
     }
+    DirectoryCommit(path.parent_path());
     return true;
 }
 

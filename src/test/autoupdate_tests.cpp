@@ -20,6 +20,7 @@
 #include <boost/signals2/connection.hpp>
 #include <boost/test/unit_test.hpp>
 
+#include <csignal>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -27,6 +28,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifndef WIN32
+#include <sys/resource.h>
+#endif
 
 namespace {
 
@@ -764,6 +769,44 @@ BOOST_AUTO_TEST_CASE(pq_ml_dsa_signature_path_launches_and_rejects_tamper)
     BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("ecdsa") == nullptr);
     BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("not-a-scheme") == nullptr);
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(failed_state_write_is_not_reported_as_written)
+{
+    // RLIMIT_FSIZE 0 fails every write that grows a file (EFBIG), the way a
+    // full disk fails the flush at close.
+    Harness first;
+    first.config.datadir = m_path_root;
+    first.AddManifest();
+    first.AddSignature();
+    first.AddScript();
+    struct rlimit old_limit {};
+    BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit no_growth{old_limit};
+    no_growth.rlim_cur = 0;
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &no_growth) == 0);
+    const auto during{first.Run()};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    BOOST_CHECK(during.status == node::AutoUpdateStatus::LAUNCH_FAILED);
+    BOOST_CHECK_EQUAL(first.runner.calls, 0);
+    BOOST_CHECK(!fs::exists(m_path_root / "autoupdate" / "highest-accepted-version"));
+
+    // Once writes work again the next poll proceeds normally.
+    Harness later;
+    later.config.datadir = m_path_root;
+    later.AddManifest();
+    later.AddSignature();
+    later.AddScript();
+    BOOST_CHECK(later.Run().status == node::AutoUpdateStatus::LAUNCHED);
+    std::ifstream mark_in{m_path_root / "autoupdate" / "highest-accepted-version"};
+    std::string marked;
+    std::getline(mark_in, marked);
+    BOOST_CHECK_EQUAL(marked, "99.0.0");
+}
+#endif
 
 // End-to-end artifact generator: when BTX_AUTOUPDATE_E2E_DIR + BTX_AUTOUPDATE_E2E_BASEURL are
 // set, emit a real ML-DSA-44-signed manifest, signature, installer, and public key so a live
