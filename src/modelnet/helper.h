@@ -123,9 +123,11 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop = nullptr);
  *
  * Linux sockaddr_un.sun_path is 108 bytes. A path that does not fit, or that
  * would sit directly in a sticky world-writable directory, is remapped under
- * XDG_RUNTIME_DIR/btx-modeld (mode 0700). There is no /tmp/btx-md-*.sock
- * fallback. Both sides must use this mapping. A pre-created /tmp socket is
- * not a running helper.
+ * <runtime dir>/btx-modeld (mode 0700). The runtime dir is XDG_RUNTIME_DIR;
+ * without it, /run/user/<uid> (or /run for root) when only that user can
+ * write there, and the per-user temporary directory on macOS. There is no
+ * /tmp/btx-md-*.sock fallback. Both sides must use this mapping. A
+ * pre-created /tmp socket is not a running helper.
  */
 fs::path UnixRpcListenPath(const fs::path& requested);
 

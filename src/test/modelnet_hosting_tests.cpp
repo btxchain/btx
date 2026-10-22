@@ -451,6 +451,37 @@ BOOST_AUTO_TEST_CASE(start_03_explicit_missing_does_not_spawn)
     BOOST_CHECK(sup.Snapshot().managed_by_btxd);
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(start_socket_path_that_cannot_fit_does_not_spawn)
+{
+    // A runtime dir too long to shorten anything: the mapped path cannot fit.
+    const char* saved = std::getenv("XDG_RUNTIME_DIR");
+    const std::string saved_value = saved ? saved : "";
+    const fs::path long_dir = m_path_root / fs::PathFromString(std::string(120, 'r'));
+    ::setenv("XDG_RUNTIME_DIR", fs::PathToString(long_dir).c_str(), 1);
+    for (const bool required : {false, true}) {
+        modelnet::HelperLaunchConfig cfg;
+        cfg.helper_exe = fs::PathFromString("/bin/true");
+        cfg.modeldir = m_path_root / "modeldir";
+        cfg.rpc_socket = long_dir / "modelnet" / "modeld.sock";
+        cfg.required = required;
+        modelnet::HelperSupervisor sup(std::move(cfg));
+        std::string err;
+        BOOST_CHECK_EQUAL(sup.Start(err), !required);
+        BOOST_CHECK(err.find("over the") != std::string::npos);
+        BOOST_CHECK(err.find("XDG_RUNTIME_DIR") != std::string::npos);
+        BOOST_CHECK(sup.Snapshot().state == modelnet::HelperState::FAILED_RETRYING);
+        BOOST_CHECK(sup.Snapshot().pid <= 0);
+        BOOST_CHECK_EQUAL(sup.Snapshot().restart_count, 0);
+    }
+    if (saved) {
+        ::setenv("XDG_RUNTIME_DIR", saved_value.c_str(), 1);
+    } else {
+        ::unsetenv("XDG_RUNTIME_DIR");
+    }
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(start_10_argv_has_bind_not_wallet)
 {
     modelnet::HelperLaunchConfig cfg;

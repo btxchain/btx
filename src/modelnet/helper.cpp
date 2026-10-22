@@ -122,6 +122,17 @@ bool LooksLikeTmpFallbackSock(const fs::path& sock)
     return s.find("/tmp/btx-md-") != std::string::npos || s.find("/var/tmp/btx-md-") != std::string::npos;
 }
 
+#if !defined(WIN32) && !defined(__APPLE__)
+// Only `owner` (and root) can add entries: a real directory, not a symlink,
+// owned by `owner`, with no group or other write bit.
+bool OwnerOnlyDir(const fs::path& dir, uid_t owner)
+{
+    struct stat st {};
+    return ::lstat(fs::PathToString(dir).c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == owner &&
+           (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+#endif
+
 fs::path RuntimeSockDir()
 {
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
@@ -133,6 +144,16 @@ fs::path RuntimeSockDir()
     char tmp[1024];
     const size_t n = ::confstr(_CS_DARWIN_USER_TEMP_DIR, tmp, sizeof(tmp));
     if (n > 1 && n <= sizeof(tmp) && tmp[0] == '/') return fs::PathFromString(tmp) / "btx-modeld";
+#elif !defined(WIN32)
+    // XDG_RUNTIME_DIR is often missing under cron, su, sudo and in
+    // containers. Use the login runtime directory it would have named, or
+    // /run for root. Nobody else can add entries to either, so btx-modeld/
+    // cannot be pre-created there by another user; ListenUnix() still makes
+    // it 0700 and checks its owner.
+    const uid_t uid = ::getuid();
+    const fs::path user_run = fs::PathFromString(strprintf("/run/user/%u", static_cast<unsigned>(uid)));
+    if (OwnerOnlyDir(user_run, uid)) return user_run / "btx-modeld";
+    if (uid == 0 && OwnerOnlyDir(fs::PathFromString("/run"), 0)) return fs::PathFromString("/run/btx-modeld");
 #endif
     return {};
 }
