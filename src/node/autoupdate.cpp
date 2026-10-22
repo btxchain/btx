@@ -1223,6 +1223,11 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
         bool corrupt_highest{false};
         highest_accepted = ReadHighestAcceptedVersion(config.datadir, corrupt_highest);
         if (corrupt_highest) {
+            // Refused, as the installer refuses it, but this does not clear on
+            // its own, so say it at the default level and not only under
+            // -debug=autoupdate.
+            LogWarning("Auto-update is paused: %s is empty or unreadable. Fix or remove it to resume (a missing file sets no floor).\n",
+                       fs::PathToString(HighestAcceptedVersionPath(config.datadir)));
             result.status = AutoUpdateStatus::BAD_MANIFEST;
             result.detail = "highest accepted version state is unreadable";
             return result;
