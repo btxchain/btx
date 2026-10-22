@@ -7,6 +7,7 @@
 #include <rpc/server.h>
 #include <crypto/sha256.h>
 #include <modelnet/acl.h>
+#include <modelnet/canonical_codec.h>
 #include <modelnet/catalog.h>
 #include <modelnet/cores.h>
 #include <modelnet/crypto.h>
@@ -171,6 +172,61 @@ BOOST_AUTO_TEST_CASE(record_vectors)
             std::vector<unsigned char> trunc(encoded.begin(), encoded.end() - 1);
             BOOST_CHECK(!modelnet::DecodeRecord(kind, trunc, decoded, err));
         }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(typed_record_expiry_above_int64_is_refused)
+{
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    UniValue body(UniValue::VOBJ);
+    modelnet::FillRecordCommon(body, 1, modelnet::ResearchIdentityId(pk), 1700000000, 0);
+    body.pushKV("expires_at", uint64_t{1} << 63);
+    body.pushKV("display_name", "card");
+    body.pushKV("description", "");
+    std::vector<unsigned char> payload, sig;
+    modelnet::Digest48 rid;
+    BOOST_REQUIRE(modelnet::SignTypedRecord(modelnet::RECORD_IDENTITY_CARD, body, sk, payload, sig, rid, err));
+    UniValue decoded;
+    modelnet::Digest48 got;
+    bool ok{true};
+    BOOST_CHECK_NO_THROW(ok = modelnet::VerifyTypedRecord(modelnet::RECORD_IDENTITY_CARD, payload, sig, pk, 1700000000, decoded, got, err));
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(err, "expiry out of range");
+}
+
+BOOST_AUTO_TEST_CASE(typed_record_string_must_be_utf8)
+{
+    UniValue body(UniValue::VOBJ);
+    modelnet::FillRecordCommon(body, 1, modelnet::Digest48{}, 1700000000, 0);
+    body.pushKV("display_name", std::string{"\xff\xfe"});
+    body.pushKV("description", "");
+    std::vector<unsigned char> encoded;
+    std::string err;
+    BOOST_REQUIRE(modelnet::EncodeRecord(modelnet::RECORD_IDENTITY_CARD, body, encoded, err));
+    UniValue decoded;
+    BOOST_CHECK(!modelnet::DecodeRecord(modelnet::RECORD_IDENTITY_CARD, encoded, decoded, err));
+    BOOST_CHECK_EQUAL(err, "invalid UTF-8");
+
+    body.pushKV("display_name", std::string{"caf\xc3\xa9"});
+    BOOST_REQUIRE(modelnet::EncodeRecord(modelnet::RECORD_IDENTITY_CARD, body, encoded, err));
+    BOOST_CHECK(modelnet::DecodeRecord(modelnet::RECORD_IDENTITY_CARD, encoded, decoded, err));
+}
+
+BOOST_AUTO_TEST_CASE(envelope_version_is_compared_as_a_number_token)
+{
+    for (const std::string version : {"1", "1.5", "1e0", "4294967297"}) {
+        UniValue body;
+        BOOST_REQUIRE(body.read(R"({"envelope_version":)" + version +
+                                R"(,"record_type":"x","network_id":"x","signer_id":"x","public_key_hex":"x","delegation_id":"x","payload":{}})"));
+        std::vector<unsigned char> preimage;
+        std::string err;
+        bool ok{true};
+        BOOST_CHECK_NO_THROW(ok = modelnet::EnvelopePreimage(body, preimage, err));
+        BOOST_CHECK(!ok);
+        // Version 1 passes the version check and stops at the unknown record type.
+        BOOST_CHECK_EQUAL(err, version == "1" ? "record type" : "envelope version");
     }
 }
 

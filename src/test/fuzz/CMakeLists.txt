@@ -60,6 +60,7 @@ add_executable(fuzz
   kitchen_sink.cpp
   load_external_block_file.cpp
   locale.cpp
+  matmul_attestation.cpp
   merkleblock.cpp
   message.cpp
   miniscript.cpp
@@ -155,6 +156,38 @@ target_link_libraries(fuzz
   Boost::headers
   libevent::extra
 )
+if(UNIX AND NOT APPLE)
+  # GNU ld scans each static archive once. With the model plane on,
+  # bitcoin_node calls into bitcoin_wallet and bitcoin_modelnet, so link the
+  # archives as one group, the same way test_btx does.
+  if(TARGET bitcoin_wallet)
+    target_link_btx_linux_archive_group(fuzz
+      test_fuzz
+      test_util
+      bitcoin_cli
+      ${BTX_NODE_WALLET_ARCHIVES}
+    )
+  else()
+    target_link_btx_linux_archive_group(fuzz
+      test_fuzz
+      test_util
+      bitcoin_cli
+      ${BTX_NODE_ARCHIVES}
+    )
+  endif()
+endif()
+
+if(WITH_MODELNET)
+  target_sources(fuzz
+    PRIVATE
+      modelnet_canonical_codec.cpp
+      modelnet_lab_api.cpp
+      modelnet_lab_peer.cpp
+      modelnet_signed_envelope.cpp
+      modelnet_typed_records.cpp
+  )
+  target_link_libraries(fuzz bitcoin_modelnet)
+endif()
 
 if(ENABLE_WALLET)
   add_subdirectory(${PROJECT_SOURCE_DIR}/src/wallet/test/fuzz wallet)
