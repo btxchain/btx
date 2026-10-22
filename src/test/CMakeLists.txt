@@ -581,6 +581,7 @@ if(WITH_MODELNET)
     modelnet_store2_tests.cpp
     modelnet_cloud_tests.cpp
     modelnet_bounty_tests.cpp
+    modelnet_envelope_dupkey_tests.cpp
     modelnet_submandate_tests.cpp
     modelnet_bounty_script_spend_tests.cpp
     modelnet_economy_tests.cpp

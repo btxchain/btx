@@ -867,4 +867,35 @@ BOOST_AUTO_TEST_CASE(epoch_rotation_preserves_stempool_entries)
     BOOST_FAIL("failed to enter stem mode with live relay peers");
 }
 
+BOOST_AUTO_TEST_CASE(local_stem_suppresses_inventory_until_embargo_is_gone)
+{
+    ConnmanTestMsg connman{0x1337, 0x1337, *m_node.addrman, *m_node.netgroupman, Params()};
+    NodeId next_id{0};
+    AddDandelionPeer(connman, next_id, /*keyed_netgroup=*/71, 0x0D0D0D0D, true);
+    AddDandelionPeer(connman, next_id, /*keyed_netgroup=*/72, 0x0E0E0E0E, true);
+
+    Dandelion::DandelionManager manager;
+    manager.Initialize(&connman);
+    BOOST_REQUIRE(RotateUntilStemMode(manager));
+
+    const CTransactionRef tx = CreateTestTx();
+    const uint256 txid = tx->GetHash();
+    const size_t tx_size = ::GetSerializeSize(TX_WITH_WITNESS(tx));
+    auto [result, dest] = manager.AcceptStemTransaction(tx, /*from_peer=*/-1, tx_size);
+    BOOST_CHECK(result == Dandelion::DandelionManager::AcceptResult::ACCEPTED);
+    BOOST_CHECK(dest.has_value());
+    BOOST_CHECK(manager.IsInStemPool(txid));
+    BOOST_CHECK(Dandelion::DandelionManager::SuppressInventoryRelay(manager.IsInStemPool(txid)));
+
+    // A restarted process keeps the mempool transaction and loses the
+    // stempool. The bloom filter can still remember the txid; that must not
+    // keep the persisted unbroadcast retry quiet.
+    BOOST_CHECK(manager.RemoveFromStemPool(txid));
+    BOOST_CHECK(!manager.IsInStemPool(txid));
+    BOOST_CHECK(manager.HaveStemTx(txid));
+    BOOST_CHECK(!Dandelion::DandelionManager::SuppressInventoryRelay(manager.IsInStemPool(txid)));
+
+    connman.ClearTestNodes();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

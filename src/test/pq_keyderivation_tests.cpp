@@ -3,6 +3,7 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <crypto/hkdf_sha256_32.h>
+#include <crypto/sha256.h>
 #include <pq/pq_keyderivation.h>
 #include <wallet/pq_keyderivation.h>
 #include <pqkey.h>
@@ -39,6 +40,30 @@ BOOST_AUTO_TEST_CASE(determinism)
     BOOST_CHECK(key_a.has_value());
     BOOST_CHECK(key_b.has_value());
     BOOST_CHECK(key_a->GetPubKey() == key_b->GetPubKey());
+}
+
+BOOST_AUTO_TEST_CASE(pqhd_known_answer)
+{
+    // A fixed seed and path must give the same keys on every platform and
+    // build, or seed and descriptor backups restore different addresses.
+    // The official macOS 0.34.15 btxd bound ML-DSA keygen to libsodium's
+    // randombytes() and derived a random key here (fixed for new keys on
+    // the lab in 17c2da89). m/87h/1h/0h/0/0 is index 0
+    // of pqhd(<seed>/1h/0h/0/*). On regtest, index 0 of
+    // mr(pqhd(<seed>/1h/0h/0/*),pk_slh(pqhd(<seed>/1h/0h/0/*))) is
+    // btxrt1zrzz25edf2k7lktau5kzvngzy70azczl868et5w2geap8y934nl6q0lt90u.
+    const auto seed = MakeSeed(0x42);
+    const auto ml = pq::DerivePQKeyFromBIP39(seed, PQAlgorithm::ML_DSA_44, /*coin_type=*/1, /*account=*/0, /*change=*/0, /*index=*/0);
+    const auto slh = pq::DerivePQKeyFromBIP39(seed, PQAlgorithm::SLH_DSA_128S, /*coin_type=*/1, /*account=*/0, /*change=*/0, /*index=*/0);
+    BOOST_REQUIRE(ml.has_value());
+    BOOST_REQUIRE(slh.has_value());
+
+    const std::vector<unsigned char> ml_pubkey = ml->GetPubKey();
+    BOOST_REQUIRE_EQUAL(ml_pubkey.size(), MLDSA44_PUBKEY_SIZE);
+    std::array<unsigned char, CSHA256::OUTPUT_SIZE> ml_pubkey_sha256{};
+    CSHA256().Write(ml_pubkey.data(), ml_pubkey.size()).Finalize(ml_pubkey_sha256.data());
+    BOOST_CHECK_EQUAL(HexStr(ml_pubkey_sha256), "c5b1ea49059e138fccf97198820b4596183e338bdd6911261db30b0ed64c2781");
+    BOOST_CHECK_EQUAL(HexStr(slh->GetPubKey()), "c9e0f7097df04cf1b4b6886781317e5603d88de26eb7e755df6bcb733335bfb1");
 }
 
 BOOST_AUTO_TEST_CASE(path_components_affect_output)

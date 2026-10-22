@@ -1812,7 +1812,9 @@ void EnsureEconomy(ModelCatalog& cat)
     }
 }
 
-void PersistEconomy(ModelCatalog& cat)
+// g_search_mu must be held: Save() walks the index that Put() rewrites on
+// the other unix worker. The campaign lock is taken second, as elsewhere.
+static void PersistEconomyLocked(ModelCatalog& cat)
 {
     std::string err;
     (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", err);
@@ -1823,6 +1825,12 @@ void PersistEconomy(ModelCatalog& cat)
         camps = g_campaigns.List();
     }
     (void)SaveCampaigns(HelperDir(cat), camps, err);
+}
+
+void PersistEconomy(ModelCatalog& cat)
+{
+    std::lock_guard<std::mutex> lock(g_search_mu);
+    PersistEconomyLocked(cat);
 }
 
 bool ReadCatalogBytes(ModelCatalog& cat, const CatalogEntry& e, std::vector<unsigned char>& out, std::string& err)
@@ -6565,7 +6573,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             return false;
         }
         AfterIndexPut(rec, ConnNowMs());
-        PersistEconomy(cat);
+        PersistEconomyLocked(cat);
         const auto* stored = g_search_idx.Get(rec.model_id);
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
@@ -7795,8 +7803,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err = "unknown release";
                 return false;
             }
-            if (const auto* rec = g_search_idx.Get(camp.model_id)) h.rec = *rec;
-            else h.rec.model_id = camp.model_id;
+            {
+                std::lock_guard<std::mutex> lock(g_search_mu);
+                if (const auto* rec = g_search_idx.Get(camp.model_id)) h.rec = *rec;
+                else h.rec.model_id = camp.model_id;
+            }
             auto e = ComposeEconomyEntry(h, &camp, ObservationFromHit(h, &camp, &cat));
             UniValue one = CampaignToJson(camp);
             one.pushKV("lifecycle_state", ModelLifecycleName(e.lifecycle));
@@ -9067,7 +9078,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
         }
         result = FeedPageJson(items, entries, fq, cov, g_feed.Sequence(), next);
-        PersistEconomy(cat);
+        PersistEconomyLocked(cat);
         return true;
     }
     err_code = "METHOD_NOT_FOUND";
@@ -10353,7 +10364,12 @@ static void RefreshAutoStorage(HelperConfig& cfg, ModelCatalog* cat)
     g_runtime.preserve_rare = cfg.preserve_rare;
     g_runtime.follow_peers = cfg.follow_peers;
     g_runtime.upload_bps = cfg.upload_bps;
-    g_runtime.watch_dir = fs::PathToString(cfg.watch_dir);
+    // The unix RPC workers copy watch_dir without a lock, and cfg.watch_dir
+    // never changes after start. Write it only when it differs, so the 60 s
+    // refresh does not free the string while a worker is reading it.
+    if (const std::string watch{fs::PathToString(cfg.watch_dir)}; g_runtime.watch_dir != watch) {
+        g_runtime.watch_dir = watch;
+    }
     g_runtime.public_host_reachable = cfg.public_host_reachable;
     g_swarm.host = cfg.host;
     if (cfg.storage_mode == StorageMode::DISABLED) {
@@ -10483,7 +10499,8 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
         if (!body.read(resp.body) || !body.isObject()) continue;
         const UniValue models = (body.exists("local") && body["local"].exists("models")) ? body["local"]["models"] : UniValue(UniValue::VARR);
         for (const auto& m : models.getValues()) {
-            if (!m.exists("model_id") || !m.exists("seeded") || !m["seeded"].get_bool()) continue;
+            if (!m.isObject() || !m.exists("model_id") || !m["model_id"].isStr() ||
+                !m.exists("seeded") || !m["seeded"].isBool() || !m["seeded"].get_bool()) continue;
             Digest48 id;
             std::string e;
             if (!Digest48::FromHex(m["model_id"].get_str(), id, e)) continue;
@@ -10497,7 +10514,13 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
             }
             PreserveCandidate c;
             c.model_id = id;
-            c.bytes = m.exists("bytes") ? m["bytes"].getInt<uint64_t>() : 0;
+            c.bytes = 0;
+            if (m.exists("bytes") && m["bytes"].isNum()) {
+                try {
+                    c.bytes = m["bytes"].getInt<uint64_t>();
+                } catch (const std::exception&) {
+                }
+            }
             c.observed_sources = 1;
             c.peer = endpoint;
             c.admission = AdmissionLevel::BYTES_VERIFIED;
@@ -10606,7 +10629,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     g_swarm.host = cfg.host;
     g_swarm.pex.NoteSelf(cfg.bind);
     if (tcp_fd >= 0) {
-        g_swarm.nat = AttemptModelPortMap(cfg.bind, true);
+        g_swarm.nat = AttemptModelPortMap(cfg.bind, cfg.natpmp);
         const bool mapped = g_swarm.nat.status == ModelNatStatus::MAPPED;
         cfg.public_host_reachable = mapped;
         g_runtime.public_host_reachable = mapped;
@@ -10705,7 +10728,14 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             if (stop->load()) break;
             if (cat.Policy().preserve_rare ||
                 (cat.Policy().follow_configured_peers && cat.Policy().seed_mode == SeedMode::AUTO)) {
-                TryPreserveRareTick(cat, pq, pinfile, stop);
+                // The tick parses other peers' replies and nothing above this
+                // thread catches. A malformed reply must not terminate
+                // btx-modeld; skip the tick, as the inbound worker does.
+                try {
+                    TryPreserveRareTick(cat, pq, pinfile, stop);
+                } catch (const std::exception&) {
+                } catch (...) {
+                }
             }
         }
     });

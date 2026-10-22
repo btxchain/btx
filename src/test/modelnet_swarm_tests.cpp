@@ -482,4 +482,39 @@ BOOST_AUTO_TEST_CASE(swarm_extinction_labels)
     BOOST_CHECK_EQUAL(std::string(ExtinctionLabel(s)), "CURRENTLY_UNAVAILABLE");
 }
 
+BOOST_AUTO_TEST_CASE(swarm_px_numbers_outside_int64_are_refused)
+{
+    using namespace modelnet;
+    const int64_t now{1'700'000'000'000};
+    // isNum() is true for these; getInt<int64_t>() throws for the first three.
+    for (const std::string& field : {std::string{"\"expiry\":99999999999999999999999999"},
+                                     std::string{"\"ttl_ms\":99999999999999999999999999"},
+                                     std::string{"\"expiry\":1700000000001.5"}}) {
+        UniValue obj;
+        BOOST_REQUIRE(obj.read("{\"endpoint\":\"203.0.113.9:29447\"," + field + "}"));
+        ProviderHint hint;
+        std::string err;
+        bool ok{true};
+        BOOST_CHECK_NO_THROW(ok = ParseProviderHint(obj, now, PEX_DEFAULT_TTL_MS, hint, err));
+        BOOST_CHECK(!ok);
+        BOOST_CHECK_EQUAL(err, "expiry range");
+
+        ProviderExchange px;
+        UniValue body(UniValue::VOBJ);
+        UniValue recs(UniValue::VARR);
+        recs.push_back(obj);
+        body.pushKV("providers", recs);
+        std::vector<ProviderHint> acc;
+        BOOST_CHECK_NO_THROW(px.Ingest("198.51.100.1:29447", body, now, acc, err));
+        BOOST_CHECK(acc.empty());
+    }
+    // A ttl_ms near the int64 limit is capped, not added past it.
+    UniValue big;
+    BOOST_REQUIRE(big.read("{\"endpoint\":\"203.0.113.9:29447\",\"ttl_ms\":9223372036854775807}"));
+    ProviderHint hint;
+    std::string err;
+    BOOST_REQUIRE(ParseProviderHint(big, now, PEX_DEFAULT_TTL_MS, hint, err));
+    BOOST_CHECK_EQUAL(hint.expiry_ms, now + PEX_DEFAULT_TTL_MS);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

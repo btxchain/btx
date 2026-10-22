@@ -7648,7 +7648,7 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
     for (const auto& txid : unbroadcast_txids) {
         // Skip transactions currently in the Dandelion++ stempool to avoid
         // bypassing stem-phase privacy by fluffing them prematurely.
-        if (m_dandelion && m_dandelion->HaveStemTx(txid)) {
+        if (m_dandelion && Dandelion::DandelionManager::SuppressInventoryRelay(m_dandelion->IsInStemPool(txid))) {
             continue;
         }
 
@@ -9201,6 +9201,16 @@ void PeerManagerImpl::StartScheduledTasks(CScheduler& scheduler)
             // Skip if already in mempool (e.g., added via regular TX path
             // while the embargo was still active).
             if (m_mempool.exists(GenTxid::Txid(txid))) {
+                // Only a local stem transaction is in both the stempool and
+                // the mempool. BroadcastTransaction marked it unbroadcast so
+                // that a restart during the embargo still announces it. This
+                // fluff is its initial broadcast, so drop the mark now.
+                // Otherwise it stays until a peer requests the transaction
+                // from this node, which never happens once the network has it
+                // from the stem's fluff, and the post-VERACK queue keeps
+                // announcing it to every new peer until it is mined: only the
+                // originator does that.
+                m_mempool.RemoveUnbroadcastTx(txid);
                 to_relay.emplace_back(txid, tx->GetWitnessHash());
                 continue;
             }
@@ -9296,8 +9306,18 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
 void PeerManagerImpl::TransactionAddedToMempool(const NewMempoolTransactionInfo& tx, uint64_t)
 {
     // Reorg-resurrected transactions arrive here without passing through the
-    // normal peer/RPC accept path, so queue inventory relay on every mempool add.
-    RelayTransaction(tx.info.m_tx->GetHash(), tx.info.m_tx->GetWitnessHash());
+    // normal peer/RPC accept path, so they still need an inventory announcement.
+    // A local transaction enters the stempool before BroadcastTransaction
+    // releases cs_main. Announcing it here would tell every peer the originator
+    // during the embargo; if this runs first and queues an inv anyway,
+    // SendMessages drops it. BroadcastTransaction records the tx in the persisted
+    // unbroadcast set so a restart, which drops the in-memory embargo, can
+    // announce it later.
+    const uint256& txid = tx.info.m_tx->GetHash();
+    if (m_dandelion && Dandelion::DandelionManager::SuppressInventoryRelay(m_dandelion->IsInStemPool(txid))) {
+        return;
+    }
+    RelayTransaction(txid, tx.info.m_tx->GetWitnessHash());
 }
 
 /**
@@ -10230,8 +10250,11 @@ PeerManagerImpl::GetBlockDataOutcome PeerManagerImpl::ProcessGetBlockData(
 CTransactionRef PeerManagerImpl::FindTxForGetData(const Peer::TxRelay& tx_relay, const GenTxid& gtxid)
 {
     // If a tx was in the mempool prior to the last INV for this peer, permit the request.
+    // Never serve one that is still in our Dandelion++ stempool: it has not
+    // been announced, and only its originator holds it in the mempool during
+    // the stem phase.
     auto txinfo = m_mempool.info_for_relay(gtxid, tx_relay.m_last_inv_sequence);
-    if (txinfo.tx) {
+    if (txinfo.tx && !(m_dandelion && m_dandelion->IsInStemPool(txinfo.tx->GetHash()))) {
         return std::move(txinfo.tx);
     }
 
@@ -17492,6 +17515,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // the normal randomized inventory timing.
             const auto unbroadcast_txids{m_mempool.GetUnbroadcastTxs()};
             for (const auto& txid : unbroadcast_txids) {
+                if (m_dandelion && Dandelion::DandelionManager::SuppressInventoryRelay(m_dandelion->IsInStemPool(txid))) {
+                    continue;
+                }
                 const auto tx{m_mempool.get(txid)};
                 if (tx == nullptr) continue;
 
@@ -23554,6 +23580,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         if (txinfo.tx->HasShieldedBundle() && !PeerSupportsShieldedRelay(*peer, *pto)) {
                             continue;
                         }
+                        // Still in our Dandelion++ stempool: not announced yet.
+                        if (m_dandelion && m_dandelion->IsInStemPool(txinfo.tx->GetHash())) {
+                            continue;
+                        }
                         CInv inv{
                             peer->m_wtxid_relay ? MSG_WTX : MSG_TX,
                             peer->m_wtxid_relay ?
@@ -23613,6 +23643,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         // Not in the mempool anymore? don't bother sending it.
                         auto txinfo = m_mempool.info(ToGenTxid(inv));
                         if (!txinfo.tx) {
+                            continue;
+                        }
+                        // Still in our Dandelion++ stempool (stem phase)? Don't
+                        // announce it. The embargo monitor queues it again
+                        // when the transaction is fluffed.
+                        if (m_dandelion && m_dandelion->IsInStemPool(txinfo.tx->GetHash())) {
                             continue;
                         }
                         if (txinfo.tx->HasShieldedBundle() && !PeerSupportsShieldedRelay(*peer, *pto)) {

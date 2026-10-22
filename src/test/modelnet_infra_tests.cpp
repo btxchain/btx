@@ -7,6 +7,7 @@
 
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
+#include <modelnet/model_nat.h>
 #include <modelnet/piece_ranges.h>
 #include <modelnet/profile.h>
 #include <modelnet/reachability.h>
@@ -442,6 +443,21 @@ BOOST_AUTO_TEST_CASE(infra_12_profile_restart_persist)
     BOOST_CHECK(!p2.relay);
     BOOST_CHECK_EQUAL(p2.auto_cap_bytes, PERSONAL_AUTO_CAP_BYTES);
     BOOST_CHECK(!p2.preserve_rare);
+}
+
+BOOST_AUTO_TEST_CASE(infra_13_natpmp_off_reaches_helper)
+{
+    using namespace modelnet;
+    HelperLaunchConfig cfg;
+    cfg.bind = "0.0.0.0:29447";
+    BOOST_CHECK(!ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
+    cfg.natpmp = false;
+    BOOST_CHECK(ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
+    // No PQ1 listener, nothing to map.
+    cfg.bind.clear();
+    BOOST_CHECK(!ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
+    // Disabled mapping never looks for a gateway.
+    BOOST_CHECK(AttemptModelPortMap("0.0.0.0:29447", /*enable=*/false).status == ModelNatStatus::DISABLED);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

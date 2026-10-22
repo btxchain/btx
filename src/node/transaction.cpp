@@ -20,6 +20,7 @@
 #include <init.h>
 
 #include <future>
+#include <optional>
 
 namespace node {
 static TransactionError HandleATMPError(const TxValidationState& state, std::string& err_string_out)
@@ -54,6 +55,10 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
     uint256 wtxid = tx->GetWitnessHash();
     bool callback_set = false;
     int active_height{0};
+    // Set under cs_main right after the mempool add, before any inventory can
+    // be sent (see below).
+    bool stemmed = false;
+    std::optional<NodeId> stem_dest;
 
     {
         LOCK(cs_main);
@@ -109,6 +114,23 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
 
             // Transaction was accepted to the mempool.
 
+            // Enter the stempool now, before cs_main is released. The mempool
+            // add may already have queued an inv (TransactionAddedToMempool),
+            // but SendMessages holds cs_main while it announces and skips a
+            // transaction that is in the stempool, so that inv never goes
+            // out. Entering before the mempool add would leave a rejected
+            // transaction in the stem bloom filter, and a retry of the same
+            // transaction would then be announced instead of stemmed.
+            active_height = node.chainman->ActiveHeight();
+            if (relay && node.dandelion && node.dandelion->IsActive(active_height)) {
+                const size_t tx_size = ::GetSerializeSize(TX_WITH_WITNESS(tx));
+                auto [stem_result, dest] = node.dandelion->AcceptStemTransaction(tx, /*from_peer=*/-1, tx_size);
+                if (stem_result == Dandelion::DandelionManager::AcceptResult::ACCEPTED && dest.has_value()) {
+                    stemmed = true;
+                    stem_dest = dest;
+                }
+            }
+
             if (wait_callback && node.validation_signals) {
                 // For transactions broadcast from outside the wallet, make sure
                 // that the wallet has been notified of the transaction before
@@ -136,44 +158,35 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
     }
 
     if (relay) {
-        bool stemmed = false;
-
-        // Use Dandelion++ stem relay if available and active.
-        if (node.dandelion && node.dandelion->IsActive(active_height)) {
-            const size_t tx_size = ::GetSerializeSize(TX_WITH_WITNESS(tx));
-            auto [result, relay_dest] = node.dandelion->AcceptStemTransaction(tx, /*from_peer=*/-1, tx_size);
-            if (result == Dandelion::DandelionManager::AcceptResult::ACCEPTED && relay_dest.has_value()) {
-                bool sent_dltx = false;
-                node.connman->ForNode(relay_dest.value(), [&](CNode* pnode) {
-                    if (pnode->m_supports_dandelion) {
-                        node.connman->PushMessage(pnode, NetMsg::Make(NetMsgType::DLTX, TX_WITH_WITNESS(tx)));
-                        sent_dltx = true;
-                    }
-                    return true;
-                });
-                if (sent_dltx) {
-                    stemmed = true;
-                } else {
-                    // DLTX not sent (peer disconnected or doesn't support
-                    // Dandelion); remove from stempool and relay normally.
-                    node.dandelion->RemoveFromStemPool(txid);
-                    node.peerman->RelayTransaction(txid, wtxid);
+        if (stemmed && stem_dest.has_value()) {
+            bool sent_dltx = false;
+            node.connman->ForNode(stem_dest.value(), [&](CNode* pnode) {
+                if (pnode->m_supports_dandelion) {
+                    node.connman->PushMessage(pnode, NetMsg::Make(NetMsgType::DLTX, TX_WITH_WITNESS(tx)));
+                    sent_dltx = true;
                 }
-            } else {
-                // Dandelion couldn't stem — relay normally.
+                return true;
+            });
+            if (!sent_dltx) {
+                // DLTX was not sent. Drop the embargo and announce normally.
+                node.dandelion->RemoveFromStemPool(txid);
+                stemmed = false;
                 node.peerman->RelayTransaction(txid, wtxid);
             }
-        } else {
+        } else if (!node.dandelion || !Dandelion::DandelionManager::SuppressInventoryRelay(node.dandelion->IsInStemPool(txid))) {
+            // No live embargo. This covers ordinary relay and a resubmit of a
+            // transaction whose stem already ended. A resubmit that is still
+            // embargoed must not be turned into an inv.
             node.peerman->RelayTransaction(txid, wtxid);
         }
 
-        if (!stemmed) {
-            // Only add to unbroadcast set when NOT using Dandelion++ stem relay.
-            // When stemmed, the embargo mechanism handles rebroadcast; adding to
-            // the unbroadcast set would cause ReattemptInitialBroadcast to fluff
-            // the transaction to all peers, bypassing Dandelion++ privacy.
-            node.mempool->AddUnbroadcastTx(txid);
-        }
+        // Record every locally submitted transaction, including one that is
+        // currently stemmed. ReattemptInitialBroadcast and the post-verack
+        // path skip a txid that is still in the stempool, so this does not
+        // fluff during the embargo. The set is stored in mempool.dat. After a
+        // restart the stempool is gone and the transaction is announced again
+        // instead of sitting in the mempool with unbroadcast=false.
+        node.mempool->AddUnbroadcastTx(txid);
     }
 
     return TransactionError::OK;

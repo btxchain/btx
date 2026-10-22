@@ -20,6 +20,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -3250,6 +3252,11 @@ bool CanonicalizeHcpBindHost(std::string& host)
     return inet_pton(AF_INET, host.c_str(), &parsed) == 1;
 }
 
+// A request gets this long, in total, to arrive. The daemon serves one
+// connection at a time, so without a total bound a client that stops sending,
+// or keeps sending slowly, would hold this single-threaded loop.
+static constexpr std::chrono::seconds HCP_REQUEST_READ_DEADLINE{5};
+
 int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket, std::atomic<bool>* stop)
 {
     cfg.automatic_spend_atoms = 0;
@@ -3298,12 +3305,35 @@ int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket,
         if (select(fd + 1, &rf, nullptr, nullptr, &tv) <= 0) continue;
         int cfd = accept(fd, nullptr, nullptr);
         if (cfd < 0) continue;
+        timeval rcv_to{};
+        rcv_to.tv_sec = 2;
+        rcv_to.tv_usec = 0;
+        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
+        // The engine admits a CR12 import chunk up to HCP_CR12_MAX_STAGE_BYTES
+        // and answers 413 above max_body_bytes for everything else, so read no
+        // more than the larger bound plus room for the request head.
+        const size_t accum_cap = static_cast<size_t>(std::max<int64_t>(cfg.max_body_bytes, HCP_CR12_MAX_STAGE_BYTES)) + 8192;
+        const auto read_deadline{std::chrono::steady_clock::now() + HCP_REQUEST_READ_DEADLINE};
         std::string reqs;
         char buf[4096];
         size_t content_len = 0;
+        bool drop_client = false;
         for (;;) {
+            if (std::chrono::steady_clock::now() >= read_deadline || (stop != nullptr && stop->load())) {
+                drop_client = true;
+                break;
+            }
             ssize_t n = recv(cfd, buf, sizeof(buf), 0);
-            if (n <= 0) break;
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                drop_client = true;
+                break;
+            }
+            if (n == 0) break;
+            if (static_cast<size_t>(n) > accum_cap - std::min(accum_cap, reqs.size())) {
+                drop_client = true;
+                break;
+            }
             reqs.append(buf, static_cast<size_t>(n));
             auto blank = reqs.find("\r\n\r\n");
             if (blank == std::string::npos) continue;
@@ -3312,7 +3342,15 @@ int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket,
             if (cl != std::string::npos) {
                 content_len = static_cast<size_t>(std::strtoul(headers.c_str() + cl + 15, nullptr, 10));
             }
+            if (blank + 4 > accum_cap || content_len > accum_cap - (blank + 4)) {
+                drop_client = true;
+                break;
+            }
             if (reqs.size() >= blank + 4 + content_len) break;
+        }
+        if (drop_client) {
+            close(cfd);
+            continue;
         }
         HcpHttpRequest hr;
         hr.method = "GET";

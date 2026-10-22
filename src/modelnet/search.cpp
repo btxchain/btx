@@ -1049,8 +1049,11 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
         err = "index cap";
         return false;
     }
-    const std::string pub = r.publisher_identity.Hex();
-    if (!pub.empty() && !r.publisher_identity.IsNull()) {
+    // Charge the key that signed the record (verified above). publisher_identity
+    // is a field the record states about itself and is not bound to the signer,
+    // so it is not a sound quota key.
+    const std::string pub = verified && !r.signer_id.IsNull() ? r.signer_id.Hex() : std::string{};
+    if (!pub.empty()) {
         if (m_pub_window[pub] > 64) {
             err = "publisher spam";
             return false;

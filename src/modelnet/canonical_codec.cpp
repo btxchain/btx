@@ -458,6 +458,12 @@ bool CanonicalEncode(const UniValue& value, std::vector<unsigned char>& out, std
     case UniValue::VOBJ: {
         std::map<std::string, UniValue> kv;
         value.getObjMap(kv);
+        if (kv.size() != value.getKeys().size()) {
+            // getObjMap keeps the last of two equal keys, but operator[] and
+            // every reader of the parsed object see the first one.
+            err = "duplicate JSON key";
+            return false;
+        }
         if (kv.size() > CANONICAL_MAX_FIELDS) {
             err = "object bound";
             return false;
