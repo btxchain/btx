@@ -1040,8 +1040,17 @@ bool CWallet::Unlock(const SecureString& strWalletPassphrase)
             if (Unlock(_vMasterKey)) {
                 // Now that we've unlocked, upgrade the key metadata
                 UpgradeKeyMetadata();
-                // Now that we've unlocked, upgrade the descriptor cache
-                UpgradeDescriptorCache();
+                // Now that we've unlocked, upgrade the descriptor cache. The
+                // upgrade is best-effort: the wallet is already unlocked here,
+                // so an exception must not escape to callers that would then
+                // skip their relock (walletpassphrase, EncryptWallet,
+                // exportwalletbundle). The upgrade flag stays unset, so the
+                // upgrade is retried on the next unlock.
+                try {
+                    UpgradeDescriptorCache();
+                } catch (const std::exception& e) {
+                    WalletLogPrintf("Descriptor cache upgrade after unlock failed: %s\n", e.what());
+                }
                 return true;
             }
         }

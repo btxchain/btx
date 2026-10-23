@@ -1356,6 +1356,72 @@ BOOST_AUTO_TEST_CASE(encrypted_import_persists_pq_seed_as_ciphertext)
     }
 }
 
+BOOST_AUTO_TEST_CASE(mismatched_pq_cache_does_not_leave_wallet_unlocked)
+{
+    // CWallet::Unlock() runs UpgradeDescriptorCache() after the master key is
+    // already in memory. For a wallet whose cached index-0 ML-DSA pubkey is not
+    // the one its seed derives, that upgrade used to throw from
+    // DescriptorCache::MergeAndDiff(), and the exception left Unlock() with the
+    // wallet unlocked: EncryptWallet() skipped its final Lock(), and the
+    // walletpassphrase and exportwalletbundle callers skipped their relock.
+    // EncryptWallet() must finish with the wallet locked, and Unlock() must
+    // succeed.
+    const std::array<unsigned char, 32> pq_seed = MakePQSeed(0xD5);
+
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    {
+        LOCK(wallet->cs_wallet);
+        wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet->m_keypool_size = 2;
+        for (const bool internal : {false, true}) {
+            WalletDescriptor w_desc = GeneratePQWalletDescriptor(pq_seed, internal);
+            BOOST_REQUIRE(w_desc.descriptor);
+
+            // Cache index 0 as the seed derives it, then change the cached
+            // ML-DSA pubkey so that re-deriving index 0 no longer matches.
+            FlatSigningProvider out_keys;
+            std::vector<CScript> scripts;
+            BOOST_REQUIRE(w_desc.descriptor->Expand(0, DUMMY_SIGNING_PROVIDER, scripts, out_keys, &w_desc.cache));
+            size_t changed{0};
+            for (const auto& [key_exp_pos, by_index] : w_desc.cache.GetCachedDerivedPQPubKeys(PQAlgorithm::ML_DSA_44)) {
+                for (const auto& [der_index, pubkey] : by_index) {
+                    std::vector<unsigned char> other_pubkey{pubkey};
+                    other_pubkey.back() ^= 0x01;
+                    w_desc.cache.CacheDerivedPQPubKey(PQAlgorithm::ML_DSA_44, key_exp_pos, der_index, other_pubkey);
+                    ++changed;
+                }
+            }
+            BOOST_REQUIRE_EQUAL(changed, 1U);
+
+            auto* spkm = wallet->AddWalletDescriptor(w_desc, FlatSigningProvider{}, "", internal);
+            BOOST_REQUIRE(spkm != nullptr);
+            wallet->AddActiveScriptPubKeyMan(spkm->GetID(), OutputType::P2MR, internal);
+        }
+        // The descriptor cache upgrade has not run yet, so the next unlock runs it.
+        BOOST_REQUIRE(!wallet->IsWalletFlagSet(WALLET_FLAG_LAST_HARDENED_XPUB_CACHED));
+    }
+
+    // EncryptWallet() commits the master key, then locks and unlocks again.
+    // It must still finish and leave the wallet locked.
+    bool encrypted{false};
+    BOOST_CHECK_NO_THROW(encrypted = wallet->EncryptWallet("encrypt"));
+    BOOST_CHECK(encrypted);
+    BOOST_CHECK(wallet->IsCrypted());
+    BOOST_CHECK(wallet->IsLocked());
+
+    // The right passphrase unlocks without an error, and the wallet locks again.
+    bool unlocked{false};
+    BOOST_CHECK_NO_THROW(unlocked = wallet->Unlock("encrypt"));
+    BOOST_CHECK(unlocked);
+    BOOST_CHECK(!wallet->IsLocked());
+    BOOST_CHECK(wallet->Lock());
+    BOOST_CHECK(wallet->IsLocked());
+
+    // A wrong passphrase is still rejected.
+    BOOST_CHECK(!wallet->Unlock("wrong passphrase"));
+    BOOST_CHECK(wallet->IsLocked());
+}
+
 // =============================================================================
 // Cross-descriptor PQ key merge tests
 // =============================================================================

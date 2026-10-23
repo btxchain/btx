@@ -3528,6 +3528,30 @@ void DescriptorScriptPubKeyMan::UpgradeDescriptorCache()
         return;
     }
 
+    // Expand() had no read cache, so it also re-derived the PQ pubkeys at
+    // index 0, which are normally cached already. If the wallet's seed does not
+    // derive a cached PQ pubkey (for example one written by a build with a
+    // different PQ key derivation), keep the cached pubkey: this wallet's
+    // scripts and coins use it. This upgrade only adds the last hardened
+    // xpubs, so a mismatch is logged rather than failing the wallet load.
+    for (PQAlgorithm algo : {PQAlgorithm::ML_DSA_44, PQAlgorithm::SLH_DSA_128S}) {
+        const PQPubKeyExprMap derived_pubkeys = temp_cache.GetCachedDerivedPQPubKeys(algo);
+        for (const auto& [key_exp_pos, pubkeys] : derived_pubkeys) {
+            for (const auto& [der_index, derived_pubkey] : pubkeys) {
+                std::vector<unsigned char> cached_pubkey;
+                if (!m_wallet_descriptor.cache.GetCachedDerivedPQPubKey(algo, key_exp_pos, der_index, cached_pubkey) ||
+                    cached_pubkey == derived_pubkey) {
+                    continue;
+                }
+                WalletLogPrintf("Warning: descriptor %s: the cached %s pubkey at index %u is not the key this wallet's seed derives. "
+                                "Keeping the cached pubkey, which this wallet's scripts use. This wallet cannot sign with it; "
+                                "coins sent to it can only be spent through another leaf.\n",
+                                GetID().ToString(), algo == PQAlgorithm::ML_DSA_44 ? "ML-DSA-44" : "SLH-DSA-128s", der_index);
+                temp_cache.CacheDerivedPQPubKey(algo, key_exp_pos, der_index, cached_pubkey);
+            }
+        }
+    }
+
     // Cache the last hardened xpubs
     DescriptorCache diff = m_wallet_descriptor.cache.MergeAndDiff(temp_cache);
     if (!WalletBatch(m_storage.GetDatabase()).WriteDescriptorCacheItems(GetID(), diff)) {
