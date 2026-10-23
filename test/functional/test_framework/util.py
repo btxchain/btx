@@ -468,6 +468,12 @@ def write_config(config_path, *, n, chain, extra_config="", disable_autoconnect=
         f.write("upnp=0\n")
         f.write("natpmp=0\n")
         f.write("shrinkdebugfile=0\n")
+        # Modelnet stays on: every node still starts btx-modeld with its unix
+        # RPC socket. Only the PQ1 listener is off, because every helper
+        # would bind the same fixed port 29447 and all but one fail with a
+        # bind error on stderr. A test that needs PQ1 passes
+        # -modelbind=<ip:port>; the command line overrides the config.
+        f.write("modelbind=off\n")
         f.write("deprecatedrpc=create_bdb\n")  # Required to run the tests
         # To improve SQLite wallet performance so that the tests don't timeout, use -unsafesqlitesync
         f.write("unsafesqlitesync=1\n")

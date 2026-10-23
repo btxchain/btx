@@ -281,6 +281,12 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
         if (auto value{m_node.args->GetBoolArg("-resetshieldedstate")}) {
             chainman_opts.reset_shielded_state = *value;
         }
+        // Fixtures that keep the default regtest MatMul schedule can pass
+        // -matmulvalidation=economic so ConnectTip does not wait on an
+        // asynchronous ExactReplay (28fefe91) while the fixture mines.
+        if (m_node.args->GetArg("-matmulvalidation") == std::string{"economic"}) {
+            chainman_opts.matmul_validation_mode = kernel::MatMulValidationMode::ECONOMIC;
+        }
         // Honor the deep-reorg defense options from extra_args so tests can
         // exercise explicit PARK and default WARN/hysteresis paths (see
         // ApplyArgsManOptions / ActivateBestChainStep).

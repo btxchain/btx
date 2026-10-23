@@ -6251,7 +6251,9 @@ static void CheckConsensusBehindCompetingHeaders(
             release_confirmation.release.reset();
             BOOST_REQUIRE(PeermanWaitFor([&] { return !confirmations.Pending(child_hash); }));
         } else if (!ready_frontier) {
-            ASSERT_DEBUG_LOG("MatMul pending verification cap reached");
+            // dff890e3: the grandchild yields the single RC job to its
+            // retained, capacity-deferred parent instead of hitting the cap.
+            ASSERT_DEBUG_LOG("Holding the RC verification job for a lower unverified ancestor");
             send_ticketed_body(honest_grand);
         } else {
             // A fresh delivery of the selected deep-fork body must not fall
@@ -10998,8 +11000,13 @@ static void CheckReadyAcquisitionFork(node::NodeContext& m_node, bool incoming,
     BOOST_REQUIRE(peerman.RetainMatMulBodyForTest(std::make_shared<const CBlock>(b[1].first)));
     SetMockTime(std::chrono::seconds{GetTime() + 2});
     peerman.RetryMatMulDeferredBodiesForTest();
-    BOOST_CHECK_GT(replayed.load(), 0);
-    BOOST_CHECK(b[1].second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+    // Since 68f2bf3e a retained body without a connected source is replayed
+    // on the bounded worker, not on the caller: wait for it.
+    BOOST_CHECK(PeermanWaitFor([&] { return replayed.load() > 0; }));
+    BOOST_CHECK(PeermanWaitFor([&] {
+        return (WITH_LOCK(::cs_main, return b[1].second->nStatus) &
+                BLOCK_EXACT_REPLAY_VERIFIED) != 0;
+    }));
     BOOST_CHECK(!(b[2].second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
 }
 

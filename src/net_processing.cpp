@@ -16062,6 +16062,9 @@ bool PeerManagerImpl::HoldRCJobForLowerAncestor(
         if (cand == nullptr) continue;
         if ((cand->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
         if (index->GetAncestor(cand->nHeight) != cand) continue;
+        // An ancestor on the background CPU confirmation lane does not wait
+        // for the RC job; holding for it would idle the GPU slot (6b38975e).
+        if (matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(deferred.first)) continue;
         if (CanStartMatMulRCVerification(
                 m_matmul_rc_pending_verifications.load(
                     std::memory_order_relaxed),
