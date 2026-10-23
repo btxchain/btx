@@ -1,26 +1,47 @@
-# Native Model Network — example btxd bridge settings (0.34.7)
+# Native Model Network — example btxd settings
 #
 # Copy into your datadir and include from btx.conf, e.g.:
 #   includeconf=modelnet.conf
 #
-# btxd never starts btx-modeld. Run the helper separately; if it dies,
-# model RPCs fail closed and monetary consensus continues.
+# If the btx-modeld helper binary is present, btxd starts and supervises it by
+# default (modelnet=1). btxd looks for it next to itself and in libexec/;
+# modelhelper=<path> names another path. Without the binary, btxd logs
+# "btx-modeld not found next to btxd" and runs without the helper (with
+# modelnetrequired=1 it refuses to start instead). If the helper dies, model
+# RPCs fail closed and monetary consensus continues. To run the helper
+# yourself, set modelrpcsocket=<path>; btxd then connects to that socket and
+# does not spawn or kill the helper.
+#
+# The helper btxd starts listens on port 29447 on all interfaces unless
+# modelbind (below) or modelnet=0 says otherwise.
 #
 # Product contract: inference is local after acquire; automatic spend default 0;
 # FREE_ONLY never becomes paid because a timer expired. Not a remote inference
 # marketplace.
 
-# Enable model RPC proxy through btxd (default off for fresh installs).
+# The model network is on by default. modelnet=0 turns the helper off.
 # modelnet=1
 
-# Unix JSON-RPC socket (default: <datadir>/modelnet/modeld.sock)
-# modelrpcsocket=
+# PQ1 listen address of the helper btxd starts (default: port 29447 on all
+# interfaces). 0, off or none keeps the helper on its unix RPC socket; if
+# hosting is on (modelhost or modelprofile), it then listens on loopback
+# port 29447 only.
+# modelbind=<ip:port>
+# modelbind=0
+
+# A model-plane contact to start from (repeatable; not monetary addnode).
+# No model contact is compiled in.
+# modelpeer=<host:port>
+
+# Unix JSON-RPC socket (default: <datadir>/modelnet/modeld.sock). Set it only
+# for a helper you run yourself; btxd then does not start one.
+# modelrpcsocket=<path>
 
 # Optional introduction hints (require modelnet=1; not monetary AddrMan):
 # modelrelay=1
 # modelhost=1
 
-# --- btx-modeld (separate process; paste into a systemd unit or shell) ---
+# --- btx-modeld run by hand (only with modelrpcsocket=<path> set above) ---
 # build/bin/btx-modeld \
 #   -modeldir=<datadir>/modelnet \
 #   -modelstorage=80GiB \
