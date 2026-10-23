@@ -52,6 +52,7 @@ add_executable(test_btx
   disconnected_transactions.cpp
   feefrac_tests.cpp
   flatfile_tests.cpp
+  fork_hole_walk_tests.cpp
   fs_tests.cpp
   getarg_tests.cpp
   hash_tests.cpp

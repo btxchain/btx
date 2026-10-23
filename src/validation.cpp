@@ -12917,6 +12917,53 @@ const CBlockIndex* ChainstateManager::FindBestKnownAttestedIndex() const
     return best;
 }
 
+ForkHoleWalkMemo::Result ForkHoleWalkMemo::Walk(const CBlockIndex* start,
+                                                const CBlockIndex* stop)
+{
+    AssertLockHeld(::cs_main);
+    Result out;
+    for (const CBlockIndex* walk{start}; walk != stop; walk = walk->pprev) {
+        if (walk == nullptr || (walk->nStatus & BLOCK_FAILED_MASK) != 0) {
+            out.aborted = true;
+            break;
+        }
+        if (m_enabled && walk->nHeight >= m_min_height &&
+            walk->nHeight <= m_max_height) {
+            const auto it{m_entries.find(walk)};
+            if (it != m_entries.end() && it->second.stop == stop) {
+                // [walk, stop) is already summarized. Combine it with the
+                // part walked so far: the lower segment's hole is lower.
+                out.aborted = it->second.result.aborted;
+                if (it->second.result.lowest_unconnectable != nullptr) {
+                    out.lowest_unconnectable =
+                        it->second.result.lowest_unconnectable;
+                }
+                break;
+            }
+        }
+        ++m_steps;
+        if (!(walk->nStatus & BLOCK_HAVE_DATA) ||
+            !walk->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+            !walk->HaveNumChainTxs()) {
+            out.lowest_unconnectable = walk;
+        }
+    }
+    if (out.aborted) out.lowest_unconnectable = nullptr;
+    if (m_enabled && start != nullptr && start != stop) {
+        m_entries.try_emplace(start, Entry{stop, out});
+        m_min_height = std::min(m_min_height, start->nHeight);
+        m_max_height = std::max(m_max_height, start->nHeight);
+    }
+    return out;
+}
+
+static std::atomic<bool> g_fucai_hole_walk_memo{true};
+
+void ChainstateManager::SetFindUniqueCompetingAttestedIndexHoleWalkMemoForTest(bool enable)
+{
+    g_fucai_hole_walk_memo.store(enable);
+}
+
 const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
 {
     AssertLockHeld(::cs_main);
@@ -12947,6 +12994,10 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     // loser MMATTEST cannot hide the winner.
     const bool tip_has_quorum{IndexHasTrustedMatMulAuthority(tip)};
 
+    // Lives for this call only: cs_main is held throughout and nothing below
+    // modifies a CBlockIndex, so remembered walk results cannot go stale.
+    ForkHoleWalkMemo hole_walks{
+        g_fucai_hole_walk_memo.load(std::memory_order_relaxed)};
     std::vector<const CBlockIndex*> competing;
     auto consider = [&](const CBlockIndex* idx) {
         if (idx == nullptr || idx == tip ||
@@ -12998,17 +13049,13 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         // Nominate only the maximal connectable prefix below a HEADER_ONLY
         // hole. Once it is active, ordinary signed-frontier catch-up requests
         // the next body. Consensus-mode signers keep the all-or-nothing rule.
-        const CBlockIndex* lowest_unconnectable{nullptr};
-        for (const CBlockIndex* walk{idx}; walk != path_lca; walk = walk->pprev) {
-            if (walk == nullptr || (walk->nStatus & BLOCK_FAILED_MASK) != 0) {
-                return;
-            }
-            if (!(walk->nStatus & BLOCK_HAVE_DATA) ||
-                !walk->IsValid(BLOCK_VALID_TRANSACTIONS) ||
-                !walk->HaveNumChainTxs()) {
-                lowest_unconnectable = walk;
-            }
-        }
+        // Every hint above a HEADER_ONLY gap walks the same path down to the
+        // tip. The memo stops each walk at the summary of the hint below it
+        // (D + H steps per call instead of H * D; live trusted CPU mirror in
+        // IBD 2026-10-22: ~513 hints × ~205k gap = ~0.5 s per FMWC).
+        const ForkHoleWalkMemo::Result holes{hole_walks.Walk(idx, path_lca)};
+        if (holes.aborted) return;
+        const CBlockIndex* const lowest_unconnectable{holes.lowest_unconnectable};
         if (lowest_unconnectable != nullptr) {
             if (!trusted_mirror || !source_on_signed_frontier_chain) return;
             idx = lowest_unconnectable->pprev;
