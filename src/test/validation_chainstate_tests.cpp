@@ -6622,4 +6622,112 @@ BOOST_FIXTURE_TEST_CASE(phase1_only_header_does_not_become_best_header_at_securi
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(best_header_leaves_disconnected_former_tip_after_shallow_reorg, TestChain100Setup)
+{
+    // Live 0.34.15 consensus node, no -matmultrustedpubkey (IsConfigured()
+    // false), 22-23 Oct 2026: after a 1-deep reorg off its own tip,
+    // m_best_header stayed on the block it had just disconnected, so
+    // getblockchaininfo "headers" lagged "blocks" (16 times in ~43 h, worst
+    // 40 blocks for 49 min; 14 of the 16 cleared only when the hourly
+    // restart re-ran LoadBlockIndex). The ancestor floor in
+    // EnsureBestHeaderNotBehindConnectedTip cannot see a header that is not
+    // an ancestor of the tip. Regtest has no Phase-1 header gate, so the
+    // next header would re-rank m_best_header here anyway; this case pins
+    // the measured state (former tip, lighter than the new tip, off the
+    // active chain) and checks the floor clears it, while an equal-work
+    // twin and a heavier fork are left alone.
+    node::matmul_trusted::ResetForTest();
+    BOOST_REQUIRE(!node::matmul_trusted::IsConfigured());
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    const Consensus::Params& consensus{chainman.GetConsensus()};
+    const CScript script{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+
+    CBlockIndex* former_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(former_tip != nullptr);
+    const int fork_height{former_tip->nHeight};
+
+    // 1-deep reorg: a competing block at the same height plus one child.
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, former_tip));
+    for (int i = 0; i < 2; ++i) {
+        (void)CreateAndProcessBlock({}, script);
+    }
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(former_tip);
+        CBlockIndex* const tip{chainstate.m_chain.Tip()};
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE_EQUAL(tip->nHeight, fork_height + 1);
+        BOOST_REQUIRE(!chainstate.m_chain.Contains(former_tip));
+        BOOST_REQUIRE(former_tip->IsValid(BLOCK_VALID_TREE));
+        BOOST_REQUIRE((former_tip->nStatus & BLOCK_FAILED_MASK) == 0);
+        BOOST_REQUIRE(former_tip->nChainWork < tip->nChainWork);
+
+        chainman.SetBestHeader(former_tip);
+        chainman.EnsureBestHeaderNotBehindConnectedTip();
+        BOOST_CHECK_MESSAGE(
+            chainman.m_best_header == tip,
+            "unconfigured node: m_best_header must leave the disconnected "
+            "former tip (lighter than the connected tip, off the active "
+            "chain) instead of staying there until restart");
+        BOOST_CHECK_EQUAL(chainman.m_best_header->nHeight, tip->nHeight);
+    }
+
+    // The floor keeps following the tip afterwards.
+    const CBlock next_block{CreateAndProcessBlock({}, script)};
+    CBlockIndex* tip{nullptr};
+    {
+        LOCK(::cs_main);
+        tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE(tip->GetBlockHash() == next_block.GetHash());
+        chainman.EnsureBestHeaderNotBehindConnectedTip();
+        BOOST_CHECK_EQUAL(chainman.m_best_header, tip);
+    }
+
+    const auto header_child = [&](const CBlockIndex* parent, uint32_t time) {
+        CBlockHeader header{next_block.GetBlockHeader()};
+        header.hashPrevBlock = parent->GetBlockHash();
+        header.nTime = time;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            header, static_cast<uint32_t>(parent->nHeight + 1), consensus,
+            5'000'000, parent->GetMedianTimePast()));
+        BlockValidationState header_state;
+        const CBlockIndex* added{nullptr};
+        BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+            {{header}}, /*min_pow_checked=*/true, header_state, &added));
+        BOOST_REQUIRE(added != nullptr);
+        return const_cast<CBlockIndex*>(added);
+    };
+
+    // Control 1: an equal-work twin of the tip is not clamped (ties stay
+    // where they are).
+    CBlockIndex* const twin{header_child(tip->pprev, tip->nTime + 1)};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(twin != tip);
+        BOOST_REQUIRE(twin->nChainWork == tip->nChainWork);
+        chainman.SetBestHeader(twin);
+        chainman.EnsureBestHeaderNotBehindConnectedTip();
+        BOOST_CHECK_EQUAL(chainman.m_best_header, twin);
+    }
+
+    // Control 2: a heavier headers-only fork off the former tip is not
+    // clamped either.
+    CBlockIndex* heavier{former_tip};
+    for (int i = 0; i < 3; ++i) {
+        heavier = header_child(heavier, heavier->nTime + 1);
+    }
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(heavier->nChainWork > tip->nChainWork);
+        BOOST_REQUIRE(heavier->GetAncestor(tip->nHeight) != tip);
+        chainman.SetBestHeader(heavier);
+        chainman.EnsureBestHeaderNotBehindConnectedTip();
+        BOOST_CHECK_EQUAL(chainman.m_best_header, heavier);
+        BOOST_CHECK(chainstate.m_chain.Tip() == tip);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -23309,10 +23309,23 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
     const bool behind_on_active{
         m_best_header->nHeight <= tip->nHeight &&
         tip->GetAncestor(m_best_header->nHeight) == m_best_header};
+    // Independent validators (IsConfigured()==false) rank m_best_header by
+    // nChainWork alone (RecalculateBestHeader). A header off the active chain
+    // with less work than the connected tip is a branch ActivateBestChain
+    // already left, e.g. our own former tip after a 1-deep reorg. The
+    // ancestor floor above cannot see it, so floor it here too; the claimed
+    // step below still re-promotes a heavier header. A heavier or equal-work
+    // fork is untouched. Configured nodes keep the authority-steered path.
+    const bool stale_lighter_fork{
+        !behind_on_active &&
+        m_best_header->nChainWork < tip->nChainWork &&
+        !node::matmul_trusted::IsConfigured()};
     if (failed_branch) {
         SetBestHeader(tip);
     } else if (behind_on_active && m_best_header != tip &&
                m_best_header->nChainWork <= tip->nChainWork) {
+        SetBestHeader(tip);
+    } else if (stale_lighter_fork) {
         SetBestHeader(tip);
     }
 
