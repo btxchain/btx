@@ -16565,6 +16565,18 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
             pindex->GetBlockHash());
     }
 
+    // ContextualCheckBlock may have released cs_main (ExactReplay, Stage-3).
+    // Another cs_main holder may have marked this index failed in that window
+    // (invalidateblock, a failed ancestor, a test helper). RaiseValidity
+    // refuses failed entries, so storing the body now would set nTx without
+    // BLOCK_VALID_TRANSACTIONS and add a failed index as a candidate. Re-run
+    // AcceptBlockHeader's cached-invalid check under the re-acquired lock.
+    if (pindex->nStatus & BLOCK_FAILED_MASK) {
+        return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate-invalid",
+                             strprintf("block %s was marked invalid while cs_main was released",
+                                       pindex->GetBlockHash().ToString()));
+    }
+
     // G.1 duplicate-processing guard: ContextualCheckBlock may have RELEASED
     // cs_main during the v4.4 ENC-DR recompute, opening a window in which
     // another thread (a local submitblock/generateblock RPC, or reindex racing

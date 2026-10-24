@@ -11105,6 +11105,93 @@ BOOST_AUTO_TEST_CASE(incoming_acquisition_fork_replays_while_heaviest_body_missi
     CheckReadyAcquisitionFork(m_node, true);
 }
 
+// AcceptBlock drops cs_main for the ExactReplay recompute. A failure recorded
+// in that window (invalidateblock, a failed ancestor, a test helper) must not
+// be followed by ReceivedBlockTransactions: RaiseValidity refuses failed
+// entries, which would leave nTx > 0 without BLOCK_VALID_TRANSACTIONS.
+static void CheckFailureDuringReleasedCsMain(node::NodeContext& m_node, bool check_block_index)
+{
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    auto& chainman{*m_node.chainman};
+    auto& mode{const_cast<kernel::MatMulValidationMode&>(
+        chainman.m_options.matmul_validation_mode)};
+    auto& cbi{const_cast<std::optional<int32_t>&>(chainman.m_options.check_block_index)};
+    auto& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    auto restore_heights{SaveMatMulHeights(consensus)};
+    struct Cleanup {
+        ChainstateManager& chainman;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        std::optional<int32_t>& cbi;
+        std::optional<int32_t> saved_cbi;
+        ~Cleanup()
+        {
+            SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+            NeutralizeUnconnectedHeaders(chainman);
+            mode = saved_mode;
+            cbi = saved_cbi;
+        }
+    } cleanup{chainman, mode, mode, cbi, cbi};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+    if (!check_block_index) cbi = 0;
+    const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    ActivateRcAtTip(consensus, *tip);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 100});
+    chainman.m_cached_finished_ibd.store(true);
+    const auto block{std::make_shared<const CBlock>(MineTipChild(m_node, *tip, 0))};
+    const uint256 hash{block->GetHash()};
+    int fired{0};
+    SetMatMulExactReplayUnderReleasedCsMainHookForTest([&]() -> std::optional<bool> {
+        // cs_main is released here, as during a real ExactReplay.
+        LOCK(::cs_main);
+        CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(hash)};
+        if (index != nullptr && fired++ == 0) {
+            index->nStatus |= BLOCK_FAILED_VALID;
+            chainman.m_failed_blocks.insert(index);
+        }
+        return true;
+    });
+    (void)chainman.ProcessNewBlock(block, /*force_processing=*/true, /*min_pow_checked=*/true, nullptr);
+    SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+    CBlockIndex* index{nullptr};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(fired, 1);
+        index = chainman.m_blockman.LookupBlockIndex(hash);
+        BOOST_REQUIRE(index != nullptr);
+        BOOST_CHECK(index->nStatus & BLOCK_FAILED_VALID);
+        BOOST_CHECK_EQUAL(index->nTx, 0U);
+        BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+        BOOST_CHECK(chainman.ActiveTip() == tip);
+    }
+    chainman.CheckBlockIndex();
+    // reconsiderblock, then the same body again: it must connect.
+    {
+        LOCK(::cs_main);
+        chainman.ActiveChainstate().ResetBlockFailureFlags(index);
+    }
+    BlockValidationState state;
+    BOOST_CHECK(chainman.ActiveChainstate().ActivateBestChain(state));
+    (void)chainman.ProcessNewBlock(block, /*force_processing=*/true, /*min_pow_checked=*/true, nullptr);
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.ActiveTip() == index);
+        BOOST_CHECK(index->IsValid(BLOCK_VALID_TRANSACTIONS));
+    }
+    chainman.CheckBlockIndex();
+}
+
+BOOST_AUTO_TEST_CASE(acceptblock_failure_during_released_cs_main_keeps_index_consistent)
+{
+    CheckFailureDuringReleasedCsMain(m_node, /*check_block_index=*/true);
+}
+
+BOOST_AUTO_TEST_CASE(acceptblock_failure_during_released_cs_main_stores_no_body)
+{
+    CheckFailureDuringReleasedCsMain(m_node, /*check_block_index=*/false);
+}
+
 BOOST_AUTO_TEST_CASE(nearby_acquisition_fork_replays_while_deep_frontier_ready)
 {
     CheckReadyAcquisitionFork(m_node, false, true);
