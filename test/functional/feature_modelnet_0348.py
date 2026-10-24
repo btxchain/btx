@@ -327,11 +327,50 @@ class ModelNet0348Test(BitcoinTestFramework):
         src = Path(self.options.tmpdir) / "weights.bin"
         src.write_bytes(payload)
         digest = hashlib.sha384(payload).hexdigest()
-        ready = node.executebtxacquisition({
+        unlisted = node.executebtxacquisition({
             "plan_id": plan_id,
             "verified_local_files": [{
                 "path": "weights.gguf",
                 "sha384": digest,
+                "source_path": str(src),
+            }],
+        })
+        if unlisted.get("state") != "SELECTION_READY" or unlisted.get("error_code") != "MODEL_BYTES_UNVERIFIED":
+            raise AssertionError(f"caller-only digest must not authorize acquisition: {unlisted}")
+        if unlisted.get("manifest_verified") is not False or unlisted.get("file_bytes_verified") is not False:
+            raise AssertionError(f"unlisted bytes must not be verified: {unlisted}")
+        if (dest / "weights.gguf").exists():
+            raise AssertionError("unlisted file was materialized")
+        self._zero_spend(unlisted, "execute unlisted file")
+
+        # This synthetic package commits document digests, not model weights.
+        # Use one of those files to exercise the verified local lease path.
+        # A caller-provided digest of different bytes must not override the
+        # digest that the helper stored from the package at plan time.
+        committed = next(d for d in docs if d["path"] == "README.md")
+        mismatched = node.executebtxacquisition({
+            "plan_id": plan_id,
+            "verified_local_files": [{
+                "path": committed["path"],
+                "sha384": digest,
+                "source_path": str(src),
+            }],
+        })
+        if mismatched.get("state") != "SELECTION_READY" or mismatched.get("error_code") != "MODEL_BYTES_UNVERIFIED":
+            raise AssertionError(f"stored digest mismatch must fail closed: {mismatched}")
+        if mismatched.get("file_bytes_verified") is not False or (dest / committed["path"]).exists():
+            raise AssertionError(f"mismatched file must not be verified or materialized: {mismatched}")
+        self._zero_spend(mismatched, "execute mismatched file")
+
+        committed_bytes = committed["text"].encode("utf-8")
+        src.write_bytes(committed_bytes)
+        if hashlib.sha384(committed_bytes).hexdigest() != committed["sha384"]:
+            raise AssertionError("fixture document digest mismatch")
+        ready = node.executebtxacquisition({
+            "plan_id": plan_id,
+            "verified_local_files": [{
+                "path": committed["path"],
+                "sha384": committed["sha384"],
                 "source_path": str(src),
             }],
         })
@@ -341,6 +380,8 @@ class ModelNet0348Test(BitcoinTestFramework):
             raise AssertionError(f"file_bytes_verified: {ready}")
         if ready.get("runtime_executed") is True:
             raise AssertionError(f"runtime must not execute: {ready}")
+        if (dest / committed["path"]).read_bytes() != committed_bytes:
+            raise AssertionError("leased file differs from committed bytes")
         self._zero_spend(ready, "execute")
 
         cancelled = node.cancelbtxacquisition({"plan_id": plan_id})

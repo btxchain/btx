@@ -1,0 +1,8 @@
+[
+  {
+    "id": "ASR-ART-005",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "load01 reads one verified file; a second path is refused and release stays unqualified"
+  }
+]

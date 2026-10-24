@@ -58,6 +58,7 @@ add_executable(fuzz
   key.cpp
   key_io.cpp
   kitchen_sink.cpp
+  lightwatch_snapshot.cpp
   load_external_block_file.cpp
   locale.cpp
   merkleblock.cpp
@@ -155,6 +156,15 @@ target_link_libraries(fuzz
   Boost::headers
   libevent::extra
 )
+
+if(WITH_MODELNET)
+  target_sources(fuzz
+    PRIVATE
+      modelnet_lab_disk.cpp
+      modelnet_swarm.cpp
+  )
+  target_link_libraries(fuzz bitcoin_modelnet)
+endif()
 
 if(ENABLE_WALLET)
   add_subdirectory(${PROJECT_SOURCE_DIR}/src/wallet/test/fuzz wallet)

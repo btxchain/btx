@@ -1,5 +1,7 @@
 # BTX Node
 
+**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](doc/modelnet/swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+
 BTX is **hard money** — MatMul proof of work, independently validated by
 **ExactReplay** — plus an isolated **Native Model Network**.
 
@@ -12,12 +14,54 @@ genesis, and implements **Dandelion++ transaction relay** (BIP 156) for
 network-layer anonymity.
 
 **0.34.7** connected that money to **discovery**, **public-model retrieval**,
-**release campaigns**, **creation bounties**, and **preservation**. This
-tree is **0.34.9** on that isolated model plane: origin-independent
-fetch, `.btx` / `btx://` retrieve, checkout, optional GPU **load**, and
-**local generate** when the replica matches this host. A BTX node already
-has compute; the Native Model Network delivers models to it. Inference is
-**local after acquire**. BTX is not a remote inference marketplace.
+**release campaigns**, **creation bounties**, and **preservation**. Later
+0.34 lines added origin-independent fetch, `.btx` / `btx://` retrieve,
+checkout, optional GPU **load**, and **local generate** when the replica
+matches this host. This branch is **0.35.0rc1**. The map of processes,
+documents, and in-process records is
+[doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
+A BTX node already has compute; the Native Model Network delivers models
+to it. Inference is **local after acquire**. BTX is not a remote inference
+marketplace.
+
+When Modelnet is compiled, `-modelnet` defaults on. `btxd` starts a
+supervised `btx-modeld` and the swarm observer thread in the same process.
+That is the default participation path: a node takes part in the swarm by
+running, without a second daemon or an extra flag. `-modelnet=0` is how an
+operator leaves it off. A swarm failure does not stop the monetary node.
+
+About every two seconds the thread reads `catalog.json` into
+`modeldir/swarm/observers.json` when the catalog is usable. Those rows are
+observers only: no compute grant, no seeding, and no spend. An empty catalog alone authorizes no work. Native helper discovery and
+verified acquisition can populate it when an eligible admitted source exists.
+
+The thread refreshes the local mesh, integrates the catalog, runs
+`SwarmFormPlane`, and publishes the live record. `FormationPlane` does not
+exec a sidecar, open a socket, add a DNS seed, broadcast, or spend. Native
+LAN discovery, PQ1 admission and verified acquisition now run in the helper,
+with measured status in `getmodelnetworkinfo.native_participation`.
+
+Once, then latched: a memory decode of the fixed public text `abcdefgh` for
+8 bytes; a vllm pull returns `ENGINE_ABSENT`; one CPU AdamW step on a
+sequence-4 hidden-8 network; a loopback exchange of two ranks on one host;
+an integer replay of 8 pairs; one snapshot; one realm seat. That legacy
+process-local fixture refuses a second host; the native helper participation
+path has separate network observations and deployment tests.
+
+Once, then latched: `TickBind` runs the in-process requirement, the 12-step
+node cycle, the module check, and the safe-slice check. `passed()`,
+`gpu_passed()`, and `windows_passed()` stay false. Spend returns the string
+`0`. Release returns `UNQUALIFIED`.
+
+There is no `btx-swarmd` and no `btx-paynetd` on this path. The swarm is the
+thread `btxd` already started. A separate swarm program would make
+participation optional. Model RPCs go to the helper `btxd` supervises.
+Retrieval is `FREE_ONLY` and automatic spend atoms stay `0`. A verified
+catalog entry is subscribed with no further switch. The native helper now
+acquires verified FREE models from admitted peers into a bounded default
+1 GiB headless store, subject to explicit disablement and available sources.
+No available verified source means no fabricated acquisition. Detail:
+[doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
 
 Two markets sit on the model plane:
 
@@ -37,13 +81,36 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.34.15** (`CLIENT_VERSION_BUILD=15`,
-`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`). Shipping tag
-**v0.34.15**. Do not recut `v0.34.14`, `v0.34.13`, `v0.34.12`, or `v0.34.10`.
+This working tree is **0.35.0rc1** (`CLIENT_VERSION_MINOR=35`,
+`CLIENT_VERSION_BUILD=0`, `CLIENT_VERSION_RC=1`,
+`CLIENT_VERSION_IS_RELEASE=true`). `btxd -version` prints `v0.35.0rc1`.
+P2P subversion is `/BTX:0.35.0/` (no rc). This is not the shipping tag
+`v0.35.0`. The last shipping tag remains **v0.34.15**. Do not recut
+`v0.34.15`, `v0.34.14`, `v0.34.13`, `v0.34.12`, or `v0.34.10`.
 
-The private branch `private/btx-035/integration` also contains unpublished
-0.35 research gates. They are not a release and they do not change the
-version numbers above. Read [doc/modelnet/035/PRIVATE.md](doc/modelnet/035/PRIVATE.md).
+Notes: [doc/release-notes/release-notes-0.35.0.md](doc/release-notes/release-notes-0.35.0.md).
+Structure: [doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
+
+## Current delivery bounds
+
+`btxd` is the control plane. Native helper discovery and verified FREE acquisition can populate an empty catalog; execution still needs local authority. Automatic spend atoms stay 0. `preparefundmodelrelease` builds an unsigned plan and does not spend.
+
+Advertised capability is separate from qualified capability. A local model can run with an empty provider key. A KV page is copied only when fingerprints match. Recovery of a recorded balance does not stop a device and does not spend.
+
+Two physical hosts, three peers, a second GPU, Windows, macOS, offline images, and the release gates remain later work.
+
+## Later releases
+
+The next releases are the path to a fully autonomous network.
+
+- Peers find each other and admit a local group.
+- A participant acquires a verified model from another participant.
+- A person submits a task or a prompt and receives work from a model on an admitted machine.
+- A qualified machine trains on an authorized recipe, and a second machine checks the result.
+- A private defensive case runs under an explicit customer grant.
+- Accepted work settles in BTX only under a mandate the operator signed.
+
+Before any of those are claimed, the verifications still required are two physical hosts, a second GPU, Windows, macOS, a linked remote execution engine, an offline release image, the hardware profiles, and the sealed acceptance catalogue. Two local ranks on one machine are not two hosts. Spend stays 0 until a mandate exists.
 
 ## Start here
 
@@ -74,14 +141,17 @@ fabric stay in the passport's capability vector. Details:
 
 ## Table of Contents
 
+- [Current delivery bounds](#current-delivery-bounds)
+- [Later releases](#later-releases)
 - [Start here](#start-here)
 - [Pay With Compute](#pay-with-compute)
-- [Current release — v0.34.15](#current-release--v03415)
+- [This tree — 0.35.0rc1](#this-tree--0350rc1)
+- [Previous shipping release — v0.34.15](#previous-shipping-release--v03415)
 - [Previous release — v0.34.14](#previous-release--v03414)
 - [Earlier release — v0.34.13](#earlier-release--v03413)
 - [Earlier shipping line — v0.34.9](#earlier-shipping-line--v0349)
 - [This tree — 0.34.11](#this-tree--03411)
-- [This tree — 0.34.10](#this-tree--03410)
+- [Historical development line — 0.34.10](#historical-development-line--03410)
 - [Get a node](#get-a-node)
 - [Use BTX for models (end to end)](#use-btx-for-models-end-to-end)
 - [Native Model Network (0.34.7)](#native-model-network-0347)
@@ -111,10 +181,28 @@ fabric stay in the passport's capability vector. Details:
 
 ---
 
-## Current release — v0.34.15
+## This tree — 0.35.0rc1
 
-**Shipping tag is v0.34.15.** `CLIENT_VERSION_IS_RELEASE=true`.
-`btxd -version` prints `v0.34.15`. P2P subversion is `/BTX:0.34.15/`.
+**This branch reports v0.35.0rc1.** It is the 0.35 release candidate, not
+the shipping tag `v0.35.0`. `btxd` is the monetary node and, by default, the
+swarm participant. With Modelnet compiled, `-modelnet` is on. `btxd` starts
+`btx-modeld` and the swarm observer thread. The observer supervises the
+packaged `btx-guardd` over private inherited stdio and records readiness in
+`modeldir/swarm/guard-process.json`. Guard readiness grants no execution
+authority. The hosted gateway and capability tools are optional programs. They are not
+required for that default. There is no separate `btx-swarmd` or
+`btx-paynetd`, because the swarm is the thread already running inside
+`btxd`.
+
+The candidate is not release-qualified. Automatic spend stays 0. The
+process map, the public contract, and the in-process records are in
+[doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
+Notes: [doc/release-notes/release-notes-0.35.0.md](doc/release-notes/release-notes-0.35.0.md).
+
+## Previous shipping release — v0.34.15
+
+**Shipping tag was v0.34.15.** `CLIENT_VERSION_IS_RELEASE=true`.
+`btxd -version` printed `v0.34.15`. P2P subversion was `/BTX:0.34.15/`.
 Do not recut `v0.34.14` or `v0.34.13`.
 
 Miner work remains the only consensus. The 0.34.14 activation height
@@ -232,9 +320,9 @@ That line printed `v0.34.12rc1` plus a git suffix. P2P subversion was
 
 Notes: [doc/release-notes/release-notes-0.34.11.md](doc/release-notes/release-notes-0.34.11.md).
 
-## This tree — 0.34.10
+## Historical development line — 0.34.10
 
-This tree is **0.34.10-dev** on the 0.34.9 / 0.34.8 monetary baseline. It
+The historical **0.34.10-dev** tree was on the 0.34.9 / 0.34.8 monetary baseline. It
 does not change ExactReplay consensus, issuance, or fork choice. It fixes
 RB-16 acquisition-escape **admission**: ExactReplay spends GPU on the
 unique parent-connectable competing-tower frontier only; a retained
@@ -244,9 +332,9 @@ shipping tag **v0.34.9** is not recut.
 
 Notes: [doc/release-notes/release-notes-0.34.10.md](doc/release-notes/release-notes-0.34.10.md).
 
-## This tree — 0.34.9 (shipping baseline)
+## Historical shipping baseline — 0.34.9
 
-Tag **v0.34.9** is the shipping client on the 0.34.8 monetary baseline. It
+Tag **v0.34.9** was the historical shipping client on the 0.34.8 monetary baseline. It
 does not change ExactReplay, issuance, or fork choice. `btxd -version`
 prints `v0.34.9`. Tester archives (`v0.34.9-dev.pr198.*`) stay published
 and are not recut.
@@ -268,14 +356,14 @@ Notes: [doc/release-notes/release-notes-0.34.9.md](doc/release-notes/release-not
 
 ## Get a node
 
-1. **Install** a v0.34.9 archive from
+1. **Install** an appropriate shipping archive (last shipping tag recorded here: v0.34.15) from
    [GitHub releases](https://github.com/btxchain/btx/releases) (Linux CPU,
    Linux CUDA 12/13, macOS arm64 Metal), or [build from source](#building-from-source).
 2. **Fast-start** on a **fresh** chainstate with the compiled assumeutxo pin
    at height **219000** (SHA256
    `78acb7dd7eeec2a17909c6c5f7e12ffa9b4ad2ffcbd9eb464421dcd960868e7b`).
    Use `loadtxoutset`, not `loadtxoutsetattested`. Details and withdrawn-pin
-   warnings: [Current release — v0.34.9](#current-release--v0349).
+   warnings: [Historical shipping baseline — v0.34.9](#historical-shipping-baseline--0349).
 3. **Run** `btxd`. Daemon config: [Running a Node](#running-a-node).
    Operator walkthrough: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
 4. **Models** (optional): isolated helper `btx-modeld`. Copy-paste host /
@@ -285,8 +373,8 @@ Notes: [doc/release-notes/release-notes-0.34.9.md](doc/release-notes/release-not
    share, watch folder, doctor, **load**, and **generate**:
    [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
    [doc/modelnet/generate.md](doc/modelnet/generate.md)
-   (this tree **0.34.9**, `CLIENT_VERSION_IS_RELEASE=true`; shipping tag
-   **v0.34.9**). CLI wrapper:
+   (this candidate **0.35.0rc1**, `CLIENT_VERSION_IS_RELEASE=true`; last shipping tag
+   **v0.34.15**). CLI wrapper:
    [contrib/modelnet/btx-model](contrib/modelnet/btx-model)
    (people: stderr hints; agents: `--json`). Optional cloud / follow / events
    / profile **fail closed** if the helper lacks the method — not a PASS:
@@ -505,7 +593,7 @@ Escrow reuses existing P2MR templates only — no new opcode:
 - Contributor lot: `mr(cltv_multi_pq(locktime,m,keys…),refund(height,refund_key))`
 - Staged winner payout: `mr(htlc_sha256(hash,claimant),refund(height,original_refund_key))`
 
-This tree is **0.34.9** (`CLIENT_VERSION_IS_RELEASE=true`). Bounty
+This tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`). Bounty
 coordination shipped in **v0.34.7** and continues here on the isolated
 helper; the wallet still signs every spend. See
 [doc/bounties.md](doc/bounties.md) and
@@ -524,13 +612,13 @@ enhancements are expected to come from **community forks and modifications,
 not from a continuing operator release schedule on this line.** That is a
 handover, not a roadmap.
 
-**v0.34.9** is the shipping tag
-(`CLIENT_VERSION_IS_RELEASE=true`). This tree is **0.34.9**.
+**v0.34.15** is the last shipping tag recorded here. This candidate is
+**0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`).
 The Native Model Network is an **isolated in-tree plane** on the 0.34.6
 monetary baseline: it does not change ExactReplay, issuance, or fork choice,
 and it does not revoke this handover. See
 [Native Model Network (0.34.7)](#native-model-network-0347) and
-[This tree — 0.34.9](#this-tree--0349).
+[Historical shipping baseline — v0.34.9](#historical-shipping-baseline--0349).
 
 The two documents that make the handover real, rather than a slogan:
 
@@ -671,8 +759,7 @@ While Epoch A still uses ExactReplay as consensus authority, a validating
 node runs `-matmulvalidation=consensus` and needs no pin. CPU archives that
 cannot ExactReplay may opt into trusted-mirror with attestors they choose;
 that is community-fork topology, not a shipped signer set. The 0.34.1
-monetary handover still applies; this tree is **0.34.9** (shipping tag
-**v0.34.9**). Historical
+monetary handover still applies. This tree is **0.35.0rc1**. Historical
 notes live in
 [doc/btx-gpu-verified-network-transition.md](doc/btx-gpu-verified-network-transition.md).
 
@@ -688,7 +775,7 @@ feature, not a live surface. See [Shielded Pool](#shielded-pool).
 ## GPU-verified network (three-phase)
 
 That three-phase topology is **community-fork work**. The 0.34.1 monetary
-handover still applies; this tree is **0.34.9** (shipping tag **v0.34.9**).
+handover still applies. This tree is **0.35.0rc1**.
 
 Profile 1 ExactReplay is the Epoch-A consensus check. It needs a qualified
 GPU. The recommended mode is `-matmulvalidation=consensus`: **this node**
@@ -2022,7 +2109,7 @@ The RPC surface also supports:
 
 ## Contributing
 
-**This tree is 0.34.9** (`CLIENT_VERSION_IS_RELEASE=true`). The **0.34.1 monetary handover** still
+**This tree is 0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`). The **0.34.1 monetary handover** still
 stands: further monetary-consensus work is expected from community forks,
 not from a continuing operator release schedule on this line. The Native
 Model Network is an isolated in-tree plane on the 0.34.6 monetary baseline;

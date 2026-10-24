@@ -5,6 +5,14 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <common/args.h>
+#include <addresstype.h>
+#include <coins.h>
+#include <key_io.h>
+#include <modelnet/pay02/pay02.h>
+#include <node/blockstorage.h>
+#include <script/descriptor.h>
+#include <script/pqm.h>
+#include <script/signingprovider.h>
 #include <modelnet/catalog.h>
 #include <modelnet/helper.h>
 #include <modelnet/research_rpc.h>
@@ -530,11 +538,51 @@ static RPCHelpMan getreleasefeed()
     return ProxyOrLocal("getreleasefeed", "Convenience wrapper over getmodelfeed for release campaigns.\n",
                         {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "mode/limit", RPCArgOptions{.skip_type_check = true}}});
 }
+static RPCHelpMan preparemodelfunding();
+
 static RPCHelpMan preparefundmodelrelease()
 {
-    return ProxyOrLocal("preparefundmodelrelease", "Unsigned funding plan for a campaign. Never spends. automatic_spend_atoms=0. Wallet must sign/submit separately.\n",
-                        {{"release_id", RPCArg::Type::STR, RPCArg::Optional::NO, "release_id"},
-                         {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "amount or options object", RPCArgOptions{.skip_type_check = true}}});
+    return RPCHelpMan{
+        "preparefundmodelrelease",
+        "Prepare a release funding transaction. An options object invokes the local wallet coin selector and returns a signable unsigned transaction.\n"
+        "Explicit key_hash, claimant, refund_height, and amount_atoms are required; the wallet owns the refund key. Never signs or broadcasts.\n"
+        "The legacy release-id / amount form remains a helper preview and does not authorize wallet funding.\n",
+        {
+            {"release_id", RPCArg::Type::STR, RPCArg::Optional::NO, "Campaign or objective release id"},
+            {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Canonical amount (legacy preview) or explicit wallet funding options object", RPCArgOptions{.skip_type_check = true}},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "Funding plan or legacy helper preview", {
+            {RPCResult::Type::ELISION, "", "Unsigned wallet quote or helper preview fields"},
+        }},
+        RPCExamples{HelpExampleCli("preparefundmodelrelease", "\"<release_id>\" '{\"amount_atoms\":\"10000000\",...}'")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            if (request.params[1].isObject()) {
+                JSONRPCRequest wallet_request = request;
+                wallet_request.strMethod = "preparemodelfunding";
+                UniValue result = preparemodelfunding().HandleRequest(wallet_request);
+                // The new objective-facing plan uses canonical atom strings.
+                // preparemodelfunding keeps its legacy numeric result contract.
+                for (const char* field : {"amount_atoms", "fee_atoms", "fee_cap_atoms"}) {
+                    if (result[field].isNum()) result.pushKV(field, result[field].getValStr());
+                }
+                result.pushKV("plan_stage", "WALLET_PREPARED");
+                result.pushKV("automatic_spend_atoms", "0");
+                result.pushKV("wallet_authorization_required", true);
+                result.pushKV("signing_rpc", "signmodelfunding");
+                result.pushKV("submission_rpc", "submitmodelfunding");
+                return result;
+            }
+            UniValue result;
+            std::string err;
+            if (!HelperCall("preparefundmodelrelease", request.params, result, err)) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Release preview unavailable. Pass an explicit funding options object to prepare a wallet transaction: " + err);
+            }
+            result.pushKV("plan_stage", "HELPER_PREVIEW");
+            result.pushKV("wallet_prepared", false);
+            result.pushKV("signing_rpc", "preparemodelfunding");
+            return result;
+        },
+    };
 }
 static RPCHelpMan cacheencryptedmodel()
 {
@@ -1128,9 +1176,9 @@ static RPCHelpMan preparemodelfunding()
                 {"claimant_pubkey", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Alias of claimant"},
                 {"refund_pubkey", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "PQ refund pubkey hex"},
                 {"refund_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "CLTV refund height"},
-                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "HTLC output value in atoms"},
-                {"fee_cap_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Maximum network fee in atoms"},
-                {"max_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Alias of amount_atoms / approval ceiling"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC output value in atoms; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
+                {"fee_cap_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Maximum network fee in atoms; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
+                {"max_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Alias of amount_atoms / approval ceiling; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                 {"auto_pay", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Must be false; automatic spend is zero"},
             }},
         },
@@ -1210,7 +1258,7 @@ static RPCHelpMan signmodelfunding()
                 {"unsigned_txid", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Frozen unsigned txid"},
                 {"descriptor", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "mr(htlc_sha256(...),refund(...))"},
                 {"output_script", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC scriptPubKey hex"},
-                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Frozen HTLC output value"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Frozen HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                 {"key_hash", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "SHA-256 hex"},
                 {"claimant", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "claimant pubkey"},
                 {"refund_pubkey", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "refund pubkey"},
@@ -1279,15 +1327,16 @@ static RPCHelpMan submitmodelfunding()
     return RPCHelpMan{
         "submitmodelfunding",
         "Revalidate a signed model-funding transaction and broadcast it.\n"
+        "Pass the complete frozen options returned by preparemodelfunding.\n"
         "A duplicate txid is reported and is not double-spent.\n",
         {
             {"hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Signed funding transaction hex"},
-            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Frozen quote from preparemodelfunding", {
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Frozen quote from preparemodelfunding", {
                 {"unsigned_hex", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Exact unsigned template hex from prepare"},
                 {"unsigned_txid", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Frozen unsigned txid"},
                 {"descriptor", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "mr(htlc_sha256(...),refund(...))"},
                 {"output_script", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC scriptPubKey hex"},
-                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Frozen HTLC output value"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Frozen HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                 {"auto_pay", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Must be false"},
             }},
         },
@@ -1300,7 +1349,7 @@ static RPCHelpMan submitmodelfunding()
             {RPCResult::Type::NUM, "automatic_spend", "Always 0"},
             {RPCResult::Type::STR, "htlc", "Always htlc_sha256"},
         }},
-        RPCExamples{HelpExampleCli("submitmodelfunding", "\"<hex>\"")},
+        RPCExamples{HelpExampleCli("submitmodelfunding", "\"<signed_hex>\" '<frozen_options_json>'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
 #ifdef ENABLE_WALLET
@@ -1334,6 +1383,9 @@ static RPCHelpMan submitmodelfunding()
                     }
                 }
             }
+            if (!have_quote) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Frozen funding options from preparemodelfunding are required");
+            }
             int funding_vout = -1;
             if (have_quote && !frozen.output_script.empty()) {
                 for (size_t i = 0; i < mtx.vout.size(); ++i) {
@@ -1357,6 +1409,17 @@ static RPCHelpMan submitmodelfunding()
                 if (pwallet->GetWalletTx(txid)) duplicate = true;
             }
             if (node.mempool && node.mempool->exists(GenTxid::Txid(txid))) duplicate = true;
+            if (!pwallet) {
+                throw JSONRPCError(RPC_WALLET_NOT_FOUND, "The funding wallet is required to validate ownership and fees");
+            }
+            if (!wallet::ValidateFrozenFundingSubmission(*pwallet, frozen, mtx, duplicate, err)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            }
+            // Rebuilt terms, rather than the caller's output_script, identify the lot.
+            funding_vout = -1;
+            for (size_t i = 0; i < mtx.vout.size(); ++i) {
+                if (mtx.vout[i].scriptPubKey == frozen.output_script) funding_vout = static_cast<int>(i);
+            }
 
             auto result_obj = [&](bool submitted, bool dup) {
                 UniValue o(UniValue::VOBJ);
@@ -1431,6 +1494,211 @@ static RPCHelpMan submitmodelfunding()
     };
 }
 
+#ifdef ENABLE_WALLET
+class NativeNodePaymentView final : public modelnet::NativePaymentChainView {
+public:
+    NativeNodePaymentView(node::NodeContext& node, wallet::CWallet& wallet,
+                          std::map<Txid, uint256> hints)
+        : m_node(node), m_wallet(wallet), m_hints(std::move(hints)) {}
+
+    uint256 Tip() const override
+    {
+        LOCK(cs_main);
+        const auto* tip = EnsureChainman(m_node).ActiveChain().Tip();
+        return tip ? tip->GetBlockHash() : uint256{};
+    }
+    int Height() const override
+    {
+        LOCK(cs_main);
+        return EnsureChainman(m_node).ActiveChain().Height();
+    }
+    bool Lookup(const Txid& txid, modelnet::NativePaymentTransaction& out, std::string& err) const override
+    {
+        out = {};
+        uint256 block_hash;
+        {
+            LOCK(m_wallet.cs_wallet);
+            if (const wallet::CWalletTx* wtx = m_wallet.GetWalletTx(txid.ToUint256())) {
+                out.tx = wtx->tx;
+                if (const auto* confirmed = wtx->state<wallet::TxStateConfirmed>()) {
+                    block_hash = confirmed->confirmed_block_hash;
+                }
+            }
+        }
+        ChainstateManager& chainman = EnsureChainman(m_node);
+        const CBlockIndex* index = nullptr;
+        if (const auto hint = m_hints.find(txid); hint != m_hints.end()) {
+            LOCK(cs_main);
+            index = chainman.m_blockman.LookupBlockIndex(hint->second);
+            if (!index) {
+                err = "NATIVE_PAYMENT_BLOCK_UNKNOWN";
+                return false;
+            }
+            block_hash = hint->second;
+            // A user block hint is checked against actual on-disk bytes even
+            // when a wallet happens to know a transaction with that txid.
+            out.tx.reset();
+        }
+        if (!out.tx) {
+            auto found = node::GetTransaction(index, m_node.mempool.get(), txid.ToUint256(), block_hash, chainman.m_blockman);
+            if (!found || !*found) {
+                err = found ? "NATIVE_PAYMENT_TRANSACTION_UNKNOWN; provide its block hash or enable txindex" : found.error();
+                return false;
+            }
+            out.tx = *found;
+        }
+        if (!block_hash.IsNull()) {
+            LOCK(cs_main);
+            const CBlockIndex* block = chainman.m_blockman.LookupBlockIndex(block_hash);
+            if (block && chainman.ActiveChain().Contains(block)) {
+                out.block_hash = block_hash;
+                out.confirmations = chainman.ActiveChain().Height() - block->nHeight + 1;
+            }
+        }
+        err.clear();
+        return true;
+    }
+    bool Unspent(const COutPoint& point, CTxOut& out) const override
+    {
+        LOCK(cs_main);
+        if (m_node.mempool && m_node.mempool->isSpent(point)) return false;
+        const Coin& coin = EnsureChainman(m_node).ActiveChainstate().CoinsTip().AccessCoin(point);
+        if (coin.IsSpent()) return false;
+        out = coin.out;
+        return true;
+    }
+private:
+    node::NodeContext& m_node;
+    wallet::CWallet& m_wallet;
+    std::map<Txid, uint256> m_hints;
+};
+#endif
+
+static RPCHelpMan getmodelfundingsettlement()
+{
+    return RPCHelpMan{
+        "getmodelfundingsettlement",
+        "Observe an exact native model/objective HTLC against the local active chain. Never signs or broadcasts.\n"
+        "An unsigned plan, a mempool acknowledgement, an orphaned block, and a peer receipt are not settlement.\n"
+        "The settlement profile is one HTLC input and one explicit destination; quote terms are rebuilt locally.\n",
+        {
+            {"funding_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding transaction id"},
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Frozen quote plus observation expectations", {
+                {"key_hash", RPCArg::Type::STR, RPCArg::Optional::NO, "SHA-256 hashlock"},
+                {"claimant", RPCArg::Type::STR, RPCArg::Optional::NO, "Claimant PQ public key"},
+                {"refund_pubkey", RPCArg::Type::STR, RPCArg::Optional::NO, "Owner refund PQ public key"},
+                {"refund_height", RPCArg::Type::NUM, RPCArg::Optional::NO, "CLTV block height"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::NO, "Canonical principal atoms or legacy integer", RPCArgOptions{.skip_type_check = true}},
+                {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Expected claim/refund destination address; required with settlement_txid"},
+                {"max_settlement_fee_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Explicit settlement fee ceiling; required with settlement_txid", RPCArgOptions{.skip_type_check = true}},
+                {"min_confirmations", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Minimum active-chain depth, default 1"},
+                {"funding_blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional funding block location when txindex is disabled"},
+                {"settlement_blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional spending block location when txindex is disabled"},
+            }},
+            {"settlement_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Exact claim/refund transaction to observe"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "Chain-tip-bound settlement observation", {
+            {RPCResult::Type::ELISION, "", "Exact funding, branch, principal, fees, confirmations and chain tip"},
+        }},
+        RPCExamples{HelpExampleCli("getmodelfundingsettlement", "\"<funding_txid>\" '<frozen quote>'")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+#ifdef ENABLE_WALLET
+            auto pwallet = WalletForModelFunding(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+            node::NodeContext& node = EnsureAnyNodeContext(request.context);
+            const UniValue& opts = request.params[1];
+            auto quote = QuoteFromRequest("", opts);
+            std::string err;
+            if (!wallet::ValidateFundingAmount(quote.amount_atoms, err) || !wallet::BuildHtlcSha256Descriptor(quote, err)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            }
+            const Txid funding = Txid::FromUint256(ParseHashV(request.params[0], "funding_txid"));
+            std::optional<Txid> settlement;
+            if (!request.params[2].isNull()) settlement = Txid::FromUint256(ParseHashV(request.params[2], "settlement_txid"));
+            std::map<Txid, uint256> hints;
+            if (opts.exists("funding_blockhash")) hints.emplace(funding, ParseHashV(opts["funding_blockhash"], "funding_blockhash"));
+            if (settlement && opts.exists("settlement_blockhash")) hints.emplace(*settlement, ParseHashV(opts["settlement_blockhash"], "settlement_blockhash"));
+            NativeNodePaymentView chain(node, *pwallet, std::move(hints));
+            modelnet::NativePaymentTransaction funding_tx;
+            if (!chain.Lookup(funding, funding_tx, err)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, err);
+            modelnet::NativePaymentTerms terms;
+            terms.objective = quote.release_id.empty() ? funding.GetHex() : quote.release_id;
+            terms.funding_script = quote.output_script;
+            terms.principal_atoms = quote.amount_atoms;
+            terms.refund_height = quote.refund_height;
+            if (opts.exists("min_confirmations")) terms.min_confirmations = opts["min_confirmations"].getInt<int>();
+            if (settlement) {
+                if (!opts.exists("destination") || !opts["destination"].isStr() || !opts.exists("max_settlement_fee_atoms")) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "destination and max_settlement_fee_atoms are required for settlement");
+                }
+                const CTxDestination dest = DecodeDestination(opts["destination"].get_str(), err);
+                if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid settlement destination");
+                terms.destination = GetScriptForDestination(dest);
+                if (!wallet::ParseFundingAtoms(opts["max_settlement_fee_atoms"], terms.max_settlement_fee_atoms, err)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+                }
+            }
+            size_t matches = 0;
+            for (size_t i = 0; i < funding_tx.tx->vout.size(); ++i) {
+                if (funding_tx.tx->vout[i].scriptPubKey == quote.output_script && funding_tx.tx->vout[i].nValue == quote.amount_atoms) {
+                    terms.funding = COutPoint(funding, static_cast<uint32_t>(i));
+                    ++matches;
+                }
+            }
+            if (matches != 1) throw JSONRPCError(RPC_INVALID_PARAMETER, "Exactly one funding output must match the rebuilt terms");
+            FlatSigningProvider parse_provider, expanded;
+            auto descriptors = Parse(quote.descriptor, parse_provider, err, false);
+            std::vector<CScript> scripts;
+            if (descriptors.empty() || !descriptors[0]->Expand(0, DUMMY_SIGNING_PROVIDER, scripts, expanded)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Unable to expand rebuilt funding descriptor");
+            }
+            int version = -1;
+            std::vector<unsigned char> program;
+            P2MRSpendData spend;
+            if (!quote.output_script.IsWitnessProgram(version, program) || program.size() != 32 ||
+                !expanded.GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spend)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid rebuilt funding script");
+            }
+            for (const auto& entry : spend.scripts) {
+                std::vector<unsigned char> hash, key;
+                PQAlgorithm algorithm;
+                int64_t height = 0;
+                if (ParseP2MRHTLCSha256Leaf(entry.first, hash, algorithm, key)) terms.claim_leaf = CScript(entry.first.begin(), entry.first.end());
+                else if (ParseP2MRRefundLeaf(entry.first, height, algorithm, key)) terms.refund_leaf = CScript(entry.first.begin(), entry.first.end());
+            }
+            modelnet::Pay02 observer;
+            if (!observer.ObserveNative(chain, terms, settlement, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            const auto& receipt = observer.native_receipt();
+            UniValue result(UniValue::VOBJ);
+            result.pushKV("schema_version", 1);
+            result.pushKV("objective", receipt.objective);
+            result.pushKV("state", receipt.state);
+            result.pushKV("branch", receipt.branch);
+            result.pushKV("funding_txid", funding.GetHex());
+            result.pushKV("funding_vout", static_cast<int64_t>(receipt.funding.n));
+            result.pushKV("funding_output_script", HexStr(terms.funding_script));
+            result.pushKV("claim_leaf", HexStr(terms.claim_leaf));
+            result.pushKV("refund_leaf", HexStr(terms.refund_leaf));
+            result.pushKV("funding_confirmations", receipt.funding_confirmations);
+            result.pushKV("settlement_confirmations", receipt.settlement_confirmations);
+            if (settlement) result.pushKV("settlement_txid", settlement->GetHex());
+            result.pushKV("chain_tip", receipt.chain_tip.GetHex());
+            result.pushKV("chain_height", receipt.chain_height);
+            result.pushKV("principal_atoms", std::to_string(receipt.principal_atoms));
+            result.pushKV("paid_atoms", std::to_string(receipt.paid_atoms));
+            result.pushKV("fee_atoms", std::to_string(receipt.fee_atoms));
+            result.pushKV("funded", receipt.funded);
+            result.pushKV("settled", receipt.settled);
+            result.pushKV("automatic_spend_atoms", "0");
+            result.pushKV("release_qualified", false);
+            return result;
+#else
+            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
+#endif
+        },
+    };
+}
+
 static RPCHelpMan exportmodelrecovery()
 {
     return RPCHelpMan{
@@ -1445,7 +1713,7 @@ static RPCHelpMan exportmodelrecovery()
                 {"claimant", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "PQ claimant pubkey hex"},
                 {"refund_pubkey", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "PQ refund pubkey hex"},
                 {"refund_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "CLTV refund height"},
-                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "HTLC output value"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
             }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
@@ -1516,7 +1784,7 @@ static RPCHelpMan buildmodelhtlcclaim()
                                 }},
                                 {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Claim destination address"},
                                 {"destination_script", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Claim scriptPubKey hex"},
-                                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "HTLC output value"},
+                                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                                 {"fee_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Absolute fee"},
                             }},
                         });
@@ -1536,7 +1804,7 @@ static RPCHelpMan buildmodelhtlcrefund()
                                 }},
                                 {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Refund destination address"},
                                 {"destination_script", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Refund scriptPubKey hex"},
-                                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "HTLC output value"},
+                                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                                 {"fee_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Absolute fee"},
                             }},
                         });
@@ -2294,6 +2562,7 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &preparemodelfunding},
         {"modelnet", &signmodelfunding},
         {"modelnet", &submitmodelfunding},
+        {"modelnet", &getmodelfundingsettlement},
         {"modelnet", &exportmodelrecovery},
         {"modelnet", &buildmodelhtlcclaim},
         {"modelnet", &buildmodelhtlcrefund},

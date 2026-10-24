@@ -1,0 +1,12 @@
+swarm_promotegate/active.cpp
+swarm_promotegate/candidate.cpp
+swarm_promotegate/memory.cpp
+swarm_promotegate/flag.cpp
+swarm_promotegate/begin.cpp
+swarm_promotegate/interrupt.cpp
+swarm_promotegate/finish.cpp
+swarm_promotegate/resume.cpp
+swarm_promotegate/clear.cpp
+swarm_promotegate/rollback.cpp
+swarm_promotegate/realm.cpp
+swarm_promotegate/promotegate.cpp

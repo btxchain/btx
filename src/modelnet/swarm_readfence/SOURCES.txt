@@ -1,0 +1,16 @@
+swarm_readfence/page.cpp
+swarm_readfence/book.cpp
+swarm_readfence/names.cpp
+swarm_readfence/engine.cpp
+swarm_readfence/warm.cpp
+swarm_readfence/roster.cpp
+swarm_readfence/ledger.cpp
+swarm_readfence/span.cpp
+swarm_readfence/quiet.cpp
+swarm_readfence/place.cpp
+swarm_readfence/probe.cpp
+swarm_readfence/prefetch.cpp
+swarm_readfence/revoke.cpp
+swarm_readfence/read.cpp
+swarm_readfence/accept.cpp
+swarm_readfence/readfence.cpp

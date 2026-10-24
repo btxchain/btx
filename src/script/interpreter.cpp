@@ -2369,9 +2369,9 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         }
         execdata.m_tapleaf_hash_init = true;
 
-        // Defense in depth for the length-pinned SHA-256 leaf only.
-        // P2MRClaimLeafPinsPreimageLength does not match legacy SHA-256 or
-        // HASH160 htlc_tx; those scripts have no OP_SIZE pin.
+        // The activated 32-byte rule covers all recognized HTLC claim
+        // templates, including legacy SHA-256 and HASH160 htlc_tx leaves
+        // without an OP_SIZE pin in their committed script.
         if ((flags & SCRIPT_VERIFY_P2MR_HTLC_PREIMAGE32) && P2MRClaimLeafPinsPreimageLength(script)) {
             if (stack.empty() || stack.back().size() != 32) {
                 return set_error(serror, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);

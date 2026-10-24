@@ -233,16 +233,49 @@ bool RejectForbiddenHtlc(const UniValue& options, std::string& err)
 bool RejectAutoPay(const UniValue& options, std::string& err)
 {
     if (!options.isObject()) return true;
-    if (const UniValue* auto_pay = FindField(options, {"auto_pay", "autopay", "automatic_spend"})) {
-        if (auto_pay->isBool() && auto_pay->get_bool()) {
-            err = "auto_pay is refused; automatic BTX spend is zero";
-            return false;
-        }
-        if (auto_pay->isNum() && auto_pay->getInt<int64_t>() != 0) {
-            err = "automatic BTX spend is zero; explicit prepare/sign/submit required";
+    // Inspect every alias. The old first-match lookup let auto_pay=false hide
+    // a second nonzero automatic_spend field, and accepted string "true".
+    for (const char* name : {"auto_pay", "autopay", "automatic_spend", "automatic_spend_atoms"}) {
+        if (!options.exists(name)) continue;
+        const UniValue& v = options[name];
+        const bool zero = (v.isBool() && !v.get_bool()) ||
+                          ((v.isNum() || v.isStr()) && v.getValStr() == "0");
+        if (!zero) {
+            err = "auto_pay is refused; automatic BTX spend is zero; explicit prepare/sign/submit required";
             return false;
         }
     }
+    return true;
+}
+
+bool ParseFundingAtoms(const UniValue& value, int64_t& atoms, std::string& err)
+{
+    if (!value.isStr() && !value.isNum()) {
+        err = "atoms must be a canonical decimal integer";
+        return false;
+    }
+    const std::string& text = value.getValStr();
+    if (text.empty() || (text.size() > 1 && text.front() == '0')) {
+        err = "atoms must be a canonical decimal integer";
+        return false;
+    }
+    if (text.front() == '-') {
+        err = "atoms must not be negative";
+        return false;
+    }
+    int64_t n = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9' || n > (std::numeric_limits<int64_t>::max() - (c - '0')) / 10) {
+            err = "atoms must be a canonical decimal integer in range";
+            return false;
+        }
+        n = n * 10 + (c - '0');
+    }
+    if (!MoneyRange(n)) {
+        err = "atoms out of MoneyRange";
+        return false;
+    }
+    atoms = n;
     return true;
 }
 
@@ -428,23 +461,23 @@ bool ParseFrozenFundingQuote(const UniValue& options, FrozenFundingQuote& q, std
         q.refund_height = static_cast<uint32_t>(h);
     }
     if (const UniValue* v = FindField(options, {"amount_atoms", "max_atoms"})) {
-        if (!v->isNum()) {
-            err = "amount_atoms must be an integer";
-            return false;
-        }
-        q.amount_atoms = v->getInt<int64_t>();
+        if (!ParseFundingAtoms(*v, q.amount_atoms, err)) return false;
         if (!ValidateFundingAmount(q.amount_atoms, err)) return false;
     }
+    if (options.exists("amount_atoms") && options.exists("max_atoms")) {
+        int64_t ceiling = 0;
+        if (!ParseFundingAtoms(options["max_atoms"], ceiling, err)) return false;
+        if (q.amount_atoms > ceiling) {
+            err = "amount_atoms exceeds max_atoms";
+            return false;
+        }
+    }
     if (const UniValue* v = FindField(options, {"fee_cap_atoms"})) {
-        if (!v->isNum()) {
-            err = "fee_cap_atoms must be an integer";
-            return false;
-        }
-        q.fee_cap_atoms = v->getInt<int64_t>();
-        if (q.fee_cap_atoms < 0) {
-            err = "fee_cap_atoms must not be negative";
-            return false;
-        }
+        if (!ParseFundingAtoms(*v, q.fee_cap_atoms, err)) return false;
+        q.fee_cap_set = true;
+    }
+    if (const UniValue* v = FindField(options, {"fee_atoms"})) {
+        if (!ParseFundingAtoms(*v, q.fee_atoms, err)) return false;
     }
     if (const UniValue* v = FindField(options, {"output_script"})) {
         if (!v->isStr() || !IsHex(v->get_str())) {
@@ -667,15 +700,23 @@ bool CreateUnsignedFunding(CWallet& wallet, FrozenFundingQuote& q, std::string& 
     CCoinControl coin_control;
     wallet.BlockUntilSyncedToCurrentChain();
     LOCK(wallet.cs_wallet);
+    if (wallet.GetLastBlockHeight() >= static_cast<int64_t>(q.refund_height)) {
+        err = "refund height has already expired";
+        return false;
+    }
     auto res = CreateTransaction(wallet, recipients, /*change_pos=*/std::nullopt, coin_control, /*sign=*/false);
     if (!res) {
         err = util::ErrorString(res).original;
         return false;
     }
-    if (q.fee_cap_atoms > 0 && res->fee > q.fee_cap_atoms) {
+    if (q.fee_cap_set && res->fee > q.fee_cap_atoms) {
         err = strprintf("funding fee %d exceeds fee_cap_atoms %d", res->fee, q.fee_cap_atoms);
         return false;
     }
+    // The prepared quote always freezes a finite fee ceiling. Omitting the
+    // ceiling uses this wallet-estimated fee; explicit zero permits zero only.
+    if (!q.fee_cap_set) q.fee_cap_atoms = res->fee;
+    q.fee_cap_set = true;
     q.fee_atoms = res->fee;
     q.unsigned_hex = EncodeHexTx(*res->tx);
     q.unsigned_txid = res->tx->GetHash().ToUint256();
@@ -694,25 +735,102 @@ bool CreateUnsignedFunding(CWallet& wallet, FrozenFundingQuote& q, std::string& 
     return true;
 }
 
+namespace {
+
+bool CheckFundingInputsAndFee(CWallet& wallet, const FrozenFundingQuote& q,
+                              const CMutableTransaction& tx, bool already_known,
+                              std::map<COutPoint, Coin>& coins, std::string& err)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    if (tx.vin.empty() || tx.vout.empty()) {
+        err = "funding transaction requires inputs and outputs";
+        return false;
+    }
+    if (!q.fee_cap_set || !MoneyRange(q.fee_cap_atoms)) {
+        err = "finite fee_cap_atoms from preparemodelfunding is required";
+        return false;
+    }
+    if (!already_known && wallet.GetLastBlockHeight() >= static_cast<int64_t>(q.refund_height)) {
+        err = "refund height has already expired";
+        return false;
+    }
+    for (const CTxIn& input : tx.vin) {
+        if (!coins.emplace(input.prevout, Coin()).second) {
+            err = "duplicate funding input";
+            return false;
+        }
+    }
+    wallet.chain().findCoins(coins);
+    CAmount input_atoms = 0;
+    for (auto& [outpoint, coin] : coins) {
+        // A known broadcast has spent its inputs. Its locally recorded parent
+        // outputs remain usable for fee verification of an idempotent retry.
+        if (coin.IsSpent() && already_known) {
+            const CWalletTx* parent = wallet.GetWalletTx(outpoint.hash.ToUint256());
+            if (parent && parent->tx && outpoint.n < parent->tx->vout.size()) {
+                coin = Coin(parent->tx->vout[outpoint.n], 0, false);
+            }
+        }
+        if (coin.IsSpent()) {
+            err = "funding input is missing or already spent";
+            return false;
+        }
+        if (!(wallet.IsMine(coin.out) & ISMINE_SPENDABLE)) {
+            err = "funding input is not owned by this wallet";
+            return false;
+        }
+        if (!MoneyRange(coin.out.nValue) || input_atoms > MAX_MONEY - coin.out.nValue) {
+            err = "funding input total out of MoneyRange";
+            return false;
+        }
+        input_atoms += coin.out.nValue;
+    }
+    CAmount output_atoms = 0;
+    for (const CTxOut& output : tx.vout) {
+        if (!MoneyRange(output.nValue) || output_atoms > MAX_MONEY - output.nValue) {
+            err = "funding output total out of MoneyRange";
+            return false;
+        }
+        output_atoms += output.nValue;
+    }
+    if (input_atoms < output_atoms || input_atoms - output_atoms > q.fee_cap_atoms) {
+        err = "funding fee exceeds the frozen fee_cap_atoms";
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
 bool SignFrozenFunding(CWallet& wallet, const FrozenFundingQuote& quote, CMutableTransaction& mtx, bool& complete, std::string& err)
 {
+    complete = false;
     FrozenFundingQuote checked = quote;
     if (!RequireModelRefundKey(wallet, checked.refund_key, err)) return false;
     if (!MatchRebuiltHtlc(checked, mtx, &wallet, err)) return false;
     if (!CompareStoredSkeleton(wallet, checked, mtx, err)) return false;
     EnsureWalletIsUnlocked(wallet);
+    wallet.BlockUntilSyncedToCurrentChain();
     LOCK(wallet.cs_wallet);
     std::map<COutPoint, Coin> coins;
-    for (const CTxIn& txin : mtx.vin) {
-        coins[txin.prevout];
-    }
-    wallet.chain().findCoins(coins);
+    if (!CheckFundingInputsAndFee(wallet, checked, mtx, false, coins, err)) return false;
     std::map<int, bilingual_str> input_errors;
     complete = wallet.SignTransaction(mtx, coins, SIGHASH_DEFAULT, input_errors);
-    if (!complete && !input_errors.empty()) {
-        err = input_errors.begin()->second.original;
-    }
+    if (!complete && !input_errors.empty()) err = input_errors.begin()->second.original;
+    else err.clear();
     return true;
+}
+
+bool ValidateFrozenFundingSubmission(CWallet& wallet, FrozenFundingQuote& quote, const CMutableTransaction& tx,
+                                     bool already_known, std::string& err)
+{
+    if (!RequireModelRefundKey(wallet, quote.refund_key, err)) return false;
+    if (!MatchRebuiltHtlc(quote, tx, &wallet, err)) return false;
+    if (!CompareStoredSkeleton(wallet, quote, tx, err)) return false;
+    wallet.BlockUntilSyncedToCurrentChain();
+    LOCK(wallet.cs_wallet);
+    std::map<COutPoint, Coin> coins;
+    return CheckFundingInputsAndFee(wallet, quote, tx, already_known, coins, err);
 }
 
 UniValue ObserveReleaseFunding(const std::vector<CWallet*>& wallets, const std::string& key_hash_hex,

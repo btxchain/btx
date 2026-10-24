@@ -1,0 +1,12 @@
+swarm_agentexec/quiet.cpp
+swarm_agentexec/prefix.cpp
+swarm_agentexec/private.cpp
+swarm_agentexec/book.cpp
+swarm_agentexec/allow.cpp
+swarm_agentexec/tool.cpp
+swarm_agentexec/digest.cpp
+swarm_agentexec/journal.cpp
+swarm_agentexec/result.cpp
+swarm_agentexec/run.cpp
+swarm_agentexec/execute.cpp
+swarm_agentexec/swarm_agentexec.cpp

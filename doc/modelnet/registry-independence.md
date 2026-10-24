@@ -1,6 +1,7 @@
 # Registry independence (0.34.9)
 
-**Status:** 0.34.9-dev. `CLIENT_VERSION_IS_RELEASE=false`. This is the model-plane
+**Status:** this tree is **0.35.0rc1**. The last shipping tag remains
+**v0.34.15**. This is the model-plane
 resolver: one verified BTX artifact, many disposable origins. It is **not** a
 ModelScope clone, **not** a replacement for Hugging Face, **not** a competitor
 to OCI/KitOps, and **not** a reason to strip the monetary plane.

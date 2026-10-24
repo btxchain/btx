@@ -21,8 +21,11 @@
 #include <rpc/util.h>
 #include <script/script.h>
 #include <uint256.h>
+#include <validation.h>
 #include <wallet/model_funding.h>
 #include <wallet/model_payment.h>
+#include <wallet/test/util.h>
+#include <wallet/wallet.h>
 #endif
 
 #include <boost/test/unit_test.hpp>
@@ -113,6 +116,48 @@ BOOST_AUTO_TEST_CASE(auto_pay_option_refused)
     std::string err;
     BOOST_CHECK(!wallet::RejectAutoPay(opts, err));
     BOOST_CHECK(err.find("auto_pay is refused") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(canonical_atom_inputs_and_fee_ceiling)
+{
+    std::string err;
+    int64_t amount = -1;
+    for (const std::string& text : {"0", "1", "10000000"}) {
+        BOOST_REQUIRE(wallet::ParseFundingAtoms(UniValue(text), amount, err));
+        BOOST_CHECK_EQUAL(std::to_string(amount), text);
+    }
+    for (const std::string& text : {"", "01", "+1", "-1", "1.0", "1e3", " 1", "1 ", "9223372036854775808"}) {
+        BOOST_CHECK(!wallet::ParseFundingAtoms(UniValue(text), amount, err));
+    }
+    UniValue options(UniValue::VOBJ);
+    options.pushKV("amount_atoms", "10000000");
+    options.pushKV("fee_cap_atoms", "0");
+    wallet::FrozenFundingQuote q;
+    BOOST_REQUIRE(wallet::ParseFrozenFundingQuote(options, q, err));
+    BOOST_CHECK_EQUAL(q.amount_atoms, 10000000);
+    BOOST_CHECK_EQUAL(q.fee_cap_atoms, 0);
+    BOOST_CHECK(q.fee_cap_set);
+    options.pushKV("max_atoms", "9999999");
+    BOOST_CHECK(!wallet::ParseFrozenFundingQuote(options, q, err));
+}
+
+BOOST_AUTO_TEST_CASE(auto_spend_aliases_cannot_hide_each_other)
+{
+    std::string err;
+    for (const std::string& name : {"auto_pay", "autopay", "automatic_spend", "automatic_spend_atoms"}) {
+        for (const std::string& value : {"true", "1", "00", "0.0", "-1", "no"}) {
+            UniValue options(UniValue::VOBJ);
+            options.pushKV("auto_pay", false);
+            options.pushKV(name, value);
+            BOOST_CHECK(!wallet::RejectAutoPay(options, err));
+        }
+    }
+    UniValue options(UniValue::VOBJ);
+    options.pushKV("auto_pay", false);
+    options.pushKV("automatic_spend_atoms", "0");
+    BOOST_CHECK(wallet::RejectAutoPay(options, err));
+    options.pushKV("autopay", true);
+    BOOST_CHECK(!wallet::RejectAutoPay(options, err));
 }
 
 BOOST_AUTO_TEST_CASE(forbidden_htlc_sha256_tx)
@@ -533,5 +578,62 @@ BOOST_AUTO_TEST_CASE(helper_prepare_sign_submit_claim_refund_implemented)
     BOOST_CHECK_EQUAL(exported["secrets"].get_bool(), false);
     BOOST_CHECK_EQUAL(exported["use_claim"].get_str(), "buildmodelhtlcclaim");
 }
+
+#ifdef ENABLE_WALLET
+// With no prepare record in this process (restart, or a template built
+// elsewhere), CompareStoredSkeleton accepts and CheckFundingInputsAndFee is
+// the only input and fee guard before signing or broadcast.
+static wallet::FrozenFundingQuote WalletQuote(wallet::CWallet& wallet)
+{
+    wallet::FrozenFundingQuote q = SampleQuote();
+    q.refund_key.clear();
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(wallet::EnsureModelRefundKey(wallet, q, err), err);
+    BOOST_REQUIRE_MESSAGE(wallet::BuildHtlcSha256Descriptor(q, err), err);
+    q.fee_cap_set = true;
+    return q;
+}
+
+static CMutableTransaction FundingSpend(const COutPoint& prevout, const wallet::FrozenFundingQuote& q)
+{
+    CMutableTransaction tx;
+    tx.vin.emplace_back(prevout);
+    tx.vout.emplace_back(q.amount_atoms, q.output_script);
+    return tx;
+}
+
+BOOST_FIXTURE_TEST_CASE(submission_refuses_fee_above_frozen_cap, TestChain100Setup)
+{
+    auto wallet = wallet::CreateSyncedWallet(*m_node.chain, WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain()), coinbaseKey);
+    wallet::FrozenFundingQuote q = WalletQuote(*wallet);
+    const CTransactionRef& coin = m_coinbase_txns.at(0);
+    const CMutableTransaction tx = FundingSpend(COutPoint{coin->GetHash(), 0}, q);
+    const CAmount fee = coin->vout[0].nValue - q.amount_atoms;
+    std::string err;
+
+    q.fee_cap_atoms = fee;
+    BOOST_CHECK_MESSAGE(wallet::ValidateFrozenFundingSubmission(*wallet, q, tx, /*already_known=*/false, err), err);
+
+    q.fee_cap_atoms = fee - 1;
+    BOOST_CHECK(!wallet::ValidateFrozenFundingSubmission(*wallet, q, tx, /*already_known=*/false, err));
+    BOOST_CHECK_EQUAL(err, "funding fee exceeds the frozen fee_cap_atoms");
+}
+
+BOOST_FIXTURE_TEST_CASE(submission_refuses_input_not_owned_by_wallet, TestChain100Setup)
+{
+    const CBlock foreign = CreateAndProcessBlock({}, CScript() << OP_TRUE);
+    auto wallet = wallet::CreateSyncedWallet(*m_node.chain, WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain()), coinbaseKey);
+    wallet::FrozenFundingQuote q = WalletQuote(*wallet);
+    q.fee_cap_atoms = MAX_MONEY;
+    std::string err;
+
+    const CTransactionRef& own = m_coinbase_txns.at(0);
+    BOOST_CHECK_MESSAGE(wallet::ValidateFrozenFundingSubmission(*wallet, q, FundingSpend(COutPoint{own->GetHash(), 0}, q), /*already_known=*/false, err), err);
+
+    const CTransactionRef& other = foreign.vtx.at(0);
+    BOOST_CHECK(!wallet::ValidateFrozenFundingSubmission(*wallet, q, FundingSpend(COutPoint{other->GetHash(), 0}, q), /*already_known=*/false, err));
+    BOOST_CHECK_EQUAL(err, "funding input is not owned by this wallet");
+}
+#endif // ENABLE_WALLET
 
 BOOST_AUTO_TEST_SUITE_END()

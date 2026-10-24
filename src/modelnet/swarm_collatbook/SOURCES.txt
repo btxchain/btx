@@ -1,0 +1,6 @@
+swarm_collatbook/bucket.cpp
+swarm_collatbook/table.cpp
+swarm_collatbook/same.cpp
+swarm_collatbook/merge.cpp
+swarm_collatbook/quiet.cpp
+swarm_collatbook/collatbook.cpp

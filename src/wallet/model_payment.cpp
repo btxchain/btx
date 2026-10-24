@@ -20,7 +20,8 @@ bool ModelPaymentPolicy::CheckQuote(const modelnet::Quote& q, std::string& err) 
         err = "automatic BTX spend is zero; explicit approval required";
         return false;
     }
-    if (q.price_atoms + q.fee_cap_atoms > budget_atoms) {
+    if (q.fee_cap_atoms < 0 || q.fee_cap_atoms > modelnet::MAX_MONEY_ATOMS ||
+        q.price_atoms > budget_atoms || q.fee_cap_atoms > budget_atoms - q.price_atoms) {
         err = "quote exceeds budget including fee cap";
         return false;
     }

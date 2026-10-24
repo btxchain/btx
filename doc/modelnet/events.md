@@ -1,7 +1,9 @@
 # Model events (0.34.8 surface)
 
-**Status:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`). `getmodelevents` /
+**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+
+**Status:** this tree is **0.35.0rc1**. The last shipping tag remains
+**v0.34.15**. `getmodelevents` /
 `getmodeleventsequence` / `waitformodelevent` exist in this helper (unit-
 tested). The CLI wrapper **fails closed** if an older helper lacks the
 method. An unknown helper RPC returns `METHOD_NOT_FOUND` immediately (no
@@ -9,7 +11,7 @@ hang). Live helper-death log dump is **NOT_RUN** (no `btx-modeld` spawn).
 This page is not a PASS and not WAN evidence. Live HTTPS/R2 remains
 **NOT_RUN**.
 
-CLI: `contrib/modelnet/btx-model events [--cursor N] [--wait SEC] --json`.
+CLI: `contrib/modelnet/btx-model --json events [--cursor N] [--wait SEC]`.
 Recipe: [../../contrib/modelnet/recipes/events.json](../../contrib/modelnet/recipes/events.json).
 Watches: [watches.md](watches.md). Feed (existing): [feed.md](feed.md).
 
@@ -54,7 +56,20 @@ contrib/modelnet/btx-model --json events --cursor 12 --wait 5
 unknown method is `METHOD_NOT_FOUND` immediately; `automatic_spend_atoms`
 is not required on that error.
 
-## RPC (this helper; `CLIENT_VERSION_IS_RELEASE=false`)
+The CLI accepts finite seconds in `0..86400` and converts a positive wait
+to integer `timeout_ms` for the native helper. Direct Unix RPC uses
+milliseconds, not `wait_s` or `timeout_s`:
+
+```json
+{"jsonrpc":"1.0","id":1,"method":"waitformodelevent","params":[{"cursor":"12","timeout_ms":5000}]}
+```
+
+The native response contains `events`, a decimal-string `cursor`, `timeout`
+and `interrupted`. `getmodeleventsequence` returns numeric `sequence`.
+The CLI exposes the returned native cursor as `next_cursor`; use that value
+for the next page or wait instead of repeating the requested cursor.
+
+## RPC (this 0.35.0rc1 helper; build flag `CLIENT_VERSION_IS_RELEASE=true`, native qualification separate)
 
 | RPC | Role |
 |---|---|

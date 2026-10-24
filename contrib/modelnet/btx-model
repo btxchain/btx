@@ -3,7 +3,7 @@
 
 Verbs: init, doctor, host, preview, search, get, pull, show, ls, files, path,
 open, share, transfers, check, pins, alias, rm-alias, unhost, link, bounty-draft
-(title, JSON, or @FILE), watch-scan, plus 0.34.9-dev cloud/follow/events/mirror/
+(title, JSON, or @FILE), watch-scan, plus cloud/follow/events/mirror/
 profile (fail closed if the helper lacks the method).
 
 Human door: stderr one_liners / next hints. Agent door: stdout JSON; --json
@@ -19,6 +19,7 @@ Never puts raw cloud secrets on argv (use --credential-ref / --secret-file).
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import sys
@@ -76,7 +77,7 @@ DEFAULT_SOCKET = os.path.join(".", "e2e-scratch", "modeld.sock")
 # Agent door. Default is human (stderr hints) + JSON stdout. --json is stdout only.
 JSON_MODE = False
 CLI_SCHEMA_VERSION = 2
-DEV349_NOTE = "0.34.9-dev; fails closed if helper lacks method"
+DEV349_NOTE = "0.35.0rc1; fails closed if helper lacks method"
 
 # First-run URI examples. btx:// is a model resource; BIP21 payment is btx:<P2MR>.
 # bitcoin: is not a BTX payment URI. Placeholders only — this CLI never spends.
@@ -209,10 +210,11 @@ verbs:
   watch-scan [DIR]               scanmodelwatch
                                  (filesystem drop folder; NOT a publisher watch)
 
-  0.34.9-dev (not shipped; fail closed if the helper has no method):
+  0.35.0rc1 (fail closed if the helper has no method):
   cloud add|test|status          setcloudstorage / testcloudstorage /
                                  getcloudstorageinfo. add takes endpoint/bucket/
                                  prefix/region/layout/provider/credential-ref.
+                                 --transport fake|https selects transport (default fake).
                                  Use --credential-ref env:NAME or --secret-file
                                  (never a raw secret on argv).
   follow publisher|collection ID  watchmodelpublisher / watchmodelcollection
@@ -1939,7 +1941,7 @@ def _emit_dev(
         "schema_version": CLI_SCHEMA_VERSION,
         "kind": kind,
         "client": "btx-model",
-        "client_version": "0.34.9-dev",
+        "client_version": "0.35.0rc1",
         "released": False,
         "ok": True,
         "available": True,
@@ -1965,6 +1967,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
             "            [--provider AUTO|GENERIC_S3|AWS_S3|CLOUDFLARE_R2|MINIO]\n"
             "            [--read-strategy AUTO|STREAM_FILE|PIECE_GET]\n"
             "            [--credential-ref env:NAME] [--secret-file PATH]\n"
+            "            [--transport fake|https] (default fake; https performs live requests)\n"
             "            [--allow-request-heavy-cloud-layout]\n"
             "  cloud test\n"
             "  cloud status",
@@ -2044,6 +2047,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
         "--read-strategy",
         "--credential-ref",
         "--secret-file",
+        "--transport",
     }
     opts, pos = _take_opts(rest, valued, {"--allow-request-heavy-cloud-layout"})
     if pos:
@@ -2097,6 +2101,9 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
     if read_strategy not in _CLOUD_READ:
         _die(f"cloud add: --read-strategy must be one of {', '.join(_CLOUD_READ)}", 2)
     allow_heavy = bool(opts.get("--allow-request-heavy-cloud-layout"))
+    transport = str(opts.get("--transport") or "fake").strip().lower()
+    if transport not in ("fake", "https"):
+        _die("cloud add: --transport must be fake or https", 2)
     prefix = str(opts.get("--prefix") or "").strip() or None
     region = str(opts.get("--region") or "").strip() or None
     cfg: dict[str, Any] = {
@@ -2113,6 +2120,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
         "credential_ref": cred_ref,
         "credential_ref_kind": cred_kind,
         "allow_request_heavy_cloud_layout": allow_heavy,
+        "use_fake": transport == "fake",
         "automatic_spend_atoms": 0,
     }
     _refuse_spend_options(cfg, "cloud add")
@@ -2131,6 +2139,7 @@ def cmd_cloud(sock: str, args: list[str]) -> None:
             "region": _pick(src, "region") if _pick(src, "region") is not None else region,
             "layout": _pick(src, "layout", "cloud_object_layout") or layout,
             "read_strategy": _pick(src, "read_strategy", "cloud_read_strategy") or read_strategy,
+            "use_fake": _pick(src, "use_fake") if _pick(src, "use_fake") is not None else transport == "fake",
             "credential_ref": _pick(src, "credential_ref") or cred_ref,
             "reachable": _pick(src, "reachable"),
             "auth_ok": _pick(src, "auth_ok", "auth"),
@@ -2229,8 +2238,8 @@ def cmd_events(sock: str, args: list[str]) -> None:
             wait_s = float(wait_raw)
         except (TypeError, ValueError):
             _die("events --wait requires seconds (number)", 2)
-        if wait_s < 0:
-            _die("events --wait must be >= 0", 2)
+        if not math.isfinite(wait_s) or not 0 <= wait_s <= 86400:
+            _die("events --wait must be finite and between 0 and 86400 seconds", 2)
         if wait_s == 0:
             wait_s = None
     query: dict[str, Any] = {
@@ -2246,10 +2255,12 @@ def cmd_events(sock: str, args: list[str]) -> None:
         wait_query = dict(query)
         wait_query["wait_s"] = wait_s
         wait_query["timeout_s"] = wait_s
+        timeout_ms = max(1, int(math.ceil(wait_s * 1000)))
+        wait_query["timeout_ms"] = timeout_ms
         waited = _rpc_dev(
             sock,
             "waitformodelevent",
-            [[wait_query], [cursor, wait_s], [wait_s]],
+            [[wait_query], [cursor or 0, timeout_ms]],
             timeout=float(wait_s) + 5.0,
         )
         method = "waitformodelevent"
@@ -2263,7 +2274,7 @@ def cmd_events(sock: str, args: list[str]) -> None:
         {
             "cursor": _pick(src, "cursor", "local_sequence", "next_cursor") if cursor is None else cursor,
             "wait_s": wait_s,
-            "next_cursor": _pick(src, "next_cursor", "local_sequence"),
+            "next_cursor": _pick(src, "next_cursor", "local_sequence", "cursor"),
             "events": events,
             "event_count": len(events) if events is not None else None,
             "waited": waited is not None,
@@ -2350,7 +2361,7 @@ def cmd_profile(sock: str, args: list[str]) -> None:
             {
                 "command": "show",
                 "profile": _pick(src, "profile", "name"),
-                "storage_bytes": _pick(src, "storage_bytes", "quota_bytes", "storage"),
+                "storage_bytes": _pick(src, "storage_bytes", "quota_bytes", "storage", "storage_arg"),
                 "seed": _pick(src, "seed"),
                 "preserve_rare": _pick(src, "preserve_rare"),
                 "relay": _pick(src, "relay"),
@@ -2399,7 +2410,7 @@ def cmd_profile(sock: str, args: list[str]) -> None:
     result = _rpc_dev(
         sock,
         "setmodelprofile",
-        [[name], [name.upper()], [payload]],
+        [[payload]] if extra else [[name], [name.upper()], [payload]],
     )
     src = result if isinstance(result, dict) else {}
     _emit_dev(
@@ -2409,7 +2420,7 @@ def cmd_profile(sock: str, args: list[str]) -> None:
         {
             "command": "set",
             "profile": _pick(src, "profile", "name") or name,
-            "storage_bytes": _pick(src, "storage_bytes", "quota_bytes", "storage"),
+            "storage_bytes": _pick(src, "storage_bytes", "quota_bytes", "storage", "storage_arg"),
             "seed": _pick(src, "seed"),
             "preserve_rare": _pick(src, "preserve_rare"),
             "relay": _pick(src, "relay"),

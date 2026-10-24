@@ -1421,13 +1421,17 @@ static int LightWatchCommand(const std::vector<std::string>& args, std::string& 
         if (!watch.Sync(LightWatchRpc, error)) throw std::runtime_error(error.empty() ? "BTX_FILTER_HEADER" : error);
         if (!watch.Save(PathToString(file), error)) throw std::runtime_error(error);
         const int tip = LightWatchRpc("getblockcount", {}).getInt<int>();
-        strPrint = LightWatchStatusJson(watch.Status(tip)).write(2);
+        LightWatchStatus status = watch.Status(tip);
+        status.ready = status.ready && watch.IsCurrentAt(tip, tip, LightWatchRpc);
+        strPrint = LightWatchStatusJson(status).write(2);
         return EXIT_SUCCESS;
     }
     if (command == "status" || command == "balance" || command == "balanceat") {
         const int tip = LightWatchRpc("getblockcount", {}).getInt<int>();
         if (command == "status") {
-            strPrint = LightWatchStatusJson(watch.Status(tip)).write(2);
+            LightWatchStatus status = watch.Status(tip);
+            status.ready = status.ready && watch.IsCurrentAt(tip, tip, LightWatchRpc);
+            strPrint = LightWatchStatusJson(status).write(2);
             return EXIT_SUCCESS;
         }
         int height = tip;
@@ -1437,6 +1441,10 @@ static int LightWatchCommand(const std::vector<std::string>& args, std::string& 
             if (!parsed || *parsed < 0) throw std::runtime_error("invalid height");
             height = *parsed;
         } else if (!watch.Status(tip).ready) {
+            strPrint = "BTX_BALANCE_NOT_READY";
+            return EXIT_FAILURE;
+        }
+        if (!watch.IsCurrentAt(height, tip, LightWatchRpc)) {
             strPrint = "BTX_BALANCE_NOT_READY";
             return EXIT_FAILURE;
         }

@@ -42,6 +42,7 @@
 #include <script/script.h>
 #include <script/sigcache.h>
 #include <streams.h>
+#include <test/util/matmul_fixture.h>
 #include <test/util/mining.h>
 #include <test/util/net.h>
 #include <test/util/random.h>
@@ -398,6 +399,8 @@ bool ExtraArgsContainPrefix(const std::vector<const char*>& args, const char* pr
     return false;
 }
 
+} // namespace
+
 // Regtest activates v4/BMX4C/DRLT at height 100 and RC Profile-1 at 101 by
 // default, with nMatMulV4Dimension=256. TestChain100Setup mines
 // COINBASE_MATURITY (==100) blocks, so every fixture would otherwise pay for
@@ -433,8 +436,6 @@ TestOpts WithCheapMatMulFixtureDefaults(TestOpts opts)
     }
     return opts;
 }
-
-} // namespace
 
 TestChain100Setup::TestChain100Setup(
     const ChainType chain_type,

@@ -205,6 +205,8 @@ UniValue CapabilitiesObject()
     c.pushKV("preserve_rare", true);
     c.pushKV("follow_configured_peers_default", true);
     c.pushKV("unsolicited_fetch_default", false);
+    c.pushKV("native_lan_free_acquisition", true);
+    c.pushKV("acquisition_requires", "strict PQ1, matching chain, verified bytes, positive quota, follow_peers and seed=auto");
     c.pushKV("extension_version", 257);
     // Native helper bits: RESOURCE_RESOLVE|FREE_GRANT|SERVICE_RECEIPT|RESEARCH_IDENTITY|
     // COLLECTIONS_ALIAS|POLICY_BUNDLE|PRESERVATION_CIRCLE. Signed announce, typed

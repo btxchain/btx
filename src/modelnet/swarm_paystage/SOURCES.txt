@@ -1,0 +1,9 @@
+swarm_paystage/balances.cpp
+swarm_paystage/channel.cpp
+swarm_paystage/preimage.cpp
+swarm_paystage/qualify.cpp
+swarm_paystage/spend_policy.cpp
+swarm_paystage/fiat_quote.cpp
+swarm_paystage/profit_split.cpp
+swarm_paystage/invoice_path.cpp
+swarm_paystage/paystage.cpp

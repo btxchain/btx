@@ -95,6 +95,21 @@ struct LabDiskImage {
         std::set<std::string> completed;
     };
     std::map<std::string, WorkspaceRow> workspaces;
+    /** Public identity that was active when the image was saved. Never a secret key. */
+    std::string active_root;
+    /**
+     * Caller-scoped idempotency rows. `digest` is the canonical request digest
+     * and `result` is the response already returned for that caller and key.
+     */
+    struct IdempotencyRow {
+        std::string caller;
+        std::string key;
+        std::string digest;
+        std::string result;
+    };
+    std::vector<IdempotencyRow> idempotency;
+    /** Admission id to model id, a newline, and the digest. Absent on an older file. */
+    std::map<std::string, std::string> admission_subject;
 };
 
 /** BTX035_LAB_DIR, or empty when unset. No relative or home fallback. */
@@ -102,13 +117,17 @@ fs::path LabDiskDirectory();
 
 /**
  * Load lab.json when the directory and file exist. A missing directory or file
- * leaves `image` unchanged. Does not create the directory.
+ * leaves `image` unchanged and returns true. A corrupt, truncated, unsupported
+ * version, or inconsistent piece image returns false with
+ * BTX035_RECOVERY_REQUIRED and does not modify the file. Does not create the
+ * directory.
  */
 bool LoadLabDisk(LabDiskImage& image, std::string& err);
 
 /**
  * Write lab.json by temp file then rename. A failed call leaves any previous
- * lab.json in place. Does nothing when BTX035_LAB_DIR is unset.
+ * lab.json in place. Refuses to replace a file that does not decode. Does
+ * nothing when BTX035_LAB_DIR is unset.
  */
 bool SaveLabDisk(const LabDiskImage& image, std::string& err);
 

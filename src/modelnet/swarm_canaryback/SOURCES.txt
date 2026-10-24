@@ -1,0 +1,11 @@
+swarm_canaryback/id.cpp
+swarm_canaryback/active.cpp
+swarm_canaryback/candidate.cpp
+swarm_canaryback/prior.cpp
+swarm_canaryback/stage.cpp
+swarm_canaryback/adopt.cpp
+swarm_canaryback/regress.cpp
+swarm_canaryback/graduate.cpp
+swarm_canaryback/mine.cpp
+swarm_canaryback/quiet.cpp
+swarm_canaryback/canaryback.cpp

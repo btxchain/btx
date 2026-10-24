@@ -160,7 +160,7 @@ bool GuardClientExecute(const std::string& host, uint16_t port, const std::strin
     std::string executed;
     std::string stopped;
     in >> verb >> receipt >> executed >> stopped;
-    if (!in || verb != "RECEIPT" || receipt.empty() || executed != "EXECUTED" || stopped != "STOPPED_QUIESCENT") {
+    if (!in || verb != "RECEIPT" || receipt.empty() || executed != "PERMIT_CONSUMED" || stopped != "NOT_DISPATCHED") {
         return Fail(err, "BTX035_SCHEMA");
     }
     receipt_id = receipt;

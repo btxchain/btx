@@ -1,0 +1,14 @@
+[
+  {
+    "id": "P2P-SCN-M",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "set02 settles only when a wallet submits a txid; automatic spend stays 0"
+  },
+  {
+    "id": "ASR-PAY-004",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "one regtest submission does not settle every claimed payment mode"
+  }
+]

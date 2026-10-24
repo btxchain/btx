@@ -3,9 +3,12 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <modelnet/qualification.h>
+#include <util/translation.h>
 
 #include <iostream>
 #include <string>
+
+const TranslateFn G_TRANSLATION_FUN{nullptr};
 
 int main(int argc, char* argv[])
 {

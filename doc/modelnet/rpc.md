@@ -1,7 +1,9 @@
 # Model RPC catalogue
 
+**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+
 `btxd` (when `-DWITH_MODELNET=ON`) proxies these to `btx-modeld` via
-`-modelrpcsocket`. If the helper is down, calls **fail closed**. The same
+the supervised helper's Unix socket (or an explicit `-modelrpcsocket`). If the helper is down, calls **fail closed**. The same
 methods are available directly on the helper unix socket (researcher
 profile, no `btxd`).
 
@@ -11,8 +13,8 @@ The `note` / `coverage_disclaimer` strings state **current network view; not a
 complete global directory**. Low `remote_count` is normal. Never interpret results
 as a global census.
 
-**Release posture:** last shipping tag is **v0.34.8**. This tree is
-**0.34.9-dev** (`CLIENT_VERSION_IS_RELEASE=false`). First-run walkthrough:
+**Release posture:** this tree is **0.35.0rc1**. The last shipping tag
+remains **v0.34.15**. First-run walkthrough:
 [first-run.md](first-run.md). Local generate: [generate.md](generate.md). CLI:
 [../../contrib/modelnet/btx-model](../../contrib/modelnet/btx-model).
 
@@ -83,7 +85,7 @@ Conceptual background: [search.md](search.md), [directory.md](directory.md),
 | `buildmodelhtlcclaim` / `buildmodelhtlcrefund` | Unsigned 0.34.6 SHA-256 HTLC templates. SHA-256(preimage) must match `key_hash`. HASH160 `htlc_tx` is recovery-only. |
 
 Search, directory, indexer, and browse RPCs below are implemented on the helper
-unix socket (and proxied through `btxd` when `-modelrpcsocket` is set). Peer
+unix socket (and proxied through `btxd` when Modelnet is enabled). Peer
 HTTP (PQ1): [http.md](http.md). Optional bounded search:
 `POST /btx-model/2/ext/search` ([search.md](search.md)). Browser
 `GET /api/v1/*` is convenience only, not authoritative.
@@ -104,13 +106,15 @@ POST `/btx-model/2/quotes` records a prepaid quote. POST `.../payment` journals 
 | `HELPER_DOWN` | Proxy socket missing (`btxd` only) |
 | `INCOMPATIBLE_HOST_PROFILE` | `generatemodel`: unknown architecture, pickle, or missing adapter |
 | `NOT_RUN` | Generate adapter / llama-cli missing or exited; CUDA loader not run |
+| `HARDWARE_NOT_RUN` | An explicitly configured `BTX_MODEL_CUDA_LOADER` could not complete the native load/smoke operation |
 
 Monetary RPC errors (`RPC_WALLET_*`, etc.) never apply on the helper unix
 socket researcher profile.
 
 Unix RPC is **one JSON line**. Helper wait is **24h** for `importmodel` /
 `hostmodel` / `getmodel` / `waitformodelevent` / `scanmodelwatch` /
-`loadmodel` / `generatemodel`. Other methods use **120s**. Do not treat the
+`executemodelimport` / `importbtxpackage` / `exportmodelpath` /
+`loadmodel` / `unloadmodel` / `generatemodel`. Other methods use **120s**. Do not treat the
 30s PQ1 idle window as the unix timeout.
 
 ## Global limits (search / records)
@@ -809,7 +813,7 @@ Do not collapse prepare/sign/submit.
 ## Cloud / events / watches / profile (fail closed)
 
 These helper RPCs **exist** in this tree
-(`CLIENT_VERSION_IS_RELEASE=false`). **`btx-model` still fails closed** if an
+(`CLIENT_VERSION_IS_RELEASE=true` for the 0.35.0rc1 candidate (native release evidence remains separate)). **`btx-model` still fails closed** if an
 older helper is missing the method.
 No PASS. Live HTTPS/R2 WAN is **NOT_RUN** (OpenSSL HTTPS transport is
 compiled; no live origin round-trip). SCALE huge / 400GiB body stream is

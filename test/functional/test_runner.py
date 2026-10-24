@@ -13,6 +13,7 @@ For a description of arguments recognized by test scripts, see
 """
 
 import argparse
+import atexit
 from collections import deque
 import configparser
 import csv
@@ -196,7 +197,7 @@ BASE_SCRIPTS = [
     'wallet_shielded_transfer_builder.py --descriptors',
     'wallet_shielded_transfer_builder_locks.py --descriptors',
     'wallet_smile_v2_benchmark.py',
-    'wallet_smile_v2_full_lifecycle.py',
+    'wallet_smile_v2_full_lifecycle.py --descriptors',
     'wallet_bridge_egress_build.py',
     'feature_spend_path_recovery_activation_compat.py',
     'feature_spend_path_recovery_reorg.py',
@@ -555,10 +556,18 @@ BASE_SCRIPTS = [
     'feature_modelnet_lan_stampede.py',
     'feature_modelnet_packages.py',
     'feature_modelnet_search_lock.py',
-    'feature_modelnet_release_cards.py',
+    'feature_modelnet_release_cards.py --descriptors',
     'feature_modelnet_jit_remaining.py',
     'feature_modelnet_swarm_live.py',
-    'feature_hcp_remaining.py',
+    'feature_swarm_catalog.py',
+    'feature_swarm_regtest_spend.py',
+    'feature_swarm_model_settlement.py',
+    'feature_swarm_funded_objective.py --descriptors',
+    'feature_swarm_lan_discover.py',
+    'feature_swarm_profile_overrides.py',
+    'feature_swarm_three_local.py',
+    'feature_lightwatch.py',
+    'feature_hcp_remaining.py --descriptors',
     'feature_modelnet_minio.py',
     'feature_modelnet_security_r10.py',
     'wallet_modelnet_funding.py --descriptors',
@@ -687,10 +696,18 @@ BTX_BASE_SCRIPTS = [
     'feature_modelnet_lan_stampede.py',
     'feature_modelnet_packages.py',
     'feature_modelnet_search_lock.py',
-    'feature_modelnet_release_cards.py',
+    'feature_modelnet_release_cards.py --descriptors',
     'feature_modelnet_jit_remaining.py',
     'feature_modelnet_swarm_live.py',
-    'feature_hcp_remaining.py',
+    'feature_swarm_catalog.py',
+    'feature_swarm_regtest_spend.py',
+    'feature_swarm_model_settlement.py',
+    'feature_swarm_funded_objective.py --descriptors',
+    'feature_swarm_lan_discover.py',
+    'feature_swarm_profile_overrides.py',
+    'feature_swarm_three_local.py',
+    'feature_lightwatch.py',
+    'feature_hcp_remaining.py --descriptors',
     'feature_modelnet_minio.py',
     'feature_modelnet_security_r10.py',
     'wallet_modelnet_funding.py --descriptors',
@@ -710,6 +727,7 @@ BTX_BASE_SCRIPTS = [
     'p2p_shielded_relay.py',
     'p2p_handshake.py',
     'p2p_handshake.py --v2transport',
+    'p2p_announce_after_handshake.py',
     'p2p_addr_relay.py',
     'mempool_limit.py',
     'mempool_package_limits.py',
@@ -843,6 +861,16 @@ def main():
         dynamic_port_min = 20_000 + ((os.getpid() * 97) % 25_000)
         os.environ["TEST_RUNNER_PORT_MIN"] = str(dynamic_port_min)
         logging.debug("Assigned TEST_RUNNER_PORT_MIN=%s", dynamic_port_min)
+
+    # btx-modeld moves its unix socket under XDG_RUNTIME_DIR when the path it
+    # is given does not fit in sun_path (108 bytes on Linux). The runner's
+    # directory names push a node's <datadir>/regtest/modelnet/modeld.sock
+    # past that, so give the tests a short private directory if there is none.
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        runtime_dir = tempfile.mkdtemp(prefix="btxrt")
+        os.environ["XDG_RUNTIME_DIR"] = runtime_dir
+        atexit.register(shutil.rmtree, runtime_dir, ignore_errors=True)
+        logging.debug("Set XDG_RUNTIME_DIR=%s", runtime_dir)
 
     logging.debug("Temporary test directory at %s" % tmpdir)
 

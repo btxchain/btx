@@ -4,6 +4,7 @@
 
 #include <chain.h>
 #include <node/header_sync.h>
+#include <sync.h>
 #include <test/util/setup_common.h>
 
 #include <chrono>
@@ -14,6 +15,8 @@ BOOST_FIXTURE_TEST_SUITE(header_sync_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(background_refresh_does_not_trust_stale_height)
 {
+    // The predicate checks CBlockIndex validity under its production lock.
+    LOCK(cs_main);
     CBlockIndex tip;
     tip.nHeight = 231975;
     tip.nStatus = BLOCK_VALID_TREE;

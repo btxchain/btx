@@ -1,7 +1,9 @@
 # Storage backends (0.34.8 surface)
 
-**Status:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`). Cloud RPCs shipped in 0.34.8. Live R2 WAN remains **HONEST_NOT_RUN**. This page describes
+**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+
+**Status:** this tree is **0.35.0rc1**. The last shipping tag remains
+**v0.34.15**. Cloud RPCs shipped in 0.34.8. Live R2 WAN remains **HONEST_NOT_RUN**. This page describes
 the intended layout. Helper MinIO / cloud RPCs **exist** in this tree
 (`setcloudstorage` / `testcloudstorage` / `getcloudstorageinfo`). FakeS3 is
 **unit-tested**. Live R2 WAN is **HONEST_NOT_RUN**. CLI verbs still fail
@@ -28,7 +30,7 @@ include bucket, URL, or layout.
 
 ## What ships today vs this page
 
-| Surface | 0.34.7 / existing first-run | 0.34.8-dev (this page) |
+| Surface | Historical 0.34.7 baseline | Current 0.35.0rc1 source |
 |---|---|---|
 | Local filesystem `ModelStore` | yes | still the swarm body |
 | `hostmodel` / watch folder | yes | unchanged |
@@ -41,7 +43,7 @@ R2 WAN round-trip is **HONEST_NOT_RUN** (not PASS). SCALE huge / 400GiB body
 stream is **NOT_RUN**. R2 AUTO is `SOURCE_FILES` +
 `STREAM_FILE`. Pieces remain the swarm unit. Qt Models page watches/cloud
 panels are 0.34.8-dev **source**; this tree is `BUILD_GUI=OFF` (do not claim
-`bitcoin-qt` was built). `CLIENT_VERSION_IS_RELEASE=false`.
+`bitcoin-qt` was built). `CLIENT_VERSION_IS_RELEASE=true` for the 0.35.0rc1 candidate (native release evidence remains separate).
 
 Do not treat a capabilities bit, a CLI wrapper, or this file as evidence
 that a live origin round-trip ran.
@@ -84,7 +86,24 @@ Never put access keys in:
 - RPC **responses** (`getcloudstorageinfo` must not echo secrets)
 
 `btx-model cloud add` sends endpoint, bucket, prefix, region, layout,
-provider, and `credential_ref` only.
+provider, a credential reference, and the explicit `use_fake` transport
+selector. `--transport https` selects `use_fake:false`; the default
+`--transport fake` uses the in-process backend. Credentials themselves are
+never placed in the request or command line.
+
+## Local quota and native image contents
+
+The fresh headless node's default local payload budget is 1 GiB. Explicit
+zero, saved disable, and zero/malformed environment overrides keep storage
+off. This local quota is distinct from S3 request/storage budgets. Attaching
+a cloud backend grants no model execution, training or payment authority.
+
+Offline deployment must package the actual native binaries, their dynamic
+dependencies, and any selected inference runtime/tokenizer/model bytes.
+`contrib/swarm/native_acceptance/collect_runtime.py` observes dependencies on
+the native build host, while `offline_image.py` builds and verifies their
+content-pinned archive. OS baseline dependencies are recorded separately.
+A manifest does not establish disconnected execution or hardware qualification.
 
 ## Health JSON
 

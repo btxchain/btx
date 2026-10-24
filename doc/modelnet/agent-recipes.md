@@ -11,8 +11,8 @@ Default posture is **read-only**. These recipes host, search, share, load,
 and generate locally when the operator asked. They do **not** spend, mine,
 evaluate-execute, or start a **network** inference server.
 
-Last shipping tag is **v0.34.8**. This tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`).
+This tree is **0.35.0rc1**. The last shipping tag remains **v0.34.15**.
+The process map is [swarm/00_THIS_TREE.md](swarm/00_THIS_TREE.md).
 
 ## Hard stop
 

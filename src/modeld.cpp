@@ -58,6 +58,7 @@ static void Usage()
         "  -modelseedupondownload=0|1  B0 alias of -modelseed=off|auto; not a second opt-in\n"
         "  -modelpreserverare     fetch qualified under-replicated models into spare quota\n"
         "  -modelfollowpeers=0|1  follow FREE catalogs of -modelpeer / PEX contacts (default 1)\n"
+        "  -modellandiscovery=0|1  discover model transport on private LAN interfaces (default 1)\n"
         "  -modeluploadlimit=<bps>  aggregate serving cap (0 = connection ceilings only)\n"
         "  -modelwatch=<dir>    auto-host GGUF/SafeTensors/EXL3 dropped in this directory\n"
         "  -modelallowencrypted   allow preserve-rare of unqualified ciphertext\n"
@@ -120,6 +121,7 @@ int main(int argc, char* argv[])
             cfg.host_auto = mode == modelnet::HostMode::AUTO;
         } else if (a == "-modelpreserverare") cfg.preserve_rare = true;
         else if (a == "-modelfollowpeers") cfg.follow_peers = true;
+        else if (a == "-modellandiscovery") cfg.lan_discovery = true;
         else if (a == "-modelallowencrypted") cfg.allow_encrypted = true;
         else if (a.rfind("-decode=", 0) == 0) decode = a.substr(8);
         else if (a == "-decode" && i + 1 < argc) decode = argv[++i];
@@ -161,6 +163,12 @@ int main(int argc, char* argv[])
             cfg.preserve_rare = !(v == "0" || v == "false" || v == "off");
         } else if (auto v = take("-modelfollowpeers"); !v.empty()) {
             cfg.follow_peers = !(v == "0" || v == "false" || v == "off");
+        } else if (auto v = take("-modellandiscovery"); !v.empty()) {
+            if (v != "0" && v != "1" && v != "false" && v != "true") {
+                std::cerr << "invalid -modellandiscovery\n";
+                return 1;
+            }
+            cfg.lan_discovery = v == "1" || v == "true";
         } else if (auto v = take("-modeluploadlimit"); !v.empty()) {
             std::string err;
             if (!modelnet::ParseModelBytes(v, cfg.upload_bps, err)) {

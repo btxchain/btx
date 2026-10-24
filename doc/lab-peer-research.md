@@ -25,7 +25,7 @@ btx-cli lab035 lab.identity_create '{
 }'
 ```
 
-Repeat this on each node you run. Each node keeps its own key.
+Repeat this on each node you run. Each node keeps its own key. Short idempotency keys such as `desk-1` are rejected with `BTX035_SCHEMA`; use at least 16 characters, as in the example above.
 
 ## Store a contribution
 

@@ -176,7 +176,7 @@ BOOST_AUTO_TEST_CASE(guard_line_is_one_use_and_refuses_spend)
     const std::string executed = GuardHandleLine(table, "EXECUTE " + secret, 1000);
     BOOST_CHECK(executed.rfind("RECEIPT ", 0) == 0);
     BOOST_CHECK(executed.size() > std::string("RECEIPT ").size());
-    BOOST_CHECK_EQUAL(executed.substr(executed.size() - std::string(" EXECUTED STOPPED_QUIESCENT").size()), " EXECUTED STOPPED_QUIESCENT");
+    BOOST_CHECK_EQUAL(executed.substr(executed.size() - std::string(" PERMIT_CONSUMED NOT_DISPATCHED").size()), " PERMIT_CONSUMED NOT_DISPATCHED");
 
     BOOST_CHECK_EQUAL(GuardHandleLine(table, "EXECUTE " + secret, 1000), "ERR BTX035_REPLAY");
     BOOST_CHECK_EQUAL(GuardHandleLine(table, "PREPARE spend " + std::string(96, 'b') + " 1", 1000), "ERR BTX035_SCOPE_DENIED");

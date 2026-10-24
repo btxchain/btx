@@ -76,6 +76,8 @@ struct HelperConfig {
     std::string seed{"auto"};
     bool preserve_rare{false};
     bool follow_peers{true};
+    /** Link-scoped hints; strict PQ1 still authenticates every dial. */
+    bool lan_discovery{true};
     bool allow_encrypted{false};
     uint64_t upload_bps{0};
     std::vector<std::string> peers;

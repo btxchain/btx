@@ -1046,6 +1046,7 @@ bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, Un
         UniValue arr(UniValue::VARR);
         for (const auto& act : acts) arr.push_back(WatchActionToJson(act));
         result.pushKV("actions", arr);
+        result.pushKV("drained", drain);
         result.pushKV("spends", false);
         result.pushKV("automatic_spend_atoms", 0);
         return true;

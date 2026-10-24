@@ -9607,7 +9607,11 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     // the scheduler drains — including across the RC activation boundary.
     SetBestBlock(new_tip.nHeight, std::chrono::seconds{new_tip.GetBlockTime()});
     m_matmul_block_lifecycle.NoteActiveTipProgress();
-    AssertLockHeld(::cs_main);
+    // ActivateBestChain delivers this while holding cs_main, but
+    // InvalidateBlock deliberately releases it before notifying listeners.
+    // Both paths update the same chain-dependent caches below. Take the
+    // recursive lock here instead of requiring an undocumented caller lock.
+    LOCK(::cs_main);
     m_header_only_competing.clear();
     m_header_only_followed_skip.clear();
     g_configured_claimed_tip_child.SetNull();
@@ -9886,11 +9890,7 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
                 PushMessage(*pnode, ser_cmpctblock.Copy());
             }
             state.pindexBestHeaderSent = pindex;
-        } else if (!PeerHasHeader(&state, pindex) &&
-                   state.pindexBestKnownBlock != nullptr &&
-                   pindex->GetAncestor(state.pindexBestKnownBlock->nHeight) ==
-                       state.pindexBestKnownBlock &&
-                   state.pindexBestKnownBlock->nHeight < pindex->nHeight) {
+        } else if (!PeerHasHeader(&state, pindex)) {
             // No-inbound miners: high-bandwidth compact relay only fires when
             // the peer already has pprev. A public node that is N blocks
             // behind never sees those bodies unless it GETDATAs. Push the
@@ -9899,21 +9899,32 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
             // Walk from the last header we already offered on this chain.
             // pindexBestKnownBlock stays put until the peer proves it, so a
             // burst otherwise resends the same height on every new block.
-            const CBlockIndex* cursor{state.pindexBestKnownBlock};
-            if (state.pindexBestHeaderSent != nullptr &&
-                state.pindexBestHeaderSent->nHeight > cursor->nHeight &&
-                pindex->GetAncestor(state.pindexBestHeaderSent->nHeight) ==
-                    state.pindexBestHeaderSent &&
-                state.pindexBestHeaderSent->GetAncestor(cursor->nHeight) ==
-                    cursor) {
-                cursor = state.pindexBestHeaderSent;
+            // A completed GETHEADERS response also establishes an offered
+            // parent, including an empty response at genesis. The peer's
+            // separate genesis INV can still be queued at that moment, so
+            // requiring BestKnown here loses the first body to a handshake
+            // race. Use the same known-or-sent ancestry as PeerHasHeader and
+            // never push from a null or competing-chain cursor.
+            const CBlockIndex* cursor{nullptr};
+            for (const CBlockIndex* candidate :
+                 {state.pindexBestKnownBlock, state.pindexBestHeaderSent}) {
+                if (candidate != nullptr && candidate->nHeight < pindex->nHeight &&
+                    pindex->GetAncestor(candidate->nHeight) == candidate &&
+                    (cursor == nullptr || candidate->nHeight > cursor->nHeight)) {
+                    cursor = candidate;
+                }
             }
-            if (cursor->nHeight >= pindex->nHeight) {
-                return;
-            }
+            if (cursor == nullptr) return;
             const CBlockIndex* const next{
                 pindex->GetAncestor(cursor->nHeight + 1)};
-            if (next != nullptr && (next->nStatus & BLOCK_HAVE_DATA) != 0) {
+            // AcceptBlock emits NewPoWValidBlock before persisting the new
+            // body and setting BLOCK_HAVE_DATA. The supplied pblock is
+            // already validated for fast relay; requiring the disk flag for
+            // that same block strands a just-connected peer at genesis until
+            // its next getheaders window. Older catch-up bodies still need
+            // their disk availability flag before ReadBlock.
+            if (next != nullptr &&
+                (next == pindex || (next->nStatus & BLOCK_HAVE_DATA) != 0)) {
                 CBlock next_block;
                 const CBlock* send{nullptr};
                 if (next == pindex) {
@@ -9935,7 +9946,8 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
                             "PeerManager::NewPoWValidBlock",
                             next->GetBlockHash().ToString(), next->nHeight,
                             pnode->GetId(),
-                            state.pindexBestKnownBlock->nHeight);
+                            state.pindexBestKnownBlock != nullptr
+                                ? state.pindexBestKnownBlock->nHeight : -1);
                     MakeAndPushMessage(*pnode, NetMsgType::BLOCK,
                                        TX_WITH_WITNESS(*send));
                     state.pindexBestHeaderSent = next;
@@ -16062,6 +16074,10 @@ bool PeerManagerImpl::HoldRCJobForLowerAncestor(
         if (cand == nullptr) continue;
         if ((cand->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
         if (index->GetAncestor(cand->nHeight) != cand) continue;
+        // A pending CPU confirmation has already yielded its GPU slot.
+        // It cannot use another GPU replay, so do not hold otherwise
+        // admissible descendants behind its stale capacity-deferred entry.
+        if (matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(deferred.first)) continue;
         if (CanStartMatMulRCVerification(
                 m_matmul_rc_pending_verifications.load(
                     std::memory_order_relaxed),

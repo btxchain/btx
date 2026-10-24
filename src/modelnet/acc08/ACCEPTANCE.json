@@ -1,0 +1,146 @@
+[
+  {
+    "id": "DS-OPS-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: a benign drill inside an unexpired retainer opens a readiness claim. An expired credential clears the claim. automatic spend stays 0."
+  },
+  {
+    "id": "DS-OPS-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: malicious alerts are blocked, benign ground truth stays unblocked, and a block-all request returns OVERBLOCK."
+  },
+  {
+    "id": "DS-OPS-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: an asset outside the fixture returns BLAST and stays unchanged. The fixture asset is contained and the evidence bytes stay equal. hosts() stays 1."
+  },
+  {
+    "id": "DS-OPS-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: public detail stays empty until an isolated control and source approval exist, and PublishDetail then returns UNQUALIFIED. release_qualified() stays false."
+  },
+  {
+    "id": "DS-OPS-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: customer telemetry returns PRIVATE_DATA and leaves the worker view empty. A public fixture with empty telemetry is the worker view."
+  },
+  {
+    "id": "DS-OPS-006",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: Adopt returns HOSTS. adopted() stays false and hosts() stays 1. A second organization is outside this process."
+  },
+  {
+    "id": "DS-EVAL-001",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: mismatched hardware returns BASELINE. hardware_qualified() stays false. A matched label is the comparator rule, and the benchmark corpus was not run."
+  },
+  {
+    "id": "DS-EVAL-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: useful triage, confirmed effects, false containment, and cost are counted. The faster incorrect trial loses to the slower correct trial."
+  },
+  {
+    "id": "DS-EVAL-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: cold, warm, and external delays are separate fields. Download and funding are added to cold and left out of warm."
+  },
+  {
+    "id": "DS-EVAL-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: injected evidence leaves effect, recipient, and spend permission equal to the grant. automatic spend stays 0."
+  },
+  {
+    "id": "DS-EVAL-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: five same-observation votes return SELF. A reproduced vote with a different observation passes that gate. passed() stays false."
+  },
+  {
+    "id": "DS-EVAL-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: NoteReference leaves native_status NOT_RUN_NATIVE. passed(), release_qualified(), and hardware_qualified() stay false."
+  },
+  {
+    "id": "DS-REC-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: LoseLeader drops the uncommitted piece and keeps the committed frontier. A mismatched digest returns SOURCE. The matching digest is restored."
+  },
+  {
+    "id": "DS-REC-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: SwarmNoteNotNoStale leaves committed and broadcast false. An older term returns FENCE. A repeated receipt returns REPLAY and the compensation total stays put. automatic spend stays 0."
+  },
+  {
+    "id": "DS-REC-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: after Revoke, Effect and ReleaseBoundary return REVOKED. The analysis output remains. release_qualified() stays false."
+  },
+  {
+    "id": "DS-REC-004",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: RecoverPayment returns the same earned balance with the runtime flag down or up. Gpu returns ENGINE_ABSENT. No device process is stopped, and enforceability is a later process."
+  },
+  {
+    "id": "DS-REC-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: Correct grows history, leaves the failed hypothesis body in place, and marks the dependent release invalid."
+  },
+  {
+    "id": "DS-REC-006",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: partition, clock, response, and liquidity together return HOSTS. waiting() is set, commands() stays 0, and hosts() stays 1."
+  },
+  {
+    "id": "DS-DEL-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: staged bytes, commit text, messages, and archive text that carry excluded-spec return OUTSIDE. Clean bytes enter the buffer and tree_clean() stays true."
+  },
+  {
+    "id": "DS-DEL-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: stripping a notice returns STOP. An empty license returns LICENSE. A kept reuse still carries the attribution and the license."
+  },
+  {
+    "id": "DS-DEL-003",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: readme, rpc, build, response, and security each return DOC. Those existing documents are left for a later process."
+  },
+  {
+    "id": "DS-DEL-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: SwarmNoteNotNoAssurance leaves proved and qualified false. Migrate copies case and balance and keeps assurance at the prior level. A raise returns ASSURANCE."
+  },
+  {
+    "id": "DS-DEL-005",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: an empty fingerprint, an empty log, and a task-count claim are refused. A filled request returns NOT_RUN_NATIVE. native_status stays NOT_RUN_NATIVE."
+  },
+  {
+    "id": "DS-DEL-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc08_tests pass_latches: a local engineering note is kept. Deploy, Push, Merge, and BroadcastPublic return UNAUTHORIZED. broadcast() and release_qualified() stay false."
+  }
+]

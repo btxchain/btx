@@ -285,6 +285,68 @@ bool ReadLaunch(const UniValue& obj, std::map<std::string, LaunchCheckpoint>& ou
     return true;
 }
 
+bool ParsePieceSlot(const std::string& text, size_t& index)
+{
+    if (text.empty() || (text.size() > 1 && text[0] == '0')) return false;
+    size_t value = 0;
+    for (unsigned char c : text) {
+        if (c < '0' || c > '9') return false;
+        value = value * 10 + static_cast<size_t>(c - '0');
+        if (value >= MODEL_MAX_PIECES) return false;
+    }
+    index = value;
+    return true;
+}
+
+bool PieceIdentity(const std::string& text)
+{
+    if (text.size() != 96) return false;
+    return HexEven(text);
+}
+
+bool ParsedPiece(const LabDiskObject& object, std::string& digest, size_t& index)
+{
+    if (object.content.rfind("v1|", 0) == 0) {
+        const auto first = object.content.find('|');
+        const auto second = first == std::string::npos ? std::string::npos : object.content.find('|', first + 1);
+        const auto third = second == std::string::npos ? std::string::npos : object.content.find('|', second + 1);
+        if (first == std::string::npos || second == std::string::npos || third == std::string::npos) return false;
+        digest = object.content.substr(first + 1, second - first - 1);
+        return PieceIdentity(digest) && ParsePieceSlot(object.content.substr(second + 1, third - second - 1), index);
+    }
+    const auto colon = object.content.find(':');
+    if (colon == std::string::npos) return false;
+    digest = object.digest;
+    return ParsePieceSlot(object.content.substr(0, colon), index);
+}
+
+/** Inside one repository, parsed piece rows for a model there must be a dense 0..n-1 list. */
+bool PieceRowsConsistent(const LabDiskImage& image)
+{
+    for (const auto& repo : image.repo_objects) {
+        std::set<std::string> models;
+        for (const LabDiskObject& object : repo.second) {
+            if (object.kind == "model" && !object.digest.empty()) models.insert(object.digest);
+        }
+        std::map<std::string, std::set<size_t>> pieces;
+        for (const LabDiskObject& object : repo.second) {
+            if (object.kind != "piece") continue;
+            std::string digest;
+            size_t index = 0;
+            if (!ParsedPiece(object, digest, index) || !models.count(digest)) continue;
+            if (!pieces[digest].insert(index).second) return false;
+        }
+        for (const auto& item : pieces) {
+            size_t expect = 0;
+            for (size_t index : item.second) {
+                if (index != expect) return false;
+                ++expect;
+            }
+        }
+    }
+    return true;
+}
+
 bool DecodeImage(const std::string& json, LabDiskImage& image)
 {
     UniValue root;
@@ -293,6 +355,9 @@ bool DecodeImage(const std::string& json, LabDiskImage& image)
     if (!root.exists("automatic_spend_atoms") || !root["automatic_spend_atoms"].isStr() ||
         root["automatic_spend_atoms"].get_str() != "0") {
         return false;
+    }
+    if (root.exists("version")) {
+        if (!root["version"].isNum() || root["version"].getValStr() != "1") return false;
     }
     LabDiskImage loaded;
     if (!root.exists("records") || !ReadStringMap(root["records"], loaded.records)) return false;
@@ -433,6 +498,22 @@ bool DecodeImage(const std::string& json, LabDiskImage& image)
             loaded.workspaces.emplace(item.first, std::move(row));
         }
     }
+    if (root.exists("active_root") && !ReadOptionalString(root, "active_root", loaded.active_root)) return false;
+    if (root.exists("admission_subject") && !ReadStringMap(root["admission_subject"], loaded.admission_subject)) return false;
+    if (root.exists("idempotency")) {
+        if (!root["idempotency"].isArray()) return false;
+        for (size_t i = 0; i < root["idempotency"].size(); ++i) {
+            const UniValue& row = root["idempotency"][i];
+            if (!row.isObject()) return false;
+            LabDiskImage::IdempotencyRow saved;
+            if (!FieldStr(row, "caller", saved.caller) || !FieldStr(row, "key", saved.key) || saved.key.empty() ||
+                !FieldStr(row, "digest", saved.digest) || saved.digest.empty() || !FieldStr(row, "result", saved.result)) {
+                return false;
+            }
+            loaded.idempotency.push_back(std::move(saved));
+        }
+    }
+    if (!PieceRowsConsistent(loaded)) return false;
     image = std::move(loaded);
     return true;
 }
@@ -598,6 +679,19 @@ std::string EncodeImage(const LabDiskImage& image)
         workspaces.pushKV(item.first, std::move(row));
     }
     root.pushKV("workspaces", workspaces);
+    root.pushKV("version", 1);
+    if (!image.active_root.empty()) root.pushKV("active_root", image.active_root);
+    UniValue idempotency(UniValue::VARR);
+    for (const LabDiskImage::IdempotencyRow& saved : image.idempotency) {
+        UniValue row(UniValue::VOBJ);
+        row.pushKV("caller", saved.caller);
+        row.pushKV("key", saved.key);
+        row.pushKV("digest", saved.digest);
+        row.pushKV("result", saved.result);
+        idempotency.push_back(std::move(row));
+    }
+    root.pushKV("idempotency", idempotency);
+    root.pushKV("admission_subject", StringMap(image.admission_subject));
     return root.write();
 }
 
@@ -709,6 +803,19 @@ bool SaveLabDisk(const LabDiskImage& image, std::string& err)
     if (dir.empty()) {
         err.clear();
         return true;
+    }
+    const fs::path existing = dir / "lab.json";
+    bool have_existing = false;
+    try {
+        have_existing = fs::exists(existing);
+    } catch (const std::filesystem::filesystem_error&) {
+        return Fail(err, "BTX035_RECOVERY_REQUIRED");
+    }
+    if (have_existing) {
+        std::string prior;
+        if (!ReadAll(existing, prior, err)) return false;
+        LabDiskImage decoded;
+        if (!DecodeImage(prior, decoded)) return Fail(err, "BTX035_RECOVERY_REQUIRED");
     }
     if (!EnsureDir(dir, err)) return false;
     const std::string bytes = EncodeImage(image);

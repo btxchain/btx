@@ -28,6 +28,7 @@
 #include <script/script.h>
 #include <streams.h>
 #include <test/util/logging.h>
+#include <test/util/matmul_fixture.h>
 #include <test/util/mining.h>
 #include <test/util/net.h>
 #include <test/util/setup_common.h>
@@ -5088,6 +5089,11 @@ BOOST_AUTO_TEST_CASE(rc_pending_cap_release_readmits_without_budget_wait)
                    (idx->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
                    m_node.chainman->ActiveChain().Contains(idx);
         }));
+        // Chain membership becomes visible before the queued BlockConnected
+        // callback terminates retained lifecycle state. Drain that callback
+        // while neither cs_main nor the message-processing mutex is held,
+        // then check the original cleanup contract below.
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
     }
     BOOST_CHECK(!peerman.HasMatMulRetainedBodyForTest(target_hash));
     BOOST_CHECK(!peer.fDisconnect);
@@ -6251,7 +6257,7 @@ static void CheckConsensusBehindCompetingHeaders(
             release_confirmation.release.reset();
             BOOST_REQUIRE(PeermanWaitFor([&] { return !confirmations.Pending(child_hash); }));
         } else if (!ready_frontier) {
-            ASSERT_DEBUG_LOG("MatMul pending verification cap reached");
+            ASSERT_DEBUG_LOG("Holding the RC verification job for a lower unverified ancestor");
             send_ticketed_body(honest_grand);
         } else {
             // A fresh delivery of the selected deep-fork body must not fall
@@ -9439,6 +9445,31 @@ static CBlockIndex* MakePeermanHeaderChild(ChainstateManager& chainman,
     return index;
 }
 
+// These scheduling tests need deep competing forks: 102 headers against an
+// 82-block active chain, or a 2,056-header pagination/permission boundary.
+// Crossing height 100 under ordinary RegTestingSetup would
+// spend minutes solving dimension-256 v4/BMX4C/DRLT proofs, unrelated to the
+// download/locator behavior under test. Reuse TestChain100Setup's activation
+// profile, retain every fork height and assertion, and explicitly enable
+// strict MatMul validation. MineHeaderForConsensus still solves each proof;
+// neither proof validation nor the separate v4/admission fixtures is bypassed.
+struct PeermanDeepHeaderSetup : public TestingSetup {
+    PeermanDeepHeaderSetup()
+        : TestingSetup{ChainType::REGTEST,
+                       WithCheapMatMulFixtureDefaults(
+                           TestOpts{.extra_args = {"-test=matmulstrict"}})}
+    {
+        const auto& consensus{m_node.chainman->GetConsensus()};
+        constexpr int max_header_height{2057};
+        BOOST_REQUIRE(consensus.fMatMulPOW);
+        BOOST_REQUIRE(!consensus.fSkipMatMulValidation);
+        BOOST_REQUIRE(!consensus.IsMatMulV4Active(max_header_height));
+        BOOST_REQUIRE_GT(consensus.nMatMulBMX4CHeight, max_header_height);
+        BOOST_REQUIRE_GT(consensus.nMatMulDRLTHeight, max_header_height);
+        BOOST_REQUIRE_GT(consensus.nMatMulRCHeight, max_header_height);
+    }
+};
+
 static std::unique_ptr<CNode> MakeOutboundConsensusPeer(NodeId id, int keyed)
 {
     return std::make_unique<CNode>(
@@ -10114,7 +10145,8 @@ BOOST_AUTO_TEST_CASE(heavier_competing_fork_n_plus_72_getdata_fork_child)
     node::matmul_trusted::ResetForTest();
 }
 
-BOOST_AUTO_TEST_CASE(deep_competing_tower_does_not_seed_or_pin_last_common)
+BOOST_FIXTURE_TEST_CASE(deep_competing_tower_does_not_seed_or_pin_last_common,
+                        PeermanDeepHeaderSetup)
 {
     // RB-16 acquire: a stale tip acquiring a strictly-heavier competing
     // tower keeps last_common at the fork root (AdvanceLastCommonPastActiveTip
@@ -10232,7 +10264,8 @@ BOOST_AUTO_TEST_CASE(deep_competing_tower_does_not_seed_or_pin_last_common)
     node::matmul_trusted::ResetForTest();
 }
 
-BOOST_AUTO_TEST_CASE(deep_competing_tower_root_fetch_allows_parallel_failover)
+BOOST_FIXTURE_TEST_CASE(deep_competing_tower_root_fetch_allows_parallel_failover,
+                        PeermanDeepHeaderSetup)
 {
     // The first archive peer owns the missing canonical root and does not
     // answer. A second archive-capable peer that learned the same tower
@@ -10331,7 +10364,8 @@ BOOST_AUTO_TEST_CASE(deep_competing_tower_root_fetch_allows_parallel_failover)
     node::matmul_trusted::ResetForTest();
 }
 
-BOOST_AUTO_TEST_CASE(missing_acquisition_frontier_getdata_is_root_not_descendants)
+BOOST_FIXTURE_TEST_CASE(missing_acquisition_frontier_getdata_is_root_not_descendants,
+                        PeermanDeepHeaderSetup)
 {
     // Acquisition-stale tip, HEADER_ONLY LCA+1 frontier, competing tower
     // (FollowedChainAhead=0 so IsNarrowCatchUpWindow is false and fetch
@@ -10605,22 +10639,26 @@ static void CheckOtherTowerFetch(node::NodeContext& m_node, bool with_missing_ti
     node::matmul_trusted::ResetForTest();
 }
 
-BOOST_AUTO_TEST_CASE(review_missing_frontier_does_not_block_other_registered_tower)
+BOOST_FIXTURE_TEST_CASE(review_missing_frontier_does_not_block_other_registered_tower,
+                        PeermanDeepHeaderSetup)
 {
     CheckOtherTowerFetch(m_node, false);
 }
 
-BOOST_AUTO_TEST_CASE(missing_tip_child_does_not_block_other_registered_tower)
+BOOST_FIXTURE_TEST_CASE(missing_tip_child_does_not_block_other_registered_tower,
+                        PeermanDeepHeaderSetup)
 {
     CheckOtherTowerFetch(m_node, true);
 }
 
-BOOST_AUTO_TEST_CASE(review_unavailable_tip_child_does_not_block_other_registered_tower)
+BOOST_FIXTURE_TEST_CASE(review_unavailable_tip_child_does_not_block_other_registered_tower,
+                        PeermanDeepHeaderSetup)
 {
     CheckOtherTowerFetch(m_node, true);
 }
 
-BOOST_AUTO_TEST_CASE(review_unavailable_tip_child_does_not_starve_unique_frontier)
+BOOST_FIXTURE_TEST_CASE(review_unavailable_tip_child_does_not_starve_unique_frontier,
+                        PeermanDeepHeaderSetup)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
     node::matmul_trusted::ResetForTest();
@@ -10721,7 +10759,8 @@ BOOST_AUTO_TEST_CASE(review_unavailable_tip_child_does_not_starve_unique_frontie
     node::matmul_trusted::ResetForTest();
 }
 
-BOOST_AUTO_TEST_CASE(competing_tower_getheaders_locator_starts_at_known_competing_tip)
+BOOST_FIXTURE_TEST_CASE(competing_tower_getheaders_locator_starts_at_known_competing_tip,
+                        PeermanDeepHeaderSetup)
 {
     // The generic locator still stays at the connected tip for a long
     // header-only tower. An explicit probe of a peer already known to follow
@@ -10998,8 +11037,13 @@ static void CheckReadyAcquisitionFork(node::NodeContext& m_node, bool incoming,
     BOOST_REQUIRE(peerman.RetainMatMulBodyForTest(std::make_shared<const CBlock>(b[1].first)));
     SetMockTime(std::chrono::seconds{GetTime() + 2});
     peerman.RetryMatMulDeferredBodiesForTest();
+    // A retained body without a connected source now runs on the bounded
+    // verification worker. Wait for its verdict before inspecting the index.
+    BOOST_REQUIRE(PeermanWaitFor([&] {
+        LOCK(::cs_main);
+        return (b[1].second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0;
+    }));
     BOOST_CHECK_GT(replayed.load(), 0);
-    BOOST_CHECK(b[1].second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
     BOOST_CHECK(!(b[2].second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
 }
 
@@ -11157,10 +11201,19 @@ BOOST_AUTO_TEST_CASE(acquisition_replay_priority_bounds_background_wait)
     BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(deep.back()));
     BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(near.back()));
     const auto all_ready = [](const CBlockIndex*) { return true; };
-    const auto complete = [&](CBlockIndex* index) {
-        // Model a completed replay and stored body, without running a GPU.
+    const auto complete = [&](CBlockIndex* index, const CBlockIndex* child) {
+        // Replay authority and byte availability alone do not make a parent
+        // connectable. Model the transaction-validated body as well, without
+        // running a GPU or writing these synthetic header fixtures to disk.
         index->nStatus |= BLOCK_HAVE_DATA;
         BOOST_REQUIRE(chainman.PersistMatMulExactReplayVerdict(index->GetBlockHash()));
+        BOOST_REQUIRE(child->pprev == index);
+        BOOST_CHECK(!chainman.AcquisitionEscapeParentConnectable(child));
+        BOOST_REQUIRE(index->pprev != nullptr && index->pprev->HaveNumChainTxs());
+        index->nTx = 1;
+        index->m_chain_tx_count = index->pprev->m_chain_tx_count + index->nTx;
+        BOOST_REQUIRE(index->RaiseValidity(BLOCK_VALID_TRANSACTIONS));
+        BOOST_REQUIRE(chainman.AcquisitionEscapeParentConnectable(child));
     };
     for (unsigned i = 0; i < ChainstateManager::ACQUISITION_REPLAY_PREFERRED_BURST; ++i) {
         // Read-only selector calls and repeated announcements spend no turns.
@@ -11168,7 +11221,7 @@ BOOST_AUTO_TEST_CASE(acquisition_replay_priority_bounds_background_wait)
             BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier(all_ready) == near[i]);
             BOOST_REQUIRE(chainman.AcquisitionEscapeMayAcquireHeavierFork(near.back()));
         }
-        complete(near[i]);
+        complete(near[i], near[i + 1]);
         for (int duplicate = 0; duplicate < 12; ++duplicate) {
             BOOST_REQUIRE(chainman.PersistMatMulExactReplayVerdict(near[i]->GetBlockHash()));
         }
@@ -11198,7 +11251,7 @@ BOOST_AUTO_TEST_CASE(acquisition_replay_priority_bounds_background_wait)
     release_confirmation.release.reset();
     BOOST_REQUIRE(PeermanWaitFor([&] { return !confirmations.Pending(deep_hash); }));
     BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier(all_ready) == deep.front());
-    complete(deep.front());
+    complete(deep.front(), deep[1]);
     BOOST_CHECK(chainman.FindAcquisitionEscapeFrontier(all_ready) ==
                 near[ChainstateManager::ACQUISITION_REPLAY_PREFERRED_BURST]);
     // Parent-before-child still applies after switching branches.
@@ -11397,12 +11450,14 @@ BOOST_AUTO_TEST_CASE(persisted_active_tip_child_precedes_ready_acquisition_front
     CheckPersistedChildWithAcquisition(m_node, true);
 }
 
-BOOST_AUTO_TEST_CASE(withdrawn_deep_tower_snaps_last_common_to_tip)
+BOOST_FIXTURE_TEST_CASE(fresh_tip_fetches_only_connecting_body_of_deep_heavier_fork,
+                        PeermanDeepHeaderSetup)
 {
     // Same topology as deep_competing_tower_does_not_seed_or_pin_last_common
-    // but the tip is NOT acquisition-stale, so AdvanceLastCommonPastActiveTip
-    // snaps last_common onto the connected tip and FindNextBlocks does not
-    // GETDATA competing twins of bodies we already have.
+    // but the tip is NOT acquisition-stale. LastCommon still snaps to the
+    // connected tip; the download walk must independently request the first
+    // missing body of the advertised heavier fork, without fetching its
+    // descendants before that body arrives. This fork is not withdrawn.
     LOCK(NetEventsInterface::g_msgproc_mutex);
     node::matmul_trusted::ResetForTest();
     ResetSharedPeermanFixture(m_node);
@@ -11475,13 +11530,19 @@ BOOST_AUTO_TEST_CASE(withdrawn_deep_tower_snaps_last_common_to_tip)
     BOOST_CHECK_EQUAL(learned.nSyncHeight, fork.back()->nHeight);
 
     SetMockTime(std::chrono::seconds{GetTime() + 180});
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return !chainman.AcquisitionTipIsStale()));
     body_peer.fPauseSend = false;
     BOOST_CHECK(peerman.SendMessages(&body_peer));
     CNodeStateStats after;
     BOOST_REQUIRE(peerman.GetNodeStateStats(body_peer.GetId(), after));
     BOOST_CHECK_GE(after.nCommonHeight, tip->nHeight);
     BOOST_CHECK_EQUAL(
-        CountQueuedGetDataForHash(body_peer, fork.front()->GetBlockHash()), 0U);
+        CountQueuedGetDataForHash(body_peer, fork.front()->GetBlockHash()), 1U);
+    for (size_t i = 1; i < fork.size(); ++i) {
+        BOOST_CHECK_EQUAL(
+            CountQueuedGetDataForHash(body_peer, fork[i]->GetBlockHash()), 0U);
+    }
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip() == tip));
 
     peerman.FinalizeNode(body_peer);
     NeutralizeUnconnectedHeaders(chainman);
@@ -13289,7 +13350,8 @@ BOOST_AUTO_TEST_CASE(trusted_authority_refresh_anchors_competing_discovery)
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
-BOOST_AUTO_TEST_CASE(background_headers_discovery_crosses_lower_work_lead_cap)
+BOOST_FIXTURE_TEST_CASE(background_headers_discovery_crosses_lower_work_lead_cap,
+                        PeermanDeepHeaderSetup)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
     ResetSharedPeermanFixture(m_node);
@@ -13780,6 +13842,7 @@ BOOST_AUTO_TEST_CASE(matmul_deferred_recovery_does_not_block_scheduler)
 
 BOOST_AUTO_TEST_CASE(mutated_or_compact_invalid_body_does_not_suppress_fetch)
 {
+    LOCK(NetEventsInterface::g_msgproc_mutex);
     ResetSharedPeermanFixture(m_node);
     ChainstateManager& chainman{*Assert(m_node.chainman)};
     PeerManager& peerman{*Assert(m_node.peerman)};
@@ -15329,6 +15392,153 @@ BOOST_AUTO_TEST_CASE(block_connected_terminate_skips_reorged_away_body)
     // must skip TerminalConnected, so the fresh retained body survives.
     peerman.SimulateBlockConnectedForTest(offchain_ptr, offchain_index);
     BOOST_CHECK(peerman.HasMatMulRetainedBodyForTest(offchain_hash));
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+
+BOOST_FIXTURE_TEST_SUITE(peerman_first_body_and_reorg_tests, RegTestingSetup)
+
+BOOST_AUTO_TEST_CASE(fast_relay_uses_supplied_body_before_disk_availability)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& peerman{*Assert(m_node.peerman)};
+    auto& signals{*Assert(m_node.validation_signals)};
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE_EQUAL(tip->nHeight, 0);
+
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    CNode peer{/*id=*/7751, /*sock=*/nullptr, CAddress{},
+               /*nKeyedNetGroupIn=*/7751, /*nLocalHostNonceIn=*/0,
+               CAddress{}, /*addrNameIn=*/"first-body-behind-peer",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false, /*network_key=*/0};
+    CNode headers_peer{/*id=*/7752, /*sock=*/nullptr, CAddress{},
+                       /*nKeyedNetGroupIn=*/7752, /*nLocalHostNonceIn=*/0,
+                       CAddress{}, /*addrNameIn=*/"first-body-headers-only-peer",
+                       ConnectionType::OUTBOUND_FULL_RELAY,
+                       /*inbound_onion=*/false, /*network_key=*/0};
+    CNode unknown_peer{/*id=*/7753, /*sock=*/nullptr, CAddress{},
+                       /*nKeyedNetGroupIn=*/7753, /*nLocalHostNonceIn=*/0,
+                       CAddress{}, /*addrNameIn=*/"first-body-no-parent-peer",
+                       ConnectionType::OUTBOUND_FULL_RELAY,
+                       /*inbound_onion=*/false, /*network_key=*/0};
+    const std::vector<CNode*> peers{&peer, &headers_peer, &unknown_peer};
+    for (CNode* candidate : peers) {
+        connman.Handshake(*candidate, /*successfully_connected=*/true, services,
+                          services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                          /*starting_height=*/0);
+        connman.AddTestNode(*candidate);
+        connman.FlushSendBuffer(*candidate);
+    }
+    signals.RegisterValidationInterface(&peerman);
+    struct Cleanup {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        ValidationSignals& signals;
+        const std::vector<CNode*>& peers;
+        ~Cleanup()
+        {
+            signals.UnregisterValidationInterface(&peerman);
+            for (CNode* peer : peers) {
+                peerman.FinalizeNode(*peer);
+                connman.RemoveTestNode(*peer);
+            }
+        }
+    } cleanup{connman, peerman, signals, peers};
+
+    // The peer proves it knows our parent but has not requested high-bandwidth
+    // compact relay. This is the first-block handshake shape in heard-serve.
+    const std::vector<CInv> parent_inv{{MSG_BLOCK, tip->GetBlockHash()}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        peer, NetMsg::Make(NetMsgType::INV, parent_inv)));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+    connman.FlushSendBuffer(peer);
+    CNodeStateStats stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(peer.GetId(), stats));
+    BOOST_REQUIRE_EQUAL(stats.nSyncHeight, tip->nHeight);
+
+    // The other node has completed its empty genesis headers exchange but its
+    // separate INV has not arrived. An offered parent must be enough, while a
+    // VERSION height alone (unknown_peer) must not authorize a body push.
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(headers_peer,
+        NetMsg::Make(NetMsgType::GETHEADERS, GetLocator(tip), uint256{})));
+    headers_peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(headers_peer);
+    BOOST_REQUIRE(peerman_tests::HasQueuedMessageType(headers_peer, NetMsgType::HEADERS));
+    connman.FlushSendBuffer(headers_peer);
+    BOOST_REQUIRE(peerman.GetNodeStateStats(headers_peer.GetId(), stats));
+    BOOST_REQUIRE_EQUAL(stats.nSyncHeight, -1);
+
+    const CBlock child{peerman_tests::MineTipChild(m_node, *tip, 0)};
+    const auto body{std::make_shared<const CBlock>(child)};
+    const CBlockIndex* index{nullptr};
+    BlockValidationState header_state;
+    const std::vector<CBlockHeader> headers{child.GetBlockHeader()};
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+        headers, /*min_pow_checked=*/true,
+        header_state, &index));
+    BOOST_REQUIRE(index != nullptr);
+    BOOST_REQUIRE_EQUAL(index->nStatus & BLOCK_HAVE_DATA, 0U);
+
+    // AcceptBlock fires this signal before writing the new body. A disk flag
+    // cannot be the prerequisite for sending the body already in the signal.
+    signals.NewPoWValidBlock(index, body);
+    for (CNode* candidate : {&peer, &headers_peer}) {
+        BOOST_REQUIRE(peerman_tests::HasQueuedMessageType(*candidate, NetMsgType::HEADERS));
+        BOOST_REQUIRE_EQUAL(peerman_tests::CountQueuedMessageType(*candidate, NetMsgType::BLOCK), 1U);
+        BOOST_CHECK_EQUAL(peerman_tests::CountQueuedMessageType(*candidate, NetMsgType::CMPCTBLOCK), 0U);
+        LOCK(candidate->cs_vSend);
+        const auto sent{std::find_if(candidate->vSendMsg.begin(), candidate->vSendMsg.end(),
+            [](const CSerializedNetMsg& msg) { return msg.m_type == NetMsgType::BLOCK; })};
+        BOOST_REQUIRE(sent != candidate->vSendMsg.end());
+        DataStream stream{sent->data};
+        CBlock decoded;
+        stream >> TX_WITH_WITNESS(decoded);
+        BOOST_CHECK(decoded.GetHash() == child.GetHash());
+        BOOST_CHECK_EQUAL(decoded.vtx.size(), child.vtx.size());
+    }
+    BOOST_CHECK_EQUAL(peerman_tests::CountQueuedMessageType(unknown_peer, NetMsgType::BLOCK), 0U);
+    signals.NewPoWValidBlock(index, body);
+    BOOST_CHECK_EQUAL(
+        peerman_tests::CountQueuedMessageType(peer, NetMsgType::BLOCK), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(invalidateblock_notifies_peerman_without_caller_chain_lock)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& peerman{*Assert(m_node.peerman)};
+    auto& signals{*Assert(m_node.validation_signals)};
+    signals.RegisterValidationInterface(&peerman);
+    struct Cleanup {
+        ValidationSignals& signals;
+        PeerManager& peerman;
+        ~Cleanup() { signals.UnregisterValidationInterface(&peerman); }
+    } cleanup{signals, peerman};
+    const CBlockIndex* parent{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    peerman_tests::mineBlock(m_node, std::chrono::seconds{parent->GetBlockTime() + 1});
+    CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE(tip->pprev == parent);
+    BlockValidationState state;
+    AssertLockNotHeld(::cs_main);
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(state, tip));
+    signals.SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()) == parent);
+    // A second synchronous callback must also work when the caller does hold
+    // cs_main, as it does in the ordinary ActivateBestChain path.
+    {
+        LOCK(::cs_main);
+        signals.ActiveTipChange(*parent, chainman.IsInitialBlockDownload());
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

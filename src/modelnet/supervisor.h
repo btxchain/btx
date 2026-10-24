@@ -37,6 +37,7 @@ struct HelperLaunchConfig {
     std::string seed{"auto"};
     bool preserve_rare{false};
     bool follow_peers{true};
+    bool lan_discovery{true};
     uint64_t auto_cap_bytes{0};
     uint64_t reserve_bytes{0};
     uint64_t upload_bps{0};
