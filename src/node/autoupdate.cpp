@@ -9,6 +9,7 @@
 #include <crypto/hex_base.h>
 #include <crypto/sha256.h>
 #include <logging.h>
+#include <netbase.h>
 #include <pqkey.h>
 #include <random.h>
 #include <tinyformat.h>
@@ -523,6 +524,7 @@ except Exception as exc:
             sp::Popen child{
                 std::vector<std::string>{
                     m_python_command,
+                    "-I",
                     "-c",
                     fetch_script,
                     std::string{url},
@@ -1388,11 +1390,38 @@ void AutoUpdateManager::ThreadLoop()
     });
 }
 
+std::optional<std::string> AutoUpdateProxyConflict(const ArgsManager& args)
+{
+    const std::string proxy_arg{args.GetArg("-proxy", "")};
+    if (proxy_arg != "" && proxy_arg != "0") return "-proxy is set";
+    const auto onlynets{args.GetArgs("-onlynet")};
+    if (!onlynets.empty() && std::none_of(onlynets.begin(), onlynets.end(), [](const std::string& net) {
+            const auto n{ParseNetwork(net)};
+            return n == NET_IPV4 || n == NET_IPV6;
+        })) {
+        return "-onlynet excludes ipv4 and ipv6";
+    }
+    return std::nullopt;
+}
+
+bool AutoUpdateEnabled(const ArgsManager& args, ChainType chain)
+{
+    if (args.IsArgSet("-autoupdate")) return args.GetBoolArg("-autoupdate", true);
+    return chain == ChainType::MAIN && !AutoUpdateProxyConflict(args);
+}
+
 std::unique_ptr<AutoUpdateManager> MakeAutoUpdateManager(const ArgsManager& args, ChainType chain)
 {
     AutoUpdateConfig config;
-    config.enabled = args.IsArgSet("-autoupdate") ? args.GetBoolArg("-autoupdate", true) : chain == ChainType::MAIN;
-    if (!config.enabled) return nullptr;
+    const auto proxy_conflict{AutoUpdateProxyConflict(args)};
+    config.enabled = AutoUpdateEnabled(args, chain);
+    if (!config.enabled) {
+        if (chain == ChainType::MAIN && !args.IsArgSet("-autoupdate") && proxy_conflict) {
+            LogInfo("Auto-update is off because %s: its checks connect directly from this host, not via -proxy. Set -autoupdate=1 to turn it on.\n",
+                    *proxy_conflict);
+        }
+        return nullptr;
+    }
 
     config.seamless = args.GetBoolArg("-autoupdateseamless", true);
     config.dev_origin = args.GetBoolArg("-autoupdatedevorigin", false);
@@ -1427,6 +1456,10 @@ std::unique_ptr<AutoUpdateManager> MakeAutoUpdateManager(const ArgsManager& args
     config.daemon_pid = getpid();
 #endif
 
+    LogInfo("Auto-update is on: checks %s every %d seconds and %s. Checks are direct HTTPS from this host, not via -proxy%s. Set -autoupdate=0 to turn it off.\n",
+            config.manifest_url, config.interval_seconds,
+            config.seamless ? "installs a verified newer release (-autoupdateseamless=1)" : "only logs a verified newer release (-autoupdateseamless=0)",
+            proxy_conflict ? strprintf(", although %s", *proxy_conflict) : "");
     return std::make_unique<AutoUpdateManager>(
         std::move(config),
         std::make_unique<PythonAutoUpdateFetcher>(args.GetArg("-autoupdatepython", "python3")),

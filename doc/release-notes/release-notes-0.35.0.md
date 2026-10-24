@@ -9,3 +9,11 @@ The public map of the candidate is [doc/modelnet/swarm/00_THIS_TREE.md](../model
 This candidate is not release-qualified. A passing in-process suite is not a second host, a second GPU, Windows, macOS, or a sealed acceptance run.
 
 The published 0.35.0rc1 file set does not yet include a CUDA Linux archive. v0.34.15 shipped `btx-0.34.15-x86_64-linux-gnu-cuda13.tar.gz`. A GPU consensus node that starts the rc1 Linux `btxd` without that CUDA build reports a CPU provider and can stall at the next MatMul block. A CUDA Linux archive has to ship with 0.35 before those operators can move.
+
+## Auto-update and -proxy
+
+An auto-update check is a direct HTTPS connection from this host to the manifest origin (`https://btx.dev` by default). It does not use `-proxy`, `-onion` or `-onlynet`. On mainnet `-autoupdate` now defaults to 0 when `-proxy` is set or `-onlynet` excludes ipv4 and ipv6, the same tests that already turn off `-listen`, `-discover` and `-dnsseed` by default. `-onion` or `-listenonion` alone do not change the default, because ipv4 and ipv6 peers still connect directly. `-autoupdate=1` keeps it on, and the check still connects directly.
+
+When auto-update is on, `btxd` logs one line at startup with the manifest URL, the interval, whether it installs a verified release (`-autoupdateseamless`), and that `-autoupdate=0` turns it off. When the rule above turns it off, `btxd` logs why.
+
+The fetch helper now starts as `python3 -I` (isolated mode). It uses only the standard library, so the working directory, `PYTHON*` environment variables and the user site directory no longer reach its module path. An `-autoupdatepython` interpreter must accept `-I` (CPython 3.4 and later do).
