@@ -9,8 +9,6 @@
 #include <univalue.h>
 
 #include <algorithm>
-#include <fstream>
-#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -21,12 +19,7 @@ namespace {
 
 bool ReadRaw(const fs::path& path, std::string& raw)
 {
-    std::error_code ec;
-    if (!fs::is_regular_file(path, ec)) return false;
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
-    raw.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return true;
+    return SwarmReadRegularFile(path, raw);
 }
 
 bool EnsureDir(const fs::path& modeldir, fs::path& swarm_dir, std::string& err, const char* code)
