@@ -524,6 +524,7 @@ except Exception as exc:
             sp::Popen child{
                 std::vector<std::string>{
                     m_python_command,
+                    "-I",
                     "-c",
                     fetch_script,
                     std::string{url},
