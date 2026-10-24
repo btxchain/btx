@@ -769,7 +769,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-reindex-chainstate", "If enabled, wipe chain state, and rebuild it from blk*.dat files on disk. If an assumeutxo snapshot was loaded, its chainstate will be wiped as well. The snapshot can then be reloaded via RPC. Note: this does not rerun all contextual block checks; use -reindex for full historical re-validation after changing MatMul validation mode.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-settings=<file>", strprintf("Specify path to dynamic settings data file. Can be disabled with -nosettings. File is written at runtime and not meant to be edited by users (use %s instead for custom settings). Relative paths will be prefixed by datadir location. (default: %s)", BITCOIN_CONF_FILENAME, BITCOIN_SETTINGS_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-softwareexpiry", strprintf("Stop working after this POSIX timestamp (default: %s)", DEFAULT_SOFTWARE_EXPIRY), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-autoupdate", "Enable signed source auto-update polling (default: 1 on mainnet, 0 on test chains). The updater silently no-ops unless the manifest signature and installer script hash verify.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdate", "Enable signed source auto-update polling (default: 1 on mainnet, 0 on test chains, and 0 when -proxy is set or -onlynet excludes ipv4 and ipv6). Checks are direct HTTPS connections from this host and do not use -proxy, -onion or -onlynet. The updater silently no-ops unless the manifest signature and installer script hash verify.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatemanifesturl=<url>", strprintf("Signed auto-update manifest URL (default: %s)", node::DEFAULT_AUTOUPDATE_MANIFEST_URL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatetrustedorigin=<origin>", strprintf("Trusted auto-update origin. Manifest, signature, and installer URLs must all stay on this origin (default: %s)", node::DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatepubkey=<hex>", "Release public key (hex) for version.txt signatures, in the scheme set by -autoupdatepubkeyalgo. Set to 0 to make auto-update inert.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1458,7 +1458,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         InitWarning(warnings);
     }
 
-    const bool auto_update_enabled = args.IsArgSet("-autoupdate") ? args.GetBoolArg("-autoupdate", true) : chain == ChainType::MAIN;
+    const bool auto_update_enabled = node::AutoUpdateEnabled(args, chain);
     if (auto_update_enabled) {
         const int64_t interval = args.GetIntArg("-autoupdateinterval", node::DEFAULT_AUTOUPDATE_INTERVAL_SECONDS);
         if (interval < 1 || interval > 24 * 60 * 60) {

@@ -10,6 +10,7 @@
 #include <init.h>
 #include <node/interface_ui.h>
 #include <pqkey.h>
+#include <test/util/logging.h>
 #include <test/util/setup_common.h>
 #include <tinyformat.h>
 #include <uint256.h>
@@ -211,6 +212,27 @@ bool AutoUpdateInitAccepted(const fs::path& datadir,
     return ok;
 }
 
+//! Parse a btxd command line, so negation (-noproxy) and repeated options (-onlynet) behave as
+//! they do in btxd. The options are registered with their SetupServerArgs flags.
+void ParseServerArgs(ArgsManager& args, std::vector<const char*> argv)
+{
+    for (const char* name : {"-autoupdate", "-autoupdateseamless", "-listenonion", "-onion", "-onlynet"}) {
+        args.AddArg(name, "", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    }
+    args.AddArg("-datadir", "", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
+    args.AddArg("-proxy", "", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_ELISION, OptionsCategory::CONNECTION);
+    argv.insert(argv.begin(), "btxd");
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(args.ParseParameters(argv.size(), argv.data(), error), error);
+}
+
+bool AutoUpdateOn(std::vector<const char*> argv, ChainType chain)
+{
+    ArgsManager args;
+    ParseServerArgs(args, std::move(argv));
+    return node::AutoUpdateEnabled(args, chain);
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(autoupdate_tests, BasicTestingSetup)
@@ -249,6 +271,90 @@ BOOST_AUTO_TEST_CASE(inert_pubkey_skips_classical_algo_at_init)
     BOOST_CHECK(error.find("-autoupdatepubkeyalgo must be ml-dsa-44 or slh-dsa-128s.") !=
                 std::string::npos);
     BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("secp256k1") == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(proxy_or_onlynet_turns_mainnet_default_off)
+{
+    // Without these settings: on for mainnet, off for test chains.
+    BOOST_CHECK(AutoUpdateOn({}, ChainType::MAIN));
+    for (const ChainType chain : {ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET,
+                                  ChainType::REGTEST, ChainType::SHIELDEDV2DEV}) {
+        BOOST_CHECK(!AutoUpdateOn({}, chain));
+        BOOST_CHECK(AutoUpdateOn({"-autoupdate=1"}, chain));
+        BOOST_CHECK(!AutoUpdateOn({"-proxy=127.0.0.1:9050"}, chain));
+    }
+
+    // -proxy: the same test as the -proxy privacy defaults (-listen=0, -discover=0).
+    BOOST_CHECK(!AutoUpdateOn({"-proxy=127.0.0.1:9050"}, ChainType::MAIN));
+    BOOST_CHECK(!AutoUpdateOn({"-proxy=127.0.0.1:9050=onion"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-proxy=0"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-noproxy"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-proxy=127.0.0.1:9050", "-proxy=0"}, ChainType::MAIN));
+
+    // -onlynet: off only when no listed network is ipv4 or ipv6 (the same test as -dnsseed=0).
+    BOOST_CHECK(!AutoUpdateOn({"-onlynet=onion"}, ChainType::MAIN));
+    BOOST_CHECK(!AutoUpdateOn({"-onlynet=onion", "-onlynet=i2p"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-onlynet=ipv4"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-onlynet=onion", "-onlynet=ipv6"}, ChainType::MAIN));
+
+    // -onion and -listenonion alone still leave IPv4/IPv6 peers on direct connections.
+    BOOST_CHECK(AutoUpdateOn({"-onion=127.0.0.1:9050"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-listenonion=1"}, ChainType::MAIN));
+
+    // An explicit -autoupdate wins.
+    BOOST_CHECK(AutoUpdateOn({"-proxy=127.0.0.1:9050", "-autoupdate=1"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-onlynet=onion", "-autoupdate=1"}, ChainType::MAIN));
+    BOOST_CHECK(!AutoUpdateOn({"-autoupdate=0"}, ChainType::MAIN));
+    BOOST_CHECK(!AutoUpdateOn({"-noautoupdate"}, ChainType::MAIN));
+}
+
+BOOST_AUTO_TEST_CASE(startup_log_states_the_auto_update_path)
+{
+    const std::string datadir{"-datadir=" + fs::PathToString(m_path_root)};
+    {
+        ASSERT_DEBUG_LOG("Auto-update is off because -proxy is set: its checks connect directly from this host, not via -proxy. Set -autoupdate=1 to turn it on.");
+        ArgsManager args;
+        ParseServerArgs(args, {datadir.c_str(), "-proxy=127.0.0.1:9050"});
+        BOOST_CHECK(node::MakeAutoUpdateManager(args, ChainType::MAIN) == nullptr);
+    }
+    {
+        ASSERT_DEBUG_LOG(strprintf("Auto-update is on: checks %s every %d seconds and installs a verified newer release (-autoupdateseamless=1). Checks are direct HTTPS from this host, not via -proxy. Set -autoupdate=0 to turn it off.",
+                                   node::DEFAULT_AUTOUPDATE_MANIFEST_URL, node::DEFAULT_AUTOUPDATE_INTERVAL_SECONDS));
+        ArgsManager args;
+        ParseServerArgs(args, {datadir.c_str()});
+        BOOST_CHECK(node::MakeAutoUpdateManager(args, ChainType::MAIN) != nullptr);
+    }
+    {
+        ASSERT_DEBUG_LOG("only logs a verified newer release (-autoupdateseamless=0). Checks are direct HTTPS from this host, not via -proxy, although -onlynet excludes ipv4 and ipv6.");
+        ArgsManager args;
+        ParseServerArgs(args, {datadir.c_str(), "-onlynet=onion", "-autoupdate=1", "-autoupdateseamless=0"});
+        BOOST_CHECK(node::MakeAutoUpdateManager(args, ChainType::MAIN) != nullptr);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(init_checks_auto_update_settings_only_when_it_runs)
+{
+    const std::string datadir{fs::PathToString(m_path_root)};
+    {
+        // Off because of -proxy, so a bad -autoupdateinterval does not stop start, as on test chains.
+        ArgsManager args;
+        args.ForceSetArg("-datadir", datadir);
+        args.ForceSetArg("-proxy", "127.0.0.1:9050");
+        args.ForceSetArg("-autoupdateinterval", "0");
+        InitErrorCapture capture;
+        BOOST_CHECK(AppInitParameterInteraction(args));
+        BOOST_CHECK(capture.LastError().empty());
+    }
+    {
+        ArgsManager args;
+        args.ForceSetArg("-datadir", datadir);
+        args.ForceSetArg("-proxy", "127.0.0.1:9050");
+        args.ForceSetArg("-autoupdateinterval", "0");
+        args.ForceSetArg("-autoupdate", "1");
+        InitErrorCapture capture;
+        BOOST_CHECK(!AppInitParameterInteraction(args));
+        BOOST_CHECK(capture.LastError().find("-autoupdateinterval must be between 1 and 86400 seconds.") != std::string::npos);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(version_comparison_uses_client_version)
