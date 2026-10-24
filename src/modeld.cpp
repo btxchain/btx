@@ -217,7 +217,9 @@ int main(int argc, char* argv[])
 
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
+#ifndef WIN32
     // Peer RST during retrieve must not kill the helper (DISC-05).
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     return modelnet::RunModelDaemon(cfg, &g_stop);
 }

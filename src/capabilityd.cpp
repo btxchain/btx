@@ -61,6 +61,8 @@ int main(int argc, char* argv[])
     if (modeldir.empty()) modeldir = fs::PathFromString("modelnet-data");
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
+#ifndef WIN32
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     return modelnet::RunCapabilityDaemon(modeldir, sock, &g_stop);
 }
