@@ -13004,7 +13004,7 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     ForkHoleWalkMemo hole_walks{
         g_fucai_hole_walk_memo.load(std::memory_order_relaxed)};
     std::vector<const CBlockIndex*> competing;
-    auto consider = [&](const CBlockIndex* idx) {
+    auto consider = [&](const CBlockIndex* idx) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         if (idx == nullptr || idx == tip ||
             (idx->nStatus & BLOCK_FAILED_MASK)) {
             return;
