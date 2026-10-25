@@ -910,9 +910,10 @@ BOOST_AUTO_TEST_CASE(btxd_registers_removemodel_proxy)
 
 BOOST_AUTO_TEST_CASE(setmodelprofile_live_host_auto_does_not_advertise_empty)
 {
-    // A3/A5: setmodelprofile applies follow/preserve/upload/host-auto live.
-    // NODE_MODEL_HOST still follows AutoHostShouldAdvertise: empty/unverified
-    // catalogs must not advertise. No helper restart required.
+    // A3/A5: setmodelprofile saves follow/preserve/upload/host-auto; the helper
+    // loop applies them on its next iteration (runtime_apply QUEUED), no
+    // helper restart. NODE_MODEL_HOST still follows AutoHostShouldAdvertise:
+    // empty/unverified catalogs must not advertise.
     const fs::path tmp = m_path_root / "first-run-profile-live";
     fs::create_directories(tmp);
     modelnet::ModelCatalog cat{tmp, 8 << 20};
@@ -921,7 +922,9 @@ BOOST_AUTO_TEST_CASE(setmodelprofile_live_host_auto_does_not_advertise_empty)
     const UniValue set = Dispatch(cat, Rpc("setmodelprofile", p));
     BOOST_CHECK(set["applied"].get_bool());
     BOOST_CHECK_EQUAL(set["automatic_spend_atoms"].getInt<int>(), 0);
-    BOOST_CHECK(set["note"].get_str().find("applied live") != std::string::npos);
+    BOOST_CHECK_EQUAL(set["note"].get_str(),
+                      "saved; helper loop applies storage and role policy on its next iteration; "
+                      "no execution or payment grant");
     const UniValue got = Dispatch(cat, Rpc("getmodelprofile"));
     BOOST_CHECK_EQUAL(got["profile"].get_str(), "personal");
     const UniValue net = Dispatch(cat, Rpc("getmodelnetworkinfo"));
