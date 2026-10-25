@@ -62,9 +62,13 @@ BOOST_AUTO_TEST_CASE(tls_identity_has_the_cli_extensions)
     // Still a valid self-signature, CN=btx-modeld.
     std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> pub(X509_get_pubkey(x.get()), EVP_PKEY_free);
     BOOST_CHECK_EQUAL(X509_verify(x.get(), pub.get()), 1);
-    char cn[64] = {};
-    X509_NAME_get_text_by_NID(X509_get_subject_name(x.get()), NID_commonName, cn, sizeof(cn));
-    BOOST_CHECK_EQUAL(std::string(cn), "btx-modeld");
+    const X509_NAME* subject = X509_get_subject_name(x.get());
+    const int cn_pos = X509_NAME_get_index_by_NID(subject, NID_commonName, -1);
+    BOOST_REQUIRE(cn_pos >= 0);
+    const ASN1_STRING* cn = X509_NAME_ENTRY_get_data(X509_NAME_get_entry(subject, cn_pos));
+    BOOST_REQUIRE(cn != nullptr);
+    BOOST_CHECK_EQUAL(std::string(reinterpret_cast<const char*>(ASN1_STRING_get0_data(cn)), ASN1_STRING_length(cn)),
+                      "btx-modeld");
 }
 
 
