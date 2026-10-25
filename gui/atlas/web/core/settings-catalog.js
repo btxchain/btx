@@ -1,0 +1,356 @@
+export const NODE_SETTINGS = [
+  {
+    "key": "port",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "upnp",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "natpmp",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "proxy",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "onion",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "listen",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "server",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "par",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "prune",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "dbcache",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "signer",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": true
+  },
+  {
+    "key": "spendzeroconfchange",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "addresstype",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "walletrbf",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "maxuploadtarget",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "peerbloomfilters",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "peerblockfilters",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "mempoolreplacement",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "mempooltruc",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "maxorphantx",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "maxmempool",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "incrementalrelayfee",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "mempoolexpiry",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejectunknownscripts",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejectunknownwitness",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejectparasites",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejecttokens",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejectspkreuse",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "minrelaytxfee",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "minrelaycoinblocks",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "minrelaymaturity",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "bytespersigop",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "bytespersigopstrict",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "limitancestorcount",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "limitancestorsize",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "limitdescendantcount",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "limitdescendantsize",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejectbarepubkey",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejectbaremultisig",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "permitephemeral",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejectbareanchor",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejectbaredatacarrier",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "maxscriptsize",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "maxtxlegacysigops",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "datacarriercost",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "datacarriersize",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "rejectnonstddatacarrier",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "dustrelayfee",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "dustdynamic",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "blockmintxfee",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "blockmaxsize",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "blockprioritysize",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "blockmaxweight",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "blockreconstructionextratxn",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "blockreconstructionextratxnsize",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "corepolicy",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "modelnet",
+    "kind": "boolean",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "modelstorage",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  },
+  {
+    "key": "modelwatch",
+    "kind": "string",
+    "restart_required": true,
+    "sensitive_execution": false
+  }
+];

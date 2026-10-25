@@ -1,0 +1,23 @@
+[package]
+name = "btx-atlas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+atlas-core = { package = "btx-atlas-core", path = "../crates/atlas-core" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.145", features = ["arbitrary_precision"] }
+tauri = { version = "=2.12.5", features = ["tray-icon"] }
+tauri-plugin-single-instance = { version = "=2.5.4", features = ["deep-link"] }
+tauri-plugin-deep-link = "=2.6.2"
+rfd = "=0.17.2"
+arboard = { version = "=3.6.1", default-features = false }
+tauri-plugin-autostart = "=2.7.0"
+base64 = "=0.22.1"
+zeroize = "=1.8.2"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }

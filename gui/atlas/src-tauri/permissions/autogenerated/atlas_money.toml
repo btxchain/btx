@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-atlas-money"
+description = "Enables the atlas_money command without any pre-configured scope."
+commands.allow = ["atlas_money"]
+
+[[permission]]
+identifier = "deny-atlas-money"
+description = "Denies the atlas_money command without any pre-configured scope."
+commands.deny = ["atlas_money"]

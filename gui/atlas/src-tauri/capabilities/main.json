@@ -1,0 +1,27 @@
+{
+  "identifier": "main",
+  "description": "The signed local Atlas window. Native mutation commands still require independent OS dialogs. No remote URL or child frame capabilities.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-atlas-status",
+    "allow-atlas-connect",
+    "allow-atlas-read",
+    "allow-atlas-prepare",
+    "allow-atlas-execute",
+    "allow-atlas-cancel",
+    "allow-atlas-money",
+    "allow-atlas-agent",
+    "allow-atlas-document",
+    "allow-atlas-qr",
+    "allow-atlas-config",
+    "allow-atlas-launch",
+    "allow-atlas-activity",
+    "allow-atlas-pending-links",
+    "allow-atlas-copy",
+    "allow-atlas-desktop"
+  ]
+}

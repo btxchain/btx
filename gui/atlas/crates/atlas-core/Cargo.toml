@@ -1,0 +1,19 @@
+[package]
+name = "btx-atlas-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "atlas_core"
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.145", features = ["arbitrary_precision"] }
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+zeroize = "=1.8.2"
+getrandom = "=0.3.4"
+tempfile = "=3.23.0"
+qrcode = { version = "=0.14.1", default-features = false }

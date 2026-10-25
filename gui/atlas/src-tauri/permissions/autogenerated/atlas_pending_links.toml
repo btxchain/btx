@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-atlas-pending-links"
+description = "Enables the atlas_pending_links command without any pre-configured scope."
+commands.allow = ["atlas_pending_links"]
+
+[[permission]]
+identifier = "deny-atlas-pending-links"
+description = "Denies the atlas_pending_links command without any pre-configured scope."
+commands.deny = ["atlas_pending_links"]

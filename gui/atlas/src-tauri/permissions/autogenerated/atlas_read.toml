@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-atlas-read"
+description = "Enables the atlas_read command without any pre-configured scope."
+commands.allow = ["atlas_read"]
+
+[[permission]]
+identifier = "deny-atlas-read"
+description = "Denies the atlas_read command without any pre-configured scope."
+commands.deny = ["atlas_read"]
