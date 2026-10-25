@@ -395,7 +395,6 @@ BOOST_AUTO_TEST_CASE(fucai_memo_matches_full_walk_on_random_scenarios)
         std::vector<CBlockIndex*> branch_main;
         std::vector<const CBlockIndex*> active_ancestors;
         {
-            LOCK(::cs_main);
             for (const CBlockIndex* p{real_tip}; p != nullptr && active_ancestors.size() < 40; p = p->pprev) {
                 active_ancestors.push_back(p);
             }
@@ -458,7 +457,6 @@ BOOST_AUTO_TEST_CASE(fucai_memo_matches_full_walk_on_random_scenarios)
         }
 
         {
-            LOCK(::cs_main);
             CBlockIndex* tip{real_tip};
             const auto tip_pick{rng.randrange(8)};
             if (tip_pick == 0) {
@@ -507,7 +505,6 @@ BOOST_AUTO_TEST_CASE(fucai_memo_cost_on_ibd_shape)
     constexpr int HINTS{513};
     std::vector<CBlockIndex*> gap;
     {
-        LOCK(::cs_main);
         CBlockIndex* parent{chainstate.m_chain.Tip()};
         for (int i = 0; i < GAP; ++i) {
             parent = AddSynthetic(chainman, parent, rng);
@@ -522,7 +519,6 @@ BOOST_AUTO_TEST_CASE(fucai_memo_cost_on_ibd_shape)
     for (int i = GAP - HINTS; i < GAP - 1; ++i) AddHint(gap[i], /*quorum=*/false);
     BOOST_REQUIRE_EQUAL(node::matmul_trusted::AttestedFrontierHints().size(), size_t{HINTS});
 
-    LOCK(::cs_main);
     using Clock = std::chrono::steady_clock;
     ChainstateManager::SetFindUniqueCompetingAttestedIndexHoleWalkMemoForTest(false);
     const auto t0{Clock::now()};
