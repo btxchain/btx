@@ -64,10 +64,20 @@ class ModelNetListenTest(BitcoinTestFramework):
         args = ["-modelnet=1", "-modelstorage=0", *MATMUL_OFF_ARGS]
 
         self.log.info("-listen=0: the helper gets no PQ1 listener")
-        with node.assert_debug_log(["parameter interaction: -listen=0 -> setting -modelbind=off",
-                                    "storage=0 bind= host="]):
+        # The harness writes modelbind=0 into every node config, so -listen=0 does
+        # not soft-set -modelbind here; the helper result is what counts.
+        with node.assert_debug_log(["storage=0 bind= host=off"],
+                                   unexpected_msgs=["setting -modelbind=off"]):
             self.restart_node(0, extra_args=[*args, "-listen=0"])
         assert_equal(self.helper_info()["nat_status"], "disabled")
+
+        self.log.info("-listen=0 without modelbind in the config: the soft-set closes the port")
+        node.replace_in_config([("modelbind=0", "#modelbind=0")])
+        with node.assert_debug_log(["parameter interaction: -listen=0 -> setting -modelbind=off",
+                                    "storage=0 bind= host=off"]):
+            self.restart_node(0, extra_args=[*args, "-listen=0"])
+        assert_equal(self.helper_info()["nat_status"], "disabled")
+        node.replace_in_config([("#modelbind=0", "modelbind=0")])
 
         self.log.info("-listen=0 with an explicit -modelbind: the operator's address wins")
         port = p2p_port(1)
