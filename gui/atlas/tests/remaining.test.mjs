@@ -53,6 +53,15 @@ test('the main window may open the native print dialog that window.print() calls
   assert.equal(capability.permissions.includes('core:webview:allow-print'), true);
 });
 
+test('a printed request is placed on the page, not inside the scrolled workspace', () => {
+  // #workspace scrolls inside a fixed-height #app; an absolute print root sat above the scrolled view and printed blank.
+  const css = fs.readFileSync(new URL('../web/style.css', import.meta.url), 'utf8');
+  const print = css.slice(css.indexOf('@media print{'));
+  const rule = print.slice(print.indexOf('[data-print-root]{'), print.indexOf('}', print.indexOf('[data-print-root]{')));
+  assert.match(rule, /position:fixed/);
+  assert.match(rule, /background:#fff/);
+});
+
 test('a native export passes the suggested file name to the save dialog', async () => {
   const calls = [];
   const previous = globalThis.__TAURI__;
