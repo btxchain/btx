@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {BY_METHOD} from '../web/core/catalog.js';
 import {atomsPerVbyteFromKvb, banDurationSeconds, blockHeights, feeDecimal, headerBars, moneyPeers, networkWarnings, sessionSamples, trafficDelta, txSummary} from '../web/core/network.js';
 
 test('trafficDelta subtracts canonical getnettotals counters', () => {
@@ -64,6 +65,14 @@ test('banDurationSeconds is setban bantime in seconds', () => {
   assert.throws(() => banDurationSeconds(0), {message: 'Ban duration must be 1 to 8760 hours.'});
   assert.throws(() => banDurationSeconds(8761), {message: 'Ban duration must be 1 to 8760 hours.'});
   assert.throws(() => banDurationSeconds(1.5), {message: 'Ban duration must be 1 to 8760 hours.'});
+});
+
+test('disconnectnode takes the address or the node id, never both by default', () => {
+  // The node refuses ["address", 0]: RPC -32602 "Only one of address and nodeid should be provided."
+  const args = BY_METHOD.get('disconnectnode').args;
+  assert.deepEqual(args.map(arg => arg.name), ['address', 'nodeid']);
+  assert.equal(args.some(arg => arg.required), false);
+  assert.equal('default' in args[1], false);
 });
 
 test('existing network readers stay exported', () => {

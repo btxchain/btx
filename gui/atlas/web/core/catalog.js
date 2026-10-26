@@ -290,17 +290,16 @@ export const OPERATIONS = [
       {
         "name": "address",
         "kind": "string",
-        "required": true,
+        "required": false,
         "default": ""
       },
       {
         "name": "nodeid",
         "kind": "integer",
-        "required": true,
-        "default": 0
+        "required": false
       }
     ],
-    "notes": "",
+    "notes": "Give the address or the node id, not both. The node refuses a request that names both.",
     "wallet": false
   },
   {
