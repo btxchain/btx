@@ -116,7 +116,13 @@ test('history actions allow bump and abandon only for an unconfirmed send', () =
   assert.deepEqual(historyActions({category: 'send', 'bip125-replaceable': 'yes'}), neither);
   assert.deepEqual(historyActions({confirmations: 0, 'bip125-replaceable': 'yes'}), neither);
   assert.deepEqual(historyActions(null), neither);
-  assert.deepEqual(historyActions({category: 'send', confirmations: '0', 'bip125-replaceable': 'yes'}), neither);
+  // the desktop app: RPC numbers arrive as exact decimal strings (strict_json::for_ui)
+  assert.deepEqual(historyActions({category: 'send', confirmations: '0', 'bip125-replaceable': 'yes'}), {bump: true, abandon: true});
+  assert.deepEqual(historyActions({category: 'send', confirmations: '0', 'bip125-replaceable': 'no'}), {bump: false, abandon: true});
+  for (const c of ['1', '00', '-0', '0.0', ' 0', '', '-1']) {
+    assert.deepEqual(historyActions({category: 'send', confirmations: c, 'bip125-replaceable': 'yes'}), neither, c);
+  }
+  assert.deepEqual(historyActions({category: 'generate', confirmations: '0', 'bip125-replaceable': 'yes'}), neither);
   assert.deepEqual(historyActions({category: 'Send', confirmations: 0, 'bip125-replaceable': 'yes'}), neither);
   assert.deepEqual(historyActions({category: 'send', confirmations: 0, 'bip125-replaceable': 'unknown'}), {bump: false, abandon: true});
 });
