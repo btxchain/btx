@@ -60,7 +60,9 @@ export function historyWalk({pageSize, cap}) {
 }
 
 export function historyActions(row) {
-  const unconfirmedSend = !!row && typeof row === 'object' && row.category === 'send' && typeof row.confirmations === 'number' && row.confirmations === 0;
+  // The desktop page receives every RPC number as an exact decimal string (strict_json::for_ui);
+  // the browser demo passes numbers. Zero confirmations is 0 or "0", nothing else.
+  const unconfirmedSend = !!row && typeof row === 'object' && row.category === 'send' && (row.confirmations === 0 || row.confirmations === '0');
   return {
     bump: unconfirmedSend && row['bip125-replaceable'] === 'yes',
     abandon: unconfirmedSend,
