@@ -142,22 +142,35 @@ export function addressFacts(info) {
   return {lines, warning};
 }
 
+// Desktop RPC delivers every number as an exact decimal string (strict_json::for_ui).
+// A canonical non-negative integer is a safe integer number, or a string of that decimal.
+function canonicalNonNegativeInteger(value) {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    return String(value);
+  }
+  if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) return null;
+  const numeric = Number(value);
+  if (!Number.isSafeInteger(numeric) || String(numeric) !== value) return null;
+  return String(numeric);
+}
+
 export function walletFacts(info) {
   try {
     if (!plainObject(info)) return [];
     const lines = [];
     if (Object.hasOwn(info, 'txcount')) {
-      const txcount = info.txcount;
-      if (Number.isSafeInteger(txcount) && txcount >= 0) lines.push(`Transactions: ${txcount}`);
+      const txcount = canonicalNonNegativeInteger(info.txcount);
+      if (txcount !== null) lines.push(`Transactions: ${txcount}`);
     }
     if (Object.hasOwn(info, 'descriptors')) {
       const descriptors = info.descriptors;
       if (typeof descriptors === 'boolean') lines.push(`Descriptors: ${descriptors ? 'yes' : 'no'}`);
     }
     if (Object.hasOwn(info, 'unlocked_until')) {
-      const unlocked = info.unlocked_until;
-      if (unlocked === 0) lines.push('This wallet is locked.');
-      else if (Number.isSafeInteger(unlocked) && unlocked > 0) lines.push('This wallet reports an unlock expiry.');
+      const unlocked = canonicalNonNegativeInteger(info.unlocked_until);
+      if (unlocked === '0') lines.push('This wallet is locked.');
+      else if (unlocked !== null) lines.push('This wallet reports an unlock expiry.');
     }
     return lines;
   } catch {

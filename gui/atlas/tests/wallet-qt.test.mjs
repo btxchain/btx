@@ -228,11 +228,18 @@ test('address facts ignore a scriptPubKey object and every other key', () => {
 test('wallet facts include a non-negative transaction count', () => {
   assert.deepEqual(walletFacts({txcount: 0}), ['Transactions: 0']);
   assert.deepEqual(walletFacts({txcount: 12}), ['Transactions: 12']);
+  assert.deepEqual(walletFacts({txcount: '0'}), ['Transactions: 0']);
+  assert.deepEqual(walletFacts({txcount: '12'}), ['Transactions: 12']);
   assert.deepEqual(walletFacts({txcount: Number.MAX_SAFE_INTEGER}), [`Transactions: ${Number.MAX_SAFE_INTEGER}`]);
+  assert.deepEqual(walletFacts({txcount: String(Number.MAX_SAFE_INTEGER)}), [`Transactions: ${Number.MAX_SAFE_INTEGER}`]);
   assert.deepEqual(walletFacts({txcount: -1}), []);
   assert.deepEqual(walletFacts({txcount: 1.5}), []);
-  assert.deepEqual(walletFacts({txcount: '12'}), []);
+  assert.deepEqual(walletFacts({txcount: true}), []);
   assert.deepEqual(walletFacts({txcount: Number.MAX_SAFE_INTEGER + 1}), []);
+  assert.deepEqual(walletFacts({txcount: String(Number.MAX_SAFE_INTEGER + 1)}), []);
+  for (const txcount of ['00', '-0', '0.0', ' 0', '', '-1', '1.5']) {
+    assert.deepEqual(walletFacts({txcount}), [], txcount);
+  }
   const counted = walletFacts({txcount: 3, balance: 1.25, unconfirmed_balance: 2, immature_balance: 3, hdseedid: 'seed', seed: 'abandon abandon'});
   assert.deepEqual(counted, ['Transactions: 3']);
   assert.equal(counted.some((line) => /balance|seed|abandon/i.test(line)), false);
@@ -248,16 +255,23 @@ test('wallet facts include descriptors only as yes or no', () => {
 
 test('wallet facts say the wallet is locked when unlock expiry is zero', () => {
   assert.deepEqual(walletFacts({unlocked_until: 0}), ['This wallet is locked.']);
+  assert.deepEqual(walletFacts({unlocked_until: '0'}), ['This wallet is locked.']);
   assert.deepEqual(walletFacts({unlocked_until: -1}), []);
   assert.deepEqual(walletFacts({unlocked_until: false}), []);
+  for (const unlocked_until of ['00', '-0', '0.0', ' 0', '', '-1', '1.5']) {
+    assert.deepEqual(walletFacts({unlocked_until}), [], unlocked_until);
+  }
   assert.deepEqual(walletFacts({unlocked_until: 0, balance: 4, seed: 'seed phrase'}), ['This wallet is locked.']);
 });
 
 test('wallet facts report an unlock expiry for a positive safe integer', () => {
   assert.deepEqual(walletFacts({unlocked_until: 1}), ['This wallet reports an unlock expiry.']);
+  assert.deepEqual(walletFacts({unlocked_until: '1700000000'}), ['This wallet reports an unlock expiry.']);
   assert.deepEqual(walletFacts({unlocked_until: Number.MAX_SAFE_INTEGER}), ['This wallet reports an unlock expiry.']);
+  assert.deepEqual(walletFacts({unlocked_until: String(Number.MAX_SAFE_INTEGER)}), ['This wallet reports an unlock expiry.']);
   assert.deepEqual(walletFacts({unlocked_until: 1.5}), []);
   assert.deepEqual(walletFacts({unlocked_until: Number.MAX_SAFE_INTEGER + 1}), []);
+  assert.deepEqual(walletFacts({unlocked_until: String(Number.MAX_SAFE_INTEGER + 1)}), []);
   assert.deepEqual(walletFacts({
     txcount: 4,
     descriptors: true,

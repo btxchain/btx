@@ -208,9 +208,21 @@ function formatByte(value) {
   return value.toLocaleString('en-US', {useGrouping: false, maximumFractionDigits: 20});
 }
 
+const CANONICAL_DECIMAL = /^(0|[1-9]\d*)(\.\d+)?$/;
+
+function unitInterval(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1) return value;
+  if (typeof value === 'string' && value.length <= 32 && CANONICAL_DECIMAL.test(value)) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
+  }
+  return null;
+}
+
 function formatSummary(key, value) {
-  if (key === 'verificationprogress' && typeof value === 'number' && value >= 0 && value <= 1) {
-    return `${(value * 100).toFixed(2)}%`;
+  if (key === 'verificationprogress') {
+    const fraction = unitInterval(value);
+    if (fraction !== null) return `${(fraction * 100).toFixed(2)}%`;
   }
   if (BYTE_KEYS.has(key)) return formatByte(value);
   return value;

@@ -45,15 +45,24 @@ export function redactObservation(value) {
   return copied === SKIP ? undefined : copied;
 }
 
+const DECIMAL_PROGRESS = /^(0|[1-9]\d*)(\.\d+)?$/;
+
 function progressText(progress) {
   return `${(progress * 100).toFixed(2)}%`;
+}
+
+function finiteProgress(progress) {
+  if (typeof progress === 'number') return Number.isFinite(progress) ? progress : undefined;
+  if (typeof progress !== 'string' || progress.length > 32 || !DECIMAL_PROGRESS.test(progress)) return undefined;
+  const value = Number(progress);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 export function syncBanner(info) {
   if (info === null || typeof info !== 'object') return {visible: false, title: '', detail: ''};
   const downloading = info.initialblockdownload === true;
-  const progress = info.verificationprogress;
-  const progressFinite = typeof progress === 'number' && Number.isFinite(progress);
+  const progress = finiteProgress(info.verificationprogress);
+  const progressFinite = progress !== undefined;
   const warnings = String(info.warnings || '').trim();
   const visible = downloading || (progressFinite && progress < 0.999) || warnings !== '';
   if (!visible) return {visible: false, title: '', detail: ''};

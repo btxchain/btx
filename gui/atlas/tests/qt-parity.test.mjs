@@ -36,7 +36,7 @@ test('redact hides credential_ref and query, keeps name, does not mutate input',
   assert.equal(cycle.self, cycle);
 });
 
-test('syncBanner hidden for null; visible for initialblockdownload; visible for progress 0.5; visible for a warning; hidden for progress 1 and empty warnings; detail does not contain qualified', () => {
+test('syncBanner hidden for null; visible for initialblockdownload; visible for progress 0.5; visible for a warning; hidden for progress 1 and empty warnings; string progress 0.5 and 0.25; rejects 1e-1; detail does not contain qualified', () => {
   assert.deepEqual(syncBanner(null), {visible: false, title: '', detail: ''});
   const ibd = syncBanner({initialblockdownload: true, verificationprogress: 0.25});
   assert.equal(ibd.visible, true);
@@ -55,7 +55,19 @@ test('syncBanner hidden for null; visible for initialblockdownload; visible for 
   assert.equal(done.visible, false);
   assert.equal(done.title, '');
   assert.equal(done.detail, '');
-  for (const banner of [ibd, mid, warn, done]) {
+  const midStr = syncBanner({initialblockdownload: false, verificationprogress: '0.5', warnings: ''});
+  assert.equal(midStr.visible, true);
+  assert.equal(midStr.title, 'Synchronization in progress');
+  assert.match(midStr.detail, /50\.00%/);
+  const ibdStr = syncBanner({initialblockdownload: true, verificationprogress: '0.25'});
+  assert.equal(ibdStr.visible, true);
+  assert.equal(ibdStr.title, 'Initial block download');
+  assert.match(ibdStr.detail, /25\.00%/);
+  const sci = syncBanner({initialblockdownload: false, verificationprogress: '1e-1', warnings: ''});
+  assert.equal(sci.visible, false);
+  assert.equal(sci.detail, '');
+  assert.doesNotMatch(sci.detail, /%/);
+  for (const banner of [ibd, mid, warn, done, midStr, ibdStr, sci]) {
     assert.equal(banner.detail.includes('qualified'), false);
     assert.doesNotMatch(`${banner.title}\n${banner.detail}`, /verified|qualified|passed/i);
   }

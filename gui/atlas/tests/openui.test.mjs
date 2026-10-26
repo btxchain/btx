@@ -94,7 +94,14 @@ test('summarizeObservation keeps six scalar facts and does not read anything els
   assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: 0}).metrics[0].value, '0.00%');
   assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: 1}).metrics[0].value, '100.00%');
   assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: 1.2}).metrics[0].value, 1.2);
-  assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: '1'}).metrics[0].value, '1');
+  assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: '1'}).metrics[0].value, '100.00%');
+  assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: '0.5'}).metrics[0].value, '50.00%');
+  assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: '1.0'}).metrics[0].value, '100.00%');
+  assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: '0'}).metrics[0].value, '0.00%');
+  assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: '1.2'}).metrics[0].value, '1.2');
+  assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: '1e-1'}).metrics[0].value, '1e-1');
+  assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: '00'}).metrics[0].value, '00');
+  assert.equal(summarizeObservation('getblockchaininfo', {verificationprogress: '-0'}).metrics[0].value, '-0');
 
   const mempool = summarizeObservation('getmempoolinfo', {size: 62, bytes: 27155, usage: 145408});
   assert.deepEqual(mempool.metrics, [

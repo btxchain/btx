@@ -264,6 +264,23 @@ function reviewPanel(app, {name, methods, failClosed, help}) {
  return el('section', {class:'panel', dataset:{panel:name}}, el('h2', {}, name), note(failClosed), typed.node, el('div', {class:'actions'}, ...buttons), status);
 }
 
+const CANONICAL_INTEGER = /^(0|[1-9]\d*)$/;
+
+function feedSequenceToken(value) {
+ if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+ if (typeof value !== 'string' || !CANONICAL_INTEGER.test(value)) return undefined;
+ const n = Number(value);
+ if (!Number.isFinite(n) || String(n) !== value) return undefined;
+ return value;
+}
+
+export function feedSequenceNote(displayed) {
+ const raw = displayed && typeof displayed === 'object' ? displayed.feed_sequence : displayed;
+ const seq = feedSequenceToken(raw);
+ if (seq === undefined) return '';
+ return `Local feed_sequence ${seq}. This refresh does not fetch the network feed.`;
+}
+
 export function modelPanels(app) {
  const directoryHost = resultBox();
  const directoryId = idField('Model id or btx://');
@@ -338,9 +355,8 @@ export function modelPanels(app) {
    method:'getmodelfeedsequence',
    failClosed:'Local feed_sequence only. This refresh does not fetch the network feed and does not download.',
    after(displayed) {
-    const seq = displayed && typeof displayed === 'object' ? displayed.feed_sequence : undefined;
-    if (typeof seq === 'number' && Number.isFinite(seq)) return [note(`Local feed_sequence ${seq}. This refresh does not fetch the network feed.`)];
-    return [];
+    const text = feedSequenceNote(displayed);
+    return text ? [note(text)] : [];
    },
   }),
   idReadPanel(app, {
