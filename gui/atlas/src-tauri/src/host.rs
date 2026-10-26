@@ -179,6 +179,18 @@ pub fn pick(app: &AppHandle, save: bool, title: &str) -> Result<PathBuf> {
     })?
     .ok_or_else(|| Error::new("CANCELLED", "No file selected"))
 }
+pub fn pick_save(app: &AppHandle, title: &str, name: Option<String>) -> Result<PathBuf> {
+    let title = title.to_owned();
+    main_thread(app, move || {
+        let d = rfd::FileDialog::new().set_title(title);
+        match name {
+            Some(name) => d.set_file_name(name),
+            None => d,
+        }
+        .save_file()
+    })?
+    .ok_or_else(|| Error::new("CANCELLED", "No file selected"))
+}
 pub fn pick_folder(app: &AppHandle, title: &str) -> Result<PathBuf> {
     let title = title.to_owned();
     main_thread(app, move || {

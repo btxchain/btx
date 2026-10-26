@@ -21,11 +21,11 @@ export class Bridge{
  async cancel(id){return this.invoke('atlas_cancel',{id});}
  async money(action,{id=null,draft=null}={}){return this.invoke('atlas_money',{action,id,draft});}
  async agent(action,{model=null,question=null}={}){return this.invoke('atlas_agent',{action,model,question});}
- async document(action,text=null){return this.invoke('atlas_document',{action,text});}
+ async document(action,text=null,name=null){return this.invoke('atlas_document',{action,text,name});}
  async config(action,section='',edit=null){return this.invoke('atlas_config',{action,section,edit:edit===null?null:JSON.stringify(edit)});}
  async activity(){if(this.mode==='demo')return {entries:[],unresolved:[],scope:'DEMO: no native audit journal'};return this.invoke('atlas_activity');}
  async export(text,filename='atlas-export.json'){
-  if(isNative)return this.document('export',text);
+  if(isNative)return this.document('export',text,filename);
   if(new TextEncoder().encode(text).length>4*1024*1024)throw Error('Export exceeds 4 MiB');
   const url=URL.createObjectURL(new Blob([text],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);return{saved:true};
  }

@@ -125,7 +125,7 @@ pub async fn atlas_money(
     let result=if action=="sign"{money.sign(&c.rpc,&id,c.epoch)}else{money.broadcast(&c.rpc,&id,c.epoch)};
     let _=h.audit(&id,method,if result.is_ok(){"SUCCEEDED"}else{"UNKNOWN"});serde_json::to_value(result?).map_err(|_|Error::new("JSON","Plan serialization failed"))},
    "inspect"=>serde_json::to_value(money.view(id.as_deref().unwrap_or(""),c.epoch)?).map_err(|_|Error::new("JSON","Plan serialization failed")),
-   "export"=>{let psbt=money.psbt(id.as_deref().unwrap_or(""),c.epoch)?;let path=pick(&app,true,"Save PSBT to a NEW file")?;files::write_new(&path,psbt.as_bytes())?;Ok(json!({"saved":true}))},
+   "export"=>{let psbt=money.psbt(id.as_deref().unwrap_or(""),c.epoch)?;let path=pick_save(&app,"Save PSBT to a NEW file",Some("transaction.psbt".to_owned()))?;files::write_new(&path,psbt.as_bytes())?;Ok(json!({"saved":true}))},
    "discard"=>{money.discard(id.as_deref().unwrap_or(""));Ok(json!({"discarded":true}))},
    _=>Err(Error::new("MONEY_ACTION","Unknown wallet workflow action"))
   }
@@ -159,12 +159,13 @@ pub async fn atlas_document(
     app: AppHandle,
     action: String,
     text: Option<String>,
+    name: Option<String>,
 ) -> Result<Value> {
     authorize(&window)?;
     blocking(move||match action.as_str(){
   "psbt_import"=>{let path=pick(&app,false,"Open binary or base64 PSBT")?;let b=files::read_bounded(&path,1_048_576)?;let text=if b.starts_with(b"psbt\xff"){STANDARD.encode(&b)}else{String::from_utf8(b).map_err(|_|Error::new("PSBT","Expected binary PSBT magic or UTF-8 base64"))?.trim().to_owned()};if text.len()>1_400_000{return Err(Error::new("PSBT","PSBT exceeds import budget"));}Ok(json!({"text":text,"trust":"UNTRUSTED_PSBT_NOT_SIGNED"}))},
   "import"=>{let path=pick(&app,false,"Open a local evidence, workflow, surface, resource, or PSBT document")?;let b=files::read_bounded(&path,1_048_576)?;let text=String::from_utf8(b).map_err(|_|Error::new("TEXT","Document is not UTF-8"))?;Ok(json!({"text":text,"digest":atlas_core::hash(text.as_bytes()),"trust":"UNTRUSTED_LOCAL_DOCUMENT"}))},
-  "export"=>{let text=text.ok_or_else(||Error::new("EXPORT","Missing export text"))?;if text.len()>4_194_304{return Err(Error::new("EXPORT_SIZE","Export exceeds 4 MiB"));}let path=pick(&app,true,"Export to a NEW file; existing files are not overwritten")?;files::write_new(&path,text.as_bytes())?;Ok(json!({"saved":true}))},
+  "export"=>{let text=text.ok_or_else(||Error::new("EXPORT","Missing export text"))?;if text.len()>4_194_304{return Err(Error::new("EXPORT_SIZE","Export exceeds 4 MiB"));}let path=pick_save(&app,"Export to a NEW file; existing files are not overwritten",name.as_deref().and_then(files::suggested_name))?;files::write_new(&path,text.as_bytes())?;Ok(json!({"saved":true}))},
   "source_path"=>{let path=pick(&app,false,"Choose a model or native source file")?;Ok(json!({"path":path.to_string_lossy()}))},
   "folder_path"=>{let path=pick_folder(&app,"Choose model/source folder")?;Ok(json!({"path":path.to_string_lossy()}))},
   "destination_path"=>{let path=pick(&app,true,"Choose destination for the separately reviewed native operation")?;Ok(json!({"path":path.to_string_lossy()}))},
