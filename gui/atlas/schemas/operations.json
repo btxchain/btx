@@ -3096,6 +3096,459 @@
       ],
       "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
       "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getcloudstorageinfo",
+      "title": "Cloud storage info",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodeldirectoryentry",
+      "title": "Model directory entry",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodeleconomyentry",
+      "title": "Model economy entry",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodeleventsequence",
+      "title": "Model event sequence",
+      "risk": "read",
+      "args": [],
+      "notes": "getmodeleventsequence must not call waitformodelevent. The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelfeedsequence",
+      "title": "Model feed sequence",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelprofile",
+      "title": "Model profile",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelreleaseeconomics",
+      "title": "Model release economics",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getsearchstatus",
+      "title": "Search status",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query_id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "listmodelwatches",
+      "title": "List model watches",
+      "risk": "read",
+      "args": [],
+      "notes": "listmodelwatches is not the filesystem -modelwatch. The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "searchcollections",
+      "title": "Search collections",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "text": "",
+            "limit": 25,
+            "sort": "RELEVANCE",
+            "scope": "LOCAL"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "searchpublishers",
+      "title": "Search publishers",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "text": "",
+            "limit": 25,
+            "sort": "RELEVANCE",
+            "scope": "LOCAL"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "cacheencryptedmodel",
+      "title": "Cache encrypted model",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "Ciphertext only and must not auto-download. The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "publishmodelsearchrecord",
+      "title": "Publish model search record",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "metadata",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "display_name": "",
+            "canonical_name": ""
+          }
+        }
+      ],
+      "notes": "Metadata only. The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "getbountycapabilities",
+      "title": "Bounty capabilities",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "getbtxcapabilityevents",
+      "title": "Capability events",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "cursor": 0,
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "getbtxruntimecapabilities",
+      "title": "Runtime capabilities",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "getbtxttctrace",
+      "title": "Capability time-to-complete",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "job_id": "",
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "ensurebtxcapability",
+      "title": "Ensure capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "plan_id": "",
+            "grant": {
+              "caller": "local",
+              "host_bytes": 8388608,
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "planbtxcapability",
+      "title": "Plan capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "recipe": {
+              "recipe_kind": "FULL_MODEL",
+              "components": [
+                {
+                  "name": "base",
+                  "resource": {
+                    "kind": "MODEL",
+                    "digest48": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  },
+                  "role": "BASE",
+                  "required": true
+                }
+              ]
+            },
+            "grant": {
+              "caller": "local",
+              "host_bytes": 8388608,
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "planbtxcapabilityupdate",
+      "title": "Plan capability update",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "preview": true,
+            "automatic_spend_atoms": "0",
+            "smoke_passed": false,
+            "lock_id": "",
+            "grant": {
+              "caller": "local",
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "prefetchbtxcapability",
+      "title": "Prefetch capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "grant": {
+              "caller": "local",
+              "automatic_spend_atoms": "0"
+            },
+            "kind": "DEMAND",
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "releasebtxcapability",
+      "title": "Release capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "lease_id": "",
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "sleepbtxcapability",
+      "title": "Sleep capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "lease_id": "",
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "switchbtxcapability",
+      "title": "Switch capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "old_lock": "",
+            "new_lock": "",
+            "automatic_spend_atoms": "0",
+            "grant": {
+              "caller": "local",
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "wakebtxcapability",
+      "title": "Wake capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "lease_id": "",
+            "remap_only": false,
+            "automatic_spend_atoms": "0",
+            "grant": {
+              "caller": "local",
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getresourcegovernorinfo",
+      "title": "Resource governor",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
     }
   ]
 }

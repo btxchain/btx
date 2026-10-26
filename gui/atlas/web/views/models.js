@@ -1,6 +1,7 @@
 import {el,button,field,heading,note,badge,table,dialog,jsonView,humanBytes,toast} from '../components/ui.js';
 import {sourceRows} from '../core/graph.js';
 import {operationDialog,operationWorkbench} from './operations.js';
+import {modelPanels} from './model-panels.js';
 export function modelsView(app){
  const root=el('div',{class:'page'},heading('Models','Acquire, preserve, inspect and run verified local models. Downloads are not execution grants.'));
  const query=el('input',{type:'search',placeholder:'Search locally known models…','aria-label':'Model search'}),scope=el('select',{},el('option',{value:'LOCAL'},'Local catalogue'),el('option',{value:'NETWORK'},'Network search — explicit disclosure')),results=el('div'),tabs=el('nav',{class:'tabs'});let selected='Catalogue';
@@ -17,7 +18,7 @@ export function modelsView(app){
    case 'Preservation':results.append(jsonView((await app.bridge.read('getmodelpolicy')).result,{open:true,title:'Current native preservation / propagation policy'}),operationButtons(app,['setmodelpolicy','seedmodel','unseedmodel','removemodel']),note('Automatic spend remains zero. A larger storage or propagation grant is an independent native policy change.'));break;
    case 'Peers':{const r=await app.bridge.read('getmodelpeers');results.append(jsonView(r,{open:true,title:'Native model peer observations'}),operationButtons(app,['addmodelnode','importmodelcontacts','exportmodelcontacts','importmodeltrust']));break;}
    case 'Identity':{const r=await app.bridge.read('listmodelidentities');results.append(jsonView(r,{open:true,title:'Model identities — not wallet keys'}),operationButtons(app,['createmodelidentity','listmodelrules','setmodelrule','removemodelrule','delegatemodelservice','revokemodelservice']));break;}
-   case 'Capabilities':results.append(operationWorkbench(app,{groups:['Capabilities','Compute'],title:'Native capability lifecycle'}),note('Installed, available, admitted, executing, and qualified are distinct states. Missing methods remain unavailable.'));break;
+   case 'Capabilities':results.append(modelPanels(app),el('details',{},el('summary',{},'Open generic template'),operationWorkbench(app,{groups:['Capabilities','Compute'],title:'Capabilities and Compute templates'})),note('Installed, available, admitted, executing, and qualified are distinct states. Missing methods remain unavailable.'));break;
   }
  }catch(e){results.append(note(e.message,'danger'));}}
  for(const name of names)tabs.append(button(name,()=>{selected=name;show();},'',{dataset:{tab:name}}));root.append(tabs,bar,results);show();return root;

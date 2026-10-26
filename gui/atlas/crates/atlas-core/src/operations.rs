@@ -77,6 +77,21 @@ const READ_METHODS: &[&str] = &[
     "getbountydraft",
     "searchmodels",
     "searchbounties",
+    "getbountycapabilities",
+    "getbtxruntimecapabilities",
+    "getbtxttctrace",
+    "getcloudstorageinfo",
+    "getmodeldirectoryentry",
+    "getmodeleconomyentry",
+    "getmodeleventsequence",
+    "getmodelfeedsequence",
+    "getmodelprofile",
+    "getmodelreleaseeconomics",
+    "getresourcegovernorinfo",
+    "getsearchstatus",
+    "listmodelwatches",
+    "searchcollections",
+    "searchpublishers",
 ];
 const AGENT_READS: &[&str] = &[
     "getblockchaininfo",
@@ -207,7 +222,10 @@ pub fn read_allowed(method: &str, params: &Value) -> bool {
     if !READ_METHODS.contains(&method) {
         return false;
     }
-    if matches!(method, "searchmodels" | "searchbounties") {
+    if matches!(
+        method,
+        "searchmodels" | "searchbounties" | "searchcollections" | "searchpublishers"
+    ) {
         let q = if params.is_array() {
             params.get(0)
         } else {
@@ -221,7 +239,19 @@ pub fn agent_read_allowed(method: &str) -> bool {
     AGENT_READS.contains(&method)
 }
 pub fn verify_zero_spend(method: &str, p: &Value) -> Result<()> {
-    if matches!(method, "setmodelpolicy" | "getmodel") {
+    if matches!(
+        method,
+        "setmodelpolicy"
+            | "getmodel"
+            | "ensurebtxcapability"
+            | "planbtxcapability"
+            | "planbtxcapabilityupdate"
+            | "prefetchbtxcapability"
+            | "releasebtxcapability"
+            | "sleepbtxcapability"
+            | "switchbtxcapability"
+            | "wakebtxcapability"
+    ) {
         fn walk(v: &Value) -> bool {
             match v {
                 Value::Object(m) => m.iter().all(|(k, v)| match k.as_str() {
@@ -392,6 +422,22 @@ mod tests {
     fn network_queries() {
         assert!(read_allowed("searchmodels", &json!([{"scope":"LOCAL"}])));
         assert!(!read_allowed("searchmodels", &json!([{"scope":"NETWORK"}])));
+        assert!(read_allowed(
+            "searchcollections",
+            &json!([{"scope":"LOCAL"}])
+        ));
+        assert!(!read_allowed(
+            "searchcollections",
+            &json!([{"scope":"NETWORK"}])
+        ));
+        assert!(read_allowed(
+            "searchpublishers",
+            &json!([{"scope":"LOCAL"}])
+        ));
+        assert!(!read_allowed(
+            "searchpublishers",
+            &json!([{"scope":"NETWORK"}])
+        ));
     }
     #[test]
     fn state() {
@@ -439,5 +485,15 @@ mod tests {
             verify_zero_spend("setmodelpolicy", &json!([{"automatic_spend_atoms":"1"}])).is_err()
         );
         assert!(verify_zero_spend("getmodel", &json!(["m",{"mode":"PAID"}])).is_err());
+        assert!(verify_zero_spend(
+            "planbtxcapability",
+            &json!([{"grant":{"automatic_spend_atoms":"1"}}])
+        )
+        .is_err());
+        assert!(verify_zero_spend(
+            "wakebtxcapability",
+            &json!([{"automatic_spend_atoms":"0","remap_only":false}])
+        )
+        .is_ok());
     }
 }

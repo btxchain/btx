@@ -66,6 +66,12 @@ the default client.
   `publishmodelsearchrecord`, `releasebtxcapability`, `searchcollections`,
   `searchpublishers`, `sleepbtxcapability`, `switchbtxcapability`,
   `wakebtxcapability`. A template is not a completed workflow.
+* Those 26 names now have catalog templates (219 total) and Models panels.
+  `getbtxcapabilityevents` is not a silent read: the handler drops stored
+  events at or below the cursor, so Atlas opens native review instead.
+  Tray, minimize, translations, fonts, hardware signing, installer signing,
+  and the relay-policy OptionIDs stay without an Atlas writer. This is not
+  Qt retirement.
 * Disposable regtest qualification was not run. The script mines 101 blocks,
   and regtest MatMul v4 starts at height 100. MatMul was not disabled to
   force a result. Windows, macOS, installers, hardware signing, local-model
