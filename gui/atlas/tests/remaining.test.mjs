@@ -2,6 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {loadRequests, rememberRequest, requestSeconds, qrSvg} from '../web/core/receive-history.js';
 import {formatObservedTime} from '../web/core/json.js';
+import fs from 'node:fs';
 import {feeBins} from '../web/core/mempool.js';
 import {atomsPerVbyteFromKvb, blockHeights, feeDecimal, moneyPeers, sessionSamples, txSummary} from '../web/core/network.js';
 
@@ -44,4 +45,10 @@ test('a saved request time is milliseconds and is shown as its UTC date', () => 
   assert.equal(requestSeconds(-5), 0);
   assert.equal(requestSeconds(1.5), 0);
   assert.equal(requestSeconds('1793017000000'), 0);
+});
+
+test('the main window may open the native print dialog that window.print() calls', () => {
+  // Tauri routes window.print() to plugin:webview|print; without this permission the call is rejected.
+  const capability = JSON.parse(fs.readFileSync(new URL('../src-tauri/capabilities/main.json', import.meta.url)));
+  assert.equal(capability.permissions.includes('core:webview:allow-print'), true);
 });

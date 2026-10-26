@@ -54,7 +54,7 @@ export function walletView(app){
     const receipt=el('div',{class:'receipt',dataset:{printRoot:'request'}},el('code',{class:'address'},address),el('code',{class:'address'},uri),el('p',{},`Amount: ${request.amount}`),el('p',{},`Label: ${request.label}`),el('p',{},`Message: ${request.message}`));
     const actions=el('div',{class:'row'},copyButton('Copy URI',uri),copyButton('Copy amount',request.amount),copyButton('Copy label',request.label),copyButton('Copy message',request.message));
     out.replaceChildren(receipt,actions);
-    try{const qr=await app.bridge.invoke('atlas_qr',{text:uri});const drawn=drawQR(qr);if(drawn&&drawn.tagName==='CANVAS')receipt.append(drawn);else if(drawn)out.append(drawn);const svg=qrSvg(qr);if(svg)actions.append(button('Save QR image',()=>app.bridge.export(svg,'btx-request.svg').catch(e=>toast(e.message,'danger'))),button('Print this request',()=>window.print()));}catch(e){out.append(note(e.message,'danger'));}
+    try{const qr=await app.bridge.invoke('atlas_qr',{text:uri});const drawn=drawQR(qr);if(drawn&&drawn.tagName==='CANVAS')receipt.append(drawn);else if(drawn)out.append(drawn);const svg=qrSvg(qr);if(svg)actions.append(button('Save QR image',()=>app.bridge.export(svg,'btx-request.svg').catch(e=>toast(e.message,'danger'))),button('Print this request',()=>{Promise.resolve(window.print()).catch(e=>toast(e?.message||String(e),'danger'));}));}catch(e){out.append(note(e.message,'danger'));}
     paintRequests();
    }catch(e){out.replaceChildren(note(e.message,'danger'));}
    finally{create.disabled=false;}
