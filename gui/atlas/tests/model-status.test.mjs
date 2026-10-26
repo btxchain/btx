@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {modelNodeStatus} from '../web/core/model-status.js';
+import {modelNodeStatus, modelRecordRows} from '../web/core/model-status.js';
 
 test('present readiness and local generate are facts, and spend is the string given', () => {
   const status = modelNodeStatus(
@@ -29,4 +29,39 @@ test('missing objects, numeric spend, and non-finite rates stay uninvented', () 
   assert.equal(rates.lines.some(line => line.includes('Infinity')), false);
   assert.ok(rates.lines.some(line => line.includes('3')));
   assert.equal(modelNodeStatus({helper_ready: 'not a boolean'}, {}).lines.some(line => line.includes('not a boolean')), true);
+});
+
+test('modelRecordRows copies an array of objects and drops non-objects', () => {
+  const row = {address: 'a'};
+  const source = [row, 'skip', null, 1, ['nested']];
+  const rows = modelRecordRows(source);
+  assert.deepEqual(rows, [row]);
+  assert.notEqual(rows, source);
+  assert.equal(rows[0], row);
+});
+
+test('modelRecordRows uses a peers array on an object', () => {
+  const peers = [{endpoint: 'e'}];
+  const rows = modelRecordRows({peers, identities: [{id: 'other'}]});
+  assert.deepEqual(rows, peers);
+  assert.notEqual(rows, peers);
+});
+
+test('modelRecordRows uses an identities array on an object', () => {
+  const identities = [{id: 'i', name: 'n'}];
+  const rows = modelRecordRows({identities});
+  assert.deepEqual(rows, identities);
+  assert.notEqual(rows, identities);
+});
+
+test('modelRecordRows returns no rows for a string', () => {
+  assert.deepEqual(modelRecordRows('peers'), []);
+});
+
+test('modelRecordRows drops the 201st row', () => {
+  const source = Array.from({length: 201}, (_, i) => ({i}));
+  const rows = modelRecordRows(source);
+  assert.equal(rows.length, 200);
+  assert.equal(rows[199], source[199]);
+  assert.equal(rows.includes(source[200]), false);
 });

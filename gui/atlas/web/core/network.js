@@ -120,6 +120,20 @@ function headerTransactions(value) {
   return null;
 }
 
+export function networkWarnings(info) {
+  if (!info || typeof info !== 'object') return '';
+  if (typeof info.warnings !== 'string') return '';
+  const text = info.warnings.trim();
+  return text.length ? text : '';
+}
+
+export function banDurationSeconds(hours) {
+  if (!Number.isInteger(hours) || hours < 1 || hours > 8760) {
+    throw new Error('Ban duration must be 1 to 8760 hours.');
+  }
+  return hours * 3600;
+}
+
 export function headerBars(rows) {
   if (!Array.isArray(rows)) return [];
   const out = [];

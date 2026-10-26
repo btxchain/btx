@@ -1,7 +1,7 @@
 import {el,button,heading,note,metric,table,jsonView,dialog,humanBytes,toast} from '../components/ui.js';
 import {buildGraph} from '../core/graph.js';
 import {JsonNumber} from '../core/json.js';
-import {blockHeights,headerBars,moneyPeers,sessionSamples,trafficDelta} from '../core/network.js';
+import {banDurationSeconds,blockHeights,headerBars,moneyPeers,networkWarnings,sessionSamples,trafficDelta} from '../core/network.js';
 import {operationDialog} from './operations.js';
 
 function sessionBytes(text) {
@@ -13,6 +13,8 @@ function sessionBytes(text) {
 export function networkView(app) {
   const root = el('div', {class:'page'}, heading('Peer network', 'Atlas is the window onto this node. Money and models move on the same BTX peer network. Counts and peers below are what this node has observed.'));
   const metricsHost = el('div', {class:'metrics'});
+  const banHours = el('input', {type:'number', min:1, max:8760, value:24, 'aria-label':'Ban duration in hours'});
+  let warningNote = null;
   const sessionHost = el('div');
   const moneyHost = el('div');
   const modelHost = el('div');
@@ -27,13 +29,25 @@ export function networkView(app) {
       button('Banned peers', () => operationDialog(app, 'listbanned')),
       button('Open the network map', () => app.navigate('atlas'))),
     metricsHost,
-    sessionHost,
-    el('section', {class:'panel'}, el('h2', {}, 'Money peers'), note('Disconnect and ban open a native review. They do not run from this table.'), moneyHost),
+    el('section', {class:'panel'}, el('h2', {}, 'This session'), note('Counts since this page first read totals.'), sessionHost),
+    el('section', {class:'panel'}, el('h2', {}, 'Money peers'), note('Disconnect and ban open a native review. They do not run from this table.'), banHours, moneyHost),
     el('section', {class:'panel'}, el('h2', {}, 'Model peers'), note('A model peer is another participant this node has observed. It is not permission to train, seed, or spend.'), modelHost),
     el('section', {class:'panel'}, el('h2', {}, 'Recent blocks'), note('Headers from this node, newest first. This is not a second chain.'), blocksHost),
     el('section', {class:'panel'}, el('h2', {}, 'Mempool during this session'), note('Samples start when this page is open. They are not the node’s historical mempool.'), mempoolHost));
   function paint() {
     const sources = app.state.state.sources || {};
+    const warning = networkWarnings(sources.getnetworkinfo?.result);
+    if (warning) {
+      if (!warningNote) {
+        warningNote = note(warning, 'warning');
+        metricsHost.before(warningNote);
+      } else {
+        warningNote.textContent = warning;
+      }
+    } else if (warningNote) {
+      warningNote.remove();
+      warningNote = null;
+    }
     const chain = sources.getblockchaininfo?.result || {};
     const network = sources.getnetworkinfo?.result || {};
     const modelnet = sources.getmodelnetworkinfo?.result || {};
@@ -75,7 +89,18 @@ export function networkView(app) {
           }
         }, '', {disabled: privacy ? !canToast : !endpoint}),
         button('Disconnect', event => { event.stopPropagation(); if (endpoint) operationDialog(app, 'disconnectnode', [endpoint]); }, '', {disabled: !endpoint}),
-        button('Ban', event => { event.stopPropagation(); if (endpoint) operationDialog(app, 'setban', [endpoint, 'add']); }, '', {disabled: !endpoint}));
+        button('Ban', event => {
+          event.stopPropagation();
+          if (!endpoint) return;
+          let bantime;
+          try {
+            bantime = banDurationSeconds(Number(banHours.value));
+          } catch (error) {
+            if (canToast) toast(error && error.message ? error.message : String(error), 'warning');
+            return;
+          }
+          operationDialog(app, 'setban', [endpoint, 'add', bantime]);
+        }, '', {disabled: !endpoint}));
     };
     moneyHost.replaceChildren(table(rows, ['address', 'direction', 'type', 'ping', 'height', 'version', {key:'actions', label:'Review', render: actions}], {empty:'No money peers observed.'}));
     const graph = buildGraph(sources, {privacy});

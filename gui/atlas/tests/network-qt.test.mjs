@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {atomsPerVbyteFromKvb, blockHeights, feeDecimal, headerBars, moneyPeers, sessionSamples, trafficDelta, txSummary} from '../web/core/network.js';
+import {atomsPerVbyteFromKvb, banDurationSeconds, blockHeights, feeDecimal, headerBars, moneyPeers, networkWarnings, sessionSamples, trafficDelta, txSummary} from '../web/core/network.js';
 
 test('trafficDelta subtracts canonical getnettotals counters', () => {
   assert.deepEqual(
@@ -42,6 +42,25 @@ test('headerBars keeps at most twelve nonnegative header transaction counts', ()
   assert.equal(bars[11].transactions, 11);
   assert.deepEqual(headerBars([{height: '1', transactions: '01'}]), []);
   assert.deepEqual(headerBars(null), []);
+});
+
+test('networkWarnings returns a trimmed node warning and nothing else', () => {
+  assert.equal(networkWarnings({warnings: '  headers behind  '}), 'headers behind');
+  assert.equal(networkWarnings({warnings: '   '}), '');
+  assert.equal(networkWarnings({warnings: ''}), '');
+  assert.equal(networkWarnings({}), '');
+  assert.equal(networkWarnings({warnings: null}), '');
+  assert.equal(networkWarnings(null), '');
+  assert.equal(networkWarnings('headers behind'), '');
+});
+
+test('banDurationSeconds is setban bantime in seconds', () => {
+  assert.equal(banDurationSeconds(24), 86400);
+  assert.equal(banDurationSeconds(1), 3600);
+  assert.equal(banDurationSeconds(8760), 31536000);
+  assert.throws(() => banDurationSeconds(0), {message: 'Ban duration must be 1 to 8760 hours.'});
+  assert.throws(() => banDurationSeconds(8761), {message: 'Ban duration must be 1 to 8760 hours.'});
+  assert.throws(() => banDurationSeconds(1.5), {message: 'Ban duration must be 1 to 8760 hours.'});
 });
 
 test('existing network readers stay exported', () => {

@@ -1,5 +1,6 @@
 import {el,button,heading,note,badge,metric,table,jsonView,dialog,toast,humanBytes,field} from '../components/ui.js';
 import {sourceRows} from '../core/graph.js';
+import {presentObservation} from '../core/observe.js';
 import {syncBanner} from '../core/qt-gaps.js';
 import {operationDialog,operationWorkbench} from './operations.js';
 import {operationButtons} from './models.js';
@@ -13,8 +14,9 @@ export function observationView(app,view){
  };const [title,subtitle,methods,group]=definitions[view],root=el('div',{class:'page'},heading(title,subtitle)),area=el('div',{class:'surface-stack'});
  if(view==='economy')root.append(note('A local budget or unsigned plan is not a spendable L2 balance. The GUI does not upgrade an unqualified native payment backend.','warning'));
  if(view==='swarms')root.append(note('Peers, model communities, work relationships and payment relationships are different graphs. This screen exposes this node’s partial observations.'));
- root.append(button('Refresh these observations',load),area,operationWorkbench(app,{groups:view==='compute'?['Compute','Capabilities']:[group],title:'Native operations'}));
- async function load(){area.replaceChildren();let chain=app.state.state.sources.getblockchaininfo?.result;for(const m of methods){const box=el('section',{class:'panel'},el('div',{class:'row'},el('h2',{},m),badge('Native source')));area.append(box);try{const envelope=await app.bridge.read(m);if(m==='getblockchaininfo')chain=envelope.result;box.append(jsonView(envelope.result,{open:true,title:`Observed ${new Date(envelope.observed_at).toLocaleTimeString()} · partial local view`}));if(m==='listmodels')box.append(table(sourceRows(envelope),['name','model_id','bytes_verified','incomplete']));}catch(err){box.append(note(err.message,'danger'));}}if(view==='mining'){const sync=syncBanner(chain)||{};if(sync.visible===true)area.append(el('p',{class:'sync-line'},el('strong',{},sync.title==null?'':String(sync.title)),sync.detail==null?'':String(sync.detail)));}}
+ const workbench=operationWorkbench(app,{groups:view==='compute'?['Compute','Capabilities']:[group],title:'Native operations'});
+ root.append(button('Refresh these observations',load),area,el('details',{},el('summary',{},'Native operations'),workbench));
+ async function load(){area.replaceChildren();let chain=app.state.state.sources.getblockchaininfo?.result;for(const m of methods){const box=el('section',{class:'panel'});area.append(box);try{const envelope=await app.bridge.read(m);if(m==='getblockchaininfo')chain=envelope.result;const shown=presentObservation(m,envelope.result);box.append(el('div',{class:'row'},el('h2',{},shown.title),el('small',{class:'mono'},m),badge('Native source')));if(shown.metrics.length)box.append(el('div',{class:'metrics'},...shown.metrics.map(item=>metric(item.label,item.value))));if(shown.rows.length&&shown.columns.length)box.append(table(shown.rows,shown.columns));else if(m==='listmodels')box.append(table(sourceRows(envelope),['name','model_id','bytes_verified','incomplete']));box.append(jsonView(envelope.result,{open:false,title:'Native record'}));}catch(err){box.append(el('div',{class:'row'},el('h2',{},presentObservation(m,null).title),el('small',{class:'mono'},m),badge('Native source')),note(err.message,'danger'));}}if(view==='mining'){const sync=syncBanner(chain)||{};if(sync.visible===true)area.append(el('p',{class:'sync-line'},el('strong',{},sync.title==null?'':String(sync.title)),sync.detail==null?'':String(sync.detail)));}}
  load();return root;
 }
 export function activityView(app){
@@ -26,7 +28,8 @@ export function toolsView(app){
  const root=el('div',{class:'page'},heading('Node tools','Peer management, mempool inspection, pairing, configuration and a native-reviewed RPC workbench.'));
  const method=el('input',{placeholder:'Exact discovered RPC method',spellcheck:false}),available=app.bridge.available?[...app.bridge.available]:[];root.append(el('section',{class:'panel'},el('h2',{},'RPC console'),note('Read-only methods use an explicit allowlist. Every other method requires complete native review; a method’s name or an agent suggestion grants no authority.'),el('div',{class:'row'},method,button('Open command',()=>{if(!/^[a-zA-Z0-9_]{1,96}$/.test(method.value)){toast('Invalid method name','danger');return;}operationDialog(app,method.value);}),button('Refresh method inventory',async()=>{try{await app.bridge.discover();toast('Native RPC inventory refreshed');}catch(e){toast(e.message,'danger');}}))));
  root.append(mempoolPanel(app),peersPanel(app),torPanel(app),helpPanel(app));
- root.append(operationWorkbench(app,{groups:['Node'],title:'Node diagnostics and control'}));return root;
+ const workbench=operationWorkbench(app,{groups:['Node'],title:'Node diagnostics and control'});
+ root.append(el('details',{},el('summary',{},'Node operations'),workbench));return root;
 }
 function mempoolPanel(app){
  const body=el('div',{class:'surface-stack'}),refresh=button('Refresh',()=>load());

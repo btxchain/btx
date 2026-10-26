@@ -52,6 +52,31 @@ function addRates(lines, source, seen) {
   }
 }
 
+const ROW_LIST_KEYS = ['peers', 'identities', 'result'];
+const ROW_CAP = 200;
+
+function modelRecordRows(value) {
+  const list = Array.isArray(value) ? value : rowList(value);
+  if (!list) return [];
+  const rows = [];
+  for (const item of list) {
+    const row = plain(item);
+    if (!row) continue;
+    rows.push(row);
+    if (rows.length === ROW_CAP) break;
+  }
+  return rows;
+}
+
+function rowList(value) {
+  const obj = plain(value);
+  if (!obj) return null;
+  for (const key of ROW_LIST_KEYS) {
+    if (Array.isArray(obj[key])) return obj[key];
+  }
+  return null;
+}
+
 function spendOf(setup) {
   const root = plain(setup);
   if (!root) return 'unknown';
@@ -60,6 +85,8 @@ function spendOf(setup) {
   if (modelnet && typeof modelnet.automatic_spend_atoms === 'string') return modelnet.automatic_spend_atoms;
   return 'unknown';
 }
+
+export {modelRecordRows};
 
 export function modelNodeStatus(setup, profile) {
   const lines = [];

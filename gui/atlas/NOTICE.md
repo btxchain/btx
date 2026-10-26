@@ -3,12 +3,19 @@
 The authored Atlas source is supplied under the MIT license in LICENSE.
 No Neuron Explorer implementation, stylesheet, screenshot, shader or font was
 copied. Its general scientific visualization concepts informed the design.
-OpenUI and Octopus supplied conceptual patterns; their runtimes are not bundled.
+Octopus supplied conceptual patterns; its runtime is not bundled.
 The icon SVG and native icon conversions are independently authored.
+- The bundled language engine is @openuidev/lang-core 1.0.1 from
+  https://github.com/thesysdev/openui, file gui/atlas/web/vendor/openui-lang.js,
+  MIT, license text in gui/atlas/web/vendor/OPENUI-LICENSE.txt.
+- The package's network capture call was removed before the file was written.
+  Atlas does not send OpenUI telemetry.
+- The React, Vue, Svelte, and Angular renderers and OpenUI Cloud are not
+  included.
+- wandb/openui is a different project and is not used.
 
 References (not runtime dependencies):
 - https://github.com/lyramakesmusic/neuron-explorer
-- https://github.com/wandb/openui
 - https://github.com/miuuyy/Octopus-SI-OS
 
 Actual native dependencies are pinned directly in Cargo.toml. Transitive dependency
