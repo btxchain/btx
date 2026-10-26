@@ -5,6 +5,17 @@ use std::{
     io::{Read, Write},
     path::Path,
 };
+/// The file name a save dialog may suggest: a plain name with an extension, no directory parts.
+pub fn suggested_name(name: &str) -> Option<String> {
+    let ok = (3..=64).contains(&name.len())
+        && !name.starts_with('.')
+        && !name.ends_with('.')
+        && name.contains('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    ok.then(|| name.to_owned())
+}
 pub fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>> {
     let m =
         fs::symlink_metadata(path).map_err(|_| Error::new("FILE", "File metadata unavailable"))?;
@@ -127,4 +138,32 @@ pub fn inspect_safetensors(path: &Path) -> Result<Value> {
     Ok(
         json!({"schema":"btx.atlas.tensor-header/1","header_sha256":hash(&bytes),"file_bytes":meta.len().to_string(),"tensors":tensors,"weights_verified":false,"activation_capture":false,"note":"Header-only inspection, not full SafeTensors validation or model qualification"}),
     )
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_suggested_name_is_a_plain_file_name_with_an_extension() {
+        assert_eq!(
+            suggested_name("wallet-history.csv").as_deref(),
+            Some("wallet-history.csv")
+        );
+        assert_eq!(
+            suggested_name("transaction.psbt").as_deref(),
+            Some("transaction.psbt")
+        );
+        for bad in [
+            "",
+            "Untitled",
+            ".csv",
+            "history.",
+            "../x.csv",
+            "a/b.csv",
+            "a b.csv",
+            "x.c\u{301}sv",
+        ] {
+            assert!(suggested_name(bad).is_none(), "{bad}");
+        }
+        assert!(suggested_name(&format!("{}.csv", "a".repeat(61))).is_none());
+    }
 }

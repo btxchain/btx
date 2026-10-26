@@ -52,3 +52,16 @@ test('the main window may open the native print dialog that window.print() calls
   const capability = JSON.parse(fs.readFileSync(new URL('../src-tauri/capabilities/main.json', import.meta.url)));
   assert.equal(capability.permissions.includes('core:webview:allow-print'), true);
 });
+
+test('a native export passes the suggested file name to the save dialog', async () => {
+  const calls = [];
+  const previous = globalThis.__TAURI__;
+  globalThis.__TAURI__ = {core: {invoke: async (command, args) => { calls.push([command, args]); return {saved: true}; }}};
+  try {
+    const {Bridge} = await import('../web/core/bridge.js?native-export');
+    await new Bridge().export('a,b\n', 'wallet-history.csv');
+  } finally {
+    globalThis.__TAURI__ = previous;
+  }
+  assert.deepEqual(calls, [['atlas_document', {action: 'export', text: 'a,b\n', name: 'wallet-history.csv'}]]);
+});
