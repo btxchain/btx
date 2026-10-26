@@ -15,6 +15,8 @@ const COMMANDS: &[&str] = &[
     "atlas_pending_links",
     "atlas_copy",
     "atlas_desktop",
+    "atlas_neuronlab",
+    "atlas_neuronlab_cancel",
 ];
 fn main() {
     let manifest = tauri_build::AppManifest::new().commands(COMMANDS);

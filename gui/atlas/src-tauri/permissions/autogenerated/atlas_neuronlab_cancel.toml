@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-atlas-neuronlab-cancel"
+description = "Enables the atlas_neuronlab_cancel command without any pre-configured scope."
+commands.allow = ["atlas_neuronlab_cancel"]
+
+[[permission]]
+identifier = "deny-atlas-neuronlab-cancel"
+description = "Denies the atlas_neuronlab_cancel command without any pre-configured scope."
+commands.deny = ["atlas_neuronlab_cancel"]

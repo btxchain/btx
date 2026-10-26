@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod commands;
 mod host;
+mod neuronlab;
 use host::Host;
 use std::sync::Arc;
 use tauri::{
@@ -48,7 +49,9 @@ fn main() {
             commands::atlas_activity,
             commands::atlas_pending_links,
             commands::atlas_copy,
-            commands::atlas_desktop
+            commands::atlas_desktop,
+            neuronlab::atlas_neuronlab,
+            neuronlab::atlas_neuronlab_cancel
         ])
         .setup(|app| {
             let dir = app.path().app_local_data_dir()?;

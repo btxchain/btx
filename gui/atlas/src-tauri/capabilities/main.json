@@ -22,6 +22,8 @@
     "allow-atlas-activity",
     "allow-atlas-pending-links",
     "allow-atlas-copy",
-    "allow-atlas-desktop"
+    "allow-atlas-desktop",
+    "allow-atlas-neuronlab",
+    "allow-atlas-neuronlab-cancel"
   ]
 }

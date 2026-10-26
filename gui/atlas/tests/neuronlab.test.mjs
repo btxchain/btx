@@ -1,0 +1,15 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {millionths,dose,operation,unknownRecipe,defaultDraft,validateDraft,bindingDifferences,coordinateKey,captureValues,KINDS} from '../web/neuronlab/contract.js';
+const b={weights_hash:'0'.repeat(96),adapter:'torch-tiny-v1',architecture:'BTXTinyLM',layers:2,heads:4,intermediate_size:64,hidden_size:24,activation:'silu'};
+test('coefficients have exact millionth representation',()=>{for(let x=-8000000;x<=8000000;x+=7919)assert.equal(millionths(dose(x)),x);assert.equal(millionths('-0.000001'),-1);});
+test('malformed coefficient formats refused',()=>{for(const s of ['NaN','Infinity','1e3','0.0000001','-00.1','1000',' 1','0x10'])assert.throws(()=>millionths(s));});
+test('unknown training recipe remains explicitly unknown',()=>{const r=unknownRecipe();for(const f of Object.values(r.facts)){assert.equal(f.status,'unknown');assert.equal(f.value,null);}});
+test('default draft has no authority, tensors or adoption',()=>{const d=defaultDraft('id',b);assert.equal(d.privacy,'private');assert.deepEqual(d.tensors,{});assert.equal(validateDraft(d,b),d);});
+test('malformed scientific coordinates are refused',()=>{for(const o of [operation('neuron_scale',2),operation('neuron_scale',0,[64]),operation('head_scale',0,[4]),operation('neuron_scale',0,[1,1]),operation('execute_shell')])assert.throws(()=>validateDraft({...defaultDraft('id',b),operations:[o]},b));});
+test('unknown metadata cannot smuggle a measured value',()=>{const d=defaultDraft('id',b);d.training_recipe.facts.optimizer.value='AdamW';assert.throws(()=>validateDraft(d,b));});
+test('profile namespace binds precise checkpoint not just unit number',()=>{assert.notEqual(coordinateKey(b,0,'mlp',2),coordinateKey({...b,weights_hash:'1'.repeat(96)},0,'mlp',2));});
+test('native origin URI is not physical model identity',()=>{assert.deepEqual(bindingDifferences({...b,btx_model_id:'x'},{...b,btx_model_id:'y'}),[]);assert.deepEqual(bindingDifferences(b,{...b,activation:'gelu'}),['activation']);});
+test('pre and post captures never conflate',()=>{const c={records:[{layer:0,site:'mlp_post_activation',stage:'pre',unit:2,value_millionths:9},{layer:0,site:'mlp_post_activation',stage:'post',unit:2,value_millionths:0}]};assert.equal(captureValues(c,0).values.get(2),0);});
+test('capture reduction reports invalid values and stays bounded',()=>{const c={records:[{layer:0,site:'mlp_post_activation',stage:'post',unit:2,value_millionths:NaN}]};assert.equal(captureValues(c,0).omitted,1);assert.equal(captureValues(null,0).values.size,0);});
+test('only fixed numeric operator families offered',()=>{assert.equal(KINDS.length,7);assert(!KINDS.includes('python'));});

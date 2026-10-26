@@ -1,0 +1,32 @@
+{
+  "schema": "btx.neuronlab.code-manifest/1",
+  "version": "0.2.0",
+  "files": {
+    "worker.py": "84e7e86ad8c93d055653c9d7814329bfd3e87f97ac87cae5f5d95a3318c6620a",
+    "generate_adapter.py": "781e70ffa0e0d78d8112862894ae2b5b5ed361dfa193b386d64f9ad47988723d",
+    "btx_neuronlab/__init__.py": "a5f2c4f8bc159b97aed3181adf4800aae5015ea70cda6425cf556dab32740113",
+    "btx_neuronlab/capsule.py": "f3d776115ab7ae62d0df6dbdb3a6128cb05da81c12a29c7821c533d136557eb3",
+    "btx_neuronlab/codec.py": "2c76b87bfc2ba1e9fc3e9388698ff00e49a08d9a459d43b4dbd1dd4e629ebe49",
+    "btx_neuronlab/conversations.py": "83d5d286317dda20dfeee214eb98636933e3ff8fe802b3350932ecba9de5eebd",
+    "btx_neuronlab/crypto.py": "5fb4488a8f6cf7e85ea0e0cd3d90206b3c5009a710ee2dbd9bcb52c49c2888b5",
+    "btx_neuronlab/decoding.py": "2496b47d01197436ba242e2c809df89984b53d4814e822d851c974755839f898",
+    "btx_neuronlab/embeddings.py": "8fe8838e5ae263e7ee2614bec33405b608636657c5f5befa70a0ed258a1e77dd",
+    "btx_neuronlab/engine.py": "d8140afc02cb5029893fab99af9350dbbb4ba9d126f122fa7c09085331fdf801",
+    "btx_neuronlab/evidence.py": "9c7eed4e352ab41a69ffc041d189bb7180b6b3c45c4049e0706bd0c605daa9f8",
+    "btx_neuronlab/inspection.py": "099e95868f51eed5d3e440811f98ebaa84016cd3ee4412bc143fde4b867f6c07",
+    "btx_neuronlab/models.py": "d2c95d6c7704e7296d4fa61dfc762e2b0dff38f786c88d10e4518db1fc2d361f",
+    "btx_neuronlab/operators.py": "eb8e95b7681a9d20002c2ef29be07a67ce335f332c940cd817ec1bdf7cceeba5",
+    "btx_neuronlab/qualification.py": "85aef33210394f7414d2e688e4c45ced2ee0df032a43f5a61de26a430c85728d",
+    "btx_neuronlab/router.py": "90133f2b72e239bb3f17dc66c093b79e93084d4b05e8a75b53078e0263b76f1c",
+    "btx_neuronlab/runtime_io.py": "157afa9d1879b2b79df19ff22c0a9cf3423e65bad6155476a739d05abfef5bb8",
+    "btx_neuronlab/schema.py": "7c571a4efa6299cc675eeb6c4c0dfe4b4e501e93296452784e59ea41a3ebc074",
+    "btx_neuronlab/science.py": "080706ee0cbe6d0f69d9468d7e4f1e67804097e8a0fca7ff5ed8f9c319582a0b",
+    "btx_neuronlab/service.py": "c4e4a345105834134cc02f5024da00a918a5cade68947dfb7971feb10dadf80e",
+    "btx_neuronlab/store.py": "e3374ea817ec17e74669b789c6996da08be4421ef903a4689f7fffd61e697d30",
+    "btx_neuronlab/study.py": "1bf4d795b0571d8ab2259eb455c950c8098810805a285688644e5450b9f74713",
+    "btx_neuronlab/tiny.py": "40eb03b43706189e3d5f53a3f31a535c963a994e5c9da59884a780bc4e3ff658",
+    "btx_neuronlab/tracing.py": "aceb40ccf871b41f9febd3e958ef5cb82a4cbd082ab451f03c8bd05fed20771d",
+    "btx_neuronlab/transport.py": "0186f0eb48b260d0dcfb6f057611abe291a6e8675a592c8c546530282415b968"
+  },
+  "notice": "Local source integrity manifest, not an independent signing certificate or dependency audit."
+}
