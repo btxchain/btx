@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {loadRequests, rememberRequest, qrSvg} from '../web/core/receive-history.js';
+import {loadRequests, rememberRequest, requestSeconds, qrSvg} from '../web/core/receive-history.js';
+import {formatObservedTime} from '../web/core/json.js';
 import {feeBins} from '../web/core/mempool.js';
 import {atomsPerVbyteFromKvb, blockHeights, feeDecimal, moneyPeers, sessionSamples, txSummary} from '../web/core/network.js';
 
@@ -33,4 +34,14 @@ test('QR save is an SVG of the matrix and fee bins are the current snapshot', ()
   assert.match(svg, /<svg /);
   assert.equal(qrSvg({width: 1, cells: ['x']}), null);
   assert.deepEqual(feeBins({fee_histogram: [[1.5, 2], ['bad', 1], [3, Number.NaN]]}), [{feerate: '1.5', count: '2'}]);
+});
+
+test('a saved request time is milliseconds and is shown as its UTC date', () => {
+  const at = Date.UTC(2026, 9, 26, 12, 14, 1, 250);
+  assert.equal(requestSeconds(at), Math.floor(at / 1000));
+  assert.match(formatObservedTime(requestSeconds(at)), /^26 Oct 2026/);
+  assert.equal(requestSeconds(0), 0);
+  assert.equal(requestSeconds(-5), 0);
+  assert.equal(requestSeconds(1.5), 0);
+  assert.equal(requestSeconds('1793017000000'), 0);
 });

@@ -4,7 +4,7 @@ import {parseBTX,formatBTX,formatUnit} from '../core/money.js';
 import {formatObservedTime} from '../core/json.js';
 import {sourceRows} from '../core/graph.js';
 import {historyFilter,paymentRequest} from '../core/qt-gaps.js';
-import {loadRequests,rememberRequest,qrSvg} from '../core/receive-history.js';
+import {loadRequests,rememberRequest,requestSeconds,qrSvg} from '../core/receive-history.js';
 import {atomsPerVbyteFromKvb,feeDecimal,txSummary} from '../core/network.js';
 import {txExplorerTemplate} from '../core/qt-surface.js';
 import {createWalletDraft,coinSelectionSummary,receivingAddressArgs,historyWalk,nextHistorySkip,coinTree,psbtWithinLimit,addressFacts,walletFacts} from '../core/wallet-qt.js';
@@ -62,7 +62,7 @@ export function walletView(app){
   const history=el('div');
   function paintRequests(){
    let rows=[];try{rows=loadRequests(localStorage.getItem('atlas.receive.v1'));}catch{rows=[];}
-   history.replaceChildren(rows.length?table(rows.map(row=>({...row,when:row.at?formatObservedTime(row.at):'—'})),[{key:'when',label:'Time'},{key:'address',label:'Address',render:addressShown},{key:'amount',label:'Amount'},'label','message',{key:'actions',label:'Actions',render:(_v,row)=>button('Fill form',ev=>{ev.stopPropagation();amount.value=row.amount??'';label.value=row.label??'';message.value=row.message??'';})}]):note('No receiving requests saved in this browser profile.'));
+   history.replaceChildren(rows.length?table(rows.map(row=>({...row,when:row.at?formatObservedTime(requestSeconds(row.at)):'—'})),[{key:'when',label:'Time'},{key:'address',label:'Address',render:addressShown},{key:'amount',label:'Amount'},'label','message',{key:'actions',label:'Actions',render:(_v,row)=>button('Fill form',ev=>{ev.stopPropagation();amount.value=row.amount??'';label.value=row.label??'';message.value=row.message??'';})}]):note('No receiving requests saved in this browser profile.'));
   }
   paintRequests();
   return el('section',{class:'panel'},el('h2',{},'Request payment'),field('Amount (optional)',amount),field('Label (optional)',label),field('Address type',addressType),field('Message (optional)',message),create,out,el('h3',{},'Request history'),note('This history is local to Atlas. It is not a wallet transaction and it does not prove a payment.'),history);
