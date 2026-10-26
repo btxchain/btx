@@ -22,6 +22,9 @@ export function loadRequests(raw) {
   }
   return out;
 }
+export function requestSeconds(at) {
+  return Number.isSafeInteger(at) && at > 0 ? Math.floor(at / 1000) : 0;
+}
 export function rememberRequest(raw, request) {
   const next = [{ ...request, at: request.at || Date.now() }, ...loadRequests(raw)];
   return loadRequests(JSON.stringify(next)).slice(0, LIMIT);
