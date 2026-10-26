@@ -96,14 +96,12 @@ impl Host {
         Ok(())
     }
     pub fn receive_link(&self, value: &str) {
-        if value.len() <= 4096
-            && (value.starts_with("btx:") || value.starts_with("btx-p2p:"))
-            && !value.chars().any(char::is_control)
-        {
-            if let Ok(mut links) = self.links.lock() {
-                if links.len() < 8 {
-                    links.push(value.into());
-                }
+        let Some(preview) = atlas_core::links::preview_target(value) else {
+            return;
+        };
+        if let Ok(mut links) = self.links.lock() {
+            if links.len() < 8 {
+                links.push(preview);
             }
         }
     }

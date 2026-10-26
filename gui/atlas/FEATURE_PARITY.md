@@ -1,29 +1,30 @@
 # Qt replacement coverage and retirement gates
 
-**No complete Qt parity claim.** This matrix describes source coverage in this
-candidate. Native tests and the full Qt-source scan must close every transition
-before Qt is removed. A generic RPC template is not a complete redesigned dialog.
+Atlas is the interface to one BTX node on the peer network. Money peers and
+model peers are both participants in that network. The Qt client remains in the
+tree until the machine gates below have been run. A generic RPC template is not
+a finished dialog, and this matrix is not a retirement certificate.
 
 | Existing function / new feature | Candidate implementation | Remaining parity work |
 |---|---|---|
-| Overview, sync/chain/mining status | Dashboard and bounded native observations | Sync overlays, exact warnings, initial-download and all network transitions |
+| Overview, sync/chain/mining status | Network home, wallet overview with recent transactions, and the sync banner | Exact warning text for every network transition |
 | Multiwallet create/open/close/restore/migrate | Selector and reviewed native templates | Real descriptor/legacy/encrypted/PQ migration and error recovery |
-| Send, multiple outputs, fees, RBF | Dedicated exact-amount native PSBT composer | All address types, custom change UI, subtract-fee behavior, external signatures |
-| Coin control and locking | Input picker and native lock/unlock templates | Grouping/tree selections, fee estimators and manual selection edge cases |
-| Receive and QR | Native new-address review, exact URI and QR matrix | Request history, optional amount/message composer, save-image/print parity |
-| History/details/export | Paged transaction tables, detail RPC, safe CSV helpers | Full Qt filters, rebroadcast/replacement workflow, privacy export review |
-| Address book | Native labels and address-by-label operations | Full CRUD UX and sending/receiving separation |
-| Sign/verify message | Reviewed operation templates | Native sign/verify UX, supported key/script types and warning equivalence |
+| Send, multiple outputs, fees, RBF | Exact-amount PSBT composer, owned change address, subtract-fee for one recipient, and a node fee estimate converted from BTX/kvB | All address types and external signatures |
+| Coin control and locking | Coins grouped by address, with select-all, select-address, clear, and native lock/unlock | Tree selection and manual selection edge cases |
+| Receive and QR | Native new-address review, optional amount/label/message, local request history, SVG save, and printing the request | A dedicated receipt layout |
+| History/details/export | Paged tables, filters, transaction summary, bump-fee and abandon review, and a privacy-masked CSV of the loaded page | Export of a wallet’s entire history |
+| Address book | Receiving and sending lists, saving a sending label, and clearing a label through native review | Deleting a key is intentionally absent |
+| Sign/verify message | Dedicated sign review and boolean verify result | Supported key/script types and warning equivalence |
 | PSBT import/decode/sign/finalize | Dedicated tools and immutable native composer | Hardware signer roundtrip, repeated partial signatures, clipboard/import limits |
 | Wallet encryption/passphrase/backup | Reviewed native methods; hidden credential values in native review | Hardened native secret-entry widgets; backup/restore crash tests |
 | Raw private-key export | Deliberately denied in Atlas | Not required by ordinary wallet UI; unrestricted Qt-console equivalence is intentionally narrower |
 | RPC console | Strict JSON operator console, native confirmation for effects | Legacy nested-console grammar intentionally not copied; document migration |
-| Node peers/bans/network activity | Read views and reviewed native controls | Full NetWatch plots/context menus and platform warning parity |
-| Mempool/block inspection | Native information and generic read tools | Bespoke time-series charts, historical range/selection/export behavior |
-| Tor pairing | Observed v3 onion URI and copy; native QR utility | Pairing QR screen, lifecycle/endpoint-change UX |
+| Node peers/bans/network activity | Network home with money peers, model peers, disconnect, ban, and recent headers | NetWatch plots and platform warning parity |
+| Mempool/block inspection | Current size, bytes, transaction ids, fee histogram, and samples taken while the network page is open | Historical mempool charts stored by the node |
+| Tor pairing | Observed onion URI, copy, and QR | Endpoint-change lifecycle |
 | Node settings | 59 allowlisted config keys, full native diff review, hash conflict refusal | Full OptionID inventory, effective CLI overrides, reset/restart semantics, platform migration |
-| Startup/tray/single instance | Native tray, explicit login launch, singleton routing | Close/minimize policy, menus, window-state persistence, notifications |
-| URI/file associations | Native scheme config and bounded URI preview | Real OS `.btx` file-open event routing on all platforms and startup race tests |
+| Startup/tray/single instance | Native tray, login launch, singleton routing, minimize-on-close, and a separate window-bounds file | Menus, notifications, and multi-monitor placement |
+| URI/file associations | Scheme config, bounded URI preview, and a regular `.btx` file that contains one URI | OS registration and startup races on every platform |
 | Language/font/denominations | System fonts; BTX/mBTX/atoms; reduced-motion/scaling | Qt translations, configurable fonts, full legacy TBC/tonal behavior |
 | Model catalog/search/acquire/import | Live contract forms and dedicated catalog | Full source RPC audit, all native job/refusal/cancel flows, large-search paging |
 | Downloads/shared/collections/preservation/identity | Tabs plus native operations | Source-specific semantics and read/write declarations independently audited |

@@ -70,13 +70,15 @@ fn main() {
                     host.receive_link(url.as_str());
                 }
             });
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("BTX Atlas · Source candidate")
-                .inner_size(1440.0, 940.0)
-                .min_inner_size(740.0, 560.0)
-                .on_navigation(trusted_url)
-                .devtools(cfg!(debug_assertions))
-                .build()?;
+            let window =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("BTX Atlas · Source candidate")
+                    .inner_size(1440.0, 940.0)
+                    .min_inner_size(740.0, 560.0)
+                    .on_navigation(trusted_url)
+                    .devtools(cfg!(debug_assertions))
+                    .build()?;
+            commands::restore_window_bounds(&window);
             let show = MenuItem::with_id(app, "show", "Open BTX Atlas", true, None::<&str>)?;
             let quit = MenuItem::with_id(
                 app,
@@ -118,13 +120,22 @@ fn main() {
         .build(tauri::generate_context!());
     match app {
         Ok(app) => app.run(|app, event| {
-            if let tauri::RunEvent::WindowEvent {
-                label,
-                event: tauri::WindowEvent::CloseRequested { api, .. },
-                ..
-            } = event
-            {
-                if label == "main" && commands::minimize_on_close_enabled(app) {
+            let tauri::RunEvent::WindowEvent { label, event, .. } = event else {
+                return;
+            };
+            if label != "main" {
+                return;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                match &event {
+                    tauri::WindowEvent::CloseRequested { .. }
+                    | tauri::WindowEvent::Resized(_)
+                    | tauri::WindowEvent::Moved(_) => commands::save_window_bounds(&window),
+                    _ => {}
+                }
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if commands::minimize_on_close_enabled(app) {
                     api.prevent_close();
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.hide();

@@ -475,6 +475,103 @@ fn store_window_policy(app: &AppHandle, policy: WindowPolicy) -> Result<()> {
     replace_policy(&tmp, &path)
 }
 
+pub(crate) fn restore_window_bounds(window: &WebviewWindow) {
+    let Ok(path) = bounds_path(window.app_handle()) else {
+        return;
+    };
+    let Ok(Some(meta)) = regular_file(&path) else {
+        return;
+    };
+    if meta.len() > 1024 {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let Some((width, height, x, y)) = parse_bounds(&bytes) else {
+        return;
+    };
+    let _ = window.set_size(tauri::PhysicalSize::new(width, height));
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+pub(crate) fn save_window_bounds(window: &WebviewWindow) {
+    let Ok(size) = window.inner_size() else {
+        return;
+    };
+    let Ok(pos) = window.outer_position() else {
+        return;
+    };
+    if !bounds_in_range(
+        u64::from(size.width),
+        u64::from(size.height),
+        i64::from(pos.x),
+        i64::from(pos.y),
+    ) {
+        return;
+    }
+    let Ok(path) = bounds_path(window.app_handle()) else {
+        return;
+    };
+    if regular_file(&path).is_err() {
+        return;
+    }
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let tmp = parent.join("window-bounds.json.tmp");
+    if regular_file(&tmp).is_err() {
+        return;
+    }
+    let Ok(mut bytes) =
+        serde_json::to_vec(&json!({"width":size.width,"height":size.height,"x":pos.x,"y":pos.y}))
+    else {
+        return;
+    };
+    bytes.push(b'\n');
+    if std::fs::write(&tmp, &bytes).is_err() {
+        return;
+    }
+    let _ = replace_policy(&tmp, &path);
+}
+
+fn bounds_path(app: &AppHandle) -> Result<PathBuf> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| Error::new("WINDOW", "Cannot resolve the Atlas data directory"))?;
+    Ok(dir.join("window-bounds.json"))
+}
+
+fn parse_bounds(bytes: &[u8]) -> Option<(u32, u32, i32, i32)> {
+    if bytes.len() > 1024 {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let obj = value.as_object()?;
+    if obj.len() != 4 {
+        return None;
+    }
+    let width = obj.get("width")?.as_u64()?;
+    let height = obj.get("height")?.as_u64()?;
+    let x = obj.get("x")?.as_i64()?;
+    let y = obj.get("y")?.as_i64()?;
+    if !bounds_in_range(width, height, x, y) {
+        return None;
+    }
+    Some((width as u32, height as u32, x as i32, y as i32))
+}
+
+fn bounds_in_range(width: u64, height: u64, x: i64, y: i64) -> bool {
+    (740..=7680).contains(&width)
+        && (560..=4320).contains(&height)
+        && (-8192..=16384).contains(&x)
+        && (-8192..=16384).contains(&y)
+}
+
 fn regular_file(path: &Path) -> Result<Option<std::fs::Metadata>> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {

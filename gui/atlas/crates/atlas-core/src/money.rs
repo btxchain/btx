@@ -24,6 +24,12 @@ pub struct SendDraft {
     pub fee_rate: String,
     #[serde(default = "yes")]
     pub replaceable: bool,
+    /// Empty leaves change selection to the wallet. A model or URI cannot set this.
+    #[serde(default)]
+    pub change_address: String,
+    /// Subtracts the whole fee from the single recipient. The review checks that sum.
+    #[serde(default)]
+    pub subtract_fee: bool,
 }
 fn default_rate() -> String {
     "2".into()
@@ -49,6 +55,8 @@ pub struct PlanView {
     pub state: String,
     pub expires_at_ms: u64,
     pub txid: Option<String>,
+    pub change_address: String,
+    pub fee_taken_from_recipient: bool,
 }
 struct Plan {
     view: PlanView,
@@ -116,6 +124,28 @@ impl SendDraft {
                 "Fee rate must be a decimal between 0 and 10000 atoms/vB",
             ));
         }
+        if self.subtract_fee && self.recipients.len() != 1 {
+            return Err(Error::new(
+                "FEE",
+                "Subtract the fee only when there is exactly one recipient",
+            ));
+        }
+        if !self.change_address.is_empty()
+            && (self.change_address.len() > 256
+                || !self
+                    .change_address
+                    .bytes()
+                    .all(|x| x.is_ascii_alphanumeric())
+                || self
+                    .recipients
+                    .iter()
+                    .any(|r| r.address == self.change_address))
+        {
+            return Err(Error::new(
+                "CHANGE",
+                "Change address must be a different valid address",
+            ));
+        }
         let mut inputs = std::collections::HashSet::new();
         for i in &self.inputs {
             if i.txid.len() != 64
@@ -132,7 +162,17 @@ impl SendDraft {
     }
     pub fn summary(&self) -> Result<String> {
         self.validate()?;
-        Ok(format!("Wallet: {}\n{}\n\nMaximum fee: {} BTX\nFee rate: {} atoms/vB\nExplicit inputs: {}\nReplaceable: {}\n\nCreates an unsigned PSBT. No signing or broadcast. The wallet may reserve a new change address.",self.wallet,self.recipients.iter().map(|r|format!("{} BTX → {}",r.amount,r.address)).collect::<Vec<_>>().join("\n"),self.maximum_fee,self.fee_rate,self.inputs.len(),self.replaceable))
+        let change = if self.change_address.is_empty() {
+            "The wallet may reserve a new change address."
+        } else {
+            "Change, when one exists, must use the reviewed change address."
+        };
+        let fee_note = if self.subtract_fee {
+            "The fee is subtracted from the single recipient. The reduced output plus the fee must equal the approved amount."
+        } else {
+            "Recipients receive the approved amounts. The fee is additional."
+        };
+        Ok(format!("Wallet: {}\n{}\n\nMaximum fee: {} BTX\nFee rate: {} atoms/vB\n{fee_note}\nExplicit inputs: {}\nReplaceable: {}\n{change}\n\nCreates an unsigned PSBT. No signing or broadcast.",self.wallet,self.recipients.iter().map(|r|format!("{} BTX → {}",r.amount,r.address)).collect::<Vec<_>>().join("\n"),self.maximum_fee,self.fee_rate,self.inputs.len(),self.replaceable))
     }
 }
 impl Money {
@@ -150,8 +190,9 @@ impl Money {
             ));
         }
         let mut expected: BTreeMap<String, i64> = BTreeMap::new();
+        let mut subtract_script = None;
         let mut outputs = Vec::new();
-        for r in &draft.recipients {
+        for (index, r) in draft.recipients.iter().enumerate() {
             let valid = rpc.call("validateaddress", &json!([r.address]), None, 20)?;
             if valid.get("isvalid") != Some(&Value::Bool(true)) {
                 return Err(Error::new("ADDRESS", "Node rejected a destination"));
@@ -163,6 +204,9 @@ impl Money {
                     Error::new("ADDRESS", "Node did not return an exact destination script")
                 })?;
             let amount = Amount::parse(&r.amount)?;
+            if draft.subtract_fee && index == 0 {
+                subtract_script = Some(script.to_owned());
+            }
             *expected.entry(script.into()).or_default() += amount.atoms();
             let mut map = serde_json::Map::new();
             map.insert(r.address.clone(), amount.json()?);
@@ -172,7 +216,13 @@ impl Money {
             .fee_rate
             .parse()
             .map_err(|_| Error::new("FEE_RATE", "Invalid fee rate"))?;
-        let options = json!({"add_inputs":draft.inputs.is_empty(),"lockUnspents":false,"replaceable":draft.replaceable,"fee_rate":rate});
+        let mut options = json!({"add_inputs":draft.inputs.is_empty(),"lockUnspents":false,"replaceable":draft.replaceable,"fee_rate":rate});
+        if !draft.change_address.is_empty() {
+            options["changeAddress"] = json!(draft.change_address);
+        }
+        if draft.subtract_fee {
+            options["subtractFeeFromOutputs"] = json!([0]);
+        }
         let reply = rpc.call(
             "walletcreatefundedpsbt",
             &json!([draft.inputs, outputs, 0, options, true]),
@@ -238,16 +288,30 @@ impl Money {
                         "Change output is not owned or watched by the selected wallet",
                     ));
                 }
+                if !draft.change_address.is_empty() && address != draft.change_address {
+                    return Err(Error::new(
+                        "CHANGE",
+                        "Change address differs from the approved address",
+                    ));
+                }
                 change = amount;
             } else {
-                match expected.remove(script) {
-                    Some(n) if n == amount.atoms() => {}
-                    _ => {
-                        return Err(Error::new(
-                            "OUTPUT_CHANGED",
-                            "Unsigned transaction does not exactly match approved recipients",
-                        ))
+                let approved = expected.remove(script);
+                let matches = match approved {
+                    Some(n) if subtract_script.as_deref() == Some(script) => {
+                        n == amount
+                            .atoms()
+                            .checked_add(fee.atoms())
+                            .ok_or_else(|| Error::new("FEE", "Fee arithmetic overflow"))?
                     }
+                    Some(n) => n == amount.atoms(),
+                    None => false,
+                };
+                if !matches {
+                    return Err(Error::new(
+                        "OUTPUT_CHANGED",
+                        "Unsigned transaction does not exactly match approved recipients",
+                    ));
                 }
             }
         }
@@ -293,6 +357,8 @@ impl Money {
             state: "UNSIGNED".into(),
             expires_at_ms: now + 600_000,
             txid: None,
+            change_address: draft.change_address.clone(),
+            fee_taken_from_recipient: draft.subtract_fee,
         };
         self.plans.insert(
             id,
@@ -325,7 +391,17 @@ impl Money {
     }
     pub fn summary(&self, id: &str, epoch: u64) -> Result<String> {
         let v = &self.plan(id, epoch)?.view;
-        Ok(format!("Wallet: {}\n{}\n\nFee: {} BTX\nChange: {} BTX\nInputs: {}\nUnsigned digest: {}\nStatus: {}\n\nApprovals apply only to this exact transaction.",v.wallet,v.recipients.iter().map(|r|format!("{} BTX → {}",r.amount,r.address)).collect::<Vec<_>>().join("\n"),v.fee,v.change,v.input_count,v.unsigned_digest,v.state))
+        let fee_note = if v.fee_taken_from_recipient {
+            "The fee was subtracted from the single recipient."
+        } else {
+            "The fee is additional to the recipient amounts."
+        };
+        let change_note = if v.change_address.is_empty() {
+            "Change address was chosen by the wallet when change exists."
+        } else {
+            "Change was restricted to the reviewed change address."
+        };
+        Ok(format!("Wallet: {}\n{}\n\nFee: {} BTX\n{fee_note}\nChange: {} BTX\n{change_note}\nInputs: {}\nUnsigned digest: {}\nStatus: {}\n\nApprovals apply only to this exact transaction.",v.wallet,v.recipients.iter().map(|r|format!("{} BTX → {}",r.amount,r.address)).collect::<Vec<_>>().join("\n"),v.fee,v.change,v.input_count,v.unsigned_digest,v.state))
     }
     pub fn psbt(&self, id: &str, epoch: u64) -> Result<String> {
         Ok(self.plan(id, epoch)?.psbt.clone())
@@ -476,7 +552,21 @@ mod tests {
             maximum_fee: "0.001".into(),
             fee_rate: "2".into(),
             replaceable: true,
+            change_address: String::new(),
+            subtract_fee: false,
         };
+        assert!(d.validate().is_ok());
+        d.subtract_fee = true;
+        assert!(d.validate().is_ok());
+        d.recipients.push(Recipient {
+            address: "btx1qother".into(),
+            amount: "0.00000001".into(),
+        });
+        assert!(d.validate().is_err());
+        d.recipients.pop();
+        d.change_address = "btx1qtest".into();
+        assert!(d.validate().is_err());
+        d.change_address.clear();
         assert!(d.validate().is_ok());
         d.recipients.push(d.recipients[0].clone());
         assert!(d.validate().is_err());

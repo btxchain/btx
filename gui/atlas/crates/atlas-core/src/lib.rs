@@ -6,6 +6,7 @@ pub mod amount;
 pub mod auth;
 pub mod files;
 pub mod journal;
+pub mod links;
 pub mod money;
 pub mod operations;
 pub mod rpc;

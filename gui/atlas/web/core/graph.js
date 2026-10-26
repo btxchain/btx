@@ -19,7 +19,7 @@ export function buildGraph(sources,{now=Date.now(),privacy=true,maxNodes=GRAPH_L
   add({id:'local:node',kind:'node',label:'This node',group:0,state:sources.getblockchaininfo?.ok?'observed':'unavailable',source:'getblockchaininfo',observed_at:sources.getblockchaininfo?.observed_at??null,detail:{chain}});
   for(const p of sourceRows(sources.getpeerinfo,[])) {
     const id=`money-peer:${p.id??hash32(String(p.addr??''))}`;
-    add({id,kind:'peer',group:1,label:privacy?`Peer ${p.id??'? '}`:p.addr||id,state:'observed',source:'getpeerinfo',detail:privacy?{id:p.id,subver:p.subver,inbound:p.inbound,connection_type:p.connection_type}:p});
+    add({id,kind:'peer',network:'money',group:1,label:privacy?`Money peer ${p.id??'? '}`:p.addr||id,state:'observed',source:'getpeerinfo',detail:privacy?{id:p.id,subver:p.subver,inbound:p.inbound,connection_type:p.connection_type,network:'money'}:p});
     edges.push({from:'local:node',to:id,kind:'OBSERVED_MONETARY_PEER',source:'getpeerinfo'});
   }
   const modelnet=sources.getmodelnetworkinfo?.result||{};
@@ -30,7 +30,7 @@ export function buildGraph(sources,{now=Date.now(),privacy=true,maxNodes=GRAPH_L
     const id=`model-peer:${identity}`;
     const expiry=numeric(p.expires_at_ms??p.expires_ms);
     const state=expiry!==null&&expiry<now?'stale':p.authenticated===true||p.transport_pin?'observed':'unverified';
-    add({id,kind:'peer',group:2,label:privacy?`Model peer ${hash32(identity).toString(16).slice(0,6)}`:p.endpoint||identity.slice(0,18),state,source:'getmodelnetworkinfo',detail:privacy?{transport_observed:!!p.transport_pin,compute_authorized:p.compute_authorized===true,expires_at_ms:expiry}:p});
+    add({id,kind:'peer',network:'models',group:2,label:privacy?`Model peer ${hash32(identity).toString(16).slice(0,6)}`:p.endpoint||identity.slice(0,18),state,source:'getmodelnetworkinfo',detail:privacy?{network:'models',transport_observed:!!p.transport_pin,compute_authorized:p.compute_authorized===true,expires_at_ms:expiry}:p});
     edges.push({from:'local:node',to:id,kind:'OBSERVED_MODEL_PEER',source:'native_participation'});
   }
   for(const m of sourceRows(sources.listmodels)){

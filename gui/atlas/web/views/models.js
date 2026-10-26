@@ -2,6 +2,7 @@ import {el,button,field,heading,note,badge,table,dialog,jsonView,humanBytes,toas
 import {sourceRows} from '../core/graph.js';
 import {operationDialog,operationWorkbench} from './operations.js';
 import {modelPanels} from './model-panels.js';
+import {modelNodeStatus} from '../core/model-status.js';
 export function modelsView(app){
  const root=el('div',{class:'page'},heading('Models','Acquire, preserve, inspect and run verified local models. Downloads are not execution grants.'));
  const query=el('input',{type:'search',placeholder:'Search locally known models…','aria-label':'Model search'}),scope=el('select',{},el('option',{value:'LOCAL'},'Local catalogue'),el('option',{value:'NETWORK'},'Network search — explicit disclosure')),results=el('div'),tabs=el('nav',{class:'tabs'});let selected='Catalogue';
@@ -21,7 +22,30 @@ export function modelsView(app){
    case 'Capabilities':results.append(modelPanels(app),el('details',{},el('summary',{},'Open generic template'),operationWorkbench(app,{groups:['Capabilities','Compute'],title:'Capabilities and Compute templates'})),note('Installed, available, admitted, executing, and qualified are distinct states. Missing methods remain unavailable.'));break;
   }
  }catch(e){results.append(note(e.message,'danger'));}}
- for(const name of names)tabs.append(button(name,()=>{selected=name;show();},'',{dataset:{tab:name}}));root.append(tabs,bar,results);show();return root;
+ for(const name of names)tabs.append(button(name,()=>{selected=name;show();},'',{dataset:{tab:name}}));
+ const nodeFacts=el('div');
+ let hostProfile=null,nodeAlive=true;
+ function paintNode(){
+  const sources=app.state.state.sources||{};
+  const setup=sources.getsetupstatus?sources.getsetupstatus.result??null:null;
+  const status=modelNodeStatus(setup,hostProfile);
+  nodeFacts.replaceChildren(...status.lines.map(text=>el('p',{},text)),el('p',{},`automatic_spend_atoms: ${status.spend}`));
+ }
+ paintNode();
+ const stopStatus=app.state.subscribe(()=>{if(nodeAlive)paintNode();});
+ const earlierCleanup=app.cleanup;
+ app.cleanup=()=>{nodeAlive=false;stopStatus();if(typeof earlierCleanup==='function')earlierCleanup();};
+ const bridge=app.bridge;
+ if(bridge&&bridge.mode!=='disconnected'&&bridge.connected===true&&typeof bridge.read==='function'){
+  try{
+   Promise.resolve(bridge.read('getmodelhostprofile')).then(envelope=>{
+    if(!nodeAlive)return;
+    hostProfile=envelope&&typeof envelope==='object'&&Object.prototype.hasOwnProperty.call(envelope,'result')?envelope.result:null;
+    paintNode();
+   }).catch(()=>{});
+  }catch{/* disconnected bridge refused the read */}}
+ const nodePanel=el('section',{class:'panel'},el('h2',{},'This node on the model network'),note('This page does not fetch a model or spend.'),nodeFacts,operationButtons(app,['showmodel','getmodelwatchstatus','getmodelpolicy']));
+ root.append(nodePanel,tabs,bar,results);show();return root;
 }
 export function operationButtons(app,methods){return el('div',{class:'actions'},...methods.map(m=>button(m,()=>operationDialog(app,m),'',{disabled:app.bridge.supported(m)===false})));}
 export function modelDetails(app,m){const id=m.model_id||m.id||m.uri||m.share?.uri;if(!id)return;const body=el('div',{class:'surface-stack'},badge(m.bytes_verified===true&&m.incomplete===false?'Verified local bytes':'Verification incomplete / unknown'),note('Byte verification is not quality evaluation, software admission or permission to execute.'),jsonView(m,{open:true}),el('div',{class:'actions'},...['showmodel','getmodel','getmodelsharecard','loadmodel','generatemodel','unloadmodel'].map(method=>button(method,()=>operationDialog(app,method,[id])))),button('Configure local assistant',()=>app.openAssistant(id),'primary'));dialog(m.name||String(id).slice(0,64),body);}

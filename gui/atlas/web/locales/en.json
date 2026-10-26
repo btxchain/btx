@@ -1,4 +1,5 @@
 {
+  "Network": "Network",
   "Atlas": "Atlas",
   "Models": "Models",
   "Swarms": "Swarms",
@@ -15,6 +16,7 @@
   "Display unit": "Display unit",
   "Display addresses": "Display addresses",
   "Coin control": "Coin control",
+  "Subtract fee by default": "Subtract fee by default",
   "Peer stripes": "Peer stripes",
   "Show tray icon": "Show tray icon",
   "Minimize on close": "Minimize on close",

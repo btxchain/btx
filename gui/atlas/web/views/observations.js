@@ -3,6 +3,7 @@ import {sourceRows} from '../core/graph.js';
 import {syncBanner} from '../core/qt-gaps.js';
 import {operationDialog,operationWorkbench} from './operations.js';
 import {operationButtons} from './models.js';
+import {feeBins} from '../core/mempool.js';
 export function observationView(app,view){
  const definitions={
   swarms:['Swarms & communities','Following a model family is not a grant to train, seed, spend or route private prompts.',['getmodelnetworkinfo','getmodelpeers','listmodels'],'Models'],
@@ -33,7 +34,7 @@ function mempoolPanel(app){
  async function load(){refresh.disabled=true;try{
   const [infoR,rawR]=await Promise.allSettled([app.bridge.read('getmempoolinfo'),app.bridge.read('getrawmempool',[false])]);
   if(!body.isConnected)return;body.replaceChildren();
-  if(infoR.status==='fulfilled'){const info=infoR.value.result||{};body.append(el('div',{class:'metrics'},metric('Size',info.size??'—','transactions'),metric('Bytes',humanBytes(info.bytes),'serialized'),metric('Usage',humanBytes(info.usage),'memory')));}
+  if(infoR.status==='fulfilled'){const info=infoR.value.result||{};body.append(el('div',{class:'metrics'},metric('Size',info.size??'—','transactions'),metric('Bytes',humanBytes(info.bytes),'serialized'),metric('Usage',humanBytes(info.usage),'memory')));const bins=feeBins(info);body.append(bins.length?table(bins,[{key:'feerate',label:'Fee rate'},{key:'count',label:'Transactions'}]):note('No fee histogram was returned for the current mempool.'));body.append(note('Fee bins are the current mempool snapshot. They are not a history.'));}
   else body.append(note(infoR.reason?.message||'Mempool info unavailable','danger'));
   if(rawR.status==='fulfilled'){const listed=txidsFrom(rawR.value.result);if(!listed)body.append(note('No transaction id list was returned for the current mempool.'));else{body.append(table(listed.ids.map(txid=>({txid})),['txid'],{empty:'No transactions in the current mempool.'}));if(listed.total>listed.ids.length)body.append(note(`Showing ${listed.ids.length} of ${listed.total} transaction ids in the current mempool.`));}}
   else body.append(note(rawR.reason?.message||'Mempool transaction list unavailable','danger'));

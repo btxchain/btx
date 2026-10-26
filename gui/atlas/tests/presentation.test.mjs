@@ -5,8 +5,8 @@ import en from '../web/locales/en.json' with { type: 'json' };
 import fr from '../web/locales/fr.json' with { type: 'json' };
 
 const LABELS = [
-  'Atlas', 'Models', 'Swarms', 'Work', 'Research', 'Economy', 'Compute', 'Mining', 'Wallet', 'Activity', 'Tools', 'Settings',
-  'Mask values', 'Display unit', 'Display addresses', 'Coin control', 'Peer stripes', 'Show tray icon', 'Minimize on close', 'Language', 'Money font', 'QR font',
+  'Network', 'Atlas', 'Models', 'Swarms', 'Work', 'Research', 'Economy', 'Compute', 'Mining', 'Wallet', 'Activity', 'Tools', 'Settings',
+  'Mask values', 'Display unit', 'Display addresses', 'Coin control', 'Subtract fee by default', 'Peer stripes', 'Show tray icon', 'Minimize on close', 'Language', 'Money font', 'QR font',
 ];
 
 test('t falls back to the english catalog, then to the key', () => {

@@ -42,6 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         maximum_fee: "0.01".into(),
         fee_rate: "2".into(),
         replaceable: true,
+        change_address: String::new(),
+        subtract_fee: false,
     };
     let mut money = Money::default();
     let plan = money.create(&rpc, draft, 1)?;
