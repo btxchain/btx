@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {BY_METHOD} from '../web/core/catalog.js';
-import {atomsPerVbyteFromKvb, banDurationSeconds, blockHeights, feeDecimal, headerBars, moneyPeers, networkWarnings, sessionSamples, trafficDelta, txSummary} from '../web/core/network.js';
+import {atomsPerVbyteFromKvb, banDurationSeconds, banSubnet, blockHeights, feeDecimal, headerBars, moneyPeers, networkWarnings, sessionSamples, trafficDelta, txSummary} from '../web/core/network.js';
 
 test('trafficDelta subtracts canonical getnettotals counters', () => {
   assert.deepEqual(
@@ -65,6 +65,18 @@ test('banDurationSeconds is setban bantime in seconds', () => {
   assert.throws(() => banDurationSeconds(0), {message: 'Ban duration must be 1 to 8760 hours.'});
   assert.throws(() => banDurationSeconds(8761), {message: 'Ban duration must be 1 to 8760 hours.'});
   assert.throws(() => banDurationSeconds(1.5), {message: 'Ban duration must be 1 to 8760 hours.'});
+});
+
+test('banSubnet gives setban the peer address without its port', () => {
+  // A getpeerinfo endpoint with a port is refused by setban: RPC -30 "Error: Invalid IP/Subnet".
+  assert.equal(banSubnet('127.0.0.1:64477'), '127.0.0.1');
+  assert.equal(banSubnet('[2001:db8::1]:8333'), '2001:db8::1');
+  assert.equal(banSubnet('[2001:db8::1]'), '2001:db8::1');
+  assert.equal(banSubnet('example.onion:8333'), 'example.onion');
+  assert.equal(banSubnet('2001:db8::1'), '2001:db8::1');
+  assert.equal(banSubnet('10.0.0.0/8'), '10.0.0.0/8');
+  assert.equal(banSubnet(' 127.0.0.1:1 '), '127.0.0.1');
+  assert.equal(banSubnet(null), '');
 });
 
 test('disconnectnode takes the address or the node id, never both by default', () => {
