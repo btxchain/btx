@@ -7,7 +7,7 @@ import {historyFilter,paymentRequest} from '../core/qt-gaps.js';
 import {loadRequests,rememberRequest,requestSeconds,qrSvg} from '../core/receive-history.js';
 import {atomsPerVbyteFromKvb,feeDecimal,txSummary} from '../core/network.js';
 import {txExplorerTemplate} from '../core/qt-surface.js';
-import {createWalletDraft,coinSelectionSummary,receivingAddressArgs,historyWalk,nextHistorySkip,coinTree,psbtWithinLimit,addressFacts,walletFacts} from '../core/wallet-qt.js';
+import {createWalletDraft,coinSelectionSummary,receivingAddressArgs,historyWalk,historyActions,nextHistorySkip,coinTree,psbtWithinLimit,addressFacts,walletFacts} from '../core/wallet-qt.js';
 export function walletView(app){
  const root=el('div',{class:'page wallet-page'},heading('Wallet','Self-custody remains in btxd. Signing and broadcasting have independent native reviews.'));
  const wallet=el('select',{'aria-label':'Select wallet'}),summary=el('div',{class:'metrics'}),content=el('div'),selected=app.state.state.wallet||'';
@@ -72,7 +72,11 @@ export function walletView(app){
   const category=el('select',{'aria-label':'Transaction category'},...[['','all'],['send','send'],['receive','receive'],['generate','generate'],['immature','immature'],['orphan','orphan']].map(([value,label])=>el('option',{value},label)));
   const query=el('input',{type:'search',placeholder:'Filter transactions','aria-label':'Filter transactions',autocomplete:'off'});
   const rowActions=(_v,row)=>{
-   const actions=[button('Bump fee',ev=>{ev.stopPropagation();operationDialog(app,'bumpfee',[row.txid]);}),button('Abandon transaction',ev=>{ev.stopPropagation();operationDialog(app,'abandontransaction',[row.txid]);}),button('Copy transaction id',ev=>{ev.stopPropagation();app.bridge.copy(String(row.txid??'')).catch(e=>toast(e.message,'danger'));})];
+   const allowed=historyActions(row);
+   const actions=[];
+   if(allowed.bump)actions.push(button('Bump fee',ev=>{ev.stopPropagation();operationDialog(app,'bumpfee',[row.txid]);}));
+   if(allowed.abandon)actions.push(button('Abandon transaction',ev=>{ev.stopPropagation();operationDialog(app,'abandontransaction',[row.txid]);}));
+   actions.push(button('Copy transaction id',ev=>{ev.stopPropagation();app.bridge.copy(String(row.txid??'')).catch(e=>toast(e.message,'danger'));}));
    if(typeof row.address==='string'&&row.address!=='')actions.push(button('Copy address',ev=>{ev.stopPropagation();app.bridge.copy(row.address).catch(e=>toast(e.message,'danger'));}));
    if(typeof row.label==='string'&&row.label!=='')actions.push(button('Copy label',ev=>{ev.stopPropagation();app.bridge.copy(row.label).catch(e=>toast(e.message,'danger'));}));
    return el('div',{class:'row'},...actions);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createWalletDraft, coinSelectionSummary, receivingAddressArgs, historyWalk, nextHistorySkip, coinTree, psbtWithinLimit, addressFacts, walletFacts} from '../web/core/wallet-qt.js';
+import {createWalletDraft, coinSelectionSummary, receivingAddressArgs, historyWalk, historyActions, nextHistorySkip, coinTree, psbtWithinLimit, addressFacts, walletFacts} from '../web/core/wallet-qt.js';
 
 const draft = (overrides = {}) => createWalletDraft({
   name: 'primary',
@@ -102,6 +102,23 @@ test('history walk is a fixed page and the caller owns the cap', () => {
   assert.deepEqual(fetches.slice(0, 3), [0, 100, 200]);
   assert.equal(fetches.at(-1), 1900);
   assert.equal(nextHistorySkip(0, 40, pageSize), null);
+});
+
+test('history actions allow bump and abandon only for an unconfirmed send', () => {
+  const neither = {bump: false, abandon: false};
+  assert.deepEqual(historyActions({category: 'generate', confirmations: 93, 'bip125-replaceable': 'yes'}), neither);
+  assert.deepEqual(historyActions({category: 'send', confirmations: 0, 'bip125-replaceable': 'yes'}), {bump: true, abandon: true});
+  assert.deepEqual(historyActions({category: 'send', confirmations: 0, 'bip125-replaceable': 'no'}), {bump: false, abandon: true});
+  assert.deepEqual(historyActions({category: 'receive', confirmations: 0, 'bip125-replaceable': 'yes'}), neither);
+  assert.deepEqual(historyActions({category: 'immature', confirmations: 0}), neither);
+  assert.deepEqual(historyActions({category: 'orphan', confirmations: 0, 'bip125-replaceable': 'yes'}), neither);
+  assert.deepEqual(historyActions({category: 'send', confirmations: 1, 'bip125-replaceable': 'yes'}), neither);
+  assert.deepEqual(historyActions({category: 'send', 'bip125-replaceable': 'yes'}), neither);
+  assert.deepEqual(historyActions({confirmations: 0, 'bip125-replaceable': 'yes'}), neither);
+  assert.deepEqual(historyActions(null), neither);
+  assert.deepEqual(historyActions({category: 'send', confirmations: '0', 'bip125-replaceable': 'yes'}), neither);
+  assert.deepEqual(historyActions({category: 'Send', confirmations: 0, 'bip125-replaceable': 'yes'}), neither);
+  assert.deepEqual(historyActions({category: 'send', confirmations: 0, 'bip125-replaceable': 'unknown'}), {bump: false, abandon: true});
 });
 
 test('coin tree groups labels and addresses without dropping coins', () => {

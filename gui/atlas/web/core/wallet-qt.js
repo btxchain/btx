@@ -59,6 +59,14 @@ export function historyWalk({pageSize, cap}) {
   return {pageSize: HISTORY_PAGE_SIZE, cap: HISTORY_CAP};
 }
 
+export function historyActions(row) {
+  const unconfirmedSend = !!row && typeof row === 'object' && row.category === 'send' && typeof row.confirmations === 'number' && row.confirmations === 0;
+  return {
+    bump: unconfirmedSend && row['bip125-replaceable'] === 'yes',
+    abandon: unconfirmedSend,
+  };
+}
+
 export function nextHistorySkip(skip, rowCount, pageSize) {
   if (!Number.isInteger(skip) || skip < 0) throw new Error('Skip must be a non-negative integer');
   if (rowCount < pageSize) return null;

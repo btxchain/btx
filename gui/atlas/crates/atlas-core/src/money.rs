@@ -163,9 +163,9 @@ impl SendDraft {
     pub fn summary(&self) -> Result<String> {
         self.validate()?;
         let change = if self.change_address.is_empty() {
-            "The wallet may reserve a new change address."
+            "The wallet may reserve a new change address.".to_owned()
         } else {
-            "Change, when one exists, must use the reviewed change address."
+            format!("Change, when one exists, must use {}.", self.change_address)
         };
         let fee_note = if self.subtract_fee {
             "The fee is subtracted from the single recipient. The reduced output plus the fee must equal the approved amount."
@@ -396,10 +396,17 @@ impl Money {
         } else {
             "The fee is additional to the recipient amounts."
         };
-        let change_note = if v.change_address.is_empty() {
-            "Change address was chosen by the wallet when change exists."
-        } else {
-            "Change was restricted to the reviewed change address."
+        let no_change = Amount::parse(&v.change)?.atoms() == 0;
+        let change_note = match (no_change, v.change_address.is_empty()) {
+            (true, true) => "There is no change output.".to_owned(),
+            (true, false) => format!(
+                "There is no change output. The reviewed address {} was not paid.",
+                v.change_address
+            ),
+            (false, true) => {
+                "Change address was chosen by the wallet when change exists.".to_owned()
+            }
+            (false, false) => format!("Change was restricted to {}.", v.change_address),
         };
         Ok(format!("Wallet: {}\n{}\n\nFee: {} BTX\n{fee_note}\nChange: {} BTX\n{change_note}\nInputs: {}\nUnsigned digest: {}\nStatus: {}\n\nApprovals apply only to this exact transaction.",v.wallet,v.recipients.iter().map(|r|format!("{} BTX → {}",r.amount,r.address)).collect::<Vec<_>>().join("\n"),v.fee,v.change,v.input_count,v.unsigned_digest,v.state))
     }
@@ -579,5 +586,84 @@ mod tests {
         assert_eq!(a, transaction_skeleton(&tx).unwrap());
         tx["vout"][0]["value"] = json!("1.00000002");
         assert_ne!(a, transaction_skeleton(&tx).unwrap());
+    }
+    fn sample_draft(change_address: &str) -> SendDraft {
+        SendDraft {
+            wallet: "test".into(),
+            recipients: vec![Recipient {
+                address: "btx1qtest".into(),
+                amount: "0.00000001".into(),
+            }],
+            inputs: vec![],
+            maximum_fee: "0.001".into(),
+            fee_rate: "2".into(),
+            replaceable: true,
+            change_address: change_address.into(),
+            subtract_fee: false,
+        }
+    }
+    #[test]
+    fn draft_summary_names_reviewed_change_address() {
+        let named = sample_draft("btx1qchange").summary().unwrap();
+        assert!(named.contains("Change, when one exists, must use btx1qchange."));
+        let open = sample_draft("").summary().unwrap();
+        assert!(open.contains("The wallet may reserve a new change address."));
+    }
+    fn plan_with(change: &str, change_address: &str) -> Money {
+        let mut money = Money::default();
+        money.plans.insert(
+            "p".into(),
+            Plan {
+                view: PlanView {
+                    id: "p".into(),
+                    wallet: "test".into(),
+                    recipients: vec![Recipient {
+                        address: "btx1qtest".into(),
+                        amount: "1.00000000".into(),
+                    }],
+                    fee: "0.00010000".into(),
+                    change: change.into(),
+                    input_count: 1,
+                    unsigned_digest: "00".into(),
+                    state: "UNSIGNED".into(),
+                    expires_at_ms: crate::now_ms() + 600_000,
+                    txid: None,
+                    change_address: change_address.into(),
+                    fee_taken_from_recipient: false,
+                },
+                psbt: String::new(),
+                raw: None,
+                skeleton: serde_json::Value::Null,
+                epoch: 3,
+                created: crate::now_ms(),
+            },
+        );
+        money
+    }
+    #[test]
+    fn funded_summary_zero_change_does_not_claim_restriction() {
+        for change in ["0", "0.00000000"] {
+            let text = plan_with(change, "btx1qforeign").summary("p", 3).unwrap();
+            assert!(
+                text.contains(
+                    "There is no change output. The reviewed address btx1qforeign was not paid."
+                ),
+                "{change}: {text}"
+            );
+            assert!(!text.contains("restrict"), "{change}: {text}");
+        }
+        let text = plan_with("0", "").summary("p", 3).unwrap();
+        assert!(text.contains("There is no change output."));
+        assert!(!text.contains("was not paid"));
+        assert!(!text.contains("restrict"));
+    }
+    #[test]
+    fn funded_summary_nonzero_change_names_address() {
+        let text = plan_with("0.25000000", "btx1qchange")
+            .summary("p", 3)
+            .unwrap();
+        assert!(text.contains("Change was restricted to btx1qchange."));
+        let open = plan_with("0.00000001", "").summary("p", 3).unwrap();
+        assert!(open.contains("Change address was chosen by the wallet when change exists."));
     }
 }

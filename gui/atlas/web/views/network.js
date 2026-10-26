@@ -1,4 +1,4 @@
-import {el,button,heading,note,metric,table,jsonView,dialog,humanBytes,toast} from '../components/ui.js';
+import {el,button,heading,note,metric,table,jsonView,dialog,humanBytes,toast,field} from '../components/ui.js';
 import {buildGraph} from '../core/graph.js';
 import {JsonNumber} from '../core/json.js';
 import {banDurationSeconds,banSubnet,blockHeights,headerBars,moneyPeers,networkWarnings,sessionSamples,trafficDelta} from '../core/network.js';
@@ -30,7 +30,7 @@ export function networkView(app) {
       button('Open the network map', () => app.navigate('atlas'))),
     metricsHost,
     el('section', {class:'panel'}, el('h2', {}, 'This session'), note('Counts since this page first read totals.'), sessionHost),
-    el('section', {class:'panel'}, el('h2', {}, 'Money peers'), note('Disconnect and ban open a native review. They do not run from this table.'), banHours, moneyHost),
+    el('section', {class:'panel'}, el('h2', {}, 'Money peers'), note('Disconnect and ban open a native review. They do not run from this table.'), field('Ban duration (hours)', banHours), moneyHost),
     el('section', {class:'panel'}, el('h2', {}, 'Model peers'), note('A model peer is another participant this node has observed. It is not permission to train, seed, or spend.'), modelHost),
     el('section', {class:'panel'}, el('h2', {}, 'Recent blocks'), note('Headers from this node, newest first. This is not a second chain.'), blocksHost),
     el('section', {class:'panel'}, el('h2', {}, 'Mempool during this session'), note('Samples start when this page is open. They are not the node’s historical mempool.'), mempoolHost));
@@ -103,7 +103,7 @@ export function networkView(app) {
           operationDialog(app, 'setban', [banSubnet(endpoint), 'add', bantime]);
         }, '', {disabled: !endpoint}));
     };
-    moneyHost.replaceChildren(table(rows, ['address', 'direction', 'type', 'ping', 'height', 'version', {key:'actions', label:'Review', render: actions}], {empty:'No money peers observed.'}));
+    moneyHost.replaceChildren(table(rows, ['address', 'direction', 'type', 'ping', {key:'height', label:'Start height'}, 'version', {key:'actions', label:'Review', render: actions}], {empty:'No money peers observed.'}));
     const graph = buildGraph(sources, {privacy});
     const models = graph.nodes.filter(node => node.network === 'models').map(node => ({label: node.label, state: node.state, id: node.id}));
     modelHost.replaceChildren(table(models, ['label', 'state'], {onSelect: row => app.focus(row.id), empty:'No model peers observed.'}));

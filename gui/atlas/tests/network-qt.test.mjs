@@ -87,6 +87,14 @@ test('disconnectnode takes the address or the node id, never both by default', (
   assert.equal('default' in args[1], false);
 });
 
+test('moneyPeers shows a safe startingheight and ignores synced_headers', () => {
+  assert.equal(moneyPeers([{id: 1, startingheight: 111, synced_headers: -1}])[0].height, '111');
+  assert.equal(moneyPeers([{id: 1, startingheight: '111', synced_headers: -1}])[0].height, '111');
+  assert.equal(moneyPeers([{id: 1, synced_headers: 0}])[0].height, '');
+  assert.equal(moneyPeers([{id: 1, startingheight: -1}])[0].height, '');
+  assert.equal(moneyPeers([{id: 1, startingheight: '-1', synced_headers: 0}])[0].height, '');
+});
+
 test('existing network readers stay exported', () => {
   assert.deepEqual(blockHeights('3', 2), ['3', '2']);
   assert.equal(moneyPeers([{id: 1, addr: '127.0.0.1:1'}], {privacy: true})[0].shown, 'peer 1');

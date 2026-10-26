@@ -15,6 +15,15 @@ export function blockHeights(tip, count = 8) {
   return out;
 }
 
+function startHeight(value) {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 ? String(value) : '';
+  }
+  if (typeof value !== 'string' || value.length > 16 || !/^(0|[1-9]\d*)$/.test(value)) return '';
+  const height = Number(value);
+  return Number.isSafeInteger(height) && String(height) === value ? value : '';
+}
+
 export function moneyPeers(peers, {privacy = true} = {}) {
   if (!Array.isArray(peers)) return [];
   const rows = [];
@@ -27,7 +36,7 @@ export function moneyPeers(peers, {privacy = true} = {}) {
       direction: peer.inbound === true ? 'inbound' : peer.inbound === false ? 'outbound' : '',
       type: typeof peer.connection_type === 'string' ? peer.connection_type : '',
       ping: peer.pingtime == null ? '' : String(peer.pingtime),
-      height: peer.synced_headers == null ? '' : String(peer.synced_headers),
+      height: startHeight(peer.startingheight),
       version: typeof peer.subver === 'string' ? peer.subver.slice(0, 80) : '',
     });
     if (rows.length === 500) break;
