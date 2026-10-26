@@ -7,6 +7,7 @@
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
+    "core:webview:allow-print",
     "allow-atlas-status",
     "allow-atlas-connect",
     "allow-atlas-read",
