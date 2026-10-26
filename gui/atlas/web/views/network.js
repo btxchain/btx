@@ -1,7 +1,7 @@
 import {el,button,heading,note,metric,table,jsonView,dialog,humanBytes,toast} from '../components/ui.js';
 import {buildGraph} from '../core/graph.js';
 import {JsonNumber} from '../core/json.js';
-import {banDurationSeconds,blockHeights,headerBars,moneyPeers,networkWarnings,sessionSamples,trafficDelta} from '../core/network.js';
+import {banDurationSeconds,banSubnet,blockHeights,headerBars,moneyPeers,networkWarnings,sessionSamples,trafficDelta} from '../core/network.js';
 import {operationDialog} from './operations.js';
 
 function sessionBytes(text) {
@@ -100,7 +100,7 @@ export function networkView(app) {
             if (canToast) toast(error && error.message ? error.message : String(error), 'warning');
             return;
           }
-          operationDialog(app, 'setban', [endpoint, 'add', bantime]);
+          operationDialog(app, 'setban', [banSubnet(endpoint), 'add', bantime]);
         }, '', {disabled: !endpoint}));
     };
     moneyHost.replaceChildren(table(rows, ['address', 'direction', 'type', 'ping', 'height', 'version', {key:'actions', label:'Review', render: actions}], {empty:'No money peers observed.'}));

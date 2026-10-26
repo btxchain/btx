@@ -136,6 +136,15 @@ export function networkWarnings(info) {
   return lines.join('\n');
 }
 
+export function banSubnet(endpoint) {
+  if (typeof endpoint !== 'string') return '';
+  const text = endpoint.trim();
+  const bracketed = /^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$/.exec(text);
+  if (bracketed) return bracketed[1];
+  const hostPort = /^([^:\s\[\]]+):\d{1,5}$/.exec(text);
+  return hostPort ? hostPort[1] : text;
+}
+
 export function banDurationSeconds(hours) {
   if (!Number.isInteger(hours) || hours < 1 || hours > 8760) {
     throw new Error('Ban duration must be 1 to 8760 hours.');
