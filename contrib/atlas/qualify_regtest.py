@@ -39,9 +39,18 @@ def main():
    else:raise RuntimeError('Node did not become ready')
    wallet='atlas-qualification-'+uuid.uuid4().hex[:12];cli('createwallet',wallet)
    mining=cli('getnewaddress',wallet=wallet);cli('generatetoaddress',101,mining)
+   tip=cli('getblockchaininfo');height=tip.get('blocks')
+   if not isinstance(height,int) or height<101:
+    def tail(path):
+     try:return path.read_text(errors='replace')[-2000:]
+     except OSError:return ''
+    log_tail=tail(data/'node.log')+'\n'+tail(data/'regtest'/'debug.log')
+    raise RuntimeError(f'Qualification stops when the chain does not reach the mined height (tip height {height}). MatMul was not disabled.\n{log_tail}')
    recipient=cli('getnewaddress',wallet=wallet)
    command=['cargo','run','--locked','-p','btx-atlas-core','--example','qualify_regtest','--','--endpoint',f'127.0.0.1:{rpcport}','--cookie',str(data/'regtest/.cookie'),'--wallet',wallet,'--recipient',recipient,'--accept-disposable-regtest','yes']
-   result=subprocess.run(command,cwd=a.repo/'gui/atlas',capture_output=True,text=True,timeout=900,check=True)
+   result=subprocess.run(command,cwd=a.repo/'gui/atlas',capture_output=True,text=True,timeout=900)
+   if result.returncode!=0:
+    raise RuntimeError(f'cargo example exited {result.returncode}\nstdout:\n{(result.stdout or "")[-4000:]}\nstderr:\n{(result.stderr or "")[-4000:]}')
    report['native']=json.loads(result.stdout);cli('generatetoaddress',1,mining)
    observed=cli('gettransaction',report['native']['txid'],wallet=wallet)
    if observed.get('confirmations',0)<1:raise RuntimeError('Transaction did not confirm')

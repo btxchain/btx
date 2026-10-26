@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {COIN,MAX_ATOMS,atoms,parseBTX,formatBTX,sumAmounts,formatUnit} from '../web/core/money.js';
-import {JsonNumber,parseJson,parseJsonExact,encodeJson,plainNumbers,numeric} from '../web/core/json.js';
+import {JsonNumber,parseJson,parseJsonExact,encodeJson,plainNumbers,numeric,formatObservedTime} from '../web/core/json.js';
 import {parseBTXUri,makePaymentUri} from '../web/core/uri.js';
 import {Store,Ring,ByteCache,Poller,boundedMap} from '../web/core/store.js';
 import {buildGraph,stablePosition,layoutGraph,descendants,topological} from '../web/core/graph.js';
@@ -27,6 +27,7 @@ test('wire JS floats are rejected',()=>{assert.throws(()=>encodeJson([.1]));asse
 test('visual conversion never silently rounds large integers',()=>{assert.throws(()=>plainNumbers(parseJson('9007199254740993')));assert.equal(plainNumbers(parseJson('1.25')),1.25);});
 test('exact parser alias',()=>assert.equal(parseJson,parseJsonExact));
 test('telemetry numeric conversion',()=>{assert.equal(numeric('12.5'),12.5);assert.equal(numeric(null),null);assert.equal(numeric(true),null);});
+test('observed time formats unix seconds in UTC',()=>{assert.equal(formatObservedTime(1700000000,'UTC'),'14 Nov 2023, 22:13:20 UTC');assert.equal(formatObservedTime('nope'),'nope');assert.equal(formatObservedTime(null),'—');});
 const address='btx1q'+'a'.repeat(50);
 test('payment URI roundtrip',()=>{const u=makePaymentUri({address,amount:'0.00000001',label:'Local & private'});const p=parseBTXUri(u);assert.equal(p.amount,'0.00000001');assert.equal(p.label,'Local & private');assert.equal(p.address,address);});
 test('URI duplicate and remote requests rejected',()=>{for(const q of ['amount=1&amount=2','r=https://evil','req-x=1','amount=1e-8','label=%00','label=%XX','amount=1?amount=2'])assert.throws(()=>parseBTXUri(`btx:${address}?${q}`));});

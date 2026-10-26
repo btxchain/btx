@@ -71,6 +71,40 @@ the default client.
   force a result. Windows, macOS, installers, hardware signing, local-model
   inference, native IPC/CSP, WebGL2 and Qt behavioral parity remain unproven.
 
+## macOS observations on d2bfcd3f
+
+A reviewer ran this head on Apple Silicon with Rust 1.95.0. Those results
+are observations. They are not a qualification record from this tree, and
+they do not cover Windows.
+
+* Source checks matched the integration notes above: 67 JavaScript tests,
+  12 static checks, and the 78/228 abstract model.
+* `btx-atlas-core` tests passed (32). Clippy `-D warnings` was clean.
+  `cargo build --locked --release -p btx-atlas` produced a binary. A
+  loopback-only sandbox kept it up for 15 seconds. The window was not
+  inspected on that run. Node on that machine was 24.15; the workflow
+  pins 22.
+* Default `qualify_regtest.py` stopped where this file predicted.
+  `generatetoaddress 101` left the tip at height 99 and the node logged
+  the ExactReplay defer at height 100. The example then reported
+  insufficient funds. The script now fails at that short tip and includes
+  the node log and the cargo example output. It still does not disable
+  MatMul.
+* A separate run used extra regtest options, including MatMul heights set
+  past the mine and economic MatMul validation. That run is not the
+  qualification script. With those options the reviewer connected Atlas
+  to the local cookie, saw a masked balance, prepared an exact send,
+  confirmed sign and broadcast in the native dialog, and observed one
+  confirmation after another block. History showed raw Unix times, blank
+  amount and address headers, and headers broken inside words. Those
+  three display bugs are fixed here. The JavaScript suite is now 68 tests.
+  `read_allowed` is one line so rustfmt 1.95 accepts it.
+* Native confirmation stays on the main thread. The system dialog is
+  meant to wait there until the operator answers.
+* Models, the assistant, PSBT export, coin control, Playwright, installers,
+  signing, local-model inference, and Windows were not part of that run.
+  The 26 Qt method names above are still templates, not workflows.
+
 ## Not executed here
 
 Rust compilation, Cargo dependency resolution, native unit/integration tests,

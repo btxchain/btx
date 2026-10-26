@@ -110,3 +110,25 @@ export function plainNumbers(value) {
 
 // Compatibility name emphasizes that the parser never converts a wire number to float.
 export const parseJsonExact = parseJson;
+
+export function formatObservedTime(value, timeZone = 'UTC') {
+  if (value === null || value === undefined) return '—';
+  const unix = (typeof value === 'number' && Number.isFinite(value)) || (typeof value === 'string' && /^\d+$/.test(value));
+  if (!unix) return String(value);
+  try {
+    const seconds = typeof value === 'number' ? value : Number(value);
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      timeZoneName: 'short',
+    }).format(new Date(seconds * 1000));
+  } catch {
+    return String(value);
+  }
+}

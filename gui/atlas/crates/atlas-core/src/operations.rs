@@ -213,9 +213,7 @@ pub fn read_allowed(method: &str, params: &Value) -> bool {
         } else {
             params.get("query").or(Some(params))
         };
-        return q
-            .and_then(|q| q.get("scope"))
-            .is_none_or(|v| v == "LOCAL");
+        return q.and_then(|q| q.get("scope")).is_none_or(|v| v == "LOCAL");
     }
     true
 }
