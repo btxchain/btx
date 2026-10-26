@@ -8,10 +8,11 @@ use atlas_core::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::{
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
 };
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{tray::TrayIcon, AppHandle, Manager, State, WebviewWindow};
 type Shared = Arc<Host>;
 
 #[tauri::command]
@@ -274,23 +275,257 @@ pub async fn atlas_desktop(
     window: WebviewWindow,
     app: AppHandle,
     state: State<'_, Shared>,
+    tray: State<'_, Option<TrayIcon>>,
     action: String,
 ) -> Result<Value> {
     authorize(&window)?;
     let h = state.inner().clone();
-    blocking(move||{
-  use tauri_plugin_autostart::ManagerExt;
-  if action=="status"{return Ok(json!({"autostart":app.autolaunch().is_enabled().map_err(|_|Error::new("AUTOSTART","Cannot observe OS autostart state"))?}));}
-  let _gate=lock(&h.gate)?;
-  match action.as_str(){
-   "enable_autostart"|"disable_autostart"=>{
-    let enable=action=="enable_autostart";confirm(&app,"Change login launch",format!("{} BTX Atlas at OS login. This does not start btxd, unlock a wallet, or grant an agent authority.",if enable{"Enable"}else{"Disable"}))?;
-    let op=atlas_core::random_id()?;h.audit(&op,"desktop.autostart","SUBMITTED")?;
-    let result=if enable{app.autolaunch().enable()}else{app.autolaunch().disable()};
-    result.map_err(|_|Error::new("AUTOSTART","OS autostart update failed; recheck its current state"))?;
-    h.audit(&op,"desktop.autostart","SUCCEEDED")?;Ok(json!({"autostart":enable}))
-   },
-   _=>Err(Error::new("DESKTOP_ACTION","Unsupported desktop operation"))
-  }
- }).await
+    let tray = tray.inner().clone();
+    blocking(move || desktop_action(app, h, tray, action)).await
+}
+
+fn desktop_action(
+    app: AppHandle,
+    host: Shared,
+    tray: Option<TrayIcon>,
+    action: String,
+) -> Result<Value> {
+    use tauri_plugin_autostart::ManagerExt;
+    match action.as_str() {
+        "status" => Ok(
+            json!({"autostart": app.autolaunch().is_enabled().map_err(|_| Error::new("AUTOSTART", "Cannot observe OS autostart state"))?}),
+        ),
+        "window_status" => Ok(policy_value(load_window_policy(&app)?)),
+        "hide" => hide_main(&app),
+        "show" => show_main(&app),
+        "enable_autostart" | "disable_autostart" => {
+            let _gate = lock(&host.gate)?;
+            let enable = action == "enable_autostart";
+            confirm(&app, "Change login launch", format!("{} BTX Atlas at OS login. This does not start btxd, unlock a wallet, or grant an agent authority.", if enable { "Enable" } else { "Disable" }))?;
+            let op = atlas_core::random_id()?;
+            host.audit(&op, "desktop.autostart", "SUBMITTED")?;
+            let result = if enable {
+                app.autolaunch().enable()
+            } else {
+                app.autolaunch().disable()
+            };
+            result.map_err(|_| {
+                Error::new(
+                    "AUTOSTART",
+                    "OS autostart update failed; recheck its current state",
+                )
+            })?;
+            host.audit(&op, "desktop.autostart", "SUCCEEDED")?;
+            Ok(json!({ "autostart": enable }))
+        }
+        "show_tray_on" | "show_tray_off" => {
+            let _gate = lock(&host.gate)?;
+            let enable = action == "show_tray_on";
+            if tray.is_none() {
+                return Err(Error::new(
+                    "TRAY",
+                    "Tray icon is unavailable. Atlas is still running",
+                ));
+            }
+            let mut policy = load_window_policy(&app)?;
+            confirm(
+                &app,
+                "Change tray icon",
+                if enable {
+                    "Show the BTX Atlas tray icon. Hiding or showing the tray does not exit Atlas. This does not start btxd, unlock a wallet, or stop the node.".to_owned()
+                } else {
+                    "Hide the BTX Atlas tray icon. Atlas keeps running. This does not stop btxd."
+                        .to_owned()
+                },
+            )?;
+            let previous = policy.show_tray;
+            policy.show_tray = enable;
+            apply_tray(&tray, enable)?;
+            if let Err(error) = store_window_policy(&app, policy) {
+                let _ = apply_tray(&tray, previous);
+                return Err(error);
+            }
+            Ok(policy_value(policy))
+        }
+        "minimize_on_close_on" | "minimize_on_close_off" => {
+            let _gate = lock(&host.gate)?;
+            let enable = action == "minimize_on_close_on";
+            let mut policy = load_window_policy(&app)?;
+            confirm(
+                &app,
+                "Change close behavior",
+                if enable {
+                    "Closing the main window will hide Atlas and leave it running. Quit from the tray menu exits Atlas only. This does not stop btxd.".to_owned()
+                } else {
+                    "Closing the main window will exit Atlas. This does not stop btxd.".to_owned()
+                },
+            )?;
+            policy.minimize_on_close = enable;
+            store_window_policy(&app, policy)?;
+            Ok(policy_value(policy))
+        }
+        _ => Err(Error::new(
+            "DESKTOP_ACTION",
+            "Unsupported desktop operation",
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WindowPolicy {
+    show_tray: bool,
+    minimize_on_close: bool,
+}
+
+impl WindowPolicy {
+    const fn defaults() -> Self {
+        Self {
+            show_tray: true,
+            minimize_on_close: false,
+        }
+    }
+}
+
+fn policy_value(policy: WindowPolicy) -> Value {
+    json!({
+        "show_tray": policy.show_tray,
+        "minimize_on_close": policy.minimize_on_close,
+    })
+}
+
+pub(crate) fn show_tray_enabled(app: &AppHandle) -> bool {
+    load_window_policy(app)
+        .map(|policy| policy.show_tray)
+        .unwrap_or(true)
+}
+
+pub(crate) fn minimize_on_close_enabled(app: &AppHandle) -> bool {
+    load_window_policy(app)
+        .map(|policy| policy.minimize_on_close)
+        .unwrap_or(false)
+}
+
+fn policy_path(app: &AppHandle) -> Result<PathBuf> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| Error::new("POLICY", "Cannot resolve the Atlas data directory"))?;
+    Ok(dir.join("window-policy.json"))
+}
+
+fn load_window_policy(app: &AppHandle) -> Result<WindowPolicy> {
+    let path = policy_path(app)?;
+    let Some(meta) = regular_file(&path)? else {
+        return Ok(WindowPolicy::defaults());
+    };
+    if meta.len() > 1024 {
+        return Err(Error::new(
+            "POLICY",
+            "Window policy must be the two saved settings",
+        ));
+    }
+    let bytes =
+        std::fs::read(&path).map_err(|_| Error::new("POLICY", "Cannot read window policy"))?;
+    if bytes.len() > 1024 {
+        return Err(Error::new(
+            "POLICY",
+            "Window policy must be the two saved settings",
+        ));
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::new("POLICY", "Window policy is not the expected JSON"))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| Error::new("POLICY", "Window policy is not the expected JSON"))?;
+    if obj.len() != 2 {
+        return Err(Error::new(
+            "POLICY",
+            "Window policy must contain only tray and close settings",
+        ));
+    }
+    let show_tray = obj
+        .get("show_tray")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Error::new("POLICY", "Window policy tray setting is invalid"))?;
+    let minimize_on_close = obj
+        .get("minimize_on_close")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Error::new("POLICY", "Window policy close setting is invalid"))?;
+    Ok(WindowPolicy {
+        show_tray,
+        minimize_on_close,
+    })
+}
+
+fn store_window_policy(app: &AppHandle, policy: WindowPolicy) -> Result<()> {
+    let path = policy_path(app)?;
+    // Refuse a symlink or directory so this write cannot follow a link onto another file.
+    let _ = regular_file(&path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new("POLICY", "Window policy path is invalid"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|_| Error::new("POLICY", "Cannot create the Atlas data directory"))?;
+    let tmp = parent.join("window-policy.json.tmp");
+    let _ = regular_file(&tmp)?;
+    let mut bytes = serde_json::to_vec(&policy_value(policy))
+        .map_err(|_| Error::new("POLICY", "Cannot encode window policy"))?;
+    bytes.push(b'\n');
+    std::fs::write(&tmp, &bytes).map_err(|_| Error::new("POLICY", "Cannot write window policy"))?;
+    replace_policy(&tmp, &path)
+}
+
+fn regular_file(path: &Path) -> Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            Err(Error::new("POLICY", "Window policy must be a regular file"))
+        }
+        Ok(meta) => Ok(Some(meta)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(Error::new("POLICY", "Cannot read window policy")),
+    }
+}
+
+fn replace_policy(tmp: &Path, path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    if path.is_file() {
+        std::fs::remove_file(path)
+            .map_err(|_| Error::new("POLICY", "Cannot replace window policy"))?;
+    }
+    std::fs::rename(tmp, path).map_err(|_| {
+        let _ = std::fs::remove_file(tmp);
+        Error::new("POLICY", "Cannot replace window policy")
+    })
+}
+
+fn apply_tray(tray: &Option<TrayIcon>, visible: bool) -> Result<()> {
+    let icon = tray
+        .as_ref()
+        .ok_or_else(|| Error::new("TRAY", "Tray icon is unavailable. Atlas is still running"))?;
+    icon.set_visible(visible)
+        .map_err(|_| Error::new("TRAY", "Cannot change tray visibility"))?;
+    Ok(())
+}
+
+fn hide_main(app: &AppHandle) -> Result<Value> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| Error::new("WINDOW", "Main window is unavailable"))?;
+    window
+        .hide()
+        .map_err(|_| Error::new("WINDOW", "Cannot hide the main window"))?;
+    Ok(json!({ "hidden": true }))
+}
+
+fn show_main(app: &AppHandle) -> Result<Value> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| Error::new("WINDOW", "Main window is unavailable"))?;
+    window
+        .show()
+        .map_err(|_| Error::new("WINDOW", "Cannot show the main window"))?;
+    window
+        .set_focus()
+        .map_err(|_| Error::new("WINDOW", "Cannot focus the main window"))?;
+    Ok(json!({ "shown": true }))
 }

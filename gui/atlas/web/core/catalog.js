@@ -3547,6 +3547,30 @@ export const OPERATIONS = [
     "args": [],
     "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
     "wallet": false
+  },
+  {
+    "group": "Wallet",
+    "method": "enumeratesigners",
+    "title": "Enumerate signers",
+    "risk": "read",
+    "args": [],
+    "notes": "A missing signer or a failed enumeration is not success and is not hardware qualification. automatic_spend_atoms stays 0.",
+    "wallet": false
+  },
+  {
+    "group": "Wallet",
+    "method": "walletdisplayaddress",
+    "title": "Display address on device",
+    "risk": "write",
+    "args": [
+      {
+        "name": "address",
+        "kind": "string",
+        "required": true
+      }
+    ],
+    "notes": "A missing signer or a failed enumeration is not success and is not hardware qualification. automatic_spend_atoms stays 0.",
+    "wallet": true
   }
 ];
 export const BY_METHOD = new Map(OPERATIONS.map(x => [x.method,x]));

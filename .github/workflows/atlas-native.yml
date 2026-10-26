@@ -29,6 +29,32 @@ jobs:
         working-directory: gui/atlas
       - run: cargo build --locked --release -p btx-atlas
         working-directory: gui/atlas
+      - name: Windows executable ACL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & powershell.exe -NoProfile -NonInteractive -File ./contrib/atlas/check_windows_acl.ps1 ./gui/atlas/target/release/btx-atlas.exe
+          exit $LASTEXITCODE
+      - name: Installer signature
+        shell: bash
+        run: |
+          bundle="gui/atlas/target/release/bundle"
+          if [ ! -d "$bundle" ]; then
+            echo "installer bundle directory absent; signature check not run"
+            exit 0
+          fi
+          py=python3
+          if ! command -v python3 >/dev/null 2>&1; then
+            py=python
+          fi
+          code=0
+          "$py" contrib/atlas/check_installer_signature.py --path "$bundle" || code=$?
+          if [ "$code" -eq 2 ]; then
+            exit 0
+          fi
+          exit "$code"
       - name: Reminder
         shell: bash
         run: echo 'A native build alone does not qualify wallet safety, OS dialogs, physical hardware, installer signing, or complete Qt parity.'

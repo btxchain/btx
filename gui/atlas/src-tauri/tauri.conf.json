@@ -20,6 +20,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": false,
     "shortDescription": "BTX spatial node, model and wallet workbench",
     "category": "DeveloperTool",
     "macOS": {

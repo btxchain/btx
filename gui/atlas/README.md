@@ -43,7 +43,7 @@ was checked; that is not proof that the implementation refines that model.
   locking, address labels, PSBT import/inspection/sign/finalize workflows and
   administration templates. Templates are checked against the node's `help`;
   an unavailable method remains unavailable rather than simulated.
-* **219 operation templates** and **59 node-configuration keys**. The 26 Qt
+* **221 operation templates** and **59 node-configuration keys**. The 26 Qt
   model RPCs that had no template now have one, plus dedicated model panels.
   A template is not evidence of a tested replacement for every Qt interaction.
 * Native-only loopback RPC authentication, strict bounded JSON, separate read

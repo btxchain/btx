@@ -69,9 +69,34 @@ the default client.
 * Those 26 names now have catalog templates (219 total) and Models panels.
   `getbtxcapabilityevents` is not a silent read: the handler drops stored
   events at or below the cursor, so Atlas opens native review instead.
-  Tray, minimize, translations, fonts, hardware signing, installer signing,
-  and the relay-policy OptionIDs stay without an Atlas writer. This is not
-  Qt retirement.
+  The catalog is now 221 templates. This is not Qt retirement.
+
+## Controls added after that inventory
+
+These controls exist. They are not qualification records.
+
+* Close can hide the window, and the tray icon can be hidden, through
+  `atlas_desktop`. Quit still leaves the node running. A missing tray does
+  not block startup.
+* Language catalogs ship English plus the Qt translation of the word Wallet
+  where that source string already existed. Every other Atlas label stays
+  English. Money and QR fonts are limited to generic families already on
+  the machine.
+* Hardware signing is `enumeratesigners` and `walletdisplayaddress` behind
+  native review. No device was attached.
+* The Windows CI job checks that the built executable is not writable by
+  Everyone, Users, or Authenticated Users. The installer signature script
+  returns NOT_RUN unless a Windows installer has a valid Authenticode
+  signature. No certificate was used. Updater artifacts are off.
+* Eight relay settings now use the conf names the node actually reads
+  (`acceptnonstdtxn`, `acceptunknownwitness`, `spkreuse`,
+  `permitbarepubkey`, `permitbaremultisig`, `permitbareanchor`,
+  `permitbaredatacarrier`, `acceptnonstddatacarrier`). `spkreuse` is
+  `allow` or `conflict`. A write still requires the existing config review.
+  Defaults were not changed.
+* `qualify_regtest.py` records the regtest, wallet, and address checks,
+  then fails when the tip is below 101 and does not run the spend example.
+  MatMul was not disabled. The script was not executed.
 * Disposable regtest qualification was not run. The script mines 101 blocks,
   and regtest MatMul v4 starts at height 100. MatMul was not disabled to
   force a result. Windows, macOS, installers, hardware signing, local-model

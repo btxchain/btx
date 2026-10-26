@@ -91,6 +91,7 @@ fn main() {
                             let _ = w.set_focus();
                         }
                     }
+                    // Exits Atlas only. Does not signal btxd.
                     "quit" => app.exit(0),
                     _ => {}
                 },
@@ -98,12 +99,36 @@ fn main() {
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
-            let _ = tray.build(app); // Desktop sessions without a system tray still work.
+            // A missing system tray must not block startup. The icon is retained so it can be shown again.
+            let tray_icon = match tray.build(app) {
+                Ok(icon) => {
+                    if !commands::show_tray_enabled(app.handle()) {
+                        let _ = icon.set_visible(false);
+                    }
+                    Some(icon)
+                }
+                Err(_) => None,
+            };
+            app.manage(tray_icon);
             Ok(())
         })
         .build(tauri::generate_context!());
     match app {
-        Ok(app) => app.run(|_, _| {}),
+        Ok(app) => app.run(|app, event| {
+            if let tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } = event
+            {
+                if label == "main" && commands::minimize_on_close_enabled(app) {
+                    api.prevent_close();
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                }
+            }
+        }),
         Err(e) => {
             eprintln!("BTX Atlas failed closed during startup: {e}");
             std::process::exit(1);

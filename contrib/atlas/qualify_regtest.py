@@ -11,6 +11,9 @@ from pathlib import Path
 def port():
  with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
 
+def spend_allowed(height):
+ return type(height) is int and height>=101
+
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--btxd',type=Path,required=True);p.add_argument('--cli',type=Path,required=True);p.add_argument('--repo',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--accept-disposable-regtest',action='store_true');a=p.parse_args()
  if not a.accept_disposable_regtest:p.error('Explicit disposable-regtest consent required')
@@ -38,23 +41,44 @@ def main():
     time.sleep(.3)
    else:raise RuntimeError('Node did not become ready')
    wallet='atlas-qualification-'+uuid.uuid4().hex[:12];cli('createwallet',wallet)
-   mining=cli('getnewaddress',wallet=wallet);cli('generatetoaddress',101,mining)
-   tip=cli('getblockchaininfo');height=tip.get('blocks')
-   if not isinstance(height,int) or height<101:
-    def tail(path):
-     try:return path.read_text(errors='replace')[-2000:]
-     except OSError:return ''
+   def tail(path):
+    try:return path.read_text(errors='replace')[-2000:]
+    except OSError:return ''
+   def abort(message):
+    raise RuntimeError(f'{message}\n{tail(data/"node.log")}')
+   try:
+    info=cli('getblockchaininfo')
+   except Exception as e:
+    abort(e)
+   if not isinstance(info,dict) or info.get('chain')!='regtest':abort('chain is not regtest')
+   report['checks'].append('chain is regtest')
+   try:
+    winfo=cli('getwalletinfo',wallet=wallet)
+   except Exception as e:
+    abort(e)
+   if not isinstance(winfo,dict):abort('getwalletinfo did not return an object')
+   report['checks'].append('getwalletinfo returns an object')
+   try:
+    mining=cli('getnewaddress',wallet=wallet)
+   except Exception as e:
+    abort(e)
+   if not isinstance(mining,str):abort('getnewaddress did not return a string')
+   report['checks'].append('getnewaddress returns a string')
+   cli('generatetoaddress',101,mining)
+   tip=cli('getblockchaininfo');height=tip.get('blocks') if isinstance(tip,dict) else None
+   if not spend_allowed(height):
     log_tail=tail(data/'node.log')+'\n'+tail(data/'regtest'/'debug.log')
     raise RuntimeError(f'Qualification stops when the chain does not reach the mined height (tip height {height}). MatMul was not disabled.\n{log_tail}')
-   recipient=cli('getnewaddress',wallet=wallet)
-   command=['cargo','run','--locked','-p','btx-atlas-core','--example','qualify_regtest','--','--endpoint',f'127.0.0.1:{rpcport}','--cookie',str(data/'regtest/.cookie'),'--wallet',wallet,'--recipient',recipient,'--accept-disposable-regtest','yes']
-   result=subprocess.run(command,cwd=a.repo/'gui/atlas',capture_output=True,text=True,timeout=900)
-   if result.returncode!=0:
-    raise RuntimeError(f'cargo example exited {result.returncode}\nstdout:\n{(result.stdout or "")[-4000:]}\nstderr:\n{(result.stderr or "")[-4000:]}')
-   report['native']=json.loads(result.stdout);cli('generatetoaddress',1,mining)
-   observed=cli('gettransaction',report['native']['txid'],wallet=wallet)
-   if observed.get('confirmations',0)<1:raise RuntimeError('Transaction did not confirm')
-   report.update(status='PASS',confirmation=observed,checks=['native RPC authentication','exact recipient amount','unsigned preparation','native signing','broadcast','duplicate-sign denial','duplicate-broadcast denial','regtest confirmation'])
+   else:
+    recipient=cli('getnewaddress',wallet=wallet)
+    command=['cargo','run','--locked','-p','btx-atlas-core','--example','qualify_regtest','--','--endpoint',f'127.0.0.1:{rpcport}','--cookie',str(data/'regtest/.cookie'),'--wallet',wallet,'--recipient',recipient,'--accept-disposable-regtest','yes']
+    result=subprocess.run(command,cwd=a.repo/'gui/atlas',capture_output=True,text=True,timeout=900)
+    if result.returncode!=0:
+     raise RuntimeError(f'cargo example exited {result.returncode}\nstdout:\n{(result.stdout or "")[-4000:]}\nstderr:\n{(result.stderr or "")[-4000:]}')
+    report['native']=json.loads(result.stdout);cli('generatetoaddress',1,mining)
+    observed=cli('gettransaction',report['native']['txid'],wallet=wallet)
+    if observed.get('confirmations',0)<1:raise RuntimeError('Transaction did not confirm')
+    report.update(status='PASS',confirmation=observed,checks=['native RPC authentication','exact recipient amount','unsigned preparation','native signing','broadcast','duplicate-sign denial','duplicate-broadcast denial','regtest confirmation'])
   except Exception as e:
    report['error']=str(e);raise
   finally:

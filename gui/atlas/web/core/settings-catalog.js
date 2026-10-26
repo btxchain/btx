@@ -138,13 +138,13 @@ export const NODE_SETTINGS = [
     "sensitive_execution": false
   },
   {
-    "key": "rejectunknownscripts",
+    "key": "acceptnonstdtxn",
     "kind": "boolean",
     "restart_required": true,
     "sensitive_execution": false
   },
   {
-    "key": "rejectunknownwitness",
+    "key": "acceptunknownwitness",
     "kind": "boolean",
     "restart_required": true,
     "sensitive_execution": false
@@ -162,8 +162,8 @@ export const NODE_SETTINGS = [
     "sensitive_execution": false
   },
   {
-    "key": "rejectspkreuse",
-    "kind": "boolean",
+    "key": "spkreuse",
+    "kind": "string",
     "restart_required": true,
     "sensitive_execution": false
   },
@@ -222,13 +222,13 @@ export const NODE_SETTINGS = [
     "sensitive_execution": false
   },
   {
-    "key": "rejectbarepubkey",
+    "key": "permitbarepubkey",
     "kind": "boolean",
     "restart_required": true,
     "sensitive_execution": false
   },
   {
-    "key": "rejectbaremultisig",
+    "key": "permitbaremultisig",
     "kind": "boolean",
     "restart_required": true,
     "sensitive_execution": false
@@ -240,13 +240,13 @@ export const NODE_SETTINGS = [
     "sensitive_execution": false
   },
   {
-    "key": "rejectbareanchor",
+    "key": "permitbareanchor",
     "kind": "boolean",
     "restart_required": true,
     "sensitive_execution": false
   },
   {
-    "key": "rejectbaredatacarrier",
+    "key": "permitbaredatacarrier",
     "kind": "boolean",
     "restart_required": true,
     "sensitive_execution": false
@@ -276,7 +276,7 @@ export const NODE_SETTINGS = [
     "sensitive_execution": false
   },
   {
-    "key": "rejectnonstddatacarrier",
+    "key": "acceptnonstddatacarrier",
     "kind": "boolean",
     "restart_required": true,
     "sensitive_execution": false
@@ -353,4 +353,4 @@ export const NODE_SETTINGS = [
     "restart_required": true,
     "sensitive_execution": false
   }
-];
+]
