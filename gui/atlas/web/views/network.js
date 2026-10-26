@@ -40,6 +40,7 @@ export function networkView(app) {
     if (warning) {
       if (!warningNote) {
         warningNote = note(warning, 'warning');
+        warningNote.style.whiteSpace = 'pre-line';
         metricsHost.before(warningNote);
       } else {
         warningNote.textContent = warning;

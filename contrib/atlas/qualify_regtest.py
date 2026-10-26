@@ -23,11 +23,11 @@ def main():
  with tempfile.TemporaryDirectory(prefix='atlas-regtest-') as temp:
   data=Path(temp);rpcport=port();log=(data/'node.log').open('wb')
   node=subprocess.Popen([str(binaries[0]),f'-datadir={data}','-chain=regtest','-server=1','-listen=0','-connect=0','-dnsseed=0','-discover=0','-modelnet=0',f'-rpcport={rpcport}','-rpcbind=127.0.0.1','-rpcallowip=127.0.0.1'],stdin=subprocess.DEVNULL,stdout=log,stderr=log)
-  def cli(method,*params,wallet=None):
+  def cli(method,*params,wallet=None,timeout=180):
    command=[str(binaries[1]),f'-datadir={data}','-chain=regtest',f'-rpcport={rpcport}']
    if wallet:command += [f'-rpcwallet={wallet}']
    command += [method,*[x if isinstance(x,str) else json.dumps(x) for x in params]]
-   result=subprocess.run(command,capture_output=True,text=True,timeout=180,check=True).stdout.strip()
+   result=subprocess.run(command,capture_output=True,text=True,timeout=timeout,check=True).stdout.strip()
    try:return json.loads(result)
    except json.JSONDecodeError:return result
   report={'scope':'Disposable native regtest only','checks':[],'status':'FAIL'}
@@ -64,7 +64,23 @@ def main():
     abort(e)
    if not isinstance(mining,str):abort('getnewaddress did not return a string')
    report['checks'].append('getnewaddress returns a string')
-   cli('generatetoaddress',101,mining)
+   mine=subprocess.Popen([str(binaries[1]),f'-datadir={data}','-chain=regtest',f'-rpcport={rpcport}',f'-rpcwallet={wallet}','generatetoaddress','101',mining],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+   height=None;last=None;still=0;deadline=time.monotonic()+180
+   while time.monotonic()<deadline:
+    if mine.poll() is not None:break
+    try:
+     seen=cli('getblockchaininfo',timeout=10);height=seen.get('blocks') if isinstance(seen,dict) else None
+    except (subprocess.CalledProcessError,subprocess.TimeoutExpired):
+     time.sleep(1);continue
+    if isinstance(height,int) and height>=101:break
+    if height==last:still+=1
+    else:still=0;last=height
+    if still>=15 and isinstance(height,int) and height<101:mine.terminate();break
+    time.sleep(1)
+   if mine.poll() is None:
+    mine.terminate()
+    try:mine.wait(timeout=5)
+    except subprocess.TimeoutExpired:mine.kill();mine.wait()
    tip=cli('getblockchaininfo');height=tip.get('blocks') if isinstance(tip,dict) else None
    if not spend_allowed(height):
     log_tail=tail(data/'node.log')+'\n'+tail(data/'regtest'/'debug.log')

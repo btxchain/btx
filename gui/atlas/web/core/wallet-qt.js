@@ -42,7 +42,7 @@ export function coinSelectionSummary(coins) {
   return {count: coins.length, amount: formatBTX(total)};
 }
 
-const RECEIVING_ADDRESS_TYPES = new Set(['bech32', 'bech32m', 'legacy', 'p2sh-segwit']);
+const RECEIVING_ADDRESS_TYPES = new Set(['p2mr']);
 const HISTORY_PAGE_SIZE = 100;
 const HISTORY_CAP = 2000;
 const PSBT_TEXT_LIMIT = 1000000;

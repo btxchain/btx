@@ -47,6 +47,9 @@ test('headerBars keeps at most twelve nonnegative header transaction counts', ()
 test('networkWarnings returns a trimmed node warning and nothing else', () => {
   assert.equal(networkWarnings({warnings: '  headers behind  '}), 'headers behind');
   assert.equal(networkWarnings({warnings: '   '}), '');
+  assert.equal(networkWarnings({warnings: ['  headers behind  ', '   ', 1, 'clock skew']}), 'headers behind\nclock skew');
+  assert.equal(networkWarnings({warnings: []}), '');
+  assert.equal(networkWarnings({warnings: [1, null]}), '');
   assert.equal(networkWarnings({warnings: ''}), '');
   assert.equal(networkWarnings({}), '');
   assert.equal(networkWarnings({warnings: null}), '');

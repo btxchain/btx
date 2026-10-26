@@ -122,9 +122,18 @@ function headerTransactions(value) {
 
 export function networkWarnings(info) {
   if (!info || typeof info !== 'object') return '';
-  if (typeof info.warnings !== 'string') return '';
-  const text = info.warnings.trim();
-  return text.length ? text : '';
+  if (typeof info.warnings === 'string') {
+    const text = info.warnings.trim();
+    return text.length ? text : '';
+  }
+  if (!Array.isArray(info.warnings)) return '';
+  const lines = [];
+  for (const item of info.warnings) {
+    if (typeof item !== 'string') continue;
+    const text = item.trim();
+    if (text.length) lines.push(text);
+  }
+  return lines.join('\n');
 }
 
 export function banDurationSeconds(hours) {

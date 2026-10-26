@@ -41,7 +41,7 @@ export function walletView(app){
   }catch(e){content.append(note(e.message,'danger'));}
  }
  function receiveForm(){
-  const amount=el('input',{placeholder:'Optional',inputmode:'decimal',autocomplete:'off',spellcheck:false}),label=el('input',{placeholder:'Optional receiving label',autocomplete:'off'}),message=el('input',{placeholder:'Optional message',autocomplete:'off'}),addressType=el('select',{'aria-label':'Address type'},...[['', 'Node default'],['bech32','bech32'],['bech32m','bech32m'],['legacy','legacy'],['p2sh-segwit','p2sh-segwit']].map(([value,text])=>el('option',{value},text))),out=el('div');
+  const amount=el('input',{placeholder:'Optional',inputmode:'decimal',autocomplete:'off',spellcheck:false}),label=el('input',{placeholder:'Optional receiving label',autocomplete:'off'}),message=el('input',{placeholder:'Optional message',autocomplete:'off'}),addressType=el('select',{'aria-label':'Address type'},...[['', 'Node default'],['p2mr','p2mr']].map(([value,text])=>el('option',{value},text))),out=el('div');
   const create=button('Create receiving address — native review',async()=>{
    create.disabled=true;
    try{

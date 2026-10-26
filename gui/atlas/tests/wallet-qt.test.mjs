@@ -54,16 +54,16 @@ test('two coins of 0.5 and 0.25 sum exactly', () => {
 test('receiving address args pass a known type and reject anything else', () => {
   assert.deepEqual(receivingAddressArgs('donation', ''), ['donation']);
   assert.deepEqual(receivingAddressArgs('', ''), ['']);
-  for (const addressType of ['bech32', 'bech32m', 'legacy', 'p2sh-segwit']) {
-    assert.deepEqual(receivingAddressArgs('donation', addressType), ['donation', addressType]);
+  assert.deepEqual(receivingAddressArgs('donation', 'p2mr'), ['donation', 'p2mr']);
+  for (const addressType of ['bech32', 'bech32m', 'legacy', 'p2sh-segwit', 'p2pkh']) {
+    assert.throws(() => receivingAddressArgs('donation', addressType), {message: 'Address type is not supported'});
   }
-  assert.throws(() => receivingAddressArgs('donation', 'p2pkh'), {message: 'Address type is not supported'});
   assert.throws(() => receivingAddressArgs('donation', 'BECH32'), {message: 'Address type is not supported'});
   assert.throws(() => receivingAddressArgs('donation', undefined), {message: 'Address type is not supported'});
   assert.throws(() => receivingAddressArgs('donation', null), {message: 'Address type is not supported'});
   assert.throws(() => receivingAddressArgs(null, ''), {message: 'Label must be a string'});
-  assert.throws(() => receivingAddressArgs(1, 'bech32'), {message: 'Label must be a string'});
-  assert.throws(() => receivingAddressArgs(undefined, 'legacy'), {message: 'Label must be a string'});
+  assert.throws(() => receivingAddressArgs(1, 'p2mr'), {message: 'Label must be a string'});
+  assert.throws(() => receivingAddressArgs(undefined, 'p2mr'), {message: 'Label must be a string'});
 });
 
 test('history walk is a fixed page and the caller owns the cap', () => {
