@@ -93,6 +93,15 @@ bool ApprovedCampaign(Database& db,const std::string& campaign){
     auto allow=StringArray(security["allowed_campaigns"],128);
     return std::find(allow.begin(),allow.end(),campaign)!=allow.end();
 }
+// Policy::Check for stored records: a signer revoked or no longer enrolled for
+// the role gives an empty list instead of a throw.
+std::vector<std::string> CurrentSigners(Database& db,const Policy& p,const Json& e,std::string_view role,int64_t now){
+    try{return p.Check(e,role,db,now);}
+    catch(const Error& error){
+        if(error.code!="SEC_SIGNER_REVOKED"&&error.code!="SEC_SIGNATURE_THRESHOLD")throw;
+        return {};
+    }
+}
 uint64_t MaxAge(Database& db){
     auto local=ReadLocalConfig(db);const auto& settings=local["continuous_security"];
     if(!settings.isObject())return 0;
@@ -282,7 +291,7 @@ void MeshTick(Database& db,int64_t now){
     for(const auto& row:db.Query("SELECT envelope FROM objects WHERE kind='evaluation' ORDER BY id LIMIT 1024")){
         auto e=Parse(row[0]);auto b=e["body"];
         if(!b["campaign"].isStr()||!ApprovedCampaign(db,b["campaign"].get_str()))continue;
-        auto signers=p.Check(e,"evaluator",db,now);
+        auto signers=CurrentSigners(db,p,e,"evaluator",now);
         if(signers.size()!=1)continue;
         const auto host=Text(local,"host",128);
         if(p.Find(signers[0],"evaluator",db,now).host!=host)continue;
@@ -300,7 +309,7 @@ void MeshTick(Database& db,int64_t now){
             auto result=Parse(row[0]);const auto& b=result["body"];
             const auto work_id=DigestField(b,"work");if(!db.Has(work_id))continue;
             auto work=db.Get(work_id);
-            auto signers=p.Check(result,"worker",db,now);
+            auto signers=CurrentSigners(db,p,result,"worker",now);
             if(signers.size()!=1||p.Find(signers[0],"worker",db,now).host!=Text(local,"host",128))continue;
             if(![&]{auto packages=StringArray(local["remote_work"]["packages"],128);
                 return std::find(packages.begin(),packages.end(),DigestField(work["body"],"package"))!=packages.end();}())continue;
