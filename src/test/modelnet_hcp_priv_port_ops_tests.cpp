@@ -8,6 +8,7 @@
 #include <modelnet/http_bridge.h>
 #include <modelnet/package_core.h>
 #include <clientversion.h>
+#include <tinyformat.h>
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
@@ -236,9 +237,10 @@ BOOST_AUTO_TEST_CASE(hcp_ops_01_public_bridge_isolation)
 BOOST_AUTO_TEST_CASE(hcp_ops_02_money_only_regression)
 {
     const std::string ver = FormatFullVersion();
-    BOOST_CHECK(ver.find("0.34.8") != std::string::npos);
+    const std::string triple = strprintf("%d.%d.%d", CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD);
+    BOOST_CHECK(ver.find(triple) != std::string::npos);
     if (!CLIENT_VERSION_IS_RELEASE) {
-        BOOST_CHECK(ver.find("-dev") != std::string::npos || ver.find("0.34.8") != std::string::npos);
+        BOOST_CHECK(ver.find("-dev") != std::string::npos || ver.find(triple) != std::string::npos);
     }
     auto e = hcp_test::Lab();
     BOOST_CHECK_EQUAL(e->Cfg().automatic_spend_atoms, 0);
