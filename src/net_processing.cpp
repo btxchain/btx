@@ -5997,6 +5997,34 @@ static bool TrustedMirrorMayDownloadIndex(
         /*may_fetch=*/true, immediate_fork_child, contiguous_to_active);
 }
 
+//! Trusted mirror (no local signer) on a one-block twin: the sibling at the
+//! tip height was HEADER_ONLY'd before the signers moved, then they signed
+//! past it on its own branch. Neither pull-ahead path in
+//! IsHeaderOnlyFetchSuppressed is open to a mirror whose tip has quorum: the
+//! lost-twin path sees the height occupied, and the heavier-tower path is
+//! closed to every mirror. For a mirror, pulling ahead means a signed
+//! frontier strictly above the sibling that descends from it and not from
+//! the tip. A lone sibling whose own quorum is the frontier stays skipped.
+//! Live 2026-10-27 (community archive): root selected, never requested, 6 h.
+[[nodiscard]] static bool TrustedMirrorSignedPastTipSibling(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (tip == nullptr || index == nullptr) return false;
+    if (!node::matmul_trusted::IsTrustedMirror() ||
+        node::matmul_trusted::HasLocalSigner()) {
+        return false;
+    }
+    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    if (!frontier_height.has_value() || *frontier_height <= index->nHeight) {
+        return false;
+    }
+    return chainman.IndexIsCoveredBySignedFrontier(index) &&
+           !chainman.IndexIsCoveredBySignedFrontier(tip);
+}
+
 [[nodiscard]] static bool IsHeaderOnlyFetchSuppressed(
     const ChainstateManager& chainman,
     const CBlockIndex* tip,
@@ -6016,13 +6044,18 @@ static bool TrustedMirrorMayDownloadIndex(
     }
     // A same-height sibling of the connected tip is not a download hole
     // (F3). Quorum does not make it inflight. A pulled-ahead lost-twin
-    // or heavier-tower path below is what unsuppresses it.
+    // or heavier-tower path below is what unsuppresses it, or on a trusted
+    // mirror a signed frontier past it on its own branch.
     const bool same_height_tip_sibling{
         tip != nullptr && index != tip && index->pprev == tip->pprev &&
         index->nHeight == tip->nHeight};
     const bool already_header_only_skipped{
         competing.count(index->GetBlockHash()) != 0 ||
         followed_skip.count(index->GetBlockHash()) != 0};
+    if (same_height_tip_sibling && already_header_only_skipped &&
+        TrustedMirrorSignedPastTipSibling(chainman, tip, index)) {
+        return false;
+    }
     if (!(same_height_tip_sibling && already_header_only_skipped)) {
         if (IndexIsShortReorgAttestedForkChild(chainman, tip, index)) return false;
         if (chainman.IsAcquisitionEscapeFrontier(index)) return false;
