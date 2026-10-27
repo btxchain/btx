@@ -8929,7 +8929,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 next_velocity.RecordBlock(pindex->nHeight, block_net_egress);
                 const CAmount min_cap =
                     vparams.ShieldedUnshieldVelocityMinCapForHeight(pindex->nHeight);
-                if (!next_velocity.WithinCap(pindex->nHeight, pool_start,
+                // Every block in the window is recorded, but the cap is enforced only on a
+                // block with a shielded bundle. Up to v0.33.2 the cap was checked only on such
+                // blocks, and the mainnet window (125,000-134,999, mined 8-19 June 2026) was
+                // accepted that way. Checking a block without a bundle against a pool that an
+                // earlier block already shrank rejects that history (126,979 on a sync from
+                // genesis).
+                if (block_has_shielded_bundle &&
+                    !next_velocity.WithinCap(pindex->nHeight, pool_start,
                                              vparams.nShieldedUnshieldVelocityCapBps,
                                              vparams.nShieldedUnshieldVelocityWindowBlocks,
                                              min_cap)) {

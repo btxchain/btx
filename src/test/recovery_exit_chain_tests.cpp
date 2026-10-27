@@ -28,10 +28,12 @@
 #include <shielded/nullifier.h>
 #include <shielded/recovery_exit.h>
 #include <shielded/smile2/wallet_bridge.h>
+#include <shielded/unshield_velocity.h>
 #include <shielded/v2_bundle.h>
 #include <span.h>
 #include <streams.h>
 #include <sync.h>
+#include <test/util/logging.h>
 #include <test/util/mining.h>
 #include <test/util/setup_common.h>
 #include <test/util/shielded_account_registry_test_util.h>
@@ -850,6 +852,90 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_rebuild_preserves_retired_identifiers, Rec
                               chainman.GetConsensus().nShieldedUnshieldVelocityWindowBlocks),
                           v.note.value);
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_velocity_cap_skips_a_block_without_a_shielded_bundle, RecoveryExitRebuildSetup)
+{
+    // Mainnet 126,979: a coinbase-only block whose trailing window already held more than half
+    // of the pool left by earlier exits. v0.32.x checked the cap only on blocks with a shielded
+    // bundle and accepted it, so a sync from genesis has to accept it too.
+    const ReVectors& v = Vectors();
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const Consensus::Params& consensus = chainman.GetConsensus();
+
+    while (WITH_LOCK(cs_main, return chainman.ActiveChain().Height()) < kRebuildSunsetHeight - 2) {
+        CreateAndProcessBlock({}, CScript() << OP_TRUE, /*chainstate=*/nullptr, /*use_mempool=*/false);
+    }
+    std::vector<CTransactionRef> funding_txs;
+    CAmount seeded_pool{-kRecoverFee};
+    for (int i = 0; i < kRebuildFundingCount; ++i) {
+        funding_txs.push_back(m_coinbase_txns.at(i));
+        seeded_pool += funding_txs.back()->vout[0].nValue;
+    }
+    CreateAndProcessBlock({BuildLegacyShieldOnlyTx(*this, funding_txs, kRecoverFee)}, CScript() << OP_TRUE,
+                          /*chainstate=*/nullptr, /*use_mempool=*/false);
+    CreateAndProcessBlock({BuildRecoveryExitTx()}, CScript() << OP_TRUE,
+                          /*chainstate=*/nullptr, /*use_mempool=*/false);
+    const CAmount pool_after_exit{seeded_pool - v.note.value};
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveChain().Height(), kRebuildSunsetHeight);
+        BOOST_REQUIRE_EQUAL(chainman.GetShieldedPoolBalance(), pool_after_exit);
+        BOOST_REQUIRE(consensus.IsShieldedUnshieldVelocityCapActive(kRebuildSunsetHeight + 1));
+        BOOST_REQUIRE_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(kRebuildSunsetHeight + 1), 0);
+        // A capped block at the next height would fail: the window holds the exit, which is more
+        // than half of what is left in the pool.
+        BOOST_REQUIRE_GT(v.note.value, ShieldedUnshieldVelocity::WindowCap(
+                                           pool_after_exit, consensus.nShieldedUnshieldVelocityCapBps));
+    }
+
+    CreateAndProcessBlock({}, CScript() << OP_TRUE, /*chainstate=*/nullptr, /*use_mempool=*/false);
+
+    LOCK(cs_main);
+    BOOST_REQUIRE_EQUAL(chainman.ActiveChain().Height(), kRebuildSunsetHeight + 1);
+    BOOST_CHECK_EQUAL(chainman.GetShieldedPoolBalance(), pool_after_exit);
+    BOOST_CHECK_EQUAL(chainman.GetShieldedUnshieldVelocityWindowTotal(
+                          chainman.ActiveChain().Height(), consensus.nShieldedUnshieldVelocityWindowBlocks),
+                      v.note.value);
+    // The block is still recorded: the persisted log holds the exit and a zero entry for it.
+    ShieldedUnshieldVelocity persisted;
+    BOOST_REQUIRE(chainman.ReadShieldedUnshieldVelocity(persisted));
+    BOOST_CHECK_EQUAL(persisted.Size(), size_t{2});
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_velocity_cap_still_rejects_an_exit_above_the_cap, RecoveryExitRebuildSetup)
+{
+    // The cap still applies to a block with a shielded bundle: the same exit from a pool too
+    // small for it is refused.
+    const ReVectors& v = Vectors();
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const Consensus::Params& consensus = chainman.GetConsensus();
+    constexpr int kSmallFundingCount{3};
+
+    while (WITH_LOCK(cs_main, return chainman.ActiveChain().Height()) < kRebuildSunsetHeight - 2) {
+        CreateAndProcessBlock({}, CScript() << OP_TRUE, /*chainstate=*/nullptr, /*use_mempool=*/false);
+    }
+    std::vector<CTransactionRef> funding_txs;
+    CAmount seeded_pool{-kRecoverFee};
+    for (int i = 0; i < kSmallFundingCount; ++i) {
+        funding_txs.push_back(m_coinbase_txns.at(i));
+        seeded_pool += funding_txs.back()->vout[0].nValue;
+    }
+    CreateAndProcessBlock({BuildLegacyShieldOnlyTx(*this, funding_txs, kRecoverFee)}, CScript() << OP_TRUE,
+                          /*chainstate=*/nullptr, /*use_mempool=*/false);
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(cs_main, return chainman.GetShieldedPoolBalance()), seeded_pool);
+    BOOST_REQUIRE_GT(seeded_pool, v.note.value);
+    BOOST_REQUIRE_GT(v.note.value, ShieldedUnshieldVelocity::WindowCap(seeded_pool,
+                                                                       consensus.nShieldedUnshieldVelocityCapBps));
+
+    {
+        ASSERT_DEBUG_LOG("shielded-unshield-velocity-exceeded");
+        CreateAndProcessBlock({BuildRecoveryExitTx()}, CScript() << OP_TRUE,
+                              /*chainstate=*/nullptr, /*use_mempool=*/false);
+    }
+    LOCK(cs_main);
+    BOOST_CHECK_EQUAL(chainman.ActiveChain().Height(), kRebuildSunsetHeight - 1);
+    BOOST_CHECK_EQUAL(chainman.GetShieldedPoolBalance(), seeded_pool);
 }
 
 BOOST_FIXTURE_TEST_CASE(recovery_exit_disconnect_rebuild_fallback_unwinds_retired_identifiers, RecoveryExitRebuildSetup)
