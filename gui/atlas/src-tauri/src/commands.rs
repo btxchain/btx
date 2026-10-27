@@ -196,7 +196,9 @@ pub async fn atlas_config(
   if action=="read"{return serde_json::to_value(settings::inspect(&path,&section)?).map_err(|_|Error::new("JSON","Cannot show settings"));}
   if action!="apply"{return Err(Error::new("CONFIG_ACTION","Unknown configuration action"));}
   let edit=settings::parse_edit(&edit.unwrap_or_default())?;
-  confirm(&app,"Change node configuration",format!("File: {}\nSection: {}\nExpected digest: {}\n\n{}\n\nNode restart is required. This edits only the selected file. It does not override command-line settings or start/stop the node. External signer paths can cause code execution by btxd.",path.display(),edit.section,edit.expected_hash,edit.values.iter().map(|(k,v)|format!("{k}={v}")).collect::<Vec<_>>().join("\n")))?;
+  let mut text=format!("File: {}\nSection: {}\nExpected digest: {}\n\n{}\n\nNode restart is required. This edits only the selected file. It does not override command-line settings or start/stop the node. External signer paths can cause code execution by btxd.",path.display(),edit.section,edit.expected_hash,edit.values.iter().map(|(k,v)|format!("{k}={v}")).collect::<Vec<_>>().join("\n"));
+  if edit.values.contains_key("proxy"){text.push_str(" A proxy routes all node traffic and is a privacy and eclipse exposure.");}
+  confirm(&app,"Change node configuration",text)?;
   serde_json::to_value(settings::apply(&path,&edit)?).map_err(|_|Error::new("JSON","Cannot show settings"))
  }).await
 }

@@ -10,7 +10,7 @@ WebView/Tauri/Rust dependencies, trusted local model execution adapter and nativ
 confirmation UI. Same-user malware, compromised administrator/kernel, malicious
 node binary, hostile graphics driver and physical key theft are not solved here.
 
-## Implemented controls (native implementation not yet executed)
+## Implemented controls (Linux crate tests ran; the release matrix has not)
 
 | Boundary | Control | Remaining evidence |
 |---|---|---|
@@ -27,9 +27,10 @@ node binary, hostile graphics driver and physical key theft are not solved here.
 
 `#![forbid(unsafe_code)]` applies to authored Rust modules, not all dependencies,
 WebViews, operating systems or graphics drivers. Memory-safe source structure is
-not proof of a vulnerability-free application. Native code has not been compiled
-in this authoring environment, so compiler errors and platform API mismatches may
-remain. Do not ship until the native matrix and adverse-path tests pass.
+not proof of a vulnerability-free application. The Atlas Rust crate has been
+compiled on one Linux host and its unit tests have been run there. That is not a
+release qualification. Compiler and platform mismatches can remain on Windows and
+macOS. Do not ship until the native matrix and adverse-path tests pass.
 
 The abstract model checker enumerates a finite approval machine. It is not linked
 by a machine-checked refinement proof to the real Rust functions, IPC races or

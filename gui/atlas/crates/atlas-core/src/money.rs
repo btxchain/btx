@@ -280,12 +280,18 @@ impl Money {
                     })?;
                 let owned =
                     rpc.call("getaddressinfo", &json!([address]), Some(&draft.wallet), 20)?;
-                if owned.get("ismine") != Some(&Value::Bool(true))
-                    && owned.get("iswatchonly") != Some(&Value::Bool(true))
-                {
+                // ismine must be boolean true. External signers report ismine and pass.
+                // Watch-only change cannot be spent by this signing wallet.
+                if owned.get("ismine") != Some(&Value::Bool(true)) {
+                    if owned.get("iswatchonly") == Some(&Value::Bool(true)) {
+                        return Err(Error::new(
+                            "CHANGE",
+                            "Change output is watch-only and cannot be spent by this wallet",
+                        ));
+                    }
                     return Err(Error::new(
                         "CHANGE",
-                        "Change output is not owned or watched by the selected wallet",
+                        "Change output is not owned by the selected wallet",
                     ));
                 }
                 if !draft.change_address.is_empty() && address != draft.change_address {

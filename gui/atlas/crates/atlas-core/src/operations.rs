@@ -4,6 +4,9 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use zeroize::Zeroize;
 
+// openbtxuri, openmodelshare, decoderesource, and decoderesourceuri read a local file
+// when the argument is a filesystem path, so they are not silent reads. They stay
+// available through the prepared approval path. They do not spend and do not start inference.
 const READ_METHODS: &[&str] = &[
     "getblockchaininfo",
     "getnetworkinfo",
@@ -65,10 +68,6 @@ const READ_METHODS: &[&str] = &[
     "showmodel",
     "getmodelsharecard",
     "getmodelmanifest",
-    "openbtxuri",
-    "openmodelshare",
-    "decoderesource",
-    "decoderesourceuri",
     "getmodelrelease",
     "getmodeljob",
     "getbounty",
@@ -170,46 +169,51 @@ impl Request {
     }
     pub fn summary(&self) -> Result<String> {
         let p = self.parse()?;
-        // Redact credential fields, not the operation's non-secret semantics. The
-        // native dialog still shows wallet, timeout, destination/message and switches.
-        let mut shown = p.clone();
-        let positions: &[usize] = match self.method.as_str() {
-            "walletpassphrase" | "encryptwallet" | "importprivkey" => &[0],
-            "walletpassphrasechange" => &[0, 1],
-            "createwallet" => &[3],
-            "migratewallet" => &[1],
-            "signrawtransactionwithkey" => &[1],
-            _ => &[],
+        let body = if self.method == "importdescriptors" {
+            "Descriptor import. Descriptor material is hidden from this dialog. Approval still covers the exact submitted bytes.".to_owned()
+        } else {
+            // Redact credential fields, not the operation's non-secret semantics. The
+            // native dialog still shows wallet, timeout, destination/message and switches.
+            let mut shown = p.clone();
+            let positions: &[usize] = match self.method.as_str() {
+                "walletpassphrase" | "encryptwallet" | "importprivkey" => &[0],
+                "walletpassphrasechange" => &[0, 1],
+                "createwallet" => &[3],
+                "migratewallet" => &[1],
+                "signrawtransactionwithkey" => &[1],
+                _ => &[],
+            };
+            if let Some(a) = shown.as_array_mut() {
+                for i in positions {
+                    if let Some(v) = a.get_mut(*i) {
+                        *v = json!("[credential hidden]");
+                    }
+                }
+            }
+            if let Some(o) = shown.as_object_mut() {
+                for name in [
+                    "passphrase",
+                    "oldpassphrase",
+                    "newpassphrase",
+                    "private_keys",
+                    "privkeys",
+                    "privkey",
+                ] {
+                    if o.contains_key(name) {
+                        o.insert(name.into(), json!("[credential hidden]"));
+                    }
+                }
+            }
+            let body = serde_json::to_string_pretty(&shown)
+                .map_err(|_| Error::new("JSON", "Cannot show request"))?;
+            if body.len() > 12000 {
+                return Err(Error::new(
+                    "REVIEW_SIZE",
+                    "Request too large for complete native review. Use the PSBT or file workflow.",
+                ));
+            }
+            body
         };
-        if let Some(a) = shown.as_array_mut() {
-            for i in positions {
-                if let Some(v) = a.get_mut(*i) {
-                    *v = json!("[credential hidden]");
-                }
-            }
-        }
-        if let Some(o) = shown.as_object_mut() {
-            for name in [
-                "passphrase",
-                "oldpassphrase",
-                "newpassphrase",
-                "private_keys",
-                "privkeys",
-                "privkey",
-            ] {
-                if o.contains_key(name) {
-                    o.insert(name.into(), json!("[credential hidden]"));
-                }
-            }
-        }
-        let body = serde_json::to_string_pretty(&shown)
-            .map_err(|_| Error::new("JSON", "Cannot show request"))?;
-        if body.len() > 12000 {
-            return Err(Error::new(
-                "REVIEW_SIZE",
-                "Request too large for complete native review. Use the PSBT or file workflow.",
-            ));
-        }
         Ok(format!(
             "Method: {}\nWallet: {}\n\n{}",
             self.method,
@@ -226,14 +230,35 @@ pub fn read_allowed(method: &str, params: &Value) -> bool {
         method,
         "searchmodels" | "searchbounties" | "searchcollections" | "searchpublishers"
     ) {
-        let q = if params.is_array() {
-            params.get(0)
-        } else {
-            params.get("query").or(Some(params))
-        };
-        return q.and_then(|q| q.get("scope")).is_none_or(|v| v == "LOCAL");
+        return search_stays_local(params);
     }
     true
+}
+fn search_stays_local(params: &Value) -> bool {
+    let query = if params.is_array() {
+        match params.get(0) {
+            Some(v) => v,
+            None => return true,
+        }
+    } else if params.is_object() {
+        params.get("query").unwrap_or(params)
+    } else {
+        return false;
+    };
+    match query {
+        Value::Object(o) => match o.get("scope") {
+            Some(Value::String(s)) => s.eq_ignore_ascii_case("local"),
+            Some(_) => false,
+            None => !o.contains_key("text") && !o.contains_key("query"),
+        },
+        _ => false,
+    }
+}
+fn private_flag(params: &Value) -> bool {
+    params == &Value::Bool(true)
+        || params.get(0) == Some(&Value::Bool(true))
+        || params.get("private") == Some(&Value::Bool(true))
+        || params.get(0).and_then(|v| v.get("private")) == Some(&Value::Bool(true))
 }
 pub fn agent_read_allowed(method: &str) -> bool {
     AGENT_READS.contains(&method)
@@ -340,12 +365,20 @@ impl PreparedStore {
             ));
         }
         let p = request.parse()?;
-        if matches!(request.method.as_str(), "dumpprivkey" | "dumpwallet")
-            || (request.method == "listdescriptors"
-                && (p.get(0) == Some(&Value::Bool(true))
-                    || p.get("private") == Some(&Value::Bool(true))))
+        if matches!(
+            request.method.as_str(),
+            "dumpprivkey"
+                | "dumpwallet"
+                | "backupwallet"
+                | "backupwalletbundle"
+                | "backupwalletbundlearchive"
+        ) || (matches!(request.method.as_str(), "listdescriptors" | "gethdkeys")
+            && private_flag(&p))
         {
-            return Err(Error::new("KEY_EXPORT_DENIED","Raw private-key export is excluded from Atlas. Use an independently trusted native recovery procedure."));
+            return Err(Error::new(
+                "KEY_EXPORT_DENIED",
+                "Private key, seed, and wallet-file export are excluded from Atlas.",
+            ));
         }
         verify_zero_spend(&request.method, &p)?;
         let digest = request.digest()?;
@@ -420,23 +453,99 @@ mod tests {
     }
     #[test]
     fn network_queries() {
-        assert!(read_allowed("searchmodels", &json!([{"scope":"LOCAL"}])));
-        assert!(!read_allowed("searchmodels", &json!([{"scope":"NETWORK"}])));
-        assert!(read_allowed(
+        for method in [
+            "searchmodels",
+            "searchbounties",
             "searchcollections",
-            &json!([{"scope":"LOCAL"}])
-        ));
-        assert!(!read_allowed(
-            "searchcollections",
-            &json!([{"scope":"NETWORK"}])
-        ));
-        assert!(read_allowed(
             "searchpublishers",
-            &json!([{"scope":"LOCAL"}])
-        ));
-        assert!(!read_allowed(
-            "searchpublishers",
-            &json!([{"scope":"NETWORK"}])
+        ] {
+            assert!(read_allowed(method, &json!([{"scope":"LOCAL"}])));
+            assert!(read_allowed(method, &json!([{"scope":"local"}])));
+            assert!(read_allowed(method, &json!([])));
+            assert!(!read_allowed(method, &json!(["text"])));
+            assert!(!read_allowed(
+                method,
+                &json!({"query":"text","scope":"NETWORK"})
+            ));
+            assert!(!read_allowed(method, &json!(["text", {"scope":"NETWORK"}])));
+            assert!(!read_allowed(method, &json!([{"text":"x"}])));
+            assert!(!read_allowed(method, &json!([{"scope":"NETWORK"}])));
+            assert!(!read_allowed(method, &json!([{"scope":"PEERS"}])));
+            assert!(!read_allowed(method, &json!([{"scope":"ALL"}])));
+            assert!(!read_allowed(method, &json!([{"scope":""}])));
+        }
+    }
+    #[test]
+    fn path_reads_need_approval() {
+        for method in [
+            "openbtxuri",
+            "openmodelshare",
+            "decoderesource",
+            "decoderesourceuri",
+        ] {
+            assert!(!read_allowed(method, &json!(["/tmp/x"])));
+        }
+    }
+    #[test]
+    fn key_export_denied() {
+        let mut s = PreparedStore::default();
+        match s.prepare(
+            Request {
+                method: "backupwallet".into(),
+                params_json: "[]".into(),
+                wallet: None,
+            },
+            1,
+        ) {
+            Err(e) => assert_eq!(e.code, "KEY_EXPORT_DENIED"),
+            Ok(_) => panic!("backupwallet was prepared"),
+        }
+        match s.prepare(
+            Request {
+                method: "gethdkeys".into(),
+                params_json: "[true]".into(),
+                wallet: None,
+            },
+            1,
+        ) {
+            Err(e) => assert_eq!(e.code, "KEY_EXPORT_DENIED"),
+            Ok(_) => panic!("private gethdkeys was prepared"),
+        }
+        match s.prepare(
+            Request {
+                method: "gethdkeys".into(),
+                params_json: r#"[{"private":true}]"#.into(),
+                wallet: None,
+            },
+            1,
+        ) {
+            Err(e) => assert_eq!(e.code, "KEY_EXPORT_DENIED"),
+            Ok(_) => panic!("private gethdkeys was prepared"),
+        }
+        assert!(s
+            .prepare(
+                Request {
+                    method: "gethdkeys".into(),
+                    params_json: "[false]".into(),
+                    wallet: None,
+                },
+                1,
+            )
+            .is_ok());
+    }
+    #[test]
+    fn importdescriptors_summary_hides_material() {
+        let descriptor = "wpkh(xprv9s21ZrQH143KSECRETDESCRIPTOR/0/*)";
+        let summary = Request {
+            method: "importdescriptors".into(),
+            params_json: json!([{"desc": descriptor}]).to_string(),
+            wallet: None,
+        }
+        .summary()
+        .unwrap();
+        assert!(!summary.contains(descriptor));
+        assert!(summary.contains(
+            "Descriptor import. Descriptor material is hidden from this dialog. Approval still covers the exact submitted bytes."
         ));
     }
     #[test]

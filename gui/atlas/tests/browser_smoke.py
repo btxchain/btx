@@ -11,6 +11,7 @@ with sync_playwright() as p:
  kw={'headless':True}
  if a.browser:kw['executable_path']=a.browser
  browser=p.chromium.launch(**kw);page=browser.new_page(viewport={'width':1440,'height':940});page.on('pageerror',lambda e:errors.append(str(e)))
+ page.on('console',lambda m:errors.append(m.text) if any(s in m.text for s in ('Content Security Policy','Refused to load','Refused to connect')) else None)
  page.goto(a.url,wait_until='networkidle');page.locator('#demo-start').click();page.wait_for_timeout(400)
  for view in ['atlas','models','swarms','work','research','economy','compute','mining','wallet','activity','tools','settings']:
   page.locator(f'.nav-item[data-view="{view}"]').click();page.wait_for_timeout(100)
