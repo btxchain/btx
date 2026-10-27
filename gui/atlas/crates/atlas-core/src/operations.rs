@@ -265,11 +265,19 @@ fn search_stays_local(params: &Value) -> bool {
 fn private_flag(params: &Value) -> bool {
     // Positional form, plus params["args"] when it is the array the node
     // substitutes for positional parameters. A sibling "private" key still counts.
+    // gethdkeys names its object "options"; only a JSON bool true at
+    // options.private exports the seed. The same check runs on args arrays.
     fn on(params: &Value) -> bool {
         params == &Value::Bool(true)
             || params.get(0) == Some(&Value::Bool(true))
             || params.get("private") == Some(&Value::Bool(true))
             || params.get(0).and_then(|v| v.get("private")) == Some(&Value::Bool(true))
+            || params.get("options").and_then(|v| v.get("private")) == Some(&Value::Bool(true))
+            || params
+                .get(0)
+                .and_then(|v| v.get("options"))
+                .and_then(|v| v.get("private"))
+                == Some(&Value::Bool(true))
     }
     on(params)
         || params
@@ -606,6 +614,47 @@ mod tests {
                 1,
             )
             .is_ok());
+    }
+    #[test]
+    fn options_private_key_export_denied() {
+        let mut s = PreparedStore::default();
+        for params_json in [
+            r#"{"options":{"private":true}}"#,
+            r#"{"options":{"private":true,"active_only":true}}"#,
+            r#"[{"options":{"private":true}}]"#,
+            r#"{"args":[{"options":{"private":true}}]}"#,
+            r#"{"args":[{"private":true}]}"#,
+        ] {
+            match s.prepare(
+                Request {
+                    method: "gethdkeys".into(),
+                    params_json: params_json.into(),
+                    wallet: None,
+                },
+                1,
+            ) {
+                Err(e) => assert_eq!(e.code, "KEY_EXPORT_DENIED"),
+                Ok(_) => panic!("private gethdkeys was prepared: {params_json}"),
+            }
+        }
+        for params_json in [
+            r#"{"options":{"private":false}}"#,
+            r#"{"options":{"active_only":true}}"#,
+            r#"{"options":{"private":"true"}}"#,
+        ] {
+            assert!(
+                s.prepare(
+                    Request {
+                        method: "gethdkeys".into(),
+                        params_json: params_json.into(),
+                        wallet: None,
+                    },
+                    1,
+                )
+                .is_ok(),
+                "gethdkeys should prepare: {params_json}"
+            );
+        }
     }
     #[test]
     fn importdescriptors_summary_hides_material() {

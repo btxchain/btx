@@ -12,11 +12,23 @@ function fieldControl(arg,bridge){
  if(['path','savepath'].includes(arg.kind))wrap.append(button('Choose native path',async()=>{try{const r=await bridge.document(arg.kind==='savepath'?'destination_path':'source_path');input.value=r.path;}catch(e){toast(e.message,'danger');}},'subtle'));
  return{input,wrap,value(){const s=input.value;if(arg.kind==='boolean')return input.checked;if((s===''||s===undefined)&&!arg.required)return undefined;if(arg.kind==='json')return parseJsonExact(s||'{}');if(arg.kind==='integer'){if(!/^-?(0|[1-9][0-9]*)$/.test(s))throw Error(`${arg.name}: use an exact integer`);return new JsonNumber(s);}if(arg.kind==='amount'){parseBTX(s);return new JsonNumber(s);}return s;}};
 }
+export function prefillFieldText(kind,value){
+ if(value instanceof JsonNumber)return value.text;
+ if(value!==null&&typeof value==='object')return encodeJson(value);
+ return String(value);
+}
+export function rawPreferred(args,prefill){
+ if(!Array.isArray(prefill)||prefill.length!==1)return false;
+ const value=prefill[0];
+ if(value===null||typeof value!=='object'||value instanceof JsonNumber||Array.isArray(value))return false;
+ const kind=args&&args[0]&&args[0].kind;
+ return kind!=='json'&&kind!=='long';
+}
 export function operationDialog(app,method,prefill=[],walletContext){
  const definition=BY_METHOD.get(method)||{method,title:method,risk:'dangerous',args:[],wallet:false,notes:'Discovered native method. Read its current help; no argument shape is assumed.'};
  const body=el('div',{class:'operation-form'}),result=el('div'),wallet=el('input',{value:walletContext===undefined?(app.state.state.wallet||''):String(walletContext),placeholder:'Exact loaded wallet name',autocomplete:'off'}),raw=el('textarea',{rows:6,spellcheck:false,value:'[]',class:'mono','aria-label':'Exact JSON RPC parameters'});
- const useRaw=el('input',{type:'checkbox',checked:!definition.args.length}),controls=definition.args.map(a=>fieldControl(a,app.bridge));
- for(let i=0;i<prefill.length&&i<controls.length;i++){const a=definition.args[i],v=prefill[i];if(a.kind==='boolean')controls[i].input.checked=!!v;else if(v instanceof JsonNumber)controls[i].input.value=v.text;else if(v!==null&&typeof v==='object'&&(a.kind==='json'||a.kind==='long'))controls[i].input.value=encodeJson(v);else controls[i].input.value=typeof v==='object'?JSON.stringify(v):String(v);}
+ const useRaw=el('input',{type:'checkbox',checked:!definition.args.length||rawPreferred(definition.args,prefill)}),controls=definition.args.map(a=>fieldControl(a,app.bridge));
+ for(let i=0;i<prefill.length&&i<controls.length;i++){const a=definition.args[i],v=prefill[i];if(a.kind==='boolean')controls[i].input.checked=!!v;else controls[i].input.value=prefillFieldText(a.kind,v);}
  const fields=el('div',{class:'fields'},...controls.map(c=>c.wrap));
  const updateMode=()=>{fields.hidden=useRaw.checked;raw.hidden=!useRaw.checked;};useRaw.addEventListener('change',updateMode);updateMode();
  if(prefill.length)raw.value=encodeJson(prefill);

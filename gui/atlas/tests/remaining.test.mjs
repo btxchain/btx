@@ -63,6 +63,27 @@ test('a printed request is placed on the page, not inside the scrolled workspace
   assert.match(rule, /background:#fff/);
 });
 
+test('fee bins include every requested mempool floor through 200', () => {
+  const floors = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 17, 20, 25, 30, 40, 50, 60, 70, 80, 100, 120, 140, 170, 200];
+  const fee_histogram = {total_fees: '1.00000000'};
+  for (const floor of floors) fee_histogram[String(floor)] = {count: '1', from_feerate: String(floor)};
+  const bins = feeBins({fee_histogram});
+  assert.equal(fee_histogram.total_fees, '1.00000000');
+  assert.equal(bins.length, floors.length);
+  assert.deepEqual(bins.map((bin) => bin.feerate), floors.map(String));
+  assert.equal(bins.some((bin) => bin.feerate === '200' && bin.count === '1'), true);
+});
+
+test('fee bins over the safety cap keep the highest feerates', () => {
+  const fee_histogram = {};
+  for (let rate = 0; rate < 40; rate += 1) fee_histogram[String(rate)] = {count: '1', from_feerate: String(rate)};
+  const bins = feeBins({fee_histogram});
+  const cap = 32;
+  assert.equal(bins.length, cap);
+  assert.equal(bins.some((bin) => bin.feerate === '39'), true);
+  assert.equal(bins.some((bin) => bin.feerate === '0'), false);
+});
+
 test('a native export passes the suggested file name to the save dialog', async () => {
   const calls = [];
   const previous = globalThis.__TAURI__;

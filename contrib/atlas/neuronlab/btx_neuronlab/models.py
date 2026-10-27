@@ -79,6 +79,58 @@ def _weight_index_shards(root: Path):
     return shards
 
 
+def _config_ties_word_embeddings(config):
+    # Absent is not tied. Transformers defaults a missing attribute to true; the file must say true.
+    if type(config) is not dict:
+        return False
+    if 'tie_word_embeddings' in config:
+        return config['tie_word_embeddings'] is True
+    for name in ('decoder', 'generator', 'text_config'):
+        nested = config.get(name)
+        if type(nested) is dict and nested.get('tie_word_embeddings') is True:
+            return True
+    return False
+
+
+def _same_embedding_weight(left, right):
+    if left is None or right is None:
+        return False
+    if left is right:
+        return True
+    try:
+        return left.numel() > 0 and left.shape == right.shape and left.data_ptr() == right.data_ptr()
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _module_weight_key(model, module):
+    for name, found in model.named_modules():
+        if found is module:
+            return 'weight' if name == '' else name + '.weight'
+    return None
+
+
+def _bind_omitted_tied_head(model, root: Path, state):
+    # A tied output head is the same Parameter as the input embedding and is omitted from safetensors.
+    config = loads(read_file(root / 'config.json', 1_048_576), signed=False, limit=1_048_576)
+    if not _config_ties_word_embeddings(config):
+        return
+    try:
+        output, inputs = model.get_output_embeddings(), model.get_input_embeddings()
+    except (AttributeError, NotImplementedError):
+        return
+    if output is None or inputs is None:
+        return
+    if not _same_embedding_weight(getattr(output, 'weight', None), getattr(inputs, 'weight', None)):
+        return
+    output_key, input_key = _module_weight_key(model, output), _module_weight_key(model, inputs)
+    if not output_key or not input_key or output_key == input_key or input_key not in state:
+        return
+    missing = [key for key in model.state_dict() if key not in state]
+    if len(missing) == 1 and missing[0] == output_key:
+        state[output_key] = state[input_key]
+
+
 def _load_declared_weights(model, root: Path):
     from safetensors.torch import load_file
     shards = _weight_index_shards(root)
@@ -88,6 +140,7 @@ def _load_declared_weights(model, root: Path):
         state = {}
         for shard in shards:
             state.update(load_file(str(shard)))
+        _bind_omitted_tied_head(model, root, state)
         model.load_state_dict(state, strict=True)
     except LabError:
         raise
