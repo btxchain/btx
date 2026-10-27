@@ -7,6 +7,7 @@ if(NOT WITH_MODELNET)
 endif()
 
 find_package(OpenSSL REQUIRED)
+include(${CMAKE_CURRENT_SOURCE_DIR}/security_v2/native.cmake)
 
 add_library(bitcoin_modelnet STATIC
   types.cpp
@@ -2546,6 +2547,9 @@ add_library(bitcoin_modelnet STATIC
     hcp_crl12.cpp
     hcp_engine.cpp
 )
+target_compile_definitions(bitcoin_modelnet PRIVATE BTX_MODEL_SECURITY_V2=1)
+target_link_libraries(bitcoin_modelnet PUBLIC bitcoin_model_security)
+
 target_link_libraries(bitcoin_modelnet
   PUBLIC
     core_interface

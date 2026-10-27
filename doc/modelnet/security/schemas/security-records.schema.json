@@ -1,0 +1,1471 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:security:record:v1",
+  "title": "BTX security-v2 signed record",
+  "description": "Shape only. C++ enforces signatures, authority, canonical integer JSON, bounds, clocks, closure and effects. An empty signature list is only an unsigned draft; not authority.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "BTX/SecurityEnvelope/v1"
+    },
+    "kind": {
+      "enum": [
+        "policy",
+        "composition",
+        "capsule",
+        "challenge",
+        "evaluation",
+        "receipt",
+        "channel",
+        "mandate",
+        "grant",
+        "revocation",
+        "control",
+        "lease",
+        "anchor",
+        "peer"
+      ]
+    },
+    "body": {
+      "type": "object"
+    },
+    "signatures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "public_key": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{2624}$"
+          },
+          "signature": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{4840}$"
+          }
+        },
+        "required": [
+          "public_key",
+          "signature"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 16,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema",
+    "kind",
+    "body",
+    "signatures"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "policy"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/policy"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "composition"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/composition"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "capsule"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/capsule"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "challenge"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/challenge"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "evaluation"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/evaluation"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "receipt"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/receipt"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "channel"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/channel"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "mandate"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/mandate"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "grant"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/grant"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "revocation"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/revocation"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "control"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/control"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "lease"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/lease"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "anchor"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/anchor"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "peer"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/peer"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "policy": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "release_threshold": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "evaluator_domains": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 16
+        },
+        "physical_hosts": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 16
+        },
+        "evidence_ttl_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "canary_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "trial_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "principals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "public_key": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{2624}$"
+              },
+              "roles": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "owner",
+                    "publisher",
+                    "release",
+                    "evaluator",
+                    "revoker",
+                    "coordinator",
+                    "worker",
+                    "peer",
+                    "witness"
+                  ]
+                },
+                "maxItems": 9,
+                "uniqueItems": true
+              },
+              "domain": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "host": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "transport_pin": {
+                "type": "string",
+                "pattern": "^([0-9a-f]{96})?$"
+              }
+            },
+            "required": [
+              "public_key",
+              "roles",
+              "domain",
+              "host",
+              "transport_pin"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "external-controls",
+              "outcome",
+              "revocation",
+              "rollback",
+              "privacy",
+              "adversarial"
+            ]
+          },
+          "maxItems": 6,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "realm",
+        "epoch",
+        "issued_ms",
+        "expires_ms",
+        "release_threshold",
+        "evaluator_domains",
+        "physical_hosts",
+        "evidence_ttl_ms",
+        "canary_ms",
+        "trial_limit",
+        "principals",
+        "gates"
+      ],
+      "additionalProperties": false
+    },
+    "composition": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "sha384": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{96}$"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "role": {
+                "enum": [
+                  "weights",
+                  "tokenizer",
+                  "config",
+                  "chat_template",
+                  "adapter"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "sha384",
+              "bytes",
+              "role"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 512,
+          "uniqueItems": true
+        },
+        "runtime": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "sandbox": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "tool_schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "system_prompt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "parents": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "contributors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "license": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "architecture": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "visibility": {
+          "enum": [
+            "public",
+            "private"
+          ]
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "files",
+        "runtime",
+        "sandbox",
+        "tool_schema",
+        "system_prompt",
+        "parents",
+        "contributors",
+        "license",
+        "architecture",
+        "visibility"
+      ],
+      "additionalProperties": false
+    },
+    "capsule": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "composition": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "evaluations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "profile": {
+          "enum": [
+            "inference-only",
+            "restricted-tools"
+          ]
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "composition",
+        "evaluations",
+        "profile"
+      ],
+      "additionalProperties": false
+    },
+    "challenge": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "composition": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "campaign": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "suite": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "sample_commitment": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "package": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "gate": {
+          "enum": [
+            "external-controls",
+            "outcome",
+            "revocation",
+            "rollback",
+            "privacy",
+            "adversarial"
+          ]
+        },
+        "trial_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "composition",
+        "campaign",
+        "suite",
+        "sample_commitment",
+        "package",
+        "gate",
+        "trial_limit"
+      ],
+      "additionalProperties": false
+    },
+    "evaluation": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "composition": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "challenge": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "campaign": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "suite": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "sample_commitment": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "runtime": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "sandbox": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "gate": {
+          "enum": [
+            "external-controls",
+            "outcome",
+            "revocation",
+            "rollback",
+            "privacy",
+            "adversarial"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "BLOCKED",
+            "NOT_RUN"
+          ]
+        },
+        "cases": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "execution_receipt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "output_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "physical_host_evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "maxItems": 64,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "composition",
+        "challenge",
+        "campaign",
+        "suite",
+        "sample_commitment",
+        "runtime",
+        "sandbox",
+        "gate",
+        "outcome",
+        "cases",
+        "execution_receipt",
+        "output_digest",
+        "host",
+        "physical_host_evidence",
+        "limitations"
+      ],
+      "additionalProperties": false
+    },
+    "receipt": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "job": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "request": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "package": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "composition": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "runtime": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "sandbox": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "outcome": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "output_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "output_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limits": {
+          "type": "object"
+        },
+        "dispatched": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "job",
+        "request",
+        "package",
+        "composition",
+        "runtime",
+        "sandbox",
+        "outcome",
+        "output_digest",
+        "output_bytes",
+        "host",
+        "limits",
+        "dispatched"
+      ],
+      "additionalProperties": false
+    },
+    "channel": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "capsule": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "previous": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{96})?$"
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "name",
+        "sequence",
+        "capsule",
+        "previous"
+      ],
+      "additionalProperties": false
+    },
+    "mandate": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "channel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "profile": {
+          "enum": [
+            "inference-only",
+            "restricted-tools"
+          ]
+        },
+        "runtimes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "tool_schemas": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "automatic_follow": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "channel",
+        "profile",
+        "runtimes",
+        "tool_schemas",
+        "automatic_follow"
+      ],
+      "additionalProperties": false
+    },
+    "grant": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "composition": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{96})?$"
+        },
+        "channel": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "capsule": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{96})?$"
+        },
+        "runtime": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "tool_schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "session": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "read",
+              "hash",
+              "write-new",
+              "run-static"
+            ]
+          },
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "read_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "write_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "max_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "per_action_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "composition",
+        "channel",
+        "capsule",
+        "runtime",
+        "tool_schema",
+        "session",
+        "workspace",
+        "tools",
+        "read_paths",
+        "write_paths",
+        "packages",
+        "max_calls",
+        "max_bytes",
+        "per_action_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "revocation": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "subject",
+        "sequence",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "control": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "operation": {
+          "const": "resume"
+        },
+        "nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "operation",
+        "nonce"
+      ],
+      "additionalProperties": false
+    },
+    "lease": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "task": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "worker": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "task",
+        "worker",
+        "nonce"
+      ],
+      "additionalProperties": false
+    },
+    "anchor": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "issued_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "journal_head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        }
+      },
+      "required": [
+        "realm",
+        "policy_epoch",
+        "issued_ms",
+        "expires_ms",
+        "journal_head"
+      ],
+      "additionalProperties": false
+    },
+    "peer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "realm": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            "policy_epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "issued_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "expires_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "sender": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            "recipient": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            "phase": {
+              "const": "request"
+            },
+            "nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "cursor": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{96})?$"
+            },
+            "want": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{96}$"
+              },
+              "maxItems": 8,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "realm",
+            "policy_epoch",
+            "issued_ms",
+            "expires_ms",
+            "sender",
+            "recipient",
+            "phase",
+            "nonce",
+            "cursor",
+            "want"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "realm": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            "policy_epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "issued_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "expires_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "sender": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            "recipient": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            "phase": {
+              "const": "response"
+            },
+            "nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "request_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            "inventory": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{96}$"
+              },
+              "maxItems": 16,
+              "uniqueItems": true
+            },
+            "next_cursor": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{96})?$"
+            },
+            "records": {
+              "type": "array",
+              "items": {
+                "$ref": "#"
+              },
+              "maxItems": 8,
+              "uniqueItems": true
+            },
+            "not_available": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{96}$"
+              },
+              "maxItems": 8,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "realm",
+            "policy_epoch",
+            "issued_ms",
+            "expires_ms",
+            "sender",
+            "recipient",
+            "phase",
+            "nonce",
+            "request_id",
+            "inventory",
+            "next_cursor",
+            "records",
+            "not_available"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

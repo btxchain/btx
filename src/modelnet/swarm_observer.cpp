@@ -5,6 +5,8 @@
 #include <modelnet/swarm_form/plane.h>
 #include <modelnet/swarm_form/atomic.h>
 #include <modelnet/guard_supervisor.h>
+#include <modelnet/security_v2/native.h>
+#include <memory>
 #include <modelnet/swarm_lifecycle.h>
 #include <modelnet/swarm_live.h>
 #include <modelnet/swarm_node.h>
@@ -36,6 +38,8 @@ using Row = SwarmCatalogEntry;
 std::atomic<bool> g_stop{false};
 std::thread g_thread;
 std::mutex g_mu;
+std::mutex g_security_mu;
+std::shared_ptr<GuardSupervisor> g_security_guard;
 
 bool IsSwarmId(std::string_view s)
 {
@@ -354,9 +358,11 @@ void StartSwarmObserver(const fs::path& modeldir)
     try {
     g_thread = std::thread([modeldir] {
         InputGeneration generation;
-        GuardSupervisor guard;
+        const auto owned_guard = std::make_shared<GuardSupervisor>();
+        GuardSupervisor& guard = *owned_guard;
+        { std::lock_guard lock(g_security_mu); g_security_guard = owned_guard; }
         std::string guard_error;
-        if (!guard.Start(FindPackagedGuardd(), guard_error)) {
+        if (!guard.Start(FindPackagedGuardd(), modeldir / "security", guard_error)) {
             LogPrintf("swarm guard: %s (monetary node continues)\n", guard_error);
         }
         uint64_t guard_heartbeat = 0;
@@ -507,6 +513,7 @@ void StartSwarmObserver(const fs::path& modeldir)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
+        { std::lock_guard lock(g_security_mu); if (g_security_guard == owned_guard) g_security_guard.reset(); }
         guard.Stop();
         try {
             std::string error;
@@ -520,6 +527,14 @@ void StartSwarmObserver(const fs::path& modeldir)
     } catch (const std::exception& e) {
         LogPrintf("swarm observer: thread not started: %s (monetary node continues)\n", e.what());
     }
+}
+
+bool SwarmSecurityRequest(const UniValue& request, UniValue& response, std::string& error)
+{
+    std::shared_ptr<GuardSupervisor> guard;
+    { std::lock_guard lock(g_security_mu); guard = g_security_guard; }
+    if (!guard) { error = "SEC_GUARD_NOT_READY"; return false; }
+    return guard->SecurityExchange(request, response, error);
 }
 
 void StopSwarmObserver() noexcept

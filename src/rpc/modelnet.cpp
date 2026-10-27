@@ -21,6 +21,7 @@
 #include <modelnet/policy.h>
 #include <modelnet/resource_uri.h>
 #include <modelnet/supervisor.h>
+#include <modelnet/security_v2/native.h>
 #include <core_io.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <net.h>
@@ -2422,6 +2423,41 @@ PWC_RPC(verifycomputeaccessgrant, "Check a ComputeAccessGrant signature, trusted
 PWC_RPC(getcomputesigningidentity, "Return the local application signing identity. Not a wallet key.")
 #undef PWC_RPC
 
+
+static RPCHelpMan modelsecurity()
+{
+    return RPCHelpMan{
+        "modelsecurity",
+        "Dispatch a bounded local model-security request through the node-owned guard. "
+        "This is an owner RPC, not a public peer endpoint. Long jobs return a job id. "
+        "No request grants wallet or automatic spending authority.\n",
+        {{"request", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Typed security request", {},
+          RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "Scoped result or refusal"}}},
+        RPCExamples{HelpExampleCli("modelsecurity", "'{\"op\":\"status\"}'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+#ifdef ENABLE_MODELNET
+            UniValue input = request.params[0];
+            if (input.isStr()) {
+                const auto raw = input.get_str();
+                if (raw.size() > 1024 * 1024 || !input.read(raw))
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "SEC_SCHEMA");
+            }
+            if (!input.isObject() || input.write().size() > 1024 * 1024)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "SEC_SCHEMA");
+            UniValue result;
+            std::string error;
+            if (!modelnet::SwarmSecurityRequest(input, result, error))
+                throw JSONRPCError(RPC_MISC_ERROR, error);
+            return result;
+#else
+            throw JSONRPCError(RPC_MISC_ERROR, "SEC_MODELNET_NOT_BUILT");
+#endif
+        },
+    };
+}
+
 static RPCHelpMan lab035()
 {
     return RPCHelpMan{
@@ -2796,6 +2832,7 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &verifycomputeaccessgrant},
         {"modelnet", &getcomputesigningidentity},
         {"modelnet", &lab035},
+        {"modelnet", &modelsecurity},
     };
     for (const auto& c : commands) t.appendCommand(c.name, &c);
 #else

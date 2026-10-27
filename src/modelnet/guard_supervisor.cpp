@@ -1,6 +1,9 @@
 // Copyright (c) 2026 The BTX developers. MIT license. See COPYING.
 #include <modelnet/guard_supervisor.h>
 #include <modelnet/guard_machine.h>
+#ifdef BTX_MODEL_SECURITY_V2
+#include <modelnet/security_v2/database.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <mutex>
@@ -91,6 +94,7 @@ public:
     mutable std::mutex mutex;
     GuardProcessStatus status;
     fs::path executable;
+    fs::path security_directory;
     Clock::time_point next_attempt{};
     Clock::time_point last_ping{};
     Clock::time_point ready_since{};
@@ -147,10 +151,10 @@ public:
         failures=std::min(failures+1,7U);
         next_attempt=Clock::now()+std::chrono::milliseconds(std::min(60000U,500U<<failures));
     }
-    bool Transport(const std::string& line, std::string& reply)
+    bool Transport(const std::string& line, std::string& reply, std::chrono::milliseconds budget=EXCHANGE_TIMEOUT)
     {
         if (line.empty() || line.size()>GuardTable::kMaxLine || line.find_first_of("\r\n\0",0,3)!=std::string::npos) return false;
-        const auto deadline=Clock::now()+EXCHANGE_TIMEOUT;
+        const auto deadline=Clock::now()+budget;
         const std::string bytes=line+"\n";
         size_t sent=0; reply.clear();
 #ifdef _WIN32
@@ -205,6 +209,10 @@ public:
             Failed("GUARD_EXECUTABLE_ABSENT");return false;
         }
 #ifdef _WIN32
+        if (!security_directory.empty() &&
+            (!security_directory.is_absolute() || security_directory.native().find(L'"') != std::wstring::npos)) {
+            Failed("SEC_DIRECTORY"); return false;
+        }
         SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES),nullptr,TRUE};
         HANDLE child_input=nullptr,child_output=nullptr,child_error=nullptr;
         if (!CreatePipe(&child_input,&input,&security,8192) || !CreatePipe(&output,&child_output,&security,8192)) {
@@ -224,6 +232,14 @@ public:
         const bool configured=initialized && UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
              const_cast<HANDLE*>(allowed),sizeof(allowed),nullptr,nullptr)!=0;
         std::wstring command=L"\""+executable.native()+L"\" --stdio";
+        if (!security_directory.empty()) {
+            std::wstring value = security_directory.native();
+            size_t trailing = 0;
+            while (trailing < value.size() && value[value.size()-1-trailing] == L'\\') ++trailing;
+            // CommandLineToArgvW requires trailing backslashes to be doubled
+            // before the closing quote. Never append a filesystem dot component.
+            command += L" --security-dir \"" + value + std::wstring(trailing, L'\\') + L"\"";
+        }
         wchar_t system_root[32768];const UINT count=GetWindowsDirectoryW(system_root,32768);
         std::wstring environment=L"LANG=C";environment.push_back(0);
         if(count>0 && count<32768) {environment+=L"SystemRoot=";environment.append(system_root,count);environment.push_back(0);}
@@ -273,7 +289,10 @@ public:
         }
         const long fd_max=std::max(1024L,sysconf(_SC_OPEN_MAX));
         char arg_stdio[]="--stdio", lang[]="LANG=C", path[]="PATH=/usr/bin:/bin";
-        char* const argv[]{const_cast<char*>(executable.c_str()),arg_stdio,nullptr};
+        char arg_security[]="--security-dir";
+        char* const argv[]{const_cast<char*>(executable.c_str()), arg_stdio,
+            security_directory.empty() ? nullptr : arg_security,
+            security_directory.empty() ? nullptr : const_cast<char*>(security_directory.c_str()), nullptr};
         char* const environment[]{lang,path,nullptr};
 #ifdef __linux__
         const pid_t owner=getpid();
@@ -304,7 +323,9 @@ public:
         status.pid=child;
 #endif
         std::string reply;
-        if(!Transport("PING",reply) || reply!="READY BTX_GUARD/1"){Failed("GUARD_NOT_READY");return false;}
+        // The first reply waits out private-directory and database setup.
+        // Later health checks keep the short exchange budget.
+        if(!Transport("PING",reply,std::chrono::seconds(5)) || reply!="READY BTX_GUARD/1"){Failed("GUARD_NOT_READY");return false;}
         status.ready=true;status.error.clear();last_ping=Clock::now();ready_since=last_ping;return true;
     }
 };
@@ -312,7 +333,15 @@ GuardSupervisor::GuardSupervisor():m_impl(std::make_unique<Impl>()){}
 GuardSupervisor::~GuardSupervisor(){Stop();}
 bool GuardSupervisor::Start(const fs::path& path,std::string& error)
 {
+    return Start(path, {}, error);
+}
+bool GuardSupervisor::Start(const fs::path& path,const fs::path& security_directory,std::string& error)
+{
     std::lock_guard lock(m_impl->mutex);m_impl->CloseOwned();
+    if (!security_directory.empty() && !security_directory.is_absolute()) {
+        error="SEC_DIRECTORY"; return false;
+    }
+    m_impl->security_directory=security_directory;
     m_impl->executable=path.empty()?FindPackagedGuardd():path;
     m_impl->status={};m_impl->status.enabled=true;m_impl->failures=0;
     const bool ok=m_impl->Launch();error=m_impl->status.error;return ok;
@@ -348,4 +377,76 @@ GuardProcessStatus GuardSupervisor::Snapshot()const
 {
     std::lock_guard lock(m_impl->mutex);return m_impl->status;
 }
+
+bool GuardSupervisor::SecurityExchange(const UniValue& request, UniValue& response, std::string& error)
+{
+#ifdef BTX_MODEL_SECURITY_V2
+    // Hold the lock for the ENTIRE frame sequence: health checks and concurrent
+    // RPC requests may not interleave fragments or consume another response.
+    std::lock_guard lock(m_impl->mutex);
+    if (!m_impl->status.ready || m_impl->security_directory.empty()) {
+        error = "SEC_GUARD_NOT_READY";
+        return false;
+    }
+    try {
+        using namespace security;
+        const auto raw = Canonical(request);
+        Require(!raw.empty() && raw.size() <= MAX_RECORD, "SEC_FRAME_LIMIT");
+        const auto id = Hex(RandomBytes(16));
+        const auto deadline = Clock::now() + std::chrono::seconds(9);
+        auto exchange = [&](const std::string& line) {
+            Require(Clock::now() < deadline, "SEC_FRAME_TIMEOUT");
+            std::string reply;
+            Require(m_impl->Transport(line, reply), "SEC_GUARD_TRANSPORT");
+            Require(reply.rfind("ERR ", 0) != 0, "SEC_GUARD_REFUSED");
+            return reply;
+        };
+        Require(exchange("SEC2 BEGIN " + id + " " + std::to_string(raw.size())) == "SEC2 READY " + id,
+                "SEC_FRAME_RESPONSE");
+        for (size_t offset = 0; offset < raw.size();) {
+            const size_t count = std::min<size_t>(1536, raw.size() - offset);
+            const auto bytes = std::span<const unsigned char>(
+                reinterpret_cast<const unsigned char*>(raw.data() + offset), count);
+            const auto reply = exchange("SEC2 DATA " + id + " " + std::to_string(offset) + " " + Hex(bytes));
+            offset += count;
+            Require(reply == "SEC2 STORED " + std::to_string(offset), "SEC_FRAME_RESPONSE");
+        }
+        const auto committed = exchange("SEC2 COMMIT " + id);
+        const std::string prefix = "SEC2 RESPONSE " + id + " ";
+        Require(committed.rfind(prefix, 0) == 0, "SEC_FRAME_RESPONSE");
+        const auto size = ParseUInt(std::string_view(committed).substr(prefix.size()));
+        Require(size > 0 && size <= MAX_RECORD, "SEC_FRAME_LIMIT");
+        std::string output;
+        output.reserve(size);
+        while (output.size() < size) {
+            const auto offset = output.size();
+            const auto reply = exchange("SEC2 READ " + id + " " + std::to_string(offset));
+            const std::string start = "SEC2 BYTES " + std::to_string(offset) + " ";
+            Require(reply.rfind(start, 0) == 0, "SEC_FRAME_RESPONSE");
+            const auto part = Unhex(std::string_view(reply).substr(start.size()), 1536);
+            Require(!part.empty() && part.size() <= size - offset, "SEC_FRAME_LIMIT");
+            output.append(reinterpret_cast<const char*>(part.data()), part.size());
+        }
+        response = Parse(output);
+        error.clear();
+        return true;
+    } catch (const security::Error& e) {
+        error = e.code;
+        // A partial protocol exchange must not be reused; restart loses all
+        // in-memory output and invalidates outstanding boot-bound permits.
+        m_impl->Failed("SEC_GUARD_PROTOCOL");
+        return false;
+    } catch (...) {
+        error = "SEC_GUARD_EXCEPTION";
+        m_impl->Failed("SEC_GUARD_PROTOCOL");
+        return false;
+    }
+#else
+    (void)request;
+    (void)response;
+    error = "SEC_V2_NOT_BUILT";
+    return false;
+#endif
+}
+
 } // namespace modelnet
