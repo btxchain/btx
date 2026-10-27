@@ -5,6 +5,7 @@ import {syncBanner} from '../core/qt-gaps.js';
 import {operationDialog,operationWorkbench} from './operations.js';
 import {operationButtons} from './models.js';
 import {feeBins} from '../core/mempool.js';
+import {banSubnet} from '../core/network.js';
 export function observationView(app,view){
  const definitions={
   swarms:['Swarms & communities','Following a model family is not a grant to train, seed, spend or route private prompts.',['getmodelnetworkinfo','getmodelpeers','listmodels'],'Models'],
@@ -32,10 +33,11 @@ export function toolsView(app){
  root.append(el('details',{},el('summary',{},'Node operations'),workbench));return root;
 }
 function mempoolPanel(app){
+ const floors=[0,1,2,3,4,5,6,7,8,10,12,14,17,20,25,30,40,50,60,70,80,100,120,140,170,200];
  const body=el('div',{class:'surface-stack'}),refresh=button('Refresh',()=>load());
  const panel=el('section',{class:'panel'},el('div',{class:'row'},el('h2',{},'Mempool'),refresh),note('This is the current mempool, not a historical chart.'),body);
  async function load(){refresh.disabled=true;try{
-  const [infoR,rawR]=await Promise.allSettled([app.bridge.read('getmempoolinfo'),app.bridge.read('getrawmempool',[false])]);
+  const [infoR,rawR]=await Promise.allSettled([app.bridge.read('getmempoolinfo',[floors]),app.bridge.read('getrawmempool',[false])]);
   if(!body.isConnected)return;body.replaceChildren();
   if(infoR.status==='fulfilled'){const info=infoR.value.result||{};body.append(el('div',{class:'metrics'},metric('Size',info.size??'—','transactions'),metric('Bytes',humanBytes(info.bytes),'serialized'),metric('Usage',humanBytes(info.usage),'memory')));const bins=feeBins(info);body.append(bins.length?table(bins,[{key:'feerate',label:'Fee rate'},{key:'count',label:'Transactions'}]):note('No fee histogram was returned for the current mempool.'));body.append(note('Fee bins are the current mempool snapshot. They are not a history.'));}
   else body.append(note(infoR.reason?.message||'Mempool info unavailable','danger'));
@@ -53,7 +55,7 @@ function peersPanel(app){
   const peers=Array.isArray(envelope.result)?envelope.result.filter(p=>p&&typeof p==='object'):[];
   const extra=peers.some(p=>Object.prototype.hasOwnProperty.call(p,'banscore'))?'banscore':'bytessent';
   const rows=peers.map(p=>({address:String(p.addr??p.address??''),subver:p.subver??'',synced_headers:p.synced_headers??'',[extra]:p[extra]??'',peer:p}));
-  const grid=table(rows,[{key:'address',label:'address',render:address=>el('span',{class:'row'},el('span',{class:'address'},address||'—'),button('Ban',event=>{event.stopPropagation();operationDialog(app,'setban',[address,'add']);},'',{onKeydown:event=>{if(event.key==='Enter'||event.key===' ')event.stopPropagation();}}))},'subver','synced_headers',extra],{onSelect:row=>dialog('Observed peer',jsonView(row.peer,{open:true})),empty:'No peers observed.'});
+  const grid=table(rows,[{key:'address',label:'address',render:address=>el('span',{class:'row'},el('span',{class:'address'},address||'—'),button('Ban',event=>{event.stopPropagation();const subnet=banSubnet(address);if(!subnet)return;operationDialog(app,'setban',[subnet,'add']);},'',{onKeydown:event=>{if(event.key==='Enter'||event.key===' ')event.stopPropagation();}}))},'subver','synced_headers',extra],{onSelect:row=>dialog('Observed peer',jsonView(row.peer,{open:true})),empty:'No peers observed.'});
   const peerTable=grid.querySelector('table');if(peerTable){peerTable.dataset.stripe='peer';peerTable.classList.toggle('peer-stripes',app.preferences.peerStripes===true);}
   body.replaceChildren(grid);
  }catch(err){if(body.isConnected)body.replaceChildren(note(err.message,'danger'));}finally{if(refresh.isConnected)refresh.disabled=false;}}

@@ -31,8 +31,10 @@ def main():
             model,tok,adapter,binding=load_local(Path(args.dir),device=os.environ.get('BTX_NEURONLAB_DEVICE','cpu'))
             active=store.active(binding)
             cap,generation=active if active else (None,None)
+            tokens=req.get('max_new_tokens',args.max_new_tokens)
+            if 'max_new_tokens' in req and type(tokens)is int and tokens>256:tokens=256
             result=generate(model,tok,adapter,binding,req.get('prompt',''),profile=cap.profile if cap else None,
-                tensors=cap.tensors if cap else None,max_new_tokens=req.get('max_new_tokens',args.max_new_tokens),
+                tensors=cap.tensors if cap else None,max_new_tokens=tokens,
                 fence=(lambda:store.check_fence(cap.id,binding,generation))if cap else None,
                 device=os.environ.get('BTX_NEURONLAB_DEVICE','cpu'))
         print(json.dumps({'ok':True,'backend':'btx-neuronlab/torch-local','local_generate':True,**result},allow_nan=False))

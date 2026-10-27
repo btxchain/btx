@@ -306,3 +306,11 @@ test('rememberOpenUI validates, dedupes, and keeps twelve newest first', () => {
   assert.throws(() => validateOpenUIDocument(document('x'.repeat(81))));
   assert.equal(validateOpenUIDocument(document('Chain')).program, emptyStack);
 });
+
+test('a doubling fan-out is rejected at the materialised node limit', () => {
+  const lines = ['root = Stack([a, a])', 'a = Stack([n0, n0])'];
+  for (let i = 0; i < 8; i++) lines.push(`n${i} = Stack([n${i + 1}, n${i + 1}])`);
+  lines.push('n8 = Text("x")');
+  assert.throws(() => parseOpenUI(lines.join('\n')), /OpenUI materialised node limit/);
+  assert.equal(parseOpenUI(EXAMPLE_PROGRAM).root.typeName, 'Stack');
+});

@@ -130,7 +130,7 @@ impl Agent {
             }
             let result = rpc.call(
                 "generatemodel",
-                &json!([model,{"prompt":prompt,"max_new_tokens":512}]),
+                &json!([model,{"prompt":prompt,"max_new_tokens":256}]),
                 None,
                 180,
             )?;

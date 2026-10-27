@@ -23109,6 +23109,8 @@ function containsDynamicValue(v) {
   return Object.values(obj).some(containsDynamicValue);
 }
 function resolveRef2(name, ctx, mode) {
+  ctx.materialized = (ctx.materialized ?? 0) + 1;
+  if (ctx.materialized > 256) throw new Error("OpenUI materialised node limit");
   if (ctx.visited.has(name)) {
     ctx.unres.push(name);
     return mode === "expr" ? {

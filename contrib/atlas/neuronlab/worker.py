@@ -15,6 +15,8 @@ from btx_neuronlab.service import Service
 MAX_LINE=1_048_576
 
 def main():
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
     ap=argparse.ArgumentParser();ap.add_argument('--store',required=True);ap.add_argument('--serve',action='store_true');ap.add_argument('--stream',action='store_true')
     args=ap.parse_args()
     os.environ['HF_HUB_OFFLINE']='1';os.environ['TRANSFORMERS_OFFLINE']='1';os.environ['HF_DATASETS_OFFLINE']='1'

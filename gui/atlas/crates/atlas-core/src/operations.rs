@@ -183,14 +183,22 @@ impl Request {
                 "signrawtransactionwithkey" => &[1],
                 _ => &[],
             };
-            if let Some(a) = shown.as_array_mut() {
+            // The node turns an object key "args" into the positional array
+            // (transformNamedArguments). Hide the same indexes there.
+            fn hide_positions(values: &mut [Value], positions: &[usize]) {
                 for i in positions {
-                    if let Some(v) = a.get_mut(*i) {
+                    if let Some(v) = values.get_mut(*i) {
                         *v = json!("[credential hidden]");
                     }
                 }
             }
+            if let Some(a) = shown.as_array_mut() {
+                hide_positions(a, positions);
+            }
             if let Some(o) = shown.as_object_mut() {
+                if let Some(args) = o.get_mut("args").and_then(Value::as_array_mut) {
+                    hide_positions(args, positions);
+                }
                 for name in [
                     "passphrase",
                     "oldpassphrase",
@@ -255,10 +263,19 @@ fn search_stays_local(params: &Value) -> bool {
     }
 }
 fn private_flag(params: &Value) -> bool {
-    params == &Value::Bool(true)
-        || params.get(0) == Some(&Value::Bool(true))
-        || params.get("private") == Some(&Value::Bool(true))
-        || params.get(0).and_then(|v| v.get("private")) == Some(&Value::Bool(true))
+    // Positional form, plus params["args"] when it is the array the node
+    // substitutes for positional parameters. A sibling "private" key still counts.
+    fn on(params: &Value) -> bool {
+        params == &Value::Bool(true)
+            || params.get(0) == Some(&Value::Bool(true))
+            || params.get("private") == Some(&Value::Bool(true))
+            || params.get(0).and_then(|v| v.get("private")) == Some(&Value::Bool(true))
+    }
+    on(params)
+        || params
+            .get("args")
+            .filter(|args| args.is_array())
+            .is_some_and(on)
 }
 pub fn agent_read_allowed(method: &str) -> bool {
     AGENT_READS.contains(&method)
@@ -534,6 +551,63 @@ mod tests {
             .is_ok());
     }
     #[test]
+    fn args_key_export_denied() {
+        let mut s = PreparedStore::default();
+        match s.prepare(
+            Request {
+                method: "listdescriptors".into(),
+                params_json: r#"{"args":[true]}"#.into(),
+                wallet: None,
+            },
+            1,
+        ) {
+            Err(e) => assert_eq!(e.code, "KEY_EXPORT_DENIED"),
+            Ok(_) => panic!("private listdescriptors was prepared"),
+        }
+        match s.prepare(
+            Request {
+                method: "gethdkeys".into(),
+                params_json: r#"{"args":[{"private":true}]}"#.into(),
+                wallet: None,
+            },
+            1,
+        ) {
+            Err(e) => assert_eq!(e.code, "KEY_EXPORT_DENIED"),
+            Ok(_) => panic!("private gethdkeys was prepared"),
+        }
+        match s.prepare(
+            Request {
+                method: "listdescriptors".into(),
+                params_json: r#"{"args":[false],"private":true}"#.into(),
+                wallet: None,
+            },
+            1,
+        ) {
+            Err(e) => assert_eq!(e.code, "KEY_EXPORT_DENIED"),
+            Ok(_) => panic!("named private listdescriptors was prepared"),
+        }
+        assert!(s
+            .prepare(
+                Request {
+                    method: "listdescriptors".into(),
+                    params_json: r#"{"args":[false]}"#.into(),
+                    wallet: None,
+                },
+                1,
+            )
+            .is_ok());
+        assert!(s
+            .prepare(
+                Request {
+                    method: "gethdkeys".into(),
+                    params_json: r#"{"args":[{"private":false}]}"#.into(),
+                    wallet: None,
+                },
+                1,
+            )
+            .is_ok());
+    }
+    #[test]
     fn importdescriptors_summary_hides_material() {
         let descriptor = "wpkh(xprv9s21ZrQH143KSECRETDESCRIPTOR/0/*)";
         let summary = Request {
@@ -547,6 +621,19 @@ mod tests {
         assert!(summary.contains(
             "Descriptor import. Descriptor material is hidden from this dialog. Approval still covers the exact submitted bytes."
         ));
+    }
+    #[test]
+    fn walletpassphrase_args_summary_hides_passphrase() {
+        let summary = Request {
+            method: "walletpassphrase".into(),
+            params_json: r#"{"args":["secret-passphrase",60]}"#.into(),
+            wallet: None,
+        }
+        .summary()
+        .unwrap();
+        assert!(!summary.contains("secret-passphrase"));
+        assert!(summary.contains("[credential hidden]"));
+        assert!(summary.contains("60"));
     }
     #[test]
     fn state() {

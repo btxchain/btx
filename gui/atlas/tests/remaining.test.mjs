@@ -35,6 +35,7 @@ test('QR save is an SVG of the matrix and fee bins are the current snapshot', ()
   assert.match(svg, /<svg /);
   assert.equal(qrSvg({width: 1, cells: ['x']}), null);
   assert.deepEqual(feeBins({fee_histogram: [[1.5, 2], ['bad', 1], [3, Number.NaN]]}), [{feerate: '1.5', count: '2'}]);
+  assert.deepEqual(feeBins({fee_histogram: {'0': {count: '4', from_feerate: '1.5'}, total_fees: {count: 9, from_feerate: 9}, '10': {count: 2, from_feerate: 10}, skip: {count: '00', from_feerate: 1}}}), [{feerate: '1.5', count: '4'}, {feerate: '10', count: '2'}]);
 });
 
 test('a saved request time is milliseconds and is shown as its UTC date', () => {

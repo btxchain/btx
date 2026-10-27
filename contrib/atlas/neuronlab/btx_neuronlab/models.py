@@ -34,6 +34,67 @@ def file_digest(path):
     return h.hexdigest()
 
 
+def _weight_record(root, path):
+    return {'path': path.relative_to(root).as_posix(), 'bytes': path.stat().st_size, 'hash': file_digest(path)}
+
+
+def _weight_map_target(root: Path, value):
+    # Join only after rejecting absolute paths. On POSIX, root / "/abs" discards root.
+    require(type(value) is str and bool(value) and '\x00' not in value and not value.startswith(('/', '\\')),
+            'WEIGHTS', 'Weight map entry must be a relative safetensors path')
+    rel = Path(value)
+    require(not rel.is_absolute() and '..' not in rel.parts, 'WEIGHTS', 'Weight map path escapes the model directory')
+    located = root
+    for part in rel.parts:
+        require(part not in {'', '..'}, 'WEIGHTS', 'Weight map path escapes the model directory')
+        if part == '.':
+            continue
+        located = located / part
+        require(not located.is_symlink(), 'WEIGHTS', 'Weight map symlink refused')
+    require(located.is_file(), 'WEIGHTS', 'Weight map target is missing')
+    require(located.suffix == '.safetensors', 'WEIGHTS', 'Weight map target must be safetensors')
+    root_real, located_real = root.resolve(), located.resolve()
+    require(located_real.is_relative_to(root_real) and located_real != root_real,
+            'WEIGHTS', 'Weight map path escapes the model directory')
+    return located
+
+
+def _weight_index_shards(root: Path):
+    index_path = root / 'model.safetensors.index.json'
+    if not index_path.exists():
+        return None
+    index = loads(read_file(index_path, 1_048_576), signed=False, limit=1_048_576)
+    require(type(index) is dict, 'WEIGHTS', 'Weight index must be an object')
+    weight_map = index.get('weight_map')
+    require(type(weight_map) is dict and len(weight_map) > 0, 'WEIGHTS', 'Weight index requires a non-empty weight map')
+    shards, seen = [], set()
+    for value in weight_map.values():
+        target = _weight_map_target(root, value)
+        key = target.resolve().as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        shards.append(target)
+    shards.sort(key=lambda path: path.as_posix())
+    return shards
+
+
+def _load_declared_weights(model, root: Path):
+    from safetensors.torch import load_file
+    shards = _weight_index_shards(root)
+    if shards is None:
+        shards = [root / 'model.safetensors']
+    try:
+        state = {}
+        for shard in shards:
+            state.update(load_file(str(shard)))
+        model.load_state_dict(state, strict=True)
+    except LabError:
+        raise
+    except Exception as exc:
+        raise LabError('WEIGHTS', 'Weight keys do not match the model') from exc
+
+
 def execution_fingerprint(architecture):
     # Pin the reviewed numerical adapter and framework versions, not a claim of
     # bitwise equivalence across hardware or a lock of every transitive library.
@@ -59,15 +120,19 @@ def model_binding(root: Path, btx_model_id=None):
     arch = architectures[0]
     c = config.get('text_config', config)
     require(not c.get('auto_map'), 'REMOTE_CODE', 'Nested custom model code refused')
+    shards = _weight_index_shards(root)
     files = sorted(root.rglob('*'))
     require(len(files) <= 4096, 'FILES', 'Model directory entry limit exceeded')
     weights, tokenizer = [], []
+    index_path = root / 'model.safetensors.index.json'
     for f in files:
         require(not f.is_symlink(), 'SYMLINK', 'Model directory cannot contain symlinks')
         if not f.is_file(): continue
         require(f.suffix.lower() not in {'.bin', '.pt', '.pth', '.pkl', '.pickle', '.py', '.so', '.dll', '.dylib'}, 'UNSAFE_MODEL_FILE', 'Executable/pickle model payload refused')
         if f.suffix == '.safetensors':
-            weights.append({'path': f.relative_to(root).as_posix(), 'bytes': f.stat().st_size, 'hash': file_digest(f)})
+            weights.append(_weight_record(root, f))
+        elif shards is not None and f == index_path:
+            weights.append(_weight_record(root, f))
         elif f.name in {'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'vocab.json', 'merges.txt', 'tokenizer.model', 'added_tokens.json'}:
             tokenizer.append({'path': f.relative_to(root).as_posix(), 'bytes': f.stat().st_size, 'hash': file_digest(f)})
     require(weights and len(weights) <= 1024, 'WEIGHTS', 'SafeTensors weight files are required')
@@ -177,6 +242,8 @@ def load_local(root: Path, binding=None, *, device='cpu'):
         tokenizer = transformers.AutoTokenizer.from_pretrained(str(root), local_files_only=True, trust_remote_code=False)
         model = cls.from_pretrained(str(root), local_files_only=True, trust_remote_code=False,
                                     use_safetensors=True, torch_dtype=torch.float32)
+        # The index selects bytes. Reload those shards strictly so a changed map cannot admit a different key set.
+        _load_declared_weights(model, root)
     model = model.to(device).eval()
     # Science code does not train this instance. Attribution uses activation grads
     # explicitly and never accumulates parameter gradients.

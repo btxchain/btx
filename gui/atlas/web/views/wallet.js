@@ -237,7 +237,7 @@ export function walletView(app){
    button('Encrypt wallet',()=>operationDialog(app,'encryptwallet')),
    button('Change passphrase',()=>operationDialog(app,'walletpassphrasechange')),
    button('Migrate wallet',()=>operationDialog(app,'migratewallet',[wallet.value])),
-   button('Close every loaded wallet',async()=>{try{const names=await read('listwallets');const list=Array.isArray(names)?names:[];dialog('Close wallets',el('div',{class:'surface-stack'},note('Each wallet closes through its own native review.'),...list.map(name=>button(`Close ${name}`,()=>operationDialog(app,'unloadwallet',[name]))),list.length?null:note('No wallets are loaded.')));}catch(e){toast(e.message,'danger');}})
+   button('Close every loaded wallet',async()=>{try{const names=await read('listwallets');const list=Array.isArray(names)?names:[];dialog('Close wallets',el('div',{class:'surface-stack'},note('Each wallet closes through its own native review.'),...list.map(name=>button(`Close ${name}`,()=>operationDialog(app,'unloadwallet',[name],name))),list.length?null:note('No wallets are loaded.')));}catch(e){toast(e.message,'danger');}})
   )));
  }
  wallet.addEventListener('change',show);

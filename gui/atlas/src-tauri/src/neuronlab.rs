@@ -385,6 +385,8 @@ fn run_stream(
     let mut cmd = Command::new(&r.python);
     cmd.arg("-I")
         .arg("-B")
+        .arg("-X")
+        .arg("utf8")
         .arg(&r.entry)
         .arg("--store")
         .arg(&r.store)
