@@ -50,6 +50,7 @@
 #include <script/sign.h>
 #include <serialize.h>
 #include <shielded/bridge.h>
+#include <shielded/bundle.h>
 #include <streams.h>
 #include <sync.h>
 #include <txdb.h>
@@ -2703,7 +2704,7 @@ static RPCHelpMan getblockstats()
                 {RPCResult::Type::NUM, "minfeerate", /*optional=*/true, "Minimum feerate (in satoshis per virtual byte)"},
                 {RPCResult::Type::NUM, "mintxsize", /*optional=*/true, "Minimum transaction size"},
                 {RPCResult::Type::NUM, "outs", /*optional=*/true, "The number of outputs"},
-                {RPCResult::Type::NUM, "subsidy", /*optional=*/true, "The block subsidy"},
+                {RPCResult::Type::NUM, "subsidy", /*optional=*/true, "The subsidy this block may claim, after any empty-block penalty"},
                 {RPCResult::Type::NUM, "swtotal_size", /*optional=*/true, "Total size of all segwit transactions"},
                 {RPCResult::Type::NUM, "swtotal_weight", /*optional=*/true, "Total weight of all segwit transactions"},
                 {RPCResult::Type::NUM, "swtxs", /*optional=*/true, "The number of segwit transactions"},
@@ -2841,7 +2842,12 @@ static RPCHelpMan getblockstats()
                 utxo_size_inc_actual -= prevout_size;
             }
 
-            CAmount txfee = tx_total_in - tx_total_out;
+            // As in CheckTxInputs, the shielded value balance counts on the
+            // input side: value an unshield takes out of the pool is not
+            // missing input, and value a shield puts into it is not fee.
+            const CAmount shielded_value_balance{
+                tx->HasShieldedBundle() ? GetShieldedTxValueBalance(tx->GetShieldedBundle()) : CAmount{0}};
+            CAmount txfee = tx_total_in + shielded_value_balance - tx_total_out;
             CHECK_NONFATAL(MoneyRange(txfee));
             if (do_medianfee) {
                 fee_array.push_back(txfee);
@@ -2886,7 +2892,7 @@ static RPCHelpMan getblockstats()
     ret_all.pushKV("minfeerate", (minfeerate == MAX_MONEY) ? 0 : minfeerate);
     ret_all.pushKV("mintxsize", mintxsize == MAX_BLOCK_SERIALIZED_SIZE ? 0 : mintxsize);
     ret_all.pushKV("outs", outputs);
-    ret_all.pushKV("subsidy", GetBlockSubsidy(pindex.nHeight, chainman.GetParams().GetConsensus()));
+    ret_all.pushKV("subsidy", GetBlockSubsidyForBlock(pindex.nHeight, block, pindex.pprev, chainman.GetParams().GetConsensus()));
     ret_all.pushKV("swtotal_size", swtotal_size);
     ret_all.pushKV("swtotal_weight", swtotal_weight);
     ret_all.pushKV("swtxs", swtxs);
