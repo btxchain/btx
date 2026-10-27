@@ -37,6 +37,7 @@ struct HelperLaunchConfig {
     std::string seed{"auto"};
     bool preserve_rare{false};
     bool follow_peers{true};
+    bool lan_discovery{true};
     uint64_t auto_cap_bytes{0};
     uint64_t reserve_bytes{0};
     uint64_t upload_bps{0};
@@ -48,6 +49,8 @@ struct HelperLaunchConfig {
     HostMode host_mode{HostMode::OFF};
     /** PQ1 listen host:port. Empty = unix RPC only. Packaged btxd default is 0.0.0.0:29447. */
     std::string bind;
+    /** btxd -natpmp. When false the helper does not map the PQ1 port. */
+    bool natpmp{true};
     std::vector<std::string> peers;
     std::string watch_dir;
     std::string pwc_chain{"regtest"};

@@ -59,8 +59,8 @@ bool LabCallLoopback(const std::string& host, uint16_t port, const std::string& 
                      const std::string& params_json, std::string& result_json, std::string& err);
 
 /**
- * POST `body_json` to `http://127.0.0.1:port/btx-model/3/` + `route`.
- * A non-200 body that is a BTX035_* code is returned in `err`.
+ * POST `body_json` to `http://127.0.0.1:port/btx-model/3/` + `route` with the peer's RPC credential,
+ * which the route requires. A non-200 body that is a BTX035_* code is returned in `err`.
  */
 bool PeerRouteLoopback(const std::string& host, uint16_t port, const std::string& rpc_user,
                        const std::string& rpc_password, const std::string& route,

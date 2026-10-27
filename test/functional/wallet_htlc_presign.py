@@ -27,15 +27,19 @@ Negative controls:
   - a presigned PSBT does not finalize without the preimage;
   - a wrong preimage is still rejected when the PSBT is read (BIP174);
   - the presignature commits to the transaction: a changed output does not
-    finalize even with the real preimage.
+    finalize even with the real preimage;
+  - as with buildhtlcclaim, no presign against a funding output that is
+    unconfirmed, unknown or below min_confirmations, and none once the refund
+    path is final, unless allow_unconfirmed_funding / allow_late_claim is set;
+  - the refund leaf of a funding that is not broadcast yet can still be signed.
 """
 
 import hashlib
 from decimal import Decimal
 
 from test_framework.key import TaggedHash
-from test_framework.messages import ser_string, tx_from_hex
-from test_framework.psbt import PSBT, PSBT_IN_SHA256
+from test_framework.messages import CTxOut, ser_string, tx_from_hex
+from test_framework.psbt import PSBT, PSBT_IN_SHA256, PSBT_IN_WITNESS_UTXO
 from test_framework.segwit_addr import encode_segwit_address
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
@@ -198,6 +202,63 @@ class WalletHtlcPresignTest(BitcoinTestFramework):
         assert_raises_rpc_error(None, "htlc_presign signs only the htlc_sha256 claim leaf, not htlc_sha256_legacy",
                                 claimer.walletprocesspsbt, l_psbt,
                                 {"htlc_presign": True, "p2mr_leaf": {f"{l_txid}:{l_vout}": legacy_leaf.hex()}})
+
+        self.log.info("The funding and refund options apply only with htlc_presign")
+        assert_raises_rpc_error(-8, "apply only with htlc_presign",
+                                claimer.walletprocesspsbt, psbt, {"p2mr_leaf": claim_leaf, "allow_late_claim": True})
+        assert_raises_rpc_error(-8, "min_confirmations must be at least 1",
+                                claimer.walletprocesspsbt, psbt, {"htlc_presign": True, "p2mr_leaf": claim_leaf, "min_confirmations": 0})
+        assert_raises_rpc_error(-8, "allow_unconfirmed_funding cannot be combined with min_confirmations",
+                                claimer.walletprocesspsbt, psbt,
+                                {"htlc_presign": True, "p2mr_leaf": claim_leaf, "allow_unconfirmed_funding": True, "min_confirmations": 2})
+
+        self.log.info("No presign against funding that is unconfirmed or not known, unless allow_unconfirmed_funding is set")
+        u_txid = maker.sendtoaddress(htlc_addr, Decimal("1"))
+        u_vout, u_value = find_output(node, u_txid, htlc_addr, maker)
+        u_psbt, _ = self.claim_psbt(u_txid, u_vout, u_value, dest)
+        u_leaf = {f"{u_txid}:{u_vout}": 0}
+        assert_raises_rpc_error(None, "is unconfirmed: the funder can still replace it",
+                                claimer.walletprocesspsbt, u_psbt, {"htlc_presign": True, "p2mr_leaf": u_leaf})
+        unconfirmed = claimer.walletprocesspsbt(u_psbt, {"htlc_presign": True, "p2mr_leaf": u_leaf, "allow_unconfirmed_funding": True})
+        assert_equal(unconfirmed["complete"], False)
+        assert_equal(len(node.decodepsbt(unconfirmed["psbt"])["inputs"][0].get("p2mr_partial_signatures", [])), 1)
+        unknown = PSBT.from_base64(node.createpsbt([{"txid": "11" * 32, "vout": 0}], [{dest: Decimal("0.5")}], 0, True))
+        unknown.i[0].map[bytes([PSBT_IN_WITNESS_UTXO])] = CTxOut(50_100_000, bytes.fromhex(node.validateaddress(htlc_addr)["scriptPubKey"])).serialize()
+        assert_raises_rpc_error(None, "is not in the UTXO set",
+                                claimer.walletprocesspsbt, unknown.to_base64(), {"htlc_presign": True, "p2mr_leaf": {f"{'11' * 32}:0": 0}})
+
+        self.log.info("min_confirmations is checked against the funding depth")
+        mine_block(self, node, self.mine_addr)
+        assert_raises_rpc_error(None, "has 1 confirmations but min_confirmations is 2",
+                                claimer.walletprocesspsbt, u_psbt, {"htlc_presign": True, "p2mr_leaf": u_leaf, "min_confirmations": 2})
+        mine_block(self, node, self.mine_addr)
+        deep = claimer.walletprocesspsbt(u_psbt, {"htlc_presign": True, "p2mr_leaf": u_leaf, "min_confirmations": 2})
+        assert_equal(deep["complete"], False)
+
+        self.log.info("No presign once the refund path is final, unless allow_late_claim is set")
+        late_lock = node.getblockcount() + 2
+        late_pub = self.checksummed(f"mr(htlc_sha256({hashlock},{claimer_pk}),refund({late_lock},{refund_pk}))")
+        self.import_lock(claimer, self.checksummed(f"mr(htlc_sha256({hashlock},{claimer_key}),refund({late_lock},{refund_pk}))"))
+        late_addr = node.deriveaddresses(late_pub)[0]
+        lt_txid, lt_vout, lt_value = self.fund(late_addr)
+        lt_psbt, _ = self.claim_psbt(lt_txid, lt_vout, lt_value, dest)
+        lt_leaf = {f"{lt_txid}:{lt_vout}": 0}
+        assert_equal(node.getblockcount(), late_lock - 1)
+        assert_equal(claimer.walletprocesspsbt(lt_psbt, {"htlc_presign": True, "p2mr_leaf": lt_leaf})["complete"], False)
+        mine_block(self, node, self.mine_addr)
+        assert_raises_rpc_error(None, f"the refund path of {lt_txid}:{lt_vout} is already final (refund locktime {late_lock}, tip height {late_lock})",
+                                claimer.walletprocesspsbt, lt_psbt, {"htlc_presign": True, "p2mr_leaf": lt_leaf})
+        late = claimer.walletprocesspsbt(lt_psbt, {"htlc_presign": True, "p2mr_leaf": lt_leaf, "allow_late_claim": True})
+        assert_equal(late["complete"], False)
+
+        self.log.info("The refund leaf of a funding that is not broadcast yet can still be signed")
+        # The sender signs its refund before it sends the funding. That signing has no
+        # htlc_presign, so none of the checks above apply. nokey holds the refund key of nk_addr.
+        r_psbt = PSBT.from_base64(node.createpsbt([{"txid": "22" * 32, "vout": 0}], [{dest: Decimal("0.5")}], lock, True))
+        r_psbt.i[0].map[bytes([PSBT_IN_WITNESS_UTXO])] = CTxOut(50_100_000, bytes.fromhex(node.validateaddress(nk_addr)["scriptPubKey"])).serialize()
+        refund = nokey.walletprocesspsbt(r_psbt.to_base64(), {"p2mr_leaf": {f"{'22' * 32}:0": 1}, "finalize": False})
+        r_sigs = node.decodepsbt(refund["psbt"])["inputs"][0].get("p2mr_partial_signatures", [])
+        assert_equal([s["pubkey"] for s in r_sigs], [nokey_pk])
 
         self.log.info("Watchtower: add the real preimage, finalize without the wallet, broadcast")
         final = node.finalizepsbt(with_preimage(presigned["psbt"], secret))

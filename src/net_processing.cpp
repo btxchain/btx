@@ -332,6 +332,9 @@ static constexpr unsigned int CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER = 1;
  *  it (assumeutxo-189307 + 517 headers, IBD already latched false on chainwork
  *  + tip age) the IBD window is required; 1-slot/15s is a near-tip policy. */
 static constexpr int CATCHUP_NARROW_MAX_AHEAD = 32;
+/** In a wide catch-up window, blocks this close to the tip may get extra
+ *  owners before their request is stale (see node::EarlyParallelBlockOwners). */
+static constexpr int CATCHUP_EARLY_OWNERS_AHEAD = 32;
 /** Catch-up / IBD getdata failover. Used as a *duplicate-owner* clamp only:
  *  a hash that already has a fresh copy in flight elsewhere may be failed
  *  over at 15s. The unique-owner deadline is the spacing formula
@@ -7550,6 +7553,7 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
     int nMaxHeight = std::min<int>(state->pindexBestKnownBlock->nHeight, window_end_plus_one);
     bool is_limited_peer = IsLimitedPeer(peer);
     NodeId waitingfor = -1;
+    bool hole_pending{true};
     while (pindexWalk->nHeight < nMaxHeight) {
         // Read up to 128 (or more, if more blocks than that are needed) successors of pindexWalk (towards
         // pindexBestKnownBlock) into vToFetch. We fetch 128, because CBlockIndex::GetAncestor may be as expensive
@@ -7718,10 +7722,19 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 // outstanding request for this block is stale, let another peer
                 // fetch it in parallel (bounded by MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK).
                 // The redundant copy is discarded cheaply if both arrive.
+                // Early extra owners only for the hole: deeper in a wide
+                // window, only once the request is stale.
+                const size_t parallel_owners{node::EarlyParallelBlockOwners(
+                    min_parallel_owners,
+                    /*hole=*/hole_pending || count <= CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER,
+                    pindex->nHeight,
+                    tip != nullptr ? tip->nHeight : -1,
+                    CATCHUP_EARLY_OWNERS_AHEAD)};
+                hole_pending = false;
                 if (!MayDuplicateStaleBlockRequest(pindex->GetBlockHash(),
                                                    GetTime<std::chrono::microseconds>(),
                                                    rerequest_stale_after,
-                                                   min_parallel_owners)) {
+                                                   parallel_owners)) {
                     if (waitingfor == -1) {
                         // This is the first already-in-flight block.
                         waitingfor = mapBlocksInFlight.lower_bound(pindex->GetBlockHash())->second.first;
@@ -9575,6 +9588,16 @@ void PeerManagerImpl::StartScheduledTasks(CScheduler& scheduler)
             // Skip if already in mempool (e.g., added via regular TX path
             // while the embargo was still active).
             if (m_mempool.exists(GenTxid::Txid(txid))) {
+                // Only a local stem transaction is in both the stempool and
+                // the mempool. BroadcastTransaction marked it unbroadcast so
+                // that a restart during the embargo still announces it. This
+                // fluff is its initial broadcast, so drop the mark now.
+                // Otherwise it stays until a peer requests the transaction
+                // from this node, which never happens once the network has it
+                // from the stem's fluff, and the post-VERACK queue keeps
+                // announcing it to every new peer until it is mined: only the
+                // originator does that.
+                m_mempool.RemoveUnbroadcastTx(txid);
                 to_relay.emplace_back(txid, tx->GetWitnessHash());
                 continue;
             }
@@ -9607,7 +9630,11 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     // the scheduler drains — including across the RC activation boundary.
     SetBestBlock(new_tip.nHeight, std::chrono::seconds{new_tip.GetBlockTime()});
     m_matmul_block_lifecycle.NoteActiveTipProgress();
-    AssertLockHeld(::cs_main);
+    // ActivateBestChain delivers this while holding cs_main, but
+    // InvalidateBlock deliberately releases it before notifying listeners.
+    // Both paths update the same chain-dependent caches below. Take the
+    // recursive lock here instead of requiring an undocumented caller lock.
+    LOCK(::cs_main);
     m_header_only_competing.clear();
     m_header_only_followed_skip.clear();
     g_configured_claimed_tip_child.SetNull();
@@ -9671,9 +9698,10 @@ void PeerManagerImpl::TransactionAddedToMempool(const NewMempoolTransactionInfo&
 {
     // Reorg-resurrected transactions arrive here without passing through the
     // normal peer/RPC accept path, so they still need an inventory announcement.
-    // A local transaction is placed in the stempool before this callback is
-    // queued. Announcing it here would tell every peer the originator during
-    // the embargo. BroadcastTransaction records the tx in the persisted
+    // A local transaction enters the stempool before BroadcastTransaction
+    // releases cs_main. Announcing it here would tell every peer the originator
+    // during the embargo; if this runs first and queues an inv anyway,
+    // SendMessages drops it. BroadcastTransaction records the tx in the persisted
     // unbroadcast set so a restart, which drops the in-memory embargo, can
     // announce it later.
     const uint256& txid = tx.info.m_tx->GetHash();
@@ -9886,11 +9914,7 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
                 PushMessage(*pnode, ser_cmpctblock.Copy());
             }
             state.pindexBestHeaderSent = pindex;
-        } else if (!PeerHasHeader(&state, pindex) &&
-                   state.pindexBestKnownBlock != nullptr &&
-                   pindex->GetAncestor(state.pindexBestKnownBlock->nHeight) ==
-                       state.pindexBestKnownBlock &&
-                   state.pindexBestKnownBlock->nHeight < pindex->nHeight) {
+        } else if (!PeerHasHeader(&state, pindex)) {
             // No-inbound miners: high-bandwidth compact relay only fires when
             // the peer already has pprev. A public node that is N blocks
             // behind never sees those bodies unless it GETDATAs. Push the
@@ -9899,21 +9923,32 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
             // Walk from the last header we already offered on this chain.
             // pindexBestKnownBlock stays put until the peer proves it, so a
             // burst otherwise resends the same height on every new block.
-            const CBlockIndex* cursor{state.pindexBestKnownBlock};
-            if (state.pindexBestHeaderSent != nullptr &&
-                state.pindexBestHeaderSent->nHeight > cursor->nHeight &&
-                pindex->GetAncestor(state.pindexBestHeaderSent->nHeight) ==
-                    state.pindexBestHeaderSent &&
-                state.pindexBestHeaderSent->GetAncestor(cursor->nHeight) ==
-                    cursor) {
-                cursor = state.pindexBestHeaderSent;
+            // A completed GETHEADERS response also establishes an offered
+            // parent, including an empty response at genesis. The peer's
+            // separate genesis INV can still be queued at that moment, so
+            // requiring BestKnown here loses the first body to a handshake
+            // race. Use the same known-or-sent ancestry as PeerHasHeader and
+            // never push from a null or competing-chain cursor.
+            const CBlockIndex* cursor{nullptr};
+            for (const CBlockIndex* candidate :
+                 {state.pindexBestKnownBlock, state.pindexBestHeaderSent}) {
+                if (candidate != nullptr && candidate->nHeight < pindex->nHeight &&
+                    pindex->GetAncestor(candidate->nHeight) == candidate &&
+                    (cursor == nullptr || candidate->nHeight > cursor->nHeight)) {
+                    cursor = candidate;
+                }
             }
-            if (cursor->nHeight >= pindex->nHeight) {
-                return;
-            }
+            if (cursor == nullptr) return;
             const CBlockIndex* const next{
                 pindex->GetAncestor(cursor->nHeight + 1)};
-            if (next != nullptr && (next->nStatus & BLOCK_HAVE_DATA) != 0) {
+            // AcceptBlock emits NewPoWValidBlock before persisting the new
+            // body and setting BLOCK_HAVE_DATA. The supplied pblock is
+            // already validated for fast relay; requiring the disk flag for
+            // that same block strands a just-connected peer at genesis until
+            // its next getheaders window. Older catch-up bodies still need
+            // their disk availability flag before ReadBlock.
+            if (next != nullptr &&
+                (next == pindex || (next->nStatus & BLOCK_HAVE_DATA) != 0)) {
                 CBlock next_block;
                 const CBlock* send{nullptr};
                 if (next == pindex) {
@@ -9935,7 +9970,8 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
                             "PeerManager::NewPoWValidBlock",
                             next->GetBlockHash().ToString(), next->nHeight,
                             pnode->GetId(),
-                            state.pindexBestKnownBlock->nHeight);
+                            state.pindexBestKnownBlock != nullptr
+                                ? state.pindexBestKnownBlock->nHeight : -1);
                     MakeAndPushMessage(*pnode, NetMsgType::BLOCK,
                                        TX_WITH_WITNESS(*send));
                     state.pindexBestHeaderSent = next;
@@ -10630,8 +10666,11 @@ PeerManagerImpl::GetBlockDataOutcome PeerManagerImpl::ProcessGetBlockData(
 CTransactionRef PeerManagerImpl::FindTxForGetData(const Peer::TxRelay& tx_relay, const GenTxid& gtxid)
 {
     // If a tx was in the mempool prior to the last INV for this peer, permit the request.
+    // Never serve one that is still in our Dandelion++ stempool: it has not
+    // been announced, and only its originator holds it in the mempool during
+    // the stem phase.
     auto txinfo = m_mempool.info_for_relay(gtxid, tx_relay.m_last_inv_sequence);
-    if (txinfo.tx) {
+    if (txinfo.tx && !(m_dandelion && m_dandelion->IsInStemPool(txinfo.tx->GetHash()))) {
         return std::move(txinfo.tx);
     }
 
@@ -12937,7 +12976,8 @@ void PeerManagerImpl::MaybeLogAttestationServe(const char* reason,
                                                int32_t height,
                                                NodeId peer)
 {
-    AssertLockNotHeld(cs_main);
+    // Takes no lock. The GETMMATTEST handler calls this inside LOCK(cs_main)
+    // for "no_such_block", so do not assert cs_main is free.
     LogDebug(BCLog::NET,
              "getmmattest peer=%d block=%s height=%d reason=%s\n",
              peer, hash.ToString(), height, reason);
@@ -16062,6 +16102,10 @@ bool PeerManagerImpl::HoldRCJobForLowerAncestor(
         if (cand == nullptr) continue;
         if ((cand->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
         if (index->GetAncestor(cand->nHeight) != cand) continue;
+        // A pending CPU confirmation has already yielded its GPU slot.
+        // It cannot use another GPU replay, so do not hold otherwise
+        // admissible descendants behind its stale capacity-deferred entry.
+        if (matmul::v4::rc::GetRCCpuConfirmationQueue().Pending(deferred.first)) continue;
         if (CanStartMatMulRCVerification(
                 m_matmul_rc_pending_verifications.load(
                     std::memory_order_relaxed),
@@ -24257,6 +24301,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         if (txinfo.tx->HasShieldedBundle() && !PeerSupportsShieldedRelay(*peer, *pto)) {
                             continue;
                         }
+                        // Still in our Dandelion++ stempool: not announced yet.
+                        if (m_dandelion && m_dandelion->IsInStemPool(txinfo.tx->GetHash())) {
+                            continue;
+                        }
                         CInv inv{
                             peer->m_wtxid_relay ? MSG_WTX : MSG_TX,
                             peer->m_wtxid_relay ?
@@ -24316,6 +24364,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         // Not in the mempool anymore? don't bother sending it.
                         auto txinfo = m_mempool.info(ToGenTxid(inv));
                         if (!txinfo.tx) {
+                            continue;
+                        }
+                        // Still in our Dandelion++ stempool (stem phase)? Don't
+                        // announce it. The embargo monitor queues it again
+                        // when the transaction is fluffed.
+                        if (m_dandelion && m_dandelion->IsInStemPool(txinfo.tx->GetHash())) {
                             continue;
                         }
                         if (txinfo.tx->HasShieldedBundle() && !PeerSupportsShieldedRelay(*peer, *pto)) {

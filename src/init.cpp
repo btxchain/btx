@@ -127,6 +127,7 @@
 #include <modelnet/policy.h>
 #include <modelnet/profile.h>
 #include <modelnet/supervisor.h>
+#include <modelnet/swarm_observer.h>
 #endif
 
 #include <algorithm>
@@ -426,6 +427,10 @@ void Shutdown(NodeContext& node)
         }
     };
     flush_chainstate_for_shutdown("before HTTP worker join");
+#ifdef ENABLE_MODELNET
+    // The observer can block in a pass. Seal chainstate before joining it.
+    modelnet::StopSwarmObserver();
+#endif
 
     StopHTTPRPC();
     StopREST();
@@ -646,13 +651,14 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-modeld=<path>", "Path to packaged btx-modeld. Alias of -modelhelper. Default: next to the running btxd / libexec/btx-modeld. A missing explicit path does not spawn a substitute.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelhelper=<path>", "Path to packaged btx-modeld. Default: next to the running btxd / libexec/btx-modeld.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modeldir=<dir>", "Isolated model store (default: <datadir>/modelnet). Never wallet/chainstate.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-modelbind=<ip:port>", "PQ1 listen address passed to the owned helper (default: 0.0.0.0:29447). Empty/0/off = unix RPC only. Does not advertise NODE_MODEL_HOST.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modelbind=<ip:port>", "PQ1 listen address passed to the owned helper (default: 0.0.0.0:29447, or off with -listen=0). Empty/0/off = unix RPC only. The helper maps it with PCP/NAT-PMP only when -natpmp is on. Does not advertise NODE_MODEL_HOST.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelstorage=<size>", "Model payload budget: auto (packaged default), 0, or 80GiB. AUTO sizes against the model-store filesystem.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelstorageautocap=<size>", "AUTO hard cap (default: 512GiB).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelfreespacereserve=<size>", "AUTO free-space reserve override (default: about 10% of filesystem capacity; not raised to 32GiB).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelseed=auto|manual|off", "Demand-seed after intentional import/getmodel (default: auto).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelpreserverare", "Fetch qualified under-replicated public models into spare quota (default: 0).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelfollowpeers", "Follow FREE models announced by -modelpeer / addmodelnode / TTL'd PEX into spare quota (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-modellandiscovery", "Discover model transport peers on private LAN interfaces using bounded multicast hints (default: 1 when the model helper listens). Every peer still requires strict PQ1. Never modifies monetary AddrMan.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelpeer=<host:port>", "Model-plane bootstrap contact passed to the owned helper (repeatable). When unset, resolve chainparams ModelDNSSeeds() (empty until a crawl publishes DNS names; no compiled-in host or address). Alias: -modelseednode. Monetary DNS seeds and MDPEERS hints are not dialed.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modelseednode=<host:port>", "Alias of -modelpeer.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-modeluploadlimit=<bps>", "Aggregate model upload cap. auto = governor ceiling. 0 = connection ceilings only.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -775,7 +781,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-reindex-chainstate", "If enabled, wipe chain state, and rebuild it from blk*.dat files on disk. If an assumeutxo snapshot was loaded, its chainstate will be wiped as well. The snapshot can then be reloaded via RPC. Note: this does not rerun all contextual block checks; use -reindex for full historical re-validation after changing MatMul validation mode.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-settings=<file>", strprintf("Specify path to dynamic settings data file. Can be disabled with -nosettings. File is written at runtime and not meant to be edited by users (use %s instead for custom settings). Relative paths will be prefixed by datadir location. (default: %s)", BITCOIN_CONF_FILENAME, BITCOIN_SETTINGS_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-softwareexpiry", strprintf("Stop working after this POSIX timestamp (default: %s)", DEFAULT_SOFTWARE_EXPIRY), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-autoupdate", "Enable signed source auto-update polling (default: 1 on mainnet, 0 on test chains). The updater silently no-ops unless the manifest signature and installer script hash verify.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdate", "Enable signed source auto-update polling (default: 1 on mainnet, 0 on test chains, and 0 when -proxy is set or -onlynet excludes ipv4 and ipv6). Checks are direct HTTPS connections from this host and do not use -proxy, -onion or -onlynet. The updater silently no-ops unless the manifest signature and installer script hash verify.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatemanifesturl=<url>", strprintf("Signed auto-update manifest URL (default: %s)", node::DEFAULT_AUTOUPDATE_MANIFEST_URL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatetrustedorigin=<origin>", strprintf("Trusted auto-update origin. Manifest, signature, and installer URLs must all stay on this origin (default: %s)", node::DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatepubkey=<hex>", "Release public key (hex) for version.txt signatures, in the scheme set by -autoupdatepubkeyalgo. Set to 0 to make auto-update inert.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -789,7 +795,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-autoupdaterequirescripthash", "Require the signed manifest to include script_sha256/install_sha256 matching the downloaded installer before execution (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatetelemetry", "Attach privacy-minimized auto-update request metrics query parameters: update-flow marker, client version, platform, architecture, and rollout cohort. No wallet data, addresses, peer IPs, txids, or persistent client ID are sent by default (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatetelemetryclientid", "Also attach a persistent random auto-update client UUID stored under the datadir. This is useful for controlled release cohorts but is off by default for privacy/GDPR minimization.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-autoupdatepython=<path>", "Python interpreter used only for HTTPS manifest/signature/script fetching (default: python3).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatepython=<path>", "Python interpreter used only for HTTPS manifest/signature/script fetching. It is started with -I (isolated mode) (default: python3).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatedevorigin", "Allow non-HTTPS auto-update origins for local testing only.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
 #if HAVE_SYSTEM
     argsman.AddArg("-startupnotify=<cmd>", "Execute command on startup.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1224,6 +1230,13 @@ void InitParameterInteraction(ArgsManager& args)
         if (args.SoftSetBoolArg("-i2pacceptincoming", false)) {
             LogInfo("parameter interaction: -listen=0 -> setting -i2pacceptincoming=0\n");
         }
+#ifdef ENABLE_MODELNET
+        // The model helper's PQ1 port accepts connections from outside too.
+        // Keep it closed unless the operator sets -modelbind.
+        if (args.SoftSetArg("-modelbind", "off")) {
+            LogInfo("parameter interaction: -listen=0 -> setting -modelbind=off\n");
+        }
+#endif
     }
 
     if (!args.GetArgs("-externalip").empty()) {
@@ -1464,7 +1477,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         InitWarning(warnings);
     }
 
-    const bool auto_update_enabled = args.IsArgSet("-autoupdate") ? args.GetBoolArg("-autoupdate", true) : chain == ChainType::MAIN;
+    const bool auto_update_enabled = node::AutoUpdateEnabled(args, chain);
     if (auto_update_enabled) {
         const int64_t interval = args.GetIntArg("-autoupdateinterval", node::DEFAULT_AUTOUPDATE_INTERVAL_SECONDS);
         if (interval < 1 || interval > 24 * 60 * 60) {
@@ -4316,6 +4329,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         hcfg.seed = args.GetArg("-modelseed", "auto");
         hcfg.preserve_rare = args.GetBoolArg("-modelpreserverare", false);
         hcfg.follow_peers = args.GetBoolArg("-modelfollowpeers", true);
+        // Respect node-wide proxy/private-network posture; an explicit choice can enable LAN discovery.
+        hcfg.lan_discovery = args.GetBoolArg("-modellandiscovery", !args.IsArgSet("-proxy") && !args.IsArgSet("-connect"));
         hcfg.peers = args.GetArgs("-modelpeer");
         {
             const auto aliases = args.GetArgs("-modelseednode");
@@ -4405,18 +4420,17 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             if (apply_profile) {
                 modelnet::ApplyProfileToLaunchConfig(policy, hcfg);
             }
-            // The default budget is "auto" (up to 512 GiB). Hold it at 0 until
-            // the operator has consented the way the GUI and btx-open ask:
-            // an explicit -modelstorage/-modelprofile, a saved profile, the
-            // first-run consent file, or BTX_MODEL_STORAGE.
+            // A fresh headless node has a bounded 1 GiB free-model cache.
+            // Explicit settings, saved disable choices and exact consent or
+            // environment limits take precedence over that starter budget.
             const std::string requested_storage = hcfg.storage_arg;
             hcfg.storage_arg = modelnet::ResolveHeadlessStorageArg(
                 requested_storage,
                 args.IsArgSet("-modelstorage") || args.IsArgSet("-modelprofile") || apply_profile,
                 modelnet::FirstRunConsentPath(args.GetDataDirNet()));
             if (hcfg.storage_arg != requested_storage) {
-                LogPrintf("model storage: no first-run consent for a payload budget (%s); keeping 0. "
-                          "Set -modelstorage=<size|auto> or record consent to enable it.\n", requested_storage);
+                LogPrintf("model storage: resolved requested budget %s to %s using saved policy or the bounded starter default.\n",
+                          requested_storage, hcfg.storage_arg);
             }
         }
         const std::string modeld_arg = args.IsArgSet("-modelhelper") ? args.GetArg("-modelhelper", "") :
@@ -4437,6 +4451,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         } else {
             hcfg.bind = "0.0.0.0:29447";
         }
+        if (hcfg.bind.empty() && hcfg.host_mode != modelnet::HostMode::OFF) {
+            LogPrintf("model helper: -modelhost is on but -modelbind is off, so the helper listens on loopback only; set -modelbind=<ip:port> to serve peers (-listen=0 turns the default off)\n");
+        }
+        hcfg.natpmp = args.GetBoolArg("-natpmp", DEFAULT_NATPMP);
         LogPrintf("model helper exe=%s socket=%s storage=%s bind=%s host=%s relay=%d missing=%d\n",
                   fs::PathToString(hcfg.helper_exe),
                   fs::PathToString(hcfg.rpc_socket),
@@ -4472,6 +4490,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (!helper_err.empty()) {
             LogPrintf("model helper: %s (monetary node continues)\n", helper_err);
         }
+        // Observer subscriptions and the mesh refresh live in this process.
+        // A missing catalog does nothing. The Python sidecar is not started.
+        modelnet::StartSwarmObserver(hcfg.modeldir);
     } else {
         LogPrintf("model network disabled (-modelnet=0); monetary node continues\n");
     }

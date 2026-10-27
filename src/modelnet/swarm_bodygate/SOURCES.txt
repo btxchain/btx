@@ -1,0 +1,7 @@
+swarm_bodygate/piece.cpp
+swarm_bodygate/ledger.cpp
+swarm_bodygate/span.cpp
+swarm_bodygate/lastmark.cpp
+swarm_bodygate/join.cpp
+swarm_bodygate/manifest.cpp
+swarm_bodygate/swarm_bodygate.cpp

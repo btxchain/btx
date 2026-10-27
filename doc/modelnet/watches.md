@@ -1,13 +1,15 @@
 # Watches (0.34.8 surface)
 
-**Status:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`). Publisher / collection / query /
+**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+
+**Status:** this tree is **0.35.0rc1**. The last shipping tag remains
+**v0.34.15**. Publisher / collection / query /
 model watch RPCs exist in this helper (unit-tested). The CLI wrapper **fails
 closed** if an older helper lacks the method. GUI watches are 0.34.8-dev
 **source** (`BUILD_GUI=OFF`; do not claim `bitcoin-qt` was built). This page
 is not a PASS. Live HTTPS/R2 WAN is **NOT_RUN**.
 
-CLI: `contrib/modelnet/btx-model follow publisher|collection --action … --json`.
+CLI: `contrib/modelnet/btx-model --json follow publisher|collection ID --action …`.
 Recipe: [../../contrib/modelnet/recipes/follow-publisher.json](../../contrib/modelnet/recipes/follow-publisher.json).
 Events: [events.md](events.md). Filesystem first-run: [first-run.md](first-run.md)
 §5.
@@ -51,7 +53,7 @@ helper lacks method)`. `DispatchHelperRpc` of an unknown method is
 `METHOD_NOT_FOUND` immediately; `automatic_spend_atoms` is not required on
 that error.
 
-## RPC names (this helper; `CLIENT_VERSION_IS_RELEASE=false`)
+## RPC names (this 0.35.0rc1 helper; build flag `CLIENT_VERSION_IS_RELEASE=true`, native qualification separate)
 
 Do not confuse with the **implemented** folder pair
 `scanmodelwatch` / `getmodelwatchstatus`.
@@ -65,6 +67,14 @@ Do not confuse with the **implemented** folder pair
 | `listmodelwatches` / `getmodelwatch` / `unwatchmodel` | List / inspect / drop |
 
 Default action is NOTIFY. Query watches use ordinary search/feed sync.
+
+`getmodelwatchactions` exposes queued actions. Its default `drain:true`
+drains the queue and the helper executes eligible `FREE_DOWNLOAD` actions
+through its existing free retrieval path; `drain:false` inspects the queue.
+Creating a watch is therefore not evidence that a download completed.
+Confirm the actual `getmodeljob`/catalog outcome and the verified bytes.
+The `follow` CLI supports publisher and collection selectors; query/model
+selectors use the corresponding RPCs in the table.
 
 ## Dual door
 

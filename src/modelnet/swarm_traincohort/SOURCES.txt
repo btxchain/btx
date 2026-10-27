@@ -1,0 +1,6 @@
+swarm_traincohort/average.cpp
+swarm_traincohort/cohort.cpp
+swarm_traincohort/grant.cpp
+swarm_traincohort/member.cpp
+swarm_traincohort/remote.cpp
+swarm_traincohort/step.cpp

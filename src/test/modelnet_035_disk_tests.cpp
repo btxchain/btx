@@ -176,7 +176,7 @@ BOOST_AUTO_TEST_CASE(guard_line_is_one_use_and_refuses_spend)
     const std::string executed = GuardHandleLine(table, "EXECUTE " + secret, 1000);
     BOOST_CHECK(executed.rfind("RECEIPT ", 0) == 0);
     BOOST_CHECK(executed.size() > std::string("RECEIPT ").size());
-    BOOST_CHECK_EQUAL(executed.substr(executed.size() - std::string(" EXECUTED STOPPED_QUIESCENT").size()), " EXECUTED STOPPED_QUIESCENT");
+    BOOST_CHECK_EQUAL(executed.substr(executed.size() - std::string(" PERMIT_CONSUMED NOT_DISPATCHED").size()), " PERMIT_CONSUMED NOT_DISPATCHED");
 
     BOOST_CHECK_EQUAL(GuardHandleLine(table, "EXECUTE " + secret, 1000), "ERR BTX035_REPLAY");
     BOOST_CHECK_EQUAL(GuardHandleLine(table, "PREPARE spend " + std::string(96, 'b') + " 1", 1000), "ERR BTX035_SCOPE_DENIED");
@@ -1408,6 +1408,29 @@ BOOST_AUTO_TEST_CASE(piece_index_past_the_cap_or_after_a_gap_is_refused)
     BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_c, cap), "BTX035_NOT_FOUND");
     BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_d, "0"), "OK");
     BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_d, "2"), "BTX035_NOT_FOUND");
+
+    modelnet::ResetLabApi();
+}
+
+BOOST_AUTO_TEST_CASE(manifest_pieces_out_of_index_order_are_a_gap)
+{
+    BOOST_REQUIRE(!m_path_root.empty());
+    ::unsetenv("BTX035_LAB_DIR");
+    ::unsetenv("BTX_GUARD_PORT");
+    modelnet::ResetLabApi();
+
+    const std::string model_e(96, '5');
+    const std::string model_f(96, '6');
+    std::string err;
+
+    // An export lists a model's pieces in index order from 0. A complete set in another order is refused
+    // at the first piece past the next index.
+    BOOST_CHECK(!ImportObjects({PieceObject(model_e, "1", "bb"), PieceObject(model_e, "0", "aa")}, "idempotency-piece-order-reversed", err));
+    BOOST_CHECK_EQUAL(err, "BTX035_GAP");
+
+    // The same pieces in index order import.
+    BOOST_CHECK(ImportObjects({PieceObject(model_f, "0", "aa"), PieceObject(model_f, "1", "bb")}, "idempotency-piece-order-ok", err));
+    BOOST_CHECK(err.empty());
 
     modelnet::ResetLabApi();
 }

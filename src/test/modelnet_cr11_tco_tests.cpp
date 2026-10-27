@@ -110,4 +110,19 @@ BOOST_AUTO_TEST_CASE(cr11_tco_10_external_route_stays_planning)
     BOOST_CHECK_EQUAL(cr11_test::Json(r)["body"]["route"].get_str(), "EXTERNAL_SERVICE");
 }
 
+BOOST_AUTO_TEST_CASE(cr11_tco_11_break_even_is_exact)
+{
+    // local / (unit * years) at 1e18 used to form a 1e36-scaled product that
+    // overflows __int128 already for the worked case.
+    UniValue out;
+    std::string err;
+    BOOST_REQUIRE(modelnet::Cr11Tco("20000000", "0.01", 3, "50000", "65000", true, true, out, err));
+    BOOST_CHECK_EQUAL(out["break_even_annual_tasks"].get_str(), "8166666.666666666666666666");
+    // A remainder above max/1e18 keeps its fractional digits.
+    BOOST_REQUIRE(modelnet::Cr11Tco("1", "100", 3, "50000", "65000", true, true, out, err));
+    BOOST_CHECK_EQUAL(out["break_even_annual_tasks"].get_str(), "816.666666666666666666");
+    BOOST_REQUIRE(modelnet::Cr11Tco("1", "0.03", 1, "3", "0", true, true, out, err));
+    BOOST_CHECK_EQUAL(out["break_even_annual_tasks"].get_str(), "100");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -1,0 +1,8 @@
+[
+  {
+    "id": "P2P-SCN-B",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "host01 binds cpu and gpu roles and refuses loopback; the probe speaks only when both RPC endpoints are supplied"
+  }
+]

@@ -42,6 +42,7 @@
 #include <script/script.h>
 #include <script/sigcache.h>
 #include <streams.h>
+#include <test/util/matmul_fixture.h>
 #include <test/util/mining.h>
 #include <test/util/net.h>
 #include <test/util/random.h>
@@ -281,6 +282,12 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
         if (auto value{m_node.args->GetBoolArg("-resetshieldedstate")}) {
             chainman_opts.reset_shielded_state = *value;
         }
+        // Fixtures that keep the default regtest MatMul schedule can pass
+        // -matmulvalidation=economic so ConnectTip does not wait on an
+        // asynchronous ExactReplay (28fefe91) while the fixture mines.
+        if (m_node.args->GetArg("-matmulvalidation") == std::string{"economic"}) {
+            chainman_opts.matmul_validation_mode = kernel::MatMulValidationMode::ECONOMIC;
+        }
         // Honor the deep-reorg defense options from extra_args so tests can
         // exercise explicit PARK and default WARN/hysteresis paths (see
         // ApplyArgsManOptions / ActivateBestChainStep).
@@ -398,6 +405,8 @@ bool ExtraArgsContainPrefix(const std::vector<const char*>& args, const char* pr
     return false;
 }
 
+} // namespace
+
 // Regtest activates v4/BMX4C/DRLT at height 100 and RC Profile-1 at 101 by
 // default, with nMatMulV4Dimension=256. TestChain100Setup mines
 // COINBASE_MATURITY (==100) blocks, so every fixture would otherwise pay for
@@ -433,8 +442,6 @@ TestOpts WithCheapMatMulFixtureDefaults(TestOpts opts)
     }
     return opts;
 }
-
-} // namespace
 
 TestChain100Setup::TestChain100Setup(
     const ChainType chain_type,

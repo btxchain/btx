@@ -58,10 +58,12 @@ static void Usage()
         "  -modelseedupondownload=0|1  B0 alias of -modelseed=off|auto; not a second opt-in\n"
         "  -modelpreserverare     fetch qualified under-replicated models into spare quota\n"
         "  -modelfollowpeers=0|1  follow FREE catalogs of -modelpeer / PEX contacts (default 1)\n"
+        "  -modellandiscovery=0|1  discover model transport on private LAN interfaces (default 1)\n"
         "  -modeluploadlimit=<bps>  aggregate serving cap (0 = connection ceilings only)\n"
         "  -modelwatch=<dir>    auto-host GGUF/SafeTensors/EXL3 dropped in this directory\n"
         "  -modelallowencrypted   allow preserve-rare of unqualified ciphertext\n"
         "  -modelbind=<ip:port>  PQ1 TLS listen address (empty = unix RPC only)\n"
+        "  -modelnatpmp=0|1     map the PQ1 port with PCP/NAT-PMP (default 1)\n"
         "  -modelrpcsocket=<path> unix JSON-RPC socket\n"
         "  -modeltransport=pq1  only accepted value; anything else fail-closes\n"
         "  -modeltlscert=<file>  self-signed ML-DSA certificate\n"
@@ -120,6 +122,7 @@ int main(int argc, char* argv[])
             cfg.host_auto = mode == modelnet::HostMode::AUTO;
         } else if (a == "-modelpreserverare") cfg.preserve_rare = true;
         else if (a == "-modelfollowpeers") cfg.follow_peers = true;
+        else if (a == "-modellandiscovery") cfg.lan_discovery = true;
         else if (a == "-modelallowencrypted") cfg.allow_encrypted = true;
         else if (a.rfind("-decode=", 0) == 0) decode = a.substr(8);
         else if (a == "-decode" && i + 1 < argc) decode = argv[++i];
@@ -161,6 +164,12 @@ int main(int argc, char* argv[])
             cfg.preserve_rare = !(v == "0" || v == "false" || v == "off");
         } else if (auto v = take("-modelfollowpeers"); !v.empty()) {
             cfg.follow_peers = !(v == "0" || v == "false" || v == "off");
+        } else if (auto v = take("-modellandiscovery"); !v.empty()) {
+            if (v != "0" && v != "1" && v != "false" && v != "true") {
+                std::cerr << "invalid -modellandiscovery\n";
+                return 1;
+            }
+            cfg.lan_discovery = v == "1" || v == "true";
         } else if (auto v = take("-modeluploadlimit"); !v.empty()) {
             std::string err;
             if (!modelnet::ParseModelBytes(v, cfg.upload_bps, err)) {
@@ -168,6 +177,7 @@ int main(int argc, char* argv[])
                 return 1;
             }
         } else if (auto v = take("-modelbind"); !v.empty()) cfg.bind = v;
+        else if (auto v = take("-modelnatpmp"); !v.empty()) cfg.natpmp = !(v == "0" || v == "false" || v == "off");
         else if (auto v = take("-modelrpcsocket"); !v.empty()) cfg.rpc_socket = v.c_str();
         else if (auto v = take("-modeltransport"); !v.empty()) transport = v;
         else if (auto v = take("-modeltlscert"); !v.empty()) cfg.tls_cert = v.c_str();
@@ -209,7 +219,9 @@ int main(int argc, char* argv[])
 
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
+#ifndef WIN32
     // Peer RST during retrieve must not kill the helper (DISC-05).
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     return modelnet::RunModelDaemon(cfg, &g_stop);
 }

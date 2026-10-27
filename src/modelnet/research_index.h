@@ -6,15 +6,19 @@
 #define BITCOIN_MODELNET_RESEARCH_INDEX_H
 
 #include <modelnet/research_graph.h>
+#include <modelnet/research_views/research_views.h>
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace modelnet {
 
 /**
  * Topic-scoped wrapper over ResearchBook.
- * Announce publishes on the canonical topic id. Query returns that topic only.
+ * Announce publishes on the canonical topic id and, when the summary is
+ * non-empty, records that row for the local views. Query returns that topic
+ * only. View answers LEADING, CONTESTED, NEGLECTED, RECENT, and REPRODUCED.
  * A label that fails RejectCanonical fails BTX035_TOPIC. There is no method
  * that assigns work to an author.
  */
@@ -26,8 +30,11 @@ public:
     bool Query(std::string_view topic_label, const Digest48& cursor, size_t limit, ResearchPage& out,
                std::string& err) const;
 
+    std::vector<std::string> View(const std::string& name, const std::string& topic, std::string& err) const;
+
 private:
     ResearchBook m_book;
+    ResearchViews m_views;
 };
 
 } // namespace modelnet

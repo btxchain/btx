@@ -1,7 +1,9 @@
 # Mirroring (0.34.8 surface)
 
-**Status:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`). `getmodelmirror` / `setmodelmirror` /
+**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+
+**Status:** this tree is **0.35.0rc1**. The last shipping tag remains
+**v0.34.15**. `getmodelmirror` / `setmodelmirror` /
 `setmodelprofile` exist in this helper (keep-N, `automatic_spend_atoms=0`).
 The CLI wrapper **fails closed** if an older helper lacks the method. This
 page is not a PASS and not evidence that a public mirror is running.
@@ -39,6 +41,16 @@ contrib/modelnet/btx-model --json profile set infrastructure
 contrib/modelnet/btx-model --json profile set mirror
 contrib/modelnet/btx-model --json profile set custom '{"storage_bytes":null}'
 ```
+
+The optional object is sent intact to `setmodelprofile`. Supported override
+fields are `relay`, `index`, `follow_peers`, `preserve_rare` (Booleans),
+`host_mode`, `storage_arg` or `storage_bytes`, `auto_cap_bytes`, `upload_bps`,
+and `seed` (`auto`, `manual`, or `off`). `storage_bytes:null` selects auto;
+explicit zero disables payload storage. Storage aliases cannot both be
+present. Unknown/duplicate fields and nonzero `automatic_spend_atoms` are
+rejected. Storage/quota application is queued to the helper loop; inspect
+the subsequent `getmodelnetworkinfo`/doctor response for the effective quota.
+No profile grants inference, training, private-data access, or payment authority.
 
 `INFRASTRUCTURE`: relay + index + host-auto as **independent** roles, larger
 AUTO target. Host advertisement still requires proven reachability and at
@@ -88,4 +100,4 @@ required for the role. FakeS3 is unit-tested; live HTTPS/R2 is **NOT_RUN**
 is **NOT_RUN**. R2 AUTO is `SOURCE_FILES` + `STREAM_FILE`. Pieces remain the
 swarm unit. See [cloud-seeding.md](cloud-seeding.md). Secrets never appear in
 mirror JSON. GUI is 0.34.8-dev source (`BUILD_GUI=OFF`).
-`CLIENT_VERSION_IS_RELEASE=false`.
+`CLIENT_VERSION_IS_RELEASE=true` for the 0.35.0rc1 candidate (native release evidence remains separate).

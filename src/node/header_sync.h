@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 
 namespace node {
@@ -213,6 +214,24 @@ inline constexpr int HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD{6};
 {
     if (tip_height < 0) return false;
     return uncapped_followed_ahead >= stall_headers_ahead;
+}
+
+/**
+ * Owners an in-flight block may get before its request is stale. Catch-up
+ * grants extra owners at once to the hole a silent peer would pin: the first
+ * in-flight block of a walk, every block of a 1-wide walk, and blocks within
+ * early_ahead of the tip. Deeper in a wide download window a block gets
+ * another owner only once its request is stale; granting them at once there
+ * fetched each body about three times in IBD.
+ */
+[[nodiscard]] inline size_t EarlyParallelBlockOwners(size_t catch_up_owners,
+                                                     bool hole,
+                                                     int block_height,
+                                                     int tip_height,
+                                                     int early_ahead)
+{
+    if (hole || tip_height < 0 || block_height <= tip_height + early_ahead) return catch_up_owners;
+    return 1;
 }
 
 /** GPU-protect 1-wide / HEADER_ONLY competing must yield when the node is

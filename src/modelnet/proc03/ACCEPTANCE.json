@@ -1,0 +1,1 @@
+[{"id":"DS-REC-004","final_acceptance":"CLOSED_IN_PROCESS","native_status":"NOT_RUN_NATIVE","evidence":"proc03 recovers a positive balance while runtime_up is false and does not stop a device"}]

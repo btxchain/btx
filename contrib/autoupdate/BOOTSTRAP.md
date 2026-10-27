@@ -82,6 +82,10 @@ can opt out or override the trust root with `-autoupdate=0`,
 `-autoupdatepubkey=0`, or an explicit PQ `-autoupdatepubkey` /
 `-autoupdatepubkeyalgo` pair (`ml-dsa-44` or `slh-dsa-128s`).
 
+Each check is a direct HTTPS connection from the node's host. It does not use
+`-proxy`, `-onion` or `-onlynet`, so the mainnet default is off when `-proxy`
+is set or `-onlynet` excludes ipv4 and ipv6. `-autoupdate=1` turns it back on.
+
 ## Manifest fields
 
 `version.txt` is JSON. Recognized fields:

@@ -8,6 +8,8 @@
 #include <span.h>
 #include <univalue.h>
 
+#include <util/fs.h>
+
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -15,6 +17,12 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#ifndef _WIN32
+#include <cerrno>
+#include <fcntl.h>
+#include <poll.h>
+#endif
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -77,6 +85,25 @@ void AppendPeerList(std::vector<std::string>& tokens, const std::string& list)
     }
 }
 
+/** Base64 of `user:password` for an HTTP Basic Authorization header. */
+std::string BasicCredential(const std::string& user, const std::string& password)
+{
+    const std::string raw = user + ":" + password;
+    static const char* kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string auth;
+    for (size_t i = 0; i < raw.size(); i += 3) {
+        const unsigned int a = static_cast<unsigned char>(raw[i]);
+        const unsigned int b = i + 1 < raw.size() ? static_cast<unsigned char>(raw[i + 1]) : 0;
+        const unsigned int c = i + 2 < raw.size() ? static_cast<unsigned char>(raw[i + 2]) : 0;
+        const unsigned int triple = (a << 16) | (b << 8) | c;
+        auth.push_back(kB64[(triple >> 18) & 63]);
+        auth.push_back(kB64[(triple >> 12) & 63]);
+        auth.push_back(i + 1 < raw.size() ? kB64[(triple >> 6) & 63] : '=');
+        auth.push_back(i + 2 < raw.size() ? kB64[triple & 63] : '=');
+    }
+    return auth;
+}
+
 // Loopback only. Does not dial DNS or any host other than 127.0.0.1.
 bool ParseLoopbackEndpoint(const std::string& endpoint, std::string& host, uint16_t& port, std::string& err)
 {
@@ -99,7 +126,298 @@ bool ParseLoopbackEndpoint(const std::string& endpoint, std::string& host, uint1
     return true;
 }
 
+constexpr int kLoopbackTimeoutMs = 2000;
+constexpr size_t kMaxLoopbackBytes = 1024 * 1024;
+
+#ifndef _WIN32
+
+bool ParseHexU(const std::string& text, uint64_t& out)
+{
+    if (text.empty()) return false;
+    uint64_t value = 0;
+    for (unsigned char c : text) {
+        uint64_t digit = 0;
+        if (c >= '0' && c <= '9') digit = static_cast<uint64_t>(c - '0');
+        else if (c >= 'a' && c <= 'f') digit = static_cast<uint64_t>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') digit = static_cast<uint64_t>(c - 'A' + 10);
+        else return false;
+        if (value > (UINT64_MAX - digit) / 16) return false;
+        value = value * 16 + digit;
+    }
+    out = value;
+    return true;
+}
+
+bool ParseDecU(const std::string& text, uint64_t& out)
+{
+    if (text.empty()) return false;
+    uint64_t value = 0;
+    for (unsigned char c : text) {
+        if (c < '0' || c > '9') return false;
+        const uint64_t digit = static_cast<uint64_t>(c - '0');
+        if (value > (UINT64_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    out = value;
+    return true;
+}
+
+bool InodeOwned(uint64_t inode)
+{
+    const fs::path dir("/proc/self/fd");
+    if (!fs::exists(dir)) return false;
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (!fs::is_symlink(entry.path())) continue;
+        const std::string text = fs::PathToString(fs::read_symlink(entry.path()));
+        const std::string prefix = "socket:[";
+        if (text.size() < prefix.size() + 2 || text.compare(0, prefix.size(), prefix) != 0 || text.back() != ']') continue;
+        uint64_t value = 0;
+        if (!ParseDecU(text.substr(prefix.size(), text.size() - prefix.size() - 1), value)) continue;
+        if (value == inode) return true;
+    }
+    return false;
+}
+
+bool ScanTcpTable(const char* path, uint16_t port)
+{
+    FILE* file = std::fopen(path, "r");
+    if (!file) return false;
+    char line[512];
+    if (!std::fgets(line, sizeof(line), file)) {
+        std::fclose(file);
+        return false;
+    }
+    bool found = false;
+    while (std::fgets(line, sizeof(line), file) != nullptr) {
+        std::vector<std::string> fields;
+        std::string cur;
+        for (char c : std::string(line)) {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                if (!cur.empty()) {
+                    fields.push_back(cur);
+                    cur.clear();
+                }
+            } else {
+                cur.push_back(c);
+            }
+        }
+        if (!cur.empty()) fields.push_back(cur);
+        if (fields.size() < 10 || fields[3] != "0A") continue;
+        const auto colon = fields[1].rfind(':');
+        if (colon == std::string::npos) continue;
+        uint64_t port_hex = 0;
+        uint64_t inode = 0;
+        if (!ParseHexU(fields[1].substr(colon + 1), port_hex) || port_hex != port) continue;
+        if (!ParseDecU(fields[9], inode)) continue;
+        if (InodeOwned(inode)) {
+            found = true;
+            break;
+        }
+    }
+    std::fclose(file);
+    return found;
+}
+
+bool OwnListenSocket(uint16_t port)
+{
+    const long open_max = sysconf(_SC_OPEN_MAX);
+    const int limit = open_max > 0 && open_max < 65536 ? static_cast<int>(open_max) : 65536;
+    for (int fd = 0; fd < limit; ++fd) {
+        sockaddr_storage address{};
+        socklen_t length = sizeof(address);
+        if (getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) != 0) continue;
+        uint16_t local = 0;
+        if (address.ss_family == AF_INET) {
+            local = ntohs(reinterpret_cast<const sockaddr_in*>(&address)->sin_port);
+        } else if (address.ss_family == AF_INET6) {
+            local = ntohs(reinterpret_cast<const sockaddr_in6*>(&address)->sin6_port);
+        }
+        if (local != port) continue;
+        int type = 0;
+        length = sizeof(type);
+        if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &length) != 0 || type != SOCK_STREAM) continue;
+        // macOS does not report SO_ACCEPTCONN through getsockopt. A stream
+        // socket on this port without a peer is our listener.
+        sockaddr_storage peer{};
+        length = sizeof(peer);
+        if (getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &length) != 0 && errno == ENOTCONN) return true;
+    }
+    return false;
+}
+
+bool OwnListenPort(uint16_t port)
+{
+    // macOS and the BSDs have no /proc/net/tcp: ask each open descriptor
+    // whether it is a listening socket on that port.
+    if (::access("/proc/net/tcp", R_OK) != 0) return OwnListenSocket(port);
+    return ScanTcpTable("/proc/net/tcp", port) || ScanTcpTable("/proc/net/tcp6", port);
+}
+
+bool WaitFd(int fd, short events, std::chrono::steady_clock::time_point deadline, std::string& err)
+{
+    while (true) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return Fail(err, "BTX035_TRANSPORT");
+        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        if (left < 1) left = 1;
+        if (left > 1000) left = 1000;
+        pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = events;
+        const int rc = ::poll(&pfd, 1, static_cast<int>(left));
+        if (rc < 0) {
+            if (errno == EINTR) continue;
+            return Fail(err, "BTX035_TRANSPORT");
+        }
+        if (rc == 0) continue;
+        return true;
+    }
+}
+
+bool ConnectBounded(int fd, uint16_t port, int timeout_ms, std::string& err)
+{
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) return Fail(err, "BTX035_TRANSPORT");
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) return Fail(err, "BTX035_SCOPE_DENIED");
+    const int rc = connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+    if (rc != 0 && errno != EINPROGRESS) return Fail(err, "BTX035_TRANSPORT");
+    if (rc != 0) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        if (!WaitFd(fd, POLLOUT, deadline, err)) return false;
+        int soerr = 0;
+        socklen_t len = sizeof(soerr);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) != 0 || soerr != 0) return Fail(err, "BTX035_TRANSPORT");
+    }
+    err.clear();
+    return true;
+}
+
+bool SendBounded(int fd, const std::string& bytes, int timeout_ms, std::string& err)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    size_t sent = 0;
+    while (sent < bytes.size()) {
+        if (!WaitFd(fd, POLLOUT, deadline, err)) return false;
+        const auto n = ::send(fd, bytes.data() + sent, bytes.size() - sent, 0);
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            return Fail(err, "BTX035_TRANSPORT");
+        }
+        if (n == 0) return Fail(err, "BTX035_TRANSPORT");
+        sent += static_cast<size_t>(n);
+    }
+    err.clear();
+    return true;
+}
+
+bool ReadBounded(int fd, std::string& out, size_t max_bytes, int timeout_ms, std::string& err)
+{
+    out.clear();
+    if (timeout_ms < 0) return Fail(err, "BTX035_TRANSPORT");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    char buf[4096];
+    // Read to end of stream. Stopping at exactly max_bytes would return a
+    // response cut at the cap as if it were complete.
+    for (;;) {
+        if (!WaitFd(fd, POLLIN, deadline, err)) return false;
+        const auto n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            return Fail(err, "BTX035_TRANSPORT");
+        }
+        if (n == 0) break;
+        if (out.size() + static_cast<size_t>(n) > max_bytes) return Fail(err, "BTX035_LIMIT_EXCEEDED");
+        out.append(buf, buf + n);
+    }
+    err.clear();
+    return true;
+}
+
+#else
+
+bool OwnListenPort(uint16_t)
+{
+    return false;
+}
+
+bool ReadBounded(int fd, std::string& out, size_t max_bytes, int timeout_ms, std::string& err)
+{
+    out.clear();
+    const DWORD timeout = timeout_ms < 0 ? 0 : static_cast<DWORD>(timeout_ms);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    char buf[4096];
+    for (;;) {
+        const auto n = recv(fd, buf, sizeof(buf), 0);
+        if (n < 0) return Fail(err, "BTX035_TRANSPORT");
+        if (n == 0) break;
+        if (out.size() + static_cast<size_t>(n) > max_bytes) return Fail(err, "BTX035_LIMIT_EXCEEDED");
+        out.append(buf, buf + n);
+    }
+    err.clear();
+    return true;
+}
+
+#endif
+
+bool ExchangeLoopback(uint16_t port, const std::string& request, std::string& response, std::string& err)
+{
+    response.clear();
+    if (OwnListenPort(port)) return Fail(err, "BTX035_SCOPE_DENIED");
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return Fail(err, "BTX035_TRANSPORT");
+    const DWORD timeout = static_cast<DWORD>(kLoopbackTimeoutMs);
+#endif
+    const int fd = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
+    if (fd < 0) return Fail(err, "BTX035_TRANSPORT");
+#ifndef _WIN32
+    if (!ConnectBounded(fd, port, kLoopbackTimeoutMs, err) || !SendBounded(fd, request, kLoopbackTimeoutMs, err) ||
+        !ReadBounded(fd, response, kMaxLoopbackBytes, kLoopbackTimeoutMs, err)) {
+        CloseSock(fd);
+        return false;
+    }
+#else
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) {
+        CloseSock(fd);
+        return Fail(err, "BTX035_SCOPE_DENIED");
+    }
+    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        CloseSock(fd);
+        return Fail(err, "BTX035_TRANSPORT");
+    }
+    size_t sent = 0;
+    while (sent < request.size()) {
+        const auto n = send(fd, request.data() + sent, request.size() - sent, 0);
+        if (n <= 0) {
+            CloseSock(fd);
+            return Fail(err, "BTX035_TRANSPORT");
+        }
+        sent += static_cast<size_t>(n);
+    }
+    if (!ReadBounded(fd, response, kMaxLoopbackBytes, kLoopbackTimeoutMs, err)) {
+        CloseSock(fd);
+        return false;
+    }
+#endif
+    CloseSock(fd);
+    err.clear();
+    return true;
+}
+
 } // namespace
+
+bool ReadLoopbackBounded(int fd, std::string& out, size_t max_bytes, int timeout_ms, std::string& err)
+{
+    return ReadBounded(fd, out, max_bytes, timeout_ms, err);
+}
 
 bool WriteExchangeManifest(const std::vector<ExchangeObject>& objects, std::string& manifest_json, std::string& err)
 {
@@ -176,63 +494,13 @@ bool LabCallLoopback(const std::string& host, uint16_t port, const std::string& 
     const std::string body = rpc_body.write();
     std::ostringstream request;
     request << "POST / HTTP/1.1\r\nHost: 127.0.0.1:" << port
-            << "\r\nAuthorization: Basic ";
-    const std::string raw = rpc_user + ":" + rpc_password;
-    static const char* kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string auth;
-    for (size_t i = 0; i < raw.size(); i += 3) {
-        const unsigned int a = static_cast<unsigned char>(raw[i]);
-        const unsigned int b = i + 1 < raw.size() ? static_cast<unsigned char>(raw[i + 1]) : 0;
-        const unsigned int c = i + 2 < raw.size() ? static_cast<unsigned char>(raw[i + 2]) : 0;
-        const unsigned int triple = (a << 16) | (b << 8) | c;
-        auth.push_back(kB64[(triple >> 18) & 63]);
-        auth.push_back(kB64[(triple >> 12) & 63]);
-        auth.push_back(i + 1 < raw.size() ? kB64[(triple >> 6) & 63] : '=');
-        auth.push_back(i + 2 < raw.size() ? kB64[triple & 63] : '=');
-    }
-    request << auth << "\r\nContent-Type: application/json\r\nContent-Length: " << body.size()
+            << "\r\nAuthorization: Basic " << BasicCredential(rpc_user, rpc_password)
+            << "\r\nContent-Type: application/json\r\nContent-Length: " << body.size()
             << "\r\nConnection: close\r\n\r\n"
             << body;
 
-#ifdef _WIN32
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return Fail(err, "BTX035_TRANSPORT");
-#endif
-    const int fd = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
-    if (fd < 0) return Fail(err, "BTX035_TRANSPORT");
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) {
-        CloseSock(fd);
-        return Fail(err, "BTX035_SCOPE_DENIED");
-    }
-    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-        CloseSock(fd);
-        return Fail(err, "BTX035_TRANSPORT");
-    }
-    const std::string bytes = request.str();
-    size_t sent = 0;
-    while (sent < bytes.size()) {
-        const auto n = send(fd, bytes.data() + sent, bytes.size() - sent, 0);
-        if (n <= 0) {
-            CloseSock(fd);
-            return Fail(err, "BTX035_TRANSPORT");
-        }
-        sent += static_cast<size_t>(n);
-    }
     std::string response;
-    char buf[4096];
-    while (true) {
-        const auto n = recv(fd, buf, sizeof(buf), 0);
-        if (n < 0) {
-            CloseSock(fd);
-            return Fail(err, "BTX035_TRANSPORT");
-        }
-        if (n == 0) break;
-        response.append(buf, buf + n);
-    }
-    CloseSock(fd);
+    if (!ExchangeLoopback(port, request.str(), response, err)) return false;
     const auto split = response.find("\r\n\r\n");
     if (split == std::string::npos) return Fail(err, "BTX035_TRANSPORT");
     const std::string payload = response.substr(split + 4);
@@ -266,50 +534,12 @@ bool PeerRouteLoopback(const std::string& host, uint16_t port, const std::string
     }
     std::ostringstream request;
     request << "POST /btx-model/3/" << route << " HTTP/1.1\r\nHost: 127.0.0.1:" << port
+            << "\r\nAuthorization: Basic " << BasicCredential(rpc_user, rpc_password)
             << "\r\nContent-Type: application/json\r\nContent-Length: " << body_json.size()
             << "\r\nConnection: close\r\n\r\n"
             << body_json;
-    (void)rpc_user;
-    (void)rpc_password;
-#ifdef _WIN32
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return Fail(err, "BTX035_TRANSPORT");
-#endif
-    const int fd = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
-    if (fd < 0) return Fail(err, "BTX035_TRANSPORT");
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) {
-        CloseSock(fd);
-        return Fail(err, "BTX035_SCOPE_DENIED");
-    }
-    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-        CloseSock(fd);
-        return Fail(err, "BTX035_TRANSPORT");
-    }
-    const std::string bytes = request.str();
-    size_t sent = 0;
-    while (sent < bytes.size()) {
-        const auto n = send(fd, bytes.data() + sent, bytes.size() - sent, 0);
-        if (n <= 0) {
-            CloseSock(fd);
-            return Fail(err, "BTX035_TRANSPORT");
-        }
-        sent += static_cast<size_t>(n);
-    }
     std::string response;
-    char buf[4096];
-    while (true) {
-        const auto n = recv(fd, buf, sizeof(buf), 0);
-        if (n < 0) {
-            CloseSock(fd);
-            return Fail(err, "BTX035_TRANSPORT");
-        }
-        if (n == 0) break;
-        response.append(buf, buf + n);
-    }
-    CloseSock(fd);
+    if (!ExchangeLoopback(port, request.str(), response, err)) return false;
     const auto split = response.find("\r\n\r\n");
     if (split == std::string::npos || response.size() < 12) return Fail(err, "BTX035_TRANSPORT");
     const bool ok = response.compare(0, 12, "HTTP/1.1 200") == 0 || response.compare(0, 12, "HTTP/1.0 200") == 0;

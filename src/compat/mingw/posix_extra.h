@@ -16,6 +16,14 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+// The other Windows headers model plane files include. They use macros
+// removed below (VOID, CALLBACK, interface), so they are read first.
+#include <aclapi.h>
+#include <bcrypt.h>
+#include <iphlpapi.h>
+#include <objbase.h>
+#include <sddl.h>
+#include <userenv.h>
 
 // Windows headers macro-define identifiers the node and the lab use as enums.
 #ifdef STRICT
@@ -266,9 +274,18 @@ inline int btx_setpgid(int, int)
     return -1;
 }
 
+// getenv reads the C runtime's copy of the environment, which
+// SetEnvironmentVariableA does not change. _putenv_s changes that copy and
+// the process environment together, and an empty value removes the name.
+inline int setenv(const char* name, const char* value, int overwrite)
+{
+    if (overwrite == 0 && getenv(name) != nullptr) return 0;
+    return _putenv_s(name, value) == 0 ? 0 : -1;
+}
+
 inline int unsetenv(const char* name)
 {
-    return SetEnvironmentVariableA(name, nullptr) ? 0 : -1;
+    return _putenv_s(name, "") == 0 ? 0 : -1;
 }
 
 inline struct tm* btx_gmtime_r(const time_t* t, struct tm* out)
@@ -343,6 +360,23 @@ inline int btx_recv(SOCKET s, void* buf, int len, int flags)
     return (recv)(s, static_cast<char*>(buf), len, flags);
 }
 
+inline int btx_sendto(SOCKET s, const void* buf, int len, int flags, const struct sockaddr* to, int tolen)
+{
+    return (sendto)(s, static_cast<const char*>(buf), len, flags, to, tolen);
+}
+
+inline int btx_recvfrom(SOCKET s, void* buf, int len, int flags, struct sockaddr* from, int* fromlen)
+{
+    return (recvfrom)(s, static_cast<char*>(buf), len, flags, from, fromlen);
+}
+
+// Winsock has no AF_UNIX socketpair. Callers see a failed socketpair.
+inline int btx_socketpair(int, int, int, int*)
+{
+    errno = ENOSYS;
+    return -1;
+}
+
 #define lstat(...) btx_lstat(__VA_ARGS__)
 #define fork() btx_fork()
 #define pipe(...) btx_pipe(__VA_ARGS__)
@@ -362,6 +396,9 @@ inline int btx_recv(SOCKET s, void* buf, int len, int flags)
 #define connect(...) btx_connect(__VA_ARGS__)
 #define send(...) btx_send(__VA_ARGS__)
 #define recv(...) btx_recv(__VA_ARGS__)
+#define sendto(...) btx_sendto(__VA_ARGS__)
+#define recvfrom(...) btx_recvfrom(__VA_ARGS__)
+#define socketpair(...) btx_socketpair(__VA_ARGS__)
 
 #endif // _WIN32
 #endif

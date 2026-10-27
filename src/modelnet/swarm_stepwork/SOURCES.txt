@@ -1,0 +1,7 @@
+swarm_stepwork/kind.cpp
+swarm_stepwork/outcome.cpp
+swarm_stepwork/admit.cpp
+swarm_stepwork/offer.cpp
+swarm_stepwork/gpu.cpp
+swarm_stepwork/record.cpp
+swarm_stepwork/swarm_stepwork.cpp

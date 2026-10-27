@@ -9,10 +9,35 @@ Nothing here spends BTX. `automatic_spend_atoms` stays **0**. Paid release
 or bounty settlement is a later **prepare → sign → submit** wallet path, not
 a first-run timer. BTX is **not** a remote inference marketplace.
 
-You need the isolated helper (`btx-modeld`). Packaged `btxd` starts it when
-`-modelnet=1` (the default). Standalone: `contrib/modelnet/btx-model init`.
+Host, search, retrieve, and local generate use the isolated helper
+(`btx-modeld`). Packaged `btxd` starts that helper when `-modelnet=1` (the
+default). Standalone: `contrib/modelnet/btx-model init`.
 CLI wrapper: [../../contrib/modelnet/btx-model](../../contrib/modelnet/btx-model)
-(people: stderr hints; agents: `--json`).
+(people: stderr hints; agents: `--json`). `btx-modeld` can still be a
+supervised child. That child is separate from the swarm thread.
+
+The swarm control plane is a thread in `btxd`. `src/init.cpp` calls
+`modelnet::StartSwarmObserver` after the model helper when `-modelnet` is on
+(default 1). The observer is a thread in `btxd`. `-modelnet=0` disables it.
+Monetary consensus continues if the swarm pass fails. `btxd` does not start
+`btx-swarmd` or `btx-paynetd`.
+
+`SwarmObserveCatalog` reconciles verified, explicitly complete catalog entries
+into `modeldir/swarm/observers.json`, removing entries that become ineligible or
+disappear. A missing catalog clears existing subscriptions. Subscriptions are observers only: no compute
+grant, no seeding, no spend.
+
+`SwarmFormPlane` does not exec a sidecar, open a socket, add a DNS seed,
+broadcast, or spend.
+
+The first observer pass, then latched, is an internal conformance pass:
+memory echo of `abcdefgh` for 8 bytes, vllm returns `ENGINE_ABSENT`, one CPU
+AdamW step (sequence 4, hidden 8), loopback two-rank exchange with
+`physical_hosts` 1, integer replay of 8 pairs, one snapshot, one realm seat.
+`Hosts(2)` is refused.
+
+`TickBind` then runs the in-process checks once. `passed()`, `gpu_passed()`,
+and `windows_passed()` stay false. Spend is `"0"`. Release is `UNQUALIFIED`.
 
 Truncated `btx://…` strings below are **placeholders**. Substitute a complete
 token from `btx-model link` / `share.copy_text`.
@@ -224,3 +249,16 @@ doctor
 - Do not `SIGKILL` production `btxd`. `unloadmodel` SIGTERMs the helper-spawned
   CUDA loader child only.
 - Do not recut `v0.34.8` or `v0.34.9-dev.pr198*`. This tree is 0.34.9.
+
+## Later releases
+
+These are the next releases toward a fully autonomous network:
+
+- Peers discover and admit a local group.
+- A participant acquires a verified model from another participant.
+- A person submits a task or prompt and receives model work.
+- A qualified machine trains on an authorized recipe and a second machine checks it.
+- A private defensive case runs under an explicit customer grant.
+- Accepted work settles in BTX only under an operator-signed mandate.
+
+The verifications still required before those claims are two physical hosts, a second GPU, Windows, macOS, a linked remote execution engine, an offline release image, the hardware profiles, and the sealed acceptance catalogue. Two local ranks are not two hosts. Spend stays 0 until a mandate exists.

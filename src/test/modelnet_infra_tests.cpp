@@ -7,6 +7,7 @@
 
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
+#include <modelnet/model_nat.h>
 #include <modelnet/piece_ranges.h>
 #include <modelnet/profile.h>
 #include <modelnet/reachability.h>
@@ -442,6 +443,60 @@ BOOST_AUTO_TEST_CASE(infra_12_profile_restart_persist)
     BOOST_CHECK(!p2.relay);
     BOOST_CHECK_EQUAL(p2.auto_cap_bytes, PERSONAL_AUTO_CAP_BYTES);
     BOOST_CHECK(!p2.preserve_rare);
+}
+
+BOOST_AUTO_TEST_CASE(operator_rpc_overrides_reach_resolved_policy)
+{
+    using namespace modelnet;
+    UniValue request;
+    BOOST_REQUIRE(request.read(R"({"profile":"custom","storage_bytes":"8MiB","relay":true,"follow_peers":false,"host_mode":"auto","upload_bps":"2MiB","seed":"manual","automatic_spend_atoms":0})"));
+    ProfileOverrides overrides;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ParseProfileOverridesJson(request, overrides, error), error);
+    const auto policy = ResolveProfile(OperatorProfile::CUSTOM, overrides);
+    BOOST_CHECK_EQUAL(policy.storage_arg, "8388608");
+    BOOST_CHECK(policy.relay);
+    BOOST_CHECK(!policy.follow_peers);
+    BOOST_CHECK(policy.host_mode == HostMode::AUTO);
+    BOOST_CHECK_EQUAL(policy.upload_bps, 2 * MIB);
+    BOOST_CHECK_EQUAL(policy.seed, "manual");
+    BOOST_REQUIRE(request.read(R"({"storage_bytes":null})"));
+    BOOST_REQUIRE(ParseProfileOverridesJson(request, overrides, error));
+    BOOST_CHECK_EQUAL(*overrides.storage_arg, "auto");
+    BOOST_REQUIRE(request.read(R"({"storage_bytes":0})"));
+    BOOST_REQUIRE(ParseProfileOverridesJson(request, overrides, error));
+    BOOST_CHECK_EQUAL(*overrides.storage_arg, "0");
+}
+
+BOOST_AUTO_TEST_CASE(operator_rpc_override_rejects_authority_and_ambiguity)
+{
+    using namespace modelnet;
+    for (const char* body : {R"({"storage_bytes":-1})", R"({"storage_bytes":1.5})",
+        R"({"storage_bytes":"8MiB","storage_arg":"0"})", R"({"relay":1})",
+        R"({"seed":"invalid"})", R"({"host_mode":true})", R"({"automatic_spend_atoms":1})",
+        R"({"automatic_spend_atoms":"00"})", R"({"wallet":true})", R"({"relay":true,"relay":false})"}) {
+        UniValue request;
+        BOOST_REQUIRE(request.read(body));
+        ProfileOverrides overrides;
+        std::string error;
+        BOOST_CHECK_MESSAGE(!ParseProfileOverridesJson(request, overrides, error), body);
+        BOOST_CHECK(!error.empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(infra_13_natpmp_off_reaches_helper)
+{
+    using namespace modelnet;
+    HelperLaunchConfig cfg;
+    cfg.bind = "0.0.0.0:29447";
+    BOOST_CHECK(!ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
+    cfg.natpmp = false;
+    BOOST_CHECK(ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
+    // No PQ1 listener, nothing to map.
+    cfg.bind.clear();
+    BOOST_CHECK(!ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
+    // Disabled mapping never looks for a gateway.
+    BOOST_CHECK(AttemptModelPortMap("0.0.0.0:29447", /*enable=*/false).status == ModelNatStatus::DISABLED);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

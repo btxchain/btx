@@ -364,7 +364,11 @@ struct AssumeutxoTestChain100Setup : TestChain100Setup {
     AssumeutxoTestChain100Setup()
         : TestChain100Setup(
               ChainType::REGTEST,
-              {.defer_expensive_matmul = false,
+              // 28fefe91 defers ConnectTip of a v4 body until ExactReplay in
+              // consensus mode; block 100 is v4 on default regtest. Economic
+              // mode keeps the canned schedule and connects synchronously.
+              {.extra_args = {"-matmulvalidation=economic"},
+               .defer_expensive_matmul = false,
                .freeze_coinbase_extra_nonce = true})
     {
     }

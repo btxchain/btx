@@ -1,8 +1,10 @@
-# BTX 0.35 private gates
+# BTX 0.35 private gates — historical snapshot (2026-10-13)
 
 Status: PRIVATE DEVELOPMENT / NOT RELEASE QUALIFIED. This document is not an announcement and not a production signature.
 
-The monetary client version in this tree stays 0.34.15. The 0.35 work is an additional research plane on the private branch `private/btx-035/integration`.
+This note records the private integration state and operator-reported runs on 2026-10-13, before the 0.35 release candidate. Its version strings, build inventory, and acceptance counts describe that snapshot, not the current checkout. The private evidence directory is not a portable qualification record for this tree. For current behavior see [lab research](../../lab-peer-research.md), [lab slices](../../release/0.35.0-lab-slices.md), and [swarm integration](../swarm/INTEGRATION.md).
+
+At that snapshot the monetary client version was 0.34.15; the additional research plane was on `private/btx-035/integration`.
 
 ## What the gates do
 

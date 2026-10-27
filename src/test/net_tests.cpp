@@ -1042,7 +1042,10 @@ BOOST_AUTO_TEST_CASE(discovery_relay_inbound_gossip_uses_listen_port_not_source_
 
     constexpr uint16_t listen_port{19335};
     constexpr uint16_t source_port{44838};
-    constexpr int32_t recent_height{199400};
+    // Within reorg_recovery_max_depth (72) of this node's best header
+    // (regtest genesis). A VERSION height far above it is unproven since
+    // 46404d17 and is not advertised until a header proves the branch.
+    constexpr int32_t recent_height{50};
     const ServiceFlags listener_services{
         ServiceFlags(NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
     const ServiceFlags local_services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};

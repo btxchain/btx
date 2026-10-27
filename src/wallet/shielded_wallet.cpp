@@ -1725,7 +1725,9 @@ bool ShieldedAddressLifecycle::IsValid() const
 CShieldedWallet::CShieldedWallet(CWallet& parent_wallet)
     : m_parent_wallet(parent_wallet)
 {
-    LOCK(cs_shielded);
+    // LoadPersistedState() takes cs_wallet; take it first so the order
+    // does not depend on the caller (AttachChain already holds it).
+    LOCK2(m_parent_wallet.cs_wallet, cs_shielded);
     LoadPersistedState();
     CatchUpToChainTip();
 }

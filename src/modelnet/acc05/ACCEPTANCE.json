@@ -1,0 +1,146 @@
+[
+  {
+    "id": "DS-NAT-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: Grp20::Apply accepts owner btxd only with aux 0, refuses a second service, and hosts() stays 1."
+  },
+  {
+    "id": "DS-NAT-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: Grp20::Apply refuses drop with PRESERVE and keeps the first working source text."
+  },
+  {
+    "id": "DS-NAT-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: SwarmEligibleRoles keeps observer defaults off the enrollment record and automatic_spend at 0."
+  },
+  {
+    "id": "DS-NAT-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: Grp20::Apply leaves stored aux 40 in place after analysis failure, and Spend stays 0."
+  },
+  {
+    "id": "DS-NAT-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: restart restores the journaled case and pending effect after the live fields are scratched."
+  },
+  {
+    "id": "DS-NAT-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: SwarmGovern and SwarmNoteNotContrib refuse an opted-out contribution, and NifScope::SendWan returns NO_ROUTE."
+  },
+  {
+    "id": "DS-HIRE-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: a fingerprint is kept only when model, runtime, and tool are all non-empty, and a later triple does not replace it."
+  },
+  {
+    "id": "DS-HIRE-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: Grp19::Apply keeps family membership on DS-HIRE-002#family and responder admission on a separate bit."
+  },
+  {
+    "id": "DS-HIRE-003",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Qualifying a modified model needs a release. Apply returns UNQUALIFIED and release_qualified() stays false."
+  },
+  {
+    "id": "DS-HIRE-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: Grp19::Apply refuses a different primary with SUBSTITUTE and keeps alpha."
+  },
+  {
+    "id": "DS-HIRE-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: Grp19::Apply refuses an empty validation configuration and keeps cfg-a."
+  },
+  {
+    "id": "DS-HIRE-006",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Advertising qualified warm capacity needs a release. Apply returns UNQUALIFIED and advertised() stays false."
+  },
+  {
+    "id": "DS-AUTH-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: SwarmNoteNotMandate refuses an unsigned mandate, Grp17::Apply binds cust|grant, and Spend stays 0."
+  },
+  {
+    "id": "DS-AUTH-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: Grp17::Apply binds case|gen1 and a later generation does not replace it."
+  },
+  {
+    "id": "DS-AUTH-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: an uncertain clock is refused, now equal to expiry is EXPIRED, and an earlier now is kept."
+  },
+  {
+    "id": "DS-AUTH-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: a severity change keeps scope asset-a, and a different scope is refused."
+  },
+  {
+    "id": "DS-AUTH-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: read, effect, release, and spend grants are separate. ResearchMaySpend stays false and Spend stays 0."
+  },
+  {
+    "id": "DS-AUTH-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: ActionGate::Revoke fences a prepared notify action and a prepared release. Consume returns REVOKED."
+  },
+  {
+    "id": "DS-DATA-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: original bytes stay orig while hash-2 is appended beside hash-1."
+  },
+  {
+    "id": "DS-DATA-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: Grp17::Apply refuses identical sensor and fact strings and stores sensor|disputed when they differ."
+  },
+  {
+    "id": "DS-DATA-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: a query is kept only inside asset, time, byte, and purpose bounds, and a later asset does not replace it."
+  },
+  {
+    "id": "DS-DATA-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: export without the exact grant is refused. A matching grant records body-a and bytes_moved stays 0."
+  },
+  {
+    "id": "DS-DATA-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: Grp18::Apply taints adversarial text and a model instruction, and keeps the ordinary log."
+  },
+  {
+    "id": "DS-DATA-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc05_tests pass_latches: clock, loss, duplicate, and missing are reported, and any other label is GAP."
+  }
+]

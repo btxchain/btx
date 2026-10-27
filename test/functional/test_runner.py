@@ -13,6 +13,7 @@ For a description of arguments recognized by test scripts, see
 """
 
 import argparse
+import atexit
 from collections import deque
 import configparser
 import csv
@@ -93,6 +94,10 @@ EXTENDED_SCRIPTS = [
     # BTX: KAWPOW is currently disabled in consensus params; keep coverage categorized,
     # but don't run it as part of the base suite.
     'feature_btx_kawpow_consensus.py',
+    # BTX: upstream test that builds SHA256d blocks; MatMul regtest rejects them
+    # (DoS 100). Keep it categorized, out of the base suite, until it is ported
+    # to node-built MatMul blocks.
+    'p2p_unrequested_blocks.py',
 ]
 
 BASE_SCRIPTS = [
@@ -196,7 +201,7 @@ BASE_SCRIPTS = [
     'wallet_shielded_transfer_builder.py --descriptors',
     'wallet_shielded_transfer_builder_locks.py --descriptors',
     'wallet_smile_v2_benchmark.py',
-    'wallet_smile_v2_full_lifecycle.py',
+    'wallet_smile_v2_full_lifecycle.py --descriptors',
     'wallet_bridge_egress_build.py',
     'feature_spend_path_recovery_activation_compat.py',
     'feature_spend_path_recovery_reorg.py',
@@ -216,6 +221,8 @@ BASE_SCRIPTS = [
     'p2p_matmul_compact_admission.py',
     'p2p_matmul_admission_precheck.py',
     'p2p_authority_serves_headers.py',
+    'p2p_dandelion_originator.py',
+    'p2p_dandelion_restart.py',
     'rpc_packages.py',
     'rpc_bind.py --ipv4',
     'rpc_bind.py --ipv6',
@@ -272,6 +279,7 @@ BASE_SCRIPTS = [
     'mempool_resurrect.py',
     'wallet_p2mr_multiparty_psbt.py --descriptors',
     'wallet_sendall_pq.py',
+    'wallet_pq_sigop_fee.py',
     'wallet_p2mr_locked_key_lookup.py --descriptors',
     'wallet_sweepprivkeys.py',
     'wallet_sweeptoself.py',
@@ -412,6 +420,7 @@ BASE_SCRIPTS = [
     'wallet_btxwallet.py --descriptors',
     'wallet_backupbundle.py --descriptors',
     'wallet_bundlearchive.py --descriptors',
+    'wallet_shielded_lock_order.py --descriptors',
     'wallet_verifywalletintegrity.py --descriptors',
     'wallet_bridge_planin.py --descriptors',
     'wallet_bridge_batch_in.py --descriptors',
@@ -451,6 +460,7 @@ BASE_SCRIPTS = [
     'wallet_otc_offer.py --descriptors',
     'p2p_leak.py',
     'wallet_encryption.py --descriptors',
+    'wallet_unlock_cache_upgrade.py --descriptors',
     'feature_dersig.py',
     'feature_reindex_init.py',
     'feature_cltv.py',
@@ -484,7 +494,6 @@ BASE_SCRIPTS = [
     'p2p_add_connections.py',
     'p2p_duplicate_manual_connections.py',
     'feature_bind_port_discover.py',
-    'p2p_unrequested_blocks.py',
     'p2p_message_capture.py',
     'feature_softwareexpiry.py',
     'feature_includeconf.py',
@@ -539,12 +548,14 @@ BASE_SCRIPTS = [
     'feature_modelnet_unique_todos.py',
     'feature_modelnet_hcp.py',
     'feature_modelnet_hcp_journeys.py',
+    'feature_modelnet_hcpd_slow_client.py',
     'feature_modelnet_cr11.py',
     'feature_modelnet_cr11_journeys.py',
     'feature_modelnet_cr12.py',
     'feature_modelnet_cr12_scale.py',
     'feature_modelnet_cr12_stage_chunk.py',
     'feature_modelnet_firstrun.py',
+    'feature_modelnet_listen.py',
     'feature_modelnet_events.py',
     'feature_modelnet_bounty_lifecycle.py --descriptors',
     'rpc_compute_qualification.py',
@@ -555,12 +566,23 @@ BASE_SCRIPTS = [
     'feature_modelnet_lan_stampede.py',
     'feature_modelnet_packages.py',
     'feature_modelnet_search_lock.py',
-    'feature_modelnet_release_cards.py',
+    'feature_modelnet_release_cards.py --descriptors',
+    'rpc_modelnet_wallet_restriction.py --descriptors',
     'feature_modelnet_jit_remaining.py',
     'feature_modelnet_swarm_live.py',
-    'feature_hcp_remaining.py',
+    'feature_modelnet_retrieve_regressions.py',
+    'feature_swarm_catalog.py',
+    'feature_swarm_regtest_spend.py',
+    'feature_swarm_model_settlement.py',
+    'feature_swarm_funded_objective.py --descriptors',
+    'feature_swarm_lan_discover.py',
+    'feature_swarm_profile_overrides.py',
+    'feature_swarm_three_local.py',
+    'feature_lightwatch.py',
+    'feature_hcp_remaining.py --descriptors',
     'feature_modelnet_minio.py',
     'feature_modelnet_security_r10.py',
+    'feature_modelnet_lab_peer_auth.py',
     'wallet_modelnet_funding.py --descriptors',
     'wallet_migration.py',
     'p2p_ibd_txrelay.py',
@@ -596,6 +618,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_shielded_randomized_sim.py',
     'wallet_shielded_replacement.py',
     'wallet_shielded_unlock_rehydrate_autoshield.py',
+    'wallet_unlock_cache_upgrade.py --descriptors',
     'wallet_shielded_postfork_coinbase_autoshield.py',
     'wallet_shielded_autoshield_optin.py',
     'wallet_shielded_sunset_rpc_guards.py',
@@ -606,6 +629,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_shielded_rpc_surface.py',
     'wallet_shielded_viewingkey_rescan.py',
     'wallet_shielded_psbt.py --descriptors',
+    'wallet_shielded_lock_order.py --descriptors',
     'wallet_smile_v2_benchmark.py',
     'wallet_smile_v2_full_lifecycle.py --descriptors',
     'wallet_bridge_egress_build.py',
@@ -613,8 +637,10 @@ BTX_BASE_SCRIPTS = [
     'wallet_bridge_rebalance.py --descriptors',
     'wallet_p2mr_multiparty_psbt.py --descriptors',
     'wallet_sendall_pq.py',
+    'wallet_pq_sigop_fee.py',
     'wallet_p2mr_locked_key_lookup.py --descriptors',
     'wallet_sweeptoself.py',
+    'wallet_pq_cache_mismatch_load.py --descriptors',
     'feature_btx_matmul_consensus.py',
     'feature_shieldedv2dev_datadir_isolation.py',
     'feature_autoupdate_installer.py',
@@ -651,6 +677,8 @@ BTX_BASE_SCRIPTS = [
     'feature_matmul_trusted_mirror_backfill.py',
     'feature_matmul_signer_wif_only_start.py',
     'feature_block_download_slot_reclaim.py',
+    'p2p_noconnect_inbound_relay.py',
+    'p2p_connect_strict_inbound.py',
     'feature_attested_utxo_snapshot_p2p.py',
     'feature_attested_utxo_snapshot_offer_restart.py',
     'feature_matmul_rc_activation.py',
@@ -671,12 +699,14 @@ BTX_BASE_SCRIPTS = [
     'feature_modelnet_unique_todos.py',
     'feature_modelnet_hcp.py',
     'feature_modelnet_hcp_journeys.py',
+    'feature_modelnet_hcpd_slow_client.py',
     'feature_modelnet_cr11.py',
     'feature_modelnet_cr11_journeys.py',
     'feature_modelnet_cr12.py',
     'feature_modelnet_cr12_scale.py',
     'feature_modelnet_cr12_stage_chunk.py',
     'feature_modelnet_firstrun.py',
+    'feature_modelnet_listen.py',
     'feature_modelnet_events.py',
     'feature_modelnet_bounty_lifecycle.py --descriptors',
     'rpc_compute_qualification.py',
@@ -687,12 +717,23 @@ BTX_BASE_SCRIPTS = [
     'feature_modelnet_lan_stampede.py',
     'feature_modelnet_packages.py',
     'feature_modelnet_search_lock.py',
-    'feature_modelnet_release_cards.py',
+    'feature_modelnet_release_cards.py --descriptors',
+    'rpc_modelnet_wallet_restriction.py --descriptors',
     'feature_modelnet_jit_remaining.py',
     'feature_modelnet_swarm_live.py',
-    'feature_hcp_remaining.py',
+    'feature_modelnet_retrieve_regressions.py',
+    'feature_swarm_catalog.py',
+    'feature_swarm_regtest_spend.py',
+    'feature_swarm_model_settlement.py',
+    'feature_swarm_funded_objective.py --descriptors',
+    'feature_swarm_lan_discover.py',
+    'feature_swarm_profile_overrides.py',
+    'feature_swarm_three_local.py',
+    'feature_lightwatch.py',
+    'feature_hcp_remaining.py --descriptors',
     'feature_modelnet_minio.py',
     'feature_modelnet_security_r10.py',
+    'feature_modelnet_lab_peer_auth.py',
     'wallet_modelnet_funding.py --descriptors',
     'mining_basic.py',
     'mining_mainnet.py',
@@ -707,9 +748,12 @@ BTX_BASE_SCRIPTS = [
     'p2p_matmul_compact_admission.py',
     'p2p_matmul_admission_precheck.py',
     'p2p_authority_serves_headers.py',
+    'p2p_dandelion_originator.py',
+    'p2p_dandelion_restart.py',
     'p2p_shielded_relay.py',
     'p2p_handshake.py',
     'p2p_handshake.py --v2transport',
+    'p2p_announce_after_handshake.py',
     'p2p_addr_relay.py',
     'mempool_limit.py',
     'mempool_package_limits.py',
@@ -843,6 +887,16 @@ def main():
         dynamic_port_min = 20_000 + ((os.getpid() * 97) % 25_000)
         os.environ["TEST_RUNNER_PORT_MIN"] = str(dynamic_port_min)
         logging.debug("Assigned TEST_RUNNER_PORT_MIN=%s", dynamic_port_min)
+
+    # btx-modeld moves its unix socket under XDG_RUNTIME_DIR when the path it
+    # is given does not fit in sun_path (108 bytes on Linux). The runner's
+    # directory names push a node's <datadir>/regtest/modelnet/modeld.sock
+    # past that, so give the tests a short private directory if there is none.
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        runtime_dir = tempfile.mkdtemp(prefix="btxrt")
+        os.environ["XDG_RUNTIME_DIR"] = runtime_dir
+        atexit.register(shutil.rmtree, runtime_dir, ignore_errors=True)
+        logging.debug("Set XDG_RUNTIME_DIR=%s", runtime_dir)
 
     logging.debug("Temporary test directory at %s" % tmpdir)
 

@@ -3621,7 +3621,7 @@ void CConnman::ThreadMessageHandler()
                 // Still SendMessages to inbound ARCHIVE/MIRROR so GETDATA
                 // BLOCK replies are not stuck behind miner visits.
                 const bool skip_inbound_send{
-                    (!m_use_addrman_outgoing && pnode->IsInboundConn() &&
+                    (m_strict_connect && pnode->IsInboundConn() &&
                      !pnode->IsManualConn() && !archive_target &&
                      pnode->fSuccessfullyConnected.load()) ||
                     node::matmul_trusted::

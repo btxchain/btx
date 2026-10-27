@@ -279,6 +279,44 @@ BOOST_AUTO_TEST_CASE(watch_free_download_queues_not_spend)
     BOOST_CHECK_EQUAL(acts[0].object_id, "mid-9");
 }
 
+BOOST_AUTO_TEST_CASE(watch_helper_peek_does_not_execute_or_drain)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "watch-helper-peek";
+    BindModelEventLayer(dir, 32);
+    ModelCatalog cat{dir, 8 << 20};
+    ModelWatch watch;
+    watch.kind = WatchKind::PUBLISHER;
+    watch.publisher_id = "peek-publisher";
+    watch.action = ActionPolicy::FREE_DOWNLOAD;
+    std::string err, code;
+    BOOST_REQUIRE(BoundModelWatchStore()->PutWatch(watch, err));
+    ObserveResult observed;
+    BOOST_REQUIRE(JournalObserve(MakeSigned("peek-publisher", "not-a-model-digest"), observed, err));
+    UniValue peek(UniValue::VOBJ);
+    peek.pushKV("drain", false);
+    UniValue result;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("getmodelwatchactions", peek), result, code, err), err);
+        BOOST_CHECK(!result["drained"].get_bool());
+        BOOST_CHECK(!result["executed_free_downloads"].get_bool());
+        BOOST_REQUIRE_EQUAL(result["actions"].size(), 1U);
+        BOOST_CHECK(!result["actions"][0].exists("executed"));
+        BOOST_CHECK(!result["actions"][0].exists("getmodel"));
+        BOOST_REQUIRE_EQUAL(BoundModelWatchStore()->PeekActions().size(), 1U);
+    }
+    UniValue drain(UniValue::VOBJ);
+    drain.pushKV("drain", true);
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("getmodelwatchactions", drain), result, code, err), err);
+    BOOST_CHECK(result["drained"].get_bool());
+    BOOST_CHECK(result["executed_free_downloads"].get_bool());
+    BOOST_REQUIRE_EQUAL(result["actions"].size(), 1U);
+    BOOST_CHECK(result["actions"][0].exists("executed"));
+    BOOST_CHECK(result["actions"][0].exists("getmodel_error"));
+    BOOST_CHECK(BoundModelWatchStore()->PeekActions().empty());
+    AssertZeroSpendNoWallet(result);
+}
+
 BOOST_AUTO_TEST_CASE(watch_persist_restart)
 {
     using namespace modelnet;

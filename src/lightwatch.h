@@ -8,8 +8,13 @@
 #include <consensus/amount.h>
 #include <uint256.h>
 
+#include <cstdint>
 #include <functional>
+#include <iosfwd>
+#include <map>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 class CBlock;
@@ -72,8 +77,15 @@ public:
 
     void RewindTo(int height);
 
+    /** Local snapshot only; callers reporting current-chain readiness or amounts
+     *  must also check IsCurrentAt against their RPC node. */
     LightWatchStatus Status(int chain_height) const;
     LightWatchAmount BalanceAt(int height) const;
+
+    /** Bind a saved height to the active chain at the supplied tip height.
+     *  RPC errors propagate, so an unavailable node cannot authorize an amount. */
+    bool IsCurrentAt(int height, int chain_height,
+                     const std::function<UniValue(const std::string&, const std::vector<std::string>&)>& rpc) const;
 
     /** Walk filters from the cursor through the node tip. `rpc` returns the
      *  unwrapped RPC result and throws on transport or RPC error. */
@@ -97,10 +109,20 @@ private:
         bool spend{false};
     };
 
+    struct OpenOutput {
+        CAmount value{0};
+        bool coinbase{false};
+    };
+
     int NextHeight() const;
     void RebuildScripts();
     bool IsOpen(const uint256& txid, uint32_t n, CAmount& value, bool& coinbase) const;
+    void NoteEvent(const Event& event);
+    void UndoEvent(const Event& event);
     void NoteFetch(int height, const uint256& block_hash);
+    std::optional<uint256> HashAt(int height) const;
+    bool ReadSnapshot(std::istream& in, std::string& error);
+    bool AcceptSnapshot(std::string& error);
 
     int m_start{0};
     int m_cursor{-1};
@@ -110,7 +132,10 @@ private:
     uint256 m_anchor;
     std::vector<std::string> m_descriptors;
     std::vector<Event> m_events;
-    std::vector<std::pair<int, uint256>> m_hashes;
+    // Block hash by height. Contiguous from m_start through m_cursor once caught up.
+    std::map<int, uint256> m_hashes;
+    // Outputs still unspent. IsOpen reads this; ApplyFilter updates it and RewindTo reverses it.
+    std::map<std::pair<uint256, uint32_t>, OpenOutput> m_open;
     std::vector<LightWatchFetch> m_fetched;
     uint64_t m_fetched_total{0};
 

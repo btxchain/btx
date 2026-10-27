@@ -475,6 +475,43 @@ BOOST_AUTO_TEST_CASE(search_exactreplay_isolation)
     BOOST_CHECK(!ModelWorkMayStarveExactReplay());
 }
 
+BOOST_AUTO_TEST_CASE(search_quota_charges_the_signer)
+{
+    using namespace modelnet;
+    std::string err;
+    std::vector<unsigned char> own_pk, own_sk, other_pk, other_sk;
+    BOOST_REQUIRE(GenerateMlDsa44(own_pk, own_sk, err));
+    BOOST_REQUIRE(GenerateMlDsa44(other_pk, other_sk, err));
+    SearchIndex idx;
+    const auto own = MakeRec("Own", own_pk, own_sk, 1);
+    BOOST_REQUIRE_MESSAGE(idx.Put(own, 1, err), err);
+
+    // Another key signs records that name this publisher as theirs, as a peer's
+    // search or feed reply can carry them.
+    auto claim = [&](int i) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = 2;
+        r.model_id.data[1] = static_cast<unsigned char>(i);
+        r.canonical_name = "claim" + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.pubkey = other_pk;
+        r.publisher_identity = own.publisher_identity;
+        r.expires_at = 1'000'000;
+        BOOST_REQUIRE(SignSearchRecord(r, Span<const unsigned char>{other_sk.data(), other_sk.size()}, err));
+        return r;
+    };
+    for (int i = 1; i <= 63; ++i) {
+        BOOST_REQUIRE_MESSAGE(idx.Put(claim(i), 1, err, "203.0.113.7:29447"), err);
+    }
+
+    // They count against the key that signed them, not against this publisher.
+    const auto next = MakeRec("Own next", own_pk, own_sk, 3);
+    BOOST_CHECK_MESSAGE(idx.Put(next, 1, err), err);
+    BOOST_CHECK_MESSAGE(idx.Put(claim(64), 1, err, "203.0.113.7:29447"), err);
+    BOOST_CHECK(!idx.Put(claim(65), 1, err, "203.0.113.7:29447"));
+    BOOST_CHECK_EQUAL(err, "publisher spam");
+}
+
 BOOST_AUTO_TEST_CASE(search_unsigned_expiry_quota_and_save)
 {
     using namespace modelnet;

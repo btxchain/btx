@@ -1,0 +1,8 @@
+swarm_form/atomic.cpp
+swarm_form/codec.cpp
+swarm_form/directory.cpp
+swarm_form/discovery.cpp
+swarm_form/election.cpp
+swarm_form/limits.cpp
+swarm_form/membership.cpp
+swarm_form/plane.cpp

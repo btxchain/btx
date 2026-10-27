@@ -15,22 +15,35 @@
 #include <uint256.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <map>
 #include <set>
+#include <system_error>
 #include <utility>
 
 namespace {
 
-const uint256* FindHash(const std::vector<std::pair<int, uint256>>& hashes, int height)
+constexpr std::array<const char*, 7> kMandatory{{
+    "start",
+    "cursor",
+    "filter_ready",
+    "filter_header",
+    "anchor_set",
+    "anchor",
+    "fetched_total",
+}};
+
+bool MandatoryTag(const std::string& tag)
 {
-    for (const auto& item : hashes) {
-        if (item.first == height) return &item.second;
+    for (const char* name : kMandatory) {
+        if (tag == name) return true;
     }
-    return nullptr;
+    return false;
 }
 
 } // namespace
@@ -112,20 +125,40 @@ bool LightWatch::AddDescriptor(const std::string& descriptor, std::string& error
     return true;
 }
 
+std::optional<uint256> LightWatch::HashAt(int height) const
+{
+    const auto it = m_hashes.find(height);
+    if (it == m_hashes.end()) return std::nullopt;
+    return it->second;
+}
+
 bool LightWatch::IsOpen(const uint256& txid, uint32_t n, CAmount& value, bool& coinbase) const
 {
-    bool open = false;
-    for (const Event& event : m_events) {
-        if (event.txid != txid || event.n != n) continue;
-        if (event.spend) {
-            open = false;
-        } else {
-            open = true;
-            value = event.value;
-            coinbase = event.coinbase;
-        }
+    const auto it = m_open.find(std::make_pair(txid, n));
+    if (it == m_open.end()) return false;
+    value = it->second.value;
+    coinbase = it->second.coinbase;
+    return true;
+}
+
+void LightWatch::NoteEvent(const Event& event)
+{
+    const auto key = std::make_pair(event.txid, event.n);
+    if (event.spend) {
+        m_open.erase(key);
+    } else {
+        m_open[key] = OpenOutput{event.value, event.coinbase};
     }
-    return open;
+}
+
+void LightWatch::UndoEvent(const Event& event)
+{
+    const auto key = std::make_pair(event.txid, event.n);
+    if (event.spend) {
+        m_open[key] = OpenOutput{event.value, event.coinbase};
+    } else {
+        m_open.erase(key);
+    }
 }
 
 void LightWatch::NoteFetch(int height, const uint256& block_hash)
@@ -152,7 +185,7 @@ LightWatch::Step LightWatch::ApplyFilter(int height, const uint256& block_hash, 
             error = "BTX_BLOCK_LINK";
             return Step::REJECTED;
         }
-    } else if (const uint256* prev = FindHash(m_hashes, height - 1)) {
+    } else if (const auto prev = HashAt(height - 1)) {
         if (*prev != prev_hash) {
             error = "BTX_BLOCK_LINK";
             return Step::REJECTED;
@@ -189,6 +222,9 @@ LightWatch::Step LightWatch::ApplyFilter(int height, const uint256& block_hash, 
     }
 
     std::vector<Event> added;
+    // Credits discovered in this block, before they are committed. Historical
+    // outputs are answered by the outpoint index.
+    std::map<std::pair<uint256, uint32_t>, OpenOutput> staged;
     if (matched) {
         for (const auto& tx : block->vtx) {
             const bool coinbase = tx->IsCoinBase();
@@ -202,32 +238,35 @@ LightWatch::Step LightWatch::ApplyFilter(int height, const uint256& block_hash, 
                     return Step::REJECTED;
                 }
                 added.push_back(Event{height, txid, i, out.nValue, coinbase, false});
+                staged[std::make_pair(txid, i)] = OpenOutput{out.nValue, coinbase};
             }
         }
         for (const auto& tx : block->vtx) {
             if (tx->IsCoinBase()) continue;
             for (const CTxIn& input : tx->vin) {
                 if (input.prevout.IsNull()) continue;
+                const uint256 prev_txid = input.prevout.hash;
+                const uint32_t prev_n = input.prevout.n;
                 CAmount value{0};
                 bool coinbase{false};
-                bool open = IsOpen(input.prevout.hash, input.prevout.n, value, coinbase);
+                bool open = IsOpen(prev_txid, prev_n, value, coinbase);
                 if (!open) {
-                    for (const Event& event : added) {
-                        if (!event.spend && event.txid == input.prevout.hash && event.n == input.prevout.n) {
-                            open = true;
-                            value = event.value;
-                            coinbase = event.coinbase;
-                        }
+                    const auto created = staged.find(std::make_pair(prev_txid, prev_n));
+                    if (created != staged.end()) {
+                        open = true;
+                        value = created->second.value;
+                        coinbase = created->second.coinbase;
                     }
                 }
                 if (!open) continue;
-                added.push_back(Event{height, input.prevout.hash, input.prevout.n, value, coinbase, true});
+                added.push_back(Event{height, prev_txid, prev_n, value, coinbase, true});
             }
         }
     }
 
+    for (const Event& event : added) NoteEvent(event);
     m_events.insert(m_events.end(), added.begin(), added.end());
-    m_hashes.push_back({height, block_hash});
+    m_hashes.insert_or_assign(height, block_hash);
     m_cursor = height;
     m_filter_header = filter_header;
     m_filter_ready = true;
@@ -241,6 +280,7 @@ void LightWatch::RewindTo(int height)
         m_cursor = m_start - 1;
         m_events.clear();
         m_hashes.clear();
+        m_open.clear();
         m_fetched.clear();
         m_fetched_total = 0;
         m_anchor_set = false;
@@ -248,10 +288,15 @@ void LightWatch::RewindTo(int height)
         m_filter_header.SetNull();
         return;
     }
-    m_cursor = height;
-    std::erase_if(m_events, [&](const Event& event) { return event.height > height; });
-    std::erase_if(m_hashes, [&](const std::pair<int, uint256>& item) { return item.first > height; });
+    // Events are applied in height order, so the disconnected suffix is a
+    // tail. Undo it backwards to put spent outputs back.
+    while (!m_events.empty() && m_events.back().height > height) {
+        UndoEvent(m_events.back());
+        m_events.pop_back();
+    }
+    m_hashes.erase(m_hashes.upper_bound(height), m_hashes.end());
     std::erase_if(m_fetched, [&](const LightWatchFetch& fetch) { return fetch.height > height; });
+    m_cursor = height;
     m_filter_ready = false;
 }
 
@@ -321,11 +366,24 @@ LightWatchAmount LightWatch::BalanceAt(int height) const
     return result;
 }
 
+bool LightWatch::IsCurrentAt(int height, int chain_height,
+                            const std::function<UniValue(const std::string&, const std::vector<std::string>&)>& rpc) const
+{
+    if (height < m_start || height > m_cursor || height > chain_height) return false;
+    const auto stored = HashAt(height);
+    if (!stored) return false;
+    const auto current = uint256::FromHex(rpc("getblockhash", {strprintf("%d", height)}).get_str());
+    return current && *stored == *current;
+}
+
 bool LightWatch::Sync(const std::function<UniValue(const std::string&, const std::vector<std::string>&)>& rpc, std::string& error)
 {
     const int tip = rpc("getblockcount", {}).getInt<int>();
+    // A disconnected suffix has no active-chain hash to query. Drop it before
+    // looking for the common ancestor, including when the tip is below start.
+    if (m_cursor > tip) RewindTo(tip);
     while (m_cursor >= m_start) {
-        const uint256* stored = FindHash(m_hashes, m_cursor);
+        const auto stored = HashAt(m_cursor);
         const auto now = uint256::FromHex(rpc("getblockhash", {strprintf("%d", m_cursor)}).get_str());
         if (!now || !stored || *stored != *now) {
             RewindTo(m_cursor - 1);
@@ -349,7 +407,7 @@ bool LightWatch::Sync(const std::function<UniValue(const std::string&, const std
                     error = "BTX_FILTER_ANCHOR";
                     return false;
                 }
-                if (const uint256* stored = FindHash(m_hashes, parent); stored && *stored != *hash) {
+                if (const auto stored = HashAt(parent); stored && *stored != *hash) {
                     RewindTo(parent - 1);
                     continue;
                 }
@@ -419,7 +477,7 @@ bool LightWatch::Save(const std::string& path, std::string& error) const
         error = "BTX_LIGHTWATCH_IO";
         return false;
     }
-    out << "btx-lightwatch 1\n";
+    out << "btx-lightwatch 2\n";
     out << "start " << m_start << "\n";
     out << "cursor " << m_cursor << "\n";
     out << "filter_ready " << (m_filter_ready ? 1 : 0) << "\n";
@@ -440,108 +498,249 @@ bool LightWatch::Save(const std::string& path, std::string& error) const
     for (const LightWatchFetch& fetch : m_fetched) {
         out << "fetch " << fetch.height << " " << fetch.block_hash.GetHex() << "\n";
     }
+    // A file cut at the end of a line still parses. The trailer counts the
+    // records, so a lost spend or credit is refused instead of read as ready.
+    out << "end " << m_descriptors.size() << " " << m_hashes.size() << " " << m_events.size() << " "
+        << m_fetched.size() << "\n";
     out.close();
     if (!out) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        error = "BTX_LIGHTWATCH_IO";
+        return false;
+    }
+    // A replacement that does not parse is not installed. The previous file
+    // stays, and the partial temp is removed so it cannot be read as a snapshot.
+    {
+        LightWatch check;
+        std::ifstream written(tmp);
+        std::string parsed_error;
+        if (!written || !check.ReadSnapshot(written, parsed_error)) {
+            std::error_code ec;
+            fs::remove(tmp, ec);
+            error = "BTX_LIGHTWATCH_IO";
+            return false;
+        }
+    }
+    // Commit the temp before it replaces the file. Otherwise a power loss
+    // after the rename can leave a short file under the final name.
+    FILE* file = fsbridge::fopen(tmp, "rb+");
+    const bool committed = file != nullptr && FileCommit(file);
+    if (file != nullptr) fclose(file);
+    if (!committed) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
         error = "BTX_LIGHTWATCH_IO";
         return false;
     }
     fs::rename(tmp, dest);
+    DirectoryCommit(dest.parent_path());
     return true;
 }
 
-bool LightWatch::Load(const std::string& path, std::string& error)
+bool LightWatch::AcceptSnapshot(std::string& error)
 {
-    std::ifstream in(fs::PathFromString(path));
-    if (!in) {
+    const auto reject = [&]() {
         error = "BTX_LIGHTWATCH_IO";
         return false;
+    };
+    if (m_start < 0 || m_cursor < -1) return reject();
+    if (m_cursor < m_start) {
+        // Not caught up: the initial cursor is -1, and a rewind below start
+        // lands on start-1. Either way there is no chain suffix to report.
+        if (m_cursor != -1 && m_cursor != m_start - 1) return reject();
+        if (!m_hashes.empty() || !m_events.empty() || !m_fetched.empty() || m_fetched_total != 0) return reject();
+        m_open.clear();
+        return true;
     }
+
+    const int64_t span = static_cast<int64_t>(m_cursor) - static_cast<int64_t>(m_start) + 1;
+    if (span < 1 || static_cast<int64_t>(m_hashes.size()) != span) return reject();
+    int expect = m_start;
+    for (const auto& item : m_hashes) {
+        if (item.first != expect) return reject();
+        ++expect;
+    }
+    if (m_fetched.size() > MAX_FETCHED || m_fetched_total < m_fetched.size()) return reject();
+
+    m_open.clear();
+    int last_event = m_start - 1;
+    for (const Event& event : m_events) {
+        if (event.height < last_event || event.height < m_start || event.height > m_cursor) return reject();
+        if (!m_hashes.count(event.height) || !MoneyRange(event.value)) return reject();
+        last_event = event.height;
+        const auto key = std::make_pair(event.txid, event.n);
+        if (event.spend) {
+            const auto it = m_open.find(key);
+            if (it == m_open.end() || it->second.value != event.value || it->second.coinbase != event.coinbase) return reject();
+            m_open.erase(it);
+        } else if (!m_open.emplace(key, OpenOutput{event.value, event.coinbase}).second) {
+            return reject();
+        }
+    }
+    int last_fetch = m_start - 1;
+    for (const LightWatchFetch& fetch : m_fetched) {
+        if (fetch.height < last_fetch || fetch.height < m_start || fetch.height > m_cursor) return reject();
+        const auto it = m_hashes.find(fetch.height);
+        if (it == m_hashes.end() || it->second != fetch.block_hash) return reject();
+        last_fetch = fetch.height;
+    }
+    return true;
+}
+
+bool LightWatch::ReadSnapshot(std::istream& in, std::string& error)
+{
+    const auto reject = [&]() {
+        error = "BTX_LIGHTWATCH_IO";
+        return false;
+    };
     std::string magic;
     int version{0};
-    in >> magic >> version;
-    if (!in || magic != "btx-lightwatch" || version != 1) {
-        error = "BTX_LIGHTWATCH_IO";
-        return false;
-    }
+    if (!(in >> magic >> version) || magic != "btx-lightwatch" || (version != 1 && version != 2)) return reject();
     *this = LightWatch{};
+
+    for (int index = 0; index < static_cast<int>(kMandatory.size()); ++index) {
+        std::string tag;
+        if (!(in >> tag) || tag != kMandatory[static_cast<std::size_t>(index)]) return reject();
+        switch (index) {
+        case 0:
+            if (!(in >> m_start) || m_start < 0) return reject();
+            break;
+        case 1:
+            if (!(in >> m_cursor) || m_cursor < -1) return reject();
+            break;
+        case 2: {
+            int ready{0};
+            if (!(in >> ready) || (ready != 0 && ready != 1)) return reject();
+            m_filter_ready = ready != 0;
+            break;
+        }
+        case 3: {
+            std::string hex;
+            if (!(in >> hex)) return reject();
+            const auto parsed = uint256::FromHex(hex);
+            if (!parsed) return reject();
+            m_filter_header = *parsed;
+            break;
+        }
+        case 4: {
+            int set{0};
+            if (!(in >> set) || (set != 0 && set != 1)) return reject();
+            m_anchor_set = set != 0;
+            break;
+        }
+        case 5: {
+            std::string hex;
+            if (!(in >> hex)) return reject();
+            const auto parsed = uint256::FromHex(hex);
+            if (!parsed) return reject();
+            m_anchor = *parsed;
+            break;
+        }
+        case 6:
+            if (!(in >> m_fetched_total)) return reject();
+            break;
+        default:
+            return reject();
+        }
+    }
+
+    enum class Phase { DESC, HASH, EVENT, FETCH };
+    Phase phase = Phase::DESC;
+    int last_hash = -1;
+    bool saw_hash = false;
+    bool saw_end = false;
     std::string tag;
     while (in >> tag) {
-        if (tag == "start") {
-            in >> m_start;
-        } else if (tag == "cursor") {
-            in >> m_cursor;
-        } else if (tag == "filter_ready") {
-            int ready{0};
-            in >> ready;
-            m_filter_ready = ready != 0;
-        } else if (tag == "filter_header") {
-            std::string hex;
-            in >> hex;
-            const auto parsed = uint256::FromHex(hex);
-            if (!parsed) {
-                error = "BTX_LIGHTWATCH_IO";
-                return false;
-            }
-            m_filter_header = *parsed;
-        } else if (tag == "anchor_set") {
-            int set{0};
-            in >> set;
-            m_anchor_set = set != 0;
-        } else if (tag == "anchor") {
-            std::string hex;
-            in >> hex;
-            const auto parsed = uint256::FromHex(hex);
-            if (!parsed) {
-                error = "BTX_LIGHTWATCH_IO";
-                return false;
-            }
-            m_anchor = *parsed;
-        } else if (tag == "fetched_total") {
-            in >> m_fetched_total;
-        } else if (tag == "desc") {
+        if (saw_end || MandatoryTag(tag)) return reject();
+        if (tag == "desc") {
+            if (phase != Phase::DESC) return reject();
             std::string descriptor;
-            std::getline(in >> std::ws, descriptor);
-            if (!AddDescriptor(descriptor, error, /*reset_progress=*/false)) return false;
+            if (!std::getline(in >> std::ws, descriptor) || descriptor.empty()) return reject();
+            const std::size_t before = m_descriptors.size();
+            if (!AddDescriptor(descriptor, error, /*reset_progress=*/false)) return reject();
+            if (m_descriptors.size() != before + 1) return reject();
         } else if (tag == "hash") {
+            if (phase == Phase::DESC) phase = Phase::HASH;
+            if (phase != Phase::HASH) return reject();
             int height{0};
             std::string hex;
-            in >> height >> hex;
+            if (!(in >> height >> hex) || height < 0) return reject();
+            if (saw_hash && height <= last_hash) return reject();
             const auto parsed = uint256::FromHex(hex);
-            if (!parsed) {
-                error = "BTX_LIGHTWATCH_IO";
-                return false;
-            }
-            m_hashes.push_back({height, *parsed});
+            if (!parsed || m_hashes.count(height)) return reject();
+            m_hashes.emplace(height, *parsed);
+            last_hash = height;
+            saw_hash = true;
         } else if (tag == "event") {
+            // Spends and credits follow the hash prefix. A record before any
+            // hash, or after a fetch, is out of order.
+            if (phase == Phase::HASH) phase = Phase::EVENT;
+            if (phase != Phase::EVENT) return reject();
             Event event;
             int coinbase{0};
             int spend{0};
             std::string hex;
-            in >> event.height >> hex >> event.n >> event.value >> coinbase >> spend;
+            // Every field must extract. A short line used to survive FromHex
+            // on the txid alone and become a ready zero-value credit.
+            if (!(in >> event.height >> hex >> event.n >> event.value >> coinbase >> spend)) return reject();
+            if ((coinbase != 0 && coinbase != 1) || (spend != 0 && spend != 1)) return reject();
             const auto parsed = uint256::FromHex(hex);
-            if (!parsed) {
-                error = "BTX_LIGHTWATCH_IO";
-                return false;
-            }
+            if (!parsed) return reject();
+            if (!m_events.empty() && event.height < m_events.back().height) return reject();
             event.txid = *parsed;
             event.coinbase = coinbase != 0;
             event.spend = spend != 0;
             m_events.push_back(event);
         } else if (tag == "fetch") {
+            if (phase != Phase::HASH && phase != Phase::EVENT && phase != Phase::FETCH) return reject();
+            phase = Phase::FETCH;
             LightWatchFetch fetch;
             std::string hex;
-            in >> fetch.height >> hex;
+            if (!(in >> fetch.height >> hex) || fetch.height < 0) return reject();
             const auto parsed = uint256::FromHex(hex);
-            if (!parsed) {
-                error = "BTX_LIGHTWATCH_IO";
-                return false;
-            }
+            if (!parsed) return reject();
+            if (!m_fetched.empty() && fetch.height < m_fetched.back().height) return reject();
             fetch.block_hash = *parsed;
             m_fetched.push_back(fetch);
+        } else if (tag == "end" && version == 2) {
+            std::size_t descriptors{0};
+            std::size_t hashes{0};
+            std::size_t events{0};
+            std::size_t fetched{0};
+            if (!(in >> descriptors >> hashes >> events >> fetched)) return reject();
+            if (descriptors != m_descriptors.size() || hashes != m_hashes.size() || events != m_events.size() ||
+                fetched != m_fetched.size()) {
+                return reject();
+            }
+            saw_end = true;
         } else {
-            error = "BTX_LIGHTWATCH_IO";
-            return false;
+            return reject();
         }
     }
+    if (in.bad() || !in.eof()) return reject();
+    // Version 1 had no trailer. It is still read, and the next Save writes version 2.
+    if (version == 2 && !saw_end) return reject();
+    return AcceptSnapshot(error);
+}
+
+bool LightWatch::Load(const std::string& path, std::string& error)
+{
+    // Save writes path.tmp and renames it over path only after the temp parses.
+    // A crash in between leaves the previous file intact and a torn temp beside
+    // it. The temp is never a snapshot. A damaged primary is not adopted, so a
+    // caller that already holds a complete snapshot keeps it.
+    const fs::path primary = fs::PathFromString(path);
+    std::ifstream in(primary);
+    if (!in) {
+        error = "BTX_LIGHTWATCH_IO";
+        return false;
+    }
+    LightWatch loaded;
+    if (!loaded.ReadSnapshot(in, error)) {
+        error = "BTX_LIGHTWATCH_IO";
+        return false;
+    }
+    *this = std::move(loaded);
     return true;
 }

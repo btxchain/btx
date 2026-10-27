@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "btx-swarm-runtime"
+version = "0.1.0"
+description = "BTX 0.35 swarm, model evolution and bounded economy runtime"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = ["aiohttp>=3.13.3,<4", "cryptography>=46.0.4,<47", "safetensors>=0.7.0,<0.8", "numpy>=1.24,<3"]
+
+[project.optional-dependencies]
+training = ["torch>=2.10,<2.11"]
+test = ["pytest>=8,<10", "pytest-asyncio>=0.23,<2"]
+
+[project.scripts]
+btx-swarm = "btxmesh.cli:main"
+btx-swarmd = "btxmesh.daemon:main"
+btx-paynetd = "btxmesh.paynet:main"
+
+[tool.setuptools.packages.find]
+include = ["btxmesh*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

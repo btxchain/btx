@@ -157,8 +157,8 @@ BOOST_AUTO_TEST_CASE(headless_storage_needs_consent)
     fs::create_directories(path.parent_path());
     fs::remove(path);
 
-    // No consent: the "auto" default is held at 0, an explicit 0 stays 0.
-    BOOST_CHECK_EQUAL(modelnet::ResolveHeadlessStorageArg("auto", false, path), "0");
+    // New nodes get a bounded starter cache; an explicit 0 stays 0.
+    BOOST_CHECK_EQUAL(modelnet::ResolveHeadlessStorageArg("auto", false, path), "1GiB");
     BOOST_CHECK_EQUAL(modelnet::ResolveHeadlessStorageArg("80GiB", false, path), "0");
     BOOST_CHECK_EQUAL(modelnet::ResolveHeadlessStorageArg("0", false, path), "0");
 
@@ -170,7 +170,7 @@ BOOST_AUTO_TEST_CASE(headless_storage_needs_consent)
     env.Set("0");
     BOOST_CHECK_EQUAL(modelnet::ResolveHeadlessStorageArg("auto", false, path), "0");
     env.Set("80GiB");
-    BOOST_CHECK_EQUAL(modelnet::ResolveHeadlessStorageArg("auto", false, path), "auto");
+    BOOST_CHECK_EQUAL(modelnet::ResolveHeadlessStorageArg("auto", false, path), "85899345920");
     env.Unset();
 
     // A consent file that disallows payload storage does not unlock it.

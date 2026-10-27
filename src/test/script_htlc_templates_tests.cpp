@@ -307,7 +307,7 @@ BOOST_AUTO_TEST_CASE(htlc_sha256_leaf_rejects_other_preimage_length)
     BOOST_CHECK_EQUAL(serror, SCRIPT_ERR_EQUALVERIFY);
 }
 
-BOOST_AUTO_TEST_CASE(unpinned_htlc_leaves_accept_non32_preimage_under_flag)
+BOOST_AUTO_TEST_CASE(htlc_claim_leaves_enforce_32_byte_preimage_under_flag)
 {
     CPQKey oracle_key;
     oracle_key.MakeNewKey(PQAlgorithm::ML_DSA_44);
@@ -336,15 +336,15 @@ BOOST_AUTO_TEST_CASE(unpinned_htlc_leaves_accept_non32_preimage_under_flag)
     const std::vector<unsigned char> preimage64(64, 0x22);
     const std::vector<unsigned char> preimage20(20, 0x33);
 
-    // Legacy SHA-256: no OP_SIZE in the committed script. A matching preimage
-    // of any length is consensus-valid with the 32-byte flag set.
+    // Legacy SHA-256 has no OP_SIZE in the committed script, but the
+    // activated flag also requires 32-byte preimages for this template.
     const std::vector<unsigned char> legacy64 = BuildP2MRHTLCSha256LegacyLeaf(
         Sha256Bytes(preimage64), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
     BOOST_REQUIRE(!legacy64.empty());
-    BOOST_CHECK(!P2MRClaimLeafPinsPreimageLength(legacy64));
+    BOOST_CHECK(P2MRClaimLeafPinsPreimageLength(legacy64));
     const auto legacy_pinned = spend(legacy64, preimage64, pinned_flags);
-    BOOST_CHECK(legacy_pinned.first);
-    BOOST_CHECK_EQUAL(legacy_pinned.second, SCRIPT_ERR_OK);
+    BOOST_CHECK(!legacy_pinned.first);
+    BOOST_CHECK_EQUAL(legacy_pinned.second, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
     const auto legacy_base = spend(legacy64, preimage64, base_flags);
     BOOST_CHECK(legacy_base.first);
     BOOST_CHECK_EQUAL(legacy_base.second, SCRIPT_ERR_OK);
@@ -355,24 +355,36 @@ BOOST_AUTO_TEST_CASE(unpinned_htlc_leaves_accept_non32_preimage_under_flag)
     BOOST_CHECK(legacy32_ok.first);
     BOOST_CHECK_EQUAL(legacy32_ok.second, SCRIPT_ERR_OK);
 
-    // HASH160 htlc_tx: same rule. The digest matches; the length is not pinned.
+    // HASH160 htlc_tx follows the same activated length rule.
     const std::vector<unsigned char> tx20 = BuildP2MRHTLCTxLeaf(
         Hash160Bytes(preimage20), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
     BOOST_REQUIRE(!tx20.empty());
-    BOOST_CHECK(!P2MRClaimLeafPinsPreimageLength(tx20));
+    BOOST_CHECK(P2MRClaimLeafPinsPreimageLength(tx20));
     const auto tx_pinned = spend(tx20, preimage20, pinned_flags);
-    BOOST_CHECK(tx_pinned.first);
-    BOOST_CHECK_EQUAL(tx_pinned.second, SCRIPT_ERR_OK);
+    BOOST_CHECK(!tx_pinned.first);
+    BOOST_CHECK_EQUAL(tx_pinned.second, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
+    const auto tx20_base = spend(tx20, preimage20, base_flags);
+    BOOST_CHECK(tx20_base.first);
+    BOOST_CHECK_EQUAL(tx20_base.second, SCRIPT_ERR_OK);
 
     const std::vector<unsigned char> tx64 = BuildP2MRHTLCTxLeaf(
         Hash160Bytes(preimage64), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
     const auto tx64_pinned = spend(tx64, preimage64, pinned_flags);
-    BOOST_CHECK(tx64_pinned.first);
-    BOOST_CHECK_EQUAL(tx64_pinned.second, SCRIPT_ERR_OK);
+    BOOST_CHECK(!tx64_pinned.first);
+    BOOST_CHECK_EQUAL(tx64_pinned.second, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
+    const auto tx64_base = spend(tx64, preimage64, base_flags);
+    BOOST_CHECK(tx64_base.first);
+    BOOST_CHECK_EQUAL(tx64_base.second, SCRIPT_ERR_OK);
+
+    const std::vector<unsigned char> tx32 = BuildP2MRHTLCTxLeaf(
+        Hash160Bytes(preimage32), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    const auto tx32_ok = spend(tx32, preimage32, pinned_flags);
+    BOOST_CHECK(tx32_ok.first);
+    BOOST_CHECK_EQUAL(tx32_ok.second, SCRIPT_ERR_OK);
 
     // New htlc_sha256 leaf embeds OP_SIZE 32 OP_EQUALVERIFY. A matching
-    // non-32-byte preimage fails under the flag (defense in depth for this
-    // format only) and without it (the committed script).
+    // non-32-byte preimage fails under the flag (defense in depth) and
+    // without it (the committed script).
     const std::vector<unsigned char> pinned_leaf = BuildP2MRHTLCSha256Leaf(
         Sha256Bytes(preimage64), PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
     BOOST_REQUIRE(!pinned_leaf.empty());

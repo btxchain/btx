@@ -1,0 +1,7 @@
+swarm_nicheslots/names.cpp
+swarm_nicheslots/table.cpp
+swarm_nicheslots/open.cpp
+swarm_nicheslots/spend.cpp
+swarm_nicheslots/move.cpp
+swarm_nicheslots/quiet.cpp
+swarm_nicheslots/nicheslots.cpp
