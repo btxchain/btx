@@ -123,6 +123,54 @@ std::string InstallPlan(Fixture& f,const std::string& gate="adversarial") {
     const auto id=PlanId(plan);WritePrivate(f.root/"probe-input","probe",true);auto entry=Object();entry.pushKV("plan",plan);entry.pushKV("executable",f.probe.string());entry.pushKV("input_file",(f.root/"probe-input").string());auto plans=f.local["evaluation_plans"];plans.pushKV(id,entry);f.local.pushKV("evaluation_plans",plans);auto runtime=Object();runtime.pushKV("canary_package",id);auto runtimes=f.local["runtimes"];runtimes.pushKV(f.runtime,runtime);f.local.pushKV("runtimes",runtimes);f.SaveLocal();return id;
 }
 Json Control(Fixture& f){auto b=Common(f.realm,1,NowMs());b.pushKV("operation","resume");b.pushKV("nonce",Hex(RandomBytes(32)));return Signed("control",b,f.owner);}
+// The coordinator (f.db) runs a 2 s campaign. Evaluator bob then syncs from it
+// while advertised records cannot be imported on bob's node:
+// - "expired-record": bob joins after round 0 expired;
+// - "revoked-record": bob already holds a revocation of round 0;
+// - "revoked-signer": bob already holds a revocation of the publisher key, so
+//   the composition is refused;
+// - "old-epoch-records": records from before a policy epoch bump;
+// - "many-expired-records": bob joins after 120 rounds expired, and must still
+//   get 8 compositions exported after them and stop wanting the expired ones.
+// Returns an empty string when bob still receives the new records.
+std::string LateEvaluatorMissesNewRecords(Fixture& f,const std::string& mode) {
+    std::vector<std::string> live;
+    if(mode=="many-expired-records")for(int k=0;k<8;++k)live.push_back(f.MakeComposition("live"+std::to_string(k)));
+    const int64_t t0=NowMs()+1000;
+    auto cb=Common(f.realm,1,t0,300000);cb.pushKV("composition",f.composition);cb.pushKV("package",Hash("late package"));cb.pushKV("suite",Hash("suite adversarial"));cb.pushKV("sample_commitment",Hash("samples adversarial"));cb.pushKV("gate","adversarial");cb.pushKV("interval_ms",static_cast<uint64_t>(2000));cb.pushKV("max_rounds",static_cast<uint64_t>(1000));
+    const auto campaign_record=Signed("campaign",cb,f.owner);ImportRecord(f.db,f.policy,campaign_record,t0);const auto campaign=RecordId(campaign_record);MeshExport(f.db,campaign,t0);
+    auto worker=f.local;auto settings=Object();settings.pushKV("enabled",true);settings.pushKV("max_evidence_age_ms",static_cast<uint64_t>(180000));settings.pushKV("allowed_campaigns",Strings({campaign}));
+    auto owner_id=Object();owner_id.pushKV("public_key",Hex(f.owner.public_key));owner_id.pushKV("secret_file",(f.root/"coordinator.key").string());WritePrivate(f.root/"coordinator.key",Hex(f.owner.secret_key));
+    f.local.pushKV("host","owner-host");f.local.pushKV("identity",owner_id);f.local.pushKV("continuous_security",settings);f.SaveLocal();
+    MeshTick(f.db,t0);
+    auto round=[&](uint64_t n){auto r=f.db.Query("SELECT challenge FROM mesh_rounds WHERE campaign=? AND round=?",{campaign,std::to_string(n)});Check(r.size()==1,"round not scheduled");return r[0][0];};
+    const auto first=round(0);
+    for(int k=1;k<120&&!live.empty();++k)MeshTick(f.db,t0+2000*k);
+    Json epoch2;
+    if(mode=="old-epoch-records"){auto b=f.policy_record["body"];b.pushKV("epoch",2);b.pushKV("issued_ms",t0+300);b.pushKV("expires_ms",t0+3600000);epoch2=Signed("policy",b,f.owner);InstallPolicy(f.db,epoch2,t0+300);}
+    const int64_t join=mode=="expired-record"?t0+5000:live.empty()?t0+500:t0+245000;
+    const auto path=f.temp.root/"late-evaluator";EnsurePrivateDirectory(path);WritePrivate(path/"root-pins.json",ReadFile(f.root/"root-pins.json"));
+    Database late(path);InstallPolicy(late,f.policy_record,join-100);if(epoch2.isObject())InstallPolicy(late,epoch2,join-100);
+    auto identity=Object();identity.pushKV("public_key",Hex(f.bob.public_key));identity.pushKV("secret_file",(path/"identity.key").string());WritePrivate(path/"identity.key",Hex(f.bob.secret_key));
+    worker.pushKV("host","host-b");worker.pushKV("identity",identity);worker.pushKV("continuous_security",settings);WritePrivate(path/"local.json",Canonical(worker));
+    const auto blocked=mode=="revoked-signer"?f.composition:first;
+    if(mode=="revoked-record"||mode=="revoked-signer"){auto b=Common(f.realm,1,join-50);b.pushKV("subject",mode=="revoked-signer"?KeyId(f.publisher.public_key):first);b.pushKV("sequence",1);b.pushKV("reason","test incident");ImportRecord(late,Policy::Load(late,join-50),Signed("revocation",b,f.owner,&f.second),join-50);}
+    const auto coordinator=KeyId(f.owner.public_key);std::string error;
+    auto sync=[&](int64_t t){auto reply=MeshHandle(f.db,MeshRequest(late,coordinator,t),Hash("pin-b"),t);try{MeshAccept(late,reply,Hash("pin-owner"),t);}catch(const Error& e){error=e.code;}};
+    for(const auto& c:live)MeshExport(f.db,c,join-50);
+    sync(join);sync(join+100);
+    if(!live.empty()){
+        for(int k=1;k<=40;++k)sync(join+1100*k);
+        size_t held=0;for(const auto& c:live)held+=late.Has(c);
+        Check(!late.Has(blocked),"unimportable record stored");
+        const auto wants=late.Query("SELECT count(*) FROM mesh_wants")[0][0]; // refused ids must not be wanted again
+        return held==live.size()&&wants=="0"?std::string():"received "+std::to_string(held)+" of 8 new records, "+wants+" wants left; last MeshAccept error "+error;
+    }
+    MeshTick(f.db,t0+6000);const auto later=round(3);
+    for(int64_t t:{6100,6200,6300})sync(t0+t);
+    Check(!late.Has(blocked),"unimportable record stored");
+    return late.Has(later)?std::string():"later round not received; last MeshAccept error "+error;
+}
 }
 int main(int argc,char** argv) {
     fs::path probe;fs::path report;
@@ -218,6 +266,7 @@ int main(int argc,char** argv) {
         MeshAccept(remote,reply,Hash("pin-a"),NowMs());
         Reject([&]{MeshAccept(remote,reply,Hash("pin-a"),NowMs());},"SEC_MESH_REPLAY");
     });
+    for(const std::string mode:{"expired-record","revoked-record","revoked-signer","old-epoch-records","many-expired-records"})h.Test("mesh-sync-continues-past-"+mode,[&]{Fixture f;const auto r=LateEvaluatorMissesNewRecords(f,mode);Check(r.empty(),r.c_str());});
     h.Test("mesh-three-enrolled-hosts-continuous-security-lifecycle",[&]{
         std::string stage="begin";
         try {
