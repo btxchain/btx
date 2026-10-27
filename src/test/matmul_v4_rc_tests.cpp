@@ -1969,7 +1969,8 @@ BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_cpu_confirms_invalid_not_quarantined
     BOOST_CHECK(!rejected.device_mismatch_retried);
     BOOST_CHECK_EQUAL(rejected.digest, honest_digest);
     BOOST_CHECK_EQUAL(rejected.cpu_gemm_calls, 0U);
-    BOOST_CHECK(!rejected.fully_accelerated);
+    // No portable CPU replay ran (5be6edd6): the device did every GEMM.
+    BOOST_CHECK(rejected.fully_accelerated);
     BOOST_CHECK_EQUAL(rejected.provider_attempts, 1U);
     BOOST_CHECK_EQUAL(rejected.independent_provider_attempts, 0U);
     BOOST_CHECK(!rejected.provider_quarantined);
@@ -2550,7 +2551,8 @@ BOOST_AUTO_TEST_CASE(rc_strict_faulty_device_cpu_recovers_honest_header)
     BOOST_CHECK(!recovered.device_mismatch_retried);
     BOOST_CHECK(!recovered.device_mismatch_confirmed);
     BOOST_CHECK_EQUAL(recovered.cpu_gemm_calls, 0U);
-    BOOST_CHECK(!recovered.fully_accelerated);
+    // No portable CPU replay ran (5be6edd6): the device did every GEMM.
+    BOOST_CHECK(recovered.fully_accelerated);
     BOOST_CHECK(!recovered.provider_quarantined);
     BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
     rc::ClearRCExactReplayAlternateProviders();
@@ -2559,6 +2561,9 @@ BOOST_AUTO_TEST_CASE(rc_strict_faulty_device_cpu_recovers_honest_header)
 
 BOOST_AUTO_TEST_CASE(rc_device_mismatch_auto_fallback_remains_diagnostic_only)
 {
+    // The inline portable retry runs only with -matmulrcconfirmcpu=1, which
+    // is off by default since fa878338 (the fixture applies that default).
+    ConfirmationPolicyGuard confirmation{true};
     auto header{MakeRCHeader(0x4350555245545259)};
     const auto params{rc::MakeToyRCEpisodeParams()};
     const uint256 honest_digest{
