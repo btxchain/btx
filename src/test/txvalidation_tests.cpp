@@ -521,109 +521,13 @@ void AttachCoinbaseFeeCarrier(TestChain100Setup& setup,
 
 void ReplaceV2SendWitness(CMutableTransaction& tx, const v2proof::V2SendWitness& witness);
 
-void WriteU32LEForTest(std::vector<uint8_t>& out, uint32_t value)
-{
-    out.push_back(static_cast<uint8_t>(value));
-    out.push_back(static_cast<uint8_t>(value >> 8));
-    out.push_back(static_cast<uint8_t>(value >> 16));
-    out.push_back(static_cast<uint8_t>(value >> 24));
-}
-
-class TestBitWriter
-{
-private:
-    std::vector<uint8_t>& m_out;
-    uint8_t m_current{0};
-    int m_bits_used{0};
-
-public:
-    explicit TestBitWriter(std::vector<uint8_t>& out) : m_out(out) {}
-
-    void WriteBit(bool bit)
-    {
-        if (bit) {
-            m_current |= static_cast<uint8_t>(1u << m_bits_used);
-        }
-        ++m_bits_used;
-        if (m_bits_used == 8) {
-            m_out.push_back(m_current);
-            m_current = 0;
-            m_bits_used = 0;
-        }
-    }
-
-    void Write(uint32_t value, uint8_t bits)
-    {
-        for (uint8_t bit = 0; bit < bits; ++bit) {
-            WriteBit((value >> bit) & 1U);
-        }
-    }
-
-    void Flush()
-    {
-        if (m_bits_used != 0) {
-            m_out.push_back(m_current);
-            m_current = 0;
-            m_bits_used = 0;
-        }
-    }
-};
-
-int64_t CenterCoeffForTest(int64_t coeff)
-{
-    coeff = smile2::mod_q(coeff);
-    return coeff > smile2::Q / 2 ? coeff - smile2::Q : coeff;
-}
-
-uint8_t ComputeBitsNeededForCenteredRangeForTest(int64_t max_abs)
-{
-    const uint64_t range = static_cast<uint64_t>(2 * max_abs + 1);
-    uint8_t bits_needed = 1;
-    while (bits_needed < 32 && (1ULL << bits_needed) < range) {
-        ++bits_needed;
-    }
-    return bits_needed;
-}
-
-int64_t ComputeCenteredMaxAbsForTest(const smile2::SmilePolyVec& polys)
-{
-    int64_t max_abs = 0;
-    for (const auto& poly : polys) {
-        for (size_t i = 0; i < smile2::POLY_DEGREE; ++i) {
-            const int64_t centered = CenterCoeffForTest(poly.coeffs[i]);
-            const int64_t abs_centered = centered < 0 ? -centered : centered;
-            max_abs = std::max(max_abs, abs_centered);
-        }
-    }
-    return max_abs;
-}
-
-std::vector<uint8_t> SerializeNonCanonicalCenteredPolyVecFixedForTest(
-    const smile2::SmilePolyVec& polys)
-{
-    std::vector<uint8_t> out;
-    if (polys.empty()) {
-        return out;
-    }
-
-    const int64_t canonical_max_abs = ComputeCenteredMaxAbsForTest(polys);
-    const int64_t encoded_max_abs = canonical_max_abs + 1;
-    WriteU32LEForTest(out, static_cast<uint32_t>(encoded_max_abs));
-
-    const uint8_t bits_needed = ComputeBitsNeededForCenteredRangeForTest(encoded_max_abs);
-    out.push_back(bits_needed);
-
-    TestBitWriter bw(out);
-    for (const auto& poly : polys) {
-        for (size_t i = 0; i < smile2::POLY_DEGREE; ++i) {
-            const int64_t centered = CenterCoeffForTest(poly.coeffs[i]);
-            const uint32_t encoded = static_cast<uint32_t>(centered + encoded_max_abs);
-            bw.Write(encoded, bits_needed);
-        }
-    }
-    bw.Flush();
-    return out;
-}
+// Wire tag of the per-polynomial centered Gaussian codec
+// (kGaussianCodecPolywiseCentered in shielded/smile2/serialize.cpp). The
+// SMALLEST policy may emit it; CANONICAL_NO_RICE always writes the vector-wide
+// centered codec. Since cd4301fc the centered decoders refuse a header that is
+// not the exact max_abs, so an inflated header is malformed at every height
+// and cannot stand in for a parseable non-canonical encoding.
+constexpr uint8_t kPolywiseCenteredGaussianCodecForTest{2};
 
 std::vector<uint8_t> BuildNonCanonicalSmileProofBytes(const std::vector<uint8_t>& canonical_bytes,
                                                       size_t num_inputs,
@@ -632,31 +536,31 @@ std::vector<uint8_t> BuildNonCanonicalSmileProofBytes(const std::vector<uint8_t>
     smile2::SmileCTProof proof;
     auto parse_err = smile2::ParseSmile2Proof(canonical_bytes, num_inputs, num_outputs, proof);
     BOOST_REQUIRE_MESSAGE(!parse_err.has_value(), parse_err.value_or("ok"));
+    BOOST_REQUIRE(!proof.z.empty());
 
-    std::vector<uint8_t> canonical_wire_prefix;
-    if (canonical_bytes.size() >= 5 &&
-        canonical_bytes[0] == 0xFF &&
-        canonical_bytes[1] == 0xFF &&
-        canonical_bytes[2] == 0xFF &&
-        canonical_bytes[3] == 0xFF) {
-        canonical_wire_prefix.assign(canonical_bytes.begin(), canonical_bytes.begin() + 5);
+    // Re-encode the response vector z with the per-polynomial codec. Every
+    // decoded coefficient stays the same, so only the wire bytes change.
+    std::vector<uint8_t> canonical_z;
+    smile2::SerializeGaussianVecFixed(proof.z, canonical_z, smile2::SmileProofCodecPolicy::CANONICAL_NO_RICE);
+    std::vector<uint8_t> polywise_z{kPolywiseCenteredGaussianCodecForTest};
+    for (const auto& poly : proof.z) {
+        smile2::SerializeCenteredPolyExact(poly, polywise_z);
     }
+    BOOST_REQUIRE(!canonical_z.empty());
+    BOOST_REQUIRE(polywise_z != canonical_z);
 
-    std::vector<uint8_t> canonical_prefix;
-    smile2::SerializeCenteredPolyVecFixed(proof.aux_commitment.t0, canonical_prefix);
-    const size_t body_offset = canonical_wire_prefix.size();
-    BOOST_REQUIRE(!canonical_prefix.empty());
-    BOOST_REQUIRE_GE(canonical_bytes.size(), body_offset + canonical_prefix.size());
+    const auto z_at = std::search(canonical_bytes.begin(), canonical_bytes.end(),
+                                  canonical_z.begin(), canonical_z.end());
+    BOOST_REQUIRE(z_at != canonical_bytes.end());
+    BOOST_REQUIRE(std::search(std::next(z_at), canonical_bytes.end(),
+                              canonical_z.begin(), canonical_z.end()) == canonical_bytes.end());
 
-    const auto noncanonical_prefix =
-        SerializeNonCanonicalCenteredPolyVecFixedForTest(proof.aux_commitment.t0);
-    BOOST_REQUIRE(noncanonical_prefix != canonical_prefix);
-
-    std::vector<uint8_t> mutated = canonical_wire_prefix;
-    mutated.insert(mutated.end(), noncanonical_prefix.begin(), noncanonical_prefix.end());
+    std::vector<uint8_t> mutated(canonical_bytes.begin(), z_at);
+    mutated.insert(mutated.end(), polywise_z.begin(), polywise_z.end());
     mutated.insert(mutated.end(),
-                   canonical_bytes.begin() + static_cast<std::ptrdiff_t>(body_offset + canonical_prefix.size()),
+                   z_at + static_cast<std::ptrdiff_t>(canonical_z.size()),
                    canonical_bytes.end());
+    BOOST_REQUIRE(mutated != canonical_bytes);
 
     smile2::SmileCTProof reparsed;
     parse_err = smile2::ParseSmile2Proof(mutated, num_inputs, num_outputs, reparsed);

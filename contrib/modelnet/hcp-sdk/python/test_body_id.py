@@ -20,9 +20,8 @@ if str(HERE) not in sys.path:
 
 from btx_hcp import body_id, canonical_body  # noqa: E402
 
-EXAMPLES_DIR = Path(
-    "/home/administrator/btx-0.34.7-private/src/modelnet/hcp/examples"
-)
+# Same tree as typescript/src/body_id.test.ts: contrib/modelnet/hcp-sdk/python -> repo root.
+EXAMPLES_DIR = HERE.parents[3] / "src" / "modelnet" / "hcp" / "examples"
 
 
 def main() -> int:

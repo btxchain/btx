@@ -776,6 +776,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot_candidate_lifecycle,
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_tip_mismatch_missing_history_preserves_persisted_shielded_record,
                         SnapshotTestSetup)
 {
+    if (SkipUnlessExtendedSnapshotTests()) return;
     auto [background_chainstate_ptr, snapshot_chainstate_ptr] = this->SetupSnapshot();
     Chainstate& background_chainstate = *Assert(background_chainstate_ptr);
     BOOST_REQUIRE(snapshot_chainstate_ptr != nullptr);
@@ -2775,8 +2776,11 @@ BOOST_FIXTURE_TEST_CASE(
     }
 }
 
+//! 4547ecb3 removed the startup reconsideration below a retuned pool-credit
+//! gate: a BLOCK_FAILED_* mark can record real invalidity. The mark survives a
+//! restart, and an operator reconsiderblock still reconnects the block.
 BOOST_FIXTURE_TEST_CASE(
-    chainstatemanager_startup_reconsiders_failed_pre_pool_credit_disable_shielded_block_after_consensus_retune,
+    chainstatemanager_startup_keeps_failed_pre_pool_credit_disable_shielded_block_until_reconsidered,
     PoolCreditRetunePersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -2888,14 +2892,31 @@ BOOST_FIXTURE_TEST_CASE(
 
     {
         LOCK(::cs_main);
-        CBlockIndex* reconsidered_index = chainman_restarted.m_blockman.LookupBlockIndex(invalid_hash);
-        BOOST_REQUIRE(reconsidered_index != nullptr);
-        BOOST_CHECK_EQUAL(reconsidered_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        CBlockIndex* kept_index = chainman_restarted.m_blockman.LookupBlockIndex(invalid_hash);
+        BOOST_REQUIRE(kept_index != nullptr);
+        BOOST_CHECK(kept_index->nStatus & BLOCK_FAILED_VALID);
         BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
         BOOST_CHECK_NE(chainman_restarted.ActiveTip()->GetBlockHash(), invalid_hash);
     }
 
     BlockValidationState state;
+    BOOST_REQUIRE(chainman_restarted.ActiveChainstate().ActivateBestChain(state));
+    BOOST_CHECK(state.IsValid());
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK_NE(chainman_restarted.ActiveTip()->GetBlockHash(), invalid_hash);
+    }
+
+    // The reconsiderblock path (rpc/blockchain.cpp ReconsiderBlock).
+    {
+        LOCK(::cs_main);
+        CBlockIndex* reconsidered_index = chainman_restarted.m_blockman.LookupBlockIndex(invalid_hash);
+        BOOST_REQUIRE(reconsidered_index != nullptr);
+        chainman_restarted.ActiveChainstate().ResetBlockFailureFlags(reconsidered_index);
+        chainman_restarted.RecalculateBestHeader();
+    }
+    state = BlockValidationState{};
     BOOST_REQUIRE(chainman_restarted.ActiveChainstate().ActivateBestChain(state));
     BOOST_CHECK(state.IsValid());
 
@@ -4619,7 +4640,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_refuses_genesis_rebuild_wipe_when_ahea
         pruned->nDataPos = 0;
         pruned->nFile = -1;
 
-        ASSERT_DEBUG_LOG("Refusing to wipe shielded_state");
+        ASSERT_DEBUG_LOG("refusing destructive full shielded rebuild");
         BOOST_CHECK(!restarted.EnsureShieldedStateInitialized());
         BOOST_CHECK(!restarted.HasShieldedState());
 

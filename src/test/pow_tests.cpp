@@ -2574,7 +2574,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_CLOSE(params->TxData().dTxRate, 0.015165177474, 0.000001);
 
     const auto& checkpoints = params->Checkpoints().mapCheckpoints;
-    BOOST_REQUIRE_EQUAL(checkpoints.size(), 7U);
+    BOOST_REQUIRE_EQUAL(checkpoints.size(), 8U);
     const auto it_0 = checkpoints.find(0);
     BOOST_REQUIRE(it_0 != checkpoints.end());
     BOOST_CHECK_EQUAL(
@@ -2610,7 +2610,12 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_EQUAL(
         it_219000->second.GetHex(),
         "dc51220bc7e5db96e29df9d817ae6179245d33eb8adcaaff765cfec83fdb87c3");
-    BOOST_CHECK_EQUAL(std::prev(checkpoints.end())->first, 219000);
+    const auto it_228000 = checkpoints.find(228000);
+    BOOST_REQUIRE(it_228000 != checkpoints.end());
+    BOOST_CHECK_EQUAL(
+        it_228000->second.GetHex(),
+        "0104909051a017c9045faf7382627e89c5b83c4bbd3c1270706d5d2ef2ab0c87");
+    BOOST_CHECK_EQUAL(std::prev(checkpoints.end())->first, 228000);
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -2917,13 +2922,24 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_219000->blockhash.GetHex(),
         "dc51220bc7e5db96e29df9d817ae6179245d33eb8adcaaff765cfec83fdb87c3");
 
+    const auto assumeutxo_228000 = params->AssumeutxoForHeight(228000);
+    BOOST_REQUIRE(assumeutxo_228000.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_228000->height, 228000);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_228000->hash_serialized.ToString(),
+        "c53b264565f1fdafdcb4de605c90d9a09ca2bdb484494688acd09e8738fec398");
+    BOOST_CHECK_EQUAL(assumeutxo_228000->m_chain_tx_count, 330421U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_228000->blockhash.GetHex(),
+        "0104909051a017c9045faf7382627e89c5b83c4bbd3c1270706d5d2ef2ab0c87");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 28U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 29U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 219000);
-    // Checkpoints and assumeutxo both tail at 219000. 199299/199300 snapshots
-    // stay withdrawn (issue 127).
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 228000);
+    // Checkpoints and assumeutxo both tail at 228000 (90dc515d). 199299/199300
+    // snapshots stay withdrawn (issue 127).
 }
 
 BOOST_AUTO_TEST_CASE(HasValidProofOfWork_matmul_phase1_checks)
