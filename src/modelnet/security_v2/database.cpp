@@ -47,7 +47,9 @@ namespace modelnet::security {
             sqlite3_busy_timeout(m_db,1500);
             sqlite3_limit(m_db,SQLITE_LIMIT_LENGTH,4*MAX_RECORD);
             sqlite3_limit(m_db,SQLITE_LIMIT_SQL_LENGTH,64*1024);
-            sqlite3_enable_load_extension(m_db,0);
+#ifdef SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION
+            sqlite3_db_config(m_db,SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION,0,nullptr);
+#endif
 #ifdef SQLITE_DBCONFIG_DEFENSIVE
             sqlite3_db_config(m_db,SQLITE_DBCONFIG_DEFENSIVE,1,nullptr);
 #endif
