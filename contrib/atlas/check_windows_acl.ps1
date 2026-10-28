@@ -1,4 +1,5 @@
-# Read-only ACL check. Prints icacls output and exits.
+# Read-only ACL check. Prints icacls output, then any write grant to Everyone, Users or
+# Authenticated Users, and exits.
 # Never grants, denies, saves, restores, or rewrites the ACL.
 param(
     [Parameter(Mandatory = $true, Position = 0)]
@@ -17,42 +18,6 @@ if (-not (Test-Path -LiteralPath $Path)) {
 
 $target = (Get-Item -LiteralPath $Path).FullName
 
-function Test-RightsGrantWrite {
-    param([string]$Rights)
-    $deny = $false
-    $write = $false
-    $writeTokens = @(
-        'F', 'M', 'W', 'GA', 'GW', 'WD', 'AD', 'WEA', 'WA', 'WDAC', 'WO'
-    )
-    foreach ($match in [regex]::Matches($Rights, '\(([^)]*)\)')) {
-        $inner = $match.Groups[1].Value.Trim()
-        if ($inner -match '^(?i:DENY)$') {
-            $deny = $true
-            continue
-        }
-        if ($inner -match '^(?i:OI|CI|IO|I|NP|GRANT)$') {
-            continue
-        }
-        foreach ($token in ($inner -split ',')) {
-            $name = $token.Trim().ToUpperInvariant()
-            if ([string]::IsNullOrEmpty($name)) {
-                continue
-            }
-            if ($writeTokens -contains $name) {
-                $write = $true
-                continue
-            }
-            if ($name -match '^[NFMRXWD]+$' -and $name -match '[FMW]') {
-                $write = $true
-            }
-        }
-    }
-    if ($deny) {
-        return $false
-    }
-    return $write
-}
-
 $lines = @(& icacls.exe $target 2>&1 | ForEach-Object { "$_" })
 $icaclsExit = $LASTEXITCODE
 foreach ($line in $lines) {
@@ -63,28 +28,36 @@ if ($lines.Count -eq 0 -or $icaclsExit -ne 0) {
     exit 1
 }
 
-$acePattern = '(?i)(?:^|\s)(?<id>Everyone|BUILTIN\\Users|(?:[\p{L}0-9 ._-]+\\)?Authenticated Users|(?:[\p{L}0-9 ._-]+\\)?Jeder|(?:[\p{L}0-9 ._-]+\\)?VORDEFINIERT\\Benutzer|(?:[\p{L}0-9 ._-]+\\)?Authentifizierte Benutzer):(?<rights>(?:\([^)]*\))+)'
-$identityPattern = '(?i)(?:^|\s)(?:Everyone|BUILTIN\\Users|(?:[\p{L}0-9 ._-]+\\)?Authenticated Users|(?:[\p{L}0-9 ._-]+\\)?Jeder|(?:[\p{L}0-9 ._-]+\\)?VORDEFINIERT\\Benutzer|(?:[\p{L}0-9 ._-]+\\)?Authentifizierte Benutzer):'
+# Decide on SIDs, not on the icacls text: account names are translated, and the console code
+# page can garble them (the German NT AUTHORITY prefix under 65001). The rights match the icacls tokens F, M, W,
+# WD, AD, WEA, WA, WDAC, WO, GA and GW. An allow rule grants; a deny rule does not.
+$broad = @{
+    'S-1-1-0'      = 'Everyone'
+    'S-1-5-32-545' = 'BUILTIN\Users'
+    'S-1-5-11'     = 'Authenticated Users'
+}
+$writeMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x100 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+try {
+    $rules = (Get-Acl -LiteralPath $target).GetAccessRules(
+        $true, $true, [System.Security.Principal.SecurityIdentifier])
+} catch {
+    Write-Output "Get-Acl failed: $($_.Exception.Message)"
+    exit 1
+}
 $grantsWrite = $false
-$unparsed = $false
-
-foreach ($line in $lines) {
-    $parsed = $false
-    foreach ($match in [regex]::Matches($line, $acePattern)) {
-        $parsed = $true
-        if (Test-RightsGrantWrite -Rights $match.Groups['rights'].Value) {
-            $grantsWrite = $true
-        }
+foreach ($rule in $rules) {
+    $sid = $rule.IdentityReference.Value
+    if ((-not $broad.ContainsKey($sid)) -or ("$($rule.AccessControlType)" -ne 'Allow')) {
+        continue
     }
-    if ((-not $parsed) -and ($line -match $identityPattern)) {
-        $unparsed = $true
-    }
-    if ($line -match 'Failed processing\s+[1-9]') {
-        $unparsed = $true
+    if (([int]$rule.FileSystemRights -band $writeMask) -ne 0) {
+        Write-Output ("write grant: {0} ({1}) {2}{3}" -f $broad[$sid], $sid, $rule.FileSystemRights,
+            $(if ($rule.IsInherited) { ', inherited' } else { '' }))
+        $grantsWrite = $true
     }
 }
 
-if ($grantsWrite -or $unparsed) {
+if ($grantsWrite) {
     exit 1
 }
 exit 0
