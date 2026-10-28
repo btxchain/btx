@@ -20,16 +20,21 @@ fn scheme_arg(value: &str) -> bool {
     let value = value.trim().to_ascii_lowercase();
     value.starts_with("btx:") || value.starts_with("btx-p2p:")
 }
+/// A later instance's arguments reach `on_open_url` through the deep-link plugin only on Windows
+/// and Linux, and only when one scheme URL is the sole argument.
+fn plugin_forwards(args: &[String]) -> bool {
+    cfg!(any(windows, target_os = "linux"))
+        && matches!(args, [_, arg] if scheme_arg(arg) && tauri::Url::parse(arg).is_ok())
+}
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(h) = app.try_state::<Arc<Host>>() {
-                // Scheme URLs arrive through on_open_url. Paths and file:// stay here.
-                for arg in args.iter().skip(1) {
-                    if scheme_arg(arg) {
-                        continue;
+                // A sole scheme URL arrives through on_open_url. Everything else stays here.
+                if !plugin_forwards(&args) {
+                    for arg in args.iter().skip(1) {
+                        h.receive_link(arg);
                     }
-                    h.receive_link(arg);
                 }
             }
             if let Some(w) = app.get_webview_window("main") {
@@ -162,6 +167,33 @@ fn main() {
         Err(e) => {
             eprintln!("BTX Atlas failed closed during startup: {e}");
             std::process::exit(1);
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_a_sole_scheme_url_is_left_to_the_deep_link_plugin() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let sole = cfg!(any(windows, target_os = "linux"));
+        assert_eq!(
+            plugin_forwards(&args(&["atlas", "btx:addr?amount=0.2"])),
+            sole
+        );
+        assert_eq!(
+            plugin_forwards(&args(&["atlas", "btx-p2p://x.onion:8333"])),
+            sole
+        );
+        for v in [
+            &["atlas", "btx:addr?amount=0.2", r"D:\Atlas Request.btx"][..],
+            &["atlas", r"D:\Atlas Request.btx", "btx:addr?amount=0.2"],
+            &["atlas", "btx:addr", "btx:addr"],
+            &["atlas", r"D:\Atlas Request.btx"],
+            &["atlas", "file:///D:/Atlas%20Request.btx"],
+            &["atlas"],
+        ] {
+            assert!(!plugin_forwards(&args(v)), "{v:?}");
         }
     }
 }
