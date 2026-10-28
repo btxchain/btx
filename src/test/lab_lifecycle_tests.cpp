@@ -369,6 +369,75 @@ BOOST_AUTO_TEST_CASE(evicted_idempotency_key_is_not_reused)
     modelnet::ResetLabApi();
 }
 
+BOOST_AUTO_TEST_CASE(retired_idempotency_keys_stop_at_256)
+{
+    BOOST_REQUIRE(!m_path_root.empty());
+    TempTree root{m_path_root / "lab-lifecycle-idem-retired-cap"};
+    LabDirEnv env(root.path);
+    PrepareDir(root.path);
+
+    UniValue ignored;
+    std::string err;
+    BOOST_REQUIRE(Call("lab.identity_create", Identity("kept", "lifecycle-retired-cap-0"), ignored, err));
+    // 329 keys under one caller: 64 stay live and 265 are retired, of which the oldest 9 are dropped.
+    for (int i = 1; i <= 328; ++i) {
+        UniValue realm(UniValue::VOBJ);
+        realm.pushKV("name", "cap");
+        realm.pushKV("nonce", "lifecycle-retired-cap-" + std::to_string(i));
+        realm.pushKV("policy_template", "local");
+        realm.pushKV("idempotency_key", "lifecycle-retired-cap-" + std::to_string(i));
+        realm.pushKV("expected_state", UniValue());
+        BOOST_REQUIRE(Call("lab.realm_create", realm, ignored, err));
+    }
+
+    UniValue disk;
+    BOOST_REQUIRE(disk.read(ReadFile(root.path / "lab.json")));
+    size_t live = 0;
+    size_t retired = 0;
+    for (size_t i = 0; i < disk["idempotency"].size(); ++i) {
+        if (disk["idempotency"][i].exists("retired")) {
+            ++retired;
+        } else {
+            ++live;
+        }
+    }
+    BOOST_CHECK_EQUAL(live, 64U);
+    BOOST_CHECK_EQUAL(retired, 256U);
+
+    modelnet::ResetLabApi();
+}
+
+BOOST_AUTO_TEST_CASE(retired_flag_that_is_not_a_bool_makes_the_image_corrupt)
+{
+    BOOST_REQUIRE(!m_path_root.empty());
+    TempTree root{m_path_root / "lab-lifecycle-idem-retired-type"};
+    LabDirEnv env(root.path);
+    PrepareDir(root.path);
+
+    UniValue ignored;
+    std::string err;
+    BOOST_REQUIRE(Call("lab.identity_create", Identity("kept", "lifecycle-retired-type"), ignored, err));
+    modelnet::ResetLabApi();
+
+    const fs::path image = root.path / "lab.json";
+    std::string bytes = ReadFile(image);
+    const std::string key = "\"key\":\"lifecycle-retired-type\"";
+    const size_t at = bytes.find(key);
+    BOOST_REQUIRE(at != std::string::npos);
+    bytes.insert(at + key.size(), ",\"retired\":\"yes\"");
+    WriteFile(image, bytes);
+
+    PrepareDir(root.path);
+    UniValue info;
+    BOOST_CHECK(Call("lab.info", UniValue(UniValue::VOBJ), info, err));
+    BOOST_CHECK_EQUAL(info["recovery_required"].getValStr(), "BTX035_RECOVERY_REQUIRED");
+    BOOST_CHECK(!Call("lab.identity_create", Identity("other", "lifecycle-retired-type-2"), ignored, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_RECOVERY_REQUIRED");
+    BOOST_CHECK_EQUAL(ReadFile(image), bytes);
+
+    modelnet::ResetLabApi();
+}
+
 BOOST_AUTO_TEST_CASE(bounded_read_does_not_hold_the_lab_mutex)
 {
 #ifndef _WIN32
@@ -504,6 +573,32 @@ BOOST_AUTO_TEST_CASE(strict_admission_follows_the_registry_file)
     BOOST_CHECK(!modelnet::LivePathAllowed(model_a, false, code));
     BOOST_CHECK_EQUAL(code, "BTX035_QUARANTINE");
     BOOST_CHECK(!modelnet::LivePathAllowed(model_b, false, code));
+    BOOST_CHECK_EQUAL(code, "BTX035_ADMISSION");
+
+    modelnet::ResetLabApi();
+}
+
+BOOST_AUTO_TEST_CASE(admission_for_other_bytes_does_not_open_a_strict_model)
+{
+    BOOST_REQUIRE(!m_path_root.empty());
+    TempTree root{m_path_root / "lab-lifecycle-admit-digest"};
+    LabDirEnv env(root.path);
+    AdmissionGuard admission;
+    PrepareDir(root.path);
+
+    const std::string model = "btx035-lifecycle-strict-digest";
+    modelnet::StrictAdmissionRecord record;
+    record.digest = std::string(96, 'a');
+    modelnet::RegisterStrictModel(model, record);
+
+    std::string err;
+    BOOST_REQUIRE(modelnet::RecordModelAdmission(model, std::string(96, 'b'), "ADMITTED", err));
+    std::string code;
+    BOOST_CHECK(!modelnet::LivePathAllowed(model, false, code));
+    BOOST_CHECK_EQUAL(code, "BTX035_ADMISSION");
+
+    modelnet::ClearAdmissionMemory();
+    BOOST_CHECK(!modelnet::LivePathAllowed(model, false, code));
     BOOST_CHECK_EQUAL(code, "BTX035_ADMISSION");
 
     modelnet::ResetLabApi();
