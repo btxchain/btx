@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-atlas-desktop"
+description = "Enables the atlas_desktop command without any pre-configured scope."
+commands.allow = ["atlas_desktop"]
+
+[[permission]]
+identifier = "deny-atlas-desktop"
+description = "Denies the atlas_desktop command without any pre-configured scope."
+commands.deny = ["atlas_desktop"]

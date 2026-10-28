@@ -1,0 +1,98 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {loadRequests, rememberRequest, requestSeconds, qrSvg} from '../web/core/receive-history.js';
+import {formatObservedTime} from '../web/core/json.js';
+import fs from 'node:fs';
+import {feeBins} from '../web/core/mempool.js';
+import {atomsPerVbyteFromKvb, blockHeights, feeDecimal, moneyPeers, sessionSamples, txSummary} from '../web/core/network.js';
+
+test('receive history keeps sixteen cleaned requests', () => {
+  let raw = '[]';
+  for (let i = 0; i < 20; i++) raw = JSON.stringify(rememberRequest(raw, {address: `btx${i}`, amount: '0.00000001', label: 'a\u0000', message: 'm', at: i + 1}));
+  const rows = loadRequests(raw);
+  assert.equal(rows.length, 16);
+  assert.equal(rows[0].address, 'btx19');
+  assert.equal(rows[0].label, 'a');
+  assert.deepEqual(loadRequests('{'), []);
+});
+
+test('network reads keep money peers, headers, and fee units distinct', () => {
+  assert.deepEqual(blockHeights('101', 3), ['101', '100', '99']);
+  assert.deepEqual(blockHeights('nope'), []);
+  const peers = moneyPeers([{id: 7, addr: '127.0.0.1:8333', inbound: true, subver: '/BTX/'}], {privacy: true});
+  assert.equal(peers[0].shown, 'peer 7');
+  assert.equal(peers[0].endpoint, '127.0.0.1:8333');
+  assert.equal(atomsPerVbyteFromKvb('0.001'), '100');
+  assert.equal(atomsPerVbyteFromKvb(feeDecimal(0.00000001)), '1');
+  assert.throws(() => atomsPerVbyteFromKvb('2'));
+  const summary = txSummary({txid: 'aa', amount: '1', details: [{category: 'receive', address: 'btx'}]});
+  assert.equal(summary.details.length, 1);
+  assert.equal(sessionSamples([{size: 1, bytes: 2}], {size: 'x'}, 3).length, 1);
+});
+
+test('QR save is an SVG of the matrix and fee bins are the current snapshot', () => {
+  const svg = qrSvg({width: 1, cells: [true]});
+  assert.match(svg, /<svg /);
+  assert.equal(qrSvg({width: 1, cells: ['x']}), null);
+  assert.deepEqual(feeBins({fee_histogram: [[1.5, 2], ['bad', 1], [3, Number.NaN]]}), [{feerate: '1.5', count: '2'}]);
+  assert.deepEqual(feeBins({fee_histogram: {'0': {count: '4', from_feerate: '1.5'}, total_fees: {count: 9, from_feerate: 9}, '10': {count: 2, from_feerate: 10}, skip: {count: '00', from_feerate: 1}}}), [{feerate: '1.5', count: '4'}, {feerate: '10', count: '2'}]);
+});
+
+test('a saved request time is milliseconds and is shown as its UTC date', () => {
+  const at = Date.UTC(2026, 9, 26, 12, 14, 1, 250);
+  assert.equal(requestSeconds(at), Math.floor(at / 1000));
+  assert.match(formatObservedTime(requestSeconds(at)), /^26 Oct 2026/);
+  assert.equal(requestSeconds(0), 0);
+  assert.equal(requestSeconds(-5), 0);
+  assert.equal(requestSeconds(1.5), 0);
+  assert.equal(requestSeconds('1793017000000'), 0);
+});
+
+test('the main window may open the native print dialog that window.print() calls', () => {
+  // Tauri routes window.print() to plugin:webview|print; without this permission the call is rejected.
+  const capability = JSON.parse(fs.readFileSync(new URL('../src-tauri/capabilities/main.json', import.meta.url)));
+  assert.equal(capability.permissions.includes('core:webview:allow-print'), true);
+});
+
+test('a printed request is placed on the page, not inside the scrolled workspace', () => {
+  // #workspace scrolls inside a fixed-height #app; an absolute print root sat above the scrolled view and printed blank.
+  const css = fs.readFileSync(new URL('../web/style.css', import.meta.url), 'utf8');
+  const print = css.slice(css.indexOf('@media print{'));
+  const rule = print.slice(print.indexOf('[data-print-root]{'), print.indexOf('}', print.indexOf('[data-print-root]{')));
+  assert.match(rule, /position:fixed/);
+  assert.match(rule, /background:#fff/);
+});
+
+test('fee bins include every requested mempool floor through 200', () => {
+  const floors = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 17, 20, 25, 30, 40, 50, 60, 70, 80, 100, 120, 140, 170, 200];
+  const fee_histogram = {total_fees: '1.00000000'};
+  for (const floor of floors) fee_histogram[String(floor)] = {count: '1', from_feerate: String(floor)};
+  const bins = feeBins({fee_histogram});
+  assert.equal(fee_histogram.total_fees, '1.00000000');
+  assert.equal(bins.length, floors.length);
+  assert.deepEqual(bins.map((bin) => bin.feerate), floors.map(String));
+  assert.equal(bins.some((bin) => bin.feerate === '200' && bin.count === '1'), true);
+});
+
+test('fee bins over the safety cap keep the highest feerates', () => {
+  const fee_histogram = {};
+  for (let rate = 0; rate < 40; rate += 1) fee_histogram[String(rate)] = {count: '1', from_feerate: String(rate)};
+  const bins = feeBins({fee_histogram});
+  const cap = 32;
+  assert.equal(bins.length, cap);
+  assert.equal(bins.some((bin) => bin.feerate === '39'), true);
+  assert.equal(bins.some((bin) => bin.feerate === '0'), false);
+});
+
+test('a native export passes the suggested file name to the save dialog', async () => {
+  const calls = [];
+  const previous = globalThis.__TAURI__;
+  globalThis.__TAURI__ = {core: {invoke: async (command, args) => { calls.push([command, args]); return {saved: true}; }}};
+  try {
+    const {Bridge} = await import('../web/core/bridge.js?native-export');
+    await new Bridge().export('a,b\n', 'wallet-history.csv');
+  } finally {
+    globalThis.__TAURI__ = previous;
+  }
+  assert.deepEqual(calls, [['atlas_document', {action: 'export', text: 'a,b\n', name: 'wallet-history.csv'}]]);
+});
