@@ -47,7 +47,20 @@ fn file_url_path(rest: &str) -> Option<PathBuf> {
         }
         bytes.push(byte);
     }
-    Some(PathBuf::from(String::from_utf8(bytes).ok()?))
+    let path = String::from_utf8(bytes).ok()?;
+    Some(PathBuf::from(if cfg!(windows) {
+        drive_path(&path)
+    } else {
+        &path
+    }))
+}
+
+/// A Windows file URL puts a `/` before the drive: `file:///D:/x.btx` names `D:/x.btx`.
+fn drive_path(path: &str) -> &str {
+    match path.as_bytes() {
+        [b'/', drive, b':', b'/', ..] if drive.is_ascii_alphabetic() => &path[1..],
+        _ => path,
+    }
 }
 
 fn uri_ok(value: &str) -> bool {
@@ -123,5 +136,23 @@ mod tests {
             assert!(preview_target(&url).is_none(), "{url}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_windows_file_url_drops_the_slash_before_the_drive() {
+        assert_eq!(
+            drive_path("/D:/btx/Atlas Request.btx"),
+            "D:/btx/Atlas Request.btx"
+        );
+        assert_eq!(drive_path("/c:/r.btx"), "c:/r.btx");
+        for path in [
+            "/Users/a/r.btx",
+            "/D/r.btx",
+            "/1:/r.btx",
+            "/D:",
+            "/D:r.btx",
+            "//D:/r.btx",
+        ] {
+            assert_eq!(drive_path(path), path);
+        }
     }
 }
