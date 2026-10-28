@@ -15,11 +15,20 @@ fn trusted_url(url: &tauri::Url) -> bool {
     url.scheme() == "tauri" && url.host_str() == Some("localhost")
         || matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost")
 }
+/// `btx:` and `btx-p2p:` are also emitted by the deep-link plugin. A path or `file://` URL is not.
+fn scheme_arg(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("btx:") || value.starts_with("btx-p2p:")
+}
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(h) = app.try_state::<Arc<Host>>() {
+                // Scheme URLs arrive through on_open_url. Paths and file:// stay here.
                 for arg in args.iter().skip(1) {
+                    if scheme_arg(arg) {
+                        continue;
+                    }
                     h.receive_link(arg);
                 }
             }
@@ -56,15 +65,22 @@ fn main() {
         .setup(|app| {
             let dir = app.path().app_local_data_dir()?;
             let host = Arc::new(Host::new(dir.join("audit/operations.jsonl"))?);
-            for arg in std::env::args().skip(1) {
-                host.receive_link(&arg);
-            }
-            app.manage(host.clone());
+            // The plugin copies one scheme argument into get_current. Skip those env args
+            // when it already delivered a URL. Paths and file:// are still delivered.
+            let mut plugin_delivered = false;
             if let Ok(Some(urls)) = app.deep_link().get_current() {
                 for url in urls {
+                    plugin_delivered = true;
                     host.receive_link(url.as_str());
                 }
             }
+            for arg in std::env::args().skip(1) {
+                if plugin_delivered && scheme_arg(&arg) {
+                    continue;
+                }
+                host.receive_link(&arg);
+            }
+            app.manage(host.clone());
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
                     host.receive_link(url.as_str());

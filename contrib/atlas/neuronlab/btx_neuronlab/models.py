@@ -79,17 +79,27 @@ def _weight_index_shards(root: Path):
     return shards
 
 
-def _config_ties_word_embeddings(config):
-    # Absent is not tied. Transformers defaults a missing attribute to true; the file must say true.
+def _config_ties_word_embeddings(config, model):
+    # Only JSON true allows an omitted output embedding. A missing key follows the loaded model.
     if type(config) is not dict:
         return False
     if 'tie_word_embeddings' in config:
         return config['tie_word_embeddings'] is True
+    present = False
     for name in ('decoder', 'generator', 'text_config'):
         nested = config.get(name)
-        if type(nested) is dict and nested.get('tie_word_embeddings') is True:
+        if type(nested) is not dict or 'tie_word_embeddings' not in nested:
+            continue
+        if nested['tie_word_embeddings'] is True:
             return True
-    return False
+        present = True
+    if present:
+        return False
+    cfg = getattr(model, 'config', None)
+    if getattr(cfg, 'tie_word_embeddings', None) is True:
+        return True
+    text = getattr(cfg, 'text_config', None)
+    return getattr(text, 'tie_word_embeddings', None) is True
 
 
 def _same_embedding_weight(left, right):
@@ -113,7 +123,7 @@ def _module_weight_key(model, module):
 def _bind_omitted_tied_head(model, root: Path, state):
     # A tied output head is the same Parameter as the input embedding and is omitted from safetensors.
     config = loads(read_file(root / 'config.json', 1_048_576), signed=False, limit=1_048_576)
-    if not _config_ties_word_embeddings(config):
+    if not _config_ties_word_embeddings(config, model):
         return
     try:
         output, inputs = model.get_output_embeddings(), model.get_input_embeddings()

@@ -508,6 +508,19 @@ fn run_stream(
         .cloned()
         .ok_or_else(|| err("LAB_RESULT", "Worker result missing"))
 }
+fn compact_review(action: &str, operation_id: &str, payload: &Value, pretty: &str) -> String {
+    let preview: String = pretty.chars().take(400).collect();
+    let digest = atlas_core::hash(pretty.as_bytes());
+    let title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .map(|title| format!("Title: {title}\n"))
+        .unwrap_or_default();
+    format!(
+        "Research action: {action}\nOperation ID: {operation_id}\n{title}\n{preview}\n\nSHA-256: {digest}\n\nApproval still covers the exact payload and the dialog omitted the rest so the buttons stay on screen."
+    )
+}
+
 fn uri(p: &Value) -> Result<String> {
     let s = string(p, "uri")?;
     if s.len() > 4096
@@ -600,11 +613,13 @@ pub async fn atlas_neuronlab(
   }
   if action=="export"{only_keys(&p,&["profile_id"])?;digest(string(&p,"profile_id")?)?;let path=pick(&app,true,"Save capsule to a NEW .safetensors file")?;p["path"]=json!(path.to_string_lossy());}
   if !READS.contains(&action.as_str()){
-   let mut review=format!("Research action: {action}\nOperation ID: {operation_id}\n\n{}\n\nNo wallet/host-tool authority is added. Profile signatures do not certify model behavior.",serde_json::to_string_pretty(&p).map_err(|_|err("LAB_JSON","Review serialization failed"))?);
+   let pretty=serde_json::to_string_pretty(&p).map_err(|_|err("LAB_JSON","Review serialization failed"))?;
+   let mut review=format!("Research action: {action}\nOperation ID: {operation_id}\n\n{pretty}\n\nNo wallet/host-tool authority is added. Profile signatures do not certify model behavior.");
    if ["compare","generate","activate"].contains(&action.as_str()){
     if let Some(id)=p.get("profile_id").and_then(Value::as_str){let actual=run(&r,"profile",json!({"profile_id":id}),&format!("{operation_id}-inspect"))?;
      review.push_str(&format!("\n\nExact signed operators:\n{}",serde_json::to_string_pretty(&actual.pointer("/profile/operations")).unwrap_or_default()));}
    }
+   if review.len()>1200{review=compact_review(&action,&operation_id,&p,&pretty);}
    confirm(&app,"Review local model intervention",review)?;
    if action=="revoke"||action=="deactivate"{CANCEL.fetch_add(1,Ordering::SeqCst);}
    h.audit(&operation_id,&format!("neuronlab.{action}"),"SUBMITTED")?;

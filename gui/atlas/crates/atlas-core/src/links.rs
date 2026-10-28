@@ -95,7 +95,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Atlas Request.btx"), "btx:address?amount=0.5\n").unwrap();
-        let path = format!("{}/Atlas%20Request.btx", dir.to_string_lossy());
+        let mut path = dir
+            .join("Atlas Request.btx")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !path.starts_with('/') {
+            path.insert(0, '/');
+        }
+        let path = path.replace(' ', "%20");
         for url in [format!("file://{path}"), format!("file://localhost{path}")] {
             assert_eq!(
                 preview_target(&url).as_deref(),

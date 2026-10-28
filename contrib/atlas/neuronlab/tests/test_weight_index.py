@@ -125,6 +125,50 @@ def test_untied_or_extra_missing_head_stays_refused(tmp_path):
     assert caught.value.code == 'WEIGHTS'
 
 
+def test_absent_tie_key_follows_the_loaded_model(tmp_path):
+    torch = pytest.importorskip('torch')
+    from safetensors.torch import save_file
+    from btx_neuronlab.models import _load_declared_weights
+
+    class Config:
+        def __init__(self, tie):
+            self.tie_word_embeddings = tie
+
+    class Tied(torch.nn.Module):
+        def __init__(self, tie):
+            super().__init__()
+            self.embed = torch.nn.Embedding(4, 3)
+            self.lm_head = torch.nn.Linear(3, 4, bias=False)
+            self.lm_head.weight = self.embed.weight
+            self.config = Config(tie)
+
+        def get_input_embeddings(self):
+            return self.embed
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+    root = tmp_path / 'absent-tie'
+    root.mkdir()
+    weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    (root / 'config.json').write_text(json.dumps({}), encoding='utf-8')
+    save_file({'embed.weight': weight}, root / 'model.safetensors')
+    model = Tied(True)
+    with torch.no_grad():
+        model.embed.weight.zero_()
+    _load_declared_weights(model, root)
+    assert torch.equal(model.embed.weight.detach(), weight)
+    assert torch.equal(model.lm_head.weight.detach(), weight)
+
+    refused = tmp_path / 'absent-untied'
+    refused.mkdir()
+    (refused / 'config.json').write_text(json.dumps({}), encoding='utf-8')
+    save_file({'embed.weight': weight}, refused / 'model.safetensors')
+    with pytest.raises(LabError) as caught:
+        _load_declared_weights(Tied(False), refused)
+    assert caught.value.code == 'WEIGHTS'
+
+
 def test_tied_gpt2_save_pretrained_loads(tmp_path):
     root = _save_tiny_gpt2(tmp_path / 'tied')
     from safetensors import safe_open
