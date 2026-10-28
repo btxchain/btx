@@ -680,6 +680,8 @@ BTX_BASE_SCRIPTS = [
     'feature_matmul_signer_wif_only_start.py',
     'feature_block_download_slot_reclaim.py',
     'p2p_noconnect_inbound_relay.py',
+    'p2p_unconnected_block_relay.py',
+    'p2p_unconnected_block_relay_catchup.py',
     'p2p_connect_strict_inbound.py',
     'feature_attested_utxo_snapshot_p2p.py',
     'feature_attested_utxo_snapshot_offer_restart.py',
