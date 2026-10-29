@@ -411,8 +411,9 @@ public:
             // sysctl-read is allowed for every name or process-info is not
             // denied ((deny default) does not cover it), so allow only the
             // hardware and OS identification names and deny process-info.
+            // uname() also reads kern.hostname and fails without it.
             "(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name-prefix \"kern.os\")"
-            " (sysctl-name \"kern.version\"))\n"
+            " (sysctl-name \"kern.version\") (sysctl-name \"kern.hostname\"))\n"
             "(deny process-info*)\n";
         const char* params[]{"ROOT", root, "HELPER", helper, nullptr};
         char* error = nullptr;
