@@ -44,7 +44,7 @@ using Route = std::function<void(const modelnet::NativeRequest&, modelnet::Nativ
 class FakePeer
 {
 public:
-    FakePeer(const fs::path& dir, Route route) : m_route(std::move(route))
+    FakePeer(const fs::path& dir, Route route, int refuse_from = 0) : m_route(std::move(route)), m_refuse_from(refuse_from)
     {
         std::string err;
         BOOST_REQUIRE_MESSAGE(modelnet::LoadPq1Identity(m_pq, dir, err), err);
@@ -83,6 +83,10 @@ private:
             if (::poll(&p, 1, 100) <= 0) continue;
             const int c = ::accept(m_fd, nullptr, nullptr);
             if (c < 0) continue;
+            if (m_refuse_from > 0 && ++m_accepted >= m_refuse_from) {
+                ::close(c); // closed before TLS: that dial fails
+                continue;
+            }
             std::lock_guard<std::mutex> lock(m_mu);
             m_conns.emplace_back([this, c] { Serve(c); });
         }
@@ -115,6 +119,8 @@ private:
 
     modelnet::Pq1Context m_pq;
     Route m_route;
+    int m_refuse_from{0};
+    int m_accepted{0};
     int m_fd{-1};
     uint16_t m_port{0};
     std::atomic<bool> m_stop{false};
@@ -123,13 +129,19 @@ private:
     std::vector<std::thread> m_conns;
 };
 
-modelnet::CatalogEntry ImportTiny(modelnet::ModelCatalog& cat, const fs::path& src)
+/** A safetensors file with one U8 tensor of `body` bytes ({} and no data when 0). */
+modelnet::CatalogEntry ImportModel(modelnet::ModelCatalog& cat, const fs::path& src, size_t body)
 {
     fs::create_directories(src);
-    std::vector<unsigned char> st(10, 0);
-    WriteLE64(st.data(), 2);
-    st[8] = '{';
-    st[9] = '}';
+    std::string hdr = "{}";
+    if (body > 0) {
+        hdr = "{\"t\":{\"dtype\":\"U8\",\"shape\":[" + std::to_string(body) + "],\"data_offsets\":[0," +
+              std::to_string(body) + "]}}";
+        while (hdr.size() % 8) hdr += ' ';
+    }
+    std::vector<unsigned char> st(8 + hdr.size() + body, 0);
+    WriteLE64(st.data(), hdr.size());
+    std::copy(hdr.begin(), hdr.end(), st.begin() + 8);
     {
         std::ofstream out(src / "model.safetensors", std::ios::binary);
         out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
@@ -153,12 +165,15 @@ using SwarmRoute = std::function<void(const modelnet::CatalogEntry&, const model
  * Run the helper in-process with two configured contacts: an honest host that
  * serves the model but lists no availability, and a swarm source answered by
  * `swarm`. Fetch the model with getmodel and return the job's final status.
+ * `model_bytes` sizes the model; `host_refuse_from` makes the host refuse its
+ * Nth connection and every one after it.
  */
-std::string RetrieveWithSwarmSource(const fs::path& root, const SwarmRoute& swarm)
+std::string RetrieveWithSwarmSource(const fs::path& root, const SwarmRoute& swarm, size_t model_bytes = 0,
+                                    int host_refuse_from = 0)
 {
     fs::create_directories(root);
-    modelnet::ModelCatalog host_cat{root / "host", 8 << 20};
-    const auto model = ImportTiny(host_cat, root / "host-src");
+    modelnet::ModelCatalog host_cat{root / "host", 32 << 20};
+    const auto model = ImportModel(host_cat, root / "host-src", model_bytes);
     UniValue manifest;
     std::string err;
     BOOST_REQUIRE_MESSAGE(host_cat.GetManifest(model.model_id, manifest, err), err);
@@ -172,7 +187,7 @@ std::string RetrieveWithSwarmSource(const fs::path& root, const SwarmRoute& swar
         if (req.path == r + "ext/free/grant" || req.path.rfind(r + "transfers/", 0) == 0) {
             (void)modelnet::HandleNativeRequest(host_cat, req, resp);
         }
-    });
+    }, host_refuse_from);
     FakePeer source(root / "swarm-peer", [&](const modelnet::NativeRequest& req, modelnet::NativeResponse& resp) {
         swarm(model, req, resp);
     });
@@ -181,7 +196,7 @@ std::string RetrieveWithSwarmSource(const fs::path& root, const SwarmRoute& swar
     cfg.modeldir = root / "victim";
     fs::create_directories(cfg.modeldir);
     cfg.storage_mode = modelnet::StorageMode::FIXED;
-    cfg.quota_bytes = 8 << 20;
+    cfg.quota_bytes = 32 << 20;
     cfg.lan_discovery = false;
     cfg.natpmp = false;
     cfg.pwc_chain = "regtest";
@@ -283,6 +298,34 @@ BOOST_AUTO_TEST_CASE(swarm_availability_with_wrong_types_does_not_fail_the_retri
         BOOST_CHECK_GE(asked.load(), 1);
         BOOST_CHECK_MESSAGE(status == "done", "reply " + replies[k] + " left the job " + status);
     }
+}
+
+BOOST_AUTO_TEST_CASE(early_return_waits_for_swarm_threads_before_their_state_goes)
+{
+    // Two pieces: the source claims piece 0 and is slow to answer its grant.
+    // The host refuses the piece pool's connections, so the attempt returns
+    // while the source's thread still runs; that thread then records the
+    // failed grant. Before the fix it wrote to state the return had already
+    // destroyed: a use after free, which crashes under glibc malloc perturbation.
+    std::atomic<int> grants{0};
+    const std::string status = RetrieveWithSwarmSource(
+        m_args.GetDataDirBase() / "early-return",
+        [&](const modelnet::CatalogEntry& model, const modelnet::NativeRequest& req, modelnet::NativeResponse& resp) {
+            const std::string r{modelnet::MODEL_HTTP_ROOT};
+            if (req.path == r + "availability") {
+                return Json(resp, "{\"local\":{\"models\":[{\"artifact_id\":\"" + model.artifact_id.Hex() +
+                                      "\",\"files\":[{\"file_index\":0,\"piece_count\":2,\"ranges\":[[0,0]]}]}]}}");
+            }
+            if (req.path == r + "ext/free/grant") {
+                ++grants;
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                resp.status = 404;
+            }
+        },
+        /*model_bytes=*/(4u << 20) + 4096, /*host_refuse_from=*/3);
+    BOOST_CHECK_GE(grants.load(), 1);
+    // Neither contact can serve the model; the job ends without taking the helper down.
+    BOOST_CHECK_EQUAL(status, "failed");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

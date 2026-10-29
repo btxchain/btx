@@ -10710,7 +10710,6 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
             progress->pieces_committed.fetch_add(1);
             NoteRetrieveBytes(progress, cat.UsedBytes());
         };
-        ThreadJoin extra_join;
         std::atomic<int> extra_ok{0};
         std::mutex rid_mu;
         std::map<uint32_t, std::vector<uint64_t>> piece_rid;
@@ -10750,6 +10749,9 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
             }
             xfer.ObservePeer(ep, m);
         };
+        // Declared after everything its threads use, so any return below joins
+        // them before that state is destroyed.
+        ThreadJoin extra_join;
         std::vector<SourceAvailability> sources;
         if (!missing.empty() && !extras.empty()) {
             auto add_av = [&](const std::string& eh, uint16_t eport) {
