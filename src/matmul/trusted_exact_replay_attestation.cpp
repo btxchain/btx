@@ -484,7 +484,8 @@ AttestationStore::AttestationStore(StoreConfig config)
         throw std::invalid_argument{
             "trusted ExactReplay threshold must be between one and N"};
     }
-    if (m_config.blocklist.size() > DEFAULT_MAX_BLOCKED_SIGNERS) {
+    if (m_config.blocklist.size() + m_config.pq_blocklist.size() >
+        DEFAULT_MAX_BLOCKED_SIGNERS) {
         throw std::invalid_argument{
             "attestation blocklist exceeds the maximum number of keys"};
     }
@@ -497,6 +498,17 @@ AttestationStore::AttestationStore(StoreConfig config)
             !m_blocked.insert(blocked).second) {
             throw std::invalid_argument{
                 "attestation blocklist contains a duplicate"};
+        }
+    }
+    for (const auto& blocked : m_config.pq_blocklist) {
+        if (!IsCanonicalPqSigner(blocked)) {
+            throw std::invalid_argument{
+                "attestation PQ blocklist entries must be ML-DSA-44 public keys"};
+        }
+        if (!m_blocked_pq_config.insert(blocked).second ||
+            !m_blocked_pq.insert(blocked).second) {
+            throw std::invalid_argument{
+                "attestation PQ blocklist contains a duplicate"};
         }
     }
     if (!PinQuorumIsReachable(UnblockedPinMembersLocked(),
@@ -548,6 +560,10 @@ AttestationStore::AttestationStore(StoreConfig config)
             !m_config.open_attestors) {
             throw std::invalid_argument{
                 "local ExactReplay PQ signer must be a configured ML-DSA-44 key"};
+        }
+        if (m_blocked_pq.count(*m_config.local_pq_pk) != 0) {
+            throw std::invalid_argument{
+                "local ExactReplay PQ signer must not be on the attestation blocklist"};
         }
     }
     if (m_config.open_attestors) {
@@ -624,7 +640,8 @@ size_t AttestationStore::PinVotesLocked(const Bucket& bucket) const
     }
     for (const auto& [pubkey, attestation] : bucket.pq_attestations) {
         (void)attestation;
-        if (m_trusted_pq_signers.count(pubkey) != 0) {
+        if (m_trusted_pq_signers.count(pubkey) != 0 &&
+            !IsBlockedPqLocked(pubkey)) {
             ++votes;
         }
     }
@@ -684,6 +701,7 @@ bool AttestationStore::WouldReachQuorumLocked(
     const BlockKey& key, const std::vector<unsigned char>& pq_signer) const
 {
     if (m_trusted_pq_signers.count(pq_signer) == 0) return false;
+    if (IsBlockedPqLocked(pq_signer)) return false;
     const auto it{m_buckets.find(key)};
     const bool already{
         it != m_buckets.end() && HasQuorumLocked(key, it->second)};
@@ -698,13 +716,21 @@ bool AttestationStore::IsBlockedLocked(const CPubKey& pubkey) const
     return m_blocked.count(pubkey) != 0;
 }
 
+bool AttestationStore::IsBlockedPqLocked(
+    const std::vector<unsigned char>& pubkey) const
+{
+    return m_blocked_pq.count(pubkey) != 0;
+}
+
 size_t AttestationStore::UnblockedPinMembersLocked() const
 {
     size_t unblocked{0};
     for (const auto& signer : m_trusted_signers) {
         if (!IsBlockedLocked(signer)) ++unblocked;
     }
-    unblocked += m_trusted_pq_signers.size();
+    for (const auto& signer : m_trusted_pq_signers) {
+        if (!IsBlockedPqLocked(signer)) ++unblocked;
+    }
     return unblocked;
 }
 
@@ -1055,6 +1081,10 @@ AddResult AttestationStore::AddPq(
         if (m_trusted_pq_signers.count(attestation.signer) == 0) {
             ++m_stats.rejected;
             return AddResult::UntrustedSigner;
+        }
+        if (IsBlockedPqLocked(attestation.signer)) {
+            ++m_stats.rejected;
+            return AddResult::BlocklistedSigner;
         }
 
         if (m_config.local_pq_pk.has_value() &&
@@ -1484,7 +1514,8 @@ bool AttestationStore::HasQuorumFromAttestations(
                     block_height) != VerifyResult::Valid) {
                 continue;
             }
-            if (m_trusted_pq_signers.count(attestation.signer) != 0) {
+            if (m_trusted_pq_signers.count(attestation.signer) != 0 &&
+                !IsBlockedPqLocked(attestation.signer)) {
                 pq_votes.insert(attestation.signer);
             }
         }
@@ -1857,7 +1888,9 @@ bool AttestationStore::IsAuthoritySigner(const CPubKey& pubkey) const
 bool AttestationStore::IsAuthorityPqSigner(
     const std::vector<unsigned char>& pubkey) const
 {
-    return m_trusted_pq_signers.count(pubkey) != 0;
+    std::lock_guard lock{m_mutex};
+    return m_trusted_pq_signers.count(pubkey) != 0 &&
+           !IsBlockedPqLocked(pubkey);
 }
 
 bool AttestationStore::IsBlocked(const CPubKey& pubkey) const
@@ -1866,10 +1899,34 @@ bool AttestationStore::IsBlocked(const CPubKey& pubkey) const
     return IsBlockedLocked(pubkey);
 }
 
+bool AttestationStore::IsBlockedPq(
+    const std::vector<unsigned char>& pubkey) const
+{
+    std::lock_guard lock{m_mutex};
+    return IsBlockedPqLocked(pubkey);
+}
+
 std::set<CPubKey> AttestationStore::BlockedSigners() const
 {
     std::lock_guard lock{m_mutex};
     return m_blocked;
+}
+
+std::set<std::vector<unsigned char>> AttestationStore::BlockedPqSigners() const
+{
+    std::lock_guard lock{m_mutex};
+    return m_blocked_pq;
+}
+
+std::set<std::vector<unsigned char>>
+AttestationStore::RuntimeBlockedPqSigners() const
+{
+    std::lock_guard lock{m_mutex};
+    std::set<std::vector<unsigned char>> runtime;
+    for (const auto& pubkey : m_blocked_pq) {
+        if (m_blocked_pq_config.count(pubkey) == 0) runtime.insert(pubkey);
+    }
+    return runtime;
 }
 
 std::set<CPubKey> AttestationStore::ConfigBlockedSigners() const
@@ -1911,7 +1968,8 @@ BlocklistResult AttestationStore::AddBlocklistedSigner(const CPubKey& pubkey)
             return BlocklistResult::LocalSigner;
         }
         if (IsBlockedLocked(pubkey)) return BlocklistResult::Duplicate;
-        if (m_blocked.size() >= DEFAULT_MAX_BLOCKED_SIGNERS) {
+        if (m_blocked.size() + m_blocked_pq.size() >=
+            DEFAULT_MAX_BLOCKED_SIGNERS) {
             return BlocklistResult::Capacity;
         }
         if (m_trusted_signers.count(pubkey) != 0) {
@@ -1928,11 +1986,53 @@ BlocklistResult AttestationStore::AddBlocklistedSigner(const CPubKey& pubkey)
     return BlocklistResult::Blocked;
 }
 
+BlocklistResult AttestationStore::AddBlocklistedPqSigner(
+    const std::vector<unsigned char>& pubkey)
+{
+    if (!IsCanonicalPqSigner(pubkey)) return BlocklistResult::Invalid;
+    {
+        std::lock_guard lock{m_mutex};
+        if (m_config.local_pq_pk.has_value() &&
+            *m_config.local_pq_pk == pubkey) {
+            return BlocklistResult::LocalSigner;
+        }
+        if (IsBlockedPqLocked(pubkey)) return BlocklistResult::Duplicate;
+        if (m_blocked.size() + m_blocked_pq.size() >=
+            DEFAULT_MAX_BLOCKED_SIGNERS) {
+            return BlocklistResult::Capacity;
+        }
+        if (m_trusted_pq_signers.count(pubkey) != 0) {
+            const size_t unblocked_after{UnblockedPinMembersLocked() - 1};
+            if (!PinQuorumIsReachable(unblocked_after, m_config.threshold)) {
+                return BlocklistResult::WouldDisablePinQuorum;
+            }
+        }
+        m_blocked_pq.insert(pubkey);
+    }
+    m_changed.notify_all();
+    return BlocklistResult::Blocked;
+}
+
 bool AttestationStore::RestoreRuntimeBlocked(std::set<CPubKey> blocked)
 {
     for (const auto& pubkey : blocked) {
         if (!IsCanonicalSigner(pubkey)) continue;
         const BlocklistResult result{AddBlocklistedSigner(pubkey)};
+        if (result == BlocklistResult::WouldDisablePinQuorum ||
+            result == BlocklistResult::LocalSigner ||
+            result == BlocklistResult::Capacity) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool AttestationStore::RestoreRuntimeBlockedPq(
+    std::set<std::vector<unsigned char>> blocked)
+{
+    for (const auto& pubkey : blocked) {
+        if (!IsCanonicalPqSigner(pubkey)) continue;
+        const BlocklistResult result{AddBlocklistedPqSigner(pubkey)};
         if (result == BlocklistResult::WouldDisablePinQuorum ||
             result == BlocklistResult::LocalSigner ||
             result == BlocklistResult::Capacity) {

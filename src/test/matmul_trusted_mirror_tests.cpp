@@ -29,12 +29,20 @@
 #include <util/strencodings.h>
 #include <util/translation.h>
 
+extern "C" {
+#include <libbitcoinpqc/ml_dsa.h>
+}
+
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
+#include <future>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -151,6 +159,155 @@ bool FinalizedTrustedMirrorInstalled(std::string& error)
 
 struct RegtestParamSetup : public BasicTestingSetup {
     RegtestParamSetup() : BasicTestingSetup{ChainType::REGTEST} {}
+};
+
+struct PqKey {
+    std::vector<unsigned char> pk;
+    std::vector<unsigned char> sk;
+};
+
+//! Deterministic ML-DSA-44 key pair; seed_byte keeps keys distinct per test.
+PqKey MakePqKey(unsigned char seed_byte)
+{
+    PqKey key{
+        .pk = std::vector<unsigned char>(matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK),
+        .sk = std::vector<unsigned char>(matmul::trusted::EXACT_REPLAY_ML_DSA_44_SK),
+    };
+    const std::vector<unsigned char> seed(128, seed_byte);
+    BOOST_REQUIRE_EQUAL(ml_dsa_44_keygen(key.pk.data(), key.sk.data(),
+                                         seed.data(), seed.size()),
+                        0);
+    return key;
+}
+
+//! Run a call that persists an attestation on a worker thread and return its
+//! result (an exception thrown by fn is rethrown here). A thread that locks a
+//! std::mutex it already holds never returns, and ctest sets no per-test
+//! timeout, so waiting on the test thread would hang the whole binary. If the
+//! call has not returned after 10 seconds, report it and end the process with
+//! a failure code: the stuck worker keeps the lock, so neither the remaining
+//! checks nor RuntimeReset could finish.
+template <typename Fn>
+auto CallWithDeadline(const char* what, Fn fn) -> decltype(fn())
+{
+    constexpr std::chrono::seconds timeout{10};
+    std::packaged_task<decltype(fn())()> task{std::move(fn)};
+    auto result{task.get_future()};
+    std::thread worker{std::move(task)};
+    if (result.wait_for(timeout) != std::future_status::ready) {
+        BOOST_ERROR(what << " did not return within " << timeout.count()
+                         << " seconds");
+        std::cout.flush();
+        std::cerr << what << " did not return within " << timeout.count()
+                  << " seconds; exiting the test binary" << std::endl;
+        std::_Exit(EXIT_FAILURE);
+    }
+    worker.join();
+    return result.get();
+}
+
+//! True if AttestedFrontierHints (the window fork choice reads) has the pair.
+bool HasFrontierHint(int32_t height, const uint256& hash)
+{
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height == height && hint.hash == hash) return true;
+    }
+    return false;
+}
+
+//! A trusted mirror pinned to 2 secp256k1 and 2 ML-DSA-44 keys, M=2, with
+//! the durable attestation database open. Both ML-DSA-44 keys are stolen:
+//! their votes for one block reach pin quorum and are persisted before the
+//! operator blocks them.
+struct StolenPqPinMembers {
+    const CKey a{NewKey()};
+    const CKey b{NewKey()};
+    const PqKey pq1{MakePqKey(0x61)};
+    const PqKey pq2{MakePqKey(0x62)};
+    const uint256 chain{Hex256('5')};
+    const uint256 context{Hex256('6')};
+    const uint256 stolen{Hex256('7')};
+    const uint256 honest{Hex256('8')};
+    static constexpr int32_t STOLEN_HEIGHT{201};
+    const fs::path archive;
+
+    explicit StolenPqPinMembers(fs::path path) : archive{std::move(path)} {}
+
+    matmul::trusted::ExactReplayStatement Statement(const uint256& hash,
+                                                    int32_t height) const
+    {
+        matmul::trusted::ExactReplayStatement out;
+        out.chain_id = chain;
+        out.block_hash = hash;
+        out.block_height = height;
+        out.replay_authority_context = context;
+        return out;
+    }
+
+    //! Configure the store (pq_blocklist is the startup blocklist) and open
+    //! the durable database, as a node start does.
+    bool Start(std::vector<std::vector<unsigned char>> pq_blocklist,
+               std::string& error) const
+    {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {a.GetPubKey(), b.GetPubKey()};
+        config.trusted_pq_signers = {pq1.pk, pq2.pk};
+        config.threshold = 2;
+        config.pq_blocklist = std::move(pq_blocklist);
+        if (!node::matmul_trusted::Configure(
+                std::move(config), /*trusted_mirror=*/true,
+                /*serve=*/false, std::chrono::milliseconds{20}, error)) {
+            return false;
+        }
+        return node::matmul_trusted::OpenPersistence(archive, error);
+    }
+
+    void CastStolenVotes() const
+    {
+        for (const PqKey* key : {&pq1, &pq2}) {
+            const auto vote{matmul::trusted::SignStatementMlDsa44(
+                Statement(stolen, STOLEN_HEIGHT), key->sk, key->pk)};
+            BOOST_REQUIRE(vote);
+            BOOST_CHECK(CallWithDeadline("AddPq of a pinned ML-DSA-44 vote", [&] {
+                            return node::matmul_trusted::AddPq(
+                                *vote, stolen, STOLEN_HEIGHT);
+                        }) == matmul::trusted::AddResult::Accepted);
+        }
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorum(stolen, STOLEN_HEIGHT));
+    }
+
+    //! After a restart with both ML-DSA-44 keys blocked: they stay blocked,
+    //! their stolen quorum does not come back (hot cache, durable miss path,
+    //! attested height, frontier hints), and the secp256k1 members still
+    //! reach quorum on another block.
+    void CheckAfterRestart() const
+    {
+        BOOST_CHECK(node::matmul_trusted::IsBlockedPq(pq1.pk));
+        BOOST_CHECK(node::matmul_trusted::IsBlockedPq(pq2.pk));
+        BOOST_CHECK(!node::matmul_trusted::IsAuthorityPqSigner(pq1.pk));
+        BOOST_CHECK(!node::matmul_trusted::IsAuthorityPqSigner(pq2.pk));
+        BOOST_CHECK_EQUAL(node::matmul_trusted::UnblockedPinMembers(), 2U);
+        BOOST_CHECK_MESSAGE(!node::matmul_trusted::HasQuorum(stolen, STOLEN_HEIGHT),
+                            "the blocked keys' quorum is back after the restart");
+        const auto highest{node::matmul_trusted::HighestAttestedHeight()};
+        BOOST_CHECK(!highest.has_value() || *highest < STOLEN_HEIGHT);
+        BOOST_CHECK(!HasFrontierHint(STOLEN_HEIGHT, stolen));
+        const auto again{matmul::trusted::SignStatementMlDsa44(
+            Statement(stolen, STOLEN_HEIGHT), pq1.sk, pq1.pk)};
+        BOOST_REQUIRE(again);
+        BOOST_CHECK(node::matmul_trusted::AddPq(*again, stolen, STOLEN_HEIGHT) ==
+                    matmul::trusted::AddResult::BlocklistedSigner);
+        for (const CKey* key : {&a, &b}) {
+            const auto vote{matmul::trusted::SignStatement(
+                Statement(honest, STOLEN_HEIGHT + 1), *key)};
+            BOOST_REQUIRE(vote);
+            BOOST_CHECK(node::matmul_trusted::Add(*vote, honest, STOLEN_HEIGHT + 1) ==
+                        matmul::trusted::AddResult::Accepted);
+        }
+        BOOST_CHECK(node::matmul_trusted::HasQuorum(honest, STOLEN_HEIGHT + 1));
+    }
 };
 
 } // namespace
@@ -3882,6 +4039,228 @@ BOOST_AUTO_TEST_CASE(attestations_survive_simulated_restart)
     }
 }
 
+BOOST_AUTO_TEST_CASE(local_pq_vote_persists_and_survives_restart)
+{
+    // SignAuthoritative writes a local ML-DSA-44 vote through
+    // PersistAfterPqMutation. That function used to hold g_mutex while
+    // PersistDurablePqAttestations locked it again in Store(), so the first
+    // call with persistence open never returned.
+    RuntimeReset reset;
+    const PqKey pq{MakePqKey(0x5a)};
+    const uint256 chain{Hex256('7')};
+    const uint256 context{Hex256('8')};
+    const uint256 block{Hex256('9')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_pq_local.dat"};
+
+    auto open = [&] {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_pq_signers = {pq.pk};
+        config.threshold = 1;
+        config.local_pq_pk = pq.pk;
+        config.local_pq_sk = pq.sk;
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(node::matmul_trusted::Configure(
+                                  std::move(config), /*trusted_mirror=*/false,
+                                  /*serve=*/true, std::chrono::milliseconds{50}, error),
+                              error);
+        BOOST_REQUIRE_MESSAGE(node::matmul_trusted::OpenPersistence(archive, error), error);
+    };
+
+    open();
+    BOOST_CHECK(CallWithDeadline("SignAuthoritative with a local ML-DSA-44 key", [&] {
+                    return node::matmul_trusted::SignAuthoritative(block, 77);
+                }) == matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorum(block, 77));
+    BOOST_REQUIRE(HasFrontierHint(77, block));
+
+    // Simulate a restart: the quorum must come back from the durable record.
+    node::matmul_trusted::ResetForTest();
+    open();
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 77));
+    const auto highest{node::matmul_trusted::HighestAttestedHeight()};
+    BOOST_REQUIRE(highest.has_value());
+    BOOST_CHECK_EQUAL(*highest, 77);
+    BOOST_CHECK_MESSAGE(HasFrontierHint(77, block),
+                        "durable PQ load must restore the frontier hint");
+}
+
+BOOST_AUTO_TEST_CASE(received_pq_votes_persist_and_survive_restart)
+{
+    // A trusted mirror pinned to two ML-DSA-44 keys (2-of-2) persists each
+    // pinned vote it accepts through AddPq (the mmattestpq path) in
+    // PersistAfterPqMutation. Height 56 reaches quorum; height 55 has one
+    // vote and must stay below quorum after the restart.
+    RuntimeReset reset;
+    const PqKey pq1{MakePqKey(0x71)};
+    const PqKey pq2{MakePqKey(0x72)};
+    const uint256 chain{Hex256('d')};
+    const uint256 context{Hex256('e')};
+    const uint256 block_55{Hex256('a')};
+    const uint256 block_56{Hex256('b')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_pq_mirror.dat"};
+
+    auto statement = [&](const uint256& hash, int32_t height) {
+        matmul::trusted::ExactReplayStatement out;
+        out.chain_id = chain;
+        out.block_hash = hash;
+        out.block_height = height;
+        out.replay_authority_context = context;
+        return out;
+    };
+    const auto vote_55{matmul::trusted::SignStatementMlDsa44(
+        statement(block_55, 55), pq1.sk, pq1.pk)};
+    const auto vote_56_first{matmul::trusted::SignStatementMlDsa44(
+        statement(block_56, 56), pq1.sk, pq1.pk)};
+    const auto vote_56_second{matmul::trusted::SignStatementMlDsa44(
+        statement(block_56, 56), pq2.sk, pq2.pk)};
+    BOOST_REQUIRE(vote_55 && vote_56_first && vote_56_second);
+
+    auto open = [&] {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_pq_signers = {pq1.pk, pq2.pk};
+        config.threshold = 2;
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(node::matmul_trusted::Configure(
+                                  std::move(config), /*trusted_mirror=*/true,
+                                  /*serve=*/false, std::chrono::milliseconds{50}, error),
+                              error);
+        BOOST_REQUIRE_MESSAGE(node::matmul_trusted::OpenPersistence(archive, error), error);
+    };
+
+    open();
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    for (const auto* vote : {&*vote_55, &*vote_56_first, &*vote_56_second}) {
+        BOOST_CHECK(CallWithDeadline("AddPq of a pinned ML-DSA-44 vote", [&] {
+                        return node::matmul_trusted::AddPq(
+                            *vote, vote->statement.block_hash,
+                            vote->statement.block_height);
+                    }) == matmul::trusted::AddResult::Accepted);
+    }
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(block_55, 55));
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorum(block_56, 56));
+    BOOST_REQUIRE(HasFrontierHint(56, block_56));
+    BOOST_CHECK(!HasFrontierHint(55, block_55));
+
+    // Simulate a restart: both votes at 56 must come back from disk.
+    node::matmul_trusted::ResetForTest();
+    open();
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(block_56, 56));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(block_55, 55));
+    const auto highest{node::matmul_trusted::HighestAttestedHeight()};
+    BOOST_REQUIRE(highest.has_value());
+    BOOST_CHECK_EQUAL(*highest, 56);
+    BOOST_CHECK_MESSAGE(HasFrontierHint(56, block_56),
+                        "durable PQ load must restore the frontier hint");
+    // A single vote below the threshold must not become a hint.
+    BOOST_CHECK(!HasFrontierHint(55, block_55));
+}
+
+BOOST_AUTO_TEST_CASE(mixed_pin_quorum_completed_by_pq_vote_restores_hint)
+{
+    // secp256k1 + ML-DSA-44 pin, 2-of-2. After a restart the secp vote alone
+    // is below the threshold, so LoadDurableAttestations does not note it;
+    // the durable PQ load completes the quorum and must note it.
+    RuntimeReset reset;
+    const CKey secp{NewKey()};
+    const PqKey pq{MakePqKey(0x3c)};
+    const uint256 chain{Hex256('1')};
+    const uint256 context{Hex256('2')};
+    const uint256 block{Hex256('6')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_mixed_pin.dat"};
+
+    auto open = [&] {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {secp.GetPubKey()};
+        config.trusted_pq_signers = {pq.pk};
+        config.threshold = 2;
+        config.local_signer = secp;
+        config.local_pq_pk = pq.pk;
+        config.local_pq_sk = pq.sk;
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(node::matmul_trusted::Configure(
+                                  std::move(config), /*trusted_mirror=*/false,
+                                  /*serve=*/true, std::chrono::milliseconds{50}, error),
+                              error);
+        BOOST_REQUIRE_MESSAGE(node::matmul_trusted::OpenPersistence(archive, error), error);
+    };
+
+    open();
+    BOOST_CHECK(CallWithDeadline("SignAuthoritative with secp and ML-DSA-44 keys", [&] {
+                    return node::matmul_trusted::SignAuthoritative(block, 93);
+                }) == matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorum(block, 93));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(node::matmul_trusted::FlushPersistence(error), error);
+
+    node::matmul_trusted::ResetForTest();
+    open();
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 93));
+    const auto highest{node::matmul_trusted::HighestAttestedHeight()};
+    BOOST_REQUIRE(highest.has_value());
+    BOOST_CHECK_EQUAL(*highest, 93);
+    BOOST_CHECK_MESSAGE(HasFrontierHint(93, block),
+                        "a quorum completed by the durable PQ load must restore the frontier hint");
+}
+
+BOOST_AUTO_TEST_CASE(wal_replay_restores_frontier_hint)
+{
+    // A crash after AppendWal and before the LevelDB sync leaves the vote
+    // only in the WAL. OpenPersistence replays it through ImportAttestations,
+    // which calls store->Add directly instead of the Add() wrapper.
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const uint256 chain{Hex256('3')};
+    const uint256 context{Hex256('4')};
+    const uint256 block{Hex256('5')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_wal_hint.dat"};
+    const fs::path wal{archive + ".wal"};
+
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = chain;
+    statement.block_hash = block;
+    statement.block_height = 61;
+    statement.replay_authority_context = context;
+    const auto attestation{matmul::trusted::SignStatement(statement, signer)};
+    BOOST_REQUIRE(attestation.has_value());
+    DataStream record;
+    record << *attestation;
+    constexpr char wal_magic[16] = "BTX_MMAT_WAL_V1";
+    DataStream encoded;
+    encoded.write(AsBytes(Span{wal_magic, sizeof(wal_magic)}));
+    encoded << static_cast<uint32_t>(record.size());
+    encoded.write(Span{record.data(), record.size()});
+    BOOST_REQUIRE(WriteBinaryFile(
+        wal, std::string{reinterpret_cast<const char*>(encoded.data()),
+                         encoded.size()}));
+
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE_MESSAGE(node::matmul_trusted::OpenPersistence(archive, error), error);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 61));
+    const auto highest{node::matmul_trusted::HighestAttestedHeight()};
+    BOOST_REQUIRE(highest.has_value());
+    BOOST_CHECK_EQUAL(*highest, 61);
+    BOOST_CHECK_MESSAGE(HasFrontierHint(61, block),
+                        "WAL replay must restore the frontier hint");
+}
+
 BOOST_AUTO_TEST_CASE(open_archive_records_do_not_seed_signed_frontier)
 {
     RuntimeReset reset;
@@ -3940,6 +4319,10 @@ BOOST_AUTO_TEST_CASE(open_archive_records_do_not_seed_signed_frontier)
     BOOST_CHECK_EQUAL(*node::matmul_trusted::HighestAttestedHeight(), 10);
     BOOST_CHECK(node::matmul_trusted::Get(open_block, 50).empty());
     BOOST_CHECK(node::matmul_trusted::HeardAttestations().empty());
+    // The imported pin quorum is a frontier hint; the open record is not.
+    BOOST_CHECK_MESSAGE(HasFrontierHint(10, pin_block),
+                        "legacy archive import must restore the frontier hint");
+    BOOST_CHECK(!HasFrontierHint(50, open_block));
 }
 
 BOOST_AUTO_TEST_CASE(durable_history_outlives_bounded_hot_cache)
@@ -4590,6 +4973,101 @@ BOOST_AUTO_TEST_CASE(blocklist_init_fail_closed_below_threshold)
     BOOST_CHECK(!AppInitParameterInteraction(args));
     BOOST_CHECK(capture.LastError().find("unblocked pin") !=
                 std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_init_accepts_pq_pin_member)
+{
+    // -matmulattestationblocklist takes an ML-DSA-44 pin member like a
+    // secp256k1 one. Pin: 2 secp256k1 + 1 ML-DSA-44 key, the ML-DSA-44 key
+    // blocked. With M=2 the node starts and the blocked key is inert; with
+    // M=3 start is refused because 2 unblocked members are below M.
+    RuntimeReset reset;
+    const CKey a{NewKey()};
+    const CKey b{NewKey()};
+    const PqKey pq{MakePqKey(0x4b)};
+    auto startup = [&](int64_t threshold, std::string& error) {
+        node::matmul_trusted::ResetForTest();
+        ArgsManager args;
+        args.ForceSetArg("-matmulvalidation", "trusted");
+        UniValue keys{UniValue::VARR};
+        keys.push_back(HexPubKey(a));
+        keys.push_back(HexPubKey(b));
+        args.ForceSetArgV("-matmultrustedpubkey", keys);
+        UniValue pq_keys{UniValue::VARR};
+        pq_keys.push_back(HexStr(pq.pk));
+        args.ForceSetArgV("-matmultrustedpqpubkey", pq_keys);
+        args.ForceSetArg("-matmultrustedthreshold", threshold);
+        UniValue blocked{UniValue::VARR};
+        blocked.push_back(HexStr(pq.pk));
+        args.ForceSetArgV("-matmulattestationblocklist", blocked);
+        InitErrorCapture capture;
+        const bool ok{AppInitParameterInteraction(args)};
+        error = capture.LastError().substr(0, 120);
+        return ok;
+    };
+
+    std::string error;
+    const bool started{startup(/*threshold=*/2, error)};
+    BOOST_CHECK_MESSAGE(started, "init refused an ML-DSA-44 blocklist entry: " << error);
+    if (started) {
+        BOOST_REQUIRE_MESSAGE(node::matmul_trusted::FinalizeConfiguration(error), error);
+        BOOST_CHECK_EQUAL(node::matmul_trusted::UnblockedPinMembers(), 2U);
+        BOOST_CHECK(node::matmul_trusted::PinQuorumReachable());
+        BOOST_CHECK(!node::matmul_trusted::IsAuthorityPqSigner(pq.pk));
+    }
+
+    BOOST_CHECK(!startup(/*threshold=*/3, error));
+    BOOST_CHECK_MESSAGE(error.find("unblocked pin") != std::string::npos,
+                        "refused for another reason: " << error);
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_pq_runtime_block_of_voters_survives_restart)
+{
+    // The operator blocks both stolen ML-DSA-44 keys at runtime, after their
+    // votes were persisted. The blocks persist; the next start must succeed
+    // and keep the keys inert.
+    RuntimeReset reset;
+    const StolenPqPinMembers pin{
+        m_args.GetDataDirNet() / "matmul_blocklist_pq_runtime.dat"};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(pin.Start({}, error), error);
+    pin.CastStolenVotes();
+
+    std::string persist_error;
+    BOOST_CHECK(node::matmul_trusted::AddBlocklistedPqSigner(
+                    pin.pq1.pk, persist_error) ==
+                matmul::trusted::BlocklistResult::Blocked);
+    BOOST_CHECK_MESSAGE(persist_error.empty(), persist_error);
+    BOOST_CHECK_EQUAL(node::matmul_trusted::UnblockedPinMembers(), 3U);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(pin.stolen, pin.STOLEN_HEIGHT));
+    BOOST_CHECK(node::matmul_trusted::AddBlocklistedPqSigner(
+                    pin.pq2.pk, persist_error) ==
+                matmul::trusted::BlocklistResult::Blocked);
+    BOOST_CHECK_MESSAGE(persist_error.empty(), persist_error);
+
+    node::matmul_trusted::ResetForTest();
+    BOOST_REQUIRE_MESSAGE(pin.Start({}, error),
+                          "restart after a runtime block of PQ keys that voted failed: "
+                              << error);
+    pin.CheckAfterRestart();
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_pq_startup_block_of_voters_survives_restart)
+{
+    // Both stolen ML-DSA-44 keys voted and their votes were persisted. The
+    // operator restarts with both in -matmulattestationblocklist.
+    RuntimeReset reset;
+    const StolenPqPinMembers pin{
+        m_args.GetDataDirNet() / "matmul_blocklist_pq_startup.dat"};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(pin.Start({}, error), error);
+    pin.CastStolenVotes();
+
+    node::matmul_trusted::ResetForTest();
+    BOOST_REQUIRE_MESSAGE(pin.Start({pin.pq1.pk, pin.pq2.pk}, error),
+                          "restart with PQ keys that voted in the startup blocklist failed: "
+                              << error);
+    pin.CheckAfterRestart();
 }
 
 BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_trusted)

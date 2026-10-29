@@ -50,27 +50,16 @@ UniValue TrustedPqSignerPubKeysJSON()
     return keys;
 }
 
-CPubKey ParseCompressedPubKeyHex(const std::string& encoded)
-{
-    if (!IsHex(encoded)) {
-        throw JSONRPCError(
-            RPC_INVALID_ADDRESS_OR_KEY,
-            "Pubkey must be compressed secp256k1 hex");
-    }
-    const CPubKey pubkey{ParseHex(encoded)};
-    if (!pubkey.IsCompressed() || !pubkey.IsFullyValid()) {
-        throw JSONRPCError(
-            RPC_INVALID_ADDRESS_OR_KEY,
-            "Pubkey must be a valid compressed secp256k1 key");
-    }
-    return pubkey;
-}
-
 UniValue BlocklistStatusJSON()
 {
     UniValue result{UniValue::VOBJ};
     result.pushKV("blocked_pubkeys",
                   PubKeysJSON(node::matmul_trusted::BlockedSigners()));
+    UniValue blocked_pq{UniValue::VARR};
+    for (const auto& pubkey : node::matmul_trusted::BlockedPqSigners()) {
+        blocked_pq.push_back(HexStr(pubkey));
+    }
+    result.pushKV("blocked_pq_pubkeys", std::move(blocked_pq));
     result.pushKV(
         "unblocked_pin_members",
         static_cast<uint64_t>(node::matmul_trusted::UnblockedPinMembers()));
@@ -1093,13 +1082,14 @@ RPCHelpMan addmatmulattestationblocklist()
         "addmatmulattestationblocklist",
         "Manually block an attestation public key. The key becomes inert for "
         "pin votes, open admission, refutations, and IsAuthoritySigner even if "
-        "it remains in -matmultrustedpubkey. Refused without applying when the "
-        "add would leave fewer than M unblocked pin members, or when the key is "
-        "this node's local signer. Never auto-populated from peer or attestor "
-        "counts.\n",
+        "it remains in -matmultrustedpubkey / -matmultrustedpqpubkey. Accepts a "
+        "compressed secp256k1 key or an ML-DSA-44 pin public key. Refused "
+        "without applying when the add would leave fewer than M unblocked pin "
+        "members, or when the key is this node's local signer. Never "
+        "auto-populated from peer or attestor counts.\n",
         {
             {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
-             "Compressed secp256k1 public key hex"},
+             "Compressed secp256k1 public key hex, or ML-DSA-44 pin pubkey hex"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
             {
@@ -1107,10 +1097,13 @@ RPCHelpMan addmatmulattestationblocklist()
                 {RPCResult::Type::STR, "result", "blocked|duplicate|would-disable-pin-quorum|local-signer|invalid|capacity"},
                 {RPCResult::Type::ARR, "blocked_pubkeys", "",
                     {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "blocked_pq_pubkeys", "",
+                    {{RPCResult::Type::STR_HEX, "", "ML-DSA-44 pubkey hex"}}},
                 {RPCResult::Type::NUM, "unblocked_pin_members", ""},
                 {RPCResult::Type::NUM, "threshold", ""},
                 {RPCResult::Type::BOOL, "pin_quorum_reachable", ""},
                 {RPCResult::Type::BOOL, "fail_closed", ""},
+                {RPCResult::Type::BOOL, "persisted", "Whether the durable attestation database is open"},
                 {RPCResult::Type::STR, "persist_error", /*optional=*/true, ""},
             }},
         RPCExamples{HelpExampleCli("addmatmulattestationblocklist", "\"02..\"")},
@@ -1120,12 +1113,29 @@ RPCHelpMan addmatmulattestationblocklist()
                     RPC_MISC_ERROR,
                     "MatMul attestation store is not configured");
             }
-            const CPubKey pubkey{
-                ParseCompressedPubKeyHex(self.Arg<std::string>("pubkey"))};
+            const std::string encoded{self.Arg<std::string>("pubkey")};
+            if (!IsHex(encoded)) {
+                throw JSONRPCError(
+                    RPC_INVALID_ADDRESS_OR_KEY,
+                    "Pubkey must be hex");
+            }
+            const std::vector<unsigned char> raw{ParseHex(encoded)};
             std::string persist_error;
-            const auto result{
-                node::matmul_trusted::AddBlocklistedSigner(
-                    pubkey, persist_error)};
+            matmul::trusted::BlocklistResult result{
+                matmul::trusted::BlocklistResult::Invalid};
+            if (raw.size() == matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK) {
+                result = node::matmul_trusted::AddBlocklistedPqSigner(
+                    raw, persist_error);
+            } else {
+                const CPubKey pubkey{raw};
+                if (!pubkey.IsCompressed() || !pubkey.IsFullyValid()) {
+                    throw JSONRPCError(
+                        RPC_INVALID_ADDRESS_OR_KEY,
+                        "Pubkey must be a valid compressed secp256k1 key or an ML-DSA-44 pin public key");
+                }
+                result = node::matmul_trusted::AddBlocklistedSigner(
+                    pubkey, persist_error);
+            }
             if (result == matmul::trusted::BlocklistResult::WouldDisablePinQuorum ||
                 result == matmul::trusted::BlocklistResult::LocalSigner ||
                 result == matmul::trusted::BlocklistResult::Capacity ||
@@ -1159,6 +1169,8 @@ RPCHelpMan listmatmulattestationblocklist()
             {
                 {RPCResult::Type::ARR, "blocked_pubkeys", "",
                     {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "blocked_pq_pubkeys", "",
+                    {{RPCResult::Type::STR_HEX, "", "ML-DSA-44 pubkey hex"}}},
                 {RPCResult::Type::NUM, "unblocked_pin_members", ""},
                 {RPCResult::Type::NUM, "threshold", ""},
                 {RPCResult::Type::BOOL, "pin_quorum_reachable", ""},

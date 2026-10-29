@@ -418,7 +418,8 @@ without treating the referenced block as invalid.
   unblocked pin members. There is no auto-ban from peer counts, heard
   volume, or open-attestor majority (those are Sybil). Runtime adds persist
   across restart; unblocking a persisted key is an operator edit of the
-  durable record, not an RPC.
+  durable record, not an RPC. Both take a compressed secp256k1 key or an
+  ML-DSA-44 (`-matmultrustedpqpubkey`) pin member.
 - If mirrors stall, recover or replace an archive signer, reconnect providers,
   or import a bundle. Missing quorum is retryable and source-neutral.
 - To regain independent validation, restart a node with

@@ -679,7 +679,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-matmultrustedpqpubkey=<hex>", "ML-DSA-44 (1312-byte) public key trusted to attest successful Profile-1 ExactReplay. Repeat for additional independent pin members; each must be distinct. Counted in N alongside -matmultrustedpubkey. Does not change consensus ExactReplay: only trusted mirrors skip GPU on pin quorum. Empty keeps the live secp pin.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1). On mainnet with -matmulvalidation=trusted, M<2 or N<2 is refused: above the Profile-1 activation height the quorum replaces the MatMul proof-of-work check, so a 1-of-1 quorum makes one key the node's sole proof-of-work authority. Override with -allowsinglekeytrustedmirror=1. On -matmulvalidation=consensus the pin is telemetry and never skips ExactReplay. Configure 2 independent signers with M=2.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowsinglekeytrustedmirror", "Allow a mainnet trusted mirror to start with N<2 or M<2 (default: 0). That topology is a single stolen WIF hijacking ExactReplay skip. Transition override only; logged and alarming. Consensus+pin is never refused for 1-of-1 (the pin is telemetry).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-matmulattestationblocklist=<hex>", "Compressed secp256k1 public key whose ExactReplay attestations are never counted, even if the key is also in -matmultrustedpubkey. Repeat for multiple keys. Manual emergency hijack control only; never auto-populated from peer counts or open-attestor majority. Starting or adding a block that leaves fewer than -matmultrustedthreshold unblocked pin members is refused (fail-closed). Runtime adds persist; unblocking a persisted key requires editing the durable record. Restart without this flag unblocks config-only keys.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulattestationblocklist=<hex>", "Compressed secp256k1 or ML-DSA-44 ExactReplay pin public key whose attestations are never counted, even if the key is also in -matmultrustedpubkey / -matmultrustedpqpubkey. Repeat for multiple keys. Manual emergency hijack control only; never auto-populated from peer counts or open-attestor majority. Starting or adding a block that leaves fewer than -matmultrustedthreshold unblocked pin members is refused (fail-closed). Runtime adds persist; unblocking a persisted key requires editing the durable record. Restart without this flag unblocks config-only keys.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulopenattestors", "Hear cryptographically valid ExactReplay attestations from keys outside -matmultrustedpubkey (default: 0). Off until the open-speak directory is rate-limited. A new key is listed as admitted after it co-signs a hash that already has pin quorum; that directory is not MatMul authority. A serving node also answers GETMMATTEST with up to 4 heard statements, after its pinned ones. Only trusted mirrors skip ExactReplay on pin M-of-N; consensus miners never skip because a pin signed, and the pin is not FindMostWorkChain or getblocktemplate fork choice on consensus. Set to 1 to enable the directory.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulopenthreshold=<n>", "Directory open-quorum signal: distinct pinned-or-admitted unfrozen keys (default: max(M, 2)). Reported by getmatmulattestors; never replaces -matmultrustedthreshold and never skips ExactReplay.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedwaitms=<n>", "Maximum time a trusted-mirror block may remain parked awaiting an M-of-N attestation quorum before the attempt is left retryable (non-punitive), in milliseconds (default: 60000, maximum: 600000). Does not block the verify worker: many blocks may await quorum concurrently.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1654,12 +1654,31 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 
     const auto blocklist_args{args.GetArgs("-matmulattestationblocklist")};
     std::vector<CPubKey> attestation_blocklist;
+    std::vector<std::vector<unsigned char>> attestation_pq_blocklist;
     attestation_blocklist.reserve(blocklist_args.size());
+    attestation_pq_blocklist.reserve(blocklist_args.size());
     for (const auto& encoded : blocklist_args) {
-        const CPubKey pubkey{ParseHex(encoded)};
+        if (!IsHex(encoded)) {
+            return InitError(strprintf(
+                _("Invalid hex in -matmulattestationblocklist: %s"),
+                encoded));
+        }
+        const std::vector<unsigned char> raw{ParseHex(encoded)};
+        if (raw.size() == matmul::trusted::EXACT_REPLAY_ML_DSA_44_PK) {
+            if (std::find(attestation_pq_blocklist.begin(),
+                          attestation_pq_blocklist.end(),
+                          raw) != attestation_pq_blocklist.end()) {
+                return InitError(strprintf(
+                    _("Duplicate -matmulattestationblocklist: %s"),
+                    encoded));
+            }
+            attestation_pq_blocklist.push_back(raw);
+            continue;
+        }
+        const CPubKey pubkey{raw};
         if (!pubkey.IsCompressed() || !pubkey.IsFullyValid()) {
             return InitError(strprintf(
-                _("Invalid compressed public key in -matmulattestationblocklist: %s"),
+                _("Invalid compressed or ML-DSA-44 public key in -matmulattestationblocklist: %s"),
                 encoded));
         }
         if (std::find(attestation_blocklist.begin(), attestation_blocklist.end(),
@@ -1774,6 +1793,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         (!trusted_signers.empty() || !trusted_pq_signers.empty() ||
          has_local_attestation_signer ||
          serve_attestations || !attestation_blocklist.empty() ||
+         !attestation_pq_blocklist.empty() ||
          open_attestors)) {
         return InitError(_("Discovery relay mode (-matmulvalidation=relay) is not MatMul authority and must not load a pin, signing key, GETMMATTEST serve, attestation blocklist, or open attestors. Archives follow GPU attestors via the pin; this node only introduces peers. Remove those flags or run -matmulvalidation=trusted / consensus."));
     }
@@ -1790,7 +1810,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         !trusted_pq_signers.empty() ||
         has_local_attestation_signer ||
         serve_attestations ||
-        !attestation_blocklist.empty()};
+        !attestation_blocklist.empty() ||
+        !attestation_pq_blocklist.empty()};
     if (attestation_config_requested) {
         if (trusted_signers.empty() && trusted_pq_signers.empty() &&
             !has_local_attestation_signer) {
@@ -1821,8 +1842,19 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                 ++unblocked_pin_members;
             }
         }
-        unblocked_pin_members += trusted_pq_signers.size() +
-                                 (pq_seeds_pin ? 1 : 0);
+        for (const auto& signer : trusted_pq_signers) {
+            if (std::find(attestation_pq_blocklist.begin(),
+                          attestation_pq_blocklist.end(),
+                          signer) == attestation_pq_blocklist.end()) {
+                ++unblocked_pin_members;
+            }
+        }
+        if (pq_seeds_pin &&
+            std::find(attestation_pq_blocklist.begin(),
+                      attestation_pq_blocklist.end(),
+                      local_pq_pk) == attestation_pq_blocklist.end()) {
+            ++unblocked_pin_members;
+        }
         // A local secp WIF seeds the pin in FinalizeConfiguration, as counted
         // in preliminary_signer_capacity above. Its pubkey is not known before
         // ECC_Start (it may already be pinned, or blocked), so it only lifts
@@ -1912,6 +1944,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         }
         config.threshold = static_cast<size_t>(trusted_threshold);
         config.blocklist = attestation_blocklist;
+        config.pq_blocklist = attestation_pq_blocklist;
         config.open_attestors = open_attestors;
         config.open_threshold =
             open_attestors && args.IsArgSet("-matmulopenthreshold")
