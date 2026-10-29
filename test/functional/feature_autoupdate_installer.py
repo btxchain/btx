@@ -794,6 +794,31 @@ def test_pinned_manifest_digest_mismatch_aborts():
             raise AssertionError(f"expected a digest mismatch; got:\n{result.stdout}\n{result.stderr}")
 
 
+def test_unpinned_manifest_must_match_verified_version():
+    # btxd 0.34.15 and older pass only the manifest URL and the version they
+    # verified. The installer fetches the manifest again, so that fetch must not
+    # be allowed to name another (for example an older, validly signed) version.
+    with Scenario("unpinned-version", {"BTX_AUTOUPDATE_REMOTE_VERSION": "100.0.0"}) as scenario:
+        result = scenario.run_installer()
+        assert_failure(result)
+        if "refusing manifest version 99.0.0: the node verified 100.0.0" not in (result.stdout + result.stderr):
+            raise AssertionError(f"expected a version mismatch refusal; got:\n{result.stdout}\n{result.stderr}")
+    with Scenario("unpinned-version-match", {"BTX_AUTOUPDATE_REMOTE_VERSION": "99.0.0"}) as scenario:
+        assert_success(scenario.run_installer())
+
+
+def test_python_module_in_working_directory_is_not_imported():
+    # btxd starts the installer without changing directory. A json.py there must
+    # not run inside the installer's python3 helpers.
+    with Scenario("cwd-import") as scenario:
+        marker = scenario.tmp / "planted-json-ran"
+        (scenario.tmp / "json.py").write_text(
+            f"open({str(marker)!r}, 'a').write('x')\nraise ImportError('planted')\n", encoding="utf8")
+        assert_success(scenario.run_installer())
+        if marker.exists():
+            raise AssertionError("installer imported json.py from its working directory")
+
+
 def test_unusable_prebuilt_falls_back_to_source_build():
     with Scenario("prebuilt-unusable", {"BTX_AUTO_RESTART": "1"}) as scenario:
         try:
@@ -834,6 +859,8 @@ def main():
         test_unusable_prebuilt_falls_back_to_source_build,
         test_pinned_manifest_ignores_url_and_version_overrides,
         test_pinned_manifest_digest_mismatch_aborts,
+        test_unpinned_manifest_must_match_verified_version,
+        test_python_module_in_working_directory_is_not_imported,
     ]
     for test in tests:
         test()
