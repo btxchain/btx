@@ -680,6 +680,7 @@ BTX_BASE_SCRIPTS = [
     'feature_matmul_trusted_mirror_backfill.py',
     'feature_matmul_signer_wif_only_start.py',
     'feature_block_download_slot_reclaim.py',
+    'p2p_archive_requested_body_no_punish.py',
     'p2p_noconnect_inbound_relay.py',
     'p2p_unconnected_block_relay.py',
     'p2p_unconnected_block_relay_catchup.py',

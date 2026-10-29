@@ -2217,6 +2217,13 @@ private:
      * punished if the block is invalid.
      */
     std::map<uint256, std::pair<NodeId, bool>> mapBlockSource GUARDED_BY(cs_main);
+    /** Full blocks requested from an archive or trusted-mirror peer that
+     *  extend the active tip, so the sender may have stored the body before
+     *  ConnectBlock (see the BLOCK handler). The mapBlockSource entry stays
+     *  punishable; BlockChecked spares the sender only when ConnectBlock
+     *  rejects the block, never for a malformed body (BLOCK_MUTATED). Same
+     *  lifetime as the mapBlockSource entry. */
+    std::map<uint256, NodeId> m_archive_body_sources GUARDED_BY(cs_main);
     /** Async MatMul jobs own their block-source entry through validation
      *  re-entry. Same-hash mutated/header-only relays may be processed while a
      *  job is pending, but must not erase the source used to punish the job's
@@ -3626,6 +3633,7 @@ bool PeerManagerImpl::StoreMatMulDeferredBody(const uint256& hash,
     const size_t bytes{::GetSerializeSize(TX_WITH_WITNESS(*block))};
     if (bytes > MATMUL_DEFERRED_BODY_MAX_BYTES) return false;  // never storable
     bool source_punishable{true};
+    bool source_archive_exempt{false};
     bool pin_progress{false};
     {
         LOCK(cs_main);
@@ -3633,6 +3641,9 @@ bool PeerManagerImpl::StoreMatMulDeferredBody(const uint256& hash,
         if (it != mapBlockSource.end() && it->second.first == source.GetId()) {
             source_punishable = it->second.second;
         }
+        const auto archive_it{m_archive_body_sources.find(hash)};
+        source_archive_exempt = archive_it != m_archive_body_sources.end() &&
+                                archive_it->second == source.GetId();
         const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
         const CBlockIndex* const idx{
             m_chainman.m_blockman.LookupBlockIndex(hash)};
@@ -3661,6 +3672,7 @@ bool PeerManagerImpl::StoreMatMulDeferredBody(const uint256& hash,
             .source_address = source_address,
             .source_netgroup = source.nKeyedNetGroup,
             .source_punishable = source_punishable,
+            .source_archive_exempt = source_archive_exempt,
             .force_processing = force_processing,
             .min_pow_checked = min_pow_checked,
             .is_ibd = is_ibd,
@@ -4195,6 +4207,7 @@ void PeerManagerImpl::DispatchDisconnectedRetainedMatMulBody(
     {
         LOCK(cs_main);
         mapBlockSource[hash] = std::make_pair(source_id, candidate.source_punishable);
+        if (candidate.source_archive_exempt) m_archive_body_sources[hash] = source_id;
         PinMatMulBlockSource(hash);
     }
     auto source_pin{std::make_shared<MatMulBlockSourcePin>(*this, hash)};
@@ -4711,6 +4724,11 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     candidate_hash,
                     std::make_pair(candidate.source_peer,
                                    candidate.source_punishable));
+                if (candidate.source_archive_exempt) {
+                    m_archive_body_sources.emplace(
+                        candidate_hash,
+                        static_cast<NodeId>(candidate.source_peer));
+                }
             }
             LogDebug(
                 BCLog::NET,
@@ -4776,6 +4794,7 @@ void PeerManagerImpl::UnpinMatMulBlockSource(const uint256& hash)
     if (--pin->second == 0) {
         m_matmul_block_source_pins.erase(pin);
         mapBlockSource.erase(hash);
+        m_archive_body_sources.erase(hash);
     }
 }
 
@@ -4802,7 +4821,10 @@ void PeerManagerImpl::DrainMatMulPendingSourceUnpins()
 void PeerManagerImpl::EraseMatMulBlockSourceIfUnpinned(const uint256& hash)
 {
     AssertLockHeld(cs_main);
-    if (!m_matmul_block_source_pins.contains(hash)) mapBlockSource.erase(hash);
+    if (!m_matmul_block_source_pins.contains(hash)) {
+        mapBlockSource.erase(hash);
+        m_archive_body_sources.erase(hash);
+    }
 }
 
 MatMulBlockSourcePin::~MatMulBlockSourcePin()
@@ -10151,7 +10173,14 @@ void PeerManagerImpl::BlockChecked(const CBlock& block, const BlockValidationSta
     if (state.IsInvalid() &&
         it != mapBlockSource.end() &&
         State(it->second.first)) {
-            MaybePunishNodeForBlock(/*nodeid=*/ it->second.first, state, /*via_compact_block=*/ !it->second.second);
+            bool via_compact_block{!it->second.second};
+            if (!via_compact_block &&
+                state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+                const auto archive_it{m_archive_body_sources.find(hash)};
+                via_compact_block = archive_it != m_archive_body_sources.end() &&
+                                    archive_it->second == it->second.first;
+            }
+            MaybePunishNodeForBlock(/*nodeid=*/ it->second.first, state, via_compact_block);
     }
     // BLOCK_MUTATED is not a permanent header failure. matrix_c_data and
     // other body-only fields are outside the header hash, so an honest
@@ -15857,6 +15886,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 }
                 auto source_pin = std::make_shared<MatMulBlockSourcePin>(*this, hash);
                 bool source_punishable{true};
+                bool source_archive_exempt{false};
                 {
                     LOCK(cs_main);
                     const auto source_it{mapBlockSource.find(hash)};
@@ -15864,6 +15894,10 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         source_it->second.first == node.GetId()) {
                         source_punishable = source_it->second.second;
                     }
+                    const auto archive_it{m_archive_body_sources.find(hash)};
+                    source_archive_exempt =
+                        archive_it != m_archive_body_sources.end() &&
+                        archive_it->second == node.GetId();
                 }
                 const auto lifecycle_now{std::chrono::steady_clock::now()};
                 if (matmul_admission.lifecycle_token &&
@@ -15880,6 +15914,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                             .source_address = node.addr,
                             .source_netgroup = node.nKeyedNetGroup,
                             .source_punishable = source_punishable,
+                            .source_archive_exempt = source_archive_exempt,
                             .force_processing = force_processing,
                             .min_pow_checked = min_pow_checked,
                             .is_ibd = matmul_admission.is_ibd,
@@ -22550,17 +22585,26 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // A full block we requested from an archive or trusted-mirror peer
             // may be a body that peer stored before ConnectBlock: a trusted
             // mirror persists tip-extending HAVE_DATA before quorum, and
-            // BlockRequestAllowed serves it to any requester. Like a BIP 152
-            // compact block, such a body was relayed on header validation
-            // only, so an invalid body must not get that honest peer punished
-            // or disconnected. useful_owned_delivery was taken before
-            // RemoveBlockRequest above. A forged MatMul proof is still
-            // punished: MaybePunishNodeForBlock ignores via_compact_block for
-            // phase-2 failures.
+            // BlockRequestAllowed serves it to any requester. Such a body was
+            // relayed on header validation only, so a ConnectBlock failure
+            // must not get that honest peer punished or disconnected. This
+            // only applies to blocks that extend our active tip (a tip child
+            // or the unattested suffix above it): the sender cannot hold an
+            // unconnected body anywhere else. A malformed body (BLOCK_MUTATED,
+            // for example bytes appended to matrix_c_data, which sits outside
+            // the header hash and the merkle root) and a forged MatMul proof
+            // are still punished: an honest archive never stores either.
+            // useful_owned_delivery was taken before RemoveBlockRequest above.
+            const CBlockIndex* const active_tip{m_chainman.ActiveChain().Tip()};
             const bool solicited_from_archive{
-                useful_owned_delivery && pfrom.HasArchiveOrMirrorService()};
-            mapBlockSource.emplace(
-                hash, std::make_pair(pfrom.GetId(), !solicited_from_archive));
+                useful_owned_delivery && pfrom.HasArchiveOrMirrorService() &&
+                prev_block != nullptr && active_tip != nullptr &&
+                prev_block->nHeight >= active_tip->nHeight &&
+                prev_block->GetAncestor(active_tip->nHeight) == active_tip};
+            mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
+            if (solicited_from_archive) {
+                m_archive_body_sources.emplace(hash, pfrom.GetId());
+            }
         }
 
         if (!AdmitMatMulBlockVerification(
