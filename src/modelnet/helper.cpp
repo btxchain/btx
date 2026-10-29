@@ -1997,13 +1997,17 @@ bool ReadCatalogBytes(ModelCatalog& cat, const CatalogEntry& e, std::vector<unsi
     return true;
 }
 
-FundingObservation ObservationFromHit(const SearchHit& h, const ReleaseCampaign* campaign, ModelCatalog* cat)
+/** include_wallet_observation=false leaves out g_chain_obs: those entries come from
+ *  btxd's join against the local wallets (ObserveReleaseFunding reads mapWallet), so
+ *  they must not reach a remote peer. */
+FundingObservation ObservationFromHit(const SearchHit& h, const ReleaseCampaign* campaign, ModelCatalog* cat,
+                                      bool include_wallet_observation = true)
 {
     FundingObservation f;
     f.funding_source = "OBSERVED_NETWORK_STATE";
     f.ciphertext_providers_observed = h.health.providers_observed;
     if (campaign) {
-        auto it = g_chain_obs.find(campaign->release_id.Hex());
+        auto it = include_wallet_observation ? g_chain_obs.find(campaign->release_id.Hex()) : g_chain_obs.end();
         if (it != g_chain_obs.end() && it->second.confirmed_known &&
             it->second.funding_source == "CHAIN_OBSERVATION") {
             f = it->second;
@@ -2024,12 +2028,12 @@ FundingObservation ObservationFromHit(const SearchHit& h, const ReleaseCampaign*
     return f;
 }
 
-ModelEconomyEntry EconomyForHit(const SearchHit& h, ModelCatalog* cat = nullptr)
+ModelEconomyEntry EconomyForHit(const SearchHit& h, ModelCatalog* cat = nullptr, bool include_wallet_observation = true)
 {
     std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
     const ReleaseCampaign* c = g_campaigns.GetByModel(h.rec.model_id);
     if (!c && !h.rec.release_id.empty()) c = g_campaigns.GetByReleaseHex(h.rec.release_id);
-    return ComposeEconomyEntry(h, c, ObservationFromHit(h, c, cat));
+    return ComposeEconomyEntry(h, c, ObservationFromHit(h, c, cat, include_wallet_observation));
 }
 
 UniValue EconomyCard(const SearchHit& h)
@@ -3057,14 +3061,23 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         fq.scope = SearchScope::LOCAL;
         std::lock_guard<std::mutex> lock(g_search_mu);
         std::string next;
-        const auto items = g_feed.Query(fq, ConnNowMs(), next);
+        // This is a peer route. Funding events come only from local pledges and from
+        // btxd's join against the local wallets, and the wallet join also sets
+        // confirmed funding, wallet_local_state and the refund state of a card.
+        // Serve neither to a peer.
+        std::vector<FeedEvent> items;
+        for (auto& ev : g_feed.Query(fq, ConnNowMs(), next)) {
+            if (ev.event_type == FeedEventType::RELEASE_FUNDING_CHANGED ||
+                ev.event_type == FeedEventType::RELEASE_FUNDED) continue;
+            items.push_back(std::move(ev));
+        }
         std::vector<ModelEconomyEntry> entries;
         UniValue recs(UniValue::VARR);
         for (const auto& ev : items) {
             SearchHit h;
             h.rec = ev.rec;
             if (h.rec.model_id.IsNull()) h.rec.model_id = ev.model_id;
-            entries.push_back(EconomyForHit(h));
+            entries.push_back(EconomyForHit(h, nullptr, /*include_wallet_observation=*/false));
             recs.push_back(SearchRecordToJson(h.rec));
         }
         FeedCoverage cov;
@@ -8894,11 +8907,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 // g_search_mu is already held. Campaign lock is taken second.
                 std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
                 if (auto* c = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(id))) {
-                    c->funded_atoms = f.confirmed_funded_atoms;
-                    if (f.chain_height_known) c->latest_funding_height = f.chain_height;
+                    // The observation comes from btxd's join against the local
+                    // wallets (ObserveReleaseFunding reads mapWallet). Keep it in
+                    // g_chain_obs for local views; do not write it into the shared
+                    // campaign, which is serialized in cards served to peers.
                     g_feed.NoteFundingChanged(*c, ConnNowMs());
                     LiveObserveCampaign(*c, FeedEventType::RELEASE_FUNDING_CHANGED);
-                    SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
                 }
             }
             result.pushKV("accepted", true);
