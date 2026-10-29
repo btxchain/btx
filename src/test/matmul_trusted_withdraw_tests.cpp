@@ -66,12 +66,6 @@ struct WithdrawSignerNode {
         std::string error;
         BOOST_REQUIRE_MESSAGE(node::matmul_trusted::FlushPersistence(error), error);
     }
-    void Restart() const
-    {
-        Flush();
-        node::matmul_trusted::ResetForTest();
-        Start();
-    }
     void PeerSign(const uint256& hash, int32_t height) const
     {
         matmul::trusted::ExactReplayStatement statement;
