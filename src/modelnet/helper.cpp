@@ -10420,8 +10420,10 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
             return false;
         }
         UniValue gj;
-        if (!gj.read(grant_resp.body) || !gj.isObject() || !gj.exists("payload_hex") ||
-            !gj.exists("sig_hex") || !gj.exists("pubkey_hex")) {
+        // Peer data: a field of another type fails this grant like a missing one.
+        // Swarm sources run this on threads of their own, where a throw ends the helper.
+        if (!gj.read(grant_resp.body) || !gj.isObject() || !gj["payload_hex"].isStr() ||
+            !gj["sig_hex"].isStr() || !gj["pubkey_hex"].isStr()) {
             gerr = "missing FreeGrant";
             return false;
         }
