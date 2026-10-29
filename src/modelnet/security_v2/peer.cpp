@@ -7,7 +7,10 @@ namespace modelnet::security {
         void Tables(Database& db) {
             db.Exec("CREATE TABLE IF NOT EXISTS peer_pending(id TEXT PRIMARY KEY,peer TEXT NOT NULL,expires INTEGER NOT NULL) WITHOUT ROWID");
             db.Exec("CREATE TABLE IF NOT EXISTS peer_wants(peer TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(peer,id)) WITHOUT ROWID");
+            db.Exec("CREATE TABLE IF NOT EXISTS peer_rejected(peer TEXT NOT NULL,id TEXT NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(peer,id)) WITHOUT ROWID");
         }
+        constexpr uint64_t kRejectedMs=86400000;
+        constexpr size_t kMaxRejected=4096;
         bool ExportKind(const std::string& kind) {
             static const std::set<std::string> allowed {
                 "composition","capsule","evaluation","receipt","challenge","channel","revocation","anchor"
@@ -78,6 +81,9 @@ namespace modelnet::security {
         }
         void Want(Database& db,const std::string& peer,const std::string& id) {
             if(!IsHash(id)||db.Has(id))return;
+            if(!db.Query("SELECT id FROM peer_rejected WHERE peer=? AND id=?", {
+                peer,id
+            }).empty())return;
             auto count=db.Query("SELECT count(*) FROM peer_wants WHERE peer=?", {
                 peer
             });
@@ -225,13 +231,36 @@ namespace modelnet::security {
             tx.Commit();
         }
         Require(b["records"].isArray()&&b["records"].size()<=8,"SEC_PEER_RECORD_COUNT");
+        db.Exec("DELETE FROM peer_rejected WHERE expires<=?", {
+            std::to_string(now)
+        });
         for(const auto& record:b["records"].getValues()) {
             Require(ExportKind(Text(record,"kind")),"SEC_PEER_PRIVATE_RECORD");
             const auto id=RecordId(record);
             Require(!db.Query("SELECT id FROM peer_wants WHERE peer=? AND id=?", {
                 peer,id
             }).empty(),"SEC_UNREQUESTED_RECORD");
-            ImportRecord(db,p,record,now,true);
+            try {
+                ImportRecord(db,p,record,now,true);
+            }
+            catch(const Error& error) {
+                // Same four codes as MeshAccept: not importable on this node, but no
+                // reason to stop syncing with this peer. Drop the want and do not
+                // want the record from this peer again for a day.
+                if(error.code!="SEC_EXPIRED_OR_FUTURE"&&error.code!="SEC_RECORD_REVOKED"&&
+                   error.code!="SEC_SIGNER_REVOKED"&&error.code!="SEC_POLICY_BINDING")throw;
+                Database::Transaction tx(db);
+                db.Exec("DELETE FROM peer_wants WHERE peer=? AND id=?", {
+                    peer,id
+                });
+                if(ParseUInt(db.Query("SELECT count(*) FROM peer_rejected WHERE peer=?", {
+                    peer
+                })[0][0])<kMaxRejected)db.Exec("INSERT OR REPLACE INTO peer_rejected(peer,id,expires) VALUES(?,?,?)", {
+                    peer,id,std::to_string(now+static_cast<int64_t>(kRejectedMs))
+                });
+                tx.Commit();
+                continue;
+            }
             Database::Transaction tx(db);
             db.Exec("DELETE FROM peer_wants WHERE peer=? AND id=?", {
                 peer,id

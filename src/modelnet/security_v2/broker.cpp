@@ -282,7 +282,7 @@ namespace modelnet::security {
         Fields(c, {
             "schema","workspaces","packages","host"
         }, {
-            "evaluation_plans","runtimes","identity","peer_identity","execution_policy","continuous_security"
+            "evaluation_plans","runtimes","identity","peer_identity","execution_policy","continuous_security","remote_work"
         });
         Require(Text(c,"schema")=="BTX/SecurityLocal/v1"&&c["workspaces"].isObject()&&c["packages"].isObject(),
         "SEC_LOCAL_CONFIG");

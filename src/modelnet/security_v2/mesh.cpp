@@ -6,8 +6,8 @@
 #include <set>
 namespace modelnet::security {
 namespace {
-constexpr uint64_t kPacketLease=30000, kMaxPeerAge=30000;
-constexpr size_t kMaxObjects=16, kMaxWants=8;
+constexpr uint64_t kPacketLease=30000, kMaxPeerAge=30000, kRejectedMs=86400000;
+constexpr size_t kMaxObjects=16, kMaxWants=8, kMaxRejected=4096;
 const std::set<std::string> kExportKinds{"composition","capsule","evaluation","receipt","challenge","channel","revocation","campaign","anchor","work","result"};
 void Ensure(bool condition,const char* error){Require(condition,error);}
 Json Header(const Policy& p,const std::string& self,const std::string& peer,std::string_view phase,int64_t now){
@@ -51,6 +51,7 @@ std::string Check(Database& db,const Policy& p,const Json& packet,const std::str
 }
 void Want(Database& db,const std::string& peer,const std::string& id){
     if(!IsHash(id)||db.Has(id))return;
+    if(!db.Query("SELECT id FROM mesh_rejected WHERE peer=? AND id=?",{peer,id}).empty())return;
     const auto rows=db.Query("SELECT count(*) FROM mesh_wants WHERE peer=?",{peer});
     if(ParseUInt(rows[0][0])<512)db.Exec("INSERT OR IGNORE INTO mesh_wants(peer,id) VALUES(?,?)",{peer,id});
 }
@@ -91,6 +92,15 @@ bool ApprovedCampaign(Database& db,const std::string& campaign){
     if(!security.isObject()||!security["enabled"].isBool()||!security["enabled"].get_bool())return false;
     auto allow=StringArray(security["allowed_campaigns"],128);
     return std::find(allow.begin(),allow.end(),campaign)!=allow.end();
+}
+// Policy::Check for stored records: a signer revoked or no longer enrolled for
+// the role gives an empty list instead of a throw.
+std::vector<std::string> CurrentSigners(Database& db,const Policy& p,const Json& e,std::string_view role,int64_t now){
+    try{return p.Check(e,role,db,now);}
+    catch(const Error& error){
+        if(error.code!="SEC_SIGNER_REVOKED"&&error.code!="SEC_SIGNATURE_THRESHOLD")throw;
+        return {};
+    }
 }
 uint64_t MaxAge(Database& db){
     auto local=ReadLocalConfig(db);const auto& settings=local["continuous_security"];
@@ -150,6 +160,7 @@ void MeshTables(Database& db){
     db.Exec("CREATE TABLE IF NOT EXISTS mesh_wants(peer TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(peer,id)) WITHOUT ROWID");
     db.Exec("CREATE TABLE IF NOT EXISTS mesh_pending(id TEXT PRIMARY KEY,peer TEXT NOT NULL,expires INTEGER NOT NULL) WITHOUT ROWID");
     db.Exec("CREATE TABLE IF NOT EXISTS mesh_cursors(peer TEXT PRIMARY KEY,cursor TEXT NOT NULL) WITHOUT ROWID");
+    db.Exec("CREATE TABLE IF NOT EXISTS mesh_rejected(peer TEXT NOT NULL,id TEXT NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(peer,id)) WITHOUT ROWID");
     db.Exec("CREATE TABLE IF NOT EXISTS mesh_live(peer TEXT PRIMARY KEY,seen_ms INTEGER NOT NULL,domain TEXT NOT NULL,host TEXT NOT NULL,epoch INTEGER NOT NULL) WITHOUT ROWID");
     db.Exec("CREATE TABLE IF NOT EXISTS mesh_rounds(campaign TEXT NOT NULL,round INTEGER NOT NULL,challenge TEXT NOT NULL,PRIMARY KEY(campaign,round)) WITHOUT ROWID");
 }
@@ -203,12 +214,26 @@ void MeshAccept(Database& db,const Json& response,const std::string& pin,int64_t
     Ensure(b["next_cursor"].isStr(),"SEC_MESH_CURSOR");
     auto next=b["next_cursor"].get_str();Ensure(next.empty()||IsHash(next),"SEC_MESH_CURSOR");
     Ensure(b["records"].isArray()&&b["records"].size()<=kMaxWants,"SEC_MESH_RECORD_LIMIT");
+    db.Exec("DELETE FROM mesh_rejected WHERE expires<=?",{std::to_string(now)});
     for(const auto& item:b["records"].getValues()){
         Ensure(Canonical(item).size()<=MAX_RECORD,"SEC_MESH_RECORD_LIMIT");
         ValidateEnvelope(item);
         const auto kind=Text(item,"kind");Ensure(kExportKinds.contains(kind),"SEC_MESH_PRIVATE_KIND");
         const auto record_id=RecordId(item);
-        if(!db.Has(record_id))ImportRecord(db,p,item,now,true);
+        if(!db.Has(record_id)){
+            try{ImportRecord(db,p,item,now,true);}
+            catch(const Error& e){
+                // Not importable on this node (expired or not yet valid, record or
+                // signer revoked, another policy epoch): drop the want, keep syncing,
+                // and do not want it from this peer's inventory again for a day.
+                if(e.code!="SEC_EXPIRED_OR_FUTURE"&&e.code!="SEC_RECORD_REVOKED"&&
+                   e.code!="SEC_SIGNER_REVOKED"&&e.code!="SEC_POLICY_BINDING")throw;
+                db.Exec("DELETE FROM mesh_wants WHERE peer=? AND id=?",{peer,record_id});
+                if(ParseUInt(db.Query("SELECT count(*) FROM mesh_rejected WHERE peer=?",{peer})[0][0])<kMaxRejected)
+                    db.Exec("INSERT OR REPLACE INTO mesh_rejected(peer,id,expires) VALUES(?,?,?)",{peer,record_id,std::to_string(now+static_cast<int64_t>(kRejectedMs))});
+                continue;
+            }
+        }
         for(const auto& dep:RecordDependencies(item))Want(db,peer,dep);
         if(kind=="challenge")Want(db,peer,DigestField(item["body"],"campaign"));
         if(kind=="result"){
@@ -234,7 +259,10 @@ void MeshTick(Database& db,int64_t now){
             for(const auto& campaign:allowed){
                 if(!db.Has(campaign))continue;
                 auto e=db.Get(campaign);if(Text(e,"kind")!="campaign")continue;
-                p.Check(e,"owner",db,now);const auto& b=e["body"];
+                // A campaign whose owner signer is revoked schedules no more rounds;
+                // throwing here would also stop Lifecycle::Tick in Maintain.
+                if(CurrentSigners(db,p,e,"owner",now).empty())continue;
+                const auto& b=e["body"];
                 const auto issued=UInt(b,"issued_ms",INT64_MAX),expires=UInt(b,"expires_ms",INT64_MAX);
                 if(static_cast<uint64_t>(now)<issued||static_cast<uint64_t>(now)>=expires)continue;
                 const auto interval=UInt(b,"interval_ms",86400000);
@@ -266,7 +294,7 @@ void MeshTick(Database& db,int64_t now){
     for(const auto& row:db.Query("SELECT envelope FROM objects WHERE kind='evaluation' ORDER BY id LIMIT 1024")){
         auto e=Parse(row[0]);auto b=e["body"];
         if(!b["campaign"].isStr()||!ApprovedCampaign(db,b["campaign"].get_str()))continue;
-        auto signers=p.Check(e,"evaluator",db,now);
+        auto signers=CurrentSigners(db,p,e,"evaluator",now);
         if(signers.size()!=1)continue;
         const auto host=Text(local,"host",128);
         if(p.Find(signers[0],"evaluator",db,now).host!=host)continue;
@@ -284,7 +312,7 @@ void MeshTick(Database& db,int64_t now){
             auto result=Parse(row[0]);const auto& b=result["body"];
             const auto work_id=DigestField(b,"work");if(!db.Has(work_id))continue;
             auto work=db.Get(work_id);
-            auto signers=p.Check(result,"worker",db,now);
+            auto signers=CurrentSigners(db,p,result,"worker",now);
             if(signers.size()!=1||p.Find(signers[0],"worker",db,now).host!=Text(local,"host",128))continue;
             if(![&]{auto packages=StringArray(local["remote_work"]["packages"],128);
                 return std::find(packages.begin(),packages.end(),DigestField(work["body"],"package"))!=packages.end();}())continue;
