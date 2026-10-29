@@ -569,6 +569,69 @@ BOOST_AUTO_TEST_CASE(release_card_keeps_display_name_publisher_and_size)
     BOOST_REQUIRE(FindReleaseCard(still, rid) != nullptr);
 }
 
+BOOST_AUTO_TEST_CASE(peer_feed_omits_local_wallet_observation)
+{
+    // btxd joins release cards against the local wallets and ingests the result
+    // (ObserveReleaseFunding reads mapWallet). The peer route ext/feed must not
+    // hand that wallet state, or the funding event it causes, to a remote peer.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "peer-feed";
+    const fs::path model = root / "toy.safetensors.dir";
+    fs::create_directories(model);
+    const auto st = TinySafeTensors();
+    {
+        std::ofstream out(model / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    ModelCatalog cat{root, 8 << 20};
+    UniValue host_params(UniValue::VARR);
+    host_params.push_back(fs::PathToString(model));
+    const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+    BOOST_REQUIRE(hosted.exists("uri"));
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("uri", hosted["uri"].get_str());
+    body.pushKV("secret32_hex", std::string(64, 'c'));
+    body.pushKV("refund_height", 100000);
+    body.pushKV("target_atoms", 5'000'000);
+    body.pushKV("display_name", "Peer Feed");
+    UniValue create_params(UniValue::VARR);
+    create_params.push_back(body);
+    const UniValue rel = HelperDispatch(cat, "createmodelrelease", create_params);
+    const std::string rid = rel["release_id"].get_str();
+
+    UniValue obs(UniValue::VOBJ);
+    obs.pushKV("confirmed_known", true);
+    obs.pushKV("funding_source", "CHAIN_OBSERVATION");
+    obs.pushKV("confirmed_funded_atoms", 1'234'567);
+    obs.pushKV("wallet_contributor", true);
+    obs.pushKV("refund_available_locally", true);
+    obs.pushKV("chain_height", 150);
+    obs.pushKV("release_id", rid);
+    UniValue obs_params(UniValue::VARR);
+    obs_params.push_back(obs);
+    BOOST_REQUIRE(HelperDispatch(cat, "ingestchainfundingobservation", obs_params)["accepted"].isTrue());
+
+    // The local view still has the wallet observation.
+    UniValue econ_params(UniValue::VARR);
+    econ_params.push_back(rid);
+    const UniValue econ = HelperDispatch(cat, "getmodelreleaseeconomics", econ_params);
+    BOOST_CHECK_EQUAL(econ["confirmed_funded_atoms"].getInt<int64_t>(), 1'234'567);
+
+    NativeRequest req;
+    req.method = "POST";
+    req.path = "/btx-model/2/ext/feed";
+    req.body = R"({"limit":50})";
+    NativeResponse resp;
+    BOOST_REQUIRE(HandleNativeRequest(cat, req, resp));
+    BOOST_REQUIRE_EQUAL(resp.status, 200);
+    BOOST_CHECK(resp.body.find(rid) != std::string::npos);
+    BOOST_CHECK(resp.body.find("1234567") == std::string::npos);
+    BOOST_CHECK(resp.body.find("\"wallet_local_state\":true") == std::string::npos);
+    BOOST_CHECK(resp.body.find("\"refund_available_locally\":true") == std::string::npos);
+    BOOST_CHECK(resp.body.find("RELEASE_FUNDING_CHANGED") == std::string::npos);
+    BOOST_CHECK(resp.body.find("\"funded_percent\"") == std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(verifycomputereceipt_does_not_persist)
 {
     const std::string profile = pwc::ProfileIdHex(pwc::ToyProfile());
