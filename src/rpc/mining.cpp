@@ -695,7 +695,11 @@ static IntervalHealthStats ComputeRecentIntervalStatsFromTip(
     double target_spacing_s)
 {
     IntervalHealthStats stats;
-    if (window_blocks <= 0) return stats;
+    if (window_blocks <= 0 || tip == nullptr) return stats;
+    // The walk stops at genesis, so a tip at height h has at most h intervals.
+    // Clamp the window to that so the reservation follows the chain, not the
+    // caller's window_blocks.
+    window_blocks = std::min(window_blocks, tip->nHeight);
 
     std::vector<double> intervals;
     intervals.reserve(window_blocks);
@@ -776,26 +780,56 @@ static std::string CoinbaseRecipientLabel(const CTxOut& txout)
     return "unknown";
 }
 
+/** Where one block of the reward window is stored, recorded under cs_main. */
+struct RewardWindowBlock {
+    int height;
+    int64_t time;
+    FlatFilePos pos;
+    uint256 hash;
+};
+
+/** Records the newest window_blocks blocks of the active chain that have data,
+ *  so that they can be read from disk after cs_main is released. */
+static std::vector<RewardWindowBlock> CollectRewardWindow(
+    const CChain& active_chain,
+    int window_blocks) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    std::vector<RewardWindowBlock> window;
+    if (window_blocks <= 0) return window;
+    // The active chain holds Height() + 1 blocks. Clamp the window to that so
+    // the reservation follows the chain, not the caller's window_blocks.
+    window_blocks = std::min(window_blocks, active_chain.Height() + 1);
+    window.reserve(window_blocks);
+    for (const CBlockIndex* cursor = active_chain.Tip();
+         cursor != nullptr && static_cast<int>(window.size()) < window_blocks;
+         cursor = cursor->pprev) {
+        // A block without data (pruned or not downloaded) cannot be read.
+        if (!(cursor->nStatus & BLOCK_HAVE_DATA)) continue;
+        window.push_back({cursor->nHeight, cursor->GetBlockTime(), cursor->GetBlockPos(), cursor->GetBlockHash()});
+    }
+    return window;
+}
+
+/** Reads the blocks recorded by CollectRewardWindow. Does not need cs_main:
+ *  ReadBlock checks each block against the recorded hash. */
 static RewardDistributionStats ComputeRecentRewardDistribution(
     ChainstateManager& chainman,
-    const CChain& active_chain,
-    int window_blocks)
+    const std::vector<RewardWindowBlock>& window)
 {
     RewardDistributionStats stats;
-    if (window_blocks <= 0) return stats;
+    if (window.empty()) return stats;
 
     std::vector<RewardObservation> observations;
-    observations.reserve(window_blocks);
+    observations.reserve(window.size());
     std::map<std::string, RewardRecipientStats> grouped;
-    const CBlockIndex* cursor = active_chain.Tip();
-    while (cursor != nullptr && static_cast<int>(stats.count) < window_blocks) {
+    for (const RewardWindowBlock& window_block : window) {
         CBlock block;
-        if (!chainman.m_blockman.ReadBlock(block, *cursor, /*lowprio=*/true)) {
-            cursor = cursor->pprev;
+        // A read fails if the block was pruned after cs_main was released,
+        // or if its data cannot be read. The block is then left out.
+        if (!chainman.m_blockman.ReadBlock(block, window_block.pos, window_block.hash, /*lowprio=*/true)) {
             continue;
         }
         if (block.vtx.empty() || block.vtx[0]->vout.empty()) {
-            cursor = cursor->pprev;
             continue;
         }
 
@@ -805,13 +839,12 @@ static RewardDistributionStats ComputeRecentRewardDistribution(
         entry.recipient = recipient;
         ++entry.blocks;
         entry.reward_sats += coinbase_output.nValue;
-        observations.push_back({cursor->nHeight, cursor->GetBlockTime(), recipient, coinbase_output.nValue});
+        observations.push_back({window_block.height, window_block.time, recipient, coinbase_output.nValue});
         ++stats.count;
         stats.total_reward_sats += coinbase_output.nValue;
         if (recipient == "unknown" || recipient.rfind("script:", 0) == 0) {
             ++stats.unknown_recipients;
         }
-        cursor = cursor->pprev;
     }
 
     if (stats.count == 0) return stats;
@@ -7186,53 +7219,65 @@ static RPCHelpMan getdifficultyhealth()
     ChainstateManager& chainman = EnsureChainman(node);
     const ArgsManager& args = EnsureArgsman(node);
     const auto registry_health = GetMatMulServiceChallengeRegistryHealthSnapshot(args);
-    LOCK(cs_main);
-    const CChain& active_chain = chainman.ActiveChain();
-    CBlockIndex& tip{*CHECK_NONFATAL(active_chain.Tip())};
-    CBlockIndex next_index;
-    NextEmptyBlockIndex(tip, chainman.GetConsensus(), next_index);
-
-    const IntervalHealthStats stats = ComputeRecentIntervalStats(
-        active_chain,
-        window_blocks,
-        static_cast<double>(chainman.GetConsensus().nPowTargetSpacing));
-    const RewardDistributionStats reward_distribution =
-        ComputeRecentRewardDistribution(chainman, active_chain, window_blocks);
 
     UniValue obj(UniValue::VOBJ);
-    obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
-    obj.pushKV("algorithm", PowAlgorithmName(chainman.GetConsensus()));
-    obj.pushKV("window_blocks", window_blocks);
-    obj.pushKV("target_spacing_s", static_cast<int64_t>(chainman.GetConsensus().nPowTargetSpacing));
+    IntervalHealthStats stats;
+    std::vector<RewardWindowBlock> reward_window;
+    UniValue networkhashps;
+    UniValue alerts;
+    {
+        LOCK(cs_main);
+        const CChain& active_chain = chainman.ActiveChain();
+        CBlockIndex& tip{*CHECK_NONFATAL(active_chain.Tip())};
+        CBlockIndex next_index;
+        NextEmptyBlockIndex(tip, chainman.GetConsensus(), next_index);
 
-    UniValue tip_obj(UniValue::VOBJ);
-    tip_obj.pushKV("height", tip.nHeight);
-    tip_obj.pushKV("hash", tip.GetBlockHash().GetHex());
-    tip_obj.pushKV("time", tip.GetBlockTime());
-    tip_obj.pushKV("bits", strprintf("%08x", tip.nBits));
-    tip_obj.pushKV("difficulty", GetDifficulty(tip));
-    tip_obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
-    obj.pushKV("tip", std::move(tip_obj));
+        stats = ComputeRecentIntervalStats(
+            active_chain,
+            window_blocks,
+            static_cast<double>(chainman.GetConsensus().nPowTargetSpacing));
+        // Only record where the blocks are. Reading them can take long for a
+        // large window, so it happens after cs_main is released.
+        reward_window = CollectRewardWindow(active_chain, window_blocks);
 
-    UniValue next_obj(UniValue::VOBJ);
-    next_obj.pushKV("height", next_index.nHeight);
-    next_obj.pushKV("bits", strprintf("%08x", next_index.nBits));
-    next_obj.pushKV("difficulty", GetDifficulty(next_index));
-    next_obj.pushKV("target", GetTarget(next_index, chainman.GetConsensus().powLimit).GetHex());
-    obj.pushKV("next", std::move(next_obj));
-    obj.pushKV("recent", IntervalStatsToUniValue(stats));
-    obj.pushKV("network", BuildPropagationProxyProfile(chainman, node));
-    obj.pushKV("reorg_protection", BuildReorgProtectionProfile(chainman));
-    obj.pushKV("consensus_guards", BuildConsensusGuardProfile(active_chain, chainman.GetConsensus()));
+        obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
+        obj.pushKV("algorithm", PowAlgorithmName(chainman.GetConsensus()));
+        obj.pushKV("window_blocks", window_blocks);
+        obj.pushKV("target_spacing_s", static_cast<int64_t>(chainman.GetConsensus().nPowTargetSpacing));
+
+        UniValue tip_obj(UniValue::VOBJ);
+        tip_obj.pushKV("height", tip.nHeight);
+        tip_obj.pushKV("hash", tip.GetBlockHash().GetHex());
+        tip_obj.pushKV("time", tip.GetBlockTime());
+        tip_obj.pushKV("bits", strprintf("%08x", tip.nBits));
+        tip_obj.pushKV("difficulty", GetDifficulty(tip));
+        tip_obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
+        obj.pushKV("tip", std::move(tip_obj));
+
+        UniValue next_obj(UniValue::VOBJ);
+        next_obj.pushKV("height", next_index.nHeight);
+        next_obj.pushKV("bits", strprintf("%08x", next_index.nBits));
+        next_obj.pushKV("difficulty", GetDifficulty(next_index));
+        next_obj.pushKV("target", GetTarget(next_index, chainman.GetConsensus().powLimit).GetHex());
+        obj.pushKV("next", std::move(next_obj));
+        obj.pushKV("recent", IntervalStatsToUniValue(stats));
+        obj.pushKV("network", BuildPropagationProxyProfile(chainman, node));
+        obj.pushKV("reorg_protection", BuildReorgProtectionProfile(chainman));
+        obj.pushKV("consensus_guards", BuildConsensusGuardProfile(active_chain, chainman.GetConsensus()));
+        networkhashps = GetNetworkHashPS(window_blocks, -1, active_chain);
+        alerts = DifficultyAlerts(stats);
+        UniValue guard_alerts = ConsensusGuardAlerts(active_chain, chainman.GetConsensus());
+        for (size_t index = 0; index < guard_alerts.size(); ++index) {
+            alerts.push_back(guard_alerts[index].get_str());
+        }
+    }
+
+    const RewardDistributionStats reward_distribution =
+        ComputeRecentRewardDistribution(chainman, reward_window);
     obj.pushKV("reward_distribution", RewardDistributionToUniValue(reward_distribution));
     obj.pushKV("service_challenge_registry", MatMulServiceChallengeRegistryHealthToUniValue(registry_health));
-    obj.pushKV("networkhashps", GetNetworkHashPS(window_blocks, -1, active_chain));
+    obj.pushKV("networkhashps", std::move(networkhashps));
     obj.pushKV("health_score", DifficultyHealthScore(stats));
-    UniValue alerts = DifficultyAlerts(stats);
-    UniValue guard_alerts = ConsensusGuardAlerts(active_chain, chainman.GetConsensus());
-    for (size_t index = 0; index < guard_alerts.size(); ++index) {
-        alerts.push_back(guard_alerts[index].get_str());
-    }
     UniValue reward_alerts = RewardDistributionAlerts(reward_distribution);
     for (size_t index = 0; index < reward_alerts.size(); ++index) {
         alerts.push_back(reward_alerts[index].get_str());
