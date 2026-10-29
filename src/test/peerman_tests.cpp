@@ -15125,6 +15125,227 @@ BOOST_AUTO_TEST_CASE(getmmattest_heard_fills_answer_to_four)
     BOOST_CHECK(!requester.fDisconnect);
 }
 
+// Issue #292. A node at the tip whose followed chain still lacks old bodies
+// (an assumeutxo background chainstate, or pruned history) drops a delivered
+// hole body HEADER_ONLY when the hole sits at an attestation-active height,
+// lies deeper than MATMUL_RC_NEAR_TIP_DEPTH below the tip, and no signer
+// quorum covers it. The hash then goes into m_header_only_competing, the only
+// thing that stops the next GETDATA until the tip moves. That set held 1024
+// hashes, the size of BLOCK_DOWNLOAD_WINDOW, and on overflow it erases
+// begin(), the smallest hash in uint256 byte order. One full window of
+// dropped holes plus one more drop released the smallest hole; its next
+// delivery released the second smallest, and the two then evicted each other
+// at the round-trip rate until the tip moved. On mainnet 185093 (...c6ac0000)
+// and 185512 (...c7f10000) are the two smallest hashes in 185000-186023.
+BOOST_AUTO_TEST_CASE(dropped_historical_holes_stay_fetch_suppressed_past_one_window)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ResetMatMulEncDrVerdictsForTest();
+    BOOST_REQUIRE(!node::matmul_trusted::IsConfigured());
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    PeerManager& peerman{*m_node.peerman};
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        chainman.m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        chainman.GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+    chainman.m_cached_finished_ibd.store(true, std::memory_order_relaxed);
+    const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    ActivateRcAtTip(consensus, *tip);
+
+    // Building the chain is not under test: connect each block without a
+    // device replay.
+    SetMatMulExactReplayUnderReleasedCsMainHookForTest(
+        []() -> std::optional<bool> { return true; });
+    struct Cleanup {
+        node::NodeContext& node;
+        PeerManager& peerman;
+        ~Cleanup()
+        {
+            SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+            ResetMatMulEncDrVerdictsForTest();
+            NeutralizeUnconnectedHeaders(*Assert(node.chainman));
+            peerman.ResetMatMulVerifyAdmissionForTest();
+        }
+    } cleanup{m_node, peerman};
+
+    // One download window of holes plus one, then MATMUL_RC_NEAR_TIP_DEPTH + 1
+    // bodies on top so every hole is below the near-tip replay band.
+    constexpr int kWindow{1024};
+    constexpr int kHoles{kWindow + 1};
+    constexpr int kAbove{4};
+    std::vector<CBlock> blocks;
+    blocks.reserve(kHoles + kAbove);
+    for (int i = 0; i < kHoles + kAbove; ++i) {
+        const CBlockIndex* parent{
+            WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        CBlock block{MineTipChild(m_node, *parent, /*extra_time=*/89)};
+        SetMockTime(std::chrono::seconds{block.GetBlockTime() + 1});
+        BOOST_REQUIRE(chainman.ProcessNewBlock(
+            std::make_shared<const CBlock>(block), /*force_processing=*/true,
+            /*min_pow_checked=*/true, nullptr));
+        blocks.push_back(std::move(block));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    tip = WITH_LOCK(::cs_main, return chainman.ActiveTip());
+    BOOST_REQUIRE(tip->GetBlockHash() == blocks.back().GetHash());
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+    peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+
+    // Model never-downloaded history: the headers are on the active chain,
+    // the bodies and any local replay verdict are not.
+    struct Hole {
+        CBlockIndex* index;
+        uint32_t status;
+    };
+    std::vector<Hole> holes;
+    holes.reserve(kHoles);
+    {
+        LOCK(::cs_main);
+        chainman.m_blockman.m_have_pruned = true;
+        for (int i = 0; i < kHoles; ++i) {
+            CBlockIndex* index{
+                chainman.m_blockman.LookupBlockIndex(blocks[i].GetHash())};
+            BOOST_REQUIRE(index != nullptr);
+            holes.push_back({index, index->nStatus});
+            index->nStatus &= ~(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO |
+                                BLOCK_EXACT_REPLAY_VERIFIED);
+            BOOST_REQUIRE(chainman.IsMatMulFollowedHistoricalHole(index));
+            BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(
+                index->nHeight));
+            BOOST_REQUIRE(index->nHeight < tip->nHeight - 3);
+        }
+    }
+    ResetMatMulEncDrVerdictsForTest();
+    struct RestoreHoles {
+        ChainstateManager& chainman;
+        std::vector<Hole>& holes;
+        ~RestoreHoles()
+        {
+            LOCK(::cs_main);
+            for (const Hole& hole : holes) hole.index->nStatus = hole.status;
+            chainman.m_blockman.m_have_pruned = false;
+        }
+    } restore_holes{chainman, holes};
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode archive{/*id=*/2920, /*sock=*/nullptr,
+                  CAddress{PeermanTestService(0x2920007f), NODE_NETWORK},
+                  /*nKeyedNetGroupIn=*/0x92, /*nLocalHostNonceIn=*/0,
+                  CAddress{}, /*addrNameIn=*/"archive-292",
+                  ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(archive, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight);
+    connman.AddTestNode(archive);
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& peer;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(peer);
+            connman.RemoveTestNode(peer);
+        }
+    } finalize{connman, peerman, archive};
+
+    // The request is what the background-chainstate walk sends: a
+    // single-inv GETDATA for the hole, answered with the body.
+    auto deliver = [&](size_t i) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        BOOST_REQUIRE(!peerman.FetchBlock(archive.GetId(), *holes[i].index).has_value());
+        connman.FlushSendBuffer(archive);
+        archive.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            archive, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(blocks[i]))));
+        (void)connman.ProcessMessagesOnce(archive);
+        connman.FlushSendBuffer(archive);
+        archive.fPauseSend = false;
+    };
+    auto released = [&]() {
+        std::vector<size_t> out;
+        for (size_t i = 0; i < holes.size(); ++i) {
+            if (!peerman.HeaderFetchSuppressedForTest(blocks[i].GetHash())) {
+                out.push_back(i);
+            }
+        }
+        return out;
+    };
+    // Rank of each hole by hash in uint256 (byte) order: rank 0 is begin().
+    std::vector<size_t> by_hash(holes.size());
+    for (size_t i = 0; i < by_hash.size(); ++i) by_hash[i] = i;
+    std::sort(by_hash.begin(), by_hash.end(), [&](size_t a, size_t b) {
+        return blocks[a].GetHash() < blocks[b].GetHash();
+    });
+    std::vector<size_t> rank(holes.size());
+    for (size_t r = 0; r < by_hash.size(); ++r) rank[by_hash[r]] = r;
+    auto describe = [&](const std::vector<size_t>& set) {
+        std::string out;
+        for (const size_t i : set) {
+            out += strprintf(" [height=%d hash_rank=%u hash=%s]",
+                             holes[i].index->nHeight, rank[i],
+                             blocks[i].GetHash().ToString());
+        }
+        return out.empty() ? std::string{" none"} : out;
+    };
+
+    {
+        ASSERT_DEBUG_LOG("no GPU attestation; body not connected");
+        deliver(0);
+    }
+    for (size_t i = 1; i < holes.size(); ++i) deliver(i);
+    BOOST_REQUIRE(!archive.fDisconnect);
+
+    // Precondition: every delivered body was dropped, so only the skip set
+    // stands between each hole and the next GETDATA.
+    size_t persisted{0};
+    {
+        LOCK(::cs_main);
+        for (const Hole& hole : holes) {
+            if (hole.index->nStatus & BLOCK_HAVE_DATA) ++persisted;
+        }
+    }
+    BOOST_REQUIRE_EQUAL(persisted, 0U);
+
+    const auto first_pass{released()};
+    BOOST_TEST_MESSAGE("after one delivery each, holes released for GETDATA:"
+                       << describe(first_pass));
+    BOOST_CHECK_MESSAGE(first_pass.empty(),
+                        "a delivered hole lost fetch suppression before the tip moved:"
+                            << describe(first_pass));
+
+    // What the scheduler then does: GETDATA each released hole again and
+    // drop the body again. Every delivered hole must stay suppressed.
+    std::vector<size_t> pending{first_pass};
+    for (int round = 0; round < 6 && !pending.empty(); ++round) {
+        for (const size_t i : pending) deliver(i);
+        const auto now_released{released()};
+        BOOST_TEST_MESSAGE("re-delivery round " << round + 1 << ": re-sent"
+                           << describe(pending) << "; released now:"
+                           << describe(now_released));
+        BOOST_CHECK_MESSAGE(now_released.empty(),
+                            "re-delivery round " << round + 1
+                                << " released:" << describe(now_released));
+        pending = now_released;
+    }
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == tip);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // Fresh RegTestingSetup is genesis (tip=0), matching the 2026-08-26 field

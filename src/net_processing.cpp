@@ -594,8 +594,14 @@ static constexpr auto MATMUL_DEFERRED_BODY_MAX_AGE{45min};
  *  not grow without a cap (same contract as RCDeferredBodyCooldowns). */
 static constexpr size_t MATMUL_BUDGET_DEFERRED_MAX{256};
 /** HEADER_ONLY skip sets are cleared on tip move; a stalled tip plus unique
- *  competing hashes must still be memory-bounded. */
-static constexpr size_t MAX_HEADER_ONLY_SKIP_HASHES{1024};
+ *  competing hashes must still be memory-bounded. Between two tip moves a set
+ *  must hold every body dropped in that interval: a full BLOCK_DOWNLOAD_WINDOW
+ *  of followed historical holes (the assumeutxo background walk)
+ *  plus the near-tip bodies dropped alongside them. At exactly one window, a
+ *  single extra drop overflowed the set; the overflow erases begin(), the
+ *  smallest hash, so the two smallest dropped holes then evicted each other
+ *  and were fetched again on every delivery until the tip moved (#292). */
+static constexpr size_t MAX_HEADER_ONLY_SKIP_HASHES{4 * BLOCK_DOWNLOAD_WINDOW};
 
 //! Claimed unique unattested tip-child for ExactReplay GPU. File-static so
 //! ResetMatMulVerifyAdmissionForTest can clear it between shared-fixture cases.
