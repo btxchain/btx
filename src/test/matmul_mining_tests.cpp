@@ -11,11 +11,13 @@
 #include <interfaces/mining.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <key.h>
+#include <logging.h>
 #include <matmul/accel_v4.h>
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/pow_v4.h>
 #include <net.h>
+#include <node/blockstorage.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <pow.h>
@@ -24,6 +26,7 @@
 #include <rpc/server.h>
 #include <serialize.h>
 #include <streams.h>
+#include <sync.h>
 #include <test/util/mining.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
@@ -32,13 +35,22 @@
 
 #include <boost/test/unit_test.hpp>
 
+#ifdef __linux__
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
+
+#include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -392,6 +404,44 @@ bool RuntimeErrorContains(const std::exception& e, const std::string& needle)
 {
     return std::string{e.what()}.find(needle) != std::string::npos;
 }
+
+/** On Linux, lowers RLIMIT_AS to what the process has mapped plus headroom,
+ *  until destroyed, so that a large allocation fails instead of succeeding on
+ *  a host with plenty of memory. Does nothing on other platforms. */
+class AddressSpaceLimit
+{
+public:
+    explicit AddressSpaceLimit([[maybe_unused]] uint64_t headroom_bytes)
+    {
+#ifdef __linux__
+        if (getrlimit(RLIMIT_AS, &m_before) != 0) return;
+        // The first field of /proc/self/statm is the mapped size in pages.
+        std::ifstream statm{"/proc/self/statm"};
+        uint64_t pages{0};
+        if (!(statm >> pages)) return;
+        rlimit tight{m_before};
+        const uint64_t limit{pages * static_cast<uint64_t>(sysconf(_SC_PAGESIZE)) + headroom_bytes};
+        if (limit < tight.rlim_cur) tight.rlim_cur = limit;
+        m_active = setrlimit(RLIMIT_AS, &tight) == 0;
+#endif
+    }
+    ~AddressSpaceLimit()
+    {
+#ifdef __linux__
+        if (m_active) setrlimit(RLIMIT_AS, &m_before);
+#endif
+    }
+    AddressSpaceLimit(const AddressSpaceLimit&) = delete;
+    AddressSpaceLimit& operator=(const AddressSpaceLimit&) = delete;
+
+    bool Active() const { return m_active; }
+
+private:
+#ifdef __linux__
+    rlimit m_before{};
+#endif
+    bool m_active{false};
+};
 
 } // namespace
 
@@ -1049,6 +1099,120 @@ BOOST_AUTO_TEST_CASE(difficulty_health_reports_nonzero_best_header_lag)
         network.find_value("best_header_height").getInt<int>(),
         ActiveHeight() + 4);
     BOOST_CHECK_EQUAL(network.find_value("header_lag").getInt<int>(), 4);
+}
+
+BOOST_AUTO_TEST_CASE(difficulty_health_reads_blocks_without_holding_cs_main)
+{
+    MineBlocksWithSpacing(*this, 3, 90);
+    node::BlockManager& blockman{m_node.chainman->m_blockman};
+    const FlatFilePos block_pos{WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->pprev->GetBlockPos())};
+    const FlatFilePos magic_pos{block_pos.nFile, block_pos.nPos - node::BLOCK_SERIALIZATION_HEADER_SIZE};
+    const auto write_magic{[&](const MessageStartChars& magic) {
+        AutoFile file{blockman.OpenBlockFile(magic_pos, /*fReadOnly=*/false)};
+        BOOST_REQUIRE(!file.IsNull());
+        file << magic;
+        BOOST_REQUIRE_EQUAL(file.fclose(), 0);
+    }};
+    // Break the file magic of the block below the tip. The RPC's read of that
+    // block then logs an error from inside the read loop, on the RPC thread.
+    write_magic(MessageStartChars{});
+
+    std::atomic<int> failed_reads{0};
+    std::atomic<bool> cs_main_taken{false};
+    const auto callback{LogInstance().PushBackCallback([&](const std::string& line) {
+        if (line.find("Block magic mismatch") == std::string::npos) return;
+        if (failed_reads++ > 0) return;
+        // Another thread must be able to take cs_main while the RPC reads the
+        // block. Give up after ten seconds instead of waiting for the RPC.
+        std::thread other{[&] {
+            const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{10}};
+            do {
+                TRY_LOCK(cs_main, locked);
+                if (locked) {
+                    cs_main_taken = true;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            } while (std::chrono::steady_clock::now() < deadline);
+        }};
+        other.join();
+    })};
+    std::optional<UniValue> health;
+    std::string error;
+    try {
+        health = CallRPC("getdifficultyhealth");
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
+    LogInstance().DeleteCallback(callback);
+    write_magic(m_node.chainman->GetParams().MessageStart());
+
+    BOOST_REQUIRE_MESSAGE(error.empty(), error);
+    BOOST_CHECK_EQUAL(failed_reads.load(), 1);
+    BOOST_CHECK_MESSAGE(cs_main_taken.load(), "cs_main was held while getdifficultyhealth read a block");
+    // Genesis and three mined blocks, less the unreadable one.
+    BOOST_CHECK_EQUAL(health->find_value("reward_distribution").find_value("count").getInt<int>(), 3);
+}
+
+BOOST_AUTO_TEST_CASE(difficulty_window_is_clamped_to_the_chain)
+{
+    MineBlocksWithSpacing(*this, 6, 180);
+    const int height{ActiveHeight()};
+    constexpr int window_blocks{std::numeric_limits<int>::max()};
+
+    UniValue health_params{UniValue::VARR};
+    health_params.push_back(window_blocks);
+    std::optional<UniValue> health;
+    std::optional<UniValue> service;
+    std::string health_error;
+    std::string service_error;
+    {
+        // A reservation sized by window_blocks needs about 16 GiB, so it
+        // fails under this limit on Linux.
+        AddressSpaceLimit limit{uint64_t{4} << 30};
+#ifdef __linux__
+        BOOST_REQUIRE(limit.Active());
+#endif
+        try {
+            health = CallRPC("getdifficultyhealth", health_params);
+        } catch (const std::exception& e) {
+            health_error = e.what();
+        }
+        try {
+            service = CallRPC(
+                "getmatmulservicechallenge",
+                GetMatMulServiceChallengeParams(
+                    "rate_limit",
+                    "adaptive:/v1/window",
+                    "user:window@example.com",
+                    2.0,
+                    300,
+                    0.10,
+                    0.20,
+                    "adaptive_window",
+                    window_blocks));
+        } catch (const std::exception& e) {
+            service_error = e.what();
+        }
+    }
+
+    BOOST_CHECK_MESSAGE(health_error.empty(), "getdifficultyhealth: " + health_error);
+    BOOST_CHECK_MESSAGE(service_error.empty(), "getmatmulservicechallenge: " + service_error);
+    BOOST_REQUIRE(health.has_value() && service.has_value());
+
+    BOOST_CHECK_EQUAL(health->find_value("window_blocks").getInt<int>(), window_blocks);
+    BOOST_CHECK_EQUAL(health->find_value("recent").find_value("count").getInt<int>(), height);
+    BOOST_CHECK_EQUAL(health->find_value("reward_distribution").find_value("count").getInt<int>(), height + 1);
+
+    const int anchor_height{service->find_value("binding").find_value("anchor_height").getInt<int>()};
+    BOOST_CHECK_EQUAL(anchor_height, height);
+    const auto difficulty_resolution = service->find_value("challenge")
+                                           .find_value("service_profile")
+                                           .find_value("difficulty_resolution")
+                                           .get_obj();
+    BOOST_CHECK_EQUAL(difficulty_resolution.find_value("window_blocks").getInt<int>(), window_blocks);
+    BOOST_CHECK_EQUAL(difficulty_resolution.find_value("observed_interval_count").getInt<int>(), anchor_height);
+    BOOST_CHECK_CLOSE(difficulty_resolution.find_value("observed_mean_interval_s").get_real(), 180.0, 0.0001);
 }
 
 // TEST: rpc_matmul_service_profile_runtime_observability
