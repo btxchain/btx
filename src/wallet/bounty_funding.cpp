@@ -462,8 +462,55 @@ bool SignBountyTransaction(CWallet& wallet, BountyEscrowPlan& plan, CMutableTran
     EnsureWalletIsUnlocked(wallet);
     LOCK(wallet.cs_wallet);
     std::map<COutPoint, Coin> coins;
-    for (const CTxIn& txin : tx.vin) coins[txin.prevout];
+    for (const CTxIn& txin : tx.vin) {
+        if (!coins.emplace(txin.prevout, Coin()).second) {
+            err = "duplicate funding input";
+            return false;
+        }
+    }
     wallet.chain().findCoins(coins);
+    // The plan and the transaction come from the caller, and the fingerprint
+    // check above compares the transaction with the caller's own unsigned_hex.
+    // So bound what the signature can cost here: every input must be an
+    // unspent coin of this wallet, and the fee may not exceed the plan's fee
+    // reserve or this wallet's -maxtxfee.
+    CAmount input_atoms{0};
+    for (const auto& [outpoint, coin] : coins) {
+        if (coin.IsSpent()) {
+            err = "funding input is missing or already spent";
+            return false;
+        }
+        if (!(wallet.IsMine(coin.out) & ISMINE_SPENDABLE)) {
+            err = "funding input is not owned by this wallet";
+            return false;
+        }
+        if (!MoneyRange(coin.out.nValue) || input_atoms > MAX_MONEY - coin.out.nValue) {
+            err = "funding input total out of MoneyRange";
+            return false;
+        }
+        input_atoms += coin.out.nValue;
+    }
+    CAmount output_atoms{0};
+    for (const CTxOut& output : tx.vout) {
+        if (!MoneyRange(output.nValue) || output_atoms > MAX_MONEY - output.nValue) {
+            err = "funding output total out of MoneyRange";
+            return false;
+        }
+        output_atoms += output.nValue;
+    }
+    if (input_atoms < output_atoms) {
+        err = "funding inputs do not cover the outputs";
+        return false;
+    }
+    const CAmount fee{input_atoms - output_atoms};
+    if (plan.fee_reserve_atoms > 0 && fee > plan.fee_reserve_atoms) {
+        err = "funding fee exceeds fee_reserve_atoms";
+        return false;
+    }
+    if (fee > wallet.m_default_max_tx_fee) {
+        err = "funding fee exceeds -maxtxfee";
+        return false;
+    }
     std::map<int, bilingual_str> input_errors;
     const bool complete = wallet.SignTransaction(tx, coins, SIGHASH_ALL, input_errors);
     if (!complete && !input_errors.empty()) {

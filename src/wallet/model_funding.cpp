@@ -797,6 +797,13 @@ bool CheckFundingInputsAndFee(CWallet& wallet, const FrozenFundingQuote& q,
         err = "funding fee exceeds the frozen fee_cap_atoms";
         return false;
     }
+    // fee_cap_atoms comes from the caller's quote. The prepared skeleton binds
+    // it only while this process still holds the prepare record, so also cap
+    // the fee at this wallet's -maxtxfee.
+    if (input_atoms - output_atoms > wallet.m_default_max_tx_fee) {
+        err = "funding fee exceeds -maxtxfee";
+        return false;
+    }
     return true;
 }
 
