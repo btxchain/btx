@@ -16,6 +16,7 @@
 #include <cassert>
 #include <cstdint>
 #include <ios>
+#include <string>
 
 using namespace shielded::ringct;
 
@@ -43,12 +44,15 @@ bool RoundTripCheck(const T& obj)
         return false;
     }
 
+    // Reading drains ds, so keep the first serialization to compare with.
+    const std::string serialized{ds.str()};
     T obj2;
     try {
         ds >> obj2;
     } catch (const std::ios_base::failure&) {
         return false;
     }
+    assert(ds.empty());
 
     // Re-serialize the round-tripped object and compare bytes.
     DataStream ds2{};
@@ -58,7 +62,7 @@ bool RoundTripCheck(const T& obj)
         return false;
     }
 
-    assert(ds.str() == ds2.str());
+    assert(serialized == ds2.str());
     return true;
 }
 
