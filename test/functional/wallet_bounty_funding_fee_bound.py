@@ -14,6 +14,8 @@ sign a fee above the plan's fee_reserve_atoms or its own -maxtxfee:
   A       change output lowered by 5 BTX           -> refused
   B       extra wallet input, same outputs         -> refused
   D       change lowered to 3.5x fee_reserve_atoms -> refused
+  E       fee_reserve_atoms "0.5", "-5", "12abc", "1e6", wrapping heights and
+          a sloppy outpoint vout                     -> refused at parse time
 """
 
 from decimal import Decimal
@@ -103,6 +105,32 @@ class WalletBountyFundingFeeBoundTest(BitcoinTestFramework):
         hex_d = tx.serialize().hex()
         assert_raises_rpc_error(-4, "funding fee exceeds fee_reserve_atoms",
                                 funder.signbountyfunding, {**bound, "unsigned_hex": hex_d, "hex": hex_d})
+
+        self.log.info("E: a non-canonical fee_reserve_atoms does not switch the cap off")
+        for bad in ["0.5", "0.0001", "-5", "12abc", "1e6", " 1"]:
+            assert_raises_rpc_error(-8, "fee_reserve_atoms: canonical non-negative atoms required",
+                                    funder.signbountyfunding, {**bound, "fee_reserve_atoms": bad,
+                                                               "unsigned_hex": hex_a, "hex": hex_a})
+            assert_raises_rpc_error(-8, "fee_reserve_atoms: canonical non-negative atoms required",
+                                    funder.preparebountyfunding, {**plan, "fee_reserve_atoms": bad})
+        assert_raises_rpc_error(-8, "fee_reserve_atoms: canonical non-negative atoms required",
+                                funder.signbountyfunding, {**bound, "fee_reserve_atoms": -5,
+                                                           "unsigned_hex": hex_a, "hex": hex_a})
+        assert_raises_rpc_error(-8, "fee_atoms: canonical non-negative atoms required",
+                                funder.signbountyfunding, {**bound, "fee_atoms": "3.9",
+                                                           "unsigned_hex": hex_a, "hex": hex_a})
+        assert_raises_rpc_error(-8, "award_height out of range",
+                                funder.preparebountyfunding, {**plan, "award_height": 2**32 + h + 6})
+        assert_raises_rpc_error(-8, "refund_height out of range",
+                                funder.preparebountyfunding, {**plan, "refund_height": -1})
+        assert_raises_rpc_error(-8, "refund_height out of range",
+                                funder.preparebountyfunding, {**plan, "refund_height": 500_000_000})
+        prev = tx_from_hex(prep["unsigned_hex"]).vin[0].prevout
+        assert_raises_rpc_error(-8, "outpoint", funder.signbountyfunding,
+                                {**bound, "outpoint": f"{prev.hash:064x}:{prev.n}x",
+                                 "unsigned_hex": hex_a, "hex": hex_a})
+        assert_raises_rpc_error(-8, "prev_vout", funder.signbountyfunding,
+                                {**bound, "prev_vout": -1, "unsigned_hex": hex_a, "hex": hex_a})
 
         self.log.info("Without a fee reserve, -maxtxfee still bounds the fee")
         no_reserve = {k: v for k, v in bound.items() if k != "fee_reserve_atoms"}
