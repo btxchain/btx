@@ -178,6 +178,7 @@ BASE_SCRIPTS = [
     'wallet_shielded_reorg_recovery.py',
     'feature_shielded_prune_reorg.py',
     'wallet_shielded_anchor_window.py',
+    'feature_shielded_anchor_window_reorg.py',
     'wallet_shielded_ring_size_policy.py',
     'wallet_shielded_chunking.py',
     'wallet_shielded_cross_wallet.py',

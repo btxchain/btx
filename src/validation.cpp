@@ -7608,9 +7608,14 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
             m_chainman.m_shielded_anchor_roots.pop_front();
         }
         const uint256 current_root = m_chainman.m_shielded_merkle_tree.Root();
+        // Popping the disconnected block's root leaves the window one root
+        // short: the oldest root that is still valid for pindex->pprev is
+        // not in it. Rebuild the window from the chain in that case as well.
+        const size_t max_roots = static_cast<size_t>(SHIELDED_ANCHOR_DEPTH) + 1;
         if (m_chainman.m_shielded_anchor_roots.empty()) {
             m_chainman.RecordShieldedAnchorRoot(current_root);
-        } else if (m_chainman.m_shielded_anchor_roots.front() != current_root) {
+        } else if (m_chainman.m_shielded_anchor_roots.front() != current_root ||
+                   m_chainman.m_shielded_anchor_roots.size() < max_roots) {
             if (!m_chainman.RebuildShieldedAnchorHistory(*this, pindex->pprev)) {
                 return DISCONNECT_FAILED;
             }
@@ -7621,7 +7626,8 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         const uint256 current_registry_root = m_chainman.m_shielded_account_registry.Root();
         if (m_chainman.m_shielded_account_registry_roots.empty()) {
             m_chainman.RecordShieldedAccountRegistryRoot(current_registry_root);
-        } else if (m_chainman.m_shielded_account_registry_roots.front() != current_registry_root) {
+        } else if (m_chainman.m_shielded_account_registry_roots.front() != current_registry_root ||
+                   m_chainman.m_shielded_account_registry_roots.size() < max_roots) {
             if (!m_chainman.RebuildShieldedAccountRegistryHistory(*this, pindex->pprev)) {
                 return DISCONNECT_FAILED;
             }
