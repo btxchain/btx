@@ -259,7 +259,10 @@ void MeshTick(Database& db,int64_t now){
             for(const auto& campaign:allowed){
                 if(!db.Has(campaign))continue;
                 auto e=db.Get(campaign);if(Text(e,"kind")!="campaign")continue;
-                p.Check(e,"owner",db,now);const auto& b=e["body"];
+                // A campaign whose owner signer is revoked schedules no more rounds;
+                // throwing here would also stop Lifecycle::Tick in Maintain.
+                if(CurrentSigners(db,p,e,"owner",now).empty())continue;
+                const auto& b=e["body"];
                 const auto issued=UInt(b,"issued_ms",INT64_MAX),expires=UInt(b,"expires_ms",INT64_MAX);
                 if(static_cast<uint64_t>(now)<issued||static_cast<uint64_t>(now)>=expires)continue;
                 const auto interval=UInt(b,"interval_ms",86400000);
