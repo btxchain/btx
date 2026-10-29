@@ -290,6 +290,19 @@ BOOST_AUTO_TEST_CASE(ahp_acq_08_symlinked_subdirectory)
     BOOST_CHECK(!modelnet::ExecuteBtxAcquisition(req, rec2, reserved, code, err));
     BOOST_CHECK_EQUAL(code, "SYMLINK_REFUSED");
     BOOST_CHECK(rec2.ready_state != "MODEL_READY");
+
+    // A request whose later file goes through the link is refused before an
+    // earlier, harmless file is written.
+    modelnet::VerifiedLocalFile first;
+    first.relative_path = "first.gguf";
+    first.sha384_hex = Sha384Of(good);
+    first.source_path = fs::PathToString(src);
+    req.files = {first, f};
+    RememberDigest(req, first.relative_path, Sha384Of(good));
+    modelnet::AcquisitionReceipt rec3;
+    BOOST_CHECK(!modelnet::ExecuteBtxAcquisition(req, rec3, reserved, code, err));
+    BOOST_CHECK_EQUAL(code, "SYMLINK_REFUSED");
+    BOOST_CHECK(!fs::exists(dest / "first.gguf"));
 }
 
 BOOST_AUTO_TEST_CASE(ahp_acq_09_lease_blocks_eviction)
