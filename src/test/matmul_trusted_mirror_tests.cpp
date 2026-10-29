@@ -5288,4 +5288,115 @@ BOOST_AUTO_TEST_CASE(withdrawn_vote_reconnected_restores_frontier_height)
     BOOST_CHECK(HasFrontierHint(high, 30));
 }
 
+namespace {
+//! A trusted mirror with two pins, M=2 and a two-block hot cache, with a
+//! durable archive so a case can restart it.
+struct TwoPinMirror {
+    CKey a{NewKey()};
+    CKey b{NewKey()};
+    uint256 chain{Hex256('5')};
+    uint256 context{Hex256('6')};
+    fs::path archive;
+
+    explicit TwoPinMirror(fs::path path) : archive{std::move(path)} {}
+    void Start() const
+    {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {a.GetPubKey(), b.GetPubKey()};
+        config.threshold = 2;
+        config.max_blocks = 2;
+        config.max_attestations = 8;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+            std::chrono::milliseconds{20}, error));
+        BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    }
+    void Restart() const
+    {
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::FlushPersistence(error));
+        node::matmul_trusted::ResetForTest();
+        Start();
+    }
+    static uint256 HashAt(int32_t height) { return (HashWriter{} << height).GetHash(); }
+    void Sign(const CKey& key, int32_t height) const
+    {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = HashAt(height);
+        statement.block_height = height;
+        statement.replay_authority_context = context;
+        const auto att{matmul::trusted::SignStatement(statement, key)};
+        BOOST_REQUIRE(att.has_value());
+        BOOST_REQUIRE(node::matmul_trusted::Add(*att, HashAt(height), height) ==
+                      matmul::trusted::AddResult::Accepted);
+    }
+};
+} // namespace
+
+BOOST_AUTO_TEST_CASE(hot_tail_keeps_frontier_quorum_across_restart)
+{
+    // One pin signs more than max_blocks blocks above the last quorum while
+    // the other is silent. The restart restores the watermark from durable
+    // history, so the frontier's hint and in-memory quorum must come back too.
+    RuntimeReset reset;
+    const TwoPinMirror mirror{m_args.GetDataDirNet() / "matmul_hot_tail_frontier.dat"};
+    mirror.Start();
+    mirror.Sign(mirror.a, 10);
+    mirror.Sign(mirror.b, 10);
+    for (int32_t height{11}; height <= 13; ++height) mirror.Sign(mirror.a, height);
+    BOOST_REQUIRE(!node::matmul_trusted::HasQuorum(TwoPinMirror::HashAt(13), 13));
+
+    mirror.Restart();
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 10);
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPinMirror::HashAt(10), 10));
+    BOOST_CHECK(HasFrontierHint(TwoPinMirror::HashAt(10), 10));
+}
+
+BOOST_AUTO_TEST_CASE(hot_tail_keeps_frontier_loaded_last_across_restart)
+{
+    // Heights 256..258 serialize before 255 in the durable key, so the
+    // frontier at 255 is the last record loaded. It must still be kept, and
+    // the newest partial must stay so the second vote completes its quorum.
+    RuntimeReset reset;
+    const TwoPinMirror mirror{m_args.GetDataDirNet() / "matmul_hot_tail_order.dat"};
+    mirror.Start();
+    mirror.Sign(mirror.a, 255);
+    mirror.Sign(mirror.b, 255);
+    for (int32_t height{256}; height <= 258; ++height) mirror.Sign(mirror.a, height);
+
+    mirror.Restart();
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 255);
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPinMirror::HashAt(255), 255));
+    BOOST_CHECK(HasFrontierHint(TwoPinMirror::HashAt(255), 255));
+    mirror.Sign(mirror.b, 258);
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPinMirror::HashAt(258), 258));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 258);
+}
+
+BOOST_AUTO_TEST_CASE(hot_tail_keeps_tip_partial_across_restart)
+{
+    // More quorum records than max_blocks plus one pin's vote at the tip. As
+    // without a restart, the second pin's vote after the restart must
+    // complete the tip quorum in memory and move the frontier.
+    RuntimeReset reset;
+    const TwoPinMirror mirror{m_args.GetDataDirNet() / "matmul_hot_tail_tip.dat"};
+    mirror.Start();
+    mirror.Sign(mirror.a, 10);
+    mirror.Sign(mirror.b, 10);
+    mirror.Sign(mirror.a, 11);
+    mirror.Sign(mirror.b, 11);
+    mirror.Sign(mirror.a, 12);
+
+    mirror.Restart();
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPinMirror::HashAt(11), 11));
+    mirror.Sign(mirror.b, 12);
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPinMirror::HashAt(12), 12));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 12);
+    BOOST_CHECK(HasFrontierHint(TwoPinMirror::HashAt(12), 12));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

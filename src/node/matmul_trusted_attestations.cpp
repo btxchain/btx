@@ -587,6 +587,13 @@ bool LoadDurableAttestations(
     std::map<TailKey,
              std::vector<matmul::trusted::ExactReplayAttestation>> hot_tail;
     size_t hot_tail_attestations{0};
+    // Quorum keys in the tail. Eviction skips the ones at the highest quorum
+    // height seen so far, so more than max_blocks newer non-quorum records
+    // (one pin signing while quorum stalls) cannot evict the signed frontier
+    // and leave the watermark restored below without its hint or in-memory
+    // quorum. The height is serialized little-endian, so records do not
+    // arrive in height order and "highest" is a running maximum.
+    std::set<TailKey> quorum_tail_keys;
     for (; cursor->Valid(); cursor->Next()) {
         DurableAttestationKey key;
         if (!cursor->GetKey(key) ||
@@ -655,10 +662,22 @@ bool LoadDurableAttestations(
         }
         hot_tail_attestations += pin_only.size();
         hot_tail.emplace(tail_key, std::move(pin_only));
+        if (pin_quorum) quorum_tail_keys.insert(tail_key);
         while (hot_tail.size() > store->MaxBlocks() ||
                hot_tail_attestations > store->MaxAttestations()) {
-            hot_tail_attestations -= hot_tail.begin()->second.size();
-            hot_tail.erase(hot_tail.begin());
+            // Oldest first, but step over the frontier quorum
+            // key(s). Newer partials stay, and an eviction only walks past
+            // the frontier twins when the tail starts at that height. If the
+            // tail holds nothing else, fall back to the oldest key.
+            auto drop{hot_tail.begin()};
+            while (drop != hot_tail.end() && drop->first.first == highest &&
+                   quorum_tail_keys.count(drop->first) != 0) {
+                ++drop;
+            }
+            if (drop == hot_tail.end()) drop = hot_tail.begin();
+            quorum_tail_keys.erase(drop->first);
+            hot_tail_attestations -= drop->second.size();
+            hot_tail.erase(drop);
         }
         ++records;
     }
