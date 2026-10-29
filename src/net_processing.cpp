@@ -18144,8 +18144,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
         }
 
-        // Signal Dandelion++ support to this peer
-        if (m_dandelion && m_dandelion->IsActive(m_best_height)) {
+        // Signal Dandelion++ support to this peer. This is sent once, at the
+        // handshake, so it must not depend on our current height: a node that
+        // is still below the activation height during IBD would otherwise never
+        // announce support on this connection, and the peer would later treat
+        // the stem relay it receives from us as unsolicited. Use of stems is
+        // still gated by IsActive() on both sides.
+        if (m_dandelion) {
             MakeAndPushMessage(pfrom, NetMsgType::DANDELIONACC);
         }
 
@@ -19416,7 +19421,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
         if (!pfrom.m_supports_dandelion) {
-            Misbehaving(*peer, "dltx from non-dandelion peer");
+            // Releases up to 0.34.15 send DANDELIONACC only when they are past
+            // the activation height at the handshake, but relay stems to any
+            // peer that sent one. Such a peer is honest; ignore the stem
+            // instead of punishing it. Its embargo timer fluffs the transaction.
+            LogDebug(BCLog::DANDELION, "ignoring dltx from peer=%d that did not announce Dandelion++\n", pfrom.GetId());
             return;
         }
         if (!m_dandelion || !m_dandelion->IsActive(m_best_height)) return;
