@@ -679,6 +679,7 @@ BTX_BASE_SCRIPTS = [
     'feature_block_download_slot_reclaim.py',
     'p2p_noconnect_inbound_relay.py',
     'p2p_connect_strict_inbound.py',
+    'p2p_strict_connect_inbound_punished.py',
     'feature_attested_utxo_snapshot_p2p.py',
     'feature_attested_utxo_snapshot_offer_restart.py',
     'feature_matmul_rc_activation.py',

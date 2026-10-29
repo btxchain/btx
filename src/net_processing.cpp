@@ -23088,6 +23088,11 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         LogDebug(BCLog::NET, "%s(%s, %u bytes): Unknown exception caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size);
     }
 
+    // SendMessages() acts on Misbehaving(), but CConnman skips it for inbound
+    // peers under strict -connect. Act on it here too, so such a peer is still
+    // disconnected and discouraged.
+    if (MaybeDiscourageAndDisconnect(*pfrom, *peer)) return false;
+
     return fMoreWork;
 }
 
