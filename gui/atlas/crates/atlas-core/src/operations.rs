@@ -397,6 +397,9 @@ impl PreparedStore {
                 | "backupwallet"
                 | "backupwalletbundle"
                 | "backupwalletbundlearchive"
+                | "exportwalletbundle"
+                | "dumpmasterprivkey"
+                | "z_exportviewingkey"
         ) || (matches!(request.method.as_str(), "listdescriptors" | "gethdkeys")
             && private_flag(&p))
         {
@@ -509,6 +512,34 @@ mod tests {
             "decoderesourceuri",
         ] {
             assert!(!read_allowed(method, &json!(["/tmp/x"])));
+        }
+    }
+    #[test]
+    fn seed_and_viewing_key_export_denied() {
+        // exportwalletbundle writes plaintext PQ master seed material,
+        // dumpmasterprivkey prints the master key and z_exportviewingkey a
+        // shielded viewing key.
+        for (method, params) in [
+            ("exportwalletbundle", r#"["/tmp/w.btxwallet"]"#),
+            (
+                "exportwalletbundle",
+                r#"{"bundle_file":"/tmp/w.btxwallet"}"#,
+            ),
+            ("dumpmasterprivkey", "[]"),
+            ("z_exportviewingkey", r#"["btxrt1example"]"#),
+        ] {
+            let mut s = PreparedStore::default();
+            match s.prepare(
+                Request {
+                    method: method.into(),
+                    params_json: params.into(),
+                    wallet: None,
+                },
+                1,
+            ) {
+                Err(e) => assert_eq!(e.code, "KEY_EXPORT_DENIED", "{method}"),
+                Ok(_) => panic!("{method} was prepared"),
+            }
         }
     }
     #[test]
