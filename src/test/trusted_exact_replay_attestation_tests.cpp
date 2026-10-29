@@ -1469,6 +1469,57 @@ BOOST_AUTO_TEST_CASE(pq_and_secp_are_independent_pin_members)
         store.GetAttestations(block, 11), block, 11));
 }
 
+BOOST_AUTO_TEST_CASE(blocklist_pq_pin_vote_is_inert)
+{
+    // 2-of-3 pin: two secp + one ML-DSA-44. Emergency secp blocklist alone
+    // cannot make the PQ member inert; PinVotes must skip a blocked PQ key
+    // the same way it skips a blocked secp key.
+    const auto secp{MakeKeys(2)};
+    const auto [pq_pk, pq_sk]{MakePqKey()};
+    const uint256 chain{TestHash(0xb3)};
+    const uint256 block{TestHash(0xb4)};
+    auto config{MakeConfig(chain, secp, /*threshold=*/2)};
+    config.trusted_pq_signers.push_back(pq_pk);
+    AttestationStore store{config};
+    BOOST_CHECK_EQUAL(store.UnblockedPinMembers(), 3U);
+
+    BOOST_CHECK(store.AddBlocklistedPqSigner(pq_pk) ==
+                BlocklistResult::Blocked);
+    BOOST_CHECK(store.IsBlockedPq(pq_pk));
+    BOOST_CHECK(!store.IsAuthorityPqSigner(pq_pk));
+    BOOST_CHECK_EQUAL(store.UnblockedPinMembers(), 2U);
+    BOOST_CHECK(store.PinQuorumReachable());
+    BOOST_CHECK(store.AddBlocklistedPqSigner(pq_pk) ==
+                BlocklistResult::Duplicate);
+
+    BOOST_CHECK(store.AddPq(MustSignPq(MakeStatement(chain, block, 21), pq_sk,
+                                       pq_pk),
+                            block, 21) == AddResult::BlocklistedSigner);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 21), secp[0]),
+                          block, 21) == AddResult::Accepted);
+    BOOST_CHECK(!store.HasQuorum(block, 21));
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 21), secp[1]),
+                          block, 21) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(block, 21));
+
+    // Config-forced PQ blocklist: constructor refuses when it would leave
+    // fewer than M, and otherwise makes the PQ vote inert.
+    auto reachable{MakeConfig(chain, secp, /*threshold=*/2)};
+    reachable.trusted_pq_signers.push_back(pq_pk);
+    reachable.pq_blocklist = {pq_pk};
+    AttestationStore blocked_store{reachable};
+    BOOST_CHECK(blocked_store.IsBlockedPq(pq_pk));
+    BOOST_CHECK_EQUAL(blocked_store.UnblockedPinMembers(), 2U);
+    BOOST_CHECK(blocked_store.AddPq(
+                    MustSignPq(MakeStatement(chain, block, 22), pq_sk, pq_pk),
+                    block, 22) == AddResult::BlocklistedSigner);
+
+    auto too_small{MakeConfig(chain, secp, /*threshold=*/3)};
+    too_small.trusted_pq_signers.push_back(pq_pk);
+    too_small.pq_blocklist = {pq_pk};
+    BOOST_CHECK_THROW(AttestationStore{too_small}, std::invalid_argument);
+}
+
 BOOST_AUTO_TEST_CASE(pq_only_pin_and_local_sign)
 {
     const auto [pq_pk, pq_sk]{MakePqKey()};
