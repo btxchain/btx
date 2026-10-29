@@ -303,8 +303,16 @@ int main(int argc,char** argv) {
         auto settings=f.local;settings.pushKV("host","host-b");auto peerid=Object();peerid.pushKV("public_key",Hex(f.bob.public_key));peerid.pushKV("secret_file",(directory/"peer.key").string());WritePrivate(directory/"peer.key",Hex(f.bob.secret_key));settings.pushKV("identity",peerid);WritePrivate(directory/"local.json",Canonical(settings));
         auto rb=Common(f.realm,1,NowMs());rb.pushKV("subject",f.capsule);rb.pushKV("sequence",1);rb.pushKV("reason","test incident");ImportRecord(remote,Policy::Load(remote,NowMs()),Signed("revocation",rb,f.owner,&f.second),NowMs());
         const auto alice=KeyId(f.alice.public_key);
-        for(int j=0;j<24&&!remote.Has(f.composition);++j){auto request=MakePeerRequest(remote,alice,NowMs());auto reply=HandlePeerRequest(f.db,request,Hash("pin-b"),NowMs());AcceptPeerResponse(remote,reply,Hash("pin-a"),NowMs());}
-        Check(remote.Has(f.composition),"composition not received past the revoked capsule");Check(!remote.Has(f.capsule),"revoked capsule imported");});
+        // Keep syncing until alice has actually offered the revoked capsule:
+        // whether it comes before or after the composition depends on the
+        // record ids, so stopping at the composition alone passed by chance.
+        bool offered=false;
+        for(int j=0;j<24&&!(offered&&remote.Has(f.composition));++j){auto request=MakePeerRequest(remote,alice,NowMs());auto reply=HandlePeerRequest(f.db,request,Hash("pin-b"),NowMs());
+            for(const auto& record:reply["body"]["records"].getValues())offered=offered||RecordId(record)==f.capsule;
+            AcceptPeerResponse(remote,reply,Hash("pin-a"),NowMs());}
+        Check(offered,"revoked capsule never offered");Check(remote.Has(f.composition),"composition not received past the revoked capsule");Check(!remote.Has(f.capsule),"revoked capsule imported");
+        Check(remote.Query("SELECT count(*) FROM peer_rejected WHERE peer=? AND id=?",{alice,f.capsule})[0][0]=="1","revoked capsule not recorded as rejected");
+        Check(remote.Query("SELECT count(*) FROM peer_wants WHERE peer=? AND id=?",{alice,f.capsule})[0][0]=="0","revoked capsule still wanted");});
     h.Test("mesh-three-enrolled-hosts-continuous-security-lifecycle",[&]{
         std::string stage="begin";
         try {
