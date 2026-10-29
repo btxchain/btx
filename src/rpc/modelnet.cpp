@@ -1913,10 +1913,12 @@ static RPCHelpMan preparebountyclaim()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "funding outpoint is required (outpoint or prevout.txid/vout)");
             }
             plan.mode = "STAGED_RELEASE";
+            // Resolve the wallet first: a caller without wallet access must not
+            // learn from the secret_ref errors whether a local file exists.
+            auto pwallet = WalletForModelFunding(request);
             if (!wallet::LoadBountySecretRef(request.params[0]["secret_ref"].get_str(), plan.claim_preimage, err)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, err);
             }
-            auto pwallet = WalletForModelFunding(request);
             if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, wallet::BountySpendPath::CLAIM, err, /*sign=*/false)) {
                 if (!plan.claim_preimage.empty()) {
                     memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
@@ -1959,10 +1961,12 @@ static RPCHelpMan signbountyclaim()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "funding outpoint is required (outpoint or prevout.txid/vout)");
             }
             plan.mode = "STAGED_RELEASE";
+            // Resolve the wallet first: a caller without wallet access must not
+            // learn from the secret_ref errors whether a local file exists.
+            auto pwallet = WalletForModelFunding(request);
             if (!wallet::LoadBountySecretRef(o["secret_ref"].get_str(), plan.claim_preimage, err)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, err);
             }
-            auto pwallet = WalletForModelFunding(request);
             if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, wallet::BountySpendPath::CLAIM, err, /*sign=*/true)) {
                 if (!plan.claim_preimage.empty()) {
                     memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
