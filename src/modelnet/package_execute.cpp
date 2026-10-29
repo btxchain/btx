@@ -247,9 +247,16 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
     for (const auto& f : req.files) {
         const fs::path dest = dest_root / fs::PathFromString(f.relative_path);
         const std::string dest_s = fs::PathToString(dest);
-        if (std::filesystem::is_symlink(dest)) {
-            release_on_fail();
-            return Fail(err_code, err, "SYMLINK_REFUSED", "output is a symlink");
+        // Check every component below the destination, not only the last one:
+        // the cache probe and the stale-cache remove() below follow a symlinked
+        // directory and would read or delete a file outside the destination.
+        fs::path cur = dest_root;
+        for (const auto& part : fs::PathFromString(f.relative_path)) {
+            cur /= part;
+            if (std::filesystem::is_symlink(cur)) {
+                release_on_fail();
+                return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
+            }
         }
         if (fs::exists(dest) && !std::filesystem::is_directory(dest)) {
             std::string have, herr;
