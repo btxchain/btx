@@ -291,7 +291,7 @@ int main(int argc,char** argv) {
         Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round 0 not scheduled");
         f.Revoke(KeyId(f.owner.public_key));MeshTick(f.db,t0+2500);
         Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round scheduled for a revoked owner's campaign");});
-    h.Test("maintain-freezes-channel-after-owner-revocation",[&]{Fixture f;Lifecycle l(f.db);auto m=f.Import(f.FollowMandate());l.Follow(m,NowMs());l.Stage(f.Import(f.Channel(1,f.capsule)),NowMs());coordinate(f,NowMs());f.Revoke(m);f.Revoke(KeyId(f.owner.public_key));
+    h.Test("maintain-freezes-channel-after-owner-revocation",[&]{Fixture f;Lifecycle l(f.db);auto m=f.Import(f.FollowMandate());l.Follow(m,NowMs());const auto channel=f.Import(f.Channel(1,f.capsule));l.Stage(channel,NowMs());coordinate(f,NowMs());f.Revoke(m);f.Revoke(KeyId(f.owner.public_key));
         Service svc(f.root);for(int i=0;i<100&&f.db.Meta("maintenance_at").empty()&&f.db.Meta("maintenance_error").empty();++i)std::this_thread::sleep_for(std::chrono::milliseconds(50));
         const auto error=f.db.Meta("maintenance_error");Check(error.empty(),error.c_str());Check(Text(Lifecycle(f.db).Status()[0],"phase")=="frozen","channel not frozen");});
     // Evaluator bob already holds a revocation of the capsule that alice
