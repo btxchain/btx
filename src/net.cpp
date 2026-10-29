@@ -429,10 +429,21 @@ static CService GetBindAddress(const Sock& sock)
     return addr_bind;
 }
 
+namespace {
+bool V2TransportPQOnly() noexcept;
+} // namespace
+
 CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCountFailure, ConnectionType conn_type, bool use_v2transport)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
+
+    // -v2pqonly is enforced inside V2Transport. A connection created as v1
+    // never reaches that check, so do not open one.
+    if (!use_v2transport && V2TransportPQOnly()) {
+        LogDebug(BCLog::NET, "not opening a v1 connection under -v2pqonly\n");
+        return nullptr;
+    }
 
     if (pszDest == nullptr) {
         if (IsLocal(addrConnect))

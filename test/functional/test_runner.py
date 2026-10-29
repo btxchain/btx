@@ -362,6 +362,7 @@ BASE_SCRIPTS = [
     'p2p_v2_transport.py',
     'p2p_v2_encrypted.py',
     'p2p_v2_misbehaving.py',
+    'p2p_v2pqonly.py',
     'example_test.py',
     'mempool_truc.py',
     'wallet_multisig_descriptor_psbt.py --descriptors',
