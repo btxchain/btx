@@ -1319,6 +1319,14 @@ void AttestationStore::SeedOffActiveChain(int32_t height,
     CapOffActiveChainLocked();
 }
 
+void AttestationStore::RestoreLocalMintSlot(int32_t height,
+                                            const uint256& block_hash)
+{
+    if (height < 0 || block_hash.IsNull()) return;
+    std::lock_guard lock{m_mutex};
+    m_local_minted_hash_by_height.emplace(height, block_hash);
+}
+
 void AttestationStore::NotifyActiveChainBlockConnected(
     int32_t height, const uint256& connected_hash)
 {
