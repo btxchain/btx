@@ -184,6 +184,7 @@ if(WITH_MODELNET)
       modelnet_canonical_codec.cpp
       modelnet_lab_api.cpp
       modelnet_lab_peer.cpp
+      modelnet_peer_parsers.cpp
       modelnet_signed_envelope.cpp
       modelnet_typed_records.cpp
   )
