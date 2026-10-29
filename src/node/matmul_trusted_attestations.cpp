@@ -1013,9 +1013,17 @@ std::vector<matmul::trusted::ExactReplayPqAttestation> ReadDurablePqAttestations
         out)};
     if (status.status != CDBWrapper::ReadStatus::Code::OK) return {};
     if (auto store{Store()}) {
+        // Same rule as ReadDurableAttestations for the local ML-DSA-44 vote:
+        // a vote this node withdrew on its own reorg stays in the durable
+        // record, but must not count or be served again.
+        const auto local_pq_pk{store->LocalPqPubKey()};
+        const bool local_vote_withdrawn{
+            local_pq_pk.has_value() &&
+            store->IsOffActiveChain(block_height, block_hash)};
         std::erase_if(
             out, [&](const matmul::trusted::ExactReplayPqAttestation& a) {
-                return !store->IsAuthorityPqSigner(a.signer);
+                return !store->IsAuthorityPqSigner(a.signer) ||
+                       (local_vote_withdrawn && a.signer == *local_pq_pk);
             });
     }
     return out;
