@@ -279,6 +279,32 @@ int main(int argc,char** argv) {
     h.Test("maintain-freezes-channel-after-evaluator-revocation",[&]{Fixture f;mesh_on(f,true);Lifecycle l(f.db);auto m=f.Import(f.FollowMandate());l.Follow(m,NowMs());l.Stage(f.Import(f.Channel(1,f.capsule)),NowMs());f.Revoke(KeyId(f.bob.public_key));f.Revoke(m);
         Service svc(f.root);for(int i=0;i<100&&f.db.Meta("maintenance_at").empty()&&f.db.Meta("maintenance_error").empty();++i)std::this_thread::sleep_for(std::chrono::milliseconds(50));
         const auto error=f.db.Meta("maintenance_error");Check(error.empty(),error.c_str());Check(Text(Lifecycle(f.db).Status()[0],"phase")=="frozen","channel not frozen");});
+    // This node (f.db) coordinates a 2 s campaign signed by the owner key, which
+    // is then revoked. MeshTick must skip the campaign instead of throwing, so
+    // the Maintain loop still reaches Lifecycle::Tick.
+    auto coordinate=[](Fixture& f,int64_t t0){auto cb=Common(f.realm,1,t0,300000);cb.pushKV("composition",f.composition);cb.pushKV("package",Hash("coordinated package"));cb.pushKV("suite",Hash("suite adversarial"));cb.pushKV("sample_commitment",Hash("samples adversarial"));cb.pushKV("gate","adversarial");cb.pushKV("interval_ms",static_cast<uint64_t>(2000));cb.pushKV("max_rounds",static_cast<uint64_t>(1000));
+        const auto record=Signed("campaign",cb,f.owner);ImportRecord(f.db,f.policy,record,t0);const auto campaign=RecordId(record);
+        auto settings=Object();settings.pushKV("enabled",true);settings.pushKV("max_evidence_age_ms",static_cast<uint64_t>(180000));settings.pushKV("allowed_campaigns",Strings({campaign}));
+        auto id=Object();id.pushKV("public_key",Hex(f.owner.public_key));id.pushKV("secret_file",(f.root/"coordinator.key").string());WritePrivate(f.root/"coordinator.key",Hex(f.owner.secret_key));
+        f.local.pushKV("host","owner-host");f.local.pushKV("identity",id);f.local.pushKV("continuous_security",settings);f.SaveLocal();return campaign;};
+    h.Test("mesh-tick-skips-campaign-of-revoked-owner",[&]{Fixture f;const int64_t t0=NowMs();const auto campaign=coordinate(f,t0);MeshTick(f.db,t0);
+        Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round 0 not scheduled");
+        f.Revoke(KeyId(f.owner.public_key));MeshTick(f.db,t0+2500);
+        Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round scheduled for a revoked owner's campaign");});
+    h.Test("maintain-freezes-channel-after-owner-revocation",[&]{Fixture f;Lifecycle l(f.db);auto m=f.Import(f.FollowMandate());l.Follow(m,NowMs());l.Stage(f.Import(f.Channel(1,f.capsule)),NowMs());coordinate(f,NowMs());f.Revoke(m);f.Revoke(KeyId(f.owner.public_key));
+        Service svc(f.root);for(int i=0;i<100&&f.db.Meta("maintenance_at").empty()&&f.db.Meta("maintenance_error").empty();++i)std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const auto error=f.db.Meta("maintenance_error");Check(error.empty(),error.c_str());Check(Text(Lifecycle(f.db).Status()[0],"phase")=="frozen","channel not frozen");});
+    // Evaluator bob already holds a revocation of the capsule that alice
+    // publishes. The peer evidence sync must still deliver the rest of the
+    // closure instead of failing at the capsule on every response.
+    h.Test("peer-sync-continues-past-revoked-record",[&]{Fixture f;PublishEvidenceClosure(f.db,f.capsule,NowMs());
+        auto directory=f.temp.root/"peer-host-b";EnsurePrivateDirectory(directory);WritePrivate(directory/"root-pins.json",ReadFile(f.root/"root-pins.json"));
+        Database remote(directory);InstallPolicy(remote,f.policy_record,NowMs());
+        auto settings=f.local;settings.pushKV("host","host-b");auto peerid=Object();peerid.pushKV("public_key",Hex(f.bob.public_key));peerid.pushKV("secret_file",(directory/"peer.key").string());WritePrivate(directory/"peer.key",Hex(f.bob.secret_key));settings.pushKV("identity",peerid);WritePrivate(directory/"local.json",Canonical(settings));
+        auto rb=Common(f.realm,1,NowMs());rb.pushKV("subject",f.capsule);rb.pushKV("sequence",1);rb.pushKV("reason","test incident");ImportRecord(remote,Policy::Load(remote,NowMs()),Signed("revocation",rb,f.owner,&f.second),NowMs());
+        const auto alice=KeyId(f.alice.public_key);
+        for(int j=0;j<24&&!remote.Has(f.composition);++j){auto request=MakePeerRequest(remote,alice,NowMs());auto reply=HandlePeerRequest(f.db,request,Hash("pin-b"),NowMs());AcceptPeerResponse(remote,reply,Hash("pin-a"),NowMs());}
+        Check(remote.Has(f.composition),"composition not received past the revoked capsule");Check(!remote.Has(f.capsule),"revoked capsule imported");});
     h.Test("mesh-three-enrolled-hosts-continuous-security-lifecycle",[&]{
         std::string stage="begin";
         try {
