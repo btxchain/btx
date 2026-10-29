@@ -334,9 +334,17 @@ inline WaitResult Wait(pid_t child, int error_fd, int wall_seconds, uint64_t max
     const std::function<void()> limits;
 #endif
     while (true) {
-        const pid_t done = waitpid(child, &result.status, WNOHANG);
-        if (done == child) break;
-        if (done < 0 && errno != EINTR) { close(error_fd); return result; }
+        // Look without reaping: until the exited child is reaped, its pid
+        // and process group id cannot be reused, so the group kill reaches
+        // only what this invocation started (a helper that forked).
+        siginfo_t exited{};
+        const int seen = waitid(P_PID, static_cast<id_t>(child), &exited, WEXITED | WNOHANG | WNOWAIT);
+        if (seen == 0 && exited.si_pid == child) {
+            kill(-child, SIGKILL);
+            while (waitpid(child, &result.status, 0) < 0 && errno == EINTR) {}
+            break;
+        }
+        if (seen < 0 && errno != EINTR) { close(error_fd); return result; }
         if (max_tree_bytes != 0 && !TreeWithinLimit(tree_root, max_tree_bytes, true, limits) &&
             !TreeWithinLimit(tree_root, max_tree_bytes, true, limits)) {
             result.over_tree = true;
