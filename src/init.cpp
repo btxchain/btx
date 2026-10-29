@@ -1211,6 +1211,14 @@ void InitParameterInteraction(ArgsManager& args)
         if (args.SoftSetBoolArg("-natpmp", false)) {
             LogInfo("parameter interaction: -proxy set -> setting -natpmp=0\n");
         }
+#ifdef ENABLE_MODELNET
+        // The model helper listens on all interfaces and does not use -proxy.
+        // With -listen=1 (an onion service) the -listen=0 rule below does not
+        // apply, so keep the model port closed here unless -modelbind is set.
+        if (args.SoftSetArg("-modelbind", "off")) {
+            LogInfo("parameter interaction: -proxy set -> setting -modelbind=off\n");
+        }
+#endif
         // to protect privacy, do not discover addresses by default
         if (args.SoftSetBoolArg("-discover", false))
             LogInfo("parameter interaction: -proxy set -> setting -discover=0\n");
@@ -1238,6 +1246,37 @@ void InitParameterInteraction(ArgsManager& args)
         }
 #endif
     }
+
+#ifdef ENABLE_MODELNET
+    {
+        // A node restricted to non-IP networks, or bound to loopback only (for
+        // example behind a local Tor onion service), must not open the model
+        // helper's PQ1 port on all interfaces.
+        bool only_non_ip{false};
+        if (args.IsArgSet("-onlynet")) {
+            only_non_ip = true;
+            for (const std::string& net : args.GetArgs("-onlynet")) {
+                const std::string n{ToLower(net)};
+                if (n == "ipv4" || n == "ipv6") only_non_ip = false;
+            }
+        }
+        const std::vector<std::string> binds{args.GetArgs("-bind")};
+        bool loopback_bind{!binds.empty()};
+        for (const std::string& bind : binds) {
+            uint16_t port{0};
+            std::string host;
+            const std::string addr{bind.substr(0, bind.find('='))};
+            const auto parsed{SplitHostPort(addr, port, host) ? LookupHost(host, /*fAllowLookup=*/false) : std::nullopt};
+            if (!parsed || !parsed->IsLocal()) loopback_bind = false;
+        }
+        if (only_non_ip && args.SoftSetArg("-modelbind", "off")) {
+            LogInfo("parameter interaction: -onlynet without ipv4/ipv6 -> setting -modelbind=off\n");
+        }
+        if (loopback_bind && args.SoftSetArg("-modelbind", "off")) {
+            LogInfo("parameter interaction: -bind on loopback only -> setting -modelbind=off\n");
+        }
+    }
+#endif
 
     if (!args.GetArgs("-externalip").empty()) {
         // if an explicit public IP is specified, do not try to find others
