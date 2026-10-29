@@ -406,7 +406,15 @@ public:
             " (subpath \"/System/Library\") (subpath \"/usr/lib\")"
             " (literal \"/dev/null\") (literal \"/dev/urandom\") (literal \"/dev/random\"))\n"
             "(allow file-write* (subpath (param \"ROOT\")) (literal \"/dev/null\"))\n"
-            "(allow sysctl-read)\n";
+            // sysctl KERN_PROCARGS2 returns argv and the environment of any
+            // process of this user, the parent included. It stays open while
+            // sysctl-read is allowed for every name or process-info is not
+            // denied ((deny default) does not cover it), so allow only the
+            // hardware and OS identification names and deny process-info.
+            // uname() also reads kern.hostname and fails without it.
+            "(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name-prefix \"kern.os\")"
+            " (sysctl-name \"kern.version\") (sysctl-name \"kern.hostname\"))\n"
+            "(deny process-info*)\n";
         const char* params[]{"ROOT", root, "HELPER", helper, nullptr};
         char* error = nullptr;
         const int rc = m_init(profile, 0, params, &error);

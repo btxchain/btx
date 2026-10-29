@@ -21,8 +21,9 @@
 // Each mode writes <mode>.started before and <mode>.done after its work, so a
 // test can tell a stopped child from one that never ran or ran to the end.
 // Without a mode it also records whether it can look up a Mach service, fork,
-// signal its parent, create POSIX shared memory, and whether it starts in its
-// own directory.
+// signal its parent, read its parent's arguments and environment
+// (KERN_PROCARGS2), create POSIX shared memory, call uname(), and whether it
+// starts in its own directory.
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -33,6 +34,8 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -112,6 +115,24 @@ bool Forks()
     int status = 0;
     waitpid(pid, &status, 0);
     return true;
+}
+
+// argv and the start environment of the parent, as sysctl returns them for
+// any process of the same user unless the profile denies sysctl-read.
+bool ParentArguments()
+{
+    int mib[3]{CTL_KERN, KERN_PROCARGS2, static_cast<int>(getppid())};
+    static char buffer[1 << 20];
+    size_t size = sizeof(buffer);
+    return sysctl(mib, 3, buffer, &size, nullptr, 0) == 0 && size > 0;
+}
+
+// uname() reads the host name and the OS and hardware names through sysctl
+// and fails if the profile denies one of them.
+bool Uname()
+{
+    struct utsname name;
+    return uname(&name) == 0;
 }
 
 bool PosixShm()
@@ -252,6 +273,8 @@ int main(int argc, char** argv)
     std::fprintf(out, "mach_lookup=%d\n", MachLookup() ? 1 : 0);
     std::fprintf(out, "fork=%d\n", Forks() ? 1 : 0);
     std::fprintf(out, "signal_parent=%d\n", kill(getppid(), 0) == 0 ? 1 : 0);
+    std::fprintf(out, "procargs_parent=%d\n", ParentArguments() ? 1 : 0);
+    std::fprintf(out, "uname=%d\n", Uname() ? 1 : 0);
     std::fprintf(out, "posix_shm=%d\n", PosixShm() ? 1 : 0);
     std::fprintf(out, "cwd_root=%d\n", StartsIn(dir) ? 1 : 0);
     return std::fclose(out) == 0 ? 0 : 7;
