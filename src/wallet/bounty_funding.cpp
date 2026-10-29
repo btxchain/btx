@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -582,23 +583,37 @@ bool ParseBountyPlan(const UniValue& o, BountyEscrowPlan& plan, std::string& err
     S("signed_hex", plan.signed_hex);
     S("selected_path", plan.selected_path);
     S("mode", plan.mode);
-    if (o.exists("principal_atoms")) {
-        if (o["principal_atoms"].isStr()) {
-            if (!modelnet::CanonicalAtoms(o["principal_atoms"].get_str(), plan.principal_atoms, err)) return false;
-        } else {
-            plan.principal_atoms = o["principal_atoms"].getInt<int64_t>();
+    // Amounts are read like principal_atoms: canonical decimal strings or
+    // non-negative integers. A sloppy parse here ("0.5" -> 0, "-5" -> -5)
+    // used to switch off the fee_reserve_atoms cap without an error.
+    auto A = [&](const char* k, int64_t& d) -> bool {
+        if (!o.exists(k)) return true;
+        const UniValue& v = o[k];
+        if (v.isStr()) {
+            if (modelnet::CanonicalAtoms(v.get_str(), d, err)) return true;
+        } else if (v.isNum()) {
+            d = v.getInt<int64_t>();
+            if (MoneyRange(d)) return true;
         }
-    }
-    if (o.exists("fee_reserve_atoms")) {
-        plan.fee_reserve_atoms = o["fee_reserve_atoms"].isStr() ? std::stoll(o["fee_reserve_atoms"].get_str()) :
-                                                                  o["fee_reserve_atoms"].getInt<int64_t>();
-    }
-    if (o.exists("fee_atoms")) {
-        plan.fee_atoms = o["fee_atoms"].isStr() ? std::stoll(o["fee_atoms"].get_str()) :
-                                                 o["fee_atoms"].getInt<int64_t>();
-    }
-    if (o.exists("award_height")) plan.award_height = static_cast<uint32_t>(o["award_height"].getInt<int64_t>());
-    if (o.exists("refund_height")) plan.refund_height = static_cast<uint32_t>(o["refund_height"].getInt<int64_t>());
+        err = std::string{k} + ": canonical non-negative atoms required";
+        return false;
+    };
+    if (!A("principal_atoms", plan.principal_atoms)) return false;
+    if (!A("fee_reserve_atoms", plan.fee_reserve_atoms)) return false;
+    if (!A("fee_atoms", plan.fee_atoms)) return false;
+    // CLTV heights: refuse values that would wrap in uint32_t or be read as a time.
+    auto H = [&](const char* k, uint32_t& d) -> bool {
+        if (!o.exists(k)) return true;
+        const int64_t h = o[k].getInt<int64_t>();
+        if (h < 0 || h >= LOCKTIME_THRESHOLD) {
+            err = std::string{k} + " out of range";
+            return false;
+        }
+        d = static_cast<uint32_t>(h);
+        return true;
+    };
+    if (!H("award_height", plan.award_height)) return false;
+    if (!H("refund_height", plan.refund_height)) return false;
     if (o.exists("threshold")) plan.threshold = o["threshold"].getInt<int>();
     if (o.exists("council_keys") && o["council_keys"].isArray()) {
         for (const auto& k : o["council_keys"].getValues()) plan.council_keys.push_back(k.get_str());
@@ -621,17 +636,26 @@ bool ParseBountyPlan(const UniValue& o, BountyEscrowPlan& plan, std::string& err
         plan.prev_txid = *parsed;
         return true;
     };
+    auto V = [&](const UniValue& v) -> bool {
+        const int64_t n = v.getInt<int64_t>();
+        if (n < 0 || n > std::numeric_limits<int>::max()) {
+            err = "prev_vout";
+            return false;
+        }
+        plan.prev_vout = static_cast<int>(n);
+        return true;
+    };
     if (o.exists("prevout") && o["prevout"].isObject()) {
         const UniValue& p = o["prevout"];
         if (p.exists("txid") && p["txid"].isStr() && !parse_txid(p["txid"].get_str())) return false;
-        if (p.exists("vout")) plan.prev_vout = p["vout"].getInt<int>();
+        if (p.exists("vout") && !V(p["vout"])) return false;
     }
     if (o.exists("txid") && o["txid"].isStr() && plan.prev_txid.IsNull() && !parse_txid(o["txid"].get_str())) {
         return false;
     }
-    if (o.exists("vout") && plan.prev_vout < 0) plan.prev_vout = o["vout"].getInt<int>();
+    if (o.exists("vout") && plan.prev_vout < 0 && !V(o["vout"])) return false;
     if (o.exists("prev_txid") && o["prev_txid"].isStr() && !parse_txid(o["prev_txid"].get_str())) return false;
-    if (o.exists("prev_vout")) plan.prev_vout = o["prev_vout"].getInt<int>();
+    if (o.exists("prev_vout") && !V(o["prev_vout"])) return false;
     if (o.exists("outpoint") && o["outpoint"].isStr()) {
         const std::string s = o["outpoint"].get_str();
         const auto colon = s.rfind(':');
@@ -640,7 +664,12 @@ bool ParseBountyPlan(const UniValue& o, BountyEscrowPlan& plan, std::string& err
             return false;
         }
         if (!parse_txid(s.substr(0, colon))) return false;
-        plan.prev_vout = std::stoi(s.substr(colon + 1));
+        uint32_t n;
+        if (!ParseUInt32(s.substr(colon + 1), &n) || n > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+            err = "outpoint";
+            return false;
+        }
+        plan.prev_vout = static_cast<int>(n);
     }
     return true;
 }
