@@ -9972,9 +9972,16 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
         node::matmul_trusted::IsConfigured() &&
         consensus_params.IsMatMulTrustedReplayAttestationActive(pindex->nHeight)};
 
-    if (pindex->nHeight <= m_highest_fast_announce)
+    // Fast announcement normally goes to the first block at each height. A
+    // mirror that waits for attestation can hold an earlier tip child that
+    // never connects: no signer attests a block that fails ConnectBlock. A
+    // signer that reaches the network only through this mirror would then
+    // never see an honest sibling, never attest it, and both would stall on
+    // the parent. While connect waits for attestation, announce every stored
+    // tip child; each one carries valid proof of work.
+    if (pindex->nHeight <= m_highest_fast_announce && !connect_waits_for_attestation)
         return;
-    m_highest_fast_announce = pindex->nHeight;
+    m_highest_fast_announce = std::max(m_highest_fast_announce, pindex->nHeight);
 
     if (!DeploymentActiveAt(*pindex, m_chainman, Consensus::DEPLOYMENT_SEGWIT)) return;
 
