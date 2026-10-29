@@ -123,6 +123,54 @@ std::string InstallPlan(Fixture& f,const std::string& gate="adversarial") {
     const auto id=PlanId(plan);WritePrivate(f.root/"probe-input","probe",true);auto entry=Object();entry.pushKV("plan",plan);entry.pushKV("executable",f.probe.string());entry.pushKV("input_file",(f.root/"probe-input").string());auto plans=f.local["evaluation_plans"];plans.pushKV(id,entry);f.local.pushKV("evaluation_plans",plans);auto runtime=Object();runtime.pushKV("canary_package",id);auto runtimes=f.local["runtimes"];runtimes.pushKV(f.runtime,runtime);f.local.pushKV("runtimes",runtimes);f.SaveLocal();return id;
 }
 Json Control(Fixture& f){auto b=Common(f.realm,1,NowMs());b.pushKV("operation","resume");b.pushKV("nonce",Hex(RandomBytes(32)));return Signed("control",b,f.owner);}
+// The coordinator (f.db) runs a 2 s campaign. Evaluator bob then syncs from it
+// while advertised records cannot be imported on bob's node:
+// - "expired-record": bob joins after round 0 expired;
+// - "revoked-record": bob already holds a revocation of round 0;
+// - "revoked-signer": bob already holds a revocation of the publisher key, so
+//   the composition is refused;
+// - "old-epoch-records": records from before a policy epoch bump;
+// - "many-expired-records": bob joins after 120 rounds expired, and must still
+//   get 8 compositions exported after them and stop wanting the expired ones.
+// Returns an empty string when bob still receives the new records.
+std::string LateEvaluatorMissesNewRecords(Fixture& f,const std::string& mode) {
+    std::vector<std::string> live;
+    if(mode=="many-expired-records")for(int k=0;k<8;++k)live.push_back(f.MakeComposition("live"+std::to_string(k)));
+    const int64_t t0=NowMs()+1000;
+    auto cb=Common(f.realm,1,t0,300000);cb.pushKV("composition",f.composition);cb.pushKV("package",Hash("late package"));cb.pushKV("suite",Hash("suite adversarial"));cb.pushKV("sample_commitment",Hash("samples adversarial"));cb.pushKV("gate","adversarial");cb.pushKV("interval_ms",static_cast<uint64_t>(2000));cb.pushKV("max_rounds",static_cast<uint64_t>(1000));
+    const auto campaign_record=Signed("campaign",cb,f.owner);ImportRecord(f.db,f.policy,campaign_record,t0);const auto campaign=RecordId(campaign_record);MeshExport(f.db,campaign,t0);
+    auto worker=f.local;auto settings=Object();settings.pushKV("enabled",true);settings.pushKV("max_evidence_age_ms",static_cast<uint64_t>(180000));settings.pushKV("allowed_campaigns",Strings({campaign}));
+    auto owner_id=Object();owner_id.pushKV("public_key",Hex(f.owner.public_key));owner_id.pushKV("secret_file",(f.root/"coordinator.key").string());WritePrivate(f.root/"coordinator.key",Hex(f.owner.secret_key));
+    f.local.pushKV("host","owner-host");f.local.pushKV("identity",owner_id);f.local.pushKV("continuous_security",settings);f.SaveLocal();
+    MeshTick(f.db,t0);
+    auto round=[&](uint64_t n){auto r=f.db.Query("SELECT challenge FROM mesh_rounds WHERE campaign=? AND round=?",{campaign,std::to_string(n)});Check(r.size()==1,"round not scheduled");return r[0][0];};
+    const auto first=round(0);
+    for(int k=1;k<120&&!live.empty();++k)MeshTick(f.db,t0+2000*k);
+    Json epoch2;
+    if(mode=="old-epoch-records"){auto b=f.policy_record["body"];b.pushKV("epoch",2);b.pushKV("issued_ms",t0+300);b.pushKV("expires_ms",t0+3600000);epoch2=Signed("policy",b,f.owner);InstallPolicy(f.db,epoch2,t0+300);}
+    const int64_t join=mode=="expired-record"?t0+5000:live.empty()?t0+500:t0+245000;
+    const auto path=f.temp.root/"late-evaluator";EnsurePrivateDirectory(path);WritePrivate(path/"root-pins.json",ReadFile(f.root/"root-pins.json"));
+    Database late(path);InstallPolicy(late,f.policy_record,join-100);if(epoch2.isObject())InstallPolicy(late,epoch2,join-100);
+    auto identity=Object();identity.pushKV("public_key",Hex(f.bob.public_key));identity.pushKV("secret_file",(path/"identity.key").string());WritePrivate(path/"identity.key",Hex(f.bob.secret_key));
+    worker.pushKV("host","host-b");worker.pushKV("identity",identity);worker.pushKV("continuous_security",settings);WritePrivate(path/"local.json",Canonical(worker));
+    const auto blocked=mode=="revoked-signer"?f.composition:first;
+    if(mode=="revoked-record"||mode=="revoked-signer"){auto b=Common(f.realm,1,join-50);b.pushKV("subject",mode=="revoked-signer"?KeyId(f.publisher.public_key):first);b.pushKV("sequence",1);b.pushKV("reason","test incident");ImportRecord(late,Policy::Load(late,join-50),Signed("revocation",b,f.owner,&f.second),join-50);}
+    const auto coordinator=KeyId(f.owner.public_key);std::string error;
+    auto sync=[&](int64_t t){auto reply=MeshHandle(f.db,MeshRequest(late,coordinator,t),Hash("pin-b"),t);try{MeshAccept(late,reply,Hash("pin-owner"),t);}catch(const Error& e){error=e.code;}};
+    for(const auto& c:live)MeshExport(f.db,c,join-50);
+    sync(join);sync(join+100);
+    if(!live.empty()){
+        for(int k=1;k<=40;++k)sync(join+1100*k);
+        size_t held=0;for(const auto& c:live)held+=late.Has(c);
+        Check(!late.Has(blocked),"unimportable record stored");
+        const auto wants=late.Query("SELECT count(*) FROM mesh_wants")[0][0]; // refused ids must not be wanted again
+        return held==live.size()&&wants=="0"?std::string():"received "+std::to_string(held)+" of 8 new records, "+wants+" wants left; last MeshAccept error "+error;
+    }
+    MeshTick(f.db,t0+6000);const auto later=round(3);
+    for(int64_t t:{6100,6200,6300})sync(t0+t);
+    Check(!late.Has(blocked),"unimportable record stored");
+    return late.Has(later)?std::string():"later round not received; last MeshAccept error "+error;
+}
 }
 int main(int argc,char** argv) {
     fs::path probe;fs::path report;
@@ -154,6 +202,7 @@ int main(int argc,char** argv) {
     h.Test("restart-invalidates-bearer",[&]{Fixture f;auto g=f.Grant();auto p=Broker(f.db,Hex(RandomBytes(32))).Prepare(g,f.Context(),f.ReadRequest(),NowMs());Reject([&]{Broker(f.db,Hex(RandomBytes(32))).Execute(Text(p,"secret"),f.Context(),f.ReadRequest(),NowMs());},"SEC_PERMIT_EXPIRED_OR_RESTARTED");});
     h.Test("persistent-budget-cannot-reset-permit",[&]{Fixture f;auto g=f.Grant(1);Broker b(f.db,Hex(RandomBytes(32)));auto a=b.Prepare(g,f.Context(),f.ReadRequest(),NowMs());auto c=b.Prepare(g,f.Context(),f.ReadRequest(),NowMs());b.Execute(Text(a,"secret"),f.Context(),f.ReadRequest(),NowMs());Reject([&]{b.Execute(Text(c,"secret"),f.Context(),f.ReadRequest(),NowMs());},"SEC_BUDGET_EXHAUSTED");});
     h.Test("pause-resume-does-not-resurrect-permit",[&]{Fixture f;auto g=f.Grant();Broker b(f.db,Hex(RandomBytes(32)));auto p=b.Prepare(g,f.Context(),f.ReadRequest(),NowMs());b.Pause(NowMs());auto control=Control(f);b.Resume(control,NowMs());Reject([&]{b.Execute(Text(p,"secret"),f.Context(),f.ReadRequest(),NowMs());},"SEC_PERMIT_REPLAY");b.Pause(NowMs());Reject([&]{b.Resume(control,NowMs());},"SEC_RESUME_REPLAY");});
+    h.Test("broker-accepts-documented-remote-work-config",[&]{Fixture f;auto rw=Object();rw.pushKV("enabled",true);rw.pushKV("packages",Strings({Hash("owner-installed static plan")}));rw.pushKV("compositions",Strings({f.composition}));f.local.pushKV("remote_work",rw);f.SaveLocal();auto g=f.Grant();Broker b(f.db,Hex(RandomBytes(32)));auto p=b.Prepare(g,f.Context(),f.ReadRequest(),NowMs());auto r=b.Execute(Text(p,"secret"),f.Context(),f.ReadRequest(),NowMs());Check(Boolean(r,"ok")&&Boolean(r,"dispatched"),r.write().c_str());});
     h.Test("revocation-after-prepare-blocks-effect",[&]{Fixture f;auto g=f.Grant();Broker b(f.db,Hex(RandomBytes(32)));auto p=b.Prepare(g,f.Context(),f.ReadRequest(),NowMs());f.Revoke(g);Reject([&]{b.Execute(Text(p,"secret"),f.Context(),f.ReadRequest(),NowMs());});});
 #ifndef _WIN32
     h.Test("symlink-read-escape-refused",[&]{Fixture f;fs::create_symlink(f.temp.root/"workspace"/".env",f.temp.root/"workspace"/"link.txt");auto g=f.Grant();Broker b(f.db,Hex(RandomBytes(32)));auto r=f.ReadRequest();r.pushKV("path","link.txt");auto p=b.Prepare(g,f.Context(),r,NowMs());auto result=b.Execute(Text(p,"secret"),f.Context(),r,NowMs());Check(!Boolean(result,"ok"),"symlink escaped");});
@@ -217,6 +266,19 @@ int main(int argc,char** argv) {
         MeshAccept(remote,reply,Hash("pin-a"),NowMs());
         Reject([&]{MeshAccept(remote,reply,Hash("pin-a"),NowMs());},"SEC_MESH_REPLAY");
     });
+    for(const std::string mode:{"expired-record","revoked-record","revoked-signer","old-epoch-records","many-expired-records"})h.Test("mesh-sync-continues-past-"+mode,[&]{Fixture f;const auto r=LateEvaluatorMissesNewRecords(f,mode);Check(r.empty(),r.c_str());});
+    // Fixture evaluations name campaign Hash("campaign "+gate); allowing those
+    // makes MeshTick walk them. This node is host-a (alice).
+    auto mesh_on=[](Fixture& f,bool fixture_campaigns){std::vector<std::string> c;if(fixture_campaigns)for(const auto& g:GATES)c.push_back(Hash("campaign "+g));auto s=Object();s.pushKV("enabled",true);s.pushKV("max_evidence_age_ms",static_cast<uint64_t>(60000));s.pushKV("allowed_campaigns",Strings(c));f.local.pushKV("continuous_security",s);f.SaveLocal();};
+    h.Test("mesh-tick-skips-revoked-evaluator",[&]{Fixture f;mesh_on(f,true);MeshTick(f.db,NowMs());f.Revoke(KeyId(f.bob.public_key));f.db.Exec("DELETE FROM mesh_outbox");MeshTick(f.db,NowMs());Check(f.db.Query("SELECT count(*) FROM mesh_outbox WHERE kind='evaluation'")[0][0]=="6","local evaluations not exported");});
+    h.Test("mesh-tick-skips-evaluator-dropped-by-new-policy",[&]{Fixture f;mesh_on(f,true);MeshTick(f.db,NowMs());auto carol=GenerateKey();auto b=f.policy_record["body"];Json principals=Array();for(auto row:b["principals"].getValues()){if(Text(row,"public_key",PK_BYTES*2)==Hex(f.bob.public_key))row.pushKV("public_key",Hex(carol.public_key));principals.push_back(row);}const auto now=NowMs();b.pushKV("epoch",2);b.pushKV("issued_ms",now);b.pushKV("expires_ms",now+3600000);b.pushKV("principals",principals);InstallPolicy(f.db,Signed("policy",b,f.owner),now);MeshTick(f.db,NowMs());});
+    h.Test("mesh-tick-skips-revoked-worker-result",[&]{Fixture f;mesh_on(f,false);const auto package=Hash("remote package");auto rw=Object();rw.pushKV("enabled",true);rw.pushKV("packages",Strings({package}));rw.pushKV("compositions",Strings({f.composition}));f.local.pushKV("remote_work",rw);f.SaveLocal();
+        auto wb=Common(f.realm,1,NowMs(),50000);wb.pushKV("composition",f.composition);wb.pushKV("capsule",f.capsule);wb.pushKV("package",package);wb.pushKV("purpose","verification");wb.pushKV("input_sha384",Hash("in"));wb.pushKV("expected_output_sha384",Hash("out"));wb.pushKV("target_host","any");wb.pushKV("nonce",Hex(RandomBytes(32)));wb.pushKV("max_output_bytes",static_cast<uint64_t>(8192));const auto work=f.Import(Signed("work",wb,f.owner));
+        const auto receipt=f.Import(f.Receipt(f.composition,work,package,f.bob,"host-b",NowMs(),Hash("out")));auto rb=Common(f.realm,1,NowMs(),50000);rb.pushKV("work",work);rb.pushKV("purpose","verification");rb.pushKV("composition",f.composition);rb.pushKV("package",package);rb.pushKV("receipt",receipt);rb.pushKV("host","host-b");rb.pushKV("outcome","PASS");rb.pushKV("output_sha384",Hash("out"));rb.pushKV("output_bytes",static_cast<uint64_t>(100));f.Import(Signed("result",rb,f.bob));
+        MeshTick(f.db,NowMs());f.Revoke(KeyId(f.bob.public_key));MeshTick(f.db,NowMs());});
+    h.Test("maintain-freezes-channel-after-evaluator-revocation",[&]{Fixture f;mesh_on(f,true);Lifecycle l(f.db);auto m=f.Import(f.FollowMandate());l.Follow(m,NowMs());const auto channel=f.Import(f.Channel(1,f.capsule));l.Stage(channel,NowMs());f.Revoke(KeyId(f.bob.public_key));f.Revoke(m);
+        Service svc(f.root);for(int i=0;i<100&&f.db.Meta("maintenance_at").empty()&&f.db.Meta("maintenance_error").empty();++i)std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const auto error=f.db.Meta("maintenance_error");Check(error.empty(),error.c_str());Check(Text(Lifecycle(f.db).Status()[0],"phase")=="frozen","channel not frozen");});
     h.Test("mesh-three-enrolled-hosts-continuous-security-lifecycle",[&]{
         std::string stage="begin";
         try {
