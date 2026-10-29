@@ -91,7 +91,7 @@ pub async fn atlas_execute(
   h.recheck(&c)?;let summary=if request.method=="walletprocesspsbt"{
    let p=params.get(0).and_then(Value::as_str).or_else(||params.get("psbt").and_then(Value::as_str)).or_else(||params.get("args").and_then(|a|a.get(0)).and_then(Value::as_str)).ok_or_else(||Error::new("PSBT","Missing PSBT"))?;
    let decoded=c.rpc.call("decodepsbt",&json!([p]),None,20)?;
-   format!("Method: walletprocesspsbt\nWallet: {}\nPSBT SHA-256: {}\n\n{}",request.wallet.as_deref().unwrap_or("NONE"),atlas_core::hash(p.as_bytes()),serde_json::to_string_pretty(&atlas_core::money::transaction_skeleton(&decoded["tx"])?) .map_err(|_|Error::new("PSBT","Cannot show decoded transaction"))?)
+   format!("Method: walletprocesspsbt\nWallet: {}\nPSBT SHA-256: {}\n\n{}",request.wallet.as_deref().unwrap_or("NONE"),atlas_core::hash(p.as_bytes()),serde_json::to_string_pretty(&atlas_core::money::transaction_skeleton(&decoded["tx"])?) .map_err(|_|Error::new("PSBT","Cannot show decoded transaction"))?)+"\n\n"+&operations::psbt_sign_summary(&params,&decoded)
   }else{request.summary()?};
   confirm(&app,"Authorize exact operation",format!("Chain: {}\nGenesis: {}\n\n{}\n\nThis is a native approval, not a model recommendation. A timeout after submission is UNKNOWN and will NOT be retried automatically.",c.chain,c.genesis,summary))?;
   h.recheck(&c)?;h.audit(&id,&request.method,"SUBMITTED")?;
