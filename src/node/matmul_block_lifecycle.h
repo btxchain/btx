@@ -82,6 +82,9 @@ public:
         CNetAddr source_address{};
         uint64_t source_netgroup{0};
         bool source_punishable{true};
+        //! Archive or mirror delivery that extends the tip: a ConnectBlock
+        //! failure does not punish the source (net_processing.cpp).
+        bool source_archive_exempt{false};
         bool force_processing{false};
         bool min_pow_checked{false};
         bool is_ibd{false};
