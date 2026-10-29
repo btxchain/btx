@@ -969,10 +969,18 @@ std::vector<matmul::trusted::ExactReplayPqAttestation> ReadDurablePqAttestations
 void PersistAfterPqMutation(
     const matmul::trusted::ExactReplayPqAttestation& attestation)
 {
-    std::lock_guard config_lock{g_mutex};
-    if (!g_persist_enabled || g_persist_path.empty()) return;
-    std::string error;
+    // PersistDurablePqAttestations calls Store(), which locks g_mutex, so
+    // g_mutex is held only for the admission check. Taking the io lock first
+    // (the order every other persistence path uses) and keeping it across
+    // the write means ClosePersistence cannot reset the database under a
+    // record admitted here, the same guarantee PersistAfterMutation gives
+    // its queue.
     std::lock_guard io_lock{g_persist_io_mutex};
+    {
+        std::lock_guard config_lock{g_mutex};
+        if (!g_persist_enabled || g_persist_path.empty()) return;
+    }
+    std::string error;
     (void)PersistDurablePqAttestations(Span{&attestation, 1}, error);
 }
 
