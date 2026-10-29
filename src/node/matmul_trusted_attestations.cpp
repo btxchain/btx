@@ -763,6 +763,17 @@ bool LoadDurablePqAttestations(
     size_t records{0};
     int32_t highest{-1};
     std::map<int32_t, std::set<uint256>> all_quorum;
+    // Same hot tail as LoadDurableAttestations: verify every record, but
+    // import only the newest cache-sized tail, and never evict the quorum
+    // key(s) at the highest quorum height seen so far. Importing in key order
+    // instead lets every later record evict an earlier one, and the height
+    // is serialized little-endian, so the frontier is often loaded first and
+    // evicted.
+    using TailKey = std::pair<int32_t, uint256>;
+    std::map<TailKey,
+             std::vector<matmul::trusted::ExactReplayPqAttestation>> hot_tail;
+    size_t hot_tail_attestations{0};
+    std::set<TailKey> quorum_tail_keys;
     for (; cursor->Valid(); cursor->Next()) {
         DurablePqAttestationKey key;
         if (!cursor->GetKey(key) ||
@@ -777,6 +788,7 @@ bool LoadDurablePqAttestations(
             return false;
         }
         std::set<std::vector<unsigned char>> seen;
+        std::vector<matmul::trusted::ExactReplayPqAttestation> pin_only;
         for (const auto& attestation : attestations) {
             if (attestation.statement.block_hash != key.block_hash ||
                 attestation.statement.block_height != key.height ||
@@ -797,7 +809,39 @@ bool LoadDurablePqAttestations(
                 }
                 continue;
             }
-            const auto result{store->AddPq(attestation, key.block_hash, key.height)};
+            pin_only.push_back(attestation);
+        }
+        ++records;
+        if (pin_only.empty()) continue;
+        // A mixed pin quorum counts the secp votes already in the hot cache.
+        const TailKey tail_key{key.height, key.block_hash};
+        const bool pin_quorum{store->HasQuorumFromAttestations(
+            store->GetAttestations(key.block_hash, key.height), pin_only,
+            key.block_hash, key.height)};
+        if (pin_quorum) {
+            highest = std::max(highest, key.height);
+            all_quorum[key.height].insert(key.block_hash);
+        }
+        hot_tail_attestations += pin_only.size();
+        hot_tail.emplace(tail_key, std::move(pin_only));
+        if (pin_quorum) quorum_tail_keys.insert(tail_key);
+        while (hot_tail.size() > store->MaxBlocks() ||
+               hot_tail_attestations > store->MaxAttestations()) {
+            auto drop{hot_tail.begin()};
+            while (drop != hot_tail.end() && drop->first.first == highest &&
+                   quorum_tail_keys.count(drop->first) != 0) {
+                ++drop;
+            }
+            if (drop == hot_tail.end()) drop = hot_tail.begin();
+            quorum_tail_keys.erase(drop->first);
+            hot_tail_attestations -= drop->second.size();
+            hot_tail.erase(drop);
+        }
+    }
+    for (const auto& [tail_key, attestations] : hot_tail) {
+        for (const auto& attestation : attestations) {
+            const auto result{store->AddPq(attestation, tail_key.second,
+                                           tail_key.first)};
             if (result != matmul::trusted::AddResult::Accepted &&
                 result != matmul::trusted::AddResult::Duplicate &&
                 result != matmul::trusted::AddResult::Capacity &&
@@ -806,11 +850,6 @@ bool LoadDurablePqAttestations(
                                   matmul::trusted::AddResultName(result));
                 return false;
             }
-        }
-        ++records;
-        if (store->HasQuorum(key.block_hash, key.height)) {
-            highest = std::max(highest, key.height);
-            all_quorum[key.height].insert(key.block_hash);
         }
     }
     {

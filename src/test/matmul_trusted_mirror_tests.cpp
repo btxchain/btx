@@ -5399,4 +5399,108 @@ BOOST_AUTO_TEST_CASE(hot_tail_keeps_tip_partial_across_restart)
     BOOST_CHECK(HasFrontierHint(TwoPinMirror::HashAt(12), 12));
 }
 
+namespace {
+//! TwoPinMirror with two ML-DSA-44 pins.
+struct TwoPqPinMirror {
+    PqKey a{MakePqKey(0x81)};
+    PqKey b{MakePqKey(0x82)};
+    uint256 chain{Hex256('5')};
+    uint256 context{Hex256('6')};
+    fs::path archive;
+
+    explicit TwoPqPinMirror(fs::path path) : archive{std::move(path)} {}
+    void Start() const
+    {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_pq_signers = {a.pk, b.pk};
+        config.threshold = 2;
+        config.max_blocks = 2;
+        config.max_attestations = 8;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+            std::chrono::milliseconds{20}, error));
+        BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    }
+    void Restart() const
+    {
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::FlushPersistence(error));
+        node::matmul_trusted::ResetForTest();
+        Start();
+    }
+    static uint256 HashAt(int32_t height) { return (HashWriter{} << height).GetHash(); }
+    void Sign(const PqKey& key, int32_t height) const
+    {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = HashAt(height);
+        statement.block_height = height;
+        statement.replay_authority_context = context;
+        const auto att{matmul::trusted::SignStatementMlDsa44(statement, key.sk, key.pk)};
+        BOOST_REQUIRE(att.has_value());
+        BOOST_REQUIRE(node::matmul_trusted::AddPq(*att, HashAt(height), height) ==
+                      matmul::trusted::AddResult::Accepted);
+    }
+};
+} // namespace
+
+BOOST_AUTO_TEST_CASE(pq_hot_tail_keeps_frontier_quorum_across_restart)
+{
+    // hot_tail_keeps_frontier_quorum_across_restart with ML-DSA-44 pins.
+    RuntimeReset reset;
+    const TwoPqPinMirror mirror{m_args.GetDataDirNet() / "matmul_pq_hot_tail_frontier.dat"};
+    mirror.Start();
+    mirror.Sign(mirror.a, 10);
+    mirror.Sign(mirror.b, 10);
+    for (int32_t height{11}; height <= 13; ++height) mirror.Sign(mirror.a, height);
+    BOOST_REQUIRE(!node::matmul_trusted::HasQuorum(TwoPqPinMirror::HashAt(13), 13));
+
+    mirror.Restart();
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 10);
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPqPinMirror::HashAt(10), 10));
+    BOOST_CHECK(HasFrontierHint(TwoPqPinMirror::HashAt(10), 10));
+}
+
+BOOST_AUTO_TEST_CASE(pq_hot_tail_keeps_frontier_loaded_first_across_restart)
+{
+    // Quorum at 10, 11 and 256. Height 256 serializes before 10 and 11 in the
+    // durable key, so the frontier is the first record loaded; two later
+    // records must not evict it.
+    RuntimeReset reset;
+    const TwoPqPinMirror mirror{m_args.GetDataDirNet() / "matmul_pq_hot_tail_first.dat"};
+    mirror.Start();
+    for (const int32_t height : {10, 11, 256}) {
+        mirror.Sign(mirror.a, height);
+        mirror.Sign(mirror.b, height);
+    }
+
+    mirror.Restart();
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 256);
+    BOOST_CHECK_MESSAGE(node::matmul_trusted::HasQuorumInMemory(TwoPqPinMirror::HashAt(256), 256),
+                        "PQ durable load evicted the frontier quorum from the hot cache");
+    BOOST_CHECK(HasFrontierHint(TwoPqPinMirror::HashAt(256), 256));
+}
+
+BOOST_AUTO_TEST_CASE(pq_hot_tail_keeps_frontier_loaded_last_across_restart)
+{
+    // hot_tail_keeps_frontier_loaded_last_across_restart with ML-DSA-44 pins.
+    RuntimeReset reset;
+    const TwoPqPinMirror mirror{m_args.GetDataDirNet() / "matmul_pq_hot_tail_last.dat"};
+    mirror.Start();
+    mirror.Sign(mirror.a, 255);
+    mirror.Sign(mirror.b, 255);
+    for (int32_t height{256}; height <= 258; ++height) mirror.Sign(mirror.a, height);
+
+    mirror.Restart();
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 255);
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPqPinMirror::HashAt(255), 255));
+    BOOST_CHECK(HasFrontierHint(TwoPqPinMirror::HashAt(255), 255));
+    mirror.Sign(mirror.b, 258);
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPqPinMirror::HashAt(258), 258));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 258);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
