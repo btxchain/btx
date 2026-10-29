@@ -705,6 +705,7 @@ BTX_BASE_SCRIPTS = [
     'feature_matmul_drlt_sealaspow.py',
     'feature_matmul_v47_epoch_a_activation.py',
     'rpc_matmul_attestation_aliases.py',
+    'rpc_matmul_attestation_blocklist.py',
     'feature_matmul_trusted_mirrors.py',
     'p2p_mirror_relay_to_signer.py',
     'feature_matmul_heard_serve.py',

@@ -206,6 +206,100 @@ auto CallWithDeadline(const char* what, Fn fn) -> decltype(fn())
     return result.get();
 }
 
+//! A trusted mirror pinned to 2 secp256k1 and 2 ML-DSA-44 keys, M=2, with
+//! the durable attestation database open. Both ML-DSA-44 keys are stolen:
+//! their votes for one block reach pin quorum and are persisted before the
+//! operator blocks them.
+struct StolenPqPinMembers {
+    const CKey a{NewKey()};
+    const CKey b{NewKey()};
+    const PqKey pq1{MakePqKey(0x61)};
+    const PqKey pq2{MakePqKey(0x62)};
+    const uint256 chain{Hex256('5')};
+    const uint256 context{Hex256('6')};
+    const uint256 stolen{Hex256('7')};
+    const uint256 honest{Hex256('8')};
+    static constexpr int32_t STOLEN_HEIGHT{201};
+    const fs::path archive;
+
+    explicit StolenPqPinMembers(fs::path path) : archive{std::move(path)} {}
+
+    matmul::trusted::ExactReplayStatement Statement(const uint256& hash,
+                                                    int32_t height) const
+    {
+        matmul::trusted::ExactReplayStatement out;
+        out.chain_id = chain;
+        out.block_hash = hash;
+        out.block_height = height;
+        out.replay_authority_context = context;
+        return out;
+    }
+
+    //! Configure the store (pq_blocklist is the startup blocklist) and open
+    //! the durable database, as a node start does.
+    bool Start(std::vector<std::vector<unsigned char>> pq_blocklist,
+               std::string& error) const
+    {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {a.GetPubKey(), b.GetPubKey()};
+        config.trusted_pq_signers = {pq1.pk, pq2.pk};
+        config.threshold = 2;
+        config.pq_blocklist = std::move(pq_blocklist);
+        if (!node::matmul_trusted::Configure(
+                std::move(config), /*trusted_mirror=*/true,
+                /*serve=*/false, std::chrono::milliseconds{20}, error)) {
+            return false;
+        }
+        return node::matmul_trusted::OpenPersistence(archive, error);
+    }
+
+    void CastStolenVotes() const
+    {
+        for (const PqKey* key : {&pq1, &pq2}) {
+            const auto vote{matmul::trusted::SignStatementMlDsa44(
+                Statement(stolen, STOLEN_HEIGHT), key->sk, key->pk)};
+            BOOST_REQUIRE(vote);
+            BOOST_CHECK(CallWithDeadline("AddPq of a pinned ML-DSA-44 vote", [&] {
+                            return node::matmul_trusted::AddPq(
+                                *vote, stolen, STOLEN_HEIGHT);
+                        }) == matmul::trusted::AddResult::Accepted);
+        }
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorum(stolen, STOLEN_HEIGHT));
+    }
+
+    //! After a restart with both ML-DSA-44 keys blocked: they stay blocked,
+    //! their stolen quorum does not come back (hot cache, durable miss path,
+    //! attested height), and the secp256k1 members still
+    //! reach quorum on another block.
+    void CheckAfterRestart() const
+    {
+        BOOST_CHECK(node::matmul_trusted::IsBlockedPq(pq1.pk));
+        BOOST_CHECK(node::matmul_trusted::IsBlockedPq(pq2.pk));
+        BOOST_CHECK(!node::matmul_trusted::IsAuthorityPqSigner(pq1.pk));
+        BOOST_CHECK(!node::matmul_trusted::IsAuthorityPqSigner(pq2.pk));
+        BOOST_CHECK_EQUAL(node::matmul_trusted::UnblockedPinMembers(), 2U);
+        BOOST_CHECK_MESSAGE(!node::matmul_trusted::HasQuorum(stolen, STOLEN_HEIGHT),
+                            "the blocked keys' quorum is back after the restart");
+        const auto highest{node::matmul_trusted::HighestAttestedHeight()};
+        BOOST_CHECK(!highest.has_value() || *highest < STOLEN_HEIGHT);
+        const auto again{matmul::trusted::SignStatementMlDsa44(
+            Statement(stolen, STOLEN_HEIGHT), pq1.sk, pq1.pk)};
+        BOOST_REQUIRE(again);
+        BOOST_CHECK(node::matmul_trusted::AddPq(*again, stolen, STOLEN_HEIGHT) ==
+                    matmul::trusted::AddResult::BlocklistedSigner);
+        for (const CKey* key : {&a, &b}) {
+            const auto vote{matmul::trusted::SignStatement(
+                Statement(honest, STOLEN_HEIGHT + 1), *key)};
+            BOOST_REQUIRE(vote);
+            BOOST_CHECK(node::matmul_trusted::Add(*vote, honest, STOLEN_HEIGHT + 1) ==
+                        matmul::trusted::AddResult::Accepted);
+        }
+        BOOST_CHECK(node::matmul_trusted::HasQuorum(honest, STOLEN_HEIGHT + 1));
+    }
+};
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(matmul_trusted_mirror_tests, BasicTestingSetup)
@@ -4763,6 +4857,101 @@ BOOST_AUTO_TEST_CASE(blocklist_init_fail_closed_below_threshold)
     BOOST_CHECK(!AppInitParameterInteraction(args));
     BOOST_CHECK(capture.LastError().find("unblocked pin") !=
                 std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_init_accepts_pq_pin_member)
+{
+    // -matmulattestationblocklist takes an ML-DSA-44 pin member like a
+    // secp256k1 one. Pin: 2 secp256k1 + 1 ML-DSA-44 key, the ML-DSA-44 key
+    // blocked. With M=2 the node starts and the blocked key is inert; with
+    // M=3 start is refused because 2 unblocked members are below M.
+    RuntimeReset reset;
+    const CKey a{NewKey()};
+    const CKey b{NewKey()};
+    const PqKey pq{MakePqKey(0x4b)};
+    auto startup = [&](int64_t threshold, std::string& error) {
+        node::matmul_trusted::ResetForTest();
+        ArgsManager args;
+        args.ForceSetArg("-matmulvalidation", "trusted");
+        UniValue keys{UniValue::VARR};
+        keys.push_back(HexPubKey(a));
+        keys.push_back(HexPubKey(b));
+        args.ForceSetArgV("-matmultrustedpubkey", keys);
+        UniValue pq_keys{UniValue::VARR};
+        pq_keys.push_back(HexStr(pq.pk));
+        args.ForceSetArgV("-matmultrustedpqpubkey", pq_keys);
+        args.ForceSetArg("-matmultrustedthreshold", threshold);
+        UniValue blocked{UniValue::VARR};
+        blocked.push_back(HexStr(pq.pk));
+        args.ForceSetArgV("-matmulattestationblocklist", blocked);
+        InitErrorCapture capture;
+        const bool ok{AppInitParameterInteraction(args)};
+        error = capture.LastError().substr(0, 120);
+        return ok;
+    };
+
+    std::string error;
+    const bool started{startup(/*threshold=*/2, error)};
+    BOOST_CHECK_MESSAGE(started, "init refused an ML-DSA-44 blocklist entry: " << error);
+    if (started) {
+        BOOST_REQUIRE_MESSAGE(node::matmul_trusted::FinalizeConfiguration(error), error);
+        BOOST_CHECK_EQUAL(node::matmul_trusted::UnblockedPinMembers(), 2U);
+        BOOST_CHECK(node::matmul_trusted::PinQuorumReachable());
+        BOOST_CHECK(!node::matmul_trusted::IsAuthorityPqSigner(pq.pk));
+    }
+
+    BOOST_CHECK(!startup(/*threshold=*/3, error));
+    BOOST_CHECK_MESSAGE(error.find("unblocked pin") != std::string::npos,
+                        "refused for another reason: " << error);
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_pq_runtime_block_of_voters_survives_restart)
+{
+    // The operator blocks both stolen ML-DSA-44 keys at runtime, after their
+    // votes were persisted. The blocks persist; the next start must succeed
+    // and keep the keys inert.
+    RuntimeReset reset;
+    const StolenPqPinMembers pin{
+        m_args.GetDataDirNet() / "matmul_blocklist_pq_runtime.dat"};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(pin.Start({}, error), error);
+    pin.CastStolenVotes();
+
+    std::string persist_error;
+    BOOST_CHECK(node::matmul_trusted::AddBlocklistedPqSigner(
+                    pin.pq1.pk, persist_error) ==
+                matmul::trusted::BlocklistResult::Blocked);
+    BOOST_CHECK_MESSAGE(persist_error.empty(), persist_error);
+    BOOST_CHECK_EQUAL(node::matmul_trusted::UnblockedPinMembers(), 3U);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(pin.stolen, pin.STOLEN_HEIGHT));
+    BOOST_CHECK(node::matmul_trusted::AddBlocklistedPqSigner(
+                    pin.pq2.pk, persist_error) ==
+                matmul::trusted::BlocklistResult::Blocked);
+    BOOST_CHECK_MESSAGE(persist_error.empty(), persist_error);
+
+    node::matmul_trusted::ResetForTest();
+    BOOST_REQUIRE_MESSAGE(pin.Start({}, error),
+                          "restart after a runtime block of PQ keys that voted failed: "
+                              << error);
+    pin.CheckAfterRestart();
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_pq_startup_block_of_voters_survives_restart)
+{
+    // Both stolen ML-DSA-44 keys voted and their votes were persisted. The
+    // operator restarts with both in -matmulattestationblocklist.
+    RuntimeReset reset;
+    const StolenPqPinMembers pin{
+        m_args.GetDataDirNet() / "matmul_blocklist_pq_startup.dat"};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(pin.Start({}, error), error);
+    pin.CastStolenVotes();
+
+    node::matmul_trusted::ResetForTest();
+    BOOST_REQUIRE_MESSAGE(pin.Start({pin.pq1.pk, pin.pq2.pk}, error),
+                          "restart with PQ keys that voted in the startup blocklist failed: "
+                              << error);
+    pin.CheckAfterRestart();
 }
 
 BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_trusted)
