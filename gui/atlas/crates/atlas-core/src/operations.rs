@@ -115,6 +115,12 @@ const SECRET_METHODS: &[&str] = &[
     "walletprocesspsbt",
     "signrawtransactionwithkey",
     "listdescriptors",
+    "signmessagewithprivkey",
+    "sweepprivkeys",
+    "sethdseed",
+    "exportwalletbundle",
+    "restorewalletbundle",
+    "restorewalletbundlearchive",
 ];
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -176,13 +182,47 @@ impl Request {
             // native dialog still shows wallet, timeout, destination/message and switches.
             let mut shown = p.clone();
             let positions: &[usize] = match self.method.as_str() {
-                "walletpassphrase" | "encryptwallet" | "importprivkey" => &[0],
+                "walletpassphrase"
+                | "encryptwallet"
+                | "importprivkey"
+                | "signmessagewithprivkey" => &[0],
                 "walletpassphrasechange" => &[0, 1],
                 "createwallet" => &[3],
-                "migratewallet" => &[1],
+                "migratewallet" | "sethdseed" | "exportwalletbundle" => &[1],
                 "signrawtransactionwithkey" => &[1],
+                "restorewalletbundle" => &[4],
+                "restorewalletbundlearchive" => &[2],
                 _ => &[],
             };
+            // Named credentials are hidden at every depth: sweepprivkeys takes them
+            // inside its first positional object, and options objects nest them too.
+            const CREDENTIAL_NAMES: &[&str] = &[
+                "passphrase",
+                "oldpassphrase",
+                "newpassphrase",
+                "wallet_passphrase",
+                "archive_passphrase",
+                "private_keys",
+                "privkeys",
+                "privkey",
+                "privatekey",
+                "seed",
+            ];
+            fn hide_names(value: &mut Value) {
+                match value {
+                    Value::Object(o) => {
+                        for (name, v) in o.iter_mut() {
+                            if CREDENTIAL_NAMES.contains(&name.as_str()) {
+                                *v = json!("[credential hidden]");
+                            } else {
+                                hide_names(v);
+                            }
+                        }
+                    }
+                    Value::Array(a) => a.iter_mut().for_each(hide_names),
+                    _ => {}
+                }
+            }
             // The node turns an object key "args" into the positional array
             // (transformNamedArguments). Hide the same indexes there.
             fn hide_positions(values: &mut [Value], positions: &[usize]) {
@@ -199,19 +239,8 @@ impl Request {
                 if let Some(args) = o.get_mut("args").and_then(Value::as_array_mut) {
                     hide_positions(args, positions);
                 }
-                for name in [
-                    "passphrase",
-                    "oldpassphrase",
-                    "newpassphrase",
-                    "private_keys",
-                    "privkeys",
-                    "privkey",
-                ] {
-                    if o.contains_key(name) {
-                        o.insert(name.into(), json!("[credential hidden]"));
-                    }
-                }
             }
+            hide_names(&mut shown);
             let body = serde_json::to_string_pretty(&shown)
                 .map_err(|_| Error::new("JSON", "Cannot show request"))?;
             if body.len() > 12000 {
@@ -683,6 +712,47 @@ mod tests {
         assert!(!summary.contains("secret-passphrase"));
         assert!(summary.contains("[credential hidden]"));
         assert!(summary.contains("60"));
+    }
+    #[test]
+    fn bundle_and_key_credentials_hidden_in_summary() {
+        let secret = "secret-credential-value";
+        let cases = [
+            ("exportwalletbundle", json!(["/tmp/w.btxwallet", secret])),
+            (
+                "restorewalletbundle",
+                json!(["w", "/tmp/w.btxwallet", null, null, secret]),
+            ),
+            (
+                "restorewalletbundlearchive",
+                json!(["w", "/tmp/w.archive", secret]),
+            ),
+            ("restorewalletbundle", json!({"wallet_passphrase": secret})),
+            (
+                "restorewalletbundlearchive",
+                json!({"args": ["w", "/tmp/w.archive", secret]}),
+            ),
+            ("signmessagewithprivkey", json!([secret, "message"])),
+            ("sethdseed", json!([true, secret])),
+            (
+                "sweepprivkeys",
+                json!([{"privkeys": [secret], "label": "x"}]),
+            ),
+            ("sweepprivkeys", json!({"options": {"privkeys": [secret]}})),
+        ];
+        for (method, params) in cases {
+            let request = Request {
+                method: method.into(),
+                params_json: params.to_string(),
+                wallet: None,
+            };
+            let summary = request.summary().unwrap();
+            assert!(
+                !summary.contains(secret),
+                "{method} {params} shows the credential"
+            );
+            assert!(summary.contains("[credential hidden]"), "{method} {params}");
+            assert!(request.sensitive(), "{method} is not marked sensitive");
+        }
     }
     #[test]
     fn state() {
