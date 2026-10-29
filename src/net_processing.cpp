@@ -22546,7 +22546,21 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // above has passed. In particular, a bad claimed-work block is
             // disconnected without reaching ProcessNewBlock/BlockChecked and
             // therefore has no later lifecycle hook that could erase it.
-            mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
+            //
+            // A full block we requested from an archive or trusted-mirror peer
+            // may be a body that peer stored before ConnectBlock: a trusted
+            // mirror persists tip-extending HAVE_DATA before quorum, and
+            // BlockRequestAllowed serves it to any requester. Like a BIP 152
+            // compact block, such a body was relayed on header validation
+            // only, so an invalid body must not get that honest peer punished
+            // or disconnected. useful_owned_delivery was taken before
+            // RemoveBlockRequest above. A forged MatMul proof is still
+            // punished: MaybePunishNodeForBlock ignores via_compact_block for
+            // phase-2 failures.
+            const bool solicited_from_archive{
+                useful_owned_delivery && pfrom.HasArchiveOrMirrorService()};
+            mapBlockSource.emplace(
+                hash, std::make_pair(pfrom.GetId(), !solicited_from_archive));
         }
 
         if (!AdmitMatMulBlockVerification(
