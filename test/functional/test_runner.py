@@ -695,6 +695,7 @@ BTX_BASE_SCRIPTS = [
     'feature_modelnet_0348.py',
     'feature_modelnet_0348_ops.py',
     'feature_modelnet_jit_capability.py',
+    'feature_capabilityd_file_modes.py',
     'feature_modelnet_btx_model.py',
     'feature_modelnet_unique_todos.py',
     'feature_modelnet_hcp.py',

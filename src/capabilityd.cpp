@@ -6,6 +6,10 @@
 #include <util/fs.h>
 #include <util/translation.h>
 
+#ifndef WIN32
+#include <sys/stat.h>
+#endif
+
 #include <atomic>
 #include <csignal>
 #include <cstdlib>
@@ -38,6 +42,12 @@ static void Usage()
 
 int main(int argc, char* argv[])
 {
+    // The catalog, the model store and the capability socket are private to
+    // the operator, as in btx-modeld. Without this a umask of 0022 leaves the
+    // socket srwxr-xr-x and the catalog readable by every local user.
+#ifndef WIN32
+    umask(0077);
+#endif
     fs::path modeldir;
     fs::path sock;
     for (int i = 1; i < argc; ++i) {
