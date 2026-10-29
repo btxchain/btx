@@ -5102,4 +5102,190 @@ BOOST_AUTO_TEST_CASE(detect_better_work_twin_blocked_by_local_commitment)
     BOOST_CHECK(!minted_winner.blocked);
 }
 
+namespace {
+//! A signing node: its local key plus peer pins, M=2, with a durable archive
+//! so a case can restart it.
+struct LocalSignerNode {
+    CKey local{NewKey()};
+    std::vector<CKey> peers;
+    uint256 chain{Hex256('8')};
+    uint256 context{Hex256('9')};
+    fs::path archive;
+
+    LocalSignerNode(fs::path path, size_t peer_count) : archive{std::move(path)}
+    {
+        for (size_t i{0}; i < peer_count; ++i) peers.push_back(NewKey());
+    }
+    void Start() const
+    {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {local.GetPubKey()};
+        for (const auto& peer : peers) {
+            config.trusted_signers.push_back(peer.GetPubKey());
+        }
+        config.threshold = 2;
+        config.local_signer = local;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/false, /*serve=*/true,
+            std::chrono::milliseconds{20}, error));
+        BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    }
+    void Restart() const
+    {
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::FlushPersistence(error));
+        node::matmul_trusted::ResetForTest();
+        Start();
+    }
+    void PeerSign(size_t peer, const uint256& hash, int32_t height) const
+    {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = hash;
+        statement.block_height = height;
+        statement.replay_authority_context = context;
+        const auto att{matmul::trusted::SignStatement(statement, peers.at(peer))};
+        BOOST_REQUIRE(att.has_value());
+        BOOST_REQUIRE(node::matmul_trusted::Add(*att, hash, height) ==
+                      matmul::trusted::AddResult::Accepted);
+    }
+    //! The local vote plus the first peer: a quorum that needs the local vote.
+    void SignQuorum(const uint256& hash, int32_t height) const
+    {
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash, height) ==
+                      matmul::trusted::AddResult::Accepted);
+        PeerSign(0, hash, height);
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorumInMemory(hash, height));
+    }
+};
+
+bool HasFrontierHint(const uint256& hash, int32_t height)
+{
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height == height && hint.hash == hash) return true;
+    }
+    return false;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(withdrawn_necessary_votes_do_not_keep_frontier_height)
+{
+    // M=2 with one peer. Our own reorg disconnects 31 and then 30, which
+    // withdraws the local vote that each quorum needed. The watermark and
+    // the hints must fall back to the quorum at 10, live and after the
+    // durable records (which still hold the withdrawn votes) reload.
+    RuntimeReset reset;
+    const LocalSignerNode signer{
+        m_args.GetDataDirNet() / "matmul_withdrawn_frontier.dat",
+        /*peer_count=*/1};
+    const uint256 low{Hex256('a')};
+    const uint256 mid{Hex256('b')};
+    const uint256 top{Hex256('c')};
+    signer.Start();
+    signer.SignQuorum(low, 10);
+    signer.SignQuorum(mid, 30);
+    signer.SignQuorum(top, 31);
+    BOOST_REQUIRE_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 31);
+
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(31, top));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(top, 31));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 30);
+    BOOST_CHECK(!HasFrontierHint(top, 31));
+
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(30, mid));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(mid, 30));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 10);
+    BOOST_CHECK(!HasFrontierHint(mid, 30));
+    BOOST_CHECK(HasFrontierHint(low, 10));
+
+    signer.Restart();
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(low, 10));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(mid, 30));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(top, 31));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 10);
+    BOOST_CHECK(HasFrontierHint(low, 10));
+    BOOST_CHECK(!HasFrontierHint(mid, 30));
+    BOOST_CHECK(!HasFrontierHint(top, 31));
+}
+
+BOOST_AUTO_TEST_CASE(withdrawn_local_vote_does_not_occupy_height_after_reload)
+{
+    // Live, the disconnect releases the local mint slot, so the signer can
+    // sign the replacement block at that height. A restart before it does
+    // must not bring the withdrawn vote back as an occupied height.
+    RuntimeReset reset;
+    const LocalSignerNode signer{
+        m_args.GetDataDirNet() / "matmul_withdrawn_resign.dat",
+        /*peer_count=*/1};
+    const uint256 abandoned{Hex256('b')};
+    const uint256 replacement{Hex256('c')};
+    constexpr int32_t height{30};
+    signer.Start();
+    signer.SignQuorum(abandoned, height);
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(
+        height, abandoned));
+    BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(replacement, height));
+
+    signer.Restart();
+    BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(replacement, height));
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(replacement, height) ==
+                matmul::trusted::AddResult::Accepted);
+}
+
+BOOST_AUTO_TEST_CASE(withdrawn_unneeded_vote_keeps_frontier_height)
+{
+    // Two peers also signed, so the quorum does not need the local vote:
+    // withdrawing it must leave the frontier where it is.
+    RuntimeReset reset;
+    const LocalSignerNode signer{
+        m_args.GetDataDirNet() / "matmul_withdrawn_unneeded.dat",
+        /*peer_count=*/2};
+    const uint256 low{Hex256('a')};
+    const uint256 high{Hex256('b')};
+    signer.Start();
+    signer.SignQuorum(low, 10);
+    signer.SignQuorum(high, 30);
+    signer.PeerSign(1, high, 30);
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(30, high));
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(high, 30));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 30);
+    BOOST_CHECK(HasFrontierHint(high, 30));
+
+    signer.Restart();
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(high, 30));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 30);
+    BOOST_CHECK(HasFrontierHint(high, 30));
+}
+
+BOOST_AUTO_TEST_CASE(withdrawn_vote_reconnected_restores_frontier_height)
+{
+    // Reorg away from 30 and back: re-signing the reconnected hash must
+    // restore its quorum, the watermark and the hint, live and after reload.
+    RuntimeReset reset;
+    const LocalSignerNode signer{
+        m_args.GetDataDirNet() / "matmul_withdrawn_reconnect.dat",
+        /*peer_count=*/1};
+    const uint256 low{Hex256('a')};
+    const uint256 high{Hex256('b')};
+    signer.Start();
+    signer.SignQuorum(low, 10);
+    signer.SignQuorum(high, 30);
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(30, high));
+    node::matmul_trusted::NotifyActiveChainBlockConnected(30, high);
+    const auto resigned{node::matmul_trusted::SignAuthoritative(high, 30)};
+    BOOST_CHECK(resigned == matmul::trusted::AddResult::Accepted ||
+                resigned == matmul::trusted::AddResult::Duplicate);
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(high, 30));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 30);
+    BOOST_CHECK(HasFrontierHint(high, 30));
+
+    signer.Restart();
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(high, 30));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 30);
+    BOOST_CHECK(HasFrontierHint(high, 30));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

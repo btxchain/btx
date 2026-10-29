@@ -600,6 +600,14 @@ bool LoadDurableAttestations(
             error = "durable attestation database contains a malformed record";
             return false;
         }
+        // The durable record still holds a local vote that this node withdrew
+        // on its own reorg (the tombstone seeded by LoadWithdrawnLocalVotes).
+        // AttestationStore::Add refuses that vote below, so it must not count
+        // toward the quorum, the watermark or the local-signed height here
+        // either. Peer votes for the same hash stay.
+        const bool local_vote_withdrawn{
+            local_pk.has_value() &&
+            store->IsOffActiveChain(key.height, key.block_hash)};
         std::set<CPubKey> seen;
         std::vector<matmul::trusted::ExactReplayAttestation> pin_only;
         for (const auto& attestation : attestations) {
@@ -621,6 +629,9 @@ bool LoadDurableAttestations(
                         matmul::trusted::VerifyResultName(verified));
                     return false;
                 }
+                continue;
+            }
+            if (local_vote_withdrawn && attestation.signer == *local_pk) {
                 continue;
             }
             pin_only.push_back(attestation);
@@ -1775,6 +1786,34 @@ bool NotifyActiveChainBlockDisconnected(int32_t height,
             it->second == disconnected_hash) {
             g_local_signed_hash_by_height.erase(it);
             released_hint = true;
+        }
+    }
+    if (released_store && !store->HasQuorum(disconnected_hash, height)) {
+        // Without the withdrawn vote the hash has no quorum in memory. If it
+        // had quorum, NoteAcceptedAttestationHeight put it in the quorum map
+        // and the frontier hints and may have raised the watermark to this
+        // height. Drop all three, so the signed-frontier lookups fall back to
+        // the highest remaining quorum instead of a hash that no longer has
+        // quorum in memory.
+        std::lock_guard lock{g_mutex};
+        if (const auto quorum_it{g_quorum_hashes_by_height.find(height)};
+            quorum_it != g_quorum_hashes_by_height.end()) {
+            quorum_it->second.erase(disconnected_hash);
+            if (quorum_it->second.empty()) {
+                g_quorum_hashes_by_height.erase(quorum_it);
+            }
+        }
+        if (const auto hint_it{g_attested_by_height.find(height)};
+            hint_it != g_attested_by_height.end()) {
+            hint_it->second.erase(disconnected_hash);
+            if (hint_it->second.empty()) g_attested_by_height.erase(hint_it);
+        }
+        if (g_highest_attested_height == height &&
+            g_quorum_hashes_by_height.count(height) == 0) {
+            g_highest_attested_height =
+                g_quorum_hashes_by_height.empty()
+                    ? -1
+                    : g_quorum_hashes_by_height.rbegin()->first;
         }
     }
     if (released_store || released_hint) {
