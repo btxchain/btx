@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chainparams.h>
+#include <chainparamsbase.h>
 #include <common/args.h>
 #include <consensus/amount.h>
 #include <primitives/block.h>
@@ -13,6 +14,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <string>
 
 BOOST_FIXTURE_TEST_SUITE(matmul_subsidy_tests, BasicTestingSetup)
 
@@ -103,6 +105,37 @@ BOOST_AUTO_TEST_CASE(empty_block_subsidy_caps_activate_at_130k_strict_at_130500_
     BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(131'999, empty_block, &third_empty_prev, params), 5 * COIN);
     BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(132'000, empty_block, &third_empty_prev, params), 20 * COIN);
     BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(132'000, empty_block, &non_empty_prev, params), 20 * COIN);
+}
+
+BOOST_AUTO_TEST_CASE(regtest_empty_block_subsidy_penalty_endheight_is_registered)
+{
+    // ReadRegTestArgs reads -regtestemptyblocksubsidypenaltyendheight, and
+    // ParseParameters rejects any option SetupChainParamsBaseOptions does not
+    // register. Parse both overrides as btxd would and check they apply.
+    ArgsManager args;
+    SetupChainParamsBaseOptions(args);
+    const char* argv[] = {
+        "test_btx",
+        "-regtestemptyblocksubsidypenaltyheight=100",
+        "-regtestemptyblocksubsidypenaltyendheight=104",
+    };
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(args.ParseParameters(3, argv, error), error);
+    BOOST_CHECK(error.empty());
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nEmptyBlockSubsidyPenaltyHeight, 100);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nEmptyBlockSubsidyPenaltyEndHeight, 104);
+
+    CBlock empty_block;
+    empty_block.vtx.resize(1);
+    CBlockIndex non_empty_prev;
+    non_empty_prev.nTx = 2;
+    // Inside the overridden window: empty block claims half.
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(100, empty_block, &non_empty_prev, params->GetConsensus()), 10 * COIN);
+    // At the overridden end height: full schedule again.
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(104, empty_block, &non_empty_prev, params->GetConsensus()), 20 * COIN);
 }
 
 BOOST_AUTO_TEST_CASE(money_range_enforces_cap)
