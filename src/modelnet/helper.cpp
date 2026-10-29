@@ -10772,7 +10772,14 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
                     pid.service_id = aj["service_id"].get_str();
                 }
                 std::string perr;
-                (void)ParseAvailabilitySources(aj, pid.endpoint, pid, artifact, sources, perr, ConnNowMs());
+                // Peer data: the parser throws on a field of another type. Drop
+                // this source's entries; the other sources keep the retrieve going.
+                const size_t had = sources.size();
+                try {
+                    (void)ParseAvailabilitySources(aj, pid.endpoint, pid, artifact, sources, perr, ConnNowMs());
+                } catch (const std::exception&) {
+                    sources.resize(had);
+                }
             };
             add_av(host, port);
             for (const auto& ep : extras) {

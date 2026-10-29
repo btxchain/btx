@@ -264,4 +264,25 @@ BOOST_AUTO_TEST_CASE(swarm_grant_reply_with_non_string_fields_does_not_end_the_h
     BOOST_CHECK_EQUAL(status, "done");
 }
 
+BOOST_AUTO_TEST_CASE(swarm_availability_with_wrong_types_does_not_fail_the_retrieve)
+{
+    const std::vector<std::string> replies{
+        "{\"local\":{\"models\":[{\"files\":[{\"file_index\":\"x\"}]}]}}",
+        "{\"local\":{\"models\":[{\"files\":[{\"file_index\":0,\"ranges\":[[\"x\",0]]}]}]}}",
+    };
+    for (size_t k = 0; k < replies.size(); ++k) {
+        std::atomic<int> asked{0};
+        const std::string status = RetrieveWithSwarmSource(
+            m_args.GetDataDirBase() / ("availability-" + std::to_string(k)).c_str(),
+            [&](const modelnet::CatalogEntry&, const modelnet::NativeRequest& req, modelnet::NativeResponse& resp) {
+                if (req.path == std::string(modelnet::MODEL_HTTP_ROOT) + "availability") {
+                    ++asked;
+                    Json(resp, replies[k]);
+                }
+            });
+        BOOST_CHECK_GE(asked.load(), 1);
+        BOOST_CHECK_MESSAGE(status == "done", "reply " + replies[k] + " left the job " + status);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
