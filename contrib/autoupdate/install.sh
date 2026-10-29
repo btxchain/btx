@@ -556,7 +556,15 @@ try_install_prebuilt() {
     curl -fsSL "$(with_telemetry_query "$url")" -o "$tarball" || { warn "prebuilt download failed ($key); will try next/source"; continue; }
     curl -fsSL "$(with_telemetry_query "$sig_url")" -o "$sig" || { warn "prebuilt signature download failed ($key)"; continue; }
 
-    if [[ -n "$sha256" && "$sha256" != "null" ]] && ! verify_sha256 "$tarball" "$sha256"; then
+    # The artifact signature covers only SHA256(tarball): it names no version, commit or
+    # platform, so any tarball ever signed with the release key verifies. Only the sha256
+    # inside the signed manifest binds the artifact to this release; without it, build
+    # from source (bound to git_commit) instead.
+    if [[ -z "$sha256" || "$sha256" == "null" ]]; then
+      warn "prebuilt for $key has no sha256 in the signed manifest; ignoring this artifact"
+      continue
+    fi
+    if ! verify_sha256 "$tarball" "$sha256"; then
       warn "prebuilt sha256 mismatch ($key); ignoring this artifact"
       continue
     fi

@@ -9,6 +9,7 @@ real installer script against a local signed-manifest shape and live target
 processes so process targeting and pre-stop failure behavior are observable.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -562,20 +563,24 @@ def test_unhealthy_restart_triggers_rollback_path():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
-def _prebuilt_manifest_entry(scenario, name, *, bad_btxd=False):
+def _prebuilt_manifest_entry(scenario, name, *, bad_btxd=False, with_sha256=True):
     tar_path = scenario.origin / f"{name}.tar.gz"
     build_prebuilt_tarball(scenario.tmp, tar_path, bad_btxd=bad_btxd)
     sig_path = scenario.origin / f"{name}.tar.gz.sig"
     sig_path.write_text("signature\n", encoding="utf8")
-    return {"url": tar_path.as_uri(), "sig_url": sig_path.as_uri()}
+    entry = {"url": tar_path.as_uri(), "sig_url": sig_path.as_uri()}
+    if with_sha256:
+        entry["sha256"] = hashlib.sha256(tar_path.read_bytes()).hexdigest()
+    return entry
 
 
-def _add_prebuilt_to_manifest(scenario, *, bad_btxd=False):
+def _add_prebuilt_to_manifest(scenario, *, bad_btxd=False, with_sha256=True):
     """Augment the scenario's signed manifest with a prebuilt entry for this host, returning the
     platform key used."""
     key = host_platform_keys()[0]
     manifest = json.loads((scenario.origin / "version.txt").read_text(encoding="utf8"))
-    manifest["prebuilt"] = {key: _prebuilt_manifest_entry(scenario, "btx-prebuilt", bad_btxd=bad_btxd)}
+    manifest["prebuilt"] = {key: _prebuilt_manifest_entry(scenario, "btx-prebuilt", bad_btxd=bad_btxd,
+                                                          with_sha256=with_sha256)}
     (scenario.origin / "version.txt").write_text(json.dumps(manifest), encoding="utf8")
     return key
 
@@ -841,6 +846,26 @@ def test_unusable_prebuilt_falls_back_to_source_build():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
+def test_prebuilt_without_sha256_is_not_used():
+    # The artifact signature covers only SHA256(tarball), so any tarball ever signed with the
+    # release key verifies, an older release included. Only the sha256 in the signed manifest
+    # binds the prebuilt to this release; without it the installer must build from source.
+    with Scenario("prebuilt-no-sha256", {"BTX_AUTO_RESTART": "1"}) as scenario:
+        try:
+            _add_prebuilt_to_manifest(scenario, with_sha256=False)
+            result = scenario.run_installer()
+            assert_success(result)
+
+            release_manifest = json.loads((scenario.tmp / "install" / "current" / "manifest.json").read_text(encoding="utf8"))
+            if release_manifest.get("source") == "prebuilt":
+                raise AssertionError("installed a prebuilt that the signed manifest does not pin by sha256")
+            actions = scenario.action_log.read_text(encoding="utf8") if scenario.action_log.exists() else ""
+            if "--build" not in actions:
+                raise AssertionError(f"expected a source build without a pinned prebuilt:\n{actions}")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
+
 def main():
     if not INSTALLER.exists():
         raise SystemExit(f"installer not found: {INSTALLER}")
@@ -857,6 +882,7 @@ def main():
         test_cuda12_prebuilt_is_preferred_over_generic_linux,
         test_prebuilt_falls_back_to_source_when_disabled,
         test_unusable_prebuilt_falls_back_to_source_build,
+        test_prebuilt_without_sha256_is_not_used,
         test_pinned_manifest_ignores_url_and_version_overrides,
         test_pinned_manifest_digest_mismatch_aborts,
         test_unpinned_manifest_must_match_verified_version,
