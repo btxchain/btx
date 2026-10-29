@@ -927,8 +927,16 @@ std::vector<matmul::trusted::ExactReplayAttestation> ReadDurableAttestations(
                               .block_hash = block_hash}, out)};
     if (status.status != CDBWrapper::ReadStatus::Code::OK) return {};
     if (auto store{Store()}) {
+        // Like LoadDurableAttestations: a local vote this node withdrew on its
+        // own reorg stays in the durable record, but must not count or be
+        // served again.
+        const auto local_pk{store->LocalSignerPubKey()};
+        const bool local_vote_withdrawn{
+            local_pk.has_value() &&
+            store->IsOffActiveChain(block_height, block_hash)};
         std::erase_if(out, [&](const matmul::trusted::ExactReplayAttestation& a) {
-            return !store->IsAuthoritySigner(a.signer);
+            return !store->IsAuthoritySigner(a.signer) ||
+                   (local_vote_withdrawn && a.signer == *local_pk);
         });
     }
     return out;
