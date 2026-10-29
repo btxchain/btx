@@ -1631,8 +1631,6 @@ BOOST_AUTO_TEST_CASE(shielded_coin_serialization_roundtrip_preserves_optional_ac
     BOOST_CHECK_EQUAL(decoded_without_hint.nullifier, coin.nullifier);
 }
 
-BOOST_AUTO_TEST_SUITE_END()
-
 BOOST_FIXTURE_TEST_CASE(wallet_built_spend_path_recovery_tx_is_mempool_valid,
                         ShieldedWalletRecoveryActivationSetup)
 {
@@ -1755,3 +1753,5 @@ BOOST_FIXTURE_TEST_CASE(wallet_built_spend_path_recovery_tx_is_mempool_valid,
         BOOST_CHECK(wtx->InMempool());
     }
 }
+
+BOOST_AUTO_TEST_SUITE_END()
