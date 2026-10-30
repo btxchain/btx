@@ -245,6 +245,99 @@ BOOST_AUTO_TEST_CASE(ahp_acq_08_multi_file_path_and_symlink)
     BOOST_CHECK_EQUAL(code, "SYMLINK_REFUSED");
 }
 
+BOOST_AUTO_TEST_CASE(ahp_acq_08_symlinked_subdirectory)
+{
+    // A symlinked directory below the destination must not let the cache
+    // probe or the stale-cache removal reach a file outside the destination.
+    const fs::path dest = m_path_root / "acq-08s-exec";
+    const fs::path outside = m_path_root / "acq-08s-outside";
+    const fs::path src = m_path_root / "src-08s.bin";
+    const std::string good = "verified-bytes";
+    const std::string other = "unrelated-bytes";
+    fs::create_directories(dest);
+    fs::create_directories(outside);
+    {
+        std::ofstream{fs::PathToString(src)} << good;
+        std::ofstream{fs::PathToString(outside / "weights.gguf")} << other;
+    }
+    fs::create_directory_symlink(outside, dest / "shard");
+
+    modelnet::ExecuteAcquisitionRequest req;
+    req.plan = PlanTo(dest);
+    modelnet::VerifiedLocalFile f;
+    f.relative_path = "shard/weights.gguf";
+    f.sha384_hex = Sha384Of(good);
+    f.source_path = fs::PathToString(src);
+    req.files.push_back(f);
+    RememberDigest(req, f.relative_path, Sha384Of(good));
+
+    modelnet::AcquisitionReceipt rec;
+    uint64_t reserved = 0;
+    std::string code, err;
+    // Stale file behind the link: refused, and the outside file is untouched.
+    BOOST_CHECK(!modelnet::ExecuteBtxAcquisition(req, rec, reserved, code, err));
+    BOOST_CHECK_EQUAL(code, "SYMLINK_REFUSED");
+    BOOST_REQUIRE(fs::exists(outside / "weights.gguf"));
+    std::string got;
+    BOOST_REQUIRE(modelnet::Sha384Path(fs::PathToString(outside / "weights.gguf"), got, err));
+    BOOST_CHECK_EQUAL(got, Sha384Of(other));
+
+    // Matching file behind the link: refused, not reported as a ready local path.
+    {
+        std::ofstream{fs::PathToString(outside / "weights.gguf")} << good;
+    }
+    modelnet::AcquisitionReceipt rec2;
+    BOOST_CHECK(!modelnet::ExecuteBtxAcquisition(req, rec2, reserved, code, err));
+    BOOST_CHECK_EQUAL(code, "SYMLINK_REFUSED");
+    BOOST_CHECK(rec2.ready_state != "MODEL_READY");
+
+    // A request whose later file goes through the link is refused before an
+    // earlier, harmless file is written.
+    modelnet::VerifiedLocalFile first;
+    first.relative_path = "first.gguf";
+    first.sha384_hex = Sha384Of(good);
+    first.source_path = fs::PathToString(src);
+    req.files = {first, f};
+    RememberDigest(req, first.relative_path, Sha384Of(good));
+    modelnet::AcquisitionReceipt rec3;
+    BOOST_CHECK(!modelnet::ExecuteBtxAcquisition(req, rec3, reserved, code, err));
+    BOOST_CHECK_EQUAL(code, "SYMLINK_REFUSED");
+    BOOST_CHECK(!fs::exists(dest / "first.gguf"));
+}
+
+BOOST_AUTO_TEST_CASE(ahp_acq_08_unreadable_component_is_refused)
+{
+    // MaterializePathAllowed accepts 256 bytes, one more than NAME_MAX. The
+    // symlink check cannot stat such a component; it must refuse the request,
+    // not throw.
+    const fs::path dest = m_path_root / "acq-08n-exec";
+    const fs::path src = m_path_root / "src-08n.bin";
+    const std::string good = "verified-bytes";
+    fs::create_directories(dest);
+    {
+        std::ofstream{fs::PathToString(src)} << good;
+    }
+
+    modelnet::ExecuteAcquisitionRequest req;
+    req.plan = PlanTo(dest);
+    modelnet::VerifiedLocalFile f;
+    f.relative_path = std::string(256, 'w');
+    f.sha384_hex = Sha384Of(good);
+    f.source_path = fs::PathToString(src);
+    req.files.push_back(f);
+    RememberDigest(req, f.relative_path, Sha384Of(good));
+    std::string allowed_err;
+    BOOST_REQUIRE(modelnet::MaterializePathAllowed(f.relative_path, allowed_err));
+
+    modelnet::AcquisitionReceipt rec;
+    uint64_t reserved = 0;
+    std::string code, err;
+    bool ok{true};
+    BOOST_CHECK_NO_THROW(ok = modelnet::ExecuteBtxAcquisition(req, rec, reserved, code, err));
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(code, "SYMLINK_REFUSED");
+}
+
 BOOST_AUTO_TEST_CASE(ahp_acq_09_lease_blocks_eviction)
 {
     const fs::path dest = m_path_root / "acq-09-lease";

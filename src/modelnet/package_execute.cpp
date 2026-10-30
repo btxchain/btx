@@ -61,6 +61,22 @@ bool EnsureParentsNoFollow(const fs::path& dest_file, std::string& err_code, std
     return true;
 }
 
+//! Whether any component of rel below root is a symlink or cannot be checked.
+//! The cache probe and the stale-cache remove() follow a symlinked directory,
+//! so every component is checked, not only the last one.
+bool HasSymlinkBelow(const fs::path& root, const std::string& rel)
+{
+    fs::path cur = root;
+    for (const auto& part : fs::PathFromString(rel)) {
+        cur /= part;
+        std::error_code ec;
+        const auto st = std::filesystem::symlink_status(cur, ec);
+        // A component that cannot be checked (for example a name longer than NAME_MAX) is refused too.
+        if (std::filesystem::is_symlink(st) || (ec && st.type() != std::filesystem::file_type::not_found)) return true;
+    }
+    return false;
+}
+
 std::string StoredDigestFor(const ExecuteAcquisitionRequest& req, const std::string& rel)
 {
     for (const auto& d : req.stored_digests) {
@@ -198,6 +214,10 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
         if (!seen.insert(f.relative_path).second) {
             return Fail(err_code, err, "OVERWRITE_REFUSED", "duplicate path");
         }
+        // Refuse before anything is reserved or written.
+        if (HasSymlinkBelow(dest_root, f.relative_path)) {
+            return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
+        }
         const std::string expect = StoredDigestFor(req, f.relative_path);
         if (expect.size() != 96) {
             out.ready_state.clear();
@@ -247,9 +267,11 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
     for (const auto& f : req.files) {
         const fs::path dest = dest_root / fs::PathFromString(f.relative_path);
         const std::string dest_s = fs::PathToString(dest);
-        if (std::filesystem::is_symlink(dest)) {
+        // Checked again here: an earlier file of this request created the
+        // directories, and the cache probe and remove() below follow links.
+        if (HasSymlinkBelow(dest_root, f.relative_path)) {
             release_on_fail();
-            return Fail(err_code, err, "SYMLINK_REFUSED", "output is a symlink");
+            return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
         }
         if (fs::exists(dest) && !std::filesystem::is_directory(dest)) {
             std::string have, herr;
