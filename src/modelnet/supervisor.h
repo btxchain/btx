@@ -51,6 +51,12 @@ struct HelperLaunchConfig {
     std::string bind;
     /** btxd -natpmp. When false the helper does not map the PQ1 port. */
     bool natpmp{true};
+    /** btxd's outbound proxies as "<proxy>=<ipv4|ipv6|onion|name>"; the helper dials its peers through them. */
+    std::vector<std::string> proxies;
+    /** btxd -proxyrandomize (Tor stream isolation). */
+    bool proxy_randomize{true};
+    /** btxd -onlynet networks. Empty = every network. */
+    std::vector<std::string> onlynets;
     std::vector<std::string> peers;
     std::string watch_dir;
     std::string pwc_chain{"regtest"};

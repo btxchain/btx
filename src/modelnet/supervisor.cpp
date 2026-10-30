@@ -149,6 +149,9 @@ std::vector<std::string> BuildHelperArgv(const HelperLaunchConfig& cfg)
     if (cfg.preserve_rare) argv.push_back("-modelpreserverare");
     if (!cfg.follow_peers) argv.push_back("-modelfollowpeers=0");
     if (!cfg.lan_discovery) argv.push_back("-modellandiscovery=0");
+    for (const auto& proxy : cfg.proxies) argv.push_back("-modelproxy=" + proxy);
+    if (!cfg.proxies.empty() && !cfg.proxy_randomize) argv.push_back("-modelproxyrandomize=0");
+    for (const auto& net : cfg.onlynets) argv.push_back("-modelonlynet=" + net);
     for (const auto& peer : cfg.peers) {
         if (!peer.empty()) argv.push_back("-modelpeer=" + peer);
     }
