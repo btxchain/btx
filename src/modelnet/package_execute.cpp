@@ -61,15 +61,18 @@ bool EnsureParentsNoFollow(const fs::path& dest_file, std::string& err_code, std
     return true;
 }
 
-//! Whether any component of rel below root is a symlink. The cache probe and the
-//! stale-cache remove() follow a symlinked directory, so every component is
-//! checked, not only the last one.
+//! Whether any component of rel below root is a symlink or cannot be checked.
+//! The cache probe and the stale-cache remove() follow a symlinked directory,
+//! so every component is checked, not only the last one.
 bool HasSymlinkBelow(const fs::path& root, const std::string& rel)
 {
     fs::path cur = root;
     for (const auto& part : fs::PathFromString(rel)) {
         cur /= part;
-        if (std::filesystem::is_symlink(cur)) return true;
+        std::error_code ec;
+        const auto st = std::filesystem::symlink_status(cur, ec);
+        // A component that cannot be checked (for example a name longer than NAME_MAX) is refused too.
+        if (std::filesystem::is_symlink(st) || (ec && st.type() != std::filesystem::file_type::not_found)) return true;
     }
     return false;
 }

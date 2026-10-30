@@ -305,6 +305,39 @@ BOOST_AUTO_TEST_CASE(ahp_acq_08_symlinked_subdirectory)
     BOOST_CHECK(!fs::exists(dest / "first.gguf"));
 }
 
+BOOST_AUTO_TEST_CASE(ahp_acq_08_unreadable_component_is_refused)
+{
+    // MaterializePathAllowed accepts 256 bytes, one more than NAME_MAX. The
+    // symlink check cannot stat such a component; it must refuse the request,
+    // not throw.
+    const fs::path dest = m_path_root / "acq-08n-exec";
+    const fs::path src = m_path_root / "src-08n.bin";
+    const std::string good = "verified-bytes";
+    fs::create_directories(dest);
+    {
+        std::ofstream{fs::PathToString(src)} << good;
+    }
+
+    modelnet::ExecuteAcquisitionRequest req;
+    req.plan = PlanTo(dest);
+    modelnet::VerifiedLocalFile f;
+    f.relative_path = std::string(256, 'w');
+    f.sha384_hex = Sha384Of(good);
+    f.source_path = fs::PathToString(src);
+    req.files.push_back(f);
+    RememberDigest(req, f.relative_path, Sha384Of(good));
+    std::string allowed_err;
+    BOOST_REQUIRE(modelnet::MaterializePathAllowed(f.relative_path, allowed_err));
+
+    modelnet::AcquisitionReceipt rec;
+    uint64_t reserved = 0;
+    std::string code, err;
+    bool ok{true};
+    BOOST_CHECK_NO_THROW(ok = modelnet::ExecuteBtxAcquisition(req, rec, reserved, code, err));
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(code, "SYMLINK_REFUSED");
+}
+
 BOOST_AUTO_TEST_CASE(ahp_acq_09_lease_blocks_eviction)
 {
     const fs::path dest = m_path_root / "acq-09-lease";
