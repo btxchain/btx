@@ -866,6 +866,24 @@ def test_prebuilt_without_sha256_is_not_used():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
+def test_prebuilt_without_sha256_is_not_downloaded():
+    # Without a sha256 the artifact is ignored anyway, so the installer skips it before the
+    # download. The tarball is removed from the origin: a download attempt would fail and log
+    # "prebuilt download failed" instead of the missing-sha256 warning.
+    with Scenario("prebuilt-no-sha256-no-download", {"BTX_AUTO_RESTART": "1"}) as scenario:
+        try:
+            _add_prebuilt_to_manifest(scenario, with_sha256=False)
+            (scenario.origin / "btx-prebuilt.tar.gz").unlink()
+            result = scenario.run_installer()
+            assert_success(result)
+            output = result.stdout + result.stderr
+            if "has no sha256 in the signed manifest" not in output:
+                raise AssertionError(f"expected the missing-sha256 warning before any download:\n{output}")
+            if "prebuilt download failed" in output:
+                raise AssertionError(f"downloaded a prebuilt that has no sha256:\n{output}")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
 def main():
     if not INSTALLER.exists():
         raise SystemExit(f"installer not found: {INSTALLER}")
@@ -883,6 +901,7 @@ def main():
         test_prebuilt_falls_back_to_source_when_disabled,
         test_unusable_prebuilt_falls_back_to_source_build,
         test_prebuilt_without_sha256_is_not_used,
+        test_prebuilt_without_sha256_is_not_downloaded,
         test_pinned_manifest_ignores_url_and_version_overrides,
         test_pinned_manifest_digest_mismatch_aborts,
         test_unpinned_manifest_must_match_verified_version,

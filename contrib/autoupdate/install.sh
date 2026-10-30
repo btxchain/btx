@@ -533,7 +533,7 @@ EOF
 # Try to install a signed prebuilt release matching this platform. Returns 0 on success (release_dir
 # populated + binaries verified), 1 if no usable prebuilt was found/verified (caller source-builds).
 # Trust is anchored by the SAME release-signature scheme as the manifest (PQ via btx-util, or
-# classical via openssl), plus an optional sha256 from the signed manifest.
+# classical via openssl), plus the sha256 from the signed manifest, which is required.
 try_install_prebuilt() {
   local manifest_path="$1" version="$2" release_dir="$3" expected_commit="$4" release_pub_path="$5"
   [[ "${BTX_PREFER_PREBUILT:-1}" == "1" ]] || return 1
@@ -551,19 +551,20 @@ try_install_prebuilt() {
     require_trusted_url "$url" "prebuilt.${key}.url"
     require_trusted_url "$sig_url" "prebuilt.${key}.sig_url"
 
+    # The artifact signature covers only SHA256(tarball): it names no version, commit or
+    # platform, so any tarball ever signed with the release key verifies. Only the sha256
+    # inside the signed manifest binds the artifact to this release; without it, skip the
+    # artifact before downloading it and build from source (bound to git_commit) instead.
+    if [[ -z "$sha256" || "$sha256" == "null" ]]; then
+      warn "prebuilt for $key has no sha256 in the signed manifest; ignoring this artifact"
+      continue
+    fi
+
     tarball="$BTX_TMPDIR/prebuilt-${key}.tar.gz"
     sig="$BTX_TMPDIR/prebuilt-${key}.sig"
     curl -fsSL "$(with_telemetry_query "$url")" -o "$tarball" || { warn "prebuilt download failed ($key); will try next/source"; continue; }
     curl -fsSL "$(with_telemetry_query "$sig_url")" -o "$sig" || { warn "prebuilt signature download failed ($key)"; continue; }
 
-    # The artifact signature covers only SHA256(tarball): it names no version, commit or
-    # platform, so any tarball ever signed with the release key verifies. Only the sha256
-    # inside the signed manifest binds the artifact to this release; without it, build
-    # from source (bound to git_commit) instead.
-    if [[ -z "$sha256" || "$sha256" == "null" ]]; then
-      warn "prebuilt for $key has no sha256 in the signed manifest; ignoring this artifact"
-      continue
-    fi
     if ! verify_sha256 "$tarball" "$sha256"; then
       warn "prebuilt sha256 mismatch ($key); ignoring this artifact"
       continue
