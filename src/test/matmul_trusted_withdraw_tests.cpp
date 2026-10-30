@@ -129,6 +129,11 @@ BOOST_AUTO_TEST_CASE(withdrawn_vote_not_counted_or_served_from_durable)
                         "HasQuorum's durable fallback counts the withdrawn local vote");
     BOOST_CHECK_MESSAGE(!node.ServesLocalVote(abandoned, 30),
                         "Get() (GETMMATTEST answer) returns the withdrawn local vote from disk");
+
+    // The vote stays on disk and the filter hides it, so a reconnect brings it back.
+    node::matmul_trusted::NotifyActiveChainBlockConnected(30, abandoned);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(abandoned, 30));
+    BOOST_CHECK(node.ServesLocalVote(abandoned, 30));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
