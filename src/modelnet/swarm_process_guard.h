@@ -339,7 +339,10 @@ inline WaitResult Wait(pid_t child, int error_fd, int wall_seconds, uint64_t max
         // only what this invocation started (a helper that forked).
         siginfo_t exited{};
         const int seen = waitid(P_PID, static_cast<id_t>(child), &exited, WEXITED | WNOHANG | WNOWAIT);
-        if (seen == 0 && exited.si_pid == child) {
+        // macOS also reports a stopped child here (CLD_STOPPED); only an
+        // exit ends the run.
+        if (seen == 0 && exited.si_pid == child &&
+            (exited.si_code == CLD_EXITED || exited.si_code == CLD_KILLED || exited.si_code == CLD_DUMPED)) {
             kill(-child, SIGKILL);
             while (waitpid(child, &result.status, 0) < 0 && errno == EINTR) {}
             break;

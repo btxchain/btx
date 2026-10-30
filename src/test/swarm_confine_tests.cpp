@@ -634,8 +634,6 @@ BOOST_AUTO_TEST_CASE(wait_ends_process_group_after_child_exits)
         const pid_t grandchild = fork();
         if (grandchild < 0) _exit(5);
         if (grandchild == 0) {
-            const pid_t self = getpid();
-            if (write(pid_pipe[1], &self, sizeof(self)) != static_cast<ssize_t>(sizeof(self))) _exit(6);
             // Without the error pipe, so Wait does not wait for this process.
             for (int fd = 3; fd < 1024; ++fd) close(fd);
             const timespec pause{3, 0};
@@ -643,6 +641,8 @@ BOOST_AUTO_TEST_CASE(wait_ends_process_group_after_child_exits)
             ChildWrite(late.c_str(), "late", 4);
             _exit(0);
         }
+        // The child sends the pid, so Wait may kill the grandchild before it ran.
+        if (write(pid_pipe[1], &grandchild, sizeof(grandchild)) != static_cast<ssize_t>(sizeof(grandchild))) _exit(6);
         // The child itself exits normally right away.
     });
     close(pid_pipe[1]);
@@ -676,6 +676,34 @@ BOOST_AUTO_TEST_CASE(wait_ends_process_group_after_child_exits)
     BOOST_CHECK(waited.executed);
     BOOST_CHECK(!waited.over_tree);
     BOOST_CHECK_MESSAGE(gone, "grandchild still runs after Wait returned");
+}
+
+// macOS waitid also reports a child that is only stopped (CLD_STOPPED). A
+// child that stops and is continued runs to the end like on Linux, instead
+// of being killed as if it had exited.
+BOOST_AUTO_TEST_CASE(wait_lets_stopped_child_continue)
+{
+    const fs::path root = FreshRoot("btx-swarm-wait-stopped");
+    int pid_pipe[2];
+    BOOST_REQUIRE(pipe(pid_pipe) == 0);
+    std::thread resume([&] {
+        pid_t child = -1;
+        if (read(pid_pipe[0], &child, sizeof(child)) != static_cast<ssize_t>(sizeof(child))) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        kill(child, SIGCONT);
+    });
+    const auto waited = WaitOnChild(root, 8 << 20, [&] {
+        const pid_t self = getpid();
+        if (write(pid_pipe[1], &self, sizeof(self)) != static_cast<ssize_t>(sizeof(self))) _exit(6);
+        raise(SIGSTOP);
+    });
+    close(pid_pipe[1]);
+    resume.join();
+    close(pid_pipe[0]);
+    fs::remove_all(root);
+    BOOST_CHECK(waited.executed);
+    BOOST_CHECK(!waited.timed_out);
+    BOOST_CHECK(WIFEXITED(waited.status) && WEXITSTATUS(waited.status) == 0);
 }
 
 // The same child under a limit it never reaches runs to the end.
