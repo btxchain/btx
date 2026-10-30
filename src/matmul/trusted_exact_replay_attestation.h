@@ -481,6 +481,11 @@ public:
     //! startup so Add() refuses a relayed/reloaded copy of our own abandoned
     //! signature. Loaded from the durable 'w' records before attestations.
     void SeedOffActiveChain(int32_t height, const uint256& block_hash);
+    //! Restore a mint slot this node held before a restart. The caller reads
+    //! it from the durable mint-slot record written after SignLocal /
+    //! SignLocalPq, never from stored votes: relayed copies of local_pk must
+    //! not occupy the slot.
+    void RestoreLocalMintSlot(int32_t height, const uint256& block_hash);
     [[nodiscard]] bool IsOffActiveChain(int32_t height,
                                         const uint256& block_hash) const;
 

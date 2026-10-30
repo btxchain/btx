@@ -82,6 +82,7 @@ add_executable(test_btx
   matmul_verify_worker_tests.cpp
   matmul_block_lifecycle_tests.cpp
   matmul_trusted_mirror_tests.cpp
+  matmul_trusted_withdraw_tests.cpp
   compute_profile_tests.cpp
   matmul_rc_admission_tests.cpp
   trusted_exact_replay_attestation_tests.cpp
