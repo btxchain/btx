@@ -401,6 +401,21 @@ BOOST_AUTO_TEST_CASE(linux_jail_tree_limit_refuses_result_after_run)
     BOOST_CHECK(done);
 }
 
+// A regular file at put_old (root/.btx-fsjail-old), which a package can ship,
+// makes pivot_root fail. The jail refuses then; it does not fall back to a
+// chroot and run the helper.
+BOOST_AUTO_TEST_CASE(linux_jail_refuses_when_pivot_root_fails)
+{
+    if (!JailAvailable()) return;
+    const fs::path root = FreshRoot("btx-swarm-fsjail-linux-put-old");
+    modelnet::SwarmFilesystemJailRequest request = BaseRequest(CopyProbe(root, nullptr), root);
+    WriteRegularFile(root / ".btx-fsjail-old");
+    ExpectRefusal(request, "JAIL_ABSENT");
+    const bool ran = fs::exists(root / "probe.out");
+    fs::remove_all(root);
+    BOOST_CHECK(!ran);
+}
+
 // A root that is already over max_tree_bytes is refused before launch: the
 // probe never writes spread.started, its first file. The limit is one byte
 // below the tree and each of the 8,000 files has a byte, so a walk finds the
