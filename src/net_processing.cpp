@@ -1334,6 +1334,23 @@ struct CNodeState {
     const CBlockIndex* pindexLastCommonBlock{nullptr};
     //! The best header we have sent our peer.
     const CBlockIndex* pindexBestHeaderSent{nullptr};
+    //! Tip child that NewPoWValidBlock wanted to fast-relay but withheld,
+    //! header and body, until ConnectTip succeeds. NewPoWValidBlock runs
+    //! before the block is connected, so announcing it here would get this
+    //! honest relay disconnected if ConnectBlock later rejects the block.
+    //! FlushDeferredFastBodies() sends the header and body once the block is
+    //! on the active chain, or drops the marker if the block fails.
+    const CBlockIndex* m_deferred_fast_body{nullptr};
+    //! True when the deferred body was announced on the high-bandwidth path
+    //! (product-payload block), false for the behind-peer catch-up path. Only
+    //! selects the matching log line when the body is finally sent.
+    bool m_deferred_fast_body_hb{false};
+    //! The deferring node connects this block only after an outside
+    //! attestation (a trusted Profile-1 mirror before quorum). Waiting for
+    //! ConnectTip would withhold the block from the signer whose attestation
+    //! it waits for, so FlushDeferredFastBodies() announces the header once
+    //! the body is on disk and serves the body only on request.
+    bool m_deferred_fast_header_only{false};
     //! Whether we've started headers synchronization with this peer.
     bool fSyncStarted{false};
     //! Since when we're stalling block download progress (in microseconds), or 0.
@@ -1523,6 +1540,12 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex);
     void ProcessNewBlockFinished(const CBlock& block) override
         LOCKS_EXCLUDED(cs_main);
+
+    /** Send any full BLOCK bodies that NewPoWValidBlock announced as a header
+     *  but withheld until the block connected (F-H1). Clears the per-peer
+     *  marker for connected, failed, or departing peers; leaves it in place
+     *  while the block is still unconnected so a later tip update retries. */
+    void FlushDeferredFastBodies() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Implement NetEventsInterface */
     void InitializeNode(const CNode& node, ServiceFlags our_services) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_tx_download_mutex);
@@ -9785,7 +9808,88 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
 
 void PeerManagerImpl::ProcessNewBlockFinished(const CBlock& block)
 {
+    {
+        LOCK(cs_main);
+        FlushDeferredFastBodies();
+    }
     MaybeRelayLocalExactReplayAttestation(block.GetHash());
+}
+
+void PeerManagerImpl::FlushDeferredFastBodies()
+{
+    AssertLockHeld(::cs_main);
+
+    m_connman.ForEachNode([this](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        AssertLockHeld(::cs_main);
+        CNodeState* state = State(pnode->GetId());
+        if (state == nullptr) return;
+        const CBlockIndex* const deferred{state->m_deferred_fast_body};
+        if (deferred == nullptr) return;
+
+        // Drop the marker if the peer is going away or the block failed
+        // validation; in the failure case the body must never be sent.
+        if (pnode->fDisconnect || (deferred->nStatus & BLOCK_FAILED_MASK)) {
+            state->m_deferred_fast_body = nullptr;
+            return;
+        }
+        // A trusted mirror connects a tip child only once a signer attests
+        // it, and that signer may get the block from this node alone.
+        // Announce the header as soon as the body is stored and let the peer
+        // request it: BlockRequestAllowed serves a stored tip child or
+        // unattested suffix, and the requester does not punish a requested
+        // tip-extending body from an archive or mirror peer for failing
+        // ConnectBlock. Nothing unconnected is pushed.
+        if (state->m_deferred_fast_header_only &&
+            !m_chainman.ActiveChain().Contains(deferred)) {
+            if ((deferred->nStatus & BLOCK_HAVE_DATA) == 0) return;
+            CBlock stored;
+            if (!m_chainman.m_blockman.ReadBlock(stored, *deferred)) return;
+            state->m_deferred_fast_body = nullptr;
+            std::vector<CBlock> relay_headers{CBlock{stored.GetBlockHeader()}};
+            MakeAndPushMessage(*pnode, NetMsgType::HEADERS, TX_WITH_WITNESS(relay_headers));
+            if (const auto ticket{LookupMatMulRCOutboundTicket(deferred->GetBlockHash())}) {
+                MakeAndPushMessage(*pnode, NetMsgType::RCADMIT, *ticket);
+            }
+            state->pindexBestHeaderSent = deferred;
+            LogDebug(BCLog::NET, "%s announcing stored unattested block %s height=%d to peer=%d; body on request\n",
+                     "PeerManager::NewPoWValidBlock", deferred->GetBlockHash().ToString(),
+                     deferred->nHeight, pnode->GetId());
+            return;
+        }
+        // Wait until the block is connected to the active chain and on disk.
+        // Another block's ProcessNewBlockFinished or UpdatedBlockTip retries.
+        if (!m_chainman.ActiveChain().Contains(deferred) ||
+            (deferred->nStatus & BLOCK_HAVE_DATA) == 0) {
+            return;
+        }
+
+        CBlock body;
+        if (!m_chainman.m_blockman.ReadBlock(body, *deferred)) return;
+        state->m_deferred_fast_body = nullptr;
+
+        // Announce the now-connected header, then its RCADMIT ticket if any,
+        // then the body: the order NewPoWValidBlock used before the fix, but
+        // only once the block is on the active chain. The header is indexed
+        // now, so the ticket is verified against a known candidate.
+        std::vector<CBlock> relay_headers{CBlock{body.GetBlockHeader()}};
+        MakeAndPushMessage(*pnode, NetMsgType::HEADERS, TX_WITH_WITNESS(relay_headers));
+        if (const auto ticket{LookupMatMulRCOutboundTicket(deferred->GetBlockHash())}) {
+            MakeAndPushMessage(*pnode, NetMsgType::RCADMIT, *ticket);
+        }
+        state->pindexBestHeaderSent = deferred;
+
+        if (state->m_deferred_fast_body_hb) {
+            LogDebug(BCLog::NET, "%s sending full block %s to peer=%d because product payload is required\n",
+                     "PeerManager::NewPoWValidBlock", deferred->GetBlockHash().ToString(), pnode->GetId());
+        } else {
+            LogInfo("%s sending next honest body %s height=%d to behind peer=%d (their_best=%d)\n",
+                    "PeerManager::NewPoWValidBlock",
+                    deferred->GetBlockHash().ToString(), deferred->nHeight, pnode->GetId(),
+                    state->pindexBestKnownBlock != nullptr
+                        ? state->pindexBestKnownBlock->nHeight : -1);
+        }
+        MakeAndPushMessage(*pnode, NetMsgType::BLOCK, TX_WITH_WITNESS(body));
+    });
 }
 
 /**
@@ -9823,9 +9927,23 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
 
     LOCK(cs_main);
 
-    if (pindex->nHeight <= m_highest_fast_announce)
+    // A trusted Profile-1 mirror stores this block before quorum and connects
+    // it only after a signer attests (TrustedMirrorMustDeferUnattestedConnect).
+    const bool connect_waits_for_attestation{
+        m_chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::TRUSTED &&
+        node::matmul_trusted::IsConfigured() &&
+        consensus_params.IsMatMulTrustedReplayAttestationActive(pindex->nHeight)};
+
+    // Fast announcement normally goes to the first block at each height. A
+    // mirror that waits for attestation can hold an earlier tip child that
+    // never connects: no signer attests a block that fails ConnectBlock. A
+    // signer that reaches the network only through this mirror would then
+    // never see an honest sibling, never attest it, and both would stall on
+    // the parent. While connect waits for attestation, announce every stored
+    // tip child; each one carries valid proof of work.
+    if (pindex->nHeight <= m_highest_fast_announce && !connect_waits_for_attestation)
         return;
-    m_highest_fast_announce = pindex->nHeight;
+    m_highest_fast_announce = std::max(m_highest_fast_announce, pindex->nHeight);
 
     if (!DeploymentActiveAt(*pindex, m_chainman, Consensus::DEPLOYMENT_SEGWIT)) return;
 
@@ -9848,7 +9966,7 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
     }
 
     m_connman.ForEachNode([this, pindex, pblock, requires_product_payload,
-                          &lazy_ser, &hashBlock,
+                          connect_waits_for_attestation, &lazy_ser, &hashBlock,
                           &rc_admission_ticket](CNode* pnode)
                               EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         AssertLockHeld(::cs_main);
@@ -9861,36 +9979,22 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
         // but we don't think they have this one, go ahead and announce it
         if (state.m_requested_hb_cmpctblocks && !PeerHasHeader(&state, pindex) && PeerHasHeader(&state, pindex->pprev)) {
             if (requires_product_payload) {
-                // A paid RC tip child may already have been provisionally
-                // relayed as a header.  If the peer requested its body before
-                // this node finished ExactReplay, ProcessGetBlockData could
-                // not serve it yet and the request remains in-flight.  A
-                // second headers announcement alone does not trigger another
-                // request, leaving the peer stuck until its block-download
-                // timeout. High-bandwidth relay normally pushes a compact
-                // block here; payload-bearing MatMul blocks cannot use that
-                // encoding, so push the validated full block instead.
+                // NewPoWValidBlock runs before WriteBlock and ConnectTip, so
+                // this block is not connected yet. A product-payload block
+                // cannot be served as a compact block, and pushing its full
+                // body now gets this honest relay disconnected if ConnectBlock
+                // later rejects the block. Announce nothing yet: defer the
+                // header, ticket and body until the block connects, so the
+                // peer never learns of an unconnected block it would GETDATA
+                // and then time out on. FlushDeferredFastBodies() sends
+                // HEADERS (+ RCADMIT) + BLOCK once it is on the active chain.
                 //
-                // Announce the header before its ticket. Otherwise a rapid
-                // sequence of honest blocks places every sidecar in the small
-                // unknown-hash quarantine and eventually exhausts its
-                // per-netgroup cap. Once the header is indexed, RCADMIT is
-                // verified directly and does not consume quarantine capacity.
-                std::vector<CBlock> relay_headers{
-                    CBlock{pblock->GetBlockHeader()}};
-                MakeAndPushMessage(
-                    *pnode, NetMsgType::HEADERS,
-                    TX_WITH_WITNESS(relay_headers));
-                if (rc_admission_ticket) {
-                    MakeAndPushMessage(
-                        *pnode, NetMsgType::RCADMIT,
-                        *rc_admission_ticket);
-                }
-                LogDebug(BCLog::NET, "%s sending full block %s to peer=%d because product payload is required\n",
-                    "PeerManager::NewPoWValidBlock", hashBlock.ToString(), pnode->GetId());
-                MakeAndPushMessage(
-                    *pnode, NetMsgType::BLOCK,
-                    TX_WITH_WITNESS(*pblock));
+                // Deferring until connect also indexes the header before the
+                // ticket, which is what keeps RCADMIT out of the small
+                // unknown-hash quarantine during an honest block burst.
+                state.m_deferred_fast_body = pindex;
+                state.m_deferred_fast_body_hb = true;
+                state.m_deferred_fast_header_only = connect_waits_for_attestation;
             } else {
                 // A compact block carries its header, but RCADMIT processing
                 // deliberately quarantines tickets for unknown hashes. Send a
@@ -9912,8 +10016,11 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
 
                 const CSerializedNetMsg& ser_cmpctblock{lazy_ser.get()};
                 PushMessage(*pnode, ser_cmpctblock.Copy());
+                // Only the compact path has actually sent the header here. The
+                // product-payload path above deferred it; FlushDeferredFastBodies
+                // sets pindexBestHeaderSent when it sends the header post-connect.
+                state.pindexBestHeaderSent = pindex;
             }
-            state.pindexBestHeaderSent = pindex;
         } else if (!PeerHasHeader(&state, pindex)) {
             // No-inbound miners: high-bandwidth compact relay only fires when
             // the peer already has pprev. A public node that is N blocks
@@ -9941,30 +10048,28 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
             if (cursor == nullptr) return;
             const CBlockIndex* const next{
                 pindex->GetAncestor(cursor->nHeight + 1)};
-            // AcceptBlock emits NewPoWValidBlock before persisting the new
-            // body and setting BLOCK_HAVE_DATA. The supplied pblock is
-            // already validated for fast relay; requiring the disk flag for
-            // that same block strands a just-connected peer at genesis until
-            // its next getheaders window. Older catch-up bodies still need
-            // their disk availability flag before ReadBlock.
-            if (next != nullptr &&
-                (next == pindex || (next->nStatus & BLOCK_HAVE_DATA) != 0)) {
+            if (next == pindex) {
+                // The just-validated tip child is not connected yet:
+                // NewPoWValidBlock runs before WriteBlock and ConnectTip.
+                // Defer the header and body until the block connects. Pushing
+                // an unconnected body gets this honest relay disconnected if
+                // ConnectBlock later rejects the block, and announcing the
+                // header alone lets the peer GETDATA a block we cannot serve
+                // yet and time out on it. FlushDeferredFastBodies() sends the
+                // header and body once the block is on the active chain.
+                state.m_deferred_fast_body = pindex;
+                state.m_deferred_fast_body_hb = false;
+                state.m_deferred_fast_header_only = connect_waits_for_attestation;
+            } else if (next != nullptr &&
+                       (next->nStatus & BLOCK_HAVE_DATA) != 0) {
+                // Older catch-up ancestor: already connected on the active
+                // chain and on disk, so sending its body is safe.
                 CBlock next_block;
-                const CBlock* send{nullptr};
-                if (next == pindex) {
-                    send = pblock.get();
-                } else if (m_chainman.m_blockman.ReadBlock(next_block, *next)) {
-                    send = &next_block;
-                }
-                if (send != nullptr) {
+                if (m_chainman.m_blockman.ReadBlock(next_block, *next)) {
                     std::vector<CBlock> relay_headers{
-                        CBlock{send->GetBlockHeader()}};
+                        CBlock{next_block.GetBlockHeader()}};
                     MakeAndPushMessage(*pnode, NetMsgType::HEADERS,
                                        TX_WITH_WITNESS(relay_headers));
-                    if (next == pindex && rc_admission_ticket) {
-                        MakeAndPushMessage(*pnode, NetMsgType::RCADMIT,
-                                           *rc_admission_ticket);
-                    }
                     LogInfo("%s sending next honest body %s height=%d to "
                             "behind peer=%d (their_best=%d)\n",
                             "PeerManager::NewPoWValidBlock",
@@ -9973,7 +10078,7 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
                             state.pindexBestKnownBlock != nullptr
                                 ? state.pindexBestKnownBlock->nHeight : -1);
                     MakeAndPushMessage(*pnode, NetMsgType::BLOCK,
-                                       TX_WITH_WITNESS(*send));
+                                       TX_WITH_WITNESS(next_block));
                     state.pindexBestHeaderSent = next;
                 }
             }
@@ -9996,6 +10101,9 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
             m_header_only_followed_skip.clear();
             m_structural_download_skip.clear();
         }
+        // Flush bodies NewPoWValidBlock deferred for blocks that connect
+        // outside a ProcessNewBlock call (e.g. a late ExactReplay/MMATTEST).
+        FlushDeferredFastBodies();
         // Historical catch-up still suppresses INV floods. Age-only IBD
         // (stalled tip older than -maxtipage) must announce: fInitialDownload
         // is true in that case and would hide a unique mined block.
