@@ -2142,6 +2142,9 @@ private:
      *  stempool. During the stem phase only the originator holds such a
      *  parent in its mempool; a stem relay cannot accept the child. */
     bool SpendsStemTransaction(const CTransaction& tx) const;
+    /** Our own Dandelion++ stem transaction, if gtxid names one: only the
+     *  originator holds a transaction in both the stempool and the mempool. */
+    CTransactionRef OwnStemTx(const GenTxid& gtxid) const;
     bool PeerSupportsShieldedRelay(const Peer& peer, const CNode& node) const;
     bool ConsumeShieldedRelayBudget(Peer& peer, size_t bytes, std::chrono::microseconds now)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -9437,7 +9440,8 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
       m_banman(banman),
       m_chainman(chainman),
       m_mempool(pool),
-      m_txdownloadman(node::TxDownloadOptions{pool, m_rng, opts.max_orphan_txs, opts.deterministic_rng}),
+      m_txdownloadman(node::TxDownloadOptions{pool, m_rng, opts.max_orphan_txs, opts.deterministic_rng,
+                                              [this](const GenTxid& gtxid) { return OwnStemTx(gtxid) != nullptr; }}),
       m_warnings{warnings},
       m_opts{opts}
 {
@@ -11029,6 +11033,14 @@ uint32_t PeerManagerImpl::GetFetchFlags(const Peer& peer) const
         nFetchFlags |= MSG_WITNESS_FLAG;
     }
     return nFetchFlags;
+}
+
+CTransactionRef PeerManagerImpl::OwnStemTx(const GenTxid& gtxid) const
+{
+    if (!m_dandelion) return nullptr;
+    CTransactionRef tx{m_mempool.info(gtxid).tx};
+    if (!tx || !m_dandelion->IsInStemPool(tx->GetHash())) return nullptr;
+    return tx;
 }
 
 bool PeerManagerImpl::SpendsStemTransaction(const CTransaction& tx) const
@@ -15041,16 +15053,13 @@ void PeerManagerImpl::ProcessValidTx(NodeId nodeid, const CTransactionRef& tx, c
              tx->GetWitnessHash().ToString(),
              m_mempool.size(), m_mempool.DynamicMemoryUsage() / 1000);
 
-    // Don't relay transactions that are currently in the Dandelion++ stempool;
-    // they will be relayed when the embargo expires (fluff phase).
-    // Use IsInStemPool (exact match) rather than HaveStemTx (includes bloom
-    // filter) to avoid suppressing relay for transactions that have already
-    // left the stempool (e.g., after reorgs re-accept a previously fluffed tx).
-    if (m_dandelion && m_dandelion->IsInStemPool(tx->GetHash())) {
-        m_dandelion->TxAddedToMempool(tx->GetHash());
-    } else {
-        RelayTransaction(tx->GetHash(), tx->GetWitnessHash());
-    }
+    // A copy of a transaction in our Dandelion++ stempool: whoever sent it has
+    // it, so the embargo is over here. Drop the stempool entry and announce it
+    // now. The embargo timer no longer finds it once the entry is gone, and
+    // TransactionAddedToMempool may already have run while it was still in the
+    // stempool and skipped it.
+    if (m_dandelion) m_dandelion->TxAddedToMempool(tx->GetHash());
+    RelayTransaction(tx->GetHash(), tx->GetWitnessHash());
 
     for (const CTransactionRef& removedTx : replaced_transactions) {
         const size_t tx_dynamic_usage{RecursiveDynamicUsage(*removedTx)};
@@ -19811,6 +19820,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         // ReceivedTx should not be telling us to validate the tx and a package.
         Assume(!package_to_validate.has_value());
+
+        // A copy of our own stem transaction, requested after a peer announced
+        // it or sent unasked. A stem relay takes such a copy into its mempool,
+        // which ends the embargo there, and announces it (ProcessValidTx). The
+        // originator already holds it in its mempool, so do the rest here.
+        if (const CTransactionRef own{OwnStemTx(GenTxid::Txid(txid))}) {
+            m_dandelion->TxAddedToMempool(txid);
+            m_mempool.RemoveUnbroadcastTx(txid);
+            m_txdownloadman.MempoolAcceptedTx(own);
+            LogDebug(BCLog::NET, "Copy of our stem tx %s from peer=%d ends its embargo, announcing it\n",
+                     txid.ToString(), pfrom.GetId());
+            RelayTransaction(txid, own->GetWitnessHash());
+            return;
+        }
 
         // A child of one of our stem transactions: only the originator holds
         // the parent in its mempool during the embargo, and a stem relay

@@ -10,6 +10,7 @@
 #include <txorphanage.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 class CBlock;
@@ -45,6 +46,11 @@ struct TxDownloadOptions {
     uint32_t m_max_orphan_txs;
     /** Instantiate TxRequestTracker as deterministic (used for tests). */
     bool m_deterministic_txrequest{false};
+    /** True for the originator's own Dandelion++ stem transaction. It is in
+     *  the mempool, while a stem relay holds it only in its stempool and so
+     *  requests it when a peer announces it. AlreadyHaveTx ignores the mempool
+     *  entry of such a transaction, so the originator requests it too. */
+    std::function<bool(const GenTxid&)> m_is_own_stem_tx{};
 };
 struct TxDownloadConnectionInfo {
     /** Whether this peer is preferred for transaction download. */

@@ -6,12 +6,15 @@
 
 BroadcastTransaction adds a local transaction to the mempool and sends it on
 the stem as DLTX to one relay. Until the node's embargo for that transaction
-expires, the node must not announce it to its peers (not even when a
-forcerelay peer sends it back), serve it to a GETDATA, or list it in a BIP35
-MEMPOOL reply. A child of it that a peer sends (as TX or DLTX) must not give
+expires, the node must not announce it to its peers, serve it to a GETDATA, or
+list it in a BIP35 MEMPOOL reply. A child of it that a peer sends (as TX or DLTX) must not give
 the originator away either: a stem relay cannot accept such a child, so the
-originator must not accept, announce, serve or stem it. Once the embargo has
-expired, it announces the transaction normally.
+originator must not accept, announce, serve or stem it. The originator must
+handle its own stem transaction the way a stem relay does: when a peer
+announces it, request it; when a peer sends a copy (requested or not), end the
+embargo, announce it and take children of it. A stem relay must announce such
+a copy too. Once the embargo has expired, the node announces the transaction
+normally.
 
 node0 makes two outbound full-relay connections:
   stem: sends DANDELIONACC, so it is the only possible stem relay.
@@ -33,6 +36,7 @@ from test_framework.messages import (
     msg_dandelionacc,
     msg_dltx,
     msg_getdata,
+    msg_inv,
     msg_mempool,
     msg_tx,
 )
@@ -147,14 +151,6 @@ class DandelionOriginatorTest(BitcoinTestFramework):
         with p2p_lock:
             assert not spy.announced(local), "originator listed its stem transaction in a mempool reply"
 
-        self.log.info("During the embargo a forcerelay peer sending it back does not make the originator announce it")
-        stem.send_and_ping(msg_tx(local["tx"]))
-        for _ in range(3):
-            spy.sync_with_ping()
-            stem.sync_with_ping()
-        with p2p_lock:
-            assert not spy.announced(local), "originator announced its stem transaction after a forcerelay echo"
-
         self.log.info("During the embargo a child of it from a peer does not reveal the originator")
         # Only the originator holds the parent in its mempool; a stem relay
         # cannot accept such a child. A TX child must not be accepted, announced
@@ -191,6 +187,64 @@ class DandelionOriginatorTest(BitcoinTestFramework):
         with p2p_lock:
             assert stem.got_dltx(parent) and stem.got_dltx(child), "retried transaction was not stemmed"
             assert not spy.announced(child), "originator announced a retried stem transaction"
+
+        self.log.info("When a peer announces a stem transaction, the originator requests it like a relay")
+        # The stem has fluffed it elsewhere. A stem relay holds it only in its
+        # stempool, so it requests it from the announcing peer, takes the copy
+        # into its mempool (which ends the embargo there), announces it and
+        # takes children of it. The originator must do the same.
+        fluffed = wallet.send_self_transfer(from_node=node)
+        stem.wait_until(lambda: stem.got_dltx(fluffed))
+        watcher = node.add_outbound_p2p_connection(TxObserver(), p2p_idx=2, connection_type="outbound-full-relay")
+        watcher.sync_with_ping()
+        fluffed_wtxid = int(fluffed["wtxid"], 16)
+        with p2p_lock:
+            spy.last_message.pop("getdata", None)
+        spy.send_and_ping(msg_inv([CInv(t=MSG_WTX, h=fluffed_wtxid)]))
+        spy.wait_until(lambda: "getdata" in spy.last_message and fluffed_wtxid in [i.hash for i in spy.last_message["getdata"].inv], timeout=10)
+        with p2p_lock:
+            assert not watcher.announced(fluffed), "originator announced its stem transaction before the copy arrived"
+        fluffed_child = wallet.create_self_transfer(utxo_to_spend=wallet.get_utxo(txid=fluffed["txid"]))
+        watcher.send_and_ping(msg_tx(fluffed_child["tx"]))
+        assert fluffed_child["txid"] not in node.getrawmempool()
+
+        self.log.info("When the requested copy arrives, the originator announces it and takes children of it")
+        spy.send_and_ping(msg_tx(fluffed["tx"]))
+        watcher.wait_until(lambda: watcher.announced(fluffed), timeout=10)
+        watcher.send_and_ping(msg_tx(fluffed_child["tx"]))
+        assert fluffed_child["txid"] in node.getrawmempool()
+        assert fluffed["txid"] in node.getrawmempool()
+
+        self.log.info("A copy that a peer sends unasked also ends the embargo, as on a stem relay")
+        echoed = wallet.send_self_transfer(from_node=node)
+        stem.wait_until(lambda: stem.got_dltx(echoed))
+        for _ in range(3):
+            watcher.sync_with_ping()
+        with p2p_lock:
+            assert not watcher.announced(echoed), "originator announced its stem transaction before a copy arrived"
+        stem.send_and_ping(msg_tx(echoed["tx"]))
+        watcher.wait_until(lambda: watcher.announced(echoed), timeout=10)
+
+        self.log.info("A stem relay announces a copy of a transaction it holds only in its stempool")
+        # Here the node is a stem relay: a Dandelion++ peer sends it a DLTX, and
+        # it forwards that on the stem without taking it into its mempool.
+        upstream = node.add_p2p_connection(TxObserver())
+        upstream.send_and_ping(msg_dandelionacc())
+        relayed = wallet.create_self_transfer()
+        upstream.send_and_ping(msg_dltx(relayed["tx"]))
+        for _ in range(3):
+            stem.sync_with_ping()
+        with p2p_lock:
+            stemmed = stem.got_dltx(relayed)
+        if not stemmed:
+            # The epoch is a fluff epoch (Dandelion::STEM_PROBABILITY), so the
+            # node fluffed it at once; there is no stem relay case to check.
+            self.log.info("Fluff epoch: the node did not stem the DLTX, relay case not checked")
+        else:
+            assert relayed["txid"] not in node.getrawmempool()
+            spy.send_and_ping(msg_tx(relayed["tx"]))
+            assert relayed["txid"] in node.getrawmempool()
+            watcher.wait_until(lambda: watcher.announced(relayed), timeout=10)
 
         self.log.info("After the embargo the originator announces it and serves it")
         node.setmocktime(mock_time + EMBARGO_MAX + 1)
