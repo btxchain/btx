@@ -615,6 +615,96 @@ BOOST_AUTO_TEST_CASE(wait_kills_process_group_over_tree_limit)
     BOOST_CHECK_GT(files, 8);
 }
 
+// A normal exit of the child also ends what it left in its process group.
+// Otherwise a grandchild outlives the run: no wall timeout, and it can write
+// below root after the tree check that follows the exit. Only Linux lets a
+// confined helper fork (no seccomp, no PID namespace there); Wait is shared,
+// so a plain forked child checks it on every POSIX platform.
+BOOST_AUTO_TEST_CASE(wait_ends_process_group_after_child_exits)
+{
+    const fs::path root = FreshRoot("btx-swarm-wait-group-exit");
+    const std::string late = fs::PathToString(root / "late.bin");
+    int pid_pipe[2];
+    BOOST_REQUIRE(pipe(pid_pipe) == 0);
+#ifdef __linux__
+    BOOST_REQUIRE(prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0);
+#endif
+    const auto waited = WaitOnChild(root, 8 << 20, [&] {
+        const pid_t grandchild = fork();
+        if (grandchild < 0) _exit(5);
+        if (grandchild == 0) {
+            // Without the error pipe, so Wait does not wait for this process.
+            for (int fd = 3; fd < 1024; ++fd) close(fd);
+            const timespec pause{3, 0};
+            nanosleep(&pause, nullptr);
+            ChildWrite(late.c_str(), "late", 4);
+            _exit(0);
+        }
+        // The child sends the pid, so Wait may kill the grandchild before it ran.
+        if (write(pid_pipe[1], &grandchild, sizeof(grandchild)) != static_cast<ssize_t>(sizeof(grandchild))) _exit(6);
+        // The child itself exits normally right away.
+    });
+    close(pid_pipe[1]);
+    pid_t grandchild = -1;
+    const bool got = read(pid_pipe[0], &grandchild, sizeof(grandchild)) == static_cast<ssize_t>(sizeof(grandchild));
+    close(pid_pipe[0]);
+    bool gone = false;
+#ifdef __linux__
+    int status = 0;
+#endif
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (got && !gone && std::chrono::steady_clock::now() < deadline) {
+#ifdef __linux__
+        gone = waitpid(grandchild, &status, WNOHANG) == grandchild;
+#else
+        gone = kill(grandchild, 0) != 0 && errno == ESRCH;
+#endif
+        if (!gone) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (got && !gone) {
+        kill(grandchild, SIGKILL);
+#ifdef __linux__
+        waitpid(grandchild, &status, 0);
+#endif
+    }
+#ifdef __linux__
+    BOOST_REQUIRE(prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) == 0);
+#endif
+    fs::remove_all(root);
+    BOOST_REQUIRE(got);
+    BOOST_CHECK(waited.executed);
+    BOOST_CHECK(!waited.over_tree);
+    BOOST_CHECK_MESSAGE(gone, "grandchild still runs after Wait returned");
+}
+
+// macOS waitid also reports a child that is only stopped (CLD_STOPPED). A
+// child that stops and is continued runs to the end like on Linux, instead
+// of being killed as if it had exited.
+BOOST_AUTO_TEST_CASE(wait_lets_stopped_child_continue)
+{
+    const fs::path root = FreshRoot("btx-swarm-wait-stopped");
+    int pid_pipe[2];
+    BOOST_REQUIRE(pipe(pid_pipe) == 0);
+    std::thread resume([&] {
+        pid_t child = -1;
+        if (read(pid_pipe[0], &child, sizeof(child)) != static_cast<ssize_t>(sizeof(child))) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        kill(child, SIGCONT);
+    });
+    const auto waited = WaitOnChild(root, 8 << 20, [&] {
+        const pid_t self = getpid();
+        if (write(pid_pipe[1], &self, sizeof(self)) != static_cast<ssize_t>(sizeof(self))) _exit(6);
+        raise(SIGSTOP);
+    });
+    close(pid_pipe[1]);
+    resume.join();
+    close(pid_pipe[0]);
+    fs::remove_all(root);
+    BOOST_CHECK(waited.executed);
+    BOOST_CHECK(!waited.timed_out);
+    BOOST_CHECK(WIFEXITED(waited.status) && WEXITSTATUS(waited.status) == 0);
+}
+
 // The same child under a limit it never reaches runs to the end.
 BOOST_AUTO_TEST_CASE(wait_lets_child_within_tree_limit_finish)
 {
