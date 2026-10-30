@@ -5,6 +5,7 @@
 // /btx-model/2/records/announce and /ext/objects/announce cache typed records
 // that any PQ1 peer signs with a key it made itself.
 
+#include <crypto/common.h>
 #include <modelnet/catalog.h>
 #include <modelnet/helper.h>
 #include <modelnet/identity.h>
@@ -230,6 +231,59 @@ BOOST_AUTO_TEST_CASE(helper_writes_announced_records_when_it_stops)
     }
     finish();
     BOOST_CHECK_EQUAL(RecordsOnDisk(cfg.modeldir), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(announced_records_are_bounded_in_bytes)
+{
+    const fs::path tmp = m_path_root / "records-bytes";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    const Signer s = NewSigner();
+    int accepted = 0;
+    bool full = false;
+    // 700 Collections of 512 entries are about 25 MB of payload, signature and key.
+    for (int k = 0; k < 700 && !full; ++k) {
+        const auto resp = Announce(cat, "ext/objects/announce", s, MakeCollection(s, Now(), 0, 512, k));
+        if (resp.status == 200) {
+            ++accepted;
+        } else {
+            BOOST_REQUIRE_MESSAGE(resp.body.find("router cache full") != std::string::npos, resp.body);
+            full = true;
+        }
+    }
+    modelnet::FlushRecords(cat);
+    BOOST_TEST_MESSAGE("accepted " << accepted << " Collections of 512 entries; records.json "
+                                   << fs::file_size(tmp / "records.json") << " bytes");
+    BOOST_CHECK(full);
+    BOOST_CHECK_LT(accepted, 700);
+}
+
+BOOST_AUTO_TEST_CASE(full_cache_still_refreshes_a_record_it_holds)
+{
+    const int64_t now = 1700000000;
+    std::string err;
+    const auto hint = [](uint32_t i, size_t payload_bytes) {
+        modelnet::SignedRecordHint h;
+        WriteLE32(h.record_id.data.data(), i);
+        h.kind = modelnet::RECORD_COLLECTION;
+        h.payload.assign(payload_bytes, 0x5a);
+        return h;
+    };
+    {
+        modelnet::RouterCache cache;
+        for (uint32_t i = 0; i < 4096; ++i) BOOST_REQUIRE(cache.Insert(hint(i, 8), now, err));
+        BOOST_CHECK_MESSAGE(cache.Insert(hint(0, 8), now, err), err);
+        BOOST_CHECK(!cache.Insert(hint(4096, 8), now, err));
+        BOOST_CHECK_EQUAL(cache.Size(), 4096U);
+    }
+    {
+        // 64 KiB records: the byte budget ends this well before 300.
+        modelnet::RouterCache cache;
+        uint32_t n = 0;
+        while (n < 300 && cache.Insert(hint(n, 64 << 10), now, err)) ++n;
+        BOOST_CHECK_LT(n, 300U);
+        BOOST_CHECK_MESSAGE(cache.Insert(hint(0, 64 << 10), now, err), err);
+        BOOST_CHECK(!cache.Insert(hint(n, 64 << 10), now, err));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
