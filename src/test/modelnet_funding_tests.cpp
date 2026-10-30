@@ -605,6 +605,9 @@ static CMutableTransaction FundingSpend(const COutPoint& prevout, const wallet::
 BOOST_FIXTURE_TEST_CASE(submission_refuses_fee_above_frozen_cap, TestChain100Setup)
 {
     auto wallet = wallet::CreateSyncedWallet(*m_node.chain, WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain()), coinbaseKey);
+    // The spend leaves most of a coinbase as fee, far above the default
+    // -maxtxfee; this case is about fee_cap_atoms.
+    wallet->m_default_max_tx_fee = MAX_MONEY;
     wallet::FrozenFundingQuote q = WalletQuote(*wallet);
     const CTransactionRef& coin = m_coinbase_txns.at(0);
     const CMutableTransaction tx = FundingSpend(COutPoint{coin->GetHash(), 0}, q);
@@ -623,6 +626,9 @@ BOOST_FIXTURE_TEST_CASE(submission_refuses_input_not_owned_by_wallet, TestChain1
 {
     const CBlock foreign = CreateAndProcessBlock({}, CScript() << OP_TRUE);
     auto wallet = wallet::CreateSyncedWallet(*m_node.chain, WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain()), coinbaseKey);
+    // Both spends leave most of a coinbase as fee; lift -maxtxfee so the
+    // ownership check is what decides.
+    wallet->m_default_max_tx_fee = MAX_MONEY;
     wallet::FrozenFundingQuote q = WalletQuote(*wallet);
     q.fee_cap_atoms = MAX_MONEY;
     std::string err;
