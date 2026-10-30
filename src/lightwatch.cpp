@@ -173,7 +173,9 @@ LightWatch::Step LightWatch::ApplyFilter(int height, const uint256& block_hash, 
                                          const std::vector<unsigned char>& encoded_filter, const uint256& filter_header,
                                          const CBlock* block, std::string& error)
 {
-    if (height != NextHeight()) {
+    // A cursor of INT_MAX is refused on load; never reach it here either,
+    // so NextHeight() stays representable.
+    if (height == std::numeric_limits<int>::max() || height != NextHeight()) {
         error = "BTX_BLOCK_LINK";
         return Step::REJECTED;
     }
@@ -319,7 +321,8 @@ LightWatchStatus LightWatch::Status(int chain_height) const
     }
     status.ready = m_cursor == chain_height;
     if (m_cursor < m_start) {
-        status.blocks_behind = chain_height - m_start + 1;
+        const int64_t behind = static_cast<int64_t>(chain_height) - m_start + 1;
+        status.blocks_behind = static_cast<int>(std::min<int64_t>(behind, std::numeric_limits<int>::max()));
     } else {
         status.blocks_behind = std::max(0, chain_height - m_cursor);
     }
