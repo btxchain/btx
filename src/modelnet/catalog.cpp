@@ -761,17 +761,20 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
         (void)m_store.RemoveArtifact(staging, ignored);
         DropPieceTreeCache(staging);
         commit_staging = true;
-        for (const auto& m : m_models) {
+        for (auto& m : m_models) {
             if (m.artifact_id == artifact_id) {
-                out = m;
-                if (pin && !out.pinned) {
+                if (pin && !m.pinned) {
+                    // Pin the catalog entry itself: eviction ranks by it.
                     std::string pin_err;
                     m_store.Pin(model_id, pin_err);
                     m_store.Pin(artifact_id, pin_err);
-                    out.pinned = true;
-                    out.admission = AdmissionLevel::PINNED;
-                    out.bytes_verified = true;
+                    m.pinned = true;
+                    m.admission = AdmissionLevel::PINNED;
+                    m.bytes_verified = true;
+                    out = m;
+                    return PersistLocked(err);
                 }
+                out = m;
                 return true;
             }
         }
