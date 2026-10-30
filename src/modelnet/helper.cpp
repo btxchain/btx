@@ -8169,7 +8169,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
             MakePrepaidQuote(q, r.digest, have_local ? local_probe.artifact_id : Digest48{}, 0, 0, price, err);
             quotes.push_back(q);
-            SavePaymentState(dir, quotes, journal, err);
+            if (!SavePaymentState(dir, quotes, journal, err)) {
+                err_code = "IO";
+                return false;
+            }
             result.pushKV("quote", QuoteToJson(q));
             if (mode == RetrievalMode::EXPLICIT_PAID) {
                 result.pushKV("funding_rpc", "preparemodelfunding");

@@ -369,6 +369,33 @@ BOOST_AUTO_TEST_CASE(pay_08_concurrent_submits_and_paid_plans_keep_both)
     }
 }
 
+BOOST_AUTO_TEST_CASE(pay_08_paid_plan_reports_failed_save)
+{
+    // A quote that could not be saved is in no file; getmodel must not return it.
+    const fs::path tmp = m_path_root / "pay-plan-save-fails";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    const fs::path paydir = cat.Store().Root().parent_path();
+    fs::create_directories(paydir / "quotes.json.tmp"); // the save cannot create its sibling
+    std::string err;
+    modelnet::Digest48 mid;
+    BOOST_REQUIRE(modelnet::Digest48::FromHex(std::string(96, '1'), mid, err));
+    UniValue params(UniValue::VARR);
+    params.push_back(mid.Hex());
+    UniValue opts(UniValue::VOBJ);
+    opts.pushKV("retrieval_policy", "EXPLICIT_PAID");
+    opts.pushKV("price_atoms", 5);
+    params.push_back(opts);
+    UniValue result;
+    std::string code;
+    BOOST_CHECK(!HelperCall(cat, "getmodel", params, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IO");
+    BOOST_CHECK(!result.exists("quote"));
+    std::vector<modelnet::Quote> quotes;
+    std::vector<modelnet::PaymentJournal> journal;
+    BOOST_CHECK(modelnet::LoadPaymentState(paydir, quotes, journal, err));
+    BOOST_CHECK(quotes.empty());
+}
+
 #ifndef WIN32
 BOOST_AUTO_TEST_CASE(pay_08_failed_journal_write_keeps_previous_journal)
 {

@@ -267,14 +267,13 @@ bool SavePaymentState(const fs::path& dir, const std::vector<Quote>& quotes, con
     // write never leaves a cut-short journal that the next load rejects.
     const fs::path path = dir / "quotes.json";
     const fs::path tmp = dir / "quotes.json.tmp";
+    // Sync the file before the rename and the directory after it, like
+    // AtomicWrite in lab_disk.cpp, so a power loss cannot leave it empty.
+    const std::string bytes{o.write() + "\n"};
     bool written{false};
-    {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (out) {
-            out << o.write() << "\n";
-            out.flush();
-            written = static_cast<bool>(out);
-        }
+    if (FILE* file = fsbridge::fopen(tmp, "wb")) {
+        written = fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size() && FileCommit(file);
+        if (fclose(file) != 0) written = false;
     }
     if (!written || !RenameOver(tmp, path)) {
         std::error_code ec;
@@ -282,6 +281,7 @@ bool SavePaymentState(const fs::path& dir, const std::vector<Quote>& quotes, con
         err = "quotes.json write";
         return false;
     }
+    DirectoryCommit(dir);
     return true;
 }
 
