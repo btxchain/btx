@@ -429,10 +429,21 @@ static CService GetBindAddress(const Sock& sock)
     return addr_bind;
 }
 
+namespace {
+bool V2TransportPQOnly() noexcept;
+} // namespace
+
 CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCountFailure, ConnectionType conn_type, bool use_v2transport)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
+
+    // -v2pqonly is enforced inside V2Transport. A connection created as v1
+    // never reaches that check, so do not open one.
+    if (!use_v2transport && V2TransportPQOnly()) {
+        LogDebug(BCLog::NET, "not opening a v1 connection under -v2pqonly\n");
+        return nullptr;
+    }
 
     if (pszDest == nullptr) {
         if (IsLocal(addrConnect))
@@ -3293,7 +3304,9 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
             // network connections (if any) belong in the same netgroup, and the size of `outbound_ipv46_peer_netgroups` would only be 1.
             const bool count_failures{((int)outbound_ipv46_peer_netgroups.size() + outbound_privacy_network_peers) >= std::min(m_max_automatic_connections - 1, 2)};
             // Use BIP324 transport when both us and them have NODE_V2_P2P set.
-            const bool use_v2transport(addrConnect.nServices & GetLocalServices() & NODE_P2P_V2);
+            // Under -v2pqonly no v1 connection is opened, so try v2 even when the
+            // address entry does not carry NODE_P2P_V2 (DNS-seed entries never do).
+            const bool use_v2transport(V2TransportPQOnly() || (addrConnect.nServices & GetLocalServices() & NODE_P2P_V2));
             OpenNetworkConnection(addrConnect, count_failures, std::move(grant), /*strDest=*/nullptr, conn_type, use_v2transport);
         }
     }

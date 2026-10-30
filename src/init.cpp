@@ -1557,6 +1557,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         g_local_services = ServiceFlags(g_local_services | NODE_P2P_V2);
     } else if (args.GetBoolArg("-v2onlyclearnet", false)) {
         return InitError(_("Cannot set -v2onlyclearnet to true when v2transport is disabled."));
+    } else if (args.GetBoolArg("-v2pqonly", false)) {
+        // Without v2transport every connection is v1 and -v2pqonly would never be checked.
+        return InitError(_("Cannot set -v2pqonly to true when v2transport is disabled."));
     }
 
     // Signal NODE_COMPACT_FILTERS if peerblockfilters and basic filters index are both enabled.
