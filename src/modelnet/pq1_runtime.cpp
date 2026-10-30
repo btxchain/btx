@@ -481,6 +481,36 @@ void ConnLimits::ReleaseInbound(uint32_t netgroup)
     if (inbound.load() > 0) inbound.fetch_sub(1);
 }
 
+size_t Pq1NextWaiting(const std::vector<uint32_t>& waiting, const std::map<uint32_t, int>& held)
+{
+    size_t next = 0;
+    int fewest = std::numeric_limits<int>::max();
+    for (size_t i = 0; i < waiting.size(); ++i) {
+        const auto it = held.find(waiting[i]);
+        const int n = it == held.end() ? 0 : it->second;
+        if (n < fewest) {
+            next = i;
+            fewest = n;
+        }
+    }
+    return next;
+}
+
+std::optional<uint32_t> Pq1WorkerDonor(uint32_t waiting, const std::map<uint32_t, int>& held)
+{
+    const auto it = held.find(waiting);
+    const int need = (it == held.end() ? 0 : it->second) + 2;
+    std::optional<uint32_t> donor;
+    int most = 0;
+    for (const auto& [netgroup, n] : held) {
+        if (netgroup != waiting && n >= need && n > most) {
+            donor = netgroup;
+            most = n;
+        }
+    }
+    return donor;
+}
+
 bool ConnLimits::TryOutbound()
 {
     int cur = outbound.load();

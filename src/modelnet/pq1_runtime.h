@@ -14,7 +14,10 @@
 #include <atomic>
 #include <cstdint>
 #include <limits>
+#include <map>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace modelnet {
 
@@ -87,6 +90,22 @@ public:
 };
 
 ConnLimits& GlobalConnLimits();
+
+// An inbound PQ1 connection holds its worker until it closes, idle time
+// included, and one address may open PQ1_MAX_INBOUND_PER_NETGROUP of them:
+// as many as there are workers. While another address waits, the workers are
+// shared by address (R10-03). `held` counts the workers that each netgroup's
+// connections hold now.
+
+/** Index of the waiting connection (oldest first) to serve next: the oldest
+ *  one whose netgroup holds the fewest workers. */
+size_t Pq1NextWaiting(const std::vector<uint32_t>& waiting, const std::map<uint32_t, int>& held);
+/** The netgroup that must close one connection so `waiting` gets a worker:
+ *  the one holding the most, and only if that is at least two more than
+ *  `waiting` holds. Each hand-over narrows the gap between the two, so over
+ *  the same connections workers never pass back and forth. A buyer alone
+ *  keeps every worker. */
+std::optional<uint32_t> Pq1WorkerDonor(uint32_t waiting, const std::map<uint32_t, int>& held);
 
 /** Milliseconds to wait so an upload of `nbytes` at `cap_bps` stays on the average
  *  rate. The bucket may go into debt. Returns -1 when that wait would exceed

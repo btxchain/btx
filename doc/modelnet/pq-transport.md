@@ -44,3 +44,12 @@ not fail-closed at 2 connections. Unauth handshake flood is still 4
 failures / 60s. Piece transfer timeout is 600s so a slow 4 MiB piece is
 retried, not abandoned. Transient `tls io` / timeout does **not**
 blacklist the only seeder; committed pieces stay on disk.
+
+Eight is also the number of seeder workers (`PQ1_HTTP_WORKERS`), and a
+connection holds its worker while idle. So when every worker is taken and
+a connection from another address has started its handshake and waits,
+the address holding the most workers, at least two more than the waiting
+one, gives one connection up: an idle one closes at once, else a busy one
+closes once the response it is sending is out. When every inbound slot is
+taken, the same rule drops that address's newest connection still waiting
+for a worker. A buyer alone keeps all 8.
