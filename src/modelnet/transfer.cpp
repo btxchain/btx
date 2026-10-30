@@ -162,9 +162,9 @@ UniValue QuoteToJson(const Quote& q)
     o.pushKV("buyer_id", q.buyer_id.Hex());
     o.pushKV("model_id", q.model_id.Hex());
     o.pushKV("artifact_id", q.artifact_id.Hex());
-    o.pushKV("file_index", static_cast<int>(q.file_index));
-    o.pushKV("first_piece", static_cast<int>(q.first_piece));
-    o.pushKV("piece_count", static_cast<int>(q.piece_count));
+    o.pushKV("file_index", static_cast<int64_t>(q.file_index));
+    o.pushKV("first_piece", static_cast<int64_t>(q.first_piece));
+    o.pushKV("piece_count", static_cast<int64_t>(q.piece_count));
     o.pushKV("maximum_bytes", q.maximum_bytes);
     o.pushKV("price_atoms", q.price_atoms);
     o.pushKV("fee_cap_atoms", q.fee_cap_atoms);
@@ -288,6 +288,10 @@ bool SavePaymentState(const fs::path& dir, const std::vector<Quote>& quotes, con
 bool MakePrepaidQuote(Quote& q, const Digest48& model_id, const Digest48& artifact_id, uint32_t first_piece,
                       uint32_t piece_count, int64_t price_atoms, std::string& err)
 {
+    if (price_atoms < 0 || price_atoms > MAX_MONEY_ATOMS) {
+        err = "quote price out of range";
+        return false;
+    }
     q = {};
     unsigned char nonce[32];
     GetStrongRandBytes(Span<unsigned char>{nonce, 32});
@@ -299,8 +303,29 @@ bool MakePrepaidQuote(Quote& q, const Digest48& model_id, const Digest48& artifa
     q.maximum_bytes = uint64_t{piece_count} * PIECE_SIZE;
     q.price_atoms = price_atoms;
     q.expires_at = static_cast<int64_t>(std::time(nullptr)) + 3600;
-    (void)err;
     return true;
+}
+
+int64_t OutstandingQuoteAtoms(const std::vector<Quote>& quotes, const std::vector<PaymentJournal>& journal,
+                              const Digest48& model_id)
+{
+    int64_t outstanding = 0;
+    for (const auto& q : quotes) {
+        if (!(q.model_id == model_id) || q.price_atoms <= 0) continue;
+        bool delivered = false;
+        for (const auto& j : journal) {
+            if (j.delivered && j.quote_id == q.offer_id.Hex()) delivered = true;
+        }
+        if (delivered) continue;
+        // quotes.json may hold any int64 amount; saturate instead of overflowing.
+        const int64_t fee = q.fee_cap_atoms > 0 ? q.fee_cap_atoms : 0;
+        if (q.price_atoms > MAX_MONEY_ATOMS || fee > MAX_MONEY_ATOMS - q.price_atoms ||
+            outstanding > MAX_MONEY_ATOMS - q.price_atoms - fee) {
+            return MAX_MONEY_ATOMS + 1;
+        }
+        outstanding += q.price_atoms + fee;
+    }
+    return outstanding;
 }
 
 namespace {
