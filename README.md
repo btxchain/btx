@@ -1252,8 +1252,10 @@ delegation closes. `SIGHASH_ANYPREVOUT` (APO) is not implemented.
 - **libevent**: 2.1.8+
 - **Python**: 3.10+ (for functional tests)
 
-Optional: SQLite 3.7.17+ (descriptor wallets), Qt 5.11+/6.2+ (GUI),
-ZeroMQ 4.0+ (notifications).
+Optional: SQLite 3.7.17+ (descriptor wallets), Qt 5.11+/6.2+ (GUI).
+ZeroMQ 4.0+ is required by the default shipped-node configuration.
+The tested macOS recipe below uses the versioned Boost 1.85 Homebrew formula;
+do not let an existing build directory mix it with another Boost header tree.
 
 The source-build baseline is Ubuntu 22.04 LTS (glibc 2.35) with GCC 11.1+.
 The prebuilt Linux archives do **not** share that floor: the
@@ -1295,12 +1297,32 @@ monetary-only tree. See [doc/build-unix.md](doc/build-unix.md).
 
 ### macOS
 
-```bash
-brew install cmake boost libevent sqlite pkg-config
+Apple Silicon builds that validate or mine with Metal require full Xcode and
+the separately downloadable Metal toolchain. The Command Line Tools alone are
+not sufficient.
 
-cmake -B build
-cmake --build build -j$(sysctl -n hw.logicalcpu)
+```bash
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+xcodebuild -downloadComponent MetalToolchain
+xcrun -f metal
+
+brew install cmake ninja pkgconf boost@1.85 libevent zeromq libomp openssl@3
+
+cmake -S . -B build-btx -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/opt/homebrew \
+  -DBoost_INCLUDE_DIR="$(brew --prefix boost@1.85)/include" \
+  -DWITH_ZMQ=ON \
+  -DBTX_ENABLE_METAL=ON \
+  -DBUILD_GUI=OFF
+cmake --build build-btx --target btxd btx-cli -j2
+
+./build-btx/bin/btxd -daemon -server
+./build-btx/bin/btx-cli getsetupstatus
 ```
+
+See the [macOS build guide](doc/build-osx.md) for GUI/model-network targets,
+status checks, and troubleshooting.
 
 ### Convenience Script
 
