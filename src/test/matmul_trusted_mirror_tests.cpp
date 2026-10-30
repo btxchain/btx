@@ -5503,4 +5503,88 @@ BOOST_AUTO_TEST_CASE(pq_hot_tail_keeps_frontier_loaded_last_across_restart)
     BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 258);
 }
 
+namespace {
+//! LocalSignerNode with an ML-DSA-44 local key and one ML-DSA-44 peer pin.
+struct LocalPqSignerNode {
+    PqKey local{MakePqKey(0x91)};
+    PqKey peer{MakePqKey(0x92)};
+    uint256 chain{Hex256('8')};
+    uint256 context{Hex256('9')};
+    fs::path archive;
+
+    explicit LocalPqSignerNode(fs::path path) : archive{std::move(path)} {}
+    void Start() const
+    {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_pq_signers = {local.pk, peer.pk};
+        config.threshold = 2;
+        config.local_pq_pk = local.pk;
+        config.local_pq_sk = local.sk;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/false, /*serve=*/true,
+            std::chrono::milliseconds{20}, error));
+        BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    }
+    void Restart() const
+    {
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::FlushPersistence(error));
+        node::matmul_trusted::ResetForTest();
+        Start();
+    }
+    //! The local PQ vote plus the PQ peer: a quorum that needs the local vote.
+    void SignQuorum(const uint256& hash, int32_t height) const
+    {
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash, height) ==
+                      matmul::trusted::AddResult::Accepted);
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = hash;
+        statement.block_height = height;
+        statement.replay_authority_context = context;
+        const auto att{matmul::trusted::SignStatementMlDsa44(statement, peer.sk, peer.pk)};
+        BOOST_REQUIRE(att.has_value());
+        BOOST_REQUIRE(node::matmul_trusted::AddPq(*att, hash, height) ==
+                      matmul::trusted::AddResult::Accepted);
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorumInMemory(hash, height));
+    }
+};
+} // namespace
+
+BOOST_AUTO_TEST_CASE(pq_withdrawn_local_vote_not_restored_after_reload)
+{
+    // withdrawn_necessary_votes_do_not_keep_frontier_height and
+    // withdrawn_local_vote_does_not_occupy_height_after_reload with an
+    // ML-DSA-44 local key. The durable PQ records still hold the withdrawn
+    // local votes; after a restart they must not bring back the quorum, the
+    // watermark or the hint, nor occupy the height.
+    RuntimeReset reset;
+    const LocalPqSignerNode signer{m_args.GetDataDirNet() / "matmul_pq_withdrawn.dat"};
+    const uint256 low{Hex256('a')};
+    const uint256 mid{Hex256('b')};
+    const uint256 top{Hex256('c')};
+    const uint256 replacement{Hex256('d')};
+    signer.Start();
+    signer.SignQuorum(low, 10);
+    signer.SignQuorum(mid, 30);
+    signer.SignQuorum(top, 31);
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(31, top));
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(30, mid));
+    BOOST_REQUIRE_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 10);
+
+    signer.Restart();
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(low, 10));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(mid, 30));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 10);
+    BOOST_CHECK(HasFrontierHint(low, 10));
+    BOOST_CHECK_MESSAGE(!HasFrontierHint(mid, 30) && !HasFrontierHint(top, 31),
+                        "a withdrawn local PQ vote brought back a frontier hint");
+    BOOST_CHECK_MESSAGE(node::matmul_trusted::SignAuthoritative(replacement, 30) ==
+                            matmul::trusted::AddResult::Accepted,
+                        "a withdrawn local PQ vote occupies the height after a restart");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

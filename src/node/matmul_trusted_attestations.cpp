@@ -774,6 +774,7 @@ bool LoadDurablePqAttestations(
              std::vector<matmul::trusted::ExactReplayPqAttestation>> hot_tail;
     size_t hot_tail_attestations{0};
     std::set<TailKey> quorum_tail_keys;
+    const auto local_pq_pk{store->LocalPqPubKey()};
     for (; cursor->Valid(); cursor->Next()) {
         DurablePqAttestationKey key;
         if (!cursor->GetKey(key) ||
@@ -787,6 +788,12 @@ bool LoadDurablePqAttestations(
             error = "durable PQ attestation database contains a malformed record";
             return false;
         }
+        // As in LoadDurableAttestations: a local vote this node withdrew on
+        // its own reorg stays in the durable record, and AddPq refuses it,
+        // so it must not count toward the quorum or the watermark either.
+        const bool local_vote_withdrawn{
+            local_pq_pk.has_value() &&
+            store->IsOffActiveChain(key.height, key.block_hash)};
         std::set<std::vector<unsigned char>> seen;
         std::vector<matmul::trusted::ExactReplayPqAttestation> pin_only;
         for (const auto& attestation : attestations) {
@@ -807,6 +814,9 @@ bool LoadDurablePqAttestations(
                         matmul::trusted::VerifyResultName(verified));
                     return false;
                 }
+                continue;
+            }
+            if (local_vote_withdrawn && attestation.signer == *local_pq_pk) {
                 continue;
             }
             pin_only.push_back(attestation);
