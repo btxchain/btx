@@ -39,6 +39,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -46,6 +47,7 @@ extern "C" {
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -4227,6 +4229,635 @@ BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
     }
     NeutralizeUnconnectedHeaders(*Assert(m_node.chainman));
     peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
+// Every GETDATA hash queued to `node`, then an empty send buffer. With a
+// null socket the optimistic send can leave one message in the V1
+// transport, whose header and payload come out as separate segments.
+static std::vector<uint256> TakeQueuedGetDataHashes(ConnmanTestMsg& connman,
+                                                    CNode& node)
+{
+    std::vector<uint256> out{QueuedGetDataHashes(node)};
+    {
+        LOCK(node.cs_vSend);
+        bool header_segment{true};
+        while (true) {
+            const auto& [bytes, _more, msg_type] =
+                node.m_transport->GetBytesToSend(false);
+            if (bytes.empty()) break;
+            if (!header_segment && msg_type == NetMsgType::GETDATA) {
+                DataStream stream{bytes};
+                std::vector<CInv> inv;
+                try {
+                    stream >> inv;
+                } catch (const std::ios_base::failure&) {
+                    inv.clear();
+                }
+                for (const auto& item : inv) out.push_back(item.hash);
+            }
+            node.m_transport->MarkBytesSent(bytes.size());
+            header_segment = !header_segment;
+        }
+    }
+    connman.FlushSendBuffer(node);
+    return out;
+}
+
+// Live 2026-10-27, community archive: trusted mirror, three pins, threshold
+// 2, no local signer. Two pins signed a one-block twin at H and the mirror
+// connected it (UpdateTip ... signed_frontier=H behind=0). The network block
+// at H, the twin's sibling, arrived a second later with no attestation and
+// took HEADER_ONLY (m_header_only_competing). The signers then signed H+1
+// and H+2 on that sibling's branch (signed frontier off the active chain,
+// behind=2). The scheduler kept the sibling as lowest_missing with
+// select=root_header_only_skip and logged "selected root but is not in
+// flight" for six hours, until the operator ran invalidateblock on the twin.
+//
+// root_signed=false: only H+1 and H+2 carry quorum (the frontier covers the
+// root through its descendants). root_signed=true: the root also has its
+// own quorum, so H carries two quorum hashes.
+static void CheckTrustedMirrorFetchesSignedRootPastTwin(node::NodeContext& m_node,
+                                                        bool root_signed)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    std::array<CKey, 3> keys;
+    for (auto& key : keys) key.MakeNewKey(/*fCompressed=*/true);
+    const uint256 chain_id{uint256::FromHex(std::string(64, '1')).value()};
+    const uint256 authority{uint256::FromHex(std::string(64, '2')).value()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain_id;
+    config.replay_authority_context = authority;
+    config.trusted_signers = {keys[0].GetPubKey(), keys[1].GetPubKey(),
+                              keys[2].GetPubKey()};
+    config.threshold = 2;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(!node::matmul_trusted::HasLocalSigner());
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    const CBlockIndex* parent{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    const int32_t h{parent->nHeight + 1};
+    SetMockTime(std::chrono::seconds{parent->GetBlockTime() + 1});
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        chainman.GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+    ActivateRcAtTip(consensus, *parent);
+    peerman.SetBestBlock(parent->nHeight,
+                         std::chrono::seconds{parent->GetBlockTime()});
+
+    // Two of the three pins sign (threshold 2).
+    auto attest = [&](const uint256& hash, int32_t height) {
+        for (size_t i = 0; i < 2; ++i) {
+            matmul::trusted::ExactReplayStatement statement;
+            statement.chain_id = chain_id;
+            statement.block_hash = hash;
+            statement.block_height = height;
+            statement.replay_authority_context = authority;
+            auto attestation{matmul::trusted::SignStatement(statement, keys[i])};
+            BOOST_REQUIRE(attestation.has_value());
+            const auto result{
+                node::matmul_trusted::Add(*attestation, hash, height)};
+            BOOST_REQUIRE(result == matmul::trusted::AddResult::Accepted ||
+                          result == matmul::trusted::AddResult::Duplicate);
+        }
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorumInMemory(hash, height));
+    };
+
+    // twin = the signed one-block twin the mirror connected. root = the
+    // network block at the same height, the root of the signed branch.
+    CBlock twin{MineTipChild(m_node, *parent, /*extra_time=*/0)};
+    CBlock root{MineTipChild(m_node, *parent, /*extra_time=*/1)};
+    BOOST_REQUIRE(twin.GetHash() != root.GetHash());
+    const uint256 twin_hash{twin.GetHash()};
+    const uint256 root_hash{root.GetHash()};
+    constexpr int kBranch{8};
+    std::vector<CBlock> branch;
+    {
+        uint256 prev{root_hash};
+        uint32_t n_time{root.nTime};
+        for (int i = 0; i < kBranch; ++i) {
+            branch.push_back(MineBlockOnParent(m_node, prev, h + 1 + i,
+                                               n_time + 1,
+                                               parent->GetMedianTimePast()));
+            prev = branch.back().GetHash();
+            n_time = branch.back().nTime;
+        }
+    }
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    // relay delivers the twin and the root body; source advertises the
+    // root's branch.
+    CNode relay{/*id=*/281, /*sock=*/nullptr,
+                CAddress{PeermanTestService(0x2810007f), NODE_NETWORK},
+                /*nKeyedNetGroupIn=*/0x81, /*nLocalHostNonceIn=*/0,
+                CAddress{}, /*addrNameIn=*/"signed-twin-relay",
+                ConnectionType::OUTBOUND_FULL_RELAY,
+                /*inbound_onion=*/false, /*network_key=*/0};
+    CNode source{/*id=*/282, /*sock=*/nullptr,
+                 CAddress{PeermanTestService(0x2820007f), NODE_NETWORK},
+                 /*nKeyedNetGroupIn=*/0x82, /*nLocalHostNonceIn=*/0,
+                 CAddress{}, /*addrNameIn=*/"network-branch-source",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false, /*network_key=*/0};
+    for (CNode* node : {&relay, &source}) {
+        connman.Handshake(*node, /*successfully_connected=*/true, services,
+                          services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                          /*starting_height=*/h + kBranch);
+        connman.AddTestNode(*node);
+        connman.FlushSendBuffer(*node);
+    }
+    struct FinalizePeers {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& a;
+        CNode& b;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(a);
+            peerman.FinalizeNode(b);
+            connman.RemoveTestNode(a);
+            connman.RemoveTestNode(b);
+        }
+    } finalize{connman, peerman, relay, source};
+
+    // Count every GETDATA the mirror queues for the root and for each
+    // branch block before a send buffer is flushed.
+    size_t root_getdata{0};
+    std::vector<size_t> branch_getdata(kBranch, 0);
+    auto drain = [&](CNode& node) {
+        for (const uint256& hash : TakeQueuedGetDataHashes(connman, node)) {
+            if (hash == root_hash) ++root_getdata;
+            for (int i = 0; i < kBranch; ++i) {
+                if (hash == branch[i].GetHash()) ++branch_getdata[i];
+            }
+        }
+        node.fPauseSend = false;
+    };
+    auto deliver = [&](CNode& node, const std::string& type, const auto& payload)
+                       EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        drain(node);
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(node, NetMsg::Make(type, payload)));
+        node.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(node);
+        drain(node);
+    };
+    auto headers_of = [](std::initializer_list<const CBlock*> blocks) {
+        std::vector<CBlock> out;
+        for (const CBlock* block : blocks) out.emplace_back(block->GetBlockHeader());
+        return out;
+    };
+    // One scheduling pass to each peer. Returns how many peers have height
+    // H in flight.
+    auto send_round = [&](std::chrono::seconds step)
+                          EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        SetMockTime(GetMockTime() + step);
+        int peers_with_h{0};
+        for (CNode* node : {&source, &relay}) {
+            drain(*node);
+            (void)peerman.SendMessages(node);
+            drain(*node);
+        }
+        for (CNode* node : {&source, &relay}) {
+            CNodeStateStats stats;
+            BOOST_REQUIRE(peerman.GetNodeStateStats(node->GetId(), stats));
+            for (const int height : stats.vHeightInFlight) {
+                if (height == h) ++peers_with_h;
+            }
+        }
+        return peers_with_h;
+    };
+
+    // 1. The twin connects with quorum.
+    deliver(relay, NetMsgType::HEADERS, TX_WITH_WITNESS(headers_of({&twin})));
+    attest(twin_hash, h);
+    deliver(relay, NetMsgType::BLOCK, TX_WITH_WITNESS(twin));
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(chainman.ActiveChainstate().ActivateBestChain(state));
+    }
+    BOOST_REQUIRE_EQUAL(
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash()),
+        twin_hash);
+    // UpdatedBlockTip clears the HEADER_ONLY skip sets. Drain it now so a
+    // late callback for the twin cannot clear the root's entry below.
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    // 2. The root arrives with no attestation and takes HEADER_ONLY. That
+    //    log line is printed only on the first insert into the skip set.
+    deliver(relay, NetMsgType::HEADERS, TX_WITH_WITNESS(headers_of({&root})));
+    const size_t root_getdata_on_header{root_getdata};
+    {
+        ASSERT_DEBUG_LOG("no GPU attestation; body not connected; GETMMATTEST then re-getdata");
+        deliver(relay, NetMsgType::BLOCK, TX_WITH_WITNESS(root));
+    }
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{chainman.m_blockman.LookupBlockIndex(root_hash)};
+        BOOST_REQUIRE(idx != nullptr);
+        BOOST_REQUIRE_EQUAL(idx->nStatus & BLOCK_HAVE_DATA, 0);
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE(peerman.HeaderFetchSuppressedForTest(root_hash));
+    // The body above answered the GETDATA the root's own header triggered.
+    // Count requests from here on.
+    BOOST_TEST_MESSAGE("signed-root fetch: root_signed=" << root_signed
+                       << " root getdata on its header=" << root_getdata_on_header
+                       << " through HEADER_ONLY=" << root_getdata);
+    root_getdata = 0;
+    std::fill(branch_getdata.begin(), branch_getdata.end(), 0);
+
+    // 3. The root's branch pulls ahead in headers only. Work alone does not
+    //    release the root on a mirror, and neither does the root's own
+    //    quorum at the tip height (F3: a lone sibling stays out of inflight).
+    std::vector<CBlock> branch_headers{CBlock{root.GetBlockHeader()}};
+    for (const CBlock& block : branch) branch_headers.emplace_back(block.GetBlockHeader());
+    deliver(source, NetMsgType::HEADERS, TX_WITH_WITNESS(branch_headers));
+    const size_t branch_getdata_on_headers{
+        std::accumulate(branch_getdata.begin(), branch_getdata.end(), size_t{0})};
+    BOOST_CHECK_EQUAL(send_round(std::chrono::seconds{1}), 0);
+    BOOST_CHECK(peerman.HeaderFetchSuppressedForTest(root_hash));
+    if (root_signed) {
+        attest(root_hash, h);
+        BOOST_CHECK_EQUAL(send_round(std::chrono::seconds{1}), 0);
+        BOOST_CHECK(peerman.HeaderFetchSuppressedForTest(root_hash));
+    }
+    BOOST_CHECK_EQUAL(root_getdata, 0U);
+    const size_t branch_getdata_before_frontier{
+        std::accumulate(branch_getdata.begin(), branch_getdata.end(), size_t{0})};
+    BOOST_TEST_MESSAGE("signed-root fetch: root_signed=" << root_signed
+                       << " before frontier: root_getdata=" << root_getdata
+                       << " branch_getdata on headers=" << branch_getdata_on_headers
+                       << " after rounds=" << branch_getdata_before_frontier);
+
+    // 4. The signers sign H+1 and H+2 on the root's branch. The signed
+    //    frontier is off the active chain, two blocks ahead.
+    attest(branch[0].GetHash(), h + 1);
+    attest(branch[1].GetHash(), h + 2);
+    {
+        LOCK(::cs_main);
+        const auto frontier{chainman.GetSignedFrontierStatus()};
+        BOOST_REQUIRE(frontier.available);
+        BOOST_CHECK_EQUAL(frontier.height, h + 2);
+        BOOST_CHECK(frontier.hash == branch[1].GetHash());
+        BOOST_CHECK(!frontier.on_active_chain);
+        BOOST_CHECK_EQUAL(frontier.blocks_behind, 2);
+        BOOST_CHECK_EQUAL(frontier.on_chain_attested_height, h);
+        const CBlockIndex* root_idx{chainman.m_blockman.LookupBlockIndex(root_hash)};
+        BOOST_REQUIRE(root_idx != nullptr);
+        BOOST_CHECK(chainman.IndexIsCoveredBySignedFrontier(root_idx));
+        BOOST_CHECK(!chainman.IndexIsCoveredBySignedFrontier(chainman.ActiveTip()));
+        BOOST_CHECK_EQUAL(chainman.ActiveTip()->GetBlockHash(), twin_hash);
+    }
+
+    // 5. The root is the one body the mirror needs to follow the signers,
+    //    and it must be requested, once. Rounds are 31 s apart, so the
+    //    root-first summary (30 s) and the stuck note (120 s) can fire as
+    //    they did live.
+    bool saw_header_only_skip{false};
+    bool saw_not_in_flight{false};
+    int peers_with_root{0};
+    int rounds{0};
+    {
+        DebugLogHelper skip_log{"select=root_header_only_skip",
+                                [&](const std::string* line) {
+                                    if (line != nullptr) saw_header_only_skip = true;
+                                    return false;
+                                }};
+        DebugLogHelper stuck_log{"is the selected root but is not in flight",
+                                 [&](const std::string* line) {
+                                     if (line != nullptr) saw_not_in_flight = true;
+                                     return false;
+                                 }};
+        for (; rounds < 8 && peers_with_root == 0; ++rounds) {
+            peers_with_root = send_round(std::chrono::seconds{31});
+        }
+        // Two more passes: the request is not duplicated.
+        for (int i = 0; i < 2 && peers_with_root > 0; ++i) {
+            peers_with_root = send_round(std::chrono::seconds{1});
+        }
+    }
+    const size_t branch_getdata_after_frontier{
+        std::accumulate(branch_getdata.begin(), branch_getdata.end(), size_t{0}) -
+        branch_getdata_before_frontier};
+    BOOST_TEST_MESSAGE("signed-root fetch: root_signed=" << root_signed
+                       << " rounds=" << rounds
+                       << " root_getdata=" << root_getdata
+                       << " peers_with_root_in_flight=" << peers_with_root
+                       << " branch_getdata_after_frontier=" << branch_getdata_after_frontier
+                       << " saw_root_header_only_skip=" << saw_header_only_skip
+                       << " saw_not_in_flight_note=" << saw_not_in_flight
+                       << " suppressed=" << peerman.HeaderFetchSuppressedForTest(root_hash));
+    BOOST_CHECK(!peerman.HeaderFetchSuppressedForTest(root_hash));
+    BOOST_CHECK_EQUAL(peers_with_root, 1);
+    BOOST_CHECK_EQUAL(root_getdata, 1U);
+    BOOST_CHECK(!saw_header_only_skip);
+    BOOST_CHECK(!saw_not_in_flight);
+    // The root is the only new request once the frontier passes it.
+    BOOST_CHECK_EQUAL(branch_getdata_after_frontier, 0U);
+
+    // 6. The requested body is kept (pin coverage), not dropped HEADER_ONLY
+    //    again, so the request cannot loop.
+    deliver(source, NetMsgType::BLOCK, TX_WITH_WITNESS(root));
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* root_idx{chainman.m_blockman.LookupBlockIndex(root_hash)};
+        BOOST_REQUIRE(root_idx != nullptr);
+        BOOST_CHECK(root_idx->nStatus & BLOCK_HAVE_DATA);
+        BOOST_TEST_MESSAGE("signed-root fetch: after root body tip_height="
+                           << chainman.ActiveTip()->nHeight << " tip_is_twin="
+                           << (chainman.ActiveTip()->GetBlockHash() == twin_hash));
+    }
+
+    {
+        LOCK(::cs_main);
+        chainman.SetBestHeader(const_cast<CBlockIndex*>(chainman.ActiveTip()));
+    }
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_fetches_signed_root_past_signed_twin)
+{
+    CheckTrustedMirrorFetchesSignedRootPastTwin(m_node, /*root_signed=*/false);
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_fetches_dual_signed_root_past_signed_twin)
+{
+    CheckTrustedMirrorFetchesSignedRootPastTwin(m_node, /*root_signed=*/true);
+}
+
+// Every GETMMATTEST hash queued to `node`, then an empty send buffer. With a
+// null socket the optimistic send can leave one message in the V1 transport.
+static std::vector<uint256> TakeQueuedGetMmAttestHashes(ConnmanTestMsg& connman,
+                                                        CNode& node)
+{
+    std::vector<uint256> out;
+    auto parse = [&](Span<const uint8_t> payload) {
+        DataStream stream{payload};
+        uint256 hash;
+        try {
+            stream >> hash;
+            out.push_back(hash);
+        } catch (const std::ios_base::failure&) {
+        }
+    };
+    {
+        LOCK(node.cs_vSend);
+        bool header_segment{true};
+        while (true) {
+            const auto& [bytes, _more, msg_type] =
+                node.m_transport->GetBytesToSend(false);
+            if (bytes.empty()) break;
+            if (!header_segment && msg_type == NetMsgType::GETMMATTEST) parse(bytes);
+            node.m_transport->MarkBytesSent(bytes.size());
+            header_segment = !header_segment;
+        }
+        for (const auto& msg : node.vSendMsg) {
+            if (msg.m_type == NetMsgType::GETMMATTEST) parse(msg.data);
+        }
+    }
+    connman.FlushSendBuffer(node);
+    return out;
+}
+
+// Trusted mirror, three pins, threshold 2, no local signer. N1 has no quorum
+// of its own. Both pins' MMATTESTs for N2 arrive before N2's header: each is
+// verified, triggers GETHEADERS and is dropped, because Add() waits for the
+// header. When the headers arrive, N2 is not a tip child, so the mirror
+// skipped its attestation and waited for a block whose signatures arrived
+// after its header. It must ask for N2's attestation.
+//
+// n0_signed=true: the mirror is on N0 with quorum, the signed frontier, and
+// N2 is above it (reject_above_frontier).
+// n0_signed=false: N0 has no quorum either. The mirror stays on N0's parent
+// with no stored quorum and three headers ahead, which is signed-frontier
+// catch-up: only a tip child, a short reorg or a followed body is requested,
+// so the catch-up gate dropped N2.
+static void CheckTrustedMirrorRequestsAttestationHeardBeforeHeader(
+    node::NodeContext& m_node, bool n0_signed)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    std::array<CKey, 3> keys;
+    for (auto& key : keys) key.MakeNewKey(/*fCompressed=*/true);
+    const uint256 chain_id{uint256::FromHex(std::string(64, '1')).value()};
+    const uint256 authority{uint256::FromHex(std::string(64, '2')).value()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain_id;
+    config.replay_authority_context = authority;
+    config.trusted_signers = {keys[0].GetPubKey(), keys[1].GetPubKey(),
+                              keys[2].GetPubKey()};
+    config.threshold = 2;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(!node::matmul_trusted::HasLocalSigner());
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    const CBlockIndex* parent{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    const int32_t h{parent->nHeight + 1};
+    SetMockTime(std::chrono::seconds{parent->GetBlockTime() + 1});
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        chainman.GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+    ActivateRcAtTip(consensus, *parent);
+    peerman.SetBestBlock(parent->nHeight,
+                         std::chrono::seconds{parent->GetBlockTime()});
+
+    auto attestation = [&](size_t pin, const CBlock& block, int32_t height) {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain_id;
+        statement.block_hash = block.GetHash();
+        statement.block_height = height;
+        statement.replay_authority_context = authority;
+        auto signed_attestation{matmul::trusted::SignStatement(statement, keys[pin])};
+        BOOST_REQUIRE(signed_attestation.has_value());
+        return *signed_attestation;
+    };
+
+    const CBlock n0{MineTipChild(m_node, *parent, /*extra_time=*/0)};
+    const CBlock n1{MineBlockOnParent(m_node, n0.GetHash(), h + 1, n0.nTime + 1,
+                                      parent->GetMedianTimePast())};
+    const CBlock n2{MineBlockOnParent(m_node, n1.GetHash(), h + 2, n1.nTime + 1,
+                                      parent->GetMedianTimePast())};
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    CNode source{/*id=*/3141, /*sock=*/nullptr,
+                 CAddress{PeermanTestService(0x3141007f), NODE_NETWORK},
+                 /*nKeyedNetGroupIn=*/0x3141, /*nLocalHostNonceIn=*/0,
+                 CAddress{}, /*addrNameIn=*/"headers-source",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false, /*network_key=*/0};
+    CNode relay{/*id=*/3142, /*sock=*/nullptr,
+                CAddress{PeermanTestService(0x3142007f), NODE_NETWORK},
+                /*nKeyedNetGroupIn=*/0x3142, /*nLocalHostNonceIn=*/0,
+                CAddress{}, /*addrNameIn=*/"attestation-relay",
+                ConnectionType::OUTBOUND_FULL_RELAY,
+                /*inbound_onion=*/false, /*network_key=*/0};
+    for (CNode* node : {&source, &relay}) {
+        connman.Handshake(*node, /*successfully_connected=*/true, services,
+                          services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                          /*starting_height=*/h + 2);
+        connman.AddTestNode(*node);
+        connman.FlushSendBuffer(*node);
+    }
+    struct FinalizePeers {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& a;
+        CNode& b;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(a);
+            peerman.FinalizeNode(b);
+            connman.RemoveTestNode(a);
+            connman.RemoveTestNode(b);
+        }
+    } finalize{connman, peerman, source, relay};
+
+    size_t n1_requests{0};
+    size_t n2_requests{0};
+    auto drain = [&] {
+        for (CNode* node : {&source, &relay}) {
+            for (const uint256& hash : TakeQueuedGetMmAttestHashes(connman, *node)) {
+                if (hash == n1.GetHash()) ++n1_requests;
+                if (hash == n2.GetHash()) ++n2_requests;
+            }
+            node->fPauseSend = false;
+        }
+    };
+    auto deliver = [&](CNode& node, const std::string& type, const auto& payload)
+                       EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        drain();
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(node, NetMsg::Make(type, payload)));
+        node.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(node);
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        drain();
+    };
+    auto send_round = [&]() EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        SetMockTime(GetMockTime() + std::chrono::seconds{1});
+        for (CNode* node : {&source, &relay}) {
+            drain();
+            (void)peerman.SendMessages(node);
+            drain();
+        }
+    };
+
+    // 1. N0 connects with quorum; it is the signed frontier.
+    if (n0_signed) {
+        deliver(source, NetMsgType::HEADERS,
+                TX_WITH_WITNESS(std::vector<CBlock>{CBlock{n0.GetBlockHeader()}}));
+        for (size_t pin : {0, 1}) {
+            const auto result{node::matmul_trusted::Add(attestation(pin, n0, h),
+                                                        n0.GetHash(), h)};
+            BOOST_REQUIRE(result == matmul::trusted::AddResult::Accepted ||
+                          result == matmul::trusted::AddResult::Duplicate);
+        }
+        deliver(source, NetMsgType::BLOCK, TX_WITH_WITNESS(n0));
+        {
+            BlockValidationState state;
+            BOOST_REQUIRE(chainman.ActiveChainstate().ActivateBestChain(state));
+        }
+        BOOST_REQUIRE_EQUAL(
+            WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash()),
+            n0.GetHash());
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    }
+
+    // 2. Both pins' MMATTESTs for N2 arrive before its header.
+    deliver(relay, NetMsgType::MMATTEST,
+            std::vector<matmul::trusted::ExactReplayAttestation>{
+                attestation(0, n2, h + 2), attestation(1, n2, h + 2)});
+    BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(n2.GetHash(), h + 2));
+    n1_requests = 0;
+    n2_requests = 0;
+
+    // 3. The headers of N1 and N2 arrive (and N0's, if it is not connected).
+    std::vector<CBlock> headers;
+    if (!n0_signed) headers.emplace_back(n0.GetBlockHeader());
+    headers.emplace_back(n1.GetBlockHeader());
+    headers.emplace_back(n2.GetBlockHeader());
+    deliver(source, NetMsgType::HEADERS, TX_WITH_WITNESS(headers));
+    if (!n0_signed) {
+        // No stored quorum, three headers ahead: signed-frontier catch-up.
+        LOCK(::cs_main);
+        BOOST_REQUIRE(!chainman.GetSignedFrontierStatus().available);
+        BOOST_REQUIRE_EQUAL(chainman.m_best_header->nHeight, h + 2);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveChain().Height(), h - 1);
+    }
+    send_round();
+    send_round();
+    BOOST_TEST_MESSAGE("attested-before-header n0_signed=" << n0_signed
+                       << ": getmmattest n1=" << n1_requests
+                       << " n2=" << n2_requests);
+    BOOST_CHECK_GE(n2_requests, 1U);
+
+    // 4. A peer answers with N2's quorum; the signed frontier moves to N2 and
+    //    covers N1 and N0.
+    deliver(relay, NetMsgType::MMATTEST,
+            std::vector<matmul::trusted::ExactReplayAttestation>{
+                attestation(0, n2, h + 2), attestation(1, n2, h + 2)});
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(n2.GetHash(), h + 2));
+    {
+        LOCK(::cs_main);
+        const auto frontier{chainman.GetSignedFrontierStatus()};
+        BOOST_CHECK(frontier.available);
+        BOOST_CHECK_EQUAL(frontier.height, h + 2);
+        const CBlockIndex* n1_idx{chainman.m_blockman.LookupBlockIndex(n1.GetHash())};
+        BOOST_REQUIRE(n1_idx != nullptr);
+        BOOST_CHECK(chainman.IndexIsCoveredBySignedFrontier(n1_idx));
+        const CBlockIndex* n0_idx{chainman.m_blockman.LookupBlockIndex(n0.GetHash())};
+        BOOST_REQUIRE(n0_idx != nullptr);
+        BOOST_CHECK(chainman.IndexIsCoveredBySignedFrontier(n0_idx));
+    }
+
+    {
+        LOCK(::cs_main);
+        chainman.SetBestHeader(const_cast<CBlockIndex*>(chainman.ActiveTip()));
+    }
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_requests_attestation_heard_before_header)
+{
+    CheckTrustedMirrorRequestsAttestationHeardBeforeHeader(m_node, /*n0_signed=*/true);
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_requests_attestation_heard_before_header_in_catch_up)
+{
+    CheckTrustedMirrorRequestsAttestationHeardBeforeHeader(m_node, /*n0_signed=*/false);
 }
 
 BOOST_AUTO_TEST_CASE(catchup_grandchild_persists_on_trusted_mirror)

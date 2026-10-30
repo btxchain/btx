@@ -502,6 +502,7 @@ add_executable(test_btx
   torcontrol_tests.cpp
   transaction_tests.cpp
   translation_tests.cpp
+  trusted_mirror_race_tests.cpp
   txdownload_tests.cpp
   txindex_tests.cpp
   txpackage_tests.cpp

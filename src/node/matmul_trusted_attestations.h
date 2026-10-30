@@ -2942,6 +2942,11 @@ struct TrustedAttestationAdmitView {
     //! GPU-signed frontier hash itself. Coverage for the ancestor suffix
     //! cannot be fetched if this hash is RejectAboveFrontier.
     bool is_signed_frontier_hash{false};
+    //! A pinned signer's MMATTEST for this hash arrived and verified before
+    //! its header was indexed here, and was dropped. The signers are past
+    //! this block, so the signed frontier this node has indexed does not
+    //! bound it. Park, the forward-of-tip rule and backoff still apply.
+    bool attested_before_header{false};
     bool on_parked_reorg_branch{false};
     int32_t height{-1};
     std::optional<int32_t> authority_frontier{};
@@ -2976,7 +2981,7 @@ struct TrustedAttestationAdmitView {
         return TrustedAttestationAdmit::RejectNotForwardOfTip;
     }
     if (v.authority_frontier.has_value() &&
-        v.height > *v.authority_frontier) {
+        v.height > *v.authority_frontier && !v.attested_before_header) {
         return TrustedAttestationAdmit::RejectAboveFrontier;
     }
     if (v.in_backoff) {

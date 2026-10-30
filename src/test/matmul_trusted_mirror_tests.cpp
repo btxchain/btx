@@ -2602,6 +2602,43 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         node::matmul_trusted::GPU_RETAIN_ATTESTATION_RETRY.count(), 2);
 }
 
+BOOST_AUTO_TEST_CASE(attested_before_header_lifts_only_the_frontier_rule)
+{
+    using node::matmul_trusted::EvaluateTrustedAttestationAdmit;
+    using node::matmul_trusted::TrustedAttestationAdmit;
+    using node::matmul_trusted::TrustedAttestationAdmitView;
+
+    // The pins attested this block before its header was indexed here: it is
+    // above the signed frontier this node knows, not above the signers.
+    TrustedAttestationAdmitView view{
+        .tip_extending = false,
+        .extends_active_tip_chain = true,
+        .attested_before_header = true,
+        .on_parked_reorg_branch = false,
+        .height = 190670,
+        .authority_frontier = 190668,
+        .in_backoff = false,
+    };
+    BOOST_CHECK(EvaluateTrustedAttestationAdmit(view) == TrustedAttestationAdmit::Allow);
+    view.attested_before_header = false;
+    BOOST_CHECK(EvaluateTrustedAttestationAdmit(view) ==
+                TrustedAttestationAdmit::RejectAboveFrontier);
+
+    // Park, the forward-of-tip rule and backoff still apply.
+    view.attested_before_header = true;
+    view.on_parked_reorg_branch = true;
+    BOOST_CHECK(EvaluateTrustedAttestationAdmit(view) ==
+                TrustedAttestationAdmit::RejectParkedReorg);
+    view.on_parked_reorg_branch = false;
+    view.extends_active_tip_chain = false;
+    BOOST_CHECK(EvaluateTrustedAttestationAdmit(view) ==
+                TrustedAttestationAdmit::RejectNotForwardOfTip);
+    view.extends_active_tip_chain = true;
+    view.in_backoff = true;
+    BOOST_CHECK(EvaluateTrustedAttestationAdmit(view) ==
+                TrustedAttestationAdmit::RejectBackoff);
+}
+
 BOOST_AUTO_TEST_CASE(open_heard_does_not_advance_signed_frontier)
 {
     RuntimeReset reset;
