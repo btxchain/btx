@@ -569,6 +569,7 @@ if(WITH_MODELNET)
     modelnet_uri_resolve_tests.cpp
     modelnet_ds_remaining_tests.cpp
     modelnet_resolve_bounds_tests.cpp
+    modelnet_retrieve_peer_reply_tests.cpp
     modelnet_iso_isolation_tests.cpp
     modelnet_pay_pool_tests.cpp
     modelnet_b0_disc_store_tests.cpp

@@ -10406,8 +10406,10 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
             return false;
         }
         UniValue gj;
-        if (!gj.read(grant_resp.body) || !gj.isObject() || !gj.exists("payload_hex") ||
-            !gj.exists("sig_hex") || !gj.exists("pubkey_hex")) {
+        // Peer data: a field of another type fails this grant like a missing one.
+        // Swarm sources run this on threads of their own, where a throw ends the helper.
+        if (!gj.read(grant_resp.body) || !gj.isObject() || !gj["payload_hex"].isStr() ||
+            !gj["sig_hex"].isStr() || !gj["pubkey_hex"].isStr()) {
             gerr = "missing FreeGrant";
             return false;
         }
@@ -10694,7 +10696,6 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
             progress->pieces_committed.fetch_add(1);
             NoteRetrieveBytes(progress, cat.UsedBytes());
         };
-        ThreadJoin extra_join;
         std::atomic<int> extra_ok{0};
         std::mutex rid_mu;
         std::map<uint32_t, std::vector<uint64_t>> piece_rid;
@@ -10734,6 +10735,9 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
             }
             xfer.ObservePeer(ep, m);
         };
+        // Declared after everything its threads use, so any return below joins
+        // them before that state is destroyed.
+        ThreadJoin extra_join;
         std::vector<SourceAvailability> sources;
         if (!missing.empty() && !extras.empty()) {
             auto add_av = [&](const std::string& eh, uint16_t eport) {
@@ -10756,7 +10760,14 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
                     pid.service_id = aj["service_id"].get_str();
                 }
                 std::string perr;
-                (void)ParseAvailabilitySources(aj, pid.endpoint, pid, artifact, sources, perr, ConnNowMs());
+                // Peer data: the parser throws on a field of another type. Drop
+                // this source's entries; the other sources keep the retrieve going.
+                const size_t had = sources.size();
+                try {
+                    (void)ParseAvailabilitySources(aj, pid.endpoint, pid, artifact, sources, perr, ConnNowMs());
+                } catch (const std::exception&) {
+                    sources.resize(had);
+                }
             };
             add_av(host, port);
             for (const auto& ep : extras) {
