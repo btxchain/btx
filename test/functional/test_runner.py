@@ -205,6 +205,7 @@ BASE_SCRIPTS = [
     'wallet_bridge_egress_build.py',
     'feature_spend_path_recovery_activation_compat.py',
     'feature_spend_path_recovery_reorg.py',
+    'feature_spend_path_recovery_stale_anchor_template.py',
     'rpc_btx_difficulty_health.py',
     'rpc_pq_multisig.py',
     'feature_p2mr_end_to_end.py',
