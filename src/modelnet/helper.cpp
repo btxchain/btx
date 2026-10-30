@@ -8095,21 +8095,17 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         std::vector<Quote> quotes;
         std::vector<PaymentJournal> journal;
         const fs::path dir = cat.Store().Root().parent_path();
-        LoadPaymentState(dir, quotes, journal, err);
+        std::unique_lock<std::mutex> payment_lock(PaymentStateMutex());
+        // A paid plan saves its new quote into quotes.json. Never write over
+        // a journal that could not be read; a free-only plan writes nothing.
+        if (!LoadPaymentState(dir, quotes, journal, err) && mode != RetrievalMode::FREE_ONLY) {
+            err_code = "IO";
+            return false;
+        }
         for (auto& p : missing) {
             if (DuplicateReservedRange(journal, p.file_index, p.piece_index, 1)) p.reserved_paid = true;
         }
-        int64_t outstanding = 0;
-        for (const auto& q : quotes) {
-            if (!(q.model_id == r.digest) || q.price_atoms <= 0) continue;
-            bool delivered = false;
-            for (const auto& j : journal) {
-                if (j.delivered && j.quote_id == q.offer_id.Hex()) delivered = true;
-            }
-            if (delivered) continue;
-            outstanding += q.price_atoms;
-            if (q.fee_cap_atoms > 0) outstanding += q.fee_cap_atoms;
-        }
+        const int64_t outstanding = OutstandingQuoteAtoms(quotes, journal, r.digest);
         if (mode != RetrievalMode::FREE_ONLY) {
             Quote q;
             int64_t price = 0;
@@ -8122,9 +8118,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     price = 1; // explicit paid is never a free quote; automatic spend stays 0
                 }
             }
-            MakePrepaidQuote(q, r.digest, have_local ? local_probe.artifact_id : Digest48{}, 0, 0, price, err);
+            if (!MakePrepaidQuote(q, r.digest, have_local ? local_probe.artifact_id : Digest48{}, 0, 0, price, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
             quotes.push_back(q);
-            SavePaymentState(dir, quotes, journal, err);
+            if (!SavePaymentState(dir, quotes, journal, err)) {
+                err_code = "IO";
+                return false;
+            }
             result.pushKV("quote", QuoteToJson(q));
             if (mode == RetrievalMode::EXPLICIT_PAID) {
                 result.pushKV("funding_rpc", "preparemodelfunding");
@@ -8132,6 +8134,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 result.pushKV("note", "EXPLICIT_PAID quotes a price; automatic spend remains 0. preparemodelfunding / signmodelfunding / submitmodelfunding freeze htlc_sha256.");
             }
         }
+        // Nothing below reads or writes quotes.json; release before network or cloud work.
+        payment_lock.unlock();
         bool paid_binding = false;
         for (const auto& q : quotes) {
             if (!(q.model_id == r.digest)) continue;

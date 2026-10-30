@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
@@ -394,6 +395,68 @@ BOOST_AUTO_TEST_CASE(v11_free_12)
     std::string code;
     BOOST_REQUIRE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err));
     BOOST_CHECK(result.exists("bypass_rejected") && result["bypass_rejected"].get_bool());
+}
+
+BOOST_AUTO_TEST_CASE(quote_amounts_stay_in_range)
+{
+    constexpr int64_t max64{std::numeric_limits<int64_t>::max()};
+    std::string err;
+    modelnet::Digest48 mid;
+    BOOST_REQUIRE(modelnet::Digest48::FromHex(std::string(96, '2'), mid, err));
+
+    modelnet::Quote q;
+    BOOST_CHECK(!modelnet::MakePrepaidQuote(q, mid, mid, 0, 1, max64, err));
+    BOOST_CHECK_EQUAL(err, "quote price out of range");
+    BOOST_CHECK(!modelnet::MakePrepaidQuote(q, mid, mid, 0, 1, -1, err));
+    BOOST_REQUIRE(modelnet::MakePrepaidQuote(q, mid, mid, 0, 1, modelnet::MAX_MONEY_ATOMS, err));
+
+    // getmodel refuses a requester price that MakePrepaidQuote refuses.
+    const fs::path tmp = m_path_root / "quote-amounts";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("method", "getmodel");
+    UniValue params(UniValue::VARR);
+    params.push_back(mid.Hex());
+    UniValue opts(UniValue::VOBJ);
+    opts.pushKV("retrieval_policy", "EXPLICIT_PAID");
+    opts.pushKV("price_atoms", max64);
+    params.push_back(opts);
+    rpc.pushKV("params", params);
+    UniValue result;
+    std::string code;
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat, rpc, result, code, err));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    std::vector<modelnet::Quote> stored;
+    std::vector<modelnet::PaymentJournal> journal;
+    BOOST_CHECK(modelnet::LoadPaymentState(tmp, stored, journal, err));
+    BOOST_CHECK(stored.empty());
+
+    // A stored quote may still hold any int64 amount: the sum saturates.
+    std::vector<modelnet::Quote> quotes(2);
+    for (auto& s : quotes) {
+        s.model_id = mid;
+        s.price_atoms = max64;
+    }
+    BOOST_CHECK_EQUAL(modelnet::OutstandingQuoteAtoms(quotes, journal, mid), modelnet::MAX_MONEY_ATOMS + 1);
+    quotes[0].price_atoms = 40;
+    quotes[0].fee_cap_atoms = 2;
+    quotes[1].price_atoms = modelnet::MAX_MONEY_ATOMS - 42;
+    quotes[1].fee_cap_atoms = max64;
+    BOOST_CHECK_EQUAL(modelnet::OutstandingQuoteAtoms(quotes, journal, mid), modelnet::MAX_MONEY_ATOMS + 1);
+    quotes[1].fee_cap_atoms = 0;
+    BOOST_CHECK_EQUAL(modelnet::OutstandingQuoteAtoms(quotes, journal, mid), modelnet::MAX_MONEY_ATOMS);
+
+    // uint32 piece fields survive a save and load.
+    modelnet::Quote wide;
+    BOOST_REQUIRE(modelnet::MakePrepaidQuote(wide, mid, mid, 0x80000005U, 0xFFFFFFFFU, 7, err));
+    wide.file_index = 0x80000001U;
+    BOOST_REQUIRE(modelnet::SavePaymentState(tmp, {wide}, {}, err));
+    stored.clear();
+    BOOST_REQUIRE_MESSAGE(modelnet::LoadPaymentState(tmp, stored, journal, err), err);
+    BOOST_REQUIRE_EQUAL(stored.size(), 1U);
+    BOOST_CHECK_EQUAL(stored[0].file_index, 0x80000001U);
+    BOOST_CHECK_EQUAL(stored[0].first_piece, 0x80000005U);
+    BOOST_CHECK_EQUAL(stored[0].piece_count, 0xFFFFFFFFU);
 }
 
 BOOST_AUTO_TEST_CASE(v11_free_13)

@@ -22,6 +22,7 @@
 // POOL-13  cap enforcement (max_atoms, ExposureWithinCeiling)
 // POOL-14  helper-absent recovery (wallet-only funding RPCs)
 
+#include <core_io.h>
 #include <crypto/common.h>
 #include <modelnet/access_policy.h>
 #include <modelnet/catalog.h>
@@ -31,26 +32,33 @@
 #include <modelnet/release.h>
 #include <modelnet/resource_uri.h>
 #include <modelnet/transfer.h>
+#include <primitives/transaction.h>
+#include <script/script.h>
 #include <span.h>
 #include <test/util/setup_common.h>
+#include <uint256.h>
 #include <univalue.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
 #ifdef ENABLE_WALLET
-#include <core_io.h>
 #include <pqkey.h>
-#include <primitives/transaction.h>
-#include <script/script.h>
-#include <uint256.h>
 #include <wallet/model_funding.h>
 #endif
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <thread>
 #include <vector>
+
+#ifndef WIN32
+#include <csignal>
+#include <sys/resource.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_pay_pool_tests, BasicTestingSetup)
 
@@ -89,6 +97,42 @@ modelnet::FrozenModelFunding SampleFunding()
     in.amount_atoms = 1000;
     in.max_atoms = 1000;
     return in;
+}
+
+std::string TinyTxHex(CAmount value)
+{
+    CMutableTransaction mtx;
+    mtx.vin.emplace_back(COutPoint(Txid::FromUint256(uint256::ONE), 0));
+    mtx.vout.emplace_back(value, CScript() << OP_TRUE);
+    return EncodeHexTx(CTransaction(mtx));
+}
+
+bool HelperCall(modelnet::ModelCatalog& cat, const std::string& method, const UniValue& params,
+                UniValue& result, std::string& code, std::string& err)
+{
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("method", method);
+    req.pushKV("params", params);
+    return modelnet::DispatchHelperRpc(cat, req, result, code, err);
+}
+
+std::string ReadFile(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+//! Cut quotes.json in half, as an older in-place write that was interrupted
+//! would have left it, and return what is left.
+std::string CutJournal(const fs::path& path)
+{
+    const std::string full{ReadFile(path)};
+    BOOST_REQUIRE(full.size() > 2);
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << full.substr(0, full.size() / 2);
+    }
+    return ReadFile(path);
 }
 
 } // namespace
@@ -189,6 +233,202 @@ BOOST_AUTO_TEST_CASE(pay_04_08_buyer_bind_and_durable_journal)
     BOOST_CHECK(modelnet::DuplicatePayment(journal2, "aa11"));
     BOOST_CHECK(!modelnet::DuplicatePayment(journal2, "bb22"));
 }
+
+BOOST_AUTO_TEST_CASE(pay_08_submit_keeps_unreadable_journal)
+{
+    // quotes.json is the only record of journaled txids and paid ranges. A
+    // copy that does not parse must not be replaced by one holding only the
+    // next payment, which would report every earlier txid as new again.
+    const fs::path tmp = m_path_root / "pay-unreadable-submit";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    const fs::path journal_path = cat.Store().Root().parent_path() / "quotes.json";
+    UniValue params(UniValue::VARR);
+    params.push_back(TinyTxHex(1000));
+    UniValue result;
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(HelperCall(cat, "submitmodelfunding", params, result, code, err), err);
+    BOOST_REQUIRE(result["submitted"].get_bool());
+
+    const std::string cut{CutJournal(journal_path)};
+    UniValue other(UniValue::VARR);
+    other.push_back(TinyTxHex(2000));
+    BOOST_CHECK(!HelperCall(cat, "submitmodelfunding", other, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IO");
+    BOOST_CHECK(!HelperCall(cat, "submitmodelfunding", params, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IO");
+    BOOST_CHECK(ReadFile(journal_path) == cut);
+}
+
+BOOST_AUTO_TEST_CASE(pay_08_paid_plan_keeps_unreadable_journal)
+{
+    // A paid getmodel plan stores its new quote in quotes.json. With an
+    // unreadable journal it must fail instead of writing over it; a free-only
+    // plan writes nothing and still answers.
+    const fs::path tmp = m_path_root / "pay-unreadable-plan";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    const fs::path paydir = cat.Store().Root().parent_path();
+    std::string err;
+    modelnet::Digest48 mid;
+    BOOST_REQUIRE(modelnet::Digest48::FromHex(std::string(96, '1'), mid, err));
+    std::vector<modelnet::PaymentJournal> journal(1);
+    journal[0].txid = "aa11";
+    journal[0].piece_count = 1;
+    BOOST_REQUIRE(modelnet::SavePaymentState(paydir, {}, journal, err));
+    const std::string cut{CutJournal(paydir / "quotes.json")};
+
+    UniValue params(UniValue::VARR);
+    params.push_back(mid.Hex());
+    UniValue opts(UniValue::VOBJ);
+    opts.pushKV("retrieval_policy", "EXPLICIT_PAID");
+    opts.pushKV("price_atoms", 5);
+    params.push_back(opts);
+    UniValue result;
+    std::string code;
+    BOOST_CHECK(!HelperCall(cat, "getmodel", params, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IO");
+    BOOST_CHECK(ReadFile(paydir / "quotes.json") == cut);
+
+    UniValue free_params(UniValue::VARR);
+    free_params.push_back(mid.Hex());
+    free_params.push_back("FREE_ONLY");
+    BOOST_CHECK_MESSAGE(HelperCall(cat, "getmodel", free_params, result, code, err), err);
+    BOOST_CHECK(ReadFile(paydir / "quotes.json") == cut);
+}
+
+BOOST_AUTO_TEST_CASE(pay_08_concurrent_submits_keep_every_txid)
+{
+    // The helper serves unix RPC with two workers, so two submits can run at once.
+    for (int round = 0; round < 10; ++round) {
+        const fs::path tmp = m_path_root / fs::PathFromString("pay-concurrent-" + std::to_string(round));
+        modelnet::ModelCatalog cat{tmp, 1 << 20};
+        const fs::path dir = cat.Store().Root().parent_path();
+        std::atomic<int> ok{0};
+        std::vector<std::thread> pool;
+        for (int t = 0; t < 2; ++t) {
+            pool.emplace_back([&, t] {
+                for (int i = 0; i < 40; ++i) {
+                    UniValue params(UniValue::VARR);
+                    params.push_back(TinyTxHex(1000 + t * 100000 + i));
+                    UniValue result;
+                    std::string code, err;
+                    if (HelperCall(cat, "submitmodelfunding", params, result, code, err)) ++ok;
+                }
+            });
+        }
+        for (auto& th : pool) th.join();
+        std::vector<modelnet::Quote> quotes;
+        std::vector<modelnet::PaymentJournal> journal;
+        std::string err;
+        BOOST_CHECK(modelnet::LoadPaymentState(dir, quotes, journal, err));
+        BOOST_CHECK_EQUAL(ok.load(), 80);
+        BOOST_CHECK_EQUAL(journal.size(), 80U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pay_08_concurrent_submits_and_paid_plans_keep_both)
+{
+    // A paid getmodel plan saves its quote into the same quotes.json.
+    std::string err;
+    modelnet::Digest48 mid;
+    BOOST_REQUIRE(modelnet::Digest48::FromHex(std::string(96, '1'), mid, err));
+    for (int round = 0; round < 10; ++round) {
+        const fs::path tmp = m_path_root / fs::PathFromString("pay-concurrent-plan-" + std::to_string(round));
+        modelnet::ModelCatalog cat{tmp, 1 << 20};
+        const fs::path dir = cat.Store().Root().parent_path();
+        std::atomic<int> ok{0};
+        std::thread submits([&] {
+            for (int i = 0; i < 40; ++i) {
+                UniValue params(UniValue::VARR);
+                params.push_back(TinyTxHex(1000 + i));
+                UniValue result;
+                std::string code, e;
+                if (HelperCall(cat, "submitmodelfunding", params, result, code, e)) ++ok;
+            }
+        });
+        std::thread plans([&] {
+            for (int i = 0; i < 40; ++i) {
+                UniValue params(UniValue::VARR);
+                params.push_back(mid.Hex());
+                UniValue opts(UniValue::VOBJ);
+                opts.pushKV("retrieval_policy", "EXPLICIT_PAID");
+                opts.pushKV("price_atoms", 1);
+                params.push_back(opts);
+                UniValue result;
+                std::string code, e;
+                if (HelperCall(cat, "getmodel", params, result, code, e)) ++ok;
+            }
+        });
+        submits.join();
+        plans.join();
+        std::vector<modelnet::Quote> quotes;
+        std::vector<modelnet::PaymentJournal> journal;
+        BOOST_CHECK(modelnet::LoadPaymentState(dir, quotes, journal, err));
+        BOOST_CHECK_EQUAL(ok.load(), 80);
+        BOOST_CHECK_EQUAL(journal.size(), 40U);
+        BOOST_CHECK_EQUAL(quotes.size(), 40U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pay_08_paid_plan_reports_failed_save)
+{
+    // A quote that could not be saved is in no file; getmodel must not return it.
+    const fs::path tmp = m_path_root / "pay-plan-save-fails";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    const fs::path paydir = cat.Store().Root().parent_path();
+    fs::create_directories(paydir / "quotes.json.tmp"); // the save cannot create its sibling
+    std::string err;
+    modelnet::Digest48 mid;
+    BOOST_REQUIRE(modelnet::Digest48::FromHex(std::string(96, '1'), mid, err));
+    UniValue params(UniValue::VARR);
+    params.push_back(mid.Hex());
+    UniValue opts(UniValue::VOBJ);
+    opts.pushKV("retrieval_policy", "EXPLICIT_PAID");
+    opts.pushKV("price_atoms", 5);
+    params.push_back(opts);
+    UniValue result;
+    std::string code;
+    BOOST_CHECK(!HelperCall(cat, "getmodel", params, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IO");
+    BOOST_CHECK(!result.exists("quote"));
+    std::vector<modelnet::Quote> quotes;
+    std::vector<modelnet::PaymentJournal> journal;
+    BOOST_CHECK(modelnet::LoadPaymentState(paydir, quotes, journal, err));
+    BOOST_CHECK(quotes.empty());
+}
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(pay_08_failed_journal_write_keeps_previous_journal)
+{
+    const fs::path tmp = m_path_root / "pay-short-write";
+    fs::create_directories(tmp);
+    std::vector<modelnet::PaymentJournal> journal(1);
+    journal[0].txid = "aa11";
+    std::string err;
+    BOOST_REQUIRE(modelnet::SavePaymentState(tmp, {}, journal, err));
+    const std::string before{ReadFile(tmp / "quotes.json")};
+    journal.emplace_back().txid = "bb22";
+
+    // Cap the file size below the new journal, as a full disk would. SIGXFSZ
+    // is ignored so the write fails with EFBIG instead of ending the process.
+    struct rlimit old_limit;
+    BOOST_REQUIRE(getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit cap{old_limit};
+    cap.rlim_cur = 16;
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(setrlimit(RLIMIT_FSIZE, &cap) == 0);
+    const bool saved{modelnet::SavePaymentState(tmp, {}, journal, err)};
+    BOOST_REQUIRE(setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    BOOST_CHECK(!saved);
+    BOOST_CHECK(ReadFile(tmp / "quotes.json") == before);
+    BOOST_CHECK(!fs::exists(tmp / "quotes.json.tmp"));
+    std::vector<modelnet::Quote> quotes;
+    std::vector<modelnet::PaymentJournal> loaded;
+    BOOST_REQUIRE(modelnet::LoadPaymentState(tmp, quotes, loaded, err));
+    BOOST_CHECK(modelnet::DuplicatePayment(loaded, "aa11"));
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(pay_07_helper_cannot_sign_or_verify_chain)
 {

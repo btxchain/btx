@@ -8,6 +8,7 @@
 #include <random.h>
 #include <script/script.h>
 #include <tinyformat.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 
 #include <span.h>
@@ -161,9 +162,9 @@ UniValue QuoteToJson(const Quote& q)
     o.pushKV("buyer_id", q.buyer_id.Hex());
     o.pushKV("model_id", q.model_id.Hex());
     o.pushKV("artifact_id", q.artifact_id.Hex());
-    o.pushKV("file_index", static_cast<int>(q.file_index));
-    o.pushKV("first_piece", static_cast<int>(q.first_piece));
-    o.pushKV("piece_count", static_cast<int>(q.piece_count));
+    o.pushKV("file_index", static_cast<int64_t>(q.file_index));
+    o.pushKV("first_piece", static_cast<int64_t>(q.first_piece));
+    o.pushKV("piece_count", static_cast<int64_t>(q.piece_count));
     o.pushKV("maximum_bytes", q.maximum_bytes);
     o.pushKV("price_atoms", q.price_atoms);
     o.pushKV("fee_cap_atoms", q.fee_cap_atoms);
@@ -196,6 +197,12 @@ bool QuoteFromJson(const UniValue& o, Quote& q, std::string& err)
     q.fee_cap_atoms = o.exists("fee_cap_atoms") ? o["fee_cap_atoms"].getInt<int64_t>() : 0;
     q.expires_at = o.exists("expires_at") ? o["expires_at"].getInt<int64_t>() : 0;
     return true;
+}
+
+std::mutex& PaymentStateMutex()
+{
+    static std::mutex mu;
+    return mu;
 }
 
 bool LoadPaymentState(const fs::path& dir, std::vector<Quote>& quotes, std::vector<PaymentJournal>& journal, std::string& err)
@@ -256,18 +263,35 @@ bool SavePaymentState(const fs::path& dir, const std::vector<Quote>& quotes, con
     o.pushKV("quotes", qa);
     o.pushKV("journal", ja);
     fs::create_directories(dir);
-    std::ofstream out(dir / "quotes.json", std::ios::trunc);
-    if (!out) {
+    // Write a sibling and rename it over quotes.json, so a crash or a failed
+    // write never leaves a cut-short journal that the next load rejects.
+    const fs::path path = dir / "quotes.json";
+    const fs::path tmp = dir / "quotes.json.tmp";
+    // Sync the file before the rename and the directory after it, like
+    // AtomicWrite in lab_disk.cpp, so a power loss cannot leave it empty.
+    const std::string bytes{o.write() + "\n"};
+    bool written{false};
+    if (FILE* file = fsbridge::fopen(tmp, "wb")) {
+        written = fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size() && FileCommit(file);
+        if (fclose(file) != 0) written = false;
+    }
+    if (!written || !RenameOver(tmp, path)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
         err = "quotes.json write";
         return false;
     }
-    out << o.write() << "\n";
+    DirectoryCommit(dir);
     return true;
 }
 
 bool MakePrepaidQuote(Quote& q, const Digest48& model_id, const Digest48& artifact_id, uint32_t first_piece,
                       uint32_t piece_count, int64_t price_atoms, std::string& err)
 {
+    if (price_atoms < 0 || price_atoms > MAX_MONEY_ATOMS) {
+        err = "quote price out of range";
+        return false;
+    }
     q = {};
     unsigned char nonce[32];
     GetStrongRandBytes(Span<unsigned char>{nonce, 32});
@@ -279,8 +303,29 @@ bool MakePrepaidQuote(Quote& q, const Digest48& model_id, const Digest48& artifa
     q.maximum_bytes = uint64_t{piece_count} * PIECE_SIZE;
     q.price_atoms = price_atoms;
     q.expires_at = static_cast<int64_t>(std::time(nullptr)) + 3600;
-    (void)err;
     return true;
+}
+
+int64_t OutstandingQuoteAtoms(const std::vector<Quote>& quotes, const std::vector<PaymentJournal>& journal,
+                              const Digest48& model_id)
+{
+    int64_t outstanding = 0;
+    for (const auto& q : quotes) {
+        if (!(q.model_id == model_id) || q.price_atoms <= 0) continue;
+        bool delivered = false;
+        for (const auto& j : journal) {
+            if (j.delivered && j.quote_id == q.offer_id.Hex()) delivered = true;
+        }
+        if (delivered) continue;
+        // quotes.json may hold any int64 amount; saturate instead of overflowing.
+        const int64_t fee = q.fee_cap_atoms > 0 ? q.fee_cap_atoms : 0;
+        if (q.price_atoms > MAX_MONEY_ATOMS || fee > MAX_MONEY_ATOMS - q.price_atoms ||
+            outstanding > MAX_MONEY_ATOMS - q.price_atoms - fee) {
+            return MAX_MONEY_ATOMS + 1;
+        }
+        outstanding += q.price_atoms + fee;
+    }
+    return outstanding;
 }
 
 namespace {
