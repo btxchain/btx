@@ -1,6 +1,6 @@
 # macOS Build Guide
 
-**Updated for MacOS [15](https://www.apple.com/macos/macos-sequoia/)**
+This guide covers the supported Apple Silicon build with Metal validation.
 
 This guide describes how to build `btxd`, command-line utilities, and GUI on macOS.
 
@@ -16,7 +16,7 @@ macOS comes with a built-in Terminal located in:
 ### 1. Xcode Command Line Tools
 
 The Xcode Command Line Tools are a collection of build tools for macOS.
-These tools must be installed in order to build Bitcoin Core from source.
+These tools must be installed in order to build BTX from source.
 
 To install, run the following command from your terminal:
 
@@ -26,6 +26,20 @@ xcode-select --install
 
 Upon running the command, you should see a popup appear.
 Click on `Install` to continue the installation process.
+
+The Command Line Tools alone do not include the Metal compiler used by BTX.
+Install full Xcode from the App Store, select it, and download the Metal
+toolchain:
+
+```bash
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+xcodebuild -downloadComponent MetalToolchain
+xcrun -f metal
+```
+
+The final command must print a path ending in `/usr/bin/metal`. If it reports
+`missing Metal Toolchain`, rerun the `xcodebuild` download before configuring
+BTX.
 
 ### 2. Homebrew Package Manager
 
@@ -47,18 +61,23 @@ See [dependencies.md](dependencies.md) for a complete overview.
 
 To install, run the following from your terminal:
 
-``` bash
-brew install cmake boost pkgconf libevent openssl@3
+```bash
+brew install cmake ninja pkgconf boost@1.85 libevent zeromq libomp openssl@3
 ```
 
-### 4. Clone Bitcoin repository
+BTX currently uses Boost 1.85 for the macOS release build. Pass its include
+directory explicitly during CMake configuration because versioned Homebrew
+formulae are keg-only.
+
+### 4. Clone the BTX repository
 
 `git` should already be installed by default on your system.
-Now that all the required dependencies are installed, let's clone the Bitcoin Core repository to a directory.
+Now that all the required dependencies are installed, clone BTX into a directory.
 All build scripts and commands will run from this directory.
 
-``` bash
-git clone https://github.com/bitcoin/bitcoin.git
+```bash
+git clone https://github.com/btxchain/btx.git
+cd btx
 ```
 
 ### 5. Install Optional Dependencies
@@ -88,7 +107,7 @@ brew install berkeley-db@4
 
 ###### Qt
 
-Bitcoin Core includes a GUI built with the cross-platform Qt Framework. To compile the GUI, we need to install
+BTX includes a GUI built with the cross-platform Qt Framework. To compile the GUI, install
 Qt, libqrencode and pass `-DBUILD_GUI=ON`. Skip if you don't intend to use the GUI.
 
 ``` bash
@@ -98,7 +117,7 @@ brew install qt@5
 Note: Building may fail if Qt 6 is installed (`qt` or `qt@6`)
 
 Note: Building with Qt binaries downloaded from the Qt website is not officially supported.
-See the notes in [#7714](https://github.com/bitcoin/bitcoin/issues/7714).
+See the upstream notes in [bitcoin/bitcoin#7714](https://github.com/bitcoin/bitcoin/issues/7714).
 
 ###### libqrencode
 
@@ -128,7 +147,8 @@ brew install miniupnpc
 #### ZMQ Dependencies
 
 ZMQ is **required** for every shipped `btxd` (`-DWITH_ZMQ=ON`, the CMake
-default). Install:
+default) and was installed in the required dependency step above. If it was
+omitted, install it now:
 
 ``` bash
 brew install zeromq
@@ -156,8 +176,8 @@ silent-publish failure.
 ExactReplay, mining, and Native Model Network on Apple Silicon need a
 **Metal** `btxd` plus OpenSSL 3.5+ for PQ1. Install:
 
-``` bash
-brew install cmake ninja pkgconf boost libevent zeromq libomp openssl@3 qt qrencode
+```bash
+brew install cmake ninja pkgconf boost@1.85 libevent zeromq libomp openssl@3 qt qrencode
 ```
 
 Configure a Release tree (keep `-j1` or `-j2` if another `btxd` is already
@@ -169,6 +189,7 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig"
 cmake -S . -B build-metal -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH=/opt/homebrew \
+  -DBoost_INCLUDE_DIR="$(brew --prefix boost@1.85)/include" \
   -DWITH_ZMQ=ON \
   -DBTX_ENABLE_METAL=ON \
   -DWITH_MODELNET=ON \
@@ -206,7 +227,7 @@ brew install python
 
 #### Deploy Dependencies
 
-You can [deploy](#3-deploy-optional) a `.zip` containing the Bitcoin Core application.
+You can [deploy](#3-deploy-optional) a `.zip` containing the BTX application.
 It is required that you have `python`, `libicns`, and `librsvg` installed.
 
 ``` bash
@@ -219,11 +240,11 @@ Note: Deploying may fail if NPM png2icns is installed. You can remove it with:
 npm uninstall -g png2icns
 ```
 
-## Building Bitcoin Core
+## Building BTX
 
 ### 1. Configuration
 
-There are many ways to configure Bitcoin Core, here are a few common examples:
+There are many ways to configure BTX. Here are a few common examples:
 
 ##### Wallet (BDB + SQlite) Support, No GUI:
 
@@ -260,7 +281,7 @@ cmake -B build -LH
 ### 2. Compile
 
 After configuration, you are ready to compile.
-Run the following in your terminal to compile Bitcoin Core:
+Run the following in your terminal to compile BTX:
 
 ``` bash
 cmake --build build     # Append "-j N" here for N parallel jobs.
@@ -275,10 +296,12 @@ You can also create a  `.zip` containing the `.app` bundle by running the follow
 cmake --build build --target deploy
 ```
 
-## Running Bitcoin Core
+## Running BTX
 
-Bitcoin Core should now be available at `./build/bin/btxd`.
-If you compiled support for the GUI, it should be available at `./build/bin/btx-qt`.
+The recommended Apple Silicon build above creates
+`./build-metal/bin/btxd` and `./build-metal/bin/btx-cli`. If you configured the
+generic `build` directory instead, replace `build-metal` with `build` below.
+The optional GUI is `./build-metal/bin/btx-qt`.
 
 The first time you run `btxd` or `btx-qt`, it will start downloading the blockchain.
 This process could take many hours, or even days on slower than average systems.
@@ -286,30 +309,82 @@ This process could take many hours, or even days on slower than average systems.
 By default, blockchain and wallet data files will be stored in:
 
 ``` bash
-/Users/${USER}/Library/Application Support/Bitcoin/
+$HOME/Library/Application Support/BTX/
 ```
 
 Before running, you may create an empty configuration file:
 
 ```shell
-mkdir -p "/Users/${USER}/Library/Application Support/Bitcoin"
+mkdir -p "$HOME/Library/Application Support/BTX"
 
-touch "/Users/${USER}/Library/Application Support/Bitcoin/bitcoin.conf"
+touch "$HOME/Library/Application Support/BTX/btx.conf"
 
-chmod 600 "/Users/${USER}/Library/Application Support/Bitcoin/bitcoin.conf"
+chmod 600 "$HOME/Library/Application Support/BTX/btx.conf"
 ```
 
 You can monitor the download process by looking at the debug.log file:
 
 ```shell
-tail -f $HOME/Library/Application\ Support/Bitcoin/debug.log
+tail -f "$HOME/Library/Application Support/BTX/debug.log"
+```
+
+## Troubleshooting
+
+### `cannot execute tool 'metal' due to missing Metal Toolchain`
+
+Full Xcode may be selected while the separately packaged compiler is still
+missing. Install it and verify the path:
+
+```bash
+xcodebuild -downloadComponent MetalToolchain
+xcrun -f metal
+```
+
+### Boost headers still come from unversioned Homebrew Boost
+
+If an existing CMake cache still names `/opt/homebrew/opt/boost/include`,
+configure a fresh build directory and pass the 1.85 include directory exactly
+as shown in the Apple Silicon command above. Do not mix Boost header versions
+inside one build directory.
+
+### Linker reports `_pipe2` from `libevent_core.a`
+
+This usually means the Homebrew archive was built against a newer macOS SDK
+than the selected developer tools. First install the Command Line Tools update
+shown by `softwareupdate --list`. Then rebuild libevent against the selected
+SDK:
+
+```bash
+brew reinstall --build-from-source libevent
+```
+
+### Metal is built but runtime falls back to CPU
+
+Check the selected backend:
+
+```bash
+./build-metal/bin/btx-cli getmininginfo
+```
+
+If `backend_selection_reason` reports that `MTLCompilerService` is unavailable,
+stop the daemon cleanly and keep the process under shell job control instead of
+using the daemon re-exec, so it retains access to the logged-in user's Metal
+services:
+
+```bash
+./build-metal/bin/btx-cli stop
+nohup ./build-metal/bin/btxd -server > /tmp/btxd-console.log 2>&1 &
 ```
 
 ## Other commands:
 
 ```shell
-./build/bin/btxd -daemon      # Starts the BTX daemon.
-./build/bin/btx-cli --help    # Outputs a list of command-line options.
-./build/bin/btx-cli help      # Outputs a list of RPC commands when the daemon is running.
-./build/bin/btx-qt -server # Starts btx-qt server mode, allows btx-cli control
+./build-metal/bin/btxd -daemon -server   # Start the BTX daemon.
+./build-metal/bin/btx-cli getsetupstatus # Combined first-run and sync doctor.
+./build-metal/bin/btx-cli getblockchaininfo
+./build-metal/bin/btx-cli getmininginfo
+./build-metal/bin/btx-cli stop            # Shut down cleanly.
+./build-metal/bin/btx-cli --help          # List command-line options.
+./build-metal/bin/btx-cli help            # List RPC commands while btxd is running.
+./build-metal/bin/btx-qt -server          # Start the optional GUI in server mode.
 ```
