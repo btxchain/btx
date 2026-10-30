@@ -1631,9 +1631,14 @@ inline constexpr int32_t PERSIST_FOLLOWED_SUFFIX_MAX_LEAD{1024};
  *  sending. HEADER_ONLY then waits forever (live: background tip frozen
  *  at height 6698, 28 HEADER_ONLY admits/hour, zero GETMMATTEST). Persist
  *  HAVE_DATA so background ConnectTip can complete with historical
- *  validation. Once attestation is active, keep HEADER_ONLY + GETMMATTEST
- *  so unattested RC history does not ExactReplay on the GPU. Competing
- *  extra twins are not followed historical holes and stay HEADER_ONLY. */
+ *  validation. Once attestation is active, an unattested hole stays
+ *  HEADER_ONLY + GETMMATTEST so unattested RC history does not ExactReplay,
+ *  except a body this node requested for its background chainstate that no
+ *  quorum covers (#292): without signer pins GETMMATTEST is never sent, so
+ *  that hole never filled. It goes through normal RC admission and
+ *  ExactReplays (net_processing.cpp, IsUncoveredBackgroundChainstateHole).
+ *  Competing extra twins are not followed historical holes and stay
+ *  HEADER_ONLY. */
 [[nodiscard]] inline constexpr bool PersistPreAttestationHistoricalHole(
     bool followed_historical_hole,
     bool attestation_active_at_height)

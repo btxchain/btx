@@ -6185,6 +6185,30 @@ bool PeerManagerImpl::HeaderFetchSuppressedForTest(const uint256& hash) const
     return chainman.IsMatMulFollowedHistoricalHole(index);
 }
 
+//! A body the assumeutxo background chainstate still needs that nothing else
+//! stores on this node: an ancestor of the snapshot base above the background
+//! tip and at most BLOCK_DOWNLOAD_WINDOW above it (the window
+//! TryDownloadingHistoricalBlocks requests), at an attestation-active height,
+//! with no trusted quorum covering it. Below that height the followed-hole
+//! branch already persists it, and a covered one keeps the attested path. Its
+//! header is fixed by the snapshot base, so only the real body matches it.
+[[nodiscard]] static bool IsUncoveredBackgroundChainstateHole(
+    const ChainstateManager& chainman,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    if (!chainman.GetConsensus().IsMatMulTrustedReplayAttestationActive(index->nHeight)) return false;
+    if (!chainman.BackgroundSyncInProgress()) return false;
+    const CBlockIndex* const bg_tip{chainman.GetBackgroundSyncTip()};
+    const CBlockIndex* const base{chainman.GetSnapshotBaseBlock()};
+    if (bg_tip == nullptr || base == nullptr) return false;
+    if (index->nHeight <= bg_tip->nHeight || index->nHeight > base->nHeight) return false;
+    if (index->nHeight - bg_tip->nHeight > static_cast<int>(BLOCK_DOWNLOAD_WINDOW)) return false;
+    if (base->GetAncestor(index->nHeight) != index) return false;
+    return !chainman.IndexHasTrustedMatMulAuthority(index);
+}
+
 //! ExactReplay GPU is 5GB+/12s. A competing header tree or same-height
 //! sibling burst will saturate every device and starve CandidateMining
 //! (live 2026-08-14). Split by role:
@@ -16094,6 +16118,12 @@ bool PeerManagerImpl::HoldRCJobForLowerAncestor(
 {
     AssertLockHeld(cs_main);
     if (index == nullptr) return false;
+    // #292: a requested background-chainstate hole can be retained for RC
+    // capacity, and it is an ancestor of every block above the snapshot
+    // base. It holds only another such hole: the active chain and an
+    // acquired fork above the base do not depend on the background.
+    const bool index_is_background_hole{
+        IsUncoveredBackgroundChainstateHole(m_chainman, index)};
     const auto lower{
         m_matmul_block_lifecycle.CapacityDeferredBodiesBelow(index->nHeight)};
     for (const auto& deferred : lower) {
@@ -16102,6 +16132,10 @@ bool PeerManagerImpl::HoldRCJobForLowerAncestor(
         if (cand == nullptr) continue;
         if ((cand->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) continue;
         if (index->GetAncestor(cand->nHeight) != cand) continue;
+        if (!index_is_background_hole &&
+            IsUncoveredBackgroundChainstateHole(m_chainman, cand)) {
+            continue;
+        }
         // A pending CPU confirmation has already yielded its GPU slot.
         // It cannot use another GPU replay, so do not hold otherwise
         // admissible descendants behind its stale capacity-deferred entry.
@@ -16184,6 +16218,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     bool request_attestations_without_gpu{false};
     bool header_only_competing_first{false};
     bool persist_unrequested_followed{false};
+    bool requested_background_body{false};
     bool persist_gpu_body_awaiting_attestation{false};
     bool persist_lost_twin_for_signer{false};
     bool persist_heavier_competing_fork{false};
@@ -16214,7 +16249,23 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                 admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
                 return true;
             }
+            // #292 / #305: a body this node requested for its background
+            // chainstate at an attestation-active height, with no quorum
+            // covering it, has no other way to be stored: dropping it
+            // HEADER_ONLY stopped the background below the first such
+            // height. It ExactReplays through the same admission slot,
+            // budgets and ConnectTip checks as any other body. Unsolicited
+            // pushes keep the old path.
+            requested_background_body =
+                (force_processing ||
+                 (is_retained_retry &&
+                  m_matmul_block_lifecycle.HasRetainedBody(block_hash))) &&
+                m_chainman.GetMatMulValidationMode() ==
+                    kernel::MatMulValidationMode::CONSENSUS &&
+                !node::matmul_trusted::IsTrustedMirror() &&
+                IsUncoveredBackgroundChainstateHole(m_chainman, indexed);
             persist_unrequested_followed =
+                !requested_background_body &&
                 MatMulFollowedHistoricalHole(m_chainman, indexed);
             acceptance_stable_early_exit = indexed != nullptr &&
                 (((indexed->nStatus & BLOCK_HAVE_DATA) != 0) ||
@@ -16331,9 +16382,10 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                     block_hash.ToString(),
                                     exact_reference_height, node.GetId());
                         } else if (indexed == nullptr ||
-                                   !MatMulMaySpendExactReplayGpu(
-                                       m_chainman, m_matmul_block_lifecycle,
-                                       tip, indexed, peer_best, /*body_available=*/true)) {
+                                   !(requested_background_body ||
+                                     MatMulMaySpendExactReplayGpu(
+                                         m_chainman, m_matmul_block_lifecycle,
+                                         tip, indexed, peer_best, /*body_available=*/true))) {
                             // Extra twins / trusted-mirror pin-follow: do not
                             // ExactReplay. HEADER_ONLY — except a strictly
                             // heavier competing fork whose headers we already
@@ -17159,6 +17211,11 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             ? node::MatMulBlockLifecycle::RetryCause::RC_PENDING_CAPACITY
             : node::MatMulBlockLifecycle::RetryCause::ENCDR_PENDING_CAPACITY;
         admission.capacity_epoch = observed_capacity_epoch;
+        // A background body that finds the retained store full is dropped
+        // and held off the scheduler until the deferral expires (the same
+        // fallback as an acquired-tower body): no synchronous replay on this
+        // thread, and no disconnect of the peer that served it.
+        admission.retain_floating_no_sync_fallback = requested_background_body;
         return true;
     }
     if (rc_profile) {

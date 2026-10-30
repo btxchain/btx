@@ -27,6 +27,7 @@
 #include <scheduler.h>
 #include <script/script.h>
 #include <streams.h>
+#include <test/util/chainstate.h>
 #include <test/util/logging.h>
 #include <test/util/matmul_fixture.h>
 #include <test/util/mining.h>
@@ -15123,6 +15124,761 @@ BOOST_AUTO_TEST_CASE(getmmattest_heard_fills_answer_to_four)
     BOOST_CHECK_EQUAL(DecodeMmAttest(payloads[0]).size(), per_answer - 1);
     BOOST_CHECK_EQUAL(heard_items(payloads), 0U);
     BOOST_CHECK(!requester.fDisconnect);
+}
+
+namespace {
+//! Regtest assumeutxo data is compiled in, and these cases need an entry at a
+//! height they mine themselves. A zero hash_serialized and blockhash is the
+//! mockable-chain wildcard that ActivateSnapshot already accepts on regtest
+//! (AssumeutxoHashMatches, allow_mockable_height_match).
+struct AssumeutxoTestAccess : CChainParams {
+    static std::vector<AssumeutxoData>& Data(const CChainParams& params)
+    {
+        return const_cast<CChainParams&>(params).*(&AssumeutxoTestAccess::m_assumeutxo_data);
+    }
+};
+
+//! An unconfigured -matmulvalidation=consensus node that fast-started with
+//! loadtxoutset: the snapshot chainstate is at the base, the background
+//! chainstate is at genesis, and every block from height 1 to the base is a
+//! hole on the background chain. n_pre blocks are mined below the v4/BMX4C/RC
+//! height (pre-attestation, as mainnet below 185000), then n_blocks at and
+//! above it (attestation-active, Profile 1). One outbound full peer serves the
+//! bodies.
+struct BackgroundHoleScenario {
+    TestingSetup& fx;
+    ChainstateManager& chainman;
+    ConnmanTestMsg& connman;
+    PeerManager& peerman;
+    kernel::MatMulValidationMode& mode;
+    const kernel::MatMulValidationMode saved_mode;
+    Consensus::Params& consensus;
+    RestoreMatMulHeights restore_heights;
+    const bool saved_skip_matmul_validation;
+    std::vector<CBlock> blocks; //!< blocks[i] is at height i + 1
+    const CBlockIndex* base{nullptr};
+    int au_height{-1};
+    int rc_height{1}; //!< lowest attestation-active height in `blocks`
+    std::unique_ptr<CNode> archive;
+    //! Device ExactReplay verdict for every replay, and how many ran.
+    std::atomic<bool> replay_ok{true};
+    std::atomic<int> replays{0};
+    //! Verification jobs the worker ran below rc_height.
+    std::atomic<int> worker_jobs_below_rc{0};
+
+    BackgroundHoleScenario(TestingSetup& f, int n_blocks, int n_pre = 0)
+        : fx{f},
+          chainman{*Assert(f.m_node.chainman)},
+          connman{static_cast<ConnmanTestMsg&>(*f.m_node.connman)},
+          peerman{*f.m_node.peerman},
+          mode{const_cast<kernel::MatMulValidationMode&>(
+              chainman.m_options.matmul_validation_mode)},
+          saved_mode{mode},
+          consensus{const_cast<Consensus::Params&>(chainman.GetParams().GetConsensus())},
+          restore_heights{SaveMatMulHeights(consensus)},
+          saved_skip_matmul_validation{consensus.fSkipMatMulValidation}
+    {
+        node::matmul_trusted::ResetForTest();
+        ResetSharedPeermanFixture(fx.m_node);
+        ResetMatMulEncDrVerdictsForTest();
+        BOOST_REQUIRE(!node::matmul_trusted::IsConfigured());
+        mode = kernel::MatMulValidationMode::CONSENSUS;
+        chainman.m_cached_finished_ibd.store(true, std::memory_order_relaxed);
+        const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE_EQUAL(tip->nHeight, 0);
+        SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+        if (n_pre > 0) {
+            consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+            consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+            consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+            consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+            consensus.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+        } else {
+            ActivateRcAtTip(consensus, *tip);
+        }
+
+        // Building the chain is not under test: every block passes the
+        // device replay. Cases set replay_ok before delivery; both the
+        // ContextualCheckBlock hook and the async worker report it.
+        SetMatMulExactReplayUnderReleasedCsMainHookForTest([this]() -> std::optional<bool> {
+            replays.fetch_add(1, std::memory_order_relaxed);
+            return replay_ok.load(std::memory_order_relaxed);
+        });
+        peerman.InstallMatMulVerifyOverrideForTest(
+            [this](const CBlock&, int32_t height, std::optional<int64_t>) {
+                replays.fetch_add(1, std::memory_order_relaxed);
+                if (height < rc_height) worker_jobs_below_rc.fetch_add(1, std::memory_order_relaxed);
+                return replay_ok.load(std::memory_order_relaxed);
+            });
+        auto mine = [&](int n) {
+            for (int i = 0; i < n; ++i) {
+                const CBlockIndex* parent{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+                CBlock block{MineTipChild(fx.m_node, *parent, /*extra_time=*/89)};
+                SetMockTime(std::chrono::seconds{block.GetBlockTime() + 1});
+                BOOST_REQUIRE(chainman.ProcessNewBlock(
+                    std::make_shared<const CBlock>(block), /*force_processing=*/true,
+                    /*min_pow_checked=*/true, nullptr));
+                blocks.push_back(std::move(block));
+            }
+        };
+        mine(n_pre);
+        if (n_pre > 0) {
+            // v4, BMX4C and RC share one height, as on mainnet.
+            rc_height = n_pre + 1;
+            consensus.nMatMulV4Height = rc_height;
+            consensus.nMatMulBMX4CHeight = rc_height;
+            consensus.nMatMulRCHeight = rc_height;
+        }
+        mine(n_blocks);
+        fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        uint64_t chain_tx_count{0};
+        {
+            LOCK(::cs_main);
+            base = chainman.ActiveTip();
+            BOOST_REQUIRE(base->GetBlockHash() == blocks.back().GetHash());
+            BOOST_REQUIRE(blocks.front().hashPrevBlock == base->GetAncestor(0)->GetBlockHash());
+            chain_tx_count = base->m_chain_tx_count;
+            for (const CBlock& block : blocks) {
+                const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+                BOOST_REQUIRE(index != nullptr);
+                BOOST_REQUIRE_EQUAL(consensus.IsMatMulTrustedReplayAttestationActive(index->nHeight),
+                                    index->nHeight >= rc_height);
+            }
+        }
+        au_height = base->nHeight;
+        AssumeutxoTestAccess::Data(chainman.GetParams()).push_back(AssumeutxoData{
+            .height = au_height,
+            .hash_serialized = AssumeutxoHash{uint256{}},
+            .m_chain_tx_count = chain_tx_count,
+            .blockhash = uint256{},
+        });
+        // Load the snapshot into a datadir whose own chainstate is at
+        // genesis with no bodies: the official fast start.
+        BOOST_REQUIRE(CreateAndActivateUTXOSnapshot(
+            &fx, NoMalleation, /*reset_chainstate=*/true, /*in_memory_chainstate=*/true));
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainman.IsSnapshotActive());
+            BOOST_REQUIRE(chainman.BackgroundSyncInProgress());
+            BOOST_REQUIRE(chainman.ActiveTip() == base);
+            BOOST_REQUIRE(chainman.GetSnapshotBaseBlock() == base);
+            BOOST_REQUIRE_EQUAL(chainman.GetBackgroundSyncTip()->nHeight, 0);
+            for (const CBlock& block : blocks) {
+                const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+                BOOST_REQUIRE((index->nStatus & BLOCK_HAVE_DATA) == 0);
+                BOOST_REQUIRE(chainman.IsMatMulFollowedHistoricalHole(index));
+            }
+        }
+        BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+        {
+            // The reset above leaves each hole's authenticated work as it was
+            // before its body was removed. Recompute it the way a fresh
+            // fast-started node has it: a contiguous prefix (chain.cpp).
+            LOCK(::cs_main);
+            for (int h = 1; h <= base->nHeight; ++h) {
+                UpdateAuthenticatedChainWork(
+                    *const_cast<CBlockIndex*>(base->GetAncestor(h)), consensus);
+            }
+        }
+        ResetMatMulEncDrVerdictsForTest();
+        replays.store(0, std::memory_order_relaxed);
+        worker_jobs_below_rc.store(0, std::memory_order_relaxed);
+
+        const ServiceFlags services{ServiceFlags(
+            NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+        archive = std::make_unique<CNode>(
+            /*id=*/3050, /*sock=*/nullptr,
+            CAddress{PeermanTestService(0x3050007f), NODE_NETWORK},
+            /*nKeyedNetGroupIn=*/0x305, /*nLocalHostNonceIn=*/0,
+            CAddress{}, /*addrNameIn=*/"archive-305",
+            ConnectionType::OUTBOUND_FULL_RELAY,
+            /*inbound_onion=*/false, /*network_key=*/0);
+        connman.Handshake(*archive, /*successfully_connected=*/true, services,
+                          services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                          /*starting_height=*/base->nHeight);
+        connman.AddTestNode(*archive);
+    }
+
+    ~BackgroundHoleScenario()
+    {
+        if (archive) {
+            peerman.FinalizeNode(*archive);
+            connman.RemoveTestNode(*archive);
+        }
+        peerman.InstallMatMulVerifyOverrideForTest({});
+        SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+        ResetMatMulEncDrVerdictsForTest();
+        peerman.ResetMatMulVerifyAdmissionForTest();
+        std::erase_if(AssumeutxoTestAccess::Data(chainman.GetParams()),
+                      [&](const AssumeutxoData& d) {
+                          return d.height == au_height && d.blockhash.IsNull();
+                      });
+        consensus.fSkipMatMulValidation = saved_skip_matmul_validation;
+        mode = saved_mode;
+    }
+
+    const CBlockIndex* Index(size_t i) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return chainman.m_blockman.LookupBlockIndex(blocks.at(i).GetHash());
+    }
+
+    int BackgroundHeight() const
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* bg{chainman.GetBackgroundSyncTip()};
+        if (bg != nullptr) return bg->nHeight;
+        // Completed: the background chainstate reached the base and the
+        // snapshot was validated.
+        return chainman.IsSnapshotValidated() ? base->nHeight : -1;
+    }
+
+    //! Send one BLOCK for blocks[i]; when `request` is set, first send the
+    //! single-inv GETDATA the background walk sends for it.
+    void Deliver(size_t i, bool request) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+    {
+        if (request) {
+            const CBlockIndex* index{WITH_LOCK(::cs_main, return Index(i))};
+            BOOST_REQUIRE(!peerman.FetchBlock(archive->GetId(), *index).has_value());
+        }
+        connman.FlushSendBuffer(*archive);
+        archive->fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            *archive, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(blocks.at(i)))));
+        (void)connman.ProcessMessagesOnce(*archive);
+        connman.FlushSendBuffer(*archive);
+        archive->fPauseSend = false;
+    }
+
+    bool HasData(size_t i) const
+    {
+        LOCK(::cs_main);
+        return (Index(i)->nStatus & BLOCK_HAVE_DATA) != 0;
+    }
+};
+} // namespace
+
+// Issues #292 and #305. Below the Profile-1 attestation height a background
+// hole persists (PersistPreAttestationHistoricalHole). At and above it, a hole
+// more than MATMUL_RC_NEAR_TIP_DEPTH below the active tip may not spend
+// ExactReplay (IndependentConsensusMaySpendExactReplayGpu), and a node with no
+// pins can never have a quorum for it, so the requested body was dropped
+// HEADER_ONLY and the background chainstate could not pass the first such
+// height. On mainnet that freezes it at 184,999, the node stays
+// NODE_NETWORK_LIMITED, and it re-requests 185000-186023 after every block.
+// A requested background body now ExactReplays like any IBD body; validation
+// is unchanged.
+BOOST_AUTO_TEST_CASE(background_chainstate_crosses_attestation_active_holes)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    BackgroundHoleScenario s{*this, /*n_blocks=*/8};
+    const int base_height{s.base->nHeight};
+    {
+        LOCK(::cs_main);
+        const int tip_height{s.chainman.ActiveTip()->nHeight};
+        // Height 1 is the lowest hole and lies outside the near-tip band.
+        BOOST_REQUIRE(s.Index(0)->nHeight < tip_height - 3);
+    }
+
+    auto auth_line = [&] {
+        LOCK(::cs_main);
+        return strprintf("snapshot base height=%d chainwork=%s authenticated=%s",
+                         s.base->nHeight, s.base->nChainWork.GetHex(),
+                         s.base->nAuthenticatedChainWork.GetHex());
+    };
+    BOOST_TEST_MESSAGE("before delivery: " << auth_line());
+
+    // The background walk requests the window bottom-up; deliver it so.
+    for (size_t i = 0; i < s.blocks.size(); ++i) {
+        s.Deliver(i, /*request=*/true);
+        const int want{int(i) + 1};
+        (void)PeermanWaitFor([&] { return s.BackgroundHeight() >= want; },
+                             std::chrono::milliseconds{10000});
+        BOOST_TEST_MESSAGE("delivered height " << i + 1 << ": have_data="
+                           << s.HasData(i) << " background_height="
+                           << s.BackgroundHeight());
+    }
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    BOOST_CHECK_MESSAGE(s.HasData(0),
+                        "the lowest attestation-active background hole was dropped, not stored");
+    BOOST_CHECK_MESSAGE(s.BackgroundHeight() == base_height,
+                        "background chainstate stopped at height " << s.BackgroundHeight()
+                        << " below base " << base_height);
+    {
+        LOCK(::cs_main);
+        for (size_t i = 0; i < s.blocks.size(); ++i) {
+            const CBlockIndex* index{s.Index(i)};
+            BOOST_CHECK_MESSAGE((index->nStatus & BLOCK_FAILED_MASK) == 0,
+                                "height " << index->nHeight << " failed");
+            // Stored background bodies carry the local ExactReplay verdict:
+            // nothing was connected without the device replay.
+            if (index->nStatus & BLOCK_HAVE_DATA) {
+                BOOST_CHECK_MESSAGE(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED,
+                                    "height " << index->nHeight
+                                    << " stored without an ExactReplay verdict");
+            }
+        }
+        BOOST_CHECK(s.chainman.ActiveTip() == s.base);
+    }
+    BOOST_TEST_MESSAGE("device replays during delivery: " << s.replays.load());
+    BOOST_TEST_MESSAGE("after delivery: " << auth_line());
+    BOOST_CHECK(!s.archive->fDisconnect);
+}
+
+// The background body still has to pass ExactReplay. A body whose replay fails
+// is not stored and the background chainstate does not move.
+BOOST_AUTO_TEST_CASE(background_hole_failing_exactreplay_is_not_connected)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    BackgroundHoleScenario s{*this, /*n_blocks=*/8};
+    s.replay_ok.store(false, std::memory_order_relaxed);
+    s.Deliver(0, /*request=*/true);
+    (void)PeermanWaitFor([&] {
+        LOCK(::cs_main);
+        return (s.Index(0)->nStatus & BLOCK_FAILED_MASK) != 0;
+    }, std::chrono::milliseconds{5000});
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(!s.HasData(0));
+    BOOST_CHECK_EQUAL(s.BackgroundHeight(), 0);
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK((s.Index(0)->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0);
+        BOOST_TEST_MESSAGE("failing replay: status=" << s.Index(0)->nStatus
+                           << " replays=" << s.replays.load());
+    }
+}
+
+// Only a body this node asked for may take the device. An unsolicited push of
+// a deep background hole is still dropped.
+BOOST_AUTO_TEST_CASE(unrequested_background_hole_does_not_take_the_device)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    BackgroundHoleScenario s{*this, /*n_blocks=*/8};
+    s.Deliver(0, /*request=*/false);
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(!s.HasData(0));
+    BOOST_CHECK_EQUAL(s.replays.load(), 0);
+    BOOST_CHECK_EQUAL(s.BackgroundHeight(), 0);
+}
+
+// Mainnet pacing: one RC verification slot and 1/min verify budgets. The
+// background walk keeps several requests outstanding, so a body arrives while
+// the slot or the budget is taken. It must be held (not dropped, and not a
+// reason to disconnect the peer that served it) and re-admitted by the
+// scheduler, and the background must still reach the base.
+BOOST_AUTO_TEST_CASE(background_holes_wait_for_the_single_rc_slot)
+{
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
+    BackgroundHoleScenario s{*this, /*n_blocks=*/2};
+    s.consensus.nMatMulRCMaxPendingVerifications = 1;
+    s.consensus.nMatMulRCPeerVerifyBudgetPerMin = 1;
+    s.consensus.nMatMulRCGlobalVerifyBudgetPerMin = 1;
+    const int base_height{s.base->nHeight};
+    for (size_t i = 0; i < s.blocks.size(); ++i) s.Deliver(i, /*request=*/true);
+    BOOST_CHECK(!s.archive->fDisconnect);
+    BOOST_TEST_MESSAGE("after burst: background_height=" << s.BackgroundHeight()
+                       << " replays=" << s.replays.load());
+
+    // Drive the deferred-body scheduler as the node does, one tick a second.
+    int64_t mock_now{WITH_LOCK(::cs_main, return s.base->GetBlockTime()) + 1};
+    const auto t0{std::chrono::steady_clock::now()};
+    bool finished{false};
+    {
+        REVERSE_LOCK(msgproc_lock);
+        for (int tick = 0; tick < 420 && !finished; ++tick) {
+            std::this_thread::sleep_for(std::chrono::seconds{1});
+            SetMockTime(std::chrono::seconds{++mock_now});
+            s.peerman.RetryMatMulDeferredBodiesForTest();
+            finished = PeermanWaitFor([&] { return s.BackgroundHeight() == base_height; },
+                                      std::chrono::milliseconds{200});
+        }
+    }
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    const auto secs{std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() - t0).count()};
+    BOOST_TEST_MESSAGE("single slot: background_height=" << s.BackgroundHeight()
+                       << " of " << base_height << " after " << secs << "s, replays="
+                       << s.replays.load() << " disconnect=" << s.archive->fDisconnect);
+    BOOST_CHECK_MESSAGE(finished, "background stopped at " << s.BackgroundHeight());
+    BOOST_CHECK(!s.archive->fDisconnect);
+    {
+        LOCK(::cs_main);
+        for (size_t i = 0; i < s.blocks.size(); ++i) {
+            const CBlockIndex* index{s.Index(i)};
+            BOOST_CHECK((index->nStatus & BLOCK_FAILED_MASK) == 0);
+            if (index->nStatus & BLOCK_HAVE_DATA) {
+                BOOST_CHECK(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+            }
+        }
+    }
+}
+
+// Mainnet shape: product digests are checked below the attestation height
+// (mainnet 61000-184999), and v4, BMX4C and RC share the first
+// attestation-active height (mainnet 185000). Below it a requested
+// background body keeps the existing persist path and takes no device job.
+// From it the body ExactReplays. Before the change the background chainstate
+// stopped at the last pre-attestation height.
+BOOST_AUTO_TEST_CASE(background_chainstate_mainnet_shape_crosses_the_attestation_height)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    BackgroundHoleScenario s{*this, /*n_blocks=*/8, /*n_pre=*/3};
+    s.consensus.fSkipMatMulValidation = false;
+    const int base_height{s.base->nHeight};
+    BOOST_REQUIRE_EQUAL(base_height, 11);
+    BOOST_REQUIRE_EQUAL(s.rc_height, 4);
+    BOOST_REQUIRE(s.consensus.IsMatMulProductDigestActive(1));
+    for (size_t i = 0; i < s.blocks.size(); ++i) {
+        const int height{int(i) + 1};
+        if (height < s.rc_height) {
+            ASSERT_DEBUG_LOG("Persisting pre-attestation followed historical body");
+            s.Deliver(i, /*request=*/true);
+        } else {
+            s.Deliver(i, /*request=*/true);
+        }
+        (void)PeermanWaitFor([&] { return s.BackgroundHeight() >= height; },
+                             std::chrono::milliseconds{10000});
+        BOOST_TEST_MESSAGE("delivered height " << height
+                           << (height >= s.rc_height ? " (attestation-active)" : " (pre-attestation)")
+                           << ": have_data=" << s.HasData(i)
+                           << " background_height=" << s.BackgroundHeight());
+    }
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_TEST_MESSAGE("final background_height=" << s.BackgroundHeight()
+                       << " replays=" << s.replays.load()
+                       << " worker_jobs_below_rc=" << s.worker_jobs_below_rc.load());
+    BOOST_CHECK_EQUAL(s.worker_jobs_below_rc.load(), 0);
+    BOOST_CHECK_MESSAGE(s.BackgroundHeight() >= s.rc_height - 1,
+                        "pre-attestation holes did not flow: background " << s.BackgroundHeight());
+    BOOST_CHECK_MESSAGE(s.BackgroundHeight() == base_height,
+                        "background stopped at " << s.BackgroundHeight()
+                        << " (last pre-attestation height " << s.rc_height - 1
+                        << ", base " << base_height << ")");
+    {
+        LOCK(::cs_main);
+        for (size_t i = 0; i < s.blocks.size(); ++i) {
+            const CBlockIndex* index{s.Index(i)};
+            BOOST_CHECK((index->nStatus & BLOCK_FAILED_MASK) == 0);
+            if (index->nHeight >= s.rc_height && (index->nStatus & BLOCK_HAVE_DATA)) {
+                BOOST_CHECK(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+            }
+        }
+    }
+    BOOST_CHECK(!s.archive->fDisconnect);
+}
+
+// The node's own scheduler (SendMessages -> TryDownloadingHistoricalBlocks)
+// chooses what to request; the archive only answers the GETDATAs it
+// receives. Before the change every requested hole was dropped and, with the
+// tip unchanged, never asked for again.
+BOOST_AUTO_TEST_CASE(background_walk_requests_and_stores_attestation_active_holes)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    BackgroundHoleScenario s{*this, /*n_blocks=*/8};
+    const int base_height{s.base->nHeight};
+    // The archive announces the chain, so its best known block is the base.
+    std::vector<CBlock> headers;
+    for (const CBlock& b : s.blocks) headers.emplace_back(b.GetBlockHeader());
+    s.connman.FlushSendBuffer(*s.archive);
+    s.archive->fPauseSend = false;
+    BOOST_REQUIRE(s.connman.ReceiveMsgFrom(
+        *s.archive, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+    (void)s.connman.ProcessMessagesOnce(*s.archive);
+    s.connman.FlushSendBuffer(*s.archive);
+    s.archive->fPauseSend = false;
+
+    int hole_requests{0};
+    int rounds{0};
+    for (; rounds < 6 && s.BackgroundHeight() < base_height; ++rounds) {
+        SetMockTime(GetTime<std::chrono::seconds>() + std::chrono::seconds{2});
+        s.archive->fPauseSend = false;
+        BOOST_CHECK(s.peerman.SendMessages(s.archive.get()));
+        const std::vector<uint256> requested{QueuedGetDataHashesIncludingTransport(*s.archive)};
+        s.connman.FlushSendBuffer(*s.archive);
+        s.archive->fPauseSend = false;
+        std::vector<size_t> idx;
+        for (const uint256& h : requested) {
+            for (size_t i = 0; i < s.blocks.size(); ++i) {
+                if (s.blocks[i].GetHash() == h) idx.push_back(i);
+            }
+        }
+        hole_requests += idx.size();
+        std::sort(idx.begin(), idx.end());
+        std::string heights;
+        for (size_t i : idx) heights += strprintf(" %d", int(i) + 1);
+        BOOST_TEST_MESSAGE("round " << rounds << ": getdata for heights [" << heights
+                           << " ] other=" << (requested.size() - idx.size())
+                           << " background_before=" << s.BackgroundHeight());
+        for (size_t i : idx) {
+            s.Deliver(i, /*request=*/false);
+            const int want{int(i) + 1};
+            (void)PeermanWaitFor([&] { return s.BackgroundHeight() >= want; },
+                                 std::chrono::milliseconds{2000});
+        }
+    }
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_TEST_MESSAGE("rounds=" << rounds << " hole_getdata=" << hole_requests
+                       << " background=" << s.BackgroundHeight() << " of " << base_height
+                       << " replays=" << s.replays.load());
+    BOOST_CHECK_MESSAGE(hole_requests > 0, "the node's own scheduler never requested a background hole");
+    BOOST_CHECK_MESSAGE(s.BackgroundHeight() == base_height,
+                        "background stopped at " << s.BackgroundHeight() << " of " << base_height);
+    BOOST_CHECK(!s.archive->fDisconnect);
+}
+
+// What background replays cost the tip, at mainnet pacing (one RC slot,
+// 1/min budgets). A running replay is not preempted (a body-holding
+// ExactReplay is never revoked), so a followed tip-child that arrives during
+// one waits for it. It must not wait for more: while the tip-child is held,
+// held background bodies skip the slot, so the tip-child replays next.
+BOOST_AUTO_TEST_CASE(held_tip_child_replays_before_further_background_bodies)
+{
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
+    BackgroundHoleScenario s{*this, /*n_blocks=*/8};
+    ResetGlobalMatMulRCBudgetForTest();
+    s.consensus.nMatMulRCMaxPendingVerifications = 1;
+    s.consensus.nMatMulRCPeerVerifyBudgetPerMin = 1;
+    s.consensus.nMatMulRCGlobalVerifyBudgetPerMin = 1;
+    const int base_height{s.base->nHeight};
+
+    const CBlock tip_child{MineTipChild(s.fx.m_node, *s.base, /*extra_time=*/89)};
+    const uint256 tip_hash{tip_child.GetHash()};
+    std::atomic<int> bg_replays{0};
+    std::atomic<int> bg_replays_before_tip{-1};
+    s.peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock& b, int32_t, std::optional<int64_t>) {
+            if (b.GetHash() == tip_hash) {
+                bg_replays_before_tip.store(bg_replays.load());
+                return true;
+            }
+            bg_replays.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::seconds{2});
+            return true;
+        });
+    int64_t mock_now{tip_child.GetBlockTime() + 1};
+    SetMockTime(std::chrono::seconds{mock_now});
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode miner{/*id=*/3070, /*sock=*/nullptr,
+                CAddress{PeermanTestService(0x3070007f), NODE_NETWORK},
+                /*nKeyedNetGroupIn=*/0x307, /*nLocalHostNonceIn=*/0,
+                CAddress{}, /*addrNameIn=*/"miner-307",
+                ConnectionType::OUTBOUND_FULL_RELAY,
+                /*inbound_onion=*/false, /*network_key=*/0};
+    s.connman.Handshake(miner, /*successfully_connected=*/true, services,
+                        services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                        /*starting_height=*/base_height + 1);
+    s.connman.AddTestNode(miner);
+    struct FinalizeMiner {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizeMiner()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize_miner{s.connman, s.peerman, miner};
+
+    // Background burst first: the walk keeps several requests outstanding.
+    for (size_t i = 0; i < 4; ++i) s.Deliver(i, /*request=*/true);
+
+    // The miner announces and serves the tip-child.
+    std::vector<CBlock> headers{CBlock{tip_child.GetBlockHeader()}};
+    s.connman.FlushSendBuffer(miner);
+    miner.fPauseSend = false;
+    BOOST_REQUIRE(s.connman.ReceiveMsgFrom(
+        miner, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+    (void)s.connman.ProcessMessagesOnce(miner);
+    s.connman.FlushSendBuffer(miner);
+    miner.fPauseSend = false;
+    const auto ticket{GrindTicket(tip_child.GetBlockHeader(), s.consensus.powLimit)};
+    BOOST_REQUIRE(s.connman.ReceiveMsgFrom(miner, NetMsg::Make(NetMsgType::RCADMIT, ticket)));
+    (void)s.connman.ProcessMessagesOnce(miner);
+    s.connman.FlushSendBuffer(miner);
+    miner.fPauseSend = false;
+    const auto t0{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(s.connman.ReceiveMsgFrom(
+        miner, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(tip_child))));
+    (void)s.connman.ProcessMessagesOnce(miner);
+    s.connman.FlushSendBuffer(miner);
+    miner.fPauseSend = false;
+
+    auto tip_is_child = [&] {
+        LOCK(::cs_main);
+        return s.chainman.ActiveTip() != nullptr &&
+               s.chainman.ActiveTip()->GetBlockHash() == tip_hash;
+    };
+    int64_t latency_ms{-1};
+    {
+        REVERSE_LOCK(msgproc_lock);
+        for (int tick = 0; tick < 1500; ++tick) {
+            if (tip_is_child()) {
+                latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - t0).count();
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            if (tick % 10 == 9) {
+                SetMockTime(std::chrono::seconds{++mock_now});
+                s.peerman.RetryMatMulDeferredBodiesForTest();
+            }
+        }
+    }
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_TEST_MESSAGE("tip-child latency_ms=" << latency_ms
+                       << " background_replays_before_tip_child=" << bg_replays_before_tip.load()
+                       << " background_height=" << s.BackgroundHeight() << " of " << base_height
+                       << " background_replays=" << bg_replays.load()
+                       << " archive_disconnect=" << s.archive->fDisconnect
+                       << " miner_disconnect=" << miner.fDisconnect);
+    BOOST_CHECK_MESSAGE(latency_ms >= 0, "tip-child not active after 150 s");
+    BOOST_CHECK_GE(bg_replays_before_tip.load(), 0);
+    BOOST_CHECK_LE(bg_replays_before_tip.load(), 1);
+    BOOST_CHECK(!s.archive->fDisconnect);
+    BOOST_CHECK(!miner.fDisconnect);
+    s.peerman.InstallMatMulVerifyOverrideForTest({});
+}
+
+//! RB-16 acquisition escape while background holes wait for the RC slot. A
+//! fast-started node sits on a stale lighter branch above its snapshot base
+//! and must acquire a heavier fork, while requested background holes are
+//! retained for RC capacity. Those holes are ancestors of every block above
+//! the base, but nothing above the base depends on them: the acquisition
+//! frontier may wait for the one background replay already running, not for
+//! every retained hole.
+BOOST_AUTO_TEST_CASE(acquisition_frontier_does_not_wait_for_background_holes)
+{
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
+    BackgroundHoleScenario s{*this, /*n_blocks=*/8};
+    ResetGlobalMatMulRCBudgetForTest();
+    s.consensus.nMatMulRCMaxPendingVerifications = 1;
+    auto& chainman{s.chainman};
+    struct Neutralize {
+        ChainstateManager& c;
+        ~Neutralize() { NeutralizeUnconnectedHeaders(c); }
+    } neutralize{chainman};
+
+    // Active (snapshot) chain: three more blocks on the base.
+    for (int i = 0; i < 3; ++i) {
+        const CBlockIndex* parent{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        CBlock blk{MineTipChild(s.fx.m_node, *parent, /*extra_time=*/89)};
+        SetMockTime(std::chrono::seconds{blk.GetBlockTime() + 1});
+        BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(blk),
+                                               /*force_processing=*/true,
+                                               /*min_pow_checked=*/true, nullptr));
+    }
+    const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    BOOST_REQUIRE_EQUAL(tip->nHeight, s.base->nHeight + 3);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.BackgroundSyncInProgress()));
+
+    const CBlockIndex* const root{s.base};
+    auto make_fork = [&](const CBlockIndex* parent, int count) {
+        std::vector<std::pair<CBlock, CBlockIndex*>> fork;
+        for (int i = 0; i < count; ++i) {
+            CBlock block{MineBlockOnParent(
+                s.fx.m_node, parent->GetBlockHash(), parent->nHeight + 1,
+                parent->GetBlockTime() + 2, parent->GetMedianTimePast())};
+            BlockValidationState state;
+            const CBlockIndex* index{nullptr};
+            const std::vector<CBlockHeader> headers{block.GetBlockHeader()};
+            BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(headers, true, state, &index));
+            fork.emplace_back(block, const_cast<CBlockIndex*>(index));
+            parent = index;
+        }
+        return fork;
+    };
+    const auto a{make_fork(root, 6)};
+    const auto b{make_fork(tip->GetAncestor(root->nHeight + 1), 4)};
+    // The active tip has made no better-chain progress for longer than the
+    // stall window.
+    int64_t mock_now{GetTime() + ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS + 100};
+    SetMockTime(std::chrono::seconds{mock_now});
+    {
+        LOCK(::cs_main);
+        chainman.SetBestHeader(a.back().second);
+        chainman.SetLastTipConnectMonoForTest(
+            GetTime() - ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS - 1);
+        const bool may_a{chainman.AcquisitionEscapeMayAcquireHeavierFork(a.back().second)};
+        const bool may_b{chainman.AcquisitionEscapeMayAcquireHeavierFork(b.back().second)};
+        BOOST_TEST_MESSAGE("acquisition: may_acquire a=" << may_a << " b=" << may_b
+                           << " tip=" << tip->nHeight << " base=" << s.base->nHeight);
+        BOOST_REQUIRE(may_b);
+        BOOST_REQUIRE(chainman.FindAcquisitionEscapeFrontier([&](const CBlockIndex* index) {
+            return index == b.front().second;
+        }) == b.front().second);
+    }
+
+    const uint256 acq_hash{b.front().first.GetHash()};
+    std::atomic<int> bg_started{0};
+    std::atomic<int> bg_before_acq{-1};
+    std::atomic<int> other_jobs{0};
+    s.peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock& blk, int32_t, std::optional<int64_t>) {
+            if (blk.GetHash() == acq_hash) {
+                bg_before_acq.store(bg_started.load());
+                return true;
+            }
+            bool is_bg{false};
+            for (const CBlock& h : s.blocks) {
+                if (h.GetHash() == blk.GetHash()) is_bg = true;
+            }
+            if (is_bg) {
+                bg_started.fetch_add(1);
+                std::this_thread::sleep_for(std::chrono::seconds{2});
+            } else {
+                other_jobs.fetch_add(1);
+            }
+            return true;
+        });
+
+    // The background walk keeps several requests outstanding.
+    for (size_t i = 0; i < 6; ++i) s.Deliver(i, /*request=*/true);
+    BOOST_TEST_MESSAGE("acquisition: after background burst bg_started=" << bg_started.load());
+
+    // The acquisition frontier body arrives (requested).
+    BOOST_REQUIRE(!s.peerman.FetchBlock(s.archive->GetId(), *b.front().second).has_value());
+    s.connman.FlushSendBuffer(*s.archive);
+    s.archive->fPauseSend = false;
+    const auto t0{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(s.connman.ReceiveMsgFrom(
+        *s.archive, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(b.front().first))));
+    (void)s.connman.ProcessMessagesOnce(*s.archive);
+    s.connman.FlushSendBuffer(*s.archive);
+    s.archive->fPauseSend = false;
+
+    auto acq_verified = [&] {
+        LOCK(::cs_main);
+        return (b.front().second->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0;
+    };
+    int64_t latency_ms{-1};
+    {
+        REVERSE_LOCK(msgproc_lock);
+        for (int tick = 0; tick < 900; ++tick) {
+            if (acq_verified()) {
+                latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - t0).count();
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            if (tick % 10 == 9) {
+                SetMockTime(std::chrono::seconds{++mock_now});
+                s.peerman.RetryMatMulDeferredBodiesForTest();
+            }
+        }
+    }
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_TEST_MESSAGE("acquisition: latency_ms=" << latency_ms
+                       << " background_replays_before_acquisition=" << bg_before_acq.load()
+                       << " background_replays_started=" << bg_started.load()
+                       << " other_jobs=" << other_jobs.load()
+                       << " background_height=" << s.BackgroundHeight()
+                       << " archive_disconnect=" << s.archive->fDisconnect);
+    BOOST_CHECK_MESSAGE(latency_ms >= 0, "acquisition frontier not verified within 90 s");
+    BOOST_CHECK_LE(bg_before_acq.load(), 1);
+    s.peerman.InstallMatMulVerifyOverrideForTest({});
 }
 
 BOOST_AUTO_TEST_SUITE_END()
