@@ -369,4 +369,141 @@ BOOST_AUTO_TEST_CASE(pq_withdrawal_after_restart_drops_local_vote)
                         "two in-memory quorums carrying the local PQ vote at one height");
 }
 
+// A reconnect brings the withdrawn vote back on disk without a new
+// signature, so it must also give the slot back: a later disconnect has to
+// withdraw the vote again, before and after a restart.
+BOOST_AUTO_TEST_CASE(reconnect_gives_slot_back_for_second_withdrawal)
+{
+    WithdrawReset reset;
+    const WithdrawSignerNode node{m_args.GetDataDirNet() / "withdraw_reconnect_twice.dat"};
+    const uint256 abandoned{WithdrawHex256('b')};
+    const uint256 replacement{WithdrawHex256('c')};
+    node.Start();
+    node.SignQuorum(abandoned, 34);
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(34, abandoned));
+    node::matmul_trusted::NotifyActiveChainBlockConnected(34, abandoned);
+
+    (void)node::matmul_trusted::NotifyActiveChainBlockDisconnected(34, abandoned);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(replacement, 34) ==
+                  matmul::trusted::AddResult::Accepted);
+    node.PeerSign(replacement, 34);
+    node.Restart();
+    BOOST_CHECK_MESSAGE(!node::matmul_trusted::HasQuorumInMemory(abandoned, 34),
+                        "after reconnect, disconnect and restart the withdrawn local vote is live");
+    BOOST_CHECK_MESSAGE(!node.ServesLocalVote(abandoned, 34),
+                        "after reconnect, disconnect and restart Get() serves the withdrawn local vote");
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(replacement, 34));
+}
+
+BOOST_AUTO_TEST_CASE(reconnect_then_restart_still_withdraws)
+{
+    WithdrawReset reset;
+    const WithdrawSignerNode node{m_args.GetDataDirNet() / "withdraw_reconnect_restart.dat"};
+    const uint256 abandoned{WithdrawHex256('b')};
+    const uint256 replacement{WithdrawHex256('c')};
+    node.Start();
+    node.SignQuorum(abandoned, 35);
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(35, abandoned));
+    node::matmul_trusted::NotifyActiveChainBlockConnected(35, abandoned);
+    node.Restart();
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorumInMemory(abandoned, 35));
+
+    (void)node::matmul_trusted::NotifyActiveChainBlockDisconnected(35, abandoned);
+    BOOST_CHECK_MESSAGE(!node::matmul_trusted::HasQuorumInMemory(abandoned, 35),
+                        "after reconnect and restart the disconnect leaves the local vote live");
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(replacement, 35) ==
+                  matmul::trusted::AddResult::Accepted);
+    node.PeerSign(replacement, 35);
+    BOOST_CHECK_MESSAGE(!node::matmul_trusted::HasQuorumInMemory(abandoned, 35),
+                        "two in-memory quorums carrying the local vote at one height");
+}
+
+// Only a tombstone written with the slot release gives the slot back. A
+// relayed copy of the local key's vote must not get it from a reconnect
+// either.
+BOOST_AUTO_TEST_CASE(relayed_local_key_vote_does_not_take_slot_on_reconnect)
+{
+    WithdrawReset reset;
+    const WithdrawSignerNode node{m_args.GetDataDirNet() / "withdraw_relayed_reconnect.dat"};
+    const uint256 relayed{WithdrawHex256('d')};
+    node.Start();
+    node.RelayLocal(relayed, 37);
+    node.PeerSign(relayed, 37);
+    node.Restart();
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorumInMemory(relayed, 37));
+    (void)node::matmul_trusted::NotifyActiveChainBlockDisconnected(37, relayed);
+    node::matmul_trusted::NotifyActiveChainBlockConnected(37, relayed);
+
+    (void)node::matmul_trusted::NotifyActiveChainBlockDisconnected(37, relayed);
+    BOOST_CHECK_MESSAGE(node::matmul_trusted::HasQuorumInMemory(relayed, 37),
+                        "a reconnect gave the mint slot to a relayed copy of the local key");
+}
+
+// The two reconnect cases for the local ML-DSA-44 key.
+BOOST_AUTO_TEST_CASE(pq_reconnect_gives_slot_back_for_second_withdrawal)
+{
+    WithdrawReset reset;
+    const WithdrawPqSignerNode node{m_args.GetDataDirNet() / "withdraw_pq_reconnect_twice.dat"};
+    const uint256 abandoned{WithdrawHex256('b')};
+    const uint256 replacement{WithdrawHex256('c')};
+    node.Start();
+    node.SignQuorum(abandoned, 34);
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(34, abandoned));
+    node::matmul_trusted::NotifyActiveChainBlockConnected(34, abandoned);
+
+    (void)node::matmul_trusted::NotifyActiveChainBlockDisconnected(34, abandoned);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(replacement, 34) ==
+                  matmul::trusted::AddResult::Accepted);
+    node.PeerSign(replacement, 34);
+    node.Restart();
+    BOOST_CHECK_MESSAGE(!node::matmul_trusted::HasQuorumInMemory(abandoned, 34),
+                        "after reconnect, disconnect and restart the withdrawn local PQ vote is live");
+    BOOST_CHECK_MESSAGE(!node.ServesLocalPqVote(abandoned, 34),
+                        "after reconnect, disconnect and restart GetPq() serves the withdrawn local PQ vote");
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(replacement, 34));
+}
+
+BOOST_AUTO_TEST_CASE(pq_reconnect_then_restart_still_withdraws)
+{
+    WithdrawReset reset;
+    const WithdrawPqSignerNode node{m_args.GetDataDirNet() / "withdraw_pq_reconnect_restart.dat"};
+    const uint256 abandoned{WithdrawHex256('b')};
+    const uint256 replacement{WithdrawHex256('c')};
+    node.Start();
+    node.SignQuorum(abandoned, 35);
+    BOOST_REQUIRE(node::matmul_trusted::NotifyActiveChainBlockDisconnected(35, abandoned));
+    node::matmul_trusted::NotifyActiveChainBlockConnected(35, abandoned);
+    node.Restart();
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorumInMemory(abandoned, 35));
+
+    (void)node::matmul_trusted::NotifyActiveChainBlockDisconnected(35, abandoned);
+    BOOST_CHECK_MESSAGE(!node::matmul_trusted::HasQuorumInMemory(abandoned, 35),
+                        "after reconnect and restart the disconnect leaves the local PQ vote live");
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(replacement, 35) ==
+                  matmul::trusted::AddResult::Accepted);
+    node.PeerSign(replacement, 35);
+    BOOST_CHECK_MESSAGE(!node::matmul_trusted::HasQuorumInMemory(abandoned, 35),
+                        "two in-memory quorums carrying the local PQ vote at one height");
+    // Without a tombstone from that disconnect both quorums would come back.
+    node.Restart();
+    BOOST_CHECK_MESSAGE(!node::matmul_trusted::HasQuorumInMemory(abandoned, 35),
+                        "after the next restart the withdrawn local PQ vote is live again");
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(replacement, 35));
+}
+
+// After a restart the wrapper knows every height this node signed, as
+// without a restart, also for a PQ vote that has no quorum yet.
+BOOST_AUTO_TEST_CASE(pq_local_signature_at_height_known_after_restart)
+{
+    WithdrawReset reset;
+    const WithdrawPqSignerNode node{m_args.GetDataDirNet() / "withdraw_pq_signed_height.dat"};
+    node.Start();
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(WithdrawHex256('b'), 36) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::HasLocalSignatureAtHeight(WithdrawHex256('c'), 36));
+    node.Restart();
+    BOOST_CHECK_MESSAGE(node::matmul_trusted::HasLocalSignatureAtHeight(WithdrawHex256('c'), 36),
+                        "after a restart the wrapper forgot the local PQ signature at this height");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
