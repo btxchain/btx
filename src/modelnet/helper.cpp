@@ -2415,7 +2415,7 @@ void AfterIndexPut(const ModelSearchRecord& rec, int64_t now_ms)
     g_feed.NoteSearchRecord(rec, now_ms);
     {
         std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
-        g_campaigns.IngestFromSearchRecord(rec);
+        g_campaigns.IngestFromSearchRecord(rec, [](const ReleaseCampaign& c) { return CampaignIsLocal(c.release_id.Hex()); });
     }
     if (BoundModelEventJournal()) {
         ObserveResult ores;
@@ -2515,15 +2515,21 @@ const ReleaseCampaign* CampaignForEntry(const CatalogEntry& entry)
     if (const ReleaseCampaign* by_model = g_campaigns.GetByModel(entry.model_id)) {
         if (CampaignIsLocal(by_model->release_id.Hex())) return by_model;
     }
-    for (const auto& camp : g_campaigns.List()) {
-        if (!CampaignIsLocal(camp.release_id.Hex())) continue;
-        if (camp.model_id == entry.model_id || camp.artifact_id == entry.artifact_id ||
-            (!camp.ciphertext_artifact_id.IsNull() &&
-             (camp.ciphertext_artifact_id == entry.artifact_id || camp.ciphertext_artifact_id == entry.model_id))) {
-            return g_campaigns.GetByRelease(camp.release_id);
+    const auto names_entry = [&](const ReleaseCampaign& camp) {
+        return camp.model_id == entry.model_id || camp.artifact_id == entry.artifact_id ||
+               (!camp.ciphertext_artifact_id.IsNull() &&
+                (camp.ciphertext_artifact_id == entry.artifact_id || camp.ciphertext_artifact_id == entry.model_id));
+    };
+    // This runs on every piece and file request. Walk the local releases, not
+    // a copy of every campaign learned from peers.
+    if (!g_local_releases_untrusted) {
+        for (const auto& rid : g_local_releases) {
+            const ReleaseCampaign* camp = g_campaigns.GetByReleaseHex(rid);
+            if (camp && names_entry(*camp)) return camp;
         }
+        return nullptr;
     }
-    return nullptr;
+    return g_campaigns.Find(names_entry);
 }
 
 bool DistinctCiphertextObject(const ReleaseCampaign& c, const CatalogEntry& entry)

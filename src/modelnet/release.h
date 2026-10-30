@@ -10,6 +10,8 @@
 #include <univalue.h>
 #include <util/fs.h>
 
+#include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -72,23 +74,61 @@ bool CampaignFromJson(const UniValue& o, ReleaseCampaign& c, std::string& err);
 bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::string& err);
 bool SaveCampaigns(const fs::path& dir, const std::vector<ReleaseCampaign>& campaigns, std::string& err);
 
+/** Most campaigns a CampaignIndex holds; the search index and the feed hold as many records. */
+constexpr size_t CAMPAIGN_INDEX_CAP_DEFAULT = 100000;
+/** At the cap, the most campaigns that must stay one insert moves aside before it skips the new campaign. */
+constexpr size_t CAMPAIGN_INDEX_KEPT_SCAN = 64;
+
+/** True when this node added something to `c` that no search record carries:
+ *  a key or signature, a pledge, a funding script, outpoint or observation, or an unlock. */
+bool CampaignHasLocalState(const ReleaseCampaign& c);
+
 class CampaignIndex {
+public:
+    /** True for a campaign the index must not drop (for example one this node created). */
+    using KeepFn = std::function<bool(const ReleaseCampaign&)>;
+
+private:
     std::map<std::string, ReleaseCampaign> m_by_release;
     std::map<std::string, std::string> m_model_to_release;
+    /** When a record last named each campaign (or the cap passed over it because it must stay), oldest first:
+     *  the order campaigns are dropped at the cap. */
+    std::map<uint64_t, std::string> m_by_age;
+    std::map<std::string, uint64_t> m_age;
+    uint64_t m_next_age{0};
+    size_t m_cap{CAMPAIGN_INDEX_CAP_DEFAULT};
+
+    bool Droppable(const ReleaseCampaign& c, const KeepFn& keep) const;
+    void Touch(const std::string& release_hex);
+    void Erase(const std::string& release_hex);
 
 public:
     bool Put(const ReleaseCampaign& c, std::string& err);
     const ReleaseCampaign* GetByRelease(const Digest48& release_id) const;
     const ReleaseCampaign* GetByReleaseHex(const std::string& hex) const;
     const ReleaseCampaign* GetByModel(const Digest48& model_id) const;
+    /** First campaign, in release id order, that `match` accepts. Copies nothing. */
+    const ReleaseCampaign* Find(const std::function<bool(const ReleaseCampaign&)>& match) const;
     std::vector<ReleaseCampaign> List() const;
     size_t Size() const { return m_by_release.size(); }
+    void SetCap(size_t cap) { m_cap = cap; }
     void Clear()
     {
         m_by_release.clear();
         m_model_to_release.clear();
+        m_by_age.clear();
+        m_age.clear();
     }
-    void IngestFromSearchRecord(const struct ModelSearchRecord& r);
+    /**
+     * Learn the campaign a search record names. The search index has just
+     * taken `r` as its model's record, so a campaign learned from that model's
+     * earlier record is dropped. At the cap the campaign no record has named
+     * for longest is dropped first. One that must stay is moved to the newest
+     * end instead, and after CAMPAIGN_INDEX_KEPT_SCAN of those the new
+     * campaign is skipped until its record is ingested again. A campaign
+     * stays when `keep` says so or CampaignHasLocalState() holds.
+     */
+    void IngestFromSearchRecord(const struct ModelSearchRecord& r, const KeepFn& keep = {});
 };
 
 } // namespace modelnet
