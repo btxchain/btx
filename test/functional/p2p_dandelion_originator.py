@@ -8,8 +8,10 @@ BroadcastTransaction adds a local transaction to the mempool and sends it on
 the stem as DLTX to one relay. Until the node's embargo for that transaction
 expires, the node must not announce it to its peers (not even when a
 forcerelay peer sends it back), serve it to a GETDATA, or list it in a BIP35
-MEMPOOL reply. Once the embargo has expired, it announces the transaction
-normally.
+MEMPOOL reply. A child of it that a peer sends (as TX or DLTX) must not give
+the originator away either: a stem relay cannot accept such a child, so the
+originator must not accept, announce, serve or stem it. Once the embargo has
+expired, it announces the transaction normally.
 
 node0 makes two outbound full-relay connections:
   stem: sends DANDELIONACC, so it is the only possible stem relay.
@@ -21,12 +23,15 @@ the stem phase is checked. The embargo lasts at least EMBARGO_MIN (5 s) of mock
 time, so it cannot expire before the test moves the clock.
 """
 
+from decimal import Decimal
+
 from test_framework.messages import (
     CInv,
     MSG_TX,
     MSG_TYPE_MASK,
     MSG_WTX,
     msg_dandelionacc,
+    msg_dltx,
     msg_getdata,
     msg_mempool,
     msg_tx,
@@ -149,6 +154,30 @@ class DandelionOriginatorTest(BitcoinTestFramework):
             stem.sync_with_ping()
         with p2p_lock:
             assert not spy.announced(local), "originator announced its stem transaction after a forcerelay echo"
+
+        self.log.info("During the embargo a child of it from a peer does not reveal the originator")
+        # Only the originator holds the parent in its mempool; a stem relay
+        # cannot accept such a child. A TX child must not be accepted, announced
+        # or served, and a DLTX child must not go on along the stem.
+        parent_utxo = wallet.get_utxo(txid=local["txid"])
+        child = wallet.create_self_transfer(utxo_to_spend=parent_utxo)
+        spy.send_and_ping(msg_tx(child["tx"]))
+        child_dltx = wallet.create_self_transfer(utxo_to_spend=parent_utxo, fee_rate=Decimal("0.006"))
+        stem.send_and_ping(msg_dltx(child_dltx["tx"]))
+        for _ in range(3):
+            spy.sync_with_ping()
+            stem.sync_with_ping()
+        assert child["txid"] not in node.getrawmempool()
+        assert child_dltx["txid"] not in node.getrawmempool()
+        with p2p_lock:
+            assert not stem.announced(child), "originator announced a child of its stem transaction"
+            assert not stem.got_dltx(child_dltx), "originator forwarded a child of its stem transaction on the stem"
+            stem.last_message.pop("notfound", None)
+            stem.last_message.pop("tx", None)
+        want_child = msg_getdata([CInv(t=MSG_WTX, h=int(child["wtxid"], 16))])
+        stem.send_and_ping(want_child)
+        with p2p_lock:
+            assert "tx" not in stem.last_message, "originator served a child of its stem transaction"
 
         self.log.info("A transaction retried after a rejected submission still goes on the stem")
         parent = wallet.create_self_transfer()

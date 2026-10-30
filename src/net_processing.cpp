@@ -2138,6 +2138,10 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     uint32_t GetFetchFlags(const Peer& peer) const;
+    /** True if tx spends an output of a transaction in our Dandelion++
+     *  stempool. During the stem phase only the originator holds such a
+     *  parent in its mempool; a stem relay cannot accept the child. */
+    bool SpendsStemTransaction(const CTransaction& tx) const;
     bool PeerSupportsShieldedRelay(const Peer& peer, const CNode& node) const;
     bool ConsumeShieldedRelayBudget(Peer& peer, size_t bytes, std::chrono::microseconds now)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -11027,6 +11031,15 @@ uint32_t PeerManagerImpl::GetFetchFlags(const Peer& peer) const
     return nFetchFlags;
 }
 
+bool PeerManagerImpl::SpendsStemTransaction(const CTransaction& tx) const
+{
+    if (!m_dandelion) return false;
+    for (const CTxIn& txin : tx.vin) {
+        if (m_dandelion->IsInStemPool(txin.prevout.hash)) return true;
+    }
+    return false;
+}
+
 bool PeerManagerImpl::PeerSupportsShieldedRelay(const Peer& peer, const CNode& node) const
 {
     if (node.GetCommonVersion() < NetMsgType::SHIELDED_VERSION) return false;
@@ -19612,6 +19625,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         if (m_mempool.exists(GenTxid::Txid(txid))) return;
 
+        // A stem relay drops a child of a stempool transaction below (its
+        // parent is not in the mempool). The originator holds that parent in
+        // its mempool, so its test-accept would pass and forward the child on
+        // the stem. Drop it here too, so the child does not tell a peer which
+        // node originated the parent.
+        if (SpendsStemTransaction(tx)) return;
+
         // Validate before adding to stem pool (DoS protection)
         {
             LOCK(cs_main);
@@ -19791,6 +19811,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         // ReceivedTx should not be telling us to validate the tx and a package.
         Assume(!package_to_validate.has_value());
+
+        // A child of one of our stem transactions: only the originator holds
+        // the parent in its mempool during the embargo, and a stem relay
+        // cannot accept the child. Accepting it here would announce and
+        // serve it, which tells peers which node originated the parent.
+        if (SpendsStemTransaction(tx)) {
+            LogDebug(BCLog::NET, "Ignoring tx %s (wtxid=%s) that spends a Dandelion++ stem transaction, peer=%d\n",
+                     txid.ToString(), wtxid.ToString(), pfrom.GetId());
+            return;
+        }
 
         const MempoolAcceptResult result = m_chainman.ProcessTransaction(ptx);
         const TxValidationState& state = result.m_state;
