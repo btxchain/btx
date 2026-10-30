@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <set>
 #include <system_error>
@@ -172,7 +173,9 @@ LightWatch::Step LightWatch::ApplyFilter(int height, const uint256& block_hash, 
                                          const std::vector<unsigned char>& encoded_filter, const uint256& filter_header,
                                          const CBlock* block, std::string& error)
 {
-    if (height != NextHeight()) {
+    // A cursor of INT_MAX is refused on load; never reach it here either,
+    // so NextHeight() stays representable.
+    if (height == std::numeric_limits<int>::max() || height != NextHeight()) {
         error = "BTX_BLOCK_LINK";
         return Step::REJECTED;
     }
@@ -318,7 +321,8 @@ LightWatchStatus LightWatch::Status(int chain_height) const
     }
     status.ready = m_cursor == chain_height;
     if (m_cursor < m_start) {
-        status.blocks_behind = chain_height - m_start + 1;
+        const int64_t behind = static_cast<int64_t>(chain_height) - m_start + 1;
+        status.blocks_behind = static_cast<int>(std::min<int64_t>(behind, std::numeric_limits<int>::max()));
     } else {
         status.blocks_behind = std::max(0, chain_height - m_cursor);
     }
@@ -544,7 +548,9 @@ bool LightWatch::AcceptSnapshot(std::string& error)
         error = "BTX_LIGHTWATCH_IO";
         return false;
     };
-    if (m_start < 0 || m_cursor < -1) return reject();
+    // NextHeight() returns m_cursor + 1, so a loaded cursor of INT_MAX could
+    // never advance without overflowing.
+    if (m_start < 0 || m_cursor < -1 || m_cursor == std::numeric_limits<int>::max()) return reject();
     if (m_cursor < m_start) {
         // Not caught up: the initial cursor is -1, and a rewind below start
         // lands on start-1. Either way there is no chain suffix to report.
@@ -556,7 +562,7 @@ bool LightWatch::AcceptSnapshot(std::string& error)
 
     const int64_t span = static_cast<int64_t>(m_cursor) - static_cast<int64_t>(m_start) + 1;
     if (span < 1 || static_cast<int64_t>(m_hashes.size()) != span) return reject();
-    int expect = m_start;
+    int64_t expect = m_start;
     for (const auto& item : m_hashes) {
         if (item.first != expect) return reject();
         ++expect;

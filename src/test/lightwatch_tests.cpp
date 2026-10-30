@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -445,6 +446,62 @@ BOOST_AUTO_TEST_CASE(lightwatch_file_cut_at_a_line_end_is_refused)
     BOOST_CHECK_EQUAL(old.BalanceAt(2).amount, 0);
     BOOST_REQUIRE(old.Save(path, error));
     BOOST_CHECK(read() == text);
+}
+
+BOOST_AUTO_TEST_CASE(lightwatch_heights_near_int_max_stay_representable)
+{
+    // A broken or hostile RPC node (-rpcconnect) may report any tip height.
+    constexpr int max{std::numeric_limits<int>::max()};
+    LightWatch fresh;
+    BOOST_CHECK_EQUAL(fresh.Status(max).blocks_behind, max);
+
+    // Sync from `start` to `tip` over a consistent chain of empty filters.
+    const auto sync = [](int start, int tip, LightWatch& watch, std::string& error) {
+        watch.SetStartHeight(start);
+        BOOST_REQUIRE(watch.AddDescriptor("raw(51)", error, /*reset_progress=*/false));
+        const std::vector<unsigned char> empty_filter{0x00};
+        std::map<int64_t, uint256> hash, header;
+        std::map<uint256, int64_t> height_of;
+        for (int64_t h = int64_t{start} - 1; h <= tip; ++h) {
+            hash[h] = uint256{static_cast<uint8_t>(h - start + 2)};
+            height_of[hash[h]] = h;
+            header[h] = h == start - 1 ? uint256{0xaa}
+                                       : BlockFilter(BlockFilterType::BASIC, hash[h], empty_filter, false).ComputeHeader(header[h - 1]);
+        }
+        const auto rpc = [&](const std::string& method, const std::vector<std::string>& args) -> UniValue {
+            if (method == "getblockcount") return UniValue(tip);
+            if (method == "getblockhash") return UniValue(hash.at(std::stoll(args.at(0))).GetHex());
+            const int64_t h = height_of.at(*uint256::FromHex(args.at(0)));
+            UniValue o(UniValue::VOBJ);
+            if (method == "getblockheader") {
+                if (hash.count(h - 1)) o.pushKV("previousblockhash", hash.at(h - 1).GetHex());
+            } else if (method == "getblockfilter") {
+                o.pushKV("filter", HexStr(empty_filter));
+                o.pushKV("header", header.at(h).GetHex());
+            } else {
+                throw std::runtime_error("unexpected RPC");
+            }
+            return o;
+        };
+        return watch.Sync(rpc, error);
+    };
+
+    LightWatch below;
+    std::string error;
+    BOOST_CHECK_MESSAGE(sync(max - 2, max - 1, below, error), error);
+    BOOST_CHECK_EQUAL(below.Cursor(), max - 1);
+
+    // Height INT_MAX is never applied, so NextHeight() stays representable.
+    LightWatch top;
+    bool ok{true};
+    try {
+        ok = sync(max, max, top, error);
+    } catch (const std::exception&) {
+        ok = true;
+    }
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(error, "BTX_BLOCK_LINK");
+    BOOST_CHECK(top.Cursor() < max);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
