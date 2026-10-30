@@ -1185,6 +1185,9 @@ ModelSearchRecord DraftSearchFromCatalog(const CatalogEntry& e)
     return rec;
 }
 
+/** Longest a record announced by a peer holds a record cache slot. */
+constexpr int64_t PEER_RECORD_MAX_HOLD_S{7 * DAY_SECONDS};
+
 bool AcceptSignedAnnounce(const UniValue& body, int64_t now, SignedRecordHint& h, std::string& err)
 {
     if (!body.exists("kind") || !body.exists("payload_hex") || !body.exists("sig_hex") || !body.exists("pubkey_hex")) {
@@ -1216,6 +1219,9 @@ bool AcceptSignedAnnounce(const UniValue& body, int64_t now, SignedRecordHint& h
     h.signed_ok = true;
     h.expiry = decoded.exists("expires_at") ? decoded["expires_at"].getInt<int64_t>() : 0;
     if (h.expiry == 0) h.expiry = now + 86400;
+    // The signer picks expires_at, so without a ceiling a peer's record could
+    // hold its slot for decades. The signed payload is kept unchanged.
+    h.expiry = std::min(h.expiry, now + PEER_RECORD_MAX_HOLD_S);
     h.provider_id = decoded.exists("signer_id") ? decoded["signer_id"].get_str() : ProviderId(*pk).Hex();
     return true;
 }

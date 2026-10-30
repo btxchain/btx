@@ -286,4 +286,29 @@ BOOST_AUTO_TEST_CASE(full_cache_still_refreshes_a_record_it_holds)
     }
 }
 
+BOOST_AUTO_TEST_CASE(announced_record_holds_its_slot_at_most_a_week)
+{
+    const fs::path tmp = m_path_root / "records-hold";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    const Signer s = NewSigner();
+    const int64_t now = Now();
+    const auto resp = Announce(cat, "records/announce", s, MakeCollection(s, now, int64_t{4102444800}, 1, 0));
+    BOOST_REQUIRE_MESSAGE(resp.status == 200, resp.body);
+    UniValue ann;
+    BOOST_REQUIRE(ann.read(resp.body));
+    modelnet::NativeRequest get;
+    get.method = "POST";
+    get.path = "/btx-model/2/records/get";
+    get.body = "{\"ids\":[\"" + ann["record_id"].get_str() + "\"]}";
+    modelnet::NativeResponse got;
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, get, got));
+    UniValue out;
+    BOOST_REQUIRE(out.read(got.body));
+    BOOST_REQUIRE_EQUAL(out["records"].size(), 1U);
+    const int64_t held_until = out["records"][0]["expiry"].getInt<int64_t>();
+    BOOST_TEST_MESSAGE("expires_at 4102444800 is held until " << held_until << " (now " << now << ")");
+    BOOST_CHECK_LE(held_until, Now() + 7 * 86400);
+    BOOST_CHECK_GE(held_until, now + 7 * 86400);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
