@@ -138,6 +138,7 @@ class DetachableSock : public Sock
 {
 public:
     explicit DetachableSock(Sock&& sock) : Sock{std::move(sock)} {}
+    using Sock::operator=;
 
     SOCKET Detach()
     {
