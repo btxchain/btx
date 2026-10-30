@@ -19,6 +19,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -480,6 +481,72 @@ BOOST_AUTO_TEST_CASE(swarm_extinction_labels)
     BOOST_CHECK_EQUAL(std::string(ExtinctionLabel(s)), "FRAGILE");
     s.min_piece_sources = 0;
     BOOST_CHECK_EQUAL(std::string(ExtinctionLabel(s)), "CURRENTLY_UNAVAILABLE");
+}
+
+BOOST_AUTO_TEST_CASE(swarm_summary_complete_is_range_coverage)
+{
+    using namespace modelnet;
+    auto complete = [](uint32_t declared, std::vector<std::pair<uint32_t, uint32_t>> rs, uint32_t file = 0) {
+        SourceAvailability s;
+        s.peer.endpoint = "a:1";
+        s.file_index = file;
+        s.piece_count = declared;
+        for (const auto& [first, count] : rs) s.ranges.push_back(PieceRange{first, count});
+        const auto snap = SummarizeSwarm(0, 8, {}, {s}, {}, PickConfig{});
+        BOOST_CHECK_EQUAL(snap.complete_sources + snap.partial_sources, 1);
+        return snap.complete_sources == 1;
+    };
+    // Declared piece_count: ranges must cover [0, piece_count).
+    BOOST_CHECK(complete(8, {}));
+    BOOST_CHECK(complete(8, {{0, 8}}));
+    BOOST_CHECK(complete(8, {{4, 4}, {0, 4}}));
+    BOOST_CHECK(complete(8, {{3, 5}, {0, 5}}));
+    BOOST_CHECK(!complete(8, {{0, 3}, {4, 4}}));
+    BOOST_CHECK(!complete(8, {{1, 7}}));
+    BOOST_CHECK(!complete(8, {{0, 7}}));
+    BOOST_CHECK(!complete(8, {{0, 1}, {1, 0xFFFFFFFF}}));
+    // No declared count: ranges must cover the local file, same file index.
+    BOOST_CHECK(complete(0, {{0, 8}}));
+    BOOST_CHECK(complete(0, {{0, 9}}));
+    BOOST_CHECK(!complete(0, {{0, 4}}));
+    BOOST_CHECK(!complete(0, {{0, 8}}, /*file=*/1));
+    BOOST_CHECK(!complete(0, {}));
+}
+
+// piece_count in an availability reply is peer-supplied, up to 2^32 - 1.
+// Deciding whether such a source is complete must not cost one step per piece.
+BOOST_AUTO_TEST_CASE(swarm_summary_does_not_walk_declared_piece_count)
+{
+    using namespace modelnet;
+    UniValue files(UniValue::VARR);
+    for (const char* f : {"{\"ranges\":[[0,4294967294]]}", "{\"piece_count\":4294967295}",
+                          "{\"ranges\":[[0,4294967294]]}", "{\"piece_count\":4294967295}"}) {
+        UniValue o;
+        BOOST_REQUIRE(o.read(f));
+        files.push_back(o);
+    }
+    UniValue model(UniValue::VOBJ);
+    model.pushKV("files", files);
+    UniValue models(UniValue::VARR);
+    models.push_back(model);
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("models", models);
+
+    PeerId pid;
+    pid.endpoint = "a:1";
+    std::vector<SourceAvailability> srcs;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(ParseAvailabilitySources(body, pid.endpoint, pid, Digest48{}, srcs, err, 1000), err);
+    BOOST_REQUIRE_EQUAL(srcs.size(), 4U);
+    for (const auto& s : srcs) BOOST_CHECK_EQUAL(s.piece_count, 4294967295U);
+
+    PickConfig cfg;
+    cfg.now_ms = 1000;
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto snap = SummarizeSwarm(0, 1, {}, srcs, {}, cfg);
+    BOOST_CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds{1});
+    BOOST_CHECK_EQUAL(snap.complete_sources, 4);
+    BOOST_CHECK_EQUAL(snap.partial_sources, 0);
 }
 
 BOOST_AUTO_TEST_CASE(swarm_px_numbers_outside_int64_are_refused)
