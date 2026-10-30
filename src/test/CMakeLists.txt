@@ -578,6 +578,7 @@ if(WITH_MODELNET)
     modelnet_infra_tests.cpp
     modelnet_swarm_tests.cpp
     modelnet_conn_tests.cpp
+    modelnet_pq1_worker_share_tests.cpp
     modelnet_ainode_notes_tests.cpp
     modelnet_search_tests.cpp
     modelnet_first_run_tests.cpp

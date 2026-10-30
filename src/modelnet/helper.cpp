@@ -96,6 +96,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
+#include <deque>
 #include <cstdlib>
 #include <functional>
 #include <cstring>
@@ -11374,8 +11375,32 @@ void HandleUnixFd(int cfd, ModelCatalog& cat, std::atomic<bool>* stop)
     close(cfd);
 }
 
+/** Where a served PQ1 connection is, for a hand-over of its worker. */
+enum Pq1ConnState : int {
+    PQ1_CONN_IDLE,   //!< in the handshake or waiting for a request
+    PQ1_CONN_BUSY,   //!< answering a request
+    PQ1_CONN_RETIRE, //!< answering a request, then closes
+    PQ1_CONN_CUT,    //!< closes now (`stop` is set)
+};
+
+/** The inbound PQ1 connection a worker is serving. Its I/O watches `stop`,
+ *  which the daemon sets on shutdown or to hand an idle connection's worker
+ *  to another address. `state` is a Pq1ConnState; `busy_since` is when the
+ *  current request began. */
+struct Pq1Served {
+    uint32_t netgroup{0};
+    std::chrono::steady_clock::time_point since{};
+    std::atomic<bool> stop{false};
+    std::atomic<int> state{PQ1_CONN_IDLE};
+    std::atomic<std::chrono::steady_clock::rep> busy_since{0};
+    bool handing_over{false};
+};
+
+/** `stop` also ends this connection when the daemon hands its worker to
+ *  another address while it is idle. When it is busy, `served->state` makes
+ *  it close once the response it is sending is out. */
 void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* stop, const fs::path& pinfile,
-                 uint32_t netgroup, const std::string& peer_addr)
+                 uint32_t netgroup, const std::string& peer_addr, Pq1Served* served)
 {
     SetPq1SocketOpts(cfd, true);
     SSL* ssl = SSL_new(static_cast<SSL_CTX*>(pq.SslCtx()));
@@ -11387,7 +11412,8 @@ void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* 
     SSL_set_accept_state(ssl);
     std::string err;
     if (!SslHandshake(ssl, cfd, /*accept=*/true, PQ1_HANDSHAKE_MS, stop, err)) {
-        CountUnauthAndBump(netgroup);
+        // A handshake this side cut short is not the peer's failure.
+        if (!(stop && stop->load())) CountUnauthAndBump(netgroup);
         SSL_free(ssl);
         close(cfd);
         return;
@@ -11425,8 +11451,19 @@ void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* 
                 .count() >= PQ1_CONN_MAX_MS) {
             break;
         }
+        if (served) {
+            // Asked to hand the worker over while answering: the response is out, so close.
+            int st = PQ1_CONN_BUSY;
+            if (!served->state.compare_exchange_strong(st, PQ1_CONN_IDLE) && st != PQ1_CONN_IDLE) break;
+        }
         const std::string raw = SslReadHttp(ssl, cfd, MAX_RPC_BODY + 8192, PQ1_IDLE_MS, stop);
         if (raw.empty()) break;
+        if (served) {
+            served->busy_since.store(std::chrono::steady_clock::now().time_since_epoch().count());
+            // Handed over while idle: leave this request unanswered rather than cut its reply.
+            int st = PQ1_CONN_IDLE;
+            if (!served->state.compare_exchange_strong(st, PQ1_CONN_BUSY)) break;
+        }
         ++requests;
         NativeRequest nreq;
         NativeResponse nresp;
@@ -11555,6 +11592,7 @@ struct WorkerJob {
     bool unix_rpc{false};
     uint32_t netgroup{0};
     std::string peer_addr;
+    std::chrono::steady_clock::time_point accepted{};
 };
 
 } // namespace
@@ -11942,7 +11980,109 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     std::condition_variable unix_qcv;
     std::condition_variable pq1_qcv;
     std::queue<WorkerJob> unix_jobs;
-    std::queue<WorkerJob> pq1_jobs;
+    std::deque<WorkerJob> pq1_jobs;
+    // Connections that hold a PQ1 worker now. Guarded by pq1_qmu, like pq1_jobs.
+    std::vector<Pq1Served*> pq1_served;
+    auto pq1_held = [&] {
+        std::map<uint32_t, int> held;
+        for (const Pq1Served* s : pq1_served) ++held[s->netgroup];
+        return held;
+    };
+    auto pq1_waiting = [&] {
+        std::vector<uint32_t> waiting;
+        for (const WorkerJob& j : pq1_jobs) waiting.push_back(j.netgroup);
+        return waiting;
+    };
+    // Closes the waiting connections whose peer has gone or has waited past a
+    // client's handshake timeout: serving them would only fail the handshake
+    // and count it against the address. Returns the netgroups of the others
+    // whose peer has started its handshake. Caller holds pq1_qmu.
+    auto pq1_waiting_started = [&] {
+        std::vector<uint32_t> started;
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = pq1_jobs.begin(); it != pq1_jobs.end();) {
+            // The accepted socket still blocks, and MSG_DONTWAIT is 0 on Windows:
+            // poll first, and peek only at a readable socket.
+            pollfd pfd{};
+            pfd.fd = it->fd;
+            pfd.events = POLLIN;
+            const bool readable = ::poll(&pfd, 1, 0) > 0;
+            char b;
+            // Readable with nothing to peek: the peer has closed, or the socket failed.
+            if ((readable && ::recv(it->fd, &b, 1, MSG_PEEK) <= 0) ||
+                now - it->accepted >= std::chrono::milliseconds(PQ1_HANDSHAKE_MS)) {
+                close(it->fd);
+                GlobalConnLimits().ReleaseInbound(it->netgroup);
+                it = pq1_jobs.erase(it);
+                continue;
+            }
+            if (readable) started.push_back(it->netgroup);
+            ++it;
+        }
+        return started;
+    };
+    // R10-03: when every worker is taken and a connection that has started its
+    // handshake waits, the netgroup that Pq1WorkerDonor names gives one
+    // connection up: an idle one (its longest served) if it has one, else the
+    // one whose request began first, which closes once its response is out.
+    // Paced uploads finish in the order they began. One hand-over at a time.
+    auto pq1_share_workers = [&] {
+        std::lock_guard<std::mutex> lock(pq1_qmu);
+        if (pq1_jobs.empty() || pq1_served.size() < static_cast<size_t>(PQ1_HTTP_WORKERS)) return;
+        for (const Pq1Served* s : pq1_served) {
+            if (s->handing_over) return;
+        }
+        const auto waiting = pq1_waiting_started();
+        if (waiting.empty()) return;
+        const auto held = pq1_held();
+        const auto donor = Pq1WorkerDonor(waiting[Pq1NextWaiting(waiting, held)], held);
+        if (!donor) return;
+        Pq1Served* pick = nullptr;
+        for (Pq1Served* s : pq1_served) {
+            if (s->netgroup != *donor) continue;
+            if (!pick) {
+                pick = s;
+                continue;
+            }
+            const bool s_busy = s->state.load() != PQ1_CONN_IDLE;
+            const bool pick_busy = pick->state.load() != PQ1_CONN_IDLE;
+            if (s_busy != pick_busy) {
+                if (pick_busy) pick = s;
+            } else if (s_busy ? s->busy_since.load() < pick->busy_since.load() : s->since < pick->since) {
+                pick = s;
+            }
+        }
+        if (!pick) return;
+        pick->handing_over = true;
+        // The connection moves between idle and busy on its own: mark it in one step.
+        int st = PQ1_CONN_IDLE;
+        while (!pick->state.compare_exchange_weak(st, st == PQ1_CONN_IDLE ? PQ1_CONN_CUT : PQ1_CONN_RETIRE)) {
+        }
+        if (st == PQ1_CONN_IDLE) pick->stop.store(true);
+    };
+    // R10-03: every inbound slot is taken. Unless a waiting peer has gone, the
+    // netgroup that Pq1WorkerDonor names by connections held or waiting gives
+    // up its newest waiting one, which has not been served yet.
+    auto pq1_make_room = [&](uint32_t netgroup) {
+        std::lock_guard<std::mutex> lock(pq1_qmu);
+        const size_t queued = pq1_jobs.size();
+        (void)pq1_waiting_started();
+        if (pq1_jobs.size() < queued) return true;
+        std::map<uint32_t, int> admitted = pq1_held();
+        for (const WorkerJob& j : pq1_jobs) ++admitted[j.netgroup];
+        std::map<uint32_t, int> can_give{{netgroup, admitted[netgroup]}};
+        for (const WorkerJob& j : pq1_jobs) can_give[j.netgroup] = admitted[j.netgroup];
+        const auto donor = Pq1WorkerDonor(netgroup, can_give);
+        if (!donor) return false;
+        for (auto it = pq1_jobs.rbegin(); it != pq1_jobs.rend(); ++it) {
+            if (it->netgroup != *donor) continue;
+            close(it->fd);
+            GlobalConnLimits().ReleaseInbound(it->netgroup);
+            pq1_jobs.erase(std::next(it).base());
+            return true;
+        }
+        return false;
+    };
     auto enqueue_unix = [&](WorkerJob job) -> bool {
         std::unique_lock<std::mutex> lock(unix_qmu);
         if (unix_jobs.size() >= static_cast<size_t>(PQ1_UNIX_QUEUE)) return false;
@@ -11953,7 +12093,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     auto enqueue_pq1 = [&](WorkerJob job) -> bool {
         std::unique_lock<std::mutex> lock(pq1_qmu);
         if (pq1_jobs.size() >= static_cast<size_t>(PQ1_HTTP_QUEUE)) return false;
-        pq1_jobs.push(std::move(job));
+        pq1_jobs.push_back(std::move(job));
         pq1_qcv.notify_one();
         return true;
     };
@@ -11978,6 +12118,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     }
     for (int i = 0; i < PQ1_HTTP_WORKERS; ++i) {
         workers.emplace_back([&] {
+            Pq1Served served;
             while (!stop->load()) {
                 WorkerJob job;
                 {
@@ -11985,15 +12126,28 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
                     pq1_qcv.wait_for(lock, std::chrono::milliseconds(250),
                                      [&] { return !pq1_jobs.empty() || stop->load(); });
                     if (pq1_jobs.empty()) continue;
-                    job = pq1_jobs.front();
-                    pq1_jobs.pop();
+                    (void)pq1_waiting_started();
+                    if (pq1_jobs.empty()) continue;
+                    const auto next = pq1_jobs.begin() + Pq1NextWaiting(pq1_waiting(), pq1_held());
+                    job = *next;
+                    pq1_jobs.erase(next);
+                    if (job.fd < 0) continue;
+                    served.netgroup = job.netgroup;
+                    served.since = std::chrono::steady_clock::now();
+                    served.stop.store(stop->load());
+                    served.state.store(PQ1_CONN_IDLE);
+                    served.handing_over = false;
+                    pq1_served.push_back(&served);
                 }
-                if (job.fd < 0) continue;
                 try {
-                    HandlePq1Fd(job.fd, cat, pq, stop, pinfile, job.netgroup, job.peer_addr);
+                    HandlePq1Fd(job.fd, cat, pq, &served.stop, pinfile, job.netgroup, job.peer_addr, &served);
                 } catch (const std::exception&) {
                     // A malformed request must not terminate btx-modeld.
                 } catch (...) {
+                }
+                {
+                    std::lock_guard<std::mutex> lock(pq1_qmu);
+                    pq1_served.erase(std::find(pq1_served.begin(), pq1_served.end(), &served));
                 }
                 GlobalConnLimits().ReleaseInbound(job.netgroup);
             }
@@ -12067,6 +12221,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             nf = 2;
         }
         const int pr = poll(fds, nf, 250);
+        pq1_share_workers();
         if (cfg.storage_mode == StorageMode::AUTO &&
             std::chrono::steady_clock::now() - last_quota >= std::chrono::seconds(60)) {
             RefreshAutoStorage(cfg, &cat);
@@ -12099,7 +12254,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
                     close(c);
                     continue;
                 }
-                if (!GlobalConnLimits().TryInbound(ng)) {
+                if (!GlobalConnLimits().TryInbound(ng) && !(pq1_make_room(ng) && GlobalConnLimits().TryInbound(ng))) {
                     close(c);
                     continue;
                 }
@@ -12116,12 +12271,17 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
                     }
                     job.peer_addr = ip;
                 }
+                job.accepted = std::chrono::steady_clock::now();
                 if (!enqueue_pq1(job)) {
                     GlobalConnLimits().ReleaseInbound(ng);
                     close(c);
                 }
             }
         }
+    }
+    {
+        std::lock_guard<std::mutex> lock(pq1_qmu);
+        for (Pq1Served* s : pq1_served) s->stop.store(true);
     }
     unix_qcv.notify_all();
     pq1_qcv.notify_all();
