@@ -770,6 +770,7 @@ BTX_BASE_SCRIPTS = [
     'p2p_shielded_relay.py',
     'p2p_handshake.py',
     'p2p_handshake.py --v2transport',
+    'p2p_v2pqonly.py',
     'p2p_announce_after_handshake.py',
     'p2p_addr_relay.py',
     'mempool_limit.py',
