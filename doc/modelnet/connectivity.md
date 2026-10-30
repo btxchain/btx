@@ -48,6 +48,16 @@ pieces should continue.
 This is not anonymity. Relays and routing peers can see addresses, timing,
 and encrypted byte counts. Provider interest is visible to queried peers.
 
+The helper dials by `btxd`'s `-proxy`, `-onion` and `-onlynet`, as `btxd`
+dials its own peers. IPv4, IPv6, onion and named model peers go through the
+proxy for their network (the proxy resolves names), local addresses are
+dialed directly, and an onion peer needs a proxy. `-onlynet` limits automatic
+dials and search queries. For `-onlynet` a local or private address counts as
+IPv4 or IPv6, so `-onlynet=ipv4` keeps LAN peers and `-onlynet=onion` refuses
+them. Outside search, a peer the operator names (`-modelpeer`, `addmodelnode`)
+is dialed like an `-addnode` peer. The relay splice, the registry HTTPS import
+and cloud seeding still connect directly.
+
 ## Status
 
 `getmodelnetworkinfo` exposes `reachability_state`, mapped/relay

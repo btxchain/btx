@@ -6,7 +6,8 @@
 Four native btxd/modeld processes share one host. No model peer address is
 provided. This is a socket/process integration test, not evidence of physical
 LAN separation, WAN reachability, or an Internet-disconnected deployment.
-MatMul and monetary consensus settings are left intact.
+MatMul and monetary consensus settings are left intact. With --onlynet=ipv4
+every node also runs with -onlynet=ipv4: a LAN peer counts as an IPv4 peer.
 """
 
 import json
@@ -33,6 +34,10 @@ class SwarmLanDiscoverTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.rpc_timeout = 180
 
+    def add_options(self, parser):
+        parser.add_argument("--onlynet", action="append", default=[],
+                            help="pass -onlynet=<net> to every node")
+
     def skip_test_if_missing_module(self):
         self.skip_if_platform_not_posix()
         builddir = Path(self.config["environment"]["BUILDDIR"])
@@ -58,6 +63,7 @@ class SwarmLanDiscoverTest(BitcoinTestFramework):
                         "-modellandiscovery=1"]
                 if i == 3:
                     args.append("-modelstorage=0")
+                args += [f"-onlynet={net}" for net in self.options.onlynet]
                 self.extra_args.append(args)
         finally:
             for sock in sockets:

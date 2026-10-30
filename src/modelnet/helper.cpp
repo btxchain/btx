@@ -63,6 +63,7 @@
 #include <tinyformat.h>
 #include <logging.h>
 #include <netaddress.h>
+#include <netbase.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
 
@@ -112,6 +113,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -1599,6 +1601,8 @@ struct Pq1Session {
     bool outbound_held{false};
     /** Operator addmodelnode of 127.0.0.1/::1 (howto loopback seeder). PEX extras stay blocked. */
     bool allow_loopback{false};
+    /** A -modelpeer / addmodelnode endpoint. Like -addnode, -onlynet does not limit it. */
+    bool operator_named{false};
     std::string transport_pin;
     std::vector<std::pair<std::string, std::string>> piece_headers;
     /** Automatic retrieval keeps this authority across every pooled/reopened transport. */
@@ -1650,6 +1654,34 @@ struct Pq1Session {
             return false;
         }
         outbound_held = true;
+        Proxy proxy;
+        std::optional<CNetAddr> numeric;
+        const ModelDialRoute route{RouteModelDial(host, /*manual=*/operator_named, proxy, numeric, err)};
+        if (route == ModelDialRoute::REFUSED) {
+            Close();
+            return false;
+        }
+        if (route == ModelDialRoute::PROXY) {
+            // Only names and routable addresses get a proxy; local and private ones are dialed below.
+            if (IsForbiddenControlPort(port)) {
+                err = "non-public dial target";
+                Close();
+                return false;
+            }
+            fd = ConnectModelThroughProxy(proxy, host, port, err);
+            if (fd < 0) {
+                Close();
+                return false;
+            }
+            SetPq1SocketOpts(fd, true);
+            std::string try_err;
+            const std::string pin_key{numeric ? CService{*numeric, port}.ToStringAddrPort() : host + ":" + std::to_string(port)};
+            const HandshakeResult result{Handshake(ctx, pin_key, err, try_err)};
+            if (result == HandshakeResult::OK) return true;
+            if (result == HandshakeResult::NEXT) err = try_err;
+            Close();
+            return false;
+        }
         addrinfo hints{};
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_family = AF_UNSPEC;
@@ -1704,6 +1736,10 @@ struct Pq1Session {
                 last_try_err = "non-public dial target";
                 continue;
             }
+            if (!operator_named && !g_reachable_nets.Contains(ModelOnlynetNetwork(resolved))) {
+                last_try_err = "network not reachable (-onlynet)";
+                continue;
+            }
             if (IsForbiddenOutboundDialAddr(resolved)) {
                 if (!(allow_loopback && resolved.IsLocal() && !resolved.IsBindAny())) {
                     last_try_err = "non-public dial target";
@@ -1734,46 +1770,54 @@ struct Pq1Session {
                 last_try_err = "connect failed";
                 continue;
             }
-            ssl = SSL_new(static_cast<SSL_CTX*>(ctx.SslCtx()));
-            if (!ssl) {
-                err = "SSL_new";
+            const HandshakeResult result{Handshake(ctx, resolved.ToStringAddrPort(), err, last_try_err)};
+            if (result == HandshakeResult::OK) return true;
+            if (result == HandshakeResult::FAIL) {
                 Close();
                 return false;
             }
-            SSL_set_fd(ssl, fd);
-            SSL_set_connect_state(ssl);
-            std::string herr;
-            if (!SslHandshake(ssl, fd, /*accept=*/false, handshake_ms, stop, herr)) {
-                last_try_err = herr.empty() ? "PQ1 handshake failed" : herr;
-                continue;
-            }
-            NegotiatedPq1 n;
-            InspectNegotiated(ssl, n);
-            if (!IsStrictPq1(n)) {
-                last_try_err = "negotiated parameters are not strict PQ1";
-                continue;
-            }
-            Digest48 pin;
-            std::string pinerr;
-            if (!ExtractPeerTransportPin(ssl, pin, pinerr)) {
-                last_try_err = pinerr.empty() ? "no peer certificate" : pinerr;
-                continue;
-            }
-            if (authorize_peer && !authorize_peer(host, port, pin.Hex(), err)) {
-                Close();
-                return false;
-            }
-            if (!pinfile.empty() && !CheckOrStorePin(pinfile, resolved.ToStringAddrPort(), pin, pinerr)) {
-                err = pinerr.empty() ? "peer cert pin mismatch (TOFU)" : pinerr;
-                Close();
-                return false;
-            }
-            transport_pin = pin.Hex();
-            return true;
         }
         err = last_try_err;
         Close();
         return false;
+    }
+
+    enum class HandshakeResult { OK, NEXT, FAIL };
+
+    /** Strict PQ1 over the connected fd, then the peer pin (TOFU under pin_key). NEXT: try the next address. */
+    HandshakeResult Handshake(Pq1Context& ctx, const std::string& pin_key, std::string& err, std::string& try_err)
+    {
+        ssl = SSL_new(static_cast<SSL_CTX*>(ctx.SslCtx()));
+        if (!ssl) {
+            err = "SSL_new";
+            return HandshakeResult::FAIL;
+        }
+        SSL_set_fd(ssl, fd);
+        SSL_set_connect_state(ssl);
+        std::string herr;
+        if (!SslHandshake(ssl, fd, /*accept=*/false, handshake_ms, stop, herr)) {
+            try_err = herr.empty() ? "PQ1 handshake failed" : herr;
+            return HandshakeResult::NEXT;
+        }
+        NegotiatedPq1 n;
+        InspectNegotiated(ssl, n);
+        if (!IsStrictPq1(n)) {
+            try_err = "negotiated parameters are not strict PQ1";
+            return HandshakeResult::NEXT;
+        }
+        Digest48 pin;
+        std::string pinerr;
+        if (!ExtractPeerTransportPin(ssl, pin, pinerr)) {
+            try_err = pinerr.empty() ? "no peer certificate" : pinerr;
+            return HandshakeResult::NEXT;
+        }
+        if (authorize_peer && !authorize_peer(host, port, pin.Hex(), err)) return HandshakeResult::FAIL;
+        if (!pinfile.empty() && !CheckOrStorePin(pinfile, pin_key, pin, pinerr)) {
+            err = pinerr.empty() ? "peer cert pin mismatch (TOFU)" : pinerr;
+            return HandshakeResult::FAIL;
+        }
+        transport_pin = pin.Hex();
+        return HandshakeResult::OK;
     }
 
     bool Ensure(std::string& err)
@@ -10259,6 +10303,11 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
         }
         return false;
     };
+    auto configured_peer = [&](const std::string& h, uint16_t p) {
+        const std::string ep = (h.find(':') != std::string::npos ? "[" + h + "]" : h) + ":" + std::to_string(p);
+        const auto peers = cat.Peers();
+        return std::find(peers.begin(), peers.end(), ep) != peers.end();
+    };
     auto authorize_peer = [&](const std::string& h, uint16_t p, const std::string& pin, std::string& local_err) {
         if (!AutomaticAcquisitionPermitted(cat)) {
             local_err = "automatic acquisition disabled by local policy";
@@ -10281,6 +10330,7 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
         sess.stop = stop;
         sess.pinfile = pinfile;
         sess.allow_loopback = loopback_ok(h, p);
+        sess.operator_named = configured_peer(h, p);
         if (automatic) {
             sess.authorize_peer = authorize_peer;
             sess.required_network = g_native_network;
@@ -11732,6 +11782,7 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
         // Loopback is only for explicitly configured local test/owner peers.
         const auto configured = cat.Peers();
         sess.allow_loopback = std::find(configured.begin(), configured.end(), endpoint) != configured.end();
+        sess.operator_named = sess.allow_loopback;
         sess.handshake_ms = 3000;
         sess.io_ms = 3000;
         if (!sess.Connect(pq, host, port, err)) continue;
@@ -12123,6 +12174,8 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             }
         }
     }
+    // A SOCKS5 negotiation waits up to its own timeout; wake it for shutdown.
+    g_socks5_interrupt();
     unix_qcv.notify_all();
     pq1_qcv.notify_all();
     if (preserve_thr.joinable()) preserve_thr.join();
@@ -12130,6 +12183,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     g_native_lan.Close();
     g_native_lan_enabled.store(false);
     JoinRetrieveJobs();
+    g_socks5_interrupt.reset();
     close(unix_fd);
     if (tcp_fd >= 0) close(tcp_fd);
     ReleaseModelPortMap(g_swarm.nat);

@@ -9,14 +9,18 @@
 #include <netaddress.h>
 #include <netbase.h>
 #include <random.h>
+#include <util/sock.h>
+#include <util/strencodings.h>
 #include <util/threadinterrupt.h>
 
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <netinet/in.h>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace modelnet {
@@ -125,6 +129,118 @@ bool IsForbiddenRelayEndpoint(const std::string& endpoint, std::string& err)
         return true;
     }
     return false;
+}
+
+namespace {
+
+/** Hands the descriptor of a connected Sock to code that works on raw fds. */
+class DetachableSock : public Sock
+{
+public:
+    explicit DetachableSock(Sock&& sock) : Sock{std::move(sock)} {}
+    using Sock::operator=;
+
+    SOCKET Detach()
+    {
+        const SOCKET s{m_socket};
+        m_socket = INVALID_SOCKET;
+        return s;
+    }
+};
+
+bool IsOnionName(const std::string& host)
+{
+    constexpr std::string_view suffix{".onion"};
+    return host.size() > suffix.size() && ToLower(std::string_view{host}.substr(host.size() - suffix.size())) == suffix;
+}
+
+} // namespace
+
+bool ApplyModelOutboundArgs(const std::vector<std::string>& proxies, bool randomize_credentials,
+                            const std::vector<std::string>& onlynets, std::string& err)
+{
+    for (const std::string& value : proxies) {
+        const auto eq{value.rfind('=')};
+        const std::string addr{value.substr(0, eq)};
+        const std::string net{eq == std::string::npos ? "" : ToLower(value.substr(eq + 1))};
+        Proxy proxy;
+        if (IsUnixSocketPath(addr)) {
+            proxy = Proxy{addr, randomize_credentials};
+        } else if (const auto service{Lookup(addr, 9050, /*fAllowLookup=*/false)}) {
+            proxy = Proxy{*service, randomize_credentials};
+        }
+        if (!proxy.IsValid()) {
+            err = "invalid -modelproxy: " + value;
+            return false;
+        }
+        if (net == "name") {
+            SetNameProxy(proxy);
+            continue;
+        }
+        const Network network{ParseNetwork(net)};
+        if (network != NET_IPV4 && network != NET_IPV6 && network != NET_ONION) {
+            err = "invalid -modelproxy network: " + value;
+            return false;
+        }
+        SetProxy(network, proxy);
+    }
+    std::vector<Network> reachable;
+    for (const std::string& name : onlynets) {
+        reachable.push_back(ParseNetwork(name));
+        if (reachable.back() == NET_UNROUTABLE) {
+            err = "invalid -modelonlynet: " + name;
+            return false;
+        }
+    }
+    if (!reachable.empty()) {
+        g_reachable_nets.RemoveAll();
+        for (const Network network : reachable) g_reachable_nets.Add(network);
+    }
+    return true;
+}
+
+Network ModelOnlynetNetwork(const CNetAddr& addr)
+{
+    if (addr.IsIPv4()) return NET_IPV4;
+    if (addr.IsIPv6()) return NET_IPV6;
+    return addr.GetNetwork();
+}
+
+ModelDialRoute RouteModelDial(const std::string& host, bool manual, Proxy& proxy, std::optional<CNetAddr>& numeric,
+                              std::string& err)
+{
+    numeric.reset();
+    if (const auto addr{LookupHost(host, /*fAllowLookup=*/false)}) numeric = *addr;
+    if (!numeric && !IsOnionName(host)) {
+        if (!manual && !g_reachable_nets.Contains(NET_IPV4) && !g_reachable_nets.Contains(NET_IPV6)) {
+            err = "network not reachable (-onlynet)";
+            return ModelDialRoute::REFUSED;
+        }
+        return GetNameProxy(proxy) ? ModelDialRoute::PROXY : ModelDialRoute::DIRECT;
+    }
+    // An unparseable .onion name is still an onion host: never handed to the resolver.
+    const Network net{numeric ? numeric->GetNetwork() : NET_ONION};
+    if (!manual && !g_reachable_nets.Contains(numeric ? ModelOnlynetNetwork(*numeric) : NET_ONION)) {
+        err = "network not reachable (-onlynet)";
+        return ModelDialRoute::REFUSED;
+    }
+    if (GetProxy(net, proxy)) return ModelDialRoute::PROXY;
+    if (net == NET_ONION || net == NET_I2P) {
+        err = "no proxy for this network (-proxy, -onion)";
+        return ModelDialRoute::REFUSED;
+    }
+    return ModelDialRoute::DIRECT;
+}
+
+int ConnectModelThroughProxy(const Proxy& proxy, const std::string& host, uint16_t port, std::string& err)
+{
+    bool proxy_failed{false};
+    std::unique_ptr<Sock> sock{ConnectThroughProxy(proxy, host, port, proxy_failed)};
+    if (!sock) {
+        err = proxy_failed ? "proxy connect failed" : "proxy could not reach peer";
+        return -1;
+    }
+    return static_cast<int>(DetachableSock{std::move(*sock)}.Detach());
 }
 
 bool MappingWouldExposeControlPlane(uint16_t port)

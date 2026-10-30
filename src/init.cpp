@@ -4455,14 +4455,28 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             LogPrintf("model helper: -modelhost is on but -modelbind is off, so the helper listens on loopback only; set -modelbind=<ip:port> to serve peers (-listen=0 turns the default off)\n");
         }
         hcfg.natpmp = args.GetBoolArg("-natpmp", DEFAULT_NATPMP);
-        LogPrintf("model helper exe=%s socket=%s storage=%s bind=%s host=%s relay=%d missing=%d\n",
+        // The helper reaches its peers by the node's -proxy, -onion and -onlynet.
+        {
+            Proxy proxy;
+            for (const Network net : {NET_IPV4, NET_IPV6, NET_ONION}) {
+                if (GetProxy(net, proxy)) hcfg.proxies.push_back(proxy.ToString() + "=" + GetNetworkName(net));
+            }
+            if (GetNameProxy(proxy)) hcfg.proxies.push_back(proxy.ToString() + "=name");
+            hcfg.proxy_randomize = args.GetBoolArg("-proxyrandomize", DEFAULT_PROXYRANDOMIZE);
+            for (const std::string& net : args.GetArgs("-onlynet")) {
+                hcfg.onlynets.push_back(GetNetworkName(ParseNetwork(net)));
+            }
+        }
+        LogPrintf("model helper exe=%s socket=%s storage=%s bind=%s host=%s relay=%d missing=%d proxies=%d onlynet=%s\n",
                   fs::PathToString(hcfg.helper_exe),
                   fs::PathToString(hcfg.rpc_socket),
                   hcfg.storage_arg,
                   hcfg.bind,
                   modelnet::HostModeName(hcfg.host_mode),
                   hcfg.relay ? 1 : 0,
-                  hcfg.helper_explicitly_missing ? 1 : 0);
+                  hcfg.helper_explicitly_missing ? 1 : 0,
+                  hcfg.proxies.size(),
+                  hcfg.onlynets.empty() ? "all" : Join(hcfg.onlynets, ","));
         modelnet::SetModelHostServiceBitHook([&node](bool on) {
             if (!node.connman) return;
             if (on) {
