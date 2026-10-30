@@ -2668,19 +2668,41 @@ void UnseedSafetyTarget(ModelCatalog& cat, const std::string& hex)
     (void)cat.Seed(id, false, e);
 }
 
+namespace {
+std::mutex g_grant_issue_mu;
+std::map<std::string, std::vector<int64_t>> g_grant_issue_hits;
+int64_t g_grant_issue_pruned_ms{0};
+} // namespace
+
 bool AllowGrantIssue(const std::string& peer, int64_t now_ms, std::string& err)
 {
-    static std::mutex mu;
-    static std::map<std::string, std::vector<int64_t>> hits;
-    std::lock_guard<std::mutex> lock(mu);
-    auto& v = hits[peer.empty() ? "pq1-peer" : peer];
-    v.erase(std::remove_if(v.begin(), v.end(), [&](int64_t t) { return now_ms - t > 60000; }), v.end());
+    std::lock_guard<std::mutex> lock(g_grant_issue_mu);
+    const auto expired = [&](int64_t t) { return now_ms - t > 60000; };
+    // Every peer that ever asked for a grant would otherwise keep a key here.
+    // Once a minute, drop the peers with no grant inside the window.
+    if (now_ms < g_grant_issue_pruned_ms || now_ms - g_grant_issue_pruned_ms > 60000) {
+        for (auto it = g_grant_issue_hits.begin(); it != g_grant_issue_hits.end();) {
+            auto& times = it->second;
+            times.erase(std::remove_if(times.begin(), times.end(), expired), times.end());
+            if (times.empty()) it = g_grant_issue_hits.erase(it);
+            else ++it;
+        }
+        g_grant_issue_pruned_ms = now_ms;
+    }
+    auto& v = g_grant_issue_hits[peer.empty() ? "pq1-peer" : peer];
+    v.erase(std::remove_if(v.begin(), v.end(), expired), v.end());
     if (v.size() >= 32) {
         err = "grant issue limited";
         return false;
     }
     v.push_back(now_ms);
     return true;
+}
+
+size_t GrantIssueTrackedPeers()
+{
+    std::lock_guard<std::mutex> lock(g_grant_issue_mu);
+    return g_grant_issue_hits.size();
 }
 
 void ApplyInboundSafetyRecord(ModelCatalog& cat, const SignedRecordHint& h, int64_t now, UniValue& o)

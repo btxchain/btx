@@ -51,6 +51,7 @@ class ProviderExchange {
     std::vector<ProviderHint> m_cache;
     std::vector<ProviderHint> m_local;
     std::map<std::string, std::vector<int64_t>> m_peer_times;
+    int64_t m_peer_times_pruned_ms{0};
     PexStats m_stats;
 
 public:
@@ -66,6 +67,8 @@ public:
     std::vector<ProviderHint> Recent(int64_t now_ms) const;
     UniValue Advertise(int64_t now_ms, size_t max_records) const;
     const PexStats& Stats() const { return m_stats; }
+    /** Number of peers the per-peer message window currently tracks. */
+    size_t TrackedPeers() const { return m_peer_times.size(); }
     void NoteSelf(const std::string& endpoint) { m_self = endpoint; }
     /** Upsert a locally seeded catalog hint so Advertise can introduce this node. */
     void NoteLocal(const ProviderHint& hint);

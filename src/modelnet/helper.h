@@ -116,6 +116,10 @@ std::string ResolveHelperMethodAlias(const std::string& method, std::string& ali
 bool TryAdmitModelUpload(const std::string& identity, const std::string& netgroup, uint64_t bytes,
                          uint64_t& request_id, std::string& err);
 void ReleaseModelUpload(uint64_t request_id);
+/** FreeGrant issue budget: 32 grants per peer per rolling minute. */
+bool AllowGrantIssue(const std::string& peer, int64_t now_ms, std::string& err);
+/** Number of peers the grant issue budget currently tracks. */
+size_t GrantIssueTrackedPeers();
 
 bool EnsureMlDsaTlsFiles(const fs::path& cert, const fs::path& key, std::string& err);
 bool LoadPq1Identity(Pq1Context& pq, const fs::path& modeldir, std::string& err);

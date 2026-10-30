@@ -660,6 +660,15 @@ void TrimWindow(std::vector<int64_t>& hits, int64_t now_ms, int64_t window_ms)
     hits.erase(it, hits.end());
 }
 
+void PruneWindows(std::map<std::string, std::vector<int64_t>>& m, int64_t now_ms, int64_t window_ms)
+{
+    for (auto it = m.begin(); it != m.end();) {
+        TrimWindow(it->second, now_ms, window_ms);
+        if (it->second.empty()) it = m.erase(it);
+        else ++it;
+    }
+}
+
 } // namespace
 
 bool OriginStampedeGuard::CircuitOpenLocked(const std::string& peer, int64_t now_ms) const
@@ -671,6 +680,13 @@ bool OriginStampedeGuard::CircuitOpenLocked(const std::string& peer, int64_t now
 bool OriginStampedeGuard::Allow(const std::string& peer, const std::string& netgroup, int64_t now_ms, std::string& err)
 {
     std::lock_guard<std::mutex> lock(m_mu);
+    // A key is otherwise only dropped when the same peer or netgroup comes
+    // back. Once per window, drop the keys with no hit inside it.
+    if (now_ms < m_pruned_ms || now_ms - m_pruned_ms > m_s.window_ms) {
+        PruneWindows(m_peer_hits, now_ms, m_s.window_ms);
+        PruneWindows(m_ng_hits, now_ms, m_s.window_ms);
+        m_pruned_ms = now_ms;
+    }
     if (CircuitOpenLocked(peer, now_ms)) {
         err = "origin circuit open";
         return false;
@@ -746,6 +762,7 @@ void OriginStampedeGuard::ResetForTests()
     std::lock_guard<std::mutex> lock(m_mu);
     m_peer_hits.clear();
     m_ng_hits.clear();
+    m_pruned_ms = 0;
     m_errors.clear();
     m_open_until.clear();
 }

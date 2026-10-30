@@ -106,6 +106,20 @@ bool ProviderExchange::Ingest(const std::string& from_endpoint,
         ++m_stats.rejected;
         return false;
     }
+    // A key is otherwise only dropped when the same peer comes back, so every
+    // distinct address that ever sent a message would stay here. Once a minute,
+    // drop the peers with no message inside the window.
+    if (now_ms < m_peer_times_pruned_ms || now_ms - m_peer_times_pruned_ms > 60000) {
+        for (auto it = m_peer_times.begin(); it != m_peer_times.end();) {
+            auto& times = it->second;
+            times.erase(std::remove_if(times.begin(), times.end(),
+                                       [&](int64_t t) { return now_ms - t > 60000; }),
+                        times.end());
+            if (times.empty()) it = m_peer_times.erase(it);
+            else ++it;
+        }
+        m_peer_times_pruned_ms = now_ms;
+    }
     auto tit = m_peer_times.find(from_endpoint);
     if (tit != m_peer_times.end()) {
         tit->second.erase(std::remove_if(tit->second.begin(), tit->second.end(),
