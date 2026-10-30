@@ -13,7 +13,8 @@ empty template.
 1. Recovery R is admitted to the mempool while its anchor is valid.
 2. One block without R changes the tree, then 101 empty blocks without R.
 3. An unrelated transparent transaction T is broadcast.
-4. getblocktemplate and the next mined block must include T.
+4. getblocktemplate and the next mined block must include T, and leave out
+   R without evicting it: R stays in the mempool.
 
 Regtest only, loopback only.
 """
@@ -119,6 +120,12 @@ class SpendPathRecoveryStaleAnchorTemplateTest(BitcoinTestFramework):
 
         assert t_txid in template_txids, "block template dropped every mempool transaction (empty fallback)"
         assert mined_t, "unrelated transaction T was not mined while R (stale anchor) sits in the mempool"
+        # R is skipped, not evicted: after a disconnect brings its anchor back
+        # into the window it can still be mined.
+        assert r_in_mempool, "R was evicted when its anchor left the window"
+        assert r_txid not in template_txids, "R (stale anchor) is in the block template"
+        assert r_txid not in block["tx"], "R (stale anchor) was mined"
+        assert r_txid in node.getrawmempool(), "R left the mempool when the next block was mined"
 
 
 if __name__ == "__main__":
