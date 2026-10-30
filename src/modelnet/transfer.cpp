@@ -8,6 +8,7 @@
 #include <random.h>
 #include <script/script.h>
 #include <tinyformat.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 
 #include <span.h>
@@ -256,12 +257,25 @@ bool SavePaymentState(const fs::path& dir, const std::vector<Quote>& quotes, con
     o.pushKV("quotes", qa);
     o.pushKV("journal", ja);
     fs::create_directories(dir);
-    std::ofstream out(dir / "quotes.json", std::ios::trunc);
-    if (!out) {
+    // Write a sibling and rename it over quotes.json, so a crash or a failed
+    // write never leaves a cut-short journal that the next load rejects.
+    const fs::path path = dir / "quotes.json";
+    const fs::path tmp = dir / "quotes.json.tmp";
+    bool written{false};
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (out) {
+            out << o.write() << "\n";
+            out.flush();
+            written = static_cast<bool>(out);
+        }
+    }
+    if (!written || !RenameOver(tmp, path)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
         err = "quotes.json write";
         return false;
     }
-    out << o.write() << "\n";
     return true;
 }
 

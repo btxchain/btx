@@ -8134,7 +8134,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         std::vector<Quote> quotes;
         std::vector<PaymentJournal> journal;
         const fs::path dir = cat.Store().Root().parent_path();
-        LoadPaymentState(dir, quotes, journal, err);
+        // A paid plan saves its new quote into quotes.json. Never write over
+        // a journal that could not be read; a free-only plan writes nothing.
+        if (!LoadPaymentState(dir, quotes, journal, err) && mode != RetrievalMode::FREE_ONLY) {
+            err_code = "IO";
+            return false;
+        }
         for (auto& p : missing) {
             if (DuplicateReservedRange(journal, p.file_index, p.piece_index, 1)) p.reserved_paid = true;
         }
