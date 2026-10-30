@@ -19,6 +19,9 @@ constexpr int MAX_ROUTER_CONTACTS = 8;
 constexpr int MAX_CONCURRENT_RESOLVE_QUERIES = 4;
 /** Negative lookup cache lifetime is at most 60 seconds. */
 constexpr int64_t NEGATIVE_RESOLVE_TTL_S = 60;
+/** Payload, signature and key bytes a RouterCache holds. With the 4096-record
+ *  cap alone, records announced by peers could take about 160 MB. */
+constexpr size_t ROUTER_CACHE_MAX_BYTES = 16u << 20;
 
 struct SignedRecordHint {
     Digest48 record_id;
@@ -61,6 +64,9 @@ public:
 class RouterCache {
     std::map<std::string, SignedRecordHint> m_by_id;
     size_t m_max{4096};
+    size_t m_max_bytes{ROUTER_CACHE_MAX_BYTES};
+    size_t m_bytes{0};
+    bool m_unsaved{false};
 
 public:
     bool Insert(const SignedRecordHint& rec, int64_t now, std::string& err);
@@ -69,6 +75,9 @@ public:
     std::vector<SignedRecordHint> All(int64_t now) const;
     void Expire(int64_t now);
     size_t Size() const { return m_by_id.size(); }
+    /** A record was added since MarkSaved(). Refreshing a live record with the same id does not count. */
+    bool Unsaved() const { return m_unsaved; }
+    void MarkSaved() { m_unsaved = false; }
 };
 
 } // namespace modelnet

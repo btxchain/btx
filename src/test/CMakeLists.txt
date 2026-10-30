@@ -572,6 +572,7 @@ if(WITH_MODELNET)
     modelnet_iso_isolation_tests.cpp
     modelnet_pay_pool_tests.cpp
     modelnet_b0_disc_store_tests.cpp
+    modelnet_records_cache_tests.cpp
     modelnet_b0_remaining_tests.cpp
     modelnet_b0_pq_rest_tests.cpp
     modelnet_hosting_tests.cpp

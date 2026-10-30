@@ -92,6 +92,8 @@ struct HelperConfig {
 };
 
 bool ParseHttpRequest(const std::string& raw, NativeRequest& req, std::string& err);
+/** Write records.json if a record was added to the record cache since it was last written. */
+void FlushRecords(const ModelCatalog& cat);
 std::string FormatHttpResponse(const NativeResponse& resp);
 
 bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResponse& resp);
