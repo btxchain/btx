@@ -257,6 +257,38 @@ BOOST_AUTO_TEST_CASE(pin_a_survives_restart)
     BOOST_CHECK(resumed.Store().IsPinned(found.artifact_id));
 }
 
+BOOST_AUTO_TEST_CASE(reimport_with_pin_pins_the_catalog_entry)
+{
+    const fs::path tmp = m_path_root / "reimport-pin";
+    modelnet::Digest48 id;
+    {
+        modelnet::ModelCatalog cat{tmp, 8 << 20};
+        const auto first = ImportTiny(cat, tmp / "src", 0x51, false);
+        BOOST_CHECK(!first.pinned);
+        const auto again = ImportTiny(cat, tmp / "src", 0x51, true);
+        BOOST_REQUIRE(again.artifact_id == first.artifact_id);
+        BOOST_CHECK(again.pinned);
+        id = first.model_id;
+
+        modelnet::CatalogEntry entry;
+        BOOST_REQUIRE(cat.Find(id, entry));
+        BOOST_CHECK(entry.pinned);
+        BOOST_CHECK(entry.admission == modelnet::AdmissionLevel::PINNED);
+
+        // Under storage pressure the pinned model stays.
+        modelnet::PreservationPolicy pol = cat.Policy();
+        pol.storage_quota_bytes = 1;
+        cat.SetPolicy(pol);
+        std::string err;
+        (void)cat.EnforceQuota(0, err);
+        BOOST_CHECK(cat.Find(id, entry));
+    }
+    modelnet::ModelCatalog resumed{tmp, 8 << 20};
+    modelnet::CatalogEntry found;
+    BOOST_REQUIRE(resumed.Find(id, found));
+    BOOST_CHECK(found.pinned);
+}
+
 BOOST_AUTO_TEST_CASE(store_gc_removes_only_empty_unpinned_artifacts)
 {
     const fs::path tmp = m_path_root / "store-gc";
