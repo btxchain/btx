@@ -682,6 +682,7 @@ BTX_BASE_SCRIPTS = [
     'p2p_mirror_relay_to_signer.py',
     'feature_matmul_heard_serve.py',
     'feature_matmul_signer_node_ibd.py',
+    'feature_matmul_signer_unclean_restart_reorg.py',
     'feature_matmul_trusted_mirror_convergence.py',
     'feature_matmul_trusted_mirror_bounded_park.py',
     'feature_matmul_trusted_mirror_bounded_stall_open.py',

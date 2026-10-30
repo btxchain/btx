@@ -1776,6 +1776,27 @@ void NotifyActiveChainBlockConnected(int32_t height,
     EraseWithdrawnLocalVote(height, connected_hash);
 }
 
+size_t ReleaseLocalVotesOutsideBlockIndex(
+    const std::function<bool(const uint256&)>& in_block_index)
+{
+    // Copy first: in_block_index takes cs_main, which is ordered before g_mutex.
+    std::map<int32_t, uint256> local_signed;
+    {
+        std::lock_guard lock{g_mutex};
+        local_signed = g_local_signed_hash_by_height;
+    }
+    size_t released{0};
+    for (const auto& [height, hash] : local_signed) {
+        if (hash.IsNull() || in_block_index(hash)) continue;
+        if (NotifyActiveChainBlockDisconnected(height, hash)) ++released;
+    }
+    if (released != 0) {
+        LogPrintf("matmul: released %zu local vote(s) for blocks missing from "
+                  "the block index after restart\n", released);
+    }
+    return released;
+}
+
 size_t ClearMintedAttestations(int32_t from_height, int32_t to_height)
 {
     if (from_height > to_height) return 0;
