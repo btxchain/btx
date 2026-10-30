@@ -15486,9 +15486,20 @@ BOOST_AUTO_TEST_CASE(fast_relay_uses_supplied_body_before_disk_availability)
     BOOST_REQUIRE(index != nullptr);
     BOOST_REQUIRE_EQUAL(index->nStatus & BLOCK_HAVE_DATA, 0U);
 
-    // AcceptBlock fires this signal before writing the new body. A disk flag
-    // cannot be the prerequisite for sending the body already in the signal.
+    // AcceptBlock fires this signal before writing the new body and before
+    // ConnectTip. Nothing is queued yet: pushing a block that is not connected
+    // gets this honest relay disconnected if ConnectBlock later rejects it.
     signals.NewPoWValidBlock(index, body);
+    for (CNode* candidate : peers) {
+        BOOST_CHECK(!peerman_tests::HasQueuedMessageType(*candidate, NetMsgType::HEADERS));
+        BOOST_CHECK_EQUAL(peerman_tests::CountQueuedMessageType(*candidate, NetMsgType::BLOCK), 0U);
+    }
+
+    // Once the block connects, the deferred header and body go out to the
+    // behind peer and the headers-only peer without a getheaders round trip.
+    BOOST_REQUIRE(chainman.ProcessNewBlock(body, /*force_processing=*/true,
+                                           /*min_pow_checked=*/true, /*new_block=*/nullptr));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()) == index);
     for (CNode* candidate : {&peer, &headers_peer}) {
         BOOST_REQUIRE(peerman_tests::HasQueuedMessageType(*candidate, NetMsgType::HEADERS));
         BOOST_REQUIRE_EQUAL(peerman_tests::CountQueuedMessageType(*candidate, NetMsgType::BLOCK), 1U);
