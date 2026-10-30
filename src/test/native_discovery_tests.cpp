@@ -1,7 +1,12 @@
 // Copyright (c) 2026 The BTX developers
 // Distributed under the MIT software license, see the accompanying file COPYING.
+#include <chainparams.h>
+#include <chainparamsbase.h>
+#include <modelnet/model_nat.h>
 #include <modelnet/native_discovery.h>
 #include <modelnet/native_participation.h>
+#include <test/util/setup_common.h>
+#include <util/chaintype.h>
 #include <boost/test/unit_test.hpp>
 #include <array>
 #include <limits>
@@ -40,6 +45,20 @@ BOOST_AUTO_TEST_CASE(no_rpc_metadata_public_or_hostname_hints)
     std::array<unsigned char, modelnet::MODEL_LAN_BEACON_SIZE> wire{};
     for (uint16_t port : {0, 22, 80, 443, 8332, 18332, 18443, 29443, 29448})
         BOOST_CHECK(!modelnet::EncodeLanBeacon(Beacon(port), wire));
+}
+
+BOOST_FIXTURE_TEST_CASE(node_rpc_and_p2p_ports_are_never_hints_or_dials, BasicTestingSetup)
+{
+    std::array<unsigned char, modelnet::MODEL_LAN_BEACON_SIZE> wire{};
+    for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET,
+                                  ChainType::REGTEST, ChainType::SHIELDEDV2DEV}) {
+        const uint16_t rpc_port{CreateBaseChainParams(chain)->RPCPort()};
+        const uint16_t p2p_port{CreateChainParams(*m_node.args, chain)->GetDefaultPort()};
+        for (const uint16_t port : {rpc_port, p2p_port}) {
+            BOOST_CHECK_MESSAGE(modelnet::IsForbiddenControlPort(port), ChainTypeToString(chain) << " port " << port);
+            BOOST_CHECK_MESSAGE(!modelnet::EncodeLanBeacon(Beacon(port), wire), ChainTypeToString(chain) << " port " << port);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(expiration_refresh_and_clock_reversal)

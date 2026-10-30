@@ -26,6 +26,7 @@ const uint16_t kForbidden[] = {
     8332, 18332, 18443, 18444, 28332, 28333, 8333, 18333, 38332, 38333,
     18766, 18445, 8334, 28334,
     19334, 19335, 19443, 19444,
+    29334, 29335, 48332, 48333,
 };
 
 bool ParseHostPort(const std::string& in, std::string& host, uint16_t& port)

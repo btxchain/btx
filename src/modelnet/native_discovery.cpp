@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying file COPYING.
 #include <modelnet/native_discovery.h>
 
+#include <modelnet/model_nat.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -40,8 +42,8 @@ bool ValidNetwork(const std::string& s)
 bool ValidPort(uint16_t port)
 {
     // Never turn a multicast hint into a dial to a wallet/control/metadata port.
-    if (port < 1024 || port == MODEL_LAN_DISCOVERY_PORT) return false;
-    for (uint16_t p : {8332, 18332, 18443, 38332, 48332, 29442, 29443, 29444, 29445, 29446}) {
+    if (port < 1024 || port == MODEL_LAN_DISCOVERY_PORT || IsForbiddenControlPort(port)) return false;
+    for (uint16_t p : {29442, 29443, 29444, 29445, 29446}) {
         if (port == p) return false;
     }
     return true;
