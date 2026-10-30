@@ -9,6 +9,7 @@ real installer script against a local signed-manifest shape and live target
 processes so process targeting and pre-stop failure behavior are observable.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -562,20 +563,24 @@ def test_unhealthy_restart_triggers_rollback_path():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
-def _prebuilt_manifest_entry(scenario, name, *, bad_btxd=False):
+def _prebuilt_manifest_entry(scenario, name, *, bad_btxd=False, with_sha256=True):
     tar_path = scenario.origin / f"{name}.tar.gz"
     build_prebuilt_tarball(scenario.tmp, tar_path, bad_btxd=bad_btxd)
     sig_path = scenario.origin / f"{name}.tar.gz.sig"
     sig_path.write_text("signature\n", encoding="utf8")
-    return {"url": tar_path.as_uri(), "sig_url": sig_path.as_uri()}
+    entry = {"url": tar_path.as_uri(), "sig_url": sig_path.as_uri()}
+    if with_sha256:
+        entry["sha256"] = hashlib.sha256(tar_path.read_bytes()).hexdigest()
+    return entry
 
 
-def _add_prebuilt_to_manifest(scenario, *, bad_btxd=False):
+def _add_prebuilt_to_manifest(scenario, *, bad_btxd=False, with_sha256=True):
     """Augment the scenario's signed manifest with a prebuilt entry for this host, returning the
     platform key used."""
     key = host_platform_keys()[0]
     manifest = json.loads((scenario.origin / "version.txt").read_text(encoding="utf8"))
-    manifest["prebuilt"] = {key: _prebuilt_manifest_entry(scenario, "btx-prebuilt", bad_btxd=bad_btxd)}
+    manifest["prebuilt"] = {key: _prebuilt_manifest_entry(scenario, "btx-prebuilt", bad_btxd=bad_btxd,
+                                                          with_sha256=with_sha256)}
     (scenario.origin / "version.txt").write_text(json.dumps(manifest), encoding="utf8")
     return key
 
@@ -794,6 +799,31 @@ def test_pinned_manifest_digest_mismatch_aborts():
             raise AssertionError(f"expected a digest mismatch; got:\n{result.stdout}\n{result.stderr}")
 
 
+def test_unpinned_manifest_must_match_verified_version():
+    # btxd 0.34.15 and older pass only the manifest URL and the version they
+    # verified. The installer fetches the manifest again, so that fetch must not
+    # be allowed to name another (for example an older, validly signed) version.
+    with Scenario("unpinned-version", {"BTX_AUTOUPDATE_REMOTE_VERSION": "100.0.0"}) as scenario:
+        result = scenario.run_installer()
+        assert_failure(result)
+        if "refusing manifest version 99.0.0: the node verified 100.0.0" not in (result.stdout + result.stderr):
+            raise AssertionError(f"expected a version mismatch refusal; got:\n{result.stdout}\n{result.stderr}")
+    with Scenario("unpinned-version-match", {"BTX_AUTOUPDATE_REMOTE_VERSION": "99.0.0"}) as scenario:
+        assert_success(scenario.run_installer())
+
+
+def test_python_module_in_working_directory_is_not_imported():
+    # btxd starts the installer without changing directory. A json.py there must
+    # not run inside the installer's python3 helpers.
+    with Scenario("cwd-import") as scenario:
+        marker = scenario.tmp / "planted-json-ran"
+        (scenario.tmp / "json.py").write_text(
+            f"open({str(marker)!r}, 'a').write('x')\nraise ImportError('planted')\n", encoding="utf8")
+        assert_success(scenario.run_installer())
+        if marker.exists():
+            raise AssertionError("installer imported json.py from its working directory")
+
+
 def test_unusable_prebuilt_falls_back_to_source_build():
     with Scenario("prebuilt-unusable", {"BTX_AUTO_RESTART": "1"}) as scenario:
         try:
@@ -816,6 +846,44 @@ def test_unusable_prebuilt_falls_back_to_source_build():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
+def test_prebuilt_without_sha256_is_not_used():
+    # The artifact signature covers only SHA256(tarball), so any tarball ever signed with the
+    # release key verifies, an older release included. Only the sha256 in the signed manifest
+    # binds the prebuilt to this release; without it the installer must build from source.
+    with Scenario("prebuilt-no-sha256", {"BTX_AUTO_RESTART": "1"}) as scenario:
+        try:
+            _add_prebuilt_to_manifest(scenario, with_sha256=False)
+            result = scenario.run_installer()
+            assert_success(result)
+
+            release_manifest = json.loads((scenario.tmp / "install" / "current" / "manifest.json").read_text(encoding="utf8"))
+            if release_manifest.get("source") == "prebuilt":
+                raise AssertionError("installed a prebuilt that the signed manifest does not pin by sha256")
+            actions = scenario.action_log.read_text(encoding="utf8") if scenario.action_log.exists() else ""
+            if "--build" not in actions:
+                raise AssertionError(f"expected a source build without a pinned prebuilt:\n{actions}")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
+
+def test_prebuilt_without_sha256_is_not_downloaded():
+    # Without a sha256 the artifact is ignored anyway, so the installer skips it before the
+    # download. The tarball is removed from the origin: a download attempt would fail and log
+    # "prebuilt download failed" instead of the missing-sha256 warning.
+    with Scenario("prebuilt-no-sha256-no-download", {"BTX_AUTO_RESTART": "1"}) as scenario:
+        try:
+            _add_prebuilt_to_manifest(scenario, with_sha256=False)
+            (scenario.origin / "btx-prebuilt.tar.gz").unlink()
+            result = scenario.run_installer()
+            assert_success(result)
+            output = result.stdout + result.stderr
+            if "has no sha256 in the signed manifest" not in output:
+                raise AssertionError(f"expected the missing-sha256 warning before any download:\n{output}")
+            if "prebuilt download failed" in output:
+                raise AssertionError(f"downloaded a prebuilt that has no sha256:\n{output}")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
 def main():
     if not INSTALLER.exists():
         raise SystemExit(f"installer not found: {INSTALLER}")
@@ -832,8 +900,12 @@ def main():
         test_cuda12_prebuilt_is_preferred_over_generic_linux,
         test_prebuilt_falls_back_to_source_when_disabled,
         test_unusable_prebuilt_falls_back_to_source_build,
+        test_prebuilt_without_sha256_is_not_used,
+        test_prebuilt_without_sha256_is_not_downloaded,
         test_pinned_manifest_ignores_url_and_version_overrides,
         test_pinned_manifest_digest_mismatch_aborts,
+        test_unpinned_manifest_must_match_verified_version,
+        test_python_module_in_working_directory_is_not_imported,
     ]
     for test in tests:
         test()

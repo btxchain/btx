@@ -100,7 +100,7 @@ is set or `-onlynet` excludes ipv4 and ipv6. `-autoupdate=1` turns it back on.
 | `git_commit` | optional: pin; installer refuses a mismatching resolved commit |
 | `git_commit_sig_url` | optional: detached signature over `git_commit` (same scheme) |
 | `rollout_percent` | optional staged-rollout percentage (0–100, default 100) — see below |
-| `prebuilt` | optional map of `<platform-key> → {url, sig_url, sha256?}` prebuilt binaries — see below |
+| `prebuilt` | optional map of `<platform-key> → {url, sig_url, sha256}` prebuilt binaries — see below |
 
 ## Prebuilt signed binaries (with source-build fallback)
 
@@ -125,11 +125,11 @@ when none matches or verification fails.
   "linux-x86_64-glibc": {
     "url":    "https://btx.dev/bin/btx-0.33.0-x86_64-linux-gnu.tar.gz",
     "sig_url":"https://btx.dev/bin/btx-0.33.0-x86_64-linux-gnu.tar.gz.sig",
-    "sha256": "<hex>"                       // optional, defense-in-depth
+    "sha256": "<hex>"
   },
-  "linux-aarch64-glibc": { "url": "…", "sig_url": "…" },
-  "linux-x86_64-musl":   { "url": "…", "sig_url": "…" },
-  "darwin-arm64":        { "url": "…", "sig_url": "…" }
+  "linux-aarch64-glibc": { "url": "…", "sig_url": "…", "sha256": "<hex>" },
+  "linux-x86_64-musl":   { "url": "…", "sig_url": "…", "sha256": "<hex>" },
+  "darwin-arm64":        { "url": "…", "sig_url": "…", "sha256": "<hex>" }
 }
 ```
 
@@ -144,8 +144,11 @@ when none matches or verification fails.
 - **Trust** is anchored exactly like the manifest: the tarball's detached
   signature is verified under the SAME scheme/key (`btx-util verifyupdatesig`).
   The artifact URLs must also be under
-  `BTX_TRUSTED_ORIGIN`. Because the install only runs when `git_commit` is pinned
-  in the signed manifest, the prebuilt is bound to a specific signed commit.
+  `BTX_TRUSTED_ORIGIN`. The artifact signature covers only the tarball's
+  SHA-256, not a version or commit, so any tarball ever signed with the release
+  key verifies. The `sha256` in the signed manifest is what binds the prebuilt to
+  this release; an entry without it is ignored and the installer builds from
+  source.
 - **Fallback:** a missing/mismatched/unverifiable artifact (or a platform with no
   entry) logs a warning and the installer builds from source — availability is
   preserved without weakening trust. `BTX_PREFER_PREBUILT=0` forces source builds.
