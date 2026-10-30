@@ -846,6 +846,16 @@ public:
      */
     std::set<CBlockIndex*, node::CBlockIndexWorkComparator> setBlockIndexCandidates;
 
+    /**
+     * Blocks a trusted mirror kept out of setBlockIndexCandidates: refused by
+     * TrustedMirrorShouldConsiderMostWorkCandidate, or swept as unattested
+     * competing blocks by FindMostWorkChain. Both judge a block against the
+     * tip and the attestations of that moment. ActivateBestChainStep offers
+     * these again once the tip moves (ReofferTrustedMirrorGateRefusals);
+     * until then CheckBlockIndex does not require them in the set.
+     */
+    std::set<CBlockIndex*> m_trusted_mirror_gate_refused GUARDED_BY(::cs_main);
+
     //! @returns A reference to the in-memory cache of the UTXO set.
     CCoinsViewCache& CoinsTip() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
@@ -992,6 +1002,9 @@ public:
     void TryAddBlockIndexCandidate(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void PruneBlockIndexCandidates();
+
+    /** Offer m_trusted_mirror_gate_refused again against the current tip. */
+    void ReofferTrustedMirrorGateRefusals() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     void ClearBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 

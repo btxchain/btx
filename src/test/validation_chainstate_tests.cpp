@@ -71,6 +71,155 @@ namespace {
     return node::matmul_trusted::Add(*attestation, block_hash, height);
 }
 
+//! A trusted mirror (2-of-3 pins unless set, no local signer, TRUSTED
+//! validation) for the gate-refusal cases. The trusted-mirror most-work gate
+//! judges a block against the tip and the attestations of its moment; these
+//! cases move the tip or add attestations afterwards. Restores the options it
+//! changes.
+class GateRefusalMirror
+{
+public:
+    explicit GateRefusalMirror(TestChain100Setup& setup)
+        : m_setup{setup},
+          m_chainman{*Assert(setup.m_node.chainman)},
+          m_chainstate{m_chainman.ActiveChainstate()},
+          m_consensus{const_cast<Consensus::Params&>(Params().GetConsensus())},
+          m_action{const_cast<kernel::DeepReorgAction&>(m_chainman.m_options.deep_reorg_action)},
+          m_park_depth{const_cast<std::optional<uint32_t>&>(m_chainman.m_options.max_reorg_depth_park)},
+          m_mode{const_cast<kernel::MatMulValidationMode&>(m_chainman.m_options.matmul_validation_mode)},
+          m_saved_start{m_consensus.nReorgProtectionStartHeight},
+          m_saved_action{m_action},
+          m_saved_park_depth{m_park_depth},
+          m_saved_mode{m_mode}
+    {
+        m_consensus.nReorgProtectionStartHeight = 10;
+        m_action = kernel::DeepReorgAction::PARK;
+        m_park_depth = 32;
+        m_mode = kernel::MatMulValidationMode::TRUSTED;
+        for (CKey& pin : m_pins) pin.MakeNewKey(/*fCompressed=*/true);
+    }
+    ~GateRefusalMirror()
+    {
+        node::matmul_trusted::ResetForTest();
+        m_consensus.nReorgProtectionStartHeight = m_saved_start;
+        m_action = m_saved_action;
+        m_park_depth = m_saved_park_depth;
+        m_mode = m_saved_mode;
+    }
+
+    ChainstateManager& chainman() { return m_chainman; }
+    CBlockIndex* Tip() { return WITH_LOCK(::cs_main, return m_chainstate.m_chain.Tip()); }
+
+    static CScript NewScript()
+    {
+        CKey dest;
+        dest.MakeNewKey(/*fCompressed=*/true);
+        return GetScriptForDestination(PKHash(dest.GetPubKey()));
+    }
+    CBlockIndex* Mine(const CScript& script)
+    {
+        const CBlock block{m_setup.CreateAndProcessBlock({}, script)};
+        CBlockIndex* const idx{WITH_LOCK(::cs_main, {
+            return m_chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        })};
+        BOOST_REQUIRE(idx != nullptr);
+        return idx;
+    }
+    //! Two children of the tip: one with a body, and a header-only one
+    //! whose hash sorts first. Returns {with body, header only}.
+    std::pair<CBlockIndex*, CBlockIndex*> BodyAndHeaderOnlyChildren(const CScript& script)
+    {
+        const CBlock a{m_setup.CreateBlock({}, script, m_chainstate)};
+        const CBlock b{m_setup.CreateBlock({}, NewScript(), m_chainstate)};
+        BOOST_REQUIRE(a.GetHash() != b.GetHash());
+        const bool a_first{a.GetHash() < b.GetHash()};
+        const CBlock& header_only{a_first ? a : b};
+        const CBlock& with_body{a_first ? b : a};
+        BlockValidationState state;
+        BOOST_REQUIRE(m_chainman.ProcessNewBlockHeaders(
+            {{header_only.GetBlockHeader()}}, /*min_pow_checked=*/true, state));
+        bool new_block{false};
+        BOOST_REQUIRE(m_chainman.ProcessNewBlock(
+            std::make_shared<const CBlock>(with_body), /*force_processing=*/true,
+            /*min_pow_checked=*/true, &new_block));
+        BOOST_REQUIRE(new_block);
+        LOCK(::cs_main);
+        CBlockIndex* const body_index{m_chainman.m_blockman.LookupBlockIndex(with_body.GetHash())};
+        CBlockIndex* const header_index{m_chainman.m_blockman.LookupBlockIndex(header_only.GetHash())};
+        BOOST_REQUIRE(body_index != nullptr && header_index != nullptr);
+        BOOST_REQUIRE(body_index->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(!(header_index->nStatus & BLOCK_HAVE_DATA));
+        return {body_index, header_index};
+    }
+    void SetAside(CBlockIndex* block)
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(m_chainstate.InvalidateBlock(state, block));
+        BOOST_REQUIRE(Tip() == block->pprev);
+    }
+    void BringBack(CBlockIndex* block)
+    {
+        WITH_LOCK(::cs_main, m_chainstate.ResetBlockFailureFlags(block));
+        BlockValidationState state;
+        BOOST_REQUIRE(m_chainstate.ActivateBestChain(state));
+        BOOST_REQUIRE(Tip() == block);
+    }
+    //! Offers a set-aside branch again; the gate judges it against the tip.
+    void Offer(CBlockIndex* block)
+    {
+        WITH_LOCK(::cs_main, m_chainstate.ResetBlockFailureFlags(block));
+    }
+    void Configure(size_t threshold = 2)
+    {
+        m_threshold = threshold;
+        matmul::trusted::StoreConfig config;
+        config.chain_id = m_chain_id;
+        config.replay_authority_context = m_replay_ctx;
+        config.trusted_signers = {m_pins[0].GetPubKey(), m_pins[1].GetPubKey(), m_pins[2].GetPubKey()};
+        config.threshold = threshold;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+            std::chrono::milliseconds{50}, error));
+        BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    }
+    void Sign(const CBlockIndex* block)
+    {
+        for (size_t i = 0; i < m_threshold; ++i) {
+            BOOST_REQUIRE(InjectHistoricalAttestation(
+                              m_pins[i], m_chain_id, m_replay_ctx, block->GetBlockHash(),
+                              block->nHeight) ==
+                          matmul::trusted::AddResult::Accepted);
+        }
+    }
+    bool IsCandidate(CBlockIndex* block)
+    {
+        return WITH_LOCK(::cs_main, return m_chainstate.setBlockIndexCandidates.count(block) == 1);
+    }
+    void ActivateBestChain()
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(m_chainstate.ActivateBestChain(state));
+    }
+
+private:
+    TestChain100Setup& m_setup;
+    ChainstateManager& m_chainman;
+    Chainstate& m_chainstate;
+    Consensus::Params& m_consensus;
+    kernel::DeepReorgAction& m_action;
+    std::optional<uint32_t>& m_park_depth;
+    kernel::MatMulValidationMode& m_mode;
+    const int32_t m_saved_start;
+    const kernel::DeepReorgAction m_saved_action;
+    const std::optional<uint32_t> m_saved_park_depth;
+    const kernel::MatMulValidationMode m_saved_mode;
+    std::array<CKey, 3> m_pins;
+    size_t m_threshold{2};
+    const uint256 m_chain_id{uint256::ONE};
+    const uint256 m_replay_ctx{uint256::FromHex(std::string(64, 'e')).value()};
+};
+
 //! Unindexed dump headers (not in BlockManager). GetAncestor walks pprev.
 //! Hijack 2.2: attacker-chosen nTime + nTimeReceived==0 must not become extra.
 CBlockIndex* BuildUnindexedDump(std::array<CBlockIndex, 40>& nodes, CBlockIndex* tip,
@@ -1581,6 +1730,193 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_gate_evicted_candidate_survive
         BOOST_CHECK(chainman.IsOnParkedReorgBranch(competing_tip));
         BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 0);
     }
+    chainman.CheckBlockIndex();
+}
+
+//! The mirror is on a signed one-block twin. It refuses the signed network
+//! block above the other twin as a candidate: that block does not extend the
+//! signed tip. A header-only block on the same parent also has quorum and its
+//! hash sorts first, so the block is not on the signed frontier chain and
+//! FindUniqueCompetingAttestedIndex nominates the fork child (the other twin).
+//! On the fork child, the refused block extends the tip and the gate admits
+//! it: it must be a candidate again, and the next ActivateBestChain connects it.
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_reoffers_refused_block_after_twin_switch, TestChain100Setup)
+{
+    GateRefusalMirror mirror{*this};
+    ChainstateManager& chainman{mirror.chainman()};
+    const CScript script_network{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+
+    // fork <- twin                    (the mirror's tip)
+    // fork <- network_twin <- child   (bodies)
+    //                     <- top_twin (header only)
+    // All four are signed.
+    CBlockIndex* const twin{mirror.Mine(GateRefusalMirror::NewScript())};
+    mirror.SetAside(twin);
+    CBlockIndex* const network_twin{mirror.Mine(script_network)};
+    const auto [child, top_twin]{mirror.BodyAndHeaderOnlyChildren(script_network)};
+    BOOST_REQUIRE_EQUAL(mirror.Tip(), child);
+    mirror.SetAside(network_twin);
+    mirror.BringBack(twin);
+    // One key: FindUniqueCompetingAttestedIndex compares the twins directly.
+    mirror.Configure(/*threshold=*/1);
+    for (const CBlockIndex* block : {twin, network_twin, child, top_twin}) mirror.Sign(block);
+
+    mirror.Offer(network_twin);
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(child->HaveNumChainTxs());
+        BOOST_REQUIRE(child->nChainWork > twin->nChainWork);
+        BOOST_REQUIRE(!(top_twin->nStatus & BLOCK_FAILED_MASK));
+        BOOST_REQUIRE(chainman.IndexIsOnSignedFrontierChain(top_twin));
+        BOOST_REQUIRE(!chainman.IndexIsOnSignedFrontierChain(child));
+        BOOST_REQUIRE(chainman.FindUniqueCompetingAttestedIndex() == network_twin);
+    }
+    BOOST_REQUIRE(!mirror.IsCandidate(child));
+    chainman.CheckBlockIndex();
+
+    mirror.ActivateBestChain();
+    BOOST_CHECK_EQUAL(mirror.Tip(), network_twin);
+    BOOST_CHECK(mirror.IsCandidate(child));
+    chainman.CheckBlockIndex();
+
+    mirror.ActivateBestChain();
+    BOOST_CHECK_EQUAL(mirror.Tip(), child);
+    chainman.CheckBlockIndex();
+}
+
+//! Catch-up: the mirror gets a signed block and its unsigned child together.
+//! The gate refuses the child while it is two above the tip. Once the signed
+//! block is the tip, the child is the tip's child and must be a candidate, as
+//! it would be had it arrived after its parent connected.
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_reoffers_refused_grandchild_after_catch_up, TestChain100Setup)
+{
+    GateRefusalMirror mirror{*this};
+    ChainstateManager& chainman{mirror.chainman()};
+    const CScript script{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+
+    CBlockIndex* const parent{mirror.Mine(script)};
+    CBlockIndex* const child{mirror.Mine(script)};
+    mirror.SetAside(parent);
+    mirror.Configure();
+    mirror.Sign(parent);
+
+    mirror.Offer(parent);
+    BOOST_REQUIRE(mirror.IsCandidate(parent));
+    BOOST_REQUIRE(!mirror.IsCandidate(child));
+    chainman.CheckBlockIndex();
+
+    mirror.ActivateBestChain();
+    BOOST_CHECK_EQUAL(mirror.Tip(), parent);
+    BOOST_CHECK(mirror.IsCandidate(child));
+    chainman.CheckBlockIndex();
+
+    mirror.Sign(child);
+    mirror.ActivateBestChain();
+    BOOST_CHECK_EQUAL(mirror.Tip(), child);
+    chainman.CheckBlockIndex();
+}
+
+//! The mirror is on an unsigned block. It refuses the unsigned branch beside
+//! it. The signers then sign that branch: the gate would now admit it against
+//! the same tip, but nothing offers it again until the tip moves.
+//! CheckBlockIndex must hold in between, and the next ActivateBestChain
+//! adopts the signed branch.
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_checkblockindex_after_attestation_admits_refused_block, TestChain100Setup)
+{
+    GateRefusalMirror mirror{*this};
+    ChainstateManager& chainman{mirror.chainman()};
+    const CScript script_network{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+
+    CBlockIndex* const twin{mirror.Mine(GateRefusalMirror::NewScript())};
+    mirror.SetAside(twin);
+    CBlockIndex* const network_twin{mirror.Mine(script_network)};
+    CBlockIndex* const child{mirror.Mine(script_network)};
+    mirror.SetAside(network_twin);
+    mirror.BringBack(twin);
+    mirror.Configure();
+
+    mirror.Offer(network_twin);
+    BOOST_REQUIRE(!mirror.IsCandidate(child));
+    chainman.CheckBlockIndex();
+
+    mirror.Sign(network_twin);
+    mirror.Sign(child);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.FindUniqueCompetingAttestedIndex()) == child);
+    BOOST_CHECK(!mirror.IsCandidate(child));
+    chainman.CheckBlockIndex();
+
+    mirror.ActivateBestChain();
+    BOOST_CHECK_EQUAL(mirror.Tip(), child);
+    chainman.CheckBlockIndex();
+}
+
+//! The mirror admitted the unsigned block above the other twin before it was
+//! configured; on its signed twin, the tower sweep in FindMostWorkChain (not
+//! the gate) evicted it. Once the other twin has quorum and the mirror moves
+//! onto it, the evicted block extends the tip and must be a candidate again.
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_reoffers_block_evicted_by_tower_yield, TestChain100Setup)
+{
+    GateRefusalMirror mirror{*this};
+    ChainstateManager& chainman{mirror.chainman()};
+    const CScript script_network{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+
+    CBlockIndex* const twin{mirror.Mine(GateRefusalMirror::NewScript())};
+    mirror.SetAside(twin);
+    CBlockIndex* const network_twin{mirror.Mine(script_network)};
+    CBlockIndex* const child{mirror.Mine(script_network)};
+    mirror.SetAside(network_twin);
+    mirror.BringBack(twin);
+    mirror.Offer(network_twin);
+    BOOST_REQUIRE(mirror.IsCandidate(child));
+
+    // One key: FindUniqueCompetingAttestedIndex compares the twins directly.
+    mirror.Configure(/*threshold=*/1);
+    mirror.Sign(twin);
+    mirror.ActivateBestChain();
+    BOOST_REQUIRE_EQUAL(mirror.Tip(), twin);
+    BOOST_REQUIRE(!mirror.IsCandidate(child));
+
+    mirror.Sign(network_twin);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.FindUniqueCompetingAttestedIndex()) == network_twin);
+    mirror.ActivateBestChain();
+    BOOST_CHECK_EQUAL(mirror.Tip(), network_twin);
+    BOOST_CHECK(mirror.IsCandidate(child));
+    chainman.CheckBlockIndex();
+}
+
+//! The mirror sits on a heavier unsigned branch. The signers sign the first
+//! block of the other branch, and the mirror leaves its tip for that
+//! less-work block. Its child was never offered: the old tip outranked it.
+//! On the less-work tip it is the tip's child and must be a candidate.
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_offers_child_after_moving_to_less_work_signed_block, TestChain100Setup)
+{
+    GateRefusalMirror mirror{*this};
+    ChainstateManager& chainman{mirror.chainman()};
+    const CScript script_network{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    const CScript script_other{GateRefusalMirror::NewScript()};
+
+    CBlockIndex* const signed_block{mirror.Mine(script_other)};
+    CBlockIndex* const child{mirror.Mine(script_other)};
+    mirror.SetAside(signed_block);
+    for (int i = 0; i < 3; ++i) mirror.Mine(script_network);
+    CBlockIndex* const heavier_tip{mirror.Tip()};
+    mirror.Configure();
+    mirror.Sign(signed_block);
+
+    mirror.Offer(signed_block);
+    BOOST_REQUIRE(child->nChainWork < heavier_tip->nChainWork);
+    BOOST_REQUIRE(!mirror.IsCandidate(child));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.FindUniqueCompetingAttestedIndex()) == signed_block);
+    chainman.CheckBlockIndex();
+
+    mirror.ActivateBestChain();
+    BOOST_CHECK_EQUAL(mirror.Tip(), signed_block);
+    BOOST_CHECK(mirror.IsCandidate(child));
+    chainman.CheckBlockIndex();
+
+    mirror.Sign(child);
+    mirror.ActivateBestChain();
+    BOOST_CHECK_EQUAL(mirror.Tip(), child);
     chainman.CheckBlockIndex();
 }
 
