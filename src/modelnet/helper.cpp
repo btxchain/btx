@@ -3576,6 +3576,10 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             return true;
         }
         std::lock_guard<std::mutex> lock(g_ext_mu);
+        // An advisory needs no cache slot. Apply it first, so that a cache other
+        // peers have filled cannot stop a pinned publisher's takedown.
+        UniValue safety(UniValue::VOBJ);
+        ApplyInboundSafetyRecord(cat, h, now, safety);
         if (!RecordsFor(cat).Insert(h, now, err)) {
             resp.status = 400;
             resp.body = JsonError("RECORD", err);
@@ -3587,7 +3591,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         oann.pushKV("accepted", true);
         oann.pushKV("signed", true);
         oann.pushKV("record_id", h.record_id.Hex());
-        ApplyInboundSafetyRecord(cat, h, now, oann);
+        oann.pushKVs(std::move(safety));
         resp.body = oann.write();
         return true;
     }
@@ -3684,6 +3688,10 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             return true;
         }
         std::lock_guard<std::mutex> lock(g_ext_mu);
+        // An advisory needs no cache slot. Apply it first, so that a cache other
+        // peers have filled cannot stop a pinned publisher's takedown.
+        UniValue safety(UniValue::VOBJ);
+        ApplyInboundSafetyRecord(cat, h, now, safety);
         if (!RecordsFor(cat).Insert(h, now, err)) {
             resp.status = 400;
             resp.body = JsonError("RECORD", err);
@@ -3695,7 +3703,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         oann.pushKV("accepted", true);
         oann.pushKV("signed", true);
         oann.pushKV("record_id", h.record_id.Hex());
-        ApplyInboundSafetyRecord(cat, h, now, oann);
+        oann.pushKVs(std::move(safety));
         resp.body = oann.write();
         return true;
     }

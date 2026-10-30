@@ -15,9 +15,11 @@
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <ctime>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -153,6 +155,70 @@ BOOST_AUTO_TEST_CASE(pinned_publisher_advisory_blocks_and_unseeds)
 
     std::string serr;
     BOOST_CHECK(!cat.Seed(imported.model_id, true, serr));
+}
+
+BOOST_AUTO_TEST_CASE(full_record_cache_does_not_stop_pinned_takedown)
+{
+    // records/announce and ext/objects/announce cache records that any peer
+    // signs with its own key, and records.json restores the cache after a
+    // restart. Start from a cache that is full until 2100.
+    for (const std::string route : {"records/announce", "ext/objects/announce"}) {
+        SafetyReset reset;
+        const fs::path tmp = m_path_root / fs::PathFromString("safety-full-cache-" + std::to_string(route.size()));
+        modelnet::ModelCatalog cat{tmp, 1 << 20};
+        modelnet::EnsureSafetyBound(tmp);
+        const auto imported = ImportTiny(cat);
+        BOOST_REQUIRE(imported.seeded);
+        UniValue held(UniValue::VARR);
+        for (uint32_t i = 0; i < 4096; ++i) {
+            unsigned char id[48]{};
+            WriteLE32(id, i);
+            UniValue o(UniValue::VOBJ);
+            o.pushKV("record_id", HexStr(id));
+            o.pushKV("kind", modelnet::RECORD_COLLECTION);
+            o.pushKV("expiry", int64_t{4102444800});
+            o.pushKV("payload_hex", "00");
+            held.push_back(o);
+        }
+        {
+            std::ofstream out(tmp / "records.json");
+            out << held.write();
+        }
+
+        std::vector<unsigned char> pk, sk;
+        std::string err;
+        BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+        const auto pub = modelnet::ResearchIdentityId(pk);
+        BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub.Hex(), "vendor", err));
+        UniValue body(UniValue::VOBJ);
+        modelnet::FillRecordCommon(body, 1, pub, static_cast<int64_t>(std::time(nullptr)), modelnet::DAY_SECONDS);
+        body.pushKV("target_kind", modelnet::SAFETY_TARGET_MODEL);
+        body.pushKV("target_id", imported.model_id.Hex());
+        body.pushKV("severity", modelnet::SAFETY_MALWARE);
+        body.pushKV("reason_code", 1);
+        body.pushKV("content_sha384", std::string(96, '0'));
+        body.pushKV("note", "malware");
+        std::vector<unsigned char> payload, sig;
+        modelnet::Digest48 rid;
+        BOOST_REQUIRE(modelnet::SignTypedRecord(modelnet::RECORD_SAFETY_ADVISORY, body, sk, payload, sig, rid, err));
+        UniValue env(UniValue::VOBJ);
+        env.pushKV("kind", modelnet::RECORD_SAFETY_ADVISORY);
+        env.pushKV("payload_hex", HexStr(payload));
+        env.pushKV("sig_hex", HexStr(sig));
+        env.pushKV("pubkey_hex", HexStr(pk));
+        modelnet::NativeRequest nreq;
+        nreq.method = "POST";
+        nreq.path = "/btx-model/2/" + route;
+        nreq.body = env.write();
+        modelnet::NativeResponse nresp;
+        BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+        BOOST_TEST_MESSAGE(route << ": " << nresp.status << " " << nresp.body);
+
+        BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(imported.model_id.Hex()));
+        modelnet::CatalogEntry after;
+        BOOST_REQUIRE(cat.Find(imported.model_id, after));
+        BOOST_CHECK(!after.seeded);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(safety_advisory_rejects_provider_signer_class)
