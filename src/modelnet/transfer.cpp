@@ -199,6 +199,12 @@ bool QuoteFromJson(const UniValue& o, Quote& q, std::string& err)
     return true;
 }
 
+std::mutex& PaymentStateMutex()
+{
+    static std::mutex mu;
+    return mu;
+}
+
 bool LoadPaymentState(const fs::path& dir, std::vector<Quote>& quotes, std::vector<PaymentJournal>& journal, std::string& err)
 {
     quotes.clear();

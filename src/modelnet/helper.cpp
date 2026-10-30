@@ -8134,6 +8134,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         std::vector<Quote> quotes;
         std::vector<PaymentJournal> journal;
         const fs::path dir = cat.Store().Root().parent_path();
+        std::unique_lock<std::mutex> payment_lock(PaymentStateMutex());
         // A paid plan saves its new quote into quotes.json. Never write over
         // a journal that could not be read; a free-only plan writes nothing.
         if (!LoadPaymentState(dir, quotes, journal, err) && mode != RetrievalMode::FREE_ONLY) {
@@ -8176,6 +8177,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 result.pushKV("note", "EXPLICIT_PAID quotes a price; automatic spend remains 0. preparemodelfunding / signmodelfunding / submitmodelfunding freeze htlc_sha256.");
             }
         }
+        // Nothing below reads or writes quotes.json; release before network or cloud work.
+        payment_lock.unlock();
         bool paid_binding = false;
         for (const auto& q : quotes) {
             if (!(q.model_id == r.digest)) continue;

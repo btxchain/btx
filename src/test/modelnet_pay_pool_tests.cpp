@@ -47,10 +47,12 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef WIN32
@@ -291,6 +293,80 @@ BOOST_AUTO_TEST_CASE(pay_08_paid_plan_keeps_unreadable_journal)
     free_params.push_back("FREE_ONLY");
     BOOST_CHECK_MESSAGE(HelperCall(cat, "getmodel", free_params, result, code, err), err);
     BOOST_CHECK(ReadFile(paydir / "quotes.json") == cut);
+}
+
+BOOST_AUTO_TEST_CASE(pay_08_concurrent_submits_keep_every_txid)
+{
+    // The helper serves unix RPC with two workers, so two submits can run at once.
+    for (int round = 0; round < 10; ++round) {
+        const fs::path tmp = m_path_root / fs::PathFromString("pay-concurrent-" + std::to_string(round));
+        modelnet::ModelCatalog cat{tmp, 1 << 20};
+        const fs::path dir = cat.Store().Root().parent_path();
+        std::atomic<int> ok{0};
+        std::vector<std::thread> pool;
+        for (int t = 0; t < 2; ++t) {
+            pool.emplace_back([&, t] {
+                for (int i = 0; i < 40; ++i) {
+                    UniValue params(UniValue::VARR);
+                    params.push_back(TinyTxHex(1000 + t * 100000 + i));
+                    UniValue result;
+                    std::string code, err;
+                    if (HelperCall(cat, "submitmodelfunding", params, result, code, err)) ++ok;
+                }
+            });
+        }
+        for (auto& th : pool) th.join();
+        std::vector<modelnet::Quote> quotes;
+        std::vector<modelnet::PaymentJournal> journal;
+        std::string err;
+        BOOST_CHECK(modelnet::LoadPaymentState(dir, quotes, journal, err));
+        BOOST_CHECK_EQUAL(ok.load(), 80);
+        BOOST_CHECK_EQUAL(journal.size(), 80U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pay_08_concurrent_submits_and_paid_plans_keep_both)
+{
+    // A paid getmodel plan saves its quote into the same quotes.json.
+    std::string err;
+    modelnet::Digest48 mid;
+    BOOST_REQUIRE(modelnet::Digest48::FromHex(std::string(96, '1'), mid, err));
+    for (int round = 0; round < 10; ++round) {
+        const fs::path tmp = m_path_root / fs::PathFromString("pay-concurrent-plan-" + std::to_string(round));
+        modelnet::ModelCatalog cat{tmp, 1 << 20};
+        const fs::path dir = cat.Store().Root().parent_path();
+        std::atomic<int> ok{0};
+        std::thread submits([&] {
+            for (int i = 0; i < 40; ++i) {
+                UniValue params(UniValue::VARR);
+                params.push_back(TinyTxHex(1000 + i));
+                UniValue result;
+                std::string code, e;
+                if (HelperCall(cat, "submitmodelfunding", params, result, code, e)) ++ok;
+            }
+        });
+        std::thread plans([&] {
+            for (int i = 0; i < 40; ++i) {
+                UniValue params(UniValue::VARR);
+                params.push_back(mid.Hex());
+                UniValue opts(UniValue::VOBJ);
+                opts.pushKV("retrieval_policy", "EXPLICIT_PAID");
+                opts.pushKV("price_atoms", 1);
+                params.push_back(opts);
+                UniValue result;
+                std::string code, e;
+                if (HelperCall(cat, "getmodel", params, result, code, e)) ++ok;
+            }
+        });
+        submits.join();
+        plans.join();
+        std::vector<modelnet::Quote> quotes;
+        std::vector<modelnet::PaymentJournal> journal;
+        BOOST_CHECK(modelnet::LoadPaymentState(dir, quotes, journal, err));
+        BOOST_CHECK_EQUAL(ok.load(), 80);
+        BOOST_CHECK_EQUAL(journal.size(), 40U);
+        BOOST_CHECK_EQUAL(quotes.size(), 40U);
+    }
 }
 
 #ifndef WIN32
