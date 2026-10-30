@@ -5503,6 +5503,26 @@ BOOST_AUTO_TEST_CASE(pq_hot_tail_keeps_frontier_loaded_last_across_restart)
     BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 258);
 }
 
+BOOST_AUTO_TEST_CASE(pq_hot_tail_keeps_tip_partial_across_restart)
+{
+    // hot_tail_keeps_tip_partial_across_restart with ML-DSA-44 pins.
+    RuntimeReset reset;
+    const TwoPqPinMirror mirror{m_args.GetDataDirNet() / "matmul_pq_hot_tail_tip.dat"};
+    mirror.Start();
+    mirror.Sign(mirror.a, 10);
+    mirror.Sign(mirror.b, 10);
+    mirror.Sign(mirror.a, 11);
+    mirror.Sign(mirror.b, 11);
+    mirror.Sign(mirror.a, 12);
+
+    mirror.Restart();
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPqPinMirror::HashAt(11), 11));
+    mirror.Sign(mirror.b, 12);
+    BOOST_CHECK(node::matmul_trusted::HasQuorumInMemory(TwoPqPinMirror::HashAt(12), 12));
+    BOOST_CHECK_EQUAL(node::matmul_trusted::HighestAttestedHeight().value_or(-1), 12);
+    BOOST_CHECK(HasFrontierHint(TwoPqPinMirror::HashAt(12), 12));
+}
+
 namespace {
 //! LocalSignerNode with an ML-DSA-44 local key and one ML-DSA-44 peer pin.
 struct LocalPqSignerNode {
