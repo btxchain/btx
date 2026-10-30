@@ -9,7 +9,9 @@
 #include <modelnet/catalog.h>
 #include <modelnet/free_grant.h>
 #include <modelnet/helper.h>
+#include <modelnet/identity.h>
 #include <modelnet/resource_uri.h>
+#include <modelnet/search.h>
 #include <random.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
@@ -19,6 +21,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <chrono>
 #include <ctime>
 #include <fstream>
 #include <string>
@@ -136,6 +139,51 @@ void ForceEconomyReload(modelnet::ModelCatalog& cat, const fs::path& other_root)
     p.push_back(e.model_id.Hex());
     BOOST_REQUIRE_MESSAGE(Rpc(other, "getmodeleconomyentry", p, out, code, err), err);
     (void)cat;
+}
+
+int CampaignsKnown(modelnet::ModelCatalog& cat)
+{
+    UniValue out;
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), out, code, err), code << " " << err);
+    return out["campaigns_known"].getInt<int>();
+}
+
+/** `n` signed search records for one model, as its publisher re-signs it:
+ *  sequence 1..n, each naming a new release_id. Returns importmodelindex's
+ *  "imported" count; `last_release` is the newest release_id. */
+int ImportReissuedRecords(modelnet::ModelCatalog& cat, const modelnet::Digest48& model, const modelnet::Digest48& artifact,
+                          int n, std::string& last_release)
+{
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count();
+    UniValue recs(UniValue::VARR);
+    for (int i = 1; i <= n; ++i) {
+        modelnet::ModelSearchRecord r;
+        r.model_id = model;
+        r.artifact_id = artifact;
+        r.canonical_name = "reissued";
+        r.display_name = "reissued";
+        r.metadata_sequence = static_cast<uint64_t>(i);
+        r.release_id = last_release = RandHex48();
+        r.release_state = "FUNDING";
+        r.release_target_atoms = 1000;
+        r.expires_at = now_ms + 3'600'000;
+        r.pubkey = pk;
+        BOOST_REQUIRE_MESSAGE(modelnet::SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+        recs.push_back(modelnet::SearchRecordToJson(r));
+    }
+    UniValue arg(UniValue::VOBJ);
+    arg.pushKV("records", recs);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(arg);
+    UniValue out;
+    std::string code;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), code << " " << err);
+    return out["imported"].getInt<int>();
 }
 
 } // namespace
@@ -429,6 +477,70 @@ BOOST_AUTO_TEST_CASE(truncated_grant_nonce_store_does_not_wedge_issuance)
     BOOST_TEST_MESSAGE("after nonce-store truncation: " << issued << "/5 grants issued, " << served << " served");
     BOOST_CHECK_MESSAGE(issued == 5 && served == 5, "a truncated grant_nonces.json refuses every later grant issue");
     BOOST_CHECK(fs::exists(fs::PathFromString(fs::PathToString(store) + ".quarantine")));
+}
+
+// A publisher may re-sign its search record for the same model with a higher
+// sequence and a new release_id. The index takes each one (same model, so no
+// new slot and no publisher quota). The campaign learned from the older record
+// must go with it, or every re-signed record adds a campaign that nothing
+// removes. Records arrive here through importmodelindex; searchmodels and the
+// network feed ingest peer replies through the same Put + AfterIndexPut path.
+BOOST_AUTO_TEST_CASE(reissued_release_records_do_not_grow_campaign_index)
+{
+    const fs::path tmp = m_path_root / "campaign-reissue";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto pub = ImportTiny(cat);
+    const int before = CampaignsKnown(cat);
+    modelnet::Digest48 model;
+    std::string err;
+    BOOST_REQUIRE(modelnet::Digest48::FromHex(RandHex48(), model, err));
+    constexpr int N{40};
+    std::string last_release;
+    BOOST_REQUIRE_EQUAL(ImportReissuedRecords(cat, model, model, N, last_release), N);
+    const int after = CampaignsKnown(cat);
+    BOOST_TEST_MESSAGE("campaigns_known " << before << " -> " << after << " after " << N << " re-signed records for one model");
+    BOOST_CHECK_EQUAL(after - before, 1);
+
+    // The current release is still known.
+    UniValue p(UniValue::VARR);
+    p.push_back(last_release);
+    UniValue out;
+    std::string code;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelreleaseeconomics", p, out, code, err), code << " " << err);
+    BOOST_CHECK(out.write().find(last_release) != std::string::npos);
+
+    UniValue gj;
+    BOOST_REQUIRE_EQUAL(Grant(cat, pub, "reissue-a", gj), 200);
+    BOOST_CHECK_EQUAL(GetPiece0(cat, pub, gj), 200);
+}
+
+// The same re-signed records, for a model this node released: its own
+// campaign is never dropped, and its plaintext stays withheld.
+BOOST_AUTO_TEST_CASE(local_release_survives_reissued_records)
+{
+    const fs::path tmp = m_path_root / "campaign-reissue-local";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto rel = ImportTiny(cat);
+    UniValue out;
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(CreateRelease(cat, rel, out, code, err), code << " " << err);
+    BOOST_REQUIRE(cat.Seed(rel.model_id, true, err));
+    UniValue gj;
+    BOOST_REQUIRE_EQUAL(Grant(cat, rel, "reissue-local-a", gj), 200);
+    BOOST_REQUIRE_EQUAL(GetPiece0(cat, rel, gj), 404); // sanity: the release is gated
+    const int before = CampaignsKnown(cat);
+
+    constexpr int N{20};
+    std::string last_release;
+    const int imported = ImportReissuedRecords(cat, rel.model_id, rel.artifact_id, N, last_release);
+    const int after = CampaignsKnown(cat);
+    BOOST_TEST_MESSAGE("imported " << imported << "/" << N << "; campaigns_known " << before << " -> " << after);
+    BOOST_CHECK_LE(after - before, 1);
+
+    BOOST_REQUIRE(cat.Seed(rel.model_id, true, err));
+    UniValue gj2;
+    BOOST_REQUIRE_EQUAL(Grant(cat, rel, "reissue-local-b", gj2), 200);
+    BOOST_CHECK_EQUAL(GetPiece0(cat, rel, gj2), 404);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -362,6 +362,41 @@ bool SaveCampaigns(const fs::path& dir, const std::vector<ReleaseCampaign>& camp
     return true;
 }
 
+bool CampaignHasLocalState(const ReleaseCampaign& c)
+{
+    return c.signed_ok || !c.pubkey.empty() || !c.sig.empty() || c.pledged_atoms != 0 || c.funded_atoms != 0 ||
+           c.latest_funding_height != 0 || !c.output_script_hex.empty() || !c.funding_outpoints.empty() ||
+           c.frozen || c.secret_disclosed || c.plaintext_verified;
+}
+
+bool CampaignIndex::Droppable(const ReleaseCampaign& c, const KeepFn& keep) const
+{
+    return !CampaignHasLocalState(c) && !(keep && keep(c));
+}
+
+void CampaignIndex::Touch(const std::string& release_hex)
+{
+    auto age = m_age.find(release_hex);
+    if (age == m_age.end()) return;
+    m_by_age.erase(age->second);
+    age->second = m_next_age++;
+    m_by_age.emplace(age->second, release_hex);
+}
+
+void CampaignIndex::Erase(const std::string& release_hex)
+{
+    auto it = m_by_release.find(release_hex);
+    if (it == m_by_release.end()) return;
+    auto model = m_model_to_release.find(it->second.model_id.Hex());
+    if (model != m_model_to_release.end() && model->second == release_hex) m_model_to_release.erase(model);
+    auto age = m_age.find(release_hex);
+    if (age != m_age.end()) {
+        m_by_age.erase(age->second);
+        m_age.erase(age);
+    }
+    m_by_release.erase(it);
+}
+
 bool CampaignIndex::Put(const ReleaseCampaign& c, std::string& err)
 {
     if (c.release_id.IsNull()) {
@@ -369,6 +404,7 @@ bool CampaignIndex::Put(const ReleaseCampaign& c, std::string& err)
         return false;
     }
     const std::string rid = c.release_id.Hex();
+    if (m_age.emplace(rid, m_next_age).second) m_by_age.emplace(m_next_age++, rid);
     m_by_release[rid] = c;
     if (!c.model_id.IsNull()) m_model_to_release[c.model_id.Hex()] = rid;
     return true;
@@ -390,6 +426,13 @@ const ReleaseCampaign* CampaignIndex::GetByModel(const Digest48& model_id) const
     if (it == m_model_to_release.end()) return nullptr;
     return GetByReleaseHex(it->second);
 }
+const ReleaseCampaign* CampaignIndex::Find(const std::function<bool(const ReleaseCampaign&)>& match) const
+{
+    for (const auto& kv : m_by_release) {
+        if (match(kv.second)) return &kv.second;
+    }
+    return nullptr;
+}
 std::vector<ReleaseCampaign> CampaignIndex::List() const
 {
     std::vector<ReleaseCampaign> out;
@@ -398,7 +441,7 @@ std::vector<ReleaseCampaign> CampaignIndex::List() const
     return out;
 }
 
-void CampaignIndex::IngestFromSearchRecord(const ModelSearchRecord& r)
+void CampaignIndex::IngestFromSearchRecord(const ModelSearchRecord& r, const KeepFn& keep)
 {
     if (r.release_id.empty()) return;
     ReleaseCampaign c;
@@ -421,7 +464,26 @@ void CampaignIndex::IngestFromSearchRecord(const ModelSearchRecord& r)
         if (existing->ciphertext_artifact_id.IsNull() && !c.ciphertext_artifact_id.IsNull()) {
             existing->ciphertext_artifact_id = c.ciphertext_artifact_id;
         }
+        Touch(existing->release_id.Hex());
         return;
+    }
+    // A record re-signed with a new release_id needs no new index slot, so the
+    // campaign from the model's earlier record would otherwise never go.
+    const ReleaseCampaign* prev = GetByModel(c.model_id);
+    if (prev && prev->model_id == c.model_id && Droppable(*prev, keep)) Erase(prev->release_id.Hex());
+    // At the cap, drop the campaign named least recently. One that must stay
+    // moves to the newest end, so later inserts do not pass over it again;
+    // after CAMPAIGN_INDEX_KEPT_SCAN of those the new campaign is skipped.
+    size_t kept_seen{0};
+    while (m_by_release.size() >= m_cap) {
+        if (m_by_age.empty() || kept_seen >= std::min(CAMPAIGN_INDEX_KEPT_SCAN, m_by_age.size())) return;
+        const std::string oldest{m_by_age.begin()->second};
+        if (Droppable(m_by_release.at(oldest), keep)) {
+            Erase(oldest);
+        } else {
+            Touch(oldest);
+            ++kept_seen;
+        }
     }
     (void)Put(c, err);
 }

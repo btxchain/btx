@@ -90,4 +90,125 @@ BOOST_AUTO_TEST_CASE(econ_campaign_index_dedupe)
     BOOST_CHECK_EQUAL(idx.Size(), 1);
 }
 
+namespace {
+modelnet::Digest48 Id(uint16_t n)
+{
+    modelnet::Digest48 d;
+    d.data[0] = static_cast<unsigned char>(n & 0xff);
+    d.data[1] = static_cast<unsigned char>(n >> 8);
+    return d;
+}
+modelnet::ModelSearchRecord ReleaseRecord(uint16_t model, uint16_t release)
+{
+    modelnet::ModelSearchRecord r;
+    r.model_id = Id(model);
+    r.release_id = Id(release).Hex();
+    return r;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(econ_campaign_index_bounded)
+{
+    using namespace modelnet;
+    std::string err;
+    // A campaign this node created (the caller's predicate keeps it) and a
+    // peer's campaign this node pledged to (its local state keeps it).
+    ReleaseCampaign local;
+    local.release_id = Id(0xF0);
+    local.model_id = Id(0xF0);
+    ReleaseCampaign pledged;
+    pledged.release_id = Id(0xE0);
+    pledged.model_id = Id(0xE0);
+    pledged.pledged_atoms = 5;
+    const auto keep = [&](const ReleaseCampaign& c) { return c.release_id == local.release_id; };
+
+    CampaignIndex idx;
+    idx.SetCap(4);
+    BOOST_REQUIRE(idx.Put(local, err));
+    BOOST_REQUIRE(idx.Put(pledged, err));
+    idx.IngestFromSearchRecord(ReleaseRecord(1, 1), keep);
+    idx.IngestFromSearchRecord(ReleaseRecord(2, 2), keep);
+    idx.IngestFromSearchRecord(ReleaseRecord(1, 1), keep); // named again: now the newest
+    idx.IngestFromSearchRecord(ReleaseRecord(3, 3), keep);
+    BOOST_CHECK_EQUAL(idx.Size(), 4U);
+    BOOST_CHECK(idx.GetByRelease(Id(1)));
+    BOOST_CHECK(!idx.GetByRelease(Id(2))); // named least recently: dropped first
+    for (uint8_t i = 10; i < 30; ++i) {
+        idx.IngestFromSearchRecord(ReleaseRecord(i, i), keep);
+        BOOST_CHECK_LE(idx.Size(), 4U);
+    }
+    BOOST_CHECK(idx.GetByRelease(local.release_id));
+    BOOST_CHECK(idx.GetByRelease(pledged.release_id));
+    BOOST_CHECK(idx.GetByRelease(Id(29)));
+    BOOST_CHECK(idx.GetByRelease(Id(28)));
+
+    // When every campaign is kept, a new one is skipped.
+    CampaignIndex full;
+    full.SetCap(1);
+    BOOST_REQUIRE(full.Put(local, err));
+    full.IngestFromSearchRecord(ReleaseRecord(1, 1), keep);
+    BOOST_CHECK_EQUAL(full.Size(), 1U);
+    BOOST_CHECK(full.GetByRelease(local.release_id));
+
+    // A newer record for the same model replaces the campaign learned from
+    // its older record...
+    CampaignIndex re;
+    re.IngestFromSearchRecord(ReleaseRecord(7, 1));
+    re.IngestFromSearchRecord(ReleaseRecord(7, 2));
+    BOOST_CHECK_EQUAL(re.Size(), 1U);
+    BOOST_CHECK(!re.GetByRelease(Id(1)));
+    BOOST_REQUIRE(re.GetByModel(Id(7)));
+    BOOST_CHECK(re.GetByModel(Id(7))->release_id == Id(2));
+    // ...but not one this node added state to.
+    ReleaseCampaign funded;
+    funded.release_id = Id(3);
+    funded.model_id = Id(8);
+    funded.funding_outpoints.push_back({});
+    BOOST_REQUIRE(re.Put(funded, err));
+    re.IngestFromSearchRecord(ReleaseRecord(8, 4));
+    BOOST_CHECK(re.GetByRelease(Id(3)));
+    BOOST_REQUIRE(re.GetByModel(Id(8)));
+    BOOST_CHECK(re.GetByModel(Id(8))->release_id == Id(4));
+}
+
+BOOST_AUTO_TEST_CASE(econ_campaign_index_kept_scan_bounded)
+{
+    using namespace modelnet;
+    constexpr uint16_t CAP{1000};
+    constexpr uint16_t NEW{CAP + 1};
+    size_t calls{0};
+
+    // At the cap with every campaign kept (as while local_releases.json is
+    // damaged), an insert asks about at most CAMPAIGN_INDEX_KEPT_SCAN of them
+    // and skips the new campaign.
+    CampaignIndex all;
+    all.SetCap(CAP);
+    for (uint16_t i = 1; i <= CAP; ++i) all.IngestFromSearchRecord(ReleaseRecord(i, i));
+    BOOST_REQUIRE_EQUAL(all.Size(), size_t{CAP});
+    all.IngestFromSearchRecord(ReleaseRecord(NEW, NEW), [&](const ReleaseCampaign&) { ++calls; return true; });
+    BOOST_CHECK_LE(calls, CAMPAIGN_INDEX_KEPT_SCAN);
+    BOOST_CHECK_EQUAL(all.Size(), size_t{CAP});
+    BOOST_CHECK(!all.GetByRelease(Id(NEW)));
+
+    // The kept campaigns an insert passes over move to the newest end, so
+    // when the record is ingested again (as the economy RPCs do) the insert
+    // gets past them and drops the oldest campaign that may go.
+    const auto keep_ids_1_to_100 = [&](const ReleaseCampaign& c) {
+        ++calls;
+        return c.release_id.data[1] == 0 && c.release_id.data[0] <= 100;
+    };
+    CampaignIndex some;
+    some.SetCap(CAP);
+    for (uint16_t i = 1; i <= CAP; ++i) some.IngestFromSearchRecord(ReleaseRecord(i, i));
+    for (int pass = 0; pass < 2; ++pass) {
+        calls = 0;
+        some.IngestFromSearchRecord(ReleaseRecord(NEW, NEW), keep_ids_1_to_100);
+        BOOST_CHECK_LE(calls, CAMPAIGN_INDEX_KEPT_SCAN);
+    }
+    BOOST_CHECK_EQUAL(some.Size(), size_t{CAP});
+    BOOST_CHECK(some.GetByRelease(Id(NEW)));
+    BOOST_CHECK(!some.GetByRelease(Id(101)));
+    for (uint16_t i = 1; i <= 100; ++i) BOOST_CHECK(some.GetByRelease(Id(i)));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
