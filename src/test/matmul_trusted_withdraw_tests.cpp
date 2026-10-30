@@ -240,6 +240,11 @@ BOOST_AUTO_TEST_CASE(withdrawn_pq_vote_not_counted_or_served_from_durable)
                         "after a reload HasQuorum counts the withdrawn local PQ vote");
     BOOST_CHECK_MESSAGE(!node.ServesLocalPqVote(abandoned, 30),
                         "after a reload GetPq() returns the withdrawn local PQ vote");
+
+    // The vote stays on disk and the filter hides it, so a reconnect brings it back.
+    node::matmul_trusted::NotifyActiveChainBlockConnected(30, abandoned);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(abandoned, 30));
+    BOOST_CHECK(node.ServesLocalPqVote(abandoned, 30));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
