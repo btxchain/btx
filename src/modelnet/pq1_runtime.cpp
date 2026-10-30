@@ -408,7 +408,11 @@ bool CheckOrStorePin(const fs::path& pinfile, const std::string& endpoint, const
             return false;
         }
         out << obj.write() << "\n";
+        // close() writes the buffered bytes; on a full disk only that fails.
+        out.close();
         if (!out) {
+            std::error_code ec;
+            fs::remove(tmp, ec);
             err = "pin file write";
             return false;
         }
