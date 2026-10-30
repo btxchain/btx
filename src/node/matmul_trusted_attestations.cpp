@@ -544,6 +544,15 @@ bool ImportAttestations(
             g_local_signed_hash_by_height.emplace(height, hash);
         }
     }
+    // store->Add above bypasses the Add() wrapper, so note each imported pin
+    // quorum here, as LoadDurableAttestations does for its hot tail.
+    // Otherwise a quorum known only from the WAL or the legacy archive is
+    // missing from AttestedFrontierHints after a restart.
+    for (const auto& [height, hashes] : imported_quorum) {
+        for (const auto& hash : hashes) {
+            NoteAcceptedAttestationHeight(height, hash);
+        }
+    }
     LogPrintf("Loaded %zu MatMul ExactReplay attestation(s) from %s\n",
               accepted, fs::PathToString(source));
     if (prior_authority != 0) {
@@ -578,6 +587,13 @@ bool LoadDurableAttestations(
     std::map<TailKey,
              std::vector<matmul::trusted::ExactReplayAttestation>> hot_tail;
     size_t hot_tail_attestations{0};
+    // Quorum keys in the tail. Eviction skips the ones at the highest quorum
+    // height seen so far, so more than max_blocks newer non-quorum records
+    // (one pin signing while quorum stalls) cannot evict the signed frontier
+    // and leave the watermark restored below without its hint or in-memory
+    // quorum. The height is serialized little-endian, so records do not
+    // arrive in height order and "highest" is a running maximum.
+    std::set<TailKey> quorum_tail_keys;
     for (; cursor->Valid(); cursor->Next()) {
         DurableAttestationKey key;
         if (!cursor->GetKey(key) ||
@@ -591,6 +607,14 @@ bool LoadDurableAttestations(
             error = "durable attestation database contains a malformed record";
             return false;
         }
+        // The durable record still holds a local vote that this node withdrew
+        // on its own reorg (the tombstone seeded by LoadWithdrawnLocalVotes).
+        // AttestationStore::Add refuses that vote below, so it must not count
+        // toward the quorum, the watermark or the local-signed height here
+        // either. Peer votes for the same hash stay.
+        const bool local_vote_withdrawn{
+            local_pk.has_value() &&
+            store->IsOffActiveChain(key.height, key.block_hash)};
         std::set<CPubKey> seen;
         std::vector<matmul::trusted::ExactReplayAttestation> pin_only;
         for (const auto& attestation : attestations) {
@@ -614,6 +638,9 @@ bool LoadDurableAttestations(
                 }
                 continue;
             }
+            if (local_vote_withdrawn && attestation.signer == *local_pk) {
+                continue;
+            }
             pin_only.push_back(attestation);
         }
         if (pin_only.empty()) {
@@ -635,10 +662,22 @@ bool LoadDurableAttestations(
         }
         hot_tail_attestations += pin_only.size();
         hot_tail.emplace(tail_key, std::move(pin_only));
+        if (pin_quorum) quorum_tail_keys.insert(tail_key);
         while (hot_tail.size() > store->MaxBlocks() ||
                hot_tail_attestations > store->MaxAttestations()) {
-            hot_tail_attestations -= hot_tail.begin()->second.size();
-            hot_tail.erase(hot_tail.begin());
+            // Oldest first, but step over the frontier quorum
+            // key(s). Newer partials stay, and an eviction only walks past
+            // the frontier twins when the tail starts at that height. If the
+            // tail holds nothing else, fall back to the oldest key.
+            auto drop{hot_tail.begin()};
+            while (drop != hot_tail.end() && drop->first.first == highest &&
+                   quorum_tail_keys.count(drop->first) != 0) {
+                ++drop;
+            }
+            if (drop == hot_tail.end()) drop = hot_tail.begin();
+            quorum_tail_keys.erase(drop->first);
+            hot_tail_attestations -= drop->second.size();
+            hot_tail.erase(drop);
         }
         ++records;
     }
@@ -755,6 +794,14 @@ bool LoadDurablePqAttestations(
             for (const auto& hash : hashes) {
                 g_quorum_hashes_by_height[height].insert(hash);
             }
+        }
+    }
+    // store->AddPq above bypasses the AddPq() wrapper, so note each restored
+    // pin quorum here, as LoadDurableAttestations does for its hot tail.
+    // NoteAcceptedAttestationHeight keeps only the hint window.
+    for (const auto& [height, hashes] : all_quorum) {
+        for (const auto& hash : hashes) {
+            NoteAcceptedAttestationHeight(height, hash);
         }
     }
     if (records != 0) {
@@ -880,8 +927,16 @@ std::vector<matmul::trusted::ExactReplayAttestation> ReadDurableAttestations(
                               .block_hash = block_hash}, out)};
     if (status.status != CDBWrapper::ReadStatus::Code::OK) return {};
     if (auto store{Store()}) {
+        // Like LoadDurableAttestations: a local vote this node withdrew on its
+        // own reorg stays in the durable record, but must not count or be
+        // served again.
+        const auto local_pk{store->LocalSignerPubKey()};
+        const bool local_vote_withdrawn{
+            local_pk.has_value() &&
+            store->IsOffActiveChain(block_height, block_hash)};
         std::erase_if(out, [&](const matmul::trusted::ExactReplayAttestation& a) {
-            return !store->IsAuthoritySigner(a.signer);
+            return !store->IsAuthoritySigner(a.signer) ||
+                   (local_vote_withdrawn && a.signer == *local_pk);
         });
     }
     return out;
@@ -958,9 +1013,17 @@ std::vector<matmul::trusted::ExactReplayPqAttestation> ReadDurablePqAttestations
         out)};
     if (status.status != CDBWrapper::ReadStatus::Code::OK) return {};
     if (auto store{Store()}) {
+        // Same rule as ReadDurableAttestations for the local ML-DSA-44 vote:
+        // a vote this node withdrew on its own reorg stays in the durable
+        // record, but must not count or be served again.
+        const auto local_pq_pk{store->LocalPqPubKey()};
+        const bool local_vote_withdrawn{
+            local_pq_pk.has_value() &&
+            store->IsOffActiveChain(block_height, block_hash)};
         std::erase_if(
             out, [&](const matmul::trusted::ExactReplayPqAttestation& a) {
-                return !store->IsAuthorityPqSigner(a.signer);
+                return !store->IsAuthorityPqSigner(a.signer) ||
+                       (local_vote_withdrawn && a.signer == *local_pq_pk);
             });
     }
     return out;
@@ -969,10 +1032,18 @@ std::vector<matmul::trusted::ExactReplayPqAttestation> ReadDurablePqAttestations
 void PersistAfterPqMutation(
     const matmul::trusted::ExactReplayPqAttestation& attestation)
 {
-    std::lock_guard config_lock{g_mutex};
-    if (!g_persist_enabled || g_persist_path.empty()) return;
-    std::string error;
+    // PersistDurablePqAttestations calls Store(), which locks g_mutex, so
+    // g_mutex is held only for the admission check. Taking the io lock first
+    // (the order every other persistence path uses) and keeping it across
+    // the write means ClosePersistence cannot reset the database under a
+    // record admitted here, the same guarantee PersistAfterMutation gives
+    // its queue.
     std::lock_guard io_lock{g_persist_io_mutex};
+    {
+        std::lock_guard config_lock{g_mutex};
+        if (!g_persist_enabled || g_persist_path.empty()) return;
+    }
+    std::string error;
     (void)PersistDurablePqAttestations(Span{&attestation, 1}, error);
 }
 
@@ -1750,6 +1821,34 @@ bool NotifyActiveChainBlockDisconnected(int32_t height,
             it->second == disconnected_hash) {
             g_local_signed_hash_by_height.erase(it);
             released_hint = true;
+        }
+    }
+    if (released_store && !store->HasQuorum(disconnected_hash, height)) {
+        // Without the withdrawn vote the hash has no quorum in memory. If it
+        // had quorum, NoteAcceptedAttestationHeight put it in the quorum map
+        // and the frontier hints and may have raised the watermark to this
+        // height. Drop all three, so the signed-frontier lookups fall back to
+        // the highest remaining quorum instead of a hash that no longer has
+        // quorum in memory.
+        std::lock_guard lock{g_mutex};
+        if (const auto quorum_it{g_quorum_hashes_by_height.find(height)};
+            quorum_it != g_quorum_hashes_by_height.end()) {
+            quorum_it->second.erase(disconnected_hash);
+            if (quorum_it->second.empty()) {
+                g_quorum_hashes_by_height.erase(quorum_it);
+            }
+        }
+        if (const auto hint_it{g_attested_by_height.find(height)};
+            hint_it != g_attested_by_height.end()) {
+            hint_it->second.erase(disconnected_hash);
+            if (hint_it->second.empty()) g_attested_by_height.erase(hint_it);
+        }
+        if (g_highest_attested_height == height &&
+            g_quorum_hashes_by_height.count(height) == 0) {
+            g_highest_attested_height =
+                g_quorum_hashes_by_height.empty()
+                    ? -1
+                    : g_quorum_hashes_by_height.rbegin()->first;
         }
     }
     if (released_store || released_hint) {
