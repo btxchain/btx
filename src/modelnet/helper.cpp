@@ -966,6 +966,7 @@ RouterCache& RecordsFor(const ModelCatalog& cat)
                 cache.Insert(h, now, e);
             }
         }
+        cache.MarkSaved();
     }
     return cache;
 }
@@ -987,8 +988,14 @@ bool PersistRecords(const ModelCatalog& cat, RouterCache& cache)
         arr.push_back(o);
     }
     std::string err;
-    return WriteJsonFile(HelperDir(cat) / "records.json", arr, err);
+    if (!WriteJsonFile(HelperDir(cat) / "records.json", arr, err)) return false;
+    cache.MarkSaved();
+    return true;
 }
+
+/** Peer announces leave records.json to RunModelDaemon, which writes it at most
+ *  this often and on stop. Each write is the whole cache. */
+constexpr int RECORDS_SAVE_INTERVAL_S{60};
 
 UniValue HintJson(const SignedRecordHint& h)
 {
@@ -2039,6 +2046,13 @@ Digest48 IdFromUser(const std::string& s, std::string& err)
 }
 
 } // namespace
+
+void FlushRecords(const ModelCatalog& cat)
+{
+    std::lock_guard<std::mutex> lock(g_ext_mu);
+    RouterCache& cache = RecordsFor(cat);
+    if (cache.Unsaved()) PersistRecords(cat, cache);
+}
 
 bool ParseHttpRequest(const std::string& raw, NativeRequest& req, std::string& err)
 {
@@ -3598,7 +3612,6 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             resp.body = JsonError("RECORD", err);
             return true;
         }
-        PersistRecords(cat, RecordsFor(cat));
         UniValue oann(UniValue::VOBJ);
         oann.pushKV("schema_version", 2);
         oann.pushKV("accepted", true);
@@ -3710,7 +3723,6 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             resp.body = JsonError("RECORD", err);
             return true;
         }
-        PersistRecords(cat, RecordsFor(cat));
         UniValue oann(UniValue::VOBJ);
         oann.pushKV("schema_version", 2);
         oann.pushKV("accepted", true);
@@ -12064,6 +12076,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
 
     auto last_quota = std::chrono::steady_clock::now();
     auto last_watch = std::chrono::steady_clock::now() - std::chrono::seconds(5);
+    auto last_records_save = std::chrono::steady_clock::now();
     while (!stop->load()) {
         std::optional<ProfilePolicy> pending;
         {
@@ -12111,6 +12124,10 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             std::string werr;
             ScanWatchDir(cat, wres, werr);
             last_watch = std::chrono::steady_clock::now();
+        }
+        if (std::chrono::steady_clock::now() - last_records_save >= std::chrono::seconds(RECORDS_SAVE_INTERVAL_S)) {
+            FlushRecords(cat);
+            last_records_save = std::chrono::steady_clock::now();
         }
         if (pr <= 0) continue;
         if (fds[0].revents & POLLIN) {
@@ -12160,6 +12177,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     pq1_qcv.notify_all();
     if (preserve_thr.joinable()) preserve_thr.join();
     for (auto& w : workers) w.join();
+    FlushRecords(cat);
     g_native_lan.Close();
     g_native_lan_enabled.store(false);
     JoinRetrieveJobs();

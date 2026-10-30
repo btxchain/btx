@@ -90,7 +90,12 @@ bool RouterCache::Insert(const SignedRecordHint& rec, int64_t now, std::string& 
             return false;
         }
     }
-    m_by_id[HintKey(rec.record_id, rec.kind)] = rec;
+    const std::string key = HintKey(rec.record_id, rec.kind);
+    const auto it = m_by_id.find(key);
+    // The record id is the hash of the record body, so a live entry with the
+    // same key already holds this record and refreshing it adds nothing new.
+    if (it == m_by_id.end() || (it->second.expiry && it->second.expiry < now)) m_unsaved = true;
+    m_by_id[key] = rec;
     return true;
 }
 

@@ -61,6 +61,7 @@ public:
 class RouterCache {
     std::map<std::string, SignedRecordHint> m_by_id;
     size_t m_max{4096};
+    bool m_unsaved{false};
 
 public:
     bool Insert(const SignedRecordHint& rec, int64_t now, std::string& err);
@@ -69,6 +70,9 @@ public:
     std::vector<SignedRecordHint> All(int64_t now) const;
     void Expire(int64_t now);
     size_t Size() const { return m_by_id.size(); }
+    /** A record was added since MarkSaved(). Refreshing a live record with the same id does not count. */
+    bool Unsaved() const { return m_unsaved; }
+    void MarkSaved() { m_unsaved = false; }
 };
 
 } // namespace modelnet
