@@ -16,6 +16,7 @@
 #include <policy/feerate.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <rpc/client.h>
 #include <rpc/mining.h>
 #include <rpc/protocol.h>
@@ -1386,6 +1387,20 @@ static int LightWatchCommand(const std::vector<std::string>& args, std::string& 
     }
 
     const fs::path file = LightWatchFile();
+    if (command == "init" || command == "add" || command == "sync") {
+        // Hold the lock from before loading through the final save. An atomic
+        // rename alone cannot stop another writer from replacing a newer watch
+        // with the copy it loaded before an RPC call.
+        fs::create_directories(file.parent_path());
+        switch (util::LockDirectory(file.parent_path(), "watch.lock")) {
+        case util::LockResult::ErrorWrite:
+            throw std::runtime_error("BTX_LIGHTWATCH_IO");
+        case util::LockResult::ErrorLock:
+            throw std::runtime_error("BTX_LIGHTWATCH_BUSY");
+        case util::LockResult::Success:
+            break;
+        }
+    }
     if (command == "init") {
         if (args.size() < 2 || args.size() > 3) throw std::runtime_error("lightwatch init <descriptor> [start_height]");
         if (fs::exists(file)) throw std::runtime_error("lightwatch state already exists");
