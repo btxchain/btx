@@ -19482,23 +19482,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         switch (accept_result) {
         case Dandelion::DandelionManager::AcceptResult::ACCEPTED:
             if (relay_dest.has_value()) {
-                bool sent = m_connman.ForNode(relay_dest.value(), [&](CNode* pnode) {
-                    if (pnode->m_supports_dandelion) {
-                        MakeAndPushMessage(*pnode, NetMsgType::DLTX, TX_WITH_WITNESS(ptx));
-                    } else {
-                        // Relay peer doesn't support Dandelion; remove from
-                        // stempool and fluff immediately.
-                        m_dandelion->RemoveFromStemPool(txid);
-                        LOCK(cs_main);
-                        const MempoolAcceptResult r = m_chainman.ProcessTransaction(ptx);
-                        if (r.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-                            RelayTransaction(txid, tx.GetWitnessHash());
-                        }
-                    }
+                // Only send under ForNode. The fluff below takes the
+                // Dandelion++ mutex and cs_main, which must not be taken while
+                // ForNode holds m_nodes_mutex (route selection takes them in
+                // the other order).
+                const bool sent = m_connman.ForNode(relay_dest.value(), [&](CNode* pnode) {
+                    if (!pnode->m_supports_dandelion) return false;
+                    MakeAndPushMessage(*pnode, NetMsgType::DLTX, TX_WITH_WITNESS(ptx));
                     return true;
                 });
-                // If the relay peer disconnected between route assignment and
-                // send, fall back to immediate fluff to avoid silent tx loss.
+                // If the relay peer does not support Dandelion++, or it
+                // disconnected between route assignment and send, remove the
+                // transaction from the stempool and fluff it at once, to avoid
+                // silent tx loss.
                 if (!sent) {
                     m_dandelion->RemoveFromStemPool(txid);
                     LOCK(cs_main);
