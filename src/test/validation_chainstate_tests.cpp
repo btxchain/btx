@@ -3505,6 +3505,22 @@ BOOST_FIXTURE_TEST_CASE(chainstate_signer_progress_child_when_best_header_is_com
         BOOST_REQUIRE(original_tip->nStatus & BLOCK_HAVE_DATA);
         BOOST_REQUIRE(fork_tip->nChainWork > original_tip->nChainWork);
     }
+    // Since 7dbec203 a consensus node is not pin-steered onto its attested
+    // tip, and ConnectTip needs a local ExactReplay. Put the node back on
+    // original_tip before the MatMul heights and CONSENSUS mode apply, then
+    // make the heavier fork a candidate again.
+    CBlockIndex* const fork_base{fork_tip->pprev};
+    BOOST_REQUIRE(fork_base != nullptr);
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, fork_base));
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) ==
+                  original_tip);
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(fork_base);
+    }
 
     consensus.nMatMulV4Height = original_height;
     consensus.nMatMulBMX4CHeight = original_height;
@@ -3528,11 +3544,6 @@ BOOST_FIXTURE_TEST_CASE(chainstate_signer_progress_child_when_best_header_is_com
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
                       original_hash, original_height) ==
                   matmul::trusted::AddResult::Accepted);
-
-    state = BlockValidationState{};
-    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
-    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) ==
-                  original_tip);
 
     const auto ours{std::make_shared<const CBlock>(
         CreateBlock({}, script_alt, chainstate))};
@@ -3567,6 +3578,20 @@ BOOST_FIXTURE_TEST_CASE(chainstate_signer_progress_child_when_best_header_is_com
             node::matmul_trusted::SignAuthoritative(
                 fork_tip->pprev->GetBlockHash(), original_height),
             matmul::trusted::AddResult::HeightOccupied);
+    }
+
+    // Signing does not pin-steer a consensus node either. ABC heads for the
+    // heavier fork and ConnectTip defers fork_base until a local ExactReplay,
+    // so the node waits on original_tip's parent. fork_base now outranks
+    // that tip and must stay a candidate (ActivateBestChain runs
+    // CheckBlockIndex).
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainstate.m_chain.Tip() == original_tip->pprev);
+        BOOST_CHECK(chainstate.setBlockIndexCandidates.count(fork_base));
+        BOOST_CHECK(chainstate.setBlockIndexCandidates.count(fork_tip));
     }
     chainman.CheckBlockIndex();
 }

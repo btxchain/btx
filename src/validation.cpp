@@ -10899,6 +10899,23 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                     if (m_chain.Tip() != nullptr) {
                         TryAddBlockIndexCandidate(m_chain.Tip());
                     }
+                    // Blocks that the old tip outranked were pruned or never
+                    // added: here the block ConnectTip just deferred, which
+                    // is now a tip child with more work than the tip. Offer
+                    // them again, as InvalidateBlock does after it lowers
+                    // the tip.
+                    if (fBlocksDisconnected && pindexOldTip != nullptr &&
+                        m_chain.Tip() != nullptr &&
+                        setBlockIndexCandidates.value_comp()(m_chain.Tip(), pindexOldTip)) {
+                        for (auto& [_, block_index] : m_blockman.m_block_index) {
+                            if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                                block_index.HaveNumChainTxs() &&
+                                !setBlockIndexCandidates.value_comp()(&block_index, m_chain.Tip()) &&
+                                !m_chainman.IsOnParkedReorgBranch(&block_index)) {
+                                TryAddBlockIndexCandidate(&block_index);
+                            }
+                        }
+                    }
                     fContinue = false;
                     break;
                 } else {
