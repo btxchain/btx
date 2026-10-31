@@ -12,8 +12,9 @@ height occupied and the signer refused the block the network chose instead.
 node0 signs (M=1) and does not mine; node1 mines.
   A. node0 signs X, is killed, node1 replaces X with Y. After the restart
      node0 has to sign Y.
-  B. node0 signs X2, is killed, node1 keeps X2. After the restart node0 gets
-     X2 back and still has an attestation for it and for the next block.
+  B. node0 signs X2, is killed, node1 keeps X2. The restart releases the vote
+     for X2; node0 then gets X2 back and still has an attestation for it and
+     for the next block.
   C. A restart with -reindex releases no vote: the index is still empty when
      the check would run.
 """
@@ -54,6 +55,10 @@ class MatMulSignerUncleanRestartReorgTest(BitcoinTestFramework):
             f"-matmultrustedpubkey={signer_pub.hex()}",
             "-matmultrustedthreshold=1",
             "-matmulvalidation=consensus",
+            # The model helper plays no part here. On macOS a helper whose btxd
+            # was killed keeps running and holds the P2P port, so the restart
+            # would fail to bind.
+            "-modelnet=0",
         ]
         self.signer_args = common + [
             "-matmulattestationsignerkeyfile=SIGNERKEYFILE",
@@ -113,7 +118,11 @@ class MatMulSignerUncleanRestartReorgTest(BitcoinTestFramework):
         x2 = self.mine_signed(1)[0]
         signer.kill_process()
         self.generate(miner, 1, sync_fun=self.no_op)
-        self.start_node(0, extra_args=self.signer_args)
+        # X2 itself must be released here, or B would not exercise the
+        # reconnect that lifts the release. The count line alone can come from
+        # the vote for X.
+        with signer.assert_debug_log([RELEASED, f"active-chain disconnect of {x2}"]):
+            self.start_node(0, extra_args=self.signer_args)
         self.connect_nodes(0, 1)
         self.sync_blocks([signer, miner])
         assert_equal(signer.getblockhash(miner.getblockheader(x2)["height"]), x2)
