@@ -2077,6 +2077,10 @@ bool ParseHttpRequest(const std::string& raw, NativeRequest& req, std::string& e
             err = "body too large";
             return false;
         }
+        if (req.body.size() < v) {
+            err = "truncated http";
+            return false;
+        }
         if (req.body.size() > v) req.body.resize(v);
     }
     return true;
