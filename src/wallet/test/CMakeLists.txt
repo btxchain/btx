@@ -34,4 +34,6 @@ target_sources(test_btx
     bcp1_review_tests.cpp
     ../../test/shielded_coin_selection_tests.cpp
     ../../test/shielded_wallet_address_tests.cpp
+    ../../test/shielded_wallet_privacy_tests.cpp
+    ../../test/shielded_wallet_chunk_discovery_tests.cpp
 )
