@@ -1439,6 +1439,44 @@ MatMulRCRuntimeReprobeResult RunUnavailableMatMulRCRuntimeReprobe(
     return result;
 }
 
+bilingual_str MatMulRCNextBlockUnverifiableWarning(
+    const int32_t rc_activation_height,
+    const std::optional<int> tip_height,
+    const std::string& provider,
+    const std::string& reason)
+{
+    const std::string shown_provider{provider.empty() ? "unavailable" : provider};
+    const std::string shown_reason{reason.empty() ? "strict_device_not_ready" : reason};
+    if (tip_height && *tip_height >= int64_t{rc_activation_height} - 1) {
+        return strprintf(
+            _("CRITICAL: MatMul RC strict-device validation is unavailable. "
+              "This node is at height %d and cannot connect block %d; MatMul "
+              "consensus-validator and attestation-archive services are "
+              "withheld. provider=%s reason=%s. To advance, either restart "
+              "with a qualified strict-device GPU under "
+              "-matmulvalidation=consensus, or run -matmulvalidation=trusted "
+              "with at least two -matmultrustedpubkey pins and "
+              "-matmultrustedthreshold=2 (mainnet refuses 1-of-1 unless "
+              "-allowsinglekeytrustedmirror=1). Pins added while staying on "
+              "-matmulvalidation=consensus do not skip ExactReplay. "
+              "-matmulvalidation=relay only introduces peers and is not a "
+              "chain-tip oracle."),
+            *tip_height, int64_t{*tip_height} + 1, shown_provider, shown_reason);
+    }
+    return strprintf(
+        _("CRITICAL: MatMul RC strict-device validation is unavailable. "
+          "The next MatMul RC block at or after activation height %d "
+          "cannot be independently verified by this node; MatMul "
+          "consensus-validator and attestation-archive services are "
+          "withheld. provider=%s reason=%s. Runtime presence is "
+          "re-probed on a bounded cooldown, but presence alone is not "
+          "qualification. Restart with a provider that passes the "
+          "full self-qualification and production canary, or run as a "
+          "trusted archive / discovery relay if this process is not a "
+          "consensus validator."),
+        rc_activation_height, shown_provider, shown_reason);
+}
+
 bool AppInitParameterInteraction(const ArgsManager& args)
 {
     const CChainParams& chainparams = Params();
@@ -4067,28 +4105,34 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         chainparams.GetConsensus().nMatMulRCHeight};
     const auto rc_runtime_ready{std::make_shared<std::atomic_bool>(
         !rc_runtime_monitor_enabled || ready_services != NODE_NONE)};
+    // Last tip height seen by the warning. It is read with TRY_LOCK so the
+    // readiness notifier never waits on cs_main; if the lock is busy the
+    // previous height is reused.
+    const auto rc_warning_tip_height{std::make_shared<std::atomic<int>>(-1)};
     const auto publish_rc_unverifiable_warning =
-        [&node, rc_activation_height](const std::string& provider,
-                                      const std::string& reason) {
+        [&node, rc_activation_height, rc_warning_tip_height](
+            const std::string& provider, const std::string& reason) {
             // Keep this independent of tip movement so -alertnotify does not
             // fire on every bounded scheduler observation. The warning is
             // intentionally persistent: this process has no safe transition
             // that can clear a process-lifetime provider quarantine and issue
-            // a new canary-bound capability atomically.
-            const auto warning{strprintf(
-                _("CRITICAL: MatMul RC strict-device validation is unavailable. "
-                  "The next MatMul RC block at or after activation height %d "
-                  "cannot be independently verified by this node; MatMul "
-                  "consensus-validator and attestation-archive services are "
-                  "withheld. provider=%s reason=%s. Runtime presence is "
-                  "re-probed on a bounded cooldown, but presence alone is not "
-                  "qualification. Restart with a provider that passes the "
-                  "full self-qualification and production canary, or run as a "
-                  "trusted archive / discovery relay if this process is not a "
-                  "consensus validator."),
+            // a new canary-bound capability atomically. The tip height only
+            // enters the text once the tip is at nMatMulRCHeight - 1 or
+            // later, where this node cannot connect the next block, so it
+            // does not change with ordinary tip movement.
+            {
+                TRY_LOCK(::cs_main, lock_main);
+                if (lock_main) {
+                    rc_warning_tip_height->store(
+                        node.chainman->ActiveHeight(),
+                        std::memory_order_relaxed);
+                }
+            }
+            const int tip{rc_warning_tip_height->load(std::memory_order_relaxed)};
+            const auto warning{MatMulRCNextBlockUnverifiableWarning(
                 rc_activation_height,
-                provider.empty() ? "unavailable" : provider,
-                reason.empty() ? "strict_device_not_ready" : reason)};
+                tip >= 0 ? std::optional<int>{tip} : std::nullopt,
+                provider, reason)};
             node.chainman->GetNotifications().warningSet(
                 kernel::Warning::MATMUL_RC_NEXT_BLOCK_UNVERIFIABLE,
                 warning, /*update=*/true);

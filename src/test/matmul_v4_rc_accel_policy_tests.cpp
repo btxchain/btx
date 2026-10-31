@@ -12,6 +12,7 @@
 #include <chainparams.h>
 #include <init.h>
 #include <util/chaintype.h>
+#include <util/translation.h>
 
 #include <test/util/setup_common.h>
 
@@ -20,7 +21,9 @@
 #include <cstdlib>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace rc = matmul::v4::rc;
 namespace dc = matmul::v4::rc::dc;
@@ -407,6 +410,53 @@ BOOST_AUTO_TEST_CASE(runtime_reprobe_is_bounded_and_unavailable_only)
     BOOST_CHECK(!absent.attempted);
     BOOST_CHECK_EQUAL(absent.reason, "no_runtime_candidate");
     BOOST_CHECK_EQUAL(calls, 1);
+}
+
+
+BOOST_AUTO_TEST_CASE(unverifiable_next_block_warning_names_tip_and_fixes)
+{
+    ArgsManager empty;
+    const auto main{CreateChainParams(empty, ChainType::MAIN)};
+    const int32_t rc_height{main->GetConsensus().nMatMulRCHeight};
+    BOOST_REQUIRE_EQUAL(rc_height, 185000);
+
+    const auto contains = [](const std::string& text, const std::string& part) {
+        return text.find(part) != std::string::npos;
+    };
+    // A GPU-less node at the activation boundary, and one sitting on the
+    // 228,000 compiled snapshot base retrying 228,001.
+    for (const auto& [tip, next] : {std::pair<int, std::string>{rc_height - 1, "185000"},
+                                    std::pair<int, std::string>{rc_height, "185001"},
+                                    std::pair<int, std::string>{228000, "228001"}}) {
+        const std::string text{MatMulRCNextBlockUnverifiableWarning(
+            rc_height, tip, "cuda", "strict_device_not_ready").original};
+        BOOST_TEST_MESSAGE(text);
+        BOOST_CHECK(contains(text, "at height " + std::to_string(tip)));
+        BOOST_CHECK(contains(text, "cannot connect block " + next));
+        BOOST_CHECK(!contains(text, "activation height"));
+        // Fix 1: a qualified GPU on consensus mode.
+        BOOST_CHECK(contains(text, "qualified strict-device GPU"));
+        BOOST_CHECK(contains(text, "-matmulvalidation=consensus"));
+        // Fix 2: a 2-of-N trusted mirror; mainnet refuses 1-of-1.
+        BOOST_CHECK(contains(text, "-matmulvalidation=trusted"));
+        BOOST_CHECK(contains(text, "at least two -matmultrustedpubkey"));
+        BOOST_CHECK(contains(text, "-matmultrustedthreshold=2"));
+        BOOST_CHECK(contains(text, "-allowsinglekeytrustedmirror=1"));
+        // The trap: pins on consensus mode never skip ExactReplay.
+        BOOST_CHECK(contains(text, "staying on -matmulvalidation=consensus do not skip ExactReplay"));
+        // Relay mode must not be offered as a way to advance.
+        BOOST_CHECK(!contains(text, "discovery relay if"));
+        BOOST_CHECK(contains(text, "relay only introduces peers"));
+        BOOST_CHECK(contains(text, "provider=cuda reason=strict_device_not_ready"));
+    }
+
+    // Below the boundary, or with no known tip, the text is unchanged.
+    for (const std::optional<int> tip : {std::optional<int>{rc_height - 2}, std::optional<int>{}}) {
+        const std::string text{MatMulRCNextBlockUnverifiableWarning(
+            rc_height, tip, "", "").original};
+        BOOST_CHECK(contains(text, "at or after activation height 185000"));
+        BOOST_CHECK(contains(text, "provider=unavailable reason=strict_device_not_ready"));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
