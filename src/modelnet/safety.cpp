@@ -50,7 +50,11 @@ bool WriteJsonAtomic(const fs::path& path, const UniValue& obj, std::string& err
             return false;
         }
         out << obj.write() << "\n";
+        // close() writes the buffered bytes; on a full disk only that fails.
+        out.close();
         if (!out) {
+            std::error_code ec;
+            fs::remove(tmp, ec);
             err = "write safety";
             return false;
         }
@@ -58,6 +62,7 @@ bool WriteJsonAtomic(const fs::path& path, const UniValue& obj, std::string& err
     std::error_code ec;
     fs::rename(tmp, path, ec);
     if (ec) {
+        fs::remove(tmp, ec);
         err = "rename safety";
         return false;
     }

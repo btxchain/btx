@@ -29,9 +29,18 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <fstream>
+#include <iterator>
 #include <set>
 #include <string>
 #include <vector>
+
+#ifndef WIN32
+#include <csignal>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_b0_pq_rest_tests, BasicTestingSetup)
 
@@ -118,6 +127,66 @@ BOOST_AUTO_TEST_CASE(pq_17_pin_rotation_no_forced_replace)
     modelnet::IdentityStore store;
     BOOST_CHECK(!store.RotationCopiesReciprocity());
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(pq_17_failed_pin_write_keeps_previous_pins)
+{
+    const fs::path pinfile = m_path_root / "pq17-full" / "pins.json";
+    fs::create_directories(pinfile.parent_path());
+    modelnet::Digest48 a{}, b{};
+    a.data[0] = 1;
+    b.data[0] = 2;
+    std::string err;
+    BOOST_REQUIRE(modelnet::CheckOrStorePin(pinfile, "192.0.2.9:29447", a, err));
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    };
+    const std::string before{read(pinfile)};
+
+    // Cap the file size below the file with a second pin, as a full disk would.
+    // The bytes stay in the stream buffer until close. SIGXFSZ is ignored so
+    // the write fails with EFBIG.
+    struct rlimit old_limit;
+    BOOST_REQUIRE(getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit cap{old_limit};
+    cap.rlim_cur = before.size() + 8;
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(setrlimit(RLIMIT_FSIZE, &cap) == 0);
+    const bool stored{modelnet::CheckOrStorePin(pinfile, "192.0.2.10:29447", b, err)};
+    BOOST_REQUIRE(setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    BOOST_CHECK(!stored);
+    BOOST_CHECK(read(pinfile) == before);
+    BOOST_CHECK(!fs::exists(pinfile.parent_path() / "pins.json.tmp"));
+    BOOST_CHECK(modelnet::CheckOrStorePin(pinfile, "192.0.2.9:29447", a, err));
+}
+#endif
+
+#ifdef UF_IMMUTABLE
+BOOST_AUTO_TEST_CASE(pq_17_failed_pin_rename_removes_temp_file)
+{
+    const fs::path pinfile = m_path_root / "pq17-rename" / "pins.json";
+    fs::create_directories(pinfile.parent_path());
+    modelnet::Digest48 a{}, b{};
+    a.data[0] = 1;
+    b.data[0] = 2;
+    std::string err;
+    BOOST_REQUIRE(modelnet::CheckOrStorePin(pinfile, "192.0.2.9:29447", a, err));
+
+    // The loader reads the target first, so a directory there fails before the
+    // write. An immutable target is still readable but makes the rename fail
+    // after the temp file is written.
+    BOOST_REQUIRE(chflags(fs::PathToString(pinfile).c_str(), UF_IMMUTABLE) == 0);
+    const bool stored{modelnet::CheckOrStorePin(pinfile, "192.0.2.10:29447", b, err)};
+    BOOST_REQUIRE(chflags(fs::PathToString(pinfile).c_str(), 0) == 0);
+
+    BOOST_CHECK(!stored);
+    BOOST_CHECK(!fs::exists(pinfile.parent_path() / "pins.json.tmp"));
+    BOOST_CHECK(modelnet::CheckOrStorePin(pinfile, "192.0.2.9:29447", a, err));
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(pq_18_missing_pq_fail_closed)
 {

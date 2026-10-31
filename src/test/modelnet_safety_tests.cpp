@@ -19,8 +19,14 @@
 #include <boost/test/unit_test.hpp>
 
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
+
+#ifndef WIN32
+#include <csignal>
+#include <sys/resource.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_safety_tests, BasicTestingSetup)
 
@@ -113,6 +119,58 @@ BOOST_AUTO_TEST_CASE(unpinned_advisory_is_warning_only)
     BOOST_CHECK(!modelnet::GlobalSafety().SubjectBlocked(tid));
     BOOST_CHECK(!modelnet::SubscribedWarningIsAutomaticDeny());
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(failed_advisory_write_keeps_previous_advisories)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-full-disk";
+    modelnet::GlobalSafety().Bind(tmp);
+    const std::string first(96, 'a');
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(first, modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "first", 0, err));
+    const fs::path ads = tmp / "safety_advisories.json";
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    };
+    const std::string before{read(ads)};
+
+    // Leave room for the publishers file but not for the advisories with a
+    // second entry, as a full disk would. The bytes stay in the stream buffer
+    // until close. SIGXFSZ is ignored so the write fails with EFBIG.
+    struct rlimit old_limit;
+    BOOST_REQUIRE(getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit cap{old_limit};
+    cap.rlim_cur = before.size() / 2;
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(setrlimit(RLIMIT_FSIZE, &cap) == 0);
+    const bool saved{modelnet::GlobalSafety().LocalReport(std::string(96, 'b'), modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "second", 0, err)};
+    BOOST_REQUIRE(setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    BOOST_CHECK(!saved);
+    BOOST_CHECK(read(ads) == before);
+    BOOST_CHECK(!fs::exists(tmp / "safety_advisories.json.tmp"));
+    // After a restart the first model is still blocked.
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(first));
+}
+
+BOOST_AUTO_TEST_CASE(failed_advisory_rename_removes_temp_file)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-rename";
+    // A directory at the target path makes the rename fail after the temp file is written.
+    fs::create_directories(tmp / "safety_advisories.json");
+    modelnet::GlobalSafety().Bind(tmp);
+    std::string err;
+    BOOST_CHECK(!modelnet::GlobalSafety().LocalReport(std::string(96, 'a'), modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "first", 0, err));
+    BOOST_CHECK_EQUAL(err, "rename safety");
+    BOOST_CHECK(!fs::exists(tmp / "safety_advisories.json.tmp"));
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(pinned_publisher_advisory_blocks_and_unseeds)
 {
