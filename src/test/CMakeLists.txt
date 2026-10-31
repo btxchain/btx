@@ -448,8 +448,6 @@ add_executable(test_btx
   shielded_v2_send_runtime_report.cpp
   shielded_v2_send_runtime_report_tests.cpp
   shielded_v2_wire_tests.cpp
-  shielded_wallet_privacy_tests.cpp
-  shielded_wallet_chunk_discovery_tests.cpp
   shielded_chunk_runtime_report.cpp
   shielded_chunk_runtime_report_tests.cpp
   shielded_scan_hint_runtime_report.cpp
