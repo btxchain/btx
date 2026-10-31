@@ -45,6 +45,10 @@ BOOST_AUTO_TEST_CASE(validate_wallet_bundle_archive_directory_name)
     BOOST_CHECK_THROW(ValidateWalletBundleArchiveDirectoryName("../wallet.bundle"), UniValue);
     BOOST_CHECK_THROW(ValidateWalletBundleArchiveDirectoryName("nested/wallet.bundle"), UniValue);
     BOOST_CHECK_THROW(ValidateWalletBundleArchiveDirectoryName("/tmp/wallet.bundle"), UniValue);
+#ifdef WIN32
+    // A drive without a root directory is not absolute on Windows.
+    BOOST_CHECK_THROW(ValidateWalletBundleArchiveDirectoryName("C:"), UniValue);
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(validate_wallet_bundle_archive_relative_path)
@@ -55,6 +59,11 @@ BOOST_AUTO_TEST_CASE(validate_wallet_bundle_archive_relative_path)
     BOOST_CHECK_THROW(ValidateWalletBundleArchiveRelativePath(""), UniValue);
     BOOST_CHECK_THROW(ValidateWalletBundleArchiveRelativePath("../manifest.json"), UniValue);
     BOOST_CHECK_THROW(ValidateWalletBundleArchiveRelativePath("/tmp/manifest.json"), UniValue);
+#ifdef WIN32
+    // Neither is absolute on Windows, and both leave the directory they are appended to.
+    BOOST_CHECK_THROW(ValidateWalletBundleArchiveRelativePath("\\manifest.json"), UniValue);
+    BOOST_CHECK_THROW(ValidateWalletBundleArchiveRelativePath("C:manifest.json"), UniValue);
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(validate_wallet_bundle_archive_relative_paths_are_unique)

@@ -245,7 +245,7 @@ void AddLockedShieldedAccountingWarningIfNeeded(const CWallet& wallet,
 std::string ValidateWalletBundleArchiveDirectoryName(const std::string& directory_name)
 {
     const fs::path path = fs::u8path(directory_name);
-    if (path.empty() || path.is_absolute()) {
+    if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Wallet bundle archive contains an invalid absolute bundle name");
     }
 
@@ -264,7 +264,8 @@ std::string ValidateWalletBundleArchiveDirectoryName(const std::string& director
 std::string ValidateWalletBundleArchiveRelativePath(const std::string& relative_path)
 {
     fs::path path = fs::u8path(relative_path).lexically_normal();
-    if (path.empty() || path.is_absolute()) {
+    // On Windows "\x" and "C:x" are not absolute, but appending either to a directory leaves it.
+    if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Wallet bundle archive contains an invalid absolute path");
     }
     for (const auto& part : path) {
@@ -272,7 +273,9 @@ std::string ValidateWalletBundleArchiveRelativePath(const std::string& relative_
             throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Wallet bundle archive contains a parent-directory traversal path");
         }
     }
-    return fs::PathToString(path);
+    // Archive entries use '/', so return that form on every platform.
+    const std::u8string generic{path.generic_u8string()};
+    return std::string{generic.begin(), generic.end()};
 }
 
 void EnsureUniqueWalletBundleArchiveRelativePaths(const std::vector<std::string>& relative_paths)
