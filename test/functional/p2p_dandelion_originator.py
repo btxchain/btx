@@ -13,8 +13,9 @@ originator must not accept, announce, serve or stem it. The originator must
 handle its own stem transaction the way a stem relay does: when a peer
 announces it, request it; when a peer sends a copy (requested or not), end the
 embargo, announce it and take children of it. A stem relay must announce such
-a copy too. Once the embargo has expired, the node announces the transaction
-normally.
+a copy too. A copy with the same txid but a different, invalid witness is not
+such a copy: neither the originator nor a stem relay announces anything. Once
+the embargo has expired, the node announces the transaction normally.
 
 node0 makes two outbound full-relay connections:
   stem: sends DANDELIONACC, so it is the only possible stem relay.
@@ -39,6 +40,7 @@ from test_framework.messages import (
     msg_inv,
     msg_mempool,
     msg_tx,
+    tx_from_hex,
 )
 from test_framework.p2p import (
     P2PInterface,
@@ -80,6 +82,17 @@ class TxObserver(P2PInterface):
 
     def got_dltx(self, tx):
         return tx["wtxid"] in self.dltx_wtxids
+
+
+def with_invalid_witness(tx):
+    """A copy of tx with the same txid and an extra witness element. MiniWallet
+    spends a tapscript leaf of OP_TRUE; the extra element stays on the stack, so
+    the witness fails the clean-stack rule."""
+    copy = tx_from_hex(tx["hex"])
+    copy.wit.vtxinwit[0].scriptWitness.stack.insert(0, b"\x01")
+    assert_equal(copy.rehash(), tx["txid"])
+    assert copy.getwtxid() != tx["wtxid"]
+    return copy
 
 
 class DandelionOriginatorTest(BitcoinTestFramework):
@@ -215,6 +228,20 @@ class DandelionOriginatorTest(BitcoinTestFramework):
         assert fluffed_child["txid"] in node.getrawmempool()
         assert fluffed["txid"] in node.getrawmempool()
 
+        self.log.info("A copy with a changed witness does not end the embargo on the originator")
+        # Only a stem hop holds the transaction during the embargo, so only it
+        # can send such a copy. It matches the stem transaction by txid only.
+        # Validation rejects it (txn-same-nonwitness-data-in-mempool), as a stem
+        # relay rejects it, so nothing is announced.
+        mutated = wallet.send_self_transfer(from_node=node)
+        stem.wait_until(lambda: stem.got_dltx(mutated))
+        stem.send_and_ping(msg_tx(with_invalid_witness(mutated)))
+        for _ in range(3):
+            watcher.sync_with_ping()
+            stem.sync_with_ping()
+        with p2p_lock:
+            assert not watcher.announced(mutated), "originator announced its stem transaction after a copy with a changed witness"
+
         self.log.info("A copy that a peer sends unasked also ends the embargo, as on a stem relay")
         echoed = wallet.send_self_transfer(from_node=node)
         stem.wait_until(lambda: stem.got_dltx(echoed))
@@ -242,6 +269,13 @@ class DandelionOriginatorTest(BitcoinTestFramework):
             self.log.info("Fluff epoch: the node did not stem the DLTX, relay case not checked")
         else:
             assert relayed["txid"] not in node.getrawmempool()
+            # A copy with a changed witness is rejected and not announced.
+            spy.send_and_ping(msg_tx(with_invalid_witness(relayed)))
+            for _ in range(3):
+                watcher.sync_with_ping()
+            assert relayed["txid"] not in node.getrawmempool()
+            with p2p_lock:
+                assert not watcher.announced(relayed), "stem relay announced a copy with a changed witness"
             spy.send_and_ping(msg_tx(relayed["tx"]))
             assert relayed["txid"] in node.getrawmempool()
             watcher.wait_until(lambda: watcher.announced(relayed), timeout=10)
