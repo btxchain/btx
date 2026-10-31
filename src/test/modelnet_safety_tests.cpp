@@ -157,6 +157,19 @@ BOOST_AUTO_TEST_CASE(failed_advisory_write_keeps_previous_advisories)
     modelnet::GlobalSafety().Bind(tmp);
     BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(first));
 }
+
+BOOST_AUTO_TEST_CASE(failed_advisory_rename_removes_temp_file)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-rename";
+    // A directory at the target path makes the rename fail after the temp file is written.
+    fs::create_directories(tmp / "safety_advisories.json");
+    modelnet::GlobalSafety().Bind(tmp);
+    std::string err;
+    BOOST_CHECK(!modelnet::GlobalSafety().LocalReport(std::string(96, 'a'), modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "first", 0, err));
+    BOOST_CHECK_EQUAL(err, "rename safety");
+    BOOST_CHECK(!fs::exists(tmp / "safety_advisories.json.tmp"));
+}
 #endif
 
 BOOST_AUTO_TEST_CASE(pinned_publisher_advisory_blocks_and_unseeds)

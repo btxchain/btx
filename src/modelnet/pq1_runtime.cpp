@@ -420,6 +420,7 @@ bool CheckOrStorePin(const fs::path& pinfile, const std::string& endpoint, const
     std::error_code ec;
     fs::rename(tmp, pinfile, ec);
     if (ec) {
+        fs::remove(tmp, ec);
         err = "pin file write";
         return false;
     }
