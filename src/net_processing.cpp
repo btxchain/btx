@@ -19674,7 +19674,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // it or sent unasked. A stem relay takes such a copy into its mempool,
         // which ends the embargo there, and announces it (ProcessValidTx). The
         // originator already holds it in its mempool, so do the rest here.
-        if (const CTransactionRef own{OwnStemTx(GenTxid::Txid(txid))}) {
+        // Match on wtxid: a copy with another witness goes to validation, which
+        // rejects it here as on a relay, instead of ending the embargo.
+        if (const CTransactionRef own{OwnStemTx(GenTxid::Wtxid(wtxid))}) {
             m_dandelion->TxAddedToMempool(txid);
             m_mempool.RemoveUnbroadcastTx(txid);
             m_txdownloadman.MempoolAcceptedTx(own);
