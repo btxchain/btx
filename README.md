@@ -276,8 +276,9 @@ hashes are written when a tag is sealed (see
 [doc/release-process.md](doc/release-process.md)). The previous monetary tag is
 **v0.34** (seal `dc46dee2`, freeze `ecfaa6c9`). Epoch A Profile 1 ExactReplay is
 live on mainnet at height **185000**. EncDr stall recovery at height **199299**
-is withdrawn. The shielded pool is closed at height **199300**. The compiled
-assumeutxo pin is height **219000** (the 199299 and 199300 pins were on the
+is withdrawn. The shielded pool is closed at height **199300**. On that tag
+the compiled assumeutxo pin is height **219000** (0.34.12 added **228000**;
+the 199299 and 199300 pins were on the
 withdrawn 0.34.1 branch and are removed; see
 [#127](https://github.com/btxchain/btx/issues/127)). Nodes that already loaded
 assumeutxo-199300 or assumeutxo-199299 must resync from an empty datadir.
@@ -359,9 +360,11 @@ Notes: [doc/release-notes/release-notes-0.34.9.md](doc/release-notes/release-not
 1. **Install** an appropriate shipping archive (last shipping tag recorded here: v0.34.15) from
    [GitHub releases](https://github.com/btxchain/btx/releases) (Linux CPU,
    Linux CUDA 12/13, macOS arm64 Metal), or [build from source](#building-from-source).
-2. **Fast-start** on a **fresh** chainstate with the compiled assumeutxo pin
-   at height **219000** (SHA256
-   `78acb7dd7eeec2a17909c6c5f7e12ffa9b4ad2ffcbd9eb464421dcd960868e7b`).
+2. **Fast-start** on a **fresh** chainstate with the highest compiled
+   assumeutxo pin, height **228000** since 0.34.12
+   ([assumeutxo-228000](https://github.com/btxchain/btx/releases/tag/assumeutxo-228000),
+   `assumeutxo-228000.dat` SHA256
+   `45392da4550a66ccd4ed949cc0e47cb2197dbf2fd238f79367c921adf8508890`).
    Use `loadtxoutset`, not `loadtxoutsetattested`. Details and withdrawn-pin
    warnings: [Historical shipping baseline — v0.34.9](#historical-shipping-baseline--0349).
 3. **Run** `btxd`. Daemon config: [Running a Node](#running-a-node).
@@ -1488,8 +1491,9 @@ historical sync finishes.
 
 Fast-start support in the current tree:
 
-- `main`: supported; compiled assumeutxo heights through **219000**
-  (`dc51220b…`). Load `https://github.com/btxchain/btx/releases/download/assumeutxo-219000/btx-assumeutxo-219000.dat`
+- `main`: supported; compiled assumeutxo heights through **228000**
+  (`01049090…`, since 0.34.12; 219000 `dc51220b…` is still compiled). Load
+  `https://github.com/btxchain/btx/releases/download/assumeutxo-228000/assumeutxo-228000.dat`
   with `loadtxoutset` on a fresh chainstate. Do **not** load
   assumeutxo-199300 (`ff80e629…`) or assumeutxo-199299 (`f12a27d0…`);
   those bases are on the withdrawn 0.34.1 branch and 0.34.5 rejects them.
