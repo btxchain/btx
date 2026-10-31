@@ -62,6 +62,7 @@ bool WriteJsonAtomic(const fs::path& path, const UniValue& obj, std::string& err
     std::error_code ec;
     fs::rename(tmp, path, ec);
     if (ec) {
+        fs::remove(tmp, ec);
         err = "rename safety";
         return false;
     }
