@@ -38,10 +38,16 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
+
+#ifndef WIN32
+#include <fcntl.h>
+#endif
 
 #if defined(__linux__)
 #include <fcntl.h>
@@ -540,6 +546,53 @@ BOOST_AUTO_TEST_CASE(start_socket_path_that_cannot_fit_does_not_spawn)
     } else {
         ::unsetenv("XDG_RUNTIME_DIR");
     }
+}
+#endif
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(start_spawned_helper_does_not_inherit_descriptors)
+{
+    // A descriptor without FD_CLOEXEC, like btxd's P2P listen socket. A helper
+    // that inherits it keeps it after btxd crashes, and btxd cannot bind again.
+    const int devnull = ::open("/dev/null", O_RDONLY);
+    BOOST_REQUIRE(devnull >= 0);
+    const int leaked = ::fcntl(devnull, F_DUPFD, 40);
+    ::close(devnull);
+    BOOST_REQUIRE(leaked >= 40);
+    BOOST_REQUIRE((::fcntl(leaked, F_GETFD) & FD_CLOEXEC) == 0);
+
+    // The fake helper lists its open descriptors into its model dir and exits.
+    const fs::path modeldir = m_path_root / "fdprobe";
+    fs::create_directories(modeldir);
+    const fs::path script = m_path_root / "fdprobe.sh";
+    {
+        std::ofstream f(script);
+        f << "#!/bin/sh\n"
+             "for a in \"$@\"; do case \"$a\" in -modeldir=*) d=\"${a#-modeldir=}\";; esac; done\n"
+             "/bin/ls /dev/fd > \"$d/fds.tmp\" && /bin/mv \"$d/fds.tmp\" \"$d/fds\"\n";
+    }
+    fs::permissions(script, fs::perms::owner_all);
+    const fs::path out = modeldir / "fds";
+    {
+        modelnet::HelperLaunchConfig cfg;
+        cfg.helper_exe = script;
+        cfg.modeldir = modeldir;
+        cfg.rpc_socket = modeldir / "modeld.sock";
+        modelnet::HelperSupervisor sup(std::move(cfg));
+        std::string err;
+        BOOST_REQUIRE(sup.Start(err));
+        for (int i = 0; i < 200 && !fs::exists(out); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        sup.Stop();
+    }
+    ::close(leaked);
+    BOOST_REQUIRE(fs::exists(out));
+    std::ifstream in(out);
+    std::set<int> fds;
+    for (int fd; in >> fd;) fds.insert(fd);
+    BOOST_CHECK(fds.count(0) && fds.count(1) && fds.count(2));
+    BOOST_CHECK_MESSAGE(fds.count(leaked) == 0, "helper inherited fd " << leaked);
 }
 #endif
 

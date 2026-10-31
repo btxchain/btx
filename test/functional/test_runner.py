@@ -697,6 +697,7 @@ BTX_BASE_SCRIPTS = [
     'feature_modelnet_jit_capability.py',
     'feature_modelnet_btx_model.py',
     'feature_modelnet_unique_todos.py',
+    'feature_modelnet_helper_after_kill.py',
     'feature_modelnet_hcp.py',
     'feature_modelnet_hcp_journeys.py',
     'feature_modelnet_hcpd_slow_client.py',
