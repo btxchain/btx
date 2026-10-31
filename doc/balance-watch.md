@@ -45,6 +45,8 @@ Shielded notes this wallet cannot open are omitted. Another person's shielded ba
 
 `btx-cli lightwatch` is a separate watch. It stores this wallet's public descriptors and the outputs those descriptors can see. It does not store the chain. The node it talks to must be started with `-blockfilterindex=1`.
 
+Only one `lightwatch init`, `add`, or `sync` command can write a watch directory at a time. A second writer fails with `BTX_LIGHTWATCH_BUSY`; retry it after the first command exits. Read-only commands and separate watch directories remain available.
+
 `lightwatch sync` asks for each block's basic compact filter. A block is downloaded only when the filter matches a watched script. The filter header must chain from the previous header. A break stops the walk. A filter that has not been checked stays unknown.
 
 `lightwatch balance` and `lightwatch balanceat <height>` print an amount only when the walk has reached that height and the saved block hash at that height matches the node’s active chain. Heights above the current tip and replaced blocks fail with `BTX_BALANCE_NOT_READY` and include no amount. An unavailable RPC node also fails without an amount. A historical height on the unchanged prefix remains queryable even while the watch is behind the tip. These checks use the configured RPC node; they are not independent consensus verification. `amount` is the spendable total. `immature` is coinbase that the walk has already seen and that is not yet spendable. `lightwatch status` reports ready, the cursor, blocks behind, the descriptors, and the blocks that were downloaded because a filter matched.
