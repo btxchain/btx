@@ -12,6 +12,7 @@
 #include <util/check.h>
 
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -53,7 +54,8 @@ FUZZ_TARGET(modelnet_pex_ingest)
     const UniValue advertised = pex.Advertise(now, limits.max_records);
     (void)advertised.write();
     pex.Expire(now + limits.ttl_ms + 1);
-    Assert(pex.Recent(now + limits.ttl_ms + 1).empty());
+    // Recent() leaves out expired entries itself, so ask for every entry.
+    Assert(pex.Recent(std::numeric_limits<int64_t>::min()).empty());
 }
 
 // Availability JSON a retrieving client reads from each source peer.
