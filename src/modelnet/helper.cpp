@@ -11841,6 +11841,37 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     std::signal(SIGPIPE, SIG_IGN);
     std::atomic<bool> local_stop{false};
     if (!stop) stop = &local_stop;
+#if !defined(__linux__) && !defined(WIN32)
+    // No PR_SET_PDEATHSIG here, so poll for the parent instead: once btxd is
+    // gone the helper is reparented and stops as on SIGTERM, so a crashed btxd
+    // does not leave it holding the model socket and port.
+    struct ParentWatch {
+        std::atomic<bool> done{false};
+        std::thread thread;
+        ~ParentWatch()
+        {
+            done = true;
+            if (thread.joinable()) thread.join();
+        }
+    } parent_watch;
+    if (std::getenv("BTX_HELPER_PARENT_WATCH") != nullptr) {
+        const pid_t parent{getppid()};
+        if (parent == 1) {
+            std::cerr << "btx-modeld: parent already exited\n";
+            return 1;
+        }
+        parent_watch.thread = std::thread([&done = parent_watch.done, stop, parent] {
+            while (!done.load() && !stop->load()) {
+                if (getppid() != parent) {
+                    std::cerr << "btx-modeld: parent exited, stopping\n";
+                    stop->store(true);
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+        });
+    }
+#endif
     struct ClearSeedPace {
         ~ClearSeedPace() { g_seed_pace_stop = nullptr; }
     } clear_seed_pace;
