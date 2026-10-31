@@ -139,6 +139,17 @@ bool NotifyActiveChainBlockDisconnected(int32_t height,
 void NotifyActiveChainBlockConnected(int32_t height,
                                      const uint256& connected_hash);
 /**
+ * Startup, once the block index is loaded: release this signer's votes for
+ * blocks that are not in the block index, as a disconnect of each would.
+ * After an unclean stop the index can miss blocks this node already signed
+ * (it is flushed lazily, the votes are not); nothing would disconnect them,
+ * and a vote whose block was replaced meanwhile refuses the new block at that
+ * height for good. If the block comes back, connecting it lifts the release.
+ * Returns the number of released heights.
+ */
+size_t ReleaseLocalVotesOutsideBlockIndex(
+    const std::function<bool(const uint256&)>& in_block_index);
+/**
  * Operator RPC path: clear local mint slots in [from_height, to_height]
  * inclusive. Consensus-neutral: only what this process will re-mint/serve.
  * Returns the number of distinct heights whose mint slot was released.

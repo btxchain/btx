@@ -3552,6 +3552,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     ChainstateManager& chainman = *Assert(node.chainman);
     auto& kernel_notifications{*Assert(node.notifications)};
 
+    // A block this signer attested can be missing from the block index after
+    // an unclean stop. -reindex rebuilds the index later, so skip it there.
+    if (node::matmul_trusted::HasLocalSigner() && !do_reindex) {
+        node::matmul_trusted::ReleaseLocalVotesOutsideBlockIndex(
+            [&](const uint256& hash) {
+                return WITH_LOCK(cs_main, return chainman.m_blockman.LookupBlockIndex(hash)) != nullptr;
+            });
+    }
+
     // Initialize Dandelion++ privacy relay (before PeerManager so we can pass the pointer)
     if (args.GetBoolArg("-dandelion", true)) {
         node.dandelion = std::make_unique<Dandelion::DandelionManager>();
