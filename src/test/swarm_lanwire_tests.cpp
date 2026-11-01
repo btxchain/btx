@@ -39,7 +39,7 @@ BOOST_FIXTURE_TEST_CASE(exchange_round_trips_btx_lan, BasicTestingSetup)
     const std::vector<unsigned char> payload = BtxLan();
     std::string err = "prior";
 
-    BOOST_REQUIRE(wire.Exchange(payload, err));
+    BOOST_REQUIRE_MESSAGE(wire.Exchange(payload, err), err);
     BOOST_CHECK(err.empty());
     BOOST_CHECK(wire.received() == payload);
     BOOST_CHECK_EQUAL(wire.packets(), static_cast<int64_t>(1));
