@@ -4,6 +4,8 @@
 
 #include <modelnet/swarm_form/directory.h>
 
+#include <util/fs_helpers.h>
+
 #include <filesystem>
 #include <system_error>
 
@@ -20,8 +22,7 @@ bool SwarmFormDirectory::Open(const std::filesystem::path& modeldir, std::string
     const fs::path model = fs::u8path(fs::path(modeldir).utf8string());
     const fs::path swarm = model / "swarm";
     std::error_code ec;
-    const fs::file_status status = fs::symlink_status(swarm, ec);
-    if (!ec && fs::is_symlink(status)) {
+    if (IsSymlink(swarm, ec)) {
         err = "SYMLINK";
         return false;
     }

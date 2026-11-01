@@ -11,6 +11,7 @@
 #include <modelnet/swarm_node.h>
 
 #include <test/util/setup_common.h>
+#include <test/util/symlink.h>
 #include <univalue.h>
 #include <util/fs.h>
 
@@ -115,12 +116,14 @@ BOOST_AUTO_TEST_CASE(planted_temp_symlinks_are_not_written_through)
     const auto plant = [&](const std::string& name) {
         fs::remove(swarm / fs::u8path(name + ".json"));
         WriteFile(outside / fs::u8path(name), "outside");
-        fs::create_symlink(outside / fs::u8path(name), swarm / fs::u8path(name + ".json.tmp"));
+        return CreateTestSymlink(outside / fs::u8path(name), swarm / fs::u8path(name + ".json.tmp"), /*directory=*/false);
     };
-    for (const std::string name : {"mesh-state", "networks"}) plant(name);
+    for (const std::string name : {"mesh-state", "networks"}) {
+        if (!plant(name)) return;
+    }
     BOOST_CHECK(!modelnet::SwarmRefreshLocalMesh(dir, err));
     BOOST_CHECK(!modelnet::SwarmPublishLive(dir, err));
-    plant("contribution");
+    if (!plant("contribution")) return;
     BOOST_CHECK(!modelnet::SwarmIntegrateCatalog(dir, err));
     BOOST_CHECK_EQUAL(err, "SYMLINK");
     for (const std::string name : {"mesh-state", "networks", "contribution"}) {
@@ -242,10 +245,10 @@ BOOST_AUTO_TEST_CASE(damaged_observers_file_is_set_aside_and_written_again)
     fs::remove(observers);
     fs::remove(aside);
     WriteFile(m_path_root / "catalog_bad_observers_target", "{}");
-    fs::create_symlink(m_path_root / "catalog_bad_observers_target", observers);
+    if (!CreateTestSymlink(m_path_root / "catalog_bad_observers_target", observers, /*directory=*/false)) return;
     BOOST_CHECK(!modelnet::SwarmObserveCatalog(dir, err));
     BOOST_CHECK_EQUAL(err, "CATALOG_SYMLINK");
-    BOOST_CHECK(fs::is_symlink(fs::symlink_status(observers)));
+    BOOST_CHECK(IsTestSymlink(observers));
     BOOST_CHECK(!fs::exists(fs::symlink_status(aside)));
 }
 

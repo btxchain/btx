@@ -6,6 +6,7 @@
 
 #include <modelnet/swarm_form/atomic.h>
 #include <modelnet/swarm_form/codec.h>
+#include <util/fs_helpers.h>
 
 #include <system_error>
 
@@ -31,8 +32,7 @@ bool SwarmFormElection::Load(const fs::path& swarm_dir, std::string& err)
     m_dir = swarm_dir;
     const fs::path file = swarm_dir / kElectionFile;
     std::error_code ec;
-    const fs::file_status status = fs::symlink_status(file, ec);
-    if (!ec && fs::is_symlink(status)) {
+    if (IsSymlink(file, ec)) {
         err = "SYMLINK";
         return false;
     }

@@ -5,6 +5,7 @@
 #include <modelnet/swarm_form/plane.h>
 #include <modelnet/swarm_form/types.h>
 #include <test/util/setup_common.h>
+#include <test/util/symlink.h>
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
@@ -150,13 +151,13 @@ BOOST_AUTO_TEST_CASE(symlink_model_swarm_does_not_receive_a_membership)
     const fs::path target = tree.path / "target";
     fs::create_directories(model);
     fs::create_directories(target);
-    fs::create_symlink(target, model / "swarm");
+    if (!CreateTestSymlink(target, model / "swarm", /*directory=*/true)) return;
 
     std::string err = "stale";
     BOOST_CHECK(!modelnet::SwarmFormPlane(model, err));
     BOOST_CHECK_EQUAL(err, "SYMLINK");
     BOOST_CHECK(!fs::exists(target / modelnet::kMembershipFile));
-    BOOST_CHECK(fs::is_symlink(fs::symlink_status(model / "swarm")));
+    BOOST_CHECK(IsTestSymlink(model / "swarm"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

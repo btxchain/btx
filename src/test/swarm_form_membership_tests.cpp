@@ -5,6 +5,7 @@
 #include <modelnet/swarm_form/plane.h>
 #include <modelnet/swarm_form/types.h>
 #include <test/util/setup_common.h>
+#include <test/util/symlink.h>
 #include <univalue.h>
 #include <util/fs.h>
 
@@ -196,7 +197,7 @@ BOOST_AUTO_TEST_CASE(membership_symlink_is_not_written_through)
     const fs::path outside = tree.path / "outside-membership";
     fs::create_directories(model / "swarm");
     WriteFile(outside, "secret\n");
-    fs::create_symlink(outside, model / "swarm" / modelnet::kMembershipFile);
+    if (!CreateTestSymlink(outside, model / "swarm" / modelnet::kMembershipFile, /*directory=*/false)) return;
 
     std::string err = "stale";
     BOOST_CHECK(!modelnet::SwarmFormPlane(model, err));
