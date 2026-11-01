@@ -76,6 +76,10 @@ inline bool NonBlocking(Socket s)
     u_long enabled{1};
     return ioctlsocket(s, FIONBIO, &enabled) == 0;
 #else
+#ifdef SO_NOSIGPIPE
+    const int enabled{1};
+    if (setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) != 0) return false;
+#endif
     const int flags{fcntl(s, F_GETFL, 0)};
     return flags >= 0 && fcntl(s, F_SETFL, flags | O_NONBLOCK) == 0;
 #endif

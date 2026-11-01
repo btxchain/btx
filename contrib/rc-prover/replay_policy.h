@@ -15,6 +15,21 @@ inline void ConfigureReplayPolicy()
     matmul::v4::rc::SetRCExactReplayCpuConfirmation(false);
 }
 
+/** Mirror btxd's cheap RC header checks before any replay is submitted. */
+inline const char* HeaderPrecheck(const CBlockHeader& header, uint32_t dimension)
+{
+    if (header.matmul_dim != dimension) return "invalid_dimension";
+    if (header.seed_a.IsNull() || header.seed_b.IsNull()) return "null_seed";
+    if (header.matmul_digest.IsNull()) return "null_digest";
+    return nullptr;
+}
+
+inline bool CanaryAdmits(const matmul::v4::rc::RCProductionCanaryStatus& status)
+{
+    // MissingGolden may be admitted by self-qualification, exactly as in btxd.
+    return status.passed && status.activation_ready;
+}
+
 inline bool ReadyAfterReplay(bool ready, const matmul::v4::rc::ExactReplayVerifyResult& result)
 {
     using namespace matmul::v4::rc;

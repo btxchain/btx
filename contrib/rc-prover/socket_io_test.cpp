@@ -24,7 +24,7 @@ int main(int argc, char** argv)
         const auto start{std::chrono::steady_clock::now()};
         const bool sent{WriteAll(s.Get(), std::string(32u << 20, 'x'), std::chrono::milliseconds(150))};
         const auto elapsed{std::chrono::steady_clock::now() - start};
-        return !sent && elapsed < std::chrono::seconds(3) ? 0 : 4;
+        return !sent && elapsed >= std::chrono::milliseconds(75) && elapsed < std::chrono::seconds(1) ? 0 : 4;
     }
     if (!WriteAll(s.Get(), "{\"nonce64\":18446744073709551615}\n", std::chrono::seconds(2))) return 5;
     const auto start{std::chrono::steady_clock::now()};
@@ -32,6 +32,7 @@ int main(int argc, char** argv)
     const auto elapsed{std::chrono::steady_clock::now() - start};
     if (mode == "echo") return ok && reply == "{\"nonce64\":18446744073709551615}" ? 0 : 6;
     if (mode == "crlf") return ok && reply == "ok\r" ? 0 : 7;
-    if (mode == "timeout" || mode == "slow" || mode == "eof" || mode == "oversize") return !ok && elapsed < std::chrono::seconds(3) ? 0 : 8;
+    if (mode == "timeout" || mode == "slow") return !ok && elapsed >= std::chrono::milliseconds(75) && elapsed < std::chrono::seconds(1) ? 0 : 8;
+    if (mode == "eof" || mode == "oversize") return !ok && elapsed < std::chrono::seconds(3) ? 0 : 8;
     return 9;
 }

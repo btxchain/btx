@@ -13,6 +13,7 @@ import time
 
 def run_case(exe, mode):
     errors = []
+    done = threading.Event()
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
@@ -23,7 +24,7 @@ def run_case(exe, mode):
                 with listener.accept()[0] as peer:
                     peer.settimeout(3)
                     if mode == "write_timeout":
-                        time.sleep(0.6)
+                        done.wait(4)
                         return
                     request = peer.makefile("rb").readline(1024)
                     if request != b'{"nonce64":18446744073709551615}\n':
@@ -32,20 +33,26 @@ def run_case(exe, mode):
                         peer.sendall(request[:7]); peer.sendall(request[7:])
                     elif mode == "crlf": peer.sendall(b"ok\r\n")
                     elif mode == "oversize": peer.sendall(b"x" * 129 + b"\n")
-                    elif mode == "timeout": time.sleep(0.4)
+                    elif mode == "timeout": done.wait(4)
                     elif mode == "slow":
-                        for _ in range(20):
-                            peer.sendall(b"x"); time.sleep(0.03)
+                        while not done.is_set():
+                            peer.sendall(b"x")
+                            done.wait(0.03)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass  # The deadline/size checks deliberately close the client.
             except Exception as exc:
                 errors.append(str(exc))
         thread = threading.Thread(target=serve)
         thread.start()
-        result = subprocess.run([exe, str(port), mode], capture_output=True, text=True, timeout=6)
-        thread.join(timeout=4)
+        try:
+            result = subprocess.run([exe, str(port), mode], capture_output=True, text=True, timeout=3)
+            if result.returncode: errors.append("C++ exit=" + str(result.returncode))
+        except subprocess.TimeoutExpired:
+            errors.append("C++ exceeded independent 3s watchdog")
+        finally:
+            done.set()
+            thread.join(timeout=4)
         if thread.is_alive(): errors.append("test server did not finish")
-        if result.returncode: errors.append("C++ exit=" + str(result.returncode))
         return {"case": mode, "passed": not errors, "errors": errors}
 
 
