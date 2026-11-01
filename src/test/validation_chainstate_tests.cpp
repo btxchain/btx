@@ -5299,13 +5299,15 @@ BOOST_FIXTURE_TEST_CASE(chainstate_consensus_gold_standard_ignores_cleared_attes
 
     RewindToParentAndActivate(chainstate, parent, {twin_a_index, twin_b_index});
     {
-        LOCK(::cs_main);
         // Invalidate the connected child so WITHOUT starts from the same parent
         // without re-applying the just-activated twin before ResetForTest.
-        CBlockIndex* child{chainstate.m_chain[parent->nHeight + 1]};
+        CBlockIndex* child{WITH_LOCK(::cs_main, {
+            return chainstate.m_chain[parent->nHeight + 1];
+        })};
         BOOST_REQUIRE(child != nullptr);
         BlockValidationState inv;
         BOOST_REQUIRE(chainstate.InvalidateBlock(inv, child));
+        LOCK(::cs_main);
         BOOST_REQUIRE(chainstate.m_chain.Tip() == parent);
     }
     node::matmul_trusted::ResetForTest();
@@ -5518,8 +5520,11 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_clears_poisoned_valid_marks, TestChain1
         LOCK(::cs_main);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
-        BlockValidationState again;
-        BOOST_REQUIRE(chainstate.InvalidateBlock(again, invalidate_at));
+    }
+    BlockValidationState again;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(again, invalidate_at));
+    {
+        LOCK(::cs_main);
         BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_MASK);
         BOOST_CHECK(invalidate_at->nStatus & BLOCK_MANUALLY_INVALIDATED);
         BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
