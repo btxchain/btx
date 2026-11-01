@@ -139,6 +139,46 @@ class P2PBlockChunkTransportTest(BitcoinTestFramework):
                 data=mismatched_payload))
         self.expect_re_request(peer, block)
 
+        self.log.info("Reject trailing bytes after a manifest")
+        with p2p_lock:
+            peer.last_message.pop("getdata", None)
+        with receiver.assert_debug_log(["blkchnkman trailing data"]):
+            peer.send_and_ping(msg_generic(b"blkchnkman",
+                                           manifest.serialize() + b"\x00"))
+        # Wait for the next request before the next case. The wait does not
+        # show that this rejection released the request: it also passes when
+        # the release is removed.
+        peer.wait_for_getdata([block.sha256], timeout=30)
+
+        self.log.info("Trailing bytes after a chunk end the stream")
+        peer.send_message(manifest)
+        with p2p_lock:
+            peer.last_message.pop("getdata", None)
+        chunk = msg_blkchunk(block_hash=block.sha256, index=0, data=payload)
+        with receiver.assert_debug_log(["blkchunk trailing data"]):
+            peer.send_and_ping(msg_generic(b"blkchunk",
+                                           chunk.serialize() + b"\x00"))
+        peer.wait_for_getdata([block.sha256], timeout=30)
+
+        self.log.info("A chunk after that finds no manifest: the stream ended")
+        with receiver.assert_debug_log(["blkchunk without manifest"]):
+            peer.send_and_ping(chunk)
+
+        self.log.info("Reject a manifest for a block not requested from this peer")
+        other = receiver.add_p2p_connection(BlockServingPeer())
+        other.send_and_ping(msg_sendblkchnk())
+        with receiver.assert_debug_log(["unsolicited blkchnkman"]):
+            other.send_and_ping(manifest)
+        # The refused manifest opened no stream for that peer.
+        with receiver.assert_debug_log(["blkchunk without manifest"]):
+            other.send_and_ping(chunk)
+
+        self.log.info("Disconnect a chunk sender that did not negotiate chunks")
+        legacy_chunk_peer = receiver.add_p2p_connection(P2PInterface())
+        with receiver.assert_debug_log(["blkchunk without negotiation"]):
+            legacy_chunk_peer.send_message(chunk)
+            legacy_chunk_peer.wait_for_disconnect(timeout=30)
+
         # Each terminal rejection above must have removed the expected hash's
         # in-flight ownership. Re-announcement therefore remains requestable,
         # and the ordinary BLOCK path can still advance the tip.
