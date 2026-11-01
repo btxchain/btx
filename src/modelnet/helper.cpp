@@ -11349,7 +11349,23 @@ void HandleUnixFd(int cfd, ModelCatalog& cat, std::atomic<bool>* stop)
         UniValue result;
         std::string code, emsg;
         const std::string method = req.exists("method") && req["method"].isStr() ? req["method"].get_str() : "";
-        if (DispatchHelperRpc(cat, req, result, code, emsg, stop)) {
+        // A long call holds its worker until it ends, up to 24 h for
+        // waitformodelevent. Keep one of the PQ1_UNIX_WORKERS free for short
+        // calls such as btxd's own getmodelnetworkinfo poll.
+        static std::atomic<int> g_long_calls{0};
+        const bool long_call{UnixRpcReplyTimeoutMs(method) == UNIX_RPC_LONG_REPLY_MS};
+        bool busy{false};
+        if (long_call && g_long_calls.fetch_add(1) >= PQ1_UNIX_WORKERS - 1) {
+            g_long_calls.fetch_sub(1);
+            busy = true;
+            code = "HELPER_BUSY";
+            emsg = std::to_string(PQ1_UNIX_WORKERS - 1) + " long helper call(s) already running; retry later";
+        }
+        struct Release {
+            bool held;
+            ~Release() { if (held) g_long_calls.fetch_sub(1); }
+        } release{long_call && !busy};
+        if (!busy && DispatchHelperRpc(cat, req, result, code, emsg, stop)) {
             if (HelperUnixMethodIsPublicSurface(method) && JsonLeaksPrivateLocalState(result)) {
                 UniValue e(UniValue::VOBJ);
                 e.pushKV("code", "PRIVATE_STATE_DENIED");
