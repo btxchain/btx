@@ -1,0 +1,26 @@
+# Copyright (c) 2026 The BTX developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://opensource.org/license/mit/.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  cmake_minimum_required(VERSION 3.22)
+  project(BTXRCTransportTest LANGUAGES CXX)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  enable_testing()
+else()
+  add_executable(btx-rc-prover btx-rc-prover.cpp)
+  target_link_libraries(btx-rc-prover core_interface)
+  target_link_btx_linux_archive_group(btx-rc-prover ${BTX_BASE_ARCHIVES})
+  if(WIN32)
+    target_link_libraries(btx-rc-prover ws2_32)
+  endif()
+endif()
+add_executable(btx-rc-socket-test socket_io_test.cpp)
+if(WIN32)
+  target_link_libraries(btx-rc-socket-test PRIVATE ws2_32)
+endif()
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME btx_rc_socket_transport
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_socket_io.py $<TARGET_FILE:btx-rc-socket-test>)
+endif()

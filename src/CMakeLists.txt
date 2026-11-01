@@ -1866,6 +1866,12 @@ if(BTX_ENABLE_HIP AND TARGET btx_hip_device)
   list(APPEND BTX_BASE_ARCHIVES btx_hip_device)
 endif()
 
+# Experimental operator-owned verifier; disabled in every default build.
+option(BTX_BUILD_RC_PROVER_PROTOTYPE "Build the experimental external RC verifier" OFF)
+if(BTX_BUILD_RC_PROVER_PROTOTYPE)
+  add_subdirectory(${PROJECT_SOURCE_DIR}/contrib/rc-prover ${CMAKE_CURRENT_BINARY_DIR}/rc-prover)
+endif()
+
 set(BTX_NODE_ARCHIVES
   bitcoin_node
   ${BTX_BASE_ARCHIVES}
