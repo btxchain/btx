@@ -164,7 +164,15 @@ The standalone suite has three CTest entries:
   It also checks classification of recoverable and fatal accept errors.
 * `btx_rc_token_file`: tests synthetic private tokens, CRLF/length limits,
   directory/missing-file rejection and public-access rejection using real
-  Windows ACLs or POSIX mode bits. POSIX also tests symlink and FIFO rejection.
+  Windows ACLs or POSIX mode bits. POSIX also tests symlink rejection and a
+  FIFO containing a valid-length token with its writer closed: removing S_ISREG
+  must make that fixture fail, independently of token size or read errors.
+  An optional POSIX owner fixture runs only with effective UID 0; it reads a
+  synthetic 0600 token owned by numeric UID 1. No account is created. Without
+  privileges this isolated owner case reports an explicit SKIP. In an isolated
+  privileged Linux run, the baseline passes and removing the UID guard makes
+  the foreign-owner fixture fail. Windows ownership is not isolated by this
+  POSIX fixture.
 
 Executed on 1 November 2026, based on `btx-035/swarm` at
 `cbf65894e6d61084527cd93e913a00c6794418dd`:
@@ -193,6 +201,15 @@ Jpp reports a complete macOS/Metal link, qualification and startup canary with
 successful malformed-request checks on the pre-policy-fix version plus the
 same timeout-initialization fix. Those runs do not qualify the new strict-policy
 build; real-GPU checks must be repeated after the policy change.
+
+[repch1c subsequently tested 542f4d5 on macOS](https://github.com/btxchain/btx/pull/362#issuecomment-6559145656):
+all three standalone CTest entries passed, 100-second read/write deadline
+mutations failed, and prover/policy/protocol translation units passed syntax
+checks. This was not a full in-tree link or Metal qualification of that revision.
+His observation that the empty FIFO/owner cases did not isolate their guards
+led to the filled-FIFO and optional privileged owner fixtures above. Both guard
+removals now fail in isolated Linux tests, as do mode-check and O_NOFOLLOW
+removals. The strengthened POSIX fixtures have not been rerun on macOS here.
 
 ### Policy and actual request-handler regression checks
 

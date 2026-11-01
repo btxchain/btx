@@ -50,7 +50,32 @@ def main():
             check(link, False)
             fifo = root / "fifo"
             os.mkfifo(fifo, 0o600)
-            check(fifo, False)
+            # An empty FIFO is also refused by the length check. Keep a reader
+            # open, queue a valid-length token, then close the writer so a
+            # loader with S_ISREG removed can read the bytes and reach EOF.
+            reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                writer = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                try:
+                    assert os.write(writer, b"x" * 32) == 32
+                finally:
+                    os.close(writer)
+                check(fifo, False)
+            finally:
+                os.close(reader)
+            if os.geteuid() == 0:
+                # Root can read this 0600 file despite its different UID, so
+                # neither DAC nor another guard can mask a missing owner check.
+                # UID 1 is only a numeric file owner; no account is created.
+                foreign = root / "foreign-owner"
+                foreign.write_bytes(b"x" * 32)
+                foreign.chmod(0o600)
+                os.chown(foreign, 1, -1)
+                assert foreign.read_bytes() == b"x" * 32, "fixture must be readable despite its foreign UID"
+                check(foreign, False)
+                print("foreign-owner rejection passed (privileged POSIX fixture)")
+            else:
+                print("SKIP: isolated POSIX owner check requires an effective UID of 0")
         check(token, True)
         check(root, False)
         check(root / "missing", False)
