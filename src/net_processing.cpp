@@ -2653,7 +2653,12 @@ private:
     bool IsBlockRequested(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Blocks whose body was deferred for verification budget, and the earliest
      *  time each may be requested again. Bounded by pruning on lookup. */
-    std::map<uint256, std::chrono::microseconds> m_matmul_budget_deferred GUARDED_BY(cs_main);
+    struct MatMulDownloadDeferral {
+        std::chrono::microseconds retry_after;
+        // Storage pressure cannot be relieved by re-requesting the same body.
+        bool allow_idle_bypass{true};
+    };
+    std::map<uint256, MatMulDownloadDeferral> m_matmul_budget_deferred GUARDED_BY(cs_main);
     /** True while a budget-deferred block is still in its cooldown. */
     bool IsMatMulBudgetDeferred(const uint256& hash, std::chrono::microseconds now)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -2661,7 +2666,8 @@ private:
         const uint256& hash,
         std::chrono::microseconds cooldown =
             std::chrono::duration_cast<std::chrono::microseconds>(
-                MATMUL_BUDGET_DEFER_COOLDOWN))
+                MATMUL_BUDGET_DEFER_COOLDOWN),
+        bool allow_idle_bypass = true)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** True when we may ask another peer for `hash` while it is already
      *  in-flight. A missing requested_at stamp is treated as already stale.
@@ -3450,7 +3456,7 @@ bool PeerManagerImpl::IsMatMulBudgetDeferred(const uint256& hash,
     // queried key; NoteMatMulBudgetDeferred prunes and caps on insert.
     const auto it{m_matmul_budget_deferred.find(hash)};
     if (it == m_matmul_budget_deferred.end()) return false;
-    if (now >= it->second) {
+    if (now >= it->second.retry_after) {
         m_matmul_budget_deferred.erase(it);
         return false;
     }
@@ -3458,30 +3464,35 @@ bool PeerManagerImpl::IsMatMulBudgetDeferred(const uint256& hash,
 }
 
 void PeerManagerImpl::NoteMatMulBudgetDeferred(
-    const uint256& hash, std::chrono::microseconds cooldown)
+    const uint256& hash, std::chrono::microseconds cooldown,
+    bool allow_idle_bypass)
 {
     const auto now_us{GetTime<std::chrono::microseconds>()};
     std::erase_if(m_matmul_budget_deferred,
-                  [&](const auto& e) { return now_us >= e.second; });
+                  [&](const auto& e) { return now_us >= e.second.retry_after; });
     const auto existing{m_matmul_budget_deferred.find(hash)};
     if (existing != m_matmul_budget_deferred.end()) {
         // Non-refresh: re-deferring the same hash must not extend the skip
         // window. Independent sources become eligible when this deadline
         // fires; a retained body is already skip-fetched via HasRetainedBody.
-        if (now_us < existing->second) return;
+        if (now_us < existing->second.retry_after) {
+            existing->second.allow_idle_bypass &= allow_idle_bypass;
+            return;
+        }
         m_matmul_budget_deferred.erase(existing);
     }
     if (m_matmul_budget_deferred.size() >= MATMUL_BUDGET_DEFERRED_MAX) {
         const auto oldest{std::min_element(
             m_matmul_budget_deferred.begin(), m_matmul_budget_deferred.end(),
             [](const auto& lhs, const auto& rhs) {
-                return lhs.second < rhs.second;
+                return lhs.second.retry_after < rhs.second.retry_after;
             })};
         if (oldest != m_matmul_budget_deferred.end()) {
             m_matmul_budget_deferred.erase(oldest);
         }
     }
-    m_matmul_budget_deferred.emplace(hash, now_us + cooldown);
+    m_matmul_budget_deferred.emplace(
+        hash, MatMulDownloadDeferral{now_us + cooldown, allow_idle_bypass});
 }
 
 bool PeerManagerImpl::MayDuplicateStaleBlockRequest(const uint256& hash,
@@ -7802,6 +7813,11 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             if (IsMatMulBudgetDeferred(pindex->GetBlockHash(),
                                        GetTime<std::chrono::microseconds>())) {
                 const uint256 deferred_hash{pindex->GetBlockHash()};
+                if (!m_matmul_budget_deferred.at(deferred_hash).allow_idle_bypass) {
+                    // Do not refill this historical window with descendants
+                    // while its first missing body waits for local storage.
+                    return;
+                }
                 // Issue #163: idle catch-up must not re-GETDATA a hash the
                 // retained store already holds. Re-fetch is a busy loop, not
                 // progress. Hash-only RC cooldown (ContainsHash) must NOT skip
@@ -15820,7 +15836,27 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         rollback_body_ticket();
                     }
                     release_admission_marker();
-                    node.fDisconnect = true;
+                    const bool requested_background_hole{
+                        force_processing &&
+                        m_chainman.GetMatMulValidationMode() ==
+                            kernel::MatMulValidationMode::CONSENSUS &&
+                        WITH_LOCK(cs_main, return IsUncoveredBackgroundChainstateHole(
+                            m_chainman, m_chainman.m_blockman.LookupBlockIndex(hash)))};
+                    if (requested_background_hole) {
+                        // Local capacity is not misconduct by a peer answering
+                        // our GETDATA. Keep the quotas and discard this copy
+                        // without synchronous replay; request it again after
+                        // a short cooldown, including when downloads are idle.
+                        LOCK(cs_main);
+                        NoteMatMulBudgetDeferred(
+                            hash, MATMUL_PENDING_RETRY_COOLDOWN,
+                            /*allow_idle_bypass=*/false);
+                        LogDebug(BCLog::NET,
+                                 "Deferring requested background body %s from peer=%d: protected retained store full\n",
+                                 hash.ToString(), node.GetId());
+                    } else {
+                        node.fDisconnect = true;
+                    }
                     if (post_process) post_process();
                     return;
                 }

@@ -15881,6 +15881,158 @@ BOOST_AUTO_TEST_CASE(acquisition_frontier_does_not_wait_for_background_holes)
     s.peerman.InstallMatMulVerifyOverrideForTest({});
 }
 
+namespace {
+// Hold one worker deterministically so delivery speed and GPU speed do not
+// decide whether the per-source retained-body cap is reached. This uses the
+// existing snapshot/P2P fixture and worker override; it is not device evidence.
+void ReproduceSnapshotBodyBurst(TestingSetup& fx, int count, uint32_t pending_cap, int base_count = -1)
+{
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
+    BackgroundHoleScenario s{fx, base_count < 0 ? count : base_count};
+    s.consensus.nMatMulRCMaxPendingVerifications = pending_cap;
+    struct Gate {
+        std::atomic<bool> started{false};
+        std::atomic<bool> release{false};
+        std::atomic<bool> expired{false};
+    };
+    const auto gate{std::make_shared<Gate>()};
+    struct ReleaseOnExit {
+        std::shared_ptr<Gate> gate;
+        ~ReleaseOnExit() { gate->release.store(true); }
+    } release_on_exit{gate};
+    s.peerman.InstallMatMulVerifyOverrideForTest(
+        [gate](const CBlock&, int32_t, std::optional<int64_t>) {
+            gate->started.store(true);
+            const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{10}};
+            while (!gate->release.load()) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    gate->expired.store(true);
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            return true;
+        });
+    s.Deliver(0, /*request=*/true);
+    BOOST_REQUIRE(PeermanWaitFor([&] { return gate->started.load(); },
+                                 std::chrono::milliseconds{3000}));
+    for (int i = 1; i < count; ++i) {
+        BOOST_REQUIRE_MESSAGE(!s.archive->fDisconnect,
+                              "source disconnected before delivery " << i + 1);
+        s.Deliver(i, /*request=*/true);
+    }
+    const auto pending{s.peerman.MatMulSourceVerifySnapshotForTest(
+        s.archive->addr, s.archive->nKeyedNetGroup).rc_pending};
+    size_t retained{0};
+    for (const CBlock& b : s.blocks) {
+        if (s.peerman.HasMatMulRetainedBodyForTest(b.GetHash())) ++retained;
+    }
+    BOOST_TEST_MESSAGE("requested=" << count << " pending_cap=" << pending_cap
+                       << " rc_pending=" << pending << " retained=" << retained
+                       << " disconnected=" << s.archive->fDisconnect);
+    BOOST_CHECK(!gate->expired.load());
+    // The peer delivered bodies we asked for. Local retention pressure must
+    // not be treated as misconduct by that peer.
+    BOOST_CHECK_MESSAGE(!s.archive->fDisconnect,
+                        "requested background body burst disconnected its honest source");
+    const auto read_requests = [&] {
+        auto out{QueuedGetDataHashes(*s.archive)};
+        LOCK(s.archive->cs_vSend);
+        const auto& [frame, more, type]{s.archive->m_transport->GetBytesToSend(false)};
+        if (type != NetMsgType::GETDATA || frame.empty()) return out;
+        // A null socket leaves V1's frame header and payload in separate
+        // segments. Read the payload, rather than assuming both are joined.
+        if (frame.size() == CMessageHeader::HEADER_SIZE) {
+            s.archive->m_transport->MarkBytesSent(frame.size());
+        }
+        const auto& [payload, payload_more, payload_type]{s.archive->m_transport->GetBytesToSend(false)};
+        if (payload_type != NetMsgType::GETDATA || payload.empty()) return out;
+        DataStream stream{payload};
+        std::vector<CInv> inv;
+        stream >> inv;
+        for (const CInv& i : inv) out.push_back(i.hash);
+        return out;
+    };
+    const bool check_retry{count == 17 && pending_cap > 16 && !s.archive->fDisconnect};
+    const uint256 rejected_hash{s.blocks.at(count - 1).GetHash()};
+    if (check_retry) {
+        BOOST_CHECK_EQUAL(pending, 16U);
+        BOOST_CHECK_EQUAL(retained, 16U);
+        BOOST_CHECK(!s.HasData(count - 1));
+        BOOST_CHECK(!s.peerman.HasMatMulRetainedBodyForTest(rejected_hash));
+        // Give the downloader the peer's full header chain. The attempted
+        // body17 was requested, but was not retained or verified. Even an
+        // idle network must respect its local-capacity retry delay.
+        std::vector<CBlock> headers;
+        for (const CBlock& b : s.blocks) headers.emplace_back(b.GetBlockHeader());
+        BOOST_REQUIRE(s.connman.ReceiveMsgFrom(
+            *s.archive, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+        (void)s.connman.ProcessMessagesOnce(*s.archive);
+        s.connman.FlushSendBuffer(*s.archive);
+        s.archive->fPauseSend = false;
+        BOOST_REQUIRE(s.peerman.SendMessages(s.archive.get()));
+        const auto immediate{read_requests()};
+        BOOST_CHECK_MESSAGE(immediate.empty(),
+                            "capacity wait must not fetch the rejected body or its descendants");
+        s.connman.FlushSendBuffer(*s.archive);
+        s.archive->fPauseSend = false;
+    }
+    gate->release.store(true);
+    {
+        REVERSE_LOCK(msgproc_lock);
+        BOOST_REQUIRE(PeermanWaitFor([&] {
+            return s.peerman.MatMulSourceVerifySnapshotForTest(
+                       s.archive->addr, s.archive->nKeyedNetGroup).rc_pending == 0;
+        }, std::chrono::milliseconds{5000}));
+    }
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    if (check_retry) {
+        SetMockTime(GetTime<std::chrono::seconds>() + std::chrono::seconds{2});
+        s.archive->fPauseSend = false;
+        BOOST_REQUIRE(s.peerman.SendMessages(s.archive.get()));
+        const auto retried{read_requests()};
+        BOOST_REQUIRE_MESSAGE(std::find(retried.begin(), retried.end(), rejected_hash) != retried.end(),
+                              "body17 was never re-requested after capacity and cooldown recovered");
+        s.Deliver(count - 1, /*request=*/false);
+        {
+            REVERSE_LOCK(msgproc_lock);
+            BOOST_REQUIRE(PeermanWaitFor([&] { return s.BackgroundHeight() == count; },
+                                         std::chrono::milliseconds{5000}));
+        }
+        s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        BOOST_CHECK(s.HasData(count - 1));
+        BOOST_CHECK(!s.archive->fDisconnect);
+        LOCK(::cs_main);
+        const CBlockIndex* recovered{s.Index(count - 1)};
+        BOOST_CHECK(recovered->nAuthenticatedChainWork == recovered->nChainWork);
+        BOOST_CHECK_EQUAL(s.chainman.IsSnapshotValidated(), count == s.base->nHeight);
+        BOOST_TEST_MESSAGE("body17 re-requested; background=" << s.BackgroundHeight()
+                           << " base=" << s.base->nHeight << " recovered work authenticated");
+    }
+    s.peerman.InstallMatMulVerifyOverrideForTest({});
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(snapshot_body_burst_16_keeps_source)
+{
+    ReproduceSnapshotBodyBurst(*this, 16, std::numeric_limits<uint32_t>::max());
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_body_burst_17_keeps_source)
+{
+    ReproduceSnapshotBodyBurst(*this, 17, std::numeric_limits<uint32_t>::max());
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_body_burst_17_single_slot_keeps_source)
+{
+    ReproduceSnapshotBodyBurst(*this, 17, 1);
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_body_capacity_wait_does_not_fetch_descendants)
+{
+    ReproduceSnapshotBodyBurst(*this, 17, std::numeric_limits<uint32_t>::max(), 33);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // Fresh RegTestingSetup is genesis (tip=0), matching the 2026-08-26 field
@@ -16296,5 +16448,6 @@ BOOST_AUTO_TEST_CASE(invalidateblock_notifies_peerman_without_caller_chain_lock)
         signals.ActiveTipChange(*parent, chainman.IsInitialBlockDownload());
     }
 }
+
 
 BOOST_AUTO_TEST_SUITE_END()
