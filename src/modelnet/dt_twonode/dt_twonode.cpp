@@ -14,6 +14,16 @@
 namespace modelnet {
 namespace {
 
+// A socketpair end on Windows is a Winsock SOCKET, which close() does not release.
+void CloseSocket(int fd)
+{
+#ifdef _WIN32
+    ::closesocket(static_cast<SOCKET>(fd));
+#else
+    ::close(fd);
+#endif
+}
+
 class Ends {
 public:
     Ends() = default;
@@ -32,8 +42,8 @@ public:
     void Close()
     {
         if (!m_open) return;
-        ::close(m_fd[0]);
-        ::close(m_fd[1]);
+        CloseSocket(m_fd[0]);
+        CloseSocket(m_fd[1]);
         m_open = false;
     }
     int operator[](int i) const { return m_fd[i]; }
@@ -47,7 +57,7 @@ bool WriteFull(int fd, const unsigned char* data, size_t n)
 {
     size_t off = 0;
     while (off < n) {
-        const ssize_t w = ::write(fd, data + off, n - off);
+        const ssize_t w = ::send(fd, data + off, n - off, 0);
         if (w < 0) {
             if (errno == EINTR) continue;
             return false;
@@ -62,7 +72,7 @@ bool ReadFull(int fd, unsigned char* data, size_t n)
 {
     size_t off = 0;
     while (off < n) {
-        const ssize_t r = ::read(fd, data + off, n - off);
+        const ssize_t r = ::recv(fd, data + off, n - off, 0);
         if (r < 0) {
             if (errno == EINTR) continue;
             return false;
