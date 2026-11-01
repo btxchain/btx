@@ -41,6 +41,10 @@ public:
         }
         const int fd = m_fd;
         m_fd = -1;
+#ifdef _WIN32
+        // A Winsock SOCKET is not a CRT descriptor, so close() does not release it.
+        return ::closesocket(static_cast<SOCKET>(fd)) == 0;
+#else
         for (;;) {
             if (::close(fd) == 0) {
                 return true;
@@ -49,6 +53,7 @@ public:
                 return false;
             }
         }
+#endif
     }
 
 private:
@@ -104,10 +109,15 @@ bool SwarmLanWire::Exchange(const std::vector<unsigned char>& payload, std::stri
         return false;
     }
 
-    timeval tv{};
-    tv.tv_sec = 0;
-    tv.tv_usec = static_cast<decltype(tv.tv_usec)>(kSwarmLanWireRecvTimeoutMs * 1000);
-    if (::setsockopt(held.fd(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
+#ifdef _WIN32
+    // Winsock reads SO_RCVTIMEO as a DWORD of milliseconds, not as a timeval.
+    const DWORD timeout = static_cast<DWORD>(kSwarmLanWireRecvTimeoutMs);
+#else
+    timeval timeout{};
+    timeout.tv_sec = 0;
+    timeout.tv_usec = static_cast<decltype(timeout.tv_usec)>(kSwarmLanWireRecvTimeoutMs * 1000);
+#endif
+    if (::setsockopt(held.fd(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0) {
         held.Close();
         err = kSwarmLanWireSocket;
         return false;
