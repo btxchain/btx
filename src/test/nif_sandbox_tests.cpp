@@ -12,6 +12,13 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+#define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
+#endif
+#endif
+
 BOOST_FIXTURE_TEST_SUITE(nif_sandbox_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(root_path_egress_download_elf_and_child_limit)
@@ -105,5 +112,76 @@ BOOST_AUTO_TEST_CASE(root_path_egress_download_elf_and_child_limit)
     BOOST_CHECK(!box.broadcast());
     BOOST_CHECK_EQUAL(box.automatic_spend(), "0");
 }
+
+#ifdef _WIN32
+BOOST_AUTO_TEST_CASE(reparse_point_under_the_root_is_refused)
+{
+    const fs::path root = m_path_root / "root";
+    const fs::path outside = m_path_root / "outside";
+    BOOST_REQUIRE(fs::create_directories(root));
+    BOOST_REQUIRE(fs::create_directories(outside));
+    {
+        std::ofstream out(outside / "secret.txt", std::ios::binary | std::ios::trunc);
+        BOOST_REQUIRE(out);
+        out.write("no", 2);
+        BOOST_REQUIRE(out);
+    }
+
+    modelnet::NifSandbox box;
+    std::string err;
+    BOOST_REQUIRE(box.Bind(root, err));
+    BOOST_CHECK(!box.OpenPath(root / ".." / "outside" / "secret.txt", err));
+    BOOST_CHECK_EQUAL(err, "DENIED");
+
+    // A drive-qualified name below the root ("<root>\C:x" on drive C:) is
+    // refused. Without the root-name check the walk would open "<root>\x".
+    {
+        std::ofstream out(root / "x", std::ios::binary | std::ios::trunc);
+        BOOST_REQUIRE(out);
+        out.write("x", 1);
+        BOOST_REQUIRE(out);
+    }
+    const std::string drive{fs::path{fs::absolute(root).root_name()}.utf8string()};
+    BOOST_REQUIRE(!drive.empty());
+    BOOST_CHECK(!box.OpenPath(fs::u8path(root.utf8string() + "\\" + drive + "x"), err));
+    BOOST_CHECK_EQUAL(err, "DENIED");
+    BOOST_CHECK_EQUAL(box.bytes_read(), static_cast<int64_t>(0));
+    BOOST_CHECK(box.opened().empty());
+
+    // A directory symbolic link under the root that points outside it. The test
+    // root can mix '/' and '\', so the target is written with '\' only.
+    const fs::path link_dir = root / "link";
+    fs::path target{outside};
+    target.make_preferred();
+    if (!CreateSymbolicLinkW(link_dir.wstring().c_str(), target.wstring().c_str(),
+                             SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+        const DWORD code{GetLastError()};
+        BOOST_REQUIRE_MESSAGE(code == ERROR_PRIVILEGE_NOT_HELD, "CreateSymbolicLinkW failed with Windows error " << code);
+        BOOST_TEST_MESSAGE("NOT CHECKED: Windows refused to create a symbolic link here (privilege not held), so the "
+                           "reparse-point refusal did not run. Run elevated or with developer mode to check it.");
+        BOOST_CHECK_EQUAL(box.bytes_read(), static_cast<int64_t>(0));
+        return;
+    }
+    const DWORD attributes{GetFileAttributesW(link_dir.wstring().c_str())};
+    BOOST_REQUIRE(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0);
+    BOOST_REQUIRE(fs::exists(link_dir / "secret.txt"));
+
+    BOOST_CHECK(!box.OpenPath(link_dir / "secret.txt", err));
+    BOOST_CHECK_EQUAL(err, "DENIED");
+    BOOST_CHECK(!box.OpenPath(link_dir, err));
+    BOOST_CHECK_EQUAL(err, "DENIED");
+    BOOST_CHECK_EQUAL(box.bytes_read(), static_cast<int64_t>(0));
+    BOOST_CHECK(box.opened().empty());
+
+    // A bound root that is itself a link does not open.
+    modelnet::NifSandbox linked;
+    BOOST_REQUIRE(linked.Bind(link_dir, err));
+    BOOST_CHECK(!linked.OpenPath(link_dir, err));
+    BOOST_CHECK_EQUAL(err, "DENIED");
+
+    // Removes the link only, not its target.
+    BOOST_CHECK(RemoveDirectoryW(link_dir.wstring().c_str()));
+}
+#endif // _WIN32
 
 BOOST_AUTO_TEST_SUITE_END()

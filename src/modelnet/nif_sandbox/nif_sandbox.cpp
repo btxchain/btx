@@ -11,6 +11,10 @@
 #include <fstream>
 #include <system_error>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace {
 
 constexpr unsigned char kPickle[] = {
@@ -25,17 +29,31 @@ enum class NodeKind {
     Other,
 };
 
+// lexically_normal() writes the preferred separator, which is '\' on Windows.
+bool IsSeparator(char c)
+{
+    return c == '/' || c == static_cast<char>(fs::path::preferred_separator);
+}
+
 bool HasRootPrefix(const std::string& root_utf8, const std::string& path_utf8)
 {
     if (root_utf8.empty() || path_utf8.empty()) return false;
     if (path_utf8 == root_utf8) return true;
     if (path_utf8.size() <= root_utf8.size()) return false;
     if (path_utf8.compare(0, root_utf8.size(), root_utf8) != 0) return false;
-    return root_utf8.back() == '/' || path_utf8[root_utf8.size()] == '/';
+    return IsSeparator(root_utf8.back()) || IsSeparator(path_utf8[root_utf8.size()]);
 }
 
 NodeKind Classify(const fs::path& path)
 {
+#ifdef _WIN32
+    // On MinGW, libstdc++ implements lstat with stat, so symlink_status() never
+    // reports a symbolic link or a junction. Ask Windows for the reparse
+    // attribute, and refuse every reparse point.
+    const DWORD attributes{GetFileAttributesW(path.wstring().c_str())};
+    if (attributes == INVALID_FILE_ATTRIBUTES) return NodeKind::Missing;
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return NodeKind::Symlink;
+#endif
     std::error_code ec;
     const fs::file_status status = fs::symlink_status(path, ec);
     if (ec || status.type() == fs::file_type::not_found || status.type() == fs::file_type::none) {
@@ -120,9 +138,8 @@ bool NifSandbox::ReadFile(const fs::path& path, std::string& err)
 bool NifSandbox::OpenInside(const fs::path& normal, std::string& err)
 {
     if (normal.utf8string() == m_root_utf8) {
-        std::error_code ec;
-        const fs::file_status status = fs::symlink_status(m_root, ec);
-        if (ec || fs::is_symlink(status) || !fs::exists(m_root)) {
+        const NodeKind root = Classify(m_root);
+        if (root == NodeKind::Missing || root == NodeKind::Symlink) {
             err = "DENIED";
             return false;
         }
@@ -136,7 +153,12 @@ bool NifSandbox::OpenInside(const fs::path& normal, std::string& err)
     bool saw_part = false;
     for (const auto& part : relative) {
         const std::string part_utf8 = fs::path{part}.utf8string();
-        if (part_utf8.empty() || part_utf8 == "." || part_utf8 == "..") {
+        // On Windows a name like "C:x" below the root comes back from
+        // lexically_relative() as the root name "C:" and then "x", and
+        // appending "C:" either moves the walk to that drive or drops it from
+        // the name. Refuse any part with a root name or a root directory.
+        if (part_utf8.empty() || part_utf8 == "." || part_utf8 == ".." ||
+            part.has_root_name() || part.has_root_directory()) {
             err = "DENIED";
             return false;
         }
