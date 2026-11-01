@@ -22,6 +22,7 @@
 #include <modelnet/resource_uri.h>
 #include <modelnet/supervisor.h>
 #include <core_io.h>
+#include <httpserver.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <net.h>
 #include <node/context.h>
@@ -35,6 +36,8 @@
 #include <txmempool.h>
 #include <uint256.h>
 #include <validation.h>
+#include <algorithm>
+#include <atomic>
 #include <limits>
 #include <map>
 #include <memory>
@@ -69,6 +72,19 @@ fs::path ModelRpcSocket()
 
 bool HelperCall(const std::string& method, const UniValue& params, UniValue& result, std::string& err)
 {
+    // Each call holds an RPC worker until the helper answers (up to 120 s, or
+    // 24 h for long methods). Let at most half of the workers wait on the
+    // helper, so a stuck helper cannot take every worker from the monetary RPCs.
+    static std::atomic<int> g_in_flight{0};
+    const int limit{static_cast<int>(std::max<int64_t>(1, gArgs.GetIntArg("-rpcthreads", DEFAULT_HTTP_THREADS) / 2))};
+    if (g_in_flight.fetch_add(1) >= limit) {
+        g_in_flight.fetch_sub(1);
+        err = strprintf("model helper busy: %d calls already waiting for it", limit);
+        return false;
+    }
+    struct Release {
+        ~Release() { g_in_flight.fetch_sub(1); }
+    } release;
     return modelnet::CallUnixRpc(ModelRpcSocket(), method, params, result, err);
 }
 
