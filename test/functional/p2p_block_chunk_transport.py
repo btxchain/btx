@@ -27,6 +27,18 @@ from test_framework.util import assert_equal
 CHUNK_SIZE = 1 << 20
 
 
+class BlockServingPeer(P2PInterface):
+    """A peer that advertises a start height in VERSION, as nodes do.
+
+    btxd requests bodies through its download logic only from peers that
+    sent a start height (m_starting_height >= 0). The framework default of
+    -1 leaves only the direct fetch of a newly announced header.
+    """
+    def peer_connect_send_version(self, services):
+        super().peer_connect_send_version(services)
+        self.on_connection_send_msg.nStartingHeight = 100
+
+
 class P2PBlockChunkTransportTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
@@ -79,7 +91,7 @@ class P2PBlockChunkTransportTest(BitcoinTestFramework):
             legacy_peer.send_message(manifest)
             legacy_peer.wait_for_disconnect(timeout=30)
 
-        peer = receiver.add_p2p_connection(P2PInterface())
+        peer = receiver.add_p2p_connection(BlockServingPeer())
         peer.send_and_ping(msg_sendblkchnk())
 
         self.log.info("Reject an out-of-order chunk and release its request")
