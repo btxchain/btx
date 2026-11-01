@@ -43,6 +43,9 @@ execution as independent local consensus validation.
 
 * A mainnet Profile-1 verifier process using the existing in-tree
   `VerifyBoundedExactReplay`, backend resolver and production startup canary.
+  Before qualification it explicitly selects `StrictDevice` and disables CPU
+  confirmation, matching mainnet btxd defaults; no automatic CPU fallback is
+  requested.
 * An IPv4 loopback-only listener with a required token file (32..4096 bytes).
   The token must be protected by the operator's filesystem permissions / Windows
   ACL. Use a separate token for this service, not a wallet or RPC password.
@@ -51,7 +54,10 @@ execution as independent local consensus validation.
 * Invalid JSON, missing authentication, unsupported operations and provider
   failures are errors. They do not become successful verdicts. The service
   opens no listener if initial GPU qualification/canary fails. A later local
-  accelerator failure makes it unavailable until restart.
+  accelerator result disables readiness until restart only for typed
+  `ExecutionFailure` or `ProviderUnavailable` failures. An
+  `UnconfirmedDigestMismatch` alone does not disable a healthy service, nor does
+  a cancellation. A replay result never restores readiness after a real fault.
 * A caller may request a target stricter than the header's compact target,
   but cannot use this protocol to make it easier.
 
@@ -114,9 +120,14 @@ cmake --build build-rc-transport --config Release
 ctest --test-dir build-rc-transport -C Release --output-on-failure
 ```
 
-Tests use only ephemeral loopback ports and cover exact preservation of a
-64-bit nonce, fragmented replies, CRLF, receive timeout, slow trickle, EOF,
-request-size refusal and blocked writes. They do not contact mainnet.
+The transport harness has seven cases in one CTest entry, using only ephemeral
+loopback ports: exact JSON byte preservation of a uint64-sized value, fragmented
+replies, CRLF, receive timeout, slow trickle, EOF, request-size refusal and blocked
+writes. The byte check is framing coverage, not actual header-nonce parsing.
+The three deadline cases currently also pass when the peer closes before the
+overly generous elapsed-time bound; they do **not yet establish deadline
+enforcement**. Strengthening those cases remains an open review item. These
+checks do not contact mainnet.
 
 Executed for this draft on 1 November 2026, based on
 `btx-035/swarm` at `cbf65894e6d61084527cd93e913a00c6794418dd`:
@@ -135,13 +146,38 @@ a narrowing error reported by [repch1c on macOS](https://github.com/btxchain/btx
 where `tv_usec` is an `int`. On the original commit with the same local fix,
 repch1c reports three successful transport-test runs (all seven cases), prover
 syntax compilation, and an oversize-check mutation caught by the tests. Those
-are reviewer-reported macOS results; no macOS run was performed here, and full
-macOS linking, Metal qualification and the startup canary remain unchecked.
+are reviewer-reported macOS results; no macOS run was performed here. In a
+[later review](https://github.com/btxchain/btx/pull/362#issuecomment-6557778906),
+Jpp reports a complete macOS/Metal link, qualification and startup canary with
+successful malformed-request checks on the pre-policy-fix version plus the
+same timeout-initialization fix. Those runs do not qualify the new strict-policy
+build; real-GPU checks must be repeated after the policy change.
+
+### Replay-policy regression checks
+
+The in-tree opt-in build also provides `btx-rc-replay-policy-test`. Build that
+target and run it directly (or use the `btx_rc_replay_policy` CTest entry when
+BTX test registration is enabled). Unlike the independent transport project,
+it includes the current BTX headers and needs a compatible core C++ toolchain.
+
+This CPU-only unit test uses the real ExactReplay result/enumeration types and
+stub configuration setters. It checks strict-device/no-CPU-confirmation setup,
+eight readiness classifications from both ready and unavailable states, and
+mismatch/success/fault sequences. It does not start the service, call the real
+replay implementation or qualify a GPU. The test and updated prover translation
+unit compiled on Windows/clang-cl; the test also passed on Linux/GCC with
+`-Wall -Wextra -Werror`. In isolated Linux mutation builds, the test fails if
+we restore the old all-accelerator-outcomes readiness latch, select AutoFallback,
+or enable CPU confirmation.
 
 ### Still required before this could be considered for integration
 
 - Full Windows and Linux links on supported toolchains, then real CUDA
-  self-qualification and startup canary on supported hardware.
+  self-qualification and startup canary on supported hardware. Repeat real-GPU
+  replay tests with the strict-device policy and CPU confirmation disabled.
+- Remaining review items: deadline-sensitive transport tests, startup
+  qualification/workspace parity with btxd, and its dimension/null-seed/null-digest
+  prechecks. These are not fixed by the two policy/readiness changes.
 - Positive and negative canonical-header vectors against the in-tree oracle,
   wrong digest/nonce/target/profile cases, malformed JSON and authentication
   tests against the actual process, GPU loss and service recovery.

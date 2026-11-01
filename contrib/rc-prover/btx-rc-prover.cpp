@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 // Include WinSock after core headers: Windows STRICT must not rewrite core enums.
+#include "replay_policy.h"
 #include "socket_io.h"
 
 const TranslateFn G_TRANSLATION_FUN{nullptr};
@@ -50,6 +51,7 @@ std::string Outcome(matmul::v4::rc::ExactReplayVerifyOutcome o)
 }
 bool Qualify()
 {
+    rc_prover::ConfigureReplayPolicy();
     const auto& consensus{Params().GetConsensus()};
     const auto resolved{matmul_v4::accel::ResolveExactGemmBackendForRC()};
     g_provider = resolved.provider;
@@ -110,7 +112,7 @@ UniValue Handle(const UniValue& request)
     if (!matmul::v4::rc::ValidateRCEpisodeParams(params)) return Error("unsupported_episode");
     const auto start{std::chrono::steady_clock::now()};
     const auto result{matmul::v4::rc::VerifyBoundedExactReplay(header, params, height, &target, 1)};
-    if (result.outcome == matmul::v4::rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure) g_ready = false;
+    g_ready = rc_prover::ReadyAfterReplay(g_ready, result);
     UniValue out(UniValue::VOBJ);
     out.pushKV("id", id);
     out.pushKV("ok", result.ok);
