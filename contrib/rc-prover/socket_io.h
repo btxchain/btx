@@ -95,7 +95,9 @@ inline bool Wait(Socket s, bool write, Deadline deadline)
     for (;;) {
         const auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now());
         if (left.count() <= 0) return false;
-        timeval tv{static_cast<long>(left.count() / 1000000), static_cast<long>(left.count() % 1000000)};
+        timeval tv{};
+        tv.tv_sec = static_cast<decltype(tv.tv_sec)>(left.count() / 1000000);
+        tv.tv_usec = static_cast<decltype(tv.tv_usec)>(left.count() % 1000000);
 #ifndef _WIN32
         if (s < 0 || s >= FD_SETSIZE) return false;
 #endif

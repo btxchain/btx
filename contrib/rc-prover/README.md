@@ -129,6 +129,15 @@ Executed for this draft on 1 November 2026, based on
   CUDA off succeeded; the actual prover translation unit compiled against this
   branch. This is an object compilation check, **not a complete link**.
 
+The Windows and Linux checks above were repeated after replacing the timeout
+initialization with casts to each `timeval` member's declared type. This fixes
+a narrowing error reported by [repch1c on macOS](https://github.com/btxchain/btx/pull/362#issuecomment-6556867035),
+where `tv_usec` is an `int`. On the original commit with the same local fix,
+repch1c reports three successful transport-test runs (all seven cases), prover
+syntax compilation, and an oversize-check mutation caught by the tests. Those
+are reviewer-reported macOS results; no macOS run was performed here, and full
+macOS linking, Metal qualification and the startup canary remain unchecked.
+
 ### Still required before this could be considered for integration
 
 - Full Windows and Linux links on supported toolchains, then real CUDA
