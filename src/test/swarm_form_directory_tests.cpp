@@ -72,7 +72,7 @@ BOOST_AUTO_TEST_CASE(symlink_swarm_is_symlink_and_is_not_written)
     fs::create_directories(model);
     fs::create_directories(target);
     {
-        std::ofstream sentinel(target / "sentinel");
+        std::ofstream sentinel(target / "sentinel", std::ios::binary);
         sentinel << "keep\n";
     }
     fs::create_symlink(target, model / "swarm");
@@ -108,7 +108,7 @@ BOOST_AUTO_TEST_CASE(existing_swarm_directory_is_left_in_place)
     const fs::path model = tree.path / "model";
     fs::create_directories(model / "swarm");
     {
-        std::ofstream keep(model / "swarm" / "keep.txt");
+        std::ofstream keep(model / "swarm" / "keep.txt", std::ios::binary);
         keep << "keep\n";
     }
 
