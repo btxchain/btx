@@ -51,7 +51,7 @@ BOOST_AUTO_TEST_CASE(observer_entry_forms_once_and_keeps_the_plane_local)
     const fs::path model = tree.path / "model";
     fs::create_directories(model);
     {
-        std::ofstream keep(model / "catalog.json");
+        std::ofstream keep(model / "catalog.json", std::ios::binary);
         keep << "{}\n";
     }
 
