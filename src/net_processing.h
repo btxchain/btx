@@ -391,6 +391,15 @@ public:
     /** True while a complete body is held for scheduler re-admission. */
     [[nodiscard]] virtual bool HasMatMulRetainedBodyForTest(const uint256& hash) const = 0;
     [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
+    struct MatMulDownloadSnapshot {
+        size_t budget_markers;
+        bool budget_marker_present;
+        bool budget_deferred;
+        bool recently_evicted;
+    };
+    /** Read-only state for the download-marker/lifecycle-eviction regression. */
+    [[nodiscard]] virtual MatMulDownloadSnapshot InspectMatMulDownloadForTest(
+        const uint256& hash) const = 0;
     /** Issue #130 regression: retain a MatMul lifecycle body directly, bypassing
      *  the ExactReplay deferral path so the guard is testable in CUDA-off builds. */
     virtual bool RetainMatMulBodyForTest(

@@ -1618,6 +1618,18 @@ public:
     {
         return HasMatMulRetainedBodyForTest(hash);
     }
+    MatMulDownloadSnapshot InspectMatMulDownloadForTest(
+        const uint256& hash) const override
+    {
+        LOCK(cs_main);
+        const auto it{m_matmul_budget_deferred.find(hash)};
+        return {m_matmul_budget_deferred.size(),
+                it != m_matmul_budget_deferred.end(),
+                it != m_matmul_budget_deferred.end() &&
+                    GetTime<std::chrono::microseconds>() < it->second.retry_after,
+                m_matmul_block_lifecycle.WasEvictedRecently(
+                    hash, MATMUL_BUDGET_DEFER_COOLDOWN)};
+    }
     bool RetainMatMulBodyForTest(
         const std::shared_ptr<const CBlock>& block,
         bool pin_progress, NodeId source_peer,
@@ -7808,6 +7820,23 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                          pindex->GetBlockHash().ToString(), pindex->nHeight);
             }
 
+            // Eviction tombstones outlive the smaller bounded budget-marker
+            // table. Historical download pacing must not depend on that table
+            // still containing the hash. A previously evicted body may become
+            // the next background root, which must remain fetchable.
+            const bool background_hole{
+                m_chainman.GetMatMulValidationMode() ==
+                    kernel::MatMulValidationMode::CONSENSUS &&
+                IsUncoveredBackgroundChainstateHole(m_chainman, pindex)};
+            const bool background_root{
+                background_hole &&
+                pindex->pprev == m_chainman.GetBackgroundSyncTip()};
+            if (background_hole && !background_root &&
+                m_matmul_block_lifecycle.WasEvictedRecently(
+                    pindex->GetBlockHash(), MATMUL_BUDGET_DEFER_COOLDOWN)) {
+                continue;
+            }
+
             // Deferred for MatMul verification budget: wait for the window to
             // refill rather than re-requesting into a discard/re-request loop.
             if (IsMatMulBudgetDeferred(pindex->GetBlockHash(),
@@ -7826,11 +7855,9 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 if (m_matmul_block_lifecycle.HasRetainedBody(deferred_hash)) {
                     continue;
                 }
-                // A body evicted moments ago under capacity pressure is not
-                // missing. Asking for it again makes the store evict another
-                // one to take it. The progress body is never evicted, so it
-                // is never held back here.
-                if (m_matmul_block_lifecycle.WasEvictedRecently(
+                // Keep existing pacing for other download roles. Background
+                // holes were checked above, with a next-root progress exception.
+                if (!background_hole && m_matmul_block_lifecycle.WasEvictedRecently(
                         deferred_hash, MATMUL_BUDGET_DEFER_COOLDOWN)) {
                     continue;
                 }
@@ -7848,7 +7875,7 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 const bool tip_chain_needed{
                     tip != nullptr &&
                     pindex->GetAncestor(tip->nHeight) == tip};
-                if (!mapBlocksInFlight.empty() && !tip_chain_needed) {
+                if (!mapBlocksInFlight.empty() && !tip_chain_needed && !background_root) {
                     return;
                 }
                 if (mapBlocksInFlight.empty()) {

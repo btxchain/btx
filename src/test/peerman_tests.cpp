@@ -16013,6 +16013,270 @@ void ReproduceSnapshotBodyBurst(TestingSetup& fx, int count, uint32_t pending_ca
 }
 } // namespace
 
+namespace {
+// Exercise production admission, retention and bounded download-stamp eviction.
+// The only new peerman hook reads state; it does not seed/erase the markers.
+void ReproduceSnapshotEvictionCooldown(TestingSetup& fx, bool pressure)
+{
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
+    constexpr int table_limit{256};
+    const int delivered{pressure ? table_limit + 24 : 24};
+    BackgroundHoleScenario s{fx, delivered + 16};
+    s.consensus.nMatMulRCMaxPendingVerifications = 1;
+    struct Gate {
+        std::atomic<bool> started{false};
+        std::atomic<bool> release{false};
+        std::atomic<bool> expired{false};
+    };
+    const auto gate{std::make_shared<Gate>()};
+    struct ReleaseOnExit {
+        std::shared_ptr<Gate> gate;
+        ~ReleaseOnExit() { gate->release.store(true); }
+    } release_on_exit{gate};
+    s.peerman.InstallMatMulVerifyOverrideForTest(
+        [gate](const CBlock&, int32_t, std::optional<int64_t>) {
+            gate->started.store(true);
+            const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{45}};
+            while (!gate->release.load()) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    gate->expired.store(true);
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            return true;
+        });
+    s.Deliver(0, /*request=*/true);
+    BOOST_REQUIRE(PeermanWaitFor([&] { return gate->started.load(); },
+                                 std::chrono::milliseconds{3000}));
+    for (int i = 1; i < delivered; ++i) {
+        BOOST_REQUIRE(!s.archive->fDisconnect);
+        s.Deliver(i, /*request=*/true);
+    }
+    BOOST_REQUIRE(!gate->expired.load());
+    std::set<uint256> lost_marker, marked_evictions, retained;
+    for (int i = 1; i < delivered; ++i) {
+        const uint256 hash{s.blocks.at(i).GetHash()};
+        const auto snap{s.peerman.InspectMatMulDownloadForTest(hash)};
+        if (pressure) BOOST_REQUIRE_EQUAL(snap.budget_markers, table_limit);
+        else BOOST_REQUIRE_LT(snap.budget_markers, table_limit);
+        if (s.peerman.HasMatMulRetainedBodyForTest(hash)) retained.insert(hash);
+        if (snap.budget_marker_present) BOOST_REQUIRE(snap.budget_deferred);
+        if (snap.recently_evicted && !snap.budget_marker_present) lost_marker.insert(hash);
+        if (snap.recently_evicted && snap.budget_deferred) marked_evictions.insert(hash);
+    }
+    BOOST_REQUIRE(!marked_evictions.empty());
+    if (pressure) BOOST_REQUIRE(!lost_marker.empty());
+    else BOOST_REQUIRE(lost_marker.empty());
+    BOOST_REQUIRE_EQUAL(s.BackgroundHeight(), 0);
+    BOOST_TEST_MESSAGE("delivered=" << delivered << " retained=" << retained.size()
+                       << " recent_evicted_marker_present=" << marked_evictions.size()
+                       << " recent_evicted_marker_absent=" << lost_marker.size());
+    std::vector<CBlock> headers;
+    for (const CBlock& b : s.blocks) headers.emplace_back(b.GetBlockHeader());
+    BOOST_REQUIRE(s.connman.ReceiveMsgFrom(
+        *s.archive, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+    (void)s.connman.ProcessMessagesOnce(*s.archive);
+    s.connman.FlushSendBuffer(*s.archive);
+    s.archive->fPauseSend = false;
+    BOOST_REQUIRE(s.peerman.SendMessages(s.archive.get()));
+    auto requested{QueuedGetDataHashes(*s.archive)};
+    {
+        LOCK(s.archive->cs_vSend);
+        const auto& [frame, more, type]{s.archive->m_transport->GetBytesToSend(false)};
+        if (type == NetMsgType::GETDATA && !frame.empty()) {
+            if (frame.size() == CMessageHeader::HEADER_SIZE) {
+                s.archive->m_transport->MarkBytesSent(frame.size());
+            }
+            const auto& [payload, payload_more, payload_type]{s.archive->m_transport->GetBytesToSend(false)};
+            if (payload_type == NetMsgType::GETDATA && !payload.empty()) {
+                DataStream stream{payload};
+                std::vector<CInv> inv;
+                stream >> inv;
+                for (const CInv& i : inv) requested.push_back(i.hash);
+            }
+        }
+    }
+    size_t premature{0}, marked_requested{0}, fresh_requested{0};
+    for (const uint256& hash : requested) {
+        if (lost_marker.contains(hash)) ++premature;
+        if (marked_evictions.contains(hash)) ++marked_requested;
+        for (size_t i = delivered; i < s.blocks.size(); ++i) {
+            if (hash == s.blocks.at(i).GetHash()) ++fresh_requested;
+        }
+    }
+    BOOST_TEST_MESSAGE("getdata=" << requested.size() << " lost_marker_requested=" << premature
+                       << " marked_evicted_requested=" << marked_requested
+                       << " fresh_uncached_requested=" << fresh_requested);
+    BOOST_CHECK_EQUAL(marked_requested, 0U);
+    BOOST_CHECK_MESSAGE(premature == 0,
+                        "fresh lifecycle eviction tombstone must suppress GETDATA even after budget marker eviction");
+    if (!pressure) BOOST_CHECK_GT(fresh_requested, 0U);
+    BOOST_CHECK(!s.archive->fDisconnect);
+    gate->release.store(true);
+    {
+        REVERSE_LOCK(msgproc_lock);
+        BOOST_REQUIRE(PeermanWaitFor([&] { return s.BackgroundHeight() >= 1; },
+                                     std::chrono::milliseconds{5000}));
+        BOOST_REQUIRE(PeermanWaitFor([&] {
+            return s.peerman.MatMulSourceVerifySnapshotForTest(
+                       s.archive->addr, s.archive->nKeyedNetGroup).rc_pending == 0;
+        }, std::chrono::milliseconds{5000}));
+    }
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(!gate->expired.load());
+    BOOST_CHECK(!s.archive->fDisconnect);
+    BOOST_CHECK_GE(s.BackgroundHeight(), 1);
+    BOOST_TEST_MESSAGE("released worker: background=" << s.BackgroundHeight());
+    s.peerman.InstallMatMulVerifyOverrideForTest({});
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(snapshot_eviction_cooldown_survives_budget_marker_pressure)
+{
+    ReproduceSnapshotEvictionCooldown(*this, /*pressure=*/true);
+}
+
+BOOST_AUTO_TEST_CASE(snapshot_eviction_present_marker_allows_fresh_download_and_progress)
+{
+    ReproduceSnapshotEvictionCooldown(*this, /*pressure=*/false);
+}
+
+// A far-ahead retained body can be evicted before becoming the next background
+// root. Its still-fresh tombstone must not turn the churn guard into a stall.
+BOOST_AUTO_TEST_CASE(snapshot_evicted_body_becomes_background_root)
+{
+    WAIT_LOCK(NetEventsInterface::g_msgproc_mutex, msgproc_lock);
+    BackgroundHoleScenario s{*this, /*n_blocks=*/40};
+    s.consensus.nMatMulRCMaxPendingVerifications = 1;
+    const auto release{std::make_shared<std::atomic<bool>>(false)};
+    const auto started{std::make_shared<std::atomic<bool>>(false)};
+    const auto expired{std::make_shared<std::atomic<bool>>(false)};
+    struct ReleaseOnExit {
+        std::shared_ptr<std::atomic<bool>> release;
+        ~ReleaseOnExit() { release->store(true); }
+    } release_on_exit{release};
+    s.peerman.InstallMatMulVerifyOverrideForTest(
+        [release, started, expired](const CBlock&, int32_t, std::optional<int64_t>) {
+            started->store(true);
+            const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{45}};
+            while (!release->load()) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    expired->store(true);
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            return true;
+        });
+    s.Deliver(0, /*request=*/true);
+    BOOST_REQUIRE(PeermanWaitFor([&] { return started->load(); },
+                                 std::chrono::milliseconds{3000}));
+    for (size_t i = 1; i < 24; ++i) s.Deliver(i, /*request=*/true);
+    const uint256 evicted{s.blocks.at(15).GetHash()}; // height 16
+    const auto initial{s.peerman.InspectMatMulDownloadForTest(evicted)};
+    BOOST_REQUIRE(initial.recently_evicted);
+    BOOST_REQUIRE(initial.budget_marker_present);
+    BOOST_REQUIRE(initial.budget_deferred);
+    BOOST_REQUIRE(!s.peerman.HasMatMulRetainedBodyForTest(evicted));
+    BOOST_REQUIRE_EQUAL(s.BackgroundHeight(), 0);
+    release->store(true);
+    {
+        REVERSE_LOCK(msgproc_lock);
+        BOOST_REQUIRE(PeermanWaitFor([&] { return s.BackgroundHeight() == 1; },
+                                     std::chrono::milliseconds{5000}));
+        for (int height = 2; height <= 15; ++height) {
+            BOOST_REQUIRE(PeermanWaitFor([&] {
+                return s.peerman.MatMulSourceVerifySnapshotForTest(
+                           s.archive->addr, s.archive->nKeyedNetGroup).rc_pending == 0;
+            }, std::chrono::milliseconds{5000}));
+            SetMockTime(GetTime<std::chrono::seconds>() + std::chrono::seconds{1});
+            s.peerman.RetryMatMulDeferredBodiesForTest();
+            BOOST_REQUIRE(PeermanWaitFor([&] { return s.BackgroundHeight() >= height; },
+                                         std::chrono::milliseconds{5000}));
+        }
+    }
+    BOOST_REQUIRE_EQUAL(s.BackgroundHeight(), 15);
+    const auto ready{s.peerman.InspectMatMulDownloadForTest(evicted)};
+    BOOST_REQUIRE(ready.recently_evicted);
+    BOOST_REQUIRE(ready.budget_deferred); // no artificial 60-second expiry
+    BOOST_TEST_MESSAGE("evicted height16 is now next root; fresh tombstone and active marker remain");
+    std::vector<CBlock> headers;
+    for (const CBlock& b : s.blocks) headers.emplace_back(b.GetBlockHeader());
+    BOOST_REQUIRE(s.connman.ReceiveMsgFrom(
+        *s.archive, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+    (void)s.connman.ProcessMessagesOnce(*s.archive);
+    s.connman.FlushSendBuffer(*s.archive);
+    s.archive->fPauseSend = false;
+    std::set<uint256> requested;
+    const auto collect_requests = [&] {
+        for (const uint256& hash : QueuedGetDataHashes(*s.archive)) requested.insert(hash);
+        LOCK(s.archive->cs_vSend);
+        const auto& [frame, more, type]{s.archive->m_transport->GetBytesToSend(false)};
+        if (type != NetMsgType::GETDATA || frame.empty()) return;
+        if (frame.size() == CMessageHeader::HEADER_SIZE) {
+            s.archive->m_transport->MarkBytesSent(frame.size());
+        }
+        const auto& [payload, payload_more, payload_type]{s.archive->m_transport->GetBytesToSend(false)};
+        if (payload_type != NetMsgType::GETDATA || payload.empty()) return;
+        DataStream stream{payload};
+        std::vector<CInv> inv;
+        stream >> inv;
+        for (const CInv& i : inv) requested.insert(i.hash);
+    };
+    BOOST_REQUIRE(s.peerman.SendMessages(s.archive.get()));
+    collect_requests();
+    BOOST_REQUIRE_MESSAGE(requested.contains(evicted),
+                          "next background root height16 must be requested despite its fresh eviction tombstone");
+    // Serve the actual requests, including the far-ahead ones. Leaving those
+    // unanswered would fill the background download quota and test an idle
+    // source, rather than whether this cooldown permits forward progress.
+    for (int tick = 0; tick < 40 && s.BackgroundHeight() < 40; ++tick) {
+        for (size_t i = 0; i < s.blocks.size(); ++i) {
+            if (!requested.erase(s.blocks.at(i).GetHash())) continue;
+            s.Deliver(i, /*request=*/false);
+            {
+                REVERSE_LOCK(msgproc_lock);
+                BOOST_REQUIRE(PeermanWaitFor([&] {
+                    return s.peerman.MatMulSourceVerifySnapshotForTest(
+                               s.archive->addr, s.archive->nKeyedNetGroup).rc_pending == 0;
+                }, std::chrono::milliseconds{5000}));
+            }
+        }
+        SetMockTime(GetTime<std::chrono::seconds>() + std::chrono::seconds{1});
+        {
+            REVERSE_LOCK(msgproc_lock);
+            s.peerman.RetryMatMulDeferredBodiesForTest();
+            BOOST_REQUIRE(PeermanWaitFor([&] {
+                return s.peerman.MatMulSourceVerifySnapshotForTest(
+                           s.archive->addr, s.archive->nKeyedNetGroup).rc_pending == 0;
+            }, std::chrono::milliseconds{5000}));
+        }
+        if (s.BackgroundHeight() == 40) break;
+        s.connman.FlushSendBuffer(*s.archive);
+        s.archive->fPauseSend = false;
+        BOOST_REQUIRE(s.peerman.SendMessages(s.archive.get()));
+        collect_requests();
+    }
+    s.fx.m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(!expired->load());
+    BOOST_CHECK(!s.archive->fDisconnect);
+    BOOST_CHECK_EQUAL(s.BackgroundHeight(), 40);
+    BOOST_CHECK(s.chainman.IsSnapshotValidated());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(s.chainman.ActiveTip() == s.base);
+        for (size_t i = 0; i < s.blocks.size(); ++i) {
+            const CBlockIndex* index{s.Index(i)};
+            BOOST_CHECK((index->nStatus & BLOCK_HAVE_DATA) != 0);
+            BOOST_CHECK((index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0);
+            BOOST_CHECK((index->nStatus & BLOCK_FAILED_MASK) == 0);
+        }
+    }
+    BOOST_TEST_MESSAGE("background caught up to40; snapshot validated; all40 local replay flags; source connected");
+    s.peerman.InstallMatMulVerifyOverrideForTest({});
+}
+
 BOOST_AUTO_TEST_CASE(snapshot_body_burst_16_keeps_source)
 {
     ReproduceSnapshotBodyBurst(*this, 16, std::numeric_limits<uint32_t>::max());
