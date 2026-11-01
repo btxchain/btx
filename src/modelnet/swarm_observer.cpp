@@ -13,6 +13,7 @@
 #include <crypto/sha384.h>
 #include <logging.h>
 #include <univalue.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
@@ -48,9 +49,7 @@ bool IsSwarmId(std::string_view s)
 bool RejectSymlink(const fs::path& path, std::string& err)
 {
     std::error_code ec;
-    const fs::file_status st = fs::symlink_status(path, ec);
-    if (ec) return true;
-    if (fs::is_symlink(st)) {
+    if (IsSymlink(path, ec)) {
         err = "CATALOG_SYMLINK";
         return false;
     }

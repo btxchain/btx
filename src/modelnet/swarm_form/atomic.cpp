@@ -57,8 +57,7 @@ bool SwarmReadRegularFile(const fs::path& path, std::string& raw)
 bool SwarmFormRead(const fs::path& path, std::string& raw, std::string& err)
 {
     std::error_code ec;
-    const fs::file_status status = fs::symlink_status(path, ec);
-    if (!ec && fs::is_symlink(status)) {
+    if (IsSymlink(path, ec)) {
         err = "SYMLINK";
         return false;
     }
@@ -77,15 +76,12 @@ bool SwarmFormRead(const fs::path& path, std::string& raw, std::string& err)
 bool SwarmFormWrite(const fs::path& path, const std::string& body, std::string& err)
 {
     std::error_code ec;
-    const fs::file_status status = fs::symlink_status(path, ec);
-    if (!ec && fs::is_symlink(status)) {
+    if (IsSymlink(path, ec)) {
         err = "SYMLINK";
         return false;
     }
     const fs::path tmp = fs::u8path(path.utf8string() + ".tmp");
-    ec.clear();
-    const fs::file_status tmp_status = fs::symlink_status(tmp, ec);
-    if (!ec && fs::is_symlink(tmp_status)) {
+    if (IsSymlink(tmp, ec)) {
         err = "SYMLINK";
         return false;
     }

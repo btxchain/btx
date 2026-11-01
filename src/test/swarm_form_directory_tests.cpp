@@ -5,6 +5,7 @@
 #include <modelnet/swarm_form/directory.h>
 #include <modelnet/swarm_form/plane.h>
 #include <test/util/setup_common.h>
+#include <test/util/symlink.h>
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
@@ -75,12 +76,12 @@ BOOST_AUTO_TEST_CASE(symlink_swarm_is_symlink_and_is_not_written)
         std::ofstream sentinel(target / "sentinel");
         sentinel << "keep\n";
     }
-    fs::create_symlink(target, model / "swarm");
+    if (!CreateTestSymlink(target, model / "swarm", /*directory=*/true)) return;
 
     std::string err = "stale";
     BOOST_CHECK(!modelnet::SwarmFormPlane(model, err));
     BOOST_CHECK_EQUAL(err, "SYMLINK");
-    BOOST_CHECK(fs::is_symlink(fs::symlink_status(model / "swarm")));
+    BOOST_CHECK(IsTestSymlink(model / "swarm"));
     BOOST_CHECK(fs::exists(target / "sentinel"));
     BOOST_CHECK_EQUAL(ReadFile(target / "sentinel"), "keep\n");
     BOOST_CHECK(!fs::exists(target / "formation-membership.json"));
