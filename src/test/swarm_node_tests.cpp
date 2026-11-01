@@ -27,18 +27,55 @@ std::string Id(char c)
     return std::string(96, c);
 }
 
-fs::path Scratch()
+#ifndef WIN32
+//! Open descriptors of this process. /dev/fd lists them on Linux and macOS.
+size_t OpenDescriptors()
 {
-    const fs::path path = fs::temp_directory_path() / ("btx-swarm-node-" + std::to_string(::getpid()));
-    fs::remove_all(path);
-    fs::create_directories(path);
-    return path;
+    size_t count = 0;
+    for (fs::directory_iterator it{fs::path{"/dev/fd"}}; it != fs::directory_iterator{}; ++it) ++count;
+    return count;
 }
+#endif
+
+//! The model directory of one case. Remove() fails the case if a file opened
+//! during the case is still open. Windows refuses to delete an open file, so
+//! remove_all throws there. POSIX deletes it anyway, so first compare the open
+//! descriptors with the count taken when the directory was made.
+struct ScratchDir {
+    const fs::path dir{fs::temp_directory_path() / ("btx-swarm-node-" + std::to_string(::getpid()))};
+#ifndef WIN32
+    size_t descriptors{0};
+#endif
+
+    ScratchDir()
+    {
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+#ifndef WIN32
+        descriptors = OpenDescriptors();
+#endif
+    }
+
+    void Remove() const
+    {
+#ifndef WIN32
+        BOOST_CHECK_EQUAL(OpenDescriptors(), descriptors);
+#endif
+        fs::remove_all(dir);
+    }
+};
 
 void Write(const fs::path& path, const std::string& body)
 {
     std::ofstream file(path, std::ios::trunc);
     file << body;
+}
+
+//! The stream is closed before this returns, so no reader outlives its read.
+std::string Read(const fs::path& path)
+{
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
 }
 
 std::vector<unsigned char> Key(unsigned char fill)
@@ -61,11 +98,11 @@ BOOST_AUTO_TEST_CASE(default_offer_needs_no_flag_and_no_gpu)
     BOOST_CHECK_EQUAL(offer.vram_bytes, 0);
     BOOST_CHECK_EQUAL(offer.automatic_spend_atoms, "0");
 
-    const fs::path dir = Scratch();
+    const ScratchDir scratch;
+    const fs::path& dir{scratch.dir};
     std::string err;
     BOOST_REQUIRE(modelnet::SwarmRefreshLocalMesh(dir, err));
-    std::ifstream in(dir / "swarm" / "mesh-state.json");
-    std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string raw{Read(dir / "swarm" / "mesh-state.json")};
     UniValue root;
     BOOST_REQUIRE(root.read(raw));
     BOOST_CHECK(root["observer"].get_bool());
@@ -75,12 +112,13 @@ BOOST_AUTO_TEST_CASE(default_offer_needs_no_flag_and_no_gpu)
     BOOST_CHECK(!root["drained"].get_bool());
     BOOST_CHECK(root["hardware_threads"].getInt<int>() >= 1);
     BOOST_CHECK_EQUAL(root["automatic_spend_atoms"].get_str(), "0");
-    fs::remove_all(dir);
+    scratch.Remove();
 }
 
 BOOST_AUTO_TEST_CASE(catalog_join_splits_full_precision_from_four_bit)
 {
-    const fs::path dir = Scratch();
+    const ScratchDir scratch;
+    const fs::path& dir{scratch.dir};
     Write(dir / "catalog.json",
           std::string("{\"models\":[") +
               "{\"model_id\":\"" + Id('1') + "\",\"artifact_id\":\"" + Id('a') +
@@ -96,8 +134,7 @@ BOOST_AUTO_TEST_CASE(catalog_join_splits_full_precision_from_four_bit)
           "\"" + Id('b') + "\":{\"lineage_id\":\"" + Id('c') + "\",\"visibility\":\"public\"}}");
     std::string err;
     BOOST_REQUIRE(modelnet::SwarmIntegrateCatalog(dir, err));
-    std::ifstream in(dir / "swarm" / "contribution.json");
-    std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string raw{Read(dir / "swarm" / "contribution.json")};
     UniValue root;
     BOOST_REQUIRE(root.read(raw));
     BOOST_CHECK(!root["startup_flag"].get_bool());
@@ -127,7 +164,7 @@ BOOST_AUTO_TEST_CASE(catalog_join_splits_full_precision_from_four_bit)
     BOOST_CHECK(mismatched.family);
     BOOST_CHECK(!mismatched.cohort);
     BOOST_CHECK(!mismatched.kv_share);
-    fs::remove_all(dir);
+    scratch.Remove();
 }
 
 BOOST_AUTO_TEST_CASE(presence_verifies_and_rejects_replay)
@@ -153,11 +190,12 @@ BOOST_AUTO_TEST_CASE(presence_verifies_and_rejects_replay)
     BOOST_CHECK_EQUAL(err, "CHECKPOINT_CLAIM_IS_NOT_TRUST");
     presence.claims_checkpoint_only = false;
 
-    const fs::path dir = Scratch();
+    const ScratchDir scratch;
+    const fs::path& dir{scratch.dir};
     BOOST_REQUIRE(modelnet::SwarmNotePresence(dir, presence, 1'000, err));
     BOOST_CHECK(!modelnet::SwarmNotePresence(dir, presence, 1'000, err));
     BOOST_CHECK_EQUAL(err, "PRESENCE_REPLAY");
-    fs::remove_all(dir);
+    scratch.Remove();
 }
 
 BOOST_AUTO_TEST_CASE(funding_refund_and_worker_redeem_stay_unbroadcast)
@@ -250,7 +288,8 @@ BOOST_AUTO_TEST_CASE(route_rank_lease_license_and_holdout)
 
 BOOST_AUTO_TEST_CASE(records_a_second_process_can_read)
 {
-    const fs::path dir = Scratch();
+    const ScratchDir scratch;
+    const fs::path& dir{scratch.dir};
     std::string err;
     modelnet::SwarmSepPolicy policy;
     policy.expiry_height = 100;
@@ -270,8 +309,7 @@ BOOST_AUTO_TEST_CASE(records_a_second_process_can_read)
     BOOST_CHECK(!modelnet::SwarmValidateSepPolicy(policy, err));
 
     BOOST_REQUIRE(modelnet::SwarmStoreSpecialistSignal(dir, "distillation", "signal", err));
-    std::ifstream signals(dir / "swarm" / "specialist-signals.json");
-    std::string raw((std::istreambuf_iterator<char>(signals)), std::istreambuf_iterator<char>());
+    const std::string raw{Read(dir / "swarm" / "specialist-signals.json")};
     UniValue root;
     BOOST_REQUIRE(root.read(raw));
     BOOST_CHECK_EQUAL(root["general_stable"].get_str(), "unchanged");
@@ -304,7 +342,7 @@ BOOST_AUTO_TEST_CASE(records_a_second_process_can_read)
     BOOST_CHECK(!realm);
     BOOST_CHECK(!replay);
     BOOST_CHECK_EQUAL(modelnet::SwarmMassExit(1000000, 8000, 24000000), 334);
-    fs::remove_all(dir);
+    scratch.Remove();
 }
 
 std::string Identity(const std::string& mask)
@@ -324,12 +362,12 @@ const UniValue* FindModel(const UniValue& models, const std::string& artifact)
 
 BOOST_AUTO_TEST_CASE(governor_snapshot_authorizes_seed_and_cpu)
 {
-    const fs::path root = Scratch();
+    const ScratchDir scratch;
+    const fs::path& root{scratch.dir};
     std::string err;
     const auto offer_of = [&](const fs::path& dir) {
         BOOST_REQUIRE(modelnet::SwarmIntegrateCatalog(dir, err));
-        std::ifstream in(dir / "swarm" / "contribution.json");
-        std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::string raw{Read(dir / "swarm" / "contribution.json")};
         UniValue parsed;
         BOOST_REQUIRE(parsed.read(raw));
         return parsed;
@@ -351,8 +389,7 @@ BOOST_AUTO_TEST_CASE(governor_snapshot_authorizes_seed_and_cpu)
     BOOST_CHECK_EQUAL(denied["automatic_spend_atoms"].get_str(), "0");
     BOOST_CHECK(!denied["models"][0]["seed"].get_bool());
     BOOST_REQUIRE(modelnet::SwarmRefreshLocalMesh(root / "off", err));
-    std::ifstream mesh_in(root / "off" / "swarm" / "mesh-state.json");
-    std::string mesh_raw((std::istreambuf_iterator<char>(mesh_in)), std::istreambuf_iterator<char>());
+    const std::string mesh_raw{Read(root / "off" / "swarm" / "mesh-state.json")};
     UniValue mesh;
     BOOST_REQUIRE(mesh.read(mesh_raw));
     BOOST_CHECK(mesh["observer"].get_bool());
@@ -391,12 +428,13 @@ BOOST_AUTO_TEST_CASE(governor_snapshot_authorizes_seed_and_cpu)
     BOOST_CHECK(pub->operator[]("seed").get_bool());
     BOOST_CHECK(!priv->operator[]("seed").get_bool());
     BOOST_CHECK(priv->operator[]("private_acquire").get_bool());
-    fs::remove_all(root);
+    scratch.Remove();
 }
 
 BOOST_AUTO_TEST_CASE(distinct_checkpoints_share_a_family_and_not_a_cohort)
 {
-    const fs::path dir = Scratch();
+    const ScratchDir scratch;
+    const fs::path& dir{scratch.dir};
     const std::string lineage = Id('c');
     Write(dir / "catalog.json",
           std::string("{\"models\":[") +
@@ -425,8 +463,7 @@ BOOST_AUTO_TEST_CASE(distinct_checkpoints_share_a_family_and_not_a_cohort)
               "\"" + Id('f') + "\":{\"lineage_id\":\"" + lineage + "\",\"visibility\":\"public\"}}");
     std::string err;
     BOOST_REQUIRE(modelnet::SwarmIntegrateCatalog(dir, err));
-    std::ifstream in(dir / "swarm" / "contribution.json");
-    std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string raw{Read(dir / "swarm" / "contribution.json")};
     UniValue root;
     BOOST_REQUIRE(root.read(raw));
     const UniValue& models = root["models"];
@@ -453,8 +490,7 @@ BOOST_AUTO_TEST_CASE(distinct_checkpoints_share_a_family_and_not_a_cohort)
     BOOST_CHECK(ckpt_a->operator[]("seed").get_bool());
 
     BOOST_REQUIRE(modelnet::SwarmPublishLive(dir, err));
-    std::ifstream networks_in(dir / "swarm" / "networks.json");
-    std::string networks_raw((std::istreambuf_iterator<char>(networks_in)), std::istreambuf_iterator<char>());
+    const std::string networks_raw{Read(dir / "swarm" / "networks.json")};
     UniValue networks;
     BOOST_REQUIRE(networks.read(networks_raw));
     BOOST_CHECK_EQUAL(networks["family"]["lineage_id"].get_str(), lineage);
@@ -487,7 +523,7 @@ BOOST_AUTO_TEST_CASE(distinct_checkpoints_share_a_family_and_not_a_cohort)
     BOOST_CHECK(paired);
     BOOST_REQUIRE_EQUAL(networks["families"].size(), 1U);
     BOOST_CHECK_EQUAL(networks["families"][0]["members"][0]["checkpoint_id"].get_str().empty(), false);
-    fs::remove_all(dir);
+    scratch.Remove();
 }
 
 BOOST_AUTO_TEST_SUITE_END()
