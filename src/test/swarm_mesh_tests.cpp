@@ -435,7 +435,7 @@ BOOST_AUTO_TEST_CASE(mesh_state_compare_keeps_its_meaning)
     fs::remove_all(dir, ec);
     fs::create_directories(dir / "swarm");
     std::string err;
-    BOOST_REQUIRE(modelnet::SwarmRefreshLocalMesh(dir, err));
+    BOOST_REQUIRE_MESSAGE(modelnet::SwarmRefreshLocalMesh(dir, err), err);
     const fs::path mesh = dir / "swarm" / "mesh-state.json";
     std::ifstream in(mesh);
     const std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -449,14 +449,20 @@ BOOST_AUTO_TEST_CASE(mesh_state_compare_keeps_its_meaning)
     for (size_t i = keys.size(); i-- > 0;) reordered += "\"" + keys[i] + "\":" + root.getValues()[i].write() + ",";
     reordered += "\"" + keys[0] + "\":\"later\"}";
     WriteFile(mesh, reordered);
-    BOOST_REQUIRE(modelnet::SwarmRefreshLocalMesh(dir, err));
-    std::ifstream again(mesh);
-    BOOST_CHECK_EQUAL(std::string((std::istreambuf_iterator<char>(again)), std::istreambuf_iterator<char>()), reordered);
+    BOOST_REQUIRE_MESSAGE(modelnet::SwarmRefreshLocalMesh(dir, err), err);
+    // Each reader is closed before the next refresh: Windows does not replace a
+    // file while another handle holds it open.
+    {
+        std::ifstream again(mesh);
+        BOOST_CHECK_EQUAL(std::string((std::istreambuf_iterator<char>(again)), std::istreambuf_iterator<char>()), reordered);
+    }
     // A different value is a different document.
     WriteFile(mesh, "{\"automatic_spend_atoms\":\"1\"}");
-    BOOST_REQUIRE(modelnet::SwarmRefreshLocalMesh(dir, err));
-    std::ifstream fresh(mesh);
-    BOOST_CHECK_EQUAL(std::string((std::istreambuf_iterator<char>(fresh)), std::istreambuf_iterator<char>()), body);
+    BOOST_REQUIRE_MESSAGE(modelnet::SwarmRefreshLocalMesh(dir, err), err);
+    {
+        std::ifstream fresh(mesh);
+        BOOST_CHECK_EQUAL(std::string((std::istreambuf_iterator<char>(fresh)), std::istreambuf_iterator<char>()), body);
+    }
     fs::remove_all(dir, ec);
 }
 
