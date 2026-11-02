@@ -497,11 +497,40 @@ int main(int argc,char** argv) {
     h.Test("scheduler-valid-work-and-two-per-tick",[&]{
         Fixture f(probe,false,false);const auto package=InstallPlan(f);std::vector<std::string> ids;
         for(unsigned i=0;i<7;++i)ids.push_back(QueueChallenge(f,package));
-        Service service(f.root);WaitMaintenance(f);
-        WaitFor([&]{return f.db.Query("SELECT challenge FROM evaluation_runs").size()>=2;},"first tick did not schedule valid work",1000);
-        Check(f.db.Query("SELECT challenge FROM evaluation_runs").size()==2,"more than two evaluations in the first maintenance tick");
+        std::sort(ids.begin(),ids.end());
+        Check(std::adjacent_find(ids.begin(),ids.end())==ids.end(),"fixture challenge IDs not unique");
+        Check(f.db.Query("SELECT challenge FROM evaluation_runs").empty(),"fixture has earlier evaluations");
+        const auto cursor_key="evaluation_cursor:"+KeyId(f.alice.public_key);
+        Check(f.db.Meta("maintenance_at").empty(),"fixture already has a maintenance pass");
+        Check(f.db.Meta(cursor_key).empty(),"fixture already has an evaluation cursor");
+        const auto started=std::chrono::steady_clock::now();
+        Service service(f.root);
+        Rows first_pass;
+        auto observed_at=started;
+        auto value=[&](const std::string& key){for(const auto& row:first_pass)if(row[0]==key)return row[1];return std::string{};};
+        for(;;){
+            // A single SQLite statement observes one metadata snapshot. The
+            // pre-constructor deadline excludes even an in-progress second pass.
+            first_pass=f.db.Query("SELECT k,v FROM meta WHERE k IN (?,?,?)",
+                {"maintenance_at","maintenance_error",cursor_key});
+            observed_at=std::chrono::steady_clock::now();
+            Check(value("maintenance_error").empty(),"maintenance failed before cap observation");
+            Check(observed_at-started<std::chrono::milliseconds(1500),
+                "FIXTURE_FIRST_PASS_OBSERVATION_MISSED");
+            if(!value("maintenance_at").empty())break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const auto observed_cursor=value(cursor_key);
+        // Every first-pass proposal is eligible and unique, with queue8 > jobs7.
+        // Each visited ID therefore successfully submits: cap2 leaves ID2;
+        // cap99 visits all7 and the existing tail-wrap code clears the cursor.
+        const bool cap_ok=observed_cursor==ids[1];
+        std::cout<<"CAP_OBSERVATION marker="<<value("maintenance_at")<<" cursor="<<observed_cursor
+                 <<" expected_second="<<ids[1]<<" elapsed_us="
+                 <<std::chrono::duration_cast<std::chrono::microseconds>(observed_at-started).count()<<'\n';
         WaitFor([&]{return f.db.Query("SELECT challenge FROM evaluation_runs").size()==ids.size();},"valid backlog stalled",10000);
         for(const auto& id:ids)CheckScheduledEndpoint(f,id);
+        Check(cap_ok,"first completed maintenance pass exceeded two accepted evaluation submissions");
     });
     h.Test("scheduler-missing-plan-prefix-restart-and-wrap",[&]{
         Fixture f(probe,false,false);const auto package=InstallPlan(f);
