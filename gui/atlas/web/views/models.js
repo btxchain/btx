@@ -4,17 +4,23 @@ import {presentObservation} from '../core/observe.js';
 import {operationDialog,operationWorkbench} from './operations.js';
 import {modelPanels} from './model-panels.js';
 import {modelNodeStatus,modelRecordRows} from '../core/model-status.js';
+export function refreshDownloadsOnObservation(selected,change){
+ return selected==='Downloads'&&!!change&&typeof change==='object'&&Object.prototype.hasOwnProperty.call(change,'sources');
+}
 export function modelsView(app){
  const root=el('div',{class:'page'},heading('Models','Acquire, preserve, inspect and run verified local models. Downloads are not execution grants.'));
- const query=el('input',{type:'search',placeholder:'Search locally known models…','aria-label':'Model search'}),scope=el('select',{},el('option',{value:'LOCAL'},'Local catalogue'),el('option',{value:'NETWORK'},'Network search — explicit disclosure')),results=el('div'),tabs=el('nav',{class:'tabs'});let selected='Catalogue';
+ const query=el('input',{type:'search',placeholder:'Search locally known models…','aria-label':'Model search'}),scope=el('select',{},el('option',{value:'LOCAL'},'Local catalogue'),el('option',{value:'NETWORK'},'Network search — explicit disclosure')),results=el('div'),tabs=el('nav',{class:'tabs'});let selected='Catalogue',transferPaint=0;
  const names=['Catalogue','Downloads','Shared','Collections','Preservation','Peers','Identity','Capabilities'];
+ function transferView(envelope){
+  return [table(sourceRows(envelope),['name','state','percent','bytes_per_sec','eta_s','job_id'],{onSelect:row=>dialog('Transfer',el('div',{},jsonView(row,{open:true}),button('Inspect native job',()=>operationDialog(app,'getmodeljob',[row.job_id])),button('Cancel job — native review',()=>operationDialog(app,'cancelmodeljob',[row.job_id]))))}),note('Cancelling a UI wait is not cancellation of a native transfer. Use the explicit job operation.')];
+ }
  const renderRows=data=>{const rows=sourceRows(data);results.replaceChildren(note('Search coverage is partial. Availability advertisements do not prove byte verification or runtime permission.'),table(rows,[{key:'name',label:'Model'},{key:'format',label:'Format'},{key:'size_bytes',label:'Size',render:v=>humanBytes(v)},{key:'bytes_verified',label:'Verified bytes'},{key:'incomplete',label:'Incomplete'},'model_id'],{onSelect:m=>modelDetails(app,m)}));};
  const search=button('Search',async()=>{search.disabled=true;try{const p=[{text:query.value,scope:scope.value,limit:100}];if(scope.value==='NETWORK'){const prepared=await app.bridge.prepare('searchmodels',p);renderRows((await app.bridge.execute(prepared.id)).result);}else renderRows((await app.bridge.read('searchmodels',p)).result);}catch(e){results.replaceChildren(note(e.message,'danger'));}finally{search.disabled=false;}},'primary');
  const bar=el('div',{class:'row'},query,scope,search,button('Import / host',()=>operationDialog(app,'hostmodel')),button('Open model link',()=>app.openResource()));
  async function show(){[...tabs.children].forEach(b=>b.classList.toggle('active',b.dataset.tab===selected));bar.hidden=selected!=='Catalogue';results.replaceChildren();try{
   switch(selected){
    case 'Catalogue':renderRows(app.state.state.sources.listmodels||await app.bridge.read('listmodels'));break;
-   case 'Downloads':{const r=await app.bridge.read('getmodeltransfers');results.append(table(sourceRows(r),['name','state','percent','bytes_per_sec','eta_s','job_id'],{onSelect:r=>dialog('Transfer',el('div',{},jsonView(r,{open:true}),button('Inspect native job',()=>operationDialog(app,'getmodeljob',[r.job_id])),button('Cancel job — native review',()=>operationDialog(app,'cancelmodeljob',[r.job_id]))))}),note('Cancelling a UI wait is not cancellation of a native transfer. Use the explicit job operation.'));break;}
+   case 'Downloads':{const ticket=++transferPaint;const r=await app.bridge.read('getmodeltransfers');if(nodeAlive&&ticket===transferPaint&&selected==='Downloads')results.replaceChildren(...transferView(r));break;}
    case 'Shared':{const rows=sourceRows(app.state.state.sources.listmodels).filter(m=>m.seeded===true||m.pinned===true||m.state==='SEEDING');results.append(table(rows,['name','model_id','state','ratio','served_bytes'],{onSelect:m=>modelDetails(app,m)}),operationButtons(app,['hostmodel','seedmodel','unseedmodel','unhostmodel','getmodelsharecard','exportmodellink']));break;}
    case 'Collections':{const workbench=operationWorkbench(app,{groups:['Models'],title:'Collections and directory operations'});results.append(operationButtons(app,['subscribemodelcollection','subscribemodelpolicy','joinmodelcircle','leavemodelcircle']),el('details',{},el('summary',{},'Collection operations'),workbench));break;}
    case 'Preservation':{const result=(await app.bridge.read('getmodelpolicy')).result,shown=presentObservation('getmodelpolicy',result),parts=[];if(shown.metrics.length)parts.push(el('div',{class:'metrics'},...shown.metrics.map(item=>metric(item.label,item.value))));if(shown.columns.length)parts.push(table(shown.rows,shown.columns));results.append(...parts,jsonView(result,{open:false,title:'Native record'}),operationButtons(app,['setmodelpolicy','seedmodel','unseedmodel','removemodel']),note('Automatic spend remains zero. A larger storage or propagation grant is an independent native policy change.'));break;}
@@ -33,7 +39,20 @@ export function modelsView(app){
   nodeFacts.replaceChildren(...status.lines.map(text=>el('p',{},text)),el('p',{},`automatic_spend_atoms: ${status.spend}`));
  }
  paintNode();
- const stopStatus=app.state.subscribe(()=>{if(nodeAlive)paintNode();});
+ async function paintDownloads(){
+  if(!nodeAlive)return;
+  const ticket=++transferPaint;
+  try{
+   let envelope=app.state.state.sources?.getmodeltransfers;
+   if(envelope==null)envelope=await app.bridge.read('getmodeltransfers');
+   if(!nodeAlive||ticket!==transferPaint||selected!=='Downloads')return;
+   results.replaceChildren(...transferView(envelope));
+  }catch(e){
+   if(!nodeAlive||ticket!==transferPaint||selected!=='Downloads')return;
+   results.replaceChildren(note(e.message,'danger'));
+  }
+ }
+ const stopStatus=app.state.subscribe((_state,change)=>{if(!nodeAlive)return;paintNode();if(refreshDownloadsOnObservation(selected,change))paintDownloads();});
  const earlierCleanup=app.cleanup;
  app.cleanup=()=>{nodeAlive=false;stopStatus();if(typeof earlierCleanup==='function')earlierCleanup();};
  const bridge=app.bridge;

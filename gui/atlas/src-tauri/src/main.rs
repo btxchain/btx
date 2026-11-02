@@ -24,9 +24,13 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(h) = app.try_state::<Arc<Host>>() {
-                // Scheme URLs arrive through on_open_url. Paths and file:// stay here.
+                // tauri-plugin-deep-link 2.6.2 forwards only a sole scheme argument to
+                // on_open_url. Skip that one URL so it is delivered once. A scheme URL
+                // beside any other argument is not forwarded, so receive it here. A lone
+                // path or file:// URL stays here.
+                let sole_scheme = args.len() == 2 && scheme_arg(&args[1]);
                 for arg in args.iter().skip(1) {
-                    if scheme_arg(arg) {
+                    if sole_scheme {
                         continue;
                     }
                     h.receive_link(arg);

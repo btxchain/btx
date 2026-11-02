@@ -14,7 +14,7 @@
     "btx_neuronlab/engine.py": "d8140afc02cb5029893fab99af9350dbbb4ba9d126f122fa7c09085331fdf801",
     "btx_neuronlab/evidence.py": "9c7eed4e352ab41a69ffc041d189bb7180b6b3c45c4049e0706bd0c605daa9f8",
     "btx_neuronlab/inspection.py": "099e95868f51eed5d3e440811f98ebaa84016cd3ee4412bc143fde4b867f6c07",
-    "btx_neuronlab/models.py": "f085ea15fda4038a6fee50a5eff8e5c939d50ea48fb227061348688a38de90b4",
+    "btx_neuronlab/models.py": "dcfe819ce80c1f9aef299c54020a6f91265dea3b5f0ef0dbfe050d4ca1b4de93",
     "btx_neuronlab/operators.py": "eb8e95b7681a9d20002c2ef29be07a67ce335f332c940cd817ec1bdf7cceeba5",
     "btx_neuronlab/qualification.py": "85aef33210394f7414d2e688e4c45ced2ee0df032a43f5a61de26a430c85728d",
     "btx_neuronlab/router.py": "90133f2b72e239bb3f17dc66c093b79e93084d4b05e8a75b53078e0263b76f1c",

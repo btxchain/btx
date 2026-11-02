@@ -169,6 +169,39 @@ def test_absent_tie_key_follows_the_loaded_model(tmp_path):
     assert caught.value.code == 'WEIGHTS'
 
 
+def test_embed_out_weight_moves_to_lm_head_when_it_is_the_only_mismatch(tmp_path):
+    torch = pytest.importorskip('torch')
+    from safetensors.torch import save_file
+    from btx_neuronlab.models import _load_declared_weights
+
+    class Head(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lm_head = torch.nn.Linear(3, 4, bias=False)
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+    weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    root = tmp_path / 'embed-out'
+    root.mkdir()
+    (root / 'config.json').write_text(json.dumps({'tie_word_embeddings': False}), encoding='utf-8')
+    save_file({'embed_out.weight': weight}, root / 'model.safetensors')
+    model = Head()
+    with torch.no_grad():
+        model.lm_head.weight.zero_()
+    _load_declared_weights(model, root)
+    assert torch.equal(model.lm_head.weight.detach(), weight)
+
+    extra = tmp_path / 'embed-out-extra'
+    extra.mkdir()
+    (extra / 'config.json').write_text(json.dumps({'tie_word_embeddings': False}), encoding='utf-8')
+    save_file({'embed_out.weight': weight, 'other.weight': torch.ones(2, 2)}, extra / 'model.safetensors')
+    with pytest.raises(LabError) as caught:
+        _load_declared_weights(Head(), extra)
+    assert caught.value.code == 'WEIGHTS'
+
+
 def test_tied_gpt2_save_pretrained_loads(tmp_path):
     root = _save_tiny_gpt2(tmp_path / 'tied')
     from safetensors import safe_open

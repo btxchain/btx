@@ -63,8 +63,8 @@ if ($lines.Count -eq 0 -or $icaclsExit -ne 0) {
     exit 1
 }
 
-$acePattern = '(?i)(?:^|\s)(?<id>Everyone|BUILTIN\\Users|(?:[\p{L}0-9 ._-]+\\)?Authenticated Users|(?:[\p{L}0-9 ._-]+\\)?Jeder|(?:[\p{L}0-9 ._-]+\\)?VORDEFINIERT\\Benutzer|(?:[\p{L}0-9 ._-]+\\)?Authentifizierte Benutzer):(?<rights>(?:\([^)]*\))+)'
-$identityPattern = '(?i)(?:^|\s)(?:Everyone|BUILTIN\\Users|(?:[\p{L}0-9 ._-]+\\)?Authenticated Users|(?:[\p{L}0-9 ._-]+\\)?Jeder|(?:[\p{L}0-9 ._-]+\\)?VORDEFINIERT\\Benutzer|(?:[\p{L}0-9 ._-]+\\)?Authentifizierte Benutzer):'
+$acePattern = '(?i)(?:^|\s)(?<id>Everyone|BUILTIN\\Users|(?:[^:\r\n]+\\)?Authenticated Users|(?:[^:\r\n]+\\)?Jeder|(?:[^:\r\n]+\\)?VORDEFINIERT\\Benutzer|(?:[^:\r\n]+\\)?Authentifizierte Benutzer):(?<rights>(?:\([^)]*\))+)'
+$identityPattern = '(?i)(?:^|\s)(?:Everyone|BUILTIN\\Users|(?:[^:\r\n]+\\)?Authenticated Users|(?:[^:\r\n]+\\)?Jeder|(?:[^:\r\n]+\\)?VORDEFINIERT\\Benutzer|(?:[^:\r\n]+\\)?Authentifizierte Benutzer):'
 $grantsWrite = $false
 $unparsed = $false
 

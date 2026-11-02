@@ -26,7 +26,9 @@ pub fn preview_target(value: &str) -> Option<String> {
 }
 
 /// The local path of a file URL: no host but `localhost`, no query or fragment, and percent
-/// escapes decoded, except an escaped `/` or NUL.
+/// escapes decoded, except an escaped `/` or NUL. After that decode, a Windows
+/// `file:///D:/...` rest is `/D:/...` or `/D:\...`. Drop that one leading slash when the
+/// next bytes are an ASCII letter and `:` or `\`. `/tmp` and `/home` are left as they are.
 fn file_url_path(rest: &str) -> Option<PathBuf> {
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
     if !rest.starts_with('/') || rest.contains(['?', '#']) {
@@ -47,7 +49,16 @@ fn file_url_path(rest: &str) -> Option<PathBuf> {
         }
         bytes.push(byte);
     }
-    Some(PathBuf::from(String::from_utf8(bytes).ok()?))
+    let mut path = String::from_utf8(bytes).ok()?;
+    let raw = path.as_bytes();
+    if raw.len() >= 3
+        && raw[0] == b'/'
+        && raw[1].is_ascii_alphabetic()
+        && matches!(raw[2], b':' | b'\\')
+    {
+        path.remove(0);
+    }
+    Some(PathBuf::from(path))
 }
 
 fn uri_ok(value: &str) -> bool {
@@ -123,5 +134,24 @@ mod tests {
             assert!(preview_target(&url).is_none(), "{url}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_windows_drive_file_url_drops_one_leading_slash() {
+        assert_eq!(
+            file_url_path("/D:/btx/Atlas%20Request.btx"),
+            Some(PathBuf::from("D:/btx/Atlas Request.btx"))
+        );
+        assert_eq!(
+            file_url_path("/D:\\btx/Atlas%20Request.btx"),
+            Some(PathBuf::from("D:\\btx/Atlas Request.btx"))
+        );
+        assert_eq!(
+            file_url_path("/tmp/Atlas%20Request.btx"),
+            Some(PathBuf::from("/tmp/Atlas Request.btx"))
+        );
+        assert_eq!(
+            file_url_path("/home/Atlas%20Request.btx"),
+            Some(PathBuf::from("/home/Atlas Request.btx"))
+        );
     }
 }

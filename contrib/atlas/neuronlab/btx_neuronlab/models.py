@@ -141,6 +141,23 @@ def _bind_omitted_tied_head(model, root: Path, state):
         state[output_key] = state[input_key]
 
 
+def _move_embed_out_to_lm_head(model, state):
+    # Untied GPT-NeoX: transformers 5 names the head lm_head.weight, but save_pretrained still writes embed_out.weight.
+    try:
+        output = model.get_output_embeddings()
+    except (AttributeError, NotImplementedError):
+        return
+    if output is None or _module_weight_key(model, output) != 'lm_head.weight':
+        return
+    if 'embed_out.weight' not in state or 'lm_head.weight' in state:
+        return
+    declared = model.state_dict()
+    missing = {key for key in declared if key not in state}
+    unexpected = {key for key in state if key not in declared}
+    if missing == {'lm_head.weight'} and unexpected == {'embed_out.weight'}:
+        state['lm_head.weight'] = state.pop('embed_out.weight')
+
+
 def _load_declared_weights(model, root: Path):
     from safetensors.torch import load_file
     shards = _weight_index_shards(root)
@@ -150,6 +167,7 @@ def _load_declared_weights(model, root: Path):
         state = {}
         for shard in shards:
             state.update(load_file(str(shard)))
+        _move_embed_out_to_lm_head(model, state)
         _bind_omitted_tied_head(model, root, state)
         model.load_state_dict(state, strict=True)
     except LabError:
