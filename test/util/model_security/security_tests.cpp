@@ -18,8 +18,9 @@
 using namespace modelnet::security;
 namespace {
 struct Harness {
-    size_t passed{0},failed{0};Json results=Array();
+    size_t passed{0},failed{0};Json results=Array();std::string filter;
     template<class F> void Test(const std::string& name,F f) {
+        if(!filter.empty()&&!name.starts_with(filter))return;
         Json row=Object();row.pushKV("name",name);
         try{f();++passed;row.pushKV("status","PASS");std::cout<<"PASS "<<name<<'\n';}
         catch(const std::exception& e){++failed;row.pushKV("status","FAIL");row.pushKV("error",e.what());std::cerr<<"FAIL "<<name<<": "<<e.what()<<'\n';}
@@ -51,7 +52,7 @@ struct Fixture {
     Policy policy;
     fs::path probe;
     std::string capsule,composition;std::vector<std::string> evaluations;
-    explicit Fixture(fs::path executable={},bool common_domain=false):root(temp.root/"security"),db(root),probe(std::move(executable)) {
+    explicit Fixture(fs::path executable={},bool common_domain=false,bool evidence=true):root(temp.root/"security"),db(root),probe(std::move(executable)) {
         if(!probe.empty())runtime=Hash(ReadFile(probe,128*1024*1024));
         auto pins=Object();pins.pushKV("schema","BTX/SecurityRootPins/v1");pins.pushKV("keys",Strings({KeyId(owner.public_key)}));pins.pushKV("threshold",1);WritePrivate(root/"root-pins.json",Canonical(pins));
         Json b=Object();b.pushKV("realm",realm);b.pushKV("epoch",1);b.pushKV("issued_ms",now);b.pushKV("expires_ms",now+3600000);
@@ -71,7 +72,7 @@ struct Fixture {
         local.pushKV("packages",Object());local.pushKV("evaluation_plans",Object());local.pushKV("runtimes",Object());
         auto identity=Object();identity.pushKV("public_key",Hex(alice.public_key));identity.pushKV("secret_file",(root/"worker.key").string());local.pushKV("identity",identity);WritePrivate(root/"worker.key",Hex(alice.secret_key));
         auto compute=Object();compute.pushKV("allow_evaluation",true);compute.pushKV("max_memory_bytes",512*1024*1024);compute.pushKV("max_wall_ms",5000);compute.pushKV("max_cpu_ms",4000);local.pushKV("execution_policy",compute);SaveLocal();
-        composition=MakeComposition("base");capsule=MakeEvidence(composition);
+        composition=MakeComposition("base");if(evidence)capsule=MakeEvidence(composition);
     }
     void SaveLocal(){WritePrivate(root/"local.json",Canonical(local),true);}
     std::string Import(const Json& e){ImportRecord(db,policy,e,NowMs());return RecordId(e);}
@@ -123,11 +124,55 @@ std::string InstallPlan(Fixture& f,const std::string& gate="adversarial") {
     const auto id=PlanId(plan);WritePrivate(f.root/"probe-input","probe",true);auto entry=Object();entry.pushKV("plan",plan);entry.pushKV("executable",f.probe.string());entry.pushKV("input_file",(f.root/"probe-input").string());auto plans=f.local["evaluation_plans"];plans.pushKV(id,entry);f.local.pushKV("evaluation_plans",plans);auto runtime=Object();runtime.pushKV("canary_package",id);auto runtimes=f.local["runtimes"];runtimes.pushKV(f.runtime,runtime);f.local.pushKV("runtimes",runtimes);f.SaveLocal();return id;
 }
 Json Control(Fixture& f){auto b=Common(f.realm,1,NowMs());b.pushKV("operation","resume");b.pushKV("nonce",Hex(RandomBytes(32)));return Signed("control",b,f.owner);}
+Json scheduler_evidence=Array();
+template<class F> void WaitFor(F ready,const char* failure,unsigned milliseconds=8000) {
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(milliseconds);
+    while(!ready()) {
+        Check(std::chrono::steady_clock::now()<deadline,failure);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+std::string QueueChallenge(Fixture& f,const std::string& package,const std::string& gate="adversarial",
+                           const std::string& before="",const std::string& after="",bool mismatch=false) {
+    for(unsigned attempt=0;attempt<4096;++attempt) {
+        auto body=f.Challenge(f.composition,gate,package)["body"];
+        body.pushKV("campaign",Hash(Hex(RandomBytes(16))));
+        if(mismatch)body.pushKV("suite",Hash("unbound suite"));
+        auto record=Signed("challenge",body,f.owner);const auto id=RecordId(record);
+        if((before.empty()||id<before)&&(after.empty()||id>after))return f.Import(record);
+    }
+    throw std::runtime_error("unable to construct bounded sorted challenge fixture");
+}
+bool HasRun(Fixture& f,const std::string& id) {
+    return !f.db.Query("SELECT challenge FROM evaluation_runs WHERE challenge=?",{id}).empty();
+}
+void WaitMaintenance(Fixture& f,const std::string& previous="") {
+    WaitFor([&]{return f.db.Meta("maintenance_at")!=previous;},"maintenance did not advance",4000);
+    Check(f.db.Meta("maintenance_error").empty(),"maintenance failed");
+}
+void CheckScheduledEndpoint(Fixture& f,const std::string& id) {
+    WaitFor([&]{auto rows=f.db.Query("SELECT phase FROM evaluation_runs WHERE challenge=?",{id});
+        return !rows.empty()&&rows[0][0]!="running";},"scheduled evaluation did not finish");
+    auto rows=f.db.Query("SELECT phase,report FROM evaluation_runs WHERE challenge=?",{id});
+    Check(rows.size()==1&&!rows[0][1].empty(),"evaluation produced no signed report");
+    const auto report=f.db.Get(rows[0][1]);
+    const auto receipt=f.db.Get(DigestField(report["body"],"execution_receipt"));
+#if defined(__APPLE__) || defined(_WIN32)
+    Check(rows[0][0]=="BLOCKED"&&Text(report["body"],"outcome")=="BLOCKED"&&
+          !Boolean(receipt["body"],"dispatched"),"unsupported static worker did not fail closed");
+#else
+    Check(rows[0][0]=="PASS"&&Boolean(receipt["body"],"dispatched"),"legitimate worker evaluation failed");
+#endif
+    Check(DigestField(receipt["body"],"request")==id,"scheduled receipt binding");
+    auto evidence=Object();evidence.pushKV("challenge",id);evidence.pushKV("phase",rows[0][0]);
+    evidence.pushKV("evaluation",report);evidence.pushKV("receipt",receipt);scheduler_evidence.push_back(evidence);
+}
+
 }
 int main(int argc,char** argv) {
     fs::path probe;fs::path report;
     if(argc>1)probe=fs::absolute(argv[1]);if(argc>2)report=fs::absolute(argv[2]);
-    Harness h;
+    Harness h;if(argc>3)h.filter=argv[3];
     h.Test("canonical-key-order",[]{Check(Canonical(Parse("{\"b\":2,\"a\":1}"))=="{\"a\":1,\"b\":2}","order");});
     h.Test("duplicate-json-keys-rejected",[]{Reject([]{Parse("{\"a\":1,\"a\":2}");},"SEC_JSON_DUPLICATE");});
     h.Test("float-json-rejected",[]{Reject([]{Parse("{\"a\":1.25}");});});
@@ -448,5 +493,68 @@ int main(int argc,char** argv) {
     });
     h.Test("private-protocol-framing-and-out-of-order-denial",[&]{Temp t;Service service(t.root/"security");GuardProtocol protocol(service);const auto id=Hex(RandomBytes(16));const auto request=std::string("{\"op\":\"status\"}");Check(protocol.Handle("SEC2 BEGIN "+id+" "+std::to_string(request.size()))=="SEC2 READY "+id,"begin");auto hex=Hex(std::span<const unsigned char>(reinterpret_cast<const unsigned char*>(request.data()),request.size()));Check(protocol.Handle("SEC2 DATA "+id+" 1 "+hex).starts_with("ERR "),"out-of-order accepted");protocol.Handle("SEC2 BEGIN "+id+" "+std::to_string(request.size()));Check(protocol.Handle("SEC2 DATA "+id+" 0 "+hex).starts_with("SEC2 STORED "),"data");Check(protocol.Handle("SEC2 COMMIT "+id).starts_with("SEC2 RESPONSE "),"commit");Check(protocol.Handle("SEC2 READ "+id+" 0").starts_with("SEC2 BYTES "),"response");});
     h.Test("async-service-exec-and-delayed-release-fence",[&]{Fixture f;auto grant=f.Grant();Service service(f.root);auto request=Object();request.pushKV("op","prepare");request.pushKV("grant",grant);request.pushKV("context",f.Context());request.pushKV("request",f.ReadRequest());auto p=service.Handle(request);Check(Boolean(p,"ok"),p.write().c_str());request=Object();request.pushKV("op","execute");request.pushKV("secret",p["secret"]);request.pushKV("context",f.Context());request.pushKV("request",f.ReadRequest());auto submitted=service.Handle(request);Check(Boolean(submitted,"ok"),"submit");auto poll=Object();poll.pushKV("op","poll");poll.pushKV("job",submitted["job"]);Json result;for(int i=0;i<100;++i){result=service.Handle(poll);if(result["phase"].isStr()&&result["phase"].get_str()=="finished")break;std::this_thread::sleep_for(std::chrono::milliseconds(10));}Check(Text(result,"phase")=="finished","job did not finish");f.Revoke(grant);poll.pushKV("op","take");result=service.Handle(poll);Check(!Boolean(result["result"],"ok")&&!result["result"].exists("output_hex"),"revoked queued output released");});
-    Json summary=Object();summary.pushKV("schema","BTX/ComponentSecurityTestResults/v1");summary.pushKV("passed",static_cast<uint64_t>(h.passed));summary.pushKV("failed",static_cast<uint64_t>(h.failed));summary.pushKV("physical_hosts",1);summary.pushKV("independent_organizations_verified",false);summary.pushKV("gpu_execution","NOT_RUN");summary.pushKV("whole_btxd_build","NOT_RUN");summary.pushKV("native_windows","NOT_RUN");summary.pushKV("native_macos","NOT_RUN");summary.pushKV("behavioral_backdoor_absence_proven",false);summary.pushKV("tests",h.results);if(!report.empty()){EnsurePrivateDirectory(report.parent_path());WritePrivate(report,Canonical(summary)+"\n",true);}std::cout<<"SUMMARY "<<Canonical(summary)<<'\n';return h.failed?1:0;
+
+    h.Test("scheduler-valid-work-and-two-per-tick",[&]{
+        Fixture f(probe,false,false);const auto package=InstallPlan(f);std::vector<std::string> ids;
+        for(unsigned i=0;i<7;++i)ids.push_back(QueueChallenge(f,package));
+        Service service(f.root);WaitMaintenance(f);
+        WaitFor([&]{return f.db.Query("SELECT challenge FROM evaluation_runs").size()>=2;},"first tick did not schedule valid work",1000);
+        Check(f.db.Query("SELECT challenge FROM evaluation_runs").size()==2,"more than two evaluations in the first maintenance tick");
+        WaitFor([&]{return f.db.Query("SELECT challenge FROM evaluation_runs").size()==ids.size();},"valid backlog stalled",10000);
+        for(const auto& id:ids)CheckScheduledEndpoint(f,id);
+    });
+    h.Test("scheduler-missing-plan-prefix-restart-and-wrap",[&]{
+        Fixture f(probe,false,false);const auto package=InstallPlan(f);
+        const auto target=QueueChallenge(f,package,"adversarial","","d");
+        for(unsigned i=0;i<70;++i)QueueChallenge(f,Hash("uninstalled "+std::to_string(i)),"adversarial",target);
+        const auto cursor_key="evaluation_cursor:"+KeyId(f.alice.public_key);
+        std::string cursor,first_tick;
+        const auto initial_rows=f.db.Query("SELECT id FROM challenges ORDER BY id");
+        {
+            Service service(f.root);WaitMaintenance(f);cursor=f.db.Meta(cursor_key);first_tick=f.db.Meta("maintenance_at");
+            Check(!HasRun(f,target),"fixture target was not beyond the first bounded page");
+        }
+        // Add valid work below an already traversed ID and install a previously
+        // missing local plan. Both must be reached when the persisted scan wraps.
+        const auto lower=QueueChallenge(f,package,"adversarial",cursor.empty()?"1":cursor);
+        const auto late_package=InstallPlan(f,"privacy");
+        const auto late=QueueChallenge(f,late_package,"privacy",cursor.empty()?"1":cursor);
+        auto plans=Object();plans.pushKV(package,f.local["evaluation_plans"][package]);
+        auto late_entry=f.local["evaluation_plans"][late_package];f.local.pushKV("evaluation_plans",plans);f.SaveLocal();
+        {
+            Service service(f.root);WaitMaintenance(f,first_tick);
+            const auto resumed_cursor=f.db.Meta(cursor_key);
+            WaitFor([&]{return HasRun(f,target);},"later valid challenge starved after service restart",8000);
+            CheckScheduledEndpoint(f,target);
+            Check(cursor==initial_rows[31][0],"first scan did not visit exactly one bounded page");
+            Check(resumed_cursor==initial_rows[63][0],"restart did not continue from the persisted cursor");
+            WaitFor([&]{return HasRun(f,lower);},"new lower challenge not reconsidered after wrap",8000);
+            plans.pushKV(late_package,late_entry);f.local.pushKV("evaluation_plans",plans);f.SaveLocal();
+            WaitFor([&]{return HasRun(f,late);},"later installed plan not reconsidered after wrap",10000);
+            CheckScheduledEndpoint(f,lower);CheckScheduledEndpoint(f,late);
+        }
+        std::cout<<"SCHEDULER restart_cursor="<<cursor<<" stale_prefix=70 target="<<target<<'\n';
+    });
+    h.Test("scheduler-preinsert-plan-failures-do-not-starve",[&]{
+        Fixture f(probe,false,false);const auto package=InstallPlan(f);
+        const auto target=QueueChallenge(f,package,"adversarial","","d");
+        std::vector<std::string> bad;
+        for(unsigned i=0;i<4;++i)bad.push_back(QueueChallenge(f,package,"adversarial",target,"",true));
+        for(const auto& id:bad)Reject([&]{EvaluateChallenge(f.db,id,NowMs());},"SEC_TEST_PLAN_BINDING");
+        Service service(f.root);
+        WaitFor([&]{return HasRun(f,target);},"preinsert plan failures starved later valid challenge",8000);
+        for(const auto& id:bad)Check(!HasRun(f,id),"plan admission changed");
+        CheckScheduledEndpoint(f,target);
+    });
+    h.Test("scheduler-pause-and-compute-grant-gates",[&]{
+        Fixture f(probe,false,false);const auto package=InstallPlan(f);const auto target=QueueChallenge(f,package);
+        f.db.SetMeta("paused","1");Service service(f.root);WaitMaintenance(f);
+        Check(!HasRun(f,target),"paused scheduler started evaluation");
+        auto cap=f.local["execution_policy"];cap.pushKV("allow_evaluation",false);f.local.pushKV("execution_policy",cap);f.SaveLocal();
+        const auto tick=f.db.Meta("maintenance_at");f.db.SetMeta("paused","0");WaitMaintenance(f,tick);
+        Check(!HasRun(f,target),"scheduler ignored local compute policy");
+        cap.pushKV("allow_evaluation",true);f.local.pushKV("execution_policy",cap);f.SaveLocal();
+        WaitFor([&]{return HasRun(f,target);},"scheduler did not recover after compute approval");CheckScheduledEndpoint(f,target);
+    });
+    Json summary=Object();summary.pushKV("schema","BTX/ComponentSecurityTestResults/v1");summary.pushKV("passed",static_cast<uint64_t>(h.passed));summary.pushKV("failed",static_cast<uint64_t>(h.failed));summary.pushKV("physical_hosts",1);summary.pushKV("independent_organizations_verified",false);summary.pushKV("gpu_execution","NOT_RUN");summary.pushKV("whole_btxd_build","NOT_RUN");summary.pushKV("native_windows","NOT_RUN");summary.pushKV("native_macos","NOT_RUN");summary.pushKV("behavioral_backdoor_absence_proven",false);summary.pushKV("tests",h.results);summary.pushKV("scheduler_evidence",scheduler_evidence);if(!report.empty()){EnsurePrivateDirectory(report.parent_path());WritePrivate(report,Canonical(summary)+"\n",true);}std::cout<<"SUMMARY "<<Canonical(summary)<<'\n';return h.failed?1:0;
 }

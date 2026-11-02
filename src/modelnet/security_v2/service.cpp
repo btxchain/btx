@@ -269,10 +269,16 @@ namespace modelnet::security {
                             if(local["identity"].isObject()) {
                                 const auto evaluator=KeyId(Unhex(Text(local["identity"],"public_key",PK_BYTES*2),
                                 PK_BYTES));
-                                for(const auto& row:db.Query("SELECT id FROM challenges WHERE id NOT IN (SELECT challenge FROM evaluation_runs WHERE evaluator=?) ORDER BY id LIMIT 2",
-                                {
-                                    evaluator
-                                })) {
+                                // Persist a bounded keyset scan so unrunnable proposals cannot
+                                // monopolize the first slots, including across guard restarts.
+                                // The cursor is local scheduling state, never admission authority.
+                                const auto cursor_key="evaluation_cursor:"+evaluator;
+                                const auto rows=db.Query("SELECT id FROM challenges WHERE id>? AND id NOT IN (SELECT challenge FROM evaluation_runs WHERE evaluator=?) ORDER BY id LIMIT 32",
+                                {db.Meta(cursor_key),evaluator});
+                                size_t inspected=0,submitted=0;
+                                for(const auto& row:rows) {
+                                    ++inspected;
+                                    db.SetMeta(cursor_key,row[0]);
                                     const auto challenge=db.Get(row[0]);
                                     const auto package=DigestField(challenge["body"],"package");
                                     if(!local["evaluation_plans"].isObject()||!local["evaluation_plans"].exists(package))continue;
@@ -287,8 +293,12 @@ namespace modelnet::security {
                                         r.pushKV("op","evaluate");
                                         r.pushKV("challenge",row[0]);
                                         Submit(r,true,name);
+                                        if(++submitted==2)break;
                                     }
                                 }
+                                // Wrap on the next tick: plans installed later and new lower
+                                // IDs must be reconsidered without an unbounded scan this tick.
+                                if(inspected==rows.size()&&rows.size()<32)db.SetMeta(cursor_key,"");
                             }
                         }
                         if(local["remote_work"].isObject()&&
