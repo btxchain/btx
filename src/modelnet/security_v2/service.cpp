@@ -307,7 +307,14 @@ namespace modelnet::security {
                            db.Meta("paused","0")=="0"){
                             const auto me=LoadLocalIdentity(db,p,"worker",now);
                             const auto worker=KeyId(me.public_key);
-                            for(const auto& row:db.Query("SELECT id FROM objects WHERE kind='work' ORDER BY id LIMIT 64")){
+                            MeshWorkTables(db);
+                            // Work skipped below (another host, already run, unlisted package) must
+                            // not hide later work: resume after the last inspected ID, wrap at the end.
+                            const auto cursor_key="remote_work_cursor:"+worker;
+                            const auto rows=db.Query("SELECT id FROM objects WHERE kind='work' AND id>? ORDER BY id LIMIT 64",
+                            {db.Meta(cursor_key)});
+                            for(const auto& row:rows){
+                                db.SetMeta(cursor_key,row[0]);
                                 MeshTables(db);
                                 const auto work=db.Get(row[0]);
                                 const auto& body=work["body"];
@@ -321,6 +328,7 @@ namespace modelnet::security {
                                 {std::lock_guard lock(mutex);running=internal_running.contains(name);}
                                 if(!running){Json r=Object();r.pushKV("op","work");r.pushKV("id",row[0]);Submit(r,true,name);}
                             }
+                            if(rows.size()<64)db.SetMeta(cursor_key,"");
                         }
                         Database::Transaction tx(db);
                         db.SetMeta("maintenance_error","");

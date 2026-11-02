@@ -568,6 +568,61 @@ int main(int argc,char** argv) {
         Reject([&]{VerifyMeshWorkQuorum(f.db,work,NowMs());},"SEC_WORK_PEER_EXPIRED");
         } catch(const std::exception& e){throw std::runtime_error(stage+": "+e.what());}
     });
+    h.Test("mesh-remote-work-scan-reaches-work-behind-skipped-ids",[&]{
+        Check(!probe.empty(),"native sandbox worker required");
+        Fixture f(probe);
+        const auto plan=InstallPlan(f);
+        const Json manifest=f.local["evaluation_plans"][plan]["plan"];
+        // Work IDs are digests: draw until one sorts inside the requested bounds.
+        auto queue=[&](const std::string& target,const std::string& above,const std::string& below) {
+            for(unsigned attempt=0;attempt<4096;++attempt) {
+                Json b=Common(f.realm,1,NowMs(),50000);
+                b.pushKV("composition",f.composition);b.pushKV("capsule",f.capsule);b.pushKV("package",plan);
+                b.pushKV("purpose","verification");
+                b.pushKV("input_sha384",manifest["input_sha384"]);
+                b.pushKV("expected_output_sha384",manifest["expected_output_sha384"]);
+                b.pushKV("target_host",target);b.pushKV("nonce",Hex(RandomBytes(32)));
+                b.pushKV("max_output_bytes",static_cast<uint64_t>(8192));
+                const auto work=Signed("work",b,f.owner);const auto id=RecordId(work);
+                if((above.empty()||id>above)&&(below.empty()||id<below))return f.Import(work);
+            }
+            throw std::runtime_error("unable to construct sorted work fixture");
+        };
+        auto remote=Object();remote.pushKV("enabled",true);remote.pushKV("packages",Strings({plan}));
+        remote.pushKV("compositions",Strings({f.composition}));
+        f.local.pushKV("remote_work",remote);f.local.pushKV("host","host-a");f.SaveLocal();
+        f.db.SetMeta("runtime_available","1");
+        auto has_table=[&]{return !f.db.Query("SELECT name FROM sqlite_master WHERE name='mesh_work_runs'").empty();};
+        auto wait=[&](const std::string& id,const std::string& failure) {
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(12);
+            std::string error;
+            while(!has_table()||f.db.Query("SELECT work FROM mesh_work_runs WHERE work=?",{id}).empty()) {
+                if(const auto e=f.db.Meta("maintenance_error");!e.empty())error=e;
+                if(std::chrono::steady_clock::now()>=deadline)
+                    throw std::runtime_error(failure+", last maintenance_error="+error);
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        };
+        // A fresh database has no mesh_work_runs until the first work has run.
+        Check(!has_table(),"fixture database already has mesh_work_runs");
+        const auto first=queue("any","","1");
+        {
+            Service service(f.root);
+            wait(first,"work on a fresh database did not run");
+        }
+        // More skipped work than one 64-ID scan, all sorting below the runnable item.
+        // Records are imported only while no Service runs, so the import clock cannot race it.
+        const auto later=queue("any","d","");
+        for(unsigned i=0;i<70;++i)queue("other-host","",later);
+        {
+            Service service(f.root);
+            wait(later,"work behind 70 skipped lower IDs did not run");
+        }
+        // Work added below the scan position is reached once the scan wraps.
+        const auto lower=queue("any","",later);
+        Service service(f.root);
+        wait(lower,"work below the scan position did not run after the wrap");
+    });
     h.Test("mesh-owner-consent-and-untrusted-artifact-denial",[&]{
         Fixture f;
         auto grant=f.Grant();Reject([&]{MeshExport(f.db,grant,NowMs());},"SEC_MESH_PRIVATE_KIND");

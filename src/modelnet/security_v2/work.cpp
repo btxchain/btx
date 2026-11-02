@@ -20,6 +20,7 @@ void Fresh(const Json& b,const Policy& p,int64_t now){
             expiry-issued<=p.evidence_ttl_ms,"SEC_WORK_EXPIRED");
 }
 }
+void MeshWorkTables(Database& db){Tables(db);}
 Json ExecuteMeshWork(Database& db,const std::string& id,int64_t now){
     Tables(db);auto p=Policy::Load(db,now);auto e=db.Get(id);
     Require(Text(e,"kind")=="work","SEC_WORK_KIND");p.Check(e,"coordinator",db,now);

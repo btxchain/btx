@@ -8,5 +8,7 @@ namespace modelnet::security {
  * its locally installed, byte-pinned model and native sandbox plan. */
 Json ExecuteMeshWork(Database& db,const std::string& work_id,int64_t now);
 Json VerifyMeshWorkQuorum(Database& db,const std::string& work_id,int64_t now);
+/** Create the local work-run table, which the maintenance scan reads before any work has run. */
+void MeshWorkTables(Database& db);
 } // namespace modelnet::security
 #endif
