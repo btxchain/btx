@@ -20,6 +20,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <fstream>
 #include <set>
 #include <string>
 #include <vector>
@@ -497,6 +498,36 @@ BOOST_AUTO_TEST_CASE(infra_13_natpmp_off_reaches_helper)
     BOOST_CHECK(!ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
     // Disabled mapping never looks for a gateway.
     BOOST_CHECK(AttemptModelPortMap("0.0.0.0:29447", /*enable=*/false).status == ModelNatStatus::DISABLED);
+}
+
+BOOST_AUTO_TEST_CASE(infra_14_packaged_helper_uses_platform_file_name)
+{
+    using namespace modelnet;
+#ifdef WIN32
+    BOOST_CHECK_EQUAL(std::string{MODELD_FILE_NAME}, "btx-modeld.exe");
+    const fs::path other_name{"btx-modeld"};
+#else
+    BOOST_CHECK_EQUAL(std::string{MODELD_FILE_NAME}, "btx-modeld");
+    const fs::path other_name{"btx-modeld.exe"};
+#endif
+#if defined(WIN32) || defined(__linux__) || defined(__APPLE__)
+    // btxd looks for the helper next to itself, so it must know where it runs from.
+    BOOST_CHECK(fs::is_directory(SelfExeDir()));
+#endif
+    const fs::path root = m_path_root / "packaged";
+    const fs::path btxd_dir = root / "sbin";
+    const std::vector<fs::path> searched{btxd_dir, btxd_dir / "libexec", root / "libexec", root / "bin"};
+    for (const fs::path& dir : searched) {
+        fs::create_directories(dir);
+        std::ofstream{dir / other_name};
+    }
+    // The other platform's file name is not the helper.
+    BOOST_CHECK(FindPackagedModeldIn(btxd_dir).empty());
+    // From the last place searched to the first, each one is found ahead of the places after it.
+    for (auto dir = searched.rbegin(); dir != searched.rend(); ++dir) {
+        std::ofstream{*dir / MODELD_FILE_NAME};
+        BOOST_CHECK_EQUAL(fs::PathToString(FindPackagedModeldIn(btxd_dir)), fs::PathToString(*dir / MODELD_FILE_NAME));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
