@@ -192,7 +192,7 @@ The standalone suite has three CTest entries:
   the foreign-owner fixture fail. Windows ownership is not isolated by this
   POSIX fixture.
 
-Executed on 1 November 2026, based on `btx-035/swarm` at
+Validation on 1-2 November 2026, based on `btx-035/swarm` at
 `cbf65894e6d61084527cd93e913a00c6794418dd`:
 
 * Windows x64, MSVC 19.50: standalone CMake build and all three CTest entries
@@ -202,6 +202,15 @@ Executed on 1 November 2026, based on `btx-035/swarm` at
 * Windows x64, clang-cl 22.1.8: root CMake configuration with the prototype on
   and CUDA off succeeded; the actual prover translation unit compiled. This is
   an object compilation check, **not a complete prover link**.
+* macOS 26.6.2 arm64, Apple clang 21: [native fork CI](https://github.com/lucasan123/btx/actions/runs/41397117678)
+  on code commit `d1664e6bc567c01a6e5bba7ec702582423b24121` passed all three
+  standalone CTest entries three times, plus the CPU policy and actual-handler
+  tests. Private no-ACL tokens pass; explicit/inherited/deny ACLs and an invalid
+  ACL fd are rejected. The original 7740583 token loader and a mutation removing
+  the new ACL guard both fail the extended-ACL regression as expected. Core CPU
+  test compilation uses the project's `-Wno-unused-parameter` setting; the
+  standalone suite keeps `-Wall -Wextra -Werror`. This is CPU/OS validation,
+  not a full prover link, Metal replay or GPU qualification.
 * Isolated Linux mutation builds with 100-second read/write deadlines fail
   the corresponding deadline cases; renewing the deadline after every received
   fragment fails the slow-trickle case. The peers no longer close early and
@@ -227,7 +236,8 @@ checks. This was not a full in-tree link or Metal qualification of that revision
 His observation that the empty FIFO/owner cases did not isolate their guards
 led to the filled-FIFO and optional privileged owner fixtures above. Both guard
 removals now fail in isolated Linux tests, as do mode-check and O_NOFOLLOW
-removals. The strengthened POSIX fixtures have not been rerun on macOS here.
+removals. The isolated UID-ownership case remains a privileged Linux check; native Apple
+ACL validation for the current code is recorded in the validation results.
 
 ### Policy and actual request-handler regression checks
 
@@ -256,7 +266,8 @@ transport byte check. It also verifies that a status response may be processed
 successfully while ready is false, canonical failure names, and live status
 changes between auto-fallback, configured strict-device and CPU diagnostic
 policies with different confirmation settings. Both test executables passed on
-Windows/clang-cl and Linux/GCC (`-Wall -Wextra -Werror`).
+Windows/clang-cl, Linux/GCC (`-Wall -Wextra -Werror`) and native
+Apple clang 21 with the core unused-parameter setting described above.
 
 These tests do not run the actual production main/qualification path, perform
 real GPU replay or establish consensus correctness. The listener probe is a
