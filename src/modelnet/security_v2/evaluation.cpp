@@ -1,7 +1,15 @@
 // Copyright (c) 2026 The BTX developers. MIT license.
 #include <modelnet/security_v2/evaluation.h>
 #include <algorithm>
+#include <optional>
 namespace modelnet::security {
+    namespace {
+        bool EvaluationGranted(const Json& local) {
+            return local["execution_policy"].isObject()&&
+            local["execution_policy"]["allow_evaluation"].isBool()&&
+            local["execution_policy"]["allow_evaluation"].get_bool();
+        }
+    }
     Json ReadLocalConfig(Database& db) {
         auto c=Parse(ReadFile(db.Root()/"local.json",MAX_RECORD,true));
         Fields(c, {
@@ -57,7 +65,7 @@ namespace modelnet::security {
     const std::string& request,const std::function<bool()>& allowed) {
         Require(IsHash(package)&&IsHash(request),"SEC_PLAN_REFERENCE");
         const auto local=ReadLocalConfig(db);
-        Require(local["execution_policy"].isObject()&&Boolean(local["execution_policy"],"allow_evaluation"),
+        Require(EvaluationGranted(local),
         "SEC_LOCAL_COMPUTE_NOT_GRANTED");
         const auto& entry=local["evaluation_plans"][package];
         Fields(entry, {
@@ -128,31 +136,46 @@ namespace modelnet::security {
         body.pushKV("limits",observed);
         result.receipt=Envelope("receipt",body);
         AddSignature(result.receipt,key);
-        ImportRecord(db,p,result.receipt,finished);
+        ImportCurrentEvidence(db,p,result.receipt,[&] {
+            return EvaluationGranted(ReadLocalConfig(db))&&allowed();
+        });
         return result;
     }
-    Json EvaluateChallenge(Database& db,const std::string& challenge_id,int64_t now) {
-        const auto p=Policy::Load(db,now);
-        auto key=LoadLocalIdentity(db,p,"evaluator",now);
-        const auto evaluator=KeyId(key.public_key);
-        p.Find(evaluator,"worker",db,now);
-        auto e=db.Get(challenge_id);
-        Require(Text(e,"kind")=="challenge","SEC_CHALLENGE_KIND");
-        p.Check(e,"coordinator",db,now);
-        const auto& ch=e["body"];
-        Require(DigestField(ch,"realm")==p.realm&&UInt(ch,"policy_epoch")==p.epoch&&
-        UInt(ch,"issued_ms",INT64_MAX)<=static_cast<uint64_t>(now)&&
-        UInt(ch,"expires_ms",INT64_MAX)>static_cast<uint64_t>(now),"SEC_CHALLENGE_EXPIRED");
-        const auto candidate=DigestField(ch,"composition"),package=DigestField(ch,"package");
-        const auto local=ReadLocalConfig(db);
-        const auto& plan=local["evaluation_plans"][package]["plan"];
-        Require(PlanId(plan)==package,"SEC_PLAN_NOT_INSTALLED");
-        for(auto field: {
-            "suite","sample_commitment","gate"
-        })Require(Text(plan,field)==Text(ch,field),"SEC_TEST_PLAN_BINDING");
+    static Json Evaluate(Database& db,const std::string& challenge_id,int64_t now,bool current_time) {
+        Policy p;
+        KeyPair key;
+        Json e,local;
+        std::string evaluator,candidate,package;
         {
-            Database::Transaction tx(db);
-            db.CheckClock(now);
+            std::optional<Database::Transaction> tx;
+            if(current_time) {tx.emplace(db);now=NowMs();}
+            p=Policy::Load(db,now);
+            key=LoadLocalIdentity(db,p,"evaluator",now);
+            evaluator=KeyId(key.public_key);
+            p.Find(evaluator,"worker",db,now);
+            e=db.Get(challenge_id);
+            Require(Text(e,"kind")=="challenge","SEC_CHALLENGE_KIND");
+            p.Check(e,"coordinator",db,now);
+            const auto& ch=e["body"];
+            Require(DigestField(ch,"realm")==p.realm&&UInt(ch,"policy_epoch")==p.epoch&&
+            UInt(ch,"issued_ms",INT64_MAX)<=static_cast<uint64_t>(now)&&
+            UInt(ch,"expires_ms",INT64_MAX)>static_cast<uint64_t>(now),"SEC_CHALLENGE_EXPIRED");
+            candidate=DigestField(ch,"composition");package=DigestField(ch,"package");
+            local=ReadLocalConfig(db);
+            const auto& plan=local["evaluation_plans"][package]["plan"];
+            Require(PlanId(plan)==package,"SEC_PLAN_NOT_INSTALLED");
+            for(auto field: {
+                "suite","sample_commitment","gate"
+            })Require(Text(plan,field)==Text(ch,field),"SEC_TEST_PLAN_BINDING");
+            if(!current_time)tx.emplace(db);
+            const auto commit=current_time?NowMs():now;
+            if(current_time) {
+                Require(UInt(p.envelope["body"],"issued_ms",INT64_MAX)<=static_cast<uint64_t>(commit)&&
+                p.expires>static_cast<uint64_t>(commit),"SEC_POLICY_EXPIRED");
+                Require(UInt(ch,"issued_ms",INT64_MAX)<=static_cast<uint64_t>(commit)&&
+                UInt(ch,"expires_ms",INT64_MAX)>static_cast<uint64_t>(commit),"SEC_CHALLENGE_EXPIRED");
+            }
+            db.CheckClock(commit);
             Require(db.Query("SELECT phase FROM evaluation_runs WHERE challenge=? AND evaluator=?", {
                 challenge_id,evaluator
             }).empty(),
@@ -162,14 +185,15 @@ namespace modelnet::security {
                 challenge_id,evaluator,std::to_string(UInt(ch,"expires_ms",INT64_MAX))
             });
             db.Event("evaluation-started",challenge_id,Object());
-            tx.Commit();
+            tx->Commit();
         }
+        const auto& ch=e["body"];
         auto allowed=[&]() {
             try {
                 const auto current=Policy::Load(db,NowMs());
                 current.Find(evaluator,"worker",db,NowMs());
                 current.Find(evaluator,"evaluator",db,NowMs());
-                return current.id==p.id&&db.Meta("runtime_available","1")=="1"&&db.Meta("paused","0")=="0"&&
+                return current.id==p.id&&EvaluationGranted(ReadLocalConfig(db))&&db.Meta("runtime_available","1")=="1"&&db.Meta("paused","0")=="0"&&
                 !db.AncestryRevoked(candidate,NowMs())&&!db.Revoked(challenge_id,NowMs())&&
                 static_cast<uint64_t>(NowMs())<UInt(ch,"expires_ms",INT64_MAX);
             }
@@ -204,7 +228,7 @@ namespace modelnet::security {
             auto report=Envelope("evaluation",body);
             AddSignature(report,key);
             Require(allowed(),"SEC_EVIDENCE_RELEASE_REVOKED");
-            ImportRecord(db,p,report,finished);
+            ImportCurrentEvidence(db,p,report,allowed);
             Database::Transaction tx(db);
             db.Exec("UPDATE evaluation_runs SET phase=?,report=? WHERE challenge=? AND evaluator=?",
             {
@@ -224,6 +248,12 @@ namespace modelnet::security {
             tx.Commit();
             throw;
         }
+    }
+    Json EvaluateChallenge(Database& db,const std::string& challenge_id,int64_t now) {
+        return Evaluate(db,challenge_id,now,false);
+    }
+    Json EvaluateCurrentChallenge(Database& db,const std::string& challenge_id) {
+        return Evaluate(db,challenge_id,0,true);
     }
     Json RunChannelCanary(Database& db,const std::string& channel,int64_t now) {
         const auto p=Policy::Load(db,now);

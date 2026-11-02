@@ -14,6 +14,8 @@ PlanRun RunApprovedPlan(Database& db, const Policy& policy, const KeyPair& key,
                         const std::string& composition, const std::string& package,
                         const std::string& request, const std::function<bool()>& allowed);
 Json EvaluateChallenge(Database& db, const std::string& challenge, int64_t now);
+/** Live Service admission samples current time only after serializing writes. */
+Json EvaluateCurrentChallenge(Database& db, const std::string& challenge);
 Json RunChannelCanary(Database& db, const std::string& channel, int64_t now);
 } // namespace modelnet::security
 #endif

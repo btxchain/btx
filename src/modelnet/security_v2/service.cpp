@@ -165,7 +165,7 @@ namespace modelnet::security {
                 Fields(request, {
                     "op","challenge"
                 });
-                return EvaluateChallenge(db,DigestField(request,"challenge"),now);
+                return EvaluateCurrentChallenge(db,DigestField(request,"challenge"));
             }
             if(op=="canary") {
                 Fields(request, {

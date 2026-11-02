@@ -2,6 +2,7 @@
 #ifndef BITCOIN_MODELNET_SECURITY_V2_TRUST_H
 #define BITCOIN_MODELNET_SECURITY_V2_TRUST_H
 #include <modelnet/security_v2/database.h>
+#include <functional>
 #include <map>
 #include <set>
 namespace modelnet::security {
@@ -34,6 +35,11 @@ struct Admission {
 };
 Admission AdmitCapsule(Database& db, const Policy& policy, const std::string& capsule_id, int64_t now);
 void ImportRecord(Database& db, const Policy& policy, const Json& envelope, int64_t now, bool from_peer = false);
+/** Live local evidence only: serialize current authority/expiry checks and time
+ * sampling. The callback runs inside the write transaction and must only inspect
+ * state. The explicit-time import and clock APIs retain their contracts. */
+void ImportCurrentEvidence(Database& db, const Policy& expected_policy, const Json& envelope,
+                           const std::function<bool()>& allowed);
 Json SecurityStatus(Database& db, const Policy& policy, const std::string& subject, int64_t now);
 } // namespace modelnet::security
 #endif

@@ -200,7 +200,7 @@ namespace modelnet::security {
         }
         Require(weights&&tokenizer&&config&&chat,"SEC_COMPOSITION_INCOMPLETE");
     }
-    void ImportRecord(Database& db,const Policy& p,const Json& e,int64_t now,bool peer) {
+    static std::string ValidateImport(Database& db,const Policy& p,const Json& e,int64_t now,bool peer) {
         ValidateEnvelope(e);
         auto kind=Text(e,"kind");
         const auto& b=e["body"];
@@ -379,7 +379,11 @@ namespace modelnet::security {
             DigestField(b,"journal_head");
         }
         else throw Error("SEC_RECORD_NOT_IMPORTABLE");
-        Database::Transaction tx(db);
+        return id;
+    }
+    static void StoreImport(Database& db,const Policy& p,const Json& e,const std::string& id,int64_t now) {
+        const auto kind=Text(e,"kind");
+        const auto& b=e["body"];
         db.CheckClock(now);
         std::string visibility="private";
         if(kind=="composition")visibility=Text(b,"visibility");
@@ -406,6 +410,28 @@ namespace modelnet::security {
             });
         }
         db.Event("record-imported",id,Object());
+    }
+    void ImportRecord(Database& db,const Policy& p,const Json& e,int64_t now,bool peer) {
+        const auto id=ValidateImport(db,p,e,now,peer);
+        Database::Transaction tx(db);
+        StoreImport(db,p,e,id,now);
+        tx.Commit();
+    }
+    void ImportCurrentEvidence(Database& db,const Policy& expected,const Json& e,
+    const std::function<bool()>& allowed) {
+        const auto kind=Text(e,"kind");
+        Require(kind=="receipt"||kind=="evaluation","SEC_EVIDENCE_KIND");
+        Database::Transaction tx(db);
+        const auto current=Policy::Load(db,NowMs());
+        Require(current.id==expected.id,"SEC_POLICY_CHANGED");
+        const auto id=ValidateImport(db,current,e,NowMs(),false);
+        Require(allowed(),"SEC_EVIDENCE_RELEASE_REVOKED");
+        // Event timestamps belong to the signed record. Persistence uses fresh
+        // serialized time, including after signature/authority validation.
+        const auto commit=NowMs();
+        Fresh(current.envelope["body"],commit,366ull*86400000);
+        Fresh(e["body"],commit,current.evidence_ttl_ms);
+        StoreImport(db,current,e,id,commit);
         tx.Commit();
     }
     Admission AdmitCapsule(Database& db,const Policy& p,const std::string& id,int64_t now) {
