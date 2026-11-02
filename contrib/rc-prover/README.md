@@ -129,8 +129,16 @@ transport such as SSH forwarding. GPU work remains serial and can delay other
 requests; admission backlog time is additional to the framing budget. Under
 heavy overload a connection may wait or time out at the OS layer. Bounded
 connection/memory limits and backpressure are not general denial-of-service
-protection, but full pending slots no longer cause accept-then-reset behavior. Socket/bind/listen/fatal listener errors are reported with operation
-and OS error code. Recoverable accept errors are logged and retried instead of terminating the
+protection, but full pending slots no longer cause accept-then-reset behavior.
+In [Jpp's macOS retest](https://github.com/btxchain/btx/pull/362#issuecomment-6573371622),
+a local process cycling 64 or more connections saturated pending slots and the
+backlog: 18 of 20 normal requests timed out with 10-30-second client timeouts.
+In the separately instrumented run, failures occurred during connect. At
+40-56 cycling connections, all 47 requests were answered. These are observations
+from that local workload, not portable capacity guarantees. The listener
+remains loopback-only; this overload limitation is not claimed to be solved.
+Socket/bind/listen/fatal listener errors are reported with operation and OS
+error code. Recoverable accept errors are logged and retried instead of terminating the
 verifier; resource/network exhaustion backs off, while peer resets retry
 without cumulative sleeps. Per-peer resets drop that
 peer; on platforms with SO_NOSIGPIPE, writes suppress SIGPIPE as well.
@@ -171,7 +179,10 @@ The standalone suite has three CTest entries:
   with an independent 3-second process watchdog. The byte check is framing
   coverage, not header parsing.
 * `btx_rc_request_listener`: starts a CPU-only listener probe with real sockets;
-  tests a complete request behind four idle peers and full 32-slot backpressure,
+  tests a complete request behind four idle peers and full 32-slot backpressure.
+  With all slots held by idle peers, the extra request must take at least
+  1 second and less than 6 seconds: this detects both a removed pending limit
+  and the former accept-then-reset behavior. It also covers
   16 concurrent requests during 32-peer reconnect churn (including full 64 KiB
   frames), an admitted partial frame challenged by 31 simultaneous refreshes
   and another connection, 40 resets, overlong input, incomplete-line expiry,
@@ -222,12 +233,13 @@ a narrowing error reported by [repch1c on macOS](https://github.com/btxchain/btx
 where `tv_usec` is an `int`. On the original commit with the same local fix,
 repch1c reports three successful transport-test runs (all seven cases), prover
 syntax compilation, and an oversize-check mutation caught by the tests. Those
-are reviewer-reported macOS results; no macOS run was performed here. In a
+are reviewer-reported results from that earlier revision. In a
 [later review](https://github.com/btxchain/btx/pull/362#issuecomment-6557778906),
 Jpp reports a complete macOS/Metal link, qualification and startup canary with
 successful malformed-request checks on the pre-policy-fix version plus the
-same timeout-initialization fix. Those runs do not qualify the new strict-policy
-build; real-GPU checks must be repeated after the policy change.
+same timeout-initialization fix. Those earlier runs do not qualify the
+strict-policy build; the later strict-policy retest and its memory-reserve
+limitation are recorded below.
 
 [repch1c subsequently tested 542f4d5 on macOS](https://github.com/btxchain/btx/pull/362#issuecomment-6559145656):
 all three standalone CTest entries passed, 100-second read/write deadline
@@ -238,6 +250,43 @@ led to the filled-FIFO and optional privileged owner fixtures above. Both guard
 removals now fail in isolated Linux tests, as do mode-check and O_NOFOLLOW
 removals. The isolated UID-ownership case remains a privileged Linux check; native Apple
 ACL validation for the current code is recorded in the validation results.
+
+The subsequent full-slot timing assertion passed three listener runs each on
+Windows/MSVC and Linux/GCC. With only `can_accept` forced to true in isolated
+probe builds, the old test still passed, while the new test failed at that
+assertion three times on each platform. No runtime source changed in this
+test/documentation follow-up.
+
+### Independent reviewer retests on 2 November 2026
+
+[repch1c retested d1664e6](https://github.com/btxchain/btx/pull/362#issuecomment-6572903232)
+on local macOS 26.6.2 / Apple M4 / Apple clang 21. The three standalone entries
+and both manually compiled CPU policy/handler tests passed three runs. ACL
+checks also accepted plain 0400 files and files whose ACL entry had been
+removed, while rejecting owner-only, group and deny entries. Removing the ACL
+guard, treating every ACL lookup failure as absence, restoring hard-coded
+policy fields or restoring the underscore failure-kind spelling made the
+corresponding tests fail. Reverting the listener fix caused resets, but removing
+the pending limit still passed the old test. His measured 1.92-1.95-second wait
+with the limit, versus an immediate response without it, motivated the new
+lower-bound assertion described above.
+
+[Jpp retested a12ae6f](https://github.com/btxchain/btx/pull/362#issuecomment-6573371622)
+(the same runtime code; README-only changes after d1664e6) on macOS arm64.
+He reports all four fixes holding, rejection of both explicit/inherited ACL
+cases, a normal request answered in 1.8 seconds behind 32 idle peers, and 5/5
+requests answered within 2 seconds against the earlier reconnect workload.
+The full in-tree prover linked on Metal; live status reported strict-device
+and CPU confirmation off. A wrong digest returned accel_failure /
+unconfirmed-digest-mismatch while readiness stayed true. Both in-tree tests
+passed three runs.
+
+**Qualification limit:** Jpp disabled the 25% workspace reserve locally to run
+on his 8 GB Mac, as in his earlier experiment. This is reviewer-reported full
+link and live Metal behavior under that local modification, not qualification
+with the unchanged production memory gate. He did not run the live not-ready
+path or the root-only owner fixture. The reserve in this PR remains unchanged;
+full supported-hardware qualification is still required.
 
 ### Policy and actual request-handler regression checks
 

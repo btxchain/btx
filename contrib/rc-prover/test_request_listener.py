@@ -30,8 +30,14 @@ def main():
         for peer in peers:
             peer.close()
         peers = [connect() for _ in range(32)]
-        time.sleep(0.1)  # Let the old implementation fill all pending slots.
+        time.sleep(0.1)  # Let the listener fill all pending slots.
+        start = time.monotonic()
         request(timeout=6)  # Wait in backlog instead of being reset at capacity.
+        elapsed = time.monotonic() - start
+        # No slot is freed until an idle peer's 2-second framing budget expires.
+        # A missing pending limit would serve this request immediately.
+        assert 1 <= elapsed < 6, f"full-slot backpressure missing or too slow: {elapsed:.3f}s"
+        print(f"full-slot backpressure: {elapsed:.3f}s", flush=True)
         for peer in peers:
             peer.close()
         peers = []
