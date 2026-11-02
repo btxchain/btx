@@ -16201,6 +16201,18 @@ BOOST_AUTO_TEST_CASE(snapshot_evicted_body_becomes_background_root)
     BOOST_REQUIRE(ready.recently_evicted);
     BOOST_REQUIRE(ready.budget_deferred); // no artificial 60-second expiry
     BOOST_TEST_MESSAGE("evicted height16 is now next root; fresh tombstone and active marker remain");
+    // Keep a real, unrelated request outstanding while the evicted body becomes
+    // the next background root. This exercises the in-flight return separately
+    // from the eviction-tombstone skip above it.
+    const CBlockIndex* unrelated{WITH_LOCK(::cs_main, return s.Index(39))};
+    BOOST_REQUIRE(!s.peerman.FetchBlock(s.archive->GetId(), *unrelated).has_value());
+    CNodeStateStats in_flight;
+    BOOST_REQUIRE(s.peerman.GetNodeStateStats(s.archive->GetId(), in_flight));
+    BOOST_REQUIRE(std::find(in_flight.vHeightInFlight.begin(), in_flight.vHeightInFlight.end(), 40) != in_flight.vHeightInFlight.end());
+    BOOST_TEST_MESSAGE("unrelated height40 request is in flight before the background-root walk");
+    s.connman.FlushSendBuffer(*s.archive);
+    s.archive->fPauseSend = false;
+
     std::vector<CBlock> headers;
     for (const CBlock& b : s.blocks) headers.emplace_back(b.GetBlockHeader());
     BOOST_REQUIRE(s.connman.ReceiveMsgFrom(
@@ -16208,7 +16220,7 @@ BOOST_AUTO_TEST_CASE(snapshot_evicted_body_becomes_background_root)
     (void)s.connman.ProcessMessagesOnce(*s.archive);
     s.connman.FlushSendBuffer(*s.archive);
     s.archive->fPauseSend = false;
-    std::set<uint256> requested;
+    std::set<uint256> requested{unrelated->GetBlockHash()};
     const auto collect_requests = [&] {
         for (const uint256& hash : QueuedGetDataHashes(*s.archive)) requested.insert(hash);
         LOCK(s.archive->cs_vSend);
@@ -16233,6 +16245,9 @@ BOOST_AUTO_TEST_CASE(snapshot_evicted_body_becomes_background_root)
     // source, rather than whether this cooldown permits forward progress.
     for (int tick = 0; tick < 40 && s.BackgroundHeight() < 40; ++tick) {
         for (size_t i = 0; i < s.blocks.size(); ++i) {
+            // Withhold the outstanding snapshot-base body until it is the
+            // next background root; early base delivery is not this test.
+            if (i == 39 && s.BackgroundHeight() < 39) continue;
             if (!requested.erase(s.blocks.at(i).GetHash())) continue;
             s.Deliver(i, /*request=*/false);
             {
