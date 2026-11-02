@@ -88,6 +88,16 @@ void ApplyHelperNetworkInfo(HelperStatus& st, const UniValue& result);
 bool ArgvContainsWalletMaterial(const std::vector<std::string>& argv);
 int NextBackoffMs(int fail_count, uint32_t jitter);
 
+/** File name of the packaged helper on this platform. */
+#ifdef WIN32
+inline constexpr char MODELD_FILE_NAME[]{"btx-modeld.exe"};
+#else
+inline constexpr char MODELD_FILE_NAME[]{"btx-modeld"};
+#endif
+/** Directory of the running executable. Empty where the platform gives no way to read it. */
+fs::path SelfExeDir();
+/** The helper next to a btxd in dir, or in the libexec/ and bin/ layouts around it. Empty if none. */
+fs::path FindPackagedModeldIn(const fs::path& dir);
 fs::path FindPackagedModeld(const fs::path& override_path);
 
 class HelperSupervisor {

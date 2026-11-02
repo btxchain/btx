@@ -32,12 +32,16 @@
 #include <mach-o/dyld.h>
 #endif
 extern char** environ;
+#else
+#include <windows.h>
 #endif
 
 namespace modelnet {
 namespace {
 
 HelperSupervisor* g_managed = nullptr;
+
+} // namespace
 
 fs::path SelfExeDir()
 {
@@ -57,9 +61,17 @@ fs::path SelfExeDir()
         return fs::path(buf).parent_path();
     }
 #endif
+#else
+    std::vector<wchar_t> buf(32768);
+    const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n > 0 && n < buf.size()) {
+        return fs::path(std::wstring(buf.data(), n)).parent_path();
+    }
 #endif
     return {};
 }
+
+namespace {
 
 bool SocketReady(const fs::path& sock, std::string& err)
 {
@@ -219,23 +231,27 @@ int NextBackoffMs(int fail_count, uint32_t jitter)
     return base + extra;
 }
 
+fs::path FindPackagedModeldIn(const fs::path& dir)
+{
+    const fs::path cands[] = {
+        dir / MODELD_FILE_NAME,
+        dir / "libexec" / MODELD_FILE_NAME,
+        dir.parent_path() / "libexec" / MODELD_FILE_NAME,
+        dir.parent_path() / "bin" / MODELD_FILE_NAME,
+    };
+    for (const auto& c : cands) {
+        if (!c.empty() && fs::exists(c)) return c;
+    }
+    return {};
+}
+
 fs::path FindPackagedModeld(const fs::path& override_path)
 {
     if (!override_path.empty()) {
         if (fs::exists(override_path)) return override_path;
         return {};
     }
-    const fs::path dir = SelfExeDir();
-    const fs::path cands[] = {
-        dir / "btx-modeld",
-        dir / "libexec" / "btx-modeld",
-        dir.parent_path() / "libexec" / "btx-modeld",
-        dir.parent_path() / "bin" / "btx-modeld",
-    };
-    for (const auto& c : cands) {
-        if (!c.empty() && fs::exists(c)) return c;
-    }
-    return {};
+    return FindPackagedModeldIn(SelfExeDir());
 }
 
 void SetManagedSupervisor(HelperSupervisor* p)
