@@ -19,6 +19,9 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include "token_acl_apple.h"
+#endif
 #endif
 
 namespace rc_prover {
@@ -91,6 +94,9 @@ inline std::string LoadPrivateToken(const std::filesystem::path& path)
     struct CloseFile { int value; ~CloseFile() { close(value); } } file{fd};
     struct stat info{};
     if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != geteuid() || (info.st_mode & 0077)) throw std::runtime_error("token file must be owned by this user with mode 0600 or 0400");
+#ifdef __APPLE__
+    CheckAppleTokenAcl(fd);
+#endif
     for (;;) {
         const ssize_t count{read(fd, buffer, sizeof(buffer))};
         if (count < 0) { if (errno == EINTR) continue; throw std::runtime_error("cannot read token file"); }

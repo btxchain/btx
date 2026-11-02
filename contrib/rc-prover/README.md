@@ -49,15 +49,22 @@ execution as independent local consensus validation.
 * An IPv4 loopback-only listener with a required token file (32..4096 bytes).
   The loader checks the same opened file it reads: POSIX requires this user's
   regular file with no group/other permission bits (normally 0600/0400);
-  Windows rejects reparse points and requires
+  Apple additionally requires no extended ACL entries, including inherited,
+  owner-only and deny entries. The check uses the same opened fd; Darwin's
+  absent-ACL ENOENT result is allowed, while real lookup/enumeration errors
+  refuse startup. Use a plain private token file (clear unwanted Apple ACLs
+  with `chmod -N` on that file). Windows rejects reparse points and requires
   an owner/DACL restricted to the current user, SYSTEM and local Administrators.
   It refuses unsupported ACL entries rather than guessing effective access.
   Use a separate token for this service, not a wallet or RPC password. Token
   comparison uses `TimingResistantEqual`.
 * One JSON line and one reply per connection. Calls are serialized. The maximum
   request line is 64 KiB. A nonblocking framing loop permits at most 32 pending
-  connections, each with a 2-second absolute framing budget. Waiting peers do not
-  each own the GPU worker. Time spent outside the framing loop on a serial
+  connections, each with a 2-second absolute framing budget after acceptance.
+  At capacity the listener is not polled: new connections wait in the OS backlog
+  until capacity is released. An admitted frame is never evicted to make room
+  for another unauthenticated connection. Waiting peers do not each own the GPU
+  worker. Time spent outside the framing loop on a serial
   dispatch is excluded from other peers' framing budgets. Replies have a
   separate 5-second write deadline. No per-connection threads are created.
 * Invalid JSON, missing authentication, unsupported operations and provider
@@ -104,7 +111,10 @@ A replay reply includes `id`, `ok`, `outcome`, `failure_kind`, `height`, `profil
 `protocol_error`. Cheap header rejection returns `invalid` before replay and may
 omit replay-only fields. Protocol errors may omit `id` and must not be accepted.
 The status reply's `ok:true` means that the status request was processed;
-**`ready` is the health indicator**. Status also reports policy and workspace.
+**`ready` is the health indicator**. Status reports the live execution-policy
+and CPU-confirmation getters, plus workspace. `failure_kind` uses the library's
+canonical hyphenated names (for example `provider-unavailable`); the independent
+`error` field keeps identifiers such as `provider_unavailable` for compatibility.
 
 Only this execution's in-tree result supplies a successful verdict. These are
 unsigned replies, not trusted-mirror attestations. The caller remains
@@ -116,8 +126,10 @@ but only verifies; it does not generate a succinct proof.
 No network encryption is implemented here. The listener is hard-bound to
 loopback; remote access must use an independently protected operator-owned
 transport such as SSH forwarding. GPU work remains serial and can delay other
-requests; bounded connection/memory limits are not a general denial-of-service
-protection. Socket/bind/listen/fatal listener errors are reported with operation
+requests; admission backlog time is additional to the framing budget. Under
+heavy overload a connection may wait or time out at the OS layer. Bounded
+connection/memory limits and backpressure are not general denial-of-service
+protection, but full pending slots no longer cause accept-then-reset behavior. Socket/bind/listen/fatal listener errors are reported with operation
 and OS error code. Recoverable accept errors are logged and retried instead of terminating the
 verifier; resource/network exhaustion backs off, while peer resets retry
 without cumulative sleeps. Per-peer resets drop that
@@ -159,14 +171,20 @@ The standalone suite has three CTest entries:
   with an independent 3-second process watchdog. The byte check is framing
   coverage, not header parsing.
 * `btx_rc_request_listener`: starts a CPU-only listener probe with real sockets;
-  tests a complete request behind four idle peers, 40 resets, overlong input,
-  incomplete-line expiry, and pending framing across a synthetic slow dispatch.
+  tests a complete request behind four idle peers and full 32-slot backpressure,
+  16 concurrent requests during 32-peer reconnect churn (including full 64 KiB
+  frames), an admitted partial frame challenged by 31 simultaneous refreshes
+  and another connection, 40 resets, overlong input, incomplete-line expiry,
+  and pending framing across a synthetic slow dispatch.
   It also checks classification of recoverable and fatal accept errors.
 * `btx_rc_token_file`: tests synthetic private tokens, CRLF/length limits,
   directory/missing-file rejection and public-access rejection using real
   Windows ACLs or POSIX mode bits. POSIX also tests symlink rejection and a
   FIFO containing a valid-length token with its writer closed: removing S_ISREG
   must make that fixture fail, independently of token size or read errors.
+  Apple fixtures additionally test explicit read grants, inherited read grants,
+  deny-only ACLs, cleanup back to a valid plain token, and invalid-fd inspection
+  failure. These use actual OS ACL APIs/commands, not mocked ACL contents.
   An optional POSIX owner fixture runs only with effective UID 0; it reads a
   synthetic 0600 token owned by numeric UID 1. No account is created. Without
   privileges this isolated owner case reports an explicit SKIP. In an isolated
@@ -235,7 +253,9 @@ header prechecks, and mismatch/success/execution-fault/unavailable sequences.
 Rejected requests must not call replay or change readiness. It round-trips an
 actual serialized header with nNonce64 = UINT64_MAX; this is separate from the
 transport byte check. It also verifies that a status response may be processed
-successfully while ready is false. Both test executables passed on
+successfully while ready is false, canonical failure names, and live status
+changes between auto-fallback, configured strict-device and CPU diagnostic
+policies with different confirmation settings. Both test executables passed on
 Windows/clang-cl and Linux/GCC (`-Wall -Wextra -Werror`).
 
 These tests do not run the actual production main/qualification path, perform

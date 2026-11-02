@@ -3,11 +3,13 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
 """Real loopback listener regression; no authentication, node or GPU."""
+import concurrent.futures
 import socket
 import struct
 import subprocess
 import sys
 import time
+import threading
 
 
 def main():
@@ -15,16 +17,83 @@ def main():
     peers = []
     try:
         port = int(process.stdout.readline())
-        def connect():
-            return socket.create_connection(("127.0.0.1", port), timeout=3)
-        def request(data=b"status\n"):
-            with connect() as peer:
+        def connect(timeout=3):
+            return socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        def request(data=b"status\n", timeout=3):
+            with connect(timeout) as peer:
                 peer.sendall(data)
                 assert peer.recv(32) == b"ok\n"
         peers = [connect() for _ in range(4)]
         start = time.monotonic()
         request()
         assert time.monotonic() - start < 1, "idle peers blocked complete request"
+        for peer in peers:
+            peer.close()
+        peers = [connect() for _ in range(32)]
+        time.sleep(0.1)  # Let the old implementation fill all pending slots.
+        request(timeout=6)  # Wait in backlog instead of being reset at capacity.
+        for peer in peers:
+            peer.close()
+        peers = []
+        # A refresh/reconnect attack must not preempt an admitted partial frame.
+        peers = [connect() for _ in range(31)]
+        for peer in peers:
+            peer.sendall(b"x")
+        time.sleep(0.03)
+        with connect() as victim:
+            victim.sendall(b"sta")
+            time.sleep(0.03)
+            for peer in peers:
+                peer.sendall(b"x")
+            time.sleep(0.03)
+            with connect() as extra:
+                victim.sendall(b"tus\n")
+                assert victim.recv(32) == b"ok\n", "admitted partial frame evicted"
+        for peer in peers:
+            peer.close()
+        peers = []
+        stop = threading.Event()
+        primed = threading.Event()
+        churn_errors = []
+        def churn():
+            slots = []
+            try:
+                for _ in range(32):
+                    peer = connect()
+                    peer.sendall(b"x")  # Alternate attack: incomplete non-empty frames.
+                    slots.append(peer)
+                primed.set()
+                index = 0
+                while not stop.wait(0.005):
+                    slots[index].close()
+                    slots[index] = connect(timeout=6)
+                    slots[index].sendall(b"x")
+                    index = (index + 1) % len(slots)
+            except Exception as exc:
+                churn_errors.append(str(exc))
+                primed.set()
+            finally:
+                for peer in slots:
+                    peer.close()
+        attacker = threading.Thread(target=churn)
+        attacker.start()
+        try:
+            assert primed.wait(3), "churn peer setup timed out"
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as clients:
+                futures = [clients.submit(request, b"x" * 65536 + b"\n" if i % 4 == 0 else b"status\n", 6)
+                           for i in range(16)]
+                for future in futures:
+                    future.result(timeout=8)
+            with connect(timeout=6) as partial:
+                partial.sendall(b"sta")
+                time.sleep(0.03)
+                partial.sendall(b"tus\n")
+                assert partial.recv(32) == b"ok\n", "progressing frame lost under churn"
+        finally:
+            stop.set()
+            attacker.join(timeout=8)
+        assert not attacker.is_alive() and not churn_errors, churn_errors
+        request()
         for _ in range(40):
             peer = connect()
             peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
@@ -56,7 +125,7 @@ def main():
         with connect() as peer:
             peer.sendall(b"quit\n")
         assert process.wait(timeout=3) == 0
-        print("idle-peer isolation, reset recovery, size/deadline limits and dispatch pause passed")
+        print("idle/full-slot/churn admission, reset recovery, size/deadline limits and dispatch pause passed")
         return 0
     finally:
         for peer in peers:

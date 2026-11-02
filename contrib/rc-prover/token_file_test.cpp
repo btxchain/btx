@@ -6,6 +6,12 @@
 
 int main(int argc, char** argv)
 {
+#ifdef __APPLE__
+    if (argc == 2 && std::string(argv[1]) == "--invalid-acl-fd") {
+        try { rc_prover::CheckAppleTokenAcl(-1); } catch (const std::exception&) { return 0; }
+        return 5;
+    }
+#endif
     if (argc != 3) return 2;
     const bool expected{std::string(argv[2]) == "accept"};
     try {

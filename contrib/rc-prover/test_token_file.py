@@ -27,6 +27,8 @@ def main():
                 "*S-1-5-18:(F)", "*S-1-5-32-544:(F)")
         else:
             token.chmod(0o600)
+            if sys.platform == "darwin":
+                subprocess.run(["chmod", "-N", str(token)], check=True)
         def check(path, accept):
             subprocess.run([exe, str(path), "accept" if accept else "reject"], check=True, timeout=3)
         check(token, True)
@@ -45,6 +47,37 @@ def main():
             token.chmod(0o644)
             check(token, False)
             token.chmod(0o600)
+            if sys.platform == "darwin":
+                def chmod_acl(*args):
+                    subprocess.run(["chmod", *args], check=True)
+                for entry in ["everyone allow read", "everyone deny delete"]:
+                    chmod_acl("+a", entry, str(token))
+                    try:
+                        assert token.stat().st_mode & 0o777 == 0o600
+                        print("CASE: macOS non-empty extended ACL: " + entry, flush=True)
+                        check(token, False)
+                    finally:
+                        chmod_acl("-N", str(token))
+                    check(token, True)
+                inherited_dir = root / "inherited"
+                inherited_dir.mkdir(mode=0o700)
+                chmod_acl("+a", "everyone allow read,file_inherit", str(inherited_dir))
+                inherited = inherited_dir / "token"
+                inherited.write_bytes(b"x" * 32)
+                inherited.chmod(0o600)
+                try:
+                    listing = subprocess.check_output(["ls", "-le", str(inherited)], text=True)
+                    assert any(line.lstrip().split(":", 1)[0].isdigit() and "inherited" in line
+                               for line in listing.splitlines()), "fixture did not inherit an ACL"
+                    assert inherited.stat().st_mode & 0o777 == 0o600
+                    print("CASE: macOS inherited extended ACL", flush=True)
+                    check(inherited, False)
+                finally:
+                    chmod_acl("-N", str(inherited))
+                    chmod_acl("-N", str(inherited_dir))
+                check(inherited, True)
+                subprocess.run([exe, "--invalid-acl-fd"], check=True, timeout=3)
+                print("macOS explicit/inherited/deny ACL and lookup-error rejection passed")
             link = root / "link"
             link.symlink_to(token)
             check(link, False)

@@ -56,14 +56,16 @@ inline UniValue HandleRequest(const UniValue& request, const Consensus::Params& 
         out.pushKV("ready", state.ready);
         out.pushKV("provider", state.provider);
         out.pushKV("canary", state.canary);
-        out.pushKV("execution_policy", "strict-device");
-        out.pushKV("cpu_confirmation", false);
+        out.pushKV("execution_policy", matmul::v4::rc::RCExactReplayExecutionPolicyName(
+            matmul::v4::rc::GetRCExactReplayExecutionPolicy()));
+        out.pushKV("cpu_confirmation", matmul::v4::rc::GetRCExactReplayCpuConfirmation());
         out.pushKV("workspace_required", state.workspace_required);
         out.pushKV("workspace_capacity", state.workspace_capacity);
         return out;
     }
     if (op != "verify") return Error("unsupported_op");
-    if (!state.ready) return Error("provider_unavailable", "accel_failure", "provider_unavailable");
+    if (!state.ready) return Error("provider_unavailable", "accel_failure",
+        matmul::v4::rc::RCExactReplayFailureKindName(matmul::v4::rc::RCExactReplayFailureKind::ProviderUnavailable));
     if (!request["header"].isStr() || !request["height"].isNum() || !request["id"].isNum()) return Error("missing_verify_fields");
     const int64_t id{request["id"].getInt<int64_t>()};
     const int32_t height{request["height"].getInt<int32_t>()};

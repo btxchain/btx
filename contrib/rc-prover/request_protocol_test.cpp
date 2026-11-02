@@ -7,15 +7,32 @@
 #include <limits>
 
 namespace matmul::v4::rc {
+namespace {
+RCExactReplayExecutionPolicy test_policy{RCExactReplayExecutionPolicy::AutoFallback};
+bool test_cpu_confirmation{true};
+}
+void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy) { test_policy = policy; }
+RCExactReplayExecutionPolicy GetRCExactReplayExecutionPolicy() { return test_policy; }
+void SetRCExactReplayCpuConfirmation(bool enabled) { test_cpu_confirmation = enabled; }
+bool GetRCExactReplayCpuConfirmation() { return test_cpu_confirmation; }
+const char* RCExactReplayExecutionPolicyName(RCExactReplayExecutionPolicy policy)
+{
+    switch (policy) {
+    case RCExactReplayExecutionPolicy::StrictDevice: return "strict-device";
+    case RCExactReplayExecutionPolicy::AutoFallback: return "auto-fallback";
+    case RCExactReplayExecutionPolicy::CpuDiagnostic: return "cpu-diagnostic";
+    }
+    return "unknown";
+}
 RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params&, int32_t) { return {}; }
 bool ValidateRCEpisodeParams(const RCEpisodeParams&) { return true; }
 const char* RCExactReplayFailureKindName(RCExactReplayFailureKind kind)
 {
     switch (kind) {
     case RCExactReplayFailureKind::None: return "none";
-    case RCExactReplayFailureKind::ExecutionFailure: return "execution_failure";
-    case RCExactReplayFailureKind::UnconfirmedDigestMismatch: return "unconfirmed_digest_mismatch";
-    case RCExactReplayFailureKind::ProviderUnavailable: return "provider_unavailable";
+    case RCExactReplayFailureKind::ExecutionFailure: return "execution-failure";
+    case RCExactReplayFailureKind::UnconfirmedDigestMismatch: return "unconfirmed-digest-mismatch";
+    case RCExactReplayFailureKind::ProviderUnavailable: return "provider-unavailable";
     case RCExactReplayFailureKind::Cancelled: return "cancelled";
     }
     return "unknown";
@@ -94,18 +111,31 @@ int main()
         header.matmul_digest.SetNull(); reject(make(), "invalid"); header.matmul_digest.begin()[0] = 3;
         if (!run(make())["ok"].get_bool() || calls != 1) return 2;
         failure = RCExactReplayFailureKind::UnconfirmedDigestMismatch;
-        if (run(make())["ok"].get_bool() || !state.ready) return 3;
+        const auto mismatch{run(make())};
+        if (mismatch["ok"].get_bool() || !state.ready ||
+            mismatch["failure_kind"].get_str() != "unconfirmed-digest-mismatch") return 3;
         failure = RCExactReplayFailureKind::None;
         if (!run(make())["ok"].get_bool()) return 4;
         failure = RCExactReplayFailureKind::ExecutionFailure;
-        if (run(make())["ok"].get_bool() || state.ready) return 5;
+        const auto execution_fault{run(make())};
+        if (execution_fault["ok"].get_bool() || state.ready ||
+            execution_fault["failure_kind"].get_str() != "execution-failure") return 5;
         const auto before{calls};
         const auto unavailable{run(make())};
         if (unavailable["error"].get_str() != "provider_unavailable" ||
-            unavailable["failure_kind"].get_str() != "provider_unavailable" || calls != before) return 6;
+            unavailable["failure_kind"].get_str() != "provider-unavailable" || calls != before) return 6;
         request = make(); request.pushKV("op", "status");
         const auto status{run(request)};
         if (!status["ok"].get_bool() || status["ready"].get_bool()) return 7;
+        if (status["execution_policy"].get_str() != "auto-fallback" ||
+            !status["cpu_confirmation"].get_bool()) return 9;
+        rc_prover::ConfigureReplayPolicy();
+        const auto strict{run(request)};
+        if (strict["execution_policy"].get_str() != "strict-device" || strict["cpu_confirmation"].get_bool()) return 10;
+        SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy::CpuDiagnostic);
+        SetRCExactReplayCpuConfirmation(true);
+        const auto diagnostic{run(request)};
+        if (diagnostic["execution_policy"].get_str() != "cpu-diagnostic" || !diagnostic["cpu_confirmation"].get_bool()) return 11;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "%s\n", e.what());
         return 8;

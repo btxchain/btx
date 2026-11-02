@@ -98,7 +98,10 @@ public:
             std::erase_if(m_pending, [&](const Pending& p) { return p.deadline <= now; });
             fd_set reads;
             FD_ZERO(&reads);
-            FD_SET(m_listener.Get(), &reads);
+            // At capacity, leave new connections in the bounded OS backlog.
+            // Never accept-then-reset or evict an admitted partial frame.
+            const bool can_accept{m_pending.size() < MAX_PENDING};
+            if (can_accept) FD_SET(m_listener.Get(), &reads);
             Socket highest{m_listener.Get()};
             for (const auto& p : m_pending) {
                 FD_SET(p.socket->Get(), &reads);
@@ -143,7 +146,7 @@ public:
                 }
                 ++i;
             }
-            if (FD_ISSET(m_listener.Get(), &reads)) {
+            if (can_accept && FD_ISSET(m_listener.Get(), &reads)) {
                 auto client{std::make_unique<OwnedSocket>(accept(m_listener.Get(), nullptr, nullptr))};
                 if (!client->Valid()) {
                     const int error{SocketError()};
@@ -156,7 +159,7 @@ public:
 #ifndef _WIN32
                 if (client->Get() >= FD_SETSIZE) continue;
 #endif
-                if (m_pending.size() >= MAX_PENDING || !NonBlocking(client->Get())) continue;
+                if (!NonBlocking(client->Get())) continue;
                 m_pending.push_back({std::move(client), {}, std::chrono::steady_clock::now() + std::chrono::seconds(2)});
             }
         }
