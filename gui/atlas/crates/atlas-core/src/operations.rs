@@ -115,6 +115,12 @@ const SECRET_METHODS: &[&str] = &[
     "walletprocesspsbt",
     "signrawtransactionwithkey",
     "listdescriptors",
+    "signmessagewithprivkey",
+    "sweepprivkeys",
+    "sethdseed",
+    "exportwalletbundle",
+    "restorewalletbundle",
+    "restorewalletbundlearchive",
 ];
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -176,13 +182,47 @@ impl Request {
             // native dialog still shows wallet, timeout, destination/message and switches.
             let mut shown = p.clone();
             let positions: &[usize] = match self.method.as_str() {
-                "walletpassphrase" | "encryptwallet" | "importprivkey" => &[0],
+                "walletpassphrase"
+                | "encryptwallet"
+                | "importprivkey"
+                | "signmessagewithprivkey" => &[0],
                 "walletpassphrasechange" => &[0, 1],
                 "createwallet" => &[3],
-                "migratewallet" => &[1],
+                "migratewallet" | "sethdseed" | "exportwalletbundle" => &[1],
                 "signrawtransactionwithkey" => &[1],
+                "restorewalletbundle" => &[4],
+                "restorewalletbundlearchive" => &[2],
                 _ => &[],
             };
+            // Named credentials are hidden at every depth: sweepprivkeys takes them
+            // inside its first positional object, and options objects nest them too.
+            const CREDENTIAL_NAMES: &[&str] = &[
+                "passphrase",
+                "oldpassphrase",
+                "newpassphrase",
+                "wallet_passphrase",
+                "archive_passphrase",
+                "private_keys",
+                "privkeys",
+                "privkey",
+                "privatekey",
+                "seed",
+            ];
+            fn hide_names(value: &mut Value) {
+                match value {
+                    Value::Object(o) => {
+                        for (name, v) in o.iter_mut() {
+                            if CREDENTIAL_NAMES.contains(&name.as_str()) {
+                                *v = json!("[credential hidden]");
+                            } else {
+                                hide_names(v);
+                            }
+                        }
+                    }
+                    Value::Array(a) => a.iter_mut().for_each(hide_names),
+                    _ => {}
+                }
+            }
             // The node turns an object key "args" into the positional array
             // (transformNamedArguments). Hide the same indexes there.
             fn hide_positions(values: &mut [Value], positions: &[usize]) {
@@ -199,19 +239,8 @@ impl Request {
                 if let Some(args) = o.get_mut("args").and_then(Value::as_array_mut) {
                     hide_positions(args, positions);
                 }
-                for name in [
-                    "passphrase",
-                    "oldpassphrase",
-                    "newpassphrase",
-                    "private_keys",
-                    "privkeys",
-                    "privkey",
-                ] {
-                    if o.contains_key(name) {
-                        o.insert(name.into(), json!("[credential hidden]"));
-                    }
-                }
             }
+            hide_names(&mut shown);
             let body = serde_json::to_string_pretty(&shown)
                 .map_err(|_| Error::new("JSON", "Cannot show request"))?;
             if body.len() > 12000 {
@@ -284,6 +313,118 @@ fn private_flag(params: &Value) -> bool {
             .get("args")
             .filter(|args| args.is_array())
             .is_some_and(on)
+}
+/// Signing options of a `walletprocesspsbt` request for the native dialog.
+/// The dialog shows the PSBT only as a hash and a transaction skeleton, so the
+/// other parameters (sighash type, HTLC presign, timelock adjustment, P2MR leaf)
+/// are listed here, with a warning for anything that changes what is signed.
+pub fn psbt_sign_summary(params: &Value, decoded: &Value) -> String {
+    let mut shown = params.clone();
+    let hidden = json!("[PSBT, see SHA-256 above]");
+    if let Some(a) = shown.as_array_mut() {
+        if let Some(p) = a.get_mut(0) {
+            *p = hidden.clone();
+        }
+    }
+    if let Some(o) = shown.as_object_mut() {
+        if o.contains_key("psbt") {
+            o.insert("psbt".into(), hidden.clone());
+        }
+        if let Some(p) = o
+            .get_mut("args")
+            .and_then(Value::as_array_mut)
+            .and_then(|a| a.get_mut(0))
+        {
+            *p = hidden;
+        }
+    }
+    fn collect(v: &Value, key: &str, out: &mut Vec<Value>) {
+        match v {
+            Value::Object(o) => {
+                for (k, x) in o {
+                    if k == key {
+                        out.push(x.clone());
+                    }
+                    collect(x, key, out);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| collect(x, key, out)),
+            _ => {}
+        }
+    }
+    let mut sighash = Vec::new();
+    collect(&shown, "sighashtype", &mut sighash);
+    // Positional form: walletprocesspsbt "psbt" sign "sighashtype" ...
+    let positional = shown
+        .as_array()
+        .or_else(|| shown.get("args").and_then(Value::as_array));
+    if let Some(s) = positional.and_then(|a| a.get(2)).filter(|v| v.is_string()) {
+        sighash.push(s.clone());
+    }
+    if let Some(inputs) = decoded.get("inputs").and_then(Value::as_array) {
+        for i in inputs {
+            if let Some(s) = i.get("sighash") {
+                sighash.push(s.clone());
+            }
+        }
+    }
+    let mut warnings = Vec::new();
+    if sighash.iter().filter_map(Value::as_str).any(|s| {
+        let s = s.to_ascii_uppercase();
+        s.contains("NONE") || s.contains("SINGLE") || s.contains("ANYONECANPAY")
+    }) {
+        warnings.push("Sighash type does not commit to all inputs and outputs: the signature can be reused in a different transaction.");
+    }
+    let mut flagged = |key: &str, text: &'static str| {
+        let mut values = Vec::new();
+        collect(&shown, key, &mut values);
+        if values.iter().any(|v| v.as_bool() == Some(true)) {
+            warnings.push(text);
+        }
+    };
+    flagged(
+        "htlc_presign",
+        "HTLC claim presign: signs a claim before the preimage is known.",
+    );
+    flagged(
+        "allow_unconfirmed_funding",
+        "Presign against unconfirmed or unknown funding.",
+    );
+    flagged(
+        "allow_late_claim",
+        "Presign although the refund path may already be final.",
+    );
+    flagged(
+        "adjust_timelocks",
+        "Timelocks may be raised: the signed txid can differ from the skeleton above.",
+    );
+    let options = serde_json::to_string_pretty(&shown).unwrap_or_else(|_| "unavailable".into());
+    let sighash_text = if sighash.is_empty() {
+        "default".to_owned()
+    } else {
+        sighash
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = format!(
+        "Sighash: {sighash_text}
+Parameters:
+{options}"
+    );
+    for w in warnings {
+        out.push_str(
+            "
+WARNING: ",
+        );
+        out.push_str(w);
+    }
+    out
 }
 pub fn agent_read_allowed(method: &str) -> bool {
     AGENT_READS.contains(&method)
@@ -397,6 +538,9 @@ impl PreparedStore {
                 | "backupwallet"
                 | "backupwalletbundle"
                 | "backupwalletbundlearchive"
+                | "exportwalletbundle"
+                | "dumpmasterprivkey"
+                | "z_exportviewingkey"
         ) || (matches!(request.method.as_str(), "listdescriptors" | "gethdkeys")
             && private_flag(&p))
         {
@@ -471,6 +615,36 @@ mod tests {
         }
     }
     #[test]
+    fn psbt_sign_summary_shows_options_and_warns() {
+        let decoded = json!({"inputs":[{"sighash":"NONE|ANYONECANPAY"}]});
+        let s = psbt_sign_summary(
+            &json!(["cHNidP8BAA==", true, "NONE|ANYONECANPAY"]),
+            &json!({}),
+        );
+        assert!(!s.contains("cHNidP8BAA=="));
+        assert!(s.contains("Sighash: NONE|ANYONECANPAY"));
+        assert!(s.contains("WARNING: Sighash type does not commit"));
+        let s = psbt_sign_summary(
+            &json!({"psbt":"cHNidP8BAA==","htlc_presign":true,"adjust_timelocks":true}),
+            &json!({}),
+        );
+        assert!(!s.contains("cHNidP8BAA=="));
+        assert!(s.contains("WARNING: HTLC claim presign"));
+        assert!(s.contains("WARNING: Timelocks may be raised"));
+        let s = psbt_sign_summary(
+            &json!({"args":["cHNidP8BAA==", true, "ALL|ANYONECANPAY"]}),
+            &json!({}),
+        );
+        assert!(s.contains("ALL|ANYONECANPAY") && s.contains("WARNING: Sighash type"));
+        let s = psbt_sign_summary(&json!(["cHNidP8BAA=="]), &decoded);
+        assert!(
+            s.contains("WARNING: Sighash type"),
+            "sighash from the PSBT inputs"
+        );
+        let s = psbt_sign_summary(&json!(["cHNidP8BAA==", true]), &json!({"inputs":[{}]}));
+        assert!(s.contains("Sighash: default") && !s.contains("WARNING"));
+    }
+    #[test]
     fn read_is_not_prefix() {
         assert!(!read_allowed("getnewaddress", &json!([])));
         assert!(!read_allowed("getmodel", &json!([])));
@@ -509,6 +683,34 @@ mod tests {
             "decoderesourceuri",
         ] {
             assert!(!read_allowed(method, &json!(["/tmp/x"])));
+        }
+    }
+    #[test]
+    fn seed_and_viewing_key_export_denied() {
+        // exportwalletbundle writes plaintext PQ master seed material,
+        // dumpmasterprivkey prints the master key and z_exportviewingkey a
+        // shielded viewing key.
+        for (method, params) in [
+            ("exportwalletbundle", r#"["/tmp/w.btxwallet"]"#),
+            (
+                "exportwalletbundle",
+                r#"{"bundle_file":"/tmp/w.btxwallet"}"#,
+            ),
+            ("dumpmasterprivkey", "[]"),
+            ("z_exportviewingkey", r#"["btxrt1example"]"#),
+        ] {
+            let mut s = PreparedStore::default();
+            match s.prepare(
+                Request {
+                    method: method.into(),
+                    params_json: params.into(),
+                    wallet: None,
+                },
+                1,
+            ) {
+                Err(e) => assert_eq!(e.code, "KEY_EXPORT_DENIED", "{method}"),
+                Ok(_) => panic!("{method} was prepared"),
+            }
         }
     }
     #[test]
@@ -683,6 +885,47 @@ mod tests {
         assert!(!summary.contains("secret-passphrase"));
         assert!(summary.contains("[credential hidden]"));
         assert!(summary.contains("60"));
+    }
+    #[test]
+    fn bundle_and_key_credentials_hidden_in_summary() {
+        let secret = "secret-credential-value";
+        let cases = [
+            ("exportwalletbundle", json!(["/tmp/w.btxwallet", secret])),
+            (
+                "restorewalletbundle",
+                json!(["w", "/tmp/w.btxwallet", null, null, secret]),
+            ),
+            (
+                "restorewalletbundlearchive",
+                json!(["w", "/tmp/w.archive", secret]),
+            ),
+            ("restorewalletbundle", json!({"wallet_passphrase": secret})),
+            (
+                "restorewalletbundlearchive",
+                json!({"args": ["w", "/tmp/w.archive", secret]}),
+            ),
+            ("signmessagewithprivkey", json!([secret, "message"])),
+            ("sethdseed", json!([true, secret])),
+            (
+                "sweepprivkeys",
+                json!([{"privkeys": [secret], "label": "x"}]),
+            ),
+            ("sweepprivkeys", json!({"options": {"privkeys": [secret]}})),
+        ];
+        for (method, params) in cases {
+            let request = Request {
+                method: method.into(),
+                params_json: params.to_string(),
+                wallet: None,
+            };
+            let summary = request.summary().unwrap();
+            assert!(
+                !summary.contains(secret),
+                "{method} {params} shows the credential"
+            );
+            assert!(summary.contains("[credential hidden]"), "{method} {params}");
+            assert!(request.sensitive(), "{method} is not marked sensitive");
+        }
     }
     #[test]
     fn state() {

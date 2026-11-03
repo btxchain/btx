@@ -202,6 +202,68 @@ def test_embed_out_weight_moves_to_lm_head_when_it_is_the_only_mismatch(tmp_path
     assert caught.value.code == 'WEIGHTS'
 
 
+def test_neox_legacy_attention_buffers_drop_after_embed_out_rename(tmp_path):
+    torch = pytest.importorskip('torch')
+    from safetensors.torch import save_file
+    from btx_neuronlab.models import _load_declared_weights
+
+    class Head(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lm_head = torch.nn.Linear(3, 4, bias=False)
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+    weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    buffers = {
+        'gpt_neox.layers.0.attention.bias': torch.zeros(1, 1, 2, 2),
+        'gpt_neox.layers.0.attention.masked_bias': torch.zeros(1),
+        'gpt_neox.layers.0.attention.rotary_emb.inv_freq': torch.arange(2, dtype=torch.float32),
+    }
+    root = tmp_path / 'neox-buffers'
+    root.mkdir()
+    (root / 'config.json').write_text(json.dumps({'tie_word_embeddings': False}), encoding='utf-8')
+    save_file({'embed_out.weight': weight, **buffers}, root / 'model.safetensors')
+    model = Head()
+    with torch.no_grad():
+        model.lm_head.weight.zero_()
+    _load_declared_weights(model, root)
+    assert torch.equal(model.lm_head.weight.detach(), weight)
+
+    extra = tmp_path / 'neox-buffers-extra'
+    extra.mkdir()
+    (extra / 'config.json').write_text(json.dumps({'tie_word_embeddings': False}), encoding='utf-8')
+    save_file({'embed_out.weight': weight, **buffers, 'other.weight': torch.ones(2, 2)}, extra / 'model.safetensors')
+    with pytest.raises(LabError) as caught:
+        _load_declared_weights(Head(), extra)
+    assert caught.value.code == 'WEIGHTS'
+
+    class Tied(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = torch.nn.Embedding(4, 3)
+            self.lm_head = torch.nn.Linear(3, 4, bias=False)
+            self.lm_head.weight = self.embed.weight
+
+        def get_input_embeddings(self):
+            return self.embed
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+    tied = tmp_path / 'neox-buffers-tied'
+    tied.mkdir()
+    (tied / 'config.json').write_text(json.dumps({'tie_word_embeddings': True}), encoding='utf-8')
+    save_file({'embed.weight': weight, **buffers}, tied / 'model.safetensors')
+    model = Tied()
+    with torch.no_grad():
+        model.embed.weight.zero_()
+    _load_declared_weights(model, tied)
+    assert torch.equal(model.lm_head.weight.detach(), weight)
+    assert model.lm_head.weight.data_ptr() == model.embed.weight.data_ptr()
+
+
 def test_tied_gpt2_save_pretrained_loads(tmp_path):
     root = _save_tiny_gpt2(tmp_path / 'tied')
     from safetensors import safe_open

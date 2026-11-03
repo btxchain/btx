@@ -141,6 +141,14 @@ def _bind_omitted_tied_head(model, root: Path, state):
         state[output_key] = state[input_key]
 
 
+# transformers keeps these GPT-NeoX attention buffers non-persistent. Published safetensors still store them.
+_NEOX_LEGACY_BUFFER_SUFFIXES = ('.attention.bias', '.attention.masked_bias', '.attention.rotary_emb.inv_freq')
+
+
+def _neox_legacy_buffer_key(key):
+    return key.endswith(_NEOX_LEGACY_BUFFER_SUFFIXES)
+
+
 def _move_embed_out_to_lm_head(model, state):
     # Untied GPT-NeoX: transformers 5 names the head lm_head.weight, but save_pretrained still writes embed_out.weight.
     try:
@@ -154,8 +162,20 @@ def _move_embed_out_to_lm_head(model, state):
     declared = model.state_dict()
     missing = {key for key in declared if key not in state}
     unexpected = {key for key in state if key not in declared}
-    if missing == {'lm_head.weight'} and unexpected == {'embed_out.weight'}:
+    # Those legacy buffers are not another weight name. They stay in state until the drop below.
+    if missing == {'lm_head.weight'} and {key for key in unexpected if not _neox_legacy_buffer_key(key)} == {'embed_out.weight'}:
         state['lm_head.weight'] = state.pop('embed_out.weight')
+
+
+def _drop_neox_legacy_buffers(model, state):
+    # Drop those buffers when they are every unexpected key. A missing head stays missing
+    # so the tied-head fill can bind it; any other missing or extra key still fails the strict load.
+    declared = model.state_dict()
+    unexpected = [key for key in state if key not in declared]
+    if not unexpected or not all(_neox_legacy_buffer_key(key) for key in unexpected):
+        return
+    for key in unexpected:
+        del state[key]
 
 
 def _load_declared_weights(model, root: Path):
@@ -168,6 +188,7 @@ def _load_declared_weights(model, root: Path):
         for shard in shards:
             state.update(load_file(str(shard)))
         _move_embed_out_to_lm_head(model, state)
+        _drop_neox_legacy_buffers(model, state)
         _bind_omitted_tied_head(model, root, state)
         model.load_state_dict(state, strict=True)
     except LabError:
