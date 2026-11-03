@@ -19,8 +19,9 @@
 using namespace modelnet::security;
 namespace {
 struct Harness {
-    size_t passed{0},failed{0};Json results=Array();
+    size_t passed{0},failed{0};Json results=Array();std::string only;
     template<class F> void Test(const std::string& name,F f) {
+        if(!only.empty()&&name!=only)return;
         Json row=Object();row.pushKV("name",name);
         try{f();++passed;row.pushKV("status","PASS");std::cout<<"PASS "<<name<<'\n';}
         catch(const std::exception& e){++failed;row.pushKV("status","FAIL");row.pushKV("error",e.what());std::cerr<<"FAIL "<<name<<": "<<e.what()<<'\n';}
@@ -152,7 +153,7 @@ void Phase(Database& db,const std::string& p,const char* message) {Check(Text(Li
 std::string PermitPhase(Database& db,const Json& permit) {return db.Query("SELECT phase FROM permits WHERE id=?",{Text(permit,"permit")})[0][0];}
 }
 int main(int argc,char** argv) {
-    Harness h;
+    Harness h;if(argc>2)h.only=argv[2];
     h.Test("first-freeze-safety-and-unrelated-permit-repeat-reopen",[]{
         Active a(true);auto& f=a.f;Broker b(f.db,std::string(64,'a'));auto grant=f.Grant(20);auto context=f.Context(),request=f.ReadRequest();
         f.now=a.base+1499;auto before=b.Prepare(grant,context,request,f.now);
@@ -166,6 +167,33 @@ int main(int argc,char** argv) {
         Check(after_repeat=="prepared","repeated frozen Tick revoked unrelated newly prepared permit");
         Check(Text(result,"output_digest")==Hash("hello safe workspace\n"),"wrong read bytes");
         auto stale=f.Channel(4,a.old,a.old);Reject([&]{a.l.Stage(f.Import(stale),f.now);},"SEC_EXPIRED_OR_FUTURE");
+    });
+    h.Test("owner-revoked-active-freezes-once-and-unrelated-permit-survives-reopen",[]{
+        Temp retained;Json after,context,request;int64_t now;const std::string broker_session(64,'d');
+        {
+            Active a;auto& f=a.f;Broker broker(f.db,broker_session);
+            auto grant=f.Grant(20);context=f.Context();request=f.ReadRequest();
+            auto before=broker.Prepare(grant,context,request,f.now);
+            auto channel_body=f.db.Get(grant)["body"];channel_body.pushKV("composition","");channel_body.pushKV("capsule","");channel_body.pushKV("channel","coding/stable");
+            auto channel_grant=f.Import(Signed("grant",channel_body,f.owner));
+            Check(broker.CanRelease(channel_grant,context,request,f.now),"valid active channel not initially usable");
+            f.Revoke(a.mandate);a.l.Tick(f.now);
+            Phase(f.db,"frozen","owner-revoked active not frozen");
+            Check(a.l.Status()[0]["candidate_capsule"].get_str().empty(),"candidate survived owner revoke");
+            Check(PermitPhase(f.db,before)=="revoked","first owner-revocation freeze did not revoke prepared permit");
+            Check(!broker.CanRelease(channel_grant,context,request,f.now),"owner-revoked channel still usable");
+            (void)AdmitCapsule(f.db,Policy::Load(f.db,f.now),a.old,f.now); // Only the follow mandate failed.
+            now=f.now+1;after=broker.Prepare(grant,context,request,now);a.l.Tick(now);
+            Check(PermitPhase(f.db,after)=="prepared","repeated owner-revoked Tick revoked unrelated new permit");
+            // Transfer cleanup ownership so Active's Database closes before it is reopened below.
+            std::swap(retained.root,f.temp.root);
+        }
+        Database reopened(retained.root/"security");Lifecycle(reopened).Tick(now);
+        Phase(reopened,"frozen","owner-revoked channel thawed after reopen");
+        Check(PermitPhase(reopened,after)=="prepared","reopened owner-revoked Tick revoked unrelated new permit");
+        auto result=Broker(reopened,broker_session).Execute(Text(after,"secret"),context,request,now);
+        Check(Boolean(result,"ok")&&Boolean(result,"dispatched"),"unrelated permit did not execute read after reopen");
+        Check(Text(result,"output_digest")==Hash("hello safe workspace\n"),"wrong reopened read bytes");
     });
     h.Test("successor-survives-repeat-reopen-and-activates-with-real-binding",[]{
         Active a(true);auto& f=a.f;f.now=a.base+2000;a.l.Tick(f.now);Phase(f.db,"frozen","initial freeze missing");
@@ -192,7 +220,7 @@ int main(int argc,char** argv) {
         Reject([&]{a.l.Activate("coding/stable",f.now);},"SEC_CANARY_DURATION");
         auto wrong=Canary(f,c,Hash("wrong update"),a.plan,f.alice,f.now);Reject([&]{a.l.Observe("coding/stable",wrong,f.now);},"SEC_CANARY_GENERATION");
         Observe(f,a.l,c,u,a.plan,f.now+1000);auto observation=f.db.Query("SELECT receipt FROM observations ORDER BY at_ms LIMIT 1")[0][0];f.Revoke(observation);Reject([&]{a.l.Activate("coding/stable",f.now);},"SEC_CANARY_REVOKED");
-        f.Revoke(cap);a.l.Tick(f.now);Check(a.l.Status()[0]["candidate_capsule"].get_str().empty(),"revoked candidate survived");
+        f.Revoke(cap);a.l.Tick(f.now);Check(a.l.Status()[0]["candidate_capsule"].get_str().empty(),"revoked candidate survived");Phase(f.db,"frozen","invalid active appeared recovered after candidate quarantine");
         f.now+=1;
         auto cap2=f.Capsule(c,f.evaluations);auto body=f.db.Get(u)["body"];body.pushKV("sequence",3);body.pushKV("capsule",cap2);auto next=f.Import(Signed("channel",body,f.owner,&f.second));a.l.Stage(next,f.now);
         f.Revoke(a.mandate);a.l.Tick(f.now);Phase(f.db,"frozen","revoked owner mandate bypassed");Check(a.l.Status()[0]["candidate_capsule"].get_str().empty(),"candidate survived owner revoke");
@@ -225,6 +253,7 @@ int main(int argc,char** argv) {
         a.l.Tick(f.now);Check(a.l.Status()[0]["candidate_capsule"].get_str()==cap,"eligible restored active destroyed canary");
         f.Revoke(a.old);a.l.Tick(f.now);Phase(f.db,"frozen","fresh incident after eligibility recovery was suppressed");Check(a.l.Status()[0]["candidate_capsule"].get_str().empty(),"fresh same-generation incident retained candidate");
     });
+    if(h.passed+h.failed==0){std::cerr<<"unknown test: "<<h.only<<'\n';return 2;}
     auto result=Object();result.pushKV("passed",static_cast<uint64_t>(h.passed));result.pushKV("failed",static_cast<uint64_t>(h.failed));result.pushKV("tests",h.results);
     if(argc>1){EnsurePrivateDirectory(fs::path(argv[1]).parent_path());WritePrivate(argv[1],Canonical(result),true);std::string journal;for(const auto& record:signed_records.getValues())journal+=Canonical(record)+"\n";WritePrivate(std::string(argv[1])+".records.jsonl",journal,true);}std::cout<<Canonical(result)<<'\n';return h.failed?1:0;
 }
