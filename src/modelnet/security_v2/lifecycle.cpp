@@ -194,6 +194,7 @@ namespace modelnet::security {
         {
             a.runtime,name
         });
+        m_db.SetMeta("channel-frozen-active/"+name,"");
         m_db.Exec("UPDATE permits SET phase='revoked' WHERE phase='prepared'");
         m_db.Event("channel-activated",row[0],Object());
         tx.Commit();
@@ -201,7 +202,10 @@ namespace modelnet::security {
     void Lifecycle::Tick(int64_t now) {
         auto p=Policy::Load(m_db,now);
         for(const auto& row:m_db.Query("SELECT name,active,previous,candidate,phase,mandate_id FROM channels ORDER BY name LIMIT 128")) {
-            const auto name=row[0];
+            const auto name=row[0],incident_key="channel-frozen-active/"+name;
+            const auto binding=row[1].empty()?"none":row[1];
+            const bool active_invalid=!row[1].empty()&&!Eligible(p,row[1],now);
+            bool acknowledged=m_db.Meta(incident_key)==binding;
             bool owner_current=false;
             try {
                 auto m=m_db.Get(row[5]);
@@ -211,7 +215,15 @@ namespace modelnet::security {
             }
             catch(...) {
             }
-            if(!owner_current||(!row[1].empty()&&!Eligible(p,row[1],now))) {
+            // Acknowledgement suppresses repeated incident side effects only.
+            // Eligibility recovery rearms this generation for a later failure.
+            if(owner_current&&!active_invalid&&acknowledged) {
+                Database::Transaction tx(m_db);
+                m_db.SetMeta(incident_key,"");
+                tx.Commit();
+                acknowledged=false;
+            }
+            if(!owner_current||active_invalid) {
                 bool rollback=false;
                 if(owner_current&&!row[2].empty()) {
                     try {
@@ -223,24 +235,30 @@ namespace modelnet::security {
                     catch(...) {
                     }
                 }
-                Database::Transaction tx(m_db);
-                if(rollback)m_db.Exec("UPDATE channels SET active=previous,previous='',candidate='',phase='active' WHERE name=?",
-                {
-                    name
-                });
-                else m_db.Exec("UPDATE channels SET candidate='',phase='frozen' WHERE name=?", {
-                    name
-                });
-                m_db.Exec("UPDATE permits SET phase='revoked' WHERE phase='prepared'");
-                m_db.Event(rollback?"channel-rolled-back":"channel-frozen",name,Object());
-                tx.Commit();
-                continue;
+                // Retry qualified rollback even after the incident was handled:
+                // previous evidence or resident bytes may have recovered.
+                if(rollback||!owner_current||!acknowledged) {
+                    if(!rollback&&row[4]=="frozen"&&row[3].empty()&&acknowledged)continue;
+                    Database::Transaction tx(m_db);
+                    if(rollback) {
+                        m_db.Exec("UPDATE channels SET active=previous,previous='',candidate='',phase='active' WHERE name=?",{name});
+                        m_db.SetMeta(incident_key,"");
+                    }
+                    else {
+                        m_db.Exec("UPDATE channels SET candidate='',phase='frozen' WHERE name=?",{name});
+                        m_db.SetMeta(incident_key,binding);
+                    }
+                    m_db.Exec("UPDATE permits SET phase='revoked' WHERE phase='prepared'");
+                    m_db.Event(rollback?"channel-rolled-back":"channel-frozen",name,Object());
+                    tx.Commit();
+                    continue;
+                }
             }
             if(row[4]=="canary") {
                 if(!Eligible(p,row[3],now)) {
                     Database::Transaction tx(m_db);
                     m_db.Exec("UPDATE channels SET candidate='',phase=? WHERE name=?", {
-                        row[1].empty()?"frozen":"active",name
+                        row[1].empty()||active_invalid?"frozen":"active",name
                     });
                     m_db.Event("candidate-quarantined",row[3],Object());
                     tx.Commit();
