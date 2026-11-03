@@ -184,6 +184,17 @@ CMake precompiles `.metallib` kernels (including Metal 4 TensorOps when
 `libexec/metal/` beside `btxd.real`. Stage-3 row-leaf and Fp3 LDE loaders
 look there before falling back to inline source.
 
+With Metal and `xcrun` available, precompilation is enabled by default. CMake
+requires a working basic `metal` compile and `metallib` link; Metal 4 support
+remains optional. The Command Line Tools alone may not provide these utilities.
+Install full Xcode, select its developer directory, and install its Metal
+toolchain component if requested. Check the selected tools with
+`xcrun -sdk macosx --find metal` and `xcrun -sdk macosx --find metallib`.
+
+To select inline runtime compilation, pass
+`-DBTX_MATMUL_METAL_PRECOMPILE_KERNELS=OFF`. This requires access to the runtime
+Metal compiler service, which may be unavailable to daemon services.
+
 Apple's `/usr/bin/openssl` is LibreSSL and cannot mint ML-DSA-44
 certificates. Native Model Network uses Homebrew `openssl@3` (or
 `BTX_OPENSSL`) for those files. `otool -L` on `btxd` / `btx-modeld` still
