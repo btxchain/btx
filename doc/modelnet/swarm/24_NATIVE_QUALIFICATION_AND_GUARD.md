@@ -182,7 +182,7 @@ tests and their dependencies in the package, and independently review them.
 
 | Platform | Implemented enforcement | Native validation still required |
 |---|---|---|
-| Linux | User, mount and network namespaces; UID/GID mapping; pivot/chroot; `no_new_privs`; CPU/file-descriptor limits; scrubbed environment/descriptors; wall timeout and process-group cleanup | Namespace-enabled host, real outside-file and network escape probes, actual workloads |
+| Linux | User, mount and network namespaces; UID/GID mapping; `pivot_root` (no chroot fallback: if it fails, the helper does not run); `no_new_privs`; CPU/file-descriptor limits; scrubbed environment/descriptors; wall timeout and process-group cleanup | Namespace-enabled host, real outside-file and network escape probes, actual workloads |
 | macOS | Parameterized default-deny Seatbelt profile loaded from the OS sandbox library; helper-only execution; root writes; system-library reads; network/IPC denial; CPU/address-space/descriptor/wall limits | Apple runtime/SDK combinations, native escape probes and actual workloads |
 | Windows | Fresh AppContainer with zero capabilities; actual low-integrity token/SID/capability verification; protected private staged tree; explicit inherited NUL handles; one-process Job with CPU/memory/wall limits; output/input revalidation and cleanup | Native Windows build and escape tests; actual workload qualification |
 
