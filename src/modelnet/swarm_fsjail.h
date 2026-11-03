@@ -14,7 +14,8 @@ namespace modelnet {
 
 /**
  * Execute a helper in a filesystem and network sandbox. Linux unshares user,
- * mount AND network namespaces, installs uid/gid maps, then pivots/chroots.
+ * mount AND network namespaces, installs uid/gid maps, then pivot_roots into
+ * root. If pivot_root fails, the helper does not run (JAIL_ABSENT).
  * macOS uses default-deny Seatbelt, allowing the selected root and read-only
  * system libraries required to launch a native executable. It denies host
  * user data, arbitrary process creation, IPC and all network access.
