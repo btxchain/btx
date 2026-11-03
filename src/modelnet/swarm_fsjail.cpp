@@ -171,32 +171,24 @@ bool PivotToRoot(const fs::path& root, const fs::path& put_old)
     return !DirectoryOpenable(PUT_OLD_IN_JAIL);
 }
 
-bool ChrootToRoot(const fs::path& root)
-{
-    if (chdir(root.c_str()) != 0) {
-        return false;
-    }
-    if (chroot(".") != 0) {
-        return false;
-    }
-    return chdir("/") == 0;
-}
-
 bool ConfinedToRoot(const fs::path& root, const fs::path& put_old, const fs::path& witness)
 {
     // The witness was opened in the parent. If it still opens after
-    // pivot_root or chroot, this process can see a path outside root.
+    // pivot_root, this process can see a path outside root.
     if (!DirectoryOpenable(witness.c_str())) {
         return false;
     }
-    const bool pivoted = PivotToRoot(root, put_old);
-    if (!pivoted && !ChrootToRoot(root)) {
+    // No chroot fallback: the child keeps CAP_SYS_CHROOT in its user
+    // namespace and the old root stays mounted, so a chroot would not confine
+    // it, yet the witness check below would pass. pivot_root fails, for
+    // example, when the package has a regular file at put_old.
+    if (!PivotToRoot(root, put_old)) {
         return false;
     }
     if (DirectoryOpenable(witness.c_str())) {
         return false;
     }
-    if (pivoted && DirectoryOpenable(PUT_OLD_IN_JAIL)) {
+    if (DirectoryOpenable(PUT_OLD_IN_JAIL)) {
         return false;
     }
     return true;
