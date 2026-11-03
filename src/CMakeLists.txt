@@ -1162,12 +1162,8 @@ if(APPLE AND BTX_ENABLE_METAL)
   target_sources(btx_matmul_backend PRIVATE
     metal/matmul_accel.mm
     metal/matmul_v4_accel.mm
-    # External review (P1.5): the BMX4-C (v4.2) Metal device backend source was
-    # never listed. With BTX_ENABLE_METAL defined the weak metal stub in
-    # accel_v4_stub.cpp is compiled out, so without this the strong
-    # matmul_v4::metal::ComputeDigestsBMX4CAccel had no definition -- a Metal
-    # build suppressed the weak stub while providing no strong impl (link error /
-    # silently unserved profile). Wire it in alongside its kernels metallib.
+    # Enabled Metal builds need the BMX4-C implementation alongside v4.
+    # Disabled builds select metal/matmul_v4_bmx4_accel_stub.cpp below.
     metal/matmul_v4_bmx4_accel.mm
     # MatMul v4.4 ENC-DR-LT ("MatExpand") Metal backend: exact integer MSL
     # GEMM kernels (int8xint8->int32 and int32xint8->int32) self-tested against
