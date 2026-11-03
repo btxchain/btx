@@ -108,7 +108,13 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+// MSVC and clang-cl use the native CRT, which has no unistd.h.
+#ifdef _MSC_VER
+#include <cstdio>
+typedef SSIZE_T ssize_t;
+#else
 #include <unistd.h>
+#endif
 
 #ifndef _UID_T_
 #define _UID_T_
