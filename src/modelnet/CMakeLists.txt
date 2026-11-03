@@ -2568,8 +2568,13 @@ if(WIN32)
   # POSIX shims for the model plane. Linux and macOS keep the system headers.
   target_include_directories(bitcoin_modelnet BEFORE PUBLIC
     ${PROJECT_SOURCE_DIR}/src/compat/mingw)
-  target_compile_options(bitcoin_modelnet PRIVATE
-    "SHELL:-include ${PROJECT_SOURCE_DIR}/src/compat/mingw/posix_extra.h")
+  if(MSVC)
+    target_compile_options(bitcoin_modelnet PRIVATE
+      "/FI${PROJECT_SOURCE_DIR}/src/compat/mingw/posix_extra.h")
+  else()
+    target_compile_options(bitcoin_modelnet PRIVATE
+      "SHELL:-include ${PROJECT_SOURCE_DIR}/src/compat/mingw/posix_extra.h")
+  endif()
   target_link_libraries(bitcoin_modelnet PUBLIC ws2_32 iphlpapi bcrypt userenv advapi32 ole32)
 endif()
 
