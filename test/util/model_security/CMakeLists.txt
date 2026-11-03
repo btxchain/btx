@@ -75,3 +75,8 @@ if(EXISTS "${BTX_INTEGRATED_SOURCE}/src/btx-guardd.cpp")
   target_link_libraries(security-native-ipc PRIVATE btx_model_security)
   add_test(NAME security-native-ipc COMMAND security-native-ipc $<TARGET_FILE:btx-guardd-security>)
 endif()
+
+# Main-thread lifecycle recovery regression; signed synthetic canary fixtures.
+add_executable(channel-recovery-tests channel_recovery_tests.cpp)
+target_link_libraries(channel-recovery-tests PRIVATE btx_model_security)
+add_test(NAME security-channel-recovery COMMAND channel-recovery-tests "${CMAKE_CURRENT_BINARY_DIR}/channel-recovery-results/summary.json")
