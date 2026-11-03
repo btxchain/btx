@@ -33,6 +33,27 @@
 namespace node {
 namespace {
 
+// Windows off_t and long are 32-bit, even in a 64-bit build.
+int SeekSnapshotFile(FILE* file, int64_t offset, int origin)
+{
+#ifdef _WIN32
+    return _fseeki64(file, offset, origin);
+#else
+    static_assert(sizeof(off_t) >= sizeof(int64_t));
+    return fseeko(file, static_cast<off_t>(offset), origin);
+#endif
+}
+
+int64_t TellSnapshotFile(FILE* file)
+{
+#ifdef _WIN32
+    return _ftelli64(file);
+#else
+    static_assert(sizeof(off_t) >= sizeof(int64_t));
+    return ftello(file);
+#endif
+}
+
 std::atomic<int64_t> g_last_max_cs_main_hold_us{0};
 
 class CsMainHoldScope
@@ -462,7 +483,7 @@ bool ReadAttestedUTXOSnapshotChunk(const AttestedUTXOSnapshotOffer& offer,
     }
     const uint64_t offset{
         static_cast<uint64_t>(chunk_index) * static_cast<uint64_t>(offer.chunk_size)};
-    if (offset >= offer.file_size) {
+    if (offset >= offer.file_size || offset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
         error = "Chunk offset past end of file";
         return false;
     }
@@ -479,7 +500,7 @@ bool ReadAttestedUTXOSnapshotChunk(const AttestedUTXOSnapshotOffer& offer,
         error = "Couldn't open offered snapshot file";
         return false;
     }
-    if (fseeko(file, static_cast<off_t>(offset), SEEK_SET) != 0) {
+    if (SeekSnapshotFile(file, static_cast<int64_t>(offset), SEEK_SET) != 0) {
         fclose(file);
         error = "Couldn't seek in offered snapshot file";
         return false;
@@ -526,18 +547,18 @@ bool BuildAttestedUTXOSnapshotOfferFromFiles(const fs::path& snapshot_path,
         error = "Couldn't open snapshot file";
         return false;
     }
-    if (fseeko(sfile, 0, SEEK_END) != 0) {
+    if (SeekSnapshotFile(sfile, 0, SEEK_END) != 0) {
         fclose(sfile);
         error = "Couldn't stat snapshot file";
         return false;
     }
-    const off_t sz{ftello(sfile)};
+    const int64_t sz{TellSnapshotFile(sfile)};
     if (sz < 0) {
         fclose(sfile);
         error = "Couldn't determine snapshot file size";
         return false;
     }
-    if (fseeko(sfile, 0, SEEK_SET) != 0) {
+    if (SeekSnapshotFile(sfile, 0, SEEK_SET) != 0) {
         fclose(sfile);
         error = "Couldn't rewind snapshot file";
         return false;
