@@ -7007,7 +7007,7 @@ void EnsureBridgeFeeHeadroomOrThrow(const BridgeFeeHeadroomAssessment& assessmen
     keypair.sk.assign(kem_sk.begin(), kem_sk.end());
     const auto enc = mlkem::Encaps(keypair.pk);
     const auto dec = mlkem::Decaps(enc.ct, keypair.sk);
-    return dec == enc.ss;
+    return dec && *dec == enc.ss;
 }
 
 [[nodiscard]] bool CommitShieldedTransaction(const std::shared_ptr<CWallet>& pwallet,

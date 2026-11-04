@@ -76,13 +76,13 @@ EncapsResult EncapsDerand(const PublicKey& pk, Span<const uint8_t> seed)
     return result;
 }
 
-SharedSecret Decaps(const Ciphertext& ct, const SecretKey& sk)
+std::optional<SharedSecret> Decaps(const Ciphertext& ct, const SecretKey& sk)
 {
-    Assume(sk.size() == SECRETKEYBYTES);
+    if (sk.size() != SECRETKEYBYTES) return std::nullopt;
     SharedSecret ss(SHAREDSECRETBYTES, 0);
     const int rc = PQCLEAN_MLKEM768_CLEAN_crypto_kem_dec(
         ss.data(), ct.data(), sk.data());
-    Assume(rc == 0);
+    if (rc != 0) return std::nullopt;
     return ss;
 }
 

@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace mlkem {
@@ -51,8 +52,10 @@ struct EncapsResult {
 /** Deterministic encapsulation from a 32-byte seed (tests only). */
 [[nodiscard]] EncapsResult EncapsDerand(const PublicKey& pk, Span<const uint8_t> seed);
 
-/** Decapsulate: recover shared secret from ciphertext and secret key. */
-[[nodiscard]] SharedSecret Decaps(const Ciphertext& ct, const SecretKey& sk);
+/** Recover a shared secret, or nullopt for invalid secret-key length or backend failure.
+ * Full-length wrong keys/ciphertexts retain ML-KEM implicit rejection.
+ */
+[[nodiscard]] std::optional<SharedSecret> Decaps(const Ciphertext& ct, const SecretKey& sk);
 
 } // namespace mlkem
 

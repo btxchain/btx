@@ -33,7 +33,8 @@ static void MLKEMDecapsBench(benchmark::Bench& bench)
     const auto enc = mlkem::Encaps(kp.pk);
     bench.minEpochIterations(1000).run([&] {
         auto ss = mlkem::Decaps(enc.ct, kp.sk);
-        ankerl::nanobench::doNotOptimizeAway(ss);
+        assert(ss.has_value());
+        ankerl::nanobench::doNotOptimizeAway(*ss);
     });
 }
 

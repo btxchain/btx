@@ -1228,7 +1228,7 @@ bool AppendOutputChunkViews(ShieldedTxView& tx_view,
     if (keypair.sk.size() != mlkem::SECRETKEYBYTES) return false;
     const auto enc = mlkem::Encaps(keypair.pk);
     const auto dec = mlkem::Decaps(enc.ct, keypair.sk);
-    return dec == enc.ss;
+    return dec && *dec == enc.ss;
 }
 
 [[nodiscard]] bool EncryptWithWalletKey(const CWallet& wallet,

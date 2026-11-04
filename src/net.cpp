@@ -1474,10 +1474,11 @@ bool V2Transport::ProcessReceivedPacketBytes() noexcept
                 }
                 mlkem::Ciphertext ct;
                 std::copy(m_recv_decode_buffer.begin(), m_recv_decode_buffer.end(), ct.begin());
-                const mlkem::SharedSecret ss = mlkem::Decaps(ct, m_pq_keypair.sk);
+                const auto ss = mlkem::Decaps(ct, m_pq_keypair.sk);
+                if (!ss) return false;
                 {
                     LOCK(m_send_mutex);
-                    m_cipher.RekeyHybridPQ(MakeByteSpan(ss));
+                    m_cipher.RekeyHybridPQ(MakeByteSpan(*ss));
                     m_pq_send_gated = false;
                 }
                 // The ML-KEM secret key is no longer needed; wipe it.
