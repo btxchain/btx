@@ -12,9 +12,10 @@ secret can complete the witness.
 Flow:
   1. The claimer wallet signs the selected claim leaf without the preimage
      (htlc_presign=true). The PSBT stays incomplete and carries no preimage.
-  2. A party without the wallet (the watchtower) adds the real preimage as
-     BIP174 PSBT_IN_SHA256 and calls finalizepsbt. The claim is accepted and
-     confirms, and the witness reveals the preimage.
+  2. A party without the wallet (the watchtower) passes the real preimage to
+     finalizepsbt (argument preimages). The claim is accepted and confirms,
+     and the witness reveals the preimage. Adding the preimage by hand as
+     BIP174 PSBT_IN_SHA256 gives the same transaction.
 
 Negative controls:
   - without htlc_presign the wallet still refuses to sign the claim leaf
@@ -28,6 +29,9 @@ Negative controls:
   - a wrong preimage is still rejected when the PSBT is read (BIP174);
   - the presignature commits to the transaction: a changed output does not
     finalize even with the real preimage;
+  - finalizepsbt preimages: a preimage that no selected htlc_sha256 claim
+    leaf locks, one that is not 32 bytes and one that is not hex are errors;
+  - finalizepsbt preimages adds nothing to an htlc_sha256_legacy leaf;
   - as with buildhtlcclaim, no presign against a funding output that is
     unconfirmed, unknown or below min_confirmations, and none once the refund
     path is final, unless allow_unconfirmed_funding / allow_late_claim is set;
@@ -47,6 +51,7 @@ from test_framework.bridge_utils import create_bridge_wallet, find_output, mine_
 
 FEE_SAT = 1000
 P2MR_LEAF_VERSION = 0xc2
+PSBT_IN_P2MR_LEAF_SCRIPT = 0x19
 
 
 def with_preimage(psbt_b64, preimage, digest=None):
@@ -172,6 +177,33 @@ class WalletHtlcPresignTest(BitcoinTestFramework):
         tampered.g.map[0x00] = tampered.tx.serialize()
         tampered_b64 = with_preimage(tampered.to_base64(), secret)
         assert_equal(node.finalizepsbt(tampered_b64)["complete"], False)
+        assert_equal(node.finalizepsbt(tampered.to_base64(), True, [secret.hex()])["complete"], False)
+
+        self.log.info("finalizepsbt preimages: only a preimage that the selected claim leaf locks, 32 bytes, hex")
+        assert_raises_rpc_error(-8, f"preimages[0] matches no input: no selected htlc_sha256 claim leaf locks SHA256 {hashlib.sha256(bytes(32)).hexdigest()}",
+                                node.finalizepsbt, presigned["psbt"], True, [bytes(32).hex()])
+        assert_raises_rpc_error(-8, "preimages[1] matches no input",
+                                node.finalizepsbt, presigned["psbt"], True, [secret.hex(), bytes(32).hex()])
+        assert_raises_rpc_error(-8, "preimages[0] must be 32 bytes, not 31",
+                                node.finalizepsbt, presigned["psbt"], True, [secret[:31].hex()])
+        assert_raises_rpc_error(-8, "preimages[0] must be 32 bytes, not 33",
+                                node.finalizepsbt, presigned["psbt"], True, [(secret + b"\x00").hex()])
+        assert_raises_rpc_error(-8, "preimages[0] must be hexadecimal string",
+                                node.finalizepsbt, presigned["psbt"], True, ["zz" * 32])
+        assert_equal(node.finalizepsbt(presigned["psbt"], True, [])["complete"], False)
+
+        self.log.info("finalizepsbt preimages gives the same claim as adding PSBT_IN_SHA256 by hand")
+        by_hand = node.finalizepsbt(with_preimage(presigned["psbt"], secret))
+        assert_equal(by_hand["complete"], True)
+        assert_equal(node.finalizepsbt(presigned["psbt"], True, [secret.hex()]), by_hand)
+        assert_equal(node.finalizepsbt(presigned["psbt"], True, [secret.hex(), secret.hex()]), by_hand)
+        assert_equal(node.finalizepsbt(with_preimage(presigned["psbt"], secret), True, [secret.hex()]), by_hand)
+        kept = node.finalizepsbt(presigned["psbt"], False, [secret.hex()])
+        assert_equal(kept["complete"], True)
+        assert_equal(node.finalizepsbt(kept["psbt"]), by_hand)
+        # A finalized input no longer carries its selected leaf, so a preimage matches nothing there.
+        assert_raises_rpc_error(-8, "preimages[0] matches no input",
+                                node.finalizepsbt, kept["psbt"], True, [secret.hex()])
 
         self.log.info("A wallet without the claimer key gets an error that says so")
         node.createwallet(wallet_name="nokey", descriptors=True)
@@ -202,6 +234,15 @@ class WalletHtlcPresignTest(BitcoinTestFramework):
         assert_raises_rpc_error(None, "htlc_presign signs only the htlc_sha256 claim leaf, not htlc_sha256_legacy",
                                 claimer.walletprocesspsbt, l_psbt,
                                 {"htlc_presign": True, "p2mr_leaf": {f"{l_txid}:{l_vout}": legacy_leaf.hex()}})
+
+        self.log.info("finalizepsbt preimages adds nothing to an htlc_sha256_legacy leaf")
+        # Select the legacy leaf by hand. Its sibling is the same refund leaf, so the control
+        # block is the one of the current lock.
+        l_sel = PSBT.from_base64(l_psbt)
+        l_sel.i[0].map[bytes([PSBT_IN_P2MR_LEAF_SCRIPT]) + control] = legacy_leaf + bytes([P2MR_LEAF_VERSION])
+        assert_equal(node.decodepsbt(l_sel.to_base64())["inputs"][0]["p2mr_leaf_script"], legacy_leaf.hex())
+        assert_raises_rpc_error(-8, "preimages[0] matches no input",
+                                node.finalizepsbt, l_sel.to_base64(), True, [legacy_secret.hex()])
 
         self.log.info("The funding and refund options apply only with htlc_presign")
         assert_raises_rpc_error(-8, "apply only with htlc_presign",
@@ -260,8 +301,8 @@ class WalletHtlcPresignTest(BitcoinTestFramework):
         r_sigs = node.decodepsbt(refund["psbt"])["inputs"][0].get("p2mr_partial_signatures", [])
         assert_equal([s["pubkey"] for s in r_sigs], [nokey_pk])
 
-        self.log.info("Watchtower: add the real preimage, finalize without the wallet, broadcast")
-        final = node.finalizepsbt(with_preimage(presigned["psbt"], secret))
+        self.log.info("Watchtower: pass the real preimage to finalizepsbt without the wallet, broadcast")
+        final = node.finalizepsbt(presigned["psbt"], True, [secret.hex()])
         assert_equal(final["complete"], True)
         assert_equal(node.testmempoolaccept([final["hex"]])[0]["allowed"], True)
         claim_txid = node.sendrawtransaction(final["hex"])
