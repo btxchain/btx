@@ -59,7 +59,11 @@ public:
 private:
     intptr_t m_fd{-1};
     LanBeacon m_self;
-    std::vector<uint32_t> m_interfaces;
+    struct Interface {
+        uint32_t address;
+        unsigned int index;
+    };
+    std::vector<Interface> m_interfaces;
     LanHintBook m_hints;
     int64_t m_last_announce{-1};
 };

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <random>
@@ -14,11 +15,15 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#include <mswsock.h>
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#ifdef __APPLE__
+#include <net/if_dl.h>
+#endif
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -66,16 +71,25 @@ bool SocketOption(intptr_t fd, int level, int option, const void* data, size_t s
 #endif
     ) == 0;
 }
-std::vector<uint32_t> Interfaces(const std::string& bind_host)
+struct LanInterface {
+    uint32_t address;
+    uint32_t netmask;
+    unsigned int index;
+};
+std::vector<LanInterface> Interfaces(const std::string& bind_host)
 {
-    std::vector<uint32_t> out;
-    auto add = [&](const sockaddr* addr) {
+    std::vector<LanInterface> out;
+    auto add = [&](const sockaddr* addr, uint32_t netmask, unsigned int index) {
         if (!addr || addr->sa_family != AF_INET) return;
+        const uint32_t inverse = ~ntohl(netmask);
+        if (!index || !netmask || (inverse & (inverse + 1)) != 0) return;
         const auto* a = reinterpret_cast<const sockaddr_in*>(addr);
         char ip[INET_ADDRSTRLEN]{};
         if (!inet_ntop(AF_INET, &a->sin_addr, ip, sizeof(ip)) || !LanHintSourceAllowed(ip)) return;
         if (!bind_host.empty() && bind_host != "0.0.0.0" && bind_host != ip) return;
-        if (std::find(out.begin(), out.end(), a->sin_addr.s_addr) == out.end()) out.push_back(a->sin_addr.s_addr);
+        if (std::none_of(out.begin(), out.end(), [&](const auto& entry) {
+            return entry.address == a->sin_addr.s_addr && entry.index == index;
+        })) out.push_back({a->sin_addr.s_addr, netmask, index});
     };
 #ifdef _WIN32
     ULONG size = 16384;
@@ -91,19 +105,114 @@ std::vector<uint32_t> Interfaces(const std::string& bind_host)
     }
     if (code == NO_ERROR) for (auto* a = adapters; a; a = a->Next) {
         if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
-        for (auto* u = a->FirstUnicastAddress; u; u = u->Next) add(u->Address.lpSockaddr);
+        for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+            const unsigned int prefix = u->OnLinkPrefixLength;
+            if (prefix == 0 || prefix > 32) continue;
+            add(u->Address.lpSockaddr, htonl(0xffffffffU << (32 - prefix)), a->IfIndex);
+        }
     }
 #else
     ifaddrs* list = nullptr;
     if (getifaddrs(&list) == 0) {
         for (auto* a = list; a; a = a->ifa_next) {
             if (!(a->ifa_flags & IFF_UP) || !(a->ifa_flags & IFF_MULTICAST) || (a->ifa_flags & IFF_LOOPBACK)) continue;
-            add(a->ifa_addr);
+            if (!a->ifa_netmask || a->ifa_netmask->sa_family != AF_INET) continue;
+            add(a->ifa_addr, reinterpret_cast<const sockaddr_in*>(a->ifa_netmask)->sin_addr.s_addr,
+                if_nametoindex(a->ifa_name));
         }
         freeifaddrs(list);
     }
 #endif
     return out;
+}
+
+bool EnableReceiveInterface(intptr_t fd)
+{
+    int enabled = 1;
+#if defined(__APPLE__)
+    return SocketOption(fd, IPPROTO_IP, IP_RECVIF, &enabled, sizeof(enabled)) &&
+        SocketOption(fd, IPPROTO_IP, IP_RECVDSTADDR, &enabled, sizeof(enabled));
+#elif defined(_WIN32) || defined(__linux__)
+    return SocketOption(fd, IPPROTO_IP, IP_PKTINFO, &enabled, sizeof(enabled));
+#else
+    return false;
+#endif
+}
+
+// Missing/truncated ancillary data never becomes an implicit discovery hint.
+// The socket still accepts unicast, but only to its selected interface address.
+int ReceiveBeacon(intptr_t fd, unsigned char* wire, size_t size, sockaddr_in& from,
+                  unsigned int& index, uint32_t& destination)
+{
+    index = 0;
+    destination = 0;
+#ifdef _WIN32
+    GUID id = WSAID_WSARECVMSG;
+    LPFN_WSARECVMSG receive = nullptr;
+    DWORD returned = 0;
+    if (WSAIoctl(static_cast<SOCKET>(fd), SIO_GET_EXTENSION_FUNCTION_POINTER,
+                 &id, sizeof(id), &receive, sizeof(receive), &returned, nullptr, nullptr) != 0 || !receive) return -1;
+    WSABUF data{static_cast<ULONG>(size), reinterpret_cast<char*>(wire)};
+    union { WSACMSGHDR align; char bytes[WSA_CMSG_SPACE(sizeof(IN_PKTINFO))]; } control{};
+    WSAMSG msg{};
+    msg.name = reinterpret_cast<sockaddr*>(&from);
+    msg.namelen = sizeof(from);
+    msg.lpBuffers = &data;
+    msg.dwBufferCount = 1;
+    msg.Control = {sizeof(control.bytes), control.bytes};
+    DWORD got = 0;
+    if (receive(static_cast<SOCKET>(fd), &msg, &got, nullptr, nullptr) != 0)
+        return WSAGetLastError() == WSAEMSGSIZE ? 0 : -1;
+    if (msg.namelen != sizeof(from) || (msg.dwFlags & (MSG_TRUNC | MSG_CTRUNC))) return 0;
+    for (auto* c = WSA_CMSG_FIRSTHDR(&msg); c; c = WSA_CMSG_NXTHDR(&msg, c)) {
+        if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_PKTINFO &&
+            c->cmsg_len >= WSA_CMSG_LEN(sizeof(IN_PKTINFO))) {
+            IN_PKTINFO packet{};
+            std::memcpy(&packet, WSA_CMSG_DATA(c), sizeof(packet));
+            index = packet.ipi_ifindex;
+            destination = packet.ipi_addr.s_addr;
+        }
+    }
+    return static_cast<int>(got);
+#elif defined(__APPLE__) || defined(__linux__)
+    iovec data{wire, size};
+    union { cmsghdr align; unsigned char bytes[256]; } control{};
+    msghdr msg{};
+    msg.msg_name = &from;
+    msg.msg_namelen = sizeof(from);
+    msg.msg_iov = &data;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.bytes;
+    msg.msg_controllen = sizeof(control.bytes);
+    const auto got = recvmsg(static_cast<int>(fd), &msg, 0);
+    if (got < 0) return -1;
+    if (msg.msg_namelen != sizeof(from) || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC))) return 0;
+    for (auto* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+        if (c->cmsg_level != IPPROTO_IP) continue;
+#ifdef __APPLE__
+        if (c->cmsg_type == IP_RECVIF && c->cmsg_len >= CMSG_LEN(offsetof(sockaddr_dl, sdl_data))) {
+            sockaddr_dl link{};
+            std::memcpy(&link, CMSG_DATA(c), std::min(c->cmsg_len - CMSG_LEN(0), sizeof(link)));
+            if (link.sdl_family == AF_LINK) index = link.sdl_index;
+        }
+        if (c->cmsg_type == IP_RECVDSTADDR && c->cmsg_len >= CMSG_LEN(sizeof(in_addr))) {
+            in_addr address{};
+            std::memcpy(&address, CMSG_DATA(c), sizeof(address));
+            destination = address.s_addr;
+        }
+#else
+        if (c->cmsg_type == IP_PKTINFO && c->cmsg_len >= CMSG_LEN(sizeof(in_pktinfo))) {
+            in_pktinfo packet{};
+            std::memcpy(&packet, CMSG_DATA(c), sizeof(packet));
+            if (packet.ipi_ifindex > 0) index = static_cast<unsigned int>(packet.ipi_ifindex);
+            destination = packet.ipi_addr.s_addr;
+        }
+#endif
+    }
+    return static_cast<int>(got);
+#else
+    return -1;
+#endif
 }
 } // namespace
 
@@ -195,7 +304,7 @@ bool NativeLanDiscovery::Open(const std::string& network, const std::string& bin
 {
     Close();
     if (!ValidNetwork(network) || !ValidPort(model_port)) { err = "LAN_CONFIG"; return false; }
-    m_interfaces = Interfaces(bind_host);
+    for (const auto& iface : Interfaces(bind_host)) m_interfaces.push_back({iface.address, iface.index});
     if (m_interfaces.empty()) { err = "LAN_NO_PRIVATE_INTERFACE"; return false; }
     m_self.network = network;
     m_self.port = model_port;
@@ -208,6 +317,7 @@ bool NativeLanDiscovery::Open(const std::string& network, const std::string& bin
     m_fd = static_cast<intptr_t>(socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
     if (m_fd == -1) { err = "LAN_SOCKET"; return false; }
     auto fail = [&](const char* reason) { Close(); err = reason; return false; };
+    if (!EnableReceiveInterface(m_fd)) return fail("LAN_RECEIVE_SCOPE");
     int reuse = 1;
     if (!SocketOption(m_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) return fail("LAN_REUSE");
 #if defined(__APPLE__) && defined(SO_REUSEPORT)
@@ -225,12 +335,17 @@ bool NativeLanDiscovery::Open(const std::string& network, const std::string& bin
 #endif
     if (!SocketOption(m_fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) ||
         !SocketOption(m_fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop))) return fail("LAN_SCOPE");
-    std::vector<uint32_t> joined;
-    for (uint32_t ip : m_interfaces) {
-        ip_mreq membership{};
-        inet_pton(AF_INET, GROUP, &membership.imr_multiaddr);
-        membership.imr_interface.s_addr = ip;
-        if (SocketOption(m_fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership, sizeof(membership))) joined.push_back(ip);
+    std::vector<Interface> joined;
+    for (const auto& iface : m_interfaces) {
+        group_req membership{};
+        membership.gr_interface = iface.index;
+        auto* group = reinterpret_cast<sockaddr_in*>(&membership.gr_group);
+        group->sin_family = AF_INET;
+#ifdef __APPLE__
+        group->sin_len = sizeof(*group);
+#endif
+        inet_pton(AF_INET, GROUP, &group->sin_addr);
+        if (SocketOption(m_fd, IPPROTO_IP, MCAST_JOIN_GROUP, &membership, sizeof(membership))) joined.push_back(iface);
     }
     m_interfaces = std::move(joined);
     if (m_interfaces.empty()) return fail("LAN_JOIN");
@@ -255,8 +370,8 @@ void NativeLanDiscovery::Tick()
             group.sin_family = AF_INET;
             group.sin_port = htons(MODEL_LAN_DISCOVERY_PORT);
             inet_pton(AF_INET, GROUP, &group.sin_addr);
-            for (uint32_t ip : m_interfaces) {
-                in_addr local{}; local.s_addr = ip;
+            for (const auto& iface : m_interfaces) {
+                in_addr local{}; local.s_addr = iface.address;
                 if (!SocketOption(m_fd, IPPROTO_IP, IP_MULTICAST_IF, &local, sizeof(local))) continue;
                 (void)sendto(m_fd, reinterpret_cast<const char*>(wire.data()), wire.size(), 0,
                     reinterpret_cast<sockaddr*>(&group), sizeof(group));
@@ -264,20 +379,33 @@ void NativeLanDiscovery::Tick()
         }
         m_last_announce = now;
     }
+    std::vector<LanInterface> current_interfaces;
+    in_addr group{};
+    inet_pton(AF_INET, GROUP, &group);
+    bool have_interfaces = false;
     for (int i = 0; i < 32; ++i) {
         unsigned char wire[MODEL_LAN_BEACON_SIZE + 1]{};
         sockaddr_in from{};
-#ifdef _WIN32
-        int length = sizeof(from);
-#else
-        socklen_t length = sizeof(from);
-#endif
-        const auto got = recvfrom(m_fd, reinterpret_cast<char*>(wire), sizeof(wire), 0,
-                                  reinterpret_cast<sockaddr*>(&from), &length);
+        unsigned int index = 0;
+        uint32_t destination = 0;
+        const int got = ReceiveBeacon(m_fd, wire, sizeof(wire), from, index, destination);
         if (got < 0) break;
-        if (length != sizeof(from) || from.sin_family != AF_INET) continue;
+        if (!index || !destination || from.sin_family != AF_INET) continue;
         LanBeacon beacon;
         if (!DecodeLanBeacon(wire, static_cast<size_t>(got), m_self.network, beacon) || beacon.instance == m_self.instance) continue;
+        if (!have_interfaces) {
+            current_interfaces = Interfaces({});
+            have_interfaces = true;
+        }
+        const bool on_link = std::any_of(current_interfaces.begin(), current_interfaces.end(), [&](const auto& iface) {
+            return iface.index == index &&
+                std::any_of(m_interfaces.begin(), m_interfaces.end(), [&](const auto& joined) {
+                    return joined.address == iface.address && joined.index == index;
+                }) &&
+                (destination == group.s_addr || destination == iface.address) &&
+                (from.sin_addr.s_addr & iface.netmask) == (iface.address & iface.netmask);
+        });
+        if (!on_link) continue;
         char ip[INET_ADDRSTRLEN]{};
         if (inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip))) m_hints.Observe(ip, beacon, now);
     }
