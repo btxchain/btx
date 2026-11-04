@@ -194,6 +194,79 @@ bool ConfinedToRoot(const fs::path& root, const fs::path& put_old, const fs::pat
     return true;
 }
 
+
+// Forward ordinary worker exits and terminating signals to the host-visible child.
+// Raw core-dump bits are not guaranteed by self-signalling. Namespace PID 1
+// must supervise the worker, rather than making the worker an init process
+// whose default signal dispositions would differ from ordinary execution.
+[[noreturn]] void ExitWithStatus(int status)
+{
+    if (WIFEXITED(status)) _exit(WEXITSTATUS(status));
+    if (WIFSIGNALED(status)) {
+        const int signal = WTERMSIG(status);
+        struct sigaction action{};
+        action.sa_handler = SIG_DFL;
+        sigemptyset(&action.sa_mask);
+        sigaction(signal, &action, nullptr);
+        sigset_t unblocked;
+        sigemptyset(&unblocked);
+        sigaddset(&unblocked, signal);
+        sigprocmask(SIG_UNBLOCK, &unblocked, nullptr);
+        kill(getpid(), signal);
+    }
+    _exit(126);
+}
+
+void EnterPidNamespace(int error_fd)
+{
+    int status_pipe[2];
+    if (!process_guard::ErrorPipe(status_pipe)) process_guard::ChildFailure(error_fd);
+    const pid_t init = fork();
+    if (init < 0) process_guard::ChildFailure(error_fd);
+    if (init > 0) {
+        close(status_pipe[1]);
+        int init_status{};
+        pid_t waited;
+        do { waited = waitpid(init, &init_status, 0); } while (waited < 0 && errno == EINTR);
+        int worker_status{};
+        size_t got = 0;
+        while (got < sizeof(worker_status)) {
+            const ssize_t n = read(status_pipe[0], reinterpret_cast<char*>(&worker_status) + got,
+                                   sizeof(worker_status) - got);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            got += static_cast<size_t>(n);
+        }
+        close(status_pipe[0]);
+        if (waited == init && WIFEXITED(init_status) && WEXITSTATUS(init_status) == 0 &&
+            got == sizeof(worker_status) && (WIFEXITED(worker_status) || WIFSIGNALED(worker_status))) {
+            close(error_fd);
+            ExitWithStatus(worker_status);
+        }
+        // A missing/invalid report is a supervisor failure, never a worker result.
+        errno = EIO;
+        process_guard::ChildFailure(error_fd);
+    }
+    close(status_pipe[0]);
+    const pid_t worker = fork();
+    if (worker < 0) process_guard::ChildFailure(error_fd);
+    if (worker == 0) {
+        close(status_pipe[1]);
+        return;
+    }
+    close(error_fd);
+    int status{};
+    pid_t waited;
+    do { waited = waitpid(-1, &status, 0); } while ((waited >= 0 && waited != worker) ||
+                                                  (waited < 0 && errno == EINTR));
+    if (waited != worker) _exit(126);
+    ssize_t sent;
+    do { sent = write(status_pipe[1], &status, sizeof(status)); } while (sent < 0 && errno == EINTR);
+    close(status_pipe[1]);
+    // Exiting namespace init kills even descendants that called setsid().
+    _exit(sent == sizeof(status) ? 0 : 126);
+}
+
 #endif // __linux__
 } // namespace
 
@@ -249,13 +322,14 @@ SwarmFilesystemJailResult SwarmRunFilesystemJail(const SwarmFilesystemJailReques
         // not enforce its network_denied contract. Map first; then isolate.
         if (unshare(CLONE_NEWUSER) != 0 ||
             !MapUser(uid_map, uid_len, gid_map, gid_len) ||
-            unshare(CLONE_NEWNS | CLONE_NEWNET) != 0 || !helper_in_jail ||
+            unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID) != 0 || !helper_in_jail ||
             !ConfinedToRoot(root, put_old, witness) ||
             prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
             !process_guard::Limit(RLIMIT_CPU, static_cast<rlim_t>(request.max_wall_seconds)) ||
             !process_guard::Limit(RLIMIT_NOFILE, 256) ||
             !process_guard::Limit(RLIMIT_FSIZE, static_cast<rlim_t>(request.max_tree_bytes)) ||
             !process_guard::Limit(RLIMIT_AS, static_cast<rlim_t>(8LL * 1024 * 1024 * 1024))) process_guard::ChildFailure(error_fd);
+        EnterPidNamespace(error_fd);
         if (!process_guard::ChildReady(error_fd)) process_guard::ChildFailure(error_fd);
         execve(jailed_helper.c_str(), argv, env);
         process_guard::ChildFailure(error_fd);
