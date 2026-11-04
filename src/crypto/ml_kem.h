@@ -45,6 +45,11 @@ struct EncapsResult {
 /** Deterministic key generation from a 64-byte seed (tests only). */
 [[nodiscard]] KeyPair KeyGenDerand(Span<const uint8_t> seed);
 
+/** Check the FIPS 203 section 7.2 canonical encoding of an encapsulation key.
+ * This does not establish proper generation or ownership of the key.
+ */
+[[nodiscard]] bool IsValidEncapsulationKey(const PublicKey& pk) noexcept;
+
 /** Encapsulate to recipient public key. */
 [[nodiscard]] EncapsResult Encaps(const PublicKey& pk);
 
