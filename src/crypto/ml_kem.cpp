@@ -57,6 +57,18 @@ KeyPair KeyGenDerand(Span<const uint8_t> seed)
     return result;
 }
 
+bool IsValidEncapsulationKey(const PublicKey& pk) noexcept
+{
+    static_assert(PUBLICKEYBYTES == KYBER_PUBLICKEYBYTES);
+    // The encoded polynomial vector is followed by an unrestricted 32-byte seed.
+    for (size_t i = 0; i < KYBER_POLYVECBYTES; i += 3) {
+        const uint16_t a = pk[i] | ((uint16_t{pk[i + 1]} & 0x0f) << 8);
+        const uint16_t b = (pk[i + 1] >> 4) | (uint16_t{pk[i + 2]} << 4);
+        if (a >= KYBER_Q || b >= KYBER_Q) return false;
+    }
+    return true;
+}
+
 EncapsResult Encaps(const PublicKey& pk)
 {
     std::array<uint8_t, ENCAPS_SEEDBYTES> coin;

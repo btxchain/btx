@@ -1444,6 +1444,10 @@ bool V2Transport::ProcessReceivedPacketBytes() noexcept
                     mlkem::PublicKey their_pk;
                     std::copy(m_recv_decode_buffer.begin() + 1, m_recv_decode_buffer.end(),
                               their_pk.begin());
+                    if (!mlkem::IsValidEncapsulationKey(their_pk)) {
+                        LogDebug(BCLog::NET, "v2 transport: rejecting noncanonical ML-KEM peer key, peer=%d\n", m_nodeid);
+                        return false;
+                    }
                     SendPQCiphertextAndRekey(their_pk);
                     SetReceiveState(RecvState::APP);
                 } else if (peer_pq && !m_initiating && m_recv_decode_buffer.size() == 1) {
