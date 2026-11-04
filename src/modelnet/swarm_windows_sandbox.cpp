@@ -315,6 +315,14 @@ SwarmConfineResult SwarmRunWindowsAppContainer(const SwarmConfineRequest& reques
        request.max_address_bytes<=0 || request.max_cpu_seconds<=0 || request.max_cpu_seconds>86400 ||
        request.max_wall_seconds<=0 || request.max_wall_seconds>86400 || request.max_tree_bytes==0 ||
        static_cast<uint64_t>(request.max_address_bytes)>SIZE_MAX)return Fail("WINDOWS_SANDBOX_POLICY",error);
+    // CreateProcess needs this profile lookup value for AppContainer setup.
+    // Keep the explicit child allowlist; never inherit the parent environment.
+    const DWORD local_size=GetEnvironmentVariableW(L"LOCALAPPDATA",nullptr,0);
+    if(local_size==0 || local_size>32768)return Fail("WINDOWS_SANDBOX_ENVIRONMENT",error);
+    std::wstring local_appdata(local_size,L'\0');
+    const DWORD local_length=GetEnvironmentVariableW(L"LOCALAPPDATA",local_appdata.data(),local_size);
+    if(local_length==0 || local_length>=local_size)return Fail("WINDOWS_SANDBOX_ENVIRONMENT",error);
+    local_appdata.resize(local_length);
     Profile profile;
     if(!profile.Create())return Fail("WINDOWS_APPCONTAINER_CREATE",error);
     Tree inputs;
@@ -356,6 +364,7 @@ SwarmConfineResult SwarmRunWindowsAppContainer(const SwarmConfineRequest& reques
     std::wstring environment;
     auto add=[&](const std::wstring& item){environment+=item;environment.push_back(0);};
     add(L"HF_HUB_OFFLINE=1");add(L"LANG=C");
+    add(L"LOCALAPPDATA="+local_appdata);
     if(system_length>0 && system_length<32768)add(L"SystemRoot="+std::wstring(system,system_length));
     add(L"TEMP="+profile.work.native());add(L"TMP="+profile.work.native());environment.push_back(0);
     std::wstring command=L"\""+executable.native()+L"\"";
