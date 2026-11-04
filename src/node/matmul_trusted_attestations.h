@@ -542,6 +542,17 @@ static constexpr int GETMMATTEST_CATCHUP_TTL_HEADERS_AHEAD{2};
     return consecutive_ignored >= threshold;
 }
 
+/** A trusted mirror does not 24h-ban the attestor it is pinned to for an
+ *  attestation rate limit. That peer is often its only body source. A
+ *  forged proof still bans, and every other peer still bans. */
+[[nodiscard]] inline bool TrustedMirrorSkipsPinnedAttestorHammerBan(
+    bool trusted_mirror,
+    bool pinned_attestor,
+    bool forged_proof)
+{
+    return trusted_mirror && pinned_attestor && !forged_proof;
+}
+
 /** LCA(tip, candidate) depth in (0, TRUSTED_MIRROR_SHORT_REORG_DEPTH].
  *  Depth 0 is the tip itself; depth 7+ is the EMERGENCY park window and the
  *  competing miner fork (live: ~200 headers at 1879xx vs a 187773 sibling). */

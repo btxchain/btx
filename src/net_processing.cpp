@@ -1874,7 +1874,9 @@ private:
     /** Disconnect and 24h-ban a peer that is hammering attestation P2P
      *  (GETMMATTEST floods, over-budget MMATTEST). Discourage is not
      *  enough: those peers can reconnect while inbound slots remain.
-     *  noban / manual peers are not banned; local peers disconnect only.
+     *  noban / manual peers are not banned. A trusted mirror also does
+     *  not ban the attestor it is pinned to for a rate limit; a forged
+     *  proof still bans. Local peers disconnect only.
      *  Aggressive P2P is penalized. */
     void BanHammeringPeer(CNode& pnode, Peer& peer, std::string_view reason);
 
@@ -23180,6 +23182,21 @@ void PeerManagerImpl::BanHammeringPeer(CNode& pnode, Peer& peer, std::string_vie
     }
     if (pnode.IsManualConn()) {
         LogPrintf("Warning: not banning manually connected peer %d for %s\n",
+                  peer.m_id, std::string(reason));
+        return;
+    }
+    const bool forged_proof{reason == "matmul phase2 forged proof"};
+    bool pinned_attestor{false};
+    if (!forged_proof && node::matmul_trusted::IsTrustedMirror()) {
+        LOCK(cs_main);
+        if (const CNodeState* state{State(peer.m_id)}) {
+            pinned_attestor = PeerIsGpuAuthority(peer.m_id, *state);
+        }
+    }
+    if (node::matmul_trusted::TrustedMirrorSkipsPinnedAttestorHammerBan(
+            node::matmul_trusted::IsTrustedMirror(), pinned_attestor,
+            forged_proof)) {
+        LogPrintf("Warning: not banning pinned attestor peer %d for %s\n",
                   peer.m_id, std::string(reason));
         return;
     }

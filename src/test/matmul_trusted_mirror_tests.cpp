@@ -2818,6 +2818,13 @@ BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
     BOOST_CHECK(!AggressiveGetMmAttestShouldBan(GETMMATTEST_HAMMER_BAN_AFTER - 1));
     BOOST_CHECK(AggressiveGetMmAttestShouldBan(GETMMATTEST_HAMMER_BAN_AFTER));
     BOOST_CHECK(AggressiveGetMmAttestShouldBan(GETMMATTEST_HAMMER_BAN_AFTER + 8));
+
+    using node::matmul_trusted::TrustedMirrorSkipsPinnedAttestorHammerBan;
+    BOOST_CHECK(TrustedMirrorSkipsPinnedAttestorHammerBan(
+        /*trusted_mirror=*/true, /*pinned_attestor=*/true, /*forged_proof=*/false));
+    BOOST_CHECK(!TrustedMirrorSkipsPinnedAttestorHammerBan(true, true, /*forged_proof=*/true));
+    BOOST_CHECK(!TrustedMirrorSkipsPinnedAttestorHammerBan(true, /*pinned_attestor=*/false, false));
+    BOOST_CHECK(!TrustedMirrorSkipsPinnedAttestorHammerBan(/*trusted_mirror=*/false, true, false));
 }
 
 BOOST_AUTO_TEST_CASE(getmmattest_heard_bucket)
