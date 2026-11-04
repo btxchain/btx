@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 namespace modelnet {
+#ifndef _WIN32
 namespace {
 
 bool FileSha384(const fs::path& p, Digest48& out, uint64_t& size, std::string& err)
@@ -74,6 +75,7 @@ bool EvalArtifactPath(const fs::path& root, const std::string& name, fs::path& o
 }
 
 } // namespace
+#endif
 
 bool EvaluationProfileReady(const std::string& profile_id)
 {
@@ -132,6 +134,12 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
         err = "unexecuted profile";
         return false;
     }
+#ifdef _WIN32
+    // This executor requires an isolated POSIX child; native fork is unavailable.
+    job.pushKV("state", "FAILED");
+    err = "isolated evaluation process is not supported on this platform";
+    return false;
+#else
     job.pushKV("state", "RUNNING");
     const fs::path dir = fs::PathFromString(plan["artifact_dir"].get_str());
     const UniValue spec = plan.exists("spec") ? plan["spec"] : UniValue(UniValue::VOBJ);
@@ -251,11 +259,13 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
     job.pushKV("isolated_process", true);
     job.pushKV("wallet", false);
     return true;
+#endif
 }
 
 bool CancelEvaluationJob(UniValue& job, std::string& err)
 {
     job.pushKV("cancel", true);
+#ifndef _WIN32
     if (job.exists("pid") && job["pid"].isNum()) {
         const pid_t pid = static_cast<pid_t>(job["pid"].getInt<int64_t>());
         if (pid > 1) {
@@ -264,6 +274,7 @@ bool CancelEvaluationJob(UniValue& job, std::string& err)
             waitpid(pid, &status, 0);
         }
     }
+#endif
     job.pushKV("state", "CANCELLED");
     err.clear();
     return true;
