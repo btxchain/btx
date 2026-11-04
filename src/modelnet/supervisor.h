@@ -17,6 +17,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef WIN32
+#include <sys/types.h>
+#endif
+
 namespace modelnet {
 
 enum class HelperState : uint8_t {
@@ -100,7 +104,11 @@ class HelperSupervisor {
     HelperLaunchConfig m_cfg;
     mutable std::mutex m_mu;
     HelperStatus m_st;
+#ifdef WIN32
+    int m_pid{-1}; // Helper spawning is not supported on Windows.
+#else
     pid_t m_pid{-1};
+#endif
     std::atomic<bool> m_stop{false};
     std::thread m_thread;
     std::function<bool()> m_shutdown;
