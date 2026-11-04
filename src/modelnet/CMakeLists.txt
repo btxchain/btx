@@ -2569,6 +2569,9 @@ if(WIN32)
   target_include_directories(bitcoin_modelnet BEFORE PUBLIC
     ${PROJECT_SOURCE_DIR}/src/compat/mingw)
   if(MSVC)
+    # Native CRT headers have no unistd.h; reuse the existing adapter.
+    target_include_directories(bitcoin_modelnet BEFORE PRIVATE
+      ${PROJECT_SOURCE_DIR}/src/compat/msvc)
     target_compile_options(bitcoin_modelnet PRIVATE
       "/FI${PROJECT_SOURCE_DIR}/src/compat/mingw/posix_extra.h")
   else()
