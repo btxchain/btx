@@ -21,7 +21,9 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -43,20 +45,28 @@ public:
             m_original = current;
         }
 
+#if defined(_WIN32)
+        _putenv_s(name, value != nullptr ? value : "");
+#else
         if (value != nullptr) {
             setenv(name, value, 1);
         } else {
             unsetenv(name);
         }
+#endif
     }
 
     ~ScopedEnvVar()
     {
+#if defined(_WIN32)
+        _putenv_s(m_name, m_had_original ? m_original.c_str() : "");
+#else
         if (m_had_original) {
             setenv(m_name, m_original.c_str(), 1);
         } else {
             unsetenv(m_name);
         }
+#endif
     }
 
 private:
@@ -83,6 +93,40 @@ btx::cuda::CudaDeviceInfo MakeCudaDeviceInfo(int device_index,
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(matmul_backend_capabilities_tests)
+
+BOOST_AUTO_TEST_CASE(scoped_environment_restores_values)
+{
+    constexpr const char* name = "BTX_TEST_BACKEND_SCOPED_ENV";
+    const ScopedEnvVar original{name, "original"};
+    BOOST_REQUIRE(std::getenv(name) != nullptr);
+    BOOST_CHECK_EQUAL(std::getenv(name), "original");
+    {
+        const ScopedEnvVar replacement{name, "replacement"};
+        BOOST_REQUIRE(std::getenv(name) != nullptr);
+        BOOST_CHECK_EQUAL(std::getenv(name), "replacement");
+        {
+            const ScopedEnvVar removed{name, nullptr};
+            BOOST_CHECK(std::getenv(name) == nullptr);
+        }
+        BOOST_REQUIRE(std::getenv(name) != nullptr);
+        BOOST_CHECK_EQUAL(std::getenv(name), "replacement");
+    }
+    BOOST_REQUIRE(std::getenv(name) != nullptr);
+    BOOST_CHECK_EQUAL(std::getenv(name), "original");
+}
+
+BOOST_AUTO_TEST_CASE(scoped_environment_restores_absence)
+{
+    constexpr const char* name = "BTX_TEST_BACKEND_SCOPED_ENV";
+    const ScopedEnvVar absent{name, nullptr};
+    BOOST_CHECK(std::getenv(name) == nullptr);
+    {
+        const ScopedEnvVar temporary{name, "temporary"};
+        BOOST_REQUIRE(std::getenv(name) != nullptr);
+        BOOST_CHECK_EQUAL(std::getenv(name), "temporary");
+    }
+    BOOST_CHECK(std::getenv(name) == nullptr);
+}
 
 BOOST_AUTO_TEST_CASE(cpu_backend_always_available)
 {
@@ -1081,6 +1125,10 @@ BOOST_AUTO_TEST_CASE(metal_profiling_samples_increment_after_digest)
 
 BOOST_AUTO_TEST_CASE(metal_zero_copy_profile_reports_aligned_input_wrap)
 {
+#if defined(_WIN32)
+    BOOST_CHECK(!btx::metal::ProbeMatMulDigestAcceleration().available);
+    BOOST_TEST_MESSAGE("Metal zero-copy input wrapping is unavailable on Windows");
+#else
     // Use n=128 so matrix buffers (128*128*4 = 65536 bytes) exceed the system
     // page size, satisfying WrapSharedNoCopyBuffer's minimum-length guard.
     constexpr uint32_t kN = 128;
@@ -1155,6 +1203,7 @@ BOOST_AUTO_TEST_CASE(metal_zero_copy_profile_reports_aligned_input_wrap)
 
     const auto profiling = btx::metal::ProbeMatMulProfilingStats();
     BOOST_CHECK(profiling.last_zero_copy_inputs);
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(metal_gpu_generated_inputs_match_cpu_oracle_generation)
