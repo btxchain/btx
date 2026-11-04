@@ -122,6 +122,9 @@ typedef SSIZE_T ssize_t;
 typedef unsigned int uid_t;
 #endif
 
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
 #ifndef S_IFLNK
 #define S_IFLNK 0120000
 #endif
