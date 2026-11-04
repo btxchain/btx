@@ -26,7 +26,11 @@
 #include <fstream>
 #include <string>
 #include <system_error>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace modelnet {
 namespace {
@@ -117,7 +121,12 @@ bool Obs01::Pass(std::string& err)
     if (!Accept<Prf01>(err)) return false;
     if (!Accept<Prf02>(err)) return false;
     {
-        const TempTree tree{fs::temp_directory_path() / ("btx-obs01-" + std::to_string(::getpid()))};
+#ifdef _WIN32
+        const auto process_id = ::_getpid();
+#else
+        const auto process_id = ::getpid();
+#endif
+        const TempTree tree{fs::temp_directory_path() / ("btx-obs01-" + std::to_string(process_id))};
         const fs::path admission = tree.root / "prf03";
         if (!PrepareLab(admission, false, err)) return false;
         const LabDir hold(admission);
