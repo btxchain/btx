@@ -21,6 +21,7 @@
 #include <aclapi.h>
 #include <bcrypt.h>
 #include <iphlpapi.h>
+#include <mswsock.h>
 #include <objbase.h>
 #include <sddl.h>
 #include <userenv.h>
