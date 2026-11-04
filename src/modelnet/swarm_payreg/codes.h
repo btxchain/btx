@@ -10,7 +10,7 @@ namespace modelnet {
 /** The register is closed, or a second channel id was presented. Nothing new is stored. */
 inline constexpr char kSwarmPayRegNotOpened[] = "NOT_OPENED";
 
-/** atoms is below 1. Nothing is stored. */
+/** atoms is below 1, or the pool total would pass int64 max. Nothing new is stored. */
 inline constexpr char kSwarmPayRegAmount[] = "AMOUNT";
 
 /** The outpoint is empty, or it already funds another pool. Nothing new is stored. */

@@ -9,6 +9,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -166,6 +167,28 @@ BOOST_AUTO_TEST_CASE(credit_does_not_increase_the_funded_balance)
     BOOST_CHECK(!reg.holds_money("pool-b"));
     BOOST_CHECK(!reg.spendable());
     BOOST_CHECK_EQUAL(reg.atoms_moved(), static_cast<int64_t>(0));
+    ExpectQuiet(reg);
+}
+
+BOOST_AUTO_TEST_CASE(reserve_and_credit_refuse_a_sum_past_int64_max)
+{
+    modelnet::SwarmPayReg reg;
+    std::string err;
+    BOOST_REQUIRE(reg.Open("channel-1", "pool-a", "pool-b", err));
+    const int64_t half = std::numeric_limits<int64_t>::max() / 2 + 1;
+    BOOST_REQUIRE(reg.Reserve("pool-a", "out-a", half, err));
+    BOOST_CHECK(!reg.Reserve("pool-a", "out-b", half, err));
+    BOOST_CHECK_EQUAL(err, "AMOUNT");
+    BOOST_CHECK_EQUAL(reg.funded_balance("pool-a"), half);
+    BOOST_CHECK(!reg.reserve_pool("out-b").size());
+
+    BOOST_CHECK(!reg.Credit("pool-a", std::numeric_limits<int64_t>::max(), err));
+    BOOST_CHECK_EQUAL(err, "NOT_BACKING");
+    BOOST_CHECK(!reg.Credit("pool-a", 1, err));
+    BOOST_CHECK_EQUAL(err, "AMOUNT");
+    BOOST_CHECK_EQUAL(reg.credit_note("pool-a"), std::numeric_limits<int64_t>::max());
+    BOOST_CHECK_EQUAL(reg.funded_balance("pool-a"), half);
+    BOOST_CHECK(!reg.spendable());
     ExpectQuiet(reg);
 }
 

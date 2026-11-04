@@ -254,7 +254,8 @@ SwarmFilesystemJailResult SwarmRunFilesystemJail(const SwarmFilesystemJailReques
             prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
             !process_guard::Limit(RLIMIT_CPU, static_cast<rlim_t>(request.max_wall_seconds)) ||
             !process_guard::Limit(RLIMIT_NOFILE, 256) ||
-            !process_guard::Limit(RLIMIT_FSIZE, static_cast<rlim_t>(request.max_tree_bytes))) process_guard::ChildFailure(error_fd);
+            !process_guard::Limit(RLIMIT_FSIZE, static_cast<rlim_t>(request.max_tree_bytes)) ||
+            !process_guard::Limit(RLIMIT_AS, static_cast<rlim_t>(8LL * 1024 * 1024 * 1024))) process_guard::ChildFailure(error_fd);
         if (!process_guard::ChildReady(error_fd)) process_guard::ChildFailure(error_fd);
         execve(jailed_helper.c_str(), argv, env);
         process_guard::ChildFailure(error_fd);

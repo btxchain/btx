@@ -7,6 +7,7 @@
 #include <pqkey.h>
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -69,11 +70,18 @@ bool SwarmPayReg::Reserve(const std::string& pool, const std::string& outpoint, 
         return false;
     }
 
+    const auto funded = m_funded.find(pool);
+    const int64_t already = funded == m_funded.end() ? 0 : funded->second;
+    if (atoms > std::numeric_limits<int64_t>::max() - already) {
+        err = kSwarmPayRegAmount;
+        return false;
+    }
+
     Collateral row;
     row.pool = pool;
     row.atoms = atoms;
     m_collateral.emplace(outpoint, std::move(row));
-    m_funded[pool] += atoms;
+    m_funded[pool] = already + atoms;
     err.clear();
     return true;
 }
@@ -179,7 +187,13 @@ bool SwarmPayReg::Credit(const std::string& pool, int64_t atoms, std::string& er
         return false;
     }
     // The note is recorded. It is not added to the funded collateral balance.
-    m_credit[pool] += atoms;
+    const auto credited = m_credit.find(pool);
+    const int64_t already = credited == m_credit.end() ? 0 : credited->second;
+    if (atoms > std::numeric_limits<int64_t>::max() - already) {
+        err = kSwarmPayRegAmount;
+        return false;
+    }
+    m_credit[pool] = already + atoms;
     err = kSwarmPayRegNotBacking;
     return false;
 }
