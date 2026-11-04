@@ -65,6 +65,7 @@ void DecayUnauthLocked(UnauthState& e)
 ConnLimits& GlobalConnLimits() { return g_limits; }
 
 namespace {
+#ifndef _WIN32
 bool OpensslCliHasMlKem768(const std::string& bin)
 {
     if (bin.empty()) return false;
@@ -77,11 +78,17 @@ bool OpensslCliHasMlKem768(const std::string& bin)
     const int rc = pclose(fp);
     return rc == 0 && out.find("MLKEM768") != std::string::npos;
 }
+#endif
 } // namespace
 
 std::string OpensslBin()
 {
     if (const char* e = std::getenv("BTX_OPENSSL")) return e;
+#ifdef _WIN32
+    // Keep the explicit override above and the existing CLI-name fallback.
+    // The POSIX shell probe is not a native Windows capability check.
+    return "openssl";
+#else
     static const std::string cached = [] {
         const char* cands[] = {
             "/opt/openssl-3.5.8/bin/openssl",
@@ -97,6 +104,7 @@ std::string OpensslBin()
         return std::string{"openssl"};
     }();
     return cached;
+#endif
 }
 
 void SetPq1SocketOpts(int fd, bool nonblock)
