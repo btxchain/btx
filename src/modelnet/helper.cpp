@@ -197,6 +197,11 @@ fs::path UnixRpcListenPath(const fs::path& requested)
 
 bool UnixSocketSafeToAdopt(const fs::path& sock, std::string& err)
 {
+#ifdef _WIN32
+    (void)sock;
+    err = "helper Unix RPC is not supported on this platform";
+    return false;
+#else
     err.clear();
     if (LooksLikeTmpFallbackSock(sock) || StickyWorldWritableDir(sock.parent_path())) {
         err = "tmp socket is not a helper";
@@ -224,10 +229,16 @@ bool UnixSocketSafeToAdopt(const fs::path& sock, std::string& err)
         return false;
     }
     return true;
+#endif
 }
 
 bool UnixConnectedPeerIsSelf(int fd, std::string& err)
 {
+#ifdef _WIN32
+    (void)fd;
+    err = "helper peer identity is not supported on this platform";
+    return false;
+#else
     err.clear();
 #if defined(SO_PEERCRED)
     struct ucred cred {};
@@ -244,6 +255,7 @@ bool UnixConnectedPeerIsSelf(int fd, std::string& err)
 #else
     (void)fd;
     return true;
+#endif
 #endif
 }
 
@@ -366,8 +378,21 @@ bool InventorySafeTensorsFile(const fs::path& path, UniValue& tensors, uint64_t&
     return true;
 }
 
-bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, std::string& err, pid_t* hold_pid)
+// A worker PID is meaningful only for the POSIX runners below.
+#ifdef _WIN32
+using WorkerPid = int;
+#else
+using WorkerPid = pid_t;
+#endif
+
+bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, std::string& err, WorkerPid* hold_pid)
 {
+#ifdef _WIN32
+    (void)loader; (void)dir; (void)out;
+    if (hold_pid) *hold_pid = 0;
+    err = "CUDA loader process is not supported on this platform";
+    return false;
+#else
     std::error_code ec;
     if (!fs::is_regular_file(loader, ec) || ec) {
         err = "BTX_MODEL_CUDA_LOADER is not a regular file";
@@ -437,10 +462,11 @@ bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, s
         return false;
     }
     return true;
+#endif
 }
 
 struct ResidentCuda {
-    pid_t pid{0};
+    WorkerPid pid{0};
     uint64_t bytes_on_device{0};
     std::string device_name;
     UniValue cuda;
@@ -449,14 +475,23 @@ struct ResidentCuda {
 std::mutex g_resident_mu;
 std::map<std::string, ResidentCuda> g_resident;
 
-bool PidAlive(pid_t pid)
+bool PidAlive(WorkerPid pid)
 {
+#ifdef _WIN32
+    (void)pid;
+    return false;
+#else
     if (pid <= 0) return false;
     return ::kill(pid, 0) == 0 || errno == EPERM;
+#endif
 }
 
 void StopResidentLocked(const std::string& key)
 {
+#ifdef _WIN32
+    // Windows cannot create a resident worker through these runners.
+    g_resident.erase(key);
+#else
     auto it = g_resident.find(key);
     if (it == g_resident.end()) return;
     const pid_t pid = it->second.pid;
@@ -471,6 +506,7 @@ void StopResidentLocked(const std::string& key)
     ::kill(pid, SIGKILL);
     int st = 0;
     waitpid(pid, &st, 0);
+#endif
 }
 
 void StopResident(const std::string& key)
@@ -481,6 +517,13 @@ void StopResident(const std::string& key)
 
 bool MaybeRunInferCmd(const fs::path& checkout, UniValue& result, std::string& err)
 {
+#ifdef _WIN32
+    (void)checkout; (void)result;
+    const char* cmd = std::getenv("BTX_MODEL_INFER_CMD");
+    if (!cmd || cmd[0] == '\0') return true;
+    err = "inference process is not supported on this platform";
+    return false;
+#else
     const char* cmd = std::getenv("BTX_MODEL_INFER_CMD");
     if (!cmd || cmd[0] == '\0') return true;
     int pipefd[2];
@@ -528,11 +571,17 @@ bool MaybeRunInferCmd(const fs::path& checkout, UniValue& result, std::string& e
     result.pushKV("infer_ok", true);
     result.pushKV("generated", !line.empty());
     return true;
+#endif
 }
 
 bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::string& prompt,
                         int max_new_tokens, UniValue& out, std::string& err)
 {
+#ifdef _WIN32
+    (void)exe; (void)dir; (void)prompt; (void)max_new_tokens; (void)out;
+    err = "generate adapter process is not supported on this platform";
+    return false;
+#else
     if (!fs::exists(exe) || !fs::is_regular_file(exe)) {
         err = "BTX_MODEL_GENERATE is not a regular file";
         return false;
@@ -775,11 +824,17 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         return false;
     }
     return true;
+#endif
 }
 
 bool RunLlamaGenerate(const fs::path& exe, const fs::path& gguf, const std::string& prompt,
                       int max_new_tokens, UniValue& out, std::string& err)
 {
+#ifdef _WIN32
+    (void)exe; (void)gguf; (void)prompt; (void)max_new_tokens; (void)out;
+    err = "llama process is not supported on this platform";
+    return false;
+#else
     if (!fs::exists(exe) || !fs::is_regular_file(exe) ||
         ::access(fs::PathToString(exe).c_str(), X_OK) != 0) {
         err = "BTX_LLAMA_CLI is not executable";
@@ -839,6 +894,7 @@ bool RunLlamaGenerate(const fs::path& exe, const fs::path& gguf, const std::stri
     out.pushKV("format", "gguf");
     out.pushKV("remote_inference", false);
     return true;
+#endif
 }
 
 int AddrConnectPreference(const sockaddr* sa)
@@ -1458,6 +1514,11 @@ int ListenTcp(const std::string& bind, std::string& err)
 
 int ListenUnix(fs::path& path, std::string& err)
 {
+#ifdef _WIN32
+    (void)path;
+    err = "helper Unix RPC is not supported on this platform";
+    return -1;
+#else
     const fs::path requested = path;
     path = UnixRpcListenPath(requested);
     std::string p = fs::PathToString(path);
@@ -1516,6 +1577,7 @@ int ListenUnix(fs::path& path, std::string& err)
         return -1;
     }
     return fd;
+#endif
 }
 
 std::string RecvUntil(int fd, size_t cap, std::atomic<bool>* stop, int timeout_ms = PQ1_IDLE_MS)
@@ -9204,7 +9266,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         const char* loader_env = std::getenv("BTX_MODEL_CUDA_LOADER");
         if (loader_env && loader_env[0] != '\0') {
             UniValue loaded;
-            pid_t child = 0;
+            WorkerPid child = 0;
             if (!RunCudaLoader(fs::PathFromString(loader_env), checkout, loaded, err, &child)) {
                 err_code = "HARDWARE_NOT_RUN";
                 return false;
@@ -10264,6 +10326,11 @@ namespace {
 template <typename Writer>
 bool WritePrivatePem(const fs::path& path, Writer&& write)
 {
+#ifdef _WIN32
+    // Do not create or truncate a private key without a native ACL contract.
+    (void)path; (void)write;
+    return false;
+#else
     const int fd = ::open(fs::PathToString(path).c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return false;
     if (::fchmod(fd, 0600) != 0) {
@@ -10277,6 +10344,7 @@ bool WritePrivatePem(const fs::path& path, Writer&& write)
     }
     const bool ok = write(f);
     return std::fclose(f) == 0 && ok;
+#endif
 }
 } // namespace
 
@@ -11377,6 +11445,11 @@ bool HelperRefusalFromError(const std::string& err, std::string& code, std::stri
 
 bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err)
 {
+#ifdef _WIN32
+    (void)socket_path; (void)method; (void)params; (void)result;
+    err = "helper Unix RPC is not supported on this platform";
+    return false;
+#else
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         err = "unix socket";
@@ -11421,6 +11494,7 @@ bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const U
     }
     result = reply["result"];
     return true;
+#endif
 }
 
 namespace {
