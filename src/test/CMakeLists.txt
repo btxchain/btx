@@ -2651,6 +2651,22 @@ if(WITH_MODELNET AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   check_cxx_source_compiles("int main() { return 0; }" BTX_HAVE_STATIC_TEST_PROBE)
   unset(CMAKE_REQUIRED_LINK_OPTIONS)
   if(BTX_HAVE_STATIC_TEST_PROBE)
+    # Keep supervisor fault wrappers confined to this small Linux-only target.
+    # Compile the real jail TU with the same project interface as production.
+    add_executable(test_swarm_fsjail_linux_worker swarm_fsjail_linux_worker.cpp)
+    target_link_options(test_swarm_fsjail_linux_worker PRIVATE -static)
+    add_executable(test_swarm_fsjail_linux
+      swarm_fsjail_linux_tests.cpp
+      ../modelnet/swarm_fsjail.cpp
+    )
+    target_link_libraries(test_swarm_fsjail_linux PRIVATE core_interface)
+    target_include_directories(test_swarm_fsjail_linux PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_link_options(test_swarm_fsjail_linux PRIVATE -Wl,--wrap=write -Wl,--wrap=waitpid)
+    add_dependencies(test_swarm_fsjail_linux test_swarm_fsjail_linux_worker)
+    add_dependencies(test_btx test_swarm_fsjail_linux)
+    add_test(NAME swarm_fsjail_linux_supervision
+      COMMAND test_swarm_fsjail_linux $<TARGET_FILE:test_swarm_fsjail_linux_worker>)
+    set_tests_properties(swarm_fsjail_linux_supervision PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
     add_executable(test_swarm_linux_probe swarm_linux_probe.cpp)
     target_link_options(test_swarm_linux_probe PRIVATE -static)
     add_dependencies(test_btx test_swarm_linux_probe)
