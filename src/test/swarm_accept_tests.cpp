@@ -9,7 +9,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <fstream>
-#include <unistd.h>
+#include <test/util/process.h>
 
 BOOST_FIXTURE_TEST_SUITE(swarm_accept_tests, BasicTestingSetup)
 
@@ -36,7 +36,7 @@ BOOST_AUTO_TEST_CASE(an_unmeasured_engine_is_not_advertised)
     BOOST_CHECK_EQUAL(missing.code, "ENGINE_ABSENT");
 
     fs::path bin = fs::temp_directory_path();
-    bin /= fs::u8path("btx-engine-" + std::to_string(::getpid()));
+    bin /= fs::u8path("btx-engine-" + std::to_string(test::ProcessId()));
     {
         std::ofstream out(bin);
         out << "#!/bin/sh\n";
