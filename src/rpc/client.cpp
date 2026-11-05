@@ -654,8 +654,6 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "getsimilarmodels", 0, "query" },
     { "getnewmodels", 0, "query" },
     { "getrecentreleases", 0, "query" },
-    { "addmodelindex", 0, "endpoint" },
-    { "removemodelindex", 0, "endpoint" },
     { "exportmodelindex", 0, "query" },
     { "importmodelindex", 0, "snapshot" },
     { "importmodel", 1, "options" },
