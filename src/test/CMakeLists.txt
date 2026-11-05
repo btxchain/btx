@@ -6,6 +6,7 @@
 # SOURCES property is processed to gather test suite macros.
 add_executable(test_btx
   main.cpp
+  util/sdk_process.cpp
   addrman_tests.cpp
   allocator_tests.cpp
   amount_tests.cpp
