@@ -358,7 +358,7 @@ SwarmFilesystemJailResult SwarmRunFilesystemJail(const SwarmFilesystemJailReques
     confined.network_denied = true;
     const auto run = SwarmRunConfined(confined, err);
     if (!run.launched) {
-        return Refuse(run.code == "CONFINEMENT_TIMEOUT" ? "JAIL_TIMEOUT" :
+        return Refuse((run.code == "CONFINEMENT_TIMEOUT" || run.code == "WINDOWS_SANDBOX_CPU_LIMIT") ? "JAIL_TIMEOUT" :
                       run.code == "TREE_LIMIT" ? "TREE_LIMIT" : "JAIL_ABSENT", err);
     }
     SwarmFilesystemJailResult result;

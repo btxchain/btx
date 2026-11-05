@@ -34,7 +34,14 @@ namespace modelnet {
  * filesystem, so a file written outside root is bounded only by
  * RLIMIT_FSIZE. Windows uses a
  * zero-capability AppContainer, private staged files, a one-process Job with
- * memory/CPU/wall limits and an explicit stdio handle allowlist. max_nofile
+ * memory/user-CPU limits and an explicit stdio handle allowlist. The parent
+ * samples summed Job user+kernel CPU and staged logical file lengths, with
+ * at most 100 ms requested waits and time checks during bounded tree walks.
+ * Existing input allowance plus 64 MiB of output is the live Windows tree
+ * envelope; final input hashes and output limits still apply. Sampling is
+ * not an atomic snapshot or hard disk quota; I/O/scheduling may delay it.
+ * An incomplete pass is retried once, then refused rather than treated as
+ * zero. Wall time excludes system sleep, as Windows 8+ waits do. max_nofile
  * is a POSIX descriptor quota; Windows bounds inherited handles and process
  * memory, not the number of later OS handle allocations. No environment
  * credentials or inherited RPC/wallet descriptors cross exec. Wall timeout
