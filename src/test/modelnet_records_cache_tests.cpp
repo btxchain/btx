@@ -32,7 +32,9 @@ extern "C" {
 #include <sstream>
 #include <string>
 #include <thread>
+#ifndef WIN32
 #include <unistd.h>
+#endif
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_records_cache_tests, BasicTestingSetup)
@@ -193,6 +195,7 @@ BOOST_AUTO_TEST_CASE(record_already_cached_is_not_written_again)
     BOOST_CHECK_EQUAL(RecordsOnDisk(tmp), 5U);
 }
 
+#ifndef WIN32 // Requires the helper Unix RPC transport.
 BOOST_AUTO_TEST_CASE(helper_writes_announced_records_when_it_stops)
 {
     modelnet::HelperConfig cfg;
@@ -232,6 +235,8 @@ BOOST_AUTO_TEST_CASE(helper_writes_announced_records_when_it_stops)
     finish();
     BOOST_CHECK_EQUAL(RecordsOnDisk(cfg.modeldir), 1U);
 }
+
+#endif
 
 BOOST_AUTO_TEST_CASE(announced_records_are_bounded_in_bytes)
 {
