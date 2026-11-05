@@ -44,6 +44,12 @@
 
 #include <boost/test/unit_test.hpp>
 
+#if defined(_WIN32)
+// Windows headers may define OPAQUE after v2_types.h has been included.
+#pragma push_macro("OPAQUE")
+#undef OPAQUE
+#endif
+
 using namespace util::hex_literals;
 using interfaces::BlockTemplate;
 using interfaces::Mining;
@@ -2339,3 +2345,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_skips_rebalance_that_exceeds_account_regist
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+#if defined(_WIN32)
+#pragma pop_macro("OPAQUE")
+#endif
