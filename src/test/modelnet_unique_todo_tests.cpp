@@ -24,6 +24,7 @@
 #include <modelnet/transfer_session.h>
 #include <span.h>
 #include <test/util/setup_common.h>
+#include <test/util/sdk_process.h>
 #include <univalue.h>
 #include <util/fs.h>
 
@@ -40,8 +41,13 @@
 #include <set>
 #include <string>
 #include <sys/stat.h>
+#ifdef WIN32
+#include <windows.h>
+#include <winioctl.h>
+#else
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_unique_todo_tests, BasicTestingSetup)
@@ -93,8 +99,21 @@ void ZeroSpend(const UniValue& o, const char* where)
     }
 }
 
+#ifdef WIN32
+std::string NativeExecutable(const char* configured)
+{
+    fs::path executable = fs::PathFromString(configured);
+    if (!fs::exists(executable) && executable.extension() != ".exe") executable += ".exe";
+    return fs::PathToString(executable);
+}
+#endif
+
 int SpawnArgv(const char* exe, const char* arg)
 {
+#ifdef WIN32
+    std::string output;
+    return sdk_test::Spawn({NativeExecutable(exe), arg}, output);
+#else
     const pid_t pid = ::fork();
     if (pid < 0) return -1;
     if (pid == 0) {
@@ -105,6 +124,7 @@ int SpawnArgv(const char* exe, const char* arg)
     BOOST_REQUIRE_EQUAL(::waitpid(pid, &st, 0), pid);
     if (WIFEXITED(st)) return WEXITSTATUS(st);
     return -1;
+#endif
 }
 
 } // namespace
@@ -199,17 +219,29 @@ BOOST_AUTO_TEST_CASE(unique_todo_a2_modelindex)
     ZeroSpend(rec, "A2 reconcilemodelindex");
 
 #ifdef MODELNET_MODELD_PATH
+#ifdef WIN32
+    BOOST_REQUIRE(fs::exists(fs::PathFromString(NativeExecutable(MODELNET_MODELD_PATH))));
+    // The argument parser rejects this with 1 before helper startup; a launch error is not a pass.
+    BOOST_CHECK_EQUAL(SpawnArgv(MODELNET_MODELD_PATH, "-modelindex=1"), 1);
+#else
     BOOST_REQUIRE(fs::exists(fs::PathFromString(MODELNET_MODELD_PATH)));
     BOOST_CHECK_NE(SpawnArgv(MODELNET_MODELD_PATH, "-modelindex=1"), 0);
 #endif
+#endif
 #ifdef MODELNET_BTXD_PATH
+    std::string help;
+#ifdef WIN32
+    const std::string btxd = NativeExecutable(MODELNET_BTXD_PATH);
+    BOOST_REQUIRE(fs::exists(fs::PathFromString(btxd)));
+    BOOST_REQUIRE_EQUAL(sdk_test::Spawn({btxd, "-help"}, help, false), 0);
+#else
     BOOST_REQUIRE(fs::exists(fs::PathFromString(MODELNET_BTXD_PATH)));
     FILE* fp = ::popen((std::string(MODELNET_BTXD_PATH) + " -help").c_str(), "r");
     BOOST_REQUIRE(fp);
-    std::string help;
     char buf[4096];
     while (fgets(buf, sizeof(buf), fp) != nullptr) help.append(buf);
     (void)::pclose(fp);
+#endif
     BOOST_CHECK(help.find("-modelindex") == std::string::npos);
 #endif
     BOOST_TEST_MESSAGE("HONEST_NOT_RUN -modelindex as a product flag; helper/modeld reject");
@@ -234,6 +266,15 @@ BOOST_AUTO_TEST_CASE(unique_todo_build_gui)
 BOOST_AUTO_TEST_CASE(unique_todo_live_r2_hf_wan)
 {
     auto head_code = [](const char* url) -> int {
+#ifdef WIN32
+        const std::string curl = sdk_test::Which("curl");
+        if (curl.empty()) return -1;
+        std::string output;
+        const int code = sdk_test::Spawn({curl, "-sI", "-o", "NUL", "-w", "%{http_code}",
+            "--max-time", "8", "--connect-timeout", "5", "--http1.1", url}, output, false);
+        if (code < 0) return -1;
+        return std::atoi(output.c_str());
+#else
         const std::string cmd = std::string("curl -sI -o /dev/null -w '%{http_code}' --max-time 8 --connect-timeout 5 --http1.1 ") + url;
         FILE* fp = ::popen(cmd.c_str(), "r");
         if (!fp) return -1;
@@ -241,6 +282,7 @@ BOOST_AUTO_TEST_CASE(unique_todo_live_r2_hf_wan)
         (void)::fgets(buf, sizeof(buf), fp);
         (void)::pclose(fp);
         return std::atoi(buf);
+#endif
     };
     const int hf = head_code("https://huggingface.co/robots.txt");
     const int r2 = head_code("https://r2.cloudflarestorage.com/");
@@ -269,6 +311,33 @@ BOOST_AUTO_TEST_CASE(unique_todo_400gib_sparse_addressing)
     ZeroSpend(receipt, "400GiB receipt");
 
     const fs::path sparse = m_path_root / "todo-400gib.sparse";
+#ifdef WIN32
+    const HANDLE raw = CreateFileW(sparse.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                                   nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    BOOST_REQUIRE(raw != INVALID_HANDLE_VALUE);
+    auto close_file = [](void* handle) { CloseHandle(handle); };
+    std::unique_ptr<void, decltype(close_file)> file(raw, close_file);
+    DWORD returned{0};
+    // Set sparse BEFORE extending: never allocate an ordinary 400 GiB file.
+    BOOST_REQUIRE(DeviceIoControl(raw, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned, nullptr));
+    LARGE_INTEGER length{};
+    length.QuadPart = static_cast<LONGLONG>(logical);
+    BOOST_REQUIRE(SetFilePointerEx(raw, length, nullptr, FILE_BEGIN));
+    BOOST_REQUIRE(SetEndOfFile(raw));
+    LARGE_INTEGER actual{};
+    BOOST_REQUIRE(GetFileSizeEx(raw, &actual));
+    BOOST_CHECK_EQUAL(static_cast<uint64_t>(actual.QuadPart), logical);
+    // Physical allocation, not just logical length, is part of this fixture.
+    BOOST_REQUIRE(CloseHandle(file.get()));
+    file.release();
+    DWORD high{0};
+    SetLastError(NO_ERROR);
+    const DWORD low = GetCompressedFileSizeW(sparse.wstring().c_str(), &high);
+    BOOST_REQUIRE(low != INVALID_FILE_SIZE || GetLastError() == NO_ERROR);
+    const uint64_t allocated = (static_cast<uint64_t>(high) << 32) | low;
+    BOOST_CHECK_MESSAGE(allocated < (64ull << 20), "400GiB sparse file used " + std::to_string(allocated) + " bytes");
+    BOOST_REQUIRE(DeleteFileW(sparse.wstring().c_str()));
+#else
     const int fd = ::open(fs::PathToString(sparse).c_str(), O_CREAT | O_RDWR, 0644);
     BOOST_REQUIRE_GE(fd, 0);
     BOOST_REQUIRE_EQUAL(::ftruncate(fd, static_cast<off_t>(logical)), 0);
@@ -279,6 +348,8 @@ BOOST_AUTO_TEST_CASE(unique_todo_400gib_sparse_addressing)
     BOOST_CHECK_MESSAGE(allocated < (64ull << 20), "400GiB sparse file used " + std::to_string(allocated) + " bytes");
     ::close(fd);
     ::unlink(fs::PathToString(sparse).c_str());
+#endif
+    BOOST_TEST_MESSAGE("Sparse fixture logical=" << logical << " allocated=" << allocated << " bytes");
     BOOST_TEST_MESSAGE("HONEST_NOT_RUN 400 GiB object I/O (sparse addressing is not payload I/O)");
 }
 
@@ -380,6 +451,18 @@ BOOST_AUTO_TEST_CASE(unique_todo_hw_cuda)
         }
     }
     BOOST_CHECK(saw);
+#ifdef WIN32
+    const std::string nvidia_smi = sdk_test::Which("nvidia-smi");
+    if (!nvidia_smi.empty()) {
+        std::string out;
+        const int rc = sdk_test::Spawn({nvidia_smi, "-L"}, out, false);
+        BOOST_REQUIRE_GE(rc, 0);
+        BOOST_TEST_MESSAGE(std::string("CUDA unique nvidia-smi -L rc=") + std::to_string(rc) + " " + out);
+        BOOST_CHECK(out.find("GPU") != std::string::npos || out.find("NVIDIA") != std::string::npos || rc != 0);
+    } else {
+        BOOST_TEST_MESSAGE("CUDA unique nvidia-smi absent on this host");
+    }
+#else
     if (::access("/usr/bin/nvidia-smi", X_OK) == 0) {
         FILE* fp = ::popen("/usr/bin/nvidia-smi -L", "r");
         BOOST_REQUIRE(fp);
@@ -392,6 +475,7 @@ BOOST_AUTO_TEST_CASE(unique_todo_hw_cuda)
     } else {
         BOOST_TEST_MESSAGE("CUDA unique nvidia-smi absent on this host");
     }
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(unique_todo_hw_rocm)
@@ -491,6 +575,14 @@ BOOST_AUTO_TEST_CASE(unique_todo_remote_process)
 {
     // Lab-only. Public tree does not name operator hosts or production libexec.
     const char* local_btxd = std::getenv("BTX_REMOTE_PROCESS_BTXD");
+    std::string out;
+#ifdef WIN32
+    if (local_btxd == nullptr || local_btxd[0] == '\0' || !fs::exists(fs::PathFromString(local_btxd))) {
+        BOOST_TEST_MESSAGE("HONEST_NOT_RUN env-gated unique_todo_remote_process: BTX_REMOTE_PROCESS_BTXD unset");
+        return;
+    }
+    const int rc = sdk_test::Spawn({local_btxd, "-version"}, out, false);
+#else
     if (local_btxd == nullptr || local_btxd[0] == '\0' || ::access(local_btxd, X_OK) != 0) {
         BOOST_TEST_MESSAGE("HONEST_NOT_RUN env-gated unique_todo_remote_process: BTX_REMOTE_PROCESS_BTXD unset");
         return;
@@ -498,10 +590,10 @@ BOOST_AUTO_TEST_CASE(unique_todo_remote_process)
     std::string cmd = std::string(local_btxd) + " -version 2>/dev/null | head -3";
     FILE* fp = ::popen(cmd.c_str(), "r");
     BOOST_REQUIRE(fp);
-    std::string out;
     char buf[512];
     while (::fgets(buf, sizeof(buf), fp) != nullptr) out.append(buf);
     int rc = ::pclose(fp);
+#endif
     BOOST_TEST_MESSAGE(std::string("remote-process unique rc=") + std::to_string(rc) + " " + out);
     if (rc != 0) {
         BOOST_TEST_MESSAGE("HONEST_NOT_RUN env-gated unique_todo_remote_process: version probe failed");

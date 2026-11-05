@@ -18,6 +18,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#ifndef WIN32
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
@@ -25,6 +26,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#endif
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <fstream>
@@ -36,6 +40,8 @@
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_retrieve_peer_reply_tests, BasicTestingSetup)
 
+// The integration cases below require the helper Unix RPC transport.
+#ifndef WIN32
 namespace {
 
 using Route = std::function<void(const modelnet::NativeRequest&, modelnet::NativeResponse&)>;
@@ -327,5 +333,23 @@ BOOST_AUTO_TEST_CASE(early_return_waits_for_swarm_threads_before_their_state_goe
     // Neither contact can serve the model; the job ends without taking the helper down.
     BOOST_CHECK_EQUAL(status, "failed");
 }
+
+#else
+BOOST_AUTO_TEST_CASE(windows_helper_unix_rpc_is_explicitly_unsupported)
+{
+    const fs::path socket = m_path_root / "unsupported-helper.sock";
+    std::vector<fs::path> before, after;
+    for (const auto& entry : fs::directory_iterator(m_path_root)) before.push_back(entry.path());
+    UniValue result;
+    std::string err;
+    BOOST_CHECK(!modelnet::CallUnixRpc(socket, "hello", UniValue(UniValue::VARR), result, err));
+    BOOST_CHECK_EQUAL(err, "helper Unix RPC is not supported on this platform");
+    for (const auto& entry : fs::directory_iterator(m_path_root)) after.push_back(entry.path());
+    std::sort(before.begin(), before.end());
+    std::sort(after.begin(), after.end());
+    BOOST_CHECK(before == after);
+    BOOST_TEST_MESSAGE("Windows helper Unix RPC is unsupported; the three Unix retrieval integration cases are not run");
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

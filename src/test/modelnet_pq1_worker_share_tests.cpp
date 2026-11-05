@@ -23,12 +23,15 @@
 
 #include <boost/test/unit_test.hpp>
 
+#ifndef WIN32
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -44,6 +47,8 @@
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_pq1_worker_share_tests, BasicTestingSetup)
 
+// Live-helper cases require its Unix RPC listener; policy checks below do not.
+#ifndef WIN32
 namespace {
 
 const std::string HELLO = "POST /btx-model/2/hello HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}";
@@ -561,6 +566,8 @@ BOOST_AUTO_TEST_CASE(two_addresses_cannot_take_every_inbound_slot)
     }
     BOOST_CHECK(h.Drained());
 }
+
+#endif
 
 BOOST_AUTO_TEST_CASE(worker_share_policy)
 {
