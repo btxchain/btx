@@ -2289,6 +2289,26 @@ static SearchIndex g_search_idx;
 static SearchRuntime g_search_rt;
 static std::mutex g_search_mu;
 static std::map<std::string, std::vector<ProviderObservation>> g_search_obs;
+// g_search_mu must be held. Remote observations are historical; local
+// seeding is known directly, so derive it from the current catalog instead
+// of caching a second copy that every unseed path would have to invalidate.
+std::vector<ProviderObservation> CurrentProviderObservations(ModelCatalog& cat, const Digest48& id)
+{
+    std::vector<ProviderObservation> observations;
+    const auto it = g_search_obs.find(id.Hex());
+    if (it != g_search_obs.end()) observations = it->second;
+    CatalogEntry entry;
+    if (cat.Find(id, entry) && entry.seeded) {
+        ProviderObservation local;
+        local.provider_id = "local";
+        local.endpoint = "local";
+        local.complete = !entry.incomplete;
+        local.last_seen_ms = ConnNowMs();
+        observations.push_back(std::move(local));
+    }
+    return observations;
+}
+
 static QueryDedupe g_search_dedupe;
 static bool g_search_bound{false};
 static FeedStore g_feed;
@@ -2614,18 +2634,7 @@ void IngestCatalogIntoSearch(ModelCatalog& cat)
         } else {
             (void)g_search_idx.Put(r, ConnNowMs(), err);
         }
-        if (m.exists("seeded") && m["seeded"].get_bool()) {
-            auto& vec = g_search_obs[r.model_id.Hex()];
-            vec.erase(std::remove_if(vec.begin(), vec.end(),
-                                     [](const ProviderObservation& o) { return o.provider_id == "local"; }),
-                      vec.end());
-            ProviderObservation o;
-            o.provider_id = "local";
-            o.endpoint = "local";
-            o.complete = !(m.exists("incomplete") && m["incomplete"].get_bool());
-            o.last_seen_ms = ConnNowMs();
-            vec.push_back(o);
-        }
+
     }
 }
 
@@ -7513,8 +7522,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         UniValue arr(UniValue::VARR);
         std::vector<SearchHit> decorated;
         for (auto& h : job.hits) {
-            auto it = g_search_obs.find(h.rec.model_id.Hex());
-            if (it != g_search_obs.end()) h.health = ComputeSwarmHealth(0, 0, it->second);
+            h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, h.rec.model_id));
             CatalogEntry e;
             if (cat.Find(h.rec.model_id, e)) {
                 h.local.known = true;
@@ -7731,8 +7739,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         const auto* r = g_search_idx.Get(id);
         if (r) h.rec = *r;
         else h.rec.model_id = id;
-        auto it = g_search_obs.find(id.Hex());
-        if (it != g_search_obs.end()) h.health = ComputeSwarmHealth(0, 0, it->second);
+        h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, id));
         CatalogEntry e;
         if (cat.Find(id, e)) {
             h.local.known = true;
@@ -7747,7 +7754,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         EnsureSearchBound();
         const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
         std::lock_guard<std::mutex> lock(g_search_mu);
-        const auto obs = g_search_obs[id.Hex()];
+        const auto obs = CurrentProviderObservations(cat, id);
         const SwarmHealth h = ComputeSwarmHealth(0, 0, obs);
         if (method == "getmodelproviders") {
             UniValue arr(UniValue::VARR);
@@ -9821,8 +9828,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         IngestCatalogIntoSearch(cat);
         for (const auto& rec : g_search_idx.All()) AfterIndexPut(rec, ConnNowMs());
         auto decorate = [&](SearchHit h) {
-            auto it = g_search_obs.find(h.rec.model_id.Hex());
-            if (it != g_search_obs.end()) h.health = ComputeSwarmHealth(0, 0, it->second);
+            h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, h.rec.model_id));
             CatalogEntry e;
             if (cat.Find(h.rec.model_id, e)) {
                 h.local.known = true;
