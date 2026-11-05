@@ -17,6 +17,7 @@
 #include <univalue.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -409,17 +410,17 @@ BOOST_AUTO_TEST_CASE(ahp_run_06_credentials_not_inherited_into_plan)
     };
     auto restore = [](const char* key, const std::optional<std::string>& previous) {
         if (previous) {
-            BOOST_REQUIRE_EQUAL(::setenv(key, previous->c_str(), 1), 0);
+            BOOST_REQUIRE_EQUAL(test::SetEnv(key, previous->c_str()), 0);
         } else {
-            BOOST_REQUIRE_EQUAL(::unsetenv(key), 0);
+            BOOST_REQUIRE_EQUAL(test::UnsetEnv(key), 0);
         }
     };
     const auto old_hf = snapshot("HF_TOKEN");
     const auto old_s3 = snapshot("AWS_SECRET_ACCESS_KEY");
     const auto old_w = snapshot("BTX_WALLET_SEED");
-    BOOST_REQUIRE_EQUAL(::setenv("HF_TOKEN", "HF_TEST_SENTINEL", 1), 0);
-    BOOST_REQUIRE_EQUAL(::setenv("AWS_SECRET_ACCESS_KEY", "S3_TEST_SENTINEL", 1), 0);
-    BOOST_REQUIRE_EQUAL(::setenv("BTX_WALLET_SEED", "WALLET_TEST_SENTINEL", 1), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv("HF_TOKEN", "HF_TEST_SENTINEL"), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv("AWS_SECRET_ACCESS_KEY", "S3_TEST_SENTINEL"), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_WALLET_SEED", "WALLET_TEST_SENTINEL"), 0);
 
     const UniValue core = MinimalCore();
     UniValue trusted = TrustedAdapter();

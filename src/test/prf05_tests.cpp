@@ -8,6 +8,7 @@
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdlib>
 #include <fstream>
@@ -27,14 +28,14 @@ struct LabDirEnv {
             m_had = true;
             m_prev = prev;
         }
-        ::setenv("BTX035_LAB_DIR", PathToString(dir).c_str(), 1);
+        test::SetEnv("BTX035_LAB_DIR", PathToString(dir).c_str());
     }
     ~LabDirEnv()
     {
         if (m_had) {
-            ::setenv("BTX035_LAB_DIR", m_prev.c_str(), 1);
+            test::SetEnv("BTX035_LAB_DIR", m_prev.c_str());
         } else {
-            ::unsetenv("BTX035_LAB_DIR");
+            test::UnsetEnv("BTX035_LAB_DIR");
         }
     }
     bool m_had{false};

@@ -10,6 +10,7 @@
 
 #include <array>
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
@@ -75,18 +76,18 @@ public:
             m_original = std::string(existing);
         }
         if (value != nullptr) {
-            setenv(name, value, 1);
+            test::SetEnv(name, value);
         } else {
-            unsetenv(name);
+            test::UnsetEnv(name);
         }
     }
 
     ~ScopedEnvVar()
     {
         if (m_original.has_value()) {
-            setenv(m_name, m_original->c_str(), 1);
+            test::SetEnv(m_name, m_original->c_str());
         } else {
-            unsetenv(m_name);
+            test::UnsetEnv(m_name);
         }
     }
 

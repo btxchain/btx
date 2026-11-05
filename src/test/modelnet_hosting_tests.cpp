@@ -31,6 +31,7 @@
 #include <util/syserror.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cerrno>
 #include <cstring>
@@ -557,7 +558,7 @@ BOOST_AUTO_TEST_CASE(start_socket_path_that_cannot_fit_does_not_spawn)
     const char* saved = std::getenv("XDG_RUNTIME_DIR");
     const std::string saved_value = saved ? saved : "";
     const fs::path long_dir = m_path_root / fs::PathFromString(std::string(120, 'r'));
-    ::setenv("XDG_RUNTIME_DIR", fs::PathToString(long_dir).c_str(), 1);
+    test::SetEnv("XDG_RUNTIME_DIR", fs::PathToString(long_dir).c_str());
     for (const bool required : {false, true}) {
         modelnet::HelperLaunchConfig cfg;
         cfg.helper_exe = fs::PathFromString("/bin/true");
@@ -574,9 +575,9 @@ BOOST_AUTO_TEST_CASE(start_socket_path_that_cannot_fit_does_not_spawn)
         BOOST_CHECK_EQUAL(sup.Snapshot().restart_count, 0);
     }
     if (saved) {
-        ::setenv("XDG_RUNTIME_DIR", saved_value.c_str(), 1);
+        test::SetEnv("XDG_RUNTIME_DIR", saved_value.c_str());
     } else {
-        ::unsetenv("XDG_RUNTIME_DIR");
+        test::UnsetEnv("XDG_RUNTIME_DIR");
     }
 }
 #endif
@@ -876,7 +877,7 @@ BOOST_AUTO_TEST_CASE(loadmodel_lists_local_files_without_starting_inference)
     modelnet::ModelCatalog cat{tmp, 8 << 20};
     constexpr unsigned char tag = 0x84;
     const auto imported = ImportTiny(cat, tmp / "src", tag, true);
-    ::unsetenv("BTX_MODEL_CUDA_LOADER");
+    test::UnsetEnv("BTX_MODEL_CUDA_LOADER");
 
     UniValue rpc(UniValue::VOBJ);
     rpc.pushKV("method", "loadmodel");
@@ -1053,7 +1054,7 @@ BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
                "sys.exit(0)\n";
     }
     ::chmod(fs::PathToString(loader).c_str(), 0755);
-    BOOST_REQUIRE_EQUAL(::setenv("BTX_MODEL_CUDA_LOADER", fs::PathToString(loader).c_str(), 1), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_MODEL_CUDA_LOADER", fs::PathToString(loader).c_str()), 0);
 
     UniValue rpc(UniValue::VOBJ);
     rpc.pushKV("method", "loadmodel");
@@ -1078,15 +1079,15 @@ BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, urpc, unloaded, code, err), err);
     BOOST_CHECK_EQUAL(unloaded["unloaded"].get_bool(), true);
     BOOST_CHECK_EQUAL(unloaded["device_loaded"].get_bool(), false);
-    ::unsetenv("BTX_MODEL_CUDA_LOADER");
+    test::UnsetEnv("BTX_MODEL_CUDA_LOADER");
 }
 
 BOOST_AUTO_TEST_CASE(host_generate_profile_cuda_smoke_is_not_generate)
 {
-    ::unsetenv("BTX_MODEL_GENERATE");
-    ::unsetenv("BTX_LLAMA_CLI");
-    ::unsetenv("BTX_EXL3_CLI");
-    ::unsetenv("BTX_MODEL_CUDA_LOADER");
+    test::UnsetEnv("BTX_MODEL_GENERATE");
+    test::UnsetEnv("BTX_LLAMA_CLI");
+    test::UnsetEnv("BTX_EXL3_CLI");
+    test::UnsetEnv("BTX_MODEL_CUDA_LOADER");
     const fs::path tmp = m_path_root / "host-profile";
     modelnet::ModelCatalog cat{tmp, 8 << 20};
     UniValue rpc(UniValue::VOBJ);
@@ -1171,8 +1172,8 @@ BOOST_AUTO_TEST_CASE(generatemodel_compatible_fake_adapter)
                "print(json.dumps({\"ok\":True,\"generated\":True,\"text\":\"echo:\"+str(req.get(\"prompt\",\"\")),\"backend\":\"fake\"}), flush=True)\n";
     }
     ::chmod(fs::PathToString(adapter).c_str(), 0755);
-    BOOST_REQUIRE_EQUAL(::setenv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str(), 1), 0);
-    ::unsetenv("BTX_LLAMA_CLI");
+    BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str()), 0);
+    test::UnsetEnv("BTX_LLAMA_CLI");
 
     UniValue rpc(UniValue::VOBJ);
     rpc.pushKV("method", "generatemodel");
@@ -1198,7 +1199,7 @@ BOOST_AUTO_TEST_CASE(generatemodel_compatible_fake_adapter)
     BOOST_CHECK_EQUAL(result["architecture"].get_str(), "LlamaForCausalLM");
     BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
     BOOST_CHECK_EQUAL(result["execution_profile"].getInt<int>(), 0);
-    ::unsetenv("BTX_MODEL_GENERATE");
+    test::UnsetEnv("BTX_MODEL_GENERATE");
 }
 
 #if defined(__linux__)
@@ -1268,8 +1269,8 @@ BOOST_AUTO_TEST_CASE(generatemodel_adapter_runs_when_helper_is_pid1)
                "print(json.dumps({\"ok\":True,\"generated\":True,\"text\":text,\"backend\":\"fake\"}), flush=True)\n";
     }
     ::chmod(fs::PathToString(adapter).c_str(), 0755);
-    BOOST_REQUIRE_EQUAL(::setenv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str(), 1), 0);
-    ::unsetenv("BTX_LLAMA_CLI");
+    BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str()), 0);
+    test::UnsetEnv("BTX_LLAMA_CLI");
 
     UniValue rpc(UniValue::VOBJ);
     rpc.pushKV("method", "generatemodel");
@@ -1336,7 +1337,7 @@ BOOST_AUTO_TEST_CASE(generatemodel_adapter_runs_when_helper_is_pid1)
     ::close(report[0]);
     int status = 0;
     while (::waitpid(runner, &status, 0) < 0 && errno == EINTR) {}
-    ::unsetenv("BTX_MODEL_GENERATE");
+    test::UnsetEnv("BTX_MODEL_GENERATE");
     if (out.rfind("skip: ", 0) == 0) {
         BOOST_TEST_MESSAGE("Skipping pid-1 generate adapter test: " + out.substr(6));
         return;
@@ -1367,7 +1368,7 @@ BOOST_AUTO_TEST_CASE(generatemodel_unknown_architecture_fail_closed)
         out << "#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({\"ok\":True,\"text\":\"nope\"}), flush=True)\n";
     }
     ::chmod(fs::PathToString(adapter).c_str(), 0755);
-    BOOST_REQUIRE_EQUAL(::setenv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str(), 1), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str()), 0);
 
     UniValue rpc(UniValue::VOBJ);
     rpc.pushKV("method", "generatemodel");
@@ -1384,7 +1385,7 @@ BOOST_AUTO_TEST_CASE(generatemodel_unknown_architecture_fail_closed)
     BOOST_CHECK_EQUAL(err, "unknown_architecture");
     BOOST_CHECK_EQUAL(result["generated"].get_bool(), false);
     BOOST_CHECK_EQUAL(result["compatible"].get_bool(), false);
-    ::unsetenv("BTX_MODEL_GENERATE");
+    test::UnsetEnv("BTX_MODEL_GENERATE");
 }
 
 BOOST_AUTO_TEST_CASE(generatemodel_gguf_llama_cli)
@@ -1417,8 +1418,8 @@ BOOST_AUTO_TEST_CASE(generatemodel_gguf_llama_cli)
                "print('llama:' + prompt, flush=True)\n";
     }
     ::chmod(fs::PathToString(llama).c_str(), 0755);
-    ::unsetenv("BTX_MODEL_GENERATE");
-    BOOST_REQUIRE_EQUAL(::setenv("BTX_LLAMA_CLI", fs::PathToString(llama).c_str(), 1), 0);
+    test::UnsetEnv("BTX_MODEL_GENERATE");
+    BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_LLAMA_CLI", fs::PathToString(llama).c_str()), 0);
 
     UniValue rpc(UniValue::VOBJ);
     rpc.pushKV("method", "generatemodel");
@@ -1435,14 +1436,14 @@ BOOST_AUTO_TEST_CASE(generatemodel_gguf_llama_cli)
     BOOST_CHECK_EQUAL(result["backend"].get_str(), "llama.cpp");
     BOOST_CHECK_EQUAL(result["local_generate"].get_bool(), true);
     BOOST_CHECK_EQUAL(result["remote_inference"].get_bool(), false);
-    ::unsetenv("BTX_LLAMA_CLI");
+    test::UnsetEnv("BTX_LLAMA_CLI");
 }
 
 BOOST_AUTO_TEST_CASE(generatemodel_missing_adapter_is_not_run)
 {
-    ::unsetenv("BTX_MODEL_GENERATE");
-    ::unsetenv("BTX_LLAMA_CLI");
-    ::unsetenv("BTX_EXL3_CLI");
+    test::UnsetEnv("BTX_MODEL_GENERATE");
+    test::UnsetEnv("BTX_LLAMA_CLI");
+    test::UnsetEnv("BTX_EXL3_CLI");
     const fs::path tmp = m_path_root / "gen-no-adapter";
     modelnet::ModelCatalog cat{tmp, 8 << 20};
     const fs::path src = tmp / "src";
@@ -1470,8 +1471,8 @@ BOOST_AUTO_TEST_CASE(generatemodel_missing_adapter_is_not_run)
     BOOST_CHECK(!ok);
     BOOST_CHECK_EQUAL(code, "INCOMPATIBLE_HOST_PROFILE");
     BOOST_CHECK_EQUAL(err, "no_generate_adapter");
-    ::unsetenv("BTX_MODEL_GENERATE");
-    ::unsetenv("BTX_LLAMA_CLI");
+    test::UnsetEnv("BTX_MODEL_GENERATE");
+    test::UnsetEnv("BTX_LLAMA_CLI");
 }
 
 BOOST_AUTO_TEST_CASE(exl3_is_safetensors_container_and_fail_closes_without_its_cli)

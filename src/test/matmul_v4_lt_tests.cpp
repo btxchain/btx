@@ -29,6 +29,7 @@
 #include <uint256.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <algorithm>
 #include <array>
@@ -86,15 +87,15 @@ public:
         if (const char* current = std::getenv("BTX_MATMUL_V4_BACKEND")) {
             m_original = current;
         }
-        setenv("BTX_MATMUL_V4_BACKEND", value, /*overwrite=*/1);
+        test::SetEnv("BTX_MATMUL_V4_BACKEND", value);
     }
 
     ~ScopedMatMulV4BackendEnv()
     {
         if (m_original.has_value()) {
-            setenv("BTX_MATMUL_V4_BACKEND", m_original->c_str(), /*overwrite=*/1);
+            test::SetEnv("BTX_MATMUL_V4_BACKEND", m_original->c_str());
         } else {
-            unsetenv("BTX_MATMUL_V4_BACKEND");
+            test::UnsetEnv("BTX_MATMUL_V4_BACKEND");
         }
     }
 
@@ -113,8 +114,8 @@ public:
         if (const char* value = std::getenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK")) {
             m_allow = value;
         }
-        unsetenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
-        unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+        test::UnsetEnv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
+        test::UnsetEnv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
     }
 
     ~ScopedLtNativePolicyDefault()
@@ -127,9 +128,9 @@ private:
     static void Restore(const char* name, const std::optional<std::string>& value)
     {
         if (value) {
-            setenv(name, value->c_str(), /*overwrite=*/1);
+            test::SetEnv(name, value->c_str());
         } else {
-            unsetenv(name);
+            test::UnsetEnv(name);
         }
     }
 
@@ -800,18 +801,18 @@ BOOST_AUTO_TEST_CASE(lt_peak_mx_exact_fallback_default_and_native_only_env)
     const std::optional<std::string> original_require =
         prev_require != nullptr ? std::optional<std::string>{prev_require} : std::nullopt;
 
-    unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
-    unsetenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
+    test::UnsetEnv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    test::UnsetEnv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
     BOOST_CHECK(!lt::LtEnvFlagEnabled("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK"));
     BOOST_CHECK(!lt::LtEnvFlagEnabled("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX"));
     // Exact INT8 MX is oracle-identical and remains resident by default even
     // when a peak-capable GPU cannot self-qualify native MX.
     BOOST_CHECK(lt::AllowLtExactMxFallback());
 
-    setenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", "1", /*overwrite=*/1);
+    test::SetEnv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", "1");
     BOOST_CHECK(!lt::AllowLtExactMxFallback());
     // Keep the legacy allow flag as an explicit override for old scripts.
-    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "1", /*overwrite=*/1);
+    test::SetEnv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "1");
     BOOST_CHECK(lt::AllowLtExactMxFallback());
 
     // Stub peak probes (no GPU / non-peak) never block resident.
@@ -871,14 +872,14 @@ BOOST_AUTO_TEST_CASE(lt_peak_mx_exact_fallback_default_and_native_only_env)
     }
 
     if (original_allow) {
-        setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", original_allow->c_str(), /*overwrite=*/1);
+        test::SetEnv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", original_allow->c_str());
     } else {
-        unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+        test::UnsetEnv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
     }
     if (original_require) {
-        setenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", original_require->c_str(), /*overwrite=*/1);
+        test::SetEnv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", original_require->c_str());
     } else {
-        unsetenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
+        test::UnsetEnv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
     }
 }
 
@@ -1621,11 +1622,11 @@ BOOST_AUTO_TEST_CASE(seal_env_batch_does_not_change_library_seal)
     const auto seed_fn = [](CBlockHeader& /*h*/) -> bool { return true; };
     uint256 seal_a;
     BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/128, seed_fn, seal_a));
-    setenv("BTX_MATMUL_LT_BATCH", "128", /*overwrite=*/1);
+    test::SetEnv("BTX_MATMUL_LT_BATCH", "128");
     uint256 seal_b;
     BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/128, seed_fn, seal_b));
     BOOST_CHECK(seal_a == seal_b);
-    unsetenv("BTX_MATMUL_LT_BATCH");
+    test::UnsetEnv("BTX_MATMUL_LT_BATCH");
 }
 
 BOOST_AUTO_TEST_CASE(prepared_template_slot_matches_full_digest)

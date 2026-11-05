@@ -19,6 +19,7 @@
 #include <uint256.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdlib>
 #include <limits>
@@ -84,7 +85,7 @@ BOOST_AUTO_TEST_CASE(gkr_soundness_and_height_inert)
     BOOST_CHECK(std::string(rc::kRCGkrE5Decision).find("winner-only") != std::string::npos);
     BOOST_CHECK(std::string(rc::kRCGkrShadowStatement).find("SHADOW") != std::string::npos);
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
-    unsetenv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled()); // default OFF; do not raise height
 }
 
@@ -426,9 +427,9 @@ BOOST_AUTO_TEST_CASE(gkr_m2_medium_optional_skip)
 BOOST_AUTO_TEST_CASE(gkr_m9_over_budget_switches_to_exact_replay)
 {
     // Soft over_budget → ExactReplay shipping path (arbiter never required).
-    unsetenv("BTX_RC_GKR_ARBITER");
-    setenv("BTX_RC_VERIFY_GKR", "1", 1);
-    setenv("BTX_RC_GKR_SHADOW", "1", 1);
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
+    test::SetEnv("BTX_RC_VERIFY_GKR", "1");
+    test::SetEnv("BTX_RC_GKR_SHADOW", "1");
 
     const auto header = MakeRCHeader(42);
     const auto params = rc::MakeToyRCEpisodeParams();
@@ -448,7 +449,7 @@ BOOST_AUTO_TEST_CASE(gkr_m9_over_budget_switches_to_exact_replay)
     BOOST_CHECK(dual.gkr.over_budget || pr.proof.over_budget);
     BOOST_CHECK(std::string(dual.note).find("ExactReplay") != std::string::npos);
 
-    unsetenv("BTX_RC_VERIFY_GKR");
+    test::UnsetEnv("BTX_RC_VERIFY_GKR");
 }
 
 BOOST_AUTO_TEST_CASE(gkr_malformed_proof_rejects)
@@ -515,9 +516,9 @@ BOOST_AUTO_TEST_CASE(gkr_shadow_never_blocks_consensus)
 {
     // Unit-level: ExactReplay ok + shadow observe with bad proof must not flip
     // the consensus result helper (VerifyRCWinnerOrExactReplay with arbiter OFF).
-    unsetenv("BTX_RC_GKR_ARBITER");
-    unsetenv("BTX_RC_VERIFY_GKR");
-    setenv("BTX_RC_GKR_SHADOW", "1", 1);
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_VERIFY_GKR");
+    test::SetEnv("BTX_RC_GKR_SHADOW", "1");
 
     const auto header = MakeRCHeader(42);
     const auto params = rc::MakeToyRCEpisodeParams();
@@ -534,7 +535,7 @@ BOOST_AUTO_TEST_CASE(gkr_shadow_never_blocks_consensus)
     BOOST_CHECK(dual.path == rc::RCProdVerifyPath::ExactReplay ||
                 dual.path == rc::RCProdVerifyPath::GkrFallbackExactReplay);
 
-    unsetenv("BTX_RC_GKR_SHADOW");
+    test::UnsetEnv("BTX_RC_GKR_SHADOW");
     rc::RCGkrProofCacheClear();
 }
 
@@ -591,9 +592,9 @@ BOOST_AUTO_TEST_CASE(gkr_h2_shadow_reuses_prior_exact_replay)
 {
     // With shadow ON + cached proof, CheckMatMulProofOfWork_RC must invoke
     // VerifyBoundedExactReplay exactly once (shadow reuses prior_replay).
-    unsetenv("BTX_RC_GKR_ARBITER");
-    unsetenv("BTX_RC_VERIFY_GKR");
-    setenv("BTX_RC_GKR_SHADOW", "1", 1);
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_VERIFY_GKR");
+    test::SetEnv("BTX_RC_GKR_SHADOW", "1");
 
     Consensus::Params p;
     p.fMatMulPOW = true;
@@ -626,7 +627,7 @@ BOOST_AUTO_TEST_CASE(gkr_h2_shadow_reuses_prior_exact_replay)
     BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
     BOOST_CHECK_EQUAL(rc::ExactReplayInvocationCountForTest(), 1u);
 
-    unsetenv("BTX_RC_GKR_SHADOW");
+    test::UnsetEnv("BTX_RC_GKR_SHADOW");
     rc::RCGkrProofCacheClear();
 }
 
@@ -639,14 +640,14 @@ BOOST_AUTO_TEST_CASE(gkr_arbiter_hard_disabled_ignores_env)
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCCoupledHeight,
                       std::numeric_limits<int32_t>::max());
 
-    unsetenv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
 
-    setenv("BTX_RC_GKR_ARBITER", "1", 1);
+    test::SetEnv("BTX_RC_GKR_ARBITER", "1");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
     BOOST_CHECK(!rc::kRCGkrFormalSoundnessReady);
 
-    unsetenv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
 }
 
@@ -657,8 +658,8 @@ BOOST_AUTO_TEST_CASE(gkr_f3_arbiter_rejects_sigma_or_digest_over_target)
     // setenv cannot turn the arbiter on — so dual-path falls through to
     // ExactReplay (sole consensus authority). Heights unchanged.
     BOOST_CHECK(!rc::kRCGkrFormalSoundnessReady);
-    setenv("BTX_RC_GKR_ARBITER", "1", 1);
-    unsetenv("BTX_RC_VERIFY_GKR");
+    test::SetEnv("BTX_RC_GKR_ARBITER", "1");
+    test::UnsetEnv("BTX_RC_VERIFY_GKR");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
 
@@ -706,7 +707,7 @@ BOOST_AUTO_TEST_CASE(gkr_f3_arbiter_rejects_sigma_or_digest_over_target)
         BOOST_CHECK(dual.note.find("episode dims") == std::string::npos);
     }
 
-    unsetenv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
 }
 
 BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_sound_no_toy_proof)
@@ -915,7 +916,7 @@ BOOST_AUTO_TEST_CASE(gkr_forge_target_rejects_under_arbiter)
     // kRCGkrFormalSoundnessReady==false (setenv cannot enable arbiter).
     // ExactReplay remains the sole reject path for digest > target.
     BOOST_CHECK(!rc::kRCGkrFormalSoundnessReady);
-    setenv("BTX_RC_GKR_ARBITER", "1", 1);
+    test::SetEnv("BTX_RC_GKR_ARBITER", "1");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
 
     const auto header = MakeRCHeader(42);
@@ -933,7 +934,7 @@ BOOST_AUTO_TEST_CASE(gkr_forge_target_rejects_under_arbiter)
     BOOST_CHECK(!dual.ok);
     BOOST_CHECK(dual.path != rc::RCProdVerifyPath::WinnerGkr);
     BOOST_CHECK(dual.note.find("claimed_digest > target") == std::string::npos);
-    unsetenv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
 }
 
@@ -1140,13 +1141,13 @@ BOOST_AUTO_TEST_CASE(gkr_arbiter_env_cannot_change_consensus_exactreplay_bytes)
     CBlockHeader header = header0;
     header.matmul_digest = rc::RecomputeResidentCurriculumReference(header, params, 0);
 
-    unsetenv("BTX_RC_GKR_ARBITER");
-    unsetenv("BTX_RC_VERIFY_GKR");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_VERIFY_GKR");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
     const auto off = rc::VerifyBoundedExactReplay(header, params, 0, nullptr);
     BOOST_REQUIRE(off.ok);
 
-    setenv("BTX_RC_GKR_ARBITER", "1", 1);
+    test::SetEnv("BTX_RC_GKR_ARBITER", "1");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled()); // hard-disable ignores env
     const auto on = rc::VerifyBoundedExactReplay(header, params, 0, nullptr);
     BOOST_CHECK(on.ok);
@@ -1158,7 +1159,7 @@ BOOST_AUTO_TEST_CASE(gkr_arbiter_env_cannot_change_consensus_exactreplay_bytes)
     BOOST_CHECK(dual_on.ok);
     BOOST_CHECK_EQUAL(dual_on.replay.digest, off.digest);
 
-    unsetenv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
     const auto dual_off = rc::VerifyRCWinnerOrExactReplay(header, params, 0, nullptr, nullptr);
     BOOST_CHECK(dual_off.ok);

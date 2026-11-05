@@ -27,6 +27,7 @@
 #include <uint256.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdlib>
 #include <limits>
@@ -126,9 +127,9 @@ public:
     ~EnvVarGuard()
     {
         if (m_old) {
-            setenv(m_name, m_old->c_str(), /*overwrite=*/1);
+            test::SetEnv(m_name, m_old->c_str());
         } else {
-            unsetenv(m_name);
+            test::UnsetEnv(m_name);
         }
     }
 private:
@@ -445,12 +446,12 @@ BOOST_AUTO_TEST_CASE(frvs_carrier_parallel_verdict_and_reason_are_thread_invaria
     BOOST_REQUIRE_MESSAGE(
         rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, carrier, &bwhy, kLambda), bwhy);
 
-    setenv("BTX_RC_CARRIER_VERIFY_THREADS", "1", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_CARRIER_VERIFY_THREADS", "1");
     std::string why1;
     rc::RCFreivaldsSampledTiming t1;
     const bool ok1 = rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why1, &t1);
 
-    setenv("BTX_RC_CARRIER_VERIFY_THREADS", "8", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_CARRIER_VERIFY_THREADS", "8");
     std::string why8;
     rc::RCFreivaldsSampledTiming t8;
     const bool ok8 = rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why8, &t8);
@@ -467,13 +468,13 @@ BOOST_AUTO_TEST_CASE(frvs_carrier_parallel_verdict_and_reason_are_thread_invaria
     BOOST_REQUIRE(!bad.sampled[0].tiles[0].extract_out.empty());
     bad.sampled[0].tiles[0].extract_out[0] ^= 0x01;
 
-    setenv("BTX_RC_CARRIER_VERIFY_THREADS", "1", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_CARRIER_VERIFY_THREADS", "1");
     std::string bad_why1;
     rc::RCFreivaldsSampledTiming bad_t1;
     const bool bad_ok1 =
         rc::VerifyEpisodeFreivaldsSampledCarrier(bad, f.h, 0, f.target, &bad_why1, &bad_t1);
 
-    setenv("BTX_RC_CARRIER_VERIFY_THREADS", "8", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_CARRIER_VERIFY_THREADS", "8");
     std::string bad_why8;
     rc::RCFreivaldsSampledTiming bad_t8;
     const bool bad_ok8 =
