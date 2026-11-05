@@ -51,6 +51,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+// Windows headers may define OPAQUE after v2_types.h has been included.
+#pragma push_macro("OPAQUE")
+#undef OPAQUE
+#endif
+
 using namespace shielded::recovery;
 
 namespace {
@@ -1340,3 +1346,7 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_template_filter_allows_exits_when_pending_
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+#if defined(_WIN32)
+#pragma pop_macro("OPAQUE")
+#endif

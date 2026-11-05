@@ -50,6 +50,12 @@
 #include <stdexcept>
 #include <thread>
 
+#if defined(_WIN32)
+// Windows headers may define OPAQUE after v2_types.h has been included.
+#pragma push_macro("OPAQUE")
+#undef OPAQUE
+#endif
+
 BOOST_AUTO_TEST_SUITE(txvalidation_tests)
 
 namespace {
@@ -6181,3 +6187,7 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+#if defined(_WIN32)
+#pragma pop_macro("OPAQUE")
+#endif
