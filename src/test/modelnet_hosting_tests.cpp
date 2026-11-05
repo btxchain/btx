@@ -41,13 +41,13 @@
 #include <iterator>
 #include <set>
 #include <string>
-#include <sys/stat.h>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 #ifndef WIN32
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #if defined(__linux__)
@@ -965,14 +965,14 @@ BOOST_AUTO_TEST_CASE(exportmodellink_writes_only_new_or_share_files)
 
     // Any other existing file is left as it was.
     const fs::path notes = tmp / "notes.txt";
-    std::ofstream{notes} << "keep me\n";
+    std::ofstream{notes, std::ios::binary} << "keep me\n";
     BOOST_CHECK(!export_to(notes, code));
     BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
     BOOST_CHECK_EQUAL(text_of(notes), "keep me\n");
 
     // A symlink is not followed, whether its target exists or not.
     const fs::path victim = tmp / "victim.txt";
-    std::ofstream{victim} << "keep me\n";
+    std::ofstream{victim, std::ios::binary} << "keep me\n";
     fs::create_symlink(victim, tmp / "to-victim.btx");
     BOOST_CHECK(!export_to(tmp / "to-victim.btx", code));
     BOOST_CHECK_EQUAL(text_of(victim), "keep me\n");
@@ -980,10 +980,22 @@ BOOST_AUTO_TEST_CASE(exportmodellink_writes_only_new_or_share_files)
     BOOST_CHECK(!export_to(tmp / "dangling.btx", code));
     BOOST_CHECK(!fs::exists(tmp / "missing.txt"));
 
+#ifndef WIN32
     // A FIFO is refused instead of holding a worker until a reader opens it.
     const fs::path fifo = tmp / "pipe.btx";
     BOOST_REQUIRE(::mkfifo(fs::PathToString(fifo).c_str(), 0600) == 0);
     BOOST_CHECK(!export_to(fifo, code));
+#else
+    // Windows has no POSIX FIFO. Keep a real non-regular-path refusal control.
+    const fs::path directory = tmp / "directory.btx";
+    fs::create_directory(directory);
+    const fs::path retained = directory / "keep.txt";
+    std::ofstream{retained, std::ios::binary} << "keep me\n";
+    BOOST_CHECK(!export_to(directory, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(fs::is_directory(directory));
+    BOOST_CHECK_EQUAL(text_of(retained), "keep me\n");
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(hostmodel_share_card_retrieves_free_only)
@@ -1027,11 +1039,20 @@ BOOST_AUTO_TEST_CASE(materialize_checkout_hardlinks_matching_source)
     const fs::path dstf = dest / "model.safetensors";
     BOOST_REQUIRE(fs::exists(srcf));
     BOOST_REQUIRE(fs::exists(dstf));
+#ifdef WIN32
+    // Compare actual file identity and link counts, not CRT inode placeholders.
+    BOOST_CHECK(!fs::is_symlink(srcf));
+    BOOST_CHECK(!fs::is_symlink(dstf));
+    BOOST_CHECK(fs::equivalent(srcf, dstf));
+    BOOST_CHECK_GE(fs::hard_link_count(srcf), 2U);
+    BOOST_CHECK_EQUAL(fs::hard_link_count(srcf), fs::hard_link_count(dstf));
+#else
     struct stat ss {}, ds {};
     BOOST_REQUIRE_EQUAL(::stat(fs::PathToString(srcf).c_str(), &ss), 0);
     BOOST_REQUIRE_EQUAL(::stat(fs::PathToString(dstf).c_str(), &ds), 0);
     BOOST_CHECK_EQUAL(ss.st_dev, ds.st_dev);
     BOOST_CHECK_EQUAL(ss.st_ino, ds.st_ino);
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
@@ -1042,6 +1063,9 @@ BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
     const fs::path loader = tmp / "fake-cuda-loader";
     {
         std::ofstream out(loader);
+#ifdef WIN32
+        out << "from pathlib import Path\nPath(__file__).with_suffix('.ran').write_text('ran')\n";
+#endif
         out << "#!/usr/bin/env python3\n"
                "import signal, sys, time\n"
                "hold = \"--hold\" in sys.argv\n"
@@ -1053,7 +1077,14 @@ BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
                "        time.sleep(3600)\n"
                "sys.exit(0)\n";
     }
+#ifndef WIN32
     ::chmod(fs::PathToString(loader).c_str(), 0755);
+#endif
+#ifdef WIN32
+    const test::ScopedEnvVar loader_env{"BTX_MODEL_CUDA_LOADER"};
+    BOOST_REQUIRE(fs::is_regular_file(loader));
+    BOOST_REQUIRE(!fs::exists(tmp / "fake-cuda-loader.ran"));
+#endif
     BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_MODEL_CUDA_LOADER", fs::PathToString(loader).c_str()), 0);
 
     UniValue rpc(UniValue::VOBJ);
@@ -1063,6 +1094,18 @@ BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
     rpc.pushKV("params", params);
     UniValue result;
     std::string code, err;
+#ifdef WIN32
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat, rpc, result, code, err));
+    BOOST_CHECK_EQUAL(code, "HARDWARE_NOT_RUN");
+    BOOST_CHECK_EQUAL(err, "CUDA loader process is not supported on this platform");
+    BOOST_CHECK(!result["device_loaded"].get_bool());
+    BOOST_CHECK(!result["weights_resident"].get_bool());
+    BOOST_CHECK(!result["runtime_started"].get_bool());
+    BOOST_CHECK(!result["runtime_exec"].get_bool());
+    BOOST_CHECK(!result["smoke_passed"].get_bool());
+    BOOST_CHECK(!result.exists("loader_pid"));
+    BOOST_CHECK(!fs::exists(tmp / "fake-cuda-loader.ran"));
+#else
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
     BOOST_CHECK_EQUAL(result["device_loaded"].get_bool(), true);
     BOOST_CHECK_EQUAL(result["weights_resident"].get_bool(), true);
@@ -1071,6 +1114,7 @@ BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
     BOOST_CHECK_EQUAL(result["smoke_passed"].get_bool(), true);
     BOOST_CHECK(result.exists("loader_pid"));
     BOOST_CHECK_GT(result["loader_pid"].getInt<int64_t>(), 0);
+#endif
 
     UniValue urpc(UniValue::VOBJ);
     urpc.pushKV("method", "unloadmodel");
@@ -1079,6 +1123,11 @@ BOOST_AUTO_TEST_CASE(loadmodel_hold_fake_cuda_loader_then_unload)
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, urpc, unloaded, code, err), err);
     BOOST_CHECK_EQUAL(unloaded["unloaded"].get_bool(), true);
     BOOST_CHECK_EQUAL(unloaded["device_loaded"].get_bool(), false);
+#ifdef WIN32
+    BOOST_CHECK(!unloaded["weights_resident"].get_bool());
+    BOOST_CHECK(!unloaded["runtime_started"].get_bool());
+    BOOST_CHECK(!fs::exists(tmp / "fake-cuda-loader.ran"));
+#endif
     test::UnsetEnv("BTX_MODEL_CUDA_LOADER");
 }
 
@@ -1166,12 +1215,21 @@ BOOST_AUTO_TEST_CASE(generatemodel_compatible_fake_adapter)
     const fs::path adapter = tmp / "fake-generate";
     {
         std::ofstream out(adapter);
+#ifdef WIN32
+        out << "from pathlib import Path\nPath(__file__).with_suffix('.ran').write_text('ran')\n";
+#endif
         out << "#!/usr/bin/env python3\n"
                "import json, sys\n"
                "req = json.loads(sys.stdin.readline() or '{}')\n"
                "print(json.dumps({\"ok\":True,\"generated\":True,\"text\":\"echo:\"+str(req.get(\"prompt\",\"\")),\"backend\":\"fake\"}), flush=True)\n";
     }
+#ifndef WIN32
     ::chmod(fs::PathToString(adapter).c_str(), 0755);
+#else
+    const test::ScopedEnvVar adapter_env{"BTX_MODEL_GENERATE"};
+    BOOST_REQUIRE(fs::is_regular_file(adapter));
+    BOOST_REQUIRE(!fs::exists(tmp / "fake-generate.ran"));
+#endif
     BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str()), 0);
     test::UnsetEnv("BTX_LLAMA_CLI");
 
@@ -1187,6 +1245,17 @@ BOOST_AUTO_TEST_CASE(generatemodel_compatible_fake_adapter)
     UniValue result;
     std::string code;
     err.clear();
+#ifdef WIN32
+    BOOST_CHECK(!modelnet::ProbeHostGenerateProfile().generate_adapter);
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat, rpc, result, code, err));
+    BOOST_CHECK_EQUAL(code, "INCOMPATIBLE_HOST_PROFILE");
+    BOOST_CHECK_EQUAL(err, "no_generate_adapter");
+    BOOST_CHECK(!result["generated"].get_bool());
+    BOOST_CHECK(!result["compatible"].get_bool());
+    BOOST_CHECK(!result["remote_inference"].get_bool());
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+    BOOST_CHECK(!fs::exists(tmp / "fake-generate.ran"));
+#else
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
     BOOST_CHECK_EQUAL(result["generated"].get_bool(), true);
     BOOST_CHECK_EQUAL(result["local_generate"].get_bool(), true);
@@ -1199,6 +1268,7 @@ BOOST_AUTO_TEST_CASE(generatemodel_compatible_fake_adapter)
     BOOST_CHECK_EQUAL(result["architecture"].get_str(), "LlamaForCausalLM");
     BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
     BOOST_CHECK_EQUAL(result["execution_profile"].getInt<int>(), 0);
+#endif
     test::UnsetEnv("BTX_MODEL_GENERATE");
 }
 
@@ -1365,9 +1435,18 @@ BOOST_AUTO_TEST_CASE(generatemodel_unknown_architecture_fail_closed)
     const fs::path adapter = tmp / "fake-generate";
     {
         std::ofstream out(adapter);
+#ifdef WIN32
+        out << "from pathlib import Path\nPath(__file__).with_suffix('.ran').write_text('ran')\n";
+#endif
         out << "#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({\"ok\":True,\"text\":\"nope\"}), flush=True)\n";
     }
+#ifndef WIN32
     ::chmod(fs::PathToString(adapter).c_str(), 0755);
+#else
+    const test::ScopedEnvVar adapter_env{"BTX_MODEL_GENERATE"};
+    BOOST_REQUIRE(fs::is_regular_file(adapter));
+    BOOST_REQUIRE(!fs::exists(tmp / "fake-generate.ran"));
+#endif
     BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_MODEL_GENERATE", fs::PathToString(adapter).c_str()), 0);
 
     UniValue rpc(UniValue::VOBJ);
@@ -1385,6 +1464,9 @@ BOOST_AUTO_TEST_CASE(generatemodel_unknown_architecture_fail_closed)
     BOOST_CHECK_EQUAL(err, "unknown_architecture");
     BOOST_CHECK_EQUAL(result["generated"].get_bool(), false);
     BOOST_CHECK_EQUAL(result["compatible"].get_bool(), false);
+#ifdef WIN32
+    BOOST_CHECK(!fs::exists(tmp / "fake-generate.ran"));
+#endif
     test::UnsetEnv("BTX_MODEL_GENERATE");
 }
 
@@ -1408,6 +1490,9 @@ BOOST_AUTO_TEST_CASE(generatemodel_gguf_llama_cli)
     const fs::path llama = tmp / "fake-llama";
     {
         std::ofstream out(llama);
+#ifdef WIN32
+        out << "from pathlib import Path\nPath(__file__).with_suffix('.ran').write_text('ran')\n";
+#endif
         out << "#!/usr/bin/env python3\n"
                "import sys\n"
                "prompt = ''\n"
@@ -1417,7 +1502,13 @@ BOOST_AUTO_TEST_CASE(generatemodel_gguf_llama_cli)
                "        prompt = args[i + 1]\n"
                "print('llama:' + prompt, flush=True)\n";
     }
+#ifndef WIN32
     ::chmod(fs::PathToString(llama).c_str(), 0755);
+#else
+    const test::ScopedEnvVar llama_env{"BTX_LLAMA_CLI"};
+    BOOST_REQUIRE(fs::is_regular_file(llama));
+    BOOST_REQUIRE(!fs::exists(tmp / "fake-llama.ran"));
+#endif
     test::UnsetEnv("BTX_MODEL_GENERATE");
     BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_LLAMA_CLI", fs::PathToString(llama).c_str()), 0);
 
@@ -1430,12 +1521,24 @@ BOOST_AUTO_TEST_CASE(generatemodel_gguf_llama_cli)
     UniValue result;
     std::string code;
     err.clear();
+#ifdef WIN32
+    BOOST_CHECK(!modelnet::ProbeHostGenerateProfile().llama_cli);
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat, rpc, result, code, err));
+    BOOST_CHECK_EQUAL(code, "INCOMPATIBLE_HOST_PROFILE");
+    BOOST_CHECK_EQUAL(err, "no_gguf_backend");
+    BOOST_CHECK(!result["generated"].get_bool());
+    BOOST_CHECK(!result["compatible"].get_bool());
+    BOOST_CHECK(!result["remote_inference"].get_bool());
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+    BOOST_CHECK(!fs::exists(tmp / "fake-llama.ran"));
+#else
     BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc, result, code, err), err);
     BOOST_CHECK_EQUAL(result["generated"].get_bool(), true);
     BOOST_CHECK_EQUAL(result["text"].get_str(), "llama:gguf-hi");
     BOOST_CHECK_EQUAL(result["backend"].get_str(), "llama.cpp");
     BOOST_CHECK_EQUAL(result["local_generate"].get_bool(), true);
     BOOST_CHECK_EQUAL(result["remote_inference"].get_bool(), false);
+#endif
     test::UnsetEnv("BTX_LLAMA_CLI");
 }
 
@@ -1717,6 +1820,25 @@ BOOST_AUTO_TEST_CASE(mldsa_tls_identity_is_minted_in_process_mode_0600)
     const fs::path cert = dir / "cert.pem";
     const fs::path key = dir / "key.pem";
     std::string err;
+#ifdef WIN32
+    BOOST_CHECK(!modelnet::EnsureMlDsaTlsFiles(cert, key, err));
+    BOOST_CHECK_EQUAL(err, "openssl mldsa44 certificate generation failed");
+    BOOST_CHECK(!fs::exists(cert));
+    BOOST_CHECK(!fs::exists(key));
+    BOOST_CHECK(!fs::exists(dir / "cert.pem.tmp"));
+    BOOST_CHECK(!fs::exists(dir / "key.pem.tmp"));
+
+    // Refusal also preserves a supplied key when its certificate is missing.
+    std::ofstream{key} << "existing private key\n";
+    const auto retained_key = ReadFileBytes(key);
+    err.clear();
+    BOOST_CHECK(!modelnet::EnsureMlDsaTlsFiles(cert, key, err));
+    BOOST_CHECK_EQUAL(err, "openssl mldsa44 certificate generation failed");
+    BOOST_CHECK(ReadFileBytes(key) == retained_key);
+    BOOST_CHECK(!fs::exists(cert));
+    BOOST_CHECK(!fs::exists(dir / "cert.pem.tmp"));
+    BOOST_CHECK(!fs::exists(dir / "key.pem.tmp"));
+#else
     BOOST_REQUIRE_MESSAGE(modelnet::EnsureMlDsaTlsFiles(cert, key, err), err);
     BOOST_CHECK(err.empty());
     struct stat cst {};
@@ -1734,6 +1856,7 @@ BOOST_AUTO_TEST_CASE(mldsa_tls_identity_is_minted_in_process_mode_0600)
     BOOST_REQUIRE(modelnet::EnsureMlDsaTlsFiles(cert, key, err));
     BOOST_CHECK(ReadFileBytes(key) == key_bytes);
     BOOST_CHECK(ReadFileBytes(cert) == cert_bytes);
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(removemodel_checks_in_use_before_unpin_and_deletes_the_directory)
