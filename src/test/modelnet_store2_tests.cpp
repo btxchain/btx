@@ -24,6 +24,12 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+// Keep the C++ store method distinct from the Windows SDK macro.
+#pragma push_macro("GetObject")
+#undef GetObject
+#endif
+
 BOOST_FIXTURE_TEST_SUITE(modelnet_store2_tests, BasicTestingSetup)
 
 namespace {
@@ -275,3 +281,7 @@ BOOST_AUTO_TEST_CASE(store2_04_restart_residency)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+#if defined(_WIN32)
+#pragma pop_macro("GetObject")
+#endif
