@@ -13,6 +13,7 @@
 #include <bcrypt.h>
 #include <objbase.h>
 #include <modelnet/swarm_windows_sandbox.h>
+#include <modelnet/swarm_windows_accounting.h>
 #include <modelnet/swarm_process_guard.h>
 #include <modelnet/swarm_native_io.h>
 #include <array>
@@ -23,10 +24,19 @@
 #include <memory>
 #include <vector>
 
+#ifdef BTX_WINDOWS_ACCOUNTING_TEST
+// Only the native regression binary defines these; never a runtime option.
+namespace modelnet::windows_accounting_test {
+void AdjustCpu(HANDLE,const std::wstring&,bool,bool&,LONGLONG&,LONGLONG&);
+void AdjustClock(const std::wstring&,bool&,ULONGLONG&);
+void AdjustTree(const std::wstring&,bool&,uint64_t&);
+}
+#endif
+
 namespace modelnet {
 namespace {
 constexpr size_t MAX_ENTRIES=8192;
-constexpr uint64_t MAX_OUTPUT_BYTES=64ULL*1024*1024;
+constexpr uint64_t MAX_OUTPUT_BYTES=windows_accounting::MAX_OUTPUT_BYTES;
 struct Handle {
     HANDLE value{nullptr};
     ~Handle(){if(value && value!=INVALID_HANDLE_VALUE)CloseHandle(value);}
@@ -87,7 +97,11 @@ struct Profile {
     fs::path work;
     PSECURITY_DESCRIPTOR descriptor{nullptr};
     bool created{false};
-    ~Profile(){Cleanup();}
+    bool cleanup_deferred{false};
+    ~Profile(){
+        if(!cleanup_deferred)Cleanup();
+        else {if(sid)FreeSid(sid);if(descriptor)LocalFree(descriptor);}
+    }
     bool Cleanup()
     {
         bool ok=true;
@@ -315,6 +329,8 @@ SwarmConfineResult SwarmRunWindowsAppContainer(const SwarmConfineRequest& reques
        request.max_address_bytes<=0 || request.max_cpu_seconds<=0 || request.max_cpu_seconds>86400 ||
        request.max_wall_seconds<=0 || request.max_wall_seconds>86400 || request.max_tree_bytes==0 ||
        static_cast<uint64_t>(request.max_address_bytes)>SIZE_MAX)return Fail("WINDOWS_SANDBOX_POLICY",error);
+    uint64_t live_tree_budget=0;
+    if(!windows_accounting::LiveTreeBudget(request.max_tree_bytes,live_tree_budget))return Fail("WINDOWS_SANDBOX_POLICY",error);
     // CreateProcess needs this profile lookup value for AppContainer setup.
     // Keep the explicit child allowlist; never inherit the parent environment.
     const DWORD local_size=GetEnvironmentVariableW(L"LOCALAPPDATA",nullptr,0);
@@ -379,15 +395,84 @@ SwarmConfineResult SwarmRunWindowsAppContainer(const SwarmConfineRequest& reques
         TerminateProcess(process.value,126);WaitForSingleObject(process.value,5000);
         return Fail("WINDOWS_SANDBOX_TOKEN_OR_JOB",error);
     }
-    if(ResumeThread(thread.value)==static_cast<DWORD>(-1)) {
-        TerminateJobObject(job.value,126);WaitForSingleObject(process.value,5000);
-        return Fail("WINDOWS_SANDBOX_RESUME",error);
-    }
-    const DWORD waited=WaitForSingleObject(process.value,static_cast<DWORD>(request.max_wall_seconds)*1000);
-    if(waited!=WAIT_OBJECT_0) {
-        TerminateJobObject(job.value,124);WaitForSingleObject(process.value,5000);
-        return Fail(waited==WAIT_TIMEOUT?"CONFINEMENT_TIMEOUT":"WINDOWS_SANDBOX_WAIT",error);
-    }
+    std::unique_ptr<windows_accounting::TreeSampler> sampler;
+    const auto refuse=[&](const char* code) {
+        sampler.reset();
+        if(WaitForSingleObject(process.value,0)!=WAIT_OBJECT_0) {
+            TerminateJobObject(job.value,124);
+            if(WaitForSingleObject(process.value,5000)!=WAIT_OBJECT_0) {
+                // Kill-on-close remains a backstop if explicit termination fails.
+                CloseHandle(job.value);job.value=nullptr;
+                if(WaitForSingleObject(process.value,5000)!=WAIT_OBJECT_0) {
+                    // Never remove the tree while its writer is known running.
+                    profile.cleanup_deferred=true;
+                    return Fail("WINDOWS_SANDBOX_STOP",error);
+                }
+            }
+        }
+        if(!profile.Cleanup())return Fail("WINDOWS_SANDBOX_CLEANUP",error);
+        return Fail(code?code:"WINDOWS_SANDBOX_ACCOUNTING",error);
+    };
+    try {
+        DWORD sample_error=0;
+        sampler=windows_accounting::TreeSampler::Create(profile.work.native(),sample_error);
+        if(!sampler)return refuse("WINDOWS_SANDBOX_ACCOUNTING");
+        ULONGLONG started=0;
+        if(!QueryUnbiasedInterruptTime(&started))return refuse("WINDOWS_SANDBOX_ACCOUNTING");
+        const uint64_t wall_ticks=static_cast<uint64_t>(request.max_wall_seconds)*10000000;
+        const uint64_t cpu_ticks=static_cast<uint64_t>(request.max_cpu_seconds)*10000000;
+        ULONGLONG last_clock=started;
+        bool finished=false;const char* reason=nullptr;
+        const auto running=[&]() {
+            // Observe completion before querying CPU: a query made before
+            // the exit signal cannot stand in for the final accounting read.
+            const DWORD state=WaitForSingleObject(process.value,0);
+            if(state!=WAIT_OBJECT_0 && state!=WAIT_TIMEOUT){reason="WINDOWS_SANDBOX_WAIT";return false;}
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+            bool cpu_ok=QueryInformationJobObject(job.value,JobObjectBasicAccountingInformation,
+                &accounting,sizeof(accounting),nullptr)!=0;
+            LONGLONG user=accounting.TotalUserTime.QuadPart,kernel=accounting.TotalKernelTime.QuadPart;
+            ULONGLONG now=0;bool clock_ok=QueryUnbiasedInterruptTime(&now)!=0;
+#ifdef BTX_WINDOWS_ACCOUNTING_TEST
+            windows_accounting_test::AdjustCpu(job.value,profile.work.native(),state==WAIT_OBJECT_0,cpu_ok,user,kernel);
+            windows_accounting_test::AdjustClock(profile.work.native(),clock_ok,now);
+#endif
+            const auto cpu=windows_accounting::EvaluateCpu(user,kernel,cpu_ticks);
+            if(!cpu_ok || !clock_ok || now<last_clock || cpu==windows_accounting::CpuState::invalid) {
+                reason="WINDOWS_SANDBOX_ACCOUNTING";return false;
+            }
+            last_clock=now;
+            if(cpu==windows_accounting::CpuState::over_limit){reason="WINDOWS_SANDBOX_CPU_LIMIT";return false;}
+            // If it exits after the initial poll, the next poll reads final CPU.
+            if(state==WAIT_OBJECT_0){finished=true;return false;}
+            if(now-started>=wall_ticks){reason="CONFINEMENT_TIMEOUT";return false;}
+            return true;
+        };
+        if(ResumeThread(thread.value)==static_cast<DWORD>(-1))return refuse("WINDOWS_SANDBOX_RESUME");
+        for(;;) {
+            if(!running()){if(finished)break;return refuse(reason);}
+            auto sample=sampler->Sample(live_tree_budget,running);
+            if(sample.state==windows_accounting::TreeState::incomplete)
+                sample=sampler->Sample(live_tree_budget,running); // One retry, same clocks.
+            if(sample.state==windows_accounting::TreeState::interrupted) {
+                if(finished)break;return refuse(reason?reason:"WINDOWS_SANDBOX_ACCOUNTING");
+            }
+            if(sample.state==windows_accounting::TreeState::over_limit)return refuse("TREE_LIMIT");
+            if(sample.state!=windows_accounting::TreeState::within)return refuse("WINDOWS_SANDBOX_ACCOUNTING");
+#ifdef BTX_WINDOWS_ACCOUNTING_TEST
+            bool tree_ok=true;uint64_t observed=sample.bytes;
+            windows_accounting_test::AdjustTree(profile.work.native(),tree_ok,observed);
+            if(!tree_ok)return refuse("WINDOWS_SANDBOX_ACCOUNTING");
+            if(observed>live_tree_budget)return refuse("TREE_LIMIT");
+#endif
+            if(!running()){if(finished)break;return refuse(reason);}
+            const uint64_t remaining=wall_ticks-(last_clock-started);
+            const DWORD slice=static_cast<DWORD>(std::min<uint64_t>(100,(remaining+9999)/10000));
+            const DWORD waited=WaitForSingleObject(process.value,slice);
+            if(waited!=WAIT_TIMEOUT && waited!=WAIT_OBJECT_0)return refuse("WINDOWS_SANDBOX_WAIT");
+        }
+        sampler.reset();
+    } catch(...) {return refuse("WINDOWS_SANDBOX_ACCOUNTING");}
     DWORD exit_code=0;
     if(!GetExitCodeProcess(process.value,&exit_code) || exit_code>INT_MAX)return Fail("WINDOWS_SANDBOX_EXIT",error);
     if(exit_code==0 && !PublishOutputs(request.root,profile.work,inputs,request.max_tree_bytes))return Fail("WINDOWS_SANDBOX_OUTPUT",error);
