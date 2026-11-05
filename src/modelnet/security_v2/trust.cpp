@@ -145,7 +145,7 @@ namespace modelnet::security {
             // fixed root pins require an offline, separately reviewed recovery to change.
             old.Check(e,"owner",db,now,1);
         }
-        db.Put(e);
+        db.PutVerifiedControl(e);
         db.SetMeta("active_policy",next.id);
         db.SetMeta("policy_epoch",std::to_string(next.epoch));
         db.Exec("UPDATE permits SET phase='revoked' WHERE phase='prepared'");
@@ -387,7 +387,8 @@ namespace modelnet::security {
         db.CheckClock(now);
         std::string visibility="private";
         if(kind=="composition")visibility=Text(b,"visibility");
-        db.Put(e,visibility);
+        if(kind=="revocation")db.PutVerifiedControl(e,visibility);
+        else db.Put(e,visibility);
         if(kind=="composition")for(const auto& parent:StringArray(b["parents"],32))db.LinkParent(id,parent);
         if(kind=="revocation") {
             db.Revoke(DigestField(b,"subject"),id,UInt(b,"sequence",INT64_MAX),now);

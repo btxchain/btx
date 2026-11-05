@@ -80,3 +80,8 @@ endif()
 add_executable(channel-recovery-tests channel_recovery_tests.cpp)
 target_link_libraries(channel-recovery-tests PRIVATE btx_model_security)
 add_test(NAME security-channel-recovery COMMAND channel-recovery-tests "${CMAKE_CURRENT_BINARY_DIR}/channel-recovery-results/summary.json")
+
+# Recovery admission must not broaden serialized live-evidence imports.
+add_executable(full-store-recovery-tests full_store_recovery_tests.cpp)
+target_link_libraries(full-store-recovery-tests PRIVATE btx_model_security)
+add_test(NAME security-full-store-recovery COMMAND full-store-recovery-tests)

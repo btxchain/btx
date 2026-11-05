@@ -76,3 +76,28 @@ training/evaluation engines, security UI and explicitly authorized settlement.
 
 These are real remaining implementation tasks, not merely missing test runs.
 `REQUIREMENTS.json` at the package root is the comprehensive delivery ledger.
+
+## Evidence-cap emergency headroom
+
+New ordinary records stop at 16,384 stored objects. Fully authenticated policy
+updates and revocations can use 129 additional records in the same database:
+capacity for one policy plus 128 principal revocations. Existing signature,
+realm, freshness, epoch and revoker checks still apply. This allowance is shared
+with valid peer-delivered revocations, so it does not reserve local priority or
+cover every possible revocable evidence/composition subject.
+
+SEC_OBJECT_QUOTA means an ordinary new ID is refused. SEC_CONTROL_QUOTA means
+the fixed emergency tail is exhausted too; neither error removes evidence or
+partly commits a policy/revocation transaction. Existing-ID signature merging
+stays bounded and preserves private visibility. Reopening or changing policy
+does not reset headroom. Pause and direct signed resume create no object row,
+but still require their other durable writes to succeed. A successful control
+write or resume does not restore ordinary evidence capacity.
+
+This is object-count headroom, not preallocated disk or a retention scheme.
+The 129 envelope slots represent at most 129 MiB of envelope data before SQLite,
+indexes, authority tables, journal and WAL overhead; page limits or disk failure
+can still prevent any write. Preserve containment and retained authority/audit
+evidence; do not delete the database or prune expired negative findings as a
+workaround. An older binary retains the same schema but refuses fresh IDs at
+or above 16,384, including controls; downgrading loses emergency admission.
