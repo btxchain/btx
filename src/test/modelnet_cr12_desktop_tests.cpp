@@ -5,16 +5,14 @@
 
 #include <test/modelnet_cr12_test.h>
 #include <test/util/setup_common.h>
+#include <test/util/sdk_process.h>
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
 
-#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <string>
-#include <sys/wait.h>
-#include <unistd.h>
 
 namespace {
 
@@ -28,44 +26,10 @@ fs::path SdkRoot()
 #endif
 }
 
-std::string ShellQuote(const std::string& s)
-{
-    std::string q = "'";
-    for (char c : s) {
-        if (c == '\'') q += "'\\''";
-        else q += c;
-    }
-    q += "'";
-    return q;
-}
+using sdk_test::Python3;
+using sdk_test::Spawn;
+using sdk_test::Which;
 
-int Spawn(const std::string& cmd, std::string& combined)
-{
-    FILE* fp = ::popen(cmd.c_str(), "r");
-    if (!fp) return -1;
-    char buf[4096];
-    while (fgets(buf, sizeof(buf), fp) != nullptr) combined.append(buf);
-    const int st = ::pclose(fp);
-    if (st == -1) return -1;
-    if (WIFEXITED(st)) return WEXITSTATUS(st);
-    return 127;
-}
-
-std::string Which(const char* name)
-{
-    std::string out;
-    const int rc = Spawn(std::string("command -v ") + name + " 2>/dev/null", out);
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
-    if (rc != 0) return {};
-    return out;
-}
-
-std::string Python3()
-{
-    std::string exe = "/usr/bin/python3";
-    if (::access(exe.c_str(), X_OK) != 0) exe = Which("python3");
-    return exe;
-}
 
 std::string ReadFile(const fs::path& p)
 {
@@ -102,8 +66,7 @@ BOOST_AUTO_TEST_CASE(cr12_desktop_02_no_localhost_execute)
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     const fs::path apply = sdk / "python" / "apply_desktop_context.py";
     std::string out;
-    const std::string cmd = ShellQuote(python) + " " + ShellQuote(fs::PathToString(apply)) + " " +
-                            ShellQuote(fs::PathToString(example)) + " 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(apply), fs::PathToString(example)};
     const int rc = Spawn(cmd, out);
     BOOST_REQUIRE_MESSAGE(rc == 0, "apply_desktop_context.py rc=" + std::to_string(rc) + "\n" + out);
     UniValue plan;
@@ -130,10 +93,8 @@ BOOST_AUTO_TEST_CASE(cr12_desktop_02_no_localhost_execute)
     } else {
         std::string ts_out;
         const fs::path ts = sdk / "typescript" / "src" / "apply_desktop_context.ts";
-        const std::string ts_cmd = "env NODE_NO_WARNINGS=1 " + ShellQuote(node) + " --experimental-strip-types " +
-                                   ShellQuote(fs::PathToString(ts)) + " " + ShellQuote(fs::PathToString(example)) +
-                                   " 2>/dev/null";
-        const int ts_rc = Spawn(ts_cmd, ts_out);
+        const std::vector<std::string> ts_cmd{node, "--no-warnings", "--experimental-strip-types", fs::PathToString(ts), fs::PathToString(example)};
+        const int ts_rc = Spawn(ts_cmd, ts_out, false);
         BOOST_REQUIRE_MESSAGE(ts_rc == 0, ts_out);
         BOOST_CHECK(ts_out.find("executeAllocation") == std::string::npos);
         BOOST_CHECK(ts_out.find("\"execute\":false") != std::string::npos ||
@@ -176,8 +137,7 @@ BOOST_AUTO_TEST_CASE(cr12_desktop_04_draft_maps_to_prepare)
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     const fs::path apply = SdkRoot() / "python" / "apply_desktop_context.py";
     std::string out;
-    const std::string cmd = ShellQuote(python) + " " + ShellQuote(fs::PathToString(apply)) + " " +
-                            ShellQuote(fs::PathToString(tmp)) + " 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(apply), fs::PathToString(tmp)};
     const int rc = Spawn(cmd, out);
     BOOST_REQUIRE_MESSAGE(rc == 0, out);
     UniValue plan;
@@ -193,8 +153,7 @@ BOOST_AUTO_TEST_CASE(cr12_desktop_05_source_has_no_http)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_desktop_context.py TestDesktopContext.test_source_has_no_http_client 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_desktop_context.py"), "TestDesktopContext.test_source_has_no_http_client"};
     BOOST_REQUIRE_EQUAL(Spawn(cmd, out), 0);
 }
 
@@ -203,8 +162,7 @@ BOOST_AUTO_TEST_CASE(cr12_desktop_06_rejects_token)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_desktop_context.py TestDesktopContext.test_rejects_token 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_desktop_context.py"), "TestDesktopContext.test_rejects_token"};
     BOOST_REQUIRE_EQUAL(Spawn(cmd, out), 0);
 }
 
@@ -213,9 +171,7 @@ BOOST_AUTO_TEST_CASE(cr12_desktop_07_rejects_execute_purpose)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_desktop_context.py TestDesktopContext.test_rejects_execute_purpose "
-                            "TestDesktopContext.test_rejects_localhost_execute_url 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_desktop_context.py"), "TestDesktopContext.test_rejects_execute_purpose", "TestDesktopContext.test_rejects_localhost_execute_url"};
     BOOST_REQUIRE_EQUAL(Spawn(cmd, out), 0);
 }
 
@@ -254,11 +210,7 @@ BOOST_AUTO_TEST_CASE(cr12_desktop_10_no_wallet_path)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_desktop_context.py TestDesktopContext.test_draft_maps_to_prepare_not_execute "
-                            "TestDesktopContext.test_example_is_inspect_view "
-                            "TestDesktopContext.test_compare_is_view_only "
-                            "TestDesktopContext.test_rejects_execute_now 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_desktop_context.py"), "TestDesktopContext.test_draft_maps_to_prepare_not_execute", "TestDesktopContext.test_example_is_inspect_view", "TestDesktopContext.test_compare_is_view_only", "TestDesktopContext.test_rejects_execute_now"};
     BOOST_REQUIRE_EQUAL(Spawn(cmd, out), 0);
 }
 
