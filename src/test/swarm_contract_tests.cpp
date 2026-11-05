@@ -9,7 +9,7 @@
 
 #include <boost/test/unit_test.hpp>
 
-#include <unistd.h>
+#include <test/util/process.h>
 
 BOOST_FIXTURE_TEST_SUITE(swarm_contract_tests, BasicTestingSetup)
 
@@ -18,7 +18,7 @@ namespace {
 fs::path Scratch(const char* name)
 {
     fs::path path = fs::temp_directory_path();
-    path /= fs::u8path(std::string(name) + "-" + std::to_string(::getpid()));
+    path /= fs::u8path(std::string(name) + "-" + std::to_string(test::ProcessId()));
     fs::remove_all(path);
     fs::create_directories(path);
     return path;

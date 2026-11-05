@@ -16,7 +16,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <fstream>
-#include <unistd.h>
+#include <test/util/process.h>
 
 BOOST_FIXTURE_TEST_SUITE(swarm_node_tests, BasicTestingSetup)
 
@@ -42,7 +42,7 @@ size_t OpenDescriptors()
 //! remove_all throws there. POSIX deletes it anyway, so first compare the open
 //! descriptors with the count taken when the directory was made.
 struct ScratchDir {
-    const fs::path dir{fs::temp_directory_path() / ("btx-swarm-node-" + std::to_string(::getpid()))};
+    const fs::path dir{fs::temp_directory_path() / ("btx-swarm-node-" + std::to_string(test::ProcessId()))};
 #ifndef WIN32
     size_t descriptors{0};
 #endif

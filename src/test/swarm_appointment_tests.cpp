@@ -10,7 +10,7 @@
 
 #include <fstream>
 #include <string>
-#include <unistd.h>
+#include <test/util/process.h>
 
 BOOST_FIXTURE_TEST_SUITE(swarm_appointment_tests, BasicTestingSetup)
 
@@ -21,7 +21,7 @@ struct ScratchDir {
     ScratchDir()
     {
         path = fs::temp_directory_path();
-        path /= fs::u8path("btx-swarm-appointment-" + std::to_string(::getpid()));
+        path /= fs::u8path("btx-swarm-appointment-" + std::to_string(test::ProcessId()));
         fs::remove_all(path);
         fs::create_directories(path);
     }

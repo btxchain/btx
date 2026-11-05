@@ -8,7 +8,7 @@
 
 #include <boost/test/unit_test.hpp>
 
-#include <unistd.h>
+#include <test/util/process.h>
 
 BOOST_FIXTURE_TEST_SUITE(swarm_cohortbook_tests, BasicTestingSetup)
 
@@ -42,7 +42,7 @@ BOOST_AUTO_TEST_CASE(expiry_revoke_stale_epoch_replay_and_rejoin)
     BOOST_CHECK(live.Admit(100, 3, "m", "l4", true, true, err));
 
     fs::path dir = fs::temp_directory_path();
-    dir /= fs::u8path("btx-cohort-" + std::to_string(::getpid()));
+    dir /= fs::u8path("btx-cohort-" + std::to_string(test::ProcessId()));
     fs::remove_all(dir);
     BOOST_REQUIRE(live.Persist(dir, err));
     modelnet::SwarmCohortBook restored;
@@ -113,7 +113,7 @@ BOOST_AUTO_TEST_CASE(a_checkpoint_stays_closed_until_every_child_matches)
     BOOST_CHECK(!crash.NotePeerGone(err));
     BOOST_CHECK_EQUAL(err, "PEER");
     fs::path dir = fs::temp_directory_path();
-    dir /= fs::u8path("btx-verify-" + std::to_string(::getpid()));
+    dir /= fs::u8path("btx-verify-" + std::to_string(test::ProcessId()));
     fs::remove_all(dir);
     BOOST_REQUIRE(crash.Persist(dir, err));
     modelnet::SwarmVerifyBook restored;

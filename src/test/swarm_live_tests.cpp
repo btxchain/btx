@@ -14,7 +14,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
-#include <unistd.h>
+#include <test/util/process.h>
 
 BOOST_FIXTURE_TEST_SUITE(swarm_live_tests, BasicTestingSetup)
 
@@ -27,7 +27,7 @@ std::string Id(char c)
 
 fs::path Scratch()
 {
-    const fs::path path = fs::temp_directory_path() / ("btx-swarm-live-" + std::to_string(::getpid()));
+    const fs::path path = fs::temp_directory_path() / ("btx-swarm-live-" + std::to_string(test::ProcessId()));
     fs::remove_all(path);
     fs::create_directories(path);
     return path;

@@ -9,7 +9,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <string>
-#include <unistd.h>
+#include <test/util/process.h>
 #include <utility>
 #include <vector>
 
@@ -39,7 +39,7 @@ struct TmpDir {
     fs::path path;
     explicit TmpDir(const char* name)
     {
-        path = fs::temp_directory_path() / (std::string("btx-swarm-clearing-") + name + "-" + std::to_string(::getpid()));
+        path = fs::temp_directory_path() / (std::string("btx-swarm-clearing-") + name + "-" + std::to_string(test::ProcessId()));
         fs::remove_all(path);
         fs::create_directories(path);
     }
