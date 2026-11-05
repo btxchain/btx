@@ -16,6 +16,7 @@
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdlib>
 #include <cstdint>
@@ -48,20 +49,20 @@ BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_and_env_overrides)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
     // Unset → ProductionPreferred (default).
-    unsetenv("BTX_RC_ACCEL_POLICY");
+    test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                       static_cast<uint8_t>(rc::RCAccelerationPolicy::ProductionPreferred));
     // Explicit opt-in overrides both directions.
-    setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "native");
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                       static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
-    setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "portable");
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                       static_cast<uint8_t>(rc::RCAccelerationPolicy::PortableExplicit));
     if (prev != nullptr) {
-        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+        test::SetEnv("BTX_RC_ACCEL_POLICY", prev);
     } else {
-        unsetenv("BTX_RC_ACCEL_POLICY");
+        test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     }
 }
 
@@ -72,7 +73,7 @@ BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_and_env_overrides)
 BOOST_AUTO_TEST_CASE(rc_native_required_resolver_order_qual_before_latch)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
-    setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1); // NativeRequired is opt-in now
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "native"); // NativeRequired is opt-in now
     BOOST_REQUIRE_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                         static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
 
@@ -94,9 +95,9 @@ BOOST_AUTO_TEST_CASE(rc_native_required_resolver_order_qual_before_latch)
     }
 
     if (prev != nullptr) {
-        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+        test::SetEnv("BTX_RC_ACCEL_POLICY", prev);
     } else {
-        unsetenv("BTX_RC_ACCEL_POLICY");
+        test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     }
 }
 
@@ -104,7 +105,7 @@ BOOST_AUTO_TEST_CASE(rc_native_required_resolver_order_qual_before_latch)
 BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
-    setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1); // NativeRequired is opt-in now
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "native"); // NativeRequired is opt-in now
     BOOST_REQUIRE_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                         static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
 
@@ -126,9 +127,9 @@ BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
     }
 
     if (prev != nullptr) {
-        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+        test::SetEnv("BTX_RC_ACCEL_POLICY", prev);
     } else {
-        unsetenv("BTX_RC_ACCEL_POLICY");
+        test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     }
 }
 
@@ -140,13 +141,13 @@ BOOST_AUTO_TEST_CASE(rc_production_preferred_default_admits_device_like_portable
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
     rc::ResetRcOzakiQualForTest();
-    unsetenv("BTX_RC_ACCEL_POLICY"); // ProductionPreferred (default)
+    test::UnsetEnv("BTX_RC_ACCEL_POLICY"); // ProductionPreferred (default)
     const auto def = matmul_v4::accel::ResolveExactGemmBackendForRC();
     BOOST_CHECK_MESSAGE(
         !rc::IsRcOzakiMxfp4Qualified(),
         "automatic production resolution must not run correctness-only native qual");
 
-    setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1); // PortableExplicit
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "portable"); // PortableExplicit
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
     const auto portable = matmul_v4::accel::ResolveExactGemmBackendForRC();
     BOOST_CHECK_EQUAL(def.backend.gemm_s8s8 == nullptr,
@@ -157,9 +158,9 @@ BOOST_AUTO_TEST_CASE(rc_production_preferred_default_admits_device_like_portable
     BOOST_CHECK(!def.production_eligible);
     BOOST_CHECK(!portable.production_eligible);
     if (prev != nullptr) {
-        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+        test::SetEnv("BTX_RC_ACCEL_POLICY", prev);
     } else {
-        unsetenv("BTX_RC_ACCEL_POLICY");
+        test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     }
 }
 

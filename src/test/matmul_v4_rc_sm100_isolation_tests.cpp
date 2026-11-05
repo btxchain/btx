@@ -12,6 +12,7 @@
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -48,9 +49,9 @@ struct EnvRestore {
     ~EnvRestore()
     {
         if (prior) {
-            setenv(name.c_str(), prior->c_str(), /*overwrite=*/1);
+            test::SetEnv(name.c_str(), prior->c_str());
         } else {
-            unsetenv(name.c_str());
+            test::UnsetEnv(name.c_str());
         }
     }
 };
@@ -74,8 +75,8 @@ BOOST_AUTO_TEST_CASE(rc_sm100_native_probe_fail_closed_without_b200)
     // Env cannot flip the fail-closed SM100 packaging latch.
     EnvRestore r1("BTX_CUDA_SM100_NATIVE");
     EnvRestore r2("BTX_CUDA_SM120_MXFP4_NATIVE");
-    setenv("BTX_CUDA_SM100_NATIVE", "1", /*overwrite=*/1);
-    setenv("BTX_CUDA_SM120_MXFP4_NATIVE", "1", /*overwrite=*/1);
+    test::SetEnv("BTX_CUDA_SM100_NATIVE", "1");
+    test::SetEnv("BTX_CUDA_SM120_MXFP4_NATIVE", "1");
     BOOST_CHECK(!matmul_v4::cuda::RcOzakiMxfp4Sm100NativeLinked());
 }
 

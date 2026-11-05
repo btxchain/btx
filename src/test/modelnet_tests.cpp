@@ -35,6 +35,7 @@
 #include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <crypto/common.h>
 #include <crypto/sha384.h>
@@ -715,8 +716,8 @@ BOOST_AUTO_TEST_CASE(pq19_openssl_conf_cannot_weaken_pq1)
             << "Ciphersuites = TLS_AES_128_GCM_SHA256\n"
             << "SignatureAlgorithms = ECDSA+SHA256:ed25519\n";
     }
-    BOOST_REQUIRE_EQUAL(setenv("OPENSSL_CONF", fs::PathToString(conf).c_str(), 1), 0);
-    BOOST_REQUIRE_EQUAL(setenv("OPENSSL_MODULES", "/nonexistent-btx-pq19-modules", 1), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv("OPENSSL_CONF", fs::PathToString(conf).c_str()), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv("OPENSSL_MODULES", "/nonexistent-btx-pq19-modules"), 0);
     std::string err;
     BOOST_REQUIRE_MESSAGE(modelnet::Pq1HostileConfCannotWeaken(err), err);
     BOOST_CHECK(modelnet::Pq1OpenSslEnvIsClean());

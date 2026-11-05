@@ -15,6 +15,7 @@
 #include <uint256.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <algorithm>
 #include <array>
@@ -656,10 +657,10 @@ BOOST_AUTO_TEST_CASE(coset_blocked_composition_is_byte_identical_to_dense)
     BOOST_CHECK(coset.division_exact);
 
     // Dense control, same binary, same inputs.
-    BOOST_REQUIRE_EQUAL(setenv("BTX_AIRQ_DENSE_COMPOSITION", "1", 1), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv("BTX_AIRQ_DENSE_COMPOSITION", "1"), 0);
     const auto dense =
         aq::AirQuotientProve<gf::Fp3>(b.cs, b.columns, seed);
-    BOOST_REQUIRE_EQUAL(unsetenv("BTX_AIRQ_DENSE_COMPOSITION"), 0);
+    BOOST_REQUIRE_EQUAL(test::UnsetEnv("BTX_AIRQ_DENSE_COMPOSITION"), 0);
     BOOST_REQUIRE_MESSAGE(dense.ok, dense.note);
     BOOST_CHECK(dense.division_exact);
 

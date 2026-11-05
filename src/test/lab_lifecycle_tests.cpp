@@ -12,6 +12,7 @@
 #include <util/string.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -54,8 +55,8 @@ struct TempTree {
 
 struct LabDirEnv {
     explicit LabDirEnv(const fs::path& dir) { Point(dir); }
-    void Point(const fs::path& dir) { ::setenv("BTX035_LAB_DIR", PathToString(dir).c_str(), 1); }
-    ~LabDirEnv() { ::unsetenv("BTX035_LAB_DIR"); }
+    void Point(const fs::path& dir) { test::SetEnv("BTX035_LAB_DIR", PathToString(dir).c_str()); }
+    ~LabDirEnv() { test::UnsetEnv("BTX035_LAB_DIR"); }
 };
 
 struct AdmissionGuard {
@@ -107,9 +108,9 @@ UniValue Identity(const char* label, const char* key)
 
 void PrepareDir(const fs::path& dir)
 {
-    ::unsetenv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX035_LAB_DIR");
     modelnet::ResetLabApi();
-    ::setenv("BTX035_LAB_DIR", PathToString(dir).c_str(), 1);
+    test::SetEnv("BTX035_LAB_DIR", PathToString(dir).c_str());
     modelnet::ReloadLabFromDisk();
 }
 
@@ -442,7 +443,7 @@ BOOST_AUTO_TEST_CASE(bounded_read_does_not_hold_the_lab_mutex)
 {
 #ifndef _WIN32
     BOOST_REQUIRE(!m_path_root.empty());
-    ::unsetenv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX035_LAB_DIR");
     modelnet::ResetLabApi();
 
     int stalled[2] = {-1, -1};

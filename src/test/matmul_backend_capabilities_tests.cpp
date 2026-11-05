@@ -14,6 +14,7 @@
 #include <uint256.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +26,8 @@
 #include <unistd.h>
 #endif
 
+using test::ScopedEnvVar;
+
 namespace {
 
 uint256 ParseUint256(std::string_view hex)
@@ -33,47 +36,6 @@ uint256 ParseUint256(std::string_view hex)
     BOOST_REQUIRE(parsed.has_value());
     return *parsed;
 }
-
-class ScopedEnvVar
-{
-public:
-    ScopedEnvVar(const char* name, const char* value) : m_name(name)
-    {
-        const char* current = std::getenv(name);
-        if (current != nullptr) {
-            m_had_original = true;
-            m_original = current;
-        }
-
-#if defined(_WIN32)
-        _putenv_s(name, value != nullptr ? value : "");
-#else
-        if (value != nullptr) {
-            setenv(name, value, 1);
-        } else {
-            unsetenv(name);
-        }
-#endif
-    }
-
-    ~ScopedEnvVar()
-    {
-#if defined(_WIN32)
-        _putenv_s(m_name, m_had_original ? m_original.c_str() : "");
-#else
-        if (m_had_original) {
-            setenv(m_name, m_original.c_str(), 1);
-        } else {
-            unsetenv(m_name);
-        }
-#endif
-    }
-
-private:
-    const char* m_name;
-    bool m_had_original{false};
-    std::string m_original;
-};
 
 btx::cuda::CudaDeviceInfo MakeCudaDeviceInfo(int device_index,
                                              bool supported,
@@ -127,6 +89,39 @@ BOOST_AUTO_TEST_CASE(scoped_environment_restores_absence)
     }
     BOOST_CHECK(std::getenv(name) == nullptr);
 }
+
+BOOST_AUTO_TEST_CASE(scoped_environment_restores_after_exception)
+{
+    constexpr const char* name = "BTX_TEST_BACKEND_SCOPED_ENV";
+    const ScopedEnvVar original{name, "original"};
+    struct EarlyExit {};
+    BOOST_CHECK_THROW(([&] {
+        ScopedEnvVar restored{name};
+        restored.Set("replacement");
+        BOOST_REQUIRE(std::getenv(name) != nullptr);
+        BOOST_CHECK_EQUAL(std::getenv(name), "replacement");
+        throw EarlyExit{};
+    }()), EarlyExit);
+    BOOST_REQUIRE(std::getenv(name) != nullptr);
+    BOOST_CHECK_EQUAL(std::getenv(name), "original");
+}
+
+#if !defined(_WIN32)
+BOOST_AUTO_TEST_CASE(scoped_environment_restores_present_empty_value)
+{
+    // Unlike the Windows CRT, POSIX distinguishes present-empty from absent.
+    constexpr const char* name = "BTX_TEST_BACKEND_SCOPED_ENV";
+    const ScopedEnvVar empty{name, ""};
+    BOOST_REQUIRE(std::getenv(name) != nullptr);
+    BOOST_CHECK_EQUAL(std::getenv(name), "");
+    {
+        const ScopedEnvVar removed{name, nullptr};
+        BOOST_CHECK(std::getenv(name) == nullptr);
+    }
+    BOOST_REQUIRE(std::getenv(name) != nullptr);
+    BOOST_CHECK_EQUAL(std::getenv(name), "");
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(cpu_backend_always_available)
 {

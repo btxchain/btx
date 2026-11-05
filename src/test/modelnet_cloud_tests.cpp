@@ -44,6 +44,7 @@
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -177,14 +178,14 @@ BOOST_AUTO_TEST_CASE(cloud_03_creds_0600_env_never_in_json)
 
     const char* env_name = "BTX_TEST_CLOUD_CREDS_C";
     const std::string body = std::string("aws_access_key_id=") + kAccess + "\naws_secret_access_key=" + kSecret + "\n";
-    BOOST_REQUIRE_EQUAL(setenv(env_name, body.c_str(), 1), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv(env_name, body.c_str()), 0);
     modelnet::S3Client env_client;
     auto env_cfg = cfg;
     env_cfg.creds.kind = modelnet::CredentialRefKind::ENV;
     env_cfg.creds.value = env_name;
     BOOST_REQUIRE(env_client.Init(env_cfg, err));
     NoSecrets(env_client.HealthJson(), kAccess, kSecret);
-    unsetenv(env_name);
+    test::UnsetEnv(env_name);
 }
 
 BOOST_AUTO_TEST_CASE(cloud_04_reject_file_unix_gopher)
