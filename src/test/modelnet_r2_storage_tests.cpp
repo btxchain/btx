@@ -27,6 +27,7 @@
 #include <modelnet/types.h>
 #include <crypto/sha384.h>
 #include <span.h>
+#include <test/util/environment.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
@@ -38,6 +39,12 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+// Keep the C++ store method distinct from the Windows SDK macro.
+#pragma push_macro("GetObject")
+#undef GetObject
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_r2_storage_tests, BasicTestingSetup)
 
@@ -129,8 +136,22 @@ BOOST_AUTO_TEST_CASE(r2s_01_layout_identity_invariant_across_key_families)
 {
     const fs::path creds = m_path_root / "r2s-01-creds";
     WriteCreds(creds, kFixtureAccess, kFixtureSecret);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    auto cfg = BaseCfg(creds);
     std::string err;
+#ifdef WIN32
+    // Preserve the file-permission refusal, then use the supported credential
+    // source for the same FakeS3 byte/hash/request-count checks.
+    modelnet::S3PieceStore file_store{cfg};
+    BOOST_CHECK(!file_store.Init(err));
+    BOOST_CHECK_EQUAL(err, "credential file must be mode 0600");
+    const std::string credential_body = std::string{"aws_access_key_id="} + kFixtureAccess +
+                                        "\naws_secret_access_key=" + kFixtureSecret + "\n";
+    test::ScopedEnvVar credentials{"BTX_R2_STORAGE_TEST_CREDS", credential_body.c_str()};
+    cfg.s3.creds.kind = modelnet::CredentialRefKind::ENV;
+    cfg.s3.creds.value = "BTX_R2_STORAGE_TEST_CREDS";
+#endif
+    modelnet::S3PieceStore store{cfg};
+    err.clear();
     BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     BOOST_REQUIRE_EQUAL(modelnet::CloudObjectLayoutName(store.Layout()), "SOURCE_FILES");
 
@@ -456,3 +477,7 @@ BOOST_AUTO_TEST_CASE(r2s_09_physical_whole_file_and_large_extents_fakes3)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+#if defined(_WIN32)
+#pragma pop_macro("GetObject")
+#endif
