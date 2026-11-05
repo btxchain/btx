@@ -7469,7 +7469,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         MergeRemoteSearchHits(job, std::move(remote_hits));
         job.hits = g_search_idx.Search(q, ConnNowMs());
-        lock.unlock();
+        // Keep the search lock through the cache snapshot and observation merge:
+        // a concurrent search must not restore an older provider snapshot.
         int routing_known = 0;
         std::map<std::string, std::vector<ProviderObservation>> extra_obs;
         {
@@ -7490,13 +7491,13 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 }
             }
         }
-        lock.lock();
         for (auto& kv : extra_obs) {
             auto& obs = g_search_obs[kv.first];
             for (const auto& o : kv.second) {
                 bool dup = false;
-                for (const auto& e : obs) {
+                for (auto& e : obs) {
                     if (e.provider_id == o.provider_id) {
+                        e = o;
                         dup = true;
                         break;
                     }
