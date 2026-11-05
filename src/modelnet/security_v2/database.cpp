@@ -162,6 +162,14 @@ namespace modelnet::security {
         SetMeta("clock",std::to_string(now));
     }
     std::string Database::Put(const Json& e,std::string_view visibility) {
+        return PutWithLimit(e,visibility,false);
+    }
+    std::string Database::PutVerifiedControl(const Json& e,std::string_view visibility) {
+        const auto kind=Text(e,"kind");
+        Require(kind=="policy"||kind=="revocation","SEC_CONTROL_KIND");
+        return PutWithLimit(e,visibility,true);
+    }
+    std::string Database::PutWithLimit(const Json& e,std::string_view visibility,bool verified_control) {
         ValidateEnvelope(e);
         Require(visibility=="public"||visibility=="private","SEC_VISIBILITY");
         auto id=RecordId(e);
@@ -183,7 +191,9 @@ namespace modelnet::security {
             visibility=existing[0][1]=="private"?"private":visibility;
         }
         auto count=Query("SELECT count(*) FROM objects");
-        Require(!existing.empty()||ParseUInt(count[0][0])<16384,"SEC_OBJECT_QUOTA");
+        const uint64_t limit=OBJECT_LIMIT+(verified_control?CONTROL_RESERVE:0);
+        Require(!existing.empty()||ParseUInt(count[0][0])<limit,
+                verified_control?"SEC_CONTROL_QUOTA":"SEC_OBJECT_QUOTA");
         Exec("INSERT INTO objects(id,kind,envelope,visibility,received) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET envelope=excluded.envelope,visibility=excluded.visibility",
         {
             id,Text(e,"kind"),Canonical(merged),std::string(visibility),std::to_string(NowMs())

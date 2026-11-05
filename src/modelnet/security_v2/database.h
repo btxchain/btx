@@ -13,7 +13,11 @@ class Database {
     sqlite3* m_db{nullptr};
     std::recursive_mutex m_mutex;
     fs::path m_root;
+    std::string PutWithLimit(const Json& envelope, std::string_view visibility, bool verified_control);
 public:
+    static constexpr uint64_t OBJECT_LIMIT = 16384;
+    // One policy plus revocation of up to128 enrolled principals; finite headroom.
+    static constexpr uint64_t CONTROL_RESERVE = 129;
     explicit Database(fs::path root);
     ~Database();
     Database(const Database&)=delete;
@@ -34,6 +38,8 @@ public:
     void SetMeta(const std::string& key, const std::string& value);
     void CheckClock(int64_t now);
     std::string Put(const Json& envelope, std::string_view visibility = "private");
+    // Caller must authenticate policy/revocation and hold an enclosing Transaction.
+    std::string PutVerifiedControl(const Json& envelope, std::string_view visibility = "private");
     Json Get(const std::string& id);
     bool Has(const std::string& id);
     std::vector<std::string> List(std::string_view kind, size_t limit = 128, std::string_view after = {});
