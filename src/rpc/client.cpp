@@ -663,6 +663,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "resolveresource", 0, "query" },
     { "getmodel", 1, "mode", /*also_string=*/true },
     { "generatemodel", 1, "opts" },
+    { "setmodelprofile", 0, "request", /*also_string=*/false, /*json_object=*/true },
+    { "setmodelmirror", 0, "request", /*also_string=*/false, /*json_object=*/true },
     { "setmodelpolicy", 0, "policy" },
     { "importmodelcontacts", 0, "peers" },
     { "importmodelpeers", 0, "peers" },
