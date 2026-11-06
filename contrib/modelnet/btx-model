@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import secrets
 import socket
 import sys
 from typing import Any
@@ -2338,7 +2339,7 @@ def cmd_events(sock: str, args: list[str]) -> None:
 
 
 def cmd_mirror(sock: str, args: list[str]) -> None:
-    opts, pos = _take_opts(args, {"--publisher", "--keep-latest", "--collection", "--query", "--min-independent-origins"})
+    opts, pos = _take_opts(args, {"--publisher", "--keep-latest", "--collection", "--query", "--min-independent-origins", "--idempotency-key"})
     if pos:
         _die("mirror takes no positional arguments (use --publisher / --keep-latest)", 2)
     publisher = str(opts.get("--publisher") or "").strip() or None
@@ -2357,8 +2358,13 @@ def cmd_mirror(sock: str, args: list[str]) -> None:
         if min_origins is None or min_origins < 1:
             _die("mirror --min-independent-origins requires an integer >= 1", 2)
     mutating = any(v is not None for v in (publisher, collection, query, keep_latest, min_origins))
+    key = opts.get("--idempotency-key")
+    if key is not None and (not key.strip() or not mutating):
+        _die("--idempotency-key requires a nonempty key and a mirror update", 2)
     if mutating:
+        key = key if key is not None else secrets.token_hex(16)
         payload = {
+            "idempotency_key": key,
             "publisher_id": publisher,
             "collection_id": collection,
             "query": query,

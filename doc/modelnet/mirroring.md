@@ -92,6 +92,15 @@ OMS / Sigstore / Cosign) are additional evidence-only sources; they do **not**
 replace BTX identity or BTX signatures. Keep the monetary plane unchanged:
 mirrors store no wallet secrets and money stays on `btxd`.
 
+### Retrying a mirror update
+
+Each mutating `btx-model mirror` invocation creates a fresh request key. For a
+retry after an uncertain result, choose `--idempotency-key KEY` on the original
+command and reuse the same key with the same arguments. Changed arguments need
+a new key; conflicting reuse is refused. Inspection without update options
+remains read-only. The helper's replay cache lasts for its process lifetime;
+this does not promise replay protection across a helper restart.
+
 ## Cloud is optional
 
 A mirror may use local disk only. Attaching R2/S3 is optional backing, not

@@ -55,6 +55,58 @@ class SwarmProfileOverridesTest(BitcoinTestFramework):
     def ready(self):
         self.wait_until(lambda: self.nodes[0].getmodelnetworkinfo().get("helper_ready") is True, timeout=60)
 
+    def test_mirror_cli(self):
+        cli = Path(self.config["environment"]["SRCDIR"]) / "contrib/modelnet/btx-model"
+        prefix = [sys.executable, str(cli), "--socket", str(self.socket_path), "--json", "mirror"]
+        policy_file = self.modeldir / "mirror.json"
+
+        def invoke(args):
+            return subprocess.run(prefix + args, capture_output=True, text=True, timeout=30)
+
+        sentinel = {"query": "retained-selector", "keep_latest": 1,
+                    "automatic_spend_atoms": 0, "idempotency_key": "mirror-sentinel-regression"}
+        assert not self.helper("setmodelmirror", [sentinel]).get("error")
+        args = ["--query", "wrapper-selector", "--keep-latest", "3", "--min-independent-origins", "2"]
+        result = invoke(args)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        stored = json.loads(policy_file.read_text())
+        assert any(s["query"] == "retained-selector" and s["keep_latest"] == 1 for s in stored["selectors"])
+        assert any(s["query"] == "wrapper-selector" and s["keep_latest"] == 3 for s in stored["selectors"])
+        assert_equal(stored["automatic_spend_atoms"], 0)
+        assert_equal(stored["min_independent_origins"], 2)
+
+        keyed = args + ["--idempotency-key", "mirror-wrapper-replay-regression"]
+        result = invoke(keyed)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        saved = policy_file.read_bytes()
+        # A replay must not rewrite policy, even with identical contents.
+        os.utime(policy_file, ns=(1700000000000000000, 1700000000000000000))
+        stamp = policy_file.stat().st_mtime_ns
+        result = invoke(keyed)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert_equal(policy_file.read_bytes(), saved)
+        assert_equal(policy_file.stat().st_mtime_ns, stamp)
+        conflict = list(keyed)
+        conflict[conflict.index("--keep-latest") + 1] = "4"
+        result = invoke(conflict)
+        assert result.returncode != 0 and "idempotency conflict" in result.stdout.lower(), (result.stdout, result.stderr)
+        assert_equal(policy_file.read_bytes(), saved)
+        assert_equal(policy_file.stat().st_mtime_ns, stamp)
+        result = invoke([])
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert_equal(policy_file.read_bytes(), saved)
+        assert_equal(policy_file.stat().st_mtime_ns, stamp)
+        for bad_args in (["--query", "bad", "--idempotency-key", ""], ["--idempotency-key", "read-only"]):
+            assert invoke(bad_args).returncode == 2
+            assert_equal(policy_file.read_bytes(), saved)
+        for bad, reason in (({"query": "missing-key", "keep_latest": 2}, "idempotency_key required"),
+                            ({"query": "no-spend", "keep_latest": 2, "automatic_spend_atoms": 1,
+                              "idempotency_key": "mirror-nonzero-spend-regression"}, "automatic_spend_atoms")):
+            reply = self.helper("setmodelmirror", [bad])
+            assert reply.get("error") and reason in json.dumps(reply), reply
+            assert_equal(policy_file.read_bytes(), saved)
+        assert_equal(self.nodes[0].getblockcount(), 0)
+
     def run_test(self):
         self.ready()
         node = self.nodes[0]
@@ -79,6 +131,7 @@ class SwarmProfileOverridesTest(BitcoinTestFramework):
             reply = self.helper("setmodelprofile", [{"profile": "custom", **changes}])
             assert reply.get("error"), reply
             assert_equal(policy_file.read_bytes(), original)
+        self.test_mirror_cli()
         self.restart_node(0)
         self.ready()
         assert_equal(node.getmodelnetworkinfo()["quota_bytes"], 8 * 1024 ** 2)
