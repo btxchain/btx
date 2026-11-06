@@ -15,6 +15,11 @@ function(create_test_config)
     endif()
   endmacro()
 
+  set(ENABLE_MODELNET false)
+  if(WITH_MODELNET)
+    set(ENABLE_MODELNET true)
+  endif()
+
   set_configure_variable(ENABLE_WALLET ENABLE_WALLET)
   set_configure_variable(WITH_SQLITE USE_SQLITE)
   set_configure_variable(WITH_BDB USE_BDB)
