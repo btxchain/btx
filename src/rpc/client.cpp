@@ -663,6 +663,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "pledgemodelrelease", 1, "amount_atoms" },
     { "resolveresource", 0, "query" },
     { "getmodel", 1, "mode", /*also_string=*/true },
+    { "setmodelprofile", 0, "request", /*also_string=*/false, /*json_object=*/true },
+    { "setmodelmirror", 0, "request", /*also_string=*/false, /*json_object=*/true },
     { "setmodelpolicy", 0, "policy" },
     { "importmodelcontacts", 0, "peers" },
     { "importmodelpeers", 0, "peers" },
