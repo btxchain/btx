@@ -32,7 +32,10 @@ def process_mapping(fname):
                 if line.startswith('};'):
                     in_rpcs = False
                 elif '{' in line and '"' in line:
-                    m = re.search(r'{ *("[^"]*"), *([0-9]+) *, *("[^"]*") *(, \/\*also_string=\*\/true *)?},', line)
+                    m = re.search(
+                        r'{ *("[^"]*"), *([0-9]+) *, *("[^"]*") *'
+                        r'(?:, *(?:/\*also_string=\*/)?(?:true|false) *'
+                        r'(?:, *(?:/\*json_object=\*/)?(?:true|false) *)?)?},', line)
                     assert m, 'No match to table expression: %s' % line
                     name = parse_string(m.group(1))
                     idx = int(m.group(2))
@@ -51,11 +54,20 @@ class HelpRpcTest(BitcoinTestFramework):
         self.supports_cli = False
 
     def run_test(self):
-        self.test_client_conversion_table()
-        self.test_categories()
-        self.dump_help()
+        checks = [self.test_client_conversion_table, self.test_argument_names,
+                  self.test_categories, self.dump_help]
         if self.is_wallet_compiled():
-            self.wallet_help()
+            checks.append(self.wallet_help)
+
+        failures = []
+        for check in checks:
+            try:
+                check()
+            except Exception as error:
+                self.log.exception("RPC help check failed: %s", check.__name__)
+                failures.append(f"{check.__name__}: {error}")
+        if failures:
+            raise AssertionError("RPC help checks failed:\n" + "\n".join(failures))
 
     def test_client_conversion_table(self):
         file_conversion_table = os.path.join(self.config["environment"]["SRCDIR"], 'src', 'rpc', 'client.cpp')
@@ -74,6 +86,8 @@ class HelpRpcTest(BitcoinTestFramework):
                 set(mapping_client).symmetric_difference(mapping_server_conversion),
             ))
 
+    def test_argument_names(self):
+        mapping_server = self.nodes[0].help("dump_all_command_conversions")
         # Check for conversion difference by argument name.
         # It is preferable for API consistency that arguments with the same name
         # have the same conversion, so bin by argument name.
@@ -105,8 +119,11 @@ class HelpRpcTest(BitcoinTestFramework):
 
         components = ['Blockchain', 'Control', 'Mining', 'Network', 'Rawtransactions', 'Stats', 'Util']
 
+        if self.config['components'].getboolean('ENABLE_MODELNET'):
+            components.append('Modelnet')
+
         if self.is_wallet_compiled():
-            components.append('Wallet')
+            components.extend(['Bridge', 'Shielded', 'Wallet'])
 
         if self.is_external_signer_compiled():
             components.append('Signer')
