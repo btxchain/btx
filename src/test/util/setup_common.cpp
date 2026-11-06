@@ -155,13 +155,25 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, TestOpts opts)
     }
 
     const std::string test_name{G_TEST_GET_FULL_NAME ? G_TEST_GET_FULL_NAME() : ""};
+    std::string test_path_name{test_name};
+#ifdef WIN32
+    if (!test_name.empty()) {
+        // Bound this component so nested fixtures fit Windows path limits.
+        // A stable 128-bit identifier retains per-test directory/lock isolation;
+        // keep the full test name in diagnostics rather than in the path.
+        unsigned char name_hash[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write(reinterpret_cast<const unsigned char*>(test_name.data()), test_name.size()).Finalize(name_hash);
+        test_path_name = HexStr(name_hash).substr(0, 32);
+        std::cout << "Test case: " << test_name << std::endl;
+    }
+#endif
     if (!m_node.args->IsArgSet("-testdatadir")) {
         // To avoid colliding with a leftover prior datadir, and to allow
         // tests, such as the fuzz tests to run in several processes at the
         // same time, add a random element to the path. Keep it small enough to
         // avoid a MAX_PATH violation on Windows.
         const auto rand{HexStr(g_rng_temp_path.randbytes(10))};
-        m_path_root = fs::temp_directory_path() / TEST_DIR_PATH_ELEMENT / test_name / rand;
+        m_path_root = fs::temp_directory_path() / TEST_DIR_PATH_ELEMENT / test_path_name / rand;
         TryCreateDirectories(m_path_root);
     } else {
         // Custom data directory
@@ -170,7 +182,7 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, TestOpts opts)
         if (root_dir.empty()) ExitFailure("-testdatadir argument is empty, please specify a path");
 
         root_dir = fs::absolute(root_dir);
-        m_path_lock = root_dir / TEST_DIR_PATH_ELEMENT / fs::PathFromString(test_name);
+        m_path_lock = root_dir / TEST_DIR_PATH_ELEMENT / fs::PathFromString(test_path_name);
         m_path_root = m_path_lock / "datadir";
 
         // Try to obtain the lock; if unsuccessful don't disturb the existing test.
