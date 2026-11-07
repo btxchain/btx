@@ -1465,6 +1465,60 @@ BOOST_AUTO_TEST_CASE(mismatched_pq_cache_does_not_leave_wallet_unlocked)
     BOOST_CHECK(wallet->IsLocked());
 }
 
+BOOST_AUTO_TEST_CASE(wallet_lock_drops_pq_seeds_and_private_signing_cache)
+{
+    // CWallet::Lock() used to wipe only the master key. The PQ seeds stayed in
+    // the descriptors and the cached signing providers kept the derived PQ
+    // secret keys, so CWallet::SignTransaction() still signed after a lock.
+    const auto wallet = CreateP2MRDescriptorWallet(*this);
+    const CTxDestination coin_dest = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+    const CTxDestination change_dest = *Assert(wallet->GetNewChangeDestination(OutputType::P2MR));
+    const CAmount coin_value{3 * COIN};
+    const Coin prev_coin{CTxOut{coin_value, GetScriptForDestination(coin_dest)}, /*nHeight=*/7, /*fCoinBase=*/false};
+
+    const auto can_sign = [&] {
+        // Hold cs_wallet like the signing RPCs (cs_wallet before cs_desc_man).
+        LOCK(wallet->cs_wallet);
+        CMutableTransaction tx;
+        tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{0x4c}), 1});
+        tx.vout.emplace_back(coin_value - 5000, GetScriptForDestination(change_dest));
+        return SignAndCheckP2MRTransaction(wallet, tx, prev_coin);
+    };
+    const auto pq_seed_loaded = [&] {
+        for (ScriptPubKeyMan* spkm : wallet->GetAllScriptPubKeyMans()) {
+            auto* desc_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(spkm);
+            BOOST_REQUIRE(desc_spkm != nullptr);
+            LOCK(desc_spkm->cs_desc_man);
+            if (!desc_spkm->GetWalletDescriptor().descriptor->ExtractAllPQSeeds().empty()) return true;
+        }
+        return false;
+    };
+
+    // Sign once before encrypting, so a private signing provider is cached.
+    BOOST_REQUIRE(pq_seed_loaded());
+    BOOST_REQUIRE(can_sign());
+
+    // EncryptWallet() locks, unlocks and locks the wallet again.
+    BOOST_REQUIRE(wallet->EncryptWallet("lock test"));
+    BOOST_REQUIRE(wallet->IsLocked());
+    BOOST_CHECK(!pq_seed_loaded());
+    BOOST_CHECK(!can_sign());
+
+    BOOST_REQUIRE(wallet->Unlock("lock test"));
+    BOOST_CHECK(pq_seed_loaded());
+    BOOST_CHECK(can_sign());
+
+    BOOST_REQUIRE(wallet->Lock());
+    BOOST_REQUIRE(wallet->IsLocked());
+    BOOST_CHECK(!pq_seed_loaded());
+    BOOST_CHECK(!can_sign());
+
+    // The next unlock decrypts the seeds again.
+    BOOST_REQUIRE(wallet->Unlock("lock test"));
+    BOOST_CHECK(pq_seed_loaded());
+    BOOST_CHECK(can_sign());
+}
+
 // =============================================================================
 // Cross-descriptor PQ key merge tests
 // =============================================================================

@@ -2911,6 +2911,18 @@ bool DescriptorScriptPubKeyMan::UnlockPQSeeds(const CKeyingMaterial& master_key)
     return WritePQSeeds(batch, &master_key);
 }
 
+void DescriptorScriptPubKeyMan::LockPQSeeds()
+{
+    LOCK(cs_desc_man);
+    m_map_signing_providers_private.clear();
+    m_map_signing_providers_private_locked.clear();
+    // Wipe the seeds only when UnlockPQSeeds() can decrypt them again. An older wallet
+    // has only a plaintext record until its first unlock, so its seeds stay loaded.
+    if (m_wallet_descriptor.descriptor && (m_crypted_pq_seed || m_crypted_pq_seed_map)) {
+        m_wallet_descriptor.descriptor->WipePQSeeds();
+    }
+}
+
 bool DescriptorScriptPubKeyMan::IsHDEnabled() const
 {
     LOCK(cs_desc_man);
