@@ -42,6 +42,7 @@
 #include <test/modelnet_n02_idem.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/sock.h>
 
 #include <boost/test/unit_test.hpp>
 #include <test/util/environment.h>
@@ -50,6 +51,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -107,6 +109,93 @@ modelnet::Digest48 ArtifactFill(unsigned char b)
     modelnet::Digest48 d;
     d.data.fill(b);
     return d;
+}
+
+
+// Exercise the real transport and wait for peer EOF, not just a successful
+// response. The loopback server and all waits are bounded on both platforms.
+void CheckS3SocketCleanup(bool reject_tls)
+{
+    const SOCKET handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    BOOST_REQUIRE(handle != INVALID_SOCKET);
+    Sock listener{handle};
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    BOOST_REQUIRE_EQUAL(listener.Bind(reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+    BOOST_REQUIRE_EQUAL(listener.Listen(1), 0);
+    socklen_t addr_len = sizeof(addr);
+    BOOST_REQUIRE_EQUAL(listener.GetSockName(reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+    BOOST_REQUIRE(listener.SetNonBlocking());
+    const std::vector<unsigned char> payload{'b', 't', 'x', 0, 255};
+    auto server = std::async(std::launch::async, [&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        auto ready = [&](const Sock& sock) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+            Sock::Event occurred{0};
+            return remaining.count() > 0 && sock.Wait(remaining, Sock::RECV, &occurred) && (occurred & Sock::RECV);
+        };
+        if (!ready(listener)) return false;
+        auto peer = listener.Accept(nullptr, nullptr);
+        if (!peer || !peer->SetNonBlocking()) return false;
+        std::string request;
+        char buf[4096];
+        if (!reject_tls) {
+            while (request.find("\r\n\r\n") == std::string::npos) {
+                if (!ready(*peer)) return false;
+                const auto n = peer->Recv(buf, sizeof(buf), 0);
+                if (n <= 0) return false;
+                request.append(buf, n);
+                if (request.size() > 65536) return false;
+            }
+            if (request.find("GET /btx-models/loopback-object HTTP/1.1\r\n") != 0) return false;
+        }
+        CThreadInterrupt interrupt;
+        std::string response = reject_tls ? "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" :
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n";
+        if (!reject_tls) response.append(reinterpret_cast<const char*>(payload.data()), payload.size());
+        peer->SendComplete(Span<const unsigned char>{reinterpret_cast<const unsigned char*>(response.data()), response.size()}, std::chrono::seconds{5}, interrupt);
+        // Keep the server socket open: only the client's cleanup can yield EOF.
+        size_t drained = 0;
+        while (ready(*peer)) {
+            const auto n = peer->Recv(buf, sizeof(buf), 0);
+            if (n == 0) return true;
+            if (n < 0) {
+#ifdef WIN32
+                const bool reset = WSAGetLastError() == WSAECONNRESET;
+#else
+                const bool reset = errno == ECONNRESET;
+#endif
+                // Failed TLS can close with unread plaintext. A reset still
+                // proves peer teardown; successful HTTP must yield clean EOF.
+                return reject_tls && reset;
+            }
+            if ((drained += n) > 65536) return false;
+        }
+        return false;
+    });
+    test::ScopedEnvVar credentials{"BTX_TEST_S3_SOCKET_CREDS", "aws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\n"};
+    modelnet::S3ClientConfig cfg;
+    cfg.endpoint = std::string{reject_tls ? "https://127.0.0.1:" : "http://127.0.0.1:"} + std::to_string(ntohs(addr.sin_port));
+    cfg.bucket = "btx-models";
+    cfg.region = "auto";
+    cfg.use_fake = false;
+    cfg.allow_http_loopback = !reject_tls;
+    cfg.creds = {modelnet::CredentialRefKind::ENV, "BTX_TEST_S3_SOCKET_CREDS"};
+    modelnet::S3Client client;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(client.Init(cfg, err), err);
+    BOOST_CHECK(!client.UsesFake());
+    std::vector<unsigned char> got;
+    const bool ok = client.Get("loopback-object", got, err);
+    if (reject_tls) {
+        BOOST_CHECK(!ok);
+        BOOST_CHECK_EQUAL(err, "https handshake failed");
+    } else {
+        BOOST_CHECK_MESSAGE(ok, err);
+        BOOST_CHECK(got == payload);
+    }
+    BOOST_CHECK(server.get());
 }
 
 } // namespace
@@ -948,6 +1037,16 @@ BOOST_AUTO_TEST_CASE(cloud_https_not_stub_error)
     BOOST_CHECK(!client.Put("k", body, err));
     BOOST_CHECK(err.find("stubbed") == std::string::npos);
     BOOST_CHECK(err.find("OpenSSL HTTPS transport is stubbed") == std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(cloud_real_http_socket_cleanup)
+{
+    CheckS3SocketCleanup(false);
+}
+
+BOOST_AUTO_TEST_CASE(cloud_tls_handshake_socket_cleanup)
+{
+    CheckS3SocketCleanup(true);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
