@@ -2615,10 +2615,9 @@ if(WITH_MODELNET)
   target_compile_definitions(test_btx PRIVATE
     MODELNET_V11_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/modelnet_v11_vectors.json\"
     MODELNET_B0_CODEC_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/modelnet_b0_codec_vectors.json\"
-    MODELNET_BTX_OPEN_PATH=\"${CMAKE_BINARY_DIR}/bin/btx-open\"
+    MODELNET_BTX_OPEN_PATH=\"$<TARGET_FILE:btx-open>\"
     MODELNET_BOUNTY_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/bounty/reference/golden-vectors.json\"
-    MODELNET_MODELD_PATH=\"${CMAKE_BINARY_DIR}/bin/btx-modeld\"
-    MODELNET_BTXD_PATH=\"${CMAKE_BINARY_DIR}/bin/btxd\"
+    MODELNET_MODELD_PATH=\"$<TARGET_FILE:btx-modeld>\"
     MODELNET_AHP_FIXTURE_DIR=\"${PROJECT_SOURCE_DIR}/src/test/data/agent-package\"
     MODELNET_BTX_PACKAGE_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/btx-package-vectors\"
     MODELNET_HCP_PORTAL_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/hcp-portal/index.html\"
@@ -2626,6 +2625,15 @@ if(WITH_MODELNET)
     MODELNET_CRL12_SCHEMA_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/crl12/schemas/CognitiveReserveLayer.schema.json\"
     MODELNET_CRL12_OPERATIONS_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/crl12/schemas/operations-v1.2.json\"
   )
+  # Use the configured executables, including the platform suffix and output directory.
+  add_dependencies(test_btx btx-open btx-modeld)
+  if(TARGET btxd)
+    target_compile_definitions(test_btx PRIVATE MODELNET_BTXD_PATH=\"$<TARGET_FILE:btxd>\")
+    add_dependencies(test_btx btxd)
+  else()
+    target_compile_definitions(test_btx PRIVATE
+      MODELNET_BTXD_PATH=\"${CMAKE_BINARY_DIR}/bin/btxd${CMAKE_EXECUTABLE_SUFFIX}\")
+  endif()
   set_property(SOURCE modelnet_ahp_comp_tests.cpp APPEND PROPERTY COMPILE_DEFINITIONS
     "MODELNET_OFF_CHECK_SCRIPT=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/check-with-modelnet-off.sh\"")
   set(_modelnet_b0_spec "/home/administrator/Documents/btx-0.34.7-spec-ref/BTX_0.34.7_Model_Network_v1.1/baseline/BTX_0.34.7_PQ_Native_Model_Network_Specification.md")
