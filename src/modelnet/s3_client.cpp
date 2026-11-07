@@ -381,6 +381,16 @@ void ApplySocketTimeouts(int fd, int timeout_ms)
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
+// Winsock SOCKETs are not CRT file descriptors, even when stored as int.
+void CloseS3Socket(int fd)
+{
+#ifdef WIN32
+    ::closesocket(static_cast<SOCKET>(fd));
+#else
+    ::close(fd);
+#endif
+}
+
 bool ConnectTcp(const ParsedS3Endpoint& ep, bool allow_http_loopback, bool allow_link_local, int& fd_out, std::string& err)
 {
     fd_out = -1;
@@ -440,13 +450,13 @@ bool ConnectTcp(const ParsedS3Endpoint& ep, bool allow_http_loopback, bool allow
         const int cr = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
         if (cr != 0 && errno != EINPROGRESS && errno != EINTR) {
             last = "https connect failed";
-            ::close(fd);
+            CloseS3Socket(fd);
             continue;
         }
         std::string werr;
         if (!WaitFd(fd, POLLOUT, kS3HttpsTimeoutMs, werr)) {
             last = werr.empty() ? "https connect failed" : werr;
-            ::close(fd);
+            CloseS3Socket(fd);
             continue;
         }
         int soerr = 0;
@@ -454,7 +464,7 @@ bool ConnectTcp(const ParsedS3Endpoint& ep, bool allow_http_loopback, bool allow
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
         if (soerr != 0) {
             last = "https connect failed";
-            ::close(fd);
+            CloseS3Socket(fd);
             continue;
         }
         if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
@@ -720,7 +730,7 @@ bool PerformS3Http(const S3ClientConfig& cfg, SigV4Request req, Span<const unsig
         if (!OpensslHandshake(fd, ep.host, ctx, ssl, err)) {
             ssl.reset();
             ctx.reset();
-            ::close(fd);
+            CloseS3Socket(fd);
             return false;
         }
     }
@@ -729,7 +739,7 @@ bool PerformS3Http(const S3ClientConfig& cfg, SigV4Request req, Span<const unsig
         ssl.reset();
         ctx.reset();
         if (fd >= 0) {
-            ::close(fd);
+            CloseS3Socket(fd);
             fd = -1;
         }
     };
