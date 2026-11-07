@@ -576,6 +576,58 @@ BOOST_AUTO_TEST_CASE(rpc_convert_string_alternative_of_multi_type_params)
     BOOST_CHECK_EQUAL(RPCConvertNamedValues("createmultisig", {"nrequired=1", "keys=[]", "address_type=p2mr"})["address_type"].get_str(), "p2mr");
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_p2mr_psbt_remaining_rows)
+{
+    // adjust_timelocks and p2mr_leaf convert in every RPC that takes them,
+    // positionally and by name.
+    const std::string leaf = "{\"" + std::string(64, '1') + ":0\":0}";
+    UniValue expected_leaf;
+    BOOST_REQUIRE(expected_leaf.read(leaf));
+
+    for (const std::string text : {"false", "true"}) {
+        BOOST_TEST_CONTEXT(text) {
+            const UniValue wallet = RPCConvertValues("signrawtransactionwithwallet", {"00", "[]", "ALL", text});
+            BOOST_CHECK(wallet[1].isArray());
+            BOOST_CHECK_EQUAL(wallet[2].get_str(), "ALL");
+            BOOST_CHECK(wallet[3].isBool());
+            if (wallet[3].isBool()) BOOST_CHECK_EQUAL(wallet[3].get_bool(), text == "true");
+            const UniValue wallet_named = RPCConvertNamedValues("signrawtransactionwithwallet", {"hexstring=00", "adjust_timelocks=" + text});
+            BOOST_CHECK(wallet_named["adjust_timelocks"].isBool());
+
+            const UniValue key = RPCConvertValues("signrawtransactionwithkey", {"00", "[]", "[]", "ALL", text});
+            BOOST_CHECK(key[1].isArray());
+            BOOST_CHECK(key[2].isArray());
+            BOOST_CHECK_EQUAL(key[3].get_str(), "ALL");
+            BOOST_CHECK(key[4].isBool());
+            if (key[4].isBool()) BOOST_CHECK_EQUAL(key[4].get_bool(), text == "true");
+            const UniValue key_named = RPCConvertNamedValues("signrawtransactionwithkey", {"hexstring=00", "privkeys=[]", "adjust_timelocks=" + text});
+            BOOST_CHECK(key_named["adjust_timelocks"].isBool());
+        }
+    }
+    BOOST_CHECK_THROW(RPCConvertNamedValues("signrawtransactionwithwallet", {"adjust_timelocks=not-json"}), std::runtime_error);
+    BOOST_CHECK_THROW(RPCConvertValues("signrawtransactionwithkey", {"00", "[]", "[]", "ALL", "not-json"}), std::runtime_error);
+
+    const UniValue update = RPCConvertValues("utxoupdatepsbt", {"psbt", "[]", "[]", leaf});
+    BOOST_CHECK(update[1].isArray());
+    BOOST_CHECK(update[2].isArray());
+    BOOST_CHECK(update[3].isObject());
+    BOOST_CHECK_EQUAL(update[3].write(), expected_leaf.write());
+    BOOST_CHECK(RPCConvertNamedValues("utxoupdatepsbt", {"psbt=x", "p2mr_leaf=" + leaf})["p2mr_leaf"].isObject());
+
+    const UniValue descriptor = RPCConvertNamedValues("descriptorprocesspsbt", {"psbt=x", "descriptors=[]", "p2mr_leaf=" + leaf});
+    BOOST_CHECK(descriptor["descriptors"].isArray());
+    BOOST_CHECK(descriptor["p2mr_leaf"].isObject());
+    BOOST_CHECK_EQUAL(descriptor["p2mr_leaf"].write(), expected_leaf.write());
+    BOOST_CHECK_THROW(RPCConvertNamedValues("descriptorprocesspsbt", {"p2mr_leaf=not-json"}), std::runtime_error);
+
+    // Unchanged: index 2 of descriptorprocesspsbt is still the options object,
+    // and the walletprocesspsbt rows still apply.
+    const std::string options = R"({"sighashtype":"ALL","p2mr_leaf":{}})";
+    BOOST_CHECK(RPCConvertValues("descriptorprocesspsbt", {"psbt", "[]", options})[2].isObject());
+    BOOST_CHECK(RPCConvertNamedValues("walletprocesspsbt", {"p2mr_leaf=" + leaf})["p2mr_leaf"].isObject());
+    BOOST_CHECK(RPCConvertNamedValues("walletprocesspsbt", {"adjust_timelocks=true"})["adjust_timelocks"].isBool());
+}
+
 BOOST_AUTO_TEST_CASE(rpc_convert_values_pq_wallet_methods)
 {
     UniValue result;
