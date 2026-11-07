@@ -101,6 +101,8 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                 self.assertIn("btx-29.2/contrib/modelnet/btx-model", names)
                 self.assertIn("btx-29.2/doc/modelnet/registry-independence.md", names)
                 self.assertIn("btx-29.2/doc/release-notes/release-notes-0.34.9-dev.md", names)
+                # 0.34.16 shipped only the 0.34.9-0.34.11 notes; ship this release's own.
+                self.assertIn("btx-29.2/doc/release-notes-0.34.16.md", names)
 
                 wrapper = archive.extractfile("btx-29.2/bin/btxd")
                 assert wrapper is not None
