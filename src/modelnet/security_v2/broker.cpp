@@ -520,8 +520,10 @@ namespace modelnet::security {
         }
     }
     void Broker::Pause(int64_t now) {
+        (void)now;
+        // Pausing only removes authority. A wall clock stepped back behind the stored
+        // high-water mark must not refuse it; permissive operations still check it.
         Database::Transaction tx(m_db);
-        m_db.CheckClock(now);
         m_db.SetMeta("paused","1");
         m_db.Exec("UPDATE permits SET phase='revoked' WHERE phase IN ('prepared','executing')");
         m_db.Event("paused","local",Object());
