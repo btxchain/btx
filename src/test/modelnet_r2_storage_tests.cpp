@@ -35,6 +35,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -88,6 +89,27 @@ modelnet::CloudStoreConfig BaseCfg(const fs::path& creds)
     c.layout = modelnet::CloudObjectLayout::AUTO;
     return c;
 }
+
+// Positive Windows fixtures use the supported ENV source. Keep BaseCfg's PATH
+// source available for permission-refusal checks; never relax product policy.
+class ScopedR2Credentials
+{
+#ifdef WIN32
+    test::ScopedEnvVar m_credentials{"BTX_TEST_R2_FIXTURE_CREDS",
+        (std::string{"aws_access_key_id="} + kFixtureAccess +
+         "\naws_secret_access_key=" + kFixtureSecret + "\n").c_str()};
+#endif
+
+public:
+    modelnet::CloudStoreConfig Config(const fs::path& creds) const
+    {
+        auto cfg = BaseCfg(creds);
+#ifdef WIN32
+        cfg.s3.creds = {modelnet::CredentialRefKind::ENV, "BTX_TEST_R2_FIXTURE_CREDS"};
+#endif
+        return cfg;
+    }
+};
 
 modelnet::Digest48 ArtifactFill(unsigned char b)
 {
@@ -284,9 +306,10 @@ BOOST_AUTO_TEST_CASE(r2s_03_source_files_cold_get_estimate_is_per_object)
 // retrying caller burns real egress while the ledger stays frozen.
 BOOST_AUTO_TEST_CASE(r2s_04_over_budget_get_transfers_bytes_and_records_none)
 {
+    const ScopedR2Credentials credentials;
     const fs::path creds = m_path_root / "r2s-04-creds";
     WriteCreds(creds, kFixtureAccess, kFixtureSecret);
-    modelnet::CloudStoreConfig cfg = BaseCfg(creds);
+    modelnet::CloudStoreConfig cfg = credentials.Config(creds);
     cfg.budget_origin_bytes = 8;
     modelnet::S3PieceStore store{cfg};
     std::string err;
@@ -322,9 +345,10 @@ BOOST_AUTO_TEST_CASE(r2s_04_over_budget_get_transfers_bytes_and_records_none)
 // does not bound Class A operations or written bytes.
 BOOST_AUTO_TEST_CASE(r2s_05_put_path_is_not_metered)
 {
+    const ScopedR2Credentials credentials;
     const fs::path creds = m_path_root / "r2s-05-creds";
     WriteCreds(creds, kFixtureAccess, kFixtureSecret);
-    modelnet::CloudStoreConfig cfg = BaseCfg(creds);
+    modelnet::CloudStoreConfig cfg = credentials.Config(creds);
     cfg.budget_gets = 0;
     cfg.budget_origin_bytes = 0;
     modelnet::S3PieceStore store{cfg};
@@ -421,13 +445,20 @@ BOOST_AUTO_TEST_CASE(r2s_07_minio_is_config_only_not_run)
 // setcloudstorage, so this shape is only constructible in-process.
 BOOST_AUTO_TEST_CASE(r2s_08_write_creds_break_fake_signing)
 {
+    const ScopedR2Credentials credentials;
     const fs::path read_creds = m_path_root / "r2s-08-read-creds";
     const fs::path write_creds = m_path_root / "r2s-08-write-creds";
     WriteCreds(read_creds, kFixtureAccess, kFixtureSecret);
     WriteCreds(write_creds, "AKIAR2LANEWRITEKEY00", "r2-lane-write-secret-not-real");
 
-    modelnet::S3ClientConfig cfg = BaseCfg(read_creds).s3;
+    modelnet::S3ClientConfig cfg = credentials.Config(read_creds).s3;
     cfg.write_creds = modelnet::CredentialRef{modelnet::CredentialRefKind::PATH, fs::PathToString(write_creds)};
+#ifdef WIN32
+    // Keep the deliberately different upload key distinct from the read key.
+    test::ScopedEnvVar write_credentials{"BTX_TEST_R2_WRITE_FIXTURE_CREDS",
+        "aws_access_key_id=AKIAR2LANEWRITEKEY00\naws_secret_access_key=r2-lane-write-secret-not-real\n"};
+    cfg.write_creds = modelnet::CredentialRef{modelnet::CredentialRefKind::ENV, "BTX_TEST_R2_WRITE_FIXTURE_CREDS"};
+#endif
 
     modelnet::S3Client client;
     std::string err;
@@ -445,9 +476,10 @@ BOOST_AUTO_TEST_CASE(r2s_08_write_creds_break_fake_signing)
 
 BOOST_AUTO_TEST_CASE(r2s_09_physical_whole_file_and_large_extents_fakes3)
 {
+    const ScopedR2Credentials credentials;
     const fs::path creds = m_path_root / "r2s-09-creds";
     WriteCreds(creds, kFixtureAccess, kFixtureSecret);
-    modelnet::CloudStoreConfig cfg = BaseCfg(creds);
+    modelnet::CloudStoreConfig cfg = credentials.Config(creds);
     modelnet::S3PieceStore store{cfg};
     std::string err;
     BOOST_REQUIRE_MESSAGE(store.Init(err), err);
@@ -474,6 +506,35 @@ BOOST_AUTO_TEST_CASE(r2s_09_physical_whole_file_and_large_extents_fakes3)
     const auto plan = modelnet::PlanObjectLayout(whole.size() + ext0.size() + ext1.size(),
                                                  modelnet::PhysicalObjectLayout::WHOLE_FILE);
     BOOST_CHECK(!plan.replaces_source_files);
+}
+
+BOOST_AUTO_TEST_CASE(r2s_fixture_credentials_restore_environment)
+{
+#ifdef WIN32
+    const char* name = "BTX_TEST_R2_FIXTURE_CREDS";
+    test::ScopedEnvVar previous{name, "preexisting-fixture-value"};
+    {
+        const ScopedR2Credentials credentials;
+        const auto cfg = credentials.Config(fs::PathFromString("unused-credential-file"));
+        BOOST_CHECK(cfg.s3.creds.kind == modelnet::CredentialRefKind::ENV);
+        BOOST_REQUIRE(std::getenv(name));
+        BOOST_CHECK(std::string{std::getenv(name)}.find(kFixtureSecret) != std::string::npos);
+    }
+    BOOST_REQUIRE(std::getenv(name));
+    BOOST_CHECK_EQUAL(std::getenv(name), "preexisting-fixture-value");
+    previous.Set(nullptr);
+    {
+        const ScopedR2Credentials credentials;
+        BOOST_REQUIRE(std::getenv(name));
+    }
+    BOOST_CHECK(std::getenv(name) == nullptr);
+#else
+    const ScopedR2Credentials credentials;
+    const auto path = fs::PathFromString("unchanged-posix-credential-file");
+    const auto cfg = credentials.Config(path);
+    BOOST_CHECK(cfg.s3.creds.kind == modelnet::CredentialRefKind::PATH);
+    BOOST_CHECK_EQUAL(cfg.s3.creds.value, fs::PathToString(path));
+#endif
 }
 
 BOOST_AUTO_TEST_SUITE_END()
