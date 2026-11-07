@@ -8,9 +8,9 @@
 
 #include <boost/test/unit_test.hpp>
 
-#include <sys/stat.h>
 
 #ifndef _WIN32
+#include <sys/stat.h>
 #include <signal.h>
 #endif
 
@@ -128,6 +128,7 @@ BOOST_AUTO_TEST_CASE(path_outside_or_dotdot)
     fs::remove_all(outside_root);
 }
 
+#ifndef _WIN32
 BOOST_AUTO_TEST_CASE(jailed_helper_or_namespace_absent)
 {
     // canonical: InsideRoot refuses symlinks, and macOS TMPDIR is below /var.
@@ -153,6 +154,43 @@ BOOST_AUTO_TEST_CASE(jailed_helper_or_namespace_absent)
     BOOST_CHECK(!(result.launched && result.code == "JAIL_ABSENT"));
     BOOST_CHECK(!(result.jailed && result.code == "JAIL_ABSENT"));
 }
+#else
+BOOST_AUTO_TEST_CASE(windows_rejects_non_native_helper)
+{
+    const fs::path root = fs::canonical(fs::temp_directory_path()) / "btx-swarm-fsjail-text";
+    const fs::path helper = WriteRegularFile(root / "helper.sh");
+    std::string err = "stale";
+    const auto result = modelnet::SwarmRunFilesystemJail(BaseRequest(helper, root), err);
+    fs::remove_all(root);
+    BOOST_CHECK(!result.launched);
+    BOOST_CHECK(!result.jailed);
+    BOOST_CHECK_EQUAL(result.child_status, -1);
+    BOOST_CHECK_EQUAL(result.code, "JAIL_ABSENT");
+    BOOST_CHECK_EQUAL(err, "JAIL_ABSENT");
+    BOOST_CHECK(!fs::exists(root));
+}
+
+BOOST_AUTO_TEST_CASE(windows_native_helper_runs_and_cleans_up)
+{
+    const fs::path root = fs::canonical(fs::temp_directory_path()) / "btx-swarm-fsjail-native";
+    fs::create_directories(root);
+    const fs::path helper = root / "btx-open.exe";
+    BOOST_REQUIRE(fs::copy_file(fs::path{MODELNET_BTX_OPEN_PATH}, helper, fs::copy_options::none));
+    const auto helper_size = fs::file_size(helper);
+    std::string err = "stale";
+    // No arguments: print usage and exit 1 without opening a URI.
+    const auto result = modelnet::SwarmRunFilesystemJail(BaseRequest(helper, root), err);
+    const bool helper_preserved = fs::exists(helper) && fs::file_size(helper) == helper_size;
+    fs::remove_all(root);
+    BOOST_CHECK_EQUAL(result.code, "JAILED");
+    BOOST_CHECK(result.launched);
+    BOOST_CHECK(result.jailed);
+    BOOST_CHECK_EQUAL(result.child_status, 1);
+    BOOST_CHECK(err.empty());
+    BOOST_CHECK(helper_preserved);
+    BOOST_CHECK(!fs::exists(root));
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(zero_tree_limit)
 {
