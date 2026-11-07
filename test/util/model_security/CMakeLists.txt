@@ -74,6 +74,13 @@ if(EXISTS "${BTX_INTEGRATED_SOURCE}/src/btx-guardd.cpp")
   target_compile_definitions(security-native-ipc PRIVATE BTX_MODEL_SECURITY_V2=1)
   target_link_libraries(security-native-ipc PRIVATE btx_model_security)
   add_test(NAME security-native-ipc COMMAND security-native-ipc $<TARGET_FILE:btx-guardd-security>)
+  add_executable(security-native-busy-store native_ipc_busy_store_tests.cpp
+    ${BTX_INTEGRATED_SOURCE}/src/modelnet/guard_supervisor.cpp
+    ${BTX_SOURCE_ROOT}/src/modelnet/guard_machine.cpp)
+  target_include_directories(security-native-busy-store BEFORE PRIVATE ${BTX_INTEGRATED_SOURCE}/src)
+  target_compile_definitions(security-native-busy-store PRIVATE BTX_MODEL_SECURITY_V2=1)
+  target_link_libraries(security-native-busy-store PRIVATE btx_model_security)
+  add_test(NAME security-native-busy-store COMMAND security-native-busy-store $<TARGET_FILE:btx-guardd-security>)
 endif()
 
 # Main-thread lifecycle recovery regression; signed synthetic canary fixtures.
