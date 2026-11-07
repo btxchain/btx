@@ -703,7 +703,6 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "revokesubscriptionmandate", 0, "request" },
     { "reservesubscriptionmandate", 0, "request" },
     { "listmodelidentities", 0, "request" },
-    { "createmodelidentity", 0, "label" },
     { "getbtxpackagedocument", 0, "request" },
     { "getbtxpackagecapabilities", 0, "request" },
     { "planbtxacquisition", 0, "request" },
