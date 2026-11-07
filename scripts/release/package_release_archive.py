@@ -613,6 +613,12 @@ def stage_release_tree(
         shutil.copy2(source, real_destination)
         real_destination.chmod(0o755)
         included.append(str(real_destination.relative_to(release_root)))
+        if platform_id.startswith("linux-") and dest_name == "btx-guardd":
+            # The guard supervisor requires a regular sibling of btxd.real.
+            # A hard link preserves that rule without another binary payload.
+            sibling = libexec_dir / "btx-guardd"
+            os.link(real_destination, sibling)
+            included.append(str(sibling.relative_to(release_root)))
 
         destination = bin_dir / dest_name
         destination.write_text(wrapper, encoding="utf-8")
