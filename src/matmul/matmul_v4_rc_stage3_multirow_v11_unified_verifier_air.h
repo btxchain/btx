@@ -37,7 +37,8 @@ inline constexpr uint32_t kDecoderHornerStagesV1 = 4;
 inline constexpr uint32_t kDecoderHornerAuxColumnsV1 =
     dj::kDecoderJoinBusLanesV1 * 2 *
     kDecoderHornerStagesV1;
-inline constexpr uint32_t kDeepVmNativeConstraintsV1 = 284;
+// Native DeepVM constraints, including the op_challenge boolean.
+inline constexpr uint32_t kDeepVmNativeConstraintsV1 = 285;
 inline constexpr uint32_t kDeepVmRegisterBusLanesV1 = 2;
 inline constexpr uint32_t kDeepVmRegisterBusSidesV1 = 3;
 inline constexpr uint32_t kDeepVmRegisterHornerStagesV1 = 4;
@@ -57,7 +58,7 @@ inline constexpr uint32_t kDeepVmCanonicalConstraintsV1 =
     // the immutable schedule.  The native DeepVM materializer already fills
     // this value, but without the equation a recursive prover could
     // substitute it after the child trace commitment.
-    kDeepVmNativeConstraintsV1 + 3 +
+    kDeepVmNativeConstraintsV1 + 2 +
     kDeepVmRegisterBusLanesV1 *
         (kDeepVmRegisterBusSidesV1 *
              (kDeepVmRegisterHornerStagesV1 + 1) +

@@ -754,6 +754,22 @@ void InstallDecoderManifest(
     cs.preprocessed_pin_ood = true;
 }
 
+// BuildDeepVmProgramTableV1 emits the Challenge-operand binding right after
+// the native `load` constraint, so native constraint n >= 48 sits at table
+// ordinal n + 1.
+constexpr uint32_t kDeepVmChallengeBindingOrdinal{48};
+
+uint32_t DeepVmTableOrdinal(uint32_t native_ordinal)
+{
+    return native_ordinal < kDeepVmChallengeBindingOrdinal
+        ? native_ordinal
+        : native_ordinal + 1;
+}
+
+// Outside this test only the canonical count is read; the native constant
+// only feeds it. Pin the value so a change that moves it fails to compile.
+static_assert(kDeepVmCanonicalConstraintsV1 == 323);
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -2430,7 +2446,8 @@ BOOST_AUTO_TEST_CASE(
             gf::Fp3 interpreted;
             BOOST_REQUIRE_MESSAGE(
                 cb::EvaluateProgram(
-                    table.programs[ordinal],
+                    table.programs[
+                        DeepVmTableOrdinal(ordinal)],
                     current, next,
                     challenge,
                     interpreted, &why),
@@ -2713,10 +2730,10 @@ BOOST_AUTO_TEST_CASE(
     // Proof-level version of the SSA attack: a malicious ProgramTable that
     // replaces all 37 ownership/LogUp constraints with tautologies can prove
     // the forged old-native witness, but the canonical verifier rejects that
-    // proof under the committed 321-program relation.
+    // proof under the committed 323-program relation.
     auto weakened_table = table;
     for (uint32_t ordinal =
-             kDeepVmNativeConstraintsV1;
+             DeepVmTableOrdinal(kDeepVmNativeConstraintsV1);
          ordinal <
              weakened_table.programs.size();
          ++ordinal) {
@@ -2841,7 +2858,7 @@ BOOST_AUTO_TEST_CASE(
         small_table;
     auto& acceptance =
         substituted_table.programs[
-            kDeepVmNativeConstraintsV1 - 1];
+            DeepVmTableOrdinal(kDeepVmNativeConstraintsV1 - 1)];
     acceptance.instructions = {
         Load(
             cb::Opcode::Current,
