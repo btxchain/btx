@@ -16,7 +16,7 @@ Json Common(const std::string& realm,int64_t now,uint64_t ttl=60000) {
     b.pushKV("expires_ms",static_cast<uint64_t>(now)+ttl);return b;
 }
 struct Temp {
-    fs::path root=fs::temp_directory_path()/("btx-store-recovery-"+Hex(RandomBytes(12)));
+    fs::path root=fs::canonical(fs::temp_directory_path())/("btx-store-recovery-"+Hex(RandomBytes(12)));
     Temp(){EnsurePrivateDirectory(root);}
     ~Temp(){std::error_code ec;fs::remove_all(root,ec);}
 };

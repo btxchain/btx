@@ -15,7 +15,7 @@ int main(int argc, char** argv)
 {
     if (argc != 2) return 2;
     unsigned passed = 0;
-    const auto root = std::filesystem::temp_directory_path() / ("btx-native-security-" + Hex(RandomBytes(16)));
+    const auto root = std::filesystem::canonical(std::filesystem::temp_directory_path()) / ("btx-native-security-" + Hex(RandomBytes(16)));
     try {
         EnsurePrivateDirectory(root);
         const auto exe = ::fs::PathFromString(argv[1]);
@@ -54,6 +54,21 @@ int main(int argc, char** argv)
         Require(supervisor.Exchange("PING", reply, error), "TEST_NATIVE_LEGACY_HEALTH"); ++passed;
         Require(!supervisor.SecurityExchange(status, response, error), "TEST_NATIVE_LEGACY_NO_V2_AUTHORITY"); ++passed;
         supervisor.Stop();
+#ifndef _WIN32
+        // A datadir reached through a symlinked ancestor (~/.btx -> /mnt/ssd/btx, or
+        // /var -> /private/var on macOS) must not keep the guard down. A symlink at the
+        // security directory itself is still refused.
+        const auto real = root / "real";
+        EnsurePrivateDirectory(real);
+        std::filesystem::create_directory_symlink(real, root / "link");
+        Require(supervisor.Start(exe, ::fs::PathFromString((root / "link" / "security").string()), error), "TEST_NATIVE_SYMLINKED_ANCESTOR"); ++passed;
+        Require(supervisor.SecurityExchange(status, response, error) && response["ok"].get_bool(), "TEST_NATIVE_SYMLINKED_ANCESTOR_STATUS"); ++passed;
+        supervisor.Stop();
+        Require(std::filesystem::is_regular_file(real / "security" / "security.sqlite3"), "TEST_NATIVE_SYMLINKED_ANCESTOR_STORE"); ++passed;
+        std::filesystem::create_directory_symlink(real / "security", root / "security-link");
+        Require(!supervisor.Start(exe, ::fs::PathFromString((root / "security-link").string()), error), "TEST_NATIVE_SYMLINKED_SECURITY_DIRECTORY_REFUSED"); ++passed;
+        supervisor.Stop();
+#endif
         std::filesystem::remove_all(root);
         std::cout << "{\"suite\":\"native-private-guard-ipc\",\"passed\":" << passed
                   << ",\"failed\":0,\"physical_hosts\":1,\"full_daemon\":\"NOT_RUN\"}\n";
