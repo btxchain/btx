@@ -1,0 +1,3577 @@
+{
+  "schema": "btx.atlas.operations/1",
+  "base": "18ea826ee3d82edf65a274c00316bd118ed731d2",
+  "operations": [
+    {
+      "group": "Node",
+      "method": "getblockchaininfo",
+      "title": "Chain and synchronization",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getnetworkinfo",
+      "title": "Network and local addresses",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getpeerinfo",
+      "title": "Monetary peers",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getnettotals",
+      "title": "Network traffic",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getmempoolinfo",
+      "title": "Mempool",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getmininginfo",
+      "title": "MatMul mining",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getsetupstatus",
+      "title": "First-run readiness",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "uptime",
+      "title": "Node uptime",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "listbanned",
+      "title": "Banned peers",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "listwallets",
+      "title": "Loaded wallets",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "listwalletdir",
+      "title": "Available wallets",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getmemoryinfo",
+      "title": "Node memory",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getrpcinfo",
+      "title": "RPC activity",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getblockhash",
+      "title": "Block hash",
+      "risk": "read",
+      "args": [
+        {
+          "name": "height",
+          "kind": "integer",
+          "required": true,
+          "default": 0
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getblock",
+      "title": "Block details",
+      "risk": "read",
+      "args": [
+        {
+          "name": "blockhash",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "verbosity",
+          "kind": "integer",
+          "required": true,
+          "default": 1
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getrawmempool",
+      "title": "Mempool transactions",
+      "risk": "read",
+      "args": [
+        {
+          "name": "verbose",
+          "kind": "boolean",
+          "required": true,
+          "default": false
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getrawtransaction",
+      "title": "Transaction details",
+      "risk": "read",
+      "args": [
+        {
+          "name": "txid",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "verbose",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "gettxout",
+      "title": "Unspent output",
+      "risk": "read",
+      "args": [
+        {
+          "name": "txid",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "n",
+          "kind": "integer",
+          "required": true,
+          "default": 0
+        },
+        {
+          "name": "include_mempool",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "help",
+      "title": "RPC reference",
+      "risk": "read",
+      "args": [
+        {
+          "name": "command",
+          "kind": "string",
+          "required": false,
+          "default": ""
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "validateaddress",
+      "title": "Validate an address",
+      "risk": "read",
+      "args": [
+        {
+          "name": "address",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "estimatesmartfee",
+      "title": "Fee estimate",
+      "risk": "read",
+      "args": [
+        {
+          "name": "conf_target",
+          "kind": "integer",
+          "required": true,
+          "default": 6
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "setnetworkactive",
+      "title": "Enable/disable P2P network",
+      "risk": "write",
+      "args": [
+        {
+          "name": "state",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "disconnectnode",
+      "title": "Disconnect peer",
+      "risk": "write",
+      "args": [
+        {
+          "name": "address",
+          "kind": "string",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "nodeid",
+          "kind": "integer",
+          "required": false
+        }
+      ],
+      "notes": "Give the address or the node id, not both. The node refuses a request that names both.",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "addnode",
+      "title": "Add peer",
+      "risk": "write",
+      "args": [
+        {
+          "name": "node",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "command",
+          "kind": "enum:add|remove|onetry",
+          "required": true,
+          "default": "onetry"
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "setban",
+      "title": "Ban/unban peer",
+      "risk": "write",
+      "args": [
+        {
+          "name": "subnet",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "command",
+          "kind": "enum:add|remove",
+          "required": true,
+          "default": "add"
+        },
+        {
+          "name": "bantime",
+          "kind": "integer",
+          "required": true,
+          "default": 86400
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "clearbanned",
+      "title": "Clear bans",
+      "risk": "write",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "logging",
+      "title": "Logging categories",
+      "risk": "write",
+      "args": [
+        {
+          "name": "include",
+          "kind": "json",
+          "required": true,
+          "default": []
+        },
+        {
+          "name": "exclude",
+          "kind": "json",
+          "required": true,
+          "default": []
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "stop",
+      "title": "Stop the node",
+      "risk": "dangerous",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "verifychain",
+      "title": "Verify chain",
+      "risk": "write",
+      "args": [
+        {
+          "name": "checklevel",
+          "kind": "integer",
+          "required": true,
+          "default": 3
+        },
+        {
+          "name": "nblocks",
+          "kind": "integer",
+          "required": true,
+          "default": 6
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "pruneblockchain",
+      "title": "Prune stored blocks",
+      "risk": "dangerous",
+      "args": [
+        {
+          "name": "height",
+          "kind": "integer",
+          "required": true,
+          "default": 0
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "getwalletinfo",
+      "title": "Wallet state",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "getbalances",
+      "title": "Exact wallet balances",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "listaddressgroupings",
+      "title": "Address book groups",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "listlockunspent",
+      "title": "Locked coins",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "listtransactions",
+      "title": "Transaction history",
+      "risk": "read",
+      "args": [
+        {
+          "name": "label",
+          "kind": "string",
+          "required": true,
+          "default": "*"
+        },
+        {
+          "name": "count",
+          "kind": "integer",
+          "required": true,
+          "default": 100
+        },
+        {
+          "name": "skip",
+          "kind": "integer",
+          "required": true,
+          "default": 0
+        },
+        {
+          "name": "include_watchonly",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "listunspent",
+      "title": "Coin control",
+      "risk": "read",
+      "args": [
+        {
+          "name": "minconf",
+          "kind": "integer",
+          "required": true,
+          "default": 0
+        },
+        {
+          "name": "maxconf",
+          "kind": "integer",
+          "required": true,
+          "default": 9999999
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "gettransaction",
+      "title": "Wallet transaction",
+      "risk": "read",
+      "args": [
+        {
+          "name": "txid",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "include_watchonly",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "getaddressinfo",
+      "title": "Address details",
+      "risk": "read",
+      "args": [
+        {
+          "name": "address",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "listreceivedbyaddress",
+      "title": "Received addresses",
+      "risk": "read",
+      "args": [
+        {
+          "name": "minconf",
+          "kind": "integer",
+          "required": true,
+          "default": 0
+        },
+        {
+          "name": "include_empty",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        },
+        {
+          "name": "include_watchonly",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "listlabels",
+      "title": "Labels",
+      "risk": "read",
+      "args": [
+        {
+          "name": "purpose",
+          "kind": "string",
+          "required": false,
+          "default": ""
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "getaddressesbylabel",
+      "title": "Addresses for label",
+      "risk": "read",
+      "args": [
+        {
+          "name": "label",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "decodepsbt",
+      "title": "Decode PSBT",
+      "risk": "read",
+      "args": [
+        {
+          "name": "psbt",
+          "kind": "long",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "analyzepsbt",
+      "title": "Analyze PSBT",
+      "risk": "read",
+      "args": [
+        {
+          "name": "psbt",
+          "kind": "long",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "decoderawtransaction",
+      "title": "Decode transaction",
+      "risk": "read",
+      "args": [
+        {
+          "name": "hexstring",
+          "kind": "long",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "verifymessage",
+      "title": "Verify signed message",
+      "risk": "read",
+      "args": [
+        {
+          "name": "address",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "signature",
+          "kind": "long",
+          "required": true
+        },
+        {
+          "name": "message",
+          "kind": "long",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "getbalancewatch",
+      "title": "Watch-only balance",
+      "risk": "read",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": false,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "getbalanceatheight",
+      "title": "Historical balance",
+      "risk": "read",
+      "args": [
+        {
+          "name": "height",
+          "kind": "integer",
+          "required": true,
+          "default": 0
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "createwallet",
+      "title": "Create wallet",
+      "risk": "write",
+      "args": [
+        {
+          "name": "wallet_name",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "disable_private_keys",
+          "kind": "boolean",
+          "required": true,
+          "default": false
+        },
+        {
+          "name": "blank",
+          "kind": "boolean",
+          "required": true,
+          "default": false
+        },
+        {
+          "name": "passphrase",
+          "kind": "secret",
+          "required": true,
+          "default": ""
+        },
+        {
+          "name": "avoid_reuse",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        },
+        {
+          "name": "descriptors",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        },
+        {
+          "name": "load_on_startup",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        },
+        {
+          "name": "external_signer",
+          "kind": "boolean",
+          "required": true,
+          "default": false
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "loadwallet",
+      "title": "Open wallet",
+      "risk": "write",
+      "args": [
+        {
+          "name": "filename",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "load_on_startup",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "unloadwallet",
+      "title": "Close wallet",
+      "risk": "write",
+      "args": [
+        {
+          "name": "wallet_name",
+          "kind": "string",
+          "required": false,
+          "default": ""
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "restorewallet",
+      "title": "Restore backup",
+      "risk": "write",
+      "args": [
+        {
+          "name": "wallet_name",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "backup_file",
+          "kind": "path",
+          "required": true
+        },
+        {
+          "name": "load_on_startup",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "migratewallet",
+      "title": "Migrate legacy wallet",
+      "risk": "write",
+      "args": [
+        {
+          "name": "wallet_name",
+          "kind": "string",
+          "required": true,
+          "default": ""
+        },
+        {
+          "name": "passphrase",
+          "kind": "secret",
+          "required": false,
+          "default": ""
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "backupwallet",
+      "title": "Back up wallet",
+      "risk": "write",
+      "args": [
+        {
+          "name": "destination",
+          "kind": "savepath",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "encryptwallet",
+      "title": "Encrypt wallet",
+      "risk": "write",
+      "args": [
+        {
+          "name": "passphrase",
+          "kind": "secret",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "walletpassphrase",
+      "title": "Unlock wallet temporarily",
+      "risk": "write",
+      "args": [
+        {
+          "name": "passphrase",
+          "kind": "secret",
+          "required": true
+        },
+        {
+          "name": "timeout",
+          "kind": "integer",
+          "required": true,
+          "default": 60
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "walletpassphrasechange",
+      "title": "Change passphrase",
+      "risk": "write",
+      "args": [
+        {
+          "name": "oldpassphrase",
+          "kind": "secret",
+          "required": true
+        },
+        {
+          "name": "newpassphrase",
+          "kind": "secret",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "walletlock",
+      "title": "Lock wallet",
+      "risk": "write",
+      "args": [],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "getnewaddress",
+      "title": "New receiving address",
+      "risk": "write",
+      "args": [
+        {
+          "name": "label",
+          "kind": "string",
+          "required": true,
+          "default": ""
+        },
+        {
+          "name": "address_type",
+          "kind": "string",
+          "required": false,
+          "default": ""
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "setlabel",
+      "title": "Set address label",
+      "risk": "write",
+      "args": [
+        {
+          "name": "address",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "label",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "lockunspent",
+      "title": "Lock/unlock selected coins",
+      "risk": "write",
+      "args": [
+        {
+          "name": "unlock",
+          "kind": "boolean",
+          "required": true,
+          "default": false
+        },
+        {
+          "name": "transactions",
+          "kind": "json",
+          "required": true,
+          "default": []
+        },
+        {
+          "name": "persistent",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "settxfee",
+      "title": "Set default fee",
+      "risk": "write",
+      "args": [
+        {
+          "name": "amount",
+          "kind": "amount",
+          "required": true,
+          "default": "0.00001000"
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "bumpfee",
+      "title": "Replace transaction fee",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "txid",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "psbtbumpfee",
+      "title": "Create fee-bump PSBT",
+      "risk": "write",
+      "args": [
+        {
+          "name": "txid",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "abandontransaction",
+      "title": "Abandon eligible transaction",
+      "risk": "write",
+      "args": [
+        {
+          "name": "txid",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "rescanblockchain",
+      "title": "Rescan wallet",
+      "risk": "write",
+      "args": [
+        {
+          "name": "start_height",
+          "kind": "integer",
+          "required": true,
+          "default": 0
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "signmessage",
+      "title": "Sign message",
+      "risk": "write",
+      "args": [
+        {
+          "name": "address",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "message",
+          "kind": "long",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "walletcreatefundedpsbt",
+      "title": "Prepare funded PSBT",
+      "risk": "write",
+      "args": [
+        {
+          "name": "inputs",
+          "kind": "json",
+          "required": true,
+          "default": []
+        },
+        {
+          "name": "outputs",
+          "kind": "json",
+          "required": true,
+          "default": []
+        },
+        {
+          "name": "locktime",
+          "kind": "integer",
+          "required": true,
+          "default": 0
+        },
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "replaceable": true,
+            "lockUnspents": true
+          }
+        },
+        {
+          "name": "bip32derivs",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "walletprocesspsbt",
+      "title": "Sign/process PSBT",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "psbt",
+          "kind": "long",
+          "required": true
+        },
+        {
+          "name": "sign",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        },
+        {
+          "name": "sighashtype",
+          "kind": "string",
+          "required": true,
+          "default": "ALL"
+        },
+        {
+          "name": "bip32derivs",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "finalizepsbt",
+      "title": "Finalize PSBT",
+      "risk": "write",
+      "args": [
+        {
+          "name": "psbt",
+          "kind": "long",
+          "required": true
+        },
+        {
+          "name": "extract",
+          "kind": "boolean",
+          "required": true,
+          "default": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "sendrawtransaction",
+      "title": "Broadcast reviewed transaction",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "hexstring",
+          "kind": "long",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "combinepsbt",
+      "title": "Combine PSBTs",
+      "risk": "write",
+      "args": [
+        {
+          "name": "txs",
+          "kind": "json",
+          "required": true,
+          "default": []
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "joinpsbts",
+      "title": "Join PSBTs",
+      "risk": "write",
+      "args": [
+        {
+          "name": "txs",
+          "kind": "json",
+          "required": true,
+          "default": []
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "utxoupdatepsbt",
+      "title": "Update PSBT UTXOs",
+      "risk": "write",
+      "args": [
+        {
+          "name": "psbt",
+          "kind": "long",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "importdescriptors",
+      "title": "Import descriptors",
+      "risk": "write",
+      "args": [
+        {
+          "name": "requests",
+          "kind": "json",
+          "required": true,
+          "default": []
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "listdescriptors",
+      "title": "Inspect wallet descriptors",
+      "risk": "write",
+      "args": [
+        {
+          "name": "private",
+          "kind": "boolean",
+          "required": true,
+          "default": false
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "sendtoaddress",
+      "title": "Advanced direct send",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "address",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "amount",
+          "kind": "amount",
+          "required": true,
+          "default": "0.00000000"
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Wallet",
+      "method": "sendmany",
+      "title": "Advanced multi-recipient send",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "dummy",
+          "kind": "string",
+          "required": true,
+          "default": ""
+        },
+        {
+          "name": "amounts",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": true
+    },
+    {
+      "group": "Models",
+      "method": "getmodelnetworkinfo",
+      "title": "getmodelnetworkinfo",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelcryptoinfo",
+      "title": "getmodelcryptoinfo",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "checkmodelsetup",
+      "title": "checkmodelsetup",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodeltransfers",
+      "title": "getmodeltransfers",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "listmodels",
+      "title": "listmodels",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelwatchstatus",
+      "title": "getmodelwatchstatus",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelhostprofile",
+      "title": "getmodelhostprofile",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelpolicy",
+      "title": "getmodelpolicy",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelpeers",
+      "title": "getmodelpeers",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "listmodelidentities",
+      "title": "listmodelidentities",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "listmodelrules",
+      "title": "listmodelrules",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelreciprocity",
+      "title": "getmodelreciprocity",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelaliases",
+      "title": "getmodelaliases",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "listbountydrafts",
+      "title": "listbountydrafts",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelfeed",
+      "title": "getmodelfeed",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getrecentreleases",
+      "title": "getrecentreleases",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getfundablemodels",
+      "title": "getfundablemodels",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getrecentlyunlockedmodels",
+      "title": "getrecentlyunlockedmodels",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getreleasefeed",
+      "title": "getreleasefeed",
+      "risk": "read",
+      "args": [],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "showmodel",
+      "title": "showmodel",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelsharecard",
+      "title": "getmodelsharecard",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelmanifest",
+      "title": "getmodelmanifest",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "openbtxuri",
+      "title": "openbtxuri",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "openmodelshare",
+      "title": "openmodelshare",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "decoderesource",
+      "title": "decoderesource",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "decoderesourceuri",
+      "title": "decoderesourceuri",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "resolveresource",
+      "title": "resolveresource",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "getmodelrelease",
+      "title": "getmodelrelease",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodeljob",
+      "title": "getmodeljob",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "getbounty",
+      "title": "getbounty",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "getbountyeconomy",
+      "title": "getbountyeconomy",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "getbountyterms",
+      "title": "getbountyterms",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "getbountydraft",
+      "title": "getbountydraft",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "searchmodels",
+      "title": "Search models",
+      "risk": "query",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "text": "",
+            "scope": "LOCAL",
+            "limit": 50
+          }
+        }
+      ],
+      "notes": "NETWORK scope discloses the search to peers and requires a native approval.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "searchbounties",
+      "title": "Search bounties",
+      "risk": "query",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "text": "",
+            "scope": "LOCAL",
+            "limit": 50
+          }
+        }
+      ],
+      "notes": "NETWORK scope discloses the search to peers and requires a native approval.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "previewmodelimport",
+      "title": "Preview local import",
+      "risk": "write",
+      "args": [
+        {
+          "name": "path",
+          "kind": "path",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "hostmodel",
+      "title": "Host/publish local model",
+      "risk": "write",
+      "args": [
+        {
+          "name": "path",
+          "kind": "path",
+          "required": true
+        },
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "pin": true,
+            "publish": false
+          }
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "importmodel",
+      "title": "Import local model",
+      "risk": "write",
+      "args": [
+        {
+          "name": "path",
+          "kind": "path",
+          "required": true
+        },
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "pin": true,
+            "publish": false
+          }
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "scanmodelwatch",
+      "title": "Scan watch folder",
+      "risk": "write",
+      "args": [
+        {
+          "name": "path",
+          "kind": "path",
+          "required": false,
+          "default": ""
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "exportmodellink",
+      "title": "Export model link",
+      "risk": "write",
+      "args": [
+        {
+          "name": "model_id",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "path",
+          "kind": "savepath",
+          "required": false,
+          "default": ""
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "setmodelalias",
+      "title": "Set model alias",
+      "risk": "write",
+      "args": [
+        {
+          "name": "model_id",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "alias",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "removemodelalias",
+      "title": "Remove alias",
+      "risk": "write",
+      "args": [
+        {
+          "name": "alias",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "setmodelpolicy",
+      "title": "Set model policy",
+      "risk": "write",
+      "args": [
+        {
+          "name": "policy",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodel",
+      "title": "Retrieve verified free model",
+      "risk": "write",
+      "args": [
+        {
+          "name": "model_id",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "mode": "FREE_ONLY"
+          }
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "generatemodel",
+      "title": "Generate locally",
+      "risk": "compute",
+      "args": [
+        {
+          "name": "model_id",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "prompt": "Hello",
+            "max_new_tokens": 128
+          }
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "addmodelnode",
+      "title": "Add model peer",
+      "risk": "write",
+      "args": [
+        {
+          "name": "endpoint",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "createmodelidentity",
+      "title": "Create model identity",
+      "risk": "write",
+      "args": [
+        {
+          "name": "label",
+          "kind": "string",
+          "required": false,
+          "default": ""
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "setmodelrule",
+      "title": "Set model ACL",
+      "risk": "write",
+      "args": [
+        {
+          "name": "rule",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "removemodelrule",
+      "title": "Remove ACL rule",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "createbountydraft",
+      "title": "Create private bounty draft",
+      "risk": "write",
+      "args": [
+        {
+          "name": "draft",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "title": ""
+          }
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "updatebountydraft",
+      "title": "Update private bounty draft",
+      "risk": "write",
+      "args": [
+        {
+          "name": "draft",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "deletebountydraft",
+      "title": "Delete private bounty draft",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "publishbounty",
+      "title": "Publish completed bounty",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "unhostmodel",
+      "title": "unhostmodel",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "removemodel",
+      "title": "removemodel",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "exportmodelpath",
+      "title": "exportmodelpath",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "loadmodel",
+      "title": "loadmodel",
+      "risk": "compute",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "unloadmodel",
+      "title": "unloadmodel",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "seedmodel",
+      "title": "seedmodel",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "unseedmodel",
+      "title": "unseedmodel",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "qualifymodel",
+      "title": "qualifymodel",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "cancelmodeljob",
+      "title": "cancelmodeljob",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "joinmodelcircle",
+      "title": "joinmodelcircle",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "leavemodelcircle",
+      "title": "leavemodelcircle",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "subscribemodelcollection",
+      "title": "subscribemodelcollection",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "subscribemodelpolicy",
+      "title": "subscribemodelpolicy",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "revokemodelservice",
+      "title": "revokemodelservice",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "exportmodelcontacts",
+      "title": "exportmodelcontacts",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "importmodelcontacts",
+      "title": "importmodelcontacts",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "exportmodelpeers",
+      "title": "exportmodelpeers",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "importmodelpeers",
+      "title": "importmodelpeers",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "importmodeltrust",
+      "title": "importmodeltrust",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "delegatemodelservice",
+      "title": "delegatemodelservice",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "createmodelrelease",
+      "title": "createmodelrelease",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "pledgemodelrelease",
+      "title": "pledgemodelrelease",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "claimmodelrelease",
+      "title": "claimmodelrelease",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "refundmodelrelease",
+      "title": "refundmodelrelease",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "preparemodelfunding",
+      "title": "preparemodelfunding",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "signmodelfunding",
+      "title": "signmodelfunding",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "submitmodelfunding",
+      "title": "submitmodelfunding",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "exportmodelrecovery",
+      "title": "exportmodelrecovery",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "buildmodelhtlcclaim",
+      "title": "buildmodelhtlcclaim",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "buildmodelhtlcrefund",
+      "title": "buildmodelhtlcrefund",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "preparefundmodelrelease",
+      "title": "preparefundmodelrelease",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "preparebountyfunding",
+      "title": "preparebountyfunding",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "signbountyfunding",
+      "title": "signbountyfunding",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "submitbountyfunding",
+      "title": "submitbountyfunding",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "preparebountyaward",
+      "title": "preparebountyaward",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "inspectbountyaward",
+      "title": "inspectbountyaward",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "submitbountyaward",
+      "title": "submitbountyaward",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "preparebountyrefund",
+      "title": "preparebountyrefund",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "submitbountyrefund",
+      "title": "submitbountyrefund",
+      "risk": "financial",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "preparebountyclaim",
+      "title": "preparebountyclaim",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": true
+    },
+    {
+      "group": "Economy",
+      "method": "proposebountyaward",
+      "title": "proposebountyaward",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "approvebountyaward",
+      "title": "approvebountyaward",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "observebountychain",
+      "title": "observebountychain",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "ensurecapability",
+      "title": "ensurecapability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "prefetchcapability",
+      "title": "prefetchcapability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "sleepcapability",
+      "title": "sleepcapability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "releasecapability",
+      "title": "releasecapability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "wakecapability",
+      "title": "wakecapability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "updatecapability",
+      "title": "updatecapability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "switchcapability",
+      "title": "switchcapability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "getcapabilityevents",
+      "title": "getcapabilityevents",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "getcapabilityttc",
+      "title": "getcapabilityttc",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "getruntimecapabilities",
+      "title": "getruntimecapabilities",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Compute",
+      "method": "createcomputeoffer",
+      "title": "createcomputeoffer",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Compute",
+      "method": "getcomputebalance",
+      "title": "getcomputebalance",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Compute",
+      "method": "issuecomputeaccessgrant",
+      "title": "issuecomputeaccessgrant",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "setcloudstorage",
+      "title": "setcloudstorage",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getcloudstorage",
+      "title": "getcloudstorage",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "followmodelpublisher",
+      "title": "followmodelpublisher",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "unfollowmodelpublisher",
+      "title": "unfollowmodelpublisher",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelevents",
+      "title": "getmodelevents",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelcollections",
+      "title": "getmodelcollections",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelpreservation",
+      "title": "getmodelpreservation",
+      "risk": "write",
+      "args": [
+        {
+          "name": "options",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getcloudstorageinfo",
+      "title": "Cloud storage info",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodeldirectoryentry",
+      "title": "Model directory entry",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodeleconomyentry",
+      "title": "Model economy entry",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodeleventsequence",
+      "title": "Model event sequence",
+      "risk": "read",
+      "args": [],
+      "notes": "getmodeleventsequence must not call waitformodelevent. The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelfeedsequence",
+      "title": "Model feed sequence",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelprofile",
+      "title": "Model profile",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelreleaseeconomics",
+      "title": "Model release economics",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getsearchstatus",
+      "title": "Search status",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query_id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "listmodelwatches",
+      "title": "List model watches",
+      "risk": "read",
+      "args": [],
+      "notes": "listmodelwatches is not the filesystem -modelwatch. The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "searchcollections",
+      "title": "Search collections",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "text": "",
+            "limit": 25,
+            "sort": "RELEVANCE",
+            "scope": "LOCAL"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "searchpublishers",
+      "title": "Search publishers",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "text": "",
+            "limit": 25,
+            "sort": "RELEVANCE",
+            "scope": "LOCAL"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "cacheencryptedmodel",
+      "title": "Cache encrypted model",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "Ciphertext only and must not auto-download. The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "publishmodelsearchrecord",
+      "title": "Publish model search record",
+      "risk": "write",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "name": "metadata",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "display_name": "",
+            "canonical_name": ""
+          }
+        }
+      ],
+      "notes": "Metadata only. The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Economy",
+      "method": "getbountycapabilities",
+      "title": "Bounty capabilities",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "getbtxcapabilityevents",
+      "title": "Capability events",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "cursor": 0,
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "getbtxruntimecapabilities",
+      "title": "Runtime capabilities",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "getbtxttctrace",
+      "title": "Capability time-to-complete",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "job_id": "",
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "ensurebtxcapability",
+      "title": "Ensure capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "plan_id": "",
+            "grant": {
+              "caller": "local",
+              "host_bytes": 8388608,
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "planbtxcapability",
+      "title": "Plan capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "recipe": {
+              "recipe_kind": "FULL_MODEL",
+              "components": [
+                {
+                  "name": "base",
+                  "resource": {
+                    "kind": "MODEL",
+                    "digest48": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  },
+                  "role": "BASE",
+                  "required": true
+                }
+              ]
+            },
+            "grant": {
+              "caller": "local",
+              "host_bytes": 8388608,
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "planbtxcapabilityupdate",
+      "title": "Plan capability update",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "preview": true,
+            "automatic_spend_atoms": "0",
+            "smoke_passed": false,
+            "lock_id": "",
+            "grant": {
+              "caller": "local",
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "prefetchbtxcapability",
+      "title": "Prefetch capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "grant": {
+              "caller": "local",
+              "automatic_spend_atoms": "0"
+            },
+            "kind": "DEMAND",
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "releasebtxcapability",
+      "title": "Release capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "lease_id": "",
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "sleepbtxcapability",
+      "title": "Sleep capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "lease_id": "",
+            "automatic_spend_atoms": "0"
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "switchbtxcapability",
+      "title": "Switch capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "old_lock": "",
+            "new_lock": "",
+            "automatic_spend_atoms": "0",
+            "grant": {
+              "caller": "local",
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Capabilities",
+      "method": "wakebtxcapability",
+      "title": "Wake capability",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "lease_id": "",
+            "remap_only": false,
+            "automatic_spend_atoms": "0",
+            "grant": {
+              "caller": "local",
+              "automatic_spend_atoms": "0"
+            }
+          }
+        }
+      ],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification. remap_only and a blocked smoke test are not readiness.",
+      "wallet": false
+    },
+    {
+      "group": "Node",
+      "method": "getresourcegovernorinfo",
+      "title": "Resource governor",
+      "risk": "read",
+      "args": [],
+      "notes": "The method fails closed when the node does not offer it. automatic_spend_atoms stays 0. This template is not release qualification.",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "enumeratesigners",
+      "title": "Enumerate signers",
+      "risk": "read",
+      "args": [],
+      "notes": "A missing signer or a failed enumeration is not success and is not hardware qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Wallet",
+      "method": "walletdisplayaddress",
+      "title": "Display address on device",
+      "risk": "write",
+      "args": [
+        {
+          "name": "address",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "A missing signer or a failed enumeration is not success and is not hardware qualification. automatic_spend_atoms stays 0.",
+      "wallet": true
+    }
+  ]
+}

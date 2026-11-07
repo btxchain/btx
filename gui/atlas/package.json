@@ -1,0 +1,11 @@
+{
+  "name": "btx-atlas", "version": "0.1.0", "private": true, "type": "module",
+  "description": "Framework-free BTX Atlas client; native authority is in Rust.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "serve": "python3 ../../contrib/atlas/preview.py",
+    "check": "node tests/static-audit.mjs",
+    "bench": "node tests/benchmark.mjs"
+  },
+  "engines": {"node": ">=22"}, "license": "MIT"
+}

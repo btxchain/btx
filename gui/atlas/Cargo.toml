@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/atlas-core", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.90"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+overflow-checks = true
+
+[profile.dev]
+overflow-checks = true
