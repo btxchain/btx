@@ -24,6 +24,7 @@
 #include <modelnet/training_integer.h>
 #include <modelnet/training_launch.h>
 #include <modelnet/workspace_journal.h>
+#include <clientversion.h>
 #include <crypto/sha384.h>
 #include <span.h>
 #include <support/cleanse.h>
@@ -1831,7 +1832,7 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
 
     if (method == "lab.info") {
         if (store.recovery_required) result.pushKV("recovery_required", "BTX035_RECOVERY_REQUIRED");
-        result.pushKV("release", "0.35.0rc1");
+        result.pushKV("release", CLIENT_VERSION_STRING);
         result.pushKV("network_id", Id64("BTX/035/network"));
         result.pushKV("realm_id", Id96("BTX/035/PublicRealm/v1"));
         UniValue protocols(UniValue::VARR);

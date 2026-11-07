@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "btx-atlas-neuronlab"
+version = "0.2.0"
+description = "Local data-only interventions, signed capsules, and training-recipe studies for BTX Atlas"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["numpy>=2.0,<3", "torch>=2.6,<3", "safetensors>=0.6,<1", "scikit-learn>=1.5,<2"]
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+umap = ["umap-learn>=0.5.6,<0.6"]
+# Install an independently audited release with the exact desired architecture.
+# No automatic download or pip install is performed by the runtime.
+hf = ["transformers>=4.57,<6"]
+[tool.setuptools.packages.find]
+include = ["btx_neuronlab*"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,50 @@
+name: Release Atlas binaries
+on:
+  workflow_dispatch:
+  push:
+    branches: [release-0.34.16]
+    paths:
+      - .github/workflows/release-atlas-binaries.yml
+      - gui/atlas/**
+permissions:
+  contents: write
+jobs:
+  atlas:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            asset: btx-0.34.16-atlas-x86_64-linux
+          - os: windows-2022
+            asset: btx-0.34.16-atlas-x86_64-windows.exe
+          - os: macos-14
+            asset: btx-0.34.16-atlas-arm64-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux WebView dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libxdo-dev libgtk-3-dev
+      - name: Install pinned compiler
+        shell: bash
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Build Atlas
+        shell: bash
+        working-directory: gui/atlas
+        run: cargo build --locked --release -p btx-atlas
+      - name: Stage the binary
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            src="gui/atlas/target/release/btx-atlas.exe"
+          else
+            src="gui/atlas/target/release/btx-atlas"
+          fi
+          test -f "$src"
+          cp "$src" "${{ matrix.asset }}"
+      - name: Upload to the 0.34.16 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload v0.34.16 "${{ matrix.asset }}" --clobber --repo "${{ github.repository }}"

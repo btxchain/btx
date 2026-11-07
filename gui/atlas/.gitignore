@@ -1,0 +1,7 @@
+/target/
+/benchmark.json
+/qt-inventory.json
+/src-tauri/gen/
+/test-results/
+__pycache__/
+*.pyc
