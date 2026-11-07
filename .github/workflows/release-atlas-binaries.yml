@@ -1,6 +1,11 @@
 name: Release Atlas binaries
 on:
   workflow_dispatch:
+  push:
+    branches: [release-0.34.16]
+    paths:
+      - .github/workflows/release-atlas-binaries.yml
+      - gui/atlas/**
 permissions:
   contents: write
 jobs:
