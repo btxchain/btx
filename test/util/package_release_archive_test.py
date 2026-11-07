@@ -134,6 +134,61 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                     ]
                 )
 
+    def test_linux_guard_remains_a_regular_daemon_sibling_after_extraction(self):
+        self._stub_ship_gate()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source_root = self._build_source_root(root)
+            btxd, btx_cli = self._write_binaries(root)
+            guard_bytes = b"guard executable\n"
+            (root / "btx-guardd").write_bytes(guard_bytes)
+            original_epoch = os.environ.get("SOURCE_DATE_EPOCH")
+            os.environ["SOURCE_DATE_EPOCH"] = "1712534400"
+            try:
+                for platform_id in ("linux-x86_64", "linux-arm64"):
+                    archives = []
+                    for attempt in ("first", "second"):
+                        staged, included, _ = self.module.stage_release_tree(
+                            version="29.2", platform_id=platform_id,
+                            btxd_path=btxd, btx_cli_path=btx_cli, btx_util_path=None,
+                            matmul_metallib_path=None, oracle_metallib_path=None,
+                            metal_lib_dir=None, source_root=source_root,
+                            temp_root=root / platform_id / attempt,
+                        )
+                        sibling = staged / "libexec/btx-guardd"
+                        real_guard = staged / "libexec/btx-guardd.real"
+                        self.assertTrue(sibling.is_file())
+                        self.assertFalse(sibling.is_symlink())
+                        self.assertTrue(sibling.samefile(real_guard))
+                        self.assertIn("libexec/btx-guardd", included)
+                        self.assertEqual(sibling.read_bytes(), guard_bytes)
+                        self.assertEqual(sibling.stat().st_mode & 0o777, 0o755)
+                        self.assertEqual(
+                            (staged / "bin/btx-guardd").read_text(),
+                            self.module.wrapper_payload("btx-guardd", platform_id),
+                        )
+                        archive_path = root / platform_id / (attempt + ".tar.gz")
+                        self.module.write_tar_gz(archive_path, staged)
+                        archives.append(archive_path.read_bytes())
+                        extracted = root / platform_id / (attempt + "-extracted")
+                        with tarfile.open(archive_path) as archive:
+                            # This fixture generated every member above; retain
+                            # support for Python versions before data_filter.
+                            options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+                            archive.extractall(extracted, **options)
+                        for name in ("btx-guardd", "btx-guardd.real"):
+                            actual = extracted / "btx-29.2/libexec" / name
+                            self.assertTrue(actual.is_file())
+                            self.assertFalse(actual.is_symlink())
+                            self.assertEqual(actual.read_bytes(), guard_bytes)
+                            self.assertEqual(actual.stat().st_mode & 0o777, 0o755)
+                    self.assertEqual(archives[0], archives[1])
+            finally:
+                if original_epoch is None:
+                    os.environ.pop("SOURCE_DATE_EPOCH", None)
+                else:
+                    os.environ["SOURCE_DATE_EPOCH"] = original_epoch
+
     def test_require_model_helpers_rejects_archive_without_them(self):
         self._stub_ship_gate()
         with tempfile.TemporaryDirectory() as tmpdir:
