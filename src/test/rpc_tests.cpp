@@ -530,6 +530,52 @@ BOOST_AUTO_TEST_CASE(rpc_convert_walletprocesspsbt_named_options)
     BOOST_CHECK_EQUAL(legacy[4].get_bool(), false);
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_string_alternative_of_multi_type_params)
+{
+    // dumptxoutset type|format, descriptorprocesspsbt options|sighashtype and
+    // createmultisig options|address_type take a string or a JSON value at the
+    // same position. Text that is not JSON must stay a string, as the
+    // dumptxoutset help examples pass it; JSON values keep their types.
+    const auto check_text = [](const std::string& method, const std::vector<std::string>& args, size_t idx) {
+        BOOST_TEST_CONTEXT(method << " " << args.at(idx)) {
+            UniValue positional;
+            BOOST_CHECK_NO_THROW(positional = RPCConvertValues(method, args));
+            BOOST_CHECK_EQUAL(positional.size(), args.size());
+            BOOST_CHECK(positional[idx].isStr());
+            if (positional[idx].isStr()) BOOST_CHECK_EQUAL(positional[idx].get_str(), args.at(idx));
+        }
+    };
+    check_text("dumptxoutset", {"utxo.dat", "latest"}, 1);
+    check_text("dumptxoutset", {"utxo.dat", "rollback"}, 1);
+    check_text("descriptorprocesspsbt", {"psbt", "[]", "ALL"}, 2);
+    check_text("descriptorprocesspsbt", {"psbt", "[]", "SINGLE|ANYONECANPAY"}, 2);
+    check_text("createmultisig", {"1", "[]", "p2mr"}, 2);
+
+    // JSON keeps its type: a JSON string, the Knots-compatible format array
+    // with its show_header Boolean, and the options objects.
+    BOOST_CHECK_EQUAL(RPCConvertValues("descriptorprocesspsbt", {"psbt", "[]", R"("ALL")"})[2].get_str(), "ALL");
+    const UniValue knots = RPCConvertValues("dumptxoutset", {"utxo.dat", R"(["txid","vout"])", "false"});
+    BOOST_CHECK(knots[1].isArray());
+    BOOST_CHECK(knots[2].isBool());
+    BOOST_CHECK(RPCConvertValues("dumptxoutset", {"utxo.dat", "[]", R"({"rollback":5})"})[2].isObject());
+    BOOST_CHECK(RPCConvertValues("descriptorprocesspsbt", {"psbt", "[]", R"({"sighashtype":"ALL","finalize":false})"})[2].isObject());
+    BOOST_CHECK(RPCConvertValues("createmultisig", {"1", "[]", R"({"address_type":"p2mr","sort":true})"})[2].isObject());
+    BOOST_CHECK_THROW(RPCConvertValues("dumptxoutset", {"utxo.dat", "[]", "not-json"}), std::runtime_error);
+
+    // Named forms: JSON values still parse and string parameters stay strings.
+    // type|format is STR|ARR, so the format alias takes plain text as well.
+    UniValue named_format;
+    BOOST_CHECK_NO_THROW(named_format = RPCConvertNamedValues("dumptxoutset", {"path=utxo.dat", "format=latest"}));
+    BOOST_CHECK(named_format["format"].isStr());
+    if (named_format["format"].isStr()) BOOST_CHECK_EQUAL(named_format["format"].get_str(), "latest");
+    const UniValue named = RPCConvertNamedValues("dumptxoutset", {"path=utxo.dat", "type=latest", "format=[]", "show_header=false"});
+    BOOST_CHECK_EQUAL(named["type"].get_str(), "latest");
+    BOOST_CHECK(named["format"].isArray());
+    BOOST_CHECK(named["show_header"].isBool());
+    BOOST_CHECK_EQUAL(RPCConvertNamedValues("descriptorprocesspsbt", {"psbt=x", "descriptors=[]", "sighashtype=ALL"})["sighashtype"].get_str(), "ALL");
+    BOOST_CHECK_EQUAL(RPCConvertNamedValues("createmultisig", {"nrequired=1", "keys=[]", "address_type=p2mr"})["address_type"].get_str(), "p2mr");
+}
+
 BOOST_AUTO_TEST_CASE(rpc_convert_values_pq_wallet_methods)
 {
     UniValue result;
