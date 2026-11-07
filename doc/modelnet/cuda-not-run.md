@@ -21,7 +21,9 @@ still `NOT_RUN_CUDA_ISOLATION`. A live `GPU-01 RUNTIME_OBSERVED` is
 - Process proof: `CUDA_HOST=<cuda-workstation> contrib/modelnet/cuda-isolated-e2e.sh`.
   Do not set `BTX_LIVE_ATTESTOR=1`. Never SIGKILL production `btxd.real`.
 - Shared validation GPUs remain B0-restricted: model qualification must
-  not starve ExactReplay.
+  not starve ExactReplay. The ISO-05 FIT reserve is 4096 MiB. A lower
+  `--reserve-mib` / `CUDA_FIT_RESERVE_MIB` is a labelled operator override
+  (`OVERRIDE_PASS`, see [howto.md](howto.md) §10), not release qualification.
 
 Do not treat a `STRUCTURE_VERIFIED` shard as “it runs on this GPU.”
 
