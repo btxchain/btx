@@ -395,9 +395,14 @@ bool GuardSupervisor::SecurityExchange(const UniValue& request, UniValue& respon
         const auto id = Hex(RandomBytes(16));
         const auto deadline = Clock::now() + std::chrono::seconds(9);
         auto exchange = [&](const std::string& line) {
-            Require(Clock::now() < deadline, "SEC_FRAME_TIMEOUT");
+            const auto now = Clock::now();
+            Require(now < deadline, "SEC_FRAME_TIMEOUT");
             std::string reply;
-            Require(m_impl->Transport(line, reply), "SEC_GUARD_TRANSPORT");
+            // COMMIT runs the request in the guard, which may wait on SQLite's
+            // busy timeout or check a long journal: give each frame what is left
+            // of the exchange deadline, not the 500 ms health-check budget.
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            Require(m_impl->Transport(line, reply, left), "SEC_GUARD_TRANSPORT");
             Require(reply.rfind("ERR ", 0) != 0, "SEC_GUARD_REFUSED");
             return reply;
         };
