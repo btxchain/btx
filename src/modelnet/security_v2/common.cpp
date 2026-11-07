@@ -541,6 +541,17 @@ namespace modelnet::security {
         Require(valid,"SEC_PRIVATE_DIRECTORY");
 #endif
     }
+    fs::path ResolveSecurityDirectory(const fs::path& path) {
+#ifndef _WIN32
+        if(path.is_absolute()&&path.has_filename()) {
+            // Existing ancestors are resolved; a parent not created yet is kept lexically.
+            std::error_code ec;
+            const auto parent=fs::weakly_canonical(path.parent_path(),ec);
+            if(!ec&&parent.is_absolute())return parent/path.filename();
+        }
+#endif
+        return path;
+    }
     void WritePrivate(const fs::path& path,std::string_view bytes,bool replace) {
         EnsurePrivateDirectory(path.parent_path());
         const auto temporary=path.parent_path()/(".new-"+Hex(RandomBytes(16)));

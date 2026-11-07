@@ -2715,7 +2715,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         resp.body = "{\"ok\":false,\"error\":\"SEC_MESH_DENIED\"}";
         if (req.method != "POST" || req.body.size() > security::MAX_MESH_PACKET || req.transport_pin.empty()) return true;
         try {
-            const auto directory = security::NativePath((HelperDir(cat) / "security").utf8string());
+            const auto directory = security::ResolveSecurityDirectory(security::NativePath((HelperDir(cat) / "security").utf8string()));
             if (!security::fs::exists(directory / "root-pins.json")) return true;
             security::Database db(directory);
             const auto message = security::Parse(req.body, security::MAX_MESH_PACKET);
@@ -2733,7 +2733,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         resp.body = "{\"ok\":false,\"error\":\"SEC_PEER_DENIED\"}";
         if (req.method != "POST" || req.body.size() > security::MAX_PEER_BYTES || req.transport_pin.empty()) return true;
         try {
-            const auto directory = security::NativePath((HelperDir(cat) / "security").utf8string());
+            const auto directory = security::ResolveSecurityDirectory(security::NativePath((HelperDir(cat) / "security").utf8string()));
             if (!security::fs::exists(directory / "root-pins.json")) return true;
             security::Database db(directory);
             const auto request = security::Parse(req.body, security::MAX_PEER_BYTES);
@@ -9047,7 +9047,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "loadmodel") {
 #ifdef BTX_MODEL_SECURITY_V2
         try {
-            const auto security_root = security::NativePath((HelperDir(cat) / "security").utf8string());
+            const auto security_root = security::ResolveSecurityDirectory(security::NativePath((HelperDir(cat) / "security").utf8string()));
             if (security::fs::exists(security_root / "root-pins.json")) {
                 security::Database security_db(security_root);
                 if (security_db.Meta("mesh_required", "0") == "1") {
@@ -9211,7 +9211,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "generatemodel") {
 #ifdef BTX_MODEL_SECURITY_V2
         try {
-            const auto security_root = security::NativePath((HelperDir(cat) / "security").utf8string());
+            const auto security_root = security::ResolveSecurityDirectory(security::NativePath((HelperDir(cat) / "security").utf8string()));
             if (security::fs::exists(security_root / "root-pins.json")) {
                 security::Database security_db(security_root);
                 if (security_db.Meta("mesh_required", "0") == "1") {
@@ -11731,7 +11731,7 @@ static void RefreshAutoStorage(HelperConfig& cfg, ModelCatalog* cat)
 static void GossipSecurityOnSession(Pq1Session& sess, ModelCatalog& cat)
 {
     try {
-        const auto directory = security::NativePath((HelperDir(cat) / "security").utf8string());
+        const auto directory = security::ResolveSecurityDirectory(security::NativePath((HelperDir(cat) / "security").utf8string()));
         if (!security::fs::exists(directory / "root-pins.json")) return;
         security::Database db(directory);
         const auto policy = security::Policy::Load(db, security::NowMs());

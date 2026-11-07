@@ -341,7 +341,12 @@ bool GuardSupervisor::Start(const fs::path& path,const fs::path& security_direct
     if (!security_directory.empty() && !security_directory.is_absolute()) {
         error="SEC_DIRECTORY"; return false;
     }
+#ifdef BTX_MODEL_SECURITY_V2
+    // Same resolution as every btx-modeld opener of this store.
+    m_impl->security_directory=fs::path{security::ResolveSecurityDirectory(security_directory)};
+#else
     m_impl->security_directory=security_directory;
+#endif
     m_impl->executable=path.empty()?FindPackagedGuardd():path;
     m_impl->status={};m_impl->status.enabled=true;m_impl->failures=0;
     const bool ok=m_impl->Launch();error=m_impl->status.error;return ok;

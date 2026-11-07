@@ -78,6 +78,13 @@ bool IsCredentialPath(std::string_view path);
 std::string ReadFile(const fs::path& path, uint64_t limit = MAX_RECORD, bool private_file = false);
 void WritePrivate(const fs::path& path, std::string_view bytes, bool replace = false);
 void EnsurePrivateDirectory(const fs::path& path);
+/** Resolve the ancestors of an absolute security directory once (POSIX only;
+ * Windows and relative paths are returned unchanged). The final component is
+ * kept as given, so EnsurePrivateDirectory still refuses a symlink at the
+ * security directory itself and anywhere below it. Ancestors such as
+ * ~/.btx -> /mnt/ssd/btx or macOS /var -> /private/var are the operator's
+ * filesystem layout; the result is the path the operator could have passed. */
+fs::path ResolveSecurityDirectory(const fs::path& path);
 Json Failure(std::string_view code);
 } // namespace modelnet::security
 #endif
