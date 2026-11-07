@@ -33,6 +33,15 @@ int main(int argc, char** argv)
         Json large = Object(); large.pushKV("op", "unknown"); large.pushKV("padding", std::string(180000, 'x'));
         Require(supervisor.SecurityExchange(large, response, error) && !response["ok"].get_bool(), "TEST_NATIVE_LARGE_REFUSAL"); ++passed;
         Require(supervisor.Snapshot().ready, "TEST_NATIVE_NOT_KILLED_BY_REFUSAL"); ++passed;
+        // A request the canonical encoder refuses (a float, here) never reaches the
+        // guard. It is a caller error: the guard, its boot id and its permits stay.
+        const auto pid = supervisor.Snapshot().pid;
+        Require(supervisor.SecurityExchange(status, response, error), "TEST_NATIVE_STATUS_BEFORE_SCHEMA_REFUSAL");
+        const auto boot_before = response["guard_boot"].get_str();
+        Json fractional = Object(); fractional.pushKV("op", "status"); fractional.pushKV("x", 1.5);
+        Require(!supervisor.SecurityExchange(fractional, response, error) && error == "SEC_JSON_INTEGER", "TEST_NATIVE_NONCANONICAL_REFUSED"); ++passed;
+        Require(supervisor.Snapshot().ready && supervisor.Snapshot().pid == pid, "TEST_NATIVE_NOT_KILLED_BY_SCHEMA_REFUSAL"); ++passed;
+        Require(supervisor.SecurityExchange(status, response, error) && response["guard_boot"].get_str() == boot_before, "TEST_NATIVE_SAME_BOOT_AFTER_SCHEMA_REFUSAL"); ++passed;
         std::atomic<unsigned> successful{0};
         std::vector<std::thread> threads;
         for (unsigned i = 0; i < 4; ++i) threads.emplace_back([&] {

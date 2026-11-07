@@ -388,10 +388,24 @@ bool GuardSupervisor::SecurityExchange(const UniValue& request, UniValue& respon
         error = "SEC_GUARD_NOT_READY";
         return false;
     }
+    // A request the canonical encoder refuses never reaches the guard. It is a
+    // caller error, not a desynchronized frame: keep the guard and its permits.
+    std::string raw;
+    try {
+        raw = security::Canonical(request);
+    } catch (const security::Error& e) {
+        error = e.code;
+        return false;
+    } catch (...) {
+        error = "SEC_GUARD_EXCEPTION";
+        return false;
+    }
+    if (raw.empty() || raw.size() > security::MAX_RECORD) {
+        error = "SEC_FRAME_LIMIT";
+        return false;
+    }
     try {
         using namespace security;
-        const auto raw = Canonical(request);
-        Require(!raw.empty() && raw.size() <= MAX_RECORD, "SEC_FRAME_LIMIT");
         const auto id = Hex(RandomBytes(16));
         const auto deadline = Clock::now() + std::chrono::seconds(9);
         auto exchange = [&](const std::string& line) {
