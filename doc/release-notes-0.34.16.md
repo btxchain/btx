@@ -10,7 +10,17 @@ Included
 - `btx-035/swarm` through `d522af52`, including the wallet, Windows, jail,
   and ML-KEM review fixes.
 - `btx-035/atlas-native` through `afe27a2b`, the desktop candidate.
+  The Linux archive ships `btx-atlas`. Running it needs WebKitGTK 4.1 and GTK 3
+  (`libwebkit2gtk-4.1-0` and `libgtk-3-0`). Qt stays; Atlas is the additional desktop.
 - `btx-035/model-security-v2` through `6fd4564e`, the local security guard.
+  `btx-security` is the offline administrative CLI. On a running node the same
+  guard is `btx-cli modelsecurity`.
+
+Linux x86_64 binaries in the archive: `btxd`, `btx-cli`, `btx-tx`, `btx-wallet`,
+`btx-util`, `btx-qt`, `btx-atlas`, `btx-security`, `btx-guardd`, the model
+helpers, and `btx-native-qualify`. Windows, macOS, arm64, and CUDA archives
+are not attached: this build has no Windows cross compiler, no macOS SDK, no
+aarch64 compiler, and no CUDA toolkit.
 
 Not included
 ------------

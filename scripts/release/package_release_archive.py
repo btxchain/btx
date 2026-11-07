@@ -91,6 +91,12 @@ SUPPORT_FILES = load_support_files()
 # failure under --require-model-helpers (0.35.0rc1 shipped none, #235).
 OPTIONAL_SIBLING_BINARIES = (
     "btx-qt",
+    "btx-atlas",
+    "btx-security",
+    "btx-guardd",
+    "btx-tx",
+    "btx-wallet",
+    "btx-native-qualify",
 )
 MODEL_HELPER_BINARIES = (
     "btx-modeld",
@@ -274,6 +280,8 @@ def wrapper_payload(binary_name: str, platform_id: str) -> str | None:
             extra_hint = " libsqlite3-0 libzmq5 libgomp1"
         elif binary_name in ("btx-modeld", "btx-hcpd", "btx-capabilityd"):
             extra_hint = " libgomp1"
+        elif binary_name == "btx-atlas":
+            extra_hint = " libwebkit2gtk-4.1-0 libgtk-3-0"
         # ldd's "=> not found" only catches missing sonames. Debian 12 / Ubuntu
         # 22.04 have libc.so.6 and libstdc++.so.6, so that check passes, then
         # the loader dies on GLIBC_2.38 / GLIBCXX_3.4.32. Prefer objdump -T
