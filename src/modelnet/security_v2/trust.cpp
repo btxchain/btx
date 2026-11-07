@@ -384,7 +384,9 @@ namespace modelnet::security {
     static void StoreImport(Database& db,const Policy& p,const Json& e,const std::string& id,int64_t now) {
         const auto kind=Text(e,"kind");
         const auto& b=e["body"];
-        db.CheckClock(now);
+        // A revocation only removes authority, so a backward clock step must not refuse
+        // it. Every other kind keeps the rollback check.
+        if(kind!="revocation")db.CheckClock(now);
         std::string visibility="private";
         if(kind=="composition")visibility=Text(b,"visibility");
         if(kind=="revocation")db.PutVerifiedControl(e,visibility);
