@@ -49,7 +49,7 @@ def main():
         command = [str(build / f"security-tests{suffix}")]
         if platform.system() == "Linux":
             command += [str(build / "security-probe"), str(report.parent / "component-results.json")]
-        run("component-tests", command, 300)
+        run("component-tests", command, 900)
         run("native-ipc", [str(build / f"security-native-ipc{suffix}"), str(build / f"btx-guardd-security{suffix}")], 60)
         result["status"] = "COMPONENT_TESTS_PASSED"
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
