@@ -3233,9 +3233,13 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
             throw JSONRPCError(RPC_WALLET_ERROR, "Combo descriptors cannot be set to active");
         }
 
-        // If the wallet disabled private keys, abort if private keys exist
-        if (wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) && !keys.keys.empty()) {
-            throw JSONRPCError(RPC_WALLET_ERROR, "Cannot import private keys to a wallet with private keys disabled");
+        // If the wallet disabled private keys, abort if private keys or PQ seeds exist
+        if (wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+            const bool has_pq_seed = std::any_of(parsed_descs.begin(), parsed_descs.end(),
+                [](const std::unique_ptr<Descriptor>& desc) { return !desc->ExtractAllPQSeeds().empty(); });
+            if (!keys.keys.empty() || has_pq_seed) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Cannot import private keys to a wallet with private keys disabled");
+            }
         }
 
         for (size_t j = 0; j < parsed_descs.size(); ++j) {

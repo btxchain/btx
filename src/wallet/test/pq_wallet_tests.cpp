@@ -52,6 +52,7 @@
 
 namespace wallet {
 RPCHelpMan gethdkeys();
+UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys, const std::vector<std::array<unsigned char, 32>>& pq_master_seeds) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys = {}) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 namespace {
 
@@ -1938,6 +1939,56 @@ BOOST_AUTO_TEST_CASE(importdescriptors_rejects_wpkh_on_enforcing_chain)
     BOOST_CHECK(importmulti_rejected);
 
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
+}
+
+BOOST_AUTO_TEST_CASE(importdescriptors_refuses_pq_seed_when_private_keys_disabled)
+{
+    // A wallet with private keys disabled must not take a PQ seed, neither
+    // from pqhd(<seed>) nor from pq_master_seeds for a fingerprint descriptor.
+    const auto embedded_seed = MakePQSeed(0x61);
+    const auto injected_seed = MakePQSeed(0x62);
+    const WalletDescriptor embedded = MakeRangedDescriptor(embedded_seed, /*internal=*/false);
+    const WalletDescriptor by_fingerprint = MakeRangedDescriptor(injected_seed, /*internal=*/false);
+    std::string embedded_desc;
+    BOOST_REQUIRE(embedded.descriptor->ToPrivateString(DUMMY_SIGNING_PROVIDER, embedded_desc));
+    BOOST_REQUIRE(embedded_desc.find(HexStr(embedded_seed)) != std::string::npos);
+    const std::string fingerprint_desc = by_fingerprint.descriptor->ToString();
+    BOOST_REQUIRE(fingerprint_desc.find(HexStr(injected_seed)) == std::string::npos);
+
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    LOCK(wallet->cs_wallet);
+    wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    wallet->SetWalletFlag(WALLET_FLAG_DISABLE_PRIVATE_KEYS);
+    wallet->m_keypool_size = P2MR_TEST_RANGE_END;
+
+    const auto expect_refused = [&](const std::string& desc,
+                                    const std::vector<std::array<unsigned char, 32>>& pq_master_seeds,
+                                    const uint256& desc_id) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+        UniValue data(UniValue::VOBJ);
+        data.pushKV("desc", desc);
+        data.pushKV("range", P2MR_TEST_RANGE_END - 1);
+        const UniValue result = ProcessDescriptorImport(*wallet, data, /*timestamp=*/1, /*master_keys=*/{}, pq_master_seeds);
+        BOOST_CHECK(!result["success"].get_bool());
+        BOOST_CHECK_EQUAL(result["error"]["message"].getValStr(), "Cannot import private keys to a wallet with private keys disabled");
+        BOOST_CHECK(wallet->GetAllScriptPubKeyMans().empty());
+
+        WalletBatch batch(wallet->GetDatabase());
+        std::vector<unsigned char> seed;
+        std::vector<std::pair<std::array<unsigned char, 4>, std::vector<unsigned char>>> seed_map;
+        BOOST_CHECK(!batch.ReadPQDescriptorSeed(desc_id, seed));
+        BOOST_CHECK(!batch.ReadPQDescriptorSeedMap(desc_id, seed_map));
+    };
+
+    expect_refused(embedded_desc, /*pq_master_seeds=*/{}, embedded.id);
+    expect_refused(fingerprint_desc, /*pq_master_seeds=*/{injected_seed}, by_fingerprint.id);
+
+    // A fixed public key carries no seed and still imports.
+    const size_t spkm_count{wallet->GetAllScriptPubKeyMans().size()};
+    UniValue public_data(UniValue::VOBJ);
+    public_data.pushKV("desc", AddChecksum("mr(" + HexStr(MakePattern(MLDSA44_PUBKEY_SIZE, 0x63)) + ")"));
+    const UniValue public_result = ProcessDescriptorImport(*wallet, public_data, /*timestamp=*/1);
+    BOOST_CHECK(public_result["success"].get_bool());
+    BOOST_CHECK_EQUAL(wallet->GetAllScriptPubKeyMans().size(), spkm_count + 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
