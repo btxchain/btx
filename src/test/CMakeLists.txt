@@ -279,6 +279,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_ordinary_recursive_leaf_tests.cpp
   matmul_v4_rc_stage3_v13_fixedpoint_bytecode_coverage_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_merkle_fold_tests.cpp
+  matmul_v4_rc_stage3_multirow_v11_merkle_fold_public_plan_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_decoder_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_deep_vm_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_deep_vm_public_plan_tests.cpp
