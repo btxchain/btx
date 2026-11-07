@@ -509,6 +509,7 @@ BOOST_AUTO_TEST_CASE(portable_archive_entries)
     BOOST_CHECK_EQUAL(err, "BTX035_PATH_UNSAFE");
     BOOST_CHECK_EQUAL(FileText(kept), "keep-me");
 
+#ifndef _WIN32
     const fs::path devdir = m_path_root / "wan-dev";
     BOOST_REQUIRE(fs::create_directories(devdir));
     const fs::path node = devdir / "node";
@@ -517,6 +518,7 @@ BOOST_AUTO_TEST_CASE(portable_archive_entries)
     BOOST_CHECK(!roll.WritePortableArchive(devdir, devtar, err));
     BOOST_CHECK_EQUAL(err, "BTX035_PATH_UNSAFE");
     BOOST_CHECK(!fs::exists(devtar));
+#endif
 
     const fs::path link_root = m_path_root / "tree-link";
     fs::create_symlink(tree, link_root);
