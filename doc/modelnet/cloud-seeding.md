@@ -1,7 +1,9 @@
 # Cloud seeding (0.34.8 surface)
 
-**Status:** last shipping tag **v0.34.8**. This tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`). Helper RPCs `setcloudstorage` /
+**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+
+**Status:** this tree is **0.35.0rc1**. The last shipping tag remains
+**v0.34.15**. Helper RPCs `setcloudstorage` /
 `testcloudstorage` / `getcloudstorageinfo` exist in this helper. FakeS3 is
 **unit-tested**. Live HTTPS/R2 is **NOT_RUN**. The CLI wrapper still **fails
 closed** if an older helper lacks the method. This page does **not** claim a
@@ -71,6 +73,7 @@ contrib/modelnet/btx-model --json cloud add \
   --provider AUTO \
   --layout AUTO \
   --read-strategy AUTO \
+  --transport https \
   --credential-ref env:BTX_CLOUD_CREDENTIAL
 contrib/modelnet/btx-model --json cloud test
 contrib/modelnet/btx-model --json cloud status
@@ -78,6 +81,12 @@ contrib/modelnet/btx-model --json cloud status
 
 `--secret-file /path/to/cloud.cred` (mode 0600) is the file form of the same
 ref. The wrapper **refuses** `--secret` / `--password` on argv.
+
+`--transport https` explicitly sends `use_fake:false` to `setcloudstorage`.
+It selects the compiled live HTTPS transport and may issue requests to the
+configured origin. Omitting the option retains `--transport fake`, which
+sends `use_fake:true`; a successful FakeS3 probe is not an R2 round trip.
+Read `use_fake` in `getcloudstorageinfo` before interpreting the health result.
 
 Unknown RPC → immediate error (`method not found (0.34.8-dev; fails closed
 if helper lacks method)`). Do not wait.
@@ -117,5 +126,5 @@ These figures are **not** in RPC, events, search records, or consensus.
 - `testcloudstorage` is a FakeS3 (or configured-backend) probe, not a
   production soak and not a PASS.
 - This tree does not record a successful live R2 bootstrap in this session.
-- `CLIENT_VERSION_IS_RELEASE=false`. Qt watches/cloud panels are 0.34.8-dev
+- `CLIENT_VERSION_IS_RELEASE=true` for the 0.35.0rc1 candidate (native release evidence remains separate). Qt watches/cloud panels are 0.34.8-dev
   source (`BUILD_GUI=OFF`; do not claim `bitcoin-qt` was built).

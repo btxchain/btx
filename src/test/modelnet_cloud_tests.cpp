@@ -44,6 +44,7 @@
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -51,6 +52,12 @@
 #include <fstream>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+// Windows headers also define GetObject, which is a model-store method here.
+#pragma push_macro("GetObject")
+#undef GetObject
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_cloud_tests, BasicTestingSetup)
 
@@ -177,14 +184,14 @@ BOOST_AUTO_TEST_CASE(cloud_03_creds_0600_env_never_in_json)
 
     const char* env_name = "BTX_TEST_CLOUD_CREDS_C";
     const std::string body = std::string("aws_access_key_id=") + kAccess + "\naws_secret_access_key=" + kSecret + "\n";
-    BOOST_REQUIRE_EQUAL(setenv(env_name, body.c_str(), 1), 0);
+    BOOST_REQUIRE_EQUAL(test::SetEnv(env_name, body.c_str()), 0);
     modelnet::S3Client env_client;
     auto env_cfg = cfg;
     env_cfg.creds.kind = modelnet::CredentialRefKind::ENV;
     env_cfg.creds.value = env_name;
     BOOST_REQUIRE(env_client.Init(env_cfg, err));
     NoSecrets(env_client.HealthJson(), kAccess, kSecret);
-    unsetenv(env_name);
+    test::UnsetEnv(env_name);
 }
 
 BOOST_AUTO_TEST_CASE(cloud_04_reject_file_unix_gopher)
@@ -393,9 +400,24 @@ BOOST_AUTO_TEST_CASE(cloud_10_stream_put_over_8mib)
 {
     const fs::path creds = m_path_root / "cloud-10-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    auto cfg = BaseCfg(creds);
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+#ifdef WIN32
+    // Windows file attributes cannot express owner-only POSIX permissions.
+    // Keep the file-credential refusal, then exercise streaming with the
+    // supported environment-credential path and synthetic signing keys.
+    modelnet::S3PieceStore file_store{cfg};
+    BOOST_CHECK(!file_store.Init(err));
+    BOOST_CHECK_EQUAL(err, "credential file must be mode 0600");
+    const std::string credential_body = std::string{"aws_access_key_id="} + kAccess +
+                                        "\naws_secret_access_key=" + kSecret + "\n";
+    test::ScopedEnvVar credentials{"BTX_CLOUD_STREAM_TEST_CREDS", credential_body.c_str()};
+    cfg.s3.creds.kind = modelnet::CredentialRefKind::ENV;
+    cfg.s3.creds.value = "BTX_CLOUD_STREAM_TEST_CREDS";
+#endif
+    modelnet::S3PieceStore store{cfg};
+    err.clear();
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const fs::path src = m_path_root / "cloud-10.bin";
     const uint64_t sz = modelnet::kCloudStreamChunkBytes + 100;
     {
@@ -929,3 +951,7 @@ BOOST_AUTO_TEST_CASE(cloud_https_not_stub_error)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+#if defined(_WIN32)
+#pragma pop_macro("GetObject")
+#endif

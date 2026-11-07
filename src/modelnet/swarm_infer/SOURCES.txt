@@ -1,0 +1,6 @@
+swarm_infer/engine_bind.cpp
+swarm_infer/metrics.cpp
+swarm_infer/publish.cpp
+swarm_infer/runtime.cpp
+swarm_infer/session.cpp
+swarm_infer/text_slot.cpp

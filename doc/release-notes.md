@@ -73,11 +73,16 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.15**
-(`CLIENT_VERSION_IS_RELEASE=true`). Shipping tag is **v0.34.15**.
-Do not recut **v0.34.14** or **v0.34.13**.
-See [release-notes-0.34.15.md](release-notes/release-notes-0.34.15.md).
-0.34.14 remains the previous shipping tag. See
+`CLIENT_VERSION` in this tree is **0.35.0rc1**
+(`CLIENT_VERSION_MINOR` 35, `CLIENT_VERSION_BUILD` 0, `CLIENT_VERSION_RC` 1,
+`CLIENT_VERSION_IS_RELEASE=true`). This is not the shipping tag `v0.35.0`.
+The last shipping tag remains **v0.34.15**. Do not recut **v0.34.15**,
+**v0.34.14**, or **v0.34.13**.
+See [release-notes-0.35.0.md](release-notes/release-notes-0.35.0.md)
+and [doc/modelnet/swarm/00_THIS_TREE.md](modelnet/swarm/00_THIS_TREE.md).
+The 0.34.15 notes remain the previous shipping line:
+[release-notes-0.34.15.md](release-notes/release-notes-0.34.15.md).
+0.34.14 was the shipping tag before it. See
 [release-notes-0.34.14.md](release-notes/release-notes-0.34.14.md).
 The `v0.34` tag and 0.34.0 seal remain the pool-close cut. 0.34.1 is
 withdrawn: it partitions nodes from mainnet. 0.34.2 is withdrawn for

@@ -9,6 +9,7 @@
 #include <univalue.h>
 #include <util/fs.h>
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -71,10 +72,19 @@ bool RemainingUndeliveredRange(const std::vector<PaymentJournal>& journal,
 
 UniValue QuoteToJson(const Quote& q);
 bool QuoteFromJson(const UniValue& o, Quote& q, std::string& err);
+/** Held across each LoadPaymentState ... SavePaymentState of quotes.json, so
+ *  two helper RPCs cannot interleave their read-modify-write. */
+std::mutex& PaymentStateMutex();
 bool LoadPaymentState(const fs::path& dir, std::vector<Quote>& quotes, std::vector<PaymentJournal>& journal, std::string& err);
 bool SavePaymentState(const fs::path& dir, const std::vector<Quote>& quotes, const std::vector<PaymentJournal>& journal, std::string& err);
+/** False with err when price_atoms is outside 0..MAX_MONEY_ATOMS. */
 bool MakePrepaidQuote(Quote& q, const Digest48& model_id, const Digest48& artifact_id, uint32_t first_piece,
                       uint32_t piece_count, int64_t price_atoms, std::string& err);
+/** Price plus fee cap of every undelivered paid quote for model_id. A sum
+ *  above MAX_MONEY_ATOMS is returned as MAX_MONEY_ATOMS + 1, which
+ *  PlanRetrieval treats as over budget. */
+int64_t OutstandingQuoteAtoms(const std::vector<Quote>& quotes, const std::vector<PaymentJournal>& journal,
+                              const Digest48& model_id);
 
 struct FrozenModelFunding {
     std::string descriptor;

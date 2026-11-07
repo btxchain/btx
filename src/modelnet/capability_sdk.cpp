@@ -5,6 +5,7 @@
 #include <modelnet/capability_sdk.h>
 
 #include <util/fs.h>
+#include <util/sock.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -187,7 +188,7 @@ UniValue ObjectOrEmpty(const UniValue& params)
     return o;
 }
 
-std::string RecvLine(int fd)
+std::string RecvLine(SOCKET fd)
 {
     std::string body;
     char buf[4096];
@@ -376,21 +377,20 @@ bool CallCapabilityUnix(const std::string& socket_path, const std::string& metho
         err = MakeCapabilityError("METHOD_NOT_FOUND", method, method);
         return false;
     }
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
+    const SOCKET fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd == INVALID_SOCKET) {
         err = MakeCapabilityError(kErrHelperDown, "unix socket", method);
         return false;
     }
+    Sock connection{fd};
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     if (socket_path.size() >= sizeof(addr.sun_path)) {
-        ::close(fd);
         err = MakeCapabilityError(kErrHelperDown, "unix path too long", method);
         return false;
     }
     std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
     if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        ::close(fd);
         err = MakeCapabilityError(kErrHelperDown, "capabilityd unix connect failed", method);
         return false;
     }
@@ -401,13 +401,12 @@ bool CallCapabilityUnix(const std::string& socket_path, const std::string& metho
     req.pushKV("params", params);
     const std::string wire = req.write() + "\n";
     if (::send(fd, wire.data(), wire.size(), 0) < 0) {
-        ::close(fd);
         err = MakeCapabilityError(kErrHelperDown, "unix write", method);
         return false;
     }
     ::shutdown(fd, SHUT_WR);
     const std::string raw = RecvLine(fd);
-    ::close(fd);
+    connection = Sock{INVALID_SOCKET};
     UniValue reply;
     if (!reply.read(raw) || !reply.isObject()) {
         err = MakeCapabilityError(kErrHelperDown, "capabilityd reply json", method);

@@ -1,0 +1,10 @@
+swarm_stagehead/active.cpp
+swarm_stagehead/candidate.cpp
+swarm_stagehead/memory.cpp
+swarm_stagehead/stage.cpp
+swarm_stagehead/adopt.cpp
+swarm_stagehead/rollback.cpp
+swarm_stagehead/regress.cpp
+swarm_stagehead/pin.cpp
+swarm_stagehead/realm.cpp
+swarm_stagehead/stagehead.cpp

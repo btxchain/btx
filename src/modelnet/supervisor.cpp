@@ -7,6 +7,7 @@
 #include <logging.h>
 #include <modelnet/helper.h>
 #include <modelnet/profile.h>
+#include <tinyformat.h>
 #include <univalue.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
@@ -144,8 +145,13 @@ std::vector<std::string> BuildHelperArgv(const HelperLaunchConfig& cfg)
     argv.push_back("-modelstorage=" + (cfg.storage_arg.empty() ? std::string("auto") : cfg.storage_arg));
     argv.push_back("-modelseed=" + (cfg.seed.empty() ? std::string("auto") : cfg.seed));
     if (!cfg.bind.empty()) argv.push_back("-modelbind=" + cfg.bind);
+    if (!cfg.bind.empty() && !cfg.natpmp) argv.push_back("-modelnatpmp=0");
     if (cfg.preserve_rare) argv.push_back("-modelpreserverare");
     if (!cfg.follow_peers) argv.push_back("-modelfollowpeers=0");
+    if (!cfg.lan_discovery) argv.push_back("-modellandiscovery=0");
+    for (const auto& proxy : cfg.proxies) argv.push_back("-modelproxy=" + proxy);
+    if (!cfg.proxies.empty() && !cfg.proxy_randomize) argv.push_back("-modelproxyrandomize=0");
+    for (const auto& net : cfg.onlynets) argv.push_back("-modelonlynet=" + net);
     for (const auto& peer : cfg.peers) {
         if (!peer.empty()) argv.push_back("-modelpeer=" + peer);
     }
@@ -367,6 +373,7 @@ bool HelperSupervisor::SpawnLocked(std::string& err)
         err = "posix_spawn_file_actions_init";
         return false;
     }
+    posix_spawnattr_t* attrp{nullptr};
 #if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
     // Do not leak btxd's descriptors (P2P/RPC listen sockets, datadir locks,
     // log files) into the helper. A leaked listen socket outlives a crashed
@@ -376,9 +383,29 @@ bool HelperSupervisor::SpawnLocked(std::string& err)
         err = "posix_spawn_file_actions_addclosefrom_np";
         return false;
     }
+#elif defined(__APPLE__)
+    // Same on macOS, which has no closefrom file action: POSIX_SPAWN_CLOEXEC_DEFAULT
+    // closes every descriptor that no file action names, so name 0, 1 and 2.
+    posix_spawnattr_t attr;
+    if (posix_spawnattr_init(&attr) != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        err = "posix_spawnattr_init";
+        return false;
+    }
+    attrp = &attr;
+    if (posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT) != 0 ||
+        posix_spawn_file_actions_addinherit_np(&actions, STDIN_FILENO) != 0 ||
+        posix_spawn_file_actions_addinherit_np(&actions, STDOUT_FILENO) != 0 ||
+        posix_spawn_file_actions_addinherit_np(&actions, STDERR_FILENO) != 0) {
+        posix_spawnattr_destroy(&attr);
+        posix_spawn_file_actions_destroy(&actions);
+        err = "posix_spawn CLOEXEC_DEFAULT";
+        return false;
+    }
 #endif
     pid_t pid = -1;
-    const int rc = posix_spawn(&pid, fs::PathToString(m_cfg.helper_exe).c_str(), &actions, nullptr, argv.data(), envp.data());
+    const int rc = posix_spawn(&pid, fs::PathToString(m_cfg.helper_exe).c_str(), &actions, attrp, argv.data(), envp.data());
+    if (attrp) posix_spawnattr_destroy(attrp);
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) {
         err = std::strerror(rc);
@@ -601,6 +628,23 @@ bool HelperSupervisor::Start(std::string& err)
         // START-03: never start a spawn loop that could pick up a packaged substitute.
         return true;
     }
+#ifndef WIN32
+    if (const std::string sock = fs::PathToString(m_cfg.rpc_socket);
+        !m_cfg.external_socket && sock.size() >= sizeof(sockaddr_un::sun_path)) {
+        // UnixRpcListenPath() found no short private directory. The helper
+        // could never bind this path, so do not start a loop that respawns
+        // it every 15 seconds.
+        err = strprintf("helper socket path %s is %u bytes, over the %u-byte limit; set XDG_RUNTIME_DIR to a private directory or use a shorter -datadir",
+                        sock, sock.size(), sizeof(sockaddr_un::sun_path) - 1);
+        std::lock_guard<std::mutex> lock(m_mu);
+        m_st.state = HelperState::FAILED_RETRYING;
+        m_st.error = err;
+        m_st.managed_by_btxd = true;
+        if (m_cfg.required) return false;
+        LogPrintf("model helper: %s; monetary node continues\n", err);
+        return true;
+    }
+#endif
     m_stop.store(false);
     m_thread = std::thread([this] { Loop(); });
     if (m_cfg.required) {

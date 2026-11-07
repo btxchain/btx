@@ -1,0 +1,20 @@
+[
+  {
+    "id": "P2P-SCN-B",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "lan01 refuses a manual address; regtest has no seed so an empty peer list is not discovery"
+  },
+  {
+    "id": "P2P-SCN-C",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "lan01 requires internet_up false and two peers; this host test does not remove the internet"
+  },
+  {
+    "id": "P2P-SCN-E",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "lan01 records bootstrap loss only when a peer remains"
+  }
+]

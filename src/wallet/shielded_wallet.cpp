@@ -1228,7 +1228,7 @@ bool AppendOutputChunkViews(ShieldedTxView& tx_view,
     if (keypair.sk.size() != mlkem::SECRETKEYBYTES) return false;
     const auto enc = mlkem::Encaps(keypair.pk);
     const auto dec = mlkem::Decaps(enc.ct, keypair.sk);
-    return dec == enc.ss;
+    return dec && *dec == enc.ss;
 }
 
 [[nodiscard]] bool EncryptWithWalletKey(const CWallet& wallet,
@@ -1725,7 +1725,9 @@ bool ShieldedAddressLifecycle::IsValid() const
 CShieldedWallet::CShieldedWallet(CWallet& parent_wallet)
     : m_parent_wallet(parent_wallet)
 {
-    LOCK(cs_shielded);
+    // LoadPersistedState() takes cs_wallet; take it first so the order
+    // does not depend on the caller (AttachChain already holds it).
+    LOCK2(m_parent_wallet.cs_wallet, cs_shielded);
     LoadPersistedState();
     CatchUpToChainTip();
 }

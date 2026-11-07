@@ -55,9 +55,8 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
     uint256 wtxid = tx->GetWitnessHash();
     bool callback_set = false;
     int active_height{0};
-    // Set before ProcessTransaction so TransactionAddedToMempool observes the
-    // embargo. The validation callback is queued inside mempool acceptance and
-    // can run before this function would otherwise reach its relay step.
+    // Set under cs_main right after the mempool add, before any inventory can
+    // be sent (see below).
     bool stemmed = false;
     std::optional<NodeId> stem_dest;
 
@@ -107,9 +106,21 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
                     }
                 }
             }
-            // Enter the stempool before acceptance notifies peers. Doing it
-            // afterwards loses the race to TransactionAddedToMempool, which
-            // would queue a normal inv from the originator.
+            // Try to submit the transaction to the mempool.
+            const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ false, ignore_rejects);
+            if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
+                return HandleATMPError(result.m_state, err_string);
+            }
+
+            // Transaction was accepted to the mempool.
+
+            // Enter the stempool now, before cs_main is released. The mempool
+            // add may already have queued an inv (TransactionAddedToMempool),
+            // but SendMessages holds cs_main while it announces and skips a
+            // transaction that is in the stempool, so that inv never goes
+            // out. Entering before the mempool add would leave a rejected
+            // transaction in the stem bloom filter, and a retry of the same
+            // transaction would then be announced instead of stemmed.
             active_height = node.chainman->ActiveHeight();
             if (relay && node.dandelion && node.dandelion->IsActive(active_height)) {
                 const size_t tx_size = ::GetSerializeSize(TX_WITH_WITNESS(tx));
@@ -119,19 +130,6 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
                     stem_dest = dest;
                 }
             }
-
-            // Try to submit the transaction to the mempool.
-            const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ false, ignore_rejects);
-            if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
-                if (stemmed) {
-                    node.dandelion->RemoveFromStemPool(txid);
-                    stemmed = false;
-                    stem_dest.reset();
-                }
-                return HandleATMPError(result.m_state, err_string);
-            }
-
-            // Transaction was accepted to the mempool.
 
             if (wait_callback && node.validation_signals) {
                 // For transactions broadcast from outside the wallet, make sure

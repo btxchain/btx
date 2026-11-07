@@ -1,0 +1,26 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/license/mit/.
+
+#ifndef BITCOIN_MODELNET_SWARM_GUESTHOLD_KEEP_H
+#define BITCOIN_MODELNET_SWARM_GUESTHOLD_KEEP_H
+
+#include <modelnet/swarm_guesthold/book.h>
+
+#include <string>
+
+namespace modelnet {
+
+/**
+ * Reads the name already stored.
+ * An unknown name reads as empty. This function does not write the book,
+ * does not pass the check, and does not log the agent in.
+ */
+class SwarmGuestHoldKeep {
+public:
+    std::string first(const SwarmGuestHoldBook& book, const std::string& name) const;
+};
+
+} // namespace modelnet
+
+#endif // BITCOIN_MODELNET_SWARM_GUESTHOLD_KEEP_H

@@ -611,7 +611,13 @@ bool Submit(ModelCatalog& cat, const UniValue& params, UniValue& result, std::st
     std::vector<Quote> quotes;
     std::vector<PaymentJournal> journal;
     const fs::path dir = HelperRoot(cat);
-    LoadPaymentState(dir, quotes, journal, err);
+    std::lock_guard<std::mutex> payment_lock(PaymentStateMutex());
+    // An unreadable quotes.json still holds the earlier txids; saving over it
+    // would report each of them as a new submission.
+    if (!LoadPaymentState(dir, quotes, journal, err)) {
+        err_code = "IO";
+        return false;
+    }
     const bool duplicate = DuplicatePayment(journal, txid);
     if (!duplicate) {
         PaymentJournal e;

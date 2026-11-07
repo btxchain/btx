@@ -80,7 +80,7 @@ status_event() {
   [[ -n "$BTX_STATUS_FILE" ]] || return 0
   local stage="$1" state="$2" detail="${3:-}"
   mkdir -p "$(dirname "$BTX_STATUS_FILE")" 2>/dev/null || return 0
-  python3 - "$BTX_STATUS_FILE" "$stage" "$state" "$detail" "$BTX_STATUS_VERSION" "$BTX_STATUS_COMMIT" "$$" <<'PY' 2>/dev/null || true
+  python3 -I - "$BTX_STATUS_FILE" "$stage" "$state" "$detail" "$BTX_STATUS_VERSION" "$BTX_STATUS_COMMIT" "$$" <<'PY' 2>/dev/null || true
 import json, sys, time
 path, stage, state, detail, version, commit, pid = sys.argv[1:8]
 rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "pid": int(pid),
@@ -151,7 +151,7 @@ acquire_lock() {
 require_free_space() {
   local path="$1"
   mkdir -p "$path"
-  python3 - "$path" "$BTX_MIN_FREE_GB" <<'PY' || die "insufficient free disk space for the update build"
+  python3 -I - "$path" "$BTX_MIN_FREE_GB" <<'PY' || die "insufficient free disk space for the update build"
 import os, sys
 path, min_gb = sys.argv[1], float(sys.argv[2])
 try:
@@ -170,7 +170,7 @@ PY
 prune_old_releases() {
   local release_root="$1"
   [[ -d "$release_root" ]] || return 0
-  python3 - "$release_root" "$BTX_INSTALL_ROOT/current" "$BTX_RELEASE_RETENTION" <<'PY' || true
+  python3 -I - "$release_root" "$BTX_INSTALL_ROOT/current" "$BTX_RELEASE_RETENTION" <<'PY' || true
 import os, sys, shutil
 root, current_link, keep = sys.argv[1], sys.argv[2], int(sys.argv[3])
 try:
@@ -199,7 +199,7 @@ prune_build_cache() {
   if [[ -d "$worktree_root" ]]; then
     local -a entries=()
     while IFS= read -r entry; do entries+=("$entry"); done < <(
-      python3 - "$worktree_root" "$BTX_RELEASE_RETENTION" "$keep_key" <<'PY'
+      python3 -I - "$worktree_root" "$BTX_RELEASE_RETENTION" "$keep_key" <<'PY'
 import os, sys
 root, keep, keep_key = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 dirs = [(os.path.getmtime(os.path.join(root, n)), n)
@@ -235,7 +235,7 @@ default_jobs() {
   # so -j$(nproc) OOM-kills small nodes mid-build. Allow ~one job per 2 GiB of total RAM. Portable
   # (SC_PHYS_PAGES works on Linux + macOS); falls back to cpu count if anything is unavailable.
   if command -v python3 >/dev/null 2>&1; then
-    python3 - <<'PY' 2>/dev/null && return 0
+    python3 -I - <<'PY' 2>/dev/null && return 0
 import os
 cpus = os.cpu_count() or 4
 try:
@@ -289,7 +289,7 @@ with_telemetry_query() {
 json_field() {
   local key="$1"
   local default_value="${2:-}"
-  python3 -c '
+  python3 -I -c '
 import json
 import sys
 
@@ -533,7 +533,7 @@ EOF
 # Try to install a signed prebuilt release matching this platform. Returns 0 on success (release_dir
 # populated + binaries verified), 1 if no usable prebuilt was found/verified (caller source-builds).
 # Trust is anchored by the SAME release-signature scheme as the manifest (PQ via btx-util, or
-# classical via openssl), plus an optional sha256 from the signed manifest.
+# classical via openssl), plus the sha256 from the signed manifest, which is required.
 try_install_prebuilt() {
   local manifest_path="$1" version="$2" release_dir="$3" expected_commit="$4" release_pub_path="$5"
   [[ "${BTX_PREFER_PREBUILT:-1}" == "1" ]] || return 1
@@ -551,12 +551,21 @@ try_install_prebuilt() {
     require_trusted_url "$url" "prebuilt.${key}.url"
     require_trusted_url "$sig_url" "prebuilt.${key}.sig_url"
 
+    # The artifact signature covers only SHA256(tarball): it names no version, commit or
+    # platform, so any tarball ever signed with the release key verifies. Only the sha256
+    # inside the signed manifest binds the artifact to this release; without it, skip the
+    # artifact before downloading it and build from source (bound to git_commit) instead.
+    if [[ -z "$sha256" || "$sha256" == "null" ]]; then
+      warn "prebuilt for $key has no sha256 in the signed manifest; ignoring this artifact"
+      continue
+    fi
+
     tarball="$BTX_TMPDIR/prebuilt-${key}.tar.gz"
     sig="$BTX_TMPDIR/prebuilt-${key}.sig"
     curl -fsSL "$(with_telemetry_query "$url")" -o "$tarball" || { warn "prebuilt download failed ($key); will try next/source"; continue; }
     curl -fsSL "$(with_telemetry_query "$sig_url")" -o "$sig" || { warn "prebuilt signature download failed ($key)"; continue; }
 
-    if [[ -n "$sha256" && "$sha256" != "null" ]] && ! verify_sha256 "$tarball" "$sha256"; then
+    if ! verify_sha256 "$tarball" "$sha256"; then
       warn "prebuilt sha256 mismatch ($key); ignoring this artifact"
       continue
     fi
@@ -642,7 +651,7 @@ highest_accepted_version_file() {
 # 2 when either string is not a version. Ordering matches the node's
 # CompareAutoUpdateVersionStrings.
 version_compare_older() {
-  python3 - "$1" "$2" <<'PY'
+  python3 -I - "$1" "$2" <<'PY'
 import sys
 
 def parse_version(raw):
@@ -771,7 +780,7 @@ pid_is_numeric() {
 }
 
 normalize_path() {
-  python3 - "$1" <<'PY'
+  python3 -I - "$1" <<'PY'
 import os
 import sys
 
@@ -797,7 +806,7 @@ process_is_zombie() {
 
 process_fingerprint() {
   local pid="$1"
-  python3 - "$pid" <<'PY'
+  python3 -I - "$pid" <<'PY'
 import os
 import subprocess
 import sys
@@ -1037,7 +1046,7 @@ target_note_pid() {
 
 extract_runtime_flags() {
   local pid="$1"
-  python3 - "$pid" <<'PY'
+  python3 -I - "$pid" <<'PY'
 import shlex
 import subprocess
 import sys
@@ -1249,7 +1258,7 @@ swap_symlink() {
   local target_path="$1"
   local link_path="$2"
   mkdir -p "$(dirname "$link_path")"
-  python3 - "$target_path" "$link_path" <<'PY'
+  python3 -I - "$target_path" "$link_path" <<'PY'
 import os
 import sys
 
@@ -1505,6 +1514,13 @@ main() {
   [[ -n "$version" ]] || die "manifest did not contain a version"
   [[ -n "$repo_url" ]] || die "manifest did not contain repo_url"
   [[ -n "$script_url" ]] || die "manifest did not contain script_url"
+  # A btxd that does not pin the manifest (0.34.15 and older) still exports the
+  # version it verified. Never install a different one: this fetch may return
+  # an older, validly signed manifest.
+  if [[ -z "$BTX_PINNED_MANIFEST_PATH" && -n "${BTX_AUTOUPDATE_REMOTE_VERSION:-}" ]]; then
+    [[ "$version" == "$BTX_AUTOUPDATE_REMOTE_VERSION" ]] \
+      || die "refusing manifest version ${version}: the node verified ${BTX_AUTOUPDATE_REMOTE_VERSION}"
+  fi
   enforce_highest_accepted_version "$version"
   BTX_STATUS_VERSION="$version"
 

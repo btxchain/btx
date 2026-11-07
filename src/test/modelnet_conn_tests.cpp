@@ -10,13 +10,16 @@
 #include <modelnet/provider_route.h>
 #include <modelnet/reachability.h>
 #include <modelnet/relay_reserve.h>
+#include <netbase.h>
 #include <test/util/setup_common.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_conn_tests, BasicTestingSetup)
@@ -189,6 +192,62 @@ BOOST_AUTO_TEST_CASE(conn_nat_01_to_09)
     ReachabilityTracker t;
     t.SetMapped("198.51.100.9:29447");
     BOOST_CHECK(!t.MayAdvertiseHost(true));
+}
+
+BOOST_AUTO_TEST_CASE(conn_dial_route_follows_onlynet)
+{
+    using namespace modelnet;
+    // This process sets no proxy. Restore btxd's default reachable networks afterwards.
+    const auto reachable_before{g_reachable_nets.All()};
+    struct Restore {
+        const std::unordered_set<Network>& nets;
+        ~Restore()
+        {
+            g_reachable_nets.RemoveAll();
+            for (const Network net : nets) g_reachable_nets.Add(net);
+        }
+    } restore{reachable_before};
+    const std::string onion{"pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion"};
+    Proxy proxy;
+    std::optional<CNetAddr> numeric;
+    std::string err;
+    auto route = [&](const std::string& host, bool manual) { return RouteModelDial(host, manual, proxy, numeric, err); };
+
+    // No proxy: IP and named peers are dialed directly; onion hosts never reach the resolver.
+    BOOST_CHECK(route("240.0.0.1", /*manual=*/false) == ModelDialRoute::DIRECT);
+    BOOST_CHECK(numeric && numeric->IsIPv4());
+    BOOST_CHECK(route("modelpeer.invalid", /*manual=*/false) == ModelDialRoute::DIRECT);
+    BOOST_CHECK(!numeric);
+    BOOST_CHECK(route(onion, /*manual=*/true) == ModelDialRoute::REFUSED);
+    BOOST_CHECK(numeric && numeric->IsTor());
+    BOOST_CHECK(route("not-a-v3-address.onion", /*manual=*/true) == ModelDialRoute::REFUSED);
+    BOOST_CHECK(!numeric);
+
+    // -onlynet=onion: automatic dials to other networks are refused, an operator-named peer is not.
+    BOOST_REQUIRE_MESSAGE(ApplyModelOutboundArgs({}, /*randomize_credentials=*/true, {"onion"}, err), err);
+    BOOST_CHECK(route("240.0.0.1", /*manual=*/false) == ModelDialRoute::REFUSED);
+    BOOST_CHECK(route("1233:3432:2434:2343:3234:2345:6546:4534", /*manual=*/false) == ModelDialRoute::REFUSED);
+    BOOST_CHECK(route("modelpeer.invalid", /*manual=*/false) == ModelDialRoute::REFUSED);
+    BOOST_CHECK(route("10.0.0.1", /*manual=*/false) == ModelDialRoute::REFUSED);
+    BOOST_CHECK(route("240.0.0.1", /*manual=*/true) == ModelDialRoute::DIRECT);
+    BOOST_CHECK(route("127.0.0.1", /*manual=*/true) == ModelDialRoute::DIRECT);
+
+    // Bad arguments are rejected and leave the networks as they were.
+    BOOST_CHECK(!ApplyModelOutboundArgs({}, true, {"onion", "nonet"}, err));
+    BOOST_CHECK(!ApplyModelOutboundArgs({"127.0.0.1:9050=nonet"}, true, {}, err));
+    BOOST_CHECK(!ApplyModelOutboundArgs({"127.0.0.1:9050"}, true, {}, err));
+    BOOST_CHECK(!ApplyModelOutboundArgs({"no-such-host=ipv4"}, true, {}, err));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_ONION));
+    BOOST_CHECK(!g_reachable_nets.Contains(NET_IPV4));
+    BOOST_CHECK(!GetProxy(NET_IPV4, proxy));
+    BOOST_CHECK(!GetNameProxy(proxy));
+
+    // -onlynet=ipv4: a private IPv4 (LAN) peer is still an IPv4 peer.
+    BOOST_REQUIRE_MESSAGE(ApplyModelOutboundArgs({}, /*randomize_credentials=*/true, {"ipv4"}, err), err);
+    BOOST_CHECK(route("10.0.0.1", /*manual=*/false) == ModelDialRoute::DIRECT);
+    BOOST_CHECK(route("240.0.0.1", /*manual=*/false) == ModelDialRoute::DIRECT);
+    BOOST_CHECK(route("1233:3432:2434:2343:3234:2345:6546:4534", /*manual=*/false) == ModelDialRoute::REFUSED);
+    BOOST_CHECK(route("fd00::1", /*manual=*/false) == ModelDialRoute::REFUSED);
 }
 
 BOOST_AUTO_TEST_CASE(conn_rly_01_to_10)

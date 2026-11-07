@@ -192,8 +192,27 @@ bool Cr11Tco(const std::string& annual_tasks, const std::string& service_per_tas
     out.pushKV("local", FormatDec18(local));
     out.pushKV("difference", FormatDec18(external - local));
     if (unit > 0 && years > 0) {
-        const __int128 be = local * scale / (unit * years);
-        out.pushKV("break_even_annual_tasks", FormatDec18(be));
+        // break_even = local / (unit * years), at 1e18. local and unit both
+        // carry the 1e18 scale already, so local * scale would carry 1e36 and
+        // overflow __int128 for ordinary inputs. Divide first and build the 18
+        // fractional digits by long division: the result is the same floor.
+        // Inputs too large to represent give null, as below, instead of
+        // wrapping.
+        const __int128 kMax = std::numeric_limits<__int128>::max();
+        UniValue be;
+        if (local >= 0 && unit <= kMax / 10 / years) {
+            const __int128 denom = unit * years;
+            const __int128 whole = local / denom;
+            __int128 rem = local % denom;
+            __int128 frac = 0;
+            for (int i = 0; i < 18; ++i) {
+                rem *= 10;
+                frac = frac * 10 + rem / denom;
+                rem %= denom;
+            }
+            if (whole <= (kMax - frac) / scale) be = UniValue(FormatDec18(whole * scale + frac));
+        }
+        out.pushKV("break_even_annual_tasks", be);
     } else {
         out.pushKV("break_even_annual_tasks", UniValue());
     }

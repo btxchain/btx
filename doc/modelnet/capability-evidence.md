@@ -1,6 +1,7 @@
 # Capability evidence (0.34.9)
 
-**Status:** 0.34.9-dev. `CLIENT_VERSION_IS_RELEASE=false`. This is the **run**
+**Status:** this tree is **0.35.0rc1**. The last shipping tag remains
+**v0.34.15**. This is the **run**
 question: *can this verified artifact execute here?* It is not a vendor name,
 not a Hugging Face `pipeline_tag`, not a vendor marketing tier, and not a
 reason to collapse identity into a registry.

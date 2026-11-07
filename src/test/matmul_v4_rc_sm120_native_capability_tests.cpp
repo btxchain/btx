@@ -13,6 +13,7 @@
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -66,9 +67,9 @@ struct EnvRestore {
     ~EnvRestore()
     {
         if (prior) {
-            setenv(name.c_str(), prior->c_str(), /*overwrite=*/1);
+            test::SetEnv(name.c_str(), prior->c_str());
         } else {
-            unsetenv(name.c_str());
+            test::UnsetEnv(name.c_str());
         }
     }
 };
@@ -223,12 +224,12 @@ BOOST_AUTO_TEST_CASE(rc_sm120_env_vars_do_not_advertise_native)
     EnvRestore r5("BTX_RC_OZAKI_FORCE_NATIVE");
     EnvRestore r6("BTX_MATMUL_V4_BACKEND");
 
-    setenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", "1", /*overwrite=*/1);
-    setenv("BTX_RC_ACCEL_POLICY", "native_mxfp4", /*overwrite=*/1);
-    setenv("BTX_RC_GKR_ARBITER", "1", /*overwrite=*/1);
-    setenv("BTX_CUDA_SM120_MXFP4_NATIVE", "1", /*overwrite=*/1);
-    setenv("BTX_RC_OZAKI_FORCE_NATIVE", "1", /*overwrite=*/1);
-    setenv("BTX_MATMUL_V4_BACKEND", "cuda", /*overwrite=*/1);
+    test::SetEnv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", "1");
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "native_mxfp4");
+    test::SetEnv("BTX_RC_GKR_ARBITER", "1");
+    test::SetEnv("BTX_CUDA_SM120_MXFP4_NATIVE", "1");
+    test::SetEnv("BTX_RC_OZAKI_FORCE_NATIVE", "1");
+    test::SetEnv("BTX_MATMUL_V4_BACKEND", "cuda");
 
     // Arbiter env cannot enable EnvRCGkrArbiterEnabled while hard-disabled, and
     // must never imply native MX. Heights / DC levers remain compile-time;
@@ -248,7 +249,7 @@ BOOST_AUTO_TEST_CASE(rc_sm120_env_vars_do_not_advertise_native)
     }
 
     // Restoring env happens in EnvRestore dtors; confirm native still honest after.
-    unsetenv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
 }
 

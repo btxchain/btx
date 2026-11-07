@@ -94,9 +94,13 @@ cp share/examples/btx.conf ~/.btx
 ## Native Model Network (`btxd` bridge)
 
 Model-plane options are optional for consensus. A validating node does not
-need them. Packaged `btxd` **does** start `btx-modeld` by default
-(`modelnet=1`). Disable with `modelnet=0`. If the helper dies, model RPCs
-fail closed and the chain continues. Set `modelrpcsocket=` to attach to an
+need them. If the `btx-modeld` binary is present (next to `btxd`, in
+`libexec/`, or at `modelhelper=<path>`), `btxd` **does** start it by default
+(`modelnet=1`); without it, `btxd` logs that and runs without the helper.
+Disable with `modelnet=0`. If the helper dies, model RPCs
+fail closed and the chain continues. With the model network on, `btxd` also
+starts the swarm observer in this process. There is no separate swarm program
+to launch. Set `modelrpcsocket=` to attach to an
 already-running helper instead of spawning.
 
 Copy and edit the dedicated example (not the generated `share/examples/btx.conf`):
@@ -109,6 +113,7 @@ cp share/examples/modelnet.conf.example ~/.btx/modelnet.conf
 | Option | Role |
 |---|---|
 | `modelnet=1` | Enable the model network. Packaged default **on**. `modelnet=0` disables the helper. |
+| `modelbind=<ip:port>` | PQ1 listen address of the helper `btxd` starts. Default: port 29447 on all interfaces. `0`, `off` or `none` = unix RPC socket only (loopback port 29447 if hosting is on). |
 | `modelrpcsocket=<path>` | Unix socket for helper JSON-RPC (default `<datadir>/modelnet/modeld.sock`). If set, `btxd` does not spawn or kill that helper. |
 | `modelrelay=1` | CPU-only model discovery relay hint; default **off**. Not monetary AddrMan. |
 | `modelhost=1` | Advertise a public model-serving hint only after proven reachability. Default **off**. |
@@ -116,8 +121,9 @@ cp share/examples/modelnet.conf.example ~/.btx/modelnet.conf
 | `resourcegovernor=auto` | Local spare-capacity policy. Never consensus, never auto-spend. |
 | `automining=0` | Idle-schedule mining only after mining is already enabled. Default off. |
 
-Helper-only flags (`modeldir`, `modelstorage`/`modelcache`, `modelseed`,
-`modelpreserverare`, `modelbind`, `modeltransport=pq1`,
-`modeltlscert`, `modeltlskey`, …) belong on the **`btx-modeld`** command line.
+`btxd` also accepts `modeldir`, `modelstorage`, `modelseed`,
+`modelpreserverare` and `modelbind`, and passes them to the helper it starts.
+Helper-only flags (`modelcache`, `modeltransport=pq1`, `modeltlscert`,
+`modeltlskey`, …) belong on a separately run **`btx-modeld`** command line.
 See [share/examples/modelnet.conf.example](../share/examples/modelnet.conf.example)
 and [modelnet/architecture.md](modelnet/architecture.md).

@@ -1,0 +1,11 @@
+swarm_islandgate/blank.cpp
+swarm_islandgate/fresh.cpp
+swarm_islandgate/record.cpp
+swarm_islandgate/roster.cpp
+swarm_islandgate/replay.cpp
+swarm_islandgate/kind.cpp
+swarm_islandgate/gate.cpp
+swarm_islandgate/admit.cpp
+swarm_islandgate/exchange.cpp
+swarm_islandgate/quiet.cpp
+swarm_islandgate/swarm_islandgate.cpp

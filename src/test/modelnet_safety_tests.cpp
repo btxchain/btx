@@ -15,12 +15,20 @@
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <ctime>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
+
+#ifndef WIN32
+#include <csignal>
+#include <sys/resource.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_safety_tests, BasicTestingSetup)
 
@@ -114,6 +122,58 @@ BOOST_AUTO_TEST_CASE(unpinned_advisory_is_warning_only)
     BOOST_CHECK(!modelnet::SubscribedWarningIsAutomaticDeny());
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(failed_advisory_write_keeps_previous_advisories)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-full-disk";
+    modelnet::GlobalSafety().Bind(tmp);
+    const std::string first(96, 'a');
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(first, modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "first", 0, err));
+    const fs::path ads = tmp / "safety_advisories.json";
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    };
+    const std::string before{read(ads)};
+
+    // Leave room for the publishers file but not for the advisories with a
+    // second entry, as a full disk would. The bytes stay in the stream buffer
+    // until close. SIGXFSZ is ignored so the write fails with EFBIG.
+    struct rlimit old_limit;
+    BOOST_REQUIRE(getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit cap{old_limit};
+    cap.rlim_cur = before.size() / 2;
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(setrlimit(RLIMIT_FSIZE, &cap) == 0);
+    const bool saved{modelnet::GlobalSafety().LocalReport(std::string(96, 'b'), modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "second", 0, err)};
+    BOOST_REQUIRE(setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    BOOST_CHECK(!saved);
+    BOOST_CHECK(read(ads) == before);
+    BOOST_CHECK(!fs::exists(tmp / "safety_advisories.json.tmp"));
+    // After a restart the first model is still blocked.
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(first));
+}
+
+BOOST_AUTO_TEST_CASE(failed_advisory_rename_removes_temp_file)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-rename";
+    // A directory at the target path makes the rename fail after the temp file is written.
+    fs::create_directories(tmp / "safety_advisories.json");
+    modelnet::GlobalSafety().Bind(tmp);
+    std::string err;
+    BOOST_CHECK(!modelnet::GlobalSafety().LocalReport(std::string(96, 'a'), modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "first", 0, err));
+    BOOST_CHECK_EQUAL(err, "rename safety");
+    BOOST_CHECK(!fs::exists(tmp / "safety_advisories.json.tmp"));
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(pinned_publisher_advisory_blocks_and_unseeds)
 {
     SafetyReset reset;
@@ -153,6 +213,70 @@ BOOST_AUTO_TEST_CASE(pinned_publisher_advisory_blocks_and_unseeds)
 
     std::string serr;
     BOOST_CHECK(!cat.Seed(imported.model_id, true, serr));
+}
+
+BOOST_AUTO_TEST_CASE(full_record_cache_does_not_stop_pinned_takedown)
+{
+    // records/announce and ext/objects/announce cache records that any peer
+    // signs with its own key, and records.json restores the cache after a
+    // restart. Start from a cache that is full until 2100.
+    for (const std::string route : {"records/announce", "ext/objects/announce"}) {
+        SafetyReset reset;
+        const fs::path tmp = m_path_root / fs::PathFromString("safety-full-cache-" + std::to_string(route.size()));
+        modelnet::ModelCatalog cat{tmp, 1 << 20};
+        modelnet::EnsureSafetyBound(tmp);
+        const auto imported = ImportTiny(cat);
+        BOOST_REQUIRE(imported.seeded);
+        UniValue held(UniValue::VARR);
+        for (uint32_t i = 0; i < 4096; ++i) {
+            unsigned char id[48]{};
+            WriteLE32(id, i);
+            UniValue o(UniValue::VOBJ);
+            o.pushKV("record_id", HexStr(id));
+            o.pushKV("kind", modelnet::RECORD_COLLECTION);
+            o.pushKV("expiry", int64_t{4102444800});
+            o.pushKV("payload_hex", "00");
+            held.push_back(o);
+        }
+        {
+            std::ofstream out(tmp / "records.json");
+            out << held.write();
+        }
+
+        std::vector<unsigned char> pk, sk;
+        std::string err;
+        BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+        const auto pub = modelnet::ResearchIdentityId(pk);
+        BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub.Hex(), "vendor", err));
+        UniValue body(UniValue::VOBJ);
+        modelnet::FillRecordCommon(body, 1, pub, static_cast<int64_t>(std::time(nullptr)), modelnet::DAY_SECONDS);
+        body.pushKV("target_kind", modelnet::SAFETY_TARGET_MODEL);
+        body.pushKV("target_id", imported.model_id.Hex());
+        body.pushKV("severity", modelnet::SAFETY_MALWARE);
+        body.pushKV("reason_code", 1);
+        body.pushKV("content_sha384", std::string(96, '0'));
+        body.pushKV("note", "malware");
+        std::vector<unsigned char> payload, sig;
+        modelnet::Digest48 rid;
+        BOOST_REQUIRE(modelnet::SignTypedRecord(modelnet::RECORD_SAFETY_ADVISORY, body, sk, payload, sig, rid, err));
+        UniValue env(UniValue::VOBJ);
+        env.pushKV("kind", modelnet::RECORD_SAFETY_ADVISORY);
+        env.pushKV("payload_hex", HexStr(payload));
+        env.pushKV("sig_hex", HexStr(sig));
+        env.pushKV("pubkey_hex", HexStr(pk));
+        modelnet::NativeRequest nreq;
+        nreq.method = "POST";
+        nreq.path = "/btx-model/2/" + route;
+        nreq.body = env.write();
+        modelnet::NativeResponse nresp;
+        BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+        BOOST_TEST_MESSAGE(route << ": " << nresp.status << " " << nresp.body);
+
+        BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(imported.model_id.Hex()));
+        modelnet::CatalogEntry after;
+        BOOST_REQUIRE(cat.Find(imported.model_id, after));
+        BOOST_CHECK(!after.seeded);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(safety_advisory_rejects_provider_signer_class)

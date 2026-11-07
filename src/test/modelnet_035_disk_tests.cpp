@@ -15,6 +15,7 @@
 #include <util/string.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdlib>
 #include <fstream>
@@ -47,9 +48,9 @@ struct LabDirEnv {
     void Point(const fs::path& dir)
     {
         const std::string text = PathToString(dir);
-        ::setenv("BTX035_LAB_DIR", text.c_str(), 1);
+        test::SetEnv("BTX035_LAB_DIR", text.c_str());
     }
-    ~LabDirEnv() { ::unsetenv("BTX035_LAB_DIR"); }
+    ~LabDirEnv() { test::UnsetEnv("BTX035_LAB_DIR"); }
 };
 
 bool LabCall(const char* method, const UniValue& request, UniValue& result, std::string& err)
@@ -176,7 +177,7 @@ BOOST_AUTO_TEST_CASE(guard_line_is_one_use_and_refuses_spend)
     const std::string executed = GuardHandleLine(table, "EXECUTE " + secret, 1000);
     BOOST_CHECK(executed.rfind("RECEIPT ", 0) == 0);
     BOOST_CHECK(executed.size() > std::string("RECEIPT ").size());
-    BOOST_CHECK_EQUAL(executed.substr(executed.size() - std::string(" EXECUTED STOPPED_QUIESCENT").size()), " EXECUTED STOPPED_QUIESCENT");
+    BOOST_CHECK_EQUAL(executed.substr(executed.size() - std::string(" PERMIT_CONSUMED NOT_DISPATCHED").size()), " PERMIT_CONSUMED NOT_DISPATCHED");
 
     BOOST_CHECK_EQUAL(GuardHandleLine(table, "EXECUTE " + secret, 1000), "ERR BTX035_REPLAY");
     BOOST_CHECK_EQUAL(GuardHandleLine(table, "PREPARE spend " + std::string(96, 'b') + " 1", 1000), "ERR BTX035_SCOPE_DENIED");
@@ -189,7 +190,7 @@ BOOST_AUTO_TEST_CASE(guard_line_is_one_use_and_refuses_spend)
 BOOST_AUTO_TEST_CASE(lab_directory_reloads_a_realm_and_a_second_directory_does_not)
 {
     BOOST_REQUIRE(!m_path_root.empty());
-    ::unsetenv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX035_LAB_DIR");
     modelnet::ResetLabApi();
 
     TempTree first{m_path_root / "btx035-lab-disk" / "a"};
@@ -254,7 +255,7 @@ BOOST_AUTO_TEST_CASE(lab_directory_reloads_a_realm_and_a_second_directory_does_n
 
 BOOST_AUTO_TEST_CASE(snapshot_carries_a_public_negative_row_and_drops_a_private_row)
 {
-    ::unsetenv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX035_LAB_DIR");
     modelnet::ResetLabApi();
     std::string err;
     UniValue identity(UniValue::VOBJ);
@@ -369,8 +370,8 @@ BOOST_AUTO_TEST_CASE(snapshot_carries_a_public_negative_row_and_drops_a_private_
 BOOST_AUTO_TEST_CASE(integer_train_survives_reload_and_snapshot)
 {
     BOOST_REQUIRE(!m_path_root.empty());
-    ::unsetenv("BTX035_LAB_DIR");
-    ::unsetenv("BTX_GUARD_PORT");
+    test::UnsetEnv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX_GUARD_PORT");
     modelnet::ResetLabApi();
 
     TempTree dir{m_path_root / "btx035-lab-disk" / "train"};
@@ -547,8 +548,8 @@ BOOST_AUTO_TEST_CASE(integer_train_survives_reload_and_snapshot)
 BOOST_AUTO_TEST_CASE(contribution_links_survive_reload_and_snapshot)
 {
     BOOST_REQUIRE(!m_path_root.empty());
-    ::unsetenv("BTX035_LAB_DIR");
-    ::unsetenv("BTX_GUARD_PORT");
+    test::UnsetEnv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX_GUARD_PORT");
     modelnet::ResetLabApi();
 
     TempTree dir{m_path_root / "btx035-lab-disk" / "contrib"};
@@ -723,11 +724,11 @@ UniValue Nullable()
 BOOST_AUTO_TEST_CASE(model_pieces_survive_reload_and_need_two_roots)
 {
     BOOST_REQUIRE(!m_path_root.empty());
-    ::unsetenv("BTX035_LAB_DIR");
-    ::unsetenv("BTX_GUARD_PORT");
-    ::unsetenv("BTX035_LAB_PEER");
-    ::unsetenv("BTX035_LAB_PEER_USER");
-    ::unsetenv("BTX035_LAB_PEER_PASSWORD");
+    test::UnsetEnv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX_GUARD_PORT");
+    test::UnsetEnv("BTX035_LAB_PEER");
+    test::UnsetEnv("BTX035_LAB_PEER_USER");
+    test::UnsetEnv("BTX035_LAB_PEER_PASSWORD");
     modelnet::ResetLabApi();
 
     TempTree dir{m_path_root / "btx035-lab-disk" / "pieces"};
@@ -1245,14 +1246,14 @@ BOOST_AUTO_TEST_CASE(model_pieces_survive_reload_and_need_two_roots)
     BOOST_CHECK_EQUAL(queried["coverage"]["queried_peers"].get_str(), "0");
     BOOST_CHECK_EQUAL(queried["coverage"]["omissions"][0].get_str(), "BTX035_SCOPE_DENIED");
 
-    ::setenv("BTX035_LAB_PEER", "10.1.2.3:9", 1);
-    ::setenv("BTX035_LAB_PEER_USER", "lab", 1);
-    ::setenv("BTX035_LAB_PEER_PASSWORD", "lab-pass-0001", 1);
+    test::SetEnv("BTX035_LAB_PEER", "10.1.2.3:9");
+    test::SetEnv("BTX035_LAB_PEER_USER", "lab");
+    test::SetEnv("BTX035_LAB_PEER_PASSWORD", "lab-pass-0001");
     BOOST_CHECK(!LabCall("lab.research_query", query, queried, err));
     BOOST_CHECK_EQUAL(err, "BTX035_SCOPE_DENIED");
-    ::unsetenv("BTX035_LAB_PEER");
-    ::unsetenv("BTX035_LAB_PEER_USER");
-    ::unsetenv("BTX035_LAB_PEER_PASSWORD");
+    test::UnsetEnv("BTX035_LAB_PEER");
+    test::UnsetEnv("BTX035_LAB_PEER_USER");
+    test::UnsetEnv("BTX035_LAB_PEER_PASSWORD");
     modelnet::ResetLabApi();
 }
 
@@ -1354,8 +1355,8 @@ bool AuditComplete(const std::string& trajectory_id, std::string& first_gap)
 BOOST_AUTO_TEST_CASE(piece_index_past_the_cap_or_after_a_gap_is_refused)
 {
     BOOST_REQUIRE(!m_path_root.empty());
-    ::unsetenv("BTX035_LAB_DIR");
-    ::unsetenv("BTX_GUARD_PORT");
+    test::UnsetEnv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX_GUARD_PORT");
     modelnet::ResetLabApi();
 
     const std::string last = util::ToString(modelnet::MODEL_MAX_PIECES - 1);
@@ -1412,11 +1413,34 @@ BOOST_AUTO_TEST_CASE(piece_index_past_the_cap_or_after_a_gap_is_refused)
     modelnet::ResetLabApi();
 }
 
+BOOST_AUTO_TEST_CASE(manifest_pieces_out_of_index_order_are_a_gap)
+{
+    BOOST_REQUIRE(!m_path_root.empty());
+    test::UnsetEnv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX_GUARD_PORT");
+    modelnet::ResetLabApi();
+
+    const std::string model_e(96, '5');
+    const std::string model_f(96, '6');
+    std::string err;
+
+    // An export lists a model's pieces in index order from 0. A complete set in another order is refused
+    // at the first piece past the next index.
+    BOOST_CHECK(!ImportObjects({PieceObject(model_e, "1", "bb"), PieceObject(model_e, "0", "aa")}, "idempotency-piece-order-reversed", err));
+    BOOST_CHECK_EQUAL(err, "BTX035_GAP");
+
+    // The same pieces in index order import.
+    BOOST_CHECK(ImportObjects({PieceObject(model_f, "0", "aa"), PieceObject(model_f, "1", "bb")}, "idempotency-piece-order-ok", err));
+    BOOST_CHECK(err.empty());
+
+    modelnet::ResetLabApi();
+}
+
 BOOST_AUTO_TEST_CASE(integer_train_record_past_the_step_cap_is_refused)
 {
     BOOST_REQUIRE(!m_path_root.empty());
-    ::unsetenv("BTX035_LAB_DIR");
-    ::unsetenv("BTX_GUARD_PORT");
+    test::UnsetEnv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX_GUARD_PORT");
     modelnet::ResetLabApi();
     using modelnet::INTEGER_MAX_STEPS;
 

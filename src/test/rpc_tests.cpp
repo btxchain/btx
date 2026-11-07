@@ -482,6 +482,54 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_generatetoaddress)
     BOOST_CHECK_EQUAL(result[2].getInt<int>(), 9);
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_walletprocesspsbt_named_options)
+{
+    const std::string psbt{"opaque-psbt"};
+    for (const std::string field : {"adjust_timelocks", "htlc_presign"}) {
+        for (const std::string text : {"false", "true"}) {
+            const UniValue named = RPCConvertNamedValues("walletprocesspsbt",
+                {"psbt=" + psbt, "sign=false", "finalize=false", field + "=" + text});
+            BOOST_CHECK_EQUAL(named["psbt"].get_str(), psbt);
+            BOOST_CHECK_EQUAL(named["sign"].get_bool(), false);
+            BOOST_CHECK_EQUAL(named["finalize"].get_bool(), false);
+            BOOST_CHECK(named[field].isBool());
+            if (named[field].isBool()) BOOST_CHECK_EQUAL(named[field].get_bool(), text == "true");
+        }
+        // JSON strings stay strings; conversion must not coerce a wrong type
+        // into a valid Boolean or bypass the wallet's type checks.
+        const UniValue wrong_type = RPCConvertNamedValues("walletprocesspsbt", {field + "=\"false\""});
+        BOOST_CHECK(wrong_type[field].isStr());
+        BOOST_CHECK_EQUAL(wrong_type[field].get_str(), "false");
+        BOOST_CHECK_THROW(RPCConvertNamedValues("walletprocesspsbt", {field + "=not-json"}), std::runtime_error);
+    }
+    const std::string leaf = "{\"" + std::string(64, '1') + ":0\":0}";
+    UniValue expected_leaf;
+    BOOST_REQUIRE(expected_leaf.read(leaf));
+    const UniValue named_leaf = RPCConvertNamedValues("walletprocesspsbt", {"p2mr_leaf=" + leaf});
+    BOOST_CHECK(named_leaf["p2mr_leaf"].isObject());
+    BOOST_CHECK_EQUAL(named_leaf["p2mr_leaf"].write(), expected_leaf.write());
+    BOOST_CHECK(RPCConvertNamedValues("walletprocesspsbt", {"p2mr_leaf={}"})["p2mr_leaf"].isObject());
+    BOOST_CHECK(RPCConvertNamedValues("walletprocesspsbt", {"p2mr_leaf=[]"})["p2mr_leaf"].isArray());
+    BOOST_CHECK_THROW(RPCConvertNamedValues("walletprocesspsbt", {"p2mr_leaf=not-json"}), std::runtime_error);
+
+    const std::string options = R"({"sign":false,"finalize":false,"adjust_timelocks":false,"htlc_presign":false,"p2mr_leaf":{}})";
+    UniValue expected_options;
+    BOOST_REQUIRE(expected_options.read(options));
+    const UniValue positional = RPCConvertValues("walletprocesspsbt", {psbt, options});
+    const UniValue named = RPCConvertNamedValues("walletprocesspsbt", {"psbt=" + psbt, "options=" + options});
+    BOOST_CHECK_EQUAL(positional[0].get_str(), psbt);
+    BOOST_CHECK_EQUAL(positional[1].write(), expected_options.write());
+    BOOST_CHECK_EQUAL(named["psbt"].get_str(), psbt);
+    BOOST_CHECK_EQUAL(named["options"].write(), expected_options.write());
+
+    const UniValue legacy = RPCConvertValues("walletprocesspsbt", {psbt, "false", "ALL", "false", "false"});
+    BOOST_CHECK_EQUAL(legacy[0].get_str(), psbt);
+    BOOST_CHECK_EQUAL(legacy[1].get_bool(), false);
+    BOOST_CHECK_EQUAL(legacy[2].get_str(), "ALL");
+    BOOST_CHECK_EQUAL(legacy[3].get_bool(), false);
+    BOOST_CHECK_EQUAL(legacy[4].get_bool(), false);
+}
+
 BOOST_AUTO_TEST_CASE(rpc_convert_values_pq_wallet_methods)
 {
     UniValue result;
@@ -604,6 +652,41 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_btx_mining_methods)
     BOOST_CHECK_EQUAL(result[4].getInt<int64_t>(), 120000);
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_values_model_operator_requests)
+{
+    for (const std::string method : {"setmodelprofile", "setmodelmirror"}) {
+        const std::string request = R"({"profile":"custom","storage_bytes":"4MiB","publisher_id":"publisher","keep_latest":2,"idempotency_key":"retry=key/01","automatic_spend_atoms":0})";
+        UniValue expected;
+        BOOST_REQUIRE(expected.read(request));
+        const UniValue positional = RPCConvertValues(method, {" \t" + request + "\n"});
+        const UniValue named = RPCConvertNamedValues(method, {"request=" + request});
+        BOOST_REQUIRE_EQUAL(positional.size(), 1U);
+        BOOST_CHECK(positional[0].isObject());
+        BOOST_CHECK(named["request"].isObject());
+        BOOST_CHECK_EQUAL(positional[0].write(), expected.write());
+        BOOST_CHECK_EQUAL(named["request"].write(), expected.write());
+        if (positional[0].isObject()) {
+            BOOST_CHECK_EQUAL(positional[0]["idempotency_key"].get_str(), "retry=key/01");
+        }
+        BOOST_CHECK(RPCConvertValues(method, {"{}"})[0].isObject());
+        BOOST_CHECK(RPCConvertNamedValues(method, {"request={}"})["request"].isObject());
+        BOOST_CHECK(RPCConvertValues(method, {}).empty());
+        BOOST_CHECK(RPCConvertNamedValues(method, {}).empty());
+
+        // Only objects are converted. Bare profile presets and all other text
+        // retain their original type, leaving validation to the helper.
+        for (const std::string text : {"personal", "infrastructure", "mirror", "custom",
+                                      "", "null", "true", "1", "[]", "[{}]", "\"custom\"", "{invalid"}) {
+            const UniValue value = RPCConvertValues(method, {text});
+            const UniValue arg = RPCConvertNamedValues(method, {"request=" + text});
+            BOOST_CHECK(value[0].isStr());
+            BOOST_CHECK(arg["request"].isStr());
+            BOOST_CHECK_EQUAL(value[0].get_str(), text);
+            BOOST_CHECK_EQUAL(arg["request"].get_str(), text);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(rpc_convert_values_bridge_methods)
 {
     UniValue result;
@@ -681,6 +764,76 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_bridge_methods)
     BOOST_CHECK_EQUAL(named_result["options"]["force"].get_bool(), true);
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_modelindex_endpoints_are_strings)
+{
+    // These RPCs declare STR, so preserve endpoint/identity bytes even when
+    // they resemble JSON. Ordinary shell quoting does not add JSON quotes.
+    const std::vector<std::string> endpoints{
+        "127.0.0.1:29447", "[::1]:29447", "index.example.invalid:29447",
+        "peer=label", "1234", "true", "null", "{}", "[]", R"("quoted")", "",
+    };
+    for (const std::string method : {"addmodelindex", "removemodelindex"}) {
+        for (const auto& endpoint : endpoints) {
+            const auto check_string = [&](const auto& convert) {
+                UniValue value;
+                BOOST_CHECK_NO_THROW(value = convert());
+                BOOST_CHECK(value.isStr());
+                if (value.isStr()) BOOST_CHECK_EQUAL(value.get_str(), endpoint);
+            };
+            check_string([&] { return RPCConvertValues(method, {endpoint})[0]; });
+            check_string([&] { return RPCConvertNamedValues(method, {"endpoint=" + endpoint})["endpoint"]; });
+        }
+    }
+
+    // Adjacent object/union conversions keep their existing behavior.
+    const auto search = RPCConvertValues("searchmodels", {R"({"scope":"LOCAL"})"});
+    BOOST_REQUIRE(search[0].isObject());
+    BOOST_CHECK_EQUAL(search[0]["scope"].get_str(), "LOCAL");
+    const auto host = RPCConvertNamedValues("hostmodel", {"path=model.safetensors", R"(options={"publish":false})"});
+    BOOST_REQUIRE(host["options"].isObject());
+    BOOST_CHECK(!host["options"]["publish"].get_bool());
+    const auto get = RPCConvertValues("getmodel", {"btx://fixture", "plan"});
+    BOOST_REQUIRE(get[1].isStr());
+    BOOST_CHECK_EQUAL(get[1].get_str(), "plan");
+}
+
+BOOST_AUTO_TEST_CASE(rpc_convert_values_generatemodel_options)
+{
+    const std::string options{R"({"prompt":"hello=BTX \"quoted\"","max_new_tokens":8})"};
+    UniValue expected;
+    BOOST_REQUIRE(expected.read(options));
+    for (const std::string id : {"btx://model/example", "123", "{\"literal\":true}"}) {
+        const UniValue positional = RPCConvertValues("generatemodel", {id, options});
+        BOOST_REQUIRE_EQUAL(positional.size(), 2U);
+        BOOST_CHECK_EQUAL(positional[0].get_str(), id);
+        BOOST_CHECK(positional[1].isObject());
+        BOOST_CHECK_EQUAL(positional[1].write(), expected.write());
+
+        const UniValue named = RPCConvertNamedValues("generatemodel", {"id=" + id, "opts=" + options});
+        BOOST_CHECK_EQUAL(named["id"].get_str(), id);
+        BOOST_CHECK(named["opts"].isObject());
+        BOOST_CHECK_EQUAL(named["opts"].write(), expected.write());
+
+        BOOST_CHECK_EQUAL(RPCConvertValues("generatemodel", {id})[0].get_str(), id);
+        BOOST_CHECK_EQUAL(RPCConvertNamedValues("generatemodel", {"id=" + id})["id"].get_str(), id);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rpc_convert_values_generatemodel_invalid_options)
+{
+    for (const std::string invalid : {"{", "plain prompt", "{\"prompt\":}"}) {
+        BOOST_CHECK_THROW(RPCConvertValues("generatemodel", {"id", invalid}), std::runtime_error);
+        BOOST_CHECK_THROW(RPCConvertNamedValues("generatemodel", {"id=id", "opts=" + invalid}), std::runtime_error);
+    }
+    // Generic JSON conversion retains the type; the RPC server enforces OBJ.
+    for (const std::string other : {"[]", "true", "7", "\"prompt\""}) {
+        UniValue expected;
+        BOOST_REQUIRE(expected.read(other));
+        BOOST_CHECK_EQUAL(RPCConvertValues("generatemodel", {"id", other})[1].write(), expected.write());
+        BOOST_CHECK_EQUAL(RPCConvertNamedValues("generatemodel", {"opts=" + other})["opts"].write(), expected.write());
+    }
+}
+
 BOOST_AUTO_TEST_CASE(rpc_convert_values_modelnet_methods)
 {
     BOOST_CHECK_NO_THROW(RPCConvertValues("getmodel", {"btx://x", "{\"mode\":\"plan\",\"retrieval_policy\":\"FREE_ONLY\"}"}));
@@ -719,6 +872,47 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_modelnet_methods)
     const UniValue receipt = RPCConvertValues("verifycomputereceipt", {R"({"type":"ComputeReceipt"})"});
     BOOST_CHECK(receipt[0].isObject());
     BOOST_CHECK_EQUAL(receipt[0]["type"].get_str(), "ComputeReceipt");
+}
+
+BOOST_AUTO_TEST_CASE(rpc_convert_values_model_search_text_or_object)
+{
+    // Search accepts text or a query object. JSON-looking text must stay text.
+    const std::vector<std::string> text_queries{
+        "", "llama 70m", "70", "true", "null", R"(["llama"])", "{not-json", R"("llama")", "text=llama",
+    };
+    const std::vector<std::string> object_queries{"{}", R"({"text":"llama","limit":5})"};
+    for (const auto* method : {"searchmodels", "searchpublishers", "searchcollections"}) {
+        BOOST_TEST_CONTEXT(method) {
+            BOOST_CHECK_EQUAL(RPCConvertValues(method, {}).size(), 0U);
+            BOOST_CHECK_EQUAL(RPCConvertNamedValues(method, {}).size(), 0U);
+            for (const auto& query : text_queries) {
+                BOOST_TEST_CONTEXT(query) {
+                    UniValue positional;
+                    UniValue named;
+                    BOOST_CHECK_NO_THROW(positional = RPCConvertValues(method, {query}));
+                    BOOST_CHECK_NO_THROW(named = RPCConvertNamedValues(method, {"query=" + query}));
+                    BOOST_CHECK_EQUAL(positional.size(), 1U);
+                    BOOST_CHECK(named.exists("query"));
+                    if (positional.size() == 1) {
+                        BOOST_CHECK(positional[0].isStr());
+                        if (positional[0].isStr()) BOOST_CHECK_EQUAL(positional[0].get_str(), query);
+                    }
+                    if (named.exists("query")) {
+                        BOOST_CHECK(named["query"].isStr());
+                        if (named["query"].isStr()) BOOST_CHECK_EQUAL(named["query"].get_str(), query);
+                    }
+                }
+            }
+            for (const auto& query : object_queries) {
+                const UniValue positional = RPCConvertValues(method, {query});
+                const UniValue named = RPCConvertNamedValues(method, {"query=" + query});
+                BOOST_CHECK(positional[0].isObject());
+                BOOST_CHECK(named["query"].isObject());
+                BOOST_CHECK_EQUAL(positional[0].write(), query);
+                BOOST_CHECK_EQUAL(named["query"].write(), query);
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(rpc_getblockstats_calculate_percentiles_by_weight)

@@ -9,8 +9,11 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
+
+class Proxy;
 
 namespace modelnet {
 
@@ -39,6 +42,42 @@ bool IsForbiddenRelayAddr(const CNetAddr& addr);
 bool IsForbiddenOutboundDialAddr(const CNetAddr& addr);
 bool IsForbiddenRelayEndpoint(const std::string& endpoint, std::string& err);
 bool SplitListenBind(const std::string& bind, std::string& host, uint16_t& port);
+
+/**
+ * Take btxd's outbound network settings: -modelproxy=<proxy>=<ipv4|ipv6|onion|name>
+ * (the proxies btxd uses for its own peers) and -modelonlynet=<net> (btxd's
+ * -onlynet). Without them every network is reachable and dialed directly.
+ */
+bool ApplyModelOutboundArgs(const std::vector<std::string>& proxies, bool randomize_credentials,
+                            const std::vector<std::string>& onlynets, std::string& err);
+
+enum class ModelDialRoute {
+    DIRECT,
+    PROXY,
+    REFUSED,
+};
+
+/**
+ * How to reach a model peer host, by the rules btxd applies to its own peers:
+ * through the proxy for the host's network (a name through the name proxy, so
+ * it is never resolved locally), directly when that network has no proxy
+ * (local and private addresses included), never for an onion host without a
+ * proxy. -onlynet limits automatic dials; a `manual` dial to a peer the
+ * operator named (-modelpeer, addmodelnode) is not limited by it, like
+ * -addnode. `numeric` is the parsed address of an IP or onion host.
+ */
+ModelDialRoute RouteModelDial(const std::string& host, bool manual, Proxy& proxy, std::optional<CNetAddr>& numeric,
+                              std::string& err);
+
+/**
+ * The -onlynet network of a model peer address. A local or private IPv4/IPv6
+ * address (a LAN peer) counts as IPv4/IPv6, so -onlynet=ipv4 keeps LAN peers
+ * and -onlynet=onion still refuses them.
+ */
+Network ModelOnlynetNetwork(const CNetAddr& addr);
+
+/** Connect to host:port through a SOCKS5 proxy. Returns a connected fd the caller owns, or -1. */
+int ConnectModelThroughProxy(const Proxy& proxy, const std::string& host, uint16_t port, std::string& err);
 
 /** DNS name only: rejects empty strings, IPv4/IPv6 literals, and anything that is not a hostname. */
 bool ModelDnsNameAllowed(const std::string& seed);

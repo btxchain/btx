@@ -2,7 +2,6 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
-#include <exception>
 #include <modelnet/lab_wire.h>
 
 #include <bech32.h>
@@ -12,6 +11,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstdint>
+#include <exception>
 #include <fstream>
 #include <map>
 #include <set>

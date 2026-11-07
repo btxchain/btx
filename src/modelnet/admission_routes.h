@@ -25,9 +25,29 @@ struct StrictAdmissionRecord {
     std::string final_state;
     std::vector<std::string> independent_roots;
     bool owner_authorized{false};
+    /** Exact byte digest this strict model must match. Empty when the caller did not name one. */
+    std::string digest;
 };
 
 void RegisterStrictModel(const std::string& model_id, StrictAdmissionRecord record);
+
+/** An explicit legacy id keeps the historical allow path. Quarantine still denies it. */
+void RegisterLegacyModel(const std::string& model_id);
+
+/**
+ * Durable admission for one model id and digest. `decision` is ADMITTED or a
+ * refusal such as REVOKED. An admission for one id does not cover another.
+ */
+bool RecordModelAdmission(const std::string& model_id, const std::string& digest, const std::string& decision, std::string& err);
+
+/** Revocation denies serving even when an older record says ADMITTED. */
+void RevokeModel(const std::string& model_id);
+
+/** Drop process memory of the registry. The durable file is left in place. */
+void ClearAdmissionMemory();
+
+/** Remember a quarantine id and write it into the registry file when a lab directory is set. */
+void RememberQuarantine(const std::string& model_id);
 
 /**
  * Quarantine fails BTX035_QUARANTINE even when byte_hash_matches is true.
@@ -42,7 +62,10 @@ bool RouteMayGenerate(const std::string& model_id, bool byte_hash_matches, std::
 
 /**
  * Live host, seed, publish, load, and generate paths call this before they
- * activate a model. An unregistered id with no quarantine stays allowed.
+ * activate a model. Reloads the durable registry under the lab directory.
+ * A strict id is denied until an admission names that id and digest and says
+ * ADMITTED. Explicit legacy ids stay allowed. Quarantine and revocation deny.
+ * An id with neither a strict nor a legacy record stays on the allow path.
  * `code` is empty on success and a BTX035_* code on refusal.
  */
 bool LivePathAllowed(const std::string& model_id, bool generate, std::string& code);

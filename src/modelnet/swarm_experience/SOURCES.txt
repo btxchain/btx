@@ -1,0 +1,6 @@
+swarm_experience/experience.cpp
+swarm_experience/kind.cpp
+swarm_experience/offer.cpp
+swarm_experience/queue.cpp
+swarm_experience/reward.cpp
+swarm_experience/store.cpp

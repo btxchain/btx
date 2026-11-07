@@ -19,6 +19,7 @@
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_cpu_confirmation.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
@@ -89,6 +90,27 @@ struct BlockingVerify {
             released = true;
         }
         cv.notify_all();
+    }
+};
+
+struct CpuConfirmationScope {
+    using Policy = matmul::v4::rc::RCExactReplayExecutionPolicy;
+    const Policy saved_policy{matmul::v4::rc::GetRCExactReplayExecutionPolicy()};
+    const bool saved_confirmation{matmul::v4::rc::GetRCExactReplayCpuConfirmation()};
+    const std::shared_ptr<std::atomic_bool> release{std::make_shared<std::atomic_bool>(false)};
+    matmul::v4::rc::RCCpuConfirmationQueue& queue{matmul::v4::rc::GetRCCpuConfirmationQueue()};
+
+    explicit CpuConfirmationScope(Policy policy)
+    {
+        matmul::v4::rc::SetRCExactReplayExecutionPolicy(policy);
+        matmul::v4::rc::SetRCExactReplayCpuConfirmation(true);
+    }
+    ~CpuConfirmationScope()
+    {
+        release->store(true);
+        queue.ResetForTest();
+        matmul::v4::rc::SetRCExactReplayCpuConfirmation(saved_confirmation);
+        matmul::v4::rc::SetRCExactReplayExecutionPolicy(saved_policy);
     }
 };
 
@@ -1335,48 +1357,24 @@ BOOST_AUTO_TEST_CASE(cpu_confirmation_pending_releases_worker_and_admission)
     namespace rc = matmul::v4::rc;
     node::matmul_trusted::ResetForTest();
     rc::ResetRCExactReplayProviderHealthForTest();
-    const auto saved_policy{rc::GetRCExactReplayExecutionPolicy()};
-    rc::SetRCExactReplayExecutionPolicy(rc::RCExactReplayExecutionPolicy::AutoFallback);
-    struct PolicyRestore {
-        rc::RCExactReplayExecutionPolicy saved;
-        ~PolicyRestore() { rc::SetRCExactReplayExecutionPolicy(saved); }
-    } restore{saved_policy};
-    auto release{std::make_shared<std::atomic_bool>(false)};
-    struct ReleaseCpu {
-        std::shared_ptr<std::atomic_bool> release;
-        ~ReleaseCpu() { release->store(true); }
-    } release_on_exit{release};
+    // AutoFallback can reject the bad digest immediately on portable CPU,
+    // ignoring an unfinished confirmation. StrictDevice consumes the matching
+    // pending/completed CPU confirmation before trying a device provider.
+    CpuConfirmationScope confirmation{rc::RCExactReplayExecutionPolicy::StrictDevice};
     auto params{MakeProfile1ActiveParams()};
     params.fMatMulRCUseToyDims = true;
     const auto episode{rc::ResolveRCEpisodeParams(params, 100)};
+    BOOST_REQUIRE(!rc::RCExactReplayRequiresProductionEligibility(episode));
     auto bad{MakeProfile1Header(0x43505557414954, uint256::ONE)};
     arith_uint256 target;
     target.SetCompact(bad.nBits);
-    auto& queue{rc::GetRCCpuConfirmationQueue()};
-    const auto key{rc::RCCpuConfirmationKey(bad, episode, 100, &target, params.nMatMulRCProfile)};
-    queue.Submit(key, bad.GetHash(), {}, [release] {
-        while (!release->load() && !rc::ExactReplayCancellationRequested())
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
-        rc::ExactReplayVerifyResult result;
-        result.outcome = rc::ExactReplayVerifyOutcome::Cancelled;
-        return result;
-    });
-    std::atomic<int> verdicts{0}, cleanups{0}, leases{0};
-    MatMulVerifyWorker worker{params, /*max_threads=*/1};
-    MatMulVerifyWorker::Job disputed{
-        .block = std::make_shared<CBlock>(bad),
-        .height = 100,
-        .parent_median_time_past = 1,
-        .completion = [&](bool) { ++verdicts; },
-        .retryable_failure = [&] { ++cleanups; },
-        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
-        .rc_pending_lease = std::make_shared<PendingLeaseProbe>(leases),
-    };
-    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(disputed)));
-    BOOST_REQUIRE(WaitFor([&] { return cleanups == 1 && leases == 0; }));
-    BOOST_CHECK_EQUAL(verdicts.load(), 0);
-    BOOST_CHECK(!LookupMatMulEncDrVerdict(bad.GetHash()));
-    BOOST_CHECK(queue.Pending(bad.GetHash()));
+    const auto confirm_cpu{[episode, target, profile = params.nMatMulRCProfile](const CBlockHeader& header) {
+        rc::RCExactReplayAcceleration cpu;
+        cpu.backend = "cpu";
+        cpu.profile = profile;
+        return rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, episode, 100, cpu, &target);
+    }};
 
     auto good{MakeProfile1Header(0x43505546524545, uint256::ONE)};
     bool solved{false};
@@ -1389,26 +1387,157 @@ BOOST_AUTO_TEST_CASE(cpu_confirmation_pending_releases_worker_and_admission)
         }
     }
     BOOST_REQUIRE(solved);
-    std::atomic_bool valid{false};
+    auto& queue{confirmation.queue};
+    // Complete a real CPU confirmation before occupying the one CPU lane.
+    // Following worker dispatch can then consume it under the same policy;
+    // no device or fake successful verifier callback is required.
+    const auto good_key{rc::RCCpuConfirmationKey(good, episode, 100, &target, params.nMatMulRCProfile)};
+    queue.Submit(good_key, good.GetHash(), {}, [good, confirm_cpu] { return confirm_cpu(good); });
+    BOOST_REQUIRE(WaitFor([&] { return !queue.Pending(good.GetHash()); }));
+    const auto confirmed_good{queue.Lookup(good_key)};
+    BOOST_REQUIRE(confirmed_good && confirmed_good->ok &&
+                  confirmed_good->outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK(confirmed_good->digest == good.matmul_digest);
+    BOOST_CHECK(UintToArith256(confirmed_good->digest) <= target);
+    BOOST_CHECK_GT(confirmed_good->cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(confirmed_good->device_gemm_calls, 0U);
+
+    const auto key{rc::RCCpuConfirmationKey(bad, episode, 100, &target, params.nMatMulRCProfile)};
+    const auto pending{queue.Submit(key, bad.GetHash(), {},
+        [bad, confirm_cpu, release = confirmation.release] {
+            while (!release->load() && !rc::ExactReplayCancellationRequested())
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            if (rc::ExactReplayCancellationRequested()) {
+                rc::ExactReplayVerifyResult cancelled;
+                cancelled.outcome = rc::ExactReplayVerifyOutcome::Cancelled;
+                return cancelled;
+            }
+            return confirm_cpu(bad);
+        })};
+    BOOST_REQUIRE_EQUAL(pending.acceleration_failure, "cpu_confirmation_pending");
+    std::atomic<int> verdicts{0}, cleanups{0}, leases{0};
+    std::atomic_bool following_done{false}, valid{false};
+    auto& scheduler{rc::GetRCAcceleratorScheduler()};
+    const auto scheduler_before{scheduler.GetStats()};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    rc::ResetLastExactReplayVerifyResultForTest();
+    MatMulVerifyWorker::Job disputed{
+        .block = std::make_shared<CBlock>(bad),
+        .height = 100,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++verdicts; },
+        .retryable_failure = [&] { ++cleanups; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .rc_pending_lease = std::make_shared<PendingLeaseProbe>(leases),
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(disputed)));
+    BOOST_REQUIRE_MESSAGE(WaitFor([&] {
+        return cleanups == 1 && leases == 0 && !worker.Contains(bad.GetHash()) &&
+               !scheduler.GetStats().active;
+    }), "pending confirmation did not release the worker and captured lease");
+    const auto replay{rc::GetLastExactReplayVerifyResult()};
+    BOOST_REQUIRE(replay);
+    BOOST_CHECK(replay->outcome == rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK_EQUAL(replay->acceleration_failure, "cpu_confirmation_pending");
+    BOOST_CHECK_EQUAL(replay->cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(replay->device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(verdicts.load(), 0);
+    BOOST_CHECK(!LookupMatMulEncDrVerdict(bad.GetHash()).has_value());
+    BOOST_CHECK(queue.Pending(bad.GetHash()));
+    BOOST_CHECK(!confirmation.release->load());
+
     MatMulVerifyWorker::Job following{
         .block = std::make_shared<CBlock>(good),
         .height = 100,
         .parent_median_time_past = 1,
-        .completion = [&](bool ok) { valid = ok; ++verdicts; },
+        .completion = [&](bool ok) { valid = ok; ++verdicts; following_done = true; },
         .retryable_failure = [&] { ++cleanups; },
         .priority = MatMulVerifyWorker::Priority::CompetingBranch,
         .rc_pending_lease = std::make_shared<PendingLeaseProbe>(leases),
     };
     BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(following)));
-    BOOST_REQUIRE(WaitFor([&] { return verdicts == 1 || cleanups > 1; }));
+    BOOST_REQUIRE(WaitFor([&] {
+        return following_done.load() && leases == 0 && !worker.Contains(good.GetHash()) &&
+               !scheduler.GetStats().active;
+    }));
     BOOST_CHECK(valid.load());
+    BOOST_CHECK_EQUAL(verdicts.load(), 1);
     BOOST_CHECK_EQUAL(cleanups.load(), 1);
     BOOST_CHECK(queue.Pending(bad.GetHash()));
+    BOOST_CHECK(!confirmation.release->load());
+    BOOST_CHECK(!LookupMatMulEncDrVerdict(bad.GetHash()).has_value());
+    const auto scheduler_after{scheduler.GetStats()};
+    BOOST_CHECK_EQUAL(scheduler_after.acquisitions - scheduler_before.acquisitions, 2U);
+    BOOST_CHECK_EQUAL(scheduler_after.completions - scheduler_before.completions, 2U);
+    BOOST_CHECK_EQUAL(scheduler_after.workspace_reserved_bytes, 0U);
     worker.Stop();
-    BOOST_CHECK_EQUAL(leases.load(), 0);
-    release->store(true);
+    confirmation.release->store(true);
     BOOST_REQUIRE(WaitFor([&] { return !queue.Pending(bad.GetHash()); }));
-    (void)queue.Lookup(key);
+    const auto confirmed_bad{queue.Lookup(key)};
+    BOOST_REQUIRE(confirmed_bad);
+    BOOST_CHECK(confirmed_bad->outcome == rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK(!confirmed_bad->ok);
+    BOOST_CHECK(confirmed_bad->digest != bad.matmul_digest);
+    BOOST_CHECK_GT(confirmed_bad->cpu_gemm_calls, 0U);
+    BOOST_CHECK(!LookupMatMulEncDrVerdict(bad.GetHash()).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(cpu_confirmation_pending_does_not_replace_portable_rejection)
+{
+    namespace rc = matmul::v4::rc;
+    node::matmul_trusted::ResetForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    // Explicit CPU policy keeps this terminal-rejection control independent
+    // of whether the test build also has an eligible Metal/CUDA provider.
+    CpuConfirmationScope confirmation{rc::RCExactReplayExecutionPolicy::CpuDiagnostic};
+    auto params{MakeProfile1ActiveParams()};
+    params.fMatMulRCUseToyDims = true;
+    const auto episode{rc::ResolveRCEpisodeParams(params, 100)};
+    const auto bad{MakeProfile1Header(0x43505552454a4543, uint256::ONE)};
+    arith_uint256 target;
+    target.SetCompact(bad.nBits);
+    const auto key{rc::RCCpuConfirmationKey(bad, episode, 100, &target, params.nMatMulRCProfile)};
+    const auto pending{confirmation.queue.Submit(key, bad.GetHash(), {}, [release = confirmation.release] {
+        while (!release->load() && !rc::ExactReplayCancellationRequested())
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        rc::ExactReplayVerifyResult result;
+        result.outcome = rc::ExactReplayVerifyOutcome::Cancelled;
+        return result;
+    })};
+    BOOST_REQUIRE_EQUAL(pending.acceleration_failure, "cpu_confirmation_pending");
+    std::atomic<int> verdicts{0}, cleanups{0}, leases{0};
+    std::atomic_bool rejected{false};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    rc::ResetLastExactReplayVerifyResultForTest();
+    MatMulVerifyWorker::Job disputed{
+        .block = std::make_shared<CBlock>(bad),
+        .height = 100,
+        .parent_median_time_past = 1,
+        .completion = [&](bool ok) { rejected = !ok; ++verdicts; },
+        .retryable_failure = [&] { ++cleanups; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .rc_pending_lease = std::make_shared<PendingLeaseProbe>(leases),
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(disputed)));
+    BOOST_REQUIRE(WaitFor([&] {
+        return verdicts == 1 && leases == 0 && !worker.Contains(bad.GetHash()) &&
+               !rc::GetRCAcceleratorScheduler().GetStats().active;
+    }));
+    BOOST_CHECK(rejected.load());
+    BOOST_CHECK_EQUAL(cleanups.load(), 0);
+    const auto memo{LookupMatMulEncDrVerdict(bad.GetHash())};
+    BOOST_REQUIRE(memo.has_value());
+    BOOST_CHECK(!*memo);
+    const auto replay{rc::GetLastExactReplayVerifyResult()};
+    BOOST_REQUIRE(replay);
+    BOOST_CHECK(replay->outcome == rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK_GT(replay->cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(replay->device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(rc::GetRCAcceleratorScheduler().GetStats().queue_depth, 0U);
+    BOOST_CHECK_EQUAL(rc::GetRCAcceleratorScheduler().GetStats().workspace_reserved_bytes, 0U);
+    BOOST_CHECK(confirmation.queue.Pending(bad.GetHash()));
+    BOOST_CHECK(!confirmation.release->load());
+    worker.Stop();
 }
 
 // Body-holding ExactReplay ignores ordinary job.cancelled. Stop() must still

@@ -1,0 +1,7 @@
+swarm_descendants/niche.cpp
+swarm_descendants/book.cpp
+swarm_descendants/average.cpp
+swarm_descendants/score.cpp
+swarm_descendants/integer_bound.cpp
+swarm_descendants/realm.cpp
+swarm_descendants/descendants.cpp

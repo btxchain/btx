@@ -3,7 +3,7 @@
 This page is an integration guide for custody and exchange engineering teams. It is **not** a listing announcement, and it does not claim that any exchange, custodian, or venue has listed, integrated, or approved BTX. "Listing" below means a reader's operational use case, not a commitment by BTX or by any venue.
 
 **Release state.** This contract shipped in **v0.34.8**. This working tree is
-**0.34.9-dev** (`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=false`). Do not treat any interface on this page as independently certified.
+**0.35.0rc1**. The last shipping tag remains **v0.34.15**. Do not treat any interface on this page as independently certified.
 
 **Scope.** BCP/1 is a **major monetary-wallet addition**, not a cosmetic helper. It adds a custody RPC surface and an external-digest signing lifecycle, and it also changes existing signing RPCs and wallet lifecycle behavior. Review it as a wallet change, not only as an integration document.
 

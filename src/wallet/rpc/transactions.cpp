@@ -1145,7 +1145,8 @@ RPCHelpMan rescanblockchain()
     // encrypted blob so ScanBlock can trial-decrypt notes.
     const bool has_shielded = pwallet->m_shielded_wallet != nullptr;
     if (has_shielded) {
-        LOCK(pwallet->m_shielded_wallet->cs_shielded);
+        // cs_wallet before cs_shielded: rehydration takes cs_wallet.
+        LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
         pwallet->m_shielded_wallet->MaybeRehydrateSpendingKeys();
         // Reset the shielded Merkle tree so ScanBlock rebuilds it from scratch.
         pwallet->m_shielded_wallet->Rescan(start_height);

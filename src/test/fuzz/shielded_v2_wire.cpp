@@ -8,6 +8,7 @@
 
 #include <cassert>
 #include <ios>
+#include <string>
 #include <vector>
 
 namespace {
@@ -36,12 +37,15 @@ bool RoundTripCheck(const T& obj)
         return false;
     }
 
+    // Reading drains ds, so keep the first serialization to compare with.
+    const std::string serialized{ds.str()};
     T decoded;
     try {
         ds >> decoded;
     } catch (const std::ios_base::failure&) {
         return false;
     }
+    assert(ds.empty());
 
     DataStream ds2{};
     try {
@@ -50,7 +54,7 @@ bool RoundTripCheck(const T& obj)
         return false;
     }
 
-    assert(ds.str() == ds2.str());
+    assert(serialized == ds2.str());
     return true;
 }
 

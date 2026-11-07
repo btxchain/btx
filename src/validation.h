@@ -48,6 +48,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <map>
@@ -57,6 +58,7 @@
 #include <stdint.h>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -1129,6 +1131,54 @@ bool IsAssumeUtxoSnapshotHeaderCompatible(
 bool IsAttestedSnapshotHeaderCompatible(
     const CBlockIndex* best_header,
     const CBlockIndex* snapshot_start_block);
+
+/**
+ * Per-call memo for the HEADER_ONLY-hole walk in
+ * ChainstateManager::FindUniqueCompetingAttestedIndex().
+ *
+ * Walk(start, stop) visits start, start->pprev, ... and stops before `stop`.
+ * The result is `aborted` if the path reaches nullptr or a BLOCK_FAILED_MASK
+ * index; otherwise it is the lowest-height index on the path without a
+ * usable body (no HAVE_DATA, not VALID_TRANSACTIONS, or no chain-tx count),
+ * or nullptr if every body is usable.
+ *
+ * Every start is remembered with its stop. A later walk that reaches a
+ * remembered start with the same stop combines the two summaries instead of
+ * walking that segment again. Signed-frontier hints arrive in ascending
+ * height order, so on a trusted mirror in IBD (H hints a gap of D blocks
+ * above the tip) one call costs about D + H steps instead of H * D.
+ *
+ * The memo is valid only while cs_main is held and no CBlockIndex changes:
+ * create one per call and discard it before releasing cs_main.
+ */
+class ForkHoleWalkMemo
+{
+public:
+    struct Result {
+        bool aborted{false};
+        const CBlockIndex* lowest_unconnectable{nullptr};
+    };
+
+    explicit ForkHoleWalkMemo(bool enabled = true) : m_enabled{enabled} {}
+
+    Result Walk(const CBlockIndex* start, const CBlockIndex* stop)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    //! Path indexes evaluated so far (cost accounting for tests).
+    uint64_t Steps() const { return m_steps; }
+
+private:
+    struct Entry {
+        const CBlockIndex* stop;
+        Result result;
+    };
+    const bool m_enabled;
+    uint64_t m_steps{0};
+    std::unordered_map<const CBlockIndex*, Entry> m_entries;
+    //! Height range of remembered starts; walks skip lookups outside it.
+    int m_min_height{std::numeric_limits<int>::max()};
+    int m_max_height{std::numeric_limits<int>::min()};
+};
 
 /**
  * Provides an interface for creating and interacting with one or two
@@ -2825,6 +2875,10 @@ public:
      *  MatMul ExactReplay incomplete Error (no GPU). Tests must clear this. */
     void SetRetryableMatMulConnectFailureForTest(bool enable);
     [[nodiscard]] int RetryableMatMulConnectFailureAttemptsForTest() const;
+    /** Test-only: false makes FindUniqueCompetingAttestedIndex() walk every
+     *  hint's hole path in full (the pre-memo behaviour), so tests can
+     *  compare both. Tests must restore true. */
+    static void SetFindUniqueCompetingAttestedIndexHoleWalkMemoForTest(bool enable);
     void ResetTrustedMirrorExactReplayInvocationsForTest();
     [[nodiscard]] int TrustedMirrorExactReplayInvocationsForTest() const;
 

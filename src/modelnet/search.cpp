@@ -1017,6 +1017,12 @@ void PruneExpiredSearch(std::map<std::string, ModelSearchRecord>& by_model, int6
 
 std::string PublisherQuotaKey(const ModelSearchRecord& r, const std::string& transport_endpoint)
 {
+    // Charge the key that signed the record (Put() has verified it by now).
+    // publisher_identity is a field the record states about itself and is not
+    // bound to the signer, so it is not a sound quota key. Every path that
+    // takes records from a peer verifies them first, so an unsigned record
+    // here is local and keeps the old key.
+    if (!r.sig.empty() && !r.signer_id.IsNull()) return std::string("signer:") + r.signer_id.Hex();
     if (!r.publisher_identity.IsNull()) return std::string("pub:") + r.publisher_identity.Hex();
     if (!transport_endpoint.empty()) return std::string("ep:") + transport_endpoint;
     return "anonymous";

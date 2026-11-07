@@ -1,0 +1,146 @@
+[
+  {
+    "id": "ASR-ART-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches builds a hierarchical manifest, refuses a fifth child, a node past the depth cap, a metadata overrun, and an int64 length sum, and shows the root digest change with the leaf."
+  },
+  {
+    "id": "ASR-ART-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches streams an encoded checkpoint in windows of at most 32 bytes, resumes after the first window, refuses a larger chunk, and matches the joined bytes to the artifact."
+  },
+  {
+    "id": "ASR-ART-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches seals a generation by rename, refuses a symlink, refuses a different replacement, keeps a leased file, detects a later byte change, and refuses a body above 4096 bytes."
+  },
+  {
+    "id": "ASR-ART-005",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "A real runtime load of a verified checkpoint from a second source is not performed. Acc03 returns UNQUALIFIED and pass_latches checks that refusal."
+  },
+  {
+    "id": "ASR-KVC-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches accepts only a full identity match. The same family and shape with a missing tokenizer or a different precision is SHAPE. A quantized derivative is DERIVATIVE."
+  },
+  {
+    "id": "ASR-KVC-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches edits one token and invalidates only that page and its suffix, then an append leaves the earlier page valid."
+  },
+  {
+    "id": "ASR-KVC-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches refuses metadata-only placement and copies the numeric tensor values into the destination."
+  },
+  {
+    "id": "ASR-KVC-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches accepts a checkpoint only through IntegerTrainer::CheckState. A hash-only accept is SHORTCUT. A changed weight that keeps the old hash is refused."
+  },
+  {
+    "id": "ASR-KVC-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches keeps an active page, caps speculative pages at two, revokes one speculative page, and refuses to revoke the active page."
+  },
+  {
+    "id": "ASR-KVC-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches computes resident, moving, and recompute costs and selects the minimum. A smaller recompute input changes the selection."
+  },
+  {
+    "id": "ASR-TRN-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches runs the dense owner, adds both consumer gradients, matches their sum to the analytic gradient, and steps only after both consumers have contributed."
+  },
+  {
+    "id": "ASR-TRN-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches saves weights, both moment vectors, step, rng, cursor, recipe, topology, and epoch through the checkpoint closure and restores them. A weights-only save stays partial."
+  },
+  {
+    "id": "ASR-TRN-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches accepts one update under the influence cap, then refuses a duplicate interval, a different base, and a share above the cap."
+  },
+  {
+    "id": "ASR-TRN-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches keeps the rights string and policy version when the body changes, and refuses a rights change or a policy-version change."
+  },
+  {
+    "id": "ASR-TRN-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches steps a student weight from the teacher residual so squared loss falls from 20 to 5, refuses an unevaluated merge, and records the evaluated midpoint."
+  },
+  {
+    "id": "ASR-EVO-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches leaves the objective on hold when the claimed digest does not match, then sets it from the observation after the digest is recomputed."
+  },
+  {
+    "id": "ASR-EVO-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches keeps the specialist when a worse occupant arrives, and keeps the exploration id when an exploit candidate tries to take that slot."
+  },
+  {
+    "id": "ASR-EVO-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches records an even 5/5 baseline and a gain-weighted 7/3 split of the same budget of 10."
+  },
+  {
+    "id": "ASR-EVO-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches clips held-out demands to a fixed cap in shadow and leaves the production counter at 0. release_qualified stays false."
+  },
+  {
+    "id": "ASR-VAL-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches refuses a score before the plan digest exists, then scores the held-out pair as 3 and refuses a different plan."
+  },
+  {
+    "id": "ASR-VAL-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches keeps the width for a repeated sample and for a second sample on the same task, and narrows it only for a new task."
+  },
+  {
+    "id": "ASR-VAL-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches leaves fitness unchanged for the proposer's validation and for a wrong recompute, then sets it from an independent recompute of 2+2."
+  },
+  {
+    "id": "ASR-VAL-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches refuses adoption before promotion, and promotion alone leaves adoption empty. release_qualified stays false."
+  },
+  {
+    "id": "ASR-VAL-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc03_tests pass_latches runs a second integer step that changes the weight and momentum. A cycle that does not step is WORK and leaves the first weight."
+  }
+]

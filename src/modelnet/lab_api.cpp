@@ -5,6 +5,7 @@
 #include <modelnet/lab_api.h>
 
 #include <modelnet/action_authority.h>
+#include <modelnet/admission_routes.h>
 #include <modelnet/canonical_codec.h>
 #include <modelnet/git_snapshot.h>
 #include <modelnet/guard_machine.h>
@@ -114,8 +115,17 @@ struct Store {
     RealmRollout rollout;
     ResearchBook research;
     WorkspaceBook workspaces;
-    std::map<std::string, std::string> idem_hash;
-    std::map<std::string, std::string> idem_body;
+    struct IdemRow {
+        std::string caller;
+        std::string key;
+        std::string digest;
+        std::string result;
+        bool retired{false};
+    };
+    std::vector<IdemRow> idempotency;
+    std::map<std::string, std::string> admission_subject;
+    bool recovery_required{false};
+    uint64_t commit_generation{1};
     std::map<std::string, std::string> records;
     std::map<std::string, std::string> identities;
     std::map<std::string, std::vector<unsigned char>> identity_pk;
@@ -280,6 +290,17 @@ void ImageFromStore(const Store& store, LabDiskImage& image)
         row.completed = tree.completed;
         image.workspaces.emplace(name, std::move(row));
     }
+    image.active_root = store.active_root;
+    image.admission_subject = store.admission_subject;
+    for (const Store::IdemRow& saved : store.idempotency) {
+        LabDiskImage::IdempotencyRow row;
+        row.caller = saved.caller;
+        row.key = saved.key;
+        row.digest = saved.digest;
+        row.result = saved.result;
+        row.retired = saved.retired;
+        image.idempotency.push_back(std::move(row));
+    }
     std::vector<LabDiskObject> model_rows;
     for (const auto& item : store.models) {
         LabDiskObject row;
@@ -411,6 +432,18 @@ void ImageToStore(const LabDiskImage& image, Store& store)
     store.identity_pk.clear();
     for (const auto& item : image.identity_pk) {
         store.identity_pk.emplace(item.first, ParseHex(item.second));
+    }
+    store.active_root = image.active_root;
+    store.admission_subject = image.admission_subject;
+    store.idempotency.clear();
+    for (const LabDiskImage::IdempotencyRow& saved : image.idempotency) {
+        Store::IdemRow row;
+        row.caller = saved.caller;
+        row.key = saved.key;
+        row.digest = saved.digest;
+        row.result = saved.result;
+        row.retired = saved.retired;
+        store.idempotency.push_back(std::move(row));
     }
     store.trains.clear();
     for (const auto& item : image.trains) {
@@ -559,10 +592,24 @@ void CheckPieceStore(Store& store);
 
 void LoadDiskInto(Store& store)
 {
+    store.recovery_required = false;
+    const fs::path dir = LabDiskDirectory();
+    if (dir.empty()) return;
+    const fs::path file = dir / "lab.json";
+    bool present = false;
+    try {
+        present = fs::exists(file);
+    } catch (const std::filesystem::filesystem_error&) {
+        store.recovery_required = true;
+        return;
+    }
+    if (!present) return;
     LabDiskImage image;
     std::string err;
-    if (!LoadLabDisk(image, err)) return;
-    if (LabDiskDirectory().empty()) return;
+    if (!LoadLabDisk(image, err)) {
+        store.recovery_required = true;
+        return;
+    }
     ImageToStore(image, store);
     CheckPieceStore(store);
 }
@@ -612,13 +659,12 @@ void CheckPieceStore(Store& store)
     const fs::path piece_root = root / "pieces";
     if (!fs::exists(piece_root)) return;
     LocalPieceStore pieces(piece_root, 64ull * 1024ull * 1024ull);
-    std::vector<std::string> drop;
     for (const auto& item : store.models) {
         Digest48 artifact;
         std::string err;
         if (!Digest48::FromHex(item.first, artifact, err)) {
-            drop.push_back(item.first);
-            continue;
+            store.recovery_required = true;
+            return;
         }
         std::vector<uint32_t> indexes;
         if (!pieces.EnumerateCommittedPieces(artifact, 0, indexes) || indexes.empty()) continue;
@@ -632,12 +678,11 @@ void CheckPieceStore(Store& store)
             else chunks[i].assign(raw.begin(), raw.end());
         }
         std::string joined;
-        if (!dense || !JoinModelPieces(chunks, joined, err) || joined != item.second) drop.push_back(item.first);
-        else store.model_pieces[item.first] = std::move(chunks);
-    }
-    for (const std::string& digest : drop) {
-        store.models.erase(digest);
-        store.model_pieces.erase(digest);
+        if (!dense || !JoinModelPieces(chunks, joined, err) || joined != item.second) {
+            store.recovery_required = true;
+            return;
+        }
+        store.model_pieces[item.first] = std::move(chunks);
     }
 }
 
@@ -651,6 +696,28 @@ bool PersistDurable(std::string& err)
     ImageFromStore(State(), image);
     if (!SaveLabDisk(image, err)) return false;
     return SaveModelPieces(State(), err);
+}
+
+void RevertStore(LabDiskImage prior, std::map<std::string, std::vector<unsigned char>> secrets, bool recovery, uint64_t generation)
+{
+    Store& store = State();
+    for (auto& item : store.identity_sk) memory_cleanse(item.second.data(), item.second.size());
+    store = Store{};
+    ImageToStore(prior, store);
+    for (const auto& item : store.identity_pk) {
+        Digest48 root;
+        std::string chain_err;
+        (void)store.chain.CreateRoot(Span<const unsigned char>{item.second.data(), item.second.size()}, root, chain_err);
+    }
+    for (auto& item : secrets) {
+        if (store.identity_pk.count(item.first) == 0) {
+            memory_cleanse(item.second.data(), item.second.size());
+            continue;
+        }
+        store.identity_sk[item.first] = std::move(item.second);
+    }
+    store.recovery_required = recovery;
+    store.commit_generation = generation;
 }
 
 void WipeMemory()
@@ -781,25 +848,69 @@ bool CheckRequest(const LabMethod& method, const UniValue& req, std::string& err
     return true;
 }
 
-bool Replay(const UniValue& req, const std::string& canonical, std::string& response, std::string& err)
+constexpr size_t kMaxIdempotency = 64;
+/** Keys past the live cap keep a digest-only tombstone so a retry cannot mint a second result. */
+constexpr size_t kMaxRetiredIdempotency = 256;
+
+std::string IdemCaller(const Store& store)
+{
+    return store.active_root.empty() ? std::string("local") : store.active_root;
+}
+
+bool Replay(const UniValue& req, const std::string& digest, std::string& response, std::string& err)
 {
     if (!req.exists("idempotency_key") || !req["idempotency_key"].isStr()) return true;
     const std::string key = req["idempotency_key"].get_str();
-    Store& store = State();
-    const auto it = store.idem_hash.find(key);
-    if (it == store.idem_hash.end()) {
-        store.idem_hash.emplace(key, canonical);
+    const std::string caller = IdemCaller(State());
+    for (const Store::IdemRow& row : State().idempotency) {
+        if (row.caller != caller || row.key != key) continue;
+        if (row.digest != digest) return Fail(err, "BTX035_IDEMPOTENCY");
+        if (row.retired) return Fail(err, "BTX035_IDEMPOTENCY_EXPIRED");
+        response = row.result;
         return true;
     }
-    if (it->second != canonical) return Fail(err, "BTX035_IDEMPOTENCY");
-    response = store.idem_body[key];
     return true;
 }
 
-void Remember(const UniValue& req, const std::string& response)
+void Remember(const UniValue& req, const std::string& digest, const std::string& response)
 {
     if (!req.exists("idempotency_key") || !req["idempotency_key"].isStr()) return;
-    State().idem_body[req["idempotency_key"].get_str()] = response;
+    Store& store = State();
+    const std::string key = req["idempotency_key"].get_str();
+    const std::string caller = IdemCaller(store);
+    for (Store::IdemRow& row : store.idempotency) {
+        if (row.caller != caller || row.key != key) continue;
+        // A dropped result cannot be rebuilt. Leave the tombstone in place.
+        if (row.retired) return;
+        row.digest = digest;
+        row.result = response;
+        return;
+    }
+    Store::IdemRow row;
+    row.caller = caller;
+    row.key = key;
+    row.digest = digest;
+    row.result = response;
+    store.idempotency.push_back(std::move(row));
+    size_t live = 0;
+    for (const Store::IdemRow& saved : store.idempotency) {
+        if (!saved.retired) ++live;
+    }
+    for (Store::IdemRow& saved : store.idempotency) {
+        if (live <= kMaxIdempotency) break;
+        if (saved.retired) continue;
+        saved.retired = true;
+        saved.result.clear();
+        --live;
+    }
+    size_t retired = 0;
+    for (const Store::IdemRow& saved : store.idempotency) {
+        if (saved.retired) ++retired;
+    }
+    while (retired > kMaxRetiredIdempotency && !store.idempotency.empty() && store.idempotency.front().retired) {
+        store.idempotency.erase(store.idempotency.begin());
+        --retired;
+    }
 }
 
 UniValue EnvelopeResponse(const std::string& request_id, const UniValue& result)
@@ -1706,13 +1817,20 @@ bool DurableRead(const std::string& method)
            method == "lab.audit_coverage" || method == "lab.realm_status";
 }
 
-bool Apply(const std::string& method, const UniValue& req, UniValue& result, std::string& err)
+bool GenerationHeld(const Store& store, uint64_t generation, std::string& err)
+{
+    if (store.commit_generation != generation) return Fail(err, "BTX035_GENERATION");
+    return true;
+}
+
+bool Apply(const std::string& method, const UniValue& req, UniValue& result, std::string& err, UniqueLock<GlobalMutex>& api_lock)
 {
     Store& store = State();
     store.token_subject.clear();
     const std::string id = Id96(method + "|" + req.write());
 
     if (method == "lab.info") {
+        if (store.recovery_required) result.pushKV("recovery_required", "BTX035_RECOVERY_REQUIRED");
         result.pushKV("release", "0.35.0rc1");
         result.pushKV("network_id", Id64("BTX/035/network"));
         result.pushKV("realm_id", Id96("BTX/035/PublicRealm/v1"));
@@ -1997,7 +2115,16 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
                 for (const LoopbackPeer& peer : peers) {
                     std::string remote_json;
                     std::string call_err;
-                    if (!LabCallLoopback(peer.host, peer.port, peer.user, peer.password, "lab.research_query", inner.write(), remote_json, call_err)) {
+                    const uint64_t generation = store.commit_generation;
+                    const std::string subject = store.token_subject;
+                    bool called = false;
+                    {
+                        REVERSE_LOCK(api_lock);
+                        called = LabCallLoopback(peer.host, peer.port, peer.user, peer.password, "lab.research_query", inner.write(), remote_json, call_err);
+                    }
+                    store.token_subject = subject;
+                    if (!GenerationHeld(store, generation, err)) return false;
+                    if (!called) {
                         if (call_err != "BTX035_TRANSPORT") return Fail(err, call_err.c_str());
                         continue;
                     }
@@ -2239,29 +2366,46 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
                     std::vector<std::string> chunks;
                     std::string piece_err;
                     bool saw_piece = false;
-                    for (uint64_t index = 0; index < MODEL_MAX_PIECES; ++index) {
-                        UniValue resource_ref(UniValue::VOBJ);
-                        resource_ref.pushKV("kind", "MODEL");
-                        resource_ref.pushKV("digest48", digest);
-                        UniValue piece_req(UniValue::VOBJ);
-                        piece_req.pushKV("resource", resource_ref);
-                        piece_req.pushKV("manifest_id", digest);
-                        piece_req.pushKV("piece_index", std::to_string(index));
-                        piece_req.pushKV("maximum_bytes", std::to_string(max_bytes));
-                        std::string piece_json;
-                        if (!PeerRouteLoopback(peer.host, peer.port, peer.user, peer.password, "artifacts/piece", piece_req.write(), piece_json, piece_err)) {
-                            if (piece_err == "BTX035_NOT_FOUND") break;
-                            if (piece_err == "BTX035_TRANSPORT") break;
-                            return Fail(err, piece_err.c_str());
+                    bool piece_bad = false;
+                    const uint64_t piece_generation = store.commit_generation;
+                    const std::string piece_subject = store.token_subject;
+                    {
+                        REVERSE_LOCK(api_lock);
+                        for (uint64_t index = 0; index < MODEL_MAX_PIECES; ++index) {
+                            UniValue resource_ref(UniValue::VOBJ);
+                            resource_ref.pushKV("kind", "MODEL");
+                            resource_ref.pushKV("digest48", digest);
+                            UniValue piece_req(UniValue::VOBJ);
+                            piece_req.pushKV("resource", resource_ref);
+                            piece_req.pushKV("manifest_id", digest);
+                            piece_req.pushKV("piece_index", std::to_string(index));
+                            piece_req.pushKV("maximum_bytes", std::to_string(max_bytes));
+                            std::string piece_json;
+                            if (!PeerRouteLoopback(peer.host, peer.port, peer.user, peer.password, "artifacts/piece", piece_req.write(), piece_json, piece_err)) {
+                                if (piece_err == "BTX035_NOT_FOUND" || piece_err == "BTX035_TRANSPORT") break;
+                                piece_bad = true;
+                                break;
+                            }
+                            UniValue piece;
+                            if (!piece.read(piece_json) || !piece.isObject() || !piece["content_hex"].isStr()) {
+                                piece_err = "BTX035_SCHEMA";
+                                piece_bad = true;
+                                break;
+                            }
+                            std::vector<unsigned char> raw;
+                            if (!BytesFromHex(piece["content_hex"].get_str(), raw) || raw.empty()) {
+                                piece_err = "BTX035_SCHEMA";
+                                piece_bad = true;
+                                break;
+                            }
+                            chunks.emplace_back(raw.begin(), raw.end());
+                            saw_piece = true;
+                            if (raw.size() != 32) break;
                         }
-                        UniValue piece;
-                        if (!piece.read(piece_json) || !piece.isObject() || !piece["content_hex"].isStr()) return Fail(err, "BTX035_SCHEMA");
-                        std::vector<unsigned char> raw;
-                        if (!BytesFromHex(piece["content_hex"].get_str(), raw) || raw.empty()) return Fail(err, "BTX035_SCHEMA");
-                        chunks.emplace_back(raw.begin(), raw.end());
-                        saw_piece = true;
-                        if (raw.size() != 32) break;
                     }
+                    store.token_subject = piece_subject;
+                    if (!GenerationHeld(store, piece_generation, err)) return false;
+                    if (piece_bad) return Fail(err, piece_err.c_str());
                     if (saw_piece) {
                         std::string joined;
                         if (!JoinModelPieces(chunks, joined, err)) return false;
@@ -2282,7 +2426,16 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
                     }
                     std::string manifest;
                     std::string call_err;
-                    if (!PullExchangeLoopback(peer.host, peer.port, peer.user, peer.password, resource["repository_id"].get_str(), manifest, call_err)) {
+                    const uint64_t pull_generation = store.commit_generation;
+                    const std::string pull_subject = store.token_subject;
+                    bool pulled_manifest = false;
+                    {
+                        REVERSE_LOCK(api_lock);
+                        pulled_manifest = PullExchangeLoopback(peer.host, peer.port, peer.user, peer.password, resource["repository_id"].get_str(), manifest, call_err);
+                    }
+                    store.token_subject = pull_subject;
+                    if (!GenerationHeld(store, pull_generation, err)) return false;
+                    if (!pulled_manifest) {
                         if (call_err != "BTX035_TRANSPORT") return Fail(err, call_err.c_str());
                         continue;
                     }
@@ -2640,6 +2793,14 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
         }
         const AdmissionResult decision = Admit(Assurance::PUBLIC_STRICT, hash_ok, intervals, total, start_state, final_state, roots, false);
         store.admissions[id] = decision.admitted ? "ADMITTED" : decision.code;
+        if (req["model_ref"].isObject()) {
+            const UniValue& ref = req["model_ref"];
+            const std::string digest = ref.exists("digest") && ref["digest"].isStr() ? ref["digest"].get_str() : "";
+            const std::string model_id = ref.exists("model_id") && ref["model_id"].isStr() && !ref["model_id"].get_str().empty()
+                                              ? ref["model_id"].get_str()
+                                              : digest;
+            if (!model_id.empty()) store.admission_subject[id] = model_id + "\n" + digest;
+        }
         return OpOut(store, result, id, decision.admitted ? "COMPLETE" : "FAILED", "STOPPED_QUIESCENT");
     }
     if (method == "lab.model_host") {
@@ -2647,6 +2808,24 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
         const std::string admission = RequireStr(req, "admission_id");
         const auto it = store.admissions.find(admission);
         if (it == store.admissions.end() || it->second != "ADMITTED") return Fail(err, "BTX035_ADMISSION");
+        const auto subject = store.admission_subject.find(admission);
+        if (subject != store.admission_subject.end()) {
+            const auto split = subject->second.find('\n');
+            const std::string bound_id = split == std::string::npos ? subject->second : subject->second.substr(0, split);
+            const std::string bound_digest = split == std::string::npos ? std::string() : subject->second.substr(split + 1);
+            std::string host_id;
+            std::string host_digest;
+            if (req["model_ref"].isObject()) {
+                const UniValue& ref = req["model_ref"];
+                if (ref.exists("model_id") && ref["model_id"].isStr()) host_id = ref["model_id"].get_str();
+                if (ref.exists("digest") && ref["digest"].isStr()) host_digest = ref["digest"].get_str();
+                if (host_id.empty()) host_id = host_digest;
+            } else if (req["model_ref"].isStr()) {
+                host_id = req["model_ref"].get_str();
+                host_digest = host_id;
+            }
+            if (host_id != bound_id || (!bound_digest.empty() && host_digest != bound_digest)) return Fail(err, "BTX035_ADMISSION");
+        }
         std::string hosted_id;
         if (req["model_ref"].isObject() && req["model_ref"].exists("digest") && req["model_ref"]["digest"].isStr()) {
             hosted_id = req["model_ref"]["digest"].get_str();
@@ -2717,8 +2896,9 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
             return false;
         }
         if (!store.gate->Consume(GuardCommitment(secret), row.effect, row.generation, now, row.fingerprint, err)) return false;
-        result.pushKV("physical_disposition", "STOPPED_QUIESCENT");
-        return Rec(result, receipt, "EXECUTED");
+        result.pushKV("physical_disposition", "NOT_DISPATCHED");
+        result.pushKV("permit_consumed", true);
+        return Rec(result, receipt, "PERMIT_CONSUMED");
     }
     if (method == "lab.runtime_bind") {
         if (!Expect(store, req, "bind|" + RequireStr(req, "release_id"), err)) return false;
@@ -3297,10 +3477,17 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
         if (!req.exists("port") || !ReadIntParam(req["port"], port_num)) return Fail(err, "BTX035_SCHEMA");
         if (port_num <= 0 || port_num > 65535) return Fail(err, "BTX035_SCHEMA");
         std::string manifest;
-        if (!PullExchangeLoopback(RequireStr(req, "host"), static_cast<uint16_t>(port_num), RequireStr(req, "rpc_user"),
-                                  RequireStr(req, "rpc_password"), RequireStr(req, "repository_id"), manifest, err)) {
-            return false;
+        const uint64_t generation = store.commit_generation;
+        const std::string subject = store.token_subject;
+        bool pulled = false;
+        {
+            REVERSE_LOCK(api_lock);
+            pulled = PullExchangeLoopback(RequireStr(req, "host"), static_cast<uint16_t>(port_num), RequireStr(req, "rpc_user"),
+                                          RequireStr(req, "rpc_password"), RequireStr(req, "repository_id"), manifest, err);
         }
+        store.token_subject = subject;
+        if (!GenerationHeld(store, generation, err)) return false;
+        if (!pulled) return false;
         std::vector<ExchangeObject> objects;
         if (!VerifyExchangeManifest(manifest, objects, err)) return false;
         std::vector<ResearchObservation> observed;
@@ -3443,24 +3630,58 @@ bool ServeLabPeer(const std::string& route, const std::string& request_json, std
     return DispatchPeerRoute(route, request_json, view, response_json, err);
 }
 
+bool PublishAdmission(const std::string& method, const UniValue& req, std::string& err)
+{
+    if (method != "lab.admission_evaluate") return true;
+    const std::string op = Id96(method + "|" + req.write());
+    const Store& store = State();
+    const auto subject = store.admission_subject.find(op);
+    if (subject == store.admission_subject.end()) return true;
+    const auto split = subject->second.find('\n');
+    const std::string model_id = split == std::string::npos ? subject->second : subject->second.substr(0, split);
+    const std::string digest = split == std::string::npos ? std::string() : subject->second.substr(split + 1);
+    const auto decision = store.admissions.find(op);
+    if (model_id.empty() || decision == store.admissions.end() || decision->second.empty()) return true;
+    return RecordModelAdmission(model_id, digest, decision->second, err);
+}
+
+struct SecretCopy {
+    std::map<std::string, std::vector<unsigned char>> keys;
+    ~SecretCopy()
+    {
+        for (auto& item : keys) memory_cleanse(item.second.data(), item.second.size());
+    }
+};
+
 bool DispatchLabApi(const std::string& method, const std::string& request_json, std::string& response_json, std::string& err)
 {
-    LOCK(g_lab_mutex);
+    UniqueLock<GlobalMutex> api_lock(g_lab_mutex, "g_lab_mutex", __FILE__, __LINE__);
     response_json.clear();
     const LabMethod* spec = FindMethod(method);
     if (!spec) return Fail(err, "BTX035_NOT_IMPLEMENTED");
     UniValue req;
     if (!req.read(request_json) || !req.isObject()) return Fail(err, "BTX035_INVALID_SCHEMA");
     if (!CheckRequest(*spec, req, err)) return false;
+    if (State().recovery_required && !DurableRead(method)) return Fail(err, "BTX035_RECOVERY_REQUIRED");
+    const std::string digest = Id96(method + "\n" + req.write());
     std::string replayed;
-    if (!Replay(req, method + "\n" + req.write(), replayed, err)) return false;
+    if (!Replay(req, digest, replayed, err)) return false;
     if (!replayed.empty()) {
         response_json = replayed;
         err.clear();
         return true;
     }
+    LabDiskImage prior_image;
+    SecretCopy prior_secrets;
+    // Only a durable write can roll back, so a read does not copy the store.
+    if (!DurableRead(method)) {
+        ImageFromStore(State(), prior_image);
+        prior_secrets.keys = State().identity_sk;
+    }
+    const bool prior_recovery = State().recovery_required;
+    const uint64_t prior_generation = State().commit_generation;
     UniValue result(UniValue::VOBJ);
-    if (!Apply(method, req, result, err)) return false;
+    if (!Apply(method, req, result, err, api_lock)) return false;
     if (result.empty()) return Fail(err, "BTX035_INVALID_SCHEMA");
     const std::string request_id = Id96(method + "|" + req.write()).substr(0, 32);
     const UniValue envelope = EnvelopeResponse(request_id, result);
@@ -3468,11 +3689,46 @@ bool DispatchLabApi(const std::string& method, const std::string& request_json, 
     if (!State().token_subject.empty() && envelope.exists("state_token") && envelope["state_token"].isStr()) {
         State().tokens[State().token_subject] = envelope["state_token"].get_str();
     }
-    if (!DurableRead(method) && !PersistDurable(err)) {
-        response_json.clear();
-        return false;
+    Remember(req, digest, response_json);
+    if (!DurableRead(method)) {
+        bool persisted = false;
+        try {
+            persisted = PersistDurable(err);
+        } catch (const std::filesystem::filesystem_error&) {
+            err = "BTX035_RECOVERY_REQUIRED";
+        }
+        if (!persisted) {
+            bool recovery = prior_recovery;
+            if (!recovery && err == "BTX035_RECOVERY_REQUIRED") {
+                // A failed write leaves lab.json untouched, or it is put back below. Block writes only when it cannot be read.
+                LabDiskImage on_disk;
+                std::string read_err;
+                recovery = !LoadLabDisk(on_disk, read_err);
+            }
+            if (!recovery) {
+                std::string rollback_err;
+                (void)SaveLabDisk(prior_image, rollback_err);
+            }
+            RevertStore(std::move(prior_image), std::move(prior_secrets.keys), recovery, prior_generation);
+            response_json.clear();
+            return false;
+        }
+        bool published = false;
+        try {
+            published = PublishAdmission(method, req, err);
+        } catch (const std::filesystem::filesystem_error&) {
+            err = "BTX035_RECOVERY_REQUIRED";
+        }
+        if (!published) {
+            std::string rollback_err;
+            const bool rolled_back = SaveLabDisk(prior_image, rollback_err);
+            RevertStore(std::move(prior_image), std::move(prior_secrets.keys), !rolled_back, prior_generation);
+            response_json.clear();
+            if (!rolled_back) err = "BTX035_RECOVERY_REQUIRED";
+            return false;
+        }
+        State().commit_generation += 1;
     }
-    Remember(req, response_json);
     err.clear();
     return true;
 }

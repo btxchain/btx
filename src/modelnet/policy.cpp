@@ -429,7 +429,7 @@ UniValue PolicyToJson(const PreservationPolicy& p)
     o.pushKV("preservation_propagation", p.preserve_rare && p.storage_quota_bytes > 0);
     o.pushKV("peer_follow_propagation", p.follow_configured_peers && p.seed_mode == SeedMode::AUTO && p.storage_quota_bytes > 0);
     o.pushKV("release_propagation", p.seed_mode == SeedMode::AUTO && p.storage_quota_bytes > 0);
-    o.pushKV("unsolicited_fetch", "arbitrary advertised models stay off; catalog contacts (-modelpeer, addmodelnode) are followed when seed=auto and storage>0; PEX hints stay TTL'd and are not persisted");
+    o.pushKV("unsolicited_fetch", "bounded FREE_ONLY acquisition follows strict-PQ1 same-chain catalog contacts from configured peers, expiring PEX, and enabled private-LAN discovery when follow_peers, seed=auto and storage>0; unverified public advertisements do not authorize acquisition or execution");
     return o;
 }
 

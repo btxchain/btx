@@ -28,6 +28,8 @@
 #include <modelnet/package_documents.h>
 #include <span.h>
 #include <test/util/setup_common.h>
+#include <test/util/sdk_process.h>
+#include <test/util/symlink.h>
 #include <univalue.h>
 #include <util/fs.h>
 
@@ -47,9 +49,13 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#ifndef WIN32
 #include <sys/wait.h>
+#endif
 #include <system_error>
+#ifndef WIN32
 #include <unistd.h>
+#endif
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_ahp_doc_tests, BasicTestingSetup)
@@ -189,7 +195,7 @@ std::string NotesName(int i)
 
 bool PathIsSymlink(const fs::path& p)
 {
-    return std::filesystem::is_symlink(p);
+    return IsTestSymlink(p);
 }
 
 int CountAgentsMd(const fs::path& root)
@@ -236,6 +242,25 @@ bool ExclusiveNofollowExtract(const fs::path& dest_root, const modelnet::Package
         rest = rest.substr(slash + 1);
     }
 
+#ifdef WIN32
+    const HANDLE file = CreateFileW(cur.wstring().c_str(), GENERIC_WRITE, 0, nullptr,
+                                    CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        const DWORD code = GetLastError();
+        err = (code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS) ? "overwrite refused" : "extract open failed";
+        return false;
+    }
+    DWORD written{0};
+    const bool wrote = doc.text.size() <= MAXDWORD &&
+        ::WriteFile(file, doc.text.data(), static_cast<DWORD>(doc.text.size()), &written, nullptr) &&
+        written == doc.text.size();
+    const bool closed = CloseHandle(file);
+    if (!wrote || !closed) {
+        DeleteFileW(cur.wstring().c_str());
+        err = "extract write failed";
+        return false;
+    }
+#else
     const int fd = ::open(cur.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
     if (fd < 0) {
         err = (errno == EEXIST) ? "overwrite refused" : "extract open failed";
@@ -248,6 +273,7 @@ bool ExclusiveNofollowExtract(const fs::path& dest_root, const modelnet::Package
         err = "extract write failed";
         return false;
     }
+#endif
     return true;
 }
 
@@ -263,6 +289,15 @@ std::string ShellQuote(const std::string& s)
     return q;
 }
 
+std::string BtxOpenExecutable()
+{
+    fs::path executable = fs::PathFromString(MODELNET_BTX_OPEN_PATH);
+#ifdef WIN32
+    if (!fs::exists(executable) && executable.extension() != ".exe") executable += ".exe";
+#endif
+    return fs::PathToString(executable);
+}
+
 struct BtxOpenRun {
     int wait_status{0};
     std::string stdout_text;
@@ -271,6 +306,9 @@ struct BtxOpenRun {
 BtxOpenRun SpawnBtxOpen(const fs::path& file)
 {
     BtxOpenRun run;
+#ifdef WIN32
+    run.wait_status = sdk_test::Spawn({BtxOpenExecutable(), fs::PathToString(file)}, run.stdout_text, false);
+#else
     const std::string cmd = ShellQuote(MODELNET_BTX_OPEN_PATH) + " " + ShellQuote(fs::PathToString(file));
     FILE* fp = popen(cmd.c_str(), "r");
     BOOST_REQUIRE(fp);
@@ -279,11 +317,22 @@ BtxOpenRun SpawnBtxOpen(const fs::path& file)
         run.stdout_text.append(buf);
     }
     run.wait_status = pclose(fp);
+#endif
     return run;
 }
 #endif
 
 } // namespace
+
+#ifdef WIN32
+BOOST_AUTO_TEST_CASE(ahp_doc_windows_launch_failure_is_not_a_cli_refusal)
+{
+    std::string output;
+    const fs::path missing = m_path_root / "missing executable.exe";
+    BOOST_REQUIRE(!fs::exists(missing));
+    BOOST_CHECK_EQUAL(sdk_test::Spawn({fs::PathToString(missing), "fixture.btx"}, output, false), -1);
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(ahp_doc_01_required_documents)
 {
@@ -698,7 +747,7 @@ BOOST_AUTO_TEST_CASE(ahp_doc_09_btx_open_does_not_write_workspace)
 {
     // AHP-DOC-09 / JIT-API-07: spawn btx-open on an unsigned fixture. Inspect
     // only; automatic_spend_atoms stays 0; do not write workspace AGENTS.md.
-    const fs::path workspace = m_path_root / "ahp-doc-09-open";
+    const fs::path workspace = m_path_root / "ahp-doc-09 open space";
     const fs::path parent_agents = workspace / "AGENTS.md";
     const fs::path pkg_dir = workspace / "fixture";
     const fs::path dest_btx = pkg_dir / "model-agent.btx";
@@ -729,21 +778,25 @@ BOOST_AUTO_TEST_CASE(ahp_doc_09_btx_open_does_not_write_workspace)
     BOOST_TEST_MESSAGE("AHP-DOC-09 / JIT-API-07 btx-open spawn NOT_RUN: MODELNET_BTX_OPEN_PATH unset");
 #else
     BOOST_TEST_MESSAGE(std::string("AHP-DOC-09 btx-open binary: ") + MODELNET_BTX_OPEN_PATH);
-    BOOST_REQUIRE(fs::exists(fs::PathFromString(MODELNET_BTX_OPEN_PATH)));
+    BOOST_REQUIRE(fs::exists(fs::PathFromString(BtxOpenExecutable())));
     const std::string fixture = fs::PathToString(dest_btx);
     BOOST_REQUIRE(fixture.find("btx://") == std::string::npos);
     BOOST_REQUIRE(fixture.ends_with(".btx") || fixture.ends_with(".BTX"));
     // One argv: the copied .btx path. Not a shell of mixed URI+file.
+    std::string out;
+#ifdef WIN32
+    const int rc = sdk_test::Spawn({BtxOpenExecutable(), fixture}, out, false);
+#else
     const std::string cmd = ShellQuote(MODELNET_BTX_OPEN_PATH) + " " + ShellQuote(fixture);
     BOOST_REQUIRE(cmd.find("btx://") == std::string::npos);
     FILE* fp = popen(cmd.c_str(), "r");
     BOOST_REQUIRE(fp);
-    std::string out;
     char buf[4096];
     while (fgets(buf, sizeof(buf), fp) != nullptr) {
         out.append(buf);
     }
     const int rc = pclose(fp);
+#endif
     BOOST_REQUIRE_EQUAL(rc, 0);
     const bool inspect_fields = out.find("core_version") != std::string::npos ||
                                 out.find("documents") != std::string::npos ||
@@ -777,9 +830,14 @@ BOOST_AUTO_TEST_CASE(ahp_doc_09_btx_open_fail_closed_json)
     fs::create_directories(dir);
 
     auto check_error_json = [](const BtxOpenRun& run, const char* code) {
+#ifdef WIN32
+        // PrintErrorJson returns 1; launch failures (-1) and crashes are not valid refusals.
+        BOOST_REQUIRE_EQUAL(run.wait_status, 1);
+#else
         BOOST_REQUIRE_MESSAGE(WIFEXITED(run.wait_status), run.stdout_text);
         BOOST_REQUIRE(!WIFSIGNALED(run.wait_status));
         BOOST_CHECK_NE(WEXITSTATUS(run.wait_status), 0);
+#endif
         UniValue o;
         BOOST_REQUIRE_MESSAGE(o.read(run.stdout_text), run.stdout_text);
         BOOST_REQUIRE(o.exists("error") && o["error"].isObject());
@@ -802,8 +860,12 @@ BOOST_AUTO_TEST_CASE(ahp_doc_09_btx_open_fail_closed_json)
         const fs::path p = dir / "core-v1.btx";
         WriteFile(p, R"({"core":{"version":1}})");
         const BtxOpenRun run = SpawnBtxOpen(p);
+#ifdef WIN32
+        BOOST_CHECK_EQUAL(run.wait_status, 0);
+#else
         BOOST_CHECK(WIFEXITED(run.wait_status));
         BOOST_CHECK_EQUAL(WEXITSTATUS(run.wait_status), 0);
+#endif
         BOOST_CHECK(run.stdout_text.find("core_version=1") != std::string::npos);
         BOOST_CHECK(run.stdout_text.find("CORE_V4_FORBIDDEN") == std::string::npos);
     }
@@ -946,20 +1008,22 @@ BOOST_AUTO_TEST_CASE(ahp_doc_11_explicit_safe_extraction)
     fs::create_directories(outside);
     WriteFile(outside / "victim.md", "VICTIM SENTINEL\n");
     const fs::path link_dir = m_path_root / "ahp-doc-11-linkdir";
-    fs::create_symlink(outside, link_dir);
-    BOOST_CHECK(PathIsSymlink(link_dir));
-    BOOST_CHECK(!modelnet::ExtractPackageDocuments(core, fs::PathToString(link_dir), false, err_code, err));
-    BOOST_CHECK_EQUAL(err_code, "SYMLINK_REFUSED");
-    BOOST_CHECK(!ExclusiveNofollowExtract(link_dir, readme, xerr));
-    BOOST_CHECK_EQUAL(xerr, "symlinked extraction target");
-    BOOST_CHECK_EQUAL(Slurp(outside / "victim.md"), "VICTIM SENTINEL\n");
+    if (CreateTestSymlink(outside, link_dir, /*directory=*/true)) {
+        BOOST_CHECK(PathIsSymlink(link_dir));
+        BOOST_CHECK(!modelnet::ExtractPackageDocuments(core, fs::PathToString(link_dir), false, err_code, err));
+        BOOST_CHECK_EQUAL(err_code, "SYMLINK_REFUSED");
+        BOOST_CHECK(!ExclusiveNofollowExtract(link_dir, readme, xerr));
+        BOOST_CHECK_EQUAL(xerr, "symlinked extraction target");
+        BOOST_CHECK_EQUAL(Slurp(outside / "victim.md"), "VICTIM SENTINEL\n");
+    }
 
     const fs::path dest2 = m_path_root / "ahp-doc-11-dest2";
     fs::create_directories(dest2);
-    fs::create_symlink(outside / "victim.md", dest2 / "README.md");
-    BOOST_CHECK(!ExclusiveNofollowExtract(dest2, readme, xerr));
-    BOOST_CHECK_EQUAL(xerr, "symlinked extraction target");
-    BOOST_CHECK_EQUAL(Slurp(outside / "victim.md"), "VICTIM SENTINEL\n");
+    if (CreateTestSymlink(outside / "victim.md", dest2 / "README.md", /*directory=*/false)) {
+        BOOST_CHECK(!ExclusiveNofollowExtract(dest2, readme, xerr));
+        BOOST_CHECK_EQUAL(xerr, "symlinked extraction target");
+        BOOST_CHECK_EQUAL(Slurp(outside / "victim.md"), "VICTIM SENTINEL\n");
+    }
 
     if (project_before) {
         BOOST_CHECK_EQUAL(Slurp(project_agents), *project_before);

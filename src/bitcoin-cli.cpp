@@ -16,6 +16,7 @@
 #include <policy/feerate.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <rpc/client.h>
 #include <rpc/mining.h>
 #include <rpc/protocol.h>
@@ -1386,6 +1387,20 @@ static int LightWatchCommand(const std::vector<std::string>& args, std::string& 
     }
 
     const fs::path file = LightWatchFile();
+    if (command == "init" || command == "add" || command == "sync") {
+        // Hold the lock from before loading through the final save. An atomic
+        // rename alone cannot stop another writer from replacing a newer watch
+        // with the copy it loaded before an RPC call.
+        fs::create_directories(file.parent_path());
+        switch (util::LockDirectory(file.parent_path(), "watch.lock")) {
+        case util::LockResult::ErrorWrite:
+            throw std::runtime_error("BTX_LIGHTWATCH_IO");
+        case util::LockResult::ErrorLock:
+            throw std::runtime_error("BTX_LIGHTWATCH_BUSY");
+        case util::LockResult::Success:
+            break;
+        }
+    }
     if (command == "init") {
         if (args.size() < 2 || args.size() > 3) throw std::runtime_error("lightwatch init <descriptor> [start_height]");
         if (fs::exists(file)) throw std::runtime_error("lightwatch state already exists");
@@ -1421,13 +1436,17 @@ static int LightWatchCommand(const std::vector<std::string>& args, std::string& 
         if (!watch.Sync(LightWatchRpc, error)) throw std::runtime_error(error.empty() ? "BTX_FILTER_HEADER" : error);
         if (!watch.Save(PathToString(file), error)) throw std::runtime_error(error);
         const int tip = LightWatchRpc("getblockcount", {}).getInt<int>();
-        strPrint = LightWatchStatusJson(watch.Status(tip)).write(2);
+        LightWatchStatus status = watch.Status(tip);
+        status.ready = status.ready && watch.IsCurrentAt(tip, tip, LightWatchRpc);
+        strPrint = LightWatchStatusJson(status).write(2);
         return EXIT_SUCCESS;
     }
     if (command == "status" || command == "balance" || command == "balanceat") {
         const int tip = LightWatchRpc("getblockcount", {}).getInt<int>();
         if (command == "status") {
-            strPrint = LightWatchStatusJson(watch.Status(tip)).write(2);
+            LightWatchStatus status = watch.Status(tip);
+            status.ready = status.ready && watch.IsCurrentAt(tip, tip, LightWatchRpc);
+            strPrint = LightWatchStatusJson(status).write(2);
             return EXIT_SUCCESS;
         }
         int height = tip;
@@ -1437,6 +1456,10 @@ static int LightWatchCommand(const std::vector<std::string>& args, std::string& 
             if (!parsed || *parsed < 0) throw std::runtime_error("invalid height");
             height = *parsed;
         } else if (!watch.Status(tip).ready) {
+            strPrint = "BTX_BALANCE_NOT_READY";
+            return EXIT_FAILURE;
+        }
+        if (!watch.IsCurrentAt(height, tip, LightWatchRpc)) {
             strPrint = "BTX_BALANCE_NOT_READY";
             return EXIT_FAILURE;
         }

@@ -76,6 +76,9 @@ inline bool HostModeWantsHosting(HostMode m) { return m != HostMode::OFF; }
 ProfilePolicy ResolveProfile(OperatorProfile profile, const ProfileOverrides& existing = {});
 ProfilePolicy ApplyProfileOverrides(ProfilePolicy policy, const ProfileOverrides& existing);
 ProfileOverrides OverridesFromPolicy(const ProfilePolicy& policy);
+/** Strict operator RPC fields. Unknown keys, duplicate aliases and nonzero
+ * automatic spending are rejected before any policy is persisted. */
+bool ParseProfileOverridesJson(const UniValue& value, ProfileOverrides& out, std::string& err);
 
 fs::path OperatorProfilePath(const fs::path& modeldir);
 bool LoadOperatorProfile(const fs::path& path, OperatorProfile& profile, ProfilePolicy& policy, std::string& err);

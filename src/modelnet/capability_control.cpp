@@ -7,6 +7,7 @@
 #include <modelnet/package_core.h>
 #include <modelnet/transfer_session.h>
 #include <util/fs.h>
+#include <util/sock.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 
@@ -524,17 +525,16 @@ int RunCapabilityDaemon(const fs::path& modeldir, fs::path socket, std::atomic<b
     std::string err;
     std::string p = fs::PathToString(socket);
     ::unlink(p.c_str());
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return 2;
+    const SOCKET fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd == INVALID_SOCKET) return 2;
+    Sock listener{fd};
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     if (p.size() >= sizeof(addr.sun_path)) {
-        ::close(fd);
         return 2;
     }
     std::strncpy(addr.sun_path, p.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listen(fd, 16) != 0) {
-        ::close(fd);
         return 2;
     }
     ModelCatalog cat(modeldir, 1 << 20);
@@ -544,8 +544,9 @@ int RunCapabilityDaemon(const fs::path& modeldir, fs::path socket, std::atomic<b
     while (!stop->load()) {
         const int pr = ::poll(&pfd, 1, 250);
         if (pr <= 0) continue;
-        const int cfd = ::accept(fd, nullptr, nullptr);
-        if (cfd < 0) continue;
+        const SOCKET cfd = ::accept(fd, nullptr, nullptr);
+        if (cfd == INVALID_SOCKET) continue;
+        Sock connection{cfd};
         std::string body;
         char buf[4096];
         while (body.size() < (1 << 20)) {
@@ -588,9 +589,9 @@ int RunCapabilityDaemon(const fs::path& modeldir, fs::path socket, std::atomic<b
         }
         const std::string out = reply.write() + "\n";
         ::send(cfd, out.data(), out.size(), 0);
-        ::close(cfd);
     }
-    ::close(fd);
+    // Release the native socket before removing its filesystem entry.
+    listener = Sock{INVALID_SOCKET};
     ::unlink(p.c_str());
     (void)err;
     return 0;

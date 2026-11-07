@@ -14,6 +14,9 @@
 #include <modelnet/funding.h>
 #include <modelnet/identity.h>
 #include <modelnet/model_nat.h>
+#include <modelnet/native_discovery.h>
+#include <modelnet/native_participation.h>
+#include <modelnet/swarm_form/atomic.h>
 #include <modelnet/piece_picker.h>
 #include <modelnet/transfer_session.h>
 #include <modelnet/verified_manifest.h>
@@ -60,8 +63,12 @@
 #include <tinyformat.h>
 #include <logging.h>
 #include <netaddress.h>
+#include <netbase.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
+#ifndef _WIN32
+#include <util/subprocess.h>
+#endif
 
 #include <openssl/bn.h>
 #include <openssl/evp.h>
@@ -70,6 +77,7 @@
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -92,6 +100,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
+#include <deque>
 #include <cstdlib>
 #include <functional>
 #include <cstring>
@@ -108,6 +117,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -131,11 +141,40 @@ bool LooksLikeTmpFallbackSock(const fs::path& sock)
     return s.find("/tmp/btx-md-") != std::string::npos || s.find("/var/tmp/btx-md-") != std::string::npos;
 }
 
+#if !defined(WIN32) && !defined(__APPLE__)
+// Only `owner` (and root) can add entries: a real directory, not a symlink,
+// owned by `owner`, with no group or other write bit.
+bool OwnerOnlyDir(const fs::path& dir, uid_t owner)
+{
+    struct stat st {};
+    return ::lstat(fs::PathToString(dir).c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == owner &&
+           (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+#endif
+
 fs::path RuntimeSockDir()
 {
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    if (!xdg || xdg[0] != '/') return {};
-    return fs::PathFromString(xdg) / "btx-modeld";
+    if (xdg && xdg[0] == '/') return fs::PathFromString(xdg) / "btx-modeld";
+#ifdef __APPLE__
+    // macOS sets no XDG_RUNTIME_DIR. The per-user temporary directory
+    // (/var/folders/.../T/) belongs to the user, is mode 0700, and is short
+    // enough for sun_path. ListenUnix() still makes btx-modeld/ 0700 inside it.
+    char tmp[1024];
+    const size_t n = ::confstr(_CS_DARWIN_USER_TEMP_DIR, tmp, sizeof(tmp));
+    if (n > 1 && n <= sizeof(tmp) && tmp[0] == '/') return fs::PathFromString(tmp) / "btx-modeld";
+#elif !defined(WIN32)
+    // XDG_RUNTIME_DIR is often missing under cron, su, sudo and in
+    // containers. Use the login runtime directory it would have named, or
+    // /run for root. Nobody else can add entries to either, so btx-modeld/
+    // cannot be pre-created there by another user; ListenUnix() still makes
+    // it 0700 and checks its owner.
+    const uid_t uid = ::getuid();
+    const fs::path user_run = fs::PathFromString(strprintf("/run/user/%u", static_cast<unsigned>(uid)));
+    if (OwnerOnlyDir(user_run, uid)) return user_run / "btx-modeld";
+    if (uid == 0 && OwnerOnlyDir(fs::PathFromString("/run"), 0)) return fs::PathFromString("/run/btx-modeld");
+#endif
+    return {};
 }
 
 } // namespace
@@ -161,6 +200,11 @@ fs::path UnixRpcListenPath(const fs::path& requested)
 
 bool UnixSocketSafeToAdopt(const fs::path& sock, std::string& err)
 {
+#ifdef _WIN32
+    (void)sock;
+    err = "helper Unix RPC is not supported on this platform";
+    return false;
+#else
     err.clear();
     if (LooksLikeTmpFallbackSock(sock) || StickyWorldWritableDir(sock.parent_path())) {
         err = "tmp socket is not a helper";
@@ -188,10 +232,16 @@ bool UnixSocketSafeToAdopt(const fs::path& sock, std::string& err)
         return false;
     }
     return true;
+#endif
 }
 
 bool UnixConnectedPeerIsSelf(int fd, std::string& err)
 {
+#ifdef _WIN32
+    (void)fd;
+    err = "helper peer identity is not supported on this platform";
+    return false;
+#else
     err.clear();
 #if defined(SO_PEERCRED)
     struct ucred cred {};
@@ -209,6 +259,7 @@ bool UnixConnectedPeerIsSelf(int fd, std::string& err)
     (void)fd;
     return true;
 #endif
+#endif
 }
 
 namespace {
@@ -220,6 +271,14 @@ constexpr int UNIX_RPC_REPLY_MS = 120 * 1000;
 constexpr int UNIX_RPC_LONG_REPLY_MS = 24 * 60 * 60 * 1000;
 constexpr size_t MAX_PIECE_HTTP = MAX_HTTP_HEADERS + PIECE_SIZE + 4096;
 constexpr uint64_t PQ1_RECONNECT_BYTES = 8ULL << 30;
+
+NativeLanDiscovery g_native_lan;
+std::atomic<bool> g_native_lan_enabled{false};
+std::string g_native_lan_error;
+std::string g_native_network;
+std::atomic<uint64_t> g_native_acquired{0};
+std::mutex g_native_peers_mu;
+std::map<std::string, NativePeerObservation> g_native_peers;
 
 std::string TrimCopy(std::string s)
 {
@@ -322,8 +381,29 @@ bool InventorySafeTensorsFile(const fs::path& path, UniValue& tensors, uint64_t&
     return true;
 }
 
-bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, std::string& err, pid_t* hold_pid)
+// Windows process shims reject fork, so no worker child reaches this there.
+void CloseWorkerDescriptors()
 {
+#ifndef _WIN32
+    subprocess::detail::subprocess_close_all_fds(/*except_fd=*/-1);
+#endif
+}
+
+// A worker PID is meaningful only for the POSIX runners below.
+#ifdef _WIN32
+using WorkerPid = int;
+#else
+using WorkerPid = pid_t;
+#endif
+
+bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, std::string& err, WorkerPid* hold_pid)
+{
+#ifdef _WIN32
+    (void)loader; (void)dir; (void)out;
+    if (hold_pid) *hold_pid = 0;
+    err = "CUDA loader process is not supported on this platform";
+    return false;
+#else
     std::error_code ec;
     if (!fs::is_regular_file(loader, ec) || ec) {
         err = "BTX_MODEL_CUDA_LOADER is not a regular file";
@@ -345,6 +425,7 @@ bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, s
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
         close(pipefd[1]);
+        CloseWorkerDescriptors();
         const std::string loader_s = fs::PathToString(loader);
         const std::string dir_s = fs::PathToString(dir);
         if (hold_pid) {
@@ -393,10 +474,11 @@ bool RunCudaLoader(const fs::path& loader, const fs::path& dir, UniValue& out, s
         return false;
     }
     return true;
+#endif
 }
 
 struct ResidentCuda {
-    pid_t pid{0};
+    WorkerPid pid{0};
     uint64_t bytes_on_device{0};
     std::string device_name;
     UniValue cuda;
@@ -405,14 +487,23 @@ struct ResidentCuda {
 std::mutex g_resident_mu;
 std::map<std::string, ResidentCuda> g_resident;
 
-bool PidAlive(pid_t pid)
+bool PidAlive(WorkerPid pid)
 {
+#ifdef _WIN32
+    (void)pid;
+    return false;
+#else
     if (pid <= 0) return false;
     return ::kill(pid, 0) == 0 || errno == EPERM;
+#endif
 }
 
 void StopResidentLocked(const std::string& key)
 {
+#ifdef _WIN32
+    // Windows cannot create a resident worker through these runners.
+    g_resident.erase(key);
+#else
     auto it = g_resident.find(key);
     if (it == g_resident.end()) return;
     const pid_t pid = it->second.pid;
@@ -427,6 +518,7 @@ void StopResidentLocked(const std::string& key)
     ::kill(pid, SIGKILL);
     int st = 0;
     waitpid(pid, &st, 0);
+#endif
 }
 
 void StopResident(const std::string& key)
@@ -437,6 +529,13 @@ void StopResident(const std::string& key)
 
 bool MaybeRunInferCmd(const fs::path& checkout, UniValue& result, std::string& err)
 {
+#ifdef _WIN32
+    (void)checkout; (void)result;
+    const char* cmd = std::getenv("BTX_MODEL_INFER_CMD");
+    if (!cmd || cmd[0] == '\0') return true;
+    err = "inference process is not supported on this platform";
+    return false;
+#else
     const char* cmd = std::getenv("BTX_MODEL_INFER_CMD");
     if (!cmd || cmd[0] == '\0') return true;
     int pipefd[2];
@@ -455,6 +554,7 @@ bool MaybeRunInferCmd(const fs::path& checkout, UniValue& result, std::string& e
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
         close(pipefd[1]);
+        CloseWorkerDescriptors();
         const std::string exe = cmd;
         const std::string dir_s = fs::PathToString(checkout);
         const char* argv[] = {exe.c_str(), dir_s.c_str(), nullptr};
@@ -484,11 +584,17 @@ bool MaybeRunInferCmd(const fs::path& checkout, UniValue& result, std::string& e
     result.pushKV("infer_ok", true);
     result.pushKV("generated", !line.empty());
     return true;
+#endif
 }
 
 bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::string& prompt,
                         int max_new_tokens, UniValue& out, std::string& err)
 {
+#ifdef _WIN32
+    (void)exe; (void)dir; (void)prompt; (void)max_new_tokens; (void)out;
+    err = "generate adapter process is not supported on this platform";
+    return false;
+#else
     if (!fs::exists(exe) || !fs::is_regular_file(exe)) {
         err = "BTX_MODEL_GENERATE is not a regular file";
         return false;
@@ -535,6 +641,7 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         if (dup2(outpipe[1], STDOUT_FILENO) < 0) _exit(127);
         if (inpipe[0] != STDIN_FILENO) close(inpipe[0]);
         if (outpipe[1] != STDOUT_FILENO) close(outpipe[1]);
+        CloseWorkerDescriptors();
         const std::string exe_s = fs::PathToString(exe);
         const std::string dir_s = fs::PathToString(dir);
         const std::string n_s = std::to_string(max_new_tokens);
@@ -731,11 +838,17 @@ bool RunGenerateAdapter(const fs::path& exe, const fs::path& dir, const std::str
         return false;
     }
     return true;
+#endif
 }
 
 bool RunLlamaGenerate(const fs::path& exe, const fs::path& gguf, const std::string& prompt,
                       int max_new_tokens, UniValue& out, std::string& err)
 {
+#ifdef _WIN32
+    (void)exe; (void)gguf; (void)prompt; (void)max_new_tokens; (void)out;
+    err = "llama process is not supported on this platform";
+    return false;
+#else
     if (!fs::exists(exe) || !fs::is_regular_file(exe) ||
         ::access(fs::PathToString(exe).c_str(), X_OK) != 0) {
         err = "BTX_LLAMA_CLI is not executable";
@@ -762,6 +875,7 @@ bool RunLlamaGenerate(const fs::path& exe, const fs::path& gguf, const std::stri
             close(nullfd);
         }
         close(outpipe[1]);
+        CloseWorkerDescriptors();
         const std::string exe_s = fs::PathToString(exe);
         const std::string m_s = fs::PathToString(gguf);
         const std::string n_s = std::to_string(max_new_tokens);
@@ -795,6 +909,7 @@ bool RunLlamaGenerate(const fs::path& exe, const fs::path& gguf, const std::stri
     out.pushKV("format", "gguf");
     out.pushKV("remote_inference", false);
     return true;
+#endif
 }
 
 int AddrConnectPreference(const sockaddr* sa)
@@ -925,6 +1040,7 @@ RouterCache& RecordsFor(const ModelCatalog& cat)
                 cache.Insert(h, now, e);
             }
         }
+        cache.MarkSaved();
     }
     return cache;
 }
@@ -946,8 +1062,14 @@ bool PersistRecords(const ModelCatalog& cat, RouterCache& cache)
         arr.push_back(o);
     }
     std::string err;
-    return WriteJsonFile(HelperDir(cat) / "records.json", arr, err);
+    if (!WriteJsonFile(HelperDir(cat) / "records.json", arr, err)) return false;
+    cache.MarkSaved();
+    return true;
 }
+
+/** Peer announces leave records.json to RunModelDaemon, which writes it at most
+ *  this often and on stop. Each write is the whole cache. */
+constexpr int RECORDS_SAVE_INTERVAL_S{60};
 
 UniValue HintJson(const SignedRecordHint& h)
 {
@@ -1137,6 +1259,9 @@ ModelSearchRecord DraftSearchFromCatalog(const CatalogEntry& e)
     return rec;
 }
 
+/** Longest a record announced by a peer holds a record cache slot. */
+constexpr int64_t PEER_RECORD_MAX_HOLD_S{7 * DAY_SECONDS};
+
 bool AcceptSignedAnnounce(const UniValue& body, int64_t now, SignedRecordHint& h, std::string& err)
 {
     if (!body.exists("kind") || !body.exists("payload_hex") || !body.exists("sig_hex") || !body.exists("pubkey_hex")) {
@@ -1168,6 +1293,9 @@ bool AcceptSignedAnnounce(const UniValue& body, int64_t now, SignedRecordHint& h
     h.signed_ok = true;
     h.expiry = decoded.exists("expires_at") ? decoded["expires_at"].getInt<int64_t>() : 0;
     if (h.expiry == 0) h.expiry = now + 86400;
+    // The signer picks expires_at, so without a ceiling a peer's record could
+    // hold its slot for decades. The signed payload is kept unchanged.
+    h.expiry = std::min(h.expiry, now + PEER_RECORD_MAX_HOLD_S);
     h.provider_id = decoded.exists("signer_id") ? decoded["signer_id"].get_str() : ProviderId(*pk).Hex();
     return true;
 }
@@ -1401,6 +1529,11 @@ int ListenTcp(const std::string& bind, std::string& err)
 
 int ListenUnix(fs::path& path, std::string& err)
 {
+#ifdef _WIN32
+    (void)path;
+    err = "helper Unix RPC is not supported on this platform";
+    return -1;
+#else
     const fs::path requested = path;
     path = UnixRpcListenPath(requested);
     std::string p = fs::PathToString(path);
@@ -1459,6 +1592,7 @@ int ListenUnix(fs::path& path, std::string& err)
         return -1;
     }
     return fd;
+#endif
 }
 
 std::string RecvUntil(int fd, size_t cap, std::atomic<bool>* stop, int timeout_ms = PQ1_IDLE_MS)
@@ -1558,7 +1692,15 @@ struct Pq1Session {
     bool outbound_held{false};
     /** Operator addmodelnode of 127.0.0.1/::1 (howto loopback seeder). PEX extras stay blocked. */
     bool allow_loopback{false};
+    /** A -modelpeer / addmodelnode endpoint. Like -addnode, -onlynet does not limit it. */
+    bool operator_named{false};
+    std::string transport_pin;
     std::vector<std::pair<std::string, std::string>> piece_headers;
+    /** Automatic retrieval keeps this authority across every pooled/reopened transport. */
+    std::function<bool(const std::string&, uint16_t, const std::string&, std::string&)> authorize_peer;
+    std::string required_network;
+    bool network_verified{false};
+    bool checking_network{false};
 
     ~Pq1Session() { Close(); }
 
@@ -1574,10 +1716,12 @@ struct Pq1Session {
             fd = -1;
         }
         transferred = 0;
+        network_verified = false;
     }
 
     void Close()
     {
+        transport_pin.clear();
         CloseTransport();
         if (outbound_held) {
             GlobalConnLimits().ReleaseOutbound();
@@ -1591,6 +1735,7 @@ struct Pq1Session {
         pq = &ctx;
         host = h;
         port = p;
+        if (authorize_peer && !authorize_peer(host, port, {}, err)) return false;
         if (!ctx.Ready()) {
             err = "PQ1 not ready";
             return false;
@@ -1600,6 +1745,34 @@ struct Pq1Session {
             return false;
         }
         outbound_held = true;
+        Proxy proxy;
+        std::optional<CNetAddr> numeric;
+        const ModelDialRoute route{RouteModelDial(host, /*manual=*/operator_named, proxy, numeric, err)};
+        if (route == ModelDialRoute::REFUSED) {
+            Close();
+            return false;
+        }
+        if (route == ModelDialRoute::PROXY) {
+            // Only names and routable addresses get a proxy; local and private ones are dialed below.
+            if (IsForbiddenControlPort(port)) {
+                err = "non-public dial target";
+                Close();
+                return false;
+            }
+            fd = ConnectModelThroughProxy(proxy, host, port, err);
+            if (fd < 0) {
+                Close();
+                return false;
+            }
+            SetPq1SocketOpts(fd, true);
+            std::string try_err;
+            const std::string pin_key{numeric ? CService{*numeric, port}.ToStringAddrPort() : host + ":" + std::to_string(port)};
+            const HandshakeResult result{Handshake(ctx, pin_key, err, try_err)};
+            if (result == HandshakeResult::OK) return true;
+            if (result == HandshakeResult::NEXT) err = try_err;
+            Close();
+            return false;
+        }
         addrinfo hints{};
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_family = AF_UNSPEC;
@@ -1654,6 +1827,10 @@ struct Pq1Session {
                 last_try_err = "non-public dial target";
                 continue;
             }
+            if (!operator_named && !g_reachable_nets.Contains(ModelOnlynetNetwork(resolved))) {
+                last_try_err = "network not reachable (-onlynet)";
+                continue;
+            }
             if (IsForbiddenOutboundDialAddr(resolved)) {
                 if (!(allow_loopback && resolved.IsLocal() && !resolved.IsBindAny())) {
                     last_try_err = "non-public dial target";
@@ -1684,52 +1861,91 @@ struct Pq1Session {
                 last_try_err = "connect failed";
                 continue;
             }
-            ssl = SSL_new(static_cast<SSL_CTX*>(ctx.SslCtx()));
-            if (!ssl) {
-                err = "SSL_new";
+            const HandshakeResult result{Handshake(ctx, resolved.ToStringAddrPort(), err, last_try_err)};
+            if (result == HandshakeResult::OK) return true;
+            if (result == HandshakeResult::FAIL) {
                 Close();
                 return false;
             }
-            SSL_set_fd(ssl, fd);
-            SSL_set_connect_state(ssl);
-            std::string herr;
-            if (!SslHandshake(ssl, fd, /*accept=*/false, handshake_ms, stop, herr)) {
-                last_try_err = herr.empty() ? "PQ1 handshake failed" : herr;
-                continue;
-            }
-            NegotiatedPq1 n;
-            InspectNegotiated(ssl, n);
-            if (!IsStrictPq1(n)) {
-                last_try_err = "negotiated parameters are not strict PQ1";
-                continue;
-            }
-            Digest48 pin;
-            std::string pinerr;
-            if (!ExtractPeerTransportPin(ssl, pin, pinerr)) {
-                last_try_err = pinerr.empty() ? "no peer certificate" : pinerr;
-                continue;
-            }
-            if (!pinfile.empty() && !CheckOrStorePin(pinfile, resolved.ToStringAddrPort(), pin, pinerr)) {
-                err = pinerr.empty() ? "peer cert pin mismatch (TOFU)" : pinerr;
-                Close();
-                return false;
-            }
-            return true;
         }
         err = last_try_err;
         Close();
         return false;
     }
 
+    enum class HandshakeResult { OK, NEXT, FAIL };
+
+    /** Strict PQ1 over the connected fd, then the peer pin (TOFU under pin_key). NEXT: try the next address. */
+    HandshakeResult Handshake(Pq1Context& ctx, const std::string& pin_key, std::string& err, std::string& try_err)
+    {
+        ssl = SSL_new(static_cast<SSL_CTX*>(ctx.SslCtx()));
+        if (!ssl) {
+            err = "SSL_new";
+            return HandshakeResult::FAIL;
+        }
+        SSL_set_fd(ssl, fd);
+        SSL_set_connect_state(ssl);
+        std::string herr;
+        if (!SslHandshake(ssl, fd, /*accept=*/false, handshake_ms, stop, herr)) {
+            try_err = herr.empty() ? "PQ1 handshake failed" : herr;
+            return HandshakeResult::NEXT;
+        }
+        NegotiatedPq1 n;
+        InspectNegotiated(ssl, n);
+        if (!IsStrictPq1(n)) {
+            try_err = "negotiated parameters are not strict PQ1";
+            return HandshakeResult::NEXT;
+        }
+        Digest48 pin;
+        std::string pinerr;
+        if (!ExtractPeerTransportPin(ssl, pin, pinerr)) {
+            try_err = pinerr.empty() ? "no peer certificate" : pinerr;
+            return HandshakeResult::NEXT;
+        }
+        if (authorize_peer && !authorize_peer(host, port, pin.Hex(), err)) return HandshakeResult::FAIL;
+        if (!pinfile.empty() && !CheckOrStorePin(pinfile, pin_key, pin, pinerr)) {
+            err = pinerr.empty() ? "peer cert pin mismatch (TOFU)" : pinerr;
+            return HandshakeResult::FAIL;
+        }
+        transport_pin = pin.Hex();
+        return HandshakeResult::OK;
+    }
+
     bool Ensure(std::string& err)
     {
         if (ssl && transferred >= PQ1_RECONNECT_BYTES) Close();
-        if (ssl) return true;
-        if (!pq) {
-            err = "PQ1 session has no context";
+        if (!ssl) {
+            if (!pq) {
+                err = "PQ1 session has no context";
+                return false;
+            }
+            if (!Connect(*pq, host, port, err)) return false;
+        }
+        if (authorize_peer && !authorize_peer(host, port, transport_pin, err)) {
+            Close();
             return false;
         }
-        return Connect(*pq, host, port, err);
+        if (!required_network.empty() && !network_verified && !checking_network) {
+            // Request calls Ensure too. Only this bounded availability request
+            // may run before the new transport has proved its chain namespace.
+            checking_network = true;
+            NativeRequest check;
+            NativeResponse response;
+            check.method = "POST";
+            check.path = std::string(MODEL_HTTP_ROOT) + "availability";
+            check.body = "{}";
+            const bool received = Request(check, response, err);
+            checking_network = false;
+            UniValue body;
+            if (!received || response.status != 200 || !body.read(response.body) ||
+                !NativeAvailabilityMatchesNetwork(body, required_network) || !ssl) {
+                if (err.empty()) err = "automatic retrieval requires a same-chain PQ1 session";
+                Close();
+                return false;
+            }
+            network_verified = true;
+        }
+        return true;
     }
 
     bool Request(const NativeRequest& req, NativeResponse& resp, std::string& err)
@@ -1959,6 +2175,13 @@ Digest48 IdFromUser(const std::string& s, std::string& err)
 
 } // namespace
 
+void FlushRecords(const ModelCatalog& cat)
+{
+    std::lock_guard<std::mutex> lock(g_ext_mu);
+    RouterCache& cache = RecordsFor(cat);
+    if (cache.Unsaved()) PersistRecords(cat, cache);
+}
+
 bool ParseHttpRequest(const std::string& raw, NativeRequest& req, std::string& err)
 {
     req = {};
@@ -1994,6 +2217,10 @@ bool ParseHttpRequest(const std::string& raw, NativeRequest& req, std::string& e
         const size_t v = std::strtoul(raw.c_str() + cl + 15, nullptr, 10);
         if (v > MAX_RPC_BODY && req.method != "GET") {
             err = "body too large";
+            return false;
+        }
+        if (req.body.size() < v) {
+            err = "truncated http";
             return false;
         }
         if (req.body.size() > v) req.body.resize(v);
@@ -2062,6 +2289,26 @@ static SearchIndex g_search_idx;
 static SearchRuntime g_search_rt;
 static std::mutex g_search_mu;
 static std::map<std::string, std::vector<ProviderObservation>> g_search_obs;
+// g_search_mu must be held. Remote observations are historical; local
+// seeding is known directly, so derive it from the current catalog instead
+// of caching a second copy that every unseed path would have to invalidate.
+std::vector<ProviderObservation> CurrentProviderObservations(ModelCatalog& cat, const Digest48& id)
+{
+    std::vector<ProviderObservation> observations;
+    const auto it = g_search_obs.find(id.Hex());
+    if (it != g_search_obs.end()) observations = it->second;
+    CatalogEntry entry;
+    if (cat.Find(id, entry) && entry.seeded) {
+        ProviderObservation local;
+        local.provider_id = "local";
+        local.endpoint = "local";
+        local.complete = !entry.incomplete;
+        local.last_seen_ms = ConnNowMs();
+        observations.push_back(std::move(local));
+    }
+    return observations;
+}
+
 static QueryDedupe g_search_dedupe;
 static bool g_search_bound{false};
 static FeedStore g_feed;
@@ -2218,7 +2465,9 @@ void EnsureEconomy(ModelCatalog& cat)
     }
 }
 
-void PersistEconomy(ModelCatalog& cat)
+// g_search_mu must be held: Save() walks the index that Put() rewrites on
+// the other unix worker. The campaign lock is taken second, as elsewhere.
+static void PersistEconomyLocked(ModelCatalog& cat)
 {
     std::string err;
     (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", err);
@@ -2229,6 +2478,12 @@ void PersistEconomy(ModelCatalog& cat)
         camps = g_campaigns.List();
     }
     (void)SaveCampaigns(HelperDir(cat), camps, err);
+}
+
+void PersistEconomy(ModelCatalog& cat)
+{
+    std::lock_guard<std::mutex> lock(g_search_mu);
+    PersistEconomyLocked(cat);
 }
 
 bool ReadCatalogBytes(ModelCatalog& cat, const CatalogEntry& e, std::vector<unsigned char>& out, std::string& err)
@@ -2261,13 +2516,17 @@ bool ReadCatalogBytes(ModelCatalog& cat, const CatalogEntry& e, std::vector<unsi
     return true;
 }
 
-FundingObservation ObservationFromHit(const SearchHit& h, const ReleaseCampaign* campaign, ModelCatalog* cat)
+/** include_wallet_observation=false leaves out g_chain_obs: those entries come from
+ *  btxd's join against the local wallets (ObserveReleaseFunding reads mapWallet), so
+ *  they must not reach a remote peer. */
+FundingObservation ObservationFromHit(const SearchHit& h, const ReleaseCampaign* campaign, ModelCatalog* cat,
+                                      bool include_wallet_observation = true)
 {
     FundingObservation f;
     f.funding_source = "OBSERVED_NETWORK_STATE";
     f.ciphertext_providers_observed = h.health.providers_observed;
     if (campaign) {
-        auto it = g_chain_obs.find(campaign->release_id.Hex());
+        auto it = include_wallet_observation ? g_chain_obs.find(campaign->release_id.Hex()) : g_chain_obs.end();
         if (it != g_chain_obs.end() && it->second.confirmed_known &&
             it->second.funding_source == "CHAIN_OBSERVATION") {
             f = it->second;
@@ -2308,12 +2567,12 @@ void FillKnownCatalogFields(ModelCatalog& cat, SearchHit& h)
     }
 }
 
-ModelEconomyEntry EconomyForHit(const SearchHit& h, ModelCatalog* cat = nullptr)
+ModelEconomyEntry EconomyForHit(const SearchHit& h, ModelCatalog* cat = nullptr, bool include_wallet_observation = true)
 {
     std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
     const ReleaseCampaign* c = g_campaigns.GetByModel(h.rec.model_id);
     if (!c && !h.rec.release_id.empty()) c = g_campaigns.GetByReleaseHex(h.rec.release_id);
-    return ComposeEconomyEntry(h, c, ObservationFromHit(h, c, cat));
+    return ComposeEconomyEntry(h, c, ObservationFromHit(h, c, cat, include_wallet_observation));
 }
 
 UniValue EconomyCard(const SearchHit& h)
@@ -2326,7 +2585,7 @@ void AfterIndexPut(const ModelSearchRecord& rec, int64_t now_ms)
     g_feed.NoteSearchRecord(rec, now_ms);
     {
         std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
-        g_campaigns.IngestFromSearchRecord(rec);
+        g_campaigns.IngestFromSearchRecord(rec, [](const ReleaseCampaign& c) { return CampaignIsLocal(c.release_id.Hex()); });
     }
     if (BoundModelEventJournal()) {
         ObserveResult ores;
@@ -2375,18 +2634,7 @@ void IngestCatalogIntoSearch(ModelCatalog& cat)
         } else {
             (void)g_search_idx.Put(r, ConnNowMs(), err);
         }
-        if (m.exists("seeded") && m["seeded"].get_bool()) {
-            auto& vec = g_search_obs[r.model_id.Hex()];
-            vec.erase(std::remove_if(vec.begin(), vec.end(),
-                                     [](const ProviderObservation& o) { return o.provider_id == "local"; }),
-                      vec.end());
-            ProviderObservation o;
-            o.provider_id = "local";
-            o.endpoint = "local";
-            o.complete = !(m.exists("incomplete") && m["incomplete"].get_bool());
-            o.last_seen_ms = ConnNowMs();
-            vec.push_back(o);
-        }
+
     }
 }
 
@@ -2426,15 +2674,21 @@ const ReleaseCampaign* CampaignForEntry(const CatalogEntry& entry)
     if (const ReleaseCampaign* by_model = g_campaigns.GetByModel(entry.model_id)) {
         if (CampaignIsLocal(by_model->release_id.Hex())) return by_model;
     }
-    for (const auto& camp : g_campaigns.List()) {
-        if (!CampaignIsLocal(camp.release_id.Hex())) continue;
-        if (camp.model_id == entry.model_id || camp.artifact_id == entry.artifact_id ||
-            (!camp.ciphertext_artifact_id.IsNull() &&
-             (camp.ciphertext_artifact_id == entry.artifact_id || camp.ciphertext_artifact_id == entry.model_id))) {
-            return g_campaigns.GetByRelease(camp.release_id);
+    const auto names_entry = [&](const ReleaseCampaign& camp) {
+        return camp.model_id == entry.model_id || camp.artifact_id == entry.artifact_id ||
+               (!camp.ciphertext_artifact_id.IsNull() &&
+                (camp.ciphertext_artifact_id == entry.artifact_id || camp.ciphertext_artifact_id == entry.model_id));
+    };
+    // This runs on every piece and file request. Walk the local releases, not
+    // a copy of every campaign learned from peers.
+    if (!g_local_releases_untrusted) {
+        for (const auto& rid : g_local_releases) {
+            const ReleaseCampaign* camp = g_campaigns.GetByReleaseHex(rid);
+            if (camp && names_entry(*camp)) return camp;
         }
+        return nullptr;
     }
-    return nullptr;
+    return g_campaigns.Find(names_entry);
 }
 
 bool DistinctCiphertextObject(const ReleaseCampaign& c, const CatalogEntry& entry)
@@ -2579,19 +2833,41 @@ void UnseedSafetyTarget(ModelCatalog& cat, const std::string& hex)
     (void)cat.Seed(id, false, e);
 }
 
+namespace {
+std::mutex g_grant_issue_mu;
+std::map<std::string, std::vector<int64_t>> g_grant_issue_hits;
+int64_t g_grant_issue_pruned_ms{0};
+} // namespace
+
 bool AllowGrantIssue(const std::string& peer, int64_t now_ms, std::string& err)
 {
-    static std::mutex mu;
-    static std::map<std::string, std::vector<int64_t>> hits;
-    std::lock_guard<std::mutex> lock(mu);
-    auto& v = hits[peer.empty() ? "pq1-peer" : peer];
-    v.erase(std::remove_if(v.begin(), v.end(), [&](int64_t t) { return now_ms - t > 60000; }), v.end());
+    std::lock_guard<std::mutex> lock(g_grant_issue_mu);
+    const auto expired = [&](int64_t t) { return now_ms - t > 60000; };
+    // Every peer that ever asked for a grant would otherwise keep a key here.
+    // Once a minute, drop the peers with no grant inside the window.
+    if (now_ms < g_grant_issue_pruned_ms || now_ms - g_grant_issue_pruned_ms > 60000) {
+        for (auto it = g_grant_issue_hits.begin(); it != g_grant_issue_hits.end();) {
+            auto& times = it->second;
+            times.erase(std::remove_if(times.begin(), times.end(), expired), times.end());
+            if (times.empty()) it = g_grant_issue_hits.erase(it);
+            else ++it;
+        }
+        g_grant_issue_pruned_ms = now_ms;
+    }
+    auto& v = g_grant_issue_hits[peer.empty() ? "pq1-peer" : peer];
+    v.erase(std::remove_if(v.begin(), v.end(), expired), v.end());
     if (v.size() >= 32) {
         err = "grant issue limited";
         return false;
     }
     v.push_back(now_ms);
     return true;
+}
+
+size_t GrantIssueTrackedPeers()
+{
+    std::lock_guard<std::mutex> lock(g_grant_issue_mu);
+    return g_grant_issue_hits.size();
 }
 
 void ApplyInboundSafetyRecord(ModelCatalog& cat, const SignedRecordHint& h, int64_t now, UniValue& o)
@@ -2923,6 +3199,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
     if (req.path == root + "availability" && req.method == "POST") {
         UniValue o(UniValue::VOBJ);
         o.pushKV("schema_version", 2);
+        o.pushKV("network", g_native_network);
         UniValue listed;
         cat.List(listed);
         UniValue pub(UniValue::VOBJ);
@@ -3384,14 +3661,23 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         fq.scope = SearchScope::LOCAL;
         std::lock_guard<std::mutex> lock(g_search_mu);
         std::string next;
-        const auto items = g_feed.Query(fq, ConnNowMs(), next);
+        // This is a peer route. Funding events come only from local pledges and from
+        // btxd's join against the local wallets, and the wallet join also sets
+        // confirmed funding, wallet_local_state and the refund state of a card.
+        // Serve neither to a peer.
+        std::vector<FeedEvent> items;
+        for (auto& ev : g_feed.Query(fq, ConnNowMs(), next)) {
+            if (ev.event_type == FeedEventType::RELEASE_FUNDING_CHANGED ||
+                ev.event_type == FeedEventType::RELEASE_FUNDED) continue;
+            items.push_back(std::move(ev));
+        }
         std::vector<ModelEconomyEntry> entries;
         UniValue recs(UniValue::VARR);
         for (const auto& ev : items) {
             SearchHit h;
             h.rec = ev.rec;
             if (h.rec.model_id.IsNull()) h.rec.model_id = ev.model_id;
-            entries.push_back(EconomyForHit(h));
+            entries.push_back(EconomyForHit(h, nullptr, /*include_wallet_observation=*/false));
             recs.push_back(SearchRecordToJson(h.rec));
         }
         FeedCoverage cov;
@@ -3486,18 +3772,21 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             return true;
         }
         std::lock_guard<std::mutex> lock(g_ext_mu);
+        // An advisory needs no cache slot. Apply it first, so that a cache other
+        // peers have filled cannot stop a pinned publisher's takedown.
+        UniValue safety(UniValue::VOBJ);
+        ApplyInboundSafetyRecord(cat, h, now, safety);
         if (!RecordsFor(cat).Insert(h, now, err)) {
             resp.status = 400;
             resp.body = JsonError("RECORD", err);
             return true;
         }
-        PersistRecords(cat, RecordsFor(cat));
         UniValue oann(UniValue::VOBJ);
         oann.pushKV("schema_version", 2);
         oann.pushKV("accepted", true);
         oann.pushKV("signed", true);
         oann.pushKV("record_id", h.record_id.Hex());
-        ApplyInboundSafetyRecord(cat, h, now, oann);
+        oann.pushKVs(std::move(safety));
         resp.body = oann.write();
         return true;
     }
@@ -3594,18 +3883,21 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             return true;
         }
         std::lock_guard<std::mutex> lock(g_ext_mu);
+        // An advisory needs no cache slot. Apply it first, so that a cache other
+        // peers have filled cannot stop a pinned publisher's takedown.
+        UniValue safety(UniValue::VOBJ);
+        ApplyInboundSafetyRecord(cat, h, now, safety);
         if (!RecordsFor(cat).Insert(h, now, err)) {
             resp.status = 400;
             resp.body = JsonError("RECORD", err);
             return true;
         }
-        PersistRecords(cat, RecordsFor(cat));
         UniValue oann(UniValue::VOBJ);
         oann.pushKV("schema_version", 2);
         oann.pushKV("accepted", true);
         oann.pushKV("signed", true);
         oann.pushKV("record_id", h.record_id.Hex());
-        ApplyInboundSafetyRecord(cat, h, now, oann);
+        oann.pushKVs(std::move(safety));
         resp.body = oann.write();
         return true;
     }
@@ -3844,6 +4136,21 @@ std::vector<std::string> AdvertisedNativeHttpPaths()
     return out;
 }
 
+void AppendPexGossipEndpoints(std::vector<std::string>& dest, const std::string& self);
+
+static bool PreservationPermitted(const ModelCatalog& cat);
+
+static bool AutomaticAcquisitionPermitted(const ModelCatalog& cat)
+{
+    const auto policy = cat.Policy();
+    return AutomaticAcquisitionAllowed(policy, !policy.preserve_rare || PreservationPermitted(cat));
+}
+
+static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const std::string& host, uint16_t port,
+                                      const Digest48& model_id, std::string& err, std::atomic<bool>* stop,
+                                      const fs::path& pinfile, RetrieveProgress* progress,
+                                      const std::vector<std::string>& extra_peers, bool automatic);
+
 namespace {
 
 constexpr size_t kKeepTerminalRetrieveJobs = 8;
@@ -3852,6 +4159,7 @@ struct RetrieveJob {
     std::string id;
     Digest48 model_id;
     fs::path modeldir;
+    bool automatic{false};
     int64_t created_ms{0};
     std::string status{"queued"};
     UniValue result;
@@ -3909,6 +4217,7 @@ void PersistRetrieveJobsLocked()
         UniValue o(UniValue::VOBJ);
         o.pushKV("job_id", id);
         o.pushKV("model_id", kv.second->model_id.Hex());
+        o.pushKV("automatic", kv.second->automatic);
         o.pushKV("status", "queued");
         o.pushKV("created_ms", created_ms);
         o.pushKV("bytes_committed", kv.second->progress.bytes_committed.load());
@@ -3949,6 +4258,7 @@ void LoadRetrieveJobs(ModelCatalog& cat)
         job->id = id;
         job->model_id = mid;
         job->modeldir = HelperDir(cat);
+        job->automatic = j["automatic"].isTrue();
         if (j.exists("created_ms") && j["created_ms"].isNum()) {
             job->created_ms = j["created_ms"].getInt<int64_t>();
         }
@@ -4055,19 +4365,30 @@ UniValue RetrieveJobJson(const RetrieveJob& j)
     return o;
 }
 
-std::string EnqueueRetrieve(ModelCatalog& cat, const Digest48& model_id, std::atomic<bool>* stop)
+std::string EnqueueRetrieve(ModelCatalog& cat, const Digest48& model_id, std::atomic<bool>* stop, bool automatic = false)
 {
     (void)stop;
+    if (automatic && !AutomaticAcquisitionPermitted(cat)) return {};
     auto job = std::make_shared<RetrieveJob>();
     job->id = NewRetrieveJobId();
     job->model_id = model_id;
     job->modeldir = HelperDir(cat);
+    job->automatic = automatic;
     {
         std::lock_guard<std::mutex> lock(job->mu);
         job->status = "running";
     }
     {
         std::lock_guard<std::mutex> lock(g_retrieve_mu);
+        for (const auto& [id, active] : g_retrieve_jobs) {
+            std::lock_guard<std::mutex> active_lock(active->mu);
+            const bool running = active->status == "queued" || active->status == "running";
+            if (running && active->model_id == model_id) return id;
+            // Bound automatic transfer concurrency and failed-model retry rate.
+            if (automatic && active->automatic && (running ||
+                (active->model_id == model_id && active->status == "failed" &&
+                 NowEpochMs() - active->created_ms < 30000))) return {};
+        }
         g_retrieve_jobs[job->id] = job;
         PruneRetrieveJobsLocked();
         PersistRetrieveJobsLocked();
@@ -4111,9 +4432,23 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
         std::string last_err;
         int transient_streak = 0;
         uint64_t last_bytes = 0;
+        auto current_peers = [&]() {
+            std::vector<std::string> peers;
+            if (job->automatic) {
+                const int64_t now = ConnNowMs();
+                std::lock_guard<std::mutex> lock(g_native_peers_mu);
+                for (const auto& [endpoint, observation] : g_native_peers) {
+                    if (NativePeerObservationAllows(observation, g_native_network, model_id.Hex(), now)) peers.push_back(endpoint);
+                }
+            } else {
+                peers = cat.Peers();
+                AppendPexGossipEndpoints(peers, /*self=*/{});
+            }
+            return peers;
+        };
         auto remaining_unfailed = [&]() -> size_t {
             size_t n = 0;
-            for (const auto& p : cat.Peers()) {
+            for (const auto& p : current_peers()) {
                 if (failed_peers.count(p) == 0) ++n;
             }
             return n;
@@ -4123,8 +4458,14 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                 failed("cancelled");
                 return;
             }
+            if (job->automatic) {
+                if (!AutomaticAcquisitionPermitted(cat)) {
+                    failed("automatic acquisition disabled by local policy");
+                    return;
+                }
+            }
             std::string peer;
-            for (const auto& p : cat.Peers()) {
+            for (const auto& p : current_peers()) {
                 if (failed_peers.count(p) == 0) {
                     peer = p;
                     break;
@@ -4148,10 +4489,10 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
             std::string rerr;
             try {
                 std::vector<std::string> extras;
-                for (const auto& p : cat.Peers()) {
+                for (const auto& p : current_peers()) {
                     if (p != peer && failed_peers.count(p) == 0) extras.push_back(p);
                 }
-                {
+                if (!job->automatic) {
                     std::lock_guard<std::mutex> lock(g_swarm.conn_mu);
                     for (const auto& rec : g_swarm.providers.Get(model_id, ConnNowMs())) {
                         for (const auto& ep : rec.endpoints) {
@@ -4159,7 +4500,8 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                         }
                     }
                 }
-                if (RetrieveFreeFromPeer(cat, pq, host, port, model_id, rerr, &job->cancel, pinfile, &job->progress, extras)) {
+                if (RetrieveFreeFromPeerScoped(cat, pq, host, port, model_id, rerr, &job->cancel,
+                                               pinfile, &job->progress, extras, job->automatic)) {
                     std::string seed_err;
                     DemandSeedIfDownloadable(cat, model_id, seed_err);
                     CatalogEntry got;
@@ -4180,7 +4522,10 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                         job->status = "done";
                     }
                     CatalogEntry done;
-                    if (cat.Find(model_id, done)) cat.EndTransfer(done.artifact_id);
+                    if (cat.Find(model_id, done)) {
+                        cat.EndTransfer(done.artifact_id);
+                        if (job->automatic && done.bytes_verified && !done.incomplete) ++g_native_acquired;
+                    }
                     PersistRetrieveJobs();
                     return;
                 }
@@ -4290,6 +4635,8 @@ struct HelperRuntimeInfo {
     int last_watch_skipped{0};
 };
 static HelperRuntimeInfo g_runtime;
+static std::mutex g_profile_update_mu;
+static std::optional<ProfilePolicy> g_pending_profile;
 
 static bool CatalogHasVerifiedSeededRange(const ModelCatalog& cat);
 static void RefreshAdvertisedHost(const ModelCatalog* cat);
@@ -4982,6 +5329,80 @@ void AppendPexGossipEndpoints(std::vector<std::string>& dest, const std::string&
         if (h.endpoint.empty() || h.endpoint == self) continue;
         if (std::find(dest.begin(), dest.end(), h.endpoint) == dest.end()) dest.push_back(h.endpoint);
     }
+    for (const auto& endpoint : g_native_lan.Endpoints()) {
+        if (endpoint != self && std::find(dest.begin(), dest.end(), endpoint) == dest.end()) dest.push_back(endpoint);
+    }
+}
+
+/** Observations made by this helper after PQ1, not caller-provided qualification flags. */
+static UniValue NativeParticipationJson(ModelCatalog& cat)
+{
+    UniValue out(UniValue::VOBJ), peers(UniValue::VARR), families(UniValue::VARR), local;
+    std::set<std::string> local_models;
+    cat.List(local);
+    if (local.exists("models") && local["models"].isArray()) for (const auto& item : local["models"].getValues()) {
+        if (item["model_id"].isStr() && item["bytes_verified"].isTrue() && !item["incomplete"].isTrue())
+            local_models.insert(item["model_id"].get_str());
+    }
+    std::map<std::string, std::set<std::string>> family_peers;
+    std::set<std::string> authenticated_identities;
+    const int64_t now = ConnNowMs();
+    {
+        std::lock_guard<std::mutex> lock(g_native_peers_mu);
+        for (auto it = g_native_peers.begin(); it != g_native_peers.end();) {
+            if (!NativePeerObservationFresh(it->second, now))
+                it = g_native_peers.erase(it);
+            else ++it;
+        }
+        for (const auto& [endpoint, observation] : g_native_peers) {
+            authenticated_identities.insert(observation.transport_pin);
+            UniValue peer(UniValue::VOBJ), models(UniValue::VARR);
+            peer.pushKV("endpoint", endpoint);
+            peer.pushKV("transport_pin", observation.transport_pin);
+            peer.pushKV("observed_at_ms", observation.observed_at_ms);
+            peer.pushKV("expires_at_ms", observation.observed_at_ms + NATIVE_PEER_TTL_MS);
+            for (const auto& model : observation.advertised_models) {
+                models.push_back(model);
+                if (!local_models.count(model)) continue;
+                family_peers[model].insert(observation.transport_pin);
+            }
+            peer.pushKV("advertised_models", models);
+            peer.pushKV("compute_authorized", false);
+            peers.push_back(peer);
+        }
+    }
+    for (const auto& [model, members] : family_peers) {
+        UniValue family(UniValue::VOBJ), member_pins(UniValue::VARR);
+        for (const auto& pin : members) member_pins.push_back(pin);
+        family.pushKV("model_id", model);
+        family.pushKV("peer_transport_pins", member_pins);
+        family.pushKV("role", "observer");
+        family.pushKV("assurance", "LOCAL_BYTES_VERIFIED_REMOTE_AVAILABILITY_ADVERTISED");
+        families.push_back(family);
+    }
+    out.pushKV("schema", "BTX/NativeParticipation/1");
+    out.pushKV("network", g_native_network);
+    out.pushKV("lan_enabled", g_native_lan_enabled.load());
+    out.pushKV("lan_error", g_native_lan_error);
+    out.pushKV("hint_count", static_cast<uint64_t>(g_native_lan.Endpoints().size()));
+    out.pushKV("authenticated_peers", static_cast<uint64_t>(authenticated_identities.size()));
+    out.pushKV("peer_observations", peers);
+    out.pushKV("shared_model_families", families);
+    out.pushKV("acquired_models", g_native_acquired.load());
+    out.pushKV("automatic_spend_atoms", "0");
+    out.pushKV("release_qualified", false);
+    return out;
+}
+
+static void PersistNativeParticipation(ModelCatalog& cat)
+{
+    const fs::path dir = HelperDir(cat) / "swarm";
+    std::error_code ec;
+    if (fs::is_symlink(fs::symlink_status(dir, ec))) return;
+    fs::create_directories(dir);
+    std::string err;
+    if (!SwarmFormWrite(dir / "native-participation.json", NativeParticipationJson(cat).write() + "\n", err))
+        LogPrintf("native participation snapshot: %s\n", err);
 }
 
 bool JsonLooksLikeCloudSecret(const UniValue& o)
@@ -5817,8 +6238,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (IsModelWatchHelperMethod(method)) {
         const bool ok = DispatchModelWatchRpc(method, params, result, err_code, err, stop);
         if (ok && method == "getmodelwatchactions" && result.exists("actions")) {
-            ExecuteQueuedFreeDownloads(cat, result);
-            result.pushKV("executed_free_downloads", true);
+            // A peek must remain read-only, including the helper's post-RPC
+            // action dispatcher. Only an actual drain may execute actions.
+            const bool drained = result["drained"].isTrue();
+            if (drained) ExecuteQueuedFreeDownloads(cat, result);
+            result.pushKV("executed_free_downloads", drained);
         }
         return ok;
     }
@@ -5837,9 +6261,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     }
     if (method == "setmodelprofile") {
         std::string name;
+        UniValue overrides(UniValue::VOBJ);
         if (params.isArray() && params.size() > 0 && params[0].isStr()) name = params[0].get_str();
-        else if (params.isArray() && params.size() > 0 && params[0].isObject() && params[0].exists("profile")) {
+        else if (params.isArray() && params.size() == 1 && params[0].isObject() && params[0]["profile"].isStr()) {
             name = params[0]["profile"].get_str();
+            overrides = params[0];
+        }
+        if (params.isArray() && params.size() == 2 && params[0].isStr()) overrides = params[1];
+        if (!params.isArray() || params.empty() || params.size() > 2) {
+            err_code = "INVALID_PARAMETER"; err = "expected profile and optional overrides object"; return false;
         }
         OperatorProfile prof = OperatorProfile::CUSTOM;
         if (!ParseOperatorProfile(name, prof)) {
@@ -5848,7 +6278,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             return false;
         }
         ProfileOverrides ov;
+        if (!ParseProfileOverridesJson(overrides, ov, err)) { err_code = "INVALID_PARAMETER"; return false; }
+        if (overrides.exists("profile")) {
+            OperatorProfile override_profile;
+            if (!ParseOperatorProfile(overrides["profile"].get_str(), override_profile) || override_profile != prof) {
+                err_code = "INVALID_PARAMETER"; err = "conflicting profile names"; return false;
+            }
+        }
         const ProfilePolicy policy = ResolveProfile(prof, ov);
+        std::lock_guard<std::mutex> profile_lock(g_profile_update_mu);
         std::string serr;
         if (!SaveOperatorProfile(OperatorProfilePath(HelperDir(cat)), prof, policy, serr)) {
             err_code = "IO_ERROR";
@@ -5858,9 +6296,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result = OperatorProfileToJson(prof, policy);
         result.pushKV("automatic_spend_atoms", 0);
         result.pushKV("applied", true);
-        result.pushKV("note", "follow/preserve/upload/host-auto applied live; NODE_MODEL_HOST still follows AutoHostShouldAdvertise");
-        ApplyProfilePolicyLive(cat, policy);
-        RefreshAdvertisedHost(&cat);
+        result.pushKV("runtime_apply", "QUEUED");
+        result.pushKV("note", "saved; helper loop applies storage and role policy on its next iteration; no execution or payment grant");
+        g_pending_profile = policy;
         return true;
     }
 
@@ -6133,6 +6571,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("nat_status", ModelNatStatusName(g_swarm.nat.status));
         result.pushKV("relay_status", g_swarm.relay ? "optional" : "off");
         result.pushKV("peers_connected", GlobalConnLimits().Inbound() + GlobalConnLimits().Outbound());
+        result.pushKV("native_participation", NativeParticipationJson(cat));
         result.pushKV("providers_known", g_swarm.providers_known);
         result.pushKV("min_rarity", g_swarm.min_rarity);
         result.pushKV("rare_pieces_1_source", g_swarm.rare_1);
@@ -6612,6 +7051,17 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         result.pushKV("link", link);
         if (params.isArray() && params.size() > 1 && Arg(1).isStr() && !Arg(1).get_str().empty()) {
             const fs::path outp = fs::PathFromString(Arg(1).get_str());
+            // The path is caller text (a UI, an agent, a script). Write a new
+            // file or replace a share file; never follow a symlink, never wait
+            // on a FIFO or a device, never truncate some other file.
+            std::error_code sec;
+            const fs::file_status st = fs::symlink_status(outp, sec);
+            std::string old_text, old_err;
+            if (fs::exists(st) && (!fs::is_regular_file(st) || !LoadShareText(outp, old_text, old_err))) {
+                err_code = "INVALID_PARAMETER";
+                err = "path exists and is not a share file";
+                return false;
+            }
             if (!outp.parent_path().empty()) fs::create_directories(outp.parent_path());
             std::ofstream f(outp, std::ios::trunc);
             if (!f) {
@@ -7019,7 +7469,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         MergeRemoteSearchHits(job, std::move(remote_hits));
         job.hits = g_search_idx.Search(q, ConnNowMs());
-        lock.unlock();
+        // Keep the search lock through the cache snapshot and observation merge:
+        // a concurrent search must not restore an older provider snapshot.
         int routing_known = 0;
         std::map<std::string, std::vector<ProviderObservation>> extra_obs;
         {
@@ -7040,13 +7491,13 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 }
             }
         }
-        lock.lock();
         for (auto& kv : extra_obs) {
             auto& obs = g_search_obs[kv.first];
             for (const auto& o : kv.second) {
                 bool dup = false;
-                for (const auto& e : obs) {
+                for (auto& e : obs) {
                     if (e.provider_id == o.provider_id) {
+                        e = o;
                         dup = true;
                         break;
                     }
@@ -7072,8 +7523,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         UniValue arr(UniValue::VARR);
         std::vector<SearchHit> decorated;
         for (auto& h : job.hits) {
-            auto it = g_search_obs.find(h.rec.model_id.Hex());
-            if (it != g_search_obs.end()) h.health = ComputeSwarmHealth(0, 0, it->second);
+            h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, h.rec.model_id));
             CatalogEntry e;
             if (cat.Find(h.rec.model_id, e)) {
                 h.local.known = true;
@@ -7168,7 +7618,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             return false;
         }
         AfterIndexPut(rec, ConnNowMs());
-        PersistEconomy(cat);
+        PersistEconomyLocked(cat);
         const auto* stored = g_search_idx.Get(rec.model_id);
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
@@ -7290,8 +7740,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         const auto* r = g_search_idx.Get(id);
         if (r) h.rec = *r;
         else h.rec.model_id = id;
-        auto it = g_search_obs.find(id.Hex());
-        if (it != g_search_obs.end()) h.health = ComputeSwarmHealth(0, 0, it->second);
+        h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, id));
         CatalogEntry e;
         if (cat.Find(id, e)) {
             h.local.known = true;
@@ -7306,7 +7755,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         EnsureSearchBound();
         const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
         std::lock_guard<std::mutex> lock(g_search_mu);
-        const auto obs = g_search_obs[id.Hex()];
+        const auto obs = CurrentProviderObservations(cat, id);
         const SwarmHealth h = ComputeSwarmHealth(0, 0, obs);
         if (method == "getmodelproviders") {
             UniValue arr(UniValue::VARR);
@@ -7847,21 +8296,17 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         std::vector<Quote> quotes;
         std::vector<PaymentJournal> journal;
         const fs::path dir = cat.Store().Root().parent_path();
-        LoadPaymentState(dir, quotes, journal, err);
+        std::unique_lock<std::mutex> payment_lock(PaymentStateMutex());
+        // A paid plan saves its new quote into quotes.json. Never write over
+        // a journal that could not be read; a free-only plan writes nothing.
+        if (!LoadPaymentState(dir, quotes, journal, err) && mode != RetrievalMode::FREE_ONLY) {
+            err_code = "IO";
+            return false;
+        }
         for (auto& p : missing) {
             if (DuplicateReservedRange(journal, p.file_index, p.piece_index, 1)) p.reserved_paid = true;
         }
-        int64_t outstanding = 0;
-        for (const auto& q : quotes) {
-            if (!(q.model_id == r.digest) || q.price_atoms <= 0) continue;
-            bool delivered = false;
-            for (const auto& j : journal) {
-                if (j.delivered && j.quote_id == q.offer_id.Hex()) delivered = true;
-            }
-            if (delivered) continue;
-            outstanding += q.price_atoms;
-            if (q.fee_cap_atoms > 0) outstanding += q.fee_cap_atoms;
-        }
+        const int64_t outstanding = OutstandingQuoteAtoms(quotes, journal, r.digest);
         if (mode != RetrievalMode::FREE_ONLY) {
             Quote q;
             int64_t price = 0;
@@ -7874,9 +8319,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     price = 1; // explicit paid is never a free quote; automatic spend stays 0
                 }
             }
-            MakePrepaidQuote(q, r.digest, have_local ? local_probe.artifact_id : Digest48{}, 0, 0, price, err);
+            if (!MakePrepaidQuote(q, r.digest, have_local ? local_probe.artifact_id : Digest48{}, 0, 0, price, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
             quotes.push_back(q);
-            SavePaymentState(dir, quotes, journal, err);
+            if (!SavePaymentState(dir, quotes, journal, err)) {
+                err_code = "IO";
+                return false;
+            }
             result.pushKV("quote", QuoteToJson(q));
             if (mode == RetrievalMode::EXPLICIT_PAID) {
                 result.pushKV("funding_rpc", "preparemodelfunding");
@@ -7884,6 +8335,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 result.pushKV("note", "EXPLICIT_PAID quotes a price; automatic spend remains 0. preparemodelfunding / signmodelfunding / submitmodelfunding freeze htlc_sha256.");
             }
         }
+        // Nothing below reads or writes quotes.json; release before network or cloud work.
+        payment_lock.unlock();
         bool paid_binding = false;
         for (const auto& q : quotes) {
             if (!(q.model_id == r.digest)) continue;
@@ -8010,6 +8463,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
         }
         auto peers = cat.Peers();
+        AppendPexGossipEndpoints(peers, /*self=*/{});
         ResolveQueryPlan rplan;
         PlanRouterQueries(peers, peers.size() >= 2 ? std::vector<std::string>{peers.back()} : std::vector<std::string>{}, rplan);
         if (rplan.contacts.empty()) {
@@ -8169,6 +8623,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         UniValue arr(UniValue::VARR);
         for (const auto& p : cat.Peers()) arr.push_back(p);
         result.pushKV("peers", arr);
+        result.pushKV("native_participation", NativeParticipationJson(cat));
         result.pushKV("note", "model-plane contacts; not AddrMan; not monetary addnode");
         return true;
     }
@@ -8478,8 +8933,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err = "unknown release";
                 return false;
             }
-            if (const auto* rec = g_search_idx.Get(camp.model_id)) h.rec = *rec;
-            else h.rec.model_id = camp.model_id;
+            {
+                std::lock_guard<std::mutex> lock(g_search_mu);
+                if (const auto* rec = g_search_idx.Get(camp.model_id)) h.rec = *rec;
+                else h.rec.model_id = camp.model_id;
+            }
             auto e = ComposeEconomyEntry(h, &camp, ObservationFromHit(h, &camp, &cat));
             UniValue one = CampaignToJson(camp);
             one.pushKV("lifecycle_state", ModelLifecycleName(e.lifecycle));
@@ -8831,7 +9289,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         const char* loader_env = std::getenv("BTX_MODEL_CUDA_LOADER");
         if (loader_env && loader_env[0] != '\0') {
             UniValue loaded;
-            pid_t child = 0;
+            WorkerPid child = 0;
             if (!RunCudaLoader(fs::PathFromString(loader_env), checkout, loaded, err, &child)) {
                 err_code = "HARDWARE_NOT_RUN";
                 return false;
@@ -9371,8 +9829,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         IngestCatalogIntoSearch(cat);
         for (const auto& rec : g_search_idx.All()) AfterIndexPut(rec, ConnNowMs());
         auto decorate = [&](SearchHit h) {
-            auto it = g_search_obs.find(h.rec.model_id.Hex());
-            if (it != g_search_obs.end()) h.health = ComputeSwarmHealth(0, 0, it->second);
+            h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, h.rec.model_id));
             CatalogEntry e;
             if (cat.Find(h.rec.model_id, e)) {
                 h.local.known = true;
@@ -9533,11 +9990,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 // g_search_mu is already held. Campaign lock is taken second.
                 std::lock_guard<std::recursive_mutex> camp_lock(g_campaign_mu);
                 if (auto* c = const_cast<ReleaseCampaign*>(g_campaigns.GetByRelease(id))) {
-                    c->funded_atoms = f.confirmed_funded_atoms;
-                    if (f.chain_height_known) c->latest_funding_height = f.chain_height;
+                    // The observation comes from btxd's join against the local
+                    // wallets (ObserveReleaseFunding reads mapWallet). Keep it in
+                    // g_chain_obs for local views; do not write it into the shared
+                    // campaign, which is serialized in cards served to peers.
                     g_feed.NoteFundingChanged(*c, ConnNowMs());
                     LiveObserveCampaign(*c, FeedEventType::RELEASE_FUNDING_CHANGED);
-                    SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
                 }
             }
             result.pushKV("accepted", true);
@@ -9869,7 +10327,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
         }
         result = FeedPageJson(items, entries, fq, cov, g_feed.Sequence(), next);
-        PersistEconomy(cat);
+        PersistEconomyLocked(cat);
         return true;
     }
     err_code = "METHOD_NOT_FOUND";
@@ -9890,6 +10348,11 @@ namespace {
 template <typename Writer>
 bool WritePrivatePem(const fs::path& path, Writer&& write)
 {
+#ifdef _WIN32
+    // Do not create or truncate a private key without a native ACL contract.
+    (void)path; (void)write;
+    return false;
+#else
     const int fd = ::open(fs::PathToString(path).c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return false;
     if (::fchmod(fd, 0600) != 0) {
@@ -9903,14 +10366,17 @@ bool WritePrivatePem(const fs::path& path, Writer&& write)
     }
     const bool ok = write(f);
     return std::fclose(f) == 0 && ok;
+#endif
 }
 } // namespace
 
 // Mint the helper's self-signed ML-DSA-44 TLS identity with the OpenSSL this
 // binary already links, instead of running an `openssl` command-line tool.
 // Fetch-only start must work with no openssl binary on PATH. Same output as
-// the CLI call it replaces: an unencrypted PKCS#8 key and an X.509v3
-// self-signed cert, CN=btx-modeld, 3650 days, mode 0600.
+// the CLI call it replaces with OpenSSL's stock config: an unencrypted PKCS#8
+// key and an X.509v3 self-signed cert, CN=btx-modeld, 3650 days, mode 0600,
+// with the extensions `req -x509` adds (v3_ca): subject and authority key
+// identifiers and a critical CA:TRUE.
 bool EnsureMlDsaTlsFiles(const fs::path& cert, const fs::path& key, std::string& err)
 {
     if (fs::exists(cert) && fs::exists(key)) return true;
@@ -9934,6 +10400,19 @@ bool EnsureMlDsaTlsFiles(const fs::path& cert, const fs::path& key, std::string&
     if (!X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
                                     reinterpret_cast<const unsigned char*>("btx-modeld"), -1, -1, 0) ||
         !X509_set_issuer_name(x.get(), name) || !X509_set_pubkey(x.get(), pkey.get())) return false;
+
+    // Self-signed: the cert is its own issuer, so the authority key identifier
+    // is read from the subject key identifier added just before it.
+    X509V3_CTX ctx;
+    X509V3_set_ctx_nodb(&ctx);
+    X509V3_set_ctx(&ctx, x.get(), x.get(), nullptr, nullptr, 0);
+    for (const auto& [nid, value] : {std::pair<int, const char*>{NID_subject_key_identifier, "hash"},
+                                     {NID_authority_key_identifier, "keyid:always"},
+                                     {NID_basic_constraints, "critical,CA:TRUE"}}) {
+        std::unique_ptr<X509_EXTENSION, decltype(&X509_EXTENSION_free)> ext(
+            X509V3_EXT_conf_nid(nullptr, &ctx, nid, value), X509_EXTENSION_free);
+        if (!ext || X509_add_ext(x.get(), ext.get(), -1) != 1) return false;
+    }
     // ML-DSA signs the message itself, so the digest must be NULL.
     if (X509_sign(x.get(), pkey.get(), nullptr) <= 0) return false;
 
@@ -9969,9 +10448,10 @@ bool LoadPq1Identity(Pq1Context& pq, const fs::path& modeldir, std::string& err)
     return pq.LoadSelfSignedMlDsa(cert_pem, key_pem, err);
 }
 
-bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& host, uint16_t port,
-                          const Digest48& model_id, std::string& err, std::atomic<bool>* stop, const fs::path& pinfile,
-                          RetrieveProgress* progress, const std::vector<std::string>& extra_peers)
+static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const std::string& host, uint16_t port,
+                                      const Digest48& model_id, std::string& err, std::atomic<bool>* stop,
+                                      const fs::path& pinfile, RetrieveProgress* progress,
+                                      const std::vector<std::string>& extra_peers, bool automatic)
 {
     {
         std::string admission_code;
@@ -9990,14 +10470,42 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
         }
         return false;
     };
-    auto init_sess = [&](Pq1Session& sess) -> bool {
+    auto configured_peer = [&](const std::string& h, uint16_t p) {
+        const std::string ep = (h.find(':') != std::string::npos ? "[" + h + "]" : h) + ":" + std::to_string(p);
+        const auto peers = cat.Peers();
+        return std::find(peers.begin(), peers.end(), ep) != peers.end();
+    };
+    auto authorize_peer = [&](const std::string& h, uint16_t p, const std::string& pin, std::string& local_err) {
+        if (!AutomaticAcquisitionPermitted(cat)) {
+            local_err = "automatic acquisition disabled by local policy";
+            return false;
+        }
+        const std::string endpoint = h + ":" + std::to_string(p);
+        std::lock_guard<std::mutex> lock(g_native_peers_mu);
+        auto found = g_native_peers.find(endpoint);
+        // Explicit IPv6 contacts use bracketed endpoints in the catalog.
+        if (found == g_native_peers.end() && h.find(':') != std::string::npos)
+            found = g_native_peers.find("[" + h + "]:" + std::to_string(p));
+        if (found == g_native_peers.end() ||
+            !NativePeerObservationAllows(found->second, g_native_network, model_id.Hex(), ConnNowMs(), pin)) {
+            local_err = "automatic retrieval peer/model is not a current same-chain observation";
+            return false;
+        }
+        return true;
+    };
+    auto configure_session = [&](Pq1Session& sess, const std::string& h, uint16_t p) {
         sess.stop = stop;
         sess.pinfile = pinfile;
-        sess.allow_loopback = loopback_ok(host, port);
-        return sess.Connect(pq, host, port, err);
+        sess.allow_loopback = loopback_ok(h, p);
+        sess.operator_named = configured_peer(h, p);
+        if (automatic) {
+            sess.authorize_peer = authorize_peer;
+            sess.required_network = g_native_network;
+        }
     };
     Pq1Session sess;
-    if (!init_sess(sess)) return false;
+    configure_session(sess, host, port);
+    if (!sess.Connect(pq, host, port, err)) return false;
     NativeRequest req;
     NativeResponse resp;
     req.method = "POST";
@@ -10079,7 +10587,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
     }
 
     std::vector<std::string> extras = extra_peers;
-    {
+    if (!automatic) {
         const std::string self = host + ":" + std::to_string(port);
         for (const auto& p : cat.Peers()) {
             if (p != self && std::find(extras.begin(), extras.end(), p) == extras.end()) extras.push_back(p);
@@ -10115,8 +10623,10 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
             return false;
         }
         UniValue gj;
-        if (!gj.read(grant_resp.body) || !gj.isObject() || !gj.exists("payload_hex") ||
-            !gj.exists("sig_hex") || !gj.exists("pubkey_hex")) {
+        // Peer data: a field of another type fails this grant like a missing one.
+        // Swarm sources run this on threads of their own, where a throw ends the helper.
+        if (!gj.read(grant_resp.body) || !gj.isObject() || !gj["payload_hex"].isStr() ||
+            !gj["sig_hex"].isStr() || !gj["pubkey_hex"].isStr()) {
             gerr = "missing FreeGrant";
             return false;
         }
@@ -10314,6 +10824,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                 if (Digest48::FromHex(f["pieces_root"].get_str(), root, gerr)) hyd.SetExpectedPiecesRoot(root);
             }
             auto on_body = [&](Span<const unsigned char> chunk, std::string& berr) {
+                if (automatic && !authorize_peer(sess.host, sess.port, sess.transport_pin, berr)) return false;
                 return hyd.Feed(chunk, berr);
             };
             auto keep_flushed_pieces = [&]() {
@@ -10402,7 +10913,6 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
             progress->pieces_committed.fetch_add(1);
             NoteRetrieveBytes(progress, cat.UsedBytes());
         };
-        ThreadJoin extra_join;
         std::atomic<int> extra_ok{0};
         std::mutex rid_mu;
         std::map<uint32_t, std::vector<uint64_t>> piece_rid;
@@ -10442,13 +10952,14 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
             }
             xfer.ObservePeer(ep, m);
         };
+        // Declared after everything its threads use, so any return below joins
+        // them before that state is destroyed.
+        ThreadJoin extra_join;
         std::vector<SourceAvailability> sources;
         if (!missing.empty() && !extras.empty()) {
             auto add_av = [&](const std::string& eh, uint16_t eport) {
                 Pq1Session av;
-                av.stop = stop;
-                av.pinfile = pinfile;
-                av.allow_loopback = loopback_ok(eh, eport);
+                configure_session(av, eh, eport);
                 std::string aerr;
                 if (!av.Connect(pq, eh, eport, aerr)) return;
                 NativeRequest areq;
@@ -10466,7 +10977,14 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                     pid.service_id = aj["service_id"].get_str();
                 }
                 std::string perr;
-                (void)ParseAvailabilitySources(aj, pid.endpoint, pid, artifact, sources, perr, ConnNowMs());
+                // Peer data: the parser throws on a field of another type. Drop
+                // this source's entries; the other sources keep the retrieve going.
+                const size_t had = sources.size();
+                try {
+                    (void)ParseAvailabilitySources(aj, pid.endpoint, pid, artifact, sources, perr, ConnNowMs());
+                } catch (const std::exception&) {
+                    sources.resize(had);
+                }
             };
             add_av(host, port);
             for (const auto& ep : extras) {
@@ -10544,9 +11062,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                     if (!SplitHostPort(kv.first, eh, eport)) continue;
                     extra_join.threads.emplace_back([&, eh, eport, assigned = kv.second, file_index, size, pieces_root]() {
                         Pq1Session xs;
-                        xs.stop = stop;
-                        xs.pinfile = pinfile;
-                        xs.allow_loopback = loopback_ok(eh, eport);
+                        configure_session(xs, eh, eport);
                         std::string xerr;
                         if (stop && stop->load()) {
                             xfer.Cancel();
@@ -10608,10 +11124,8 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
             std::vector<std::unique_ptr<Pq1Session>> pool;
             for (int k = 0; k < PQ1_INFLIGHT_PIECES; ++k) {
                 auto s = std::make_unique<Pq1Session>();
-                s->stop = stop;
-                s->pinfile = pinfile;
+                configure_session(*s, host, port);
                 std::string cerr;
-                s->allow_loopback = loopback_ok(host, port);
                 if (s->Connect(pq, host, port, cerr)) {
                     pool.push_back(std::move(s));
                 } else if (pool.empty()) {
@@ -10778,9 +11292,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                     }
                     left_join.threads.emplace_back([&, eh, eport, assigned = kv.second, file_index, size, pieces_root]() {
                         Pq1Session xs;
-                        xs.stop = stop;
-                        xs.pinfile = pinfile;
-                        xs.allow_loopback = loopback_ok(eh, eport);
+                        configure_session(xs, eh, eport);
                         std::string xerr;
                         if (!xs.Connect(pq, eh, eport, xerr)) {
                             for (uint32_t i : assigned) note_fail(i);
@@ -10829,9 +11341,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                 }
                 if (!leftover.empty()) {
                     Pq1Session s2;
-                    s2.stop = stop;
-                    s2.pinfile = pinfile;
-                    s2.allow_loopback = loopback_ok(host, port);
+                    configure_session(s2, host, port);
                     std::string rerr;
                     if (s2.Connect(pq, host, port, rerr) && issue_grant(s2, file_index, rerr)) {
                         for (uint32_t i : leftover) {
@@ -10897,12 +11407,20 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
     return cat.InstallFromManifest(man, err);
 }
 
+bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& host, uint16_t port,
+                          const Digest48& model_id, std::string& err, std::atomic<bool>* stop, const fs::path& pinfile,
+                          RetrieveProgress* progress, const std::vector<std::string>& extra_peers)
+{
+    return RetrieveFreeFromPeerScoped(cat, pq, host, port, model_id, err, stop, pinfile,
+                                      progress, extra_peers, /*automatic=*/false);
+}
+
 int UnixRpcReplyTimeoutMs(const std::string& method)
 {
     if (method == "waitformodelevent" || method == "importmodel" || method == "hostmodel" ||
         method == "getmodel" || method == "scanmodelwatch" || method == "executemodelimport" ||
         method == "importbtxpackage" || method == "exportmodelpath" || method == "loadmodel" ||
-        method == "unloadmodel" || method == "generatemodel") {
+        method == "unloadmodel" || method == "generatemodel" || method == "removemodel") {
         return UNIX_RPC_LONG_REPLY_MS;
     }
     return UNIX_RPC_REPLY_MS;
@@ -10949,6 +11467,11 @@ bool HelperRefusalFromError(const std::string& err, std::string& code, std::stri
 
 bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err)
 {
+#ifdef _WIN32
+    (void)socket_path; (void)method; (void)params; (void)result;
+    err = "helper Unix RPC is not supported on this platform";
+    return false;
+#else
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         err = "unix socket";
@@ -10993,6 +11516,7 @@ bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const U
     }
     result = reply["result"];
     return true;
+#endif
 }
 
 namespace {
@@ -11059,7 +11583,23 @@ void HandleUnixFd(int cfd, ModelCatalog& cat, std::atomic<bool>* stop)
         UniValue result;
         std::string code, emsg;
         const std::string method = req.exists("method") && req["method"].isStr() ? req["method"].get_str() : "";
-        if (DispatchHelperRpc(cat, req, result, code, emsg, stop)) {
+        // A long call holds its worker until it ends, up to 24 h for
+        // waitformodelevent. Keep one of the PQ1_UNIX_WORKERS free for short
+        // calls such as btxd's own getmodelnetworkinfo poll.
+        static std::atomic<int> g_long_calls{0};
+        const bool long_call{UnixRpcReplyTimeoutMs(method) == UNIX_RPC_LONG_REPLY_MS};
+        bool busy{false};
+        if (long_call && g_long_calls.fetch_add(1) >= PQ1_UNIX_WORKERS - 1) {
+            g_long_calls.fetch_sub(1);
+            busy = true;
+            code = "HELPER_BUSY";
+            emsg = std::to_string(PQ1_UNIX_WORKERS - 1) + " long helper call(s) already running; retry later";
+        }
+        struct Release {
+            bool held;
+            ~Release() { if (held) g_long_calls.fetch_sub(1); }
+        } release{long_call && !busy};
+        if (!busy && DispatchHelperRpc(cat, req, result, code, emsg, stop)) {
             if (HelperUnixMethodIsPublicSurface(method) && JsonLeaksPrivateLocalState(result)) {
                 UniValue e(UniValue::VOBJ);
                 e.pushKV("code", "PRIVATE_STATE_DENIED");
@@ -11084,8 +11624,32 @@ void HandleUnixFd(int cfd, ModelCatalog& cat, std::atomic<bool>* stop)
     close(cfd);
 }
 
+/** Where a served PQ1 connection is, for a hand-over of its worker. */
+enum Pq1ConnState : int {
+    PQ1_CONN_IDLE,   //!< in the handshake or waiting for a request
+    PQ1_CONN_BUSY,   //!< answering a request
+    PQ1_CONN_RETIRE, //!< answering a request, then closes
+    PQ1_CONN_CUT,    //!< closes now (`stop` is set)
+};
+
+/** The inbound PQ1 connection a worker is serving. Its I/O watches `stop`,
+ *  which the daemon sets on shutdown or to hand an idle connection's worker
+ *  to another address. `state` is a Pq1ConnState; `busy_since` is when the
+ *  current request began. */
+struct Pq1Served {
+    uint32_t netgroup{0};
+    std::chrono::steady_clock::time_point since{};
+    std::atomic<bool> stop{false};
+    std::atomic<int> state{PQ1_CONN_IDLE};
+    std::atomic<std::chrono::steady_clock::rep> busy_since{0};
+    bool handing_over{false};
+};
+
+/** `stop` also ends this connection when the daemon hands its worker to
+ *  another address while it is idle. When it is busy, `served->state` makes
+ *  it close once the response it is sending is out. */
 void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* stop, const fs::path& pinfile,
-                 uint32_t netgroup, const std::string& peer_addr)
+                 uint32_t netgroup, const std::string& peer_addr, Pq1Served* served)
 {
     SetPq1SocketOpts(cfd, true);
     SSL* ssl = SSL_new(static_cast<SSL_CTX*>(pq.SslCtx()));
@@ -11097,7 +11661,8 @@ void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* 
     SSL_set_accept_state(ssl);
     std::string err;
     if (!SslHandshake(ssl, cfd, /*accept=*/true, PQ1_HANDSHAKE_MS, stop, err)) {
-        CountUnauthAndBump(netgroup);
+        // A handshake this side cut short is not the peer's failure.
+        if (!(stop && stop->load())) CountUnauthAndBump(netgroup);
         SSL_free(ssl);
         close(cfd);
         return;
@@ -11135,8 +11700,19 @@ void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* 
                 .count() >= PQ1_CONN_MAX_MS) {
             break;
         }
+        if (served) {
+            // Asked to hand the worker over while answering: the response is out, so close.
+            int st = PQ1_CONN_BUSY;
+            if (!served->state.compare_exchange_strong(st, PQ1_CONN_IDLE) && st != PQ1_CONN_IDLE) break;
+        }
         const std::string raw = SslReadHttp(ssl, cfd, MAX_RPC_BODY + 8192, PQ1_IDLE_MS, stop);
         if (raw.empty()) break;
+        if (served) {
+            served->busy_since.store(std::chrono::steady_clock::now().time_since_epoch().count());
+            // Handed over while idle: leave this request unanswered rather than cut its reply.
+            int st = PQ1_CONN_IDLE;
+            if (!served->state.compare_exchange_strong(st, PQ1_CONN_BUSY)) break;
+        }
         ++requests;
         NativeRequest nreq;
         NativeResponse nresp;
@@ -11265,6 +11841,7 @@ struct WorkerJob {
     bool unix_rpc{false};
     uint32_t netgroup{0};
     std::string peer_addr;
+    std::chrono::steady_clock::time_point accepted{};
 };
 
 } // namespace
@@ -11314,7 +11891,12 @@ static void RefreshAutoStorage(HelperConfig& cfg, ModelCatalog* cat)
     g_runtime.preserve_rare = cfg.preserve_rare;
     g_runtime.follow_peers = cfg.follow_peers;
     g_runtime.upload_bps = cfg.upload_bps;
-    g_runtime.watch_dir = fs::PathToString(cfg.watch_dir);
+    // The unix RPC workers copy watch_dir without a lock, and cfg.watch_dir
+    // never changes after start. Write it only when it differs, so the 60 s
+    // refresh does not free the string while a worker is reading it.
+    if (const std::string watch{fs::PathToString(cfg.watch_dir)}; g_runtime.watch_dir != watch) {
+        g_runtime.watch_dir = watch;
+    }
     g_runtime.public_host_reachable = cfg.public_host_reachable;
     g_swarm.host = cfg.host;
     if (cfg.storage_mode == StorageMode::DISABLED) {
@@ -11389,10 +11971,11 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
 {
     const auto pol = cat.Policy();
     const bool follow = pol.follow_configured_peers && pol.seed_mode == SeedMode::AUTO && pol.storage_quota_bytes > 0;
-    const bool rare = pol.preserve_rare && PreservationPermitted(cat);
-    if (!follow && !rare) return;
+    const bool preservation_permitted = !pol.preserve_rare || PreservationPermitted(cat);
+    const bool rare = pol.preserve_rare && preservation_permitted;
     const uint64_t spare = pol.storage_quota_bytes > cat.UsedBytes() ? pol.storage_quota_bytes - cat.UsedBytes() : 0;
-    if (spare == 0) return;
+    // Peer authentication and family observation also run for storage-disabled
+    // observers. Storage policy is checked only before acquiring any bytes.
     RefreshLocalPex(cat);
     std::set<Digest48> local;
     UniValue listed;
@@ -11401,7 +11984,8 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
         for (const auto& m : listed["models"].getValues()) {
             Digest48 id;
             std::string e;
-            if (m.exists("model_id") && Digest48::FromHex(m["model_id"].get_str(), id, e)) local.insert(id);
+            if (m["bytes_verified"].isTrue() && m["incomplete"].isBool() && !m["incomplete"].get_bool() &&
+                m["model_id"].isStr() && Digest48::FromHex(m["model_id"].get_str(), id, e)) local.insert(id);
         }
     }
     {
@@ -11417,10 +12001,10 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
     std::map<std::string, PreserveCandidate> seen;
     std::vector<std::string> peers = cat.Peers();
     AppendPexGossipEndpoints(peers, /*self=*/{});
-    if (peers.empty()) return;
+    if (peers.empty()) { PersistNativeParticipation(cat); return; }
     static std::atomic<size_t> peer_cursor{0};
     const size_t n = peers.size();
-    const size_t visit = peers.empty() ? 0 : 1;
+    const size_t visit = std::min<size_t>(4, n);
     const size_t start = peer_cursor.fetch_add(visit) % n;
     for (size_t i = 0; i < visit; ++i) {
         const std::string& endpoint = peers[(start + i) % n];
@@ -11432,6 +12016,12 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
         std::string err;
         sess.stop = stop;
         sess.pinfile = pinfile;
+        // Loopback is only for explicitly configured local test/owner peers.
+        const auto configured = cat.Peers();
+        sess.allow_loopback = std::find(configured.begin(), configured.end(), endpoint) != configured.end();
+        sess.operator_named = sess.allow_loopback;
+        sess.handshake_ms = 3000;
+        sess.io_ms = 3000;
         if (!sess.Connect(pq, host, port, err)) continue;
         NativeRequest req;
         NativeResponse resp;
@@ -11439,12 +12029,27 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
         req.path = std::string(MODEL_HTTP_ROOT) + "availability";
         req.body = "{}";
         if (!sess.Request(req, resp, err) || resp.status != 200) continue;
-        GossipPexOnSession(sess, cat, endpoint);
         UniValue body;
         if (!body.read(resp.body) || !body.isObject()) continue;
+        const bool chain_matches = NativeAvailabilityMatchesNetwork(body, g_native_network);
+        // Explicit contacts remain usable by an intentional getmodel call, but
+        // no wrong-chain/legacy response can authorize automatic acquisition.
+        if (!chain_matches) continue;
+        // Keep the chain check if the availability response closed the socket
+        // or PEX needs to reconnect before this observation is recorded.
+        sess.required_network = g_native_network;
+        sess.network_verified = sess.ssl != nullptr;
+        GossipPexOnSession(sess, cat, endpoint);
         const UniValue models = (body.exists("local") && body["local"].exists("models")) ? body["local"]["models"] : UniValue(UniValue::VARR);
+        if (!models.isArray() || models.size() > 4096) continue;
+        NativePeerObservation observation;
+        observation.endpoint = endpoint;
+        observation.network = g_native_network;
+        observation.transport_pin = sess.transport_pin;
+        observation.observed_at_ms = ConnNowMs();
+        std::map<std::string, PreserveCandidate> peer_candidates;
         for (const auto& m : models.getValues()) {
-            if (!m.exists("model_id") || !m.exists("seeded") || !m["seeded"].get_bool()) continue;
+            if (!m.isObject() || !m["model_id"].isStr() || !m["seeded"].isTrue()) continue;
             Digest48 id;
             std::string e;
             if (!Digest48::FromHex(m["model_id"].get_str(), id, e)) continue;
@@ -11452,20 +12057,38 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
             const std::string adm = (m.exists("admission") && m["admission"].isStr()) ? m["admission"].get_str() : "";
             if (adm == "FAILED" || adm == "NOT_RUN_RESOURCE_LIMIT") continue;
             const std::string key = id.Hex();
-            if (seen.count(key)) {
-                seen[key].observed_sources += 1;
-                continue;
-            }
+            if (!RecordNativeAdvertisedModel(observation, key) || peer_candidates.count(key)) continue;
             PreserveCandidate c;
             c.model_id = id;
-            c.bytes = m.exists("bytes") ? m["bytes"].getInt<uint64_t>() : 0;
+            try { c.bytes = m["bytes"].isNum() ? m["bytes"].getInt<uint64_t>() : 0; }
+            catch (const std::exception&) { continue; }
             c.observed_sources = 1;
             c.peer = endpoint;
             c.admission = AdmissionLevel::BYTES_VERIFIED;
             c.encrypted = (adm == "ENCRYPTED_UNQUALIFIED");
-            seen[key] = c;
+            peer_candidates.emplace(key, std::move(c));
+        }
+        bool recorded = false;
+        if (observation.transport_pin.size() == 96) {
+            std::lock_guard<std::mutex> lock(g_native_peers_mu);
+            for (auto it = g_native_peers.begin(); it != g_native_peers.end();) {
+                if (!NativePeerObservationFresh(it->second, observation.observed_at_ms)) it = g_native_peers.erase(it);
+                else ++it;
+            }
+            if (g_native_peers.count(endpoint) || g_native_peers.size() < 128) {
+                g_native_peers[endpoint] = std::move(observation);
+                recorded = true;
+            }
+        }
+        // Candidate selection must use exactly the bounded, retained peer/model
+        // observations that the retrieval worker can authorize later.
+        if (recorded) for (auto& [key, candidate] : peer_candidates) {
+            const auto [found, inserted] = seen.try_emplace(key, std::move(candidate));
+            if (!inserted) ++found->second.observed_sources;
         }
     }
+    PersistNativeParticipation(cat);
+    if (!AutomaticAcquisitionAllowed(pol, preservation_permitted) || spare == 0) return;
     std::vector<PreserveCandidate> observed;
     observed.reserve(seen.size());
     for (auto& kv : seen) observed.push_back(kv.second);
@@ -11478,18 +12101,15 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
         got = SelectPreserveRare(observed, local, spare, pol, pick, static_cast<int64_t>(std::time(nullptr)));
     }
     if (!got) return;
-    std::string host;
-    uint16_t port = 0;
     std::string err;
-    if (!SplitHostPort(pick.peer, host, port)) return;
     if (!cat.EnforceQuota(pick.bytes, err)) return;
     {
         std::string admission_code;
         if (!LivePathAllowed(pick.model_id.Hex(), false, admission_code)) return;
     }
-    if (RetrieveFreeFromPeer(cat, pq, host, port, pick.model_id, err, stop, pinfile)) {
-        DemandSeedIfDownloadable(cat, pick.model_id, err);
-    }
+    // Reuse the durable, cancellable retrieval worker. Discovery keeps running
+    // throughout a large transfer; only one automatic transfer runs at a time.
+    (void)EnqueueRetrieve(cat, pick.model_id, stop, /*automatic=*/true);
 }
 
 int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
@@ -11509,6 +12129,37 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     std::signal(SIGPIPE, SIG_IGN);
     std::atomic<bool> local_stop{false};
     if (!stop) stop = &local_stop;
+#if !defined(__linux__) && !defined(WIN32)
+    // No PR_SET_PDEATHSIG here, so poll for the parent instead: once btxd is
+    // gone the helper is reparented and stops as on SIGTERM, so a crashed btxd
+    // does not leave it holding the model socket and port.
+    struct ParentWatch {
+        std::atomic<bool> done{false};
+        std::thread thread;
+        ~ParentWatch()
+        {
+            done = true;
+            if (thread.joinable()) thread.join();
+        }
+    } parent_watch;
+    if (std::getenv("BTX_HELPER_PARENT_WATCH") != nullptr) {
+        const pid_t parent{getppid()};
+        if (parent == 1) {
+            std::cerr << "btx-modeld: parent already exited\n";
+            return 1;
+        }
+        parent_watch.thread = std::thread([&done = parent_watch.done, stop, parent] {
+            while (!done.load() && !stop->load()) {
+                if (getppid() != parent) {
+                    std::cerr << "btx-modeld: parent exited, stopping\n";
+                    stop->store(true);
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+        });
+    }
+#endif
     struct ClearSeedPace {
         ~ClearSeedPace() { g_seed_pace_stop = nullptr; }
     } clear_seed_pace;
@@ -11544,7 +12195,6 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     BindModelEventLayer(cfg.modeldir);
     EnsureCloudLoaded(cat);
     LoadRetrieveJobs(cat);
-    StartRetrieveWorkers(cat);
     RefreshAutoStorage(cfg, &cat);
     for (const auto& p : cfg.peers) cat.AddPeer(p);
     cat.SetPolicy(PolicyFromConfig(cfg));
@@ -11574,9 +12224,26 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     g_swarm.bind = cfg.bind;
     g_swarm.relay = cfg.relay;
     g_swarm.host = cfg.host;
+    g_native_network = cfg.pwc_chain;
+    g_native_lan_error.clear();
+    g_native_acquired.store(0);
+    {
+        std::lock_guard<std::mutex> lock(g_native_peers_mu);
+        g_native_peers.clear();
+    }
+    std::string lan_host;
+    uint16_t lan_port = 0;
+    if (cfg.lan_discovery && tcp_fd >= 0 && SplitListenBind(cfg.bind, lan_host, lan_port)) {
+        g_native_lan_enabled.store(g_native_lan.Open(cfg.pwc_chain, lan_host, lan_port, g_native_lan_error));
+        if (!g_native_lan_enabled.load()) LogPrintf("model LAN discovery: %s\n", g_native_lan_error);
+    } else {
+        g_native_lan_enabled.store(false);
+    }
+    PersistNativeParticipation(cat);
+    StartRetrieveWorkers(cat);
     g_swarm.pex.NoteSelf(cfg.bind);
     if (tcp_fd >= 0) {
-        g_swarm.nat = AttemptModelPortMap(cfg.bind, true);
+        g_swarm.nat = AttemptModelPortMap(cfg.bind, cfg.natpmp);
         const bool mapped = g_swarm.nat.status == ModelNatStatus::MAPPED;
         cfg.public_host_reachable = mapped;
         g_runtime.public_host_reachable = mapped;
@@ -11594,7 +12261,109 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     std::condition_variable unix_qcv;
     std::condition_variable pq1_qcv;
     std::queue<WorkerJob> unix_jobs;
-    std::queue<WorkerJob> pq1_jobs;
+    std::deque<WorkerJob> pq1_jobs;
+    // Connections that hold a PQ1 worker now. Guarded by pq1_qmu, like pq1_jobs.
+    std::vector<Pq1Served*> pq1_served;
+    auto pq1_held = [&] {
+        std::map<uint32_t, int> held;
+        for (const Pq1Served* s : pq1_served) ++held[s->netgroup];
+        return held;
+    };
+    auto pq1_waiting = [&] {
+        std::vector<uint32_t> waiting;
+        for (const WorkerJob& j : pq1_jobs) waiting.push_back(j.netgroup);
+        return waiting;
+    };
+    // Closes the waiting connections whose peer has gone or has waited past a
+    // client's handshake timeout: serving them would only fail the handshake
+    // and count it against the address. Returns the netgroups of the others
+    // whose peer has started its handshake. Caller holds pq1_qmu.
+    auto pq1_waiting_started = [&] {
+        std::vector<uint32_t> started;
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = pq1_jobs.begin(); it != pq1_jobs.end();) {
+            // The accepted socket still blocks, and MSG_DONTWAIT is 0 on Windows:
+            // poll first, and peek only at a readable socket.
+            pollfd pfd{};
+            pfd.fd = it->fd;
+            pfd.events = POLLIN;
+            const bool readable = ::poll(&pfd, 1, 0) > 0;
+            char b;
+            // Readable with nothing to peek: the peer has closed, or the socket failed.
+            if ((readable && ::recv(it->fd, &b, 1, MSG_PEEK) <= 0) ||
+                now - it->accepted >= std::chrono::milliseconds(PQ1_HANDSHAKE_MS)) {
+                close(it->fd);
+                GlobalConnLimits().ReleaseInbound(it->netgroup);
+                it = pq1_jobs.erase(it);
+                continue;
+            }
+            if (readable) started.push_back(it->netgroup);
+            ++it;
+        }
+        return started;
+    };
+    // R10-03: when every worker is taken and a connection that has started its
+    // handshake waits, the netgroup that Pq1WorkerDonor names gives one
+    // connection up: an idle one (its longest served) if it has one, else the
+    // one whose request began first, which closes once its response is out.
+    // Paced uploads finish in the order they began. One hand-over at a time.
+    auto pq1_share_workers = [&] {
+        std::lock_guard<std::mutex> lock(pq1_qmu);
+        if (pq1_jobs.empty() || pq1_served.size() < static_cast<size_t>(PQ1_HTTP_WORKERS)) return;
+        for (const Pq1Served* s : pq1_served) {
+            if (s->handing_over) return;
+        }
+        const auto waiting = pq1_waiting_started();
+        if (waiting.empty()) return;
+        const auto held = pq1_held();
+        const auto donor = Pq1WorkerDonor(waiting[Pq1NextWaiting(waiting, held)], held);
+        if (!donor) return;
+        Pq1Served* pick = nullptr;
+        for (Pq1Served* s : pq1_served) {
+            if (s->netgroup != *donor) continue;
+            if (!pick) {
+                pick = s;
+                continue;
+            }
+            const bool s_busy = s->state.load() != PQ1_CONN_IDLE;
+            const bool pick_busy = pick->state.load() != PQ1_CONN_IDLE;
+            if (s_busy != pick_busy) {
+                if (pick_busy) pick = s;
+            } else if (s_busy ? s->busy_since.load() < pick->busy_since.load() : s->since < pick->since) {
+                pick = s;
+            }
+        }
+        if (!pick) return;
+        pick->handing_over = true;
+        // The connection moves between idle and busy on its own: mark it in one step.
+        int st = PQ1_CONN_IDLE;
+        while (!pick->state.compare_exchange_weak(st, st == PQ1_CONN_IDLE ? PQ1_CONN_CUT : PQ1_CONN_RETIRE)) {
+        }
+        if (st == PQ1_CONN_IDLE) pick->stop.store(true);
+    };
+    // R10-03: every inbound slot is taken. Unless a waiting peer has gone, the
+    // netgroup that Pq1WorkerDonor names by connections held or waiting gives
+    // up its newest waiting one, which has not been served yet.
+    auto pq1_make_room = [&](uint32_t netgroup) {
+        std::lock_guard<std::mutex> lock(pq1_qmu);
+        const size_t queued = pq1_jobs.size();
+        (void)pq1_waiting_started();
+        if (pq1_jobs.size() < queued) return true;
+        std::map<uint32_t, int> admitted = pq1_held();
+        for (const WorkerJob& j : pq1_jobs) ++admitted[j.netgroup];
+        std::map<uint32_t, int> can_give{{netgroup, admitted[netgroup]}};
+        for (const WorkerJob& j : pq1_jobs) can_give[j.netgroup] = admitted[j.netgroup];
+        const auto donor = Pq1WorkerDonor(netgroup, can_give);
+        if (!donor) return false;
+        for (auto it = pq1_jobs.rbegin(); it != pq1_jobs.rend(); ++it) {
+            if (it->netgroup != *donor) continue;
+            close(it->fd);
+            GlobalConnLimits().ReleaseInbound(it->netgroup);
+            pq1_jobs.erase(std::next(it).base());
+            return true;
+        }
+        return false;
+    };
     auto enqueue_unix = [&](WorkerJob job) -> bool {
         std::unique_lock<std::mutex> lock(unix_qmu);
         if (unix_jobs.size() >= static_cast<size_t>(PQ1_UNIX_QUEUE)) return false;
@@ -11605,7 +12374,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     auto enqueue_pq1 = [&](WorkerJob job) -> bool {
         std::unique_lock<std::mutex> lock(pq1_qmu);
         if (pq1_jobs.size() >= static_cast<size_t>(PQ1_HTTP_QUEUE)) return false;
-        pq1_jobs.push(std::move(job));
+        pq1_jobs.push_back(std::move(job));
         pq1_qcv.notify_one();
         return true;
     };
@@ -11630,6 +12399,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     }
     for (int i = 0; i < PQ1_HTTP_WORKERS; ++i) {
         workers.emplace_back([&] {
+            Pq1Served served;
             while (!stop->load()) {
                 WorkerJob job;
                 {
@@ -11637,15 +12407,28 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
                     pq1_qcv.wait_for(lock, std::chrono::milliseconds(250),
                                      [&] { return !pq1_jobs.empty() || stop->load(); });
                     if (pq1_jobs.empty()) continue;
-                    job = pq1_jobs.front();
-                    pq1_jobs.pop();
+                    (void)pq1_waiting_started();
+                    if (pq1_jobs.empty()) continue;
+                    const auto next = pq1_jobs.begin() + Pq1NextWaiting(pq1_waiting(), pq1_held());
+                    job = *next;
+                    pq1_jobs.erase(next);
+                    if (job.fd < 0) continue;
+                    served.netgroup = job.netgroup;
+                    served.since = std::chrono::steady_clock::now();
+                    served.stop.store(stop->load());
+                    served.state.store(PQ1_CONN_IDLE);
+                    served.handing_over = false;
+                    pq1_served.push_back(&served);
                 }
-                if (job.fd < 0) continue;
                 try {
-                    HandlePq1Fd(job.fd, cat, pq, stop, pinfile, job.netgroup, job.peer_addr);
+                    HandlePq1Fd(job.fd, cat, pq, &served.stop, pinfile, job.netgroup, job.peer_addr, &served);
                 } catch (const std::exception&) {
                     // A malformed request must not terminate btx-modeld.
                 } catch (...) {
+                }
+                {
+                    std::lock_guard<std::mutex> lock(pq1_qmu);
+                    pq1_served.erase(std::find(pq1_served.begin(), pq1_served.end(), &served));
                 }
                 GlobalConnLimits().ReleaseInbound(job.netgroup);
             }
@@ -11673,16 +12456,43 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
             }
             if (stop->load()) break;
-            if (cat.Policy().preserve_rare ||
-                (cat.Policy().follow_configured_peers && cat.Policy().seed_mode == SeedMode::AUTO)) {
+            try {
                 TryPreserveRareTick(cat, pq, pinfile, stop);
+            } catch (const std::exception& e) {
+                LogPrintf("model participation tick: %s\n", e.what());
             }
         }
     });
 
     auto last_quota = std::chrono::steady_clock::now();
     auto last_watch = std::chrono::steady_clock::now() - std::chrono::seconds(5);
+    auto last_records_save = std::chrono::steady_clock::now();
     while (!stop->load()) {
+        std::optional<ProfilePolicy> pending;
+        {
+            std::lock_guard<std::mutex> lock(g_profile_update_mu);
+            pending.swap(g_pending_profile);
+        }
+        if (pending) {
+            std::string policy_error;
+            if (ParseModelStorage(pending->storage_arg, cfg.storage_mode, cfg.quota_bytes, policy_error)) {
+                cfg.auto_cap_bytes = pending->auto_cap_bytes;
+                cfg.upload_bps = pending->upload_bps;
+                cfg.follow_peers = pending->follow_peers;
+                cfg.preserve_rare = pending->preserve_rare;
+                cfg.seed = pending->seed;
+                cfg.relay = pending->relay;
+                cfg.host = HostModeWantsHosting(pending->host_mode);
+                cfg.host_auto = pending->host_mode == HostMode::AUTO;
+                RefreshAutoStorage(cfg, &cat);
+                ApplyProfilePolicyLive(cat, *pending);
+                if (!AutomaticAcquisitionPermitted(cat)) {
+                    std::lock_guard<std::mutex> lock(g_retrieve_mu);
+                    for (const auto& [id, job] : g_retrieve_jobs) if (job->automatic) job->cancel.store(true);
+                }
+            } else LogPrintf("model profile: saved policy could not be applied: %s\n", policy_error);
+        }
+        g_native_lan.Tick();
         pollfd fds[2]{};
         nfds_t nf = 1;
         fds[0].fd = unix_fd;
@@ -11693,6 +12503,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             nf = 2;
         }
         const int pr = poll(fds, nf, 250);
+        pq1_share_workers();
         if (cfg.storage_mode == StorageMode::AUTO &&
             std::chrono::steady_clock::now() - last_quota >= std::chrono::seconds(60)) {
             RefreshAutoStorage(cfg, &cat);
@@ -11704,6 +12515,10 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             std::string werr;
             ScanWatchDir(cat, wres, werr);
             last_watch = std::chrono::steady_clock::now();
+        }
+        if (std::chrono::steady_clock::now() - last_records_save >= std::chrono::seconds(RECORDS_SAVE_INTERVAL_S)) {
+            FlushRecords(cat);
+            last_records_save = std::chrono::steady_clock::now();
         }
         if (pr <= 0) continue;
         if (fds[0].revents & POLLIN) {
@@ -11725,7 +12540,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
                     close(c);
                     continue;
                 }
-                if (!GlobalConnLimits().TryInbound(ng)) {
+                if (!GlobalConnLimits().TryInbound(ng) && !(pq1_make_room(ng) && GlobalConnLimits().TryInbound(ng))) {
                     close(c);
                     continue;
                 }
@@ -11742,6 +12557,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
                     }
                     job.peer_addr = ip;
                 }
+                job.accepted = std::chrono::steady_clock::now();
                 if (!enqueue_pq1(job)) {
                     GlobalConnLimits().ReleaseInbound(ng);
                     close(c);
@@ -11749,11 +12565,21 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             }
         }
     }
+    // A SOCKS5 negotiation waits up to its own timeout; wake it for shutdown.
+    g_socks5_interrupt();
+    {
+        std::lock_guard<std::mutex> lock(pq1_qmu);
+        for (Pq1Served* s : pq1_served) s->stop.store(true);
+    }
     unix_qcv.notify_all();
     pq1_qcv.notify_all();
     if (preserve_thr.joinable()) preserve_thr.join();
     for (auto& w : workers) w.join();
+    FlushRecords(cat);
+    g_native_lan.Close();
+    g_native_lan_enabled.store(false);
     JoinRetrieveJobs();
+    g_socks5_interrupt.reset();
     close(unix_fd);
     if (tcp_fd >= 0) close(tcp_fd);
     ReleaseModelPortMap(g_swarm.nat);

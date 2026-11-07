@@ -11,7 +11,17 @@ bool ResearchIndex::Announce(std::string_view topic_label, const Digest48& contr
 {
     Digest48 topic;
     if (!TopicId(topic_label, topic, err)) return false;
-    return m_book.Publish(topic, contribution_id, author_id, negative, summary, err);
+    if (!m_book.Publish(topic, contribution_id, author_id, negative, summary, err)) return false;
+    if (!summary.empty()) {
+        std::string view_err;
+        (void)m_views.Put(contribution_id.Hex(), std::string(topic_label), std::string(summary), negative, false, 1, false, view_err);
+    }
+    return true;
+}
+
+std::vector<std::string> ResearchIndex::View(const std::string& name, const std::string& topic, std::string& err) const
+{
+    return m_views.View(name, topic, err);
 }
 
 bool ResearchIndex::Query(std::string_view topic_label, const Digest48& cursor, size_t limit, ResearchPage& out,

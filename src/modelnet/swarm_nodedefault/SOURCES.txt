@@ -1,0 +1,12 @@
+swarm_nodedefault/gate.cpp
+swarm_nodedefault/profile.cpp
+swarm_nodedefault/seeds.cpp
+swarm_nodedefault/training.cpp
+swarm_nodedefault/privacy.cpp
+swarm_nodedefault/sign.cpp
+swarm_nodedefault/bound.cpp
+swarm_nodedefault/spend.cpp
+swarm_nodedefault/cpu.cpp
+swarm_nodedefault/vram.cpp
+swarm_nodedefault/role.cpp
+swarm_nodedefault/nodedefault.cpp

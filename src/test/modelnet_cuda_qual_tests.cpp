@@ -14,6 +14,7 @@
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdlib>
 #include <fstream>
@@ -38,13 +39,13 @@ public:
     ~EnvRestore()
     {
         if (m_prev) {
-            setenv(m_key.c_str(), m_prev->c_str(), 1);
+            test::SetEnv(m_key.c_str(), m_prev->c_str());
         } else {
-            unsetenv(m_key.c_str());
+            test::UnsetEnv(m_key.c_str());
         }
     }
-    void Set(const char* v) { setenv(m_key.c_str(), v, 1); }
-    void Unset() { unsetenv(m_key.c_str()); }
+    void Set(const char* v) { test::SetEnv(m_key.c_str(), v); }
+    void Unset() { test::UnsetEnv(m_key.c_str()); }
 
 private:
     std::string m_key;
@@ -229,7 +230,9 @@ BOOST_AUTO_TEST_CASE(qualify_runtime_mock_worker_gpu01)
             << "echo \"GPU-01 RUNTIME_OBSERVED backend=mock $*\"\n";
         BOOST_REQUIRE(out);
     }
+#ifndef WIN32
     BOOST_REQUIRE_EQUAL(::chmod(fs::PathToString(worker).c_str(), 0755), 0);
+#endif
 
     EnvRestore worker_env{"BTX_CUDA_QUAL_WORKER"};
     EnvRestore share_env{"BTX_ALLOW_SHARED_GPU"};
@@ -243,11 +246,26 @@ BOOST_AUTO_TEST_CASE(qualify_runtime_mock_worker_gpu01)
     opts.gpu_index = 2;
     opts.allow_validator_gpu = false;
     modelnet::QualReport report;
+    BOOST_REQUIRE(std::getenv("BTX_CUDA_QUAL_WORKER") != nullptr);
+    BOOST_REQUIRE_EQUAL(std::string{std::getenv("BTX_CUDA_QUAL_WORKER")}, fs::PathToString(worker));
+    BOOST_REQUIRE_EQUAL(modelnet::ValidatorGpuIndex(), 0);
+    BOOST_REQUIRE(!modelnet::IsValidatorOrMiningGpu(*opts.gpu_index));
     const auto qr = modelnet::QualifyRuntime(fs::PathToString(path), opts, report);
+#ifdef WIN32
+    // A configured shebang worker does not enable a Windows launcher. With
+    // the kernel stub disabled, runtime qualification must remain NOT_RUN.
+    BOOST_CHECK(!modelnet::ModelCudaQualifyKernelCompiled());
+    BOOST_CHECK(qr == modelnet::QualResult::NOT_RUN_RESOURCE_LIMIT);
+    BOOST_CHECK(report.result == qr);
+    BOOST_CHECK(report.level == modelnet::AdmissionLevel::NOT_RUN_RESOURCE_LIMIT);
+    BOOST_CHECK(report.detail.find("BTX_MODEL_CUDA_QUALIFY_COMPILE unset") != std::string::npos);
+    BOOST_CHECK(report.detail.find("libcuda not required") != std::string::npos);
+#else
     BOOST_CHECK_EQUAL(std::string{modelnet::QualResultName(qr)}, "RUNTIME_OBSERVED");
     BOOST_CHECK(qr == modelnet::QualResult::RUNTIME_OBSERVED);
     BOOST_CHECK(report.detail.find("GPU-01 RUNTIME_OBSERVED") != std::string::npos);
     BOOST_CHECK(report.detail.find("--gpu=2") != std::string::npos);
+#endif
 }
 
 BOOST_AUTO_TEST_SUITE_END()

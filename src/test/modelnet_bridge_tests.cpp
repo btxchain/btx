@@ -11,6 +11,7 @@
 #include <univalue.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cctype>
 #include <cstdint>
@@ -124,13 +125,13 @@ public:
     ~EnvRestore()
     {
         if (m_prev) {
-            setenv(m_key.c_str(), m_prev->c_str(), 1);
+            test::SetEnv(m_key.c_str(), m_prev->c_str());
         } else {
-            unsetenv(m_key.c_str());
+            test::UnsetEnv(m_key.c_str());
         }
     }
-    void Set(const char* v) { setenv(m_key.c_str(), v, 1); }
-    void Unset() { unsetenv(m_key.c_str()); }
+    void Set(const char* v) { test::SetEnv(m_key.c_str(), v); }
+    void Unset() { test::UnsetEnv(m_key.c_str()); }
 
 private:
     std::string m_key;

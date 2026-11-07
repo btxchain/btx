@@ -1,45 +1,28 @@
-# BTX Codex Swarm Runner
+# BTX swarm observer
 
-This repository includes a swarm runner that can launch multiple non-interactive
-Codex agents in parallel worktrees, then gate each round with BTX tests.
+When ModelNet is compiled, `-modelnet` defaults on. `btxd` supervises the model helper, then calls `modelnet::StartSwarmObserver` in `src/init.cpp`. The observer is a thread inside `btxd`. `-modelnet=0` turns it off. A swarm failure does not stop the monetary node.
 
-## Scripts
+About every two seconds the thread reads `catalog.json` into `modeldir/swarm/observers.json` when the catalog is usable. Those rows are observers only: no compute grant, no seeding, and no spend. A missing catalog changes nothing.
 
-- `scripts/codex_swarm.sh`: orchestrates parallel Codex agents using `codex exec`.
-- `scripts/codex_swarm_tasks.txt`: default task queue (`task_id|prompt`).
-- `scripts/test_btx_parallel.sh`: parallel test gate used by default by the swarm.
+The thread refreshes the local mesh, integrates the catalog, runs `SwarmFormPlane`, and publishes the live record. `FormationPlane` does not exec a sidecar, open a socket, add a DNS seed, broadcast, or spend.
 
-## Quick Start
+Once, then latched: a memory decode of the fixed public text `abcdefgh` for 8 bytes; a vllm pull returns `ENGINE_ABSENT`; one CPU AdamW step on a sequence-4 hidden-8 network; a loopback exchange of two ranks on one host; an integer replay of 8 pairs; one snapshot; one realm seat. A second host is refused.
 
-1. Ensure BTX binaries/tests are built:
+Once, then latched: `TickBind` runs the in-process requirement, the 12-step node cycle, the module check, and the safe-slice check. `passed()`, `gpu_passed()`, and `windows_passed()` stay false. Spend returns the string `0`. Release returns `UNQUALIFIED`.
 
-```bash
-scripts/build_btx.sh build-btx
-```
+`btx-swarmd` and `btx-paynetd` are not started by `btxd`. Model RPCs still go to the model helper. Retrieval is `FREE_ONLY` and automatic spend atoms stay `0`.
 
-2. Run one swarm round:
+This branch also contains the current 0.35 lab tip, including the wallet balance-watch RPCs `getbalancewatch` and `getbalanceatheight`, model and bounty funding updates, and the `htlc_sha256` presign path.
 
-```bash
-scripts/codex_swarm.sh --repo "$(pwd)" --max-agents 3
-```
+## Later releases
 
-3. Run continuously until a round passes the test gate:
+The next releases are the path to a fully autonomous network.
 
-```bash
-scripts/codex_swarm.sh --repo "$(pwd)" --max-agents 3 --continuous
-```
+- Peers find each other and admit a local group.
+- A participant acquires a verified model from another participant.
+- A person submits a task or a prompt and receives work from a model on an admitted machine.
+- A qualified machine trains on an authorized recipe, and a second machine checks the result.
+- A private defensive case runs under an explicit customer grant.
+- Accepted work settles in BTX only under a mandate the operator signed.
 
-4. Enforce per-agent timeout to prevent hanging rounds:
-
-```bash
-scripts/codex_swarm.sh --repo "$(pwd)" --max-agents 3 --agent-timeout-seconds 600
-```
-
-## Notes
-
-- Each agent runs in a dedicated git worktree under `.codex-swarm/worktrees/`.
-- Each agent gets its own branch named `codex/swarm-<task>-<timestamp>`.
-- Agent output is written to `.codex-swarm/logs/`.
-- Worker timeouts are enforced by default (`--agent-timeout-seconds 600`).
-- Timeout behavior is regression-tested by `test/util/codex_swarm_timeout_test.sh`.
-- Use `--dry-run` to validate orchestration logic without launching Codex.
+Before any of those are claimed, the verifications still required are two physical hosts, a second GPU, Windows, macOS, a linked remote execution engine, an offline release image, the hardware profiles, and the sealed acceptance catalogue. Two local ranks on one machine are not two hosts. Spend stays 0 until a mandate exists.

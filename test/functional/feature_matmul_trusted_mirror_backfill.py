@@ -20,6 +20,7 @@ Coverage:
 
 import os
 import re
+import shutil
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -123,6 +124,11 @@ class MatMulTrustedMirrorBackfillTest(BitcoinTestFramework):
         )
         assert os.path.exists(attest_path), attest_path
         os.remove(attest_path)
+        # Since f3098105 the durable store is <archive>.db (LevelDB) plus
+        # <archive>.wal; both reload on start. Remove them too.
+        shutil.rmtree(attest_path + ".db", ignore_errors=True)
+        if os.path.exists(attest_path + ".wal"):
+            os.remove(attest_path + ".wal")
         self.start_node(0, extra_args=self.archive_args)
         assert_equal(authority.getblockcount(), tip_height)
         assert_equal(authority.getbestblockhash(), authority_tip)

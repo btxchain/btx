@@ -1040,8 +1040,17 @@ bool CWallet::Unlock(const SecureString& strWalletPassphrase)
             if (Unlock(_vMasterKey)) {
                 // Now that we've unlocked, upgrade the key metadata
                 UpgradeKeyMetadata();
-                // Now that we've unlocked, upgrade the descriptor cache
-                UpgradeDescriptorCache();
+                // Now that we've unlocked, upgrade the descriptor cache. The
+                // upgrade is best-effort: the wallet is already unlocked here,
+                // so an exception must not escape to callers that would then
+                // skip their relock (walletpassphrase, EncryptWallet,
+                // exportwalletbundle). The upgrade flag stays unset, so the
+                // upgrade is retried on the next unlock.
+                try {
+                    UpgradeDescriptorCache();
+                } catch (const std::exception& e) {
+                    WalletLogPrintf("Descriptor cache upgrade after unlock failed: %s\n", e.what());
+                }
                 return true;
             }
         }
@@ -3269,7 +3278,14 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
 
     const PrecomputedTransactionData probe_txdata = PrecomputePSBTData(psbtx);
 
+    // DescriptorScriptPubKeyMan reads the wallet lock state (IsLocked(),
+    // WithEncryptionKey(), both take cs_wallet) while it holds cs_desc_man.
+    // Everywhere else the order is cs_wallet then cs_desc_man (wallet load,
+    // unlock, IsMine during sync), so hold cs_wallet around each manager call.
+    // Without it, a call that takes the locks in that order while the key
+    // lookup runs (getaddressinfo, walletpassphrase) deadlocks the wallet.
     for (ScriptPubKeyMan* spk_man : spk_mans) {
+        LOCK(cs_wallet);
         const auto error{spk_man->FillPSBT(psbtx, probe_txdata, sighash_type, /*sign=*/false, bip32derivs, /*n_signed=*/nullptr, /*finalize=*/false, slhdsa_fips205, error_detail)};
         if (error) {
             return error;
@@ -3315,10 +3331,11 @@ std::optional<PSBTError> CWallet::FillPSBT(PartiallySignedTransaction& psbtx, bo
 
     const PrecomputedTransactionData txdata = PrecomputePSBTData(psbtx);
 
-    // Fill in information from ScriptPubKeyMans outside cs_wallet to avoid
-    // serializing expensive signing operations across concurrent RPC calls.
+    // Fill in information from ScriptPubKeyMans, under cs_wallet for the lock
+    // order described above.
     for (ScriptPubKeyMan* spk_man : spk_mans) {
         int n_signed_this_spkm = 0;
+        LOCK(cs_wallet);
         const auto error{spk_man->FillPSBT(psbtx, txdata, sighash_type, sign, bip32derivs, &n_signed_this_spkm, finalize, slhdsa_fips205, error_detail, htlc_presign)};
         if (error) {
             return error;
@@ -5289,7 +5306,8 @@ bool CWallet::BackupWallet(const std::string& strDest) const
     // tree.  Without this, a raw database backup may contain stale
     // shielded state if PersistState was deferred or only held in memory.
     if (m_shielded_wallet) {
-        LOCK(m_shielded_wallet->cs_shielded);
+        // PersistState() takes cs_wallet to encrypt; keep cs_wallet first.
+        LOCK2(cs_wallet, m_shielded_wallet->cs_shielded);
         if (!m_shielded_wallet->PersistState()) {
             LogPrintf("CWallet::BackupWallet: warning — failed to flush shielded state before backup\n");
         }

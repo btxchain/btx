@@ -50,6 +50,17 @@ AdmissionResult Admit(Assurance assurance,
 
 void Quarantine(const std::string& legacy_id);
 
+/** Add one id to the in-memory quarantine set without writing the registry file. */
+void AddQuarantine(const std::string& legacy_id);
+
+/** Replace the in-memory quarantine set. An empty list clears it. */
+void ReplaceQuarantine(const std::vector<std::string>& legacy_ids);
+
+/** Ids currently quarantined in this process, in sorted order. */
+std::vector<std::string> QuarantineIds();
+
+void ClearQuarantineMemory();
+
 /** Quarantine fails BTX035_QUARANTINE even when byte_hash_matches is true. */
 ServeResult Serve(const std::string& legacy_id, bool byte_hash_matches);
 

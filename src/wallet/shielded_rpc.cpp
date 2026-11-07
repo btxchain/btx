@@ -7007,7 +7007,7 @@ void EnsureBridgeFeeHeadroomOrThrow(const BridgeFeeHeadroomAssessment& assessmen
     keypair.sk.assign(kem_sk.begin(), kem_sk.end());
     const auto enc = mlkem::Encaps(keypair.pk);
     const auto dec = mlkem::Decaps(enc.ct, keypair.sk);
-    return dec == enc.ss;
+    return dec && *dec == enc.ss;
 }
 
 [[nodiscard]] bool CommitShieldedTransaction(const std::shared_ptr<CWallet>& pwallet,
@@ -8218,9 +8218,11 @@ RPCHelpMan z_sendtoaddress()
             std::optional<std::vector<ShieldedCoin>> conflict_selection;
             if (conflict_txid.has_value()) {
                 std::string conflict_error;
-                conflict_selection = WITH_LOCK(
-                    pwallet->m_shielded_wallet->cs_shielded,
-                    return pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error));
+                {
+                    // GetConflictSpendSelection() takes cs_wallet: lock it first.
+                    LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                    conflict_selection = pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error);
+                }
                 if (!conflict_selection.has_value()) {
                     throw JSONRPCError(
                         RPC_INVALID_PARAMETER,
@@ -8643,9 +8645,11 @@ RPCHelpMan z_sendmany()
             std::optional<std::vector<ShieldedCoin>> conflict_selection;
             if (conflict_txid.has_value()) {
                 std::string conflict_error;
-                conflict_selection = WITH_LOCK(
-                    pwallet->m_shielded_wallet->cs_shielded,
-                    return pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error));
+                {
+                    // GetConflictSpendSelection() takes cs_wallet: lock it first.
+                    LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                    conflict_selection = pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error);
+                }
                 if (!conflict_selection.has_value()) {
                     throw JSONRPCError(
                         RPC_INVALID_PARAMETER,
@@ -10758,13 +10762,13 @@ RPCHelpMan z_validateaddress()
             RPCResult::Type::OBJ, "", "",
             {
                 {RPCResult::Type::BOOL, "isvalid", "True if valid shielded address"},
-                {RPCResult::Type::STR, "address", "Normalized address (if valid)"},
-                {RPCResult::Type::NUM, "version", "Address version"},
-                {RPCResult::Type::STR_HEX, "pk_hash", "Spending key hash"},
-                {RPCResult::Type::STR_HEX, "kem_pk_hash", "KEM key hash"},
+                {RPCResult::Type::STR, "address", /*optional=*/true, "Normalized address (if valid)"},
+                {RPCResult::Type::NUM, "version", /*optional=*/true, "Address version (if valid)"},
+                {RPCResult::Type::STR_HEX, "pk_hash", /*optional=*/true, "Spending key hash (if valid)"},
+                {RPCResult::Type::STR_HEX, "kem_pk_hash", /*optional=*/true, "KEM key hash (if valid)"},
                 {RPCResult::Type::STR_HEX, "kem_public_key", /*optional=*/true, "KEM public key when derivable from the address or known to the local wallet"},
-                {RPCResult::Type::BOOL, "ismine", "Wallet has spending key"},
-                {RPCResult::Type::BOOL, "iswatchonly", "Wallet has viewing key only"},
+                {RPCResult::Type::BOOL, "ismine", /*optional=*/true, "Wallet has spending key (if valid)"},
+                {RPCResult::Type::BOOL, "iswatchonly", /*optional=*/true, "Wallet has viewing key only (if valid)"},
                 {RPCResult::Type::STR, "lifecycle_state", /*optional=*/true, "Wallet-local lifecycle state if the address belongs to this wallet"},
                 {RPCResult::Type::BOOL, "has_successor", /*optional=*/true, "Whether the wallet-local address lifecycle points to a successor"},
                 {RPCResult::Type::STR, "successor", /*optional=*/true, "Successor address when lifecycle_state is rotated"},

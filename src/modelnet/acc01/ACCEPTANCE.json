@@ -1,0 +1,146 @@
+[
+  {
+    "id": "ASR-NAT-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: control starts enabled, and an omit on the default build is refused while the lifecycle stays present."
+  },
+  {
+    "id": "ASR-NAT-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: worker failure leaves the balance and reservation unchanged, and a later debit still applies."
+  },
+  {
+    "id": "ASR-NAT-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: shutdown stops at the step bound and records one unresolved effect as OUTCOME_UNKNOWN."
+  },
+  {
+    "id": "ASR-NAT-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: a worker keeps only approved resource names and allowlisted environment entries."
+  },
+  {
+    "id": "ASR-NAT-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: observer participation stays enabled with a zero contribution budget, and a funded device still receives workers."
+  },
+  {
+    "id": "ASR-NAT-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: migrating onto an open preset keeps host mode off, relay off, follow off, and upload at zero."
+  },
+  {
+    "id": "ASR-GRF-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: one record store filters into record, dependency, evidence, and replication views, and a repeated id is refused."
+  },
+  {
+    "id": "ASR-GRF-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: a back-edge and a self-edge are refused, and dispatch walks only the stored acyclic edges."
+  },
+  {
+    "id": "ASR-GRF-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: retraction keeps the original history text and makes a dependent dispatch invalid."
+  },
+  {
+    "id": "ASR-GRF-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: a disallowed search returns the same not-visible result for a stored id and a missing id, and the visible count stays put."
+  },
+  {
+    "id": "ASR-GRF-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: replication accepts four in-scope copies and refuses a foreign scope and a fifth copy. Bytes moved stay 0."
+  },
+  {
+    "id": "ASR-PLN-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: replacing the session keeps the planner epoch, body, outbox, and cursor."
+  },
+  {
+    "id": "ASR-PLN-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: a wake stays ahead of the cursor until commit, and a later wake remains pending."
+  },
+  {
+    "id": "ASR-PLN-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: an older proposal is stale and leaves the current epoch and body in place."
+  },
+  {
+    "id": "ASR-PLN-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: one round stores 64 intents, and a further intent is refused without growing the round."
+  },
+  {
+    "id": "ASR-PLN-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: after an explicit quiesce, a further step returns immediately and does not increment work."
+  },
+  {
+    "id": "ASR-PLN-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: two seated voters have quorum. An unseated peer does not, and a replacement voter set is refused."
+  },
+  {
+    "id": "ASR-PLN-007",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: a controller change and a rejected rollback leave the committed channel body and sequence in place."
+  },
+  {
+    "id": "ASR-EXE-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: two intents keep separate attempt counters, and a repeated payload does not advance the attempt."
+  },
+  {
+    "id": "ASR-EXE-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: a second payload for the same intent conflicts and the first payload stays."
+  },
+  {
+    "id": "ASR-EXE-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: a refused effect stays ambiguous, and a later fence does not increase the effect count."
+  },
+  {
+    "id": "ASR-EXE-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: an effect without an open fence is refused. A committed fence moves ownership once."
+  },
+  {
+    "id": "ASR-EXE-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: admission at the lease bound is expired, including equality, and one millisecond earlier is admitted."
+  },
+  {
+    "id": "ASR-EXE-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "acc01_tests pass_latches: a compatible open lease is refused when the member is revoked or superseded, and a revoked voter loses quorum."
+  }
+]

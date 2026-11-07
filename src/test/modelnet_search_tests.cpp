@@ -6,6 +6,7 @@
 #include <modelnet/helper.h>
 #include <modelnet/identity.h>
 #include <modelnet/protocol.h>
+#include <modelnet/provider_route.h>
 #include <modelnet/qualification.h>
 #include <modelnet/search.h>
 #include <span.h>
@@ -13,6 +14,7 @@
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
+#include <chrono>
 #include <fstream>
 #include <string>
 
@@ -475,6 +477,43 @@ BOOST_AUTO_TEST_CASE(search_exactreplay_isolation)
     BOOST_CHECK(!ModelWorkMayStarveExactReplay());
 }
 
+BOOST_AUTO_TEST_CASE(search_quota_charges_the_signer)
+{
+    using namespace modelnet;
+    std::string err;
+    std::vector<unsigned char> own_pk, own_sk, other_pk, other_sk;
+    BOOST_REQUIRE(GenerateMlDsa44(own_pk, own_sk, err));
+    BOOST_REQUIRE(GenerateMlDsa44(other_pk, other_sk, err));
+    SearchIndex idx;
+    const auto own = MakeRec("Own", own_pk, own_sk, 1);
+    BOOST_REQUIRE_MESSAGE(idx.Put(own, 1, err), err);
+
+    // Another key signs records that name this publisher as theirs, as a peer's
+    // search or feed reply can carry them.
+    auto claim = [&](int i) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = 2;
+        r.model_id.data[1] = static_cast<unsigned char>(i);
+        r.canonical_name = "claim" + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.pubkey = other_pk;
+        r.publisher_identity = own.publisher_identity;
+        r.expires_at = 1'000'000;
+        BOOST_REQUIRE(SignSearchRecord(r, Span<const unsigned char>{other_sk.data(), other_sk.size()}, err));
+        return r;
+    };
+    for (int i = 1; i <= 63; ++i) {
+        BOOST_REQUIRE_MESSAGE(idx.Put(claim(i), 1, err, "203.0.113.7:29447"), err);
+    }
+
+    // They count against the key that signed them, not against this publisher.
+    const auto next = MakeRec("Own next", own_pk, own_sk, 3);
+    BOOST_CHECK_MESSAGE(idx.Put(next, 1, err), err);
+    BOOST_CHECK_MESSAGE(idx.Put(claim(64), 1, err, "203.0.113.7:29447"), err);
+    BOOST_CHECK(!idx.Put(claim(65), 1, err, "203.0.113.7:29447"));
+    BOOST_CHECK_EQUAL(err, "publisher spam");
+}
+
 BOOST_AUTO_TEST_CASE(search_unsigned_expiry_quota_and_save)
 {
     using namespace modelnet;
@@ -563,6 +602,109 @@ BOOST_AUTO_TEST_CASE(search_unsigned_expiry_quota_and_save)
     BOOST_CHECK(loaded.Get(local.model_id)->local_catalog);
     BOOST_CHECK(!loaded.Get(local.model_id)->signed_ok);
     BOOST_CHECK(loaded.Get(signed_rec.model_id)->signed_ok);
+}
+
+BOOST_AUTO_TEST_CASE(search_refreshes_signed_provider_observations)
+{
+    using namespace modelnet;
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    };
+    for (const bool initially_complete : {false, true}) {
+        const fs::path root = m_path_root / (initially_complete ? "refresh-complete" : "refresh-partial");
+        fs::create_directories(root);
+        const fs::path model = root / "refresh.safetensors";
+        std::string header = R"({"weight":{"dtype":"F32","shape":[256],"data_offsets":[0,1024]}})";
+        header.append((8 - header.size() % 8) % 8, ' ');
+        {
+            std::ofstream file(model, std::ios::binary);
+            const uint64_t header_size = header.size();
+            for (int i = 0; i < 8; ++i) file.put(static_cast<char>(header_size >> (8 * i)));
+            file << header << std::string(1024, initially_complete ? '\x01' : '\x02');
+            BOOST_REQUIRE(file.good());
+        }
+        ModelCatalog cat{root / "models", 1 << 20};
+        CatalogEntry entry;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(model), false, entry, err), err);
+        BOOST_REQUIRE(cat.Seed(entry.model_id, false, err));
+        auto rpc = [&](const std::string& method, const UniValue& params) {
+            UniValue req(UniValue::VOBJ), result;
+            req.pushKV("method", method);
+            req.pushKV("params", params);
+            std::string code;
+            BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, req, result, code, err), code + ": " + err);
+            return result;
+        };
+        auto native = [&](const std::string& route, const UniValue& body, int status) {
+            NativeRequest req;
+            req.method = "POST";
+            req.path = std::string(MODEL_HTTP_ROOT) + "ext/providers/" + route;
+            req.body = body.write();
+            req.peer_addr = "signed-refresh-fixture";
+            NativeResponse response;
+            BOOST_REQUIRE(HandleNativeRequest(cat, req, response));
+            BOOST_REQUIRE_MESSAGE(response.status == status, response.body);
+            UniValue result;
+            BOOST_REQUIRE(result.read(response.body));
+            return result;
+        };
+        UniValue query(UniValue::VOBJ), search_params(UniValue::VARR), id_params(UniValue::VARR);
+        query.pushKV("scope", "LOCAL");
+        search_params.push_back(query);
+        id_params.push_back(entry.model_id.Hex());
+        rpc("searchmodels", search_params);
+        BOOST_REQUIRE_EQUAL(rpc("getmodelproviders", id_params)["providers"].size(), 0);
+        std::vector<unsigned char> pk, sk;
+        BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+        ProviderRecord record;
+        record.resource = entry.model_id;
+        record.pubkey = pk;
+        record.seq = 10;
+        record.complete = initially_complete;
+        record.reachability_kind = "direct";
+        record.endpoints = {"192.0.2.10:29447"};
+        record.ranges = {{0, 1}};
+        record.expiry_ms = now_ms() + 300000;
+        auto put = [&](int status) {
+            BOOST_REQUIRE(SignProviderRecord(record, Span<const unsigned char>{sk.data(), sk.size()}, err));
+            return native("put", ProviderRecordToJson(record), status);
+        };
+        put(200);
+        rpc("searchmodels", search_params);
+        BOOST_REQUIRE_EQUAL(rpc("getmodelproviders", id_params)["providers"].size(), 1);
+        BOOST_CHECK_EQUAL(rpc("getmodelproviders", id_params)["providers"][0]["complete"].get_bool(), initially_complete);
+        record.seq = 11;
+        record.complete = !initially_complete;
+        record.reachability_kind = "relay";
+        put(200);
+        UniValue lookup(UniValue::VOBJ);
+        lookup.pushKV("resource", entry.model_id.Hex());
+        auto cached = native("get", lookup, 200);
+        BOOST_REQUIRE_EQUAL(cached["records"].size(), 1);
+        BOOST_CHECK_EQUAL(cached["records"][0]["seq"].getInt<int>(), 11);
+        BOOST_CHECK_EQUAL(cached["records"][0]["complete"].get_bool(), !initially_complete);
+        const auto search = rpc("searchmodels", search_params);
+        BOOST_REQUIRE_EQUAL(search["results"].size(), 1);
+        BOOST_CHECK_EQUAL(search["results"][0]["model_id"].get_str(), entry.model_id.Hex());
+        BOOST_CHECK_EQUAL(search["results"][0]["availability"]["providers_complete"].getInt<int>(), initially_complete ? 0 : 1);
+        auto view = rpc("getmodelproviders", id_params);
+        BOOST_REQUIRE_EQUAL(view["providers"].size(), 1);
+        BOOST_CHECK_EQUAL(view["providers"][0]["complete"].get_bool(), !initially_complete);
+        BOOST_CHECK(view["providers"][0]["relayed"].get_bool());
+        BOOST_CHECK(!view["providers"][0]["direct"].get_bool());
+        BOOST_CHECK_EQUAL(rpc("getmodelavailability", id_params)["providers_complete"].getInt<int>(), initially_complete ? 0 : 1);
+        BOOST_CHECK_EQUAL(rpc("getmodelpeercount", id_params)["complete"].getInt<int>(), initially_complete ? 0 : 1);
+        record.seq = 9;
+        record.complete = initially_complete;
+        const auto rejected = put(403);
+        BOOST_CHECK(rejected.write().find("sequence rollback") != std::string::npos);
+        cached = native("get", lookup, 200);
+        BOOST_CHECK_EQUAL(cached["records"][0]["seq"].getInt<int>(), 11);
+        rpc("searchmodels", search_params);
+        BOOST_CHECK_EQUAL(rpc("getmodelproviders", id_params)["providers"][0]["complete"].get_bool(), !initially_complete);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

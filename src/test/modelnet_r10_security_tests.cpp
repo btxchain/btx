@@ -35,6 +35,9 @@
 //   8. Origin stampede per-peer budget and error circuit breaker.
 //   9. Event journal retention cap, dedupe, and untrusted-text sanitising.
 //  10. Torrent and HuggingFace locator refusals.
+//  11. The per-peer windows of provider exchange, grant issue and origin
+//      stampede forget a peer once it has been idle for a window, and keep the
+//      window of a peer that is still within it.
 //
 // UNPROVEN, and deliberately not asserted here because asserting today's
 // behaviour would lock in a weakness. Each needs new code first; see
@@ -59,6 +62,7 @@
 #include <modelnet/direct_seed.h>
 #include <modelnet/event_journal.h>
 #include <modelnet/file_stream.h>
+#include <modelnet/helper.h>
 #include <modelnet/package_core.h>
 #include <modelnet/package_documents.h>
 #include <modelnet/package_install.h>
@@ -75,6 +79,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -665,6 +670,60 @@ BOOST_AUTO_TEST_CASE(r10_origin_stampede_budget_and_circuit_breaker)
     BOOST_CHECK_EQUAL(j["max_per_netgroup"].getInt<int>(), s.max_per_netgroup);
     BOOST_CHECK(j.exists("tracked_peers"));
     BOOST_CHECK_EQUAL(j["automatic_spend_atoms"].getInt<int>(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(r10_limiter_windows_forget_idle_peers)
+{
+    using namespace modelnet;
+
+    // Each limiter keeps one window per peer address. A peer that spoke once
+    // and went quiet must not keep its key, or every address that ever reached
+    // the helper stays in memory. A busy peer must keep its window, or dropping
+    // keys would hand it a fresh budget.
+    const std::vector<std::string> idle{"198.51.100.1", "198.51.100.2", "198.51.100.3"};
+    const std::string busy{"203.0.113.7"};
+    std::string err;
+
+    {
+        const int64_t now = 1'000'000;
+        ProviderExchange pex;
+        std::vector<ProviderHint> accepted;
+        for (const auto& p : idle) BOOST_REQUIRE_MESSAGE(pex.Ingest(p, PexBody({}), now, accepted, err), err);
+        for (int i = 0; i < PEX_MAX_PER_PEER_PER_MINUTE; ++i) {
+            BOOST_REQUIRE_MESSAGE(pex.Ingest(busy, PexBody({}), now + 30'000, accepted, err), err);
+        }
+        BOOST_CHECK_EQUAL(pex.TrackedPeers(), idle.size() + 1);
+        BOOST_CHECK(!pex.Ingest(busy, PexBody({}), now + 60'001, accepted, err));
+        BOOST_CHECK_EQUAL(pex.TrackedPeers(), 1U);
+    }
+
+    {
+        // The grant budget is process-wide and the helper feeds it the wall
+        // clock. Start a minute past it, so windows left by earlier cases have
+        // expired here too and the first call prunes.
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count() +
+                            60'001;
+        for (const auto& p : idle) BOOST_REQUIRE_MESSAGE(AllowGrantIssue(p, now, err), err);
+        for (int i = 0; i < 32; ++i) BOOST_REQUIRE_MESSAGE(AllowGrantIssue(busy, now + 30'000, err), err);
+        BOOST_CHECK_EQUAL(GrantIssueTrackedPeers(), idle.size() + 1);
+        BOOST_CHECK(!AllowGrantIssue(busy, now + 60'001, err));
+        BOOST_CHECK_EQUAL(GrantIssueTrackedPeers(), 1U);
+    }
+
+    {
+        const OriginStampedeState s;
+        OriginStampedeGuard g{s};
+        const int64_t now = 1'000'000;
+        for (const auto& p : idle) BOOST_REQUIRE_MESSAGE(g.Allow(p, p, now, err), err);
+        for (int i = 0; i < s.max_per_peer; ++i) {
+            BOOST_REQUIRE_MESSAGE(g.Allow(busy, busy, now + s.window_ms / 2, err), err);
+        }
+        BOOST_CHECK_EQUAL(g.Json(now)["tracked_peers"].getInt<int>(), static_cast<int>(idle.size()) + 1);
+        BOOST_CHECK(!g.Allow(busy, busy, now + s.window_ms + 1, err));
+        BOOST_CHECK_EQUAL(g.Json(now)["tracked_peers"].getInt<int>(), 1);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(r10_event_journal_retention_dedupe_and_text_sanitising)

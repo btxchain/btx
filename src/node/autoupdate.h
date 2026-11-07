@@ -215,6 +215,17 @@ std::unique_ptr<AutoUpdateSignatureVerifier> MakeAutoUpdateSignatureVerifier(
 // Expected hex-string length of a release public key for the given scheme, or
 // std::nullopt if the scheme is unknown. Used for early -autoupdatepubkey validation.
 std::optional<size_t> AutoUpdateReleasePubkeyHexLength(std::string_view algo);
+
+// The setting that asks this node to keep its peer traffic private, if any: "-proxy is set" (the
+// same test as the -proxy privacy defaults in InitParameterInteraction) or "-onlynet excludes ipv4
+// and ipv6" (the same test as its -dnsseed default). An auto-update check is a direct HTTPS
+// connection from this host and does not use -proxy, -onion or -onlynet.
+std::optional<std::string> AutoUpdateProxyConflict(const ArgsManager& args);
+
+// Whether auto-update runs. An explicit -autoupdate wins. Otherwise it is on for mainnet only,
+// and off when AutoUpdateProxyConflict() names a setting.
+bool AutoUpdateEnabled(const ArgsManager& args, ChainType chain);
+
 std::unique_ptr<AutoUpdateManager> MakeAutoUpdateManager(const ArgsManager& args, ChainType chain);
 
 } // namespace node

@@ -93,6 +93,10 @@ class WalletP2MRLockedKeyLookupTest(BitcoinTestFramework):
 
         self.log.info("After walletpassphrase the wallet can still sign both coins")
         wallet.walletpassphrase(PASSPHRASE, 600)
+        # walletprocesspsbt signs through the same managers. Builds with
+        # DEBUG_LOCKORDER check its lock order here and at the call above.
+        own_psbt = wallet.walletcreatefundedpsbt(inputs=[], outputs=[{self.burn_addr: 1}])["psbt"]
+        assert_equal(wallet.walletprocesspsbt(psbt=own_psbt, sign=True)["complete"], True)
         utxos = wallet.listunspent()
         assert_equal(len(utxos), 2)
         raw = wallet.createrawtransaction(

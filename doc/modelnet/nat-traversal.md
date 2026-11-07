@@ -8,6 +8,8 @@ Never mapped: wallet RPC, monetary RPC, hidden attestor endpoints.
 Rules:
 
 - do not block `btxd`/helper startup waiting for a gateway
+- map only when `btxd`'s `-natpmp` is on (`-proxy` and `-listen=0` turn it
+  off); otherwise `btxd` passes `-modelnatpmp=0` to its helper
 - renew before expiry (`MappingRenewalDue`)
 - delete owned mappings on shutdown
 - mapping success still requires reachability proof before

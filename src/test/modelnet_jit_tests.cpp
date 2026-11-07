@@ -18,10 +18,10 @@
 #include <modelnet/package_execute.h>
 #include <modelnet/transfer_session.h>
 #include <test/util/setup_common.h>
+#include <test/util/process.h>
 #include <test/modelnet_n02_idem.h>
 #include <univalue.h>
 #include <util/fs.h>
-#include <unistd.h>
 #include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
@@ -1074,6 +1074,33 @@ BOOST_AUTO_TEST_CASE(jit_peer_moe_cxl_update)
     }
 }
 
+BOOST_AUTO_TEST_CASE(capability_socket_failure_paths)
+{
+    UniValue result;
+    modelnet::CapabilityError error;
+    const UniValue params{UniValue::VOBJ};
+#ifdef _WIN32
+    const fs::path missing = fs::path{fs::temp_directory_path()} / fs::PathFromString("btx-missing-" + std::to_string(test::ProcessId()) + ".sock");
+#else
+    const fs::path missing = fs::PathFromString("/tmp/btx-missing-" + std::to_string(test::ProcessId()) + ".sock");
+#endif
+    BOOST_REQUIRE(!fs::exists(missing));
+    BOOST_REQUIRE(fs::PathToString(missing).size() < 100);
+    BOOST_CHECK(!modelnet::CallCapabilityUnix(fs::PathToString(missing), "getbtxruntimecapabilities", params, result, error));
+    BOOST_CHECK_EQUAL(error.code, modelnet::kErrHelperDown);
+    BOOST_CHECK(result.isNull());
+    BOOST_CHECK(!fs::exists(missing));
+
+    // These refusals must return normally after releasing any created socket.
+    const std::string too_long(512, 'x');
+    BOOST_CHECK(!modelnet::CallCapabilityUnix(too_long, "getbtxruntimecapabilities", params, result, error));
+    BOOST_CHECK_EQUAL(error.code, modelnet::kErrHelperDown);
+    std::atomic<bool> stop{true};
+    BOOST_CHECK_EQUAL(modelnet::RunCapabilityDaemon(m_path_root / "long-socket", fs::PathFromString(too_long), &stop), 2);
+    BOOST_CHECK(!modelnet::CallCapabilityUnix(fs::PathToString(missing), "getnetworkinfo", params, result, error));
+    BOOST_CHECK_EQUAL(error.code, "METHOD_NOT_FOUND");
+}
+
 BOOST_AUTO_TEST_CASE(jit_api_priv_scale_journey_safety)
 {
     modelnet::ModelCatalog cat{m_path_root / "api", 1 << 20};
@@ -1092,7 +1119,12 @@ BOOST_AUTO_TEST_CASE(jit_api_priv_scale_journey_safety)
         BOOST_CHECK(modelnet::CapabilityCliUsage().find("--plan-id") != std::string::npos);
         std::atomic<bool> stop{true};
         const fs::path capd_dir = m_path_root / "capd-native";
-        const fs::path sock = fs::PathFromString(std::string("/tmp/btx-capd-") + std::to_string(::getpid()) + ".sock");
+#ifdef _WIN32
+        const fs::path sock = fs::path{fs::temp_directory_path()} / fs::PathFromString("btx-capd-" + std::to_string(test::ProcessId()) + ".sock");
+        BOOST_REQUIRE_MESSAGE(fs::PathToString(sock).size() < 100, "native capability socket path must fit sockaddr_un");
+#else
+        const fs::path sock = fs::PathFromString(std::string("/tmp/btx-capd-") + std::to_string(test::ProcessId()) + ".sock");
+#endif
         BOOST_CHECK_EQUAL(modelnet::RunCapabilityDaemon(capd_dir, sock, &stop), 0);
         BOOST_CHECK(!fs::exists(sock));
     }

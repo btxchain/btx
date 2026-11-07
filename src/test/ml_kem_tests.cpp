@@ -42,12 +42,51 @@ BOOST_AUTO_TEST_CASE(deterministic_keygen_from_seed)
     BOOST_CHECK(kp1.sk == kp2.sk);
 }
 
+BOOST_AUTO_TEST_CASE(encapsulation_key_check_preserves_generated_keys)
+{
+    std::array<uint8_t, mlkem::KEYGEN_SEEDBYTES> seed{};
+    for (const uint8_t value : {uint8_t{0}, uint8_t{0x42}, uint8_t{0xff}}) {
+        seed.fill(value);
+        const auto kp = mlkem::KeyGenDerand(seed);
+        BOOST_CHECK(mlkem::IsValidEncapsulationKey(kp.pk));
+        const auto enc = mlkem::Encaps(kp.pk);
+        BOOST_CHECK(mlkem::Decaps(enc.ct, kp.sk) == enc.ss);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(encapsulation_key_check_does_not_restrict_seed)
+{
+    mlkem::PublicKey pk{};
+    BOOST_CHECK(mlkem::IsValidEncapsulationKey(pk));
+    std::fill(pk.end() - 32, pk.end(), uint8_t{0xff});
+    BOOST_CHECK(mlkem::IsValidEncapsulationKey(pk));
+}
+
+BOOST_AUTO_TEST_CASE(encapsulation_key_check_range_and_position)
+{
+    for (size_t offset = 0; offset < mlkem::PUBLICKEYBYTES - 32; offset += 3) {
+        for (const uint16_t value : {uint16_t{0}, uint16_t{3328}, uint16_t{3329}, uint16_t{4095}}) {
+            for (const bool second : {false, true}) {
+                mlkem::PublicKey pk{};
+                const uint16_t a = second ? 0 : value;
+                const uint16_t b = second ? value : 0;
+                pk[offset] = a & 0xff;
+                pk[offset + 1] = (a >> 8) | ((b & 0x0f) << 4);
+                pk[offset + 2] = b >> 4;
+                BOOST_CHECK_EQUAL(mlkem::IsValidEncapsulationKey(pk), value < 3329);
+            }
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(encaps_decaps_roundtrip)
 {
     const auto kp = mlkem::KeyGen();
     const auto enc = mlkem::Encaps(kp.pk);
     const auto ss = mlkem::Decaps(enc.ct, kp.sk);
-    BOOST_CHECK(enc.ss == ss);
+    BOOST_REQUIRE(ss.has_value());
+    BOOST_REQUIRE_EQUAL(ss->size(), mlkem::SHAREDSECRETBYTES);
+    BOOST_CHECK(enc.ss == *ss);
 }
 
 BOOST_AUTO_TEST_CASE(decaps_with_wrong_sk_produces_different_secret)
@@ -56,7 +95,35 @@ BOOST_AUTO_TEST_CASE(decaps_with_wrong_sk_produces_different_secret)
     const auto kp_b = mlkem::KeyGen();
     const auto enc = mlkem::Encaps(kp_a.pk);
     const auto ss_wrong = mlkem::Decaps(enc.ct, kp_b.sk);
-    BOOST_CHECK(enc.ss != ss_wrong);
+    BOOST_REQUIRE(ss_wrong.has_value());
+    BOOST_REQUIRE_EQUAL(ss_wrong->size(), mlkem::SHAREDSECRETBYTES);
+    BOOST_CHECK(enc.ss != *ss_wrong);
+}
+
+BOOST_AUTO_TEST_CASE(decaps_altered_ciphertext_retains_implicit_rejection)
+{
+    const auto kp = mlkem::KeyGen();
+    const auto enc = mlkem::Encaps(kp.pk);
+    auto ct = enc.ct;
+    ct[0] ^= 1;
+    const auto ss = mlkem::Decaps(ct, kp.sk);
+    BOOST_REQUIRE(ss.has_value());
+    BOOST_REQUIRE_EQUAL(ss->size(), mlkem::SHAREDSECRETBYTES);
+    BOOST_CHECK(*ss != enc.ss);
+}
+
+BOOST_AUTO_TEST_CASE(decaps_rejects_invalid_secret_key_lengths)
+{
+    const auto kp = mlkem::KeyGen();
+    const auto enc = mlkem::Encaps(kp.pk);
+    for (const size_t length : {size_t{0}, mlkem::SECRETKEYBYTES - 1, mlkem::SECRETKEYBYTES + 1}) {
+        auto sk = kp.sk;
+        sk.resize(length);
+        BOOST_CHECK(!mlkem::Decaps(enc.ct, sk).has_value());
+    }
+    const auto recovered = mlkem::Decaps(enc.ct, kp.sk);
+    BOOST_REQUIRE(recovered.has_value());
+    BOOST_CHECK(*recovered == enc.ss);
 }
 
 BOOST_AUTO_TEST_CASE(fips203_sk_contains_pk_and_hash)

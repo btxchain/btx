@@ -23,10 +23,13 @@ static RPCHelpMan getresourcegovernorinfo()
         "Local resource-governor status. Never consensus, never a spend grant.\n",
         {},
         RPCResult{RPCResult::Type::OBJ, "", "", {
+            // The object also carries cpu, memory, gpu, network, storage, power,
+            // jobs and more. Without the leading elision every call failed the
+            // result type check ("Internal bug detected").
+            {RPCResult::Type::ELISION, "", "cpu/memory/gpu/network/storage/power/jobs"},
             {RPCResult::Type::NUM, "schema_version", "1"},
             {RPCResult::Type::STR, "mode", "AUTO|PERFORMANCE|BALANCED|ECO|MANUAL|OFF"},
             {RPCResult::Type::BOOL, "enabled", "false when OFF"},
-            {RPCResult::Type::ELISION, "", "cpu/memory/gpu/network/storage/power/jobs"},
         }},
         RPCExamples{HelpExampleCli("getresourcegovernorinfo", "")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {

@@ -606,14 +606,9 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
 } // namespace matmul_v4::bmx4::hip
 
 // ---------------------------------------------------------------------------
-// Dispatcher-integration adapter (see the matching comment in
-// matmul_v4_bmx4_accel.h): src/matmul/accel_v4.h / accel_v4_stub.cpp already
-// declare and weakly stub the ENC-BMX4C HIP entry point as
-// `matmul_v4::hip::ComputeDigestsBMX4CAccel`. This strong forwarding
-// definition is what the real dispatch layer (ComputeDigestsBMX4CDispatched)
-// actually resolves to once this translation unit is linked in; it is a pure
-// pass-through to the implementation above, so there is exactly one code path
-// and one place the algorithm/comments live.
+// Dispatcher-integration adapter: the device implementation and the
+// disabled-backend stub both provide the signature declared in accel_v4.h.
+// Forward to the implementation above without introducing another code path.
 namespace matmul_v4::hip {
 bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
                               std::vector<uint256>& digests_out,

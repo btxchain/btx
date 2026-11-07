@@ -11,6 +11,7 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <memory>
 #include <regex>
@@ -385,6 +386,8 @@ UniValue DecodeValue(const FType& t, Reader& r)
         std::string s(raw.begin(), raw.end());
         if (s.find('\0') != std::string::npos) throw std::runtime_error("NUL");
         // Validate UTF-8 by round-tripping through UniValue string.
+        UniValue probe;
+        if (!probe.read(UniValue{s}.write()) || probe.get_str() != s) throw std::runtime_error("invalid UTF-8");
         return s;
     }
     if (t.kind == FType::BYTES) {
@@ -721,8 +724,13 @@ bool VerifyTypedRecord(uint8_t kind,
         err = "signer identity mismatch";
         return false;
     }
-    const int64_t exp = body.exists("expires_at") ? body["expires_at"].getInt<int64_t>() : 0;
-    if (exp && now > 0 && exp < now) {
+    // expires_at is a u64 field, but callers such as AcceptSignedAnnounce hold it as int64.
+    const uint64_t exp = body.exists("expires_at") ? body["expires_at"].getInt<uint64_t>() : 0;
+    if (exp > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        err = "expiry out of range";
+        return false;
+    }
+    if (exp && now > 0 && static_cast<int64_t>(exp) < now) {
         err = "expired record";
         return false;
     }

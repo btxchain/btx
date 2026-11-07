@@ -1,5 +1,7 @@
 # First run — host, seed, search, share
 
+**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+
 This is the **people** walkthrough. You do not need a wallet, coins, mining,
 or a chain sync to host a local model and share its `btx://` URI. Inference
 stays **local after acquire**. `generatemodel` is the in-tree one-shot when
@@ -20,8 +22,46 @@ synthetic MODEL token (not a hosted model):
 btx://pqwy06q0q7wwzy70aeq45sxnlvq3mr067yt4jzphzvnfn2c4zc24zxz665zdprf0nwgskvqq9cq365u9n8l25
 ```
 
-Last shipping tag is **v0.34.8**. This tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`).
+This tree is **0.35.0rc1**. The last shipping tag remains **v0.34.15**.
+
+## Swarm inside btxd
+
+The steps below use the model helper. `btx-modeld` can still be a supervised
+child of packaged `btxd`, and a standalone helper
+(`contrib/modelnet/btx-model init`) is still the catalog and PQ1 door. That
+helper is separate from the swarm thread.
+
+The swarm control plane is a thread in `btxd`. `src/init.cpp` calls
+`modelnet::StartSwarmObserver` after the model helper when `-modelnet` is on
+(default 1). The observer is a thread in `btxd`. `-modelnet=0` disables it.
+Monetary consensus continues if the swarm pass fails. `btxd` does not start
+`btx-swarmd` or `btx-paynetd`.
+
+The observer starts and supervises the packaged `btx-guardd` using private
+inherited stdio. Its readiness, PID, restart count and error are written to
+`modeldir/swarm/guard-process.json`; readiness alone grants no execution.
+On a private IPv4 interface the helper sends bounded LAN discovery hints,
+authenticates contacts with strict PQ1, and can acquire verified free public
+model bytes inside its storage budget. Read the measured
+`getmodelnetworkinfo.native_participation` object. The fresh headless budget
+is 1 GiB; explicit zero and saved disable decisions remain disabled.
+
+`SwarmObserveCatalog` reconciles verified, explicitly complete catalog entries
+into `modeldir/swarm/observers.json`, removing entries that become ineligible or
+disappear. A missing catalog clears existing subscriptions. Subscriptions are observers only: no compute
+grant, no seeding, no spend.
+
+`SwarmFormPlane` does not exec a sidecar, open a socket, add a DNS seed,
+broadcast, or spend.
+
+The first observer pass, then latched, is an internal conformance pass:
+memory echo of `abcdefgh` for 8 bytes, vllm returns `ENGINE_ABSENT`, one CPU
+AdamW step (sequence 4, hidden 8), loopback two-rank exchange with
+`physical_hosts` 1, integer replay of 8 pairs, one snapshot, one realm seat.
+`Hosts(2)` is refused.
+
+`TickBind` then runs the in-process checks once. `passed()`, `gpu_passed()`,
+and `windows_passed()` stay false. Spend is `"0"`. Release is `UNQUALIFIED`.
 
 ## What you are about to do
 
@@ -148,7 +188,8 @@ You do not call `createmodelidentity` first.
 Pass `{"publish":false}` only when you want a local pin **without** a signed
 search card. Pin stays on unless you pass `{"pin":false}`. Unix RPC waits up
 to **24h** for `importmodel` / `hostmodel` / `getmodel` / `waitformodelevent` /
-`scanmodelwatch` / `loadmodel` / `generatemodel` so a large import or generate
+`scanmodelwatch` / `executemodelimport` / `importbtxpackage` /
+`exportmodelpath` / `loadmodel` / `unloadmodel` / `generatemodel` so a large import or generate
 is not killed by the 30s PQ1 idle window.
 Ordinary helper methods use a **120s** unix reply timeout.
 
@@ -229,6 +270,15 @@ contrib/modelnet/btx-model unhost qwen3-local
 ```
 
 `unhostmodel` does not delete catalog bytes. It is stop-seed + drop Keep.
+
+To **delete** a model's local pieces and its `exportmodelpath` checkout, use
+`removemodel` (refused with `IN_USE` while a retrieve for it is queued or
+running; never spends):
+
+```bash
+btx-cli removemodel 'qwen3-local'
+contrib/modelnet/btx-model rm qwen3-local
+```
 
 ## 3. Search
 
@@ -338,7 +388,7 @@ Empty `-modelwatch` is off. The doctor reports the configured path.
 
 This **filesystem drop folder is not a publisher watch**. Publisher /
 collection follow, event journal, and optional cloud backing exist in this
-**0.34.9-dev** helper (`CLIENT_VERSION_IS_RELEASE=false`). FakeS3 is
+**0.35.0rc1** helper (this surface originated in 0.34.9-dev; native release evidence remains separate). FakeS3 is
 unit-tested; live HTTPS/R2 is **NOT_RUN** (OpenSSL HTTPS transport is
 compiled; live R2 WAN is not PASS). SCALE huge / 400GiB body stream is
 **NOT_RUN**. The CLI wrapper still fails closed if an older helper has no
@@ -415,6 +465,7 @@ Never spends. No remote inference. Scratch helper socket only.
 | `pins [--type pinned\|seeded\|both]` | `listmodels` filtered to kept/served rows (`ipfs pin ls` analog) |
 | `alias` / `rm-alias` | `setmodelalias` / `getmodelaliases` / `removemodelalias` |
 | `unhost` | `unhostmodel` |
+| `rm` | `removemodel` (deletes the local pieces and the checkout) |
 | `bounty-draft` | `createbountydraft` (title string or `@file.json`); `--update` / `--delete` / `--validate` |
 | `watch-scan` | `scanmodelwatch` (`getmodelwatchstatus` is RPC-only). Filesystem folder, not publisher follow. |
 
@@ -446,7 +497,7 @@ the agent door (stdout only). People keep stderr hints without `--json`.
 R2 AUTO is `SOURCE_FILES` + `STREAM_FILE`. Pieces remain the swarm unit.
 FakeS3 is unit-tested. Live HTTPS/R2 is **NOT_RUN** (transport compiled; WAN
 not PASS). SCALE huge is **NOT_RUN**. GUI watches are 0.34.8-dev source
-(`BUILD_GUI=OFF`). `CLIENT_VERSION_IS_RELEASE=false`. HF/Xet/torrent adapters
+(`BUILD_GUI=OFF`). `CLIENT_VERSION_IS_RELEASE=true` for the 0.35.0rc1 candidate (native release evidence remains separate). HF/Xet/torrent adapters
 are local-native (pin/SSRF/CAS/infohash). They do **not** download from the
 public internet in this tree. See
 [storage-backends.md](storage-backends.md) and
@@ -518,3 +569,16 @@ contrib/modelnet/btx-model --json fetch @contrib/modelnet/recipes/registry-indep
 - Do not `getmodel` large fixtures into a live attestor datadir.
 - Do not put `dn=` (or any query string) on the `btx://` URI.
 - Do not pass cloud secrets on argv; use `--credential-ref env:BTX_CLOUD_CREDENTIAL` or `--secret-file`.
+
+## Later releases
+
+These are the next releases toward a fully autonomous network:
+
+- Peers discover and admit a local group.
+- A participant acquires a verified model from another participant.
+- A person submits a task or prompt and receives model work.
+- A qualified machine trains on an authorized recipe and a second machine checks it.
+- A private defensive case runs under an explicit customer grant.
+- Accepted work settles in BTX only under an operator-signed mandate.
+
+The verifications still required before those claims are two physical hosts, a second GPU, Windows, macOS, a linked remote execution engine, an offline release image, the hardware profiles, and the sealed acceptance catalogue. Two local ranks are not two hosts. Spend stays 0 until a mandate exists.

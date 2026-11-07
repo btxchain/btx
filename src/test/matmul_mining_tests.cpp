@@ -31,6 +31,7 @@
 #include <validation.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <charconv>
 #include <chrono>
@@ -664,14 +665,14 @@ BOOST_AUTO_TEST_CASE(getmininginfo_required_backend_satisfied_false_when_rc_quar
             if (const char* prev = std::getenv(name)) {
                 m_previous = std::string{prev};
             }
-            setenv(name, value, 1);
+            test::SetEnv(name, value);
         }
         ~ScopedEnv()
         {
             if (m_previous) {
-                setenv(m_name.c_str(), m_previous->c_str(), 1);
+                test::SetEnv(m_name.c_str(), m_previous->c_str());
             } else {
-                unsetenv(m_name.c_str());
+                test::UnsetEnv(m_name.c_str());
             }
         }
     };

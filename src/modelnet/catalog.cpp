@@ -205,6 +205,8 @@ UniValue CapabilitiesObject()
     c.pushKV("preserve_rare", true);
     c.pushKV("follow_configured_peers_default", true);
     c.pushKV("unsolicited_fetch_default", false);
+    c.pushKV("native_lan_free_acquisition", true);
+    c.pushKV("acquisition_requires", "strict PQ1, matching chain, verified bytes, positive quota, follow_peers and seed=auto");
     c.pushKV("extension_version", 257);
     // Native helper bits: RESOURCE_RESOLVE|FREE_GRANT|SERVICE_RECEIPT|RESEARCH_IDENTITY|
     // COLLECTIONS_ALIAS|POLICY_BUNDLE|PRESERVATION_CIRCLE. Signed announce, typed
@@ -759,17 +761,20 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
         (void)m_store.RemoveArtifact(staging, ignored);
         DropPieceTreeCache(staging);
         commit_staging = true;
-        for (const auto& m : m_models) {
+        for (auto& m : m_models) {
             if (m.artifact_id == artifact_id) {
-                out = m;
-                if (pin && !out.pinned) {
+                if (pin && !m.pinned) {
+                    // Pin the catalog entry itself: eviction ranks by it.
                     std::string pin_err;
                     m_store.Pin(model_id, pin_err);
                     m_store.Pin(artifact_id, pin_err);
-                    out.pinned = true;
-                    out.admission = AdmissionLevel::PINNED;
-                    out.bytes_verified = true;
+                    m.pinned = true;
+                    m.admission = AdmissionLevel::PINNED;
+                    m.bytes_verified = true;
+                    out = m;
+                    return PersistLocked(err);
                 }
+                out = m;
                 return true;
             }
         }

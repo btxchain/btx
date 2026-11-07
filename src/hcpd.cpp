@@ -20,7 +20,9 @@ int main(int argc, char* argv[])
 {
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
+#ifndef WIN32
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     bool finance = false;
     bool cr12_flag = false;
     bool cr12_set = false;

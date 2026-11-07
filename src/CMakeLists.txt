@@ -1162,12 +1162,8 @@ if(APPLE AND BTX_ENABLE_METAL)
   target_sources(btx_matmul_backend PRIVATE
     metal/matmul_accel.mm
     metal/matmul_v4_accel.mm
-    # External review (P1.5): the BMX4-C (v4.2) Metal device backend source was
-    # never listed. With BTX_ENABLE_METAL defined the weak metal stub in
-    # accel_v4_stub.cpp is compiled out, so without this the strong
-    # matmul_v4::metal::ComputeDigestsBMX4CAccel had no definition -- a Metal
-    # build suppressed the weak stub while providing no strong impl (link error /
-    # silently unserved profile). Wire it in alongside its kernels metallib.
+    # Enabled Metal builds need the BMX4-C implementation alongside v4.
+    # Disabled builds select metal/matmul_v4_bmx4_accel_stub.cpp below.
     metal/matmul_v4_bmx4_accel.mm
     # MatMul v4.4 ENC-DR-LT ("MatExpand") Metal backend: exact integer MSL
     # GEMM kernels (int8xint8->int32 and int32xint8->int32) self-tested against
@@ -1192,6 +1188,43 @@ if(APPLE AND BTX_ENABLE_METAL)
   option(BTX_MATMUL_METAL_PRECOMPILE_KERNELS "Precompile MatMul Metal kernels with xcrun metallib at build time" ON)
   find_program(BTX_XCRUN_EXECUTABLE xcrun)
   if(BTX_MATMUL_METAL_PRECOMPILE_KERNELS AND BTX_XCRUN_EXECUTABLE)
+    # Probe the required default-language compiler and linker before registering
+    # build-time kernels. Finding xcrun alone does not provide these tools.
+    set(BTX_METAL4_PROBE_SRC "${CMAKE_CURRENT_BINARY_DIR}/btx_metal4_probe.metal")
+    file(WRITE "${BTX_METAL4_PROBE_SRC}" "kernel void btx_metal4_probe(device int* d [[buffer(0)]]) { d[0] = 1; }\n")
+    set(BTX_METAL_PROBE_AIR "${CMAKE_CURRENT_BINARY_DIR}/btx_metal_basic_probe.air")
+    set(BTX_METAL_PROBE_LIB "${CMAKE_CURRENT_BINARY_DIR}/btx_metal_basic_probe.metallib")
+    file(REMOVE "${BTX_METAL_PROBE_AIR}" "${BTX_METAL_PROBE_LIB}")
+    set(BTX_METAL_PROBE_STAGE "basic Metal compilation")
+    set(BTX_METAL_PROBE_OUTPUT "${BTX_METAL_PROBE_AIR}")
+    execute_process(
+      COMMAND "${BTX_XCRUN_EXECUTABLE}" -sdk macosx metal -c "${BTX_METAL4_PROBE_SRC}" -o "${BTX_METAL_PROBE_AIR}"
+      RESULT_VARIABLE BTX_METAL_PROBE_RESULT
+      OUTPUT_VARIABLE BTX_METAL_PROBE_STDOUT
+      ERROR_VARIABLE BTX_METAL_PROBE_STDERR
+      TIMEOUT 30
+    )
+    if("${BTX_METAL_PROBE_RESULT}" STREQUAL "0" AND EXISTS "${BTX_METAL_PROBE_AIR}")
+      set(BTX_METAL_PROBE_STAGE "metallib linking")
+      set(BTX_METAL_PROBE_OUTPUT "${BTX_METAL_PROBE_LIB}")
+      execute_process(
+        COMMAND "${BTX_XCRUN_EXECUTABLE}" -sdk macosx metallib "${BTX_METAL_PROBE_AIR}" -o "${BTX_METAL_PROBE_LIB}"
+        RESULT_VARIABLE BTX_METAL_PROBE_RESULT
+        OUTPUT_VARIABLE BTX_METAL_PROBE_STDOUT
+        ERROR_VARIABLE BTX_METAL_PROBE_STDERR
+        TIMEOUT 30
+      )
+    endif()
+    if(NOT "${BTX_METAL_PROBE_RESULT}" STREQUAL "0" OR NOT EXISTS "${BTX_METAL_PROBE_OUTPUT}")
+      string(SUBSTRING "${BTX_METAL_PROBE_STDOUT}${BTX_METAL_PROBE_STDERR}" 0 2048 BTX_METAL_PROBE_DIAGNOSTIC)
+      message(FATAL_ERROR
+        "Metal kernel precompilation is ON, but ${BTX_METAL_PROBE_STAGE} failed "
+        "(result: ${BTX_METAL_PROBE_RESULT}; expected output: ${BTX_METAL_PROBE_OUTPUT}).\n"
+        "Tool diagnostic (first 2048 characters): ${BTX_METAL_PROBE_DIAGNOSTIC}\n"
+        "See doc/build-osx.md for Xcode/Metal toolchain setup, or explicitly select "
+        "-DBTX_MATMUL_METAL_PRECOMPILE_KERNELS=OFF to compile kernels at runtime "
+        "(requires the runtime Metal compiler service).")
+    endif()
     set(BTX_MATMUL_METAL_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_accel_kernels.metal)
     set(BTX_MATMUL_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_accel_kernels.air)
     set(BTX_MATMUL_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_accel_kernels.metallib)
@@ -1274,10 +1307,8 @@ if(APPLE AND BTX_ENABLE_METAL)
     add_custom_target(btx_rc_fp3_lde_metallib DEPENDS ${BTX_RC_FP3_LDE_METALLIB})
     # Issue 51: probe Metal 4 so TensorOps can be precompiled. A daemon cannot
     # always reach MTLCompilerService; newLibraryWithURL does not need it.
-    set(BTX_METAL4_PROBE_SRC ${CMAKE_CURRENT_BINARY_DIR}/btx_metal4_probe.metal)
-    file(WRITE ${BTX_METAL4_PROBE_SRC} "kernel void btx_metal4_probe(device int* d [[buffer(0)]]) { d[0] = 1; }\n")
     execute_process(
-      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -std=metal4.0 -c ${BTX_METAL4_PROBE_SRC} -o ${CMAKE_CURRENT_BINARY_DIR}/btx_metal4_probe.air
+      COMMAND "${BTX_XCRUN_EXECUTABLE}" -sdk macosx metal -std=metal4.0 -c "${BTX_METAL4_PROBE_SRC}" -o "${CMAKE_CURRENT_BINARY_DIR}/btx_metal4_probe.air"
       RESULT_VARIABLE BTX_METAL4_COMPILER_RESULT
       ERROR_VARIABLE BTX_METAL4_COMPILER_ERROR
       OUTPUT_QUIET
@@ -2233,6 +2264,9 @@ if(BUILD_UTIL)
   add_executable(btx-guardd btx-guardd.cpp modelnet/guard_machine.cpp)
   target_include_directories(btx-guardd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(btx-guardd core_interface)
+  if(WIN32)
+    target_link_libraries(btx-guardd bcrypt)
+  endif()
   if((UNIX AND NOT APPLE) OR MINGW)
     target_link_btx_linux_archive_group(btx-guardd ${BTX_BASE_ARCHIVES})
   else()

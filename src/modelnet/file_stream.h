@@ -232,6 +232,7 @@ class OriginStampedeGuard {
     mutable std::mutex m_mu;
     std::map<std::string, std::vector<int64_t>> m_peer_hits;
     std::map<std::string, std::vector<int64_t>> m_ng_hits;
+    int64_t m_pruned_ms{0};
     std::map<std::string, int> m_errors;
     std::map<std::string, int64_t> m_open_until;
 

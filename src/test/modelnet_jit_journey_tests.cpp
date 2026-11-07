@@ -13,6 +13,7 @@
 #include <modelnet/helper.h>
 #include <span.h>
 #include <test/util/setup_common.h>
+#include <test/util/process.h>
 #include <univalue.h>
 #include <util/fs.h>
 
@@ -22,7 +23,11 @@
 #include <chrono>
 #include <string>
 #include <thread>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 #include <vector>
 
 namespace modelnet {
@@ -508,14 +513,21 @@ BOOST_AUTO_TEST_CASE(jit_api_04_cli_verbs)
 
     const fs::path modeldir = m_path_root / "cli04";
     fs::create_directories(modeldir);
+#ifdef _WIN32
+    const fs::path sock = fs::path{fs::temp_directory_path()} / fs::PathFromString("btx-j04-" + std::to_string(test::ProcessId()) + ".sock");
+    BOOST_REQUIRE_MESSAGE(fs::PathToString(sock).size() < 100, "native capability socket path must fit sockaddr_un");
+    ::_wunlink(sock.c_str());
+#else
     fs::path sock = m_path_root / "c.sock";
     if (fs::PathToString(sock).size() >= 100) {
-        sock = fs::PathFromString(std::string("/tmp/btx-j04-") + std::to_string(::getpid()) + ".sock");
+        sock = fs::PathFromString(std::string("/tmp/btx-j04-") + std::to_string(test::ProcessId()) + ".sock");
     }
     ::unlink(fs::PathToString(sock).c_str());
+#endif
 
     std::atomic<bool> stop{false};
-    std::thread daemon([&] { (void)modelnet::RunCapabilityDaemon(modeldir, sock, &stop); });
+    std::atomic<int> daemon_result{-1};
+    std::thread daemon([&] { daemon_result.store(modelnet::RunCapabilityDaemon(modeldir, sock, &stop)); });
     struct Join {
         std::atomic<bool>& stop;
         std::thread& th;
@@ -524,20 +536,28 @@ BOOST_AUTO_TEST_CASE(jit_api_04_cli_verbs)
         {
             stop.store(true);
             if (th.joinable()) th.join();
+#ifdef _WIN32
+            ::_wunlink(sock.c_str());
+#else
             ::unlink(fs::PathToString(sock).c_str());
+#endif
         }
     } join{stop, daemon, sock};
 
     bool ready = false;
     const auto t0 = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8)) {
-        if (fs::exists(sock)) {
+        UniValue reply;
+        modelnet::CapabilityError error;
+        if (modelnet::CallCapabilityUnix(fs::PathToString(sock), "getbtxruntimecapabilities",
+                                        UniValue{UniValue::VOBJ}, reply, error)) {
             ready = true;
             break;
         }
+        if (daemon_result.load() != -1) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    BOOST_REQUIRE_MESSAGE(ready, "in-process capabilityd socket");
+    BOOST_REQUIRE_MESSAGE(ready, "in-process capabilityd socket; daemon result=" + std::to_string(daemon_result.load()) + "; path=" + fs::PathToString(sock));
 
     const std::string md_flag = "-modeldir=" + fs::PathToString(modeldir);
     const std::string sock_flag = "-capabilitysocket=" + fs::PathToString(sock);
@@ -855,6 +875,16 @@ BOOST_AUTO_TEST_CASE(jit_api_04_cli_verbs)
             BOOST_TEST_MESSAGE("JIT-API-04 release fail-closed " + code + " (LEASE_HOLD while active is PASS)");
         }
     }
+    // Observe daemon-owned shutdown before Join's fallback fixture cleanup.
+    stop.store(true);
+    daemon.join();
+    BOOST_CHECK_EQUAL(daemon_result.load(), 0);
+    BOOST_CHECK_MESSAGE(!fs::exists(sock), "capability daemon must remove its socket on shutdown");
+    bool socket_entry_present = false;
+    for (const auto& entry : fs::directory_iterator{sock.parent_path()}) {
+        if (entry.path().filename().native() == sock.filename().native()) socket_entry_present = true;
+    }
+    BOOST_CHECK_MESSAGE(!socket_entry_present, "daemon socket directory entry must be gone before fallback cleanup");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

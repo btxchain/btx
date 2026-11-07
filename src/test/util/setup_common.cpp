@@ -42,6 +42,7 @@
 #include <script/script.h>
 #include <script/sigcache.h>
 #include <streams.h>
+#include <test/util/matmul_fixture.h>
 #include <test/util/mining.h>
 #include <test/util/net.h>
 #include <test/util/random.h>
@@ -154,13 +155,25 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, TestOpts opts)
     }
 
     const std::string test_name{G_TEST_GET_FULL_NAME ? G_TEST_GET_FULL_NAME() : ""};
+    std::string test_path_name{test_name};
+#ifdef WIN32
+    if (!test_name.empty()) {
+        // Bound this component so nested fixtures fit Windows path limits.
+        // A stable 128-bit identifier retains per-test directory/lock isolation;
+        // keep the full test name in diagnostics rather than in the path.
+        unsigned char name_hash[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write(reinterpret_cast<const unsigned char*>(test_name.data()), test_name.size()).Finalize(name_hash);
+        test_path_name = HexStr(name_hash).substr(0, 32);
+        std::cout << "Test case: " << test_name << std::endl;
+    }
+#endif
     if (!m_node.args->IsArgSet("-testdatadir")) {
         // To avoid colliding with a leftover prior datadir, and to allow
         // tests, such as the fuzz tests to run in several processes at the
         // same time, add a random element to the path. Keep it small enough to
         // avoid a MAX_PATH violation on Windows.
         const auto rand{HexStr(g_rng_temp_path.randbytes(10))};
-        m_path_root = fs::temp_directory_path() / TEST_DIR_PATH_ELEMENT / test_name / rand;
+        m_path_root = fs::temp_directory_path() / TEST_DIR_PATH_ELEMENT / test_path_name / rand;
         TryCreateDirectories(m_path_root);
     } else {
         // Custom data directory
@@ -169,7 +182,7 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, TestOpts opts)
         if (root_dir.empty()) ExitFailure("-testdatadir argument is empty, please specify a path");
 
         root_dir = fs::absolute(root_dir);
-        m_path_lock = root_dir / TEST_DIR_PATH_ELEMENT / fs::PathFromString(test_name);
+        m_path_lock = root_dir / TEST_DIR_PATH_ELEMENT / fs::PathFromString(test_path_name);
         m_path_root = m_path_lock / "datadir";
 
         // Try to obtain the lock; if unsuccessful don't disturb the existing test.
@@ -281,6 +294,12 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
         if (auto value{m_node.args->GetBoolArg("-resetshieldedstate")}) {
             chainman_opts.reset_shielded_state = *value;
         }
+        // Fixtures that keep the default regtest MatMul schedule can pass
+        // -matmulvalidation=economic so ConnectTip does not wait on an
+        // asynchronous ExactReplay (28fefe91) while the fixture mines.
+        if (m_node.args->GetArg("-matmulvalidation") == std::string{"economic"}) {
+            chainman_opts.matmul_validation_mode = kernel::MatMulValidationMode::ECONOMIC;
+        }
         // Honor the deep-reorg defense options from extra_args so tests can
         // exercise explicit PARK and default WARN/hysteresis paths (see
         // ApplyArgsManOptions / ActivateBestChainStep).
@@ -321,6 +340,11 @@ ChainTestingSetup::~ChainTestingSetup()
     m_node.args = nullptr;
     m_node.mempool.reset();
     Assert(!m_node.fee_estimator); // Each test must create a local object, if they wish to use the fee_estimator
+    if (m_node.chainman) {
+        LOCK(::cs_main);
+        // Release process-wide shielded stores before BasicTestingSetup removes the datadir.
+        m_node.chainman->ResetChainstates();
+    }
     m_node.chainman.reset();
     m_node.validation_signals.reset();
     m_node.scheduler.reset();
@@ -398,6 +422,8 @@ bool ExtraArgsContainPrefix(const std::vector<const char*>& args, const char* pr
     return false;
 }
 
+} // namespace
+
 // Regtest activates v4/BMX4C/DRLT at height 100 and RC Profile-1 at 101 by
 // default, with nMatMulV4Dimension=256. TestChain100Setup mines
 // COINBASE_MATURITY (==100) blocks, so every fixture would otherwise pay for
@@ -433,8 +459,6 @@ TestOpts WithCheapMatMulFixtureDefaults(TestOpts opts)
     }
     return opts;
 }
-
-} // namespace
 
 TestChain100Setup::TestChain100Setup(
     const ChainType chain_type,

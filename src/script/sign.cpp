@@ -1055,7 +1055,8 @@ std::optional<int64_t> CalculateMaximumP2MRInputWeight(
 std::optional<int64_t> CalculateSelectedP2MRInputWeight(
     const CScript& script_pubkey,
     const SigningProvider& provider,
-    std::optional<PQAlgorithm> preferred_algo)
+    std::optional<PQAlgorithm> preferred_algo,
+    int64_t* sigop_cost)
 {
     std::vector<unsigned char> program;
     P2MRSpendData spenddata;
@@ -1066,6 +1067,7 @@ std::optional<int64_t> CalculateSelectedP2MRInputWeight(
     bool have_best{false};
     int best_priority{0};
     int64_t best_weight{0};
+    int64_t best_sigops{0};
     for (const auto& [script, controls] : spenddata.scripts) {
         const std::vector<unsigned char>* control{&*controls.begin()};
 
@@ -1076,18 +1078,29 @@ std::optional<int64_t> CalculateSelectedP2MRInputWeight(
         if (!witness) continue;
         witness->push_back(script);
         witness->push_back(*control);
+        // Count the leaf the way validation does. A PQ checksig costs far more
+        // sigops than its witness weight, so the sigop term can set the vsize.
+        CScriptWitness script_witness;
+        script_witness.stack = *witness;
+        const int64_t sigops{static_cast<int64_t>(CountWitnessSigOps(
+            CScript{}, script_pubkey, &script_witness, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS))};
         const int64_t weight{P2MRWitnessInputWeight(std::move(*witness))};
 
         // SignP2MR immediately accepts a fully preferred checksig/multisig leaf
         // in provider map order; otherwise it retains the lowest priority.
-        if (priority == 0) return weight;
+        if (priority == 0) {
+            if (sigop_cost) *sigop_cost = sigops;
+            return weight;
+        }
         if (!have_best || priority < best_priority) {
             have_best = true;
             best_priority = priority;
             best_weight = weight;
+            best_sigops = sigops;
         }
     }
     if (!have_best) return std::nullopt;
+    if (sigop_cost) *sigop_cost = best_sigops;
     return best_weight;
 }
 

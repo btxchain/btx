@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -3303,6 +3304,11 @@ bool CanonicalizeHcpBindHost(std::string& host)
     return inet_pton(AF_INET, host.c_str(), &parsed) == 1;
 }
 
+// SO_RCVTIMEO bounds one recv() only, so without a total limit a client that
+// keeps sending slowly would hold this single-threaded loop. A request gets
+// this long, in total, to arrive.
+static constexpr std::chrono::seconds HCP_REQUEST_READ_DEADLINE{5};
+
 int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket, std::atomic<bool>* stop)
 {
     cfg.automatic_spend_atoms = 0;
@@ -3361,7 +3367,12 @@ int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket,
         char buf[4096];
         size_t content_len = 0;
         bool drop_client = false;
+        const auto read_deadline{std::chrono::steady_clock::now() + HCP_REQUEST_READ_DEADLINE};
         for (;;) {
+            if (std::chrono::steady_clock::now() >= read_deadline || (stop != nullptr && stop->load())) {
+                drop_client = true;
+                break;
+            }
             ssize_t n = recv(cfd, buf, sizeof(buf), 0);
             if (n < 0) {
                 if (errno == EINTR) continue;

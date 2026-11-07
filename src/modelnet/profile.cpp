@@ -5,20 +5,24 @@
 #include <modelnet/profile.h>
 
 #include <modelnet/policy.h>
+#include <modelnet/auto_storage.h>
 #include <univalue.h>
 #include <util/fs_helpers.h>
 #include <util/readwritefile.h>
 #include <util/strencodings.h>
 
 #include <atomic>
+#include <cstdio>
 #include <functional>
 #include <mutex>
 #include <stdexcept>
+#include <set>
 
 namespace modelnet {
 namespace {
 
 std::mutex g_host_bit_mu;
+std::mutex g_profile_file_mu;
 std::function<void(bool)> g_host_bit_hook;
 std::atomic<bool> g_host_advertised{false};
 
@@ -211,6 +215,75 @@ ProfilePolicy ResolveProfile(OperatorProfile profile, const ProfileOverrides& ex
     return ApplyProfileOverrides(p, existing);
 }
 
+bool ParseProfileOverridesJson(const UniValue& value, ProfileOverrides& out, std::string& err)
+{
+    out = {};
+    err.clear();
+    if (!value.isObject()) { err = "overrides must be an object"; return false; }
+    const std::set<std::string> allowed{"profile", "automatic_spend_atoms", "relay", "index", "host_mode",
+        "storage_arg", "storage_bytes", "auto_cap_bytes", "upload_bps", "follow_peers", "preserve_rare", "seed"};
+    std::set<std::string> seen;
+    for (const auto& key : value.getKeys()) {
+        if (!allowed.count(key) || !seen.insert(key).second) { err = "unknown or duplicate profile field: " + key; return false; }
+    }
+    auto boolean = [&](const char* key, std::optional<bool>& dest) {
+        if (!value.exists(key)) return true;
+        if (!value[key].isBool()) { err = std::string(key) + " must be boolean"; return false; }
+        dest = value[key].get_bool(); return true;
+    };
+    auto count = [&](const char* key, std::optional<uint64_t>& dest) {
+        if (!value.exists(key)) return true;
+        uint64_t number = 0;
+        if (value[key].isStr()) {
+            if (!ParseModelBytes(value[key].get_str(), number, err)) return false;
+        } else if (value[key].isNum()) {
+            number = value[key].getInt<uint64_t>();
+        } else { err = std::string(key) + " must be a nonnegative integer or byte-size string"; return false; }
+        dest = number; return true;
+    };
+    try {
+        if (value.exists("automatic_spend_atoms") &&
+            !((value["automatic_spend_atoms"].isStr() && value["automatic_spend_atoms"].get_str() == "0") ||
+              (value["automatic_spend_atoms"].isNum() && value["automatic_spend_atoms"].getValStr() == "0"))) {
+            err = "automatic_spend_atoms must remain zero"; return false;
+        }
+        if (value.exists("profile") && !value["profile"].isStr()) { err = "profile must be a string"; return false; }
+        if (!boolean("relay", out.relay) || !boolean("index", out.index) ||
+            !boolean("follow_peers", out.follow_peers) || !boolean("preserve_rare", out.preserve_rare) ||
+            !count("auto_cap_bytes", out.auto_cap_bytes) || !count("upload_bps", out.upload_bps)) return false;
+        if (value.exists("host_mode")) {
+            HostMode host;
+            if (!value["host_mode"].isStr() || !ParseHostMode(value["host_mode"].get_str(), host)) {
+                err = "host_mode must be auto, on, or off"; return false;
+            }
+            out.host_mode = host;
+        }
+        if (value.exists("storage_arg") && value.exists("storage_bytes")) {
+            err = "supply only one of storage_arg and storage_bytes"; return false;
+        }
+        if (value.exists("storage_arg") || value.exists("storage_bytes")) {
+            const auto& storage = value.exists("storage_arg") ? value["storage_arg"] : value["storage_bytes"];
+            std::string text;
+            if (storage.isNull() && value.exists("storage_bytes")) text = "auto";
+            else if (storage.isStr()) text = storage.get_str();
+            else if (storage.isNum()) text = std::to_string(storage.getInt<uint64_t>());
+            else { err = "storage must be auto, a byte-size string, a nonnegative integer, or storage_bytes:null"; return false; }
+            StorageMode mode;
+            uint64_t bytes;
+            if (!ParseModelStorage(text, mode, bytes, err)) return false;
+            out.storage_arg = mode == StorageMode::AUTO ? "auto" : std::to_string(bytes);
+        }
+        if (value.exists("seed")) {
+            SeedMode seed;
+            if (!value["seed"].isStr() || !SeedModeFromName(value["seed"].get_str(), seed)) {
+                err = "seed must be auto, manual, or off"; return false;
+            }
+            out.seed = SeedModeName(seed);
+        }
+    } catch (const std::exception& e) { err = e.what(); return false; }
+    return true;
+}
+
 uint64_t EffectiveHostUploadBps(uint64_t profile_upload_bps, int64_t governor_upload_bps,
                                 bool seeding_allowed)
 {
@@ -321,6 +394,7 @@ bool LoadOperatorProfile(const fs::path& path, OperatorProfile& profile, Profile
 
 bool SaveOperatorProfile(const fs::path& path, OperatorProfile profile, const ProfilePolicy& policy, std::string& err)
 {
+    std::lock_guard<std::mutex> file_lock(g_profile_file_mu);
     try {
         if (!TryCreateDirectories(path.parent_path()) && !fs::exists(path.parent_path())) {
             err = "cannot create operator profile directory";
@@ -330,10 +404,26 @@ bool SaveOperatorProfile(const fs::path& path, OperatorProfile profile, const Pr
         err = e.what();
         return false;
     }
-    if (!WriteBinaryFile(path, OperatorProfileToJson(profile, policy).write() + "\n")) {
-        err = "failed to write operator profile";
+    const fs::path temporary = path.parent_path() / fs::u8path(fs::PathToString(path.filename()) + ".tmp");
+    if (IsSymlink(path) || IsSymlink(temporary)) {
+        err = "operator profile paths must not be symbolic links";
         return false;
     }
+    const std::string bytes = OperatorProfileToJson(profile, policy).write() + "\n";
+    FILE* file = fsbridge::fopen(temporary, "wb");
+    if (!file) {
+        err = "failed to open temporary operator profile";
+        return false;
+    }
+    const bool committed = fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size() && FileCommit(file);
+    const int closed = fclose(file);
+    if (!committed || closed != 0 || !RenameOver(temporary, path)) {
+        std::error_code ignored;
+        fs::remove(temporary, ignored);
+        err = "failed to commit operator profile";
+        return false;
+    }
+    DirectoryCommit(path.parent_path());
     return true;
 }
 

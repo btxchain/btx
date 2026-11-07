@@ -1303,6 +1303,7 @@ public:
         m_max_automatic_outbound = m_max_outbound_full_relay + m_max_outbound_block_relay + m_max_feeler;
         m_max_inbound = std::max(0, m_max_automatic_connections - m_max_automatic_outbound);
         m_use_addrman_outgoing = connOptions.m_use_addrman_outgoing;
+        m_strict_connect = !connOptions.m_specified_outgoing.empty();
         m_client_interface = connOptions.uiInterface;
         m_banman = connOptions.m_banman;
         m_msgproc = connOptions.m_msgproc;
@@ -1798,6 +1799,9 @@ private:
     int m_max_inbound;
 
     bool m_use_addrman_outgoing;
+    //! -connect named at least one target. -noconnect / -connect=0 only stop
+    //! automatic outbound; they do not make the node strict towards inbounds.
+    bool m_strict_connect{false};
     CClientUIInterface* m_client_interface;
     NetEventsInterface* m_msgproc;
     /** Pointer to this node's banman. May be nullptr - check existence before dereferencing. */

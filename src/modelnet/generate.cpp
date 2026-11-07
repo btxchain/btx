@@ -43,7 +43,13 @@ bool EndsWithLower(const std::string& name, const char* suf)
 bool IsExecutableFile(const fs::path& p)
 {
     if (!fs::exists(p) || !fs::is_regular_file(p)) return false;
+#ifdef _WIN32
+    // The local runners require fork/exec, which is unsupported on Windows.
+    // Existence or CRT read/write attributes cannot qualify execution.
+    return false;
+#else
     return ::access(fs::PathToString(p).c_str(), X_OK) == 0;
+#endif
 }
 
 const char* kStArch[] = {

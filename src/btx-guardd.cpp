@@ -1,14 +1,10 @@
-// Copyright (c) 2026 The BTX developers
-// Distributed under the MIT software license, see the accompanying
-// file COPYING or https://opensource.org/license/mit/.
-
+// Copyright (c) 2026 The BTX developers. MIT license. See COPYING.
 #include <modelnet/guard_machine.h>
-
 #include <chrono>
+#include <charconv>
 #include <cstdint>
 #include <iostream>
 #include <string>
-
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -16,74 +12,121 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
-
 namespace {
-
 int64_t NowMs()
 {
-    using clock = std::chrono::system_clock;
-    return std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
-
-void CloseSock(int fd)
+int Stdio()
+{
+    modelnet::GuardTable table;
+    std::string line;
+    char c;
+    while (std::cin.get(c)) {
+        if (c == '\n') {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            std::cout << modelnet::GuardHandleLine(table, line, NowMs()) << '\n' << std::flush;
+            if (!std::cout) return 2;
+            line.clear();
+        } else {
+            if (line.size() >= modelnet::GuardTable::kMaxLine) {
+                std::cout << "ERR BTX035_LIMIT\n" << std::flush;
+                return 2;
+            }
+            line.push_back(c);
+        }
+    }
+    // The parent's inherited pipe closes on normal stop or crash.
+    return line.empty() ? 0 : 2;
+}
+#ifdef _WIN32
+using Socket = SOCKET;
+constexpr Socket INVALID = INVALID_SOCKET;
+void Close(Socket fd) { closesocket(fd); }
+#else
+using Socket = int;
+constexpr Socket INVALID = -1;
+void Close(Socket fd) { close(fd); }
+#endif
+int LegacyLoopback(uint16_t port)
 {
 #ifdef _WIN32
-    closesocket(fd);
-#else
-    close(fd);
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 2;
 #endif
+    const Socket listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener == INVALID) return 2;
+    sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 || listen(listener, 16) != 0) {
+        Close(listener); return 2;
+    }
+    modelnet::GuardTable table;
+    while (true) {
+        const Socket client = accept(listener, nullptr, nullptr);
+        if (client == INVALID) continue;
+#ifdef _WIN32
+        const DWORD timeout = 2000;
+#else
+        const timeval timeout{2,0};
+#endif
+        setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
+        setsockopt(client,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
+        std::string line;
+        bool finished = false;
+        char buffer[512];
+        while (!finished) {
+            const auto n = recv(client, buffer, sizeof(buffer), 0);
+            if (n <= 0) break;
+            for (int i = 0; i < n; ++i) {
+                if (buffer[i] == '\n') {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    const auto reply = modelnet::GuardHandleLine(table,line,NowMs()) + "\n";
+                    size_t sent = 0;
+                    while (sent < reply.size()) {
+#ifdef MSG_NOSIGNAL
+                        const int flags = MSG_NOSIGNAL;
+#else
+                        const int flags = 0;
+#endif
+                        const auto count = send(client,reply.data()+sent,static_cast<int>(reply.size()-sent),flags);
+                        if (count <= 0) break;
+                        sent += count;
+                    }
+                    finished = true; break; // one bounded exchange per connection
+                }
+                if (line.size() >= modelnet::GuardTable::kMaxLine) { finished = true; break; }
+                line.push_back(buffer[i]);
+            }
+        }
+        Close(client);
+    }
 }
-
-} // namespace
-
+}
 int main(int argc, char** argv)
 {
+    bool stdio = false, legacy = false;
     uint16_t port = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--port" && i + 1 < argc) {
-            port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        if (arg == "--stdio") stdio = true;
+        else if (arg == "--allow-legacy-loopback") legacy = true;
+        else if (arg == "--port" && i + 1 < argc) {
+            const std::string value=argv[++i]; unsigned parsed=0;
+            const auto r=std::from_chars(value.data(),value.data()+value.size(),parsed);
+            if (r.ec!=std::errc{} || r.ptr!=value.data()+value.size() || parsed==0 || parsed>65535) return 1;
+            port=static_cast<uint16_t>(parsed);
+        } else {
+            std::cerr << "usage: btx-guardd --stdio\n"
+                         "Legacy diagnostic only: --port N --allow-legacy-loopback\n";
+            return 1;
         }
     }
-    if (port == 0) {
-        std::cerr << "btx-guardd --port <1-65535>\n";
-        return 1;
-    }
-#ifdef _WIN32
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
-#endif
-    const int listen_fd = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
-    if (listen_fd < 0) return 1;
-    int yes = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char*>(&yes), sizeof(yes));
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
-    if (bind(listen_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) return 1;
-    if (listen(listen_fd, 16) != 0) return 1;
-    modelnet::GuardTable table;
-    while (true) {
-        const int client = static_cast<int>(accept(listen_fd, nullptr, nullptr));
-        if (client < 0) continue;
-        std::string pending;
-        char buf[1024];
-        while (true) {
-            const auto n = recv(client, buf, sizeof(buf), 0);
-            if (n <= 0) break;
-            pending.append(buf, buf + n);
-            std::size_t nl;
-            while ((nl = pending.find('\n')) != std::string::npos) {
-                std::string line = pending.substr(0, nl);
-                pending.erase(0, nl + 1);
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                const std::string reply = modelnet::GuardHandleLine(table, line, NowMs()) + "\n";
-                send(client, reply.data(), reply.size(), 0);
-            }
-        }
-        CloseSock(client);
-    }
+    if (stdio && !legacy && port==0) return Stdio();
+    if (!stdio && legacy && port!=0) return LegacyLoopback(port);
+    std::cerr << "btx-guardd requires --stdio; TCP is disabled by default\n";
+    return 1;
 }

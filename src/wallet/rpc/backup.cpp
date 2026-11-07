@@ -800,7 +800,9 @@ public:
 
         m_wallet.TopUpKeyPool();
         if (m_wallet.m_shielded_wallet) {
-            LOCK(m_wallet.m_shielded_wallet->cs_shielded);
+            // cs_wallet before cs_shielded, as everywhere else: rehydration
+            // calls IsLocked() and GetMasterSeed(), which take cs_wallet.
+            LOCK2(m_wallet.cs_wallet, m_wallet.m_shielded_wallet->cs_shielded);
             m_wallet.m_shielded_wallet->MaybeRehydrateSpendingKeys();
         }
         m_unlocked_by_rpc = true;

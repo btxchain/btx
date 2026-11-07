@@ -26,7 +26,7 @@ Defaults for a packaged install (`-modelnet=1`, `-modelstorage=auto`):
 | Knob | Default | Meaning |
 |---|---|---|
 | helper | `btxd` starts `btx-modeld` | `-modelnet=0` / `-nomodelnet` disables. `-modelhelper=` missing does not spawn a substitute. |
-| `-modelbind` | `0.0.0.0:29447` when `btxd` owns the helper | Participant listen. `NODE_MODEL_HOST` stays off until proven reachability. |
+| `-modelbind` | `0.0.0.0:29447` when `btxd` owns the helper; `off` when `btxd` does not listen (`-listen=0`, also set by `-connect` and `-proxy`) | Participant listen. `NODE_MODEL_HOST` stays off until proven reachability. An explicit `-modelbind` always wins. |
 | `-modelseed` | `auto` | Demand-seed: an intentional `importmodel` / `getmodel` is retained and re-advertised inside quota |
 | `-modelseedupondownload` | B0 **alias** of seed off/auto | **Not** a second opt-in gate |
 | preserve-rare | off | Unsolicited fetch of under-replicated models stays explicit (`-modelpreserverare`) |

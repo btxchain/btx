@@ -87,7 +87,8 @@ PLATFORM_CONFIGS["macos-arm64-metal"] = dict(PLATFORM_CONFIGS["macos-arm64"])
 SUPPORT_FILES = load_support_files()
 # GUI is optional unless --require-gui. Model helpers are a separate list:
 # present in the build means the archive must contain them; absent means a
-# logged skip (modelnet configured off), never a silent omission.
+# logged skip (modelnet configured off), never a silent omission, and a
+# failure under --require-model-helpers (0.35.0rc1 shipped none, #235).
 OPTIONAL_SIBLING_BINARIES = (
     "btx-qt",
 )
@@ -334,6 +335,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Refuse to pack an archive that does not contain btx-qt and its Qt runtime.",
     )
+    parser.add_argument(
+        "--require-model-helpers",
+        action="store_true",
+        help="Refuse to pack an archive that is missing any of: " + ", ".join(MODEL_HELPER_BINARIES) + ".",
+    )
     parser.add_argument("--btxd", required=True, help="Path to the btxd binary for this platform.")
     parser.add_argument("--btx-cli", required=True, help="Path to the btx-cli binary for this platform.")
     parser.add_argument(
@@ -528,6 +534,7 @@ def stage_release_tree(
     source_root: Path,
     temp_root: Path,
     require_gui: bool = False,
+    require_model_helpers: bool = False,
 ) -> tuple[Path, list[str], list[str]]:
     config = PLATFORM_CONFIGS[platform_id]
     release_root = temp_root / f"btx-{version}"
@@ -540,6 +547,11 @@ def stage_release_tree(
     model_helpers, skipped_binaries = resolve_model_helper_binaries(
         btxd_path, config["exe_suffix"]
     )
+    if require_model_helpers and skipped_binaries:
+        raise FileNotFoundError(
+            "Release archive requires every model helper next to btxd or in its modelnet/ "
+            f"directory; missing: {', '.join(skipped_binaries)}. Build with -DWITH_MODELNET=ON."
+        )
     binary_pairs = [
         (ensure_input_file(btxd_path, "btxd binary"), f"btxd{config['exe_suffix']}"),
         (ensure_input_file(btx_cli_path, "btx-cli binary"), f"btx-cli{config['exe_suffix']}"),
@@ -745,6 +757,7 @@ def main(argv: list[str]) -> int:
             source_root=source_root,
             temp_root=temp_root,
             require_gui=args.require_gui,
+            require_model_helpers=args.require_model_helpers,
         )
         if PLATFORM_CONFIGS[args.platform_id]["archive_format"] == "zip":
             write_zip(archive_path, release_root)

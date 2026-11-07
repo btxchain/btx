@@ -1,0 +1,1 @@
+nif_manifest/nif_manifest.cpp

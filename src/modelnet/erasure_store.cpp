@@ -13,11 +13,16 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <cstdio>
 #include <fcntl.h>
 #include <fstream>
 #include <iterator>
 #include <set>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace modelnet {
 namespace {
@@ -305,7 +310,11 @@ bool RepairStripeFromFiles(const ErasureManifest& man, const std::vector<std::st
     const std::string tmp_path = dest_path + ".tmp";
     ::unlink(tmp_path.c_str());
     if (!io.Submit(err)) return false;
-    const int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+    int flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+#ifdef _WIN32
+    flags |= _O_BINARY;
+#endif
+    const int fd = ::open(tmp_path.c_str(), flags, 0644);
     if (fd < 0) {
         io.Complete();
         err = "dest open";

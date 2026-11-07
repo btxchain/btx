@@ -48,6 +48,27 @@ modelnet::CatalogEntry ImportTiny(modelnet::ModelCatalog& cat)
     return imported;
 }
 
+/** Import a one-tensor safetensors file with `data_bytes` bytes of `fill`. */
+modelnet::CatalogEntry ImportSized(modelnet::ModelCatalog& cat, const std::string& dir, size_t data_bytes, unsigned char fill)
+{
+    const fs::path src = cat.Store().Root().parent_path() / fs::PathFromString(dir);
+    fs::create_directories(src);
+    const std::string header = "{\"t\":{\"dtype\":\"U8\",\"shape\":[" + std::to_string(data_bytes) +
+                               "],\"data_offsets\":[0," + std::to_string(data_bytes) + "]}}";
+    std::vector<unsigned char> st(8);
+    WriteLE64(st.data(), header.size());
+    st.insert(st.end(), header.begin(), header.end());
+    st.insert(st.end(), data_bytes, fill);
+    {
+        std::ofstream out(src / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    modelnet::CatalogEntry imported;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), true, imported, err), err);
+    return imported;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(hosted_grant_rejects_foreign_key)
@@ -115,6 +136,61 @@ BOOST_AUTO_TEST_CASE(hosted_grant_issue_then_retrieve_then_replay)
 
     BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
     BOOST_CHECK_EQUAL(nresp.status, 403);
+}
+
+BOOST_AUTO_TEST_CASE(hosted_grant_is_bound_to_its_model_and_piece_range)
+{
+    // A valid grant covers the model and the pieces it was issued for, and
+    // nothing else. These checks are the only place that binds a grant to
+    // its object and range; the signature check before them does not.
+    const fs::path tmp = m_path_root / "authz-grant-binding";
+    modelnet::ModelCatalog cat{tmp, 64 << 20};
+    const auto two_pieces = ImportSized(cat, "src-two", modelnet::PIECE_SIZE + 1, 0x11);
+    const auto other = ImportSized(cat, "src-other", 64, 0x22);
+
+    modelnet::NativeRequest nreq;
+    nreq.method = "POST";
+    nreq.path = "/btx-model/2/ext/free/grant";
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("model_id", two_pieces.model_id.Hex());
+    req.pushKV("first_piece", 0);
+    req.pushKV("piece_count", 1);
+    nreq.body = req.write();
+    modelnet::NativeResponse nresp;
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_REQUIRE_EQUAL(nresp.status, 200);
+    UniValue gj;
+    BOOST_REQUIRE(gj.read(nresp.body));
+
+    const auto get = [&](const std::string& path) {
+        modelnet::NativeRequest greq;
+        greq.method = "GET";
+        greq.path = path;
+        greq.headers = {
+            {"X-BTX-Grant-Payload", gj["payload_hex"].get_str()},
+            {"X-BTX-Grant-Sig", gj["sig_hex"].get_str()},
+            {"X-BTX-Grant-Pubkey", gj["pubkey_hex"].get_str()},
+        };
+        modelnet::NativeResponse gresp;
+        BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, greq, gresp));
+        return gresp;
+    };
+
+    // Another model's piece.
+    auto resp = get("/btx-model/2/transfers/" + other.artifact_id.Hex() + "/pieces/0/0");
+    BOOST_CHECK_EQUAL(resp.status, 403);
+    BOOST_CHECK(resp.body.find("grant object mismatch") != std::string::npos);
+
+    // A piece of the granted model outside the granted range.
+    resp = get("/btx-model/2/transfers/" + two_pieces.artifact_id.Hex() + "/pieces/0/1");
+    BOOST_CHECK_EQUAL(resp.status, 403);
+    BOOST_CHECK(resp.body.find("piece not in grant range") != std::string::npos);
+
+    // The whole file, which the one-piece grant does not cover. Without this
+    // check the byte charge still refuses the stream later, so only the
+    // reason shows that the range check refused it.
+    resp = get("/btx-model/2/files/" + two_pieces.artifact_id.Hex() + "/0");
+    BOOST_CHECK(resp.body.find("grant does not cover whole file stream") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(typed_record_signer_must_match_key)

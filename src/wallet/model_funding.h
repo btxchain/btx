@@ -31,6 +31,7 @@ struct FrozenFundingQuote {
     int64_t amount_atoms{0};
     int64_t fee_cap_atoms{0};
     int64_t fee_atoms{0};
+    bool fee_cap_set{false};
     std::string descriptor;
     CScript output_script;
     std::string unsigned_hex;
@@ -40,6 +41,8 @@ struct FrozenFundingQuote {
 bool RejectForbiddenHtlc(const UniValue& options, std::string& err);
 bool RejectAutoPay(const UniValue& options, std::string& err);
 bool ValidateFundingAmount(int64_t amount_atoms, std::string& err);
+/** Canonical decimal atoms. Legacy integral JSON numbers are also accepted. */
+bool ParseFundingAtoms(const UniValue& value, int64_t& atoms, std::string& err);
 bool NormalizePqDescriptorKey(const std::string& in, std::string& out, std::string& err);
 bool ExpandHtlcSha256Descriptor(const std::string& descriptor, CScript& script_pubkey, std::string& canonical, std::string& err);
 bool BuildHtlcSha256Descriptor(FrozenFundingQuote& q, std::string& err);
@@ -62,6 +65,9 @@ UniValue ExportModelRecoveryJson(const FrozenFundingQuote& q);
 bool CreateUnsignedFunding(CWallet& wallet, FrozenFundingQuote& q, std::string& err);
 /** Rechecks the refund key, rebuilds the HTLC, then signs. Does not trust caller script or txid. */
 bool SignFrozenFunding(CWallet& wallet, const FrozenFundingQuote& quote, CMutableTransaction& mtx, bool& complete, std::string& err);
+/** Rebuild exact terms and recheck input ownership, fees, and unspentness before broadcast. */
+bool ValidateFrozenFundingSubmission(CWallet& wallet, FrozenFundingQuote& quote, const CMutableTransaction& tx,
+                                     bool already_known, std::string& err);
 
 /** Local wallet+chain view of a campaign HTLC. Not a remote peer claim. Never returns secrets.
  *  Matches P2MR scripts and recorded funding outpoints. A scan that finds nothing

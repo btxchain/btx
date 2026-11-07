@@ -31,7 +31,7 @@ insert artifact endpoints into AddrMan.
 | `-modelstorage=` / `-modelcache=` | Payload quota. Packaged default **auto** (bounded 10% of the model-store filesystem, 32 GiB–512 GiB, never below the free-space reserve). `0` is explicit no-payload. Explicit sizes (`80GiB`) are FIXED. |
 | `-modelseed=` | `auto` (default): demand-seed after intentional import/retrieve. `manual` / `off` disable auto-advertise. |
 | `-modelpreserverare` | Opt-in fetch of qualified under-replicated models into spare quota. |
-| `-modelbind=` | PQ1 listen `host:port`. Packaged `btxd` default is `0.0.0.0:29447` (participant listen). Bind failure is unix-only, not a monetary failure. Empty/`off` = unix RPC only. Standalone `btx-modeld` without `-modelbind` stays unix-only. `-modelhost` still does not imply `NODE_MODEL_HOST`. |
+| `-modelbind=` | PQ1 listen `host:port`. Packaged `btxd` default is `0.0.0.0:29447` (participant listen), or `off` when `btxd` does not listen (`-listen=0`). Bind failure is unix-only, not a monetary failure. Empty/`off` = unix RPC only. Standalone `btx-modeld` without `-modelbind` stays unix-only. `-modelhost` still does not imply `NODE_MODEL_HOST`. |
 | `-modelrpcsocket=` | Unix JSON-RPC socket. |
 | `-modeltransport=pq1` | Only accepted value; anything else fail-closes. |
 | `-modeltlscert=` / `-modeltlskey=` | Self-signed ML-DSA-44 material (generated if missing). |

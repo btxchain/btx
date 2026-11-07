@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <coins.h>
 #include <common/messages.h>
 #include <consensus/validation.h>
 #include <core_io.h>
@@ -10,6 +11,7 @@
 #include <policy/policy.h>
 #include <rpc/rawtransaction_util.h>
 #include <rpc/util.h>
+#include <script/pqm.h>
 #include <script/script.h>
 #include <util/rbf.h>
 #include <util/strencodings.h>
@@ -25,6 +27,9 @@
 #include <wallet/wallet.h>
 
 #include <univalue.h>
+
+#include <limits>
+#include <optional>
 
 using common::FeeModeFromString;
 using common::FeeModesDetail;
@@ -67,18 +72,22 @@ void ThrowPSBTError(const common::PSBTError err, const bilingual_str& detail)
     throw JSONRPCPSBTError(err);
 }
 
-bool ApplyWalletP2MRLeaves(const CWallet& wallet, PartiallySignedTransaction& psbt, const std::vector<P2MRLeafSelection>& selections, bilingual_str& error)
+CScript PsbtPrevoutScript(const PartiallySignedTransaction& psbt, unsigned int i)
 {
-    if (selections.empty()) return true;
+    const PSBTInput& input = psbt.inputs.at(i);
+    if (!input.witness_utxo.IsNull()) return input.witness_utxo.scriptPubKey;
+    if (input.non_witness_utxo && psbt.tx->vin[i].prevout.n < input.non_witness_utxo->vout.size()) {
+        return input.non_witness_utxo->vout[psbt.tx->vin[i].prevout.n].scriptPubKey;
+    }
+    return {};
+}
+
+// Public descriptor data (P2MR leaves included) the wallet holds for the PSBT's inputs.
+FlatSigningProvider WalletInputProvider(const CWallet& wallet, const PartiallySignedTransaction& psbt)
+{
     FlatSigningProvider merged;
     for (unsigned int i = 0; i < psbt.tx->vin.size(); ++i) {
-        const PSBTInput& input = psbt.inputs.at(i);
-        CScript script;
-        if (!input.witness_utxo.IsNull()) {
-            script = input.witness_utxo.scriptPubKey;
-        } else if (input.non_witness_utxo && psbt.tx->vin[i].prevout.n < input.non_witness_utxo->vout.size()) {
-            script = input.non_witness_utxo->vout[psbt.tx->vin[i].prevout.n].scriptPubKey;
-        }
+        const CScript script = PsbtPrevoutScript(psbt, i);
         if (script.empty()) continue;
         for (ScriptPubKeyMan* spk_man : wallet.GetAllScriptPubKeyMans()) {
             auto* desc_spk_man = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
@@ -87,7 +96,103 @@ bool ApplyWalletP2MRLeaves(const CWallet& wallet, PartiallySignedTransaction& ps
             if (keys) merged.Merge(std::move(*keys));
         }
     }
+    return merged;
+}
+
+bool ApplyWalletP2MRLeaves(const CWallet& wallet, PartiallySignedTransaction& psbt, const std::vector<P2MRLeafSelection>& selections, bilingual_str& error)
+{
+    if (selections.empty()) return true;
+    FlatSigningProvider merged = WalletInputProvider(wallet, psbt);
     return ApplyP2MRLeafSelections(psbt, selections, &merged, error);
+}
+
+struct HtlcPresignGuard {
+    bool allow_unconfirmed_funding{false};
+    bool allow_late_claim{false};
+    int64_t min_confirmations{1};
+};
+
+// The refund locktime of the HTLC whose claim leaf `input` selected: the refund() leaf
+// whose hash is the sibling in the claim leaf's control block.
+std::optional<int64_t> SelectedHtlcRefundLocktime(const FlatSigningProvider& provider, const CScript& prev_script, const PSBTInput& input)
+{
+    int witver{0};
+    std::vector<unsigned char> program;
+    if (!prev_script.IsWitnessProgram(witver, program) || program.size() != 32) return std::nullopt;
+    if (input.m_p2mr_control_block.size() != 33) return std::nullopt;
+    const uint256 sibling{Span{input.m_p2mr_control_block}.subspan(1)};
+    P2MRSpendData spend;
+    if (!provider.GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spend)) return std::nullopt;
+    for (const auto& [script, controls] : spend.scripts) {
+        int64_t locktime{0};
+        PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+        std::vector<unsigned char> pubkey;
+        if (ComputeP2MRLeafHash(P2MR_LEAF_VERSION, script) == sibling && ParseP2MRRefundLeaf(script, locktime, algo, pubkey)) {
+            return locktime;
+        }
+    }
+    return std::nullopt;
+}
+
+// htlc_presign signs the claim leaf now, and whoever later holds the PSBT and the preimage
+// broadcasts it. Apply buildhtlcclaim's checks at signing time: no presign against a funding
+// output the funder can still undo, or once the refund path is final.
+bool CheckHtlcPresignFunding(const CWallet& wallet, const PartiallySignedTransaction& psbt, const HtlcPresignGuard& guard, bilingual_str& error)
+{
+    int tip_height{-1};
+    int64_t tip_mtp{0};
+    FlatSigningProvider provider;
+    {
+        LOCK(wallet.cs_wallet);
+        tip_height = wallet.GetLastBlockHeight();
+        CHECK_NONFATAL(wallet.chain().findBlock(wallet.GetLastBlockHash(), interfaces::FoundBlock().mtpTime(tip_mtp)));
+        provider = WalletInputProvider(wallet, psbt);
+    }
+    for (unsigned int i = 0; i < psbt.tx->vin.size(); ++i) {
+        const PSBTInput& input = psbt.inputs.at(i);
+        std::vector<unsigned char> hash;
+        std::vector<unsigned char> pubkey;
+        PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+        if (input.m_p2mr_leaf_script.empty() || !ParseP2MRHTLCSha256Leaf(input.m_p2mr_leaf_script, hash, algo, pubkey)) continue;
+        const COutPoint& prevout = psbt.tx->vin[i].prevout;
+        const std::string outpoint{strprintf("%s:%u", prevout.hash.ToString(), prevout.n)};
+        std::map<COutPoint, Coin> coins;
+        coins[prevout];
+        wallet.chain().findCoins(coins);
+        const auto it = coins.find(prevout);
+        const bool known = it != coins.end() && !it->second.IsSpent();
+        const int64_t coin_height{known ? static_cast<int64_t>(it->second.nHeight) : std::numeric_limits<int64_t>::max()};
+        const int64_t confirmations{coin_height > tip_height ? int64_t{0} : static_cast<int64_t>(tip_height) - coin_height + 1};
+        if (!guard.allow_unconfirmed_funding && confirmations < guard.min_confirmations) {
+            if (!known) {
+                error = Untranslated(strprintf("htlc_presign: funding output %s is not in the UTXO set (not broadcast, spent or unknown). "
+                                               "Presign once it is confirmed, or pass {\"allow_unconfirmed_funding\": true}", outpoint));
+            } else if (confirmations == 0) {
+                error = Untranslated(strprintf("htlc_presign: funding output %s is unconfirmed: the funder can still replace it. "
+                                               "Presign once it is confirmed, or pass {\"allow_unconfirmed_funding\": true}", outpoint));
+            } else {
+                error = Untranslated(strprintf("htlc_presign: funding output %s has %d confirmations but min_confirmations is %d",
+                                               outpoint, confirmations, guard.min_confirmations));
+            }
+            return false;
+        }
+        if (guard.allow_late_claim) continue;
+        const std::optional<int64_t> refund_locktime = SelectedHtlcRefundLocktime(provider, PsbtPrevoutScript(psbt, i), input);
+        if (!refund_locktime.has_value()) {
+            error = Untranslated(strprintf("htlc_presign: this wallet does not know the refund leaf of %s, so it cannot check the refund height. "
+                                           "Import the HTLC descriptor, or pass {\"allow_late_claim\": true}", outpoint));
+            return false;
+        }
+        const bool time_lock = *refund_locktime >= LOCKTIME_THRESHOLD;
+        if (time_lock ? *refund_locktime < tip_mtp : *refund_locktime <= tip_height) {
+            error = Untranslated(strprintf("htlc_presign: the refund path of %s is already final (refund locktime %d, tip %s %d). "
+                                           "A claim broadcast now can lose to the refund after it made the preimage public. "
+                                           "Pass {\"allow_late_claim\": true} to presign anyway",
+                                           outpoint, *refund_locktime, time_lock ? "median time" : "height", time_lock ? tip_mtp : int64_t{tip_height}));
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -1878,7 +1983,12 @@ RPCHelpMan walletprocesspsbt()
                                 "Select the claim leaf with p2mr_leaf. The leaf signature does not commit to the preimage: the PSBT stays incomplete,\n"
                                 "and whoever later adds the matching 32-byte preimage as PSBT_IN_SHA256 can finalize and broadcast this exact transaction.\n"
                                 "Requires sign=true and sighashtype DEFAULT or ALL. Only the htlc_sha256 claim leaf is presigned,\n"
-                                "not the recovery-only htlc_sha256_legacy leaf. The claim has no timeout: a fixed-fee presigned claim must confirm before the refund height."},
+                                "not the recovery-only htlc_sha256_legacy leaf. The claim has no timeout: a fixed-fee presigned claim must confirm before the refund height.\n"
+                                "As with buildhtlcclaim, the presign is refused while the funding output is unconfirmed or below min_confirmations,\n"
+                                "and once the refund path is already final; see the three options below. Signing a refund leaf is not affected."},
+                            {"allow_unconfirmed_funding", RPCArg::Type::BOOL, RPCArg::Default{false}, "With htlc_presign: presign against a funding output that is unconfirmed or not known yet. Unsafe: the funder can replace or never send the funding."},
+                            {"allow_late_claim", RPCArg::Type::BOOL, RPCArg::Default{false}, "With htlc_presign: presign even though the refund path is already final, or the wallet does not know the refund leaf. Unsafe: the sender can refund after the claim made the preimage public."},
+                            {"min_confirmations", RPCArg::Type::NUM, RPCArg::Default{1}, "With htlc_presign: the funding output must have at least this many confirmations. 0 is rejected. Do not combine with allow_unconfirmed_funding."},
                         },
                     RPCArgOptions{.oneline_description="options"}},
                     {"sighashtype", RPCArg::Type::STR, RPCArg::Default{"DEFAULT"}, "for backwards compatibility", RPCArgOptions{.hidden=true}},
@@ -1920,6 +2030,7 @@ RPCHelpMan walletprocesspsbt()
     bool finalize = true;
     bool adjust_timelocks = false;
     bool htlc_presign = false;
+    HtlcPresignGuard presign_guard;
     std::vector<P2MRLeafSelection> leaf_selections;
     int nHashType = ParseSighashString(NullUniValue); // Use ParseSighashString default
     if (request.params[1].isBool() || request.params[1].isNull()) {
@@ -1940,6 +2051,9 @@ RPCHelpMan walletprocesspsbt()
                 {"adjust_timelocks", UniValueType(UniValue::VBOOL)},
                 {"p2mr_leaf", UniValueType(UniValue::VOBJ)},
                 {"htlc_presign", UniValueType(UniValue::VBOOL)},
+                {"allow_unconfirmed_funding", UniValueType(UniValue::VBOOL)},
+                {"allow_late_claim", UniValueType(UniValue::VBOOL)},
+                {"min_confirmations", UniValueType(UniValue::VNUM)},
             },
             true, true);
         if (options.exists("sign")) {
@@ -1971,6 +2085,21 @@ RPCHelpMan walletprocesspsbt()
             // preimage redirect the claim or take part of it as fee.
             throw JSONRPCError(RPC_INVALID_PARAMETER, "htlc_presign requires sighashtype DEFAULT or ALL");
         }
+        const bool guard_option = options.exists("allow_unconfirmed_funding") || options.exists("allow_late_claim") || options.exists("min_confirmations");
+        if (guard_option && !htlc_presign) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "allow_unconfirmed_funding, allow_late_claim and min_confirmations apply only with htlc_presign");
+        }
+        presign_guard.allow_unconfirmed_funding = options.exists("allow_unconfirmed_funding") && options["allow_unconfirmed_funding"].get_bool();
+        presign_guard.allow_late_claim = options.exists("allow_late_claim") && options["allow_late_claim"].get_bool();
+        if (options.exists("min_confirmations")) {
+            if (presign_guard.allow_unconfirmed_funding) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "allow_unconfirmed_funding cannot be combined with min_confirmations");
+            }
+            presign_guard.min_confirmations = options["min_confirmations"].getInt<int64_t>();
+            if (presign_guard.min_confirmations < 1) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "min_confirmations must be at least 1");
+            }
+        }
         if (request.params.size() > 2) {
             // Same behaviour as too many args passed normally
             throw std::runtime_error(self.ToString());
@@ -1996,8 +2125,12 @@ RPCHelpMan walletprocesspsbt()
     P2MRTimelockAdjustment timelock_adjustment;
     const auto err{wallet.FillPSBT(psbtx, complete, nHashType, sign, bip32derivs, nullptr, finalize, adjust_timelocks, &error_detail, &timelock_adjustment,
         [&](PartiallySignedTransaction& prepared, bilingual_str& leaf_error) {
-            LOCK(wallet.cs_wallet);
-            return ApplyWalletP2MRLeaves(wallet, prepared, leaf_selections, leaf_error);
+            {
+                LOCK(wallet.cs_wallet);
+                if (!ApplyWalletP2MRLeaves(wallet, prepared, leaf_selections, leaf_error)) return false;
+            }
+            // After the leaf selection, before anything is signed.
+            return !htlc_presign || CheckHtlcPresignFunding(wallet, prepared, presign_guard, leaf_error);
         }, htlc_presign)};
     if (err) {
         ThrowPSBTError(*err, error_detail);

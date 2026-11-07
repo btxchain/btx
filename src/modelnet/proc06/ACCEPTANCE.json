@@ -1,0 +1,1 @@
+[{"id":"P2P-SCN-H","final_acceptance":"CLOSED_IN_PROCESS","native_status":"NOT_RUN_NATIVE","evidence":"proc06 copies a matching KV page between two in-memory workers; this is not a two-host exchange"}]

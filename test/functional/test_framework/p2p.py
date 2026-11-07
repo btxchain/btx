@@ -44,6 +44,7 @@ from test_framework.messages import (
     msg_cfilter,
     msg_cmpctblock,
     msg_dandelionacc,
+    msg_dltx,
     msg_feefilter,
     msg_filteradd,
     msg_filterclear,
@@ -134,6 +135,7 @@ MESSAGEMAP = {
     b"cfilter": msg_cfilter,
     b"cmpctblock": msg_cmpctblock,
     b"dandelionacc": msg_dandelionacc,
+    b"dltx": msg_dltx,
     b"feefilter": msg_feefilter,
     b"filteradd": msg_filteradd,
     b"filterclear": msg_filterclear,
@@ -557,6 +559,7 @@ class P2PInterface(P2PConnection):
     def on_cfilter(self, message): pass
     def on_cmpctblock(self, message): pass
     def on_dandelionacc(self, message): pass
+    def on_dltx(self, message): pass
     def on_feefilter(self, message): pass
     def on_filteradd(self, message): pass
     def on_filterclear(self, message): pass

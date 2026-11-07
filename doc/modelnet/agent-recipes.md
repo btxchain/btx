@@ -11,8 +11,8 @@ Default posture is **read-only**. These recipes host, search, share, load,
 and generate locally when the operator asked. They do **not** spend, mine,
 evaluate-execute, or start a **network** inference server.
 
-Last shipping tag is **v0.34.8**. This tree is **0.34.9-dev**
-(`CLIENT_VERSION_IS_RELEASE=false`).
+This tree is **0.35.0rc1**. The last shipping tag remains **v0.34.15**.
+The process map is [swarm/00_THIS_TREE.md](swarm/00_THIS_TREE.md).
 
 ## Hard stop
 
@@ -78,6 +78,7 @@ then hex digest, then **alias**.
 | `alias` | `setmodelalias` / `getmodelaliases` | no | no |
 | `rm-alias` | `removemodelalias` | no | no |
 | `unhost` | `unhostmodel` (unpin + unseed in one call; does not delete bytes) | no | no |
+| `rm` | `removemodel` (deletes the local pieces and the `checkout/` copy; `IN_USE` while a retrieve for it is queued or running). A name, alias, or label that fits more than one local model is refused: pass the model id. | no | no |
 | `bounty-draft` | `createbountydraft` (incomplete OK) / `listbountydrafts` / `getbountydraft` / `updatebountydraft` / `deletebountydraft` / `validatebountyterms`. Title string, `@file.json`, `--update ID JSON`, `--delete ID`, `--validate ID`. | no | no |
 | `watch-scan` | `scanmodelwatch` (skip when `would_fit` is false; `.btx` cards are opened). Filesystem folder, **not** publisher watch. | no | no |
 | `cloud add\|test\|status` | `setcloudstorage` / `testcloudstorage` / `getcloudstorageinfo`. **0.34.8-dev; fail closed if missing.** `--credential-ref env:NAME` or `--secret-file`; never raw secret on argv. | no | no |

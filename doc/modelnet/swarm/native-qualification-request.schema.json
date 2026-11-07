@@ -1,0 +1,412 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:native-qualification-request:v1",
+  "title": "Owner-local btx-native-qualify request",
+  "description": "Select mode on the CLI. Cryptographic trust, exact per-gate uniqueness, paths, content hashes, time windows, real native execution and bounds are also verified by the implementation. JSON requests are capped at 1 MiB.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/sign_checkpoint"
+    },
+    {
+      "$ref": "#/$defs/load"
+    },
+    {
+      "$ref": "#/$defs/tool"
+    },
+    {
+      "$ref": "#/$defs/release"
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{96}$"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "public_key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2624}$"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{4840}$"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "expiry": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "receipt": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "checkpoint_sha384": {
+          "$ref": "#/$defs/digest"
+        },
+        "bytes": {
+          "$ref": "#/$defs/bytes"
+        },
+        "request_nonce": {
+          "$ref": "#/$defs/nonce"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/expiry"
+        },
+        "source_public_key": {
+          "$ref": "#/$defs/public_key"
+        },
+        "signature": {
+          "$ref": "#/$defs/signature"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "checkpoint_sha384",
+        "bytes",
+        "request_nonce",
+        "expires_at_ms",
+        "source_public_key",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "expected_source_public_key": {
+          "$ref": "#/$defs/public_key"
+        },
+        "expected_request_nonce": {
+          "$ref": "#/$defs/nonce"
+        },
+        "receipt": {
+          "$ref": "#/$defs/receipt"
+        }
+      },
+      "required": [
+        "path",
+        "expected_source_public_key",
+        "expected_request_nonce",
+        "receipt"
+      ],
+      "additionalProperties": false
+    },
+    "linear": {
+      "type": "object",
+      "properties": {
+        "weights": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bias": {
+          "type": "string"
+        },
+        "input": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1048576,
+          "items": {
+            "type": "number"
+          }
+        },
+        "expected_output": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1048576,
+          "items": {
+            "type": "number"
+          }
+        }
+      },
+      "required": [
+        "weights",
+        "bias",
+        "input",
+        "expected_output"
+      ],
+      "additionalProperties": false
+    },
+    "tool_file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "sha384": {
+          "$ref": "#/$defs/digest"
+        },
+        "bytes": {
+          "$ref": "#/$defs/bytes"
+        }
+      },
+      "required": [
+        "path",
+        "sha384",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "probe": {
+      "type": "object",
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/path"
+        },
+        "executable": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/tool_file"
+          }
+        },
+        "output_relative_path": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "expected_output_sha384": {
+          "$ref": "#/$defs/digest"
+        },
+        "expected_output_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "max_package_bytes": {
+          "$ref": "#/$defs/bytes"
+        },
+        "wall_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        }
+      },
+      "required": [
+        "root",
+        "executable",
+        "files",
+        "output_relative_path",
+        "expected_output_sha384",
+        "expected_output_bytes",
+        "max_package_bytes",
+        "wall_seconds"
+      ],
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "model_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "model_path": {
+          "$ref": "#/$defs/path"
+        },
+        "model_sha384": {
+          "$ref": "#/$defs/digest"
+        },
+        "model_bytes": {
+          "$ref": "#/$defs/bytes"
+        },
+        "max_model_bytes": {
+          "$ref": "#/$defs/bytes"
+        },
+        "parent_model_sha384": {
+          "$ref": "#/$defs/digest"
+        },
+        "controls_sha384": {
+          "$ref": "#/$defs/digest"
+        },
+        "source_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "runtime_image_sha384": {
+          "$ref": "#/$defs/digest"
+        },
+        "realm_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/expiry"
+        },
+        "release_public_key": {
+          "$ref": "#/$defs/public_key"
+        }
+      },
+      "required": [
+        "model_id",
+        "model_path",
+        "model_sha384",
+        "model_bytes",
+        "max_model_bytes",
+        "parent_model_sha384",
+        "controls_sha384",
+        "source_revision",
+        "runtime_image_sha384",
+        "realm_id",
+        "expires_at_ms",
+        "release_public_key"
+      ],
+      "additionalProperties": false
+    },
+    "gate": {
+      "type": "object",
+      "properties": {
+        "gate_id": {
+          "enum": [
+            "external-controls",
+            "outcome",
+            "revocation",
+            "rollback",
+            "privacy",
+            "adversarial"
+          ]
+        },
+        "probe": {
+          "$ref": "#/$defs/probe"
+        }
+      },
+      "required": [
+        "gate_id",
+        "probe"
+      ],
+      "additionalProperties": false
+    },
+    "sign_checkpoint": {
+      "type": "object",
+      "properties": {
+        "checkpoint_path": {
+          "$ref": "#/$defs/path"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "request_nonce": {
+          "$ref": "#/$defs/nonce"
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/expiry"
+        },
+        "max_checkpoint_bytes": {
+          "$ref": "#/$defs/bytes"
+        },
+        "source_public_key": {
+          "$ref": "#/$defs/public_key"
+        },
+        "source_secret_file": {
+          "$ref": "#/$defs/path"
+        }
+      },
+      "required": [
+        "checkpoint_path",
+        "artifact_id",
+        "request_nonce",
+        "expires_at_ms",
+        "max_checkpoint_bytes",
+        "source_public_key",
+        "source_secret_file"
+      ],
+      "additionalProperties": false
+    },
+    "load": {
+      "type": "object",
+      "properties": {
+        "max_checkpoint_bytes": {
+          "$ref": "#/$defs/bytes"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        },
+        "linear": {
+          "$ref": "#/$defs/linear"
+        }
+      },
+      "required": [
+        "max_checkpoint_bytes",
+        "sources",
+        "linear"
+      ],
+      "additionalProperties": false
+    },
+    "tool": {
+      "type": "object",
+      "properties": {
+        "probe": {
+          "$ref": "#/$defs/probe"
+        }
+      },
+      "required": [
+        "probe"
+      ],
+      "additionalProperties": false
+    },
+    "release": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "$ref": "#/$defs/policy"
+        },
+        "gates": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/gate"
+          }
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "output_path": {
+          "$ref": "#/$defs/path"
+        },
+        "release_secret_file": {
+          "$ref": "#/$defs/path"
+        }
+      },
+      "required": [
+        "policy",
+        "gates",
+        "version",
+        "output_path",
+        "release_secret_file"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

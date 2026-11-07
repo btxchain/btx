@@ -1654,6 +1654,26 @@ class msg_tx:
     def __repr__(self):
         return "msg_tx(tx=%s)" % (repr(self.tx))
 
+class msg_dltx:
+    """Dandelion++ stem transaction (DLTX); same payload as msg_tx."""
+    __slots__ = ("tx",)
+    msgtype = b"dltx"
+
+    def __init__(self, tx=None):
+        if tx is None:
+            self.tx = CTransaction()
+        else:
+            self.tx = tx
+
+    def deserialize(self, f):
+        self.tx.deserialize(f)
+
+    def serialize(self):
+        return self.tx.serialize_with_witness()
+
+    def __repr__(self):
+        return "msg_dltx(tx=%s)" % (repr(self.tx))
+
 class msg_wtxidrelay:
     __slots__ = ()
     msgtype = b"wtxidrelay"

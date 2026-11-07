@@ -1,0 +1,110 @@
+[
+  {
+    "id": "P2P-SCN-A",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "CreateLocalCommunity derives one local community for one node, keeps a single member, and refuses a remote locator."
+  },
+  {
+    "id": "P2P-SCN-B",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Two LAN nodes are absent, so discovery without supplied addresses was not claimed."
+  },
+  {
+    "id": "P2P-SCN-C",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "A LAN swarm with no internet path was not present, so continuation was not claimed."
+  },
+  {
+    "id": "P2P-SCN-D",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Joining three nodes would change the host count. hosts() stays 1 and no join was claimed."
+  },
+  {
+    "id": "P2P-SCN-E",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "An established swarm and a bootstrap contact were not present, so survival was not claimed."
+  },
+  {
+    "id": "P2P-SCN-F",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Coordination among multiple nodes was not run, and no central scheduler was contacted."
+  },
+  {
+    "id": "P2P-SCN-G",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "A supported local model was not executed. No provider key is read. The row stays defined and unrun."
+  },
+  {
+    "id": "P2P-SCN-H",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmNoteKvShare leaves the page unshared and moves no bytes. A real exchange was not run."
+  },
+  {
+    "id": "P2P-SCN-I",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "A second GPU is absent. Distributed training was not claimed."
+  },
+  {
+    "id": "P2P-SCN-J",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "The local community derives two descendants. SwarmQuorum rejects the author and accepts two evaluators. SwarmQualify scores each report."
+  },
+  {
+    "id": "P2P-SCN-K",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmQualify accepts the report. SwarmStage, SwarmCanary, SwarmActivate, and SwarmRollback restore the previous generation. release_qualified() stays false."
+  },
+  {
+    "id": "P2P-SCN-L",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "GuardTable prepares and executes one local case permit. A hosted locator is refused before a permit is issued. A second execute is a replay."
+  },
+  {
+    "id": "P2P-SCN-M",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Isolated regtest settlement was not started. ResearchMaySpend() is false and spend stays 0."
+  },
+  {
+    "id": "P2P-SCN-N",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "The coordinator scope ends after SwarmDurableLog::Commit. A survivor Read returns that commitment and drops uncommitted scratch."
+  },
+  {
+    "id": "P2P-SCN-O",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmLoadGoverned on an empty model directory admits the stock lifecycle: observer on, trainer off, spend 0, and no extra flag."
+  },
+  {
+    "id": "P2P-SCN-P",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "With no VRAM, SwarmEligibleRoles keeps observer and CPU evaluation and refuses training. LAN discovery does not require a public address."
+  },
+  {
+    "id": "P2P-SCN-Q",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Discovery and a local guard step still run with no cloud provider. Local inference was not executed, so the sentence is not closed."
+  },
+  {
+    "id": "P2P-SCN-R",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Missing hardware, model bytes, funding, authorization, and a network path leave trainer, advertisement, spend, execution, and host advertisement false."
+  }
+]
