@@ -11260,7 +11260,10 @@ RPCHelpMan z_verifywalletintegrity()
             out.pushKV("scan_height", report.scan_height);
             out.pushKV("scan_incomplete", report.scan_incomplete);
 
-            if (!report.master_seed_available) {
+            // Shielded keys need an encrypted wallet, so an unencrypted wallet has no
+            // shielded master seed to check.
+            const bool master_seed_expected = pwallet->IsCrypted() || report.total_keys > 0;
+            if (master_seed_expected && !report.master_seed_available) {
                 warnings.push_back("Master seed is not available — spending keys cannot be derived. "
                                    "Wallet may be locked or seed was not persisted.");
             }
@@ -11297,7 +11300,10 @@ RPCHelpMan z_verifywalletintegrity()
                     }
 
                     std::vector<unsigned char> seed;
-                    if (batch.ReadPQDescriptorSeed(desc_spkm->GetID(), seed) && seed.size() == 32) {
+                    uint256 iv;
+                    // An encrypted wallet keeps only the ciphertext record.
+                    if ((batch.ReadPQDescriptorSeed(desc_spkm->GetID(), seed) && seed.size() == 32) ||
+                        (batch.ReadCryptedPQDescriptorSeed(desc_spkm->GetID(), iv, seed) && !seed.empty())) {
                         ++pq_report.with_seed;
                         if (seed_capable) {
                             ++pq_report.seed_capable_with_seed;
@@ -11334,7 +11340,7 @@ RPCHelpMan z_verifywalletintegrity()
             }
 
             bool integrity_ok = (report.spending_keys_missing == 0 &&
-                                 report.master_seed_available &&
+                                 (!master_seed_expected || report.master_seed_available) &&
                                  !report.scan_incomplete &&
                                  (private_keys_disabled || pq_report.missing_local_seed == 0));
             out.pushKV("integrity_ok", integrity_ok);
