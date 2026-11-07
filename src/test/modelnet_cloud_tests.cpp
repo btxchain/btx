@@ -95,6 +95,36 @@ modelnet::CloudStoreConfig BaseCfg(const fs::path& creds, const std::string& end
     return c;
 }
 
+// Positive Windows fixtures use the supported ENV source. Keep BaseCfg's PATH
+// source available for permission-refusal checks; never relax product policy.
+class ScopedCloudCredentials
+{
+#ifdef WIN32
+    test::ScopedEnvVar m_credentials{"BTX_TEST_CLOUD_FIXTURE_CREDS",
+        (std::string{"aws_access_key_id="} + kAccess +
+         "\naws_secret_access_key=" + kSecret + "\n").c_str()};
+#endif
+
+public:
+    modelnet::CloudStoreConfig Config(const fs::path& creds, const std::string& endpoint = "https://acct.r2.cloudflarestorage.com") const
+    {
+        auto cfg = BaseCfg(creds, endpoint);
+#ifdef WIN32
+        cfg.s3.creds = {modelnet::CredentialRefKind::ENV, "BTX_TEST_CLOUD_FIXTURE_CREDS"};
+#endif
+        return cfg;
+    }
+
+    std::string RpcRef(const fs::path& creds) const
+    {
+#ifdef WIN32
+        return "env:BTX_TEST_CLOUD_FIXTURE_CREDS";
+#else
+        return fs::PathToString(creds);
+#endif
+    }
+};
+
 void NoSecrets(const UniValue& v, const std::string& access, const std::string& secret)
 {
     const std::string dump = v.write();
@@ -202,6 +232,7 @@ void CheckS3SocketCleanup(bool reject_tls)
 
 BOOST_AUTO_TEST_CASE(cloud_01_sigv4_put_get_fakes3)
 {
+    const ScopedCloudCredentials credentials;
     modelnet::SigV4Request req;
     req.method = "GET";
     req.canonical_uri = "/test.txt";
@@ -222,7 +253,7 @@ BOOST_AUTO_TEST_CASE(cloud_01_sigv4_put_get_fakes3)
     WriteCreds(creds, kAccess, kSecret, true);
     modelnet::S3Client client;
     std::string err;
-    BOOST_REQUIRE(client.Init(BaseCfg(creds).s3, err));
+    BOOST_REQUIRE_MESSAGE(client.Init(credentials.Config(creds).s3, err), err);
     const std::vector<unsigned char> body{'b', 't', 'x'};
     BOOST_REQUIRE(client.Put("v1/artifacts/aa/files/0", body, err));
     std::vector<unsigned char> got;
@@ -236,11 +267,12 @@ BOOST_AUTO_TEST_CASE(cloud_01_sigv4_put_get_fakes3)
 
 BOOST_AUTO_TEST_CASE(cloud_02_head_range_path_style)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-02-creds";
     WriteCreds(creds, kAccess, kSecret, true);
     modelnet::S3Client client;
     std::string err;
-    BOOST_REQUIRE(client.Init(BaseCfg(creds).s3, err));
+    BOOST_REQUIRE_MESSAGE(client.Init(credentials.Config(creds).s3, err), err);
     std::vector<unsigned char> body(32, 0x11);
     BOOST_REQUIRE(client.Put("obj", body, err));
     uint64_t size = 0;
@@ -267,20 +299,26 @@ BOOST_AUTO_TEST_CASE(cloud_03_creds_0600_env_never_in_json)
     const fs::path good = m_path_root / "cloud-03-good";
     WriteCreds(good, kAccess, kSecret, true);
     cfg.creds.value = fs::PathToString(good);
-    BOOST_REQUIRE(client.Init(cfg, err));
+#ifdef WIN32
+    // Windows attributes cannot express owner-only POSIX file permissions.
+    BOOST_CHECK(!client.Init(cfg, err));
+    BOOST_CHECK_EQUAL(err, "credential file must be mode 0600");
+#else
+    BOOST_REQUIRE_MESSAGE(client.Init(cfg, err), err);
     NoSecrets(client.HealthJson(), kAccess, kSecret);
     NoSecrets(client.ConfigJson(), kAccess, kSecret);
+#endif
 
     const char* env_name = "BTX_TEST_CLOUD_CREDS_C";
     const std::string body = std::string("aws_access_key_id=") + kAccess + "\naws_secret_access_key=" + kSecret + "\n";
-    BOOST_REQUIRE_EQUAL(test::SetEnv(env_name, body.c_str()), 0);
+    test::ScopedEnvVar credentials{env_name, body.c_str()};
     modelnet::S3Client env_client;
     auto env_cfg = cfg;
     env_cfg.creds.kind = modelnet::CredentialRefKind::ENV;
     env_cfg.creds.value = env_name;
-    BOOST_REQUIRE(env_client.Init(env_cfg, err));
+    BOOST_REQUIRE_MESSAGE(env_client.Init(env_cfg, err), err);
     NoSecrets(env_client.HealthJson(), kAccess, kSecret);
-    test::UnsetEnv(env_name);
+    NoSecrets(env_client.ConfigJson(), kAccess, kSecret);
 }
 
 BOOST_AUTO_TEST_CASE(cloud_04_reject_file_unix_gopher)
@@ -322,11 +360,12 @@ BOOST_AUTO_TEST_CASE(cloud_06_redact_cloud_secrets)
 
 BOOST_AUTO_TEST_CASE(cloud_07_cloud_object_store_source_files)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-07-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    modelnet::S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     BOOST_CHECK_EQUAL(modelnet::CloudObjectLayoutName(store.Layout()), "SOURCE_FILES");
     const auto art = ArtifactFill(0xab);
     const fs::path src = m_path_root / "cloud-07.bin";
@@ -345,9 +384,10 @@ BOOST_AUTO_TEST_CASE(cloud_07_cloud_object_store_source_files)
 
 BOOST_AUTO_TEST_CASE(cloud_07b_cloud_object_store_piece_objects)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-07b-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    auto cfg = BaseCfg(creds, "https://minio.example.test");
+    auto cfg = credentials.Config(creds, "https://minio.example.test");
     cfg.provider = modelnet::CloudProvider::MINIO;
     cfg.layout = modelnet::CloudObjectLayout::PIECE_OBJECTS;
     modelnet::S3PieceStore store{cfg};
@@ -374,6 +414,7 @@ BOOST_AUTO_TEST_CASE(cloud_07b_cloud_object_store_piece_objects)
 
 BOOST_AUTO_TEST_CASE(cloud_07c_piece_objects_hydrate_incomplete)
 {
+    const ScopedCloudCredentials credentials;
     using namespace modelnet;
     const fs::path dir = m_path_root / "cloud-07c";
     fs::create_directories(dir);
@@ -387,7 +428,7 @@ BOOST_AUTO_TEST_CASE(cloud_07c_piece_objects_hydrate_incomplete)
     cfg.pushKV("prefix", "v1");
     cfg.pushKV("provider", "MINIO");
     cfg.pushKV("layout", "PIECE_OBJECTS");
-    cfg.pushKV("credential_ref", fs::PathToString(creds));
+    cfg.pushKV("credential_ref", credentials.RpcRef(creds));
     cfg.pushKV("use_fake", true);
     cfg.pushKV("idempotency_key", "cloud-07c-set");
     UniValue params(UniValue::VARR);
@@ -463,11 +504,12 @@ BOOST_AUTO_TEST_CASE(cloud_08_layout_not_in_identity)
 
 BOOST_AUTO_TEST_CASE(cloud_09_presign_get_exact_object)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-09-creds";
     WriteCreds(creds, kAccess, kSecret, true);
     modelnet::S3Client client;
     std::string err;
-    BOOST_REQUIRE(client.Init(BaseCfg(creds).s3, err));
+    BOOST_REQUIRE_MESSAGE(client.Init(credentials.Config(creds).s3, err), err);
     const std::vector<unsigned char> body{'z'};
     BOOST_REQUIRE(client.Put("exact/object", body, err));
     std::string url;
@@ -533,11 +575,12 @@ BOOST_AUTO_TEST_CASE(cloud_10_stream_put_over_8mib)
 
 BOOST_AUTO_TEST_CASE(cloud_11_health_json_counters)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-11-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    modelnet::S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x33);
     const fs::path src = m_path_root / "cloud-11.bin";
     {
@@ -564,13 +607,14 @@ BOOST_AUTO_TEST_CASE(cloud_11_health_json_counters)
 
 BOOST_AUTO_TEST_CASE(cloud_12_budget_refuse_when_exhausted)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-12-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    auto cfg = BaseCfg(creds);
+    auto cfg = credentials.Config(creds);
     cfg.budget_gets = 1;
     modelnet::S3PieceStore store{cfg};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x44);
     const fs::path src = m_path_root / "cloud-12.bin";
     {
@@ -586,9 +630,10 @@ BOOST_AUTO_TEST_CASE(cloud_12_budget_refuse_when_exhausted)
 
 BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-12b-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    auto cfg = BaseCfg(creds);
+    auto cfg = credentials.Config(creds);
     cfg.budget_gets_per_day = 1;
     cfg.budget_state_path = m_path_root / "cloud-12b-budget.json";
     const int64_t day0 = 86400 * 20000 + 3600;
@@ -596,7 +641,7 @@ BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
         modelnet::S3PieceStore store{cfg};
         store.SetClockForTests(day0);
         std::string err;
-        BOOST_REQUIRE(store.Init(err));
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
         const auto art = ArtifactFill(0x45);
         const fs::path src = m_path_root / "cloud-12b.bin";
         {
@@ -619,7 +664,7 @@ BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
         modelnet::S3PieceStore store{cfg};
         store.SetClockForTests(day0 + 86400);
         std::string err;
-        BOOST_REQUIRE(store.Init(err));
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
         const auto art = ArtifactFill(0x45);
         std::vector<unsigned char> got;
         BOOST_CHECK(!store.GetSourceFile(art, 0, got, err));
@@ -629,11 +674,12 @@ BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
 
 BOOST_AUTO_TEST_CASE(fullcloud_01_102400_pieces_one_source_object)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "fc-01-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    modelnet::S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x55);
     const fs::path src = m_path_root / "fc-01.bin";
     const std::string payload = "tiny-logical-400gib";
@@ -654,11 +700,12 @@ BOOST_AUTO_TEST_CASE(fullcloud_01_102400_pieces_one_source_object)
 
 BOOST_AUTO_TEST_CASE(fullcloud_02_object_bytes_equal_fileentry)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "fc-02-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    modelnet::S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x66);
     const fs::path src = m_path_root / "fc-02.bin";
     const std::string payload = "FileEntry-bytes-exact";
@@ -776,14 +823,15 @@ BOOST_AUTO_TEST_CASE(fullcloud_13_estimated_gets)
 
 BOOST_AUTO_TEST_CASE(fullcloud_20_budget_remaining_in_health)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "fc-20-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    auto cfg = BaseCfg(creds);
+    auto cfg = credentials.Config(creds);
     cfg.budget_gets = 10;
     cfg.budget_origin_bytes = 1000;
     modelnet::S3PieceStore store{cfg};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x88);
     const fs::path src = m_path_root / "fc-20.bin";
     {
@@ -815,12 +863,13 @@ BOOST_AUTO_TEST_CASE(fullcloud_23_source_files_object_key)
 
 BOOST_AUTO_TEST_CASE(fullcloud_05_fakes3_stream_hydrates_one_get)
 {
+    const ScopedCloudCredentials credentials;
     using namespace modelnet;
     const fs::path creds = m_path_root / "cloud-stream-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    S3PieceStore store{BaseCfg(creds)};
+    S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const fs::path src = m_path_root / "stream.bin";
     std::vector<unsigned char> file(256, 0x5a);
     file[0] = 0x11;
@@ -858,6 +907,7 @@ BOOST_AUTO_TEST_CASE(fullcloud_05_fakes3_stream_hydrates_one_get)
 
 BOOST_AUTO_TEST_CASE(cloud_rpc_set_hostmodel_events_no_secrets)
 {
+    const ScopedCloudCredentials credentials;
     using namespace modelnet;
     const fs::path dir = m_path_root / "cloud-rpc";
     fs::create_directories(dir);
@@ -871,7 +921,7 @@ BOOST_AUTO_TEST_CASE(cloud_rpc_set_hostmodel_events_no_secrets)
     cfg.pushKV("prefix", "v1");
     cfg.pushKV("provider", "AUTO");
     cfg.pushKV("layout", "AUTO");
-    cfg.pushKV("credential_ref", fs::PathToString(creds));
+    cfg.pushKV("credential_ref", credentials.RpcRef(creds));
     cfg.pushKV("use_fake", true);
     cfg.pushKV("idempotency_key", "cloud-rpc-set");
     UniValue params(UniValue::VARR);
@@ -968,6 +1018,7 @@ BOOST_AUTO_TEST_CASE(cloud_https_transport_available)
 
 BOOST_AUTO_TEST_CASE(cloud_https_use_fake_false_error_is_not_stubbed)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-https-creds";
     WriteCreds(creds, kAccess, kSecret, true);
     modelnet::S3ClientConfig cfg;
@@ -975,8 +1026,7 @@ BOOST_AUTO_TEST_CASE(cloud_https_use_fake_false_error_is_not_stubbed)
     cfg.bucket = "btx-models";
     cfg.region = "auto";
     cfg.use_fake = false;
-    cfg.creds.kind = modelnet::CredentialRefKind::PATH;
-    cfg.creds.value = fs::PathToString(creds);
+    cfg.creds = credentials.Config(creds).s3.creds;
     modelnet::S3Client client;
     std::string err;
     BOOST_REQUIRE_MESSAGE(client.Init(cfg, err), err);
@@ -1024,9 +1074,10 @@ BOOST_AUTO_TEST_CASE(cloud_https_refuses_redirect)
 
 BOOST_AUTO_TEST_CASE(cloud_https_not_stub_error)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-https-not-stub-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3ClientConfig cfg = BaseCfg(creds, "http://127.0.0.1:1").s3;
+    modelnet::S3ClientConfig cfg = credentials.Config(creds, "http://127.0.0.1:1").s3;
     cfg.use_fake = false;
     cfg.allow_http_loopback = true;
     modelnet::S3Client client;
@@ -1037,6 +1088,35 @@ BOOST_AUTO_TEST_CASE(cloud_https_not_stub_error)
     BOOST_CHECK(!client.Put("k", body, err));
     BOOST_CHECK(err.find("stubbed") == std::string::npos);
     BOOST_CHECK(err.find("OpenSSL HTTPS transport is stubbed") == std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(cloud_fixture_credentials_restore_environment)
+{
+#ifdef WIN32
+    const char* name = "BTX_TEST_CLOUD_FIXTURE_CREDS";
+    test::ScopedEnvVar previous{name, "preexisting-fixture-value"};
+    {
+        const ScopedCloudCredentials credentials;
+        const auto cfg = credentials.Config(fs::PathFromString("unused-credential-file"));
+        BOOST_CHECK(cfg.s3.creds.kind == modelnet::CredentialRefKind::ENV);
+        BOOST_REQUIRE(std::getenv(name));
+        BOOST_CHECK(std::string{std::getenv(name)}.find(kSecret) != std::string::npos);
+    }
+    BOOST_REQUIRE(std::getenv(name));
+    BOOST_CHECK_EQUAL(std::getenv(name), "preexisting-fixture-value");
+    previous.Set(nullptr);
+    {
+        const ScopedCloudCredentials credentials;
+        BOOST_REQUIRE(std::getenv(name));
+    }
+    BOOST_CHECK(std::getenv(name) == nullptr);
+#else
+    const ScopedCloudCredentials credentials;
+    const auto path = fs::PathFromString("unchanged-posix-credential-file");
+    const auto cfg = credentials.Config(path);
+    BOOST_CHECK(cfg.s3.creds.kind == modelnet::CredentialRefKind::PATH);
+    BOOST_CHECK_EQUAL(cfg.s3.creds.value, fs::PathToString(path));
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(cloud_real_http_socket_cleanup)
