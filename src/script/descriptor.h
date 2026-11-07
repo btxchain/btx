@@ -231,6 +231,13 @@ struct Descriptor {
      *  descriptors that hold providers from different seeds.
      */
     virtual void InjectPQSeedByFingerprint(const std::array<unsigned char, 4>& fingerprint, Span<const unsigned char> seed) {}
+
+    /** Wipe the PQ master seed from every PQHDPubkeyProvider in this descriptor tree.
+     *
+     *  The providers keep their fingerprints, so InjectPQSeed() or
+     *  InjectPQSeedByFingerprint() can inject the seed again.
+     */
+    virtual void WipePQSeeds() {}
 };
 
 /** Parse a `descriptor` string. Included private keys are put in `out`.

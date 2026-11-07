@@ -23,6 +23,7 @@
 #include <common/args.h>
 #include <pq/pq_keyderivation.h>
 #include <span.h>
+#include <support/cleanse.h>
 #include <util/bip32.h>
 #include <util/check.h>
 #include <util/strencodings.h>
@@ -645,6 +646,8 @@ public:
     const std::array<unsigned char, 4>& GetFingerprint() const { return m_fingerprint; }
     /** Inject seed after deserialization from DB (fingerprint-only form). */
     void SetSeed(const std::array<unsigned char, 32>& seed) { m_seed = seed; m_has_seed = true; ComputeFingerprintFromSeed(); }
+    /** Wipe the seed and keep the fingerprint, so SetSeed() can restore it. */
+    void WipeSeed() { memory_cleanse(m_seed.data(), m_seed.size()); m_has_seed = false; }
     bool HasSeed() const { return m_has_seed; }
     [[maybe_unused]] uint32_t GetCoinType() const { return m_coin_type; }
     [[maybe_unused]] uint32_t GetAccount() const { return m_account; }
@@ -1015,6 +1018,20 @@ public:
         }
         for (const auto& arg : m_subdescriptor_args) {
             arg->InjectPQSeedByFingerprint(fingerprint, seed);
+        }
+    }
+
+    // NOLINTNEXTLINE(misc-no-recursion)
+    void WipePQSeeds() override
+    {
+        for (const auto& p : m_pubkey_args) {
+            auto* pqhd = dynamic_cast<PQHDPubkeyProvider*>(p.get());
+            if (pqhd && pqhd->HasSeed()) {
+                pqhd->WipeSeed();
+            }
+        }
+        for (const auto& arg : m_subdescriptor_args) {
+            arg->WipePQSeeds();
         }
     }
 

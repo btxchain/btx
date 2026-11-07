@@ -5408,6 +5408,10 @@ bool CWallet::Lock()
             memory_cleanse(vMasterKey.data(), vMasterKey.size() * sizeof(decltype(vMasterKey)::value_type));
             vMasterKey.clear();
         }
+        for (const auto& spk_man_pair : m_spk_managers) {
+            auto* desc_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man_pair.second.get());
+            if (desc_spkm != nullptr) desc_spkm->LockPQSeeds();
+        }
     }
 
     NotifyStatusChanged(this);
