@@ -628,6 +628,75 @@ BOOST_AUTO_TEST_CASE(rpc_convert_p2mr_psbt_remaining_rows)
     BOOST_CHECK(RPCConvertNamedValues("walletprocesspsbt", {"adjust_timelocks=true"})["adjust_timelocks"].isBool());
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_include_sensitive_rows)
+{
+    // include_sensitive is a Boolean in z_listunspent (index 3, like
+    // include_watchonly before it) and in z_viewtransaction (index 1),
+    // positionally and by name.
+    const std::string txid(64, 'a');
+    for (const std::string text : {"false", "true"}) {
+        BOOST_TEST_CONTEXT(text) {
+            UniValue positional;
+            BOOST_CHECK_NO_THROW(positional = RPCConvertValues("z_listunspent", {"1", "9999999", "false", text}));
+            BOOST_CHECK_EQUAL(positional.size(), 4U);
+            BOOST_CHECK(positional[0].isNum());
+            BOOST_CHECK(positional[2].isBool());
+            BOOST_CHECK(positional[3].isBool());
+            if (positional[3].isBool()) BOOST_CHECK_EQUAL(positional[3].get_bool(), text == "true");
+            const UniValue named = RPCConvertNamedValues("z_listunspent", {"include_sensitive=" + text});
+            BOOST_CHECK(named["include_sensitive"].isBool());
+            if (named["include_sensitive"].isBool()) BOOST_CHECK_EQUAL(named["include_sensitive"].get_bool(), text == "true");
+            UniValue view;
+            BOOST_CHECK_NO_THROW(view = RPCConvertValues("z_viewtransaction", {txid, text}));
+            BOOST_CHECK_EQUAL(view.size(), 2U);
+            BOOST_CHECK(view[0].isStr());
+            BOOST_CHECK(view[1].isBool());
+            if (view[1].isBool()) BOOST_CHECK_EQUAL(view[1].get_bool(), text == "true");
+            const UniValue view_named = RPCConvertNamedValues("z_viewtransaction", {"txid=" + txid, "include_sensitive=" + text});
+            BOOST_CHECK(view_named["txid"].isStr());
+            BOOST_CHECK(view_named["include_sensitive"].isBool());
+            if (view_named["include_sensitive"].isBool()) BOOST_CHECK_EQUAL(view_named["include_sensitive"].get_bool(), text == "true");
+        }
+    }
+    BOOST_CHECK_THROW(RPCConvertValues("z_listunspent", {"1", "9999999", "false", "not-json"}), std::runtime_error);
+    BOOST_CHECK_THROW(RPCConvertNamedValues("z_listunspent", {"include_sensitive=not-json"}), std::runtime_error);
+    BOOST_CHECK_THROW(RPCConvertValues("z_viewtransaction", {txid, "not-json"}), std::runtime_error);
+    BOOST_CHECK_THROW(RPCConvertNamedValues("z_viewtransaction", {"include_sensitive=not-json"}), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(rpc_convert_sendall_preferred_pq_algo_stays_text)
+{
+    // preferred_pq_algo is a string option (ml_dsa_44 or slh_dsa_128s). send,
+    // fundrawtransaction and walletcreatefundedpsbt have no row for it, so by
+    // name sendall passes it on as text too, as typed.
+    for (const std::string algo : {"ml_dsa_44", "slh_dsa_128s", R"("ml_dsa_44")"}) {
+        BOOST_TEST_CONTEXT(algo) {
+            UniValue named;
+            BOOST_CHECK_NO_THROW(named = RPCConvertNamedValues("sendall", {R"(recipients=["addr"])", "preferred_pq_algo=" + algo}));
+            BOOST_CHECK(named["recipients"].isArray());
+            BOOST_CHECK(named["preferred_pq_algo"].isStr());
+            if (named["preferred_pq_algo"].isStr()) BOOST_CHECK_EQUAL(named["preferred_pq_algo"].get_str(), algo);
+            const UniValue send = RPCConvertNamedValues("send", {"preferred_pq_algo=" + algo});
+            BOOST_CHECK(send["preferred_pq_algo"].isStr());
+            if (send["preferred_pq_algo"].isStr()) BOOST_CHECK_EQUAL(send["preferred_pq_algo"].get_str(), algo);
+        }
+    }
+
+    // Unchanged: the options object at index 4, by position and by name, and
+    // the typed options next to preferred_pq_algo.
+    const std::string options = R"({"preferred_pq_algo":"ml_dsa_44","add_to_wallet":false})";
+    const UniValue positional = RPCConvertValues("sendall", {R"(["addr"])", "null", "unset", "null", options});
+    BOOST_CHECK(positional[0].isArray());
+    BOOST_CHECK(positional[4].isObject());
+    BOOST_CHECK_EQUAL(positional[4]["preferred_pq_algo"].get_str(), "ml_dsa_44");
+    BOOST_CHECK(RPCConvertNamedValues("sendall", {"options=" + options})["options"].isObject());
+    const UniValue typed = RPCConvertNamedValues("sendall", {"add_to_wallet=false", "send_max=true", "include_watching=false", "fee_rate=1.5"});
+    BOOST_CHECK(typed["add_to_wallet"].isBool());
+    BOOST_CHECK(typed["send_max"].isBool());
+    BOOST_CHECK(typed["include_watching"].isBool());
+    BOOST_CHECK(typed["fee_rate"].isNum());
+}
+
 BOOST_AUTO_TEST_CASE(rpc_convert_values_pq_wallet_methods)
 {
     UniValue result;
