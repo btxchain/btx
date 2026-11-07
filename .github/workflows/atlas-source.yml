@@ -1,0 +1,29 @@
+name: Atlas source checks
+on:
+  pull_request:
+    paths: ['gui/atlas/**', 'contrib/atlas/**', '.github/workflows/atlas-*.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test tests/*.test.mjs
+        working-directory: gui/atlas
+      - run: node tests/static-audit.mjs
+        working-directory: gui/atlas
+      - run: python3 contrib/atlas/model_check.py
+      - run: python3 contrib/atlas/scan_qt.py --repo . --out qt-inventory.json
+      - run: node tests/benchmark.mjs > benchmark.json
+        working-directory: gui/atlas
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atlas-source-evidence
+          path: |
+            qt-inventory.json
+            gui/atlas/benchmark.json

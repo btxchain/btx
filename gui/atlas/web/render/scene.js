@@ -1,0 +1,51 @@
+// A bounded WebGL2 renderer; no scene framework, no dependency runtime, no eval.
+// One position/color upload per data generation; frames only on input/data/resize.
+import {Camera,project} from './math.js';
+import {stablePosition,layoutGraph} from '../core/graph.js';
+const COLORS={node:[.92,.94,1],peer:[.30,.70,.85],money:[.30,.70,.85],models:[.45,.78,.62],model:[.87,.63,.89],lineage:[.97,.68,.34],layer:[.61,.72,.78],tensor:[.52,.81,.69]};
+function colorOf(node){return COLORS[node.network]||COLORS[node.kind]||COLORS.layer;}
+const VS=`#version 300 es
+precision highp float;
+in vec3 aPosition;in vec3 aColor;uniform mat4 uMatrix;uniform float uSize;out vec3 color;
+void main(){gl_Position=uMatrix*vec4(aPosition,1.0);gl_PointSize=uSize;color=aColor;}`;
+const FS=`#version 300 es
+precision highp float;in vec3 color;uniform int uPoints;uniform float uAlpha;out vec4 outputColor;
+void main(){float a=uAlpha;if(uPoints==1){float d=length(gl_PointCoord-vec2(.5));if(d>.5)discard;a*=smoothstep(.5,.25,d);}outputColor=vec4(color,a);}`;
+export class Scene{
+ constructor(canvas,{onSelect=()=>{},onStats=()=>{},camera={}}={}){
+  this.canvas=canvas;this.onSelect=onSelect;this.onStats=onStats;this.camera=new Camera(camera);this.nodes=[];this.edges=[];this.generation=0;this.frame=null;this.disposed=false;this.positions=new Float32Array();this.selected=null;this.cleanups=[];this.worker=null;
+  try{this.gl=canvas.getContext('webgl2',{alpha:false,antialias:false,preserveDrawingBuffer:false,powerPreference:'low-power'});if(this.gl)this.initGL();}catch{this.gl=null;}
+  if(!this.gl)this.ctx=canvas.getContext('2d');
+  this.resizeObserver=new ResizeObserver(()=>this.resize());this.resizeObserver.observe(canvas);
+  this.listen('webglcontextlost',e=>{e.preventDefault();this.contextLost=true;this.onStats({renderer:'GPU context lost; restore or switch to list view'});});
+  this.listen('webglcontextrestored',()=>{this.contextLost=false;this.initGL();this.upload();this.invalidate();});
+  let drag=null;this.listen('pointerdown',e=>{drag={x:e.clientX,y:e.clientY,startX:e.clientX,startY:e.clientY,pan:e.shiftKey||e.button===1};canvas.setPointerCapture(e.pointerId);});
+  this.listen('pointermove',e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;drag.x=e.clientX;drag.y=e.clientY;if(drag.pan)this.camera.pan(dx,dy);else this.camera.orbit(dx,dy);this.invalidate();});
+  this.listen('pointerup',e=>{if(drag&&Math.hypot(e.clientX-drag.startX,e.clientY-drag.startY)<5)this.pick(e.offsetX,e.offsetY);drag=null;});
+  this.listen('pointercancel',()=>{drag=null;});
+  this.listen('wheel',e=>{e.preventDefault();this.camera.zoom(e.deltaY);this.invalidate();},{passive:false});
+  this.listen('keydown',e=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','+','-','Home'].includes(e.key)){e.preventDefault();if(e.key==='Home')this.camera=new Camera();else if(e.key==='+'||e.key==='-')this.camera.zoom(e.key==='+'?-100:100);else this.camera.orbit(e.key==='ArrowLeft'?-12:e.key==='ArrowRight'?12:0,e.key==='ArrowUp'?-12:e.key==='ArrowDown'?12:0);this.invalidate();}});
+  try{this.worker=new Worker(new URL('../workers/layout.js',import.meta.url),{type:'module'});this.worker.onmessage=e=>{if(e.data.generation!==this.generation||this.disposed)return;if(e.data.error){this.onStats({error:e.data.error});return;}this.positions=e.data.positions;this.edgeIndices=e.data.edgeIndices;this.upload();this.invalidate();};this.worker.onerror=()=>{this.worker?.terminate();this.worker=null;this.layoutSync();};}catch{this.worker=null;}
+ }
+ listen(name,fn,options){this.canvas.addEventListener(name,fn,options);this.cleanups.push(()=>this.canvas.removeEventListener(name,fn,options));}
+ initGL(){const g=this.gl;const shader=(type,code)=>{const s=g.createShader(type);g.shaderSource(s,code);g.compileShader(s);if(!g.getShaderParameter(s,g.COMPILE_STATUS)){const error=g.getShaderInfoLog(s);g.deleteShader(s);throw Error(error);}return s;};const v=shader(g.VERTEX_SHADER,VS),f=shader(g.FRAGMENT_SHADER,FS);this.program=g.createProgram();g.attachShader(this.program,v);g.attachShader(this.program,f);g.linkProgram(this.program);g.deleteShader(v);g.deleteShader(f);if(!g.getProgramParameter(this.program,g.LINK_STATUS))throw Error('Graph shader linking failed');this.buffers={node:g.createBuffer(),edge:g.createBuffer(),planes:g.createBuffer()};this.locations={position:g.getAttribLocation(this.program,'aPosition'),color:g.getAttribLocation(this.program,'aColor'),matrix:g.getUniformLocation(this.program,'uMatrix'),size:g.getUniformLocation(this.program,'uSize'),points:g.getUniformLocation(this.program,'uPoints'),alpha:g.getUniformLocation(this.program,'uAlpha')};g.enable(g.BLEND);g.blendFunc(g.SRC_ALPHA,g.ONE_MINUS_SRC_ALPHA);g.disable(g.DEPTH_TEST);}
+ setData(graph){this.generation++;this.nodes=graph.nodes.slice(0,100000);this.edges=graph.edges.slice(0,200000);this.sampled=this.nodes.length>10000;this.visibleNodes=this.sampled?this.nodes.slice(0,10000):this.nodes;const ids=new Set(this.visibleNodes.map(n=>n.id));const limited={nodes:this.visibleNodes,edges:this.edges.filter(e=>ids.has(e.from)&&ids.has(e.to)).slice(0,30000)};this.limited=limited;if(this.worker)this.worker.postMessage({generation:this.generation,graph:{nodes:limited.nodes.map(n=>({id:n.id,group:n.group})),edges:limited.edges},plane:this.camera.flat});else this.layoutSync();}
+ layoutSync(){if(!this.limited)return;const a=layoutGraph(this.limited,{plane:this.camera.flat});this.positions=a.positions;this.edgeIndices=a.edgeIndices;this.upload();this.invalidate();}
+ setFlat(flat){this.camera.flat=flat;this.setData({nodes:this.nodes,edges:this.edges});}
+ focus(id){const i=this.visibleNodes?.findIndex(n=>n.id===id)??-1;if(i<0)return;this.selected=id;this.camera.target=[...this.positions.slice(i*3,i*3+3)];this.camera.distance=Math.min(this.camera.distance,18);this.invalidate();}
+ upload(){if(!this.gl||this.contextLost||!this.positions)return;const g=this.gl;const data=new Float32Array(this.visibleNodes.length*6);this.visibleNodes.forEach((n,i)=>{data.set(this.positions.subarray(i*3,i*3+3),i*6);const color=colorOf(n);data.set(n.state==='stale'?color.map(x=>x*.45):color,i*6+3);});g.bindBuffer(g.ARRAY_BUFFER,this.buffers.node);g.bufferData(g.ARRAY_BUFFER,data,g.STATIC_DRAW);
+  const ei=this.edgeIndices||new Uint32Array(),edges=new Float32Array(ei.length*6);ei.forEach((idx,i)=>{edges.set(this.positions.subarray(idx*3,idx*3+3),i*6);edges.set([.30,.40,.49],i*6+3);});g.bindBuffer(g.ARRAY_BUFFER,this.buffers.edge);g.bufferData(g.ARRAY_BUFFER,edges,g.STATIC_DRAW);this.edgeCount=ei.length;
+  const planes=[];for(let k=0;k<5;k++){const y=(k-2)*3.2,corners=[[-9,y,-9],[9,y,-9],[9,y,9],[-9,y,9]];for(let i=0;i<4;i++){for(const p of [corners[i],corners[(i+1)%4]])planes.push(...(this.camera.flat?[p[0],p[2],0]:p),.18,.22,.27);}}g.bindBuffer(g.ARRAY_BUFFER,this.buffers.planes);g.bufferData(g.ARRAY_BUFFER,new Float32Array(planes),g.STATIC_DRAW);this.planeCount=planes.length/6;this.uploadBytes=data.byteLength+edges.byteLength+planes.length*4;
+ }
+ resize(){if(this.disposed)return;const r=this.canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2);this.width=Math.max(1,r.width);this.height=Math.max(1,r.height);this.canvas.width=Math.round(this.width*dpr);this.canvas.height=Math.round(this.height*dpr);this.dpr=dpr;this.invalidate();}
+ invalidate(){if(this.disposed||this.frame!==null)return;this.frame=requestAnimationFrame(()=>{this.frame=null;this.draw();});}
+ draw(){if(this.disposed||this.contextLost||!this.width)return;const start=performance.now(),matrix=this.camera.matrix(this.width/this.height);this.matrix=matrix;
+  if(this.gl){const g=this.gl,l=this.locations;g.viewport(0,0,this.canvas.width,this.canvas.height);g.clearColor(.015,.02,.027,1);g.clear(g.COLOR_BUFFER_BIT);g.useProgram(this.program);g.uniformMatrix4fv(l.matrix,false,matrix);
+   const batch=(buffer,count,points,alpha,size)=>{if(!count)return;g.bindBuffer(g.ARRAY_BUFFER,buffer);g.enableVertexAttribArray(l.position);g.vertexAttribPointer(l.position,3,g.FLOAT,false,24,0);g.enableVertexAttribArray(l.color);g.vertexAttribPointer(l.color,3,g.FLOAT,false,24,12);g.uniform1i(l.points,points?1:0);g.uniform1f(l.alpha,alpha);g.uniform1f(l.size,size*this.dpr);g.drawArrays(points?g.POINTS:g.LINES,0,count);};
+   batch(this.buffers.planes,this.planeCount,false,.55,1);batch(this.buffers.edge,this.edgeCount,false,.30,1);batch(this.buffers.node,this.visibleNodes?.length||0,true,.95,this.nodes.length>1000?4:7);
+  }else if(this.ctx){const c=this.ctx;c.setTransform(this.dpr,0,0,this.dpr,0,0);c.fillStyle='#040507';c.fillRect(0,0,this.width,this.height);const ps=(this.visibleNodes||[]).slice(0,3000).map((_,i)=>project(matrix,this.positions.subarray(i*3,i*3+3),this.width,this.height));c.strokeStyle='#26343d';c.beginPath();for(let i=0;i<(this.edgeIndices?.length||0)&&i<12000;i+=2){const a=ps[this.edgeIndices[i]],b=ps[this.edgeIndices[i+1]];if(a&&b){c.moveTo(a[0],a[1]);c.lineTo(b[0],b[1]);}}c.stroke();ps.forEach((p,i)=>{if(!p)return;const color=colorOf(this.visibleNodes[i]);c.fillStyle=`rgb(${color.map(x=>Math.round(x*255)).join(',')})`;c.beginPath();c.arc(p[0],p[1],3,0,Math.PI*2);c.fill();});}
+  this.onStats({renderer:this.gl?'WebGL2':'Canvas2D fallback',visible:Math.min(this.visibleNodes?.length||0,this.gl?10000:3000),total:this.nodes.length,cpu_draw_ms:performance.now()-start,upload_bytes:this.uploadBytes||0,sampled:this.sampled});
+ }
+ pick(x,y){if(!this.matrix)return;let best=null,distance=100;for(let i=0;i<Math.min(this.visibleNodes?.length||0,10000);i++){const p=project(this.matrix,this.positions.subarray(i*3,i*3+3),this.width,this.height);if(!p||p[2]<-1||p[2]>1)continue;const d=(p[0]-x)**2+(p[1]-y)**2;if(d<distance){distance=d;best=this.visibleNodes[i];}}if(best){this.selected=best.id;this.onSelect(best);this.invalidate();}}
+ dispose(){this.disposed=true;if(this.frame!==null)cancelAnimationFrame(this.frame);this.worker?.terminate();this.resizeObserver.disconnect();this.cleanups.forEach(f=>f());if(this.gl&&!this.contextLost){for(const b of Object.values(this.buffers))this.gl.deleteBuffer(b);this.gl.deleteProgram(this.program);}this.nodes=[];this.edges=[];this.positions=new Float32Array();this.edgeIndices=new Uint32Array();}
+}
