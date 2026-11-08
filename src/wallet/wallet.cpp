@@ -5404,6 +5404,11 @@ bool CWallet::Lock()
 
     {
         LOCK2(m_relock_mutex, cs_wallet);
+        if (m_shielded_wallet) {
+            // Wipe the shielded spending keys too (cs_wallet before cs_shielded).
+            LOCK(m_shielded_wallet->cs_shielded);
+            m_shielded_wallet->LockSpendingKeys();
+        }
         if (!vMasterKey.empty()) {
             memory_cleanse(vMasterKey.data(), vMasterKey.size() * sizeof(decltype(vMasterKey)::value_type));
             vMasterKey.clear();

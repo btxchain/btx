@@ -46,6 +46,8 @@ struct ShieldedKeySet
     uint256 kem_pk_hash;
     uint32_t account{0};
     uint32_t index{0};
+    // The spending key was derived and matched spending_pk_hash. While the
+    // wallet is locked the key itself is wiped (spending_key.IsValid() is false).
     bool spending_key_loaded{false};
     bool has_spending_key{true};
 };
@@ -541,6 +543,11 @@ public:
      *  Also reloads the full persisted state if keys/notes were lost due to
      *  a locked-wallet startup (tree-only fallback). */
     bool MaybeRehydrateSpendingKeys() EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
+    /** Wipe the spending keys held in memory, for CWallet::Lock(). The viewing
+     *  keys, notes and spend-authority flags stay, and the next
+     *  MaybeRehydrateSpendingKeys() after an unlock derives the keys again. */
+    void LockSpendingKeys() EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
     /** Flush in-memory shielded state to the wallet database.
      *  Must be called before backupwallet to ensure a consistent snapshot. */

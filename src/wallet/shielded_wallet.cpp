@@ -7541,6 +7541,14 @@ void CShieldedWallet::LoadPersistedState()
     }
 }
 
+void CShieldedWallet::LockSpendingKeys()
+{
+    AssertLockHeld(cs_shielded);
+    for (auto& [_, keyset] : m_key_sets) {
+        keyset.spending_key.ClearKeyData();
+    }
+}
+
 bool CShieldedWallet::MaybeRehydrateSpendingKeys()
 {
     AssertLockHeld(cs_shielded);
@@ -7639,6 +7647,23 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
         }
     }
 
+    std::vector<unsigned char> master_seed = GetMasterSeed();
+    ScopedByteVectorCleanse master_seed_cleanse_rehydrate(master_seed);
+    // Keys wiped by LockSpendingKeys() keep spending_key_loaded: their hash was
+    // checked when they were first derived. Derive them again before the note
+    // repair below, which needs them. A lock changes no note, so no rebuild.
+    // A key that no longer derives takes the missing-key path.
+    if (!master_seed.empty()) {
+        for (auto& [_, keyset] : m_key_sets) {
+            if (!keyset.has_spending_key || !keyset.spending_key_loaded || keyset.spending_key.IsValid()) {
+                continue;
+            }
+            if (!DeriveSpendingKeyForKeyset(master_seed, keyset)) {
+                keyset.spending_key_loaded = false;
+            }
+        }
+    }
+
     bool have_missing_spending_keys{false};
     for (const auto& [_, keyset] : m_key_sets) {
         if (keyset.has_spending_key && !keyset.spending_key_loaded) {
@@ -7646,8 +7671,6 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
             break;
         }
     }
-    std::vector<unsigned char> master_seed = GetMasterSeed();
-    ScopedByteVectorCleanse master_seed_cleanse_rehydrate(master_seed);
     if (have_missing_spending_keys && master_seed.empty()) {
         return rehydrated;
     }
@@ -7967,7 +7990,7 @@ CShieldedWallet::KeyIntegrityReport CShieldedWallet::VerifyKeyIntegrity()
     KeyIntegrityReport report;
     report.total_keys = static_cast<int>(m_key_sets.size());
     for (const auto& [addr, ks] : m_key_sets) {
-        if (ks.spending_key_loaded) {
+        if (ks.spending_key_loaded && ks.spending_key.IsValid()) {
             ++report.spending_keys_loaded;
         } else if (ks.has_spending_key) {
             ++report.spending_keys_missing;
