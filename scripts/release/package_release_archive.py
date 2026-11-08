@@ -627,10 +627,11 @@ def stage_release_tree(
         shutil.copy2(source, real_destination)
         real_destination.chmod(0o755)
         included.append(str(real_destination.relative_to(release_root)))
-        if platform_id.startswith("linux-") and dest_name == "btx-guardd":
+        if platform_id.startswith(("linux-", "macos-")) and dest_name == "btx-guardd":
             # Patch before linking: an ELF editor may replace the inode.
             # Both regular names must resolve the packaged libraries directly.
-            set_linux_guard_runpath(real_destination)
+            if platform_id.startswith("linux-"):
+                set_linux_guard_runpath(real_destination)
             # The guard supervisor requires a regular sibling of btxd.real.
             # A hard link preserves that rule without another binary payload.
             sibling = libexec_dir / "btx-guardd"

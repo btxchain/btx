@@ -138,8 +138,10 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                     ]
                 )
 
-    def test_linux_guard_remains_a_regular_daemon_sibling_after_extraction(self):
+    def test_guard_remains_a_regular_daemon_sibling_after_extraction(self):
         self._stub_ship_gate()
+        runpath_targets = []
+        self.module.set_linux_guard_runpath = runpath_targets.append
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_root = self._build_source_root(root)
@@ -149,7 +151,7 @@ class PackageReleaseArchiveTest(unittest.TestCase):
             original_epoch = os.environ.get("SOURCE_DATE_EPOCH")
             os.environ["SOURCE_DATE_EPOCH"] = "1712534400"
             try:
-                for platform_id in ("linux-x86_64", "linux-arm64"):
+                for platform_id in ("linux-x86_64", "linux-arm64", "macos-x86_64", "macos-arm64"):
                     archives = []
                     for attempt in ("first", "second"):
                         staged, included, _ = self.module.stage_release_tree(
@@ -161,6 +163,9 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                         )
                         sibling = staged / "libexec/btx-guardd"
                         real_guard = staged / "libexec/btx-guardd.real"
+                        # The RUNPATH edit is ELF-only; a macOS guard is Mach-O.
+                        self.assertEqual(runpath_targets, [real_guard] if platform_id.startswith("linux-") else [])
+                        runpath_targets.clear()
                         self.assertTrue(sibling.is_file())
                         self.assertFalse(sibling.is_symlink())
                         self.assertTrue(sibling.samefile(real_guard))
