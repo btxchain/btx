@@ -1800,6 +1800,8 @@ RPCHelpMan exportwalletbundle()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    // It reads or writes a server-side file the caller names.
+    EnsureNotWalletRestricted(request);
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
     CWallet& wallet{*pwallet};
@@ -3413,6 +3415,8 @@ RPCHelpMan importwalletbundle()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    // It reads or writes a server-side file the caller names.
+    EnsureNotWalletRestricted(request);
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
 
