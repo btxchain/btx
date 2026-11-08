@@ -553,6 +553,37 @@ class ArchiveContentGateTest(unittest.TestCase):
         self.assertIn("needs OPENSSL_3.2.0 from the host's libssl.so.3", text)
         self._gate({"btx-0.35.0/bin/btxd": self._btxd(openssl="OPENSSL_3.0.0")})
 
+    def _qt_archive(self, gui_qt: str, plugin_qt: str) -> dict[str, bytes]:
+        def lib(*needed: str) -> bytes:
+            return make_elf(list(needed), executable=False)
+
+        gui_core = f"libQt{gui_qt}Core.so.{gui_qt}"
+        gui_widgets = f"libQt{gui_qt}Widgets.so.{gui_qt}"
+        plugin_gui = f"libQt{plugin_qt}Gui.so.{plugin_qt}"
+        files = {
+            "btx-0.35.0/bin/btxd": self._btxd(runpath="$ORIGIN/../lib"),
+            "btx-0.35.0/lib/libssl.so.3": self._libssl(),
+            "btx-0.35.0/bin/btx-qt": b'#!/bin/sh\nexec "$SELF_DIR/../libexec/btx-qt.real" "$@"\n',
+            "btx-0.35.0/libexec/btx-qt.real": make_elf([gui_widgets, gui_core, "libc.so.6"],
+                                                       runpath="$ORIGIN/../lib"),
+            f"btx-0.35.0/lib/{gui_widgets}": lib(gui_core),
+            f"btx-0.35.0/lib/{gui_core}": lib("libc.so.6"),
+            f"btx-0.35.0/lib/{plugin_gui}": lib("libc.so.6"),
+            "btx-0.35.0/lib/qt6/plugins/platforms/libqxcb.so": lib(plugin_gui),
+        }
+        return files
+
+    def test_qt5_gui_with_qt6_platform_plugin_fails(self) -> None:
+        # 0.34.16: btx-qt.real NEEDs libQt5*; the only platform plugin is
+        # lib/qt6/plugins/platforms/libqxcb.so, which NEEDs libQt6Gui.
+        text = self._problems(self._qt_archive("5", "6"))
+        self.assertIn("Qt 5 and Qt 6 in one archive", text)
+        self.assertIn("btx-0.35.0/libexec/btx-qt.real", text)
+        self.assertIn("btx-0.35.0/lib/qt6/plugins/platforms/libqxcb.so", text)
+
+    def test_one_qt_major_passes(self) -> None:
+        self.assertIn("+contents", self._gate(self._qt_archive("6", "6")))
+
     def test_openssl_floor_is_per_library(self) -> None:
         # Ubuntu 24.04's libssl.so.3 defines only OPENSSL_3.0.0; its libcrypto.so.3
         # defines up to OPENSSL_3.0.9. ld.so looks for a version node only in the
