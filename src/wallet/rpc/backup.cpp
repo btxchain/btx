@@ -266,18 +266,30 @@ static void EnsureFreshDirectory(const fs::path& path)
     SetOwnerOnlyPermissions(path, /*is_directory=*/true);
 }
 
-static void WriteTextFile(const fs::path& path, const std::string& content)
+//! Write a whole file or throw. These files are a backup, and a .btxwallet
+//! holds the PQ master seed: a buffered write that fails only at close (a full
+//! disk) must not be reported as written. fwrite, the flush and sync, and the
+//! close are all checked, and a short file is removed.
+static void WriteWholeFile(const fs::path& path, Span<const unsigned char> data)
 {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
+    FILE* file = fsbridge::fopen(path, "wb");
+    if (file == nullptr) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to open %s for writing", fs::PathToString(path)));
     }
-    out.write(content.data(), content.size());
-    if (!out.good()) {
+    SetOwnerOnlyPermissions(path, /*is_directory=*/false);
+    const bool written{data.empty() || std::fwrite(data.data(), 1, data.size(), file) == data.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{std::fclose(file) == 0};
+    if (!committed || !closed) {
+        std::error_code ec;
+        fs::remove(path, ec);
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to write %s", fs::PathToString(path)));
     }
-    out.close();
-    SetOwnerOnlyPermissions(path, /*is_directory=*/false);
+}
+
+static void WriteTextFile(const fs::path& path, const std::string& content)
+{
+    WriteWholeFile(path, MakeUCharSpan(content));
 }
 
 static void WriteJsonFile(const fs::path& path, const UniValue& value)
@@ -901,16 +913,7 @@ static fs::path CreateUniqueTempFilePath(const fs::path& parent,
 
 static void WriteBinaryFile(const fs::path& path, Span<const unsigned char> data)
 {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to open %s for writing", fs::PathToString(path)));
-    }
-    out.write(reinterpret_cast<const char*>(data.data()), data.size());
-    if (!out.good()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to write %s", fs::PathToString(path)));
-    }
-    out.close();
-    SetOwnerOnlyPermissions(path, /*is_directory=*/false);
+    WriteWholeFile(path, data);
 }
 
 static void WriteBinaryFileAtomically(const fs::path& path, Span<const unsigned char> data)
