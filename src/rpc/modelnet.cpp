@@ -2457,6 +2457,9 @@ static RPCHelpMan modelsecurity()
         RPCExamples{HelpExampleCli("modelsecurity", "'{\"op\":\"status\"}'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
+            // An owner RPC: a pause needs no signed record and stops the guard
+            // for the whole node, like stop.
+            EnsureNotWalletRestricted(request);
 #ifdef ENABLE_MODELNET
             UniValue input = request.params[0];
             if (input.isStr()) {
