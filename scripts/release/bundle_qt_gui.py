@@ -5,9 +5,9 @@
 """Copy the Qt GUI stack into a release tree so btx-qt launches without a
 distro or Homebrew Qt install.
 
-Linux: Qt, qrencode, and their non-display dependencies go in lib/. The
+Linux: Qt, qrencode, and their private dependencies go in the supplied lib_dir. The
 platform plugin goes in lib/qt6/plugins. The launch wrapper sets
-QT_PLUGIN_PATH. Host libc, libstdc++, and GL/X11 stay on the machine so
+QT_PLUGIN_PATH. Host libc, GL/X11 and GTK desktop services stay on the machine so
 the GUI uses that machine's display driver.
 
 macOS: macdeployqt fills btx-qt.app. A load command that still points at
@@ -16,6 +16,9 @@ Homebrew or /usr/local/opt is a hard failure.
 
 from __future__ import annotations
 
+import importlib.util
+import os
+from functools import lru_cache
 import shutil
 import subprocess
 from pathlib import Path
@@ -50,6 +53,14 @@ _HOST_SONAME_PREFIXES = (
     "libxkbcommon.so",
     "libxkbcommon-x11.so",
     "libwayland",
+    # Atlas already requires the host GTK/WebKit desktop stack. Do not shadow
+    # those services with the copies that Qt happened to use on the builder.
+    "libglib-2.0.so",
+    "libgobject-2.0.so",
+    "libgio-2.0.so",
+    "libgmodule-2.0.so",
+    "libgthread-2.0.so",
+    "libdbus-1.so",
 )
 
 
@@ -57,7 +68,27 @@ def _host_soname(name: str) -> bool:
     return any(name.startswith(prefix) for prefix in _HOST_SONAME_PREFIXES)
 
 
-def _ldd_map(path: Path) -> dict[str, Path]:
+@lru_cache(maxsize=1)
+def _elf_reader():
+    # Reuse the release gate's bounded ELF parser, including static executables.
+    spec = importlib.util.spec_from_file_location("qt_bundle_elf_reader", Path(__file__).with_name("verify_release_btxd.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.elf_dynamic_info
+
+
+def _needed(path: Path) -> set[str]:
+    return set(_elf_reader()(path).needed)
+
+
+def _ldd_map(path: Path, required: set[str] | None = None) -> dict[str, Path]:
+    # ldd prints a flattened closure. Follow direct edges only; otherwise
+    # dependencies of a host-owned library leak back into the archive.
+    needed = _needed(path)
+    if required is not None:
+        needed &= required
+    if not needed:
+        return {}
     try:
         result = subprocess.run(
             ["ldd", str(path)],
@@ -67,7 +98,7 @@ def _ldd_map(path: Path) -> dict[str, Path]:
         )
     except OSError as exc:
         raise RuntimeError(f"ldd is required to bundle Qt for {path}") from exc
-    if result.returncode != 0:
+    if result.returncode != 0 and required is None:
         raise RuntimeError(f"ldd failed on {path}: {result.stderr.strip()}")
     found: dict[str, Path] = {}
     for line in result.stdout.splitlines():
@@ -75,6 +106,8 @@ def _ldd_map(path: Path) -> dict[str, Path]:
             continue
         soname, rest = line.strip().split("=>", 1)
         soname = soname.strip()
+        if soname not in needed:
+            continue
         token = rest.strip().split()
         if not token or token[0] == "not":
             if not _host_soname(soname):
@@ -83,6 +116,9 @@ def _ldd_map(path: Path) -> dict[str, Path]:
         lib = Path(token[0])
         if lib.is_file():
             found[soname] = lib
+    missing = sorted(name for name in needed if not _host_soname(name) and name not in found)
+    if missing:
+        raise RuntimeError(f"{path} has unresolved private dependencies: {', '.join(missing)}")
     return found
 
 
@@ -128,7 +164,7 @@ def _set_rpath(path: Path, rpath: str) -> None:
     subprocess.check_call([patchelf, "--set-rpath", rpath, str(path)])
 
 
-def bundle_linux_qt(qt_binary: Path, lib_dir: Path) -> None:
+def bundle_linux_qt(qt_binary: Path, lib_dir: Path, shared_roots: list[Path] | None = None) -> None:
     """Copy Qt into lib_dir and point qt_binary at it. No-op if Qt is absent."""
     linked = _ldd_map(qt_binary)
     if not any(name.startswith("libQt") for name in linked):
@@ -146,23 +182,59 @@ def bundle_linux_qt(qt_binary: Path, lib_dir: Path) -> None:
         )
     plugin_roots.append(platform)
     collected = _collect_private_libs([qt_binary, *plugin_roots])
+    # Preserve the shared part of the former Qt bundle for non-GUI consumers.
+    # Resolve it from those consumers, not from Qt's possibly older toolchain.
+    shared: dict[str, Path] = {}
+    pending = list(shared_roots or [])
+    seen: set[Path] = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        # Do not acquire or validate unrelated node/CUDA dependencies here.
+        relevant = _needed(current) & collected.keys()
+        if not relevant:
+            continue
+        for soname, source in _ldd_map(current, relevant).items():
+            if soname in shared:
+                if shared[soname].read_bytes() != source.read_bytes():
+                    raise RuntimeError(f"Conflicting shared dependency {soname}")
+                continue
+            shared[soname] = source
+            pending.append(source)
+    shared_dir = qt_binary.parent.parent / "lib"
     lib_dir.mkdir(parents=True, exist_ok=True)
-    for soname, source in sorted(collected.items()):
-        destination = lib_dir / soname
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    for soname, qt_source in sorted(collected.items()):
+        source = shared.get(soname, qt_source)
+        destination = (shared_dir if soname in shared else lib_dir) / soname
+        if destination.exists():
+            # Existing authoritative runtime files, especially OpenSSL, win only
+            # when their identity agrees; never silently replace them with Qt's.
+            if destination.read_bytes() != source.read_bytes():
+                raise RuntimeError(f"Conflicting packaged dependency {soname}")
+            continue
         shutil.copy2(source, destination)
         destination.chmod(destination.stat().st_mode | 0o111)
-        _set_rpath(destination, "$ORIGIN")
+        if not soname.startswith(("libssl.so", "libcrypto.so")):
+            rpath = "$ORIGIN" if soname in shared else "$ORIGIN:$ORIGIN/.."
+            current_rpath = subprocess.check_output(["patchelf", "--print-rpath", str(destination)], text=True).strip()
+            if current_rpath != rpath:
+                _set_rpath(destination, rpath)
     plugin_dest_dir = lib_dir / "qt6" / "plugins" / "platforms"
     plugin_dest_dir.mkdir(parents=True, exist_ok=True)
     plugin_dest = plugin_dest_dir / platform.name
     shutil.copy2(platform, plugin_dest)
     plugin_dest.chmod(plugin_dest.stat().st_mode | 0o111)
-    _set_rpath(plugin_dest, "$ORIGIN/../../../")
-    _set_rpath(qt_binary, "$ORIGIN/../lib")
+    _set_rpath(plugin_dest, "$ORIGIN/../../../:$ORIGIN/../../../../")
+    relative_lib = os.path.relpath(lib_dir, qt_binary.parent)
+    _set_rpath(qt_binary, "$ORIGIN/" + relative_lib + ":$ORIGIN/../lib")
     # Without this, Qt also searches the distro plugin directory and can load
     # a system xcb plugin that does not see the bundled libxcb-cursor.
+    release_lib = os.path.relpath(lib_dir, qt_binary.parent.parent)
     (qt_binary.parent / "qt.conf").write_text(
-        "[Paths]\nPrefix = ..\nPlugins = lib/qt6/plugins\nLibraries = lib\n",
+        f"[Paths]\nPrefix = ..\nPlugins = {release_lib}/qt6/plugins\nLibraries = {release_lib}\n",
         encoding="utf-8",
     )
 
