@@ -10,9 +10,11 @@
 #include <modelnet/search.h>
 #include <crypto/sha384.h>
 #include <random.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -185,13 +187,26 @@ bool ReadJson(const fs::path& p, UniValue& o)
 
 bool WriteJson(const fs::path& p, const UniValue& o, std::string& err)
 {
+    // Write a temp file, sync it and rename it over p. Writing p in place lost
+    // the previous store when the write failed (a full disk fails only the
+    // flush at close), and the caller was told it was saved.
     fs::create_directories(p.parent_path());
-    std::ofstream out(p, std::ios::trunc);
-    if (!out) {
+    const fs::path tmp = p + ".tmp";
+    const std::string text = o.write() + "\n";
+    FILE* file = fsbridge::fopen(tmp, "wb");
+    if (!file) {
         err = "write " + fs::PathToString(p);
         return false;
     }
-    out << o.write() << "\n";
+    const bool written{fwrite(text.data(), 1, text.size(), file) == text.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{fclose(file) == 0};
+    if (!committed || !closed || !RenameOver(tmp, p)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        err = "write " + fs::PathToString(p);
+        return false;
+    }
     return true;
 }
 
@@ -1090,8 +1105,10 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         return false;
     };
     auto ok = [&]() {
+        // Report a failed save. Remember the result only once it is saved, so
+        // a retry with the same request saves again.
+        if (!PersistLocked(err)) return fail("IO", err);
         Remember(method, idem, result);
-        PersistLocked(err);
         return true;
     };
 
