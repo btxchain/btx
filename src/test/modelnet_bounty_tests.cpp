@@ -30,10 +30,15 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <csignal>
 #include <fstream>
 #include <limits>
 #include <thread>
 #include <vector>
+
+#ifndef WIN32
+#include <sys/resource.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_bounty_tests, BasicTestingSetup)
 
@@ -1644,5 +1649,61 @@ BOOST_AUTO_TEST_CASE(helper_observebountychain_reorg_recovery_unsigned)
         AssertNotConsensusUnsigned(result);
     }
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(bounty_store_keeps_its_state_when_a_save_is_cut_short)
+{
+    // bounty-store.json holds every draft, bounty, round, award and mandate of
+    // the bounty plane. A save that fails only at close (a full disk) must not
+    // report success and must not cut the previous store short. RLIMIT_FSIZE
+    // stands in for the full disk: it fails every write past the limit.
+    const fs::path dir = m_path_root / "bounty-store-write";
+    fs::create_directories(dir);
+    const auto with_title = [](const UniValue& terms, const std::string& title) {
+        UniValue out(UniValue::VOBJ);
+        for (const std::string& key : terms.getKeys()) {
+            out.pushKV(key, key == "title" ? UniValue{title} : terms[key]);
+        }
+        return out;
+    };
+    std::string err;
+    std::string code;
+    UniValue result;
+    std::string first_id;
+    {
+        modelnet::BountyStore store;
+        store.Bind(dir, ZeroNet());
+        UniValue first(UniValue::VARR);
+        first.push_back(with_title(DefaultTerms(ZeroNet()), "first draft"));
+        BOOST_REQUIRE(store.Dispatch("createbountydraft", first, result, code, err));
+        first_id = result["draft_id"].get_str();
+        BOOST_REQUIRE_GT(fs::file_size(dir / "bounty-store.json"), 1024U);
+
+        UniValue second(UniValue::VARR);
+        second.push_back(with_title(DefaultTerms(ZeroNet()), "second draft"));
+        struct rlimit old_limit {};
+        BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+        struct rlimit cut{old_limit};
+        cut.rlim_cur = 64;
+        const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &cut) == 0);
+        code.clear();
+        const bool saved{store.Dispatch("createbountydraft", second, result, code, err)};
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+        std::signal(SIGXFSZ, old_handler);
+        BOOST_CHECK_MESSAGE(!saved, "createbountydraft reported success although bounty-store.json was not written");
+        BOOST_CHECK_EQUAL(code, "IO");
+        BOOST_CHECK(!fs::exists(dir / "bounty-store.json.tmp"));
+    }
+
+    // The store on disk still holds the first draft.
+    modelnet::BountyStore reloaded;
+    reloaded.Bind(dir, ZeroNet());
+    UniValue get(UniValue::VARR);
+    get.push_back(first_id);
+    BOOST_CHECK_MESSAGE(reloaded.Dispatch("getbountydraft", get, result, code, err),
+                        "the first draft was lost from bounty-store.json: " + err);
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()
