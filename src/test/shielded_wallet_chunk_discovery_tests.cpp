@@ -952,6 +952,108 @@ BOOST_AUTO_TEST_CASE(locked_scan_owned_note_rehydrates_to_spendable_on_unlock)
     }
 }
 
+BOOST_AUTO_TEST_CASE(wallet_lock_wipes_shielded_spending_keys_until_unlock)
+{
+    const mlkem::KeyPair view_key = BuildKeyPair("BTX_ShieldedV2_ChunkScan_LockViewOnly", 1);
+    const uint256 view_pk_hash = DeriveUint256("BTX_ShieldedV2_ChunkScan_LockViewOnlyPkHash", 1);
+    wallet::ShieldedAddress second_addr;
+    int total_keys{0};
+    int spend_keys{0};
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        second_addr = shielded_wallet->GenerateNewAddress();
+        BOOST_REQUIRE(shielded_wallet->ImportViewingKey(
+            std::vector<unsigned char>(view_key.sk.begin(), view_key.sk.end()),
+            std::vector<unsigned char>(view_key.pk.begin(), view_key.pk.end()),
+            view_pk_hash));
+        // The fixture's first GenerateNewAddress() also derives the gap-limit
+        // keysets, so count against this report, not a fixed number.
+        const auto report = shielded_wallet->VerifyKeyIntegrity();
+        total_keys = report.total_keys;
+        spend_keys = report.spending_keys_loaded;
+        BOOST_REQUIRE_GE(spend_keys, 2);
+        BOOST_CHECK_EQUAL(total_keys, spend_keys + 1);
+        BOOST_CHECK_EQUAL(report.viewing_keys_loaded, total_keys);
+        BOOST_CHECK_EQUAL(report.spending_keys_missing, 0);
+    }
+
+    const CAmount value = 37 * COIN / 100;
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(
+        BuildMinimalV2SendTransaction(owned_addr.pk_hash, owned_kem_pk, value, 0xf7)));
+
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        BOOST_REQUIRE(wallet.Lock());
+        {
+            LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+            const auto report = shielded_wallet->VerifyKeyIntegrity();
+            BOOST_CHECK_EQUAL(report.total_keys, total_keys);
+            BOOST_CHECK_EQUAL(report.viewing_keys_loaded, total_keys);
+            BOOST_CHECK_EQUAL(report.spending_keys_loaded, 0);
+            BOOST_CHECK_EQUAL(report.spending_keys_missing, spend_keys);
+            BOOST_CHECK(!report.master_seed_available);
+            // The spend authority is still known, so both addresses stay ismine.
+            BOOST_CHECK(shielded_wallet->HaveSpendingKey(owned_addr));
+            BOOST_CHECK(shielded_wallet->HaveSpendingKey(second_addr));
+            if (cycle == 0) {
+                // The viewing keys still find a note received while locked.
+                shielded_wallet->ScanBlock(block, /*height=*/1);
+                const auto notes = shielded_wallet->GetUnspentNotes(/*min_depth=*/0);
+                BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+                BOOST_CHECK_EQUAL(notes.front().note.value, value);
+            }
+        }
+
+        BOOST_REQUIRE(wallet.Unlock(passphrase));
+        {
+            LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+            const auto report = shielded_wallet->VerifyKeyIntegrity();
+            BOOST_CHECK_EQUAL(report.spending_keys_loaded, spend_keys);
+            BOOST_CHECK_EQUAL(report.spending_keys_missing, 0);
+            // No rebuild from the active chain: the note scanned above survives
+            // and is spendable again.
+            BOOST_REQUIRE_EQUAL(shielded_wallet->GetSpendableNotes(/*min_depth=*/0).size(), 1U);
+            BOOST_CHECK_EQUAL(shielded_wallet->GetShieldedBalance(/*min_depth=*/0), value);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(locked_wallet_cannot_sign_recovery_exit_until_unlock)
+{
+    const CAmount value = 3 * COIN;
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(
+        BuildMinimalV2SendTransaction(owned_addr.pk_hash, owned_kem_pk, value, 0x1a)));
+    wallet::ShieldedCoin coin;
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        shielded_wallet->ScanBlock(block, /*height=*/1);
+        const auto notes = shielded_wallet->GetSpendableNotes(/*min_depth=*/0);
+        BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+        coin = notes.front();
+    }
+    const CTxDestination dest = PKHash(coinbaseKey.GetPubKey());
+    const CAmount fee = shielded::SHIELDED_PRIVACY_FEE_QUANTUM;
+    const std::string missing_key_error{"missing spending key for stranded note"};
+
+    BOOST_REQUIRE(wallet.Lock());
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        std::string error;
+        const auto mtx = shielded_wallet->BuildRecoveryExitTransaction(coin, dest, fee, &error);
+        BOOST_CHECK_MESSAGE(!mtx.has_value(), "a locked wallet signed a recovery exit claim");
+        BOOST_CHECK_EQUAL(error, missing_key_error);
+    }
+
+    BOOST_REQUIRE(wallet.Unlock(passphrase));
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        std::string error;
+        const auto mtx = shielded_wallet->BuildRecoveryExitTransaction(coin, dest, fee, &error);
+        BOOST_CHECK_MESSAGE(mtx.has_value(), error);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(unreadable_encrypted_shielded_state_cache_is_rebuilt_on_unlock)
 {
     const std::vector<unsigned char> truncated_state{0x04};
