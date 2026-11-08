@@ -288,11 +288,18 @@ def wrapper_payload(binary_name: str, platform_id: str) -> str | None:
         # (then readelf -V, then a grep of the ELF) against getconf /
         # libstdc++ version nodes. BTX_GLIBC_PREFIX skips the host check and
         # execs through a private loader (unprivileged dpkg-deb -x prefix).
-        return (
-            LINUX_WRAPPER.replace("@BINARY@", binary_name).replace(
-                "@EXTRA_HINT@", extra_hint
-            )
-        )
+        payload = LINUX_WRAPPER.replace("@BINARY@", binary_name).replace("@EXTRA_HINT@", extra_hint)
+        if binary_name == "btx-qt":
+            # Keep Qt's build-time libraries out of Atlas and the node's path.
+            payload = payload.replace(
+                'if [ -e "$LIB_DIR/libssl.so.3" ]; then\n'
+                '  LD_LIBRARY_PATH="$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+                '  export LD_LIBRARY_PATH\nfi',
+                'LD_LIBRARY_PATH="$SELF_DIR/../lib/qt-private:$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+                'export LD_LIBRARY_PATH',
+            ).replace('PLUGIN_DIR="$SELF_DIR/../lib/qt6/plugins"',
+                      'PLUGIN_DIR="$SELF_DIR/../lib/qt-private/qt6/plugins"')
+        return payload
     if platform_id.startswith("macos-"):
         return f"""#!/bin/sh
 set -eu
@@ -529,6 +536,13 @@ def _load_qt_bundle():
     return module
 
 
+def set_linux_guard_runpath(path: Path) -> None:
+    """The supervisor executes this ELF directly, without the bin/ wrapper."""
+    bundle = _load_qt_bundle()
+    if bundle._needed(path):
+        bundle._set_rpath(path, "$ORIGIN/../lib")
+
+
 def stage_release_tree(
     *,
     version: str,
@@ -614,6 +628,9 @@ def stage_release_tree(
         real_destination.chmod(0o755)
         included.append(str(real_destination.relative_to(release_root)))
         if platform_id.startswith("linux-") and dest_name == "btx-guardd":
+            # Patch before linking: an ELF editor may replace the inode.
+            # Both regular names must resolve the packaged libraries directly.
+            set_linux_guard_runpath(real_destination)
             # The guard supervisor requires a regular sibling of btxd.real.
             # A hard link preserves that rule without another binary payload.
             sibling = libexec_dir / "btx-guardd"
@@ -625,7 +642,11 @@ def stage_release_tree(
         destination.chmod(0o755)
         included.append(str(destination.relative_to(release_root)))
         if dest_name.startswith("btx-qt") and platform_id.startswith("linux-"):
-            _load_qt_bundle().bundle_linux_qt(real_destination, release_root / "lib")
+            _load_qt_bundle().bundle_linux_qt(
+                real_destination, release_root / "lib" / "qt-private",
+                shared_roots=[path for path, name in binary_pairs
+                              if not name.startswith(("btx-qt", "btx-atlas"))],
+            )
 
     if "cuda" in platform_id:
         # libcublasLt and toolkit siblings live next to btxd.real ($ORIGIN).

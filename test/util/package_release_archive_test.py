@@ -7,12 +7,14 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -56,6 +58,8 @@ class PackageReleaseArchiveTest(unittest.TestCase):
         self.module.verify_shipped_cli = lambda path: None
         self.module.verify_shipped_macos_cli = lambda path: None
         self.module.verify_shipped_helper = lambda path: None
+        # Text fixtures do not exercise ELF editing; native loader coverage below does.
+        self.module.set_linux_guard_runpath = lambda path: None
 
     def test_linux_archive_includes_binaries_and_helpers(self):
         self._stub_ship_gate()
@@ -188,6 +192,83 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                     os.environ.pop("SOURCE_DATE_EPOCH", None)
                 else:
                     os.environ["SOURCE_DATE_EPOCH"] = original_epoch
+
+    def test_qt_only_wrapper_uses_private_libraries(self):
+        qt = self.module.wrapper_payload("btx-qt", "linux-x86_64")
+        self.assertIn('LD_LIBRARY_PATH="$SELF_DIR/../lib/qt-private:$LIB_DIR', qt)
+        self.assertIn('PLUGIN_DIR="$SELF_DIR/../lib/qt-private/qt6/plugins"', qt)
+        for name in ("btxd", "btx-atlas", "btx-guardd"):
+            self.assertNotIn("qt-private", self.module.wrapper_payload(name, "linux-x86_64"))
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc") and shutil.which("patchelf"),
+                         "native Linux ELF tools required")
+    def test_direct_guard_and_qt_keep_shared_and_private_dependencies(self):
+        setter = getattr(self.module, "set_linux_guard_runpath", None)
+        self._stub_ship_gate()
+        if setter is not None:
+            self.module.set_linux_guard_runpath = setter
+        bundle_path = SCRIPT_PATH.with_name("bundle_qt_gui.py")
+        spec = importlib.util.spec_from_file_location("native_bundle_fixture", bundle_path)
+        bundle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bundle)
+        self.module._load_qt_bundle = lambda: bundle
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source_root = self._build_source_root(root)
+            btxd, cli = self._write_binaries(root)
+            buildlib = root / "buildlib"; buildlib.mkdir()
+            plugins = root / "plugins"; (plugins / "platforms").mkdir(parents=True)
+            def library(name, code, deps=()):
+                c = root / (name + ".c"); c.write_text(code)
+                target = buildlib / name
+                subprocess.run(["cc", "-shared", "-fPIC", str(c), "-L" + str(buildlib),
+                                *["-l:" + d for d in deps], "-Wl,-soname," + name,
+                                "-Wl,-rpath,$ORIGIN", "-o", str(target)], check=True)
+                return target
+            library("libbtxsharedchild.so.1", "int child(void) { return 17; }\n")
+            library("libbtxshared.so.1", "extern int child(void); int shared(void) { return child(); }\n",
+                    ["libbtxsharedchild.so.1"])
+            library("libbtxprivate.so.1", "int private_value(void) { return 4; }\n")
+            qt = library("libQt6Core.so.6", "extern int shared(void), private_value(void); int qt_value(void) { return shared()+private_value(); }\n",
+                         ["libbtxshared.so.1", "libbtxprivate.so.1"])
+            plugin = library("libqxcb.so", "extern int qt_value(void); int plugin(void) { return qt_value(); }\n", [qt.name])
+            shutil.copy2(plugin, plugins / "platforms/libqxcb.so")
+            subprocess.run(["patchelf", "--set-rpath", str(buildlib), str(plugins / "platforms/libqxcb.so")], check=True)
+            bundle._qt_plugins_root = lambda: plugins
+            for name, code, dep in (("btx-guardd", "extern int shared(void); int main(void) { return shared()==17 ? 0 : 2; }\n", "libbtxshared.so.1"),
+                                    ("btx-qt", "extern int qt_value(void); int main(void) { return qt_value()==21 ? 0 : 3; }\n", qt.name)):
+                c = root / (name + ".c");c.write_text(code)
+                subprocess.run(["cc", str(c), "-L" + str(buildlib), "-l:" + dep,
+                                "-Wl,-rpath," + (str(buildlib) if name == "btx-qt" else "$ORIGIN/buildlib"), "-Wl,-rpath-link," + str(buildlib),
+                                "-o", str(root / name)], check=True)
+            # Text daemon/CLI fixtures have no ELF dependencies. Do not fake the Qt/guard graphs.
+            actual_ldd, actual_needed = bundle._ldd_map, getattr(bundle, "_needed", lambda path: set())
+            text_fixtures = (btxd, cli, root / "btx-util")
+            bundle._needed = lambda path: set() if path in text_fixtures else actual_needed(path)
+            bundle._ldd_map = lambda path, *args: {} if path in text_fixtures else actual_ldd(path, *args)
+            staged, _, _ = self.module.stage_release_tree(
+                version="29.2", platform_id="linux-x86_64", btxd_path=btxd, btx_cli_path=cli,
+                btx_util_path=None, matmul_metallib_path=None, oracle_metallib_path=None,
+                metal_lib_dir=None, source_root=source_root, temp_root=root / "staged")
+            guard = staged / "libexec/btx-guardd"
+            self.assertTrue(guard.samefile(staged / "libexec/btx-guardd.real"))
+            for name in ("libbtxshared.so.1", "libbtxsharedchild.so.1"):
+                self.assertTrue((staged / "lib" / name).is_file())
+            clean_env = {k: v for k, v in os.environ.items() if not k.startswith("LD_")}
+            for binary in (guard, staged / "libexec/btx-qt.real"):
+                result = subprocess.run([str(binary)], env=clean_env, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+            self.assertTrue((staged / "lib/qt-private/libbtxprivate.so.1").is_file())
+            self.assertFalse((staged / "lib/libbtxprivate.so.1").exists())
+            archive = root / "guard.tar.gz"
+            self.module.write_tar_gz(archive, staged)
+            with tarfile.open(archive) as tar:
+                options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+                tar.extractall(root / "restored", **options)
+            restored = root / "restored/btx-29.2/libexec/btx-guardd"
+            self.assertFalse(restored.is_symlink())
+            self.assertTrue(restored.samefile(restored.with_name("btx-guardd.real")))
+            self.assertEqual(subprocess.run([str(restored)], env=clean_env, capture_output=True, timeout=5).returncode, 0)
 
     def test_require_model_helpers_rejects_archive_without_them(self):
         self._stub_ship_gate()
@@ -545,6 +626,84 @@ class PackageReleaseArchiveTest(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn("loader-ok", proc.stdout)
+
+
+def load_bundle_module():
+    spec = importlib.util.spec_from_file_location("bundle_qt_gui", ROOT / "scripts/release/bundle_qt_gui.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+class BundleQtGuiTest(unittest.TestCase):
+    def setUp(self):
+        self.module = load_bundle_module()
+
+    def test_direct_private_dependency_survives_host_branch_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            names = ("btx-qt", "libQt6Core.so.6", "libglib-2.0.so.0", "libshared.so.1", "libhost_only.so.1")
+            paths = {n: root / n for n in names}
+            for p in paths.values(): p.write_bytes(b"fixture")
+            needed = {"btx-qt": ["libQt6Core.so.6", "libshared.so.1"],
+                      "libQt6Core.so.6": ["libglib-2.0.so.0", "libshared.so.1"],
+                      "libshared.so.1": [], "libglib-2.0.so.0": ["libhost_only.so.1"],
+                      "libhost_only.so.1": []}
+            # Every ldd response is flattened, including a dependency owned only by host GLib.
+            flat = "\n".join(f"{n} => {p} (0x1)" for n, p in paths.items() if n != "btx-qt")
+            def print_needed(path): return set(needed[path.name])
+            with mock.patch.object(self.module.shutil, "which", return_value="/tool/patchelf"), \
+                 mock.patch.object(self.module, "_needed", side_effect=print_needed, create=True), \
+                 mock.patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, flat, "")):
+                collected = self.module._collect_private_libs([paths["btx-qt"]])
+            self.assertEqual(set(collected), {"libQt6Core.so.6", "libshared.so.1"})
+
+    def test_missing_private_dependency_is_still_fatal(self):
+        with mock.patch.object(self.module.shutil, "which", return_value="/tool/patchelf"), \
+             mock.patch.object(self.module, "_needed", return_value={"libprivate.so.1"}, create=True), \
+             mock.patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "libprivate.so.1 => not found\n", "")):
+            with self.assertRaisesRegex(RuntimeError, "missing libprivate.so.1"):
+                self.module._ldd_map(pathlib.Path("fixture"))
+
+    def test_static_root_does_not_require_dynamic_libraries(self):
+        with mock.patch.object(self.module, "_needed", return_value=set(), create=True), \
+             mock.patch.object(self.module.subprocess, "run") as ldd:
+            self.assertEqual(self.module._ldd_map(pathlib.Path("static-fixture")), {})
+        ldd.assert_not_called()
+
+    def test_shared_query_does_not_acquire_unrelated_dependencies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = pathlib.Path(tmp) / "libshared.so.1"
+            shared.write_bytes(b"fixture")
+            flat = f"libshared.so.1 => {shared} (0x1)\nlibunrelated.so.1 => not found\n"
+            with mock.patch.object(self.module, "_needed", return_value={"libshared.so.1", "libunrelated.so.1"}, create=True), \
+                 mock.patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, flat, "unrelated dependency unavailable")):
+                self.assertEqual(self.module._ldd_map(pathlib.Path("fixture"), {"libshared.so.1"}), {"libshared.so.1": shared})
+                with self.assertRaises(RuntimeError):
+                    self.module._ldd_map(pathlib.Path("fixture"))
+
+    def test_host_desktop_services_are_not_copied(self):
+        for name in ("libglib-2.0.so.0", "libgobject-2.0.so.0", "libgio-2.0.so.0", "libgmodule-2.0.so.0", "libgthread-2.0.so.0", "libdbus-1.so.3"):
+            with self.subTest(name=name): self.assertTrue(self.module._host_soname(name))
+        self.assertFalse(self.module._host_soname("libQt6Core.so.6"))
+
+    def test_private_qt_paths_are_consistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            binary = root / "libexec/btx-qt.real";binary.parent.mkdir();binary.write_bytes(b"qt")
+            plugins = root / "builder/plugins"; (plugins / "platforms").mkdir(parents=True)
+            (plugins / "platforms/libqxcb.so").write_bytes(b"plugin")
+            library = root / "builder/libQt6Core.so.6";library.write_bytes(b"lib")
+            with mock.patch.object(self.module, "_ldd_map", return_value={library.name: library}), \
+                 mock.patch.object(self.module, "_qt_plugins_root", return_value=plugins), \
+                 mock.patch.object(self.module, "_collect_private_libs", return_value={library.name: library}), \
+                 mock.patch.object(self.module.subprocess, "check_output", return_value=""), \
+                 mock.patch.object(self.module, "_set_rpath") as rpath:
+                self.module.bundle_linux_qt(binary, root / "lib/qt-private")
+            rpath.assert_any_call(binary, "$ORIGIN/../lib/qt-private:$ORIGIN/../lib")
+            config = (binary.parent / "qt.conf").read_text()
+            self.assertIn("Plugins = lib/qt-private/qt6/plugins", config)
+            self.assertIn("Libraries = lib/qt-private", config)
+            self.assertTrue((root / "lib/qt-private/qt6/plugins/platforms/libqxcb.so").is_file())
 
 
 if __name__ == "__main__":
