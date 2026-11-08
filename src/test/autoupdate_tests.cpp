@@ -717,6 +717,46 @@ BOOST_AUTO_TEST_CASE(real_signature_path_accepts_supported_encodings_and_rejects
     }
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(installer_cut_short_at_close_is_not_staged)
+{
+    // LaunchInstaller runs the staged file as it is on disk. A full disk can
+    // fail only the flush at close, so the staging must not report a cut-off
+    // script as staged. RLIMIT_FSIZE lets only the first line reach the file.
+    const std::string first_line{"#!/bin/sh\necho one\n"};
+    const std::string text{first_line + "echo two\n"};
+    const std::vector<unsigned char> script{text.begin(), text.end()};
+    const fs::path datadir{m_path_root / "stage"};
+    const fs::path update_dir{datadir / "autoupdate"};
+    const auto read_file = [](const fs::path& path) {
+        std::ifstream in{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    };
+
+    struct rlimit old_limit {};
+    BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit cut{old_limit};
+    cut.rlim_cur = first_line.size();
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &cut) == 0);
+    const auto staged{node::StageAutoUpdateInstallerScript(datadir, "99.0.0", script)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    if (staged) {
+        BOOST_CHECK_EQUAL(read_file(*staged), text);
+    }
+    BOOST_CHECK(!staged);
+    BOOST_CHECK(fs::is_empty(update_dir));
+
+    // With room again the same script is staged in full and executable.
+    const auto later{node::StageAutoUpdateInstallerScript(datadir, "99.0.0", script)};
+    BOOST_REQUIRE(later);
+    BOOST_CHECK_EQUAL(read_file(*later), text);
+    BOOST_CHECK((fs::status(*later).permissions() & fs::perms::owner_exec) != fs::perms::none);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(pq_ml_dsa_signature_path_launches_and_rejects_tamper)
 {
     CPQKey signing_key;
