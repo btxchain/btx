@@ -15,6 +15,7 @@ target_sources(test_btx
     init_tests.cpp
     ismine_tests.cpp
     labels_tests.cpp
+    wallet_labels_export_tests.cpp
     bridge_wallet_tests.cpp
     psbt_wallet_tests.cpp
     pq_multisig_wallet_tests.cpp
