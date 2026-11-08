@@ -78,6 +78,17 @@ public:
             m_fp = nullptr;
         }
     }
+
+    //! Flush and close the file. False if a write, the flush or the close
+    //! failed: a buffered write can fail only there (a full disk).
+    [[nodiscard]] bool finish()
+    {
+        if (!m_fp) return false;
+        const bool flushed{std::fflush(m_fp) == 0};
+        const bool closed{std::fclose(m_fp) == 0};
+        m_fp = nullptr;
+        return flushed && closed;
+    }
 };
 
 void SetOwnerOnlyFilePermissions(const fs::path& path)
@@ -183,10 +194,11 @@ RPCHelpMan exportlabels()
         ++written;
     });
 
-    if (!file.is_open()) {
+    if (!file.finish()) {
+        std::error_code ec;
+        fs::remove(filepath, ec);
         throw JSONRPCError(RPC_WALLET_ERROR, "Failed to write labels export file");
     }
-    file.close();
     SetOwnerOnlyFilePermissions(filepath);
 
     UniValue reply(UniValue::VOBJ);
