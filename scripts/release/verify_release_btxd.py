@@ -980,6 +980,36 @@ def linux_elf_problems(root: Path, files: list[Path], floor: dict[str, str]) -> 
     return problems
 
 
+QT_SONAME_RE = re.compile(r"^libQt([0-9]+)[A-Za-z]")
+
+
+def qt_major_problems(root: Path, files: list[Path]) -> list[str]:
+    """One Qt major per archive.
+
+    0.34.16 shipped a Qt 5 btx-qt.real whose only platform plugin was the Qt 6
+    lib/qt6/plugins/platforms/libqxcb.so (bundle_qt_gui.py took whatever
+    qtpaths6 found), so the GUI had no platform plugin it could load.
+    """
+    by_major: dict[str, list[str]] = {}
+    for path in files:
+        try:
+            needed = elf_dynamic_info(path).needed
+        except (VerifyError, struct.error):
+            continue  # linux_elf_problems reports an unreadable ELF
+        for major in {m.group(1) for m in map(QT_SONAME_RE.match, needed) if m}:
+            by_major.setdefault(major, []).append(str(path.relative_to(root)))
+    if len(by_major) < 2:
+        return []
+    parts = []
+    for major, names in sorted(by_major.items()):
+        names.sort()
+        shown = [n for n in names if "/libexec/" in n or "/bin/" in n or "/plugins/" in n] or names[:2]
+        rest = len(names) - len(shown)
+        parts.append(f"Qt {major} in {', '.join(shown)}" + (f" (+{rest} libraries)" if rest else ""))
+    return [f"Qt {' and Qt '.join(sorted(by_major))} in one archive: " + "; ".join(parts)
+            + ". A GUI cannot load a platform plugin built for another Qt major."]
+
+
 def pe_imports(path: Path) -> list[str]:
     """Names in the PE import directory (what the loader must find at start)."""
     data = path.read_bytes()
@@ -1146,6 +1176,7 @@ def archive_content_problems(root: Path, *, floor: dict[str, str],
         elif len(prefix) >= 4 and struct.unpack_from("<I", prefix, 0)[0] == MACHO_MAGIC_64LE:
             machos.append(path)
     problems += linux_elf_problems(root, elves, floor)
+    problems += qt_major_problems(root, elves)
     problems += pe_problems(root, pes)
     for path in machos:  # btx-qt, btx-util and the helpers link the PQ code too
         try:

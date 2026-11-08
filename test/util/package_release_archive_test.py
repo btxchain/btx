@@ -542,6 +542,67 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                     ]
                 )
 
+    def _qt_bundle_fixture(self, root: pathlib.Path, binary_qt: str, plugin_qt: str):
+        # 0.34.16 shipped a Qt 5 btx-qt.real next to the Qt 6 xcb plugin that
+        # qtpaths6 found. ldd, qtpaths and patchelf are replaced so this runs
+        # on any host; only the Qt majors in the two ldd maps differ per test.
+        bundle = self.module._load_qt_bundle()
+        host = root / "host-libs"
+        host.mkdir()
+
+        def lib(name: str) -> pathlib.Path:
+            path = host / name
+            path.write_bytes(b"\x7fELF " + name.encode())
+            return path
+
+        binary = root / "libexec" / "btx-qt.real"
+        binary.parent.mkdir()
+        binary.write_bytes(b"\x7fELF btx-qt")
+        plugins = root / "qt-plugins"
+        (plugins / "platforms").mkdir(parents=True)
+        plugin = plugins / "platforms" / "libqxcb.so"
+        plugin.write_bytes(b"\x7fELF qxcb")
+        maps = {
+            binary: {
+                f"libQt{binary_qt}Core.so.{binary_qt}": lib(f"libQt{binary_qt}Core.so.{binary_qt}"),
+                f"libQt{binary_qt}Gui.so.{binary_qt}": lib(f"libQt{binary_qt}Gui.so.{binary_qt}"),
+            },
+            plugin: {f"libQt{plugin_qt}XcbQpa.so.{plugin_qt}": lib(f"libQt{plugin_qt}XcbQpa.so.{plugin_qt}")},
+        }
+        bundle._ldd_map = lambda path, required=None: dict(maps.get(pathlib.Path(path), {}))
+        bundle._qt_plugins_root = lambda: plugins
+        bundle._set_rpath = lambda path, rpath: None
+        print_rpath = mock.patch.object(bundle.subprocess, "check_output", return_value="")
+        print_rpath.start()
+        self.addCleanup(print_rpath.stop)
+        return bundle, binary, root / "lib" / "qt-private"
+
+    def test_linux_qt_bundle_refuses_qt5_gui(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            bundle, binary, lib_dir = self._qt_bundle_fixture(root, "5", "6")
+            with self.assertRaisesRegex(RuntimeError, "WITH_QT_VERSION=6"):
+                bundle.bundle_linux_qt(binary, lib_dir)
+            self.assertFalse((binary.parent / "qt.conf").exists())
+
+    def test_linux_qt_bundle_refuses_plugin_from_other_qt_major(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            bundle, binary, lib_dir = self._qt_bundle_fixture(root, "6", "5")
+            with self.assertRaisesRegex(RuntimeError, "Qt 5"):
+                bundle.bundle_linux_qt(binary, lib_dir)
+            self.assertFalse((binary.parent / "qt.conf").exists())
+
+    def test_linux_qt_bundle_ships_matching_qt6_plugin(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            bundle, binary, lib_dir = self._qt_bundle_fixture(root, "6", "6")
+            bundle.bundle_linux_qt(binary, lib_dir)
+            self.assertTrue((lib_dir / "libQt6Core.so.6").is_file())
+            self.assertTrue((lib_dir / "libQt6XcbQpa.so.6").is_file())
+            self.assertTrue((lib_dir / "qt6" / "plugins" / "platforms" / "libqxcb.so").is_file())
+            self.assertIn("Plugins = lib/qt-private/qt6/plugins", (binary.parent / "qt.conf").read_text(encoding="utf-8"))
+
     def _stage_linux_wrapper(self, root: pathlib.Path, *, glibc_sym: str = "GLIBC_2.99") -> pathlib.Path:
         bindir = root / "bin"
         libexec = root / "libexec"

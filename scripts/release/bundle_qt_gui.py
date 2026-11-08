@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 from functools import lru_cache
 import shutil
 import subprocess
@@ -122,6 +123,14 @@ def _ldd_map(path: Path, required: set[str] | None = None) -> dict[str, Path]:
     return found
 
 
+_QT_SONAME_RE = re.compile(r"^libQt(\d+)")
+
+
+def _qt_majors(linked: dict[str, Path]) -> set[str]:
+    """Qt major versions an ldd map names (libQt5Core.so.5 -> "5")."""
+    return {match.group(1) for match in map(_QT_SONAME_RE.match, linked) if match}
+
+
 def _collect_private_libs(roots: list[Path]) -> dict[str, Path]:
     pending = list(roots)
     collected: dict[str, Path] = {}
@@ -172,6 +181,15 @@ def bundle_linux_qt(qt_binary: Path, lib_dir: Path, shared_roots: list[Path] | N
             f"{qt_binary} is not linked to Qt. Release archives must ship a GUI "
             "built with -DBUILD_GUI=ON."
         )
+    # The plugin directory, qt.conf and the launch wrapper are Qt 6 only.
+    # CMake defaults WITH_QT_VERSION to 5 (doc/build-unix.md); a Qt 5 btx-qt
+    # next to a Qt 6 libqxcb.so cannot load its platform plugin (0.34.16).
+    binary_majors = _qt_majors(linked)
+    if binary_majors != {"6"}:
+        raise RuntimeError(
+            f"{qt_binary} links Qt {', '.join(sorted(binary_majors))}; the Linux archive "
+            "ships the Qt 6 platform plugin. Configure with -DBUILD_GUI=ON -DWITH_QT_VERSION=6."
+        )
     plugin_roots: list[Path] = []
     plugins = _qt_plugins_root()
     platform = plugins / "platforms" / "libqxcb.so" if plugins is not None else None
@@ -179,6 +197,12 @@ def bundle_linux_qt(qt_binary: Path, lib_dir: Path, shared_roots: list[Path] | N
         raise RuntimeError(
             "Qt platform plugin libqxcb.so was not found. Install qt6-base and "
             "ensure qtpaths6 -query QT_INSTALL_PLUGINS points at it."
+        )
+    plugin_majors = _qt_majors(_ldd_map(platform))
+    if plugin_majors != binary_majors:
+        raise RuntimeError(
+            f"{platform} links Qt {', '.join(sorted(plugin_majors)) or 'none'}, but {qt_binary} "
+            f"links Qt {', '.join(sorted(binary_majors))}. Point qtpaths6 at the Qt the GUI was built with."
         )
     plugin_roots.append(platform)
     collected = _collect_private_libs([qt_binary, *plugin_roots])
