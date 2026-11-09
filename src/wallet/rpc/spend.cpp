@@ -796,6 +796,24 @@ static std::vector<RPCArg> FundTxDoc(bool solving_data = true)
     return args;
 }
 
+/** Whether a locked wallet left coins of its own out of this coin selection.
+ *
+ *  Locking drops the PQ seeds, so a locked wallet cannot size its own P2MR
+ *  inputs: AvailableCoins() marks them unspendable and coin selection skips
+ *  them, while getbalances still counts them as trusted.
+ */
+static bool LockedWalletLeftOutOwnCoins(const CWallet& wallet, const CCoinControl& coin_control) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    if (!wallet.IsLocked()) return false;
+    // AvailableCoins() skips preselected inputs, so list them too.
+    CCoinControl all_coins{coin_control};
+    all_coins.UnSelectAll();
+    for (const COutput& coin : AvailableCoinsListUnspent(wallet, &all_coins).All()) {
+        if (!coin.spendable && (wallet.IsMine(coin.txout) & ISMINE_SPENDABLE)) return true;
+    }
+    return false;
+}
+
 CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransaction& tx, const std::vector<CRecipient>& recipients, const UniValue& options, CCoinControl& coinControl, bool override_min_fee)
 {
     // We want to make sure tx.vout is not used now that we are passing outputs as a vector of recipients.
@@ -1041,6 +1059,8 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
     LOCK(wallet.cs_wallet);
     auto txr = FundTransaction(wallet, tx, recipients, change_position, lockUnspents, coinControl);
     if (!txr) {
+        // The failure says nothing about the coins the lock hid: ask for the unlock instead.
+        if (LockedWalletLeftOutOwnCoins(wallet, coinControl)) EnsureWalletIsUnlocked(wallet);
         throw JSONRPCError(RPC_WALLET_ERROR, ErrorString(txr).original);
     }
     return *txr;
