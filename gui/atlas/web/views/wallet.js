@@ -8,11 +8,11 @@ import {loadRequests,rememberRequest,requestSeconds,qrSvg} from '../core/receive
 import {atomsPerVbyteFromKvb,feeDecimal,txSummary} from '../core/network.js';
 import {txExplorerTemplate} from '../core/qt-surface.js';
 import {createWalletDraft,coinSelectionSummary,receivingAddressArgs,historyWalk,historyActions,nextHistorySkip,coinTree,psbtWithinLimit,addressFacts,walletFacts} from '../core/wallet-qt.js';
-export function walletView(app){
+export function walletView(app,{tab}={}){
  const root=el('div',{class:'page wallet-page'},heading('Wallet','Self-custody remains in btxd. Signing and broadcasting have independent native reviews.'));
  const wallet=el('select',{'aria-label':'Select wallet'}),summary=el('div',{class:'metrics'}),content=el('div'),selected=app.state.state.wallet||'';
  root.append(el('div',{class:'row'},field('Loaded wallet',wallet),button('Create',()=>{current='Manage';show();}),button('Open',()=>operationDialog(app,'loadwallet')),button('Restore',()=>operationDialog(app,'restorewallet'))),summary);
- const tabs=['Overview','Send','Receive','History','Coins','Address book','Addresses','Sign / Verify','PSBT','Manage'];let current='Overview';
+ const tabs=['Overview','Send','Receive','History','Coins','Address book','Addresses','Sign / Verify','PSBT','Manage'];let current=tabs.includes(tab)?tab:'Overview';
  const tabBar=el('nav',{class:'tabs','aria-label':'Wallet sections'});for(const name of tabs)tabBar.append(button(name,()=>{current=name;show();},'',{dataset:{walletTab:name}}));root.append(tabBar,content);
  async function read(method,params=[]){return(await app.bridge.read(method,params,wallet.value||null)).result;}
  function denomination(v){if(v===undefined||v===null)return '—';try{return formatUnit(parseBTX(String(v),{signed:true}),app.preferences.unit);}catch{return 'Invalid native amount';}}
