@@ -196,7 +196,9 @@ public:
             const auto newline=reply.find('\n');
             if (newline!=std::string::npos) {
                 if (newline!=reply.size()-1 || reply.find('\0')!=std::string::npos) return false;
-                reply.pop_back(); return true;
+                reply.pop_back();
+                if (!reply.empty() && reply.back()=='\r') reply.pop_back();
+                return true;
             }
         }
         return false;
