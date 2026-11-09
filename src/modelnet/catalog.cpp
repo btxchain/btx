@@ -11,6 +11,7 @@
 #include <modelnet/safety.h>
 #include <modelnet/verified_manifest.h>
 #include <modelnet/hello_caps.h>
+#include <modelnet/model_nat.h>
 #include <crypto/sha384.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -24,6 +25,14 @@
 
 namespace modelnet {
 namespace {
+/** Model peers are dialed as host:port; anything else can never be reached. */
+bool DialablePeerEndpoint(const std::string& endpoint)
+{
+    std::string host;
+    uint16_t port{0};
+    return SplitListenBind(endpoint, host, port);
+}
+
 
 FileRole RoleFromRelPath(const std::string& rel, bool& skip)
 {
@@ -568,7 +577,11 @@ bool ModelCatalog::LoadLocked(std::string& err)
         return false;
     }
     if (root.exists("peers")) {
-        for (const auto& p : root["peers"].getValues()) m_peers.push_back(p.get_str());
+        for (const auto& p : root["peers"].getValues()) {
+            // Drop contacts saved before AddPeer checked them, so they do not
+            // keep taking one of the 64 slots.
+            if (DialablePeerEndpoint(p.get_str())) m_peers.push_back(p.get_str());
+        }
     }
     if (!root.exists("models")) return true;
     for (const auto& o : root["models"].getValues()) {
@@ -1266,7 +1279,9 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
 
 bool ModelCatalog::AddPeer(const std::string& endpoint)
 {
-    if (endpoint.empty()) return false;
+    // There is no RPC to remove a contact, so one that cannot be dialed would
+    // hold its slot for good.
+    if (!DialablePeerEndpoint(endpoint)) return false;
     std::lock_guard<std::mutex> lock(m_mu);
     if (std::find(m_peers.begin(), m_peers.end(), endpoint) != m_peers.end()) return true;
     if (m_peers.size() >= 64) return false;
