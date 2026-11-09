@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import types
 import unittest
 import zipfile
 from unittest import mock
@@ -29,6 +30,16 @@ def load_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def load_make_elf():
+    """The minimal ELF builder the archive gate tests already use."""
+    path = ROOT / "test" / "util" / "verify_release_btxd_test.py"
+    spec = importlib.util.spec_from_file_location("verify_release_btxd_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.make_elf
 
 
 class PackageReleaseArchiveTest(unittest.TestCase):
@@ -548,6 +559,76 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                         str(source_root),
                     ]
                 )
+
+    def _abi_floor_fixture(self, root: pathlib.Path, *, qt_glibc: str, plugin_needs=None) -> list[str]:
+        """A Linux GUI build: btxd at GLIBC_2.38, btx-qt and the Qt libraries at qt_glibc."""
+        make_elf = load_make_elf()
+        source_root = self._build_source_root(root)
+        build = root / "build"
+        build.mkdir()
+        for name in ("btxd", "btx-cli", "btx-util"):
+            (build / name).write_bytes(make_elf(["libc.so.6"], verneed={"libc.so.6": ["GLIBC_2.38"]}))
+        (build / "btx-qt").write_bytes(make_elf(["libQt6Gui.so.6", "libc.so.6"], runpath="$ORIGIN/../lib/qt-private",
+                                                verneed={"libc.so.6": [qt_glibc]}))
+
+        def bundle_linux_qt(binary, lib_dir, shared_roots=None):
+            plugin = lib_dir / "qt6" / "plugins" / "platforms" / "libqxcb.so"
+            plugin.parent.mkdir(parents=True)
+            for name in ("libQt6Gui.so.6", "libgnutls.so.30"):
+                (lib_dir / name).write_bytes(make_elf(["libc.so.6"], verneed={"libc.so.6": [qt_glibc]},
+                                                      executable=False))
+            plugin.write_bytes(make_elf(["libstdc++.so.6", "libc.so.6"], executable=False,
+                                        verneed=plugin_needs or {"libc.so.6": ["GLIBC_2.38"]}))
+
+        self._stub_ship_gate()
+        self.module._load_qt_bundle = lambda: types.SimpleNamespace(bundle_linux_qt=bundle_linux_qt)
+        # objdump -T lists no dynamic symbols for these fixtures. Without
+        # binutils the reader takes the version needs from the ELF itself.
+        real_run = subprocess.run
+
+        def no_binutils(command, *args, **kwargs):
+            if command[0] in ("objdump", "readelf"):
+                raise FileNotFoundError(command[0])
+            return real_run(command, *args, **kwargs)
+
+        patcher = mock.patch.object(subprocess, "run", side_effect=no_binutils)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return ["--output-dir", str(root / "out"), "--version", "0.34.16", "--platform-id", "linux-x86_64",
+                "--btxd", str(build / "btxd"), "--btx-cli", str(build / "btx-cli"),
+                "--source-root", str(source_root)]
+
+    def test_packaging_refuses_any_elf_above_the_glibc_floor(self):
+        # The 0.34.16 shape: packing read btxd alone, which needs GLIBC_2.38.
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(os.environ):
+            os.environ.pop("BTX_RELEASE_GLIBC_CEILING", None)
+            root = pathlib.Path(tmpdir)
+            argv = self._abi_floor_fixture(root, qt_glibc="GLIBC_2.43")
+            with self.assertRaises(RuntimeError) as caught:
+                self.module.main(argv)
+            text = str(caught.exception)
+            for name in ("libexec/btx-qt.real", "lib/qt-private/libQt6Gui.so.6", "lib/qt-private/libgnutls.so.30"):
+                self.assertIn(f"{name} needs GLIBC_2.43", text)
+            self.assertNotIn("btxd.real", text)
+            self.assertNotIn("libqxcb", text)
+            self.assertEqual(list((root / "out").iterdir()), [])
+            # The ceiling has one source: raising it packs the same tree.
+            os.environ["BTX_RELEASE_GLIBC_CEILING"] = "2.43"
+            self.assertEqual(self.module.main(argv), 0)
+            self.assertTrue((root / "out" / "btx-0.34.16-x86_64-linux-gnu.tar.gz").is_file())
+
+    def test_packaging_refuses_a_host_glibcxx_need_above_the_floor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            needs = {"libstdc++.so.6": ["GLIBCXX_3.4.33", "CXXABI_1.3.16"], "libc.so.6": ["GLIBC_2.38"]}
+            argv = self._abi_floor_fixture(root, qt_glibc="GLIBC_2.38", plugin_needs=needs)
+            with self.assertRaises(RuntimeError) as caught:
+                self.module.main(argv)
+            self.assertIn("lib/qt-private/qt6/plugins/platforms/libqxcb.so: needs "
+                          "CXXABI_1.3.16 from the host's libstdc++.so.6 (floor CXXABI_1.3.15), "
+                          "GLIBCXX_3.4.33 from the host's libstdc++.so.6 (floor GLIBCXX_3.4.32)",
+                          str(caught.exception))
+            self.assertNotIn("needs GLIBC_", str(caught.exception))
 
     def _qt_bundle_fixture(self, root: pathlib.Path, binary_qt: str, plugin_qt: str):
         # 0.34.16 shipped a Qt 5 btx-qt.real next to the Qt 6 xcb plugin that

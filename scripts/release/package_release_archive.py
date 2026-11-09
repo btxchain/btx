@@ -460,6 +460,39 @@ def verify_shipped_helper(path: Path) -> None:
         module.verify_macos_portable(path)
 
 
+def verify_staged_abi_floor(release_root: Path) -> None:
+    """Refuse to pack any ELF that needs more than the documented floor.
+
+    verify_shipped_btxd reads btxd alone and prints its version nodes. 0.34.16
+    was packed after that note said GLIBC_2.38, while libexec/btx-qt.real,
+    lib/qt-private/libQt6Gui.so.6 and lib/qt-private/libgnutls.so.30 need
+    GLIBC_2.43, so the GUI cannot start on Ubuntu 24.04 or Debian 13. Read
+    every ELF in the staged tree with the `--archive` readers: the GLIBC
+    ceiling, and the GLIBCXX/CXXABI/GCC/OPENSSL floor for what a host
+    library must provide. The floor stays in verify_release_btxd.py.
+    """
+    module = _load_verify_module()
+    elves = [path for path in sorted(release_root.rglob("*"))
+             if not path.is_symlink() and path.is_file() and module.classify(path) == "elf"]
+    if not elves:
+        return
+    problems = module.linux_elf_problems(release_root, elves, dict(module.DEFAULT_ABI_FLOOR))
+    try:
+        module.verify_glibc_ceiling(release_root)
+    except module.VerifyError as exc:
+        problems.append(str(exc))
+    if problems:
+        raise RuntimeError(
+            f"refusing to pack: {len(problems)} problem(s) in the staged archive\n  - "
+            + "\n  - ".join(problems)
+        )
+    print(
+        f"package_release_archive: read the version needs of {len(elves)} packaged ELF files; "
+        "none is above the documented floor",
+        file=sys.stderr,
+    )
+
+
 def resolve_optional_sibling_binaries(btxd_path: Path, exe_suffix: str) -> list[tuple[Path, str]]:
     found: list[tuple[Path, str]] = []
     for name in OPTIONAL_SIBLING_BINARIES:
@@ -723,6 +756,7 @@ def stage_release_tree(
         shutil.copy2(source, destination)
         included.append(str(destination.relative_to(release_root)))
 
+    verify_staged_abi_floor(release_root)
     return release_root, sorted(included), skipped_binaries
 
 
