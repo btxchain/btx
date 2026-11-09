@@ -5869,7 +5869,10 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
     };
     if (method == "setcloudstorage") {
         UniValue o = Arg0();
-        if (o.isArray() && o.size() > 0 && o[0].isObject()) o = o[0];
+        if (o.isArray() && o.size() > 0 && o[0].isObject()) {
+            UniValue first = o[0]; // copy out before o is overwritten
+            o = std::move(first);
+        }
         CloudStoreConfig cfg;
         if (!CloudConfigFromJson(o, cfg, err)) {
             err_code = "INVALID_PARAMETER";
@@ -5934,7 +5937,10 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
     }
     if (method == "removemodelstorage") {
         UniValue o = Arg0();
-        if (o.isArray() && o.size() > 0 && o[0].isObject()) o = o[0];
+        if (o.isArray() && o.size() > 0 && o[0].isObject()) {
+            UniValue first = o[0]; // copy out before o is overwritten
+            o = std::move(first);
+        }
         std::string mode = "DETACH";
         if (o.exists("mode") && o["mode"].isStr()) mode = o["mode"].get_str();
         result.pushKV("mode", mode);
@@ -6028,7 +6034,10 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
     }
     if (method == "setmodelmirror") {
         UniValue o = Arg0();
-        if (o.isArray() && o.size() > 0 && o[0].isObject()) o = o[0];
+        if (o.isArray() && o.size() > 0 && o[0].isObject()) {
+            UniValue first = o[0]; // copy out before o is overwritten
+            o = std::move(first);
+        }
         if (!o.isObject()) o.setObject();
         if (o.exists("automatic_spend_atoms") && o["automatic_spend_atoms"].getInt<int64_t>() != 0) {
             err_code = "INVALID_PARAMETER";

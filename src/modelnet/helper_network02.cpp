@@ -1033,7 +1033,10 @@ bool DispatchNetwork02RpcOnce(ModelCatalog& cat, const std::string& method, cons
                                   result["signature_cryptographic"].isStr() &&
                                   result["signature_cryptographic"].get_str() == "PASS";
             UniValue man = result.exists("bundle") ? result["bundle"] : UniValue(UniValue::VOBJ);
-            if (man.exists("manifest") && man["manifest"].isObject()) man = man["manifest"];
+            if (man.exists("manifest") && man["manifest"].isObject()) {
+                UniValue inner = man["manifest"]; // copy out before man is overwritten
+                man = std::move(inner);
+            }
             if (man.exists("model_id") && man.exists("files") && man["files"].isArray()) {
                 if (st == "UNSIGNED" || st == "NOT_EVALUATED" || !sig_pass) {
                     err_code = "UNSIGNED_PACKAGE";

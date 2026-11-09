@@ -1119,7 +1119,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "createbountydraft") {
         UniValue terms = ObjArg(params, 0);
-        if (terms.exists("terms")) terms = terms["terms"];
+        if (terms.exists("terms")) {
+            // Copy the member out first: assigning terms from its own member
+            // reads it after the assignment has freed it.
+            UniValue inner = terms["terms"];
+            terms = std::move(inner);
+        }
         const bool complete = ValidateBountyTerms(terms, m_network, err);
         if (!complete) {
             if (!terms.exists("title") || !terms["title"].isStr() || terms["title"].get_str().empty()) {
@@ -1205,7 +1210,10 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (id.empty() && patch.exists("draft_id") && patch["draft_id"].isStr()) {
             id = patch["draft_id"].get_str();
         }
-        if (patch.exists("terms") && patch["terms"].isObject()) patch = patch["terms"];
+        if (patch.exists("terms") && patch["terms"].isObject()) {
+            UniValue inner = patch["terms"]; // copy out before patch is overwritten
+            patch = std::move(inner);
+        }
         auto it = m_drafts.find(id);
         if (it == m_drafts.end()) return fail("NOT_FOUND", "draft");
         UniValue merged(UniValue::VOBJ);
@@ -1254,7 +1262,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "validatebountyterms") {
         UniValue terms = ObjArg(params, 0);
-        if (terms.exists("terms")) terms = terms["terms"];
+        if (terms.exists("terms")) {
+            // Copy the member out first: assigning terms from its own member
+            // reads it after the assignment has freed it.
+            UniValue inner = terms["terms"];
+            terms = std::move(inner);
+        }
         result.setObject();
         const bool ok_terms = ValidateBountyTerms(terms, m_network, err);
         result.pushKV("ok", ok_terms);

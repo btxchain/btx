@@ -1498,6 +1498,59 @@ BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
     BOOST_CHECK(!IsBountyHelperMethod("preparebountyrefund"));
 }
 
+BOOST_AUTO_TEST_CASE(wrapped_terms_read_like_direct_terms)
+{
+    // {"terms": {...}} is accepted as a wrapper. It must give the same
+    // result as passing the terms object directly.
+    modelnet::BountyStore store;
+    const fs::path dir = m_path_root / "bounty-wrapped-terms";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    const UniValue terms = DefaultTerms(ZeroNet());
+    UniValue wrapped(UniValue::VOBJ);
+    wrapped.pushKV("terms", terms);
+    struct Reply {
+        bool ok{false};
+        UniValue result;
+        std::string err;
+    };
+    auto call = [&](const std::string& method, const UniValue& arg0, const UniValue& arg1 = NullUniValue) {
+        UniValue params(UniValue::VARR);
+        params.push_back(arg0);
+        if (!arg1.isNull()) params.push_back(arg1);
+        Reply r;
+        std::string code;
+        r.ok = store.Dispatch(method, params, r.result, code, r.err);
+        r.err = code + ": " + r.err;
+        return r;
+    };
+
+    const Reply direct = call("validatebountyterms", terms);
+    const Reply via_wrapper = call("validatebountyterms", wrapped);
+    BOOST_CHECK_EQUAL(direct.ok, via_wrapper.ok);
+    BOOST_CHECK_EQUAL(direct.result.write(), via_wrapper.result.write());
+
+    const Reply created = call("createbountydraft", wrapped);
+    BOOST_REQUIRE_MESSAGE(created.ok, created.err);
+    UniValue id(UniValue::VOBJ);
+    id.pushKV("draft_id", created.result["draft_id"].get_str());
+    const Reply got = call("getbountydraft", id);
+    BOOST_REQUIRE_MESSAGE(got.ok, got.err);
+    BOOST_CHECK_EQUAL(got.result["terms"].write(), terms.write());
+
+    UniValue patch(UniValue::VOBJ);
+    for (const std::string& key : terms.getKeys()) {
+        if (key != "license_statement") patch.pushKV(key, terms[key]);
+    }
+    patch.pushKV("license_statement", "patched through the wrapper");
+    UniValue wrapped_patch(UniValue::VOBJ);
+    wrapped_patch.pushKV("terms", patch);
+    const Reply updated = call("updatebountydraft", created.result["draft_id"], wrapped_patch);
+    BOOST_REQUIRE_MESSAGE(updated.ok, updated.err);
+    BOOST_CHECK_EQUAL(updated.result["terms"]["license_statement"].get_str(), "patched through the wrapper");
+    BOOST_CHECK_EQUAL(updated.result["terms"]["title"].get_str(), terms["title"].get_str());
+}
+
 BOOST_AUTO_TEST_CASE(incomplete_bounty_draft_cannot_publish)
 {
     using namespace modelnet;
