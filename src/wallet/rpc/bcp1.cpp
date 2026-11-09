@@ -130,9 +130,11 @@ CAmount ParseAtomsOrAmount(const UniValue& o, const char* atoms_key, const char*
 
 std::vector<CRecipient> RecipientsFromValue(const UniValue& raw)
 {
-    UniValue arr = raw;
-    if (arr.isObject() && arr.exists("outputs")) arr = arr["outputs"];
-    else if (arr.isObject() && arr.exists("recipients")) arr = arr["recipients"];
+    // Bind to the member instead of assigning it back over its own parent:
+    // "arr = arr[key]" copies from inside the vector it overwrites.
+    const UniValue& arr = raw.isObject() && raw.exists("outputs")    ? raw["outputs"] :
+                          raw.isObject() && raw.exists("recipients") ? raw["recipients"] :
+                                                                       raw;
     if (!arr.isArray()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "outputs must be an array of {address, amount}");
     }
@@ -1052,7 +1054,8 @@ RPCHelpMan finalizeexternalsign()
             UniValue sigs = request.params[1];
             if (pkg_arg.isObject() && pkg_arg.exists("package")) {
                 if ((sigs.isNull() || !sigs.isArray()) && pkg_arg.exists("signatures")) sigs = pkg_arg["signatures"];
-                pkg_arg = pkg_arg["package"];
+                UniValue inner = pkg_arg["package"]; // copy out before pkg_arg is overwritten
+                pkg_arg = std::move(inner);
             }
             if ((sigs.isNull() || !sigs.isArray()) && pkg_arg.isObject() && pkg_arg.exists("signatures")) {
                 sigs = pkg_arg["signatures"];

@@ -32,12 +32,14 @@
 #include <pq/pq_keyderivation.h>
 #include <pqkey.h>
 #include <psbt.h>
+#include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <rpc/util.h>
 #include <script/pqm.h>
 #include <script/script.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
+#include <tinyformat.h>
 #include <univalue.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
@@ -813,6 +815,72 @@ BOOST_AUTO_TEST_CASE(deriveexchangeaddress_index_and_account_guards)
             threw = true;
         }
         BOOST_CHECK_MESSAGE(threw, "an unimported index must not produce an address");
+    }
+
+    RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
+}
+
+// prepareexternalsign and createexchangebatch document an object form,
+// {"outputs"|"recipients": [...]}, beside the plain outputs array. The parser
+// used to assign that member back over its own parent object, which copies out
+// of storage the assignment frees: btxd crashed on macOS, and on Linux some key
+// orders gave the wrong recipients. Every object form must parse to the same
+// recipients as the array, so on this empty wallet each call must fail exactly
+// as the array form does, at coin selection.
+BOOST_AUTO_TEST_CASE(recipients_object_form_matches_array_form)
+{
+    auto wallet = MakeBcp1WatchOnlyWallet(*this, "bcp1-review-recipients", /*external_signer=*/false);
+
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    AddWallet(context, wallet);
+
+    const ReviewDeposit a = MakeReviewDeposit(bcp1::BRANCH_DEPOSIT);
+    const ReviewDeposit b = MakeReviewDeposit(bcp1::BRANCH_CHANGE);
+    const ReviewDeposit change = MakeReviewDeposit(/*branch=*/2);
+    BOOST_REQUIRE(a.IsValid() && b.IsValid() && change.IsValid());
+
+    const std::string one{strprintf(R"([{"address":"%s","amount":1}])", a.address)};
+    const std::string outs{strprintf(R"([{"address":"%s","amount":1},{"address":"%s","amount":2}])", a.address, b.address)};
+    const std::string outs_amount_first{strprintf(R"([{"amount":1,"address":"%s"},{"amount":2,"address":"%s"}])", a.address, b.address)};
+    UniValue options(UniValue::VOBJ);
+    options.pushKV("change_address", change.address);
+
+    // The result, or the error object if the call threw.
+    const auto call = [&](const RPCHelpMan& rpc, const std::string& arg_json) {
+        UniValue arg;
+        BOOST_REQUIRE(arg.read(arg_json));
+        UniValue params(UniValue::VARR);
+        params.push_back(arg);
+        params.push_back(options);
+        JSONRPCRequest req = WalletRpc(context, params);
+        try {
+            return rpc.HandleRequest(req);
+        } catch (const UniValue& rpc_err) {
+            return rpc_err;
+        }
+    };
+
+    // {object form, the same outputs as a plain array}
+    const std::pair<std::string, std::string> forms[]{
+        {strprintf(R"({"recipients":%s})", one), one},
+        {strprintf(R"({"outputs":%s})", outs), outs},
+        {strprintf(R"({"recipients":%s})", outs), outs},
+        {strprintf(R"({"outputs":%s,"change_address":"%s"})", outs, change.address), outs},
+        {strprintf(R"({"change_address":"%s","recipients":%s})", change.address, outs), outs},
+        {strprintf(R"({"recipients":%s,"change_address":"%s"})", outs_amount_first, change.address), outs},
+    };
+    for (const auto& [form, array] : forms) {
+        // The array form parses, then fails at coin selection: nothing to spend.
+        const UniValue expected = call(createexchangebatch(), array);
+        BOOST_REQUIRE(expected.isObject() && expected.exists("code"));
+        BOOST_CHECK_EQUAL(expected["code"].getInt<int>(), RPC_WALLET_ERROR);
+
+        const std::string batch = call(createexchangebatch(), form).write();
+        BOOST_CHECK_MESSAGE(batch == expected.write(), "createexchangebatch(" + form + ") gave " + batch + ", want " + expected.write());
+        const std::string prepare = call(prepareexternalsign(), form).write();
+        BOOST_CHECK_MESSAGE(prepare == expected.write(), "prepareexternalsign(" + form + ") gave " + prepare + ", want " + expected.write());
     }
 
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);

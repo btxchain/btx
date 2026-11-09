@@ -1177,6 +1177,17 @@ BOOST_AUTO_TEST_CASE(finalizeexternalsign_accepts_valid_software_signature)
     BOOST_REQUIRE(DecodeHexTx(mtx, result["hex"].get_str()));
     BOOST_CHECK(VerifyP2MRWitness(mtx, spend.prev_txout, mtx.vin[0].scriptWitness));
 
+    // The documented {"package", "signatures"} object form must give the same
+    // result. Its parser used to assign the "package" member back over the
+    // wrapper object, which copies out of storage the assignment frees.
+    UniValue wrapped(UniValue::VOBJ);
+    wrapped.pushKV("package", bcp1::Encode(pkg));
+    wrapped.pushKV("signatures", sigs);
+    UniValue wrapped_params(UniValue::VARR);
+    wrapped_params.push_back(wrapped);
+    JSONRPCRequest wrapped_req = WalletRpc(context, wrapped_params);
+    BOOST_CHECK_EQUAL(finalizeexternalsign().HandleRequest(wrapped_req).write(), result.write());
+
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
 
