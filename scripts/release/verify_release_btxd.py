@@ -1263,21 +1263,19 @@ def verify_glibc_ceiling(root: Path, ceiling: str | None = None) -> None:
     verify_launch only runs btxd. rc1 shipped btx-qt and a bundled libgnutls
     that needed GLIBC_2.43 against a documented 2.38 (issue 237), so the GUI
     could not start on Ubuntu 24.04 and the bundled lib/ broke host tools
-    when put on LD_LIBRARY_PATH. Read every ELF under bin/, libexec/ and lib/.
+    when put on LD_LIBRARY_PATH. Read every ELF in the tree, as the
+    GLIBCXX/OPENSSL floor does: a Qt plugins/ directory beside lib/ (Qt's own
+    deployment layout) is shipped as much as lib/ is.
     """
     ceiling = ceiling or os.environ.get("BTX_RELEASE_GLIBC_CEILING", GLIBC_CEILING)
     limit = version_key(ceiling)
     offenders: list[str] = []
-    for sub in ("bin", "libexec", "lib"):
-        for directory in sorted(root.rglob(sub)):
-            if not directory.is_dir():
-                continue
-            for path in sorted(directory.rglob("*")):
-                if path.is_symlink() or not path.is_file():
-                    continue
-                glibc = elf_required_versions(path).get("GLIBC")
-                if glibc and version_key(glibc) > limit:
-                    offenders.append(f"{path.relative_to(root)} needs GLIBC_{glibc}")
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        glibc = elf_required_versions(path).get("GLIBC")
+        if glibc and version_key(glibc) > limit:
+            offenders.append(f"{path.relative_to(root)} needs GLIBC_{glibc}")
     if offenders:
         raise VerifyError(
             f"packaged files need a GLIBC newer than the documented {ceiling}: "
