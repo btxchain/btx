@@ -8,9 +8,12 @@
 #include <modelnet/crypto.h>
 #include <modelnet/identity.h>
 #include <modelnet/search.h>
+#include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -353,12 +356,26 @@ bool SaveCampaigns(const fs::path& dir, const std::vector<ReleaseCampaign>& camp
     UniValue arr(UniValue::VARR);
     for (const auto& c : campaigns) arr.push_back(CampaignToJson(c));
     o.pushKV("campaigns", arr);
-    std::ofstream out(dir / "campaigns.json", std::ios::trunc);
-    if (!out) {
+    // Write a temp file, sync it and rename it over campaigns.json. Writing the
+    // file in place lost the previous campaigns when the write failed (a full
+    // disk fails only the flush at close), and every caller was told it saved.
+    const fs::path path = dir / "campaigns.json";
+    const fs::path tmp = path + ".tmp";
+    const std::string text = o.write() + "\n";
+    FILE* file = fsbridge::fopen(tmp, "wb");
+    if (!file) {
         err = "campaigns.json write";
         return false;
     }
-    out << o.write() << "\n";
+    const bool written{fwrite(text.data(), 1, text.size(), file) == text.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{fclose(file) == 0};
+    if (!committed || !closed || !RenameOver(tmp, path)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        err = "campaigns.json write";
+        return false;
+    }
     return true;
 }
 
