@@ -1,0 +1,375 @@
+............spackage_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+.package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+....package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: copied Metal libraries to libexec/metal; btxd was not rewritten
+.package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+.package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+..package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+.package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+..package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+.package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+...package_release_archive: skip btx-modeld (absent from the build directory; not shipped)
+package_release_archive: skip btx-hcpd (absent from the build directory; not shipped)
+package_release_archive: skip btx-hosted (absent from the build directory; not shipped)
+package_release_archive: skip btx-open (absent from the build directory; not shipped)
+package_release_archive: skip btx-capability (absent from the build directory; not shipped)
+package_release_archive: skip btx-capabilityd (absent from the build directory; not shipped)
+package_release_archive: skip btx-modelcheck (absent from the build directory; not shipped)
+package_release_archive: skip btx-matmul-backend-info (absent from the build directory; not shipped)
+.
+----------------------------------------------------------------------
+Ran 30 tests in 1.022s
+
+OK (skipped=1)
+{
+  "archive_path": "/Users/runner/work/btx/btx/isolated-tmp/tmpyei7vz5k/out/btx-29.2-x86_64-linux-gnu.tar.gz",
+  "archive_name": "btx-29.2-x86_64-linux-gnu.tar.gz",
+  "platform_id": "linux-x86_64",
+  "archive_format": "tar.gz",
+  "included_paths": [
+    "bin/btx-cli",
+    "bin/btx-util",
+    "bin/btxd",
+    "contrib/faststart/README.md",
+    "contrib/faststart/btx-agent-setup.py",
+    "contrib/faststart/btx-faststart.py",
+    "contrib/faststart/miner-faststart.sh",
+    "contrib/faststart/service-faststart.sh",
+    "contrib/faststart/snapshot-manifest.example.json",
+    "contrib/mining/README.md",
+    "contrib/mining/backup-wallet.sh",
+    "contrib/mining/live-mining-loop.sh",
+    "contrib/mining/start-live-mining.sh",
+    "contrib/mining/stop-live-mining.sh",
+    "contrib/modelnet/btx-model",
+    "contrib/modelnet/recipes/registry-live-wan-hf-config.json",
+    "doc/btx-download-and-go.md",
+    "doc/modelnet/registry-independence.md",
+    "doc/release-notes/release-notes-0.34.10.md",
+    "doc/release-notes/release-notes-0.34.11.md",
+    "doc/release-notes/release-notes-0.34.9-dev.md",
+    "doc/release-notes/release-notes-0.34.9.md",
+    "libexec/btx-cli.real",
+    "libexec/btx-util.real",
+    "libexec/btxd.real"
+  ],
+  "skipped_binaries": [
+    "btx-modeld",
+    "btx-hcpd",
+    "btx-hosted",
+    "btx-open",
+    "btx-capability",
+    "btx-capabilityd",
+    "btx-modelcheck",
+    "btx-matmul-backend-info"
+  ]
+}
+{
+  "archive_path": "/Users/runner/work/btx/btx/isolated-tmp/tmpfbgcgzfm/out/btx-0.34.7-arm64-apple-darwin.tar.gz",
+  "archive_name": "btx-0.34.7-arm64-apple-darwin.tar.gz",
+  "platform_id": "macos-arm64-metal",
+  "archive_format": "tar.gz",
+  "included_paths": [
+    "bin/btx-cli",
+    "bin/btx-matmul-backend-info",
+    "bin/btx-modelcheck",
+    "bin/btx-modeld",
+    "bin/btx-open",
+    "bin/btx-util",
+    "bin/btxd",
+    "contrib/faststart/README.md",
+    "contrib/faststart/btx-agent-setup.py",
+    "contrib/faststart/btx-faststart.py",
+    "contrib/faststart/miner-faststart.sh",
+    "contrib/faststart/service-faststart.sh",
+    "contrib/faststart/snapshot-manifest.example.json",
+    "contrib/mining/README.md",
+    "contrib/mining/backup-wallet.sh",
+    "contrib/mining/live-mining-loop.sh",
+    "contrib/mining/start-live-mining.sh",
+    "contrib/mining/stop-live-mining.sh",
+    "contrib/modelnet/btx-model",
+    "contrib/modelnet/recipes/registry-live-wan-hf-config.json",
+    "doc/btx-download-and-go.md",
+    "doc/modelnet/registry-independence.md",
+    "doc/release-notes/release-notes-0.34.10.md",
+    "doc/release-notes/release-notes-0.34.11.md",
+    "doc/release-notes/release-notes-0.34.9-dev.md",
+    "doc/release-notes/release-notes-0.34.9.md",
+    "libexec/btx-cli.real",
+    "libexec/btx-matmul-backend-info.real",
+    "libexec/btx-modelcheck.real",
+    "libexec/btx-modeld.real",
+    "libexec/btx-open.real",
+    "libexec/btx-util.real",
+    "libexec/btxd.real",
+    "libexec/metal/matmul_accel_kernels.metallib",
+    "libexec/metal/matmul_v4_rc_rowleaf_gpu_kernels.metallib"
+  ],
+  "skipped_binaries": [
+    "btx-hcpd",
+    "btx-hosted",
+    "btx-capability",
+    "btx-capabilityd"
+  ]
+}
+{
+  "archive_path": "/Users/runner/work/btx/btx/isolated-tmp/tmpikvwod3q/out/btx-29.2-x86_64-linux-gnu.tar.gz",
+  "archive_name": "btx-29.2-x86_64-linux-gnu.tar.gz",
+  "platform_id": "linux-x86_64",
+  "archive_format": "tar.gz",
+  "included_paths": [
+    "bin/btx-capability",
+    "bin/btx-capabilityd",
+    "bin/btx-cli",
+    "bin/btx-hcpd",
+    "bin/btx-hosted",
+    "bin/btx-matmul-backend-info",
+    "bin/btx-modelcheck",
+    "bin/btx-modeld",
+    "bin/btx-open",
+    "bin/btx-util",
+    "bin/btxd",
+    "contrib/faststart/README.md",
+    "contrib/faststart/btx-agent-setup.py",
+    "contrib/faststart/btx-faststart.py",
+    "contrib/faststart/miner-faststart.sh",
+    "contrib/faststart/service-faststart.sh",
+    "contrib/faststart/snapshot-manifest.example.json",
+    "contrib/mining/README.md",
+    "contrib/mining/backup-wallet.sh",
+    "contrib/mining/live-mining-loop.sh",
+    "contrib/mining/start-live-mining.sh",
+    "contrib/mining/stop-live-mining.sh",
+    "contrib/modelnet/btx-model",
+    "contrib/modelnet/recipes/registry-live-wan-hf-config.json",
+    "doc/btx-download-and-go.md",
+    "doc/modelnet/registry-independence.md",
+    "doc/release-notes/release-notes-0.34.10.md",
+    "doc/release-notes/release-notes-0.34.11.md",
+    "doc/release-notes/release-notes-0.34.9-dev.md",
+    "doc/release-notes/release-notes-0.34.9.md",
+    "libexec/btx-capability.real",
+    "libexec/btx-capabilityd.real",
+    "libexec/btx-cli.real",
+    "libexec/btx-hcpd.real",
+    "libexec/btx-hosted.real",
+    "libexec/btx-matmul-backend-info.real",
+    "libexec/btx-modelcheck.real",
+    "libexec/btx-modeld.real",
+    "libexec/btx-open.real",
+    "libexec/btx-util.real",
+    "libexec/btxd.real"
+  ],
+  "skipped_binaries": []
+}
+{
+  "archive_path": "/Users/runner/work/btx/btx/isolated-tmp/tmp9h7c9wsn/out-a/btx-29.2-x86_64-linux-gnu.tar.gz",
+  "archive_name": "btx-29.2-x86_64-linux-gnu.tar.gz",
+  "platform_id": "linux-x86_64",
+  "archive_format": "tar.gz",
+  "included_paths": [
+    "bin/btx-cli",
+    "bin/btx-util",
+    "bin/btxd",
+    "contrib/faststart/README.md",
+    "contrib/faststart/btx-agent-setup.py",
+    "contrib/faststart/btx-faststart.py",
+    "contrib/faststart/miner-faststart.sh",
+    "contrib/faststart/service-faststart.sh",
+    "contrib/faststart/snapshot-manifest.example.json",
+    "contrib/mining/README.md",
+    "contrib/mining/backup-wallet.sh",
+    "contrib/mining/live-mining-loop.sh",
+    "contrib/mining/start-live-mining.sh",
+    "contrib/mining/stop-live-mining.sh",
+    "contrib/modelnet/btx-model",
+    "contrib/modelnet/recipes/registry-live-wan-hf-config.json",
+    "doc/btx-download-and-go.md",
+    "doc/modelnet/registry-independence.md",
+    "doc/release-notes/release-notes-0.34.10.md",
+    "doc/release-notes/release-notes-0.34.11.md",
+    "doc/release-notes/release-notes-0.34.9-dev.md",
+    "doc/release-notes/release-notes-0.34.9.md",
+    "libexec/btx-cli.real",
+    "libexec/btx-util.real",
+    "libexec/btxd.real"
+  ],
+  "skipped_binaries": [
+    "btx-modeld",
+    "btx-hcpd",
+    "btx-hosted",
+    "btx-open",
+    "btx-capability",
+    "btx-capabilityd",
+    "btx-modelcheck",
+    "btx-matmul-backend-info"
+  ]
+}
+{
+  "archive_path": "/Users/runner/work/btx/btx/isolated-tmp/tmp9h7c9wsn/out-b/btx-29.2-x86_64-linux-gnu.tar.gz",
+  "archive_name": "btx-29.2-x86_64-linux-gnu.tar.gz",
+  "platform_id": "linux-x86_64",
+  "archive_format": "tar.gz",
+  "included_paths": [
+    "bin/btx-cli",
+    "bin/btx-util",
+    "bin/btxd",
+    "contrib/faststart/README.md",
+    "contrib/faststart/btx-agent-setup.py",
+    "contrib/faststart/btx-faststart.py",
+    "contrib/faststart/miner-faststart.sh",
+    "contrib/faststart/service-faststart.sh",
+    "contrib/faststart/snapshot-manifest.example.json",
+    "contrib/mining/README.md",
+    "contrib/mining/backup-wallet.sh",
+    "contrib/mining/live-mining-loop.sh",
+    "contrib/mining/start-live-mining.sh",
+    "contrib/mining/stop-live-mining.sh",
+    "contrib/modelnet/btx-model",
+    "contrib/modelnet/recipes/registry-live-wan-hf-config.json",
+    "doc/btx-download-and-go.md",
+    "doc/modelnet/registry-independence.md",
+    "doc/release-notes/release-notes-0.34.10.md",
+    "doc/release-notes/release-notes-0.34.11.md",
+    "doc/release-notes/release-notes-0.34.9-dev.md",
+    "doc/release-notes/release-notes-0.34.9.md",
+    "libexec/btx-cli.real",
+    "libexec/btx-util.real",
+    "libexec/btxd.real"
+  ],
+  "skipped_binaries": [
+    "btx-modeld",
+    "btx-hcpd",
+    "btx-hosted",
+    "btx-open",
+    "btx-capability",
+    "btx-capabilityd",
+    "btx-modelcheck",
+    "btx-matmul-backend-info"
+  ]
+}
+{
+  "archive_path": "/Users/runner/work/btx/btx/isolated-tmp/tmpd3kykist/out/btx-29.2-x86_64-w64-mingw32.zip",
+  "archive_name": "btx-29.2-x86_64-w64-mingw32.zip",
+  "platform_id": "windows-x86_64",
+  "archive_format": "zip",
+  "included_paths": [
+    "bin/btx-cli.exe",
+    "bin/btx-util.exe",
+    "bin/btxd.exe",
+    "contrib/faststart/README.md",
+    "contrib/faststart/btx-agent-setup.py",
+    "contrib/faststart/btx-faststart.py",
+    "contrib/faststart/miner-faststart.sh",
+    "contrib/faststart/service-faststart.sh",
+    "contrib/faststart/snapshot-manifest.example.json",
+    "contrib/mining/README.md",
+    "contrib/mining/backup-wallet.sh",
+    "contrib/mining/live-mining-loop.sh",
+    "contrib/mining/start-live-mining.sh",
+    "contrib/mining/stop-live-mining.sh",
+    "contrib/modelnet/btx-model",
+    "contrib/modelnet/recipes/registry-live-wan-hf-config.json",
+    "doc/btx-download-and-go.md",
+    "doc/modelnet/registry-independence.md",
+    "doc/release-notes/release-notes-0.34.10.md",
+    "doc/release-notes/release-notes-0.34.11.md",
+    "doc/release-notes/release-notes-0.34.9-dev.md",
+    "doc/release-notes/release-notes-0.34.9.md"
+  ],
+  "skipped_binaries": [
+    "btx-modeld",
+    "btx-hcpd",
+    "btx-hosted",
+    "btx-open",
+    "btx-capability",
+    "btx-capabilityd",
+    "btx-modelcheck",
+    "btx-matmul-backend-info"
+  ]
+}
