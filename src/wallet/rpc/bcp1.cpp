@@ -490,9 +490,12 @@ bool SelectPlanInputs(CCoinControl& cc, const UniValue& options)
     for (const UniValue& i : ins->getValues()) {
         if (!i.isObject() || !i.exists("txid")) continue;
         const uint256 txid = ParseHashV(i["txid"], "txid");
-        const int64_t vout = i.exists("vout") ? i["vout"].getInt<int64_t>() : 0;
-        if (vout < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "vout cannot be negative");
-        cc.Select(COutPoint(Txid::FromUint256(txid), static_cast<uint32_t>(vout)));
+        uint32_t vout{0};
+        std::string vout_err;
+        if (i.exists("vout") && !ParseUint32Index(i["vout"].getInt<int64_t>(), vout, "vout", vout_err)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, vout_err);
+        }
+        cc.Select(COutPoint(Txid::FromUint256(txid), vout));
     }
     cc.m_allow_other_inputs = false;
     return cc.HasSelected();
@@ -1130,9 +1133,11 @@ RPCHelpMan getdepositstatus()
                 txid = ParseHashV(first, "txid");
                 if (!request.params[1].isNull()) vout64 = request.params[1].getInt<int64_t>();
             }
-            if (vout64 < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "vout cannot be negative");
+            uint32_t vout{0};
+            std::string vout_err;
+            if (!ParseUint32Index(vout64, vout, "vout", vout_err)) throw JSONRPCError(RPC_INVALID_PARAMETER, vout_err);
             LOCK(pwallet->cs_wallet);
-            UniValue result = GetDepositStatusUniValue(*pwallet, txid, static_cast<uint32_t>(vout64));
+            UniValue result = GetDepositStatusUniValue(*pwallet, txid, vout);
             if (!result.exists("irreversible")) result.pushKV("irreversible", false);
             return result;
         },
