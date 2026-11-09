@@ -589,6 +589,7 @@ if(WITH_MODELNET)
     modelnet_store2_tests.cpp
     modelnet_cloud_tests.cpp
     modelnet_bounty_tests.cpp
+    modelnet_release_store_tests.cpp
     modelnet_035_codec_tests.cpp
     modelnet_035_envver_tests.cpp
     modelnet_envelope_dupkey_tests.cpp
