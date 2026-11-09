@@ -37,12 +37,12 @@ export function operationDialog(app,method,prefill=[],walletContext){
  const definition=BY_METHOD.get(method)||{method,title:method,risk:'dangerous',args:[],wallet:false,notes:'Discovered native method. Read its current help; no argument shape is assumed.'};
  const filled=expandPrefill(definition.args,prefill);
  const body=el('div',{class:'operation-form'}),result=el('div'),wallet=el('input',{value:walletContext===undefined?(app.state.state.wallet||''):String(walletContext),placeholder:'Exact loaded wallet name',autocomplete:'off'}),raw=el('textarea',{rows:6,spellcheck:false,value:'[]',class:'mono','aria-label':'Exact JSON RPC parameters'});
- const useRaw=el('input',{type:'checkbox',checked:!definition.args.length}),controls=definition.args.map(a=>fieldControl(a,app.bridge));
+ const takesSecret=definition.args.some(a=>a.kind==='secret'),useRaw=el('input',{type:'checkbox',checked:!definition.args.length,disabled:takesSecret}),controls=definition.args.map(a=>fieldControl(a,app.bridge));
  for(let i=0;i<filled.length&&i<controls.length;i++){const a=definition.args[i],v=filled[i];if(v===undefined)continue;if(a.kind==='boolean')controls[i].input.checked=!!v;else controls[i].input.value=prefillFieldText(a.kind,v);if(controls[i].repeat)controls[i].repeat.value=controls[i].input.value;}
  const fields=el('div',{class:'fields'},...controls.map(c=>c.wrap));
  const updateMode=()=>{fields.hidden=useRaw.checked;raw.hidden=!useRaw.checked;};useRaw.addEventListener('change',updateMode);updateMode();
- if(prefill.length)raw.value=encodeJson(prefillWireParams(definition.args,prefill));
- body.append(el('div',{class:'row'},badge(method,'cyan'),badge(definition.risk,definition.risk==='read'?'':'warning')),note('The connected node is authoritative. The form is a template, not proof that the method or signature is supported.'),definition.notes&&note(definition.notes,'warning'),field('Wallet context (blank means node endpoint)',wallet),field('Use exact JSON array/object',useRaw),fields,raw,result);
+ if(prefill.length&&!takesSecret)raw.value=encodeJson(prefillWireParams(definition.args,prefill));
+ body.append(el('div',{class:'row'},badge(method,'cyan'),badge(definition.risk,definition.risk==='read'?'':'warning')),note('The connected node is authoritative. The form is a template, not proof that the method or signature is supported.'),definition.notes&&note(definition.notes,'warning'),field('Wallet context (blank means node endpoint)',wallet),field('Use exact JSON array/object',useRaw,takesSecret?'Not offered for an operation that takes a passphrase, so the passphrase is never shown in clear text.':''),fields,raw,result);
  const helpButton=button('Read current native help',async()=>{try{helpButton.disabled=true;const text=await app.bridge.help(method);result.replaceChildren(jsonView(text,{open:true,title:'Connected node help'}));}catch(e){result.replaceChildren(note(e.message,'danger'));}finally{helpButton.disabled=false;}});
  const run=button(definition.risk==='read'?'Read observation':'Prepare for native review',async()=>{
   run.disabled=true;let prepared;
