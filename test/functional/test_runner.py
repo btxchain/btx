@@ -623,6 +623,7 @@ BTX_BASE_SCRIPTS = [
     'feature_p2mr_end_to_end.py',
     'p2mr_end_to_end.py',
     'rpc_pq_wallet.py',
+    'wallet_bcp1_plan_inputs.py --descriptors',
     'rpc_getshieldedstateinfo.py',
     'rpc_getblockstats_shielded.py',
     'rpc_btx_help_summary.py',

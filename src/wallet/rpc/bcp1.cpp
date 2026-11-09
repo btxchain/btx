@@ -510,7 +510,11 @@ UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
     if (options.exists("minimumAmount")) fp.min_amount = AmountFromValue(options["minimumAmount"]);
     if (options.exists("min_amount")) fp.min_amount = AmountFromValue(options["min_amount"]);
     const bool have_plan_inputs = SelectPlanInputs(cc, options);
-    auto coins = AvailableCoinsListUnspent(wallet, &cc, fp);
+    // AvailableCoins skips coins that are already selected, so list with a
+    // copy that selects nothing and pick the named inputs from that list.
+    CCoinControl list_cc{cc};
+    list_cc.UnSelectAll();
+    auto coins = AvailableCoinsListUnspent(wallet, &list_cc, fp);
     std::vector<COutput> all = coins.All();
     const size_t max_inputs = options.exists("max_inputs") ? static_cast<size_t>(options["max_inputs"].getInt<int64_t>()) :
                               options.exists("batch_size") ? static_cast<size_t>(options["batch_size"].getInt<int64_t>()) :
