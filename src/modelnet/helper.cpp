@@ -8564,7 +8564,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         if (added) result.pushKV("added", peer);
         else {
             result.pushKV("added", false);
-            result.pushKV("reason", peer.empty() ? "empty endpoint" : "peer list full");
+            std::string host;
+            uint16_t port{0};
+            result.pushKV("reason", peer.empty()                       ? "empty endpoint" :
+                                    !SplitHostPort(peer, host, port) ? "endpoint must be host:port" :
+                                                                       "peer list full");
         }
         result.pushKV("automatic_spend_atoms", 0);
         result.pushKV("note", "model-plane contact; not AddrMan; not monetary addnode");

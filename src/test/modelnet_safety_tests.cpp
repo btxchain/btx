@@ -451,4 +451,51 @@ BOOST_AUTO_TEST_CASE(addpeer_cap_is_visible)
     BOOST_CHECK(result["added"].isFalse());
 }
 
+BOOST_AUTO_TEST_CASE(addpeer_refuses_endpoint_that_cannot_be_dialed)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-peers-dial";
+    {
+        modelnet::ModelCatalog cat{tmp / "cat", 1 << 20};
+        for (const std::string& bad : std::vector<std::string>{"zz", "192.0.2.1", "192.0.2.1:0", "192.0.2.1:70000",
+                                                               ":29447", std::string(4096, 'a')}) {
+            BOOST_CHECK_MESSAGE(!cat.AddPeer(bad), "accepted " + bad.substr(0, 32));
+        }
+        BOOST_CHECK(cat.Peers().empty());
+        BOOST_CHECK(cat.AddPeer("192.0.2.1:29447"));
+        BOOST_CHECK(cat.AddPeer("[2001:db8::1]:29447"));
+
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "addmodelnode");
+        UniValue params(UniValue::VARR);
+        params.push_back("zz");
+        req.pushKV("params", params);
+        UniValue result;
+        std::string code, rpc_err;
+        BOOST_REQUIRE(modelnet::DispatchHelperRpc(cat, req, result, code, rpc_err, nullptr));
+        BOOST_CHECK(result["ok"].isFalse());
+        BOOST_CHECK_EQUAL(result["reason"].get_str(), "endpoint must be host:port");
+    }
+    {
+        // A catalog saved before the check still loads, without the contact
+        // that cannot be dialed.
+        std::ifstream in{tmp / "cat" / "catalog.json"};
+        std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue saved;
+        BOOST_REQUIRE(saved.read(raw) && saved.isObject());
+        UniValue root(UniValue::VOBJ);
+        for (const std::string& key : saved.getKeys()) {
+            if (key != "peers") root.pushKV(key, saved[key]);
+        }
+        UniValue peers(UniValue::VARR);
+        peers.push_back("zz");
+        peers.push_back("192.0.2.1:29447");
+        root.pushKV("peers", peers);
+        std::ofstream out{tmp / "cat" / "catalog.json", std::ios::trunc};
+        out << root.write();
+    }
+    modelnet::ModelCatalog reloaded{tmp / "cat", 1 << 20};
+    BOOST_CHECK(reloaded.Peers() == std::vector<std::string>{"192.0.2.1:29447"});
+}
+
 BOOST_AUTO_TEST_SUITE_END()
