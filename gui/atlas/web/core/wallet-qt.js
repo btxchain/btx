@@ -12,6 +12,7 @@ export function createWalletDraft({
   disablePrivateKeys,
   blank,
   passphrase,
+  passphraseRepeat,
   avoidReuse,
   descriptors,
   loadOnStartup,
@@ -22,6 +23,7 @@ export function createWalletDraft({
   if (name.length > 64) throw new Error('Wallet name is longer than 64 characters');
   if (typeof passphrase !== 'string') throw new Error('Passphrase must be a string');
   if (passphrase.length > 1024) throw new Error('Passphrase is longer than 1024 characters');
+  if (passphraseRepeat !== passphrase) throw new Error('The passphrases do not match');
   const disable = requireBoolean(disablePrivateKeys, 'disablePrivateKeys');
   const blankWallet = requireBoolean(blank, 'blank');
   const avoid = requireBoolean(avoidReuse, 'avoidReuse');

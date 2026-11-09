@@ -4,13 +4,14 @@ import {parseBTX} from '../core/money.js';
 import {el,button,field,note,badge,jsonView,dialog,toast} from '../components/ui.js';
 
 function fieldControl(arg,bridge){
- let input;if(arg.kind==='boolean'){input=el('input',{type:'checkbox',checked:arg.default===true});}
+ let input,repeat=null;if(arg.kind==='boolean'){input=el('input',{type:'checkbox',checked:arg.default===true});}
  else if(arg.kind==='json'||arg.kind==='long'){input=el('textarea',{rows:arg.kind==='json'?4:3,value:typeof arg.default==='object'?JSON.stringify(arg.default,null,2):arg.default??'',spellcheck:false});}
  else if(arg.kind==='enum'){input=el('select',{},...(arg.options||[]).map(x=>el('option',{value:x,selected:x===arg.default},x)));}
  else input=el('input',{type:arg.kind==='secret'?'password':'text',value:arg.default??'',autocomplete:'off',spellcheck:false,'data-sensitive':arg.kind==='secret'?'true':null});
- const wrap=field(arg.name+(arg.required?' *':''),input,arg.kind==='amount'?'Exact BTX decimal, never binary floating point.':arg.kind==='integer'?'Integer':arg.kind==='secret'?'Not saved in preferences, assistant context, or the audit journal. Clear after use.':'');
+ let wrap=field(arg.name+(arg.required?' *':''),input,arg.kind==='amount'?'Exact BTX decimal, never binary floating point.':arg.kind==='integer'?'Integer':arg.kind==='secret'?'Not saved in preferences, assistant context, or the audit journal. Clear after use.':'');
  if(['path','savepath'].includes(arg.kind))wrap.append(button('Choose native path',async()=>{try{const r=await bridge.document(arg.kind==='savepath'?'destination_path':'source_path');input.value=r.path;}catch(e){toast(e.message,'danger');}},'subtle'));
- return{input,wrap,value(){const s=input.value;if(arg.kind==='boolean')return input.checked;if((s===''||s===undefined)&&!arg.required)return undefined;if(arg.kind==='json')return parseJsonExact(s||'{}');if(arg.kind==='integer'){if(!/^-?(0|[1-9][0-9]*)$/.test(s))throw Error(`${arg.name}: use an exact integer`);return new JsonNumber(s);}if(arg.kind==='amount'){parseBTX(s);return new JsonNumber(s);}return s;}};
+ if(arg.kind==='secret'&&arg.confirm===true){repeat=el('input',{type:'password',autocomplete:'off',spellcheck:false,'data-sensitive':'true'});wrap=el('div',{class:'surface-stack'},wrap,field(`Repeat ${arg.name}${arg.required?' *':''}`,repeat,'Type it again to catch a typo.'));}
+ return{input,repeat,wrap,value(){const s=input.value;if(repeat&&s!==repeat.value)throw Error(`${arg.name}: the two entries do not match`);if(arg.kind==='boolean')return input.checked;if((s===''||s===undefined)&&!arg.required)return undefined;if(arg.kind==='json')return parseJsonExact(s||'{}');if(arg.kind==='integer'){if(!/^-?(0|[1-9][0-9]*)$/.test(s))throw Error(`${arg.name}: use an exact integer`);return new JsonNumber(s);}if(arg.kind==='amount'){parseBTX(s);return new JsonNumber(s);}return s;}};
 }
 export function prefillFieldText(kind,value){
  if(value instanceof JsonNumber)return value.text;
@@ -37,7 +38,7 @@ export function operationDialog(app,method,prefill=[],walletContext){
  const filled=expandPrefill(definition.args,prefill);
  const body=el('div',{class:'operation-form'}),result=el('div'),wallet=el('input',{value:walletContext===undefined?(app.state.state.wallet||''):String(walletContext),placeholder:'Exact loaded wallet name',autocomplete:'off'}),raw=el('textarea',{rows:6,spellcheck:false,value:'[]',class:'mono','aria-label':'Exact JSON RPC parameters'});
  const useRaw=el('input',{type:'checkbox',checked:!definition.args.length}),controls=definition.args.map(a=>fieldControl(a,app.bridge));
- for(let i=0;i<filled.length&&i<controls.length;i++){const a=definition.args[i],v=filled[i];if(v===undefined)continue;if(a.kind==='boolean')controls[i].input.checked=!!v;else controls[i].input.value=prefillFieldText(a.kind,v);}
+ for(let i=0;i<filled.length&&i<controls.length;i++){const a=definition.args[i],v=filled[i];if(v===undefined)continue;if(a.kind==='boolean')controls[i].input.checked=!!v;else controls[i].input.value=prefillFieldText(a.kind,v);if(controls[i].repeat)controls[i].repeat.value=controls[i].input.value;}
  const fields=el('div',{class:'fields'},...controls.map(c=>c.wrap));
  const updateMode=()=>{fields.hidden=useRaw.checked;raw.hidden=!useRaw.checked;};useRaw.addEventListener('change',updateMode);updateMode();
  if(prefill.length)raw.value=encodeJson(prefillWireParams(definition.args,prefill));
@@ -51,7 +52,7 @@ export function operationDialog(app,method,prefill=[],walletContext){
    if(definition.risk==='read'){try{const r=await app.bridge.read(method,json,context);result.replaceChildren(jsonView(r,{open:true}));return;}catch(e){if(e.code!=='READ_DENIED')throw e;}}
    prepared=await app.bridge.prepare(method,json,context);
    result.replaceChildren(note(`Prepared ${prepared.id.slice(0,12)}… · Native dialog will show the immutable request. This page cannot approve it.`));
-   for(let i=0;i<controls.length;i++)if(definition.args[i].kind==='secret')controls[i].input.value='';
+   for(let i=0;i<controls.length;i++)if(definition.args[i].kind==='secret'){controls[i].input.value='';if(controls[i].repeat)controls[i].repeat.value='';}
    if(definition.risk!=='read')raw.value='[]';
    const response=await app.bridge.execute(prepared.id);result.replaceChildren(jsonView(response,{open:true}));app.refreshSoon();
   }catch(e){result.replaceChildren(note(`${e.code||'REQUEST'} · ${e.message}${e.outcome_unknown?' · DO NOT RETRY. Reconcile with the native node and transaction/operation ID.':''}`,'danger'));}
@@ -59,7 +60,7 @@ export function operationDialog(app,method,prefill=[],walletContext){
  },definition.risk==='read'?'primary':'warning');
  if(app.bridge.supported(method)===false){run.disabled=true;body.prepend(note('This method is absent from the connected node’s help catalogue. It is disabled.','warning'));}
  body.append(el('div',{class:'actions'},helpButton,run));const d=dialog(definition.title,body);
- d.element.addEventListener('close',()=>{raw.value='';controls.forEach(c=>{c.input.value='';});},{once:true});return d;
+ d.element.addEventListener('close',()=>{raw.value='';controls.forEach(c=>{c.input.value='';if(c.repeat)c.repeat.value='';});},{once:true});return d;
 }
 export function operationWorkbench(app,{groups=null,title='Operation workbench'}={}){
  const root=el('section',{},el('h2',{},title)),search=el('input',{type:'search',placeholder:'Find a function or native RPC…','aria-label':'Find native operation'}),list=el('div',{class:'operation-grid'}),count=el('span',{class:'muted'});
