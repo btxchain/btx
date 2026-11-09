@@ -6,7 +6,13 @@
 #include <iostream>
 #include <thread>
 #include <vector>
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <sddl.h>
+#else
 #include <signal.h>
 #include <unistd.h>
 #endif
@@ -17,8 +23,35 @@ int main(int argc, char** argv)
     unsigned passed = 0;
     const auto root = std::filesystem::canonical(std::filesystem::temp_directory_path()) / ("btx-native-security-" + Hex(RandomBytes(16)));
     try {
-        EnsurePrivateDirectory(root);
         const auto exe = ::fs::PathFromString(argv[1]);
+        // Bare startup isolates pipe framing from private-store initialization.
+        modelnet::GuardSupervisor bare;
+        std::string bare_error, bare_reply;
+        Require(bare.Start(exe, bare_error), "TEST_NATIVE_BARE_START"); ++passed;
+        Require(bare.Exchange("PING", bare_reply, bare_error) && bare_reply == "READY BTX_GUARD/1", "TEST_NATIVE_BARE_PING"); ++passed;
+        bare.Stop();
+        EnsurePrivateDirectory(root);
+        const auto private_file = root / "private.txt";
+        WritePrivate(private_file, "first", false);
+        Require(ReadFile(private_file, 64, true) == "first", "TEST_NATIVE_PRIVATE_CREATE_READ"); ++passed;
+        WritePrivate(private_file, "second", true);
+        Require(ReadFile(private_file, 64, true) == "second", "TEST_NATIVE_PRIVATE_REPLACE_READ"); ++passed;
+#ifdef _WIN32
+        // Creation must not weaken the existing reader/directory refusal rules.
+        PSECURITY_DESCRIPTOR broad=nullptr;
+        Require(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;WD)", SDDL_REVISION_1, &broad, nullptr), "TEST_NATIVE_BROAD_ACL");
+        const BOOL file_acl=SetFileSecurityW(private_file.c_str(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, broad);
+        const auto unsafe=root / "unsafe";
+        std::filesystem::create_directory(unsafe);
+        const BOOL dir_acl=SetFileSecurityW(unsafe.c_str(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, broad);
+        LocalFree(broad);
+        Require(file_acl && dir_acl, "TEST_NATIVE_BROAD_ACL_SET");
+        bool file_refused=false, directory_refused=false;
+        try { (void)ReadFile(private_file, 64, true); } catch (const Error& e) { file_refused=e.code == "SEC_PRIVATE_FILE"; }
+        try { EnsurePrivateDirectory(unsafe); } catch (const Error& e) { directory_refused=e.code == "SEC_PRIVATE_DIRECTORY"; }
+        Require(file_refused, "TEST_NATIVE_BROAD_FILE_REFUSED"); ++passed;
+        Require(directory_refused, "TEST_NATIVE_BROAD_DIRECTORY_REFUSED"); ++passed;
+#endif
         const auto state = ::fs::PathFromString((root / "security").string());
         modelnet::GuardSupervisor supervisor;
         std::string error, reply;
