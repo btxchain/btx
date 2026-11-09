@@ -683,6 +683,18 @@ class ArchiveContentGateTest(unittest.TestCase):
                 self.mod.verify_glibc_ceiling(self.root)
         self.assertIn("lib/libgnutls.so.30 needs GLIBC_2.43", str(caught.exception))
 
+    def test_glibc_ceiling_reads_every_elf_not_only_bin_libexec_lib(self) -> None:
+        # Qt's own deployment layout puts plugins/ beside lib/. The ceiling
+        # used to walk only bin/, libexec/ and lib/, so this plugin passed.
+        files = {"btx-0.35.0/bin/btxd": self._btxd(openssl="OPENSSL_3.0.0"),
+                 "btx-0.35.0/plugins/platforms/libqxcb.so": make_elf(["libc.so.6"], executable=False)}
+        versions = {"btxd": {"GLIBC": "2.38"}, "libqxcb.so": {"GLIBC": "2.43"}}
+        with mock.patch.object(self.mod, "elf_required_versions",
+                               side_effect=lambda p: versions.get(p.name, {})):
+            text = self._problems(files)
+        self.assertIn("btx-0.35.0/plugins/platforms/libqxcb.so needs GLIBC_2.43", text)
+        self.assertNotIn("btxd needs", text)
+
     def test_owner_mode_and_empty_directory(self) -> None:
         text = self._problems({"./bin/btxd": self._btxd(openssl="OPENSSL_3.0.0")},
                               uid=1000, uname="administrator", mode=0o775, dirs=("./", "./bin/", "./metal/"))
