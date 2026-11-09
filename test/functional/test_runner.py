@@ -424,6 +424,7 @@ BASE_SCRIPTS = [
     'wallet_listdescriptors.py --descriptors',
     'wallet_btxwallet.py --descriptors',
     'wallet_backupbundle.py --descriptors',
+    'wallet_backupbundle_private_descriptors.py --descriptors',
     'wallet_bundlearchive.py --descriptors',
     'wallet_shielded_lock_order.py --descriptors',
     'wallet_verifywalletintegrity.py --descriptors',
