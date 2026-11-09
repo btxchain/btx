@@ -7,6 +7,7 @@ const draft = (overrides = {}) => createWalletDraft({
   disablePrivateKeys: false,
   blank: false,
   passphrase: '',
+  passphraseRepeat: overrides.passphrase ?? '',
   avoidReuse: true,
   descriptors: true,
   loadOnStartup: true,
@@ -39,6 +40,15 @@ test('external signer requires disabled private keys and descriptors', () => {
   assert.throws(() => draft({passphrase: 'p'.repeat(1025)}));
   assert.throws(() => draft({descriptors: 'true'}));
   assert.throws(() => draft({blank: 0}));
+});
+
+test('createwallet draft refuses a passphrase whose repeat differs', () => {
+  assert.throws(() => draft({passphrase: 'correct horse', passphraseRepeat: 'correct hrose'}), {message: 'The passphrases do not match'});
+  assert.throws(() => draft({passphrase: 'correct horse', passphraseRepeat: ''}), {message: 'The passphrases do not match'});
+  assert.throws(() => draft({passphrase: '', passphraseRepeat: 'x'}), {message: 'The passphrases do not match'});
+  assert.throws(() => draft({passphrase: 'correct horse', passphraseRepeat: undefined}), {message: 'The passphrases do not match'});
+  assert.equal(draft({passphrase: 'correct horse', passphraseRepeat: 'correct horse'})[3], 'correct horse');
+  assert.equal(draft({passphrase: '', passphraseRepeat: ''})[3], '');
 });
 
 test('two coins of 0.5 and 0.25 sum exactly', () => {

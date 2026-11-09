@@ -744,6 +744,7 @@ export const OPERATIONS = [
         "name": "passphrase",
         "kind": "secret",
         "required": true,
+        "confirm": true,
         "default": ""
       },
       {
@@ -771,7 +772,7 @@ export const OPERATIONS = [
         "default": false
       }
     ],
-    "notes": "",
+    "notes": "An empty passphrase leaves the wallet unencrypted. If you set a passphrase and lose it, you lose access to the BTX in this wallet. Nobody can recover it.",
     "wallet": false
   },
   {
@@ -883,10 +884,11 @@ export const OPERATIONS = [
       {
         "name": "passphrase",
         "kind": "secret",
-        "required": true
+        "required": true,
+        "confirm": true
       }
     ],
-    "notes": "",
+    "notes": "If you lose this passphrase, you lose access to the BTX in this wallet. Nobody can recover it.",
     "wallet": true
   },
   {
@@ -924,10 +926,11 @@ export const OPERATIONS = [
       {
         "name": "newpassphrase",
         "kind": "secret",
-        "required": true
+        "required": true,
+        "confirm": true
       }
     ],
-    "notes": "",
+    "notes": "If you lose the new passphrase, you lose access to the BTX in this wallet. Nobody can recover it.",
     "wallet": true
   },
   {
