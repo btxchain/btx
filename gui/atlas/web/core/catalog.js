@@ -1230,7 +1230,7 @@ export const OPERATIONS = [
         "required": true
       }
     ],
-    "notes": "",
+    "notes": "Broadcasts the given transaction as is. Wallet → Send checks (address, fee display, fee cap) do not apply. Use Wallet → Send for a normal payment.",
     "wallet": false
   },
   {
@@ -1330,7 +1330,7 @@ export const OPERATIONS = [
         "default": "0.00000000"
       }
     ],
-    "notes": "",
+    "notes": "Bypasses Wallet → Send: no address check, no fee display and no fee cap. Use Wallet → Send for a normal payment.",
     "wallet": true
   },
   {
@@ -1352,7 +1352,7 @@ export const OPERATIONS = [
         "default": {}
       }
     ],
-    "notes": "",
+    "notes": "Bypasses Wallet → Send: no address check, no fee display and no fee cap. Use Wallet → Send for a normal payment.",
     "wallet": true
   },
   {
