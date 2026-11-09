@@ -35,6 +35,29 @@ namespace modelnet::security {
 
 #ifdef _WIN32
     namespace {
+        PSECURITY_DESCRIPTOR WindowsPrivateDescriptor()
+        {
+            HANDLE token=nullptr;
+            Require(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token),"SEC_OWNER");
+            struct Token {HANDLE value;~Token(){CloseHandle(value);}} token_owner{token};
+            DWORD size=0;
+            GetTokenInformation(token,TokenUser,nullptr,0,&size);
+            Require(size>0&&size<=65536,"SEC_OWNER");
+            std::vector<unsigned char> bytes(size);
+            Require(GetTokenInformation(token,TokenUser,bytes.data(),size,&size),"SEC_OWNER");
+            LPWSTR sid=nullptr;
+            Require(ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(bytes.data())->User.Sid,&sid),"SEC_OWNER");
+            struct Sid {LPWSTR value;~Sid(){LocalFree(value);}} saved_sid{sid};
+            // Elevated tokens may otherwise default to Administrators ownership.
+            // Keep the same owner/SYSTEM-only protected DACL, with the token user
+            // explicitly owning each new private directory and file.
+            const std::wstring sddl=std::wstring(L"O:")+sid+L"D:P(A;;FA;;;OW)(A;;FA;;;SY)";
+            PSECURITY_DESCRIPTOR descriptor=nullptr;
+            Require(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(),SDDL_REVISION_1,
+                &descriptor,nullptr),"SEC_ACL");
+            return descriptor;
+        }
+
         bool WindowsOwnerOnly(HANDLE handle)
         {
             PSECURITY_DESCRIPTOR descriptor=nullptr;
@@ -511,16 +534,15 @@ namespace modelnet::security {
             std::error_code ec;
             auto st=fs::symlink_status(walk,ec);
             if(!fs::exists(st)) {
-                Require(fs::create_directory(walk,ec)&&!ec,"SEC_DIRECTORY_CREATE");
 #ifndef _WIN32
+                Require(fs::create_directory(walk,ec)&&!ec,"SEC_DIRECTORY_CREATE");
                 Require(chmod(walk.c_str(),0700)==0,"SEC_DIRECTORY_MODE");
 #else
-                PSECURITY_DESCRIPTOR sd=nullptr;
-                Require(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;OW)(A;;FA;;;SY)",SDDL_REVISION_1,
-                &sd,nullptr),"SEC_ACL");
-                BOOL ok=SetFileSecurityW(walk.c_str(),DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,sd);
+                PSECURITY_DESCRIPTOR sd=WindowsPrivateDescriptor();
+                SECURITY_ATTRIBUTES sa{sizeof(sa),sd,FALSE};
+                const BOOL ok=CreateDirectoryW(walk.c_str(),&sa);
                 LocalFree(sd);
-                Require(ok,"SEC_ACL");
+                Require(ok,"SEC_DIRECTORY_CREATE");
 #endif
             }
             else Require(fs::is_directory(st)&&!fs::is_symlink(st),"SEC_DIRECTORY_TYPE");
@@ -556,9 +578,7 @@ namespace modelnet::security {
         EnsurePrivateDirectory(path.parent_path());
         const auto temporary=path.parent_path()/(".new-"+Hex(RandomBytes(16)));
 #ifdef _WIN32
-        PSECURITY_DESCRIPTOR sd=nullptr;
-        Require(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;OW)(A;;FA;;;SY)",SDDL_REVISION_1,
-        &sd,nullptr),"SEC_ACL");
+        PSECURITY_DESCRIPTOR sd=WindowsPrivateDescriptor();
         SECURITY_ATTRIBUTES sa {
             sizeof(sa),sd,FALSE
         };
