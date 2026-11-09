@@ -37,14 +37,14 @@ class WalletBackupBundlePrivateDescriptorsTest(BitcoinTestFramework):
 
     def run_test(self):
         node = self.nodes[0]
-        node.createwallet(wallet_name="victim", descriptors=True, passphrase=PASSPHRASE)
-        victim = node.get_wallet_rpc("victim")
-        victim_addr = victim.getnewaddress()
-        victim.walletlock()
-        assert_raises_rpc_error(-13, "walletpassphrase first", victim.listdescriptors, True)
+        node.createwallet(wallet_name="source", descriptors=True, passphrase=PASSPHRASE)
+        source = node.get_wallet_rpc("source")
+        source_addr = source.getnewaddress()
+        source.walletlock()
+        assert_raises_rpc_error(-13, "walletpassphrase first", source.listdescriptors, True)
 
         self.log.info("The directory bundle of an encrypted wallet holds its PQ seeds in plaintext")
-        bundle = victim.backupwalletbundle(node.datadir_path / "victim.bundle", PASSPHRASE)
+        bundle = source.backupwalletbundle(node.datadir_path / "source.bundle", PASSPHRASE)
         assert_equal(bundle["wallet_encrypted"], True)
         bundle_path = Path(bundle["bundle_dir"])
         private_path = bundle_path / "listdescriptors_private.json"
@@ -54,9 +54,9 @@ class WalletBackupBundlePrivateDescriptorsTest(BitcoinTestFramework):
         for entry in descriptors:
             assert PRIVATE_PQHD.search(entry["desc"]), entry["desc"]
 
-        self.log.info("A new unencrypted wallet that imports only that file signs for the victim's address")
-        node.createwallet(wallet_name="thief", descriptors=True, blank=True)
-        thief = node.get_wallet_rpc("thief")
+        self.log.info("A new unencrypted wallet that imports only that file signs for the source wallet's address")
+        node.createwallet(wallet_name="imported", descriptors=True, blank=True)
+        imported = node.get_wallet_rpc("imported")
         requests = []
         for entry in descriptors:
             request = {"desc": entry["desc"], "timestamp": 0, "active": entry["active"], "internal": entry.get("internal", False)}
@@ -65,13 +65,13 @@ class WalletBackupBundlePrivateDescriptorsTest(BitcoinTestFramework):
             if "next_index" in entry:
                 request["next_index"] = entry["next_index"]
             requests.append(request)
-        assert all(result["success"] for result in thief.importdescriptors(requests))
-        assert "unlocked_until" not in thief.getwalletinfo()
-        info = thief.getaddressinfo(victim_addr)
+        assert all(result["success"] for result in imported.importdescriptors(requests))
+        assert "unlocked_until" not in imported.getwalletinfo()
+        info = imported.getaddressinfo(source_addr)
         assert_equal(info["ismine"], True)
         prevout = {"txid": "11" * 32, "vout": 0}
-        raw = node.createrawtransaction([prevout], [{thief.getnewaddress(): 0.999}])
-        signed = thief.signrawtransactionwithwallet(raw, [{**prevout, "scriptPubKey": info["scriptPubKey"], "amount": 1}])
+        raw = node.createrawtransaction([prevout], [{imported.getnewaddress(): 0.999}])
+        signed = imported.signrawtransactionwithwallet(raw, [{**prevout, "scriptPubKey": info["scriptPubKey"], "amount": 1}])
         assert_equal(signed["complete"], True)
 
         self.log.info("So the bundle must not claim that the wallet passphrase is needed to spend, and must say why")
@@ -89,7 +89,7 @@ class WalletBackupBundlePrivateDescriptorsTest(BitcoinTestFramework):
             ), warnings
 
         self.log.info("The archive holds the same file, protected only by the archive passphrase")
-        archive = victim.backupwalletbundlearchive(node.datadir_path / "victim.bundle.btx", ARCHIVE_PASSPHRASE, PASSPHRASE)
+        archive = source.backupwalletbundlearchive(node.datadir_path / "source.bundle.btx", ARCHIVE_PASSPHRASE, PASSPHRASE)
         assert "listdescriptors_private.json" in archive["bundle_files"]
         assert_equal(archive["wallet_encrypted"], True)
         assert_equal(archive["wallet_passphrase_required_to_spend"], False)
