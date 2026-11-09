@@ -1355,6 +1355,20 @@ struct SlotReuseOrderingProbe {
     // initialization errors and must fail the test rather than masquerade as
     // an unsupported-device skip.
     bool interlock_supported{true};
+    // Pinned destination for the probed chain's D2H copies (see
+    // RunRcExactReplaySlotReuseOrderingTest). Allocated before the gate exists.
+    void* pinned_out{nullptr};
+    size_t pinned_out_bytes{0};
+
+    [[nodiscard]] bool AllocPinnedOutputs(size_t bytes)
+    {
+        if (cudaHostAlloc(&pinned_out, bytes, cudaHostAllocPortable) != cudaSuccess) {
+            pinned_out = nullptr;
+            return false;
+        }
+        pinned_out_bytes = bytes;
+        return true;
+    }
 
     [[nodiscard]] bool Init()
     {
@@ -1472,6 +1486,7 @@ struct SlotReuseOrderingProbe {
         if (gate_event) (void)cudaEventDestroy(gate_event);
         if (gate_stream) (void)cudaStreamDestroy(gate_stream);
         if (release_stream) (void)cudaStreamDestroy(release_stream);
+        if (pinned_out) (void)cudaFreeHost(pinned_out);
     }
 };
 
@@ -1729,17 +1744,6 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
             return false;
         }
 
-        if constexpr (TestSlotReuseOrdering) {
-            // Delay the first consumer behind a bounded, single-thread device
-            // gate. layer_done[0] therefore cannot complete until the host
-            // watchdog releases this event, making the later slot-0 overwrite
-            // dependency adversarial rather than relying on GEMM timing.
-            if (l == 0 && !CudaOk(cudaStreamWaitEvent(
-                              ws.compute, ordering_probe->gate_event, 0))) {
-                return false;
-            }
-        }
-
         if (l + 1 < L_lyr && !weights_shared) {
             // The pair for layer l+1 goes into the slot layer l-1 read. Without
             // this edge the generation kernels on h2d can rewrite W[l-1] while
@@ -1795,13 +1799,39 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
             NoteCpuFallback();
             return false;
         }
+        if constexpr (TestSlotReuseOrdering) {
+            // Hold layer_done[0] behind a bounded, single-thread device gate,
+            // so the later slot-0 overwrite dependency is adversarial rather
+            // than relying on GEMM timing. The hold sits after the layer-0
+            // kernels, not before them: on the pre-Hopper TN IMMA path
+            // RunCublasLtS8S8Locked synchronizes the compute stream on the host
+            // after each GEMM, so a hold in front of the consumer would hold
+            // this thread too, and the layer-1 wait could not be enqueued until
+            // the device-side gate ceiling expired.
+            if (l == 0 && !CudaOk(cudaStreamWaitEvent(
+                              ws.compute, ordering_probe->gate_event, 0))) {
+                return false;
+            }
+        }
         // Records completion of the compute that read WEIGHT slot `slot`; the
         // h2d wait above consumes it before that slot is regenerated.
         if (!CudaOk(cudaEventRecord(ws.layer_done[slot], ws.compute))) return false;
 
         if (matmul::v4::rc::ExactReplayCancellationRequested()) return false;
         if (!CudaOk(cudaStreamWaitEvent(ws.d2h, ws.layer_done[slot], 0))) return false;
-        if (!CudaOk(cudaMemcpyAsync(out_X[l + 1].data(), d_nxt, x_bytes, cudaMemcpyDeviceToHost,
+        void* d2h_dst{out_X[l + 1].data()};
+        if constexpr (TestSlotReuseOrdering) {
+            // A D2H into pageable memory returns only after the copy ran, i.e.
+            // after the held layer_done[0]; stage the probe's copies in pinned
+            // memory so this thread reaches the layer-1 wait.
+            if (ordering_probe->pinned_out == nullptr ||
+                ordering_probe->pinned_out_bytes < static_cast<size_t>(L_lyr) * x_bytes) {
+                return false;
+            }
+            d2h_dst = static_cast<int8_t*>(ordering_probe->pinned_out) +
+                static_cast<size_t>(l) * x_bytes;
+        }
+        if (!CudaOk(cudaMemcpyAsync(d2h_dst, d_nxt, x_bytes, cudaMemcpyDeviceToHost,
                                     ws.d2h))) {
             return false;
         }
@@ -1821,6 +1851,14 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
     if (!CudaOk(cudaStreamSynchronize(ws.d2h))) return false;
     if (matmul::v4::rc::ExactReplayCancellationRequested()) return false;
     stream_drain.Disarm();
+    if constexpr (TestSlotReuseOrdering) {
+        for (uint32_t l = 0; l < L_lyr; ++l) {
+            std::memcpy(out_X[l + 1].data(),
+                        static_cast<const int8_t*>(ordering_probe->pinned_out) +
+                            static_cast<size_t>(l) * x_bytes,
+                        x_bytes);
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(g_stats_mu);
         g_stats.phase2_gemm_device = true;
@@ -1864,6 +1902,13 @@ RunRcExactReplaySlotReuseOrderingTest()
     }
 
     SlotReuseOrderingProbe probe;
+    // 3 layers x 32 rows x d_model 32 (the shapes below); allocated before the
+    // gate kernel is launched.
+    if (!probe.AllocPinnedOutputs(3u * 32u * 32u)) {
+        result.interlock_supported = true;
+        result.detail = "failed to allocate pinned probe outputs";
+        return result;
+    }
     if (!probe.Init()) {
         result.interlock_supported = probe.interlock_supported;
         result.detail = result.interlock_supported

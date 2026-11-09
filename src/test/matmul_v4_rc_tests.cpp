@@ -3047,9 +3047,9 @@ BOOST_AUTO_TEST_CASE(rc_p12_phase2_exactgemm_device_probe)
 
 BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_slot_reuse_ordering)
 {
-    // The CUDA implementation inserts a synthetic event before the layer-0
-    // consumer and verifies that the real per-slot H2D wait prevents the
-    // layer-2 overwrite from crossing it. Removing the wait, or waiting on the
+    // The CUDA implementation holds layer_done[0] behind a synthetic event
+    // and verifies that the real per-slot H2D wait prevents the layer-2
+    // overwrite from crossing it. Removing the wait, or waiting on the
     // unrecorded wrong slot, makes this fail deterministically.
     if (!matmul_v4::cuda::IsRcExactReplayCudaAvailable()) {
         BOOST_TEST_MESSAGE("CUDA ExactReplay unavailable; skip slot ordering test");
