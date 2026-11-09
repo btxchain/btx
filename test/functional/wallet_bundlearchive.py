@@ -76,7 +76,7 @@ class WalletBundleArchiveTest(BitcoinTestFramework):
         assert_equal(archive["unlocked_by_rpc"], True)
         assert_equal(archive["wallet_encrypted"], True)
         assert_equal(archive["wallet_passphrase_included"], False)
-        assert_equal(archive["wallet_passphrase_required_to_spend"], True)
+        assert_equal(archive["wallet_passphrase_required_to_spend"], False)
         assert_equal(archive["integrity"]["integrity_ok"], True)
         assert any("Wallet passphrase is not stored" in warning for warning in archive["warnings"])
 
@@ -116,7 +116,7 @@ class WalletBundleArchiveTest(BitcoinTestFramework):
         assert_equal(restore["bundled_manifest"]["integrity_warnings"], [])
         assert_equal(restore["bundled_manifest"]["wallet_encrypted"], True)
         assert_equal(restore["bundled_manifest"]["wallet_passphrase_included"], False)
-        assert_equal(restore["bundled_manifest"]["wallet_passphrase_required_to_spend"], True)
+        assert_equal(restore["bundled_manifest"]["wallet_passphrase_required_to_spend"], False)
         assert_equal(restore["bundled_integrity"]["integrity_ok"], True)
         assert any("archive passphrase only decrypted" in warning for warning in restore["warnings"])
 

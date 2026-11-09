@@ -54,6 +54,12 @@ option was removed.
   leaf, 0.34.15 rewrote nLockTime, nSequence and version while signing. This
   release refuses and names the required value unless `adjust_timelocks` is
   true.
+- `backupwalletbundle` and `backupwalletbundlearchive` report
+  `wallet_passphrase_required_to_spend: false` when they write
+  `listdescriptors_private.json`, and warn about it for an encrypted wallet.
+  That file holds the private descriptors with their PQ seeds in plaintext,
+  so it spends without the wallet passphrase. 0.34.15 reported `true`.
+  Bundles and archives made by earlier versions hold the same file.
 - A parked deep reorg has its own entry in `warnings`, and `warnings` and
   `-alertnotify` follow the latest deep-reorg alarm, not only the first one.
 - `-modelnet=0` turns off the model helper, both model ports and `btx-guardd`.
