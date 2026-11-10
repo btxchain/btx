@@ -404,6 +404,8 @@ UniValue FundedPackage(CWallet& wallet, const std::vector<CRecipient>& recipient
     }
     auto res = CreateTransaction(wallet, recipients, change_pos, coin_control, /*sign=*/false);
     if (!res) {
+        // As in the RPC FundTransaction(): when the lock hid coins of the wallet's own, ask for the unlock.
+        if (LockedWalletLeftOutOwnCoins(wallet, coin_control)) EnsureWalletIsUnlocked(wallet);
         throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(res).original);
     }
     PartiallySignedTransaction psbtx{CMutableTransaction(*res->tx)};

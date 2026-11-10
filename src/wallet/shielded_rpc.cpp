@@ -7981,6 +7981,12 @@ void AppendBridgePsbtRelayFeeAnalysis(UniValue& out,
         return std::nullopt;
     }
 
+    // Each chunk preview builds and signs a candidate shielding transaction and
+    // may derive a shielded change address, which a locked wallet cannot do.
+    // z_shieldfunds asks for the passphrase first; the plan asks here, after the
+    // funds checks, so a real shortfall keeps its error.
+    EnsureWalletIsUnlocked(*pwallet);
+
     CAmount remaining_requested = requested;
     while (remaining_requested > 0) {
         auto preview = BuildShieldingChunkPreview(

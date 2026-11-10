@@ -20,6 +20,7 @@ class UniValue;
 struct bilingual_str;
 
 namespace wallet {
+class CCoinControl;
 class LegacyScriptPubKeyMan;
 enum class DatabaseStatus;
 struct WalletContext;
@@ -65,6 +66,8 @@ void EnsureUniqueWalletBundleArchiveRelativePaths(const std::vector<std::string>
 void EnsureNoHistoricalShieldedPartialRescan(const CWallet& wallet, int start_height);
 void AppendLastProcessedBlock(UniValue& entry, const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 void AppendChainStaleness(UniValue& entry, const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+/** Whether a locked wallet left coins of its own out of this coin selection (rpc/spend.cpp). */
+bool LockedWalletLeftOutOwnCoins(const CWallet& wallet, const CCoinControl& coin_control) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 } //  namespace wallet
 
 #endif // BITCOIN_WALLET_RPC_UTIL_H
