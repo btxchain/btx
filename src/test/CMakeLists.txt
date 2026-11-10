@@ -2498,6 +2498,7 @@ if(WITH_MODELNET)
     modelnet_035_live_path_tests.cpp
     modelnet_submandate_tests.cpp
     modelnet_bounty_script_spend_tests.cpp
+    modelnet_bounty_eval_tests.cpp
     modelnet_economy_tests.cpp
     modelnet_feed_tests.cpp
     modelnet_release_directory_tests.cpp
