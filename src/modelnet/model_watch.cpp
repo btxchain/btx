@@ -648,7 +648,7 @@ bool ModelWatchStore::LoadLocked(std::string& err)
     return true;
 }
 
-ModelWatchStore::ModelWatchStore(fs::path modeldir)
+ModelWatchStore::ModelWatchStore(fs::path modeldir, size_t action_cap) : m_action_cap{action_cap}
 {
     if (!modeldir.empty()) {
         m_dir = std::move(modeldir);
@@ -729,6 +729,11 @@ void ModelWatchStore::EnqueueLocked(const ModelWatch& w, const ModelEvent& ev)
     a.spends = false;
     a.downloads = w.action == ActionPolicy::FREE_DOWNLOAD;
     a.requires_mandate = w.action == ActionPolicy::FUND_WITH_MANDATE;
+    if (m_action_cap > 0 && m_actions.size() >= m_action_cap) {
+        // Nobody drained the queue; keep the newest actions.
+        m_actions.pop_front();
+        ++m_dropped_actions;
+    }
     m_actions.push_back(std::move(a));
 }
 
@@ -745,7 +750,8 @@ std::vector<QueuedWatchAction> ModelWatchStore::DrainActions()
     std::vector<QueuedWatchAction> queued;
     {
         std::lock_guard<std::mutex> lock(m_mu);
-        queued.swap(m_actions);
+        queued.assign(std::make_move_iterator(m_actions.begin()), std::make_move_iterator(m_actions.end()));
+        m_actions.clear();
     }
     std::vector<QueuedWatchAction> out;
     out.reserve(queued.size());
@@ -767,7 +773,13 @@ std::vector<QueuedWatchAction> ModelWatchStore::DrainActions()
 std::vector<QueuedWatchAction> ModelWatchStore::PeekActions() const
 {
     std::lock_guard<std::mutex> lock(m_mu);
-    return m_actions;
+    return {m_actions.begin(), m_actions.end()};
+}
+
+uint64_t ModelWatchStore::DroppedActions() const
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    return m_dropped_actions;
 }
 
 bool ModelWatchStore::ApplySignedChannel(SignedChannel ch, std::string& err)
@@ -845,7 +857,7 @@ void BindModelEventLayer(const fs::path& modeldir, size_t cap)
     SetModelEventListener(nullptr);
     g_watches.reset();
     BindModelEventJournal(modeldir, cap);
-    g_watches = std::make_unique<ModelWatchStore>(modeldir);
+    g_watches = std::make_unique<ModelWatchStore>(modeldir, cap);
     if (ModelEventJournal* j = BoundModelEventJournal()) g_watches->BindJournal(j);
     SetModelEventListener(&ForwardEventToWatches);
 }
@@ -1046,6 +1058,7 @@ bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, Un
         UniValue arr(UniValue::VARR);
         for (const auto& act : acts) arr.push_back(WatchActionToJson(act));
         result.pushKV("actions", arr);
+        result.pushKV("dropped_actions", static_cast<int64_t>(watches.DroppedActions()));
         result.pushKV("drained", drain);
         result.pushKV("spends", false);
         result.pushKV("automatic_spend_atoms", 0);
