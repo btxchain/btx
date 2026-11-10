@@ -529,6 +529,36 @@ BOOST_AUTO_TEST_CASE(local_create_validates_periods_and_expiry)
     BOOST_CHECK(Refused(dir, "createcomputejob", JobReq(aid, me, 1, "past", 2000, 1500), "COMPUTE_JOB_EXPIRED"));
 }
 
+// Outstanding jobs on one agreement are bounded (doc/pay-with-compute.md):
+// createcomputejob refuses a 65th unexpired, unsettled job. importcomputejob
+// has to apply the same bound to a job signed elsewhere.
+BOOST_AUTO_TEST_CASE(imported_jobs_count_towards_the_outstanding_limit)
+{
+    std::vector<unsigned char> pk, sk;
+    const fs::path dir = NewDir(m_path_root, "r-job-limit", pk, sk);
+    const std::string me = HexStr(pk);
+    const std::string offer = CreateOffer(dir, Offer(me, Keys({me}), Keys({me}), "PREPAID", 1'000, "limit"));
+    const std::string aid = Call(dir, "issuecomputeagreement", AgreementReq(offer, me, 1000, 9'000'000, "lim"))["agreement_id"].get_str();
+
+    UniValue template_payload;
+    for (int i = 0; i < 64; ++i) {
+        const UniValue job = Call(dir, "createcomputejob", JobReq(aid, me, 1, "l" + std::to_string(i), 2000, 8'000'000));
+        if (i == 0) template_payload = job["body"]["payload"];
+    }
+    BOOST_CHECK(Refused(dir, "createcomputejob", JobReq(aid, me, 1, "l64", 2000, 8'000'000), "COMPUTE_RECORD_INVALID"));
+
+    // The same job, signed by the same scheduler key and imported, must not get past the bound.
+    UniValue payload(UniValue::VOBJ);
+    for (const auto& key : template_payload.getKeys()) {
+        if (key == "nonce" || key == "input_commitment") continue;
+        payload.pushKV(key, template_payload[key]);
+    }
+    payload.pushKV("nonce", "job-imported-65");
+    payload.pushKV("input_commitment", "in-imported-65");
+    const UniValue env = SignEnvelope("ComputeJob", pk, sk, payload);
+    BOOST_CHECK(Refused(dir, "importcomputejob", Envelope(env, 2100), "COMPUTE_RECORD_INVALID"));
+}
+
 UniValue Pad(size_t bytes)
 {
     // Strings are capped at 8 KiB by the canonical codec; an array of them is not.

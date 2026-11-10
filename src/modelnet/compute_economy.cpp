@@ -245,6 +245,8 @@ private:
     bool Sign(const std::string& type, const UniValue& payload, SignedEnvelope& env, std::string& err_code, std::string& err);
     bool Import(const UniValue& obj, const std::string& expect_type, SignedEnvelope& env, std::string& err_code, std::string& err, bool persist = true);
     bool BalanceOf(const std::string& agreement_id, int64_t now_ms, UniValue& out, std::string& err_code, std::string& err);
+    /** Unexpired jobs on the agreement that no receipt has settled yet. */
+    uint64_t OutstandingJobs(const std::string& agreement_id, int64_t now_ms);
 };
 
 ComputeStore& Store()
@@ -452,6 +454,25 @@ bool ValidOffer(const UniValue& p, const std::string& chain, std::string& err_co
 const UniValue& PayloadOf(const SignedEnvelope& env)
 {
     return env.body["payload"];
+}
+
+uint64_t ComputeStore::OutstandingJobs(const std::string& agreement_id, int64_t now_ms)
+{
+    uint64_t outstanding = 0;
+    for (const auto& kv : m_jobs) {
+        const UniValue& jp = PayloadOf(kv.second);
+        if (StrOf(jp, "agreement_id") != agreement_id) continue;
+        bool settled = false;
+        for (const auto& rec : m_receipts) {
+            const UniValue& rp = PayloadOf(rec.second);
+            if (rp.exists("job_id") && rp["job_id"].isStr() && rp["job_id"].get_str() == kv.first) settled = true;
+        }
+        int64_t exp = 0;
+        std::string err;
+        if (settled || !I64Field(jp, "expires_at_ms", exp, err) || exp < now_ms) continue;
+        ++outstanding;
+    }
+    return outstanding;
 }
 
 bool ComputeStore::BalanceOf(const std::string& agreement_id, int64_t now_ms, UniValue& out, std::string& err_code, std::string& err)
@@ -898,20 +919,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
         if (remaining == 0 || reserved > remaining || credit > remaining - reserved) {
             return Fail(err_code, err, "COMPUTE_CREDIT_OVERFLOW", "reservation");
         }
-        uint64_t outstanding = 0;
-        for (const auto& kv : m_jobs) {
-            const UniValue& jp = PayloadOf(kv.second);
-            if (StrOf(jp, "agreement_id") != a["agreement_id"].get_str()) continue;
-            bool settled = false;
-            for (const auto& rec : m_receipts) {
-                const UniValue& rp = PayloadOf(rec.second);
-                if (rp.exists("job_id") && rp["job_id"].isStr() && rp["job_id"].get_str() == kv.first) settled = true;
-            }
-            int64_t exp = 0;
-            if (settled || !I64Field(jp, "expires_at_ms", exp, err) || exp < now_ms) continue;
-            ++outstanding;
-        }
-        if (outstanding >= 64) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "too many jobs");
+        if (OutstandingJobs(a["agreement_id"].get_str(), now_ms) >= 64) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "too many jobs");
         const std::string job_method = a.exists("verification_method") && a["verification_method"].isStr()
                                            ? a["verification_method"].get_str()
                                            : "ISSUER_ACCEPTANCE";
@@ -978,6 +986,7 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             }
             uint64_t credit = 0;
             if (!U64Field(jp, "credit_p1e_microunits", credit, err) || credit == 0) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "credit");
+            if (OutstandingJobs(jp["agreement_id"].get_str(), now_ms) >= 64) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "too many jobs");
             UniValue bal;
             if (!BalanceOf(jp["agreement_id"].get_str(), now_ms, bal, err_code, err)) return false;
             const uint64_t reserved = bal["outstanding_reserved_p1e_microunits"].getInt<uint64_t>();
