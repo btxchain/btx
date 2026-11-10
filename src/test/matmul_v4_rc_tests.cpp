@@ -133,9 +133,9 @@ bool ScaleSelectiveGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8
     return OracleGemmS8S8(L, R, rows, inner, cols, out);
 }
 
-/** Deliberately separate test entry point for the alternate-provider state
- * machine. Production independence is canary-bound to actual backend entry
- * points; two labels using OracleGemmS8S8 itself remain correlated. */
+/** Use a separate scalar implementation for the alternate-provider fixture.
+ * Identical forwarding wrappers can be folded to one address by an optimized
+ * linker; two labels using the same callback must still remain correlated. */
 bool IndependentOracleGemmS8S8(
     const std::vector<int8_t>& L,
     const std::vector<int8_t>& R,
@@ -144,7 +144,17 @@ bool IndependentOracleGemmS8S8(
     uint32_t cols,
     std::vector<int32_t>& out)
 {
-    out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+    out.assign(static_cast<size_t>(rows) * cols, 0);
+    for (uint32_t i = 0; i < rows; ++i) {
+        for (uint32_t c = 0; c < cols; ++c) {
+            int32_t sum{0};
+            for (uint32_t k = 0; k < inner; ++k) {
+                sum += static_cast<int32_t>(L[static_cast<size_t>(i) * inner + k]) *
+                       static_cast<int32_t>(R[static_cast<size_t>(k) * cols + c]);
+            }
+            out[static_cast<size_t>(i) * cols + c] = sum;
+        }
+    }
     return true;
 }
 
@@ -1989,6 +1999,21 @@ BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_cpu_confirms_invalid_not_quarantined
     BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
     rc::ClearRCExactReplayAlternateProviders();
     rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_independent_oracle_matches_reference)
+{
+    const std::vector<int8_t> left{0, 1, -1, 127, -128, 2};
+    const std::vector<int8_t> right{1, -2, 3, 4, -5, 6};
+    const std::vector<int32_t> expected{8, -2, -267, -754};
+    std::vector<int32_t> out{123};
+    BOOST_REQUIRE(IndependentOracleGemmS8S8(left, right, 2, 3, 2, out));
+    BOOST_CHECK(out == expected);
+    BOOST_CHECK(out == lt::ExactGemmS8S8(left, right, 2, 3, 2));
+
+    BOOST_REQUIRE(IndependentOracleGemmS8S8({7}, {-3}, 1, 1, 1, out));
+    BOOST_REQUIRE_EQUAL(out.size(), 1U);
+    BOOST_CHECK_EQUAL(out[0], -21);
 }
 
 BOOST_AUTO_TEST_CASE(rc_strict_independent_same_digest_rejects_false_header)
