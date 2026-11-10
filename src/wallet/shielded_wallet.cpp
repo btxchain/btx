@@ -2844,6 +2844,7 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
             // Keep live mempool spends unavailable for reselection until the
             // transaction leaves the mempool or confirms in a block.
             m_pending_spends.insert(nullifier);
+            m_inflight_spends.erase(nullifier);
             spend_view.amount = it->second.note.value;
             spend_view.is_ours = true;
             tx_has_local_visibility = true;
@@ -2858,6 +2859,8 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
         if (note_it != m_notes.end()) {
             m_pending_spends.insert(recovery_spend->nullifier);
             m_pending_spends.insert(note_it->first);
+            m_inflight_spends.erase(recovery_spend->nullifier);
+            m_inflight_spends.erase(note_it->first);
             spend_view.amount = note_it->second.note.value;
             spend_view.is_ours = true;
             tx_has_local_visibility = true;
@@ -3051,6 +3054,7 @@ void CShieldedWallet::Rescan(int start_height)
     m_mempool_notes.clear();
     m_mempool_note_index.clear();
     m_pending_spends.clear();
+    m_inflight_spends.clear();
     m_tx_view_cache.clear();
     m_tree = shielded::ShieldedMerkleTree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     m_last_scanned_height = start_height - 1;
@@ -3067,6 +3071,7 @@ void CShieldedWallet::PruneStalePendingSpends() const
 
     std::vector<Nullifier> stale_pending;
     for (const auto& nf : m_pending_spends) {
+        if (m_inflight_spends.count(nf)) continue;
         if (!NullifierReservedByAnotherMempoolTx(nf)) stale_pending.push_back(nf);
     }
     for (const auto& nf : stale_pending) {
@@ -7183,6 +7188,7 @@ void CShieldedWallet::LoadPersistedState()
     // session. The mempool is empty after a restart, so no in-flight transactions
     // exist that would still need the reservations.
     m_pending_spends.clear();
+    m_inflight_spends.clear();
     m_mempool_notes.clear();
     m_mempool_note_index.clear();
 
@@ -7340,6 +7346,7 @@ void CShieldedWallet::LoadPersistedState()
     m_mempool_notes.clear();
     m_mempool_note_index.clear();
     m_pending_spends.clear();
+    m_inflight_spends.clear();
     m_recent_ring_exclusions.clear();
     m_tx_view_cache.clear();
     m_tree = shielded::ShieldedMerkleTree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
@@ -8024,6 +8031,7 @@ void CShieldedWallet::ReservePendingSpends(const std::vector<Nullifier>& nullifi
     AssertLockHeld(cs_shielded);
     for (const auto& nf : nullifiers) {
         m_pending_spends.insert(nf);
+        m_inflight_spends.insert(nf);
     }
 }
 
@@ -8032,6 +8040,7 @@ void CShieldedWallet::ReleasePendingSpends(const std::vector<Nullifier>& nullifi
     AssertLockHeld(cs_shielded);
     for (const auto& nf : nullifiers) {
         m_pending_spends.erase(nf);
+        m_inflight_spends.erase(nf);
     }
 }
 

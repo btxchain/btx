@@ -641,6 +641,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_shielded_matrict_disable_transition.py',
     'wallet_shielded_topology_sim.py',
     'wallet_shielded_send_flow.py',
+    'wallet_shielded_concurrent_sends.py',
     'wallet_shielded_sendmany_stress.py',
     'wallet_shielded_mixed_stress.py',
     'wallet_shielded_randomized_sim.py',
