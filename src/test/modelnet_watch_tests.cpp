@@ -318,6 +318,46 @@ BOOST_AUTO_TEST_CASE(watch_helper_peek_does_not_execute_or_drain)
     AssertZeroSpendNoWallet(result);
 }
 
+BOOST_AUTO_TEST_CASE(unwatch_drops_the_actions_the_watch_queued)
+{
+    // unwatchmodel removed the watch but not the actions it had already queued,
+    // so a later drain still ran FREE_DOWNLOAD for a watch the user had dropped.
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "watch-unwatch-queued";
+    BindModelEventLayer(dir, 32);
+    ModelCatalog cat{dir, 8 << 20};
+    ModelWatch dropped;
+    dropped.kind = WatchKind::PUBLISHER;
+    dropped.publisher_id = "unwatch-publisher";
+    dropped.action = ActionPolicy::FREE_DOWNLOAD;
+    ModelWatch kept;
+    kept.kind = WatchKind::PUBLISHER;
+    kept.publisher_id = "kept-publisher";
+    kept.action = ActionPolicy::FREE_DOWNLOAD;
+    std::string err, code;
+    BOOST_REQUIRE(BoundModelWatchStore()->PutWatch(dropped, err));
+    BOOST_REQUIRE(BoundModelWatchStore()->PutWatch(kept, err));
+    ObserveResult observed;
+    BOOST_REQUIRE(JournalObserve(MakeSigned("unwatch-publisher", "dropped-model"), observed, err));
+    BOOST_REQUIRE(JournalObserve(MakeSigned("kept-publisher", "kept-model"), observed, err));
+    BOOST_REQUIRE_EQUAL(BoundModelWatchStore()->PeekActions().size(), 2U);
+
+    UniValue un(UniValue::VOBJ);
+    un.pushKV("watch_id", dropped.watch_id);
+    UniValue result;
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("unwatchmodel", un), result, code, err), err);
+    BOOST_REQUIRE(result["removed"].get_bool());
+
+    const auto queued = BoundModelWatchStore()->PeekActions();
+    BOOST_REQUIRE_EQUAL(queued.size(), 1U);
+    BOOST_CHECK_EQUAL(queued[0].object_id, "kept-model");
+    UniValue drain(UniValue::VOBJ);
+    drain.pushKV("drain", true);
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("getmodelwatchactions", drain), result, code, err), err);
+    BOOST_REQUIRE_EQUAL(result["actions"].size(), 1U);
+    BOOST_CHECK_EQUAL(result["actions"][0]["object_id"].get_str(), "kept-model");
+}
+
 BOOST_AUTO_TEST_CASE(watch_persist_restart)
 {
     using namespace modelnet;

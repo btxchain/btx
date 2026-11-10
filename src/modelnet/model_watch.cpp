@@ -711,6 +711,10 @@ bool ModelWatchStore::RemoveWatch(const std::string& watch_id)
 {
     std::lock_guard<std::mutex> lock(m_mu);
     const bool gone = m_watches.erase(watch_id) > 0;
+    // Actions the watch queued before it was removed must not run afterwards.
+    m_actions.erase(std::remove_if(m_actions.begin(), m_actions.end(),
+                                   [&](const QueuedWatchAction& a) { return a.watch_id == watch_id; }),
+                    m_actions.end());
     std::string err;
     (void)PersistWatchesLocked(err);
     return gone;
