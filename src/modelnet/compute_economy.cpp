@@ -1298,6 +1298,32 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
                         imported_credit != static_cast<uint64_t>(st["episode_count"].getInt<int64_t>()) * pwc::P1E_MICROUNITS) {
                         return Fail(err_code, err, "COMPUTE_RECEIPT_CREDIT_MISMATCH", "qualification");
                     }
+                    // The agreement's qualification terms, as issuecomputereceipt applies
+                    // them (ConfirmRedeemedQualification). The age is taken when the
+                    // receipt was accepted, which is when the issuer applied it.
+                    const UniValue& settlement = ap["settlement"];
+                    if (settlement.exists("max_qualification_age_ms")) {
+                        uint64_t max_age = 0;
+                        if (!U64Field(settlement, "max_qualification_age_ms", max_age, err)) {
+                            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
+                        }
+                        int64_t accepted_at = 0;
+                        if (!I64Field(rp, "accepted_at_ms", accepted_at, err)) {
+                            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "accepted_at_ms");
+                        }
+                        const int64_t redeemed_at = st["redeemed_at_ms"].getInt<int64_t>();
+                        if (accepted_at < redeemed_at || static_cast<uint64_t>(accepted_at - redeemed_at) > max_age) {
+                            return Fail(err_code, err, "COMPUTE_QUALIFICATION_REQUIRED", "age");
+                        }
+                    }
+                    if (settlement.exists("optional_min_rate_p1e_microunits_per_hour")) {
+                        uint64_t min_rate = 0;
+                        if (!U64Field(settlement, "optional_min_rate_p1e_microunits_per_hour", min_rate, err)) {
+                            return Fail(err_code, err, "COMPUTE_RECORD_INVALID", err);
+                        }
+                        const uint64_t rate = st["conservative_rate_p1e_microunits_per_hour"].getInt<uint64_t>();
+                        if (rate < min_rate) return Fail(err_code, err, "COMPUTE_RATE_TOO_LOW", "qualification");
+                    }
                 }
             }
         }

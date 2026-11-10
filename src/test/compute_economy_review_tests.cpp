@@ -377,6 +377,66 @@ BOOST_AUTO_TEST_CASE(imported_direct_receipt_is_bound_to_work)
     modelnet::SetPwcQualificationRegistryPath("");
 }
 
+// issuecomputereceipt holds a direct-compute receipt to the agreement's
+// qualification terms (ConfirmRedeemedQualification: minimum rate, maximum
+// age). importcomputereceipt checks a challenge this node redeemed against the
+// registry too, and must apply the same terms, with the age taken when the
+// receipt was accepted.
+BOOST_AUTO_TEST_CASE(imported_direct_receipt_meets_the_agreement_terms)
+{
+    std::vector<unsigned char> pk, sk, kpk, ksk;
+    const fs::path dir = NewDir(m_path_root, "r-direct-terms", pk, sk);
+    std::string gen_err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(kpk, ksk, gen_err));
+    const std::string me = HexStr(pk), third = HexStr(kpk);
+
+    const auto agreement = [&](const std::string& tag, const char* key, uint64_t value) {
+        UniValue offer = Offer(me, Keys({me}), Keys({me, third}), "PREPAID", 3'000'000, tag);
+        UniValue settlement = offer["settlement"];
+        settlement.pushKV(key, value);
+        offer.pushKV("settlement", settlement);
+        const std::string offer_id = CreateOffer(dir, offer);
+        return Call(dir, "issuecomputeagreement", AgreementReq(offer_id, me, 1000, 9'000'000, tag))["agreement_id"].get_str();
+    };
+    const auto local_receipt = [&](const std::string& aid, const std::string& cid) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("agreement_id", aid);
+        r.pushKV("credited_p1e_microunits", 1'000'000);
+        r.pushKV("profile_id", pwc::ProfileIdHex(pwc::ToyProfile()));
+        r.pushKV("subject_pubkey", me);
+        r.pushKV("verification_method", "DIRECT_COMPUTE");
+        r.pushKV("evidence_commitment", cid);
+        r.pushKV("now_ms", 2000);
+        return r;
+    };
+
+    const fs::path qpath = m_path_root / "r-direct-terms-qual.dat";
+    UniValue challenge, response;
+    RedeemedChallenge(qpath, pk, 1, challenge, response);
+    modelnet::SetPwcQualificationRegistryPath(fs::PathToString(qpath));
+    const std::string cid = challenge["challenge_id"].get_str();
+
+    // A minimum rate no toy challenge reaches.
+    const std::string slow = agreement("rate", "optional_min_rate_p1e_microunits_per_hour", 1'000'000'000'000'000);
+    BOOST_CHECK(Refused(dir, "issuecomputereceipt", local_receipt(slow, cid), "COMPUTE_RATE_TOO_LOW"));
+    BOOST_CHECK(Refused(dir, "importcomputereceipt", Envelope(SignEnvelope("ComputeReceipt", kpk, ksk, DirectReceipt(slow, me, 1'000'000, cid, "rate"))), "COMPUTE_RATE_TOO_LOW"));
+    BOOST_CHECK_EQUAL(Credited(dir, slow, 3000), 0u);
+
+    // The challenge was redeemed at 1500; the receipt was accepted at 2000.
+    const std::string fresh = agreement("age", "max_qualification_age_ms", 100);
+    BOOST_CHECK(Refused(dir, "issuecomputereceipt", local_receipt(fresh, cid), "COMPUTE_QUALIFICATION_REQUIRED"));
+    BOOST_CHECK(Refused(dir, "importcomputereceipt", Envelope(SignEnvelope("ComputeReceipt", kpk, ksk, DirectReceipt(fresh, me, 1'000'000, cid, "age"))), "COMPUTE_QUALIFICATION_REQUIRED"));
+    BOOST_CHECK_EQUAL(Credited(dir, fresh, 3000), 0u);
+
+    // Within the terms the imported receipt is still credited.
+    const std::string loose = agreement("loose", "max_qualification_age_ms", 10'000);
+    UniValue out;
+    std::string code;
+    BOOST_CHECK(TryCall(dir, "importcomputereceipt", Envelope(SignEnvelope("ComputeReceipt", kpk, ksk, DirectReceipt(loose, me, 1'000'000, cid, "loose"))), out, code));
+    BOOST_CHECK_EQUAL(Credited(dir, loose, 3000), 1'000'000u);
+    modelnet::SetPwcQualificationRegistryPath("");
+}
+
 // P4. The registry must keep issuing after kQualRegistryMax redemptions, and a
 // challenge dropped to make room must still never redeem again.
 BOOST_AUTO_TEST_CASE(registry_keeps_issuing_after_many_redemptions)
