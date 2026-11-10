@@ -9125,6 +9125,45 @@ RPCHelpMan z_shieldcoinbase()
         }};
 }
 
+/** Lock the inputs of a shielding chunk in memory (no wallet write) before it is
+ *  committed. The chunk is built without cs_wallet held, so a shielding call running
+ *  at the same time may have picked the same coins; whichever call locks them first
+ *  keeps them. Returns false, and locks nothing, when one of them is spent or locked
+ *  by someone else by now. `reserved` holds what this call has locked so far. */
+[[nodiscard]] bool ReserveShieldingInputs(CWallet& wallet,
+                                          const std::vector<TransparentShieldingUTXO>& selected,
+                                          std::vector<COutPoint>& reserved)
+{
+    LOCK(wallet.cs_wallet);
+    const auto is_ours = [&](const COutPoint& outpoint) {
+        return std::find(reserved.begin(), reserved.end(), outpoint) != reserved.end();
+    };
+    for (const auto& coin : selected) {
+        if (wallet.IsSpent(coin.outpoint)) return false;
+        if (wallet.IsLockedCoin(coin.outpoint) && !is_ours(coin.outpoint)) return false;
+    }
+    for (const auto& coin : selected) {
+        if (is_ours(coin.outpoint)) continue;
+        wallet.LockCoin(coin.outpoint);
+        reserved.push_back(coin.outpoint);
+    }
+    return true;
+}
+
+/** Drop the coins another call has spent or locked since they were collected. */
+void DropTakenShieldingInputs(const CWallet& wallet,
+                              std::vector<TransparentShieldingUTXO>& available,
+                              const std::vector<COutPoint>& reserved)
+{
+    LOCK(wallet.cs_wallet);
+    available.erase(std::remove_if(available.begin(), available.end(), [&](const TransparentShieldingUTXO& coin) {
+                        if (wallet.IsSpent(coin.outpoint)) return true;
+                        return wallet.IsLockedCoin(coin.outpoint) &&
+                               std::find(reserved.begin(), reserved.end(), coin.outpoint) == reserved.end();
+                    }),
+                    available.end());
+}
+
 RPCHelpMan z_shieldfunds()
 {
     return RPCHelpMan{
@@ -9251,23 +9290,46 @@ RPCHelpMan z_shieldfunds()
             UniValue chunks(UniValue::VARR);
             std::string first_txid;
 
+            // Inputs this call has locked in memory; unlocked again when it returns,
+            // after the commits or on any error.
+            std::vector<COutPoint> reserved;
+            struct UnlockReserved {
+                CWallet& wallet;
+                const std::vector<COutPoint>& outpoints;
+                ~UnlockReserved()
+                {
+                    LOCK(wallet.cs_wallet);
+                    for (const auto& outpoint : outpoints) wallet.UnlockCoin(outpoint);
+                }
+            } unlock_reserved{*pwallet, reserved};
+
             while (remaining_requested > 0) {
                 std::string build_error;
-                auto preview = BuildShieldingChunkPreview(
-                    pwallet,
-                    available,
-                    *effective_dest,
-                    remaining_requested,
-                    explicit_fee,
-                    fee,
-                    policy.applied_max_inputs_per_chunk,
-                    policy,
-                    build_error);
-                if (!preview.has_value()) {
-                    const RPCErrorCode code = build_error.find("Insufficient transparent funds") != std::string::npos
-                        ? RPC_WALLET_INSUFFICIENT_FUNDS
-                        : RPC_WALLET_ERROR;
-                    throw JSONRPCError(code, build_error);
+                const auto build_chunk = [&]() {
+                    auto chunk = BuildShieldingChunkPreview(
+                        pwallet,
+                        available,
+                        *effective_dest,
+                        remaining_requested,
+                        explicit_fee,
+                        fee,
+                        policy.applied_max_inputs_per_chunk,
+                        policy,
+                        build_error);
+                    if (!chunk.has_value()) {
+                        const RPCErrorCode code = build_error.find("Insufficient transparent funds") != std::string::npos
+                            ? RPC_WALLET_INSUFFICIENT_FUNDS
+                            : RPC_WALLET_ERROR;
+                        throw JSONRPCError(code, build_error);
+                    }
+                    return chunk;
+                };
+                auto preview = build_chunk();
+                // Another shielding call may have taken some of these inputs since they
+                // were collected: drop those and build the chunk again.
+                while (!ReserveShieldingInputs(*pwallet, preview->selected, reserved)) {
+                    DropTakenShieldingInputs(*pwallet, available, reserved);
+                    preview = build_chunk();
                 }
 
                 std::string commit_error;
