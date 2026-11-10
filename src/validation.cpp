@@ -15955,7 +15955,13 @@ static bool ContextualCheckBlock(const CBlock& block,
                                test_hook_forces_release
                                    ? std::optional<bool>{}
                                    : LookupMatMulEncDrVerdict(block.GetHash())};
-                           memo.has_value()) {
+                           memo.has_value() &&
+                           // A positive legacy LT memo does not carry durable
+                           // replay provenance. Recompute the seal before
+                           // promoting it to BLOCK_EXACT_REPLAY_VERIFIED.
+                           (!*memo || consensusParams.IsMatMulRCActive(nHeight) ||
+                            consensusParams.IsMatMulRCCoupledActive(nHeight) ||
+                            !consensusParams.IsMatMulLTSealAsPoWActive(nHeight))) {
                     // WP-7 / C5: the async verify worker (net_processing's
                     // node::MatMulVerifyWorker) already ran the pure ENC-DR
                     // predicate for this header off-thread and memoized the
@@ -16007,6 +16013,14 @@ static bool ContextualCheckBlock(const CBlock& block,
                         } else {
                             encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
                                                                       parent_mtp);
+                            // The legacy LT seal verifier always recomputes
+                            // the complete Q* seal (epsilon zero); it never
+                            // accepts through the sketch-cache fast path.
+                            if (encdr_ok && rc_authority != nullptr &&
+                                consensusParams.IsMatMulLTSealAsPoWActive(nHeight)) {
+                                *rc_authority =
+                                    MatMulRCAuthorityProvenance::LOCAL_EXACT_REPLAY;
+                            }
                         }
                     }
                 }
