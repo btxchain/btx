@@ -913,6 +913,33 @@ bool BountyStore::Load(std::string& err)
             if (EnvelopeFromJson(o["terms"][key], env, err)) m_terms[key] = env;
         }
     }
+    // The signed pledges, nominations, appointments, evaluation reports and
+    // challenges and the evaluation plans are loaded like the terms.
+    auto load_envelopes = [&](const char* k, std::map<std::string, SignedEnvelope>& dst) {
+        if (!o.exists(k) || !o[k].isObject()) return;
+        for (const auto& key : o[k].getKeys()) {
+            SignedEnvelope env;
+            if (EnvelopeFromJson(o[k][key], env, err)) dst[key] = env;
+        }
+    };
+    auto load_envelope_lists = [&](const char* k, std::map<std::string, std::vector<SignedEnvelope>>& dst) {
+        if (!o.exists(k) || !o[k].isObject()) return;
+        for (const auto& key : o[k].getKeys()) {
+            if (!o[k][key].isArray()) continue;
+            auto& list = dst[key];
+            list.clear();
+            for (const auto& j : o[k][key].getValues()) {
+                SignedEnvelope env;
+                if (EnvelopeFromJson(j, env, err)) list.push_back(env);
+            }
+        }
+    };
+    load_envelopes("pledges", m_pledges);
+    load_envelope_lists("nominations", m_noms);
+    load_envelope_lists("appointments", m_appointments);
+    load_envelopes("eval_reports", m_eval_reports);
+    load_envelopes("challenges", m_challenges);
+    load_map("eval_plans", m_eval_plans);
     return true;
 }
 
@@ -937,6 +964,27 @@ bool BountyStore::PersistLocked(std::string& err) const
     UniValue terms(UniValue::VOBJ);
     for (const auto& kv : m_terms) terms.pushKV(kv.first, EnvelopeToJson(kv.second));
     o.pushKV("terms", terms);
+    // These were kept in memory only and were gone after every restart.
+    auto dump_envelopes = [&](const char* k, const std::map<std::string, SignedEnvelope>& m) {
+        UniValue x(UniValue::VOBJ);
+        for (const auto& kv : m) x.pushKV(kv.first, EnvelopeToJson(kv.second));
+        o.pushKV(k, x);
+    };
+    auto dump_envelope_lists = [&](const char* k, const std::map<std::string, std::vector<SignedEnvelope>>& m) {
+        UniValue x(UniValue::VOBJ);
+        for (const auto& kv : m) {
+            UniValue arr(UniValue::VARR);
+            for (const auto& env : kv.second) arr.push_back(EnvelopeToJson(env));
+            x.pushKV(kv.first, arr);
+        }
+        o.pushKV(k, x);
+    };
+    dump_envelopes("pledges", m_pledges);
+    dump_envelope_lists("nominations", m_noms);
+    dump_envelope_lists("appointments", m_appointments);
+    dump_envelopes("eval_reports", m_eval_reports);
+    dump_envelopes("challenges", m_challenges);
+    dump("eval_plans", m_eval_plans);
     return WriteJson(m_dir / "bounty-store.json", o, err);
 }
 
