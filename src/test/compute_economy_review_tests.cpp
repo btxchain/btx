@@ -594,4 +594,51 @@ BOOST_AUTO_TEST_CASE(passport_rate_and_privacy_properties)
     BOOST_CHECK_EQUAL(err, "COMPUTE_CREDIT_OVERFLOW");
 }
 
+// A job reserves its credit until expires_at_ms; BalanceOf stops counting it after
+// that and createcomputejob gives the room to a new job. Settling the expired job
+// afterwards would credit the same room twice, so it fails like a late result does.
+BOOST_AUTO_TEST_CASE(expired_job_cannot_be_settled)
+{
+    std::vector<unsigned char> pk, sk;
+    const fs::path dir = NewDir(m_path_root, "r-expired-settle", pk, sk);
+    const std::string me = HexStr(pk);
+    const std::string offer = CreateOffer(dir, Offer(me, Keys({me}), Keys({me}), "PREPAID", 10, "expired"));
+    const std::string aid = Call(dir, "issuecomputeagreement", AgreementReq(offer, me, 1000, 9'000'000, "exp"))["agreement_id"].get_str();
+
+    // J1 takes the whole obligation and expires at 3000; its result comes in time.
+    const UniValue j1 = Call(dir, "createcomputejob", JobReq(aid, me, 10, "j1", 2000, 3000));
+    UniValue rq(UniValue::VOBJ);
+    rq.pushKV("job_id", j1["job_id"]);
+    rq.pushKV("output_commitment", "out-j1");
+    rq.pushKV("now_ms", 2500);
+    const UniValue r1 = Call(dir, "submitcomputejobresult", rq);
+
+    // Once J1 has expired its credit is free again, and J2 takes it.
+    UniValue j2_receipt;
+    BOOST_REQUIRE(TrySettleByJob(dir, aid, me, 10, "j2", 3500, j2_receipt));
+
+    UniValue acc(UniValue::VOBJ);
+    acc.pushKV("result_id", r1["result_id"]);
+    acc.pushKV("expected_output_commitment", "out-j1");
+    acc.pushKV("now_ms", 4000);
+    BOOST_CHECK(Refused(dir, "acceptcomputejobresult", acc, "COMPUTE_JOB_EXPIRED"));
+
+    UniValue iss(UniValue::VOBJ);
+    iss.pushKV("agreement_id", aid);
+    iss.pushKV("job_id", j1["job_id"]);
+    iss.pushKV("credited_p1e_microunits", 10);
+    iss.pushKV("profile_id", pwc::ProfileIdHex(pwc::ToyProfile()));
+    iss.pushKV("subject_pubkey", me);
+    iss.pushKV("verification_method", "ISSUER_ACCEPTANCE");
+    iss.pushKV("evidence_commitment", "out-j1");
+    iss.pushKV("now_ms", 4000);
+    BOOST_CHECK(Refused(dir, "issuecomputereceipt", iss, "COMPUTE_JOB_EXPIRED"));
+
+    UniValue b(UniValue::VOBJ);
+    b.pushKV("agreement_id", aid);
+    b.pushKV("now_ms", 4000);
+    const UniValue bal = Call(dir, "getcomputebalance", b);
+    BOOST_CHECK_EQUAL(bal["credited_p1e_microunits"].getInt<uint64_t>(), 10U);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
