@@ -186,7 +186,26 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
             req.pushKV("params", params);
             UniValue result;
             std::string err;
-            if (HelperCall(name, params, result, err)) {
+            std::string wallet_restriction;
+            const bool restricted_view = modelnet::IsWalletObservationRead(name) &&
+                GetWalletRestrictionFromJSONRPCRequest(request, wallet_restriction);
+            UniValue scoped_params(UniValue::VARR);
+            if (restricted_view) {
+                scoped_params.push_back(name);
+                scoped_params.push_back(params);
+            }
+            const bool helper_ok = restricted_view
+                ? HelperCall("getrestrictedmodelview", scoped_params, result, err)
+                : HelperCall(name, params, result, err);
+            UniValue helper_error;
+            if (!helper_ok && restricted_view && helper_error.read(err) &&
+                helper_error.isObject() && helper_error["code"].isStr() &&
+                helper_error["code"].get_str() == "METHOD_NOT_FOUND") {
+                throw JSONRPCError(RPC_MISC_ERROR,
+                    "Restricted model view failed. The node and external helper must both support "
+                    "getrestrictedmodelview. No unrestricted retry was made: " + err);
+            }
+            if (helper_ok) {
                 if (name == "getmodelnetworkinfo") {
                     const auto helper = modelnet::SnapshotManagedHelper();
                     result.pushKV("helper_managed_by_btxd", helper.managed_by_btxd);

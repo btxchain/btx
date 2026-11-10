@@ -2613,11 +2613,11 @@ void AfterIndexPut(const ModelSearchRecord& rec, int64_t now_ms)
     }
 }
 
-std::vector<ModelEconomyEntry> EconomyHits(std::vector<SearchHit> hits, const SearchQuery& q, ModelCatalog* cat = nullptr)
+std::vector<ModelEconomyEntry> EconomyHits(std::vector<SearchHit> hits, const SearchQuery& q, ModelCatalog* cat = nullptr, bool include_wallet_observation = true)
 {
     std::vector<ModelEconomyEntry> out;
     for (auto& h : hits) {
-        auto e = EconomyForHit(h, cat);
+        auto e = EconomyForHit(h, cat, include_wallet_observation);
         if (!MatchesEconomyFilters(e, q.filters)) continue;
         out.push_back(std::move(e));
     }
@@ -6247,7 +6247,7 @@ void ExecuteQueuedFreeDownloads(ModelCatalog& cat, UniValue& result)
     in_drain = false;
 }
 
-bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& result, std::string& err_code, std::string& err, std::atomic<bool>* stop)
+bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& result, std::string& err_code, std::string& err, std::atomic<bool>* stop, bool include_wallet_observation)
 {
     result = UniValue(UniValue::VOBJ);
     try {
@@ -6312,6 +6312,20 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             result.pushKV("executed_free_downloads", drained);
         }
         return ok;
+    }
+    // A distinct method makes mixed-version pairs fail closed: older helpers
+    // cannot silently ignore the requested view and return their shared cache.
+    if (method == "getrestrictedmodelview") {
+        if (!params.isArray() || params.size() != 2 || !params[0].isStr() ||
+            !params[1].isArray() || !IsWalletObservationRead(params[0].get_str())) {
+            err_code = "INVALID_PARAMETER";
+            err = "expected a supported observation read and its argument array";
+            return false;
+        }
+        UniValue scoped(UniValue::VOBJ);
+        scoped.pushKV("method", params[0]);
+        scoped.pushKV("params", params[1]);
+        return DispatchHelperRpc(cat, scoped, result, err_code, err, stop, false);
     }
     if (IsSubscriptionHelperMethod(method)) {
         return DispatchSubscriptionRpc(method, params, result, err_code, err);
@@ -7610,7 +7624,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
             decorated.push_back(h);
         }
-        auto entries = EconomyHits(std::move(decorated), q, &cat);
+        auto entries = EconomyHits(std::move(decorated), q, &cat, include_wallet_observation);
         if (static_cast<int>(entries.size()) > q.limit && q.limit > 0) entries.resize(q.limit);
         for (const auto& e : entries) arr.push_back(EconomySearchCard(e));
         result.pushKV("results", arr);
@@ -7804,7 +7818,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             q.scope = SearchScope::ALL;
             const auto hits = g_search_idx.Search(q, ConnNowMs());
             UniValue arr(UniValue::VARR);
-            auto entries = EconomyHits(hits, q, &cat);
+            auto entries = EconomyHits(hits, q, &cat, include_wallet_observation);
             for (const auto& e : entries) arr.push_back(EconomySearchCard(e));
             result.pushKV("schema_version", ECONOMY_SCHEMA_VERSION);
             result.pushKV("results", arr);
@@ -7824,7 +7838,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             h.local.pinned = e.pinned;
             h.local.partial = e.incomplete;
         }
-        result = EconomySearchCard(EconomyForHit(h, &cat));
+        result = EconomySearchCard(EconomyForHit(h, &cat, include_wallet_observation));
         return true;
     }
     if (method == "getmodelproviders" || method == "getmodelavailability" || method == "getmodelpeercount") {
@@ -8035,7 +8049,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 UniValue req(UniValue::VOBJ);
                 req.pushKV("method", "getmodelfeed");
                 req.pushKV("params", inner);
-                if (!DispatchHelperRpc(cat, req, result, err_code, err, stop)) return false;
+                if (!DispatchHelperRpc(cat, req, result, err_code, err, stop, include_wallet_observation)) return false;
                 remap_feed(result);
                 result.pushKV("scope", "NETWORK");
                 return true;
@@ -8054,7 +8068,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 UniValue req(UniValue::VOBJ);
                 req.pushKV("method", "getmodelfeed");
                 req.pushKV("params", inner);
-                if (!DispatchHelperRpc(cat, req, result, err_code, err, stop)) return false;
+                if (!DispatchHelperRpc(cat, req, result, err_code, err, stop, include_wallet_observation)) return false;
                 remap_feed(result);
                 result.pushKV("scope", SearchScopeName(scope));
                 return true;
@@ -8101,14 +8115,14 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 }
                 if (h.rec.release_id.empty()) h.rec.release_id = c.release_id.Hex();
                 FillKnownCatalogFields(cat, h);
-                auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat));
+                auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat, include_wallet_observation));
                 if (Arg(0).isObject() && Arg(0).exists("scope") && ToUpper(Arg(0)["scope"].get_str()) == "LOCAL") {
                     // keep
                 }
                 arr.push_back(EconomySearchCard(e));
             }
         } else {
-            auto entries = EconomyHits(hits, q, &cat);
+            auto entries = EconomyHits(hits, q, &cat, include_wallet_observation);
             for (const auto& e : entries) arr.push_back(EconomySearchCard(e));
         }
         result.pushKV("schema_version", ECONOMY_SCHEMA_VERSION);
@@ -9022,7 +9036,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 if (const auto* rec = g_search_idx.Get(camp.model_id)) h.rec = *rec;
                 else h.rec.model_id = camp.model_id;
             }
-            auto e = ComposeEconomyEntry(h, &camp, ObservationFromHit(h, &camp, &cat));
+            auto e = ComposeEconomyEntry(h, &camp, ObservationFromHit(h, &camp, &cat, include_wallet_observation));
             UniValue one = CampaignToJson(camp);
             one.pushKV("lifecycle_state", ModelLifecycleName(e.lifecycle));
             one.pushKV("remaining_atoms", e.remaining_atoms);
@@ -9962,7 +9976,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 h.local.partial = e.incomplete;
                 h.local.downloaded = e.bytes_verified;
             }
-            return EconomyForHit(h, &cat);
+            return EconomyForHit(h, &cat, include_wallet_observation);
         };
         if (method == "setreleaseoutputscript") {
             if (!Arg(0).isObject() || !Arg(0).exists("release_id") || !Arg(0)["release_id"].isStr()) {
@@ -10164,7 +10178,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             Digest48 mid = cp ? cp->model_id : id;
             if (const auto* rec = g_search_idx.Get(mid)) h.rec = *rec;
             else h.rec.model_id = mid;
-            auto e = ComposeEconomyEntry(h, cp, ObservationFromHit(h, cp, &cat));
+            auto e = ComposeEconomyEntry(h, cp, ObservationFromHit(h, cp, &cat, include_wallet_observation));
             result = method == "getmodelreleaseeconomics" ? EconomyReleaseJson(e) : EconomyEntryToJson(e);
             result.pushKV("schema_version", ECONOMY_SCHEMA_VERSION);
             result.pushKV("lifecycle_state", ModelLifecycleName(e.lifecycle));
@@ -10209,7 +10223,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     h.rec.refund_height = c.refund_height;
                 }
                 FillKnownCatalogFields(cat, h);
-                auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat));
+                auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat, include_wallet_observation));
                 if (!e.fundable_now) continue;
                 if (!MatchesEconomyFilters(e, q.filters)) continue;
                 camp.push_back(std::move(e));
@@ -10431,7 +10445,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     h.rec.release_target_atoms = c.target_atoms;
                     h.rec.key_hash = c.key_hash;
                 }
-                auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat));
+                auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat, include_wallet_observation));
                 if (fq.mode == FeedMode::NEARLY_FUNDED && !e.fundable_now) continue;
                 if (fq.mode == FeedMode::FUNDED_AWAITING_RELEASE &&
                     e.lifecycle != ModelLifecycle::FUNDED_AWAITING_RELEASE) {

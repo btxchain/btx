@@ -14,10 +14,31 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace modelnet {
+
+// Read methods whose composed views may include a local wallet observation.
+inline bool IsWalletObservationRead(std::string_view method)
+{
+    return method == "getmodelreleaseeconomics" ||
+           method == "getfundablemodels" ||
+           method == "getmodeleconomyentry" ||
+           method == "getmodelfeed" ||
+           method == "getreleasefeed" ||
+           method == "getrecentreleases" ||
+           method == "getrecentlyunlockedmodels" ||
+           method == "searchmodels" ||
+           method == "getmodeldirectory" ||
+           method == "getmodeldirectoryentry" ||
+           method == "browsemodels" ||
+           method == "gettrendingmodels" ||
+           method == "getsimilarmodels" ||
+           method == "getnewmodels" ||
+           method == "getmodelrelease";
+}
 
 struct NativeRequest {
     std::string method;
@@ -103,7 +124,7 @@ bool NativeHttpRequiresVerifiedPq1();
 /** Advertised /btx-model/2/ paths from capabilities.http. */
 std::vector<std::string> AdvertisedNativeHttpPaths();
 
-bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& result, std::string& err_code, std::string& err, std::atomic<bool>* stop = nullptr);
+bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& result, std::string& err_code, std::string& err, std::atomic<bool>* stop = nullptr, bool include_wallet_observation = true);
 
 bool IsNetwork02HelperMethod(const std::string& method);
 bool DispatchNetwork02Rpc(ModelCatalog& cat, const std::string& method, const UniValue& params, UniValue& result,
