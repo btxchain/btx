@@ -70,6 +70,10 @@ public:
     void Revoke();
     bool Revoked() const;
     int64_t Used() const;
+    //! The limits, the revoked flag and the reservations, for the bounty store file.
+    UniValue SaveState() const;
+    //! Restore SaveState() output. Used is summed from the reservations.
+    bool LoadState(const UniValue& state, std::string& err);
 };
 
 struct BountyChainFact {

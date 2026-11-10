@@ -765,6 +765,63 @@ int64_t MandateBudget::Used() const
     return m_used;
 }
 
+UniValue MandateBudget::SaveState() const
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("total_atoms", std::to_string(m_total));
+    o.pushKV("per_action_atoms", std::to_string(m_per_action));
+    o.pushKV("revoked", m_revoked);
+    UniValue reservations(UniValue::VARR);
+    for (const auto& [key, req] : m_req) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("key", key);
+        r.pushKV("amount_atoms", std::to_string(req.first));
+        r.pushKV("refund_key", req.second);
+        reservations.push_back(r);
+    }
+    o.pushKV("reservations", reservations);
+    return o;
+}
+
+bool MandateBudget::LoadState(const UniValue& state, std::string& err)
+{
+    int64_t total = 0, per_action = 0, used = 0;
+    if (!state.isObject() || !state["total_atoms"].isStr() || !state["per_action_atoms"].isStr() ||
+        !CanonicalAtoms(state["total_atoms"].get_str(), total, err) ||
+        !CanonicalAtoms(state["per_action_atoms"].get_str(), per_action, err)) {
+        if (err.empty()) err = "mandate budget";
+        return false;
+    }
+    std::map<std::string, std::pair<int64_t, std::string>> req;
+    if (state.exists("reservations")) {
+        if (!state["reservations"].isArray()) {
+            err = "mandate reservations";
+            return false;
+        }
+        for (const UniValue& r : state["reservations"].getValues()) {
+            int64_t amount = 0;
+            if (!r.isObject() || !r["key"].isStr() || !r["amount_atoms"].isStr() ||
+                !CanonicalAtoms(r["amount_atoms"].get_str(), amount, err) || !AddMoneyAtoms(used, amount, err)) {
+                if (err.empty()) err = "mandate reservations";
+                return false;
+            }
+            req[r["key"].get_str()] = {amount, r.exists("refund_key") && r["refund_key"].isStr() ? r["refund_key"].get_str() : ""};
+        }
+    }
+    if (used > total) {
+        err = "mandate reservations exceed total";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(m_mu);
+    m_total = total;
+    m_per_action = per_action;
+    m_used = used;
+    m_revoked = state.exists("revoked") && state["revoked"].isBool() && state["revoked"].get_bool();
+    m_req = std::move(req);
+    return true;
+}
+
 void BountyChainIndex::Observe(const BountyChainFact& f)
 {
     m_undo.push_back(m_facts);
@@ -907,6 +964,16 @@ bool BountyStore::Load(std::string& err)
     load_map("awards", m_awards);
     load_map("watches", m_watches);
     load_map("mandates", m_mandates);
+    // A mandate whose budget is missing or unreadable keeps no budget, so
+    // reservemandate refuses it rather than starting from zero.
+    if (o.exists("mandate_budgets") && o["mandate_budgets"].isObject()) {
+        for (const auto& id : o["mandate_budgets"].getKeys()) {
+            if (!m_mandates.count(id)) continue;
+            auto slot = std::make_unique<MandateBudget>();
+            std::string budget_err;
+            if (slot->LoadState(o["mandate_budgets"][id], budget_err)) m_budgets[id] = std::move(slot);
+        }
+    }
     if (o.exists("terms") && o["terms"].isObject()) {
         for (const auto& key : o["terms"].getKeys()) {
             SignedEnvelope env;
@@ -934,6 +1001,9 @@ bool BountyStore::PersistLocked(std::string& err) const
     dump("awards", m_awards);
     dump("watches", m_watches);
     dump("mandates", m_mandates);
+    UniValue budgets(UniValue::VOBJ);
+    for (const auto& [id, budget] : m_budgets) budgets.pushKV(id, budget->SaveState());
+    o.pushKV("mandate_budgets", budgets);
     UniValue terms(UniValue::VOBJ);
     for (const auto& kv : m_terms) terms.pushKV(kv.first, EnvelopeToJson(kv.second));
     o.pushKV("terms", terms);
