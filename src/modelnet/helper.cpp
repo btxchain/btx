@@ -7137,6 +7137,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             f << link.write(2, 0) << "\n";
+            f.close();
+            if (!f) {
+                // A full disk can cut the file short at the write or at the close.
+                std::error_code rm_ec;
+                fs::remove(outp, rm_ec);
+                err_code = "IO";
+                err = "write link file";
+                return false;
+            }
             result.pushKV("path", Arg(1).get_str());
             result.pushKV("written", true);
         }
