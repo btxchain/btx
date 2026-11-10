@@ -8361,15 +8361,30 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "hidesearchmodel" || method == "unhidesearchmodel") {
         EnsureSearchBound();
         const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+        if (id.IsNull()) {
+            err_code = "INVALID_PARAMETER";
+            if (err.empty()) err = "model_id";
+            return false;
+        }
         std::lock_guard<std::mutex> lock(g_search_mu);
         g_search_idx.Hide(id, method == "hidesearchmodel");
+        std::string save_err;
+        (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         result.pushKV("hidden", method == "hidesearchmodel");
         return true;
     }
     if (method == "mutesearchpublisher" || method == "unmutesearchpublisher") {
         EnsureSearchBound();
+        const std::string publisher = ToLower(Arg(0).get_str());
+        if (publisher.size() != 96 || !IsHex(publisher)) {
+            err_code = "INVALID_PARAMETER";
+            err = "publisher id";
+            return false;
+        }
         std::lock_guard<std::mutex> lock(g_search_mu);
-        g_search_idx.MutePublisher(Arg(0).get_str(), method == "mutesearchpublisher");
+        g_search_idx.MutePublisher(publisher, method == "mutesearchpublisher");
+        std::string save_err;
+        (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         result.pushKV("muted", method == "mutesearchpublisher");
         return true;
     }

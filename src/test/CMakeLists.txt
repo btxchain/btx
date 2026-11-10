@@ -586,6 +586,7 @@ if(WITH_MODELNET)
     modelnet_pq1_worker_share_tests.cpp
     modelnet_ainode_notes_tests.cpp
     modelnet_search_tests.cpp
+    modelnet_search_local_policy_tests.cpp
     modelnet_first_run_tests.cpp
     modelnet_file_stream_tests.cpp
     modelnet_store2_tests.cpp
