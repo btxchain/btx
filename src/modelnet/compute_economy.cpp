@@ -1067,6 +1067,9 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             auto jit = m_jobs.find(rp["job_id"].get_str());
             if (jit == m_jobs.end()) return Fail(err_code, err, "COMPUTE_RESULT_INVALID", "job");
             const UniValue& jp = PayloadOf(jit->second);
+            // An expired job no longer reserves its credit (BalanceOf), so settling it
+            // now could credit room a later job has taken.
+            if (jp["expires_at_ms"].getInt<int64_t>() <= now_ms) return Fail(err_code, err, "COMPUTE_JOB_EXPIRED", "job");
             if (rp["subject_pubkey"].get_str() != jp["subject_pubkey"].get_str() || SignerOf(rit->second) != jp["subject_pubkey"].get_str()) {
                 return Fail(err_code, err, "COMPUTE_SUBJECT_MISMATCH", "subject");
             }
@@ -1093,6 +1096,9 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             if (a.exists("job_id") && a["job_id"].isStr() && !a["job_id"].get_str().empty()) {
                 auto jit = m_jobs.find(a["job_id"].get_str());
                 if (jit == m_jobs.end()) return Fail(err_code, err, "COMPUTE_RESULT_INVALID", "job");
+                if (PayloadOf(jit->second)["expires_at_ms"].getInt<int64_t>() <= now_ms) {
+                    return Fail(err_code, err, "COMPUTE_JOB_EXPIRED", "job");
+                }
                 if (PayloadOf(jit->second)["credit_p1e_microunits"].getInt<uint64_t>() != credit) {
                     return Fail(err_code, err, "COMPUTE_RECEIPT_CREDIT_MISMATCH", "credit");
                 }
