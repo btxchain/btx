@@ -287,19 +287,23 @@ bool ItemToDescriptorAndLabel(const UniValue& item, size_t index, std::string& d
     if (item.exists("label") && item["label"].isStr()) {
         label = item["label"].get_str();
     } else if (item.exists("index") && !item["index"].isNull()) {
-        uint32_t branch = 0;
-        uint32_t account = 0;
-        if (item.exists("branch") && item["branch"].isNum()) {
-            const int64_t b = item["branch"].getInt<int64_t>();
-            if (b == 0 || b == 1) branch = static_cast<uint32_t>(b);
-        }
-        if (item.exists("account") && item["account"].isNum()) {
-            const int64_t a = item["account"].getInt<int64_t>();
-            if (a >= 0 && a <= static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
-                account = static_cast<uint32_t>(a);
+        // Read index, branch and account as deriveexchangeaddress does: a value it
+        // would refuse is an error here too, not a deposit label it cannot find.
+        const auto field = [&](const char* name, int64_t max, int64_t& out) {
+            int64_t v = -1;
+            if (!item[name].isNum() || !ParseInt64(item[name].getValStr(), &v) || v < 0 || v > max) {
+                err = Untranslated(strprintf("Deposit pool item %u: %s must be an integer from 0 to %d", index, name, max));
+                return false;
             }
-        }
-        label = strprintf("%u/%s/%s", account, branch == 1 ? "change" : "deposit", item["index"].getValStr());
+            out = v;
+            return true;
+        };
+        const int64_t u32_max = std::numeric_limits<uint32_t>::max();
+        int64_t pool_index = 0, branch = 0, account = 0;
+        if (!field("index", u32_max, pool_index)) return false;
+        if (item.exists("branch") && !field("branch", 1, branch)) return false;
+        if (item.exists("account") && !field("account", u32_max, account)) return false;
+        label = strprintf("%d/%s/%d", account, branch == 1 ? "change" : "deposit", pool_index);
     }
 
     if (item.exists("desc") && item["desc"].isStr()) {
@@ -509,12 +513,19 @@ bool ImportDepositPool(CWallet& wallet, const UniValue& addresses_or_pubkeys, bi
         return false;
     }
 
-    int imported = 0;
-    int address_only = 0;
+    // Read every item before importing any, so a bad item does not leave the ones
+    // before it imported.
+    std::vector<std::pair<std::string, std::string>> parsed;
+    parsed.reserve(items.size());
     for (size_t i = 0; i < items.size(); ++i) {
         std::string descriptor;
         std::string label;
         if (!ItemToDescriptorAndLabel(items[i], i, descriptor, label, err)) return false;
+        parsed.emplace_back(std::move(descriptor), std::move(label));
+    }
+    int imported = 0;
+    int address_only = 0;
+    for (const auto& [descriptor, label] : parsed) {
         if (descriptor.rfind("addr(", 0) == 0) ++address_only;
         if (!ImportPublicDescriptor(wallet, descriptor, label, err)) return false;
         ++imported;
