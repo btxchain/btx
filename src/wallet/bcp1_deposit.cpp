@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -218,6 +219,31 @@ void FillIdentity(DepositStatusResult& result)
     result.network = Bcp1NetworkName();
 }
 
+//! importdepositpool labels a change-branch entry <account>/change/<index>; older
+//! imports used change/<index>.
+bool IsPoolChangeLabel(std::string_view label)
+{
+    const auto number = [](std::string_view s) {
+        return !s.empty() && s.size() <= 10 && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+    };
+    const size_t slash = label.find('/');
+    if (slash != std::string_view::npos && number(label.substr(0, slash))) label.remove_prefix(slash + 1);
+    constexpr std::string_view prefix{"change/"};
+    return label.substr(0, prefix.size()) == prefix && number(label.substr(prefix.size()));
+}
+
+//! Change as the wallet sees it (no address-book entry), or an output to the
+//! change branch of an imported deposit pool. Every pool entry has a label, so the
+//! wallet's own rule never counts the pool's change branch as change.
+bool IsDepositChange(const CWallet& wallet, const CTxOut& txout) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    if (OutputIsChange(wallet, txout)) return true;
+    CTxDestination dest;
+    if (!ExtractDestination(txout.scriptPubKey, dest)) return false;
+    const CAddressBookData* entry = wallet.FindAddressBookEntry(dest);
+    return entry && IsPoolChangeLabel(entry->GetLabel());
+}
+
 void FillOutputFields(const CWallet& wallet, const CWalletTx& wtx, uint32_t vout, DepositStatusResult& result)
     EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
@@ -225,7 +251,7 @@ void FillOutputFields(const CWallet& wallet, const CWalletTx& wtx, uint32_t vout
     const CTxOut& txout = wtx.tx->vout[vout];
     result.amount_atoms = txout.nValue;
     result.is_mine = static_cast<bool>(wallet.IsMine(txout) & ISMINE_ALL);
-    result.is_change = OutputIsChange(wallet, txout);
+    result.is_change = IsDepositChange(wallet, txout);
     result.is_coinbase = wtx.IsCoinBase();
     result.locked = wallet.IsLockedCoin(COutPoint{Txid::FromUint256(result.txid), vout});
     CTxDestination dest;
@@ -340,7 +366,7 @@ bool IsWalletDepositOutput(const CWallet& wallet, const CTxOut& txout, bool incl
 {
     AssertLockHeld(wallet.cs_wallet);
     if (!(wallet.IsMine(txout) & ISMINE_ALL)) return false;
-    if (!include_change && OutputIsChange(wallet, txout)) return false;
+    if (!include_change && IsDepositChange(wallet, txout)) return false;
     return true;
 }
 
