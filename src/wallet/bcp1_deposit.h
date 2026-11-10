@@ -63,6 +63,7 @@ enum class DepositEventType {
     TransactionMempool,
     TransactionConfirmed,
     TransactionReorged,
+    TransactionConflicted,
     DepositDetected,
     DepositConfirmationsChanged,
     UtxoCreated,
@@ -191,6 +192,20 @@ bool DepositReorgCacheContains(const CWallet& wallet, const uint256& txid);
 
 /** JSON events for -walletdepositnotify. Empty when the tx has no wallet deposits. */
 std::vector<UniValue> DepositNotifyEventsForTx(const CWallet& wallet, const uint256& txid, bool inserted_new)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+/** Status of each wallet output of txid, in vout order. Empty when the wallet does not know txid. */
+std::vector<DepositStatusResult> DepositStatusesForTx(const CWallet& wallet, const uint256& txid)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+/**
+ * JSON events for -walletdepositnotify after the wallet changed the state of a
+ * transaction it already holds (a conflict, a conflict that went away, an
+ * abandon). before is DepositStatusesForTx taken just before the change. Only
+ * outputs whose status changed produce events.
+ */
+std::vector<UniValue> DepositNotifyEventsForStateChange(const CWallet& wallet, const uint256& txid,
+                                                        const std::vector<DepositStatusResult>& before)
     EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 
 } // namespace wallet
