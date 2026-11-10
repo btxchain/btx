@@ -741,21 +741,42 @@ std::vector<UniValue> DepositNotifyEventsForTx(const CWallet& wallet, const uint
     std::vector<UniValue> out;
     const CWalletTx* wtx = wallet.GetWalletTx(txid);
     if (!wtx || !wtx->tx) return out;
+    // Read what was known before any output is looked at: GetDepositStatus records a
+    // confirmation (and clears the reorg mark) in the same per-transaction cache
+    // entry, so reading it later found the new state, also for the next output.
+    DepositObservation obs;
+    bool had_obs{false};
+    if (!inserted_new) {
+        LOCK(g_bcp1_deposit_cache_mutex);
+        had_obs = LookupObservation(wallet, txid, obs);
+    }
     for (uint32_t n = 0; n < wtx->tx->vout.size(); ++n) {
         if (!(wallet.IsMine(wtx->tx->vout[n]) & ISMINE_ALL)) continue;
         const DepositStatusResult now = GetDepositStatus(wallet, txid, n);
         if (now.status == DepositStatus::UNKNOWN) continue;
         std::optional<DepositStatusResult> previous;
-        if (!inserted_new) {
-            DepositObservation obs;
-            LOCK(g_bcp1_deposit_cache_mutex);
-            if (LookupObservation(wallet, txid, obs) && obs.last_confirmations > 0) {
-                previous = now;
-                previous->confirmations = obs.last_confirmations;
-                previous->status = obs.saw_disconnect ? DepositStatus::REORGED : DepositStatus::CONFIRMED;
-            }
+        if (!inserted_new && had_obs && obs.last_confirmations > 0) {
+            previous = now;
+            previous->confirmations = obs.last_confirmations;
+            previous->status = obs.saw_disconnect ? DepositStatus::REORGED : DepositStatus::CONFIRMED;
+        } else if (!inserted_new && now.status == DepositStatus::CONFIRMED) {
+            // Known to the wallet but never seen confirmed: it was in the mempool. A
+            // transaction the wallet holds but has not reported yet (its own payment
+            // before broadcast is UNKNOWN) keeps no previous state, so it is reported
+            // as detected once it reaches the mempool.
+            previous = now;
+            previous->confirmations = 0;
+            previous->status = DepositStatus::MEMPOOL;
         }
-        for (const DepositEventType type : EventsForDepositTransition(previous, now)) {
+        std::vector<DepositEventType> events = EventsForDepositTransition(previous, now);
+        // A deposit spent before it confirmed reports SPENT, which GetDepositStatus
+        // decides before it looks at confirmations, so the step above never sees it
+        // confirm. Its own transaction confirming is still a confirmation.
+        if (!inserted_new && now.status == DepositStatus::SPENT && wtx->isConfirmed() &&
+            !(had_obs && obs.last_confirmations > 0)) {
+            events.insert(events.begin(), DepositEventType::TransactionConfirmed);
+        }
+        for (const DepositEventType type : events) {
             out.push_back(EmitDepositEvent(type, now));
         }
     }

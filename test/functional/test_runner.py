@@ -820,6 +820,7 @@ BTX_BASE_SCRIPTS = [
     'p2p_announce_after_handshake.py',
     'p2p_addr_relay.py',
     'mempool_limit.py',
+    'wallet_bcp1_deposit_notify_confirmed.py',
     'mempool_package_limits.py',
 ]
 
