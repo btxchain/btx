@@ -284,6 +284,7 @@ std::string DepositEventTypeToString(DepositEventType type)
     case DepositEventType::TransactionMempool: return "transaction.mempool";
     case DepositEventType::TransactionConfirmed: return "transaction.confirmed";
     case DepositEventType::TransactionReorged: return "transaction.reorged";
+    case DepositEventType::TransactionConflicted: return "transaction.conflicted";
     case DepositEventType::DepositDetected: return "deposit.detected";
     case DepositEventType::DepositConfirmationsChanged: return "deposit.confirmations_changed";
     case DepositEventType::UtxoCreated: return "utxo.created";
@@ -299,6 +300,7 @@ std::optional<DepositEventType> DepositEventTypeFromString(std::string_view name
     if (name == "transaction.mempool") return DepositEventType::TransactionMempool;
     if (name == "transaction.confirmed") return DepositEventType::TransactionConfirmed;
     if (name == "transaction.reorged") return DepositEventType::TransactionReorged;
+    if (name == "transaction.conflicted") return DepositEventType::TransactionConflicted;
     if (name == "deposit.detected") return DepositEventType::DepositDetected;
     if (name == "deposit.confirmations_changed") return DepositEventType::DepositConfirmationsChanged;
     if (name == "utxo.created") return DepositEventType::UtxoCreated;
@@ -606,6 +608,8 @@ std::vector<DepositEventType> EventsForDepositTransition(const std::optional<Dep
             events.push_back(DepositEventType::TransactionReorged);
         } else if (now.status == DepositStatus::MEMPOOL) {
             events.push_back(DepositEventType::TransactionMempool);
+        } else if (now.status == DepositStatus::CONFLICTED) {
+            events.push_back(DepositEventType::TransactionConflicted);
         } else if (now.status == DepositStatus::SPENT && was_unspent) {
             events.push_back(DepositEventType::UtxoSpent);
         }
@@ -619,6 +623,35 @@ std::vector<DepositEventType> EventsForDepositTransition(const std::optional<Dep
         events.push_back(DepositEventType::UtxoSpent);
     }
     return events;
+}
+
+std::vector<DepositStatusResult> DepositStatusesForTx(const CWallet& wallet, const uint256& txid)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    std::vector<DepositStatusResult> out;
+    const CWalletTx* wtx = wallet.GetWalletTx(txid);
+    if (!wtx || !wtx->tx) return out;
+    for (uint32_t n = 0; n < wtx->tx->vout.size(); ++n) {
+        if (!(wallet.IsMine(wtx->tx->vout[n]) & ISMINE_ALL)) continue;
+        out.push_back(GetDepositStatus(wallet, txid, n));
+    }
+    return out;
+}
+
+std::vector<UniValue> DepositNotifyEventsForStateChange(const CWallet& wallet, const uint256& txid,
+                                                        const std::vector<DepositStatusResult>& before)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    std::vector<UniValue> out;
+    for (const DepositStatusResult& now : DepositStatusesForTx(wallet, txid)) {
+        const auto prev = std::find_if(before.begin(), before.end(),
+                                       [&](const DepositStatusResult& b) { return b.vout == now.vout; });
+        if (prev == before.end() || prev->status == now.status) continue;
+        for (const DepositEventType type : EventsForDepositTransition(*prev, now)) {
+            out.push_back(EmitDepositEvent(type, now));
+        }
+    }
+    return out;
 }
 
 void NoteBlockDisconnected(const CWallet& wallet, const uint256& block_hash, int height)

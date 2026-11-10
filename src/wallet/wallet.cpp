@@ -1633,6 +1633,36 @@ bool CWallet::IsSpentKey(const CScript& scriptPubKey) const
     return false;
 }
 
+#if HAVE_SYSTEM
+/** Run each -walletdepositnotify command once per event. */
+static void RunDepositNotifyCommands(const CWallet& wallet, const uint256& hash, const std::vector<UniValue>& events)
+{
+    if (events.empty()) return;
+    const std::vector<std::string> deposit_cmds = gArgs.GetArgs("-walletdepositnotify");
+#ifdef WIN32
+    const std::string walletname_escaped = "wallet_name_substitution_is_not_available_on_Windows";
+#else
+    const std::string walletname_escaped = ShellEscape(wallet.GetName());
+#endif
+    for (const UniValue& ev : events) {
+        const std::string ev_name = ev.exists("event") && ev["event"].isStr() ? ev["event"].get_str() : "";
+        const std::string json = ev.write();
+        for (std::string command : deposit_cmds) {
+            ReplaceAll(command, "%s", hash.GetHex());
+            ReplaceAll(command, "%e", ev_name);
+            ReplaceAll(command, "%w", walletname_escaped);
+#ifndef WIN32
+            ReplaceAll(command, "%j", ShellEscape(json));
+#else
+            ReplaceAll(command, "%j", json);
+#endif
+            std::thread t(runCommand, command);
+            t.detach();
+        }
+    }
+}
+#endif
+
 CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const UpdateWalletTxFn& update_wtx, bool fFlushOnClose, bool rescanning_old_block)
 {
     LOCK(cs_wallet);
@@ -1767,29 +1797,8 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const 
             t.detach(); // thread runs free
         }
     }
-    const std::vector<std::string> deposit_cmds = gArgs.GetArgs("-walletdepositnotify");
-    if (!deposit_cmds.empty()) {
-#ifdef WIN32
-        const std::string walletname_escaped = "wallet_name_substitution_is_not_available_on_Windows";
-#else
-        const std::string walletname_escaped = ShellEscape(GetName());
-#endif
-        for (const UniValue& ev : DepositNotifyEventsForTx(*this, hash, fInsertedNew)) {
-            const std::string ev_name = ev.exists("event") && ev["event"].isStr() ? ev["event"].get_str() : "";
-            const std::string json = ev.write();
-            for (std::string command : deposit_cmds) {
-                ReplaceAll(command, "%s", hash.GetHex());
-                ReplaceAll(command, "%e", ev_name);
-                ReplaceAll(command, "%w", walletname_escaped);
-#ifndef WIN32
-                ReplaceAll(command, "%j", ShellEscape(json));
-#else
-                ReplaceAll(command, "%j", json);
-#endif
-                std::thread t(runCommand, command);
-                t.detach();
-            }
-        }
+    if (!gArgs.GetArgs("-walletdepositnotify").empty()) {
+        RunDepositNotifyCommands(*this, hash, DepositNotifyEventsForTx(*this, hash, fInsertedNew));
     }
 #endif
 
@@ -1991,6 +2000,11 @@ void CWallet::RecursiveUpdateTxState(const uint256& tx_hash, const TryUpdatingSt
 void CWallet::RecursiveUpdateTxState(WalletBatch* batch, const uint256& tx_hash, const TryUpdatingStateFn& try_updating_state) {
     std::set<uint256> todo;
     std::set<uint256> done;
+#if HAVE_SYSTEM
+    // A conflict (or its removal, or an abandon) changes a deposit's status without
+    // going through AddToWallet, so -walletdepositnotify is run from here as well.
+    const bool deposit_notify = !gArgs.GetArgs("-walletdepositnotify").empty();
+#endif
 
     todo.insert(tx_hash);
 
@@ -2001,6 +2015,10 @@ void CWallet::RecursiveUpdateTxState(WalletBatch* batch, const uint256& tx_hash,
         auto it = mapWallet.find(now);
         assert(it != mapWallet.end());
         CWalletTx& wtx = it->second;
+#if HAVE_SYSTEM
+        std::vector<DepositStatusResult> deposits_before;
+        if (deposit_notify) deposits_before = DepositStatusesForTx(*this, now);
+#endif
 
         TxUpdate update_state = try_updating_state(wtx);
         if (update_state != TxUpdate::UNCHANGED) {
@@ -2023,6 +2041,11 @@ void CWallet::RecursiveUpdateTxState(WalletBatch* batch, const uint256& tx_hash,
             // If a transaction changes its tx state, that usually changes the balance
             // available of the outputs it spends. So force those to be recomputed
             MarkInputsDirty(wtx.tx);
+#if HAVE_SYSTEM
+            if (deposit_notify) {
+                RunDepositNotifyCommands(*this, now, DepositNotifyEventsForStateChange(*this, now, deposits_before));
+            }
+#endif
         }
     }
 }
