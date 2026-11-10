@@ -1312,6 +1312,40 @@ BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
     BOOST_CHECK(!budget.Reserve("k5", 10, err));
 }
 
+BOOST_AUTO_TEST_CASE(bounty_idempotency_key_reused_for_another_request_is_refused)
+{
+    modelnet::BountyStore store;
+    const fs::path dir = m_path_root / "bounty-idem";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    auto draft = [&](const std::string& title, const std::string& key, UniValue& result, std::string& code) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("title", title);
+        o.pushKV("idempotency_key", key);
+        UniValue params(UniValue::VARR);
+        params.push_back(o);
+        std::string err;
+        code.clear();
+        return store.Dispatch("createbountydraft", params, result, code, err);
+    };
+    UniValue first, again, other, fresh;
+    std::string code;
+    BOOST_REQUIRE(draft("first title", "k1", first, code));
+    // The same request under the same key is a replay.
+    BOOST_REQUIRE(draft("first title", "k1", again, code));
+    BOOST_CHECK_EQUAL(again["draft_id"].get_str(), first["draft_id"].get_str());
+    // Another request under that key is refused, not answered with the first draft.
+    BOOST_CHECK(!draft("second title", "k1", other, code));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    // A fresh key still creates a draft.
+    BOOST_REQUIRE(draft("second title", "k2", fresh, code));
+    BOOST_CHECK(fresh["draft_id"].get_str() != first["draft_id"].get_str());
+    UniValue list;
+    std::string err;
+    BOOST_REQUIRE(store.Dispatch("listbountydrafts", UniValue(UniValue::VARR), list, code, err));
+    BOOST_CHECK_EQUAL(list["drafts"].size(), 2U);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_observe_amount_atoms_fail_closed)
 {
     using namespace modelnet;

@@ -151,6 +151,39 @@ bool AddMoneyAtoms(int64_t& total, int64_t amount, std::string& err)
     return true;
 }
 
+//! The request without its idempotency_key and with object keys sorted, so a
+//! replay can tell the request a key first answered from another one.
+std::string IdemFingerprint(const UniValue& params)
+{
+    auto strip = [](const UniValue& v) -> UniValue {
+        if (!v.isObject()) return v;
+        std::vector<std::string> keys = v.getKeys();
+        std::sort(keys.begin(), keys.end());
+        UniValue o(UniValue::VOBJ);
+        for (const auto& k : keys) {
+            if (k != "idempotency_key") o.pushKV(k, v[k]);
+        }
+        return o;
+    };
+    UniValue out(UniValue::VARR);
+    if (params.isArray()) {
+        for (const auto& p : params.getValues()) out.push_back(strip(p));
+    } else {
+        out.push_back(strip(params));
+    }
+    return out.write();
+}
+
+//! Whether `key` already answered some request to `method`. Remembered results
+//! are stored under method|key<US>fingerprint.
+bool IdemKeyUsed(const std::map<std::string, UniValue>& idem, const std::string& method, const std::string& key)
+{
+    if (key.empty()) return false;
+    const std::string prefix = method + "|" + key + '\x1f';
+    const auto it = idem.lower_bound(prefix);
+    return it != idem.end() && it->first.compare(0, prefix.size(), prefix) == 0;
+}
+
 std::string IdemKey(const UniValue& params)
 {
     const UniValue& a = ArgN(params, 0);
@@ -1143,9 +1176,18 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
                           std::string& err)
 {
     std::unique_lock<std::mutex> lock(m_mu);
-    const std::string idem = IdemKey(params);
+    // A result is remembered under the key and the request it answered. The
+    // same request again is a replay; another request under a used key is a
+    // conflict, as for NETWORK-02 writes and mandate reservations.
+    const std::string idem_key = IdemKey(params);
+    const std::string idem = idem_key.empty() ? std::string{} : idem_key + '\x1f' + IdemFingerprint(params);
     const bool skip_idem = (method == "reservemandate");
     if (!skip_idem && Idem(method, idem, result)) return true;
+    if (!skip_idem && IdemKeyUsed(m_idem, method, idem_key)) {
+        err_code = "IDEMPOTENCY_CONFLICT";
+        err = "idempotency conflict";
+        return false;
+    }
 
     auto fail = [&](const char* code, const std::string& e) {
         err_code = code;
