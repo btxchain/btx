@@ -631,6 +631,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_bcp1_pool_entry_fields.py',
     'rpc_getblockstats_shielded.py',
     'rpc_btx_help_summary.py',
+    'wallet_bcp1_omnibus_change.py',
     'wallet_shielded_encrypted_persistence.py',
     'wallet_shielded_restart_persistence.py',
     'wallet_shielded_reorg_recovery.py',
