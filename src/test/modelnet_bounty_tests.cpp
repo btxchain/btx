@@ -1115,6 +1115,55 @@ BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
 #endif
 }
 
+BOOST_AUTO_TEST_CASE(agent_mandate_budget_survives_a_store_restart)
+{
+    const fs::path dir = m_path_root / "bounty-mandate-restart";
+    fs::create_directories(dir);
+    auto reserve = [](modelnet::BountyStore& store, const std::string& mid, const std::string& key, const std::string& refund,
+                      UniValue& result, std::string& code) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("mandate_id", mid);
+        r.pushKV("idempotency_key", key);
+        r.pushKV("amount_atoms", 40);
+        r.pushKV("refund_key", refund);
+        UniValue params(UniValue::VARR);
+        params.push_back(r);
+        std::string err;
+        code.clear();
+        return store.Dispatch("reservemandate", params, result, code, err);
+    };
+    UniValue result;
+    std::string code;
+    std::string err;
+    std::string mid;
+    {
+        modelnet::BountyStore store;
+        store.Bind(dir, ZeroNet());
+        UniValue m(UniValue::VOBJ);
+        m.pushKV("total_atoms", "100");
+        m.pushKV("per_action_atoms", "40");
+        m.pushKV("owner_approval_ref", "user-1");
+        UniValue params(UniValue::VARR);
+        params.push_back(m);
+        BOOST_REQUIRE(store.Dispatch("createagentmandate", params, result, code, err));
+        mid = result["mandate_id"].get_str();
+        BOOST_REQUIRE(reserve(store, mid, "r1", "aa", result, code));
+    }
+
+    // The same store dir opened again, as after a helper restart.
+    modelnet::BountyStore store;
+    store.Bind(dir, ZeroNet());
+    UniValue get(UniValue::VARR);
+    get.push_back(mid);
+    BOOST_REQUIRE(store.Dispatch("getagentmandate", get, result, code, err));
+    BOOST_CHECK_EQUAL(result["used_atoms"].get_str(), "40");
+    BOOST_CHECK(reserve(store, mid, "r2", "bb", result, code));
+    // 40 + 40 used of 100: a third 40 does not fit.
+    BOOST_CHECK(!reserve(store, mid, "r3", "cc", result, code));
+    // The reservation from before the restart still holds its refund key.
+    BOOST_CHECK(!reserve(store, mid, "r1", "zz", result, code));
+}
+
 BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
 {
     using namespace modelnet;
