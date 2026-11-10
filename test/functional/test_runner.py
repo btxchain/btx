@@ -665,6 +665,7 @@ BTX_BASE_SCRIPTS = [
     'mining_shielded_exit_velocity_template.py',
     'wallet_shielded_rpc_surface.py',
     'wallet_shielded_concurrent_shieldfunds.py',
+    'wallet_shielded_shieldfunds_shortfall.py',
     'wallet_shielded_viewingkey_rescan.py',
     'wallet_shielded_psbt.py --descriptors',
     'wallet_shielded_lock_order.py --descriptors',

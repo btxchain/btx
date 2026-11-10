@@ -9184,6 +9184,8 @@ RPCHelpMan z_shieldfunds()
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
+                {RPCResult::Type::BOOL, "complete", "False when a later chunk failed after earlier chunks were committed; the listed chunks are in the mempool"},
+                {RPCResult::Type::STR, "error", /*optional=*/true, "Why the remaining amount was not shielded, when complete is false"},
                 {RPCResult::Type::STR_HEX, "txid", "First chunk transaction id (for backward compatibility)"},
                 {RPCResult::Type::ARR, "txids", "", {
                     {RPCResult::Type::STR_HEX, "", "Committed chunk transaction id"},
@@ -9303,7 +9305,11 @@ RPCHelpMan z_shieldfunds()
                 }
             } unlock_reserved{*pwallet, reserved};
 
-            while (remaining_requested > 0) {
+            // Once a chunk is in the mempool its transaction is out; a later failure
+            // must not be reported as if nothing happened. It ends the loop instead,
+            // and the result lists the chunks sent with "complete": false.
+            std::string stop_error;
+            while (remaining_requested > 0) try {
                 std::string build_error;
                 const auto build_chunk = [&]() {
                     auto chunk = BuildShieldingChunkPreview(
@@ -9330,6 +9336,12 @@ RPCHelpMan z_shieldfunds()
                 while (!ReserveShieldingInputs(*pwallet, preview->selected, reserved)) {
                     DropTakenShieldingInputs(*pwallet, available, reserved);
                     preview = build_chunk();
+                }
+
+                // A chunk that takes every input left and still shields less than the
+                // rest of the request cannot complete it: do not send it.
+                if (preview->shielded_amount < remaining_requested && preview->selected.size() >= available.size()) {
+                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds under current shielding policy");
                 }
 
                 std::string commit_error;
@@ -9371,9 +9383,15 @@ RPCHelpMan z_shieldfunds()
                 if (available.empty() && remaining_requested > 0) {
                     throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds under current shielding policy");
                 }
+            } catch (const UniValue& e) {
+                if (txids.empty()) throw;
+                stop_error = GetRpcErrorMessage(e);
+                break;
             }
 
             UniValue out(UniValue::VOBJ);
+            out.pushKV("complete", stop_error.empty());
+            if (!stop_error.empty()) out.pushKV("error", stop_error);
             out.pushKV("txid", first_txid);
             out.pushKV("txids", std::move(txids));
             out.pushKV("amount", ValueFromAmount(total_shielded));
