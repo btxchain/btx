@@ -4739,6 +4739,20 @@ Digest48 ResolveUserId(const std::string& s, std::string& err)
     return ResolveUserIdLocked(s, err);
 }
 
+/** Back the subscription mandate store the helper dispatches through with a file in
+ *  the helper dir, so spent budget, open reservations and revocations survive a
+ *  restart (SubscriptionStore::SetPersistPath). A file it cannot read leaves the
+ *  store unbound and is reported, rather than starting from an empty budget. */
+static bool EnsureSubscriptionStoreBound(const fs::path& dir, std::string& err)
+{
+    static std::mutex bind_mu;
+    std::lock_guard<std::mutex> lock(bind_mu);
+    SubscriptionStore& store = GlobalSubscriptionStore();
+    const fs::path path = dir / "subscription-mandates.json";
+    if (store.PersistPath() == path) return true;
+    return store.SetPersistPath(path, err);
+}
+
 bool LoadShareText(const fs::path& p, std::string& text, std::string& err)
 {
     std::error_code ec;
@@ -6277,6 +6291,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return DispatchMirrorRpc(cat, method, params, result, err_code, err);
     }
     if (IsModelWatchHelperMethod(method)) {
+        {
+            // FUND_WITH_MANDATE watches look their mandate up in the same store.
+            std::string bind_err;
+            (void)EnsureSubscriptionStoreBound(HelperDir(cat), bind_err);
+        }
         const bool ok = DispatchModelWatchRpc(method, params, result, err_code, err, stop);
         if (ok && method == "getmodelwatchactions" && result.exists("actions")) {
             // A peek must remain read-only, including the helper's post-RPC
@@ -6288,6 +6307,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return ok;
     }
     if (IsSubscriptionHelperMethod(method)) {
+        std::string bind_err;
+        if (!EnsureSubscriptionStoreBound(HelperDir(cat), bind_err)) {
+            err_code = "IO";
+            err = "subscription mandate store: " + bind_err;
+            return false;
+        }
         return DispatchSubscriptionRpc(method, params, result, err_code, err);
     }
     if (method == "getmodelprofile") {

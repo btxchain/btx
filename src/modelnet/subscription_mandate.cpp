@@ -1180,6 +1180,12 @@ bool SubscriptionStore::Persisted() const
     return !m_path.empty();
 }
 
+fs::path SubscriptionStore::PersistPath() const
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    return m_path;
+}
+
 bool SubscriptionStore::SetNodeNetwork(const std::string& network_hex, std::string& err)
 {
     if (!network_hex.empty() && !ValidNetworkHex(network_hex)) {
