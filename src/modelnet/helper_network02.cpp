@@ -683,6 +683,15 @@ bool PackageFromObject(const UniValue& o, UniValue& result, std::string& err_cod
             return false;
         }
         out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        out.close();
+        if (!out) {
+            // A full disk can cut the file short at the write or at the close.
+            std::error_code rm_ec;
+            fs::remove(path, rm_ec);
+            err = "package write";
+            err_code = "IO_ERROR";
+            return false;
+        }
         result.pushKV("path", o["path"].get_str());
     }
     return true;

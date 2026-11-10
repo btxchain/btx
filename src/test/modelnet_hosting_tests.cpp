@@ -34,6 +34,7 @@
 #include <test/util/environment.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstring>
 #include <chrono>
 #include <cstdlib>
@@ -46,6 +47,7 @@
 
 #ifndef WIN32
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -934,6 +936,70 @@ BOOST_AUTO_TEST_CASE(getmodel_opens_btx_share_file)
     BOOST_CHECK(result["uri"].get_str().rfind("btx://", 0) == 0);
     BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(export_files_cut_short_are_reported_and_removed)
+{
+    // exportmodellink and createbtxpackage write a file at a caller path. A
+    // write that a full disk cuts short must not be reported as written.
+    // RLIMIT_FSIZE stands in for the full disk.
+    const fs::path tmp = m_path_root / "export-cut-short";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x89, true);
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& params) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", method);
+        rpc.pushKV("params", params);
+        result = UniValue(UniValue::VOBJ);
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    const auto cut_short = [](uint64_t limit, auto&& fn) {
+        struct rlimit old_limit {};
+        BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+        struct rlimit cut{old_limit};
+        cut.rlim_cur = limit;
+        const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &cut) == 0);
+        const bool ok{fn()};
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+        std::signal(SIGXFSZ, old_handler);
+        return ok;
+    };
+
+    UniValue full_link(UniValue::VARR);
+    full_link.push_back(imported.model_id.Hex());
+    full_link.push_back(fs::PathToString(tmp / "full.btx"));
+    BOOST_REQUIRE_MESSAGE(call("exportmodellink", full_link), err);
+    const auto link_size = fs::file_size(tmp / "full.btx");
+    BOOST_REQUIRE_GT(link_size, 1U);
+    UniValue short_link(UniValue::VARR);
+    short_link.push_back(imported.model_id.Hex());
+    short_link.push_back(fs::PathToString(tmp / "short.btx"));
+    BOOST_CHECK_MESSAGE(!cut_short(link_size - 1, [&] { return call("exportmodellink", short_link); }),
+                        "exportmodellink reported a link file that was cut short as written");
+    BOOST_CHECK(!fs::exists(tmp / "short.btx"));
+
+    UniValue pkg(UniValue::VOBJ);
+    pkg.pushKV("kind", "btxbundle");
+    pkg.pushKV("schema_version", 1);
+    UniValue no_path_pkg{pkg};
+    no_path_pkg.pushKV("idempotency_key", "export-cut-short-no-path");
+    UniValue no_path(UniValue::VARR);
+    no_path.push_back(no_path_pkg);
+    BOOST_REQUIRE_MESSAGE(call("createbtxpackage", no_path), err);
+    const uint64_t package_size{result["hex"].get_str().size() / 2};
+    BOOST_REQUIRE_GT(package_size, 1U);
+    pkg.pushKV("idempotency_key", "export-cut-short-with-path");
+    pkg.pushKV("path", fs::PathToString(tmp / "short.btxpkg"));
+    UniValue with_path(UniValue::VARR);
+    with_path.push_back(pkg);
+    BOOST_CHECK_MESSAGE(!cut_short(package_size - 1, [&] { return call("createbtxpackage", with_path); }),
+                        "createbtxpackage reported a package file that was cut short as written");
+    BOOST_CHECK(!fs::exists(tmp / "short.btxpkg"));
+}
+#endif // WIN32
 
 BOOST_AUTO_TEST_CASE(exportmodellink_writes_only_new_or_share_files)
 {
