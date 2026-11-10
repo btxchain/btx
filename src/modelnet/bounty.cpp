@@ -1784,11 +1784,37 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "proposebountyaward") {
         const UniValue a = ObjArg(params, 0);
+        // An award names a published bounty, a submission to that bounty that
+        // was not withdrawn, and one of the documented modes.
+        auto str_field = [&](const char* k) { return a.exists(k) && a[k].isStr() ? a[k].get_str() : std::string{}; };
+        const std::string bounty_id = str_field("bounty_id");
+        if (!m_bounties.count(bounty_id)) return fail("NOT_FOUND", "bounty");
+        const std::string submission_id = str_field("submission_id");
+        auto sub = m_submissions.find(submission_id);
+        if (sub == m_submissions.end()) return fail("NOT_FOUND", "submission");
+        if (!sub->second.exists("bounty_id") || !sub->second["bounty_id"].isStr() ||
+            sub->second["bounty_id"].get_str() != bounty_id) {
+            return fail("INVALID_PARAMETER", "submission is not for this bounty");
+        }
+        auto withdrawn = [&](const std::string& id) {
+            auto it = m_submissions.find(id);
+            return it != m_submissions.end() && it->second.exists("withdrawn") && it->second["withdrawn"].isTrue();
+        };
+        const std::string commitment_id = sub->second.exists("commitment_id") && sub->second["commitment_id"].isStr()
+                                              ? sub->second["commitment_id"].get_str()
+                                              : std::string{};
+        if (withdrawn(submission_id) || (!commitment_id.empty() && withdrawn(commitment_id))) {
+            return fail("REJECTED", "submission withdrawn");
+        }
+        const UniValue mode = a.exists("mode") ? a["mode"] : UniValue("PUBLIC_PAYOUT");
+        if (!mode.isStr() || (mode.get_str() != "PUBLIC_PAYOUT" && mode.get_str() != "STAGED_RELEASE")) {
+            return fail("INVALID_PARAMETER", "mode must be PUBLIC_PAYOUT or STAGED_RELEASE");
+        }
         UniValue p(UniValue::VOBJ);
-        p.pushKV("bounty_id", a["bounty_id"]);
-        p.pushKV("submission_id", a["submission_id"]);
+        p.pushKV("bounty_id", bounty_id);
+        p.pushKV("submission_id", submission_id);
         p.pushKV("lot_ids", a.exists("lot_ids") ? a["lot_ids"] : UniValue(UniValue::VARR));
-        p.pushKV("mode", a.exists("mode") ? a["mode"] : "PUBLIC_PAYOUT");
+        p.pushKV("mode", mode);
         p.pushKV("paid", false);
         SignedEnvelope env;
         if (!sign_payload("AwardProposal", p, env)) return fail("REJECTED", err);
@@ -1810,7 +1836,17 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         const std::string award_id = a.exists("award_id") ? a["award_id"].get_str() : "";
         auto it = m_awards.find(award_id);
         if (it == m_awards.end()) return fail("NOT_FOUND", "award");
-        if (a.exists("decision") && a["decision"].get_str() == "REJECT") {
+        // Only an exact APPROVE (or no decision) approves: "reject", "DENY" or
+        // any other value used to sign and publish an approval.
+        const bool no_decision = !a.exists("decision") || a["decision"].isNull();
+        const std::string decision = no_decision ? "APPROVE" : a["decision"].isStr() ? a["decision"].get_str() : "";
+        if (decision != "APPROVE" && decision != "REJECT") {
+            return fail("INVALID_PARAMETER", "decision must be APPROVE or REJECT");
+        }
+        if (decision == "APPROVE" && it->second.exists("rejected") && it->second["rejected"].isTrue()) {
+            return fail("REJECTED", "award was rejected");
+        }
+        if (decision == "REJECT") {
             it->second.pushKV("rejected", true);
             result = it->second;
             result.pushKV("transaction_signature", false);

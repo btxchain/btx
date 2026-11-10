@@ -1660,6 +1660,118 @@ BOOST_AUTO_TEST_CASE(incomplete_bounty_draft_cannot_publish)
     BOOST_CHECK_EQUAL(result["next_actions"][0].get_str().empty(), false);
 }
 
+BOOST_AUTO_TEST_CASE(bounty_award_proposal_and_decision_are_checked)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-award-checks";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    const auto publish = [&](const std::string& title) {
+        UniValue terms = DefaultTerms(ZeroNet());
+        terms.pushKV("title", title);
+        UniValue draft_params(UniValue::VARR);
+        draft_params.push_back(terms);
+        BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("draft_id", result["draft_id"].get_str());
+        BOOST_REQUIRE_MESSAGE(call("publishbounty", p), err);
+        return result["bounty_id"].get_str();
+    };
+    const auto submit = [&](const std::string& bounty_id, const std::string& digest) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty_id);
+        c.pushKV("digest", digest);
+        BOOST_REQUIRE_MESSAGE(call("commitbountysubmission", c), err);
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("commitment_id", result["commitment_id"].get_str());
+        UniValue sub(UniValue::VOBJ);
+        sub.pushKV("note", digest);
+        r.pushKV("submission", sub);
+        BOOST_REQUIRE_MESSAGE(call("revealbountysubmission", r), err);
+        return result["submission_id"].get_str();
+    };
+    const auto proposal = [](const std::string& bounty_id, const std::string& submission_id) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("bounty_id", bounty_id);
+        o.pushKV("submission_id", submission_id);
+        return o;
+    };
+
+    const std::string bounty = publish("award checks");
+    const std::string other_bounty = publish("award checks, other bounty");
+    BOOST_REQUIRE(bounty != other_bounty);
+    const std::string sid = submit(bounty, "aa");
+    const std::string other_sid = submit(other_bounty, "bb");
+    const std::string withdrawn_sid = submit(bounty, "cc");
+    UniValue wd(UniValue::VARR);
+    wd.push_back(withdrawn_sid);
+    BOOST_REQUIRE(store.Dispatch("withdrawbountysubmission", wd, result, code, err));
+
+    // A proposal must name a published bounty and a submission to it that was
+    // not withdrawn, in a documented mode.
+    BOOST_CHECK(!call("proposebountyaward", proposal(std::string(96, 'f'), sid)));
+    BOOST_CHECK_EQUAL(code, "NOT_FOUND");
+    BOOST_CHECK(!call("proposebountyaward", proposal(bounty, std::string(96, 'f'))));
+    BOOST_CHECK_EQUAL(code, "NOT_FOUND");
+    BOOST_CHECK(!call("proposebountyaward", proposal(bounty, other_sid)));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!call("proposebountyaward", proposal(bounty, withdrawn_sid)));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    UniValue bad_mode = proposal(bounty, sid);
+    bad_mode.pushKV("mode", "INSTANT");
+    BOOST_CHECK(!call("proposebountyaward", bad_mode));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+
+    UniValue staged = proposal(bounty, sid);
+    staged.pushKV("mode", "STAGED_RELEASE");
+    BOOST_REQUIRE_MESSAGE(call("proposebountyaward", staged), err);
+    const std::string award_id = result["award_id"].get_str();
+    const auto approvals = [&]() {
+        UniValue ga(UniValue::VARR);
+        ga.push_back(award_id);
+        BOOST_REQUIRE(store.Dispatch("getbountyaward", ga, result, code, err));
+        return result["policy_approvals"].size();
+    };
+    const auto decide = [&](const UniValue& decision) {
+        UniValue d(UniValue::VOBJ);
+        d.pushKV("award_id", award_id);
+        if (!decision.isNull()) d.pushKV("decision", decision);
+        return call("approvebountyaward", d);
+    };
+
+    // Only an exact APPROVE (or no decision) approves.
+    for (const char* not_a_decision : {"reject", "Reject", "DENY", "approve", ""}) {
+        BOOST_CHECK_MESSAGE(!decide(UniValue(not_a_decision)), std::string{"decision \""} + not_a_decision + "\" was taken");
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    BOOST_CHECK(!decide(UniValue(1)));
+    BOOST_CHECK_EQUAL(approvals(), 0U);
+
+    BOOST_REQUIRE_MESSAGE(decide(UniValue("REJECT")), err);
+    BOOST_CHECK(!decide(UniValue("APPROVE")));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(!decide(UniValue{}));
+    BOOST_CHECK_EQUAL(approvals(), 0U);
+
+    // An award that was not rejected is still approved without a decision.
+    BOOST_REQUIRE_MESSAGE(call("proposebountyaward", proposal(bounty, sid)), err);
+    UniValue d(UniValue::VOBJ);
+    d.pushKV("award_id", result["award_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("approvebountyaward", d), err);
+    BOOST_CHECK(!result["transaction_signature"].get_bool());
+}
+
 BOOST_AUTO_TEST_CASE(helper_observebountychain_reorg_recovery_unsigned)
 {
     using namespace modelnet;
