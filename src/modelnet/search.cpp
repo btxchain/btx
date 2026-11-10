@@ -1311,12 +1311,28 @@ bool SearchIndex::Save(const fs::path& path, std::string& err) const
     snap.pushKV("sequence", static_cast<int64_t>(m_seq));
     snap.pushKV("records", arr);
     fs::create_directories(path.parent_path());
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) {
+    // Write a temp file, check it after close and rename it over the index, so
+    // a write that a full disk cuts short keeps the previous file.
+    const fs::path tmp = fs::PathFromString(fs::PathToString(path) + ".tmp");
+    std::error_code ec;
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (out) {
+            out << snap.write() << "\n";
+            out.close();
+        }
+        if (!out) {
+            fs::remove(tmp, ec);
+            err = "search-index write";
+            return false;
+        }
+    }
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
         err = "search-index write";
         return false;
     }
-    out << snap.write() << "\n";
     return true;
 }
 

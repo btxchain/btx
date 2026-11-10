@@ -388,12 +388,28 @@ bool FeedStore::Save(std::string& err) const
     }
     o.pushKV("events", arr);
     fs::create_directories(m_path.parent_path());
-    std::ofstream out(m_path, std::ios::trunc);
-    if (!out) {
+    // Write a temp file, check it after close and rename it over feed.json, so
+    // a write that a full disk cuts short keeps the previous file.
+    const fs::path tmp = fs::PathFromString(fs::PathToString(m_path) + ".tmp");
+    std::error_code ec;
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (out) {
+            out << o.write() << "\n";
+            out.close();
+        }
+        if (!out) {
+            fs::remove(tmp, ec);
+            err = "feed.json write";
+            return false;
+        }
+    }
+    fs::rename(tmp, m_path, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
         err = "feed.json write";
         return false;
     }
-    out << o.write() << "\n";
     return true;
 }
 

@@ -561,6 +561,7 @@ if(WITH_MODELNET)
     modelnet_v11_negative_tests.cpp
     modelnet_funding_tests.cpp
     modelnet_bridge_tests.cpp
+    modelnet_store_write_tests.cpp
     modelnet_cuda_qual_tests.cpp
     modelnet_planner_tests.cpp
     modelnet_firstrun_tests.cpp

@@ -997,13 +997,33 @@ bool ReadJsonFile(const fs::path& path, UniValue& out)
 
 bool WriteJsonFile(const fs::path& path, const UniValue& obj, std::string& err)
 {
+    // Write a temp file, check it after close and rename it over path. Writing
+    // path in place left a cut-short file when a full disk failed the write
+    // (often only the flush at close), and the caller was told it was saved.
+    // The next read of that file starts from an empty store.
     fs::create_directories(path.parent_path());
-    std::ofstream out(path);
-    if (!out) {
+    std::error_code ec;
+    const fs::path tmp = fs::PathFromString(fs::PathToString(path) + ".tmp");
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) {
+            err = "write " + fs::PathToString(path);
+            return false;
+        }
+        out << obj.write() << "\n";
+        out.close();
+        if (!out) {
+            fs::remove(tmp, ec);
+            err = "write " + fs::PathToString(path);
+            return false;
+        }
+    }
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
         err = "write " + fs::PathToString(path);
         return false;
     }
-    out << obj.write() << "\n";
     return true;
 }
 
@@ -4162,7 +4182,11 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         arr.push_back(rec);
         store.pushKV("schema_version", 2);
         store.pushKV("receipts", arr);
-        WriteJsonFile(HelperDir(cat) / "receipts.json", store, err);
+        if (!WriteJsonFile(HelperDir(cat) / "receipts.json", store, err)) {
+            resp.status = 500;
+            resp.body = JsonError("IO", err);
+            return true;
+        }
         UniValue orc(UniValue::VOBJ);
         orc.pushKV("schema_version", 2);
         orc.pushKV("recorded", true);
@@ -9720,7 +9744,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             UniValue arr = rules.exists("rules") ? rules["rules"] : UniValue(UniValue::VARR);
             arr.push_back(Arg(0));
             rules.pushKV("rules", arr);
-            WriteJsonFile(HelperDir(cat) / "acl.json", rules, err);
+            if (!WriteJsonFile(HelperDir(cat) / "acl.json", rules, err)) {
+                err_code = "IO";
+                return false;
+            }
         } else if (method == "removemodelrule" && Arg(0).isNum()) {
             UniValue arr(UniValue::VARR);
             const int idx = Arg(0).getInt<int>();
@@ -9729,7 +9756,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 if (i++ != idx) arr.push_back(r);
             }
             rules.pushKV("rules", arr);
-            WriteJsonFile(HelperDir(cat) / "acl.json", rules, err);
+            if (!WriteJsonFile(HelperDir(cat) / "acl.json", rules, err)) {
+                err_code = "IO";
+                return false;
+            }
         }
         result = rules;
         result.pushKV("schema_version", 2);
@@ -9801,7 +9831,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             result.pushKV("recorded", true);
         }
         store.pushKV(key, arr);
-        WriteJsonFile(HelperDir(cat) / "community.json", store, err);
+        if (!WriteJsonFile(HelperDir(cat) / "community.json", store, err)) {
+            err_code = "IO";
+            return false;
+        }
         result.pushKV("schema_version", 2);
         result.pushKV("on_chain_membership", false);
         result.pushKV("automatic_preservation", method.rfind("unsub", 0) != 0 && method.rfind("leave", 0) != 0);
