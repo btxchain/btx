@@ -513,7 +513,7 @@ UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
     const size_t max_inputs = options.exists("max_inputs") ? static_cast<size_t>(options["max_inputs"].getInt<int64_t>()) :
                               options.exists("batch_size") ? static_cast<size_t>(options["batch_size"].getInt<int64_t>()) :
                               all.size();
-    const size_t target = options.exists("target_utxo_count") ? static_cast<size_t>(options["target_utxo_count"].getInt<int64_t>()) : 1;
+    const int64_t target_utxos = options.exists("target_utxo_count") ? options["target_utxo_count"].getInt<int64_t>() : 1;
     CAmount fee_ceiling = MAX_MONEY;
     if (options.exists("fee_ceiling")) fee_ceiling = AmountFromValue(options["fee_ceiling"]);
     else if (options.exists("fee_ceiling_atoms") && options["fee_ceiling_atoms"].isNum()) {
@@ -521,10 +521,16 @@ UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
     }
     std::vector<COutput> selected;
     if (!have_plan_inputs) {
+        if (target_utxos < 1) throw JSONRPCError(RPC_INVALID_PARAMETER, "target_utxo_count must be at least 1");
+        const size_t target = static_cast<size_t>(target_utxos);
+        // The wallet ends with the coins left out plus the one consolidation output.
+        // At least one coin is selected, as before, so a wallet that already holds
+        // no more than target UTXOs can still sweep one, for example to a cold
+        // change_address.
         for (const COutput& c : all) {
+            if (!selected.empty() && all.size() - selected.size() + 1 <= target) break;
             if (selected.size() >= max_inputs) break;
             selected.push_back(c);
-            if (all.size() - selected.size() <= target && !selected.empty()) break;
         }
         for (const COutput& c : selected) cc.Select(c.outpoint);
         cc.m_allow_other_inputs = false;
@@ -1186,7 +1192,7 @@ RPCHelpMan planconsolidation()
             {"min_confirmations", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, ""},
             {"max_inputs", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, ""},
             {"batch_size", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, ""},
-            {"target_utxo_count", RPCArg::Type::NUM, RPCArg::Default{1}, ""},
+            {"target_utxo_count", RPCArg::Type::NUM, RPCArg::Default{1}, "UTXOs to end with: the coins left out plus the consolidation output"},
             {"fee_ceiling", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
             {"minimum_input_value", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
         }}},
