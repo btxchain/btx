@@ -1424,10 +1424,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "acceptbountyappointment") {
         const UniValue a = ObjArg(params, 0);
+        // As nominatebountyevaluator: only for terms this store published.
+        const std::string terms_id = a.exists("terms_id") && a["terms_id"].isStr() ? a["terms_id"].get_str() : "";
+        if (!m_terms.count(terms_id)) return fail("NOT_FOUND", "terms");
         SignedEnvelope env;
         if (!sign_payload("CouncilAppointment", a.exists("appointment") ? a["appointment"] : a, env))
             return fail("REJECTED", err);
-        const std::string terms_id = a.exists("terms_id") ? a["terms_id"].get_str() : "";
         m_appointments[terms_id].push_back(env);
         result = EnvelopeToJson(env);
         result.pushKV("spending_authority", false);
@@ -1549,6 +1551,10 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "commitbountysubmission") {
         const UniValue a = ObjArg(params, 0);
+        // As pledgebounty and nominatebountyevaluator: only for a known bounty.
+        if (!a.exists("bounty_id") || !a["bounty_id"].isStr() || !m_bounties.count(a["bounty_id"].get_str())) {
+            return fail("NOT_FOUND", "bounty");
+        }
         UniValue p = a.exists("commitment") ? a["commitment"] : a;
         p.pushKV("bounty_id", a["bounty_id"]);
         SignedEnvelope env;
@@ -1711,8 +1717,14 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "createbountychallenge") {
         const UniValue a = ObjArg(params, 0);
+        // A challenge is against a known bounty, named in the signed payload.
+        const UniValue& challenge = a.exists("challenge") ? a["challenge"] : a;
+        if (!challenge.isObject() || !challenge.exists("bounty_id") || !challenge["bounty_id"].isStr() ||
+            !m_bounties.count(challenge["bounty_id"].get_str())) {
+            return fail("NOT_FOUND", "bounty");
+        }
         SignedEnvelope env;
-        if (!sign_payload("Challenge", a.exists("challenge") ? a["challenge"] : a, env)) return fail("REJECTED", err);
+        if (!sign_payload("Challenge", challenge, env)) return fail("REJECTED", err);
         m_challenges[env.record_id.Hex()] = env;
         result = EnvelopeToJson(env);
         result.pushKV("challenge_id", env.record_id.Hex());
