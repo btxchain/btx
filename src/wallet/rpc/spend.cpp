@@ -802,7 +802,7 @@ static std::vector<RPCArg> FundTxDoc(bool solving_data = true)
  *  inputs: AvailableCoins() marks them unspendable and coin selection skips
  *  them, while getbalances still counts them as trusted.
  */
-static bool LockedWalletLeftOutOwnCoins(const CWallet& wallet, const CCoinControl& coin_control) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+bool LockedWalletLeftOutOwnCoins(const CWallet& wallet, const CCoinControl& coin_control) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     if (!wallet.IsLocked()) return false;
     // AvailableCoins() skips preselected inputs, so list them too.
@@ -1877,6 +1877,10 @@ RPCHelpMan sendall()
                 if (!available_coins_res) {
                     throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(available_coins_res).original);
                 }
+                // sendall does not go through FundTransaction(). AvailableCoins()
+                // leaves out the wallet's own P2MR coins while it is locked, so the
+                // sweep would miss them: ask for the passphrase instead.
+                if (LockedWalletLeftOutOwnCoins(*pwallet, coin_control)) EnsureWalletIsUnlocked(*pwallet);
                 for (const COutput& output : available_coins_res->All()) {
                     if (send_max && fee_rate.GetFee(output.input_bytes) > output.txout.nValue) {
                         continue;
@@ -1897,6 +1901,8 @@ RPCHelpMan sendall()
             // estimate final size of tx
             const TxSize tx_size{CalculateMaximumSignedTxSize(CTransaction(rawTx), pwallet.get())};
             if (tx_size.vsize == -1) {
+                // An own P2MR input given in "inputs" cannot be sized while the wallet is locked.
+                if (LockedWalletLeftOutOwnCoins(*pwallet, coin_control)) EnsureWalletIsUnlocked(*pwallet);
                 throw JSONRPCError(RPC_WALLET_ERROR, "Unable to determine the size of the transaction, the wallet contains unsolvable descriptors");
             }
             const CAmount fee_from_size{fee_rate.GetFee(tx_size.vsize)};
