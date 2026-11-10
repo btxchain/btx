@@ -280,6 +280,38 @@ BOOST_AUTO_TEST_CASE(watch_free_download_queues_not_spend)
     BOOST_CHECK_EQUAL(acts[0].object_id, "mid-9");
 }
 
+BOOST_AUTO_TEST_CASE(watch_actions_queue_is_bounded)
+{
+    using namespace modelnet;
+    // A journal that keeps 4 events: the action queue keeps at most 4 actions too,
+    // dropping the oldest, and says how many it dropped.
+    const fs::path dir = m_path_root / "watch-actions-bounded";
+    BindModelEventLayer(dir, 4);
+    ModelCatalog cat{dir, 8 << 20};
+    ModelWatch w;
+    w.kind = WatchKind::PUBLISHER;
+    w.publisher_id = "busy-publisher";
+    w.action = ActionPolicy::KEEP;
+    std::string err, code;
+    BOOST_REQUIRE(BoundModelWatchStore()->PutWatch(w, err));
+    for (int i = 0; i < 7; ++i) {
+        ObserveResult observed;
+        BOOST_REQUIRE(JournalObserve(MakeSigned("busy-publisher", "busy-model-" + std::to_string(i)), observed, err));
+    }
+    const std::vector<QueuedWatchAction> queued = BoundModelWatchStore()->PeekActions();
+    BOOST_REQUIRE_EQUAL(queued.size(), 4U);
+    for (size_t i = 0; i < queued.size(); ++i) {
+        BOOST_CHECK_EQUAL(queued[i].object_id, "busy-model-" + std::to_string(i + 3));
+    }
+    UniValue peek(UniValue::VOBJ);
+    peek.pushKV("drain", false);
+    UniValue result;
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("getmodelwatchactions", peek), result, code, err), err);
+    BOOST_CHECK_EQUAL(result["actions"].size(), 4U);
+    BOOST_REQUIRE(result.exists("dropped_actions"));
+    BOOST_CHECK_EQUAL(result["dropped_actions"].getInt<int64_t>(), 3);
+}
+
 BOOST_AUTO_TEST_CASE(watch_helper_peek_does_not_execute_or_drain)
 {
     using namespace modelnet;
