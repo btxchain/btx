@@ -622,4 +622,37 @@ BOOST_AUTO_TEST_CASE(r8_10_reservation_carries_no_wallet_or_object_binding)
     BOOST_CHECK_EQUAL(SUBSCRIPTION_AUTOMATIC_SPEND_ATOMS, 0);
 }
 
+// createsubscriptionmandate takes its mandate back when the state file cannot be
+// written. A reservation must do the same: it is refused, so it must not stay in
+// memory as spent budget that a retry or the next save would then keep.
+BOOST_AUTO_TEST_CASE(r8_11_reservation_that_cannot_be_saved_is_undone)
+{
+    const fs::path state = m_path_root / "r8-unsaved" / "subscriptions.json";
+    const fs::path blocker = fs::PathFromString(fs::PathToString(state) + ".tmp");
+    UniValue result;
+    std::string code, err;
+    SubscriptionStore store;
+    BOOST_REQUIRE_MESSAGE(store.SetPersistPath(state, err), err);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("createsubscriptionmandate", Arr(MandateJson("r8-unsaved")), result, code, err, kNow), err);
+
+    // A directory where the temp file goes makes the next save fail.
+    fs::create_directories(blocker);
+    BOOST_CHECK(!store.Dispatch("reservesubscriptionmandate", Arr(StoreReserveJson("r8-unsaved", "e-unsaved", 50, 5)), result, code, err, kNow));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("getsubscriptionmandate", Arr(MandateIdJson("r8-unsaved")), result, code, err, kNow), err);
+    BOOST_CHECK_EQUAL(result["used_principal_atoms"].get_str(), "0");
+    BOOST_CHECK_EQUAL(result["used_fee_atoms"].get_str(), "0");
+    BOOST_CHECK_EQUAL(result["action_count"].getInt<int64_t>(), 0);
+
+    // Once the file can be written, the same event reserves and is kept.
+    fs::remove(blocker);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("reservesubscriptionmandate", Arr(StoreReserveJson("r8-unsaved", "e-unsaved", 50, 5)), result, code, err, kNow), err);
+    BOOST_CHECK_EQUAL(result["used_principal_atoms"].get_str(), "50");
+    SubscriptionStore restarted;
+    BOOST_REQUIRE_MESSAGE(restarted.SetPersistPath(state, err), err);
+    BOOST_REQUIRE_MESSAGE(restarted.Dispatch("getsubscriptionmandate", Arr(MandateIdJson("r8-unsaved")), result, code, err, kNow), err);
+    BOOST_CHECK_EQUAL(result["used_principal_atoms"].get_str(), "50");
+    BOOST_CHECK_EQUAL(result["action_count"].getInt<int64_t>(), 1);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
