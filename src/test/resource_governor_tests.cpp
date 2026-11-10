@@ -4,14 +4,18 @@
 
 #include <node/resource_governor.h>
 #include <test/util/setup_common.h>
+#include <univalue.h>
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <thread>
 
 BOOST_FIXTURE_TEST_SUITE(resource_governor_tests, BasicTestingSetup)
 
@@ -914,6 +918,30 @@ BOOST_AUTO_TEST_CASE(gov_e2e_battery_sysfs)
 #else
     BOOST_TEST_MESSAGE("gov_e2e_battery_sysfs: not linux");
 #endif
+}
+
+BOOST_AUTO_TEST_CASE(gov_permit_file_is_never_read_half_written)
+{
+    // btxd rewrites governor-permit.json every 2 s while btx-modeld reads it
+    // before each seeded piece. A file it cannot parse counts as "no governor"
+    // there, so a reader must always find the whole permit.
+    ResourceGovernor g;
+    const fs::path path = m_path_root / "governor-permit.json";
+    BOOST_REQUIRE(g.WritePermitFile(fs::PathToString(path)));
+    std::atomic<bool> stop{false};
+    std::thread writer([&] {
+        while (!stop.load()) (void)g.WritePermitFile(fs::PathToString(path));
+    });
+    int unreadable{0};
+    for (int i = 0; i < 20000; ++i) {
+        std::ifstream in{path};
+        const std::string body{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+        UniValue permit;
+        if (!permit.read(body) || !permit.isObject() || !permit.exists("seeding_allowed")) ++unreadable;
+    }
+    stop = true;
+    writer.join();
+    BOOST_CHECK_EQUAL(unreadable, 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

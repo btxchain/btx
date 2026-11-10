@@ -5,6 +5,8 @@
 #include <node/resource_governor.h>
 
 #include <logging.h>
+#include <util/fs.h>
+#include <util/fs_helpers.h>
 
 #include <algorithm>
 #include <chrono>
@@ -747,10 +749,23 @@ bool ResourceGovernor::WritePermitFile(const std::string& path) const
     o.pushKV("pause_reason_seed", PauseReasonName(m_seed_reason));
     o.pushKV("pause_reason_preserve", PauseReasonName(m_preserve_reason));
     o.pushKV("automatic_spend_atoms", 0);
-    std::ofstream f(path, std::ios::trunc);
-    if (!f) return false;
-    f << o.write();
-    return bool(f);
+    // btx-modeld reads this file before each seeded piece and treats a file it
+    // cannot parse as "no governor". Write a temporary file and rename it over
+    // the permit, so a reader sees either the old permit or the new one.
+    const fs::path target = fs::PathFromString(path);
+    const fs::path tmp = fs::PathFromString(path + ".tmp");
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f) return false;
+        f << o.write();
+        f.close();
+        if (!f) {
+            std::error_code ec;
+            fs::remove(tmp, ec);
+            return false;
+        }
+    }
+    return RenameOver(tmp, target);
 }
 
 SystemSignals SampleHostSignals()
