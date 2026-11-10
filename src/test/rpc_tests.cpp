@@ -576,6 +576,101 @@ BOOST_AUTO_TEST_CASE(rpc_convert_string_alternative_of_multi_type_params)
     BOOST_CHECK_EQUAL(RPCConvertNamedValues("createmultisig", {"nrequired=1", "keys=[]", "address_type=p2mr"})["address_type"].get_str(), "p2mr");
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_btx_rows_the_server_types)
+{
+    // The server takes a number, bool, object or array for each of these, so
+    // btx-cli must parse the argument as JSON instead of sending a string.
+    // positional=false: a key inside an options object, set with -named.
+    struct Row {
+        const char* method;
+        int index;
+        const char* name;
+        bool positional;
+    };
+    const Row rows[]{
+        {"bridge_buildegressbatchtx", 1, "descriptors", true},
+        {"bridge_buildegressbatchtx", 2, "proof_receipts", true},
+        {"bridge_buildegressbatchtx", 3, "recipients", true},
+        {"bridge_buildegressbatchtx", 4, "options", true},
+        {"bridge_buildegressstatement", 0, "recipients", true},
+        {"bridge_buildegressstatement", 1, "options", true},
+        {"bridge_buildingressbatchtx", 1, "intents", true},
+        {"bridge_buildingressbatchtx", 2, "reserve_outputs", true},
+        {"bridge_buildingressbatchtx", 3, "options", true},
+        {"bridge_buildingressstatement", 0, "intents", true},
+        {"bridge_buildingressstatement", 1, "options", true},
+        {"buildhtlcclaim", 5, "min_confirmations", false},
+        {"createconsolidationtx", 1, "fee_ceiling", false},
+        {"createconsolidationtx", 1, "max_inputs", false},
+        {"createconsolidationtx", 1, "minconf", false},
+        {"createconsolidationtx", 1, "plan", false},
+        {"createexchangebatch", 1, "fee_ceiling", false},
+        {"createexchangebatch", 1, "fee_rate", false},
+        {"createexchangebatch", 1, "minconf", false},
+        {"deriveexchangeaddress", 1, "account", false},
+        {"deriveexchangeaddress", 1, "branch", false},
+        {"estimateconsolidationfee", 0, "fee_ceiling", false},
+        {"estimateconsolidationfee", 0, "max_inputs", false},
+        {"estimateconsolidationfee", 0, "minconf", false},
+        {"estimateconsolidationfee", 0, "plan", false},
+        {"finalizeexternalsign", 2, "sign", false},
+        {"importdepositpool", 1, "rescan", false},
+        {"listdepositutxos", 0, "include_change", false},
+        {"listdepositutxos", 0, "include_spent", false},
+        {"listdepositutxos", 0, "maxconf", false},
+        {"listdepositutxos", 0, "min_amount", false},
+        {"listdepositutxos", 0, "min_confirmations", false},
+        {"listdepositutxos", 0, "minconf", false},
+        {"planconsolidation", 0, "batch_size", false},
+        {"planconsolidation", 0, "fee_ceiling", false},
+        {"planconsolidation", 0, "max_inputs", false},
+        {"planconsolidation", 0, "min_confirmations", false},
+        {"planconsolidation", 0, "minconf", false},
+        {"planconsolidation", 0, "minimum_input_value", false},
+        {"planconsolidation", 0, "target_utxo_count", false},
+        {"prepareexternalsign", 1, "sign", false},
+        {"signbountyclaim", 0, "options", true},
+        {"submitbountyclaim", 0, "options", true},
+        {"submitbountyfunding", 0, "options", true},
+        {"verifymatmulserviceproof", 3, "include_local_registry_status", true},
+        {"verifymatmulserviceproofs", 1, "include_local_registry_status", true},
+        {"walletprocesspsbt", 1, "allow_late_claim", false},
+        {"walletprocesspsbt", 1, "allow_unconfirmed_funding", false},
+        {"walletprocesspsbt", 1, "min_confirmations", false},
+        {"z_exportviewingkey", 1, "allow_sensitive", true},
+        {"z_finalizepsbt", 1, "broadcast", true},
+        {"z_fundpsbt", 0, "amount", true},
+        {"z_fundpsbt", 2, "fee", true},
+        {"z_fundpsbt", 3, "options", true},
+        {"z_planshieldfunds", 0, "amount", true},
+        {"z_planshieldfunds", 2, "fee", true},
+        {"z_planshieldfunds", 3, "options", true},
+        {"z_recoverstrandednote", 2, "fee", true},
+        {"z_recoverstrandednote", 3, "verbose", true},
+        {"z_recoverstrandednote", 4, "conf_target", true},
+        {"z_revokeaddress", 1, "fee", true},
+        {"z_rotateaddress", 1, "fee", true},
+        {"z_shieldfunds", 3, "options", true},
+        {"z_sweeptotransparent", 1, "max_notes", true},
+        {"z_sweeptotransparent", 2, "fee", true},
+        {"z_sweeptotransparent", 3, "dry_run", true},
+        {"z_sweeptotransparent", 4, "minconf", true},
+        {"z_sweeptotransparent", 5, "conf_target", true},
+    };
+    for (const Row& row : rows) {
+        BOOST_TEST_CONTEXT(row.method << " " << row.name) {
+            const UniValue named = RPCConvertNamedValues(row.method, {std::string{row.name} + "=1"});
+            BOOST_CHECK(named[row.name].isNum());
+            if (row.positional) {
+                std::vector<std::string> args(row.index, "null");
+                args.emplace_back("1");
+                const UniValue positional = RPCConvertValues(row.method, args);
+                BOOST_CHECK(positional[row.index].isNum());
+            }
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(rpc_convert_p2mr_psbt_remaining_rows)
 {
     // adjust_timelocks and p2mr_leaf convert in every RPC that takes them,
