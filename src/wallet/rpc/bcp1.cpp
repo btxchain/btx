@@ -859,6 +859,20 @@ RPCHelpMan deriveexchangeaddress()
     };
 }
 
+//! A rescan from height 0 needs every block. Same check as EnsureBlockDataFromTime
+//! in rpc/backup.cpp, for the timestamp-0 rescan of importdepositpool.
+static void EnsureBlockDataFromGenesis(const CWallet& wallet)
+{
+    auto& chain{wallet.chain()};
+    if (!chain.havePruned()) return;
+    int height{0};
+    const bool found{chain.findFirstBlockWithTimeAndHeight(/*min_time=*/0, /*min_height=*/0, interfaces::FoundBlock().height(height))};
+    const uint256 tip_hash{WITH_LOCK(wallet.cs_wallet, return wallet.GetLastBlockHash())};
+    if (found && !chain.hasBlocks(tip_hash, height)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Pruned blocks from height %d required to rescan for the deposit pool. Import without rescan, or use getblockchaininfo to see the pruned height.", height));
+    }
+}
+
 RPCHelpMan importdepositpool()
 {
     return RPCHelpMan{
@@ -895,21 +909,32 @@ RPCHelpMan importdepositpool()
             std::shared_ptr<CWallet> pwallet = GetWalletForJSONRPCRequest(request);
             if (!pwallet) return UniValue::VNULL;
             (void)self;
+            bool rescan = false;
+            if (!request.params[1].isNull() && request.params[1].isObject() && request.params[1].exists("rescan")) {
+                rescan = request.params[1]["rescan"].get_bool();
+            }
+            // As importwalletbundle does: before importing, refuse a rescan the
+            // node has no block data for; after it, report a scan that stopped
+            // short, instead of answering rescan=true with deposits missing.
+            WalletRescanReserver reserver(*pwallet);
+            if (rescan) {
+                if (!reserver.reserve()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning");
+                }
+                EnsureBlockDataFromGenesis(*pwallet);
+            }
             bilingual_str err;
             UniValue details(UniValue::VOBJ);
             if (!ImportDepositPool(*pwallet, ImportArg(request.params[0]), err, details)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, err.original);
             }
-            bool rescan = false;
-            if (!request.params[1].isNull() && request.params[1].isObject() && request.params[1].exists("rescan")) {
-                rescan = request.params[1]["rescan"].get_bool();
-            }
             if (rescan) {
-                WalletRescanReserver reserver(*pwallet);
-                if (!reserver.reserve()) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning");
+                const int64_t scanned_time = pwallet->RescanFromTime(0, reserver, true);
+                if (pwallet->IsAbortingRescan()) {
+                    throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted by user.");
+                } else if (scanned_time > 0) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Rescan was unable to fully rescan the blockchain. Some transactions may be missing.");
                 }
-                pwallet->RescanFromTime(0, reserver, true);
             }
             UniValue o(UniValue::VOBJ);
             o.pushKV("success", true);
