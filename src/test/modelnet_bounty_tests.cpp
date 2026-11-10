@@ -201,6 +201,72 @@ BOOST_AUTO_TEST_CASE(bounty_codec_golden_vectors)
     }
 }
 
+BOOST_AUTO_TEST_CASE(bounty_records_need_a_known_bounty)
+{
+    // nominatebountyevaluator, pledgebounty and freezebountyfundinground
+    // refuse an unknown bounty. commitbountysubmission, createbountychallenge
+    // and acceptbountyappointment signed their record for any id.
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-known-only";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const std::string unknown(96, 'f');
+
+    const auto commit = [&](const std::string& id) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", id);
+        c.pushKV("digest", "aa");
+        return call("commitbountysubmission", c);
+    };
+    const auto challenge = [&](const std::string& id) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", id);
+        c.pushKV("kind", "typed");
+        return call("createbountychallenge", c);
+    };
+    const auto appointment = [&](const std::string& id) {
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("terms_id", id);
+        UniValue appt(UniValue::VOBJ);
+        appt.pushKV("bounty_id", id);
+        a.pushKV("appointment", appt);
+        return call("acceptbountyappointment", a);
+    };
+
+    BOOST_CHECK(!commit(unknown));
+    BOOST_CHECK_EQUAL(code, "NOT_FOUND");
+    BOOST_CHECK(!challenge(unknown));
+    BOOST_CHECK_EQUAL(code, "NOT_FOUND");
+    BOOST_CHECK(!appointment(unknown));
+    BOOST_CHECK_EQUAL(code, "NOT_FOUND");
+    UniValue no_bounty(UniValue::VOBJ);
+    no_bounty.pushKV("kind", "typed");
+    BOOST_CHECK(!call("createbountychallenge", no_bounty));
+    BOOST_CHECK_EQUAL(code, "NOT_FOUND");
+
+    BOOST_CHECK_MESSAGE(commit(bounty), err);
+    BOOST_CHECK_MESSAGE(challenge(bounty), err);
+    BOOST_CHECK_MESSAGE(appointment(bounty), err);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_auth_001_to_030)
 {
     using namespace modelnet;
