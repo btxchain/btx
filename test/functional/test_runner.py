@@ -635,6 +635,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_shielded_mixed_stress.py',
     'wallet_shielded_randomized_sim.py',
     'wallet_shielded_replacement.py',
+    'wallet_shielded_concurrent_shieldcoinbase.py',
     'wallet_shielded_unlock_rehydrate_autoshield.py',
     'wallet_unlock_cache_upgrade.py --descriptors',
     'wallet_shielded_postfork_coinbase_autoshield.py',

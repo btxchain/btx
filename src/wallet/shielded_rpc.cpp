@@ -9030,7 +9030,21 @@ RPCHelpMan z_shieldcoinbase()
                     }
                     if (static_cast<int>(utxos.size()) >= limit) break;
                 }
+                // Keep the selected outputs locked (in memory) until this call
+                // has committed or failed: the build below releases cs_wallet,
+                // and a z_shieldcoinbase (or auto-shield) running at the same
+                // time would otherwise select them again.
+                for (const auto& outpoint : utxos) pwallet->LockCoin(outpoint);
             }
+            struct UnlockSelected {
+                CWallet& wallet;
+                const std::vector<COutPoint> outpoints;
+                ~UnlockSelected()
+                {
+                    LOCK(wallet.cs_wallet);
+                    for (const auto& outpoint : outpoints) wallet.UnlockCoin(outpoint);
+                }
+            } unlock_selected{*pwallet, utxos};
             if (utxos.empty()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "No mature coinbase outputs available");
             }
