@@ -2474,12 +2474,10 @@ static void PersistEconomyLocked(ModelCatalog& cat)
     std::string err;
     (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", err);
     (void)g_feed.Save(err);
-    std::vector<ReleaseCampaign> camps;
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
-        camps = g_campaigns.List();
-    }
-    (void)SaveCampaigns(HelperDir(cat), camps, err);
+    // Save under g_campaign_mu, as the RPCs that change a campaign do. A copy
+    // saved after letting go could replace a change saved in between.
+    std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+    (void)SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
 }
 
 void PersistEconomy(ModelCatalog& cat)

@@ -15,9 +15,11 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <csignal>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef WIN32
@@ -204,6 +206,82 @@ BOOST_AUTO_TEST_CASE(campaign_rpcs_refuse_a_change_they_cannot_save)
     BOOST_REQUIRE(LoadCampaigns(helper_dir, on_disk, err));
     BOOST_REQUIRE_EQUAL(on_disk.size(), 1U);
     BOOST_CHECK_EQUAL(on_disk[0].pledged_atoms, 1'234'567);
+}
+
+// getmodelfeed and getreleasefeed end in PersistEconomyLocked. It copied the
+// campaigns under g_campaign_mu but saved the copy after letting go, so its
+// save could run at the same time as the save of a pledge on the other worker.
+// Both write campaigns.json.tmp and rename it, and the pledge was refused
+// although the disk had room. While pledges and feed reads run at once, every
+// pledge must be saved and the pledged atoms in campaigns.json may only grow.
+BOOST_AUTO_TEST_CASE(feed_reads_do_not_save_an_older_pledge)
+{
+    const fs::path root = m_path_root / "release-campaigns-snapshot";
+    WriteTinySafeTensors(root / "a.dir", "{}");
+    ModelCatalog cat{root, 8 << 20};
+    const fs::path helper_dir = cat.Store().Root().parent_path();
+
+    UniValue res;
+    std::string code;
+    BOOST_REQUIRE(CallHelper(cat, "hostmodel", OneParam(fs::PathToString(root / "a.dir")), res, code));
+    BOOST_REQUIRE_MESSAGE(CallHelper(cat, "createmodelrelease", CreateParams(res["uri"].get_str(), 'a'), res, code), code);
+    const std::string rid = res["release_id"].get_str();
+
+    constexpr int PLEDGES{150};
+    std::atomic<bool> done{false};
+    std::atomic<int> pledged{0};
+    std::atomic<int> pledge_failed{0};
+    std::atomic<int> feed_failed{0};
+    std::thread pledger([&] {
+        for (int i = 0; i < PLEDGES; ++i) {
+            UniValue params(UniValue::VARR);
+            params.push_back(rid);
+            params.push_back(1);
+            UniValue r;
+            std::string c;
+            if (CallHelper(cat, "pledgemodelrelease", params, r, c)) {
+                ++pledged;
+            } else {
+                ++pledge_failed;
+            }
+        }
+        done = true;
+    });
+    std::thread reader([&] {
+        UniValue query(UniValue::VOBJ);
+        query.pushKV("scope", "local");
+        while (!done) {
+            UniValue r;
+            std::string c;
+            if (!CallHelper(cat, "getreleasefeed", OneParam(query), r, c)) ++feed_failed;
+        }
+    });
+    int64_t highest{0};
+    int went_down{0};
+    int unreadable{0};
+    while (!done) {
+        std::vector<ReleaseCampaign> on_disk;
+        std::string err;
+        if (!LoadCampaigns(helper_dir, on_disk, err) || on_disk.size() != 1) {
+            ++unreadable;
+            continue;
+        }
+        if (on_disk[0].pledged_atoms < highest) ++went_down;
+        highest = std::max(highest, on_disk[0].pledged_atoms);
+    }
+    pledger.join();
+    reader.join();
+
+    BOOST_CHECK_MESSAGE(pledge_failed == 0, "pledges refused while feed reads ran: " + std::to_string(pledge_failed.load()) +
+                                                " of " + std::to_string(PLEDGES));
+    BOOST_CHECK_EQUAL(feed_failed.load(), 0);
+    BOOST_CHECK_MESSAGE(went_down == 0, "campaigns.json went back to an older pledge " + std::to_string(went_down) + " times");
+    BOOST_CHECK_MESSAGE(unreadable == 0, "campaigns.json could not be read " + std::to_string(unreadable) + " times");
+    std::vector<ReleaseCampaign> on_disk;
+    std::string err;
+    BOOST_REQUIRE(LoadCampaigns(helper_dir, on_disk, err));
+    BOOST_REQUIRE_EQUAL(on_disk.size(), 1U);
+    BOOST_CHECK_EQUAL(on_disk[0].pledged_atoms, pledged.load());
 }
 #endif // WIN32
 
