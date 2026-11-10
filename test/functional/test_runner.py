@@ -628,6 +628,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_shielded_chunking.py',
     'wallet_shielded_cross_wallet.py',
     'wallet_shielded_longhaul_sim.py',
+    'wallet_bcp1_pool_change_branch.py',
     'wallet_shielded_matrict_disable_transition.py',
     'wallet_shielded_topology_sim.py',
     'wallet_shielded_send_flow.py',
