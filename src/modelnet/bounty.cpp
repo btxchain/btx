@@ -1701,9 +1701,21 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "listbountyevaluations") {
         const std::string sid = StrArg(params, 0, "submission_id");
+        // Only the reports for this submission: a report names its job, and
+        // the job's plan names the submission.
+        auto report_submission = [&](const SignedEnvelope& env) -> std::string {
+            if (!env.body.exists("payload") || !env.body["payload"].isObject()) return {};
+            const UniValue& payload = env.body["payload"];
+            if (!payload.exists("job_id") || !payload["job_id"].isStr()) return {};
+            auto job = m_eval_jobs.find(payload["job_id"].get_str());
+            if (job == m_eval_jobs.end() || !job->second.exists("plan") || !job->second["plan"].isObject()) return {};
+            const UniValue& plan = job->second["plan"];
+            return plan.exists("submission_id") && plan["submission_id"].isStr() ? plan["submission_id"].get_str() : std::string{};
+        };
         UniValue arr(UniValue::VARR);
-        for (const auto& kv : m_eval_reports) arr.push_back(EnvelopeToJson(kv.second));
-        (void)sid;
+        for (const auto& kv : m_eval_reports) {
+            if (!sid.empty() && report_submission(kv.second) == sid) arr.push_back(EnvelopeToJson(kv.second));
+        }
         result.setObject();
         result.pushKV("evaluations", arr);
         return true;
@@ -1721,9 +1733,16 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "listbountychallenges") {
         const std::string bounty_id = StrArg(params, 0, "bounty_id");
+        // Only the challenges against this bounty.
         UniValue arr(UniValue::VARR);
-        for (const auto& kv : m_challenges) arr.push_back(EnvelopeToJson(kv.second));
-        (void)bounty_id;
+        for (const auto& kv : m_challenges) {
+            const UniValue& body = kv.second.body;
+            if (bounty_id.empty() || !body.exists("payload") || !body["payload"].isObject()) continue;
+            const UniValue& payload = body["payload"];
+            if (payload.exists("bounty_id") && payload["bounty_id"].isStr() && payload["bounty_id"].get_str() == bounty_id) {
+                arr.push_back(EnvelopeToJson(kv.second));
+            }
+        }
         result.setObject();
         result.pushKV("challenges", arr);
         return true;

@@ -607,6 +607,107 @@ BOOST_AUTO_TEST_CASE(bounty_script_001_to_020)
 #endif
 }
 
+BOOST_AUTO_TEST_CASE(bounty_lists_return_only_the_requested_records)
+{
+    // listbountyevaluations takes a submission id and listbountychallenges a
+    // bounty id; both returned the records of every submission and bounty.
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-list-filter";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    const fs::path art = m_path_root / "bounty-list-filter-art";
+    fs::create_directories(art);
+    {
+        std::ofstream out(art / "weights.safetensors", std::ios::binary);
+        out << "ok";
+    }
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    const auto publish = [&](const std::string& title) {
+        UniValue terms = DefaultTerms(ZeroNet());
+        terms.pushKV("title", title);
+        UniValue draft_params(UniValue::VARR);
+        draft_params.push_back(terms);
+        BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("draft_id", result["draft_id"].get_str());
+        BOOST_REQUIRE_MESSAGE(call("publishbounty", p), err);
+        return result["bounty_id"].get_str();
+    };
+    const auto submit = [&](const std::string& bounty_id, const std::string& digest) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty_id);
+        c.pushKV("digest", digest);
+        BOOST_REQUIRE_MESSAGE(call("commitbountysubmission", c), err);
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("commitment_id", result["commitment_id"].get_str());
+        UniValue sub(UniValue::VOBJ);
+        sub.pushKV("artifact_dir", fs::PathToString(art));
+        sub.pushKV("note", digest);
+        r.pushKV("submission", sub);
+        BOOST_REQUIRE_MESSAGE(call("revealbountysubmission", r), err);
+        return result["submission_id"].get_str();
+    };
+    const auto evaluate = [&](const std::string& sid) {
+        UniValue prep(UniValue::VOBJ);
+        prep.pushKV("submission_id", sid);
+        prep.pushKV("profile_id", "EXACT_CHECKS");
+        UniValue files(UniValue::VARR);
+        files.push_back("weights.safetensors");
+        prep.pushKV("required_files", files);
+        prep.pushKV("artifact_dir", fs::PathToString(art));
+        BOOST_REQUIRE_MESSAGE(call("preparebountyevaluation", prep), err);
+        UniValue run(UniValue::VOBJ);
+        run.pushKV("plan_id", result["plan_id"].get_str());
+        run.pushKV("execution_approval_ref", "unit");
+        BOOST_REQUIRE_MESSAGE(call("runbountyevaluation", run), err);
+        UniValue pub(UniValue::VOBJ);
+        pub.pushKV("job_id", result["job_id"].get_str());
+        BOOST_REQUIRE_MESSAGE(call("publishbountyevaluation", pub), err);
+        return result["record_id"].get_str();
+    };
+    const auto challenge = [&](const std::string& bounty_id) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty_id);
+        c.pushKV("kind", "typed");
+        BOOST_REQUIRE_MESSAGE(call("createbountychallenge", c), err);
+        return result["challenge_id"].get_str();
+    };
+    const auto list = [&](const std::string& method, const std::string& id, const char* key) {
+        UniValue params(UniValue::VARR);
+        params.push_back(id);
+        BOOST_REQUIRE(store.Dispatch(method, params, result, code, err));
+        std::vector<std::string> ids;
+        for (const auto& e : result[key].getValues()) ids.push_back(e["record_id"].get_str());
+        return ids;
+    };
+
+    const std::string bounty_a = publish("list filter A");
+    const std::string bounty_b = publish("list filter B");
+    const std::string sub_a = submit(bounty_a, "aa");
+    const std::string sub_b = submit(bounty_b, "bb");
+    const std::string report_a = evaluate(sub_a);
+    const std::string report_b = evaluate(sub_b);
+    BOOST_REQUIRE(report_a != report_b);
+    const std::string challenge_a = challenge(bounty_a);
+    const std::string challenge_b = challenge(bounty_b);
+
+    BOOST_CHECK(list("listbountyevaluations", sub_a, "evaluations") == std::vector<std::string>{report_a});
+    BOOST_CHECK(list("listbountyevaluations", sub_b, "evaluations") == std::vector<std::string>{report_b});
+    BOOST_CHECK(list("listbountychallenges", bounty_a, "challenges") == std::vector<std::string>{challenge_a});
+    BOOST_CHECK(list("listbountychallenges", bounty_b, "challenges") == std::vector<std::string>{challenge_b});
+    BOOST_CHECK(list("listbountyevaluations", std::string(96, 'f'), "evaluations").empty());
+}
+
 BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
 {
 #ifdef ENABLE_WALLET
