@@ -948,4 +948,59 @@ BOOST_AUTO_TEST_CASE(remaining_watch_collection_query_get_unwatch_helper)
     BOOST_CHECK(result["removed"].get_bool());
 }
 
+BOOST_AUTO_TEST_CASE(mirror_keep_latest_keeps_one_watch_per_selector)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "mirror-keep-latest";
+    BindModelEventLayer(dir, 32);
+    ModelCatalog cat{dir, 8 << 20};
+    std::string code, err;
+    const auto set_mirror = [&](int keep_latest, const std::string& key) {
+        UniValue arg(UniValue::VOBJ);
+        arg.pushKV("publisher_id", "mirror-publisher");
+        arg.pushKV("keep_latest", keep_latest);
+        arg.pushKV("idempotency_key", key);
+        UniValue result;
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("setmodelmirror", arg), result, code, err), err);
+        return result;
+    };
+    const auto keep_watches = [&]() {
+        std::vector<ModelWatch> out;
+        for (const ModelWatch& w : BoundModelWatchStore()->List()) {
+            if (w.action == ActionPolicy::KEEP && w.publisher_id == "mirror-publisher") out.push_back(w);
+        }
+        return out;
+    };
+
+    // The KEEP watch setmodelmirror adds is named in its result.
+    const UniValue first = set_mirror(3, "mirror-keep-a");
+    std::vector<ModelWatch> watches = keep_watches();
+    BOOST_REQUIRE_EQUAL(watches.size(), 1U);
+    BOOST_CHECK_EQUAL(watches[0].keep_n, 3);
+    BOOST_REQUIRE(first.exists("watch_id"));
+    BOOST_CHECK_EQUAL(first["watch_id"].get_str(), watches[0].watch_id);
+
+    // Setting the same selector again replaces that watch instead of adding one.
+    const UniValue second = set_mirror(5, "mirror-keep-b");
+    watches = keep_watches();
+    BOOST_REQUIRE_EQUAL(watches.size(), 1U);
+    BOOST_CHECK_EQUAL(watches[0].keep_n, 5);
+    BOOST_REQUIRE(second.exists("watch_id"));
+    BOOST_CHECK_EQUAL(second["watch_id"].get_str(), watches[0].watch_id);
+
+    // So one event queues one KEEP action.
+    ObserveResult observed;
+    BOOST_REQUIRE(JournalObserve(MakeSigned("mirror-publisher", "not-a-model-digest"), observed, err));
+    size_t keep_actions{0};
+    for (const QueuedWatchAction& action : BoundModelWatchStore()->PeekActions()) {
+        if (action.action == ActionPolicy::KEEP) ++keep_actions;
+    }
+    BOOST_CHECK_EQUAL(keep_actions, 1U);
+
+    // keep_latest 0 ends the mirror's KEEP watch.
+    const UniValue cleared = set_mirror(0, "mirror-keep-c");
+    BOOST_CHECK(keep_watches().empty());
+    BOOST_CHECK(!cleared.exists("watch_id"));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -6115,6 +6115,16 @@ UniValue MirrorPolicyToJson(const UniValue& stored, const OperatorProfile& prof,
     return o;
 }
 
+//! setmodelmirror keeps one KEEP watch per selector. Its id comes from the
+//! selector, so setting the same selector again replaces the watch.
+static std::string MirrorKeepWatchId(const std::string& publisher, const std::string& collection, const std::string& query)
+{
+    const std::string selector = publisher + '\n' + collection + '\n' + query;
+    unsigned char digest[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(selector.data()), selector.size()).Finalize(digest);
+    return "mirror-" + HexStr(Span<const unsigned char>{digest, 8});
+}
+
 bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniValue& params, UniValue& result,
                         std::string& err_code, std::string& err)
 {
@@ -6217,24 +6227,33 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
             err = werr;
             return false;
         }
-        if (keep_latest > 0 && BoundModelWatchStore()) {
-            ModelWatch w;
-            w.action = ActionPolicy::KEEP;
-            w.keep_n = keep_latest;
-            if (!publisher.empty()) {
-                w.kind = WatchKind::PUBLISHER;
-                w.publisher_id = publisher;
-            } else if (!collection.empty()) {
-                w.kind = WatchKind::COLLECTION;
-                w.collection_id = collection;
-            } else if (!query.empty()) {
-                w.kind = WatchKind::QUERY;
-                w.query_text = query;
-            }
-            if (w.kind == WatchKind::PUBLISHER || w.kind == WatchKind::COLLECTION || w.kind == WatchKind::QUERY) {
+        std::string keep_watch_id;
+        if (BoundModelWatchStore() && (!publisher.empty() || !collection.empty() || !query.empty())) {
+            const std::string watch_id = MirrorKeepWatchId(publisher, collection, query);
+            if (keep_latest > 0) {
+                ModelWatch w;
+                w.watch_id = watch_id;
+                w.action = ActionPolicy::KEEP;
+                w.keep_n = keep_latest;
+                if (!publisher.empty()) {
+                    w.kind = WatchKind::PUBLISHER;
+                    w.publisher_id = publisher;
+                } else if (!collection.empty()) {
+                    w.kind = WatchKind::COLLECTION;
+                    w.collection_id = collection;
+                } else {
+                    w.kind = WatchKind::QUERY;
+                    w.query_text = query;
+                }
                 std::string werr2;
-                (void)BoundModelWatchStore()->PutWatch(w, werr2);
-                result.pushKV("watch_id", w.watch_id);
+                if (!BoundModelWatchStore()->PutWatch(w, werr2)) {
+                    err_code = "IO_ERROR";
+                    err = "mirror policy saved, but its keep_latest watch was not: " + werr2;
+                    return false;
+                }
+                keep_watch_id = watch_id;
+            } else {
+                (void)BoundModelWatchStore()->RemoveWatch(watch_id);
             }
         }
         result = MirrorPolicyToJson(stored, prof, policy);
@@ -6242,6 +6261,7 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
         result.pushKV("collection_id", collection);
         result.pushKV("query", query);
         result.pushKV("keep_latest", keep_latest);
+        if (!keep_watch_id.empty()) result.pushKV("watch_id", keep_watch_id);
         result.pushKV("applied", true);
         return true;
     }
