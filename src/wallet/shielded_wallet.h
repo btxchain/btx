@@ -601,6 +601,11 @@ private:
     // M4 audit fix: mutable so const member functions can clean up stale
     // pending-spend reservations without const_cast UB.
     mutable std::set<Nullifier> m_pending_spends GUARDED_BY(cs_shielded);
+    // Nullifiers reserved by ReservePendingSpends whose transaction has not
+    // reached the mempool yet. PruneStalePendingSpends keeps these: it drops
+    // pending spends that no wallet transaction in the mempool backs, which a
+    // send that is still being built or committed does not have yet.
+    std::set<Nullifier> m_inflight_spends GUARDED_BY(cs_shielded);
     std::vector<uint64_t> m_recent_ring_exclusions GUARDED_BY(cs_shielded);
     uint32_t m_next_spending_index GUARDED_BY(cs_shielded){0};
     uint32_t m_next_kem_index GUARDED_BY(cs_shielded){0};
