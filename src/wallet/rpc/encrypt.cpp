@@ -102,6 +102,13 @@ RPCHelpMan walletpassphrase()
             LOCK(pwallet->m_shielded_wallet->cs_shielded);
             shielded_state_rehydrated = pwallet->m_shielded_wallet->MaybeRehydrateSpendingKeys();
         }
+        // The mempool pass at wallet load ran while the wallet was locked and
+        // the shielded keys were not loaded, so it found no note of an
+        // unconfirmed transaction. Now that they are, go over the mempool
+        // again, as postInitProcess does at load.
+        if (shielded_state_rehydrated) {
+            pwallet->chain().requestMempoolTransactions(*pwallet);
+        }
 
         // Unlock should be side-effect free when we just rehydrated historical
         // shielded state. Defer coinbase auto-shield until the next block or
