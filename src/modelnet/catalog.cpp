@@ -547,6 +547,14 @@ bool ModelCatalog::PersistLocked(std::string& err)
     out << root.write(2, 0) << "\n";
     out.close();
     std::error_code ec;
+    if (!out) {
+        // A full disk can fail the write or only the flush at close. Do not
+        // rename a cut-short file over catalog.json: LoadLocked cannot read it
+        // and the catalog would start empty.
+        fs::remove(tmp, ec);
+        err = "catalog write failed";
+        return false;
+    }
     fs::rename(tmp, final_path, ec);
     if (ec) {
         err = "catalog rename failed";
