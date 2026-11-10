@@ -2488,6 +2488,25 @@ void PersistEconomy(ModelCatalog& cat)
     PersistEconomyLocked(cat);
 }
 
+// Save campaigns.json as it will be once `changed` replaces the campaign with
+// its release id (or is added), before g_campaigns changes. An RPC that changes
+// a campaign calls this first and changes memory only when it returns true, so
+// it never reports a change that is gone after a restart. The list keeps List()'s
+// release id order, so the file is the one the RPC wrote before. g_campaign_mu must be held.
+static bool SaveCampaignsWith(ModelCatalog& cat, const ReleaseCampaign& changed, std::string& err)
+{
+    std::vector<ReleaseCampaign> next = g_campaigns.List();
+    const std::string changed_hex = changed.release_id.Hex();
+    auto it = std::find_if(next.begin(), next.end(),
+                           [&](const ReleaseCampaign& c) { return c.release_id.Hex() >= changed_hex; });
+    if (it != next.end() && it->release_id == changed.release_id) {
+        *it = changed;
+    } else {
+        next.insert(it, changed);
+    }
+    return SaveCampaigns(HelperDir(cat), next, err);
+}
+
 bool ReadCatalogBytes(ModelCatalog& cat, const CatalogEntry& e, std::vector<unsigned char>& out, std::string& err)
 {
     if (e.core.files.empty()) {
@@ -8836,8 +8855,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         std::string cerr;
         {
             std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+            if (!SaveCampaignsWith(cat, c, cerr)) {
+                err_code = "INTERNAL";
+                err = "cannot save campaigns.json; release not created";
+                return false;
+            }
             g_campaigns.Put(c, cerr);
-            SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
         }
         {
             CatalogEntry plain;
@@ -9024,11 +9047,17 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err = "amount_atoms";
             return false;
         }
-        c->pledged_atoms += atoms;
+        ReleaseCampaign next = *c;
+        next.pledged_atoms += atoms;
+        if (!SaveCampaignsWith(cat, next, err)) {
+            err_code = "INTERNAL";
+            err = "cannot save campaigns.json; pledge not recorded";
+            return false;
+        }
+        *c = next;
         result = CampaignToJson(*c);
         g_feed.NoteFundingChanged(*c, ConnNowMs());
         LiveObserveCampaign(*c, FeedEventType::RELEASE_FUNDING_CHANGED);
-        SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
         result.pushKV("note", "pledge is local accounting; send BTX with 0.34.6 HTLC separately. pledged is not funded.");
         result.pushKV("automatic_spend_atoms", 0);
         return true;
@@ -9937,11 +9966,17 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     err = "unknown release";
                     return false;
                 }
+                ReleaseCampaign next = *c;
                 if (Arg(0).exists("output_script") && Arg(0)["output_script"].isStr()) {
-                    c->output_script_hex = ToLower(Arg(0)["output_script"].get_str());
+                    next.output_script_hex = ToLower(Arg(0)["output_script"].get_str());
                 }
+                if (!SaveCampaignsWith(cat, next, err)) {
+                    err_code = "INTERNAL";
+                    err = "cannot save campaigns.json; output script not set";
+                    return false;
+                }
+                *c = next;
                 output_script = c->output_script_hex;
-                SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
             }
             result.pushKV("accepted", true);
             result.pushKV("release_id", rid);
@@ -9997,8 +10032,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err = "unknown release";
                 return false;
             }
+            ReleaseCampaign next = *live;
             bool have = false;
-            for (const auto& fp : live->funding_outpoints) {
+            for (const auto& fp : next.funding_outpoints) {
                 if (fp.txid == txid && fp.vout == static_cast<uint32_t>(vout64)) have = true;
             }
             if (!have) {
@@ -10007,10 +10043,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 fp.vout = static_cast<uint32_t>(vout64);
                 fp.output_script_hex = script;
                 fp.amount_atoms = amount;
-                live->funding_outpoints.push_back(fp);
+                next.funding_outpoints.push_back(fp);
             }
-            if (live->output_script_hex.empty() && !script.empty()) live->output_script_hex = script;
-            SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+            if (next.output_script_hex.empty() && !script.empty()) next.output_script_hex = script;
+            if (!SaveCampaignsWith(cat, next, err)) {
+                err_code = "INTERNAL";
+                err = "cannot save campaigns.json; funding outpoint not recorded";
+                return false;
+            }
+            *live = next;
             result.pushKV("accepted", true);
             result.pushKV("release_id", live->release_id.Hex());
             result.pushKV("txid", txid);
