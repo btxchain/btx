@@ -2337,6 +2337,11 @@ static FeedStore g_feed;
 static CampaignIndex g_campaigns;
 static std::recursive_mutex g_campaign_mu;
 static std::mutex g_receipts_mu;
+//! Held while a helper RPC reads, changes and writes back identities.json,
+//! acl.json, community.json or mirror.json. The helper serves RPCs on more than one worker
+//! (and btxd on many threads), so two calls could read the same file and the
+//! later write would drop the change of the earlier one.
+static std::mutex g_helper_store_mu;
 static std::map<std::string, FundingObservation> g_chain_obs;
 static bool g_feed_loaded{false};
 static fs::path g_econ_dir;
@@ -6048,6 +6053,7 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
     std::string perr;
     (void)LoadOperatorProfile(OperatorProfilePath(HelperDir(cat)), prof, policy, perr);
     const fs::path path = HelperDir(cat) / "mirror.json";
+    std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
     UniValue stored;
     (void)ReadJsonFile(path, stored);
     if (!stored.isObject()) stored.setObject();
@@ -9659,6 +9665,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return true;
     }
     if (method == "listmodelidentities" || method == "createmodelidentity") {
+        std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
         UniValue store;
         ReadJsonFile(HelperDir(cat) / "identities.json", store);
         UniValue arr = store.exists("identities") ? store["identities"] : UniValue(UniValue::VARR);
@@ -9732,6 +9739,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return true;
     }
     if (method == "listmodelrules" || method == "setmodelrule" || method == "removemodelrule") {
+        std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
         UniValue rules;
         ReadJsonFile(HelperDir(cat) / "acl.json", rules);
         if (!rules.isObject()) rules = UniValue(UniValue::VOBJ);
@@ -9770,6 +9778,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     }
     if (method == "joinmodelcircle" || method == "leavemodelcircle" || method == "subscribemodelcollection" ||
         method == "subscribemodelpolicy" || method == "unsubscribemodelcollection" || method == "unsubscribemodelpolicy") {
+        std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
         UniValue store;
         ReadJsonFile(HelperDir(cat) / "community.json", store);
         const std::string key = (method.find("circle") != std::string::npos) ? "circles" : "subscriptions";
