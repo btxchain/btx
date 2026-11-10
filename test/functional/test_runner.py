@@ -644,6 +644,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_bcp1_depositpool_rescan.py --descriptors',
     'wallet_shielded_chunking.py',
     'wallet_shielded_cross_wallet.py',
+    'wallet_bcp1_consolidation_target.py',
     'wallet_shielded_longhaul_sim.py',
     'wallet_shielded_matrict_disable_transition.py',
     'wallet_shielded_topology_sim.py',
