@@ -1134,14 +1134,53 @@ bool LoadOrCreateResearchIdentity(const fs::path& dir, std::vector<unsigned char
     return WriteJsonFile(dir / "research_identity.json", store, err);
 }
 
+fs::path PublisherSecretPath(const fs::path& dir, const std::string& hexid)
+{
+    return dir / "tls" / fs::PathFromString("identity-" + hexid.substr(0, 16) + ".sk");
+}
+
+/** Write an identity's secret key through a temp file and check it, before the
+ *  identity is listed: a key that a full disk cut short could not sign. */
+bool WritePublisherSecret(const fs::path& skpath, const std::vector<unsigned char>& sk, std::string& err)
+{
+    fs::create_directories(skpath.parent_path());
+    const fs::path tmp = fs::PathFromString(fs::PathToString(skpath) + ".tmp");
+    std::error_code ec;
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (out) {
+            out.write(reinterpret_cast<const char*>(sk.data()), static_cast<std::streamsize>(sk.size()));
+            out.close();
+        }
+        if (!out) {
+            fs::remove(tmp, ec);
+            err = "identity secret write";
+            return false;
+        }
+    }
+    fs::rename(tmp, skpath, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
+        err = "identity secret write";
+        return false;
+    }
+    return true;
+}
+
 bool WritePublisherIdentityFiles(const fs::path& dir, const std::vector<unsigned char>& pk,
                                   const std::vector<unsigned char>& sk, const std::string& label,
                                   Digest48& publisher_id, std::string& err)
 {
     publisher_id = PublisherId(pk);
+    if (!WritePublisherSecret(PublisherSecretPath(dir, publisher_id.Hex()), sk, err)) return false;
     UniValue store;
     ReadJsonFile(dir / "identities.json", store);
     UniValue arr = store.exists("identities") ? store["identities"] : UniValue(UniValue::VARR);
+    // EnsureDefaultPublisherIdentity also gets here to write a missing or
+    // unusable key file again; the identity is then listed already.
+    for (const auto& listed : arr.getValues()) {
+        if (listed.exists("id") && listed["id"].isStr() && listed["id"].get_str() == publisher_id.Hex()) return true;
+    }
     UniValue id(UniValue::VOBJ);
     id.pushKV("id", publisher_id.Hex());
     id.pushKV("label", label);
@@ -1150,25 +1189,16 @@ bool WritePublisherIdentityFiles(const fs::path& dir, const std::vector<unsigned
     id.pushKV("trusted", false);
     arr.push_back(id);
     store.pushKV("identities", arr);
-    if (!WriteJsonFile(dir / "identities.json", store, err)) return false;
-    const fs::path skpath = dir / "tls" / fs::PathFromString("identity-" + publisher_id.Hex().substr(0, 16) + ".sk");
-    fs::create_directories(skpath.parent_path());
-    std::ofstream skf(skpath, std::ios::binary);
-    if (!skf) {
-        err = "identity secret write";
-        return false;
-    }
-    skf.write(reinterpret_cast<const char*>(sk.data()), static_cast<std::streamsize>(sk.size()));
-    return true;
+    return WriteJsonFile(dir / "identities.json", store, err);
 }
 
 bool LoadPublisherSecret(const fs::path& dir, const std::string& hexid, std::vector<unsigned char>& sk)
 {
-    const fs::path skpath = dir / "tls" / fs::PathFromString("identity-" + hexid.substr(0, 16) + ".sk");
-    std::ifstream skf(fs::PathToString(skpath), std::ios::binary);
+    std::ifstream skf(fs::PathToString(PublisherSecretPath(dir, hexid)), std::ios::binary);
     if (!skf) return false;
     sk.assign((std::istreambuf_iterator<char>(skf)), std::istreambuf_iterator<char>());
-    return !sk.empty();
+    // A key file that is not a whole ML-DSA-44 secret key cannot sign.
+    return sk.size() == MLDSA44_SK;
 }
 
 bool EnsureDefaultPublisherIdentity(const fs::path& dir, std::vector<unsigned char>& pk,
@@ -8890,12 +8920,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 if (idj.exists("pubkey_hex") && idj.exists("id")) {
                     c.pubkey = ParseHex(idj["pubkey_hex"].get_str());
                     const std::string hexid = idj["id"].get_str();
-                    const fs::path skpath = HelperDir(cat) / "tls" /
-                                            fs::PathFromString("identity-" + hexid.substr(0, 16) + ".sk");
-                    std::ifstream skf(fs::PathToString(skpath), std::ios::binary);
-                    std::vector<unsigned char> sk((std::istreambuf_iterator<char>(skf)), std::istreambuf_iterator<char>());
+                    std::vector<unsigned char> sk;
                     std::string serr;
-                    if (!sk.empty() && SignReleaseCampaign(c, Span<const unsigned char>{sk.data(), sk.size()}, serr)) {
+                    if (LoadPublisherSecret(HelperDir(cat), hexid, sk) &&
+                        SignReleaseCampaign(c, Span<const unsigned char>{sk.data(), sk.size()}, serr)) {
                         c.signed_ok = true;
                     }
                 }
@@ -9683,14 +9711,19 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             id.pushKV("trusted", false);
             arr.push_back(id);
             store.pushKV("identities", arr);
-            if (!WriteJsonFile(HelperDir(cat) / "identities.json", store, err)) {
+            // Write the secret key first: an identity listed without a whole
+            // key file could never sign.
+            const fs::path skpath = PublisherSecretPath(HelperDir(cat), PublisherId(pk).Hex());
+            if (!WritePublisherSecret(skpath, sk, err)) {
                 err_code = "IO";
                 return false;
             }
-            const fs::path skpath = HelperDir(cat) / "tls" / fs::PathFromString("identity-" + PublisherId(pk).Hex().substr(0, 16) + ".sk");
-            fs::create_directories(skpath.parent_path());
-            std::ofstream skf(skpath, std::ios::binary);
-            skf.write(reinterpret_cast<const char*>(sk.data()), static_cast<std::streamsize>(sk.size()));
+            if (!WriteJsonFile(HelperDir(cat) / "identities.json", store, err)) {
+                std::error_code rm_ec;
+                fs::remove(skpath, rm_ec);
+                err_code = "IO";
+                return false;
+            }
             result = id;
             result.pushKV("schema_version", 2);
             result.pushKV("secret_path", fs::PathToString(skpath));

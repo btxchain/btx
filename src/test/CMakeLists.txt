@@ -579,6 +579,7 @@ if(WITH_MODELNET)
     modelnet_b0_remaining_tests.cpp
     modelnet_b0_pq_rest_tests.cpp
     modelnet_hosting_tests.cpp
+    modelnet_identity_secret_tests.cpp
     modelnet_infra_tests.cpp
     modelnet_swarm_tests.cpp
     modelnet_conn_tests.cpp
