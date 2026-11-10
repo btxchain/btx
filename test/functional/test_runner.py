@@ -270,6 +270,7 @@ BASE_SCRIPTS = [
     'wallet_hd.py --descriptors',
     'wallet_blank.py --descriptors',
     'wallet_keypool_topup.py --descriptors',
+    'wallet_encrypted_backup_recovery.py --descriptors',
     'wallet_fast_rescan.py --descriptors',
     'wallet_gethdkeys.py --descriptors',
     'wallet_createwalletdescriptor.py --descriptors',
@@ -616,6 +617,7 @@ BASE_SCRIPTS = [
 # P2MR-only chain. Use --extended (or BTX_RUN_UPSTREAM_BASE_SUITE=1) to run the
 # broad upstream-style matrix.
 BTX_BASE_SCRIPTS = [
+    'wallet_encrypted_backup_recovery.py --descriptors',
     'feature_bcp1.py --descriptors',
     'wallet_bcp1_object_form.py --descriptors',
     'feature_p2mr_end_to_end.py',

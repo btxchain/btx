@@ -979,6 +979,17 @@ std::shared_ptr<CWallet> RestoreWallet(WalletContext& context, const fs::path& b
         }
     }
 
+    if (wallet) {
+        LOCK(wallet->cs_wallet);
+        // A locked PQ descriptor wallet cannot extend the backup's cached
+        // address range during its initial rescan. Unlocking derives keys,
+        // but does not revisit blocks already processed while locked.
+        if (!wallet->IsLegacy() && wallet->IsCrypted() && wallet->IsLocked() &&
+            !wallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+            warnings.emplace_back(_("This encrypted wallet was restored while locked. Payments to addresses used after this backup may be missing. Unlock the wallet, refill its keypool with keypoolrefill, then use rescanblockchain to scan the available history. Unlocking alone does not recover those payments. If addresses remain outside the derived range or required blocks are unavailable, recovery is incomplete."));
+        }
+    }
+
     return wallet;
 }
 
