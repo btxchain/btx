@@ -870,6 +870,19 @@ bool SubscriptionBudget::EvaluateAndReserve(const SubscriptionEvent& event, cons
     return true;
 }
 
+void SubscriptionBudget::Unreserve(const Reservation& r)
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    auto it = m_by_event.find(r.event_id);
+    if (it == m_by_event.end() || it->second.reservation_id != r.reservation_id) return;
+    m_by_event.erase(it);
+    m_used_principal -= r.principal_atoms;
+    m_used_fees -= r.fee_atoms;
+    m_outstanding -= r.principal_atoms + r.fee_atoms;
+    --m_action_count;
+    --m_concurrent;
+}
+
 void SubscriptionBudget::Revoke()
 {
     std::lock_guard<std::mutex> lock(m_mu);
@@ -1327,9 +1340,15 @@ bool SubscriptionStore::Dispatch(const std::string& method, const UniValue& para
             }
         }
         Reservation r;
+        const int64_t actions_before = it->second->StatusJson()["action_count"].getInt<int64_t>();
         if (!it->second->EvaluateAndReserve(ev, terms, r, now_ms, err)) return fail("REJECTED", err);
         // Spent budget that is only in memory is spendable again after a restart.
-        if (!SaveLocked(err)) return fail("REJECTED", err);
+        if (!SaveLocked(err)) {
+            // The call is refused, so it must not leave the reservation behind: take
+            // back a new one (a replay of a saved one changed nothing).
+            if (it->second->StatusJson()["action_count"].getInt<int64_t>() > actions_before) it->second->Unreserve(r);
+            return fail("REJECTED", err);
+        }
         result = ReservationToJson(r);
         result.pushKV("used_principal_atoms", std::to_string(it->second->UsedPrincipal()));
         result.pushKV("used_fee_atoms", std::to_string(it->second->UsedFees()));

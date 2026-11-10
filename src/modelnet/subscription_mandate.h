@@ -159,6 +159,9 @@ public:
     bool Bind(const SubscriptionMandate& m, std::string& err);
     bool EvaluateAndReserve(const SubscriptionEvent& event, const SignedTerms& terms,
                             Reservation& out, int64_t now_ms, std::string& err);
+    /** Take back a reservation EvaluateAndReserve has just made (its event, budget,
+     *  exposure and counters). Does nothing for an event that holds another reservation. */
+    void Unreserve(const Reservation& r);
     void Revoke();
     bool Revoked() const;
     bool Expired(int64_t now_ms) const;
