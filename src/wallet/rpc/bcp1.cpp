@@ -801,9 +801,27 @@ RPCHelpMan deriveexchangeaddress()
                                                Params().IsTestChain() ? 1 : 0, account, branch, index);
             {
                 LOCK(pwallet->cs_wallet);
+                // A label that names this slot wins over the bcp1-deposit default
+                // label, and two addresses on the slot are an error: the answer
+                // must not depend on address-book order.
+                std::optional<CTxDestination> named;
+                std::optional<CTxDestination> fallback;
                 for (const auto& [dest, entry] : pwallet->m_address_book) {
                     const std::string label = entry.GetLabel();
-                    if (LabelMatchesPool(label, account, branch, index) || label == want) {
+                    if (!LabelMatchesPool(label, account, branch, index) && label != want) continue;
+                    if (label == "bcp1-deposit") {
+                        if (!fallback) fallback = dest;
+                        continue;
+                    }
+                    if (named && !(*named == dest)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR,
+                                           strprintf("More than one pool entry is labelled for %s; remove the extra label", want));
+                    }
+                    named = dest;
+                }
+                if (const std::optional<CTxDestination> found = named ? named : fallback) {
+                    const CTxDestination& dest = *found;
+                    {
                         UniValue o(UniValue::VOBJ);
                         o.pushKV("address", EncodeDestination(dest));
                         o.pushKV("index", static_cast<int64_t>(index));
