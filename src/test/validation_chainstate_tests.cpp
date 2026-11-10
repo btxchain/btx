@@ -16,6 +16,7 @@
 #include <node/matmul_trusted_attestations.h>
 #include <node/warnings.h>
 #include <primitives/transaction.h>
+#include <pow.h>
 #include <random.h>
 #include <rpc/blockchain.h>
 #include <rpc/server.h>
@@ -6655,6 +6656,105 @@ BOOST_FIXTURE_TEST_CASE(phase1_only_header_does_not_become_best_header_at_securi
         BOOST_CHECK(chainman.m_best_header != at_index);
         BOOST_CHECK(chainman.m_best_header != after_index);
     }
+}
+
+
+namespace {
+// Real legacy LT seal checks, with tiny unit-test dimensions. The native
+// regression separately exercises the unchanged default100/101 parameters.
+struct LegacyLTReplaySetup : TestChain100Setup {
+    ChainstateManager& chainman{*m_node.chainman};
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    Consensus::Params& consensus{const_cast<Consensus::Params&>(chainman.GetConsensus())};
+    const Consensus::Params saved{consensus};
+    const CScript script{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+
+    LegacyLTReplaySetup()
+    {
+        const int next{WITH_LOCK(::cs_main, return chainstate.m_chain.Height()) + 1};
+        consensus.nMatMulV4Height = next;
+        consensus.nMatMulBMX4CHeight = next;
+        consensus.nMatMulDRLTHeight = next;
+        consensus.nMatMulRCHeight = next + 1;
+        consensus.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulV4Dimension = 64;
+        consensus.nMatMulConsensusQStar = 1;
+        consensus.fMatMulLTSealAsPoW = true;
+        BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+        BOOST_REQUIRE(consensus.IsMatMulLTSealAsPoWActive(next));
+        BOOST_REQUIRE(!consensus.IsMatMulRCActive(next));
+    }
+
+    ~LegacyLTReplaySetup()
+    {
+        consensus = saved;
+    }
+
+    CBlock HonestBlock() { return CreateBlock({}, script, chainstate); }
+
+    const CBlockIndex* Index(const CBlock& block)
+    {
+        return WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block.GetHash()));
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(legacy_lt_recompute_records_activation_authority, LegacyLTReplaySetup)
+{
+    const CBlock block{HonestBlock()};
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(block),
+        /*force_processing=*/true, /*min_pow_checked=*/true, nullptr));
+    const CBlockIndex* index{Index(block)};
+    BOOST_REQUIRE(index != nullptr);
+    LOCK(::cs_main);
+    BOOST_CHECK(index->nStatus & BLOCK_HAVE_DATA);
+    BOOST_CHECK(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+    BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+    BOOST_CHECK(chainstate.m_chain.Tip() == index);
+    BOOST_CHECK(index->nAuthenticatedChainWork == index->nChainWork);
+}
+
+BOOST_FIXTURE_TEST_CASE(legacy_lt_positive_memo_of_honest_seal_is_recomputed, LegacyLTReplaySetup)
+{
+    const CBlock block{HonestBlock()};
+    CacheMatMulEncDrVerdict(block.GetHash(), true);
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(block),
+        /*force_processing=*/true, /*min_pow_checked=*/true, nullptr));
+    const CBlockIndex* index{Index(block)};
+    BOOST_REQUIRE(index != nullptr);
+    LOCK(::cs_main);
+    BOOST_CHECK(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+    BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_MASK));
+    BOOST_CHECK(chainstate.m_chain.Tip() == index);
+}
+
+BOOST_FIXTURE_TEST_CASE(legacy_lt_positive_memo_cannot_bless_wrong_seal, LegacyLTReplaySetup)
+{
+    CBlock block{HonestBlock()};
+    block.matmul_digest = uint256::ONE;
+    CacheMatMulEncDrVerdict(block.GetHash(), true);
+    BOOST_REQUIRE(!chainman.ProcessNewBlock(std::make_shared<const CBlock>(block),
+        /*force_processing=*/true, /*min_pow_checked=*/true, nullptr));
+    const CBlockIndex* index{Index(block)};
+    BOOST_REQUIRE(index != nullptr);
+    LOCK(::cs_main);
+    BOOST_CHECK(index->nStatus & BLOCK_FAILED_MASK);
+    BOOST_CHECK(!(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
+    BOOST_CHECK(chainstate.m_chain.Tip() != index);
+}
+
+BOOST_FIXTURE_TEST_CASE(legacy_lt_negative_memo_remains_rejection, LegacyLTReplaySetup)
+{
+    const CBlock block{HonestBlock()};
+    CacheMatMulEncDrVerdict(block.GetHash(), false);
+    BOOST_REQUIRE(!chainman.ProcessNewBlock(std::make_shared<const CBlock>(block),
+        /*force_processing=*/true, /*min_pow_checked=*/true, nullptr));
+    const CBlockIndex* index{Index(block)};
+    BOOST_REQUIRE(index != nullptr);
+    LOCK(::cs_main);
+    BOOST_CHECK(index->nStatus & BLOCK_FAILED_MASK);
+    BOOST_CHECK(!(index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
+    BOOST_CHECK(chainstate.m_chain.Tip() != index);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
