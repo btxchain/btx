@@ -445,19 +445,18 @@ UniValue FundedPackage(CWallet& wallet, const std::vector<CRecipient>& recipient
 CTxDestination WatchOmnibus(const CWallet& wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
+    // The omnibus is change 0 of account 0, else deposit 0, in the label format
+    // importdepositpool writes (0/change/0) or the legacy one (change/0). Any
+    // other address-book entry may be a customer deposit or an outside address,
+    // so without either label the caller has to name the destination.
     std::optional<CTxDestination> deposit0;
-    std::optional<CTxDestination> any;
     for (const auto& [dest, entry] : wallet.m_address_book) {
         if (!IsValidDestination(dest)) continue;
         const std::string label = entry.GetLabel();
-        if (label == "change/0") return dest;
-        if (label == "deposit/0" || label == "bcp1-deposit") {
-            if (!deposit0) deposit0 = dest;
-        }
-        if (!any) any = dest;
+        if (LabelMatchesPool(label, 0, bcp1::BRANCH_CHANGE, 0)) return dest;
+        if (!deposit0 && LabelMatchesPool(label, 0, bcp1::BRANCH_DEPOSIT, 0)) deposit0 = dest;
     }
     if (deposit0) return *deposit0;
-    if (any) return *any;
     throw JSONRPCError(RPC_INVALID_PARAMETER, "change_address required for watch-only consolidation");
 }
 
