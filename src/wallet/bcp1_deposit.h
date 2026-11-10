@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace wallet {
@@ -192,6 +193,14 @@ bool DepositReorgCacheContains(const CWallet& wallet, const uint256& txid);
 
 /** JSON events for -walletdepositnotify. Empty when the tx has no wallet deposits. */
 std::vector<UniValue> DepositNotifyEventsForTx(const CWallet& wallet, const uint256& txid, bool inserted_new)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+/**
+ * utxo.spent events, keyed by the spent deposit's txid, for the confirmed wallet
+ * outputs that spending_txid spends. Call once, when the wallet first adds
+ * spending_txid; the deposits it spends are not passed through AddToWallet.
+ */
+std::vector<std::pair<uint256, UniValue>> DepositSpentEventsForTx(const CWallet& wallet, const uint256& spending_txid)
     EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 
 /** Status of each wallet output of txid, in vout order. Empty when the wallet does not know txid. */
