@@ -596,6 +596,148 @@ BOOST_AUTO_TEST_CASE(bounty_auth_001_to_030)
     }
 }
 
+BOOST_AUTO_TEST_CASE(bounty_signed_records_survive_a_store_restart)
+{
+    // The store saves drafts, bounties, submissions, jobs and awards, but kept
+    // pledges, nominations, appointments, evaluation plans and reports and
+    // challenges in memory only: a helper restart lost them.
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "bounty-records-restart";
+    fs::create_directories(dir);
+    const fs::path art = m_path_root / "bounty-records-art";
+    fs::create_directories(art);
+    {
+        std::ofstream out(art / "weights.safetensors", std::ios::binary);
+        out << "ok";
+    }
+    std::string bounty_id, plan_id, sid, challenge_id, report_id;
+    std::string code, err;
+    UniValue result;
+    const auto call = [&](BountyStore& store, const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    struct Seen {
+        size_t evaluators{0}, pledges{0}, evaluations{0}, challenges{0};
+        bool plan_runs{false};
+    };
+    const auto look = [&](BountyStore& store) {
+        Seen seen;
+        UniValue idp(UniValue::VARR);
+        idp.push_back(bounty_id);
+        BOOST_REQUIRE(store.Dispatch("listbountyevaluators", idp, result, code, err));
+        seen.evaluators = result["evaluators"].size();
+        BOOST_REQUIRE(store.Dispatch("getbountyfunding", idp, result, code, err));
+        seen.pledges = result["pledges"].size();
+        BOOST_REQUIRE(store.Dispatch("listbountychallenges", idp, result, code, err));
+        seen.challenges = result["challenges"].size();
+        UniValue gs(UniValue::VARR);
+        gs.push_back(sid);
+        BOOST_REQUIRE(store.Dispatch("listbountyevaluations", gs, result, code, err));
+        seen.evaluations = result["evaluations"].size();
+        UniValue run(UniValue::VOBJ);
+        run.pushKV("plan_id", plan_id);
+        run.pushKV("execution_approval_ref", "unit");
+        seen.plan_runs = call(store, "runbountyevaluation", run);
+        return seen;
+    };
+
+    Seen before;
+    {
+        BountyStore store;
+        store.Bind(dir, ZeroNet());
+        UniValue draft_params(UniValue::VARR);
+        draft_params.push_back(DefaultTerms(ZeroNet()));
+        BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+        UniValue pub(UniValue::VOBJ);
+        pub.pushKV("draft_id", result["draft_id"].get_str());
+        BOOST_REQUIRE_MESSAGE(call(store, "publishbounty", pub), err);
+        bounty_id = result["bounty_id"].get_str();
+
+        UniValue nom(UniValue::VOBJ);
+        nom.pushKV("bounty_id", bounty_id);
+        nom.pushKV("nominee_identity", "n1");
+        nom.pushKV("nominee_key", "aa");
+        BOOST_REQUIRE_MESSAGE(call(store, "nominatebountyevaluator", nom), err);
+        UniValue acc(UniValue::VOBJ);
+        acc.pushKV("terms_id", bounty_id);
+        UniValue appt(UniValue::VOBJ);
+        appt.pushKV("bounty_id", bounty_id);
+        acc.pushKV("appointment", appt);
+        BOOST_REQUIRE_MESSAGE(call(store, "acceptbountyappointment", acc), err);
+
+        UniValue pledge(UniValue::VOBJ);
+        pledge.pushKV("bounty_id", bounty_id);
+        pledge.pushKV("principal_atoms", "1000");
+        BOOST_REQUIRE_MESSAGE(call(store, "pledgebounty", pledge), err);
+        // Same payload, same record: the second pledge needs its own amount.
+        pledge.pushKV("principal_atoms", "2000");
+        BOOST_REQUIRE_MESSAGE(call(store, "pledgebounty", pledge), err);
+        UniValue wd(UniValue::VOBJ);
+        wd.pushKV("pledge_id", result["pledge_id"].get_str());
+        BOOST_REQUIRE_MESSAGE(call(store, "withdrawbountypledge", wd), err);
+
+        UniValue commit(UniValue::VOBJ);
+        commit.pushKV("bounty_id", bounty_id);
+        commit.pushKV("digest", "aa");
+        BOOST_REQUIRE_MESSAGE(call(store, "commitbountysubmission", commit), err);
+        UniValue reveal(UniValue::VOBJ);
+        reveal.pushKV("commitment_id", result["commitment_id"].get_str());
+        UniValue sub(UniValue::VOBJ);
+        sub.pushKV("artifact_dir", fs::PathToString(art));
+        reveal.pushKV("submission", sub);
+        BOOST_REQUIRE_MESSAGE(call(store, "revealbountysubmission", reveal), err);
+        sid = result["submission_id"].get_str();
+
+        UniValue prep(UniValue::VOBJ);
+        prep.pushKV("submission_id", sid);
+        prep.pushKV("profile_id", "EXACT_CHECKS");
+        UniValue files(UniValue::VARR);
+        files.push_back("weights.safetensors");
+        prep.pushKV("required_files", files);
+        prep.pushKV("artifact_dir", fs::PathToString(art));
+        BOOST_REQUIRE_MESSAGE(call(store, "preparebountyevaluation", prep), err);
+        plan_id = result["plan_id"].get_str();
+        UniValue run(UniValue::VOBJ);
+        run.pushKV("plan_id", plan_id);
+        run.pushKV("execution_approval_ref", "unit");
+        BOOST_REQUIRE_MESSAGE(call(store, "runbountyevaluation", run), err);
+        UniValue publish(UniValue::VOBJ);
+        publish.pushKV("job_id", result["job_id"].get_str());
+        BOOST_REQUIRE_MESSAGE(call(store, "publishbountyevaluation", publish), err);
+
+        UniValue challenge(UniValue::VOBJ);
+        challenge.pushKV("bounty_id", bounty_id);
+        challenge.pushKV("kind", "typed");
+        BOOST_REQUIRE_MESSAGE(call(store, "createbountychallenge", challenge), err);
+        before = look(store);
+    }
+    BOOST_CHECK_EQUAL(before.evaluators, 2U);
+    BOOST_CHECK_EQUAL(before.pledges, 1U);
+    BOOST_CHECK_EQUAL(before.evaluations, 1U);
+    BOOST_CHECK_EQUAL(before.challenges, 1U);
+    BOOST_CHECK(before.plan_runs);
+
+    // A new store on the same dir stands in for a helper restart.
+    BountyStore restarted;
+    restarted.Bind(dir, ZeroNet());
+    const Seen after = look(restarted);
+    BOOST_CHECK_EQUAL(after.evaluators, before.evaluators);
+    BOOST_CHECK_EQUAL(after.pledges, before.pledges);
+    BOOST_CHECK_EQUAL(after.evaluations, before.evaluations);
+    BOOST_CHECK_EQUAL(after.challenges, before.challenges);
+    BOOST_CHECK_MESSAGE(after.plan_runs, "evaluation plan lost on restart: " + code + " " + err);
+
+    // Binding again (DispatchBountyHelperRpc binds before every call) does not
+    // duplicate the loaded lists.
+    restarted.Bind(dir, ZeroNet());
+    BOOST_CHECK_EQUAL(look(restarted).evaluators, before.evaluators);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_script_001_to_020)
 {
 #ifdef ENABLE_WALLET
