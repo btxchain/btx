@@ -9,6 +9,7 @@
 #include <qt/bitcoinunits.h>
 
 #include <QStackedWidget>
+#include <memory>
 
 class ClientModel;
 class OverviewPage;
@@ -19,10 +20,12 @@ class SendCoinsRecipient;
 class TransactionView;
 class WalletModel;
 class AddressBookPage;
+namespace interfaces { class WalletRecovery; }
 
 QT_BEGIN_NAMESPACE
 class QModelIndex;
 class QProgressDialog;
+class QThread;
 QT_END_NAMESPACE
 
 /*
@@ -68,6 +71,8 @@ private:
     TransactionView *transactionView;
 
     QProgressDialog* progressDialog{nullptr};
+    QThread* m_recovery_thread{nullptr};
+    std::shared_ptr<interfaces::WalletRecovery> m_recovery;
     const PlatformStyle *platformStyle;
 
 public Q_SLOTS:
@@ -109,6 +114,7 @@ public Q_SLOTS:
 
 private Q_SLOTS:
     void disableTransactionView(bool disable);
+    void recoverPayments();
 
 Q_SIGNALS:
     void setPrivacy(bool privacy);

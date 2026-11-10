@@ -82,6 +82,8 @@ TEST_EXIT_SKIPPED = 77
 TEST_FRAMEWORK_UNIT_TESTS = 'feature_framework_unit_tests.py'
 
 EXTENDED_SCRIPTS = [
+    # Native Qt/X11 recovery; explicitly skips without --qt-binary and pyatspi.
+    'feature_qt_wallet_recovery.py',
     # These tests are not run by default.
     # Longest test should go first, to favor running tests in parallel
     'feature_matmul_cuda_daemon_lifecycle.py',

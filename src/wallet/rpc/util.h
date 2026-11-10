@@ -46,6 +46,10 @@ bool GetWalletNameFromJSONRPCRequest(const JSONRPCRequest& request, std::string&
 std::string EnsureUniqueWalletName(const JSONRPCRequest& request, const std::string* wallet_name);
 
 void EnsureWalletIsUnlocked(const CWallet&);
+
+/** Shared implementation used by the RPC and explicit Qt recovery.
+ * Caller owns the scan reservation; this function acquires m_relock_mutex. */
+UniValue RescanWallet(CWallet& wallet, const UniValue& params, const WalletRescanReserver& reserver);
 WalletContext& EnsureWalletContext(const std::any& context);
 LegacyScriptPubKeyMan& EnsureLegacyScriptPubKeyMan(CWallet& wallet, bool also_create = false);
 const LegacyScriptPubKeyMan& EnsureConstLegacyScriptPubKeyMan(const CWallet& wallet);
