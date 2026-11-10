@@ -625,6 +625,28 @@ std::vector<DepositEventType> EventsForDepositTransition(const std::optional<Dep
     return events;
 }
 
+std::vector<std::pair<uint256, UniValue>> DepositSpentEventsForTx(const CWallet& wallet, const uint256& spending_txid)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    std::vector<std::pair<uint256, UniValue>> out;
+    const CWalletTx* spender = wallet.GetWalletTx(spending_txid);
+    if (!spender || !spender->tx || spender->IsCoinBase()) return out;
+    for (const CTxIn& txin : spender->tx->vin) {
+        const CWalletTx* prev = wallet.GetWalletTx(txin.prevout.hash.ToUint256());
+        if (!prev || !prev->tx || txin.prevout.n >= prev->tx->vout.size()) continue;
+        if (!(wallet.IsMine(prev->tx->vout[txin.prevout.n]) & ISMINE_ALL)) continue;
+        // A deposit that is not confirmed yet is reported spent when it confirms,
+        // through DepositNotifyEventsForTx; reporting it here as well would repeat it.
+        if (!prev->isConfirmed()) continue;
+        DepositStatusResult now = GetDepositStatus(wallet, prev->GetHash(), txin.prevout.n);
+        if (now.status != DepositStatus::SPENT) continue;
+        // Name this spender: a replaced spender may still be in the wallet.
+        now.spent_by = spending_txid;
+        out.emplace_back(prev->GetHash(), EmitDepositEvent(DepositEventType::UtxoSpent, now));
+    }
+    return out;
+}
+
 std::vector<DepositStatusResult> DepositStatusesForTx(const CWallet& wallet, const uint256& txid)
 {
     AssertLockHeld(wallet.cs_wallet);

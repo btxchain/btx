@@ -1758,6 +1758,12 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const 
     }
     if (!gArgs.GetArgs("-walletdepositnotify").empty()) {
         RunDepositNotifyCommands(*this, hash, DepositNotifyEventsForTx(*this, hash, fInsertedNew));
+        // The deposits this transaction spends do not pass through here; report them now.
+        if (fInsertedNew) {
+            for (const auto& [spent_txid, event] : DepositSpentEventsForTx(*this, hash)) {
+                RunDepositNotifyCommands(*this, spent_txid, {event});
+            }
+        }
     }
 #endif
 
