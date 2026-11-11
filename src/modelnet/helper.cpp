@@ -2551,6 +2551,19 @@ FundingObservation ObservationFromHit(const SearchHit& h, const ReleaseCampaign*
 
 /** Copy size and file count from the local catalog when the search record left them empty.
  *  Does not invent a publisher. */
+//! The local copy of model_id, described in h the way searchmodels does, so
+//! the local search filters (locally_available, pinned, seeded) can see it.
+void FillLocalCopyState(ModelCatalog& cat, const Digest48& model_id, SearchHit& h)
+{
+    CatalogEntry e;
+    if (model_id.IsNull() || !cat.Find(model_id, e)) return;
+    h.local.known = true;
+    h.local.seeded = e.seeded;
+    h.local.pinned = e.pinned;
+    h.local.partial = e.incomplete;
+    h.local.downloaded = e.bytes_verified;
+}
+
 void FillKnownCatalogFields(ModelCatalog& cat, SearchHit& h)
 {
     if (h.rec.size_bytes > 0 && h.rec.file_count > 0) return;
@@ -10138,6 +10151,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }();
             for (const auto& c : camps) {
                 SearchHit h;
+                FillLocalCopyState(cat, c.model_id, h);
                 if (const auto* rec = g_search_idx.Get(c.model_id)) h.rec = *rec;
                 else {
                     h.rec.model_id = c.model_id;
@@ -10362,6 +10376,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }();
             for (const auto& c : camps) {
                 SearchHit h;
+                FillLocalCopyState(cat, c.model_id, h);
                 if (const auto* rec = g_search_idx.Get(c.model_id)) h.rec = *rec;
                 else {
                     h.rec.model_id = c.model_id;
