@@ -693,6 +693,7 @@ bool ParseSearchQuery(const UniValue& o, SearchQuery& q, std::string& err)
                 !take_int(f, "min_provider_count", q.filters.min_provider_count) ||
                 !take_bool(f, "pinned", q.filters.pinned) ||
                 !take_bool(f, "seeded", q.filters.seeded) ||
+                !take_bool(f, "locally_available", q.filters.locally_available) ||
                 !take_bool(f, "locally_verified", q.filters.locally_verified) ||
                 !take_bool(f, "funding_only", q.filters.funding_only) ||
                 !take_bool(f, "released_only", q.filters.released_only) ||

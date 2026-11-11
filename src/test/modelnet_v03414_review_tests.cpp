@@ -344,6 +344,103 @@ BOOST_AUTO_TEST_CASE(forged_campaign_record_does_not_stop_public_serving)
     BOOST_TEST_MESSAGE("seeded after: " << after.seeded);
 }
 
+// doc/modelnet/search.md lists locally_available among the search filters, and
+// the economy filters apply it. The query parser must read it, so searchmodels
+// keeps only models this node holds a copy of.
+BOOST_AUTO_TEST_CASE(search_filter_locally_available_is_applied)
+{
+    const fs::path tmp = m_path_root / "search-locally-available";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::string code, err;
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    const auto held = ImportTiny(cat);
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    modelnet::ModelSearchRecord remote;
+    remote.model_id.data[0] = 0x6c;
+    remote.artifact_id.data[0] = 0x6d;
+    remote.canonical_name = "not held here";
+    remote.display_name = remote.canonical_name;
+    remote.expires_at = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count() + 3'600'000;
+    remote.pubkey = pk;
+    BOOST_REQUIRE_MESSAGE(modelnet::SignSearchRecord(remote, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+    UniValue recs(UniValue::VARR);
+    recs.push_back(modelnet::SearchRecordToJson(remote));
+    UniValue import(UniValue::VOBJ);
+    import.pushKV("records", recs);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(import);
+    UniValue out;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), code << " " << err);
+
+    const auto search = [&](bool only_local) {
+        UniValue q(UniValue::VOBJ);
+        q.pushKV("scope", "LOCAL");
+        if (only_local) {
+            UniValue filters(UniValue::VOBJ);
+            filters.pushKV("locally_available", true);
+            q.pushKV("filters", filters);
+        }
+        UniValue sp(UniValue::VARR);
+        sp.push_back(q);
+        UniValue res;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "searchmodels", sp, res, code, err), code << " " << err);
+        std::set<std::string> ids;
+        for (const UniValue& card : res["results"].getValues()) ids.insert(card["model_id"].get_str());
+        return ids;
+    };
+    const auto all = search(false);
+    BOOST_REQUIRE(all.count(held.model_id.Hex()));
+    BOOST_REQUIRE(all.count(remote.model_id.Hex()));
+    const auto local = search(true);
+    BOOST_CHECK(local.count(held.model_id.Hex()));
+    BOOST_CHECK_MESSAGE(!local.count(remote.model_id.Hex()), "locally_available kept a model this node does not hold");
+
+    // The campaign modes of getmodelfeed apply the same filter to a release of
+    // the local model.
+    std::string uri;
+    BOOST_REQUIRE(modelnet::EncodeResource(modelnet::ResourceKind::MODEL, held.model_id, uri, err));
+    unsigned char secret[32];
+    for (int i = 0; i < 32; ++i) secret[i] = static_cast<unsigned char>(i + 91);
+    UniValue rp(UniValue::VARR);
+    rp.push_back(uri);
+    rp.push_back(HexStr(Span{secret, 32}));
+    rp.push_back(100000);
+    rp.push_back(100000);
+    UniValue created;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "createmodelrelease", rp, created, code, err), code << " " << err);
+    UniValue filters(UniValue::VOBJ);
+    filters.pushKV("locally_available", true);
+    UniValue fq(UniValue::VOBJ);
+    fq.pushKV("scope", "LOCAL");
+    fq.pushKV("mode", "NEARLY_FUNDED");
+    fq.pushKV("filters", filters);
+    UniValue fp(UniValue::VARR);
+    fp.push_back(fq);
+    UniValue feed;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+    bool campaign_listed{false};
+    for (const UniValue& item : feed["items"].getValues()) {
+        if (item["release_id"].get_str() == created["release_id"].get_str()) campaign_listed = true;
+    }
+    BOOST_CHECK_MESSAGE(campaign_listed, "locally_available dropped the release campaign of a local model");
+
+    // So does getfundablemodels.
+    UniValue gq(UniValue::VOBJ);
+    gq.pushKV("filters", filters);
+    UniValue gp(UniValue::VARR);
+    gp.push_back(gq);
+    UniValue fundable;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getfundablemodels", gp, fundable, code, err), code << " " << err);
+    bool fundable_listed{false};
+    for (const UniValue& card : fundable["results"].getValues()) {
+        if (card["model_id"].get_str() == held.model_id.Hex()) fundable_listed = true;
+    }
+    BOOST_CHECK_MESSAGE(fundable_listed, "locally_available dropped a local model from getfundablemodels");
+}
+
 // W2. grant_redeems.json is rewritten in place (truncate, then write). A
 // short write (crash, full disk) leaves invalid JSON, and every later free
 // grant redemption fails closed until an operator deletes the file.
