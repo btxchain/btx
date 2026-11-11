@@ -676,6 +676,64 @@ BOOST_AUTO_TEST_CASE(truncated_grant_nonce_store_does_not_wedge_issuance)
     BOOST_CHECK(fs::exists(fs::PathFromString(fs::PathToString(store) + ".quarantine")));
 }
 
+// getmodeldirectory and getmodeldirectoryentry describe the local copy of a
+// model the way searchmodels does: known, downloaded, seeded, pinned, partial.
+BOOST_AUTO_TEST_CASE(directory_shows_the_local_copy_like_search)
+{
+    const fs::path tmp = m_path_root / "directory-local";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto model = ImportTiny(cat);
+    std::string code, err;
+    UniValue sq(UniValue::VOBJ);
+    sq.pushKV("scope", "LOCAL");
+    UniValue sp(UniValue::VARR);
+    sp.push_back(sq);
+    UniValue search;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "searchmodels", sp, search, code, err), code << " " << err);
+    UniValue from_search;
+    for (const UniValue& card : search["results"].getValues()) {
+        if (card["model_id"].get_str() == model.model_id.Hex()) from_search = card["local"];
+    }
+    BOOST_REQUIRE(from_search.isObject());
+    BOOST_REQUIRE(from_search["known"].get_bool());
+    BOOST_REQUIRE(from_search["downloaded"].get_bool());
+
+    UniValue ep(UniValue::VARR);
+    ep.push_back(model.model_id.Hex());
+    UniValue entry;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodeldirectoryentry", ep, entry, code, err), code << " " << err);
+    BOOST_CHECK_EQUAL(entry["local"].write(), from_search.write());
+
+    UniValue directory;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodeldirectory", UniValue(UniValue::VARR), directory, code, err), code << " " << err);
+    bool listed{false};
+    for (const UniValue& card : directory["results"].getValues()) {
+        if (card["model_id"].get_str() != model.model_id.Hex()) continue;
+        listed = true;
+        BOOST_CHECK_EQUAL(card["local"].write(), from_search.write());
+    }
+    BOOST_CHECK(listed);
+
+    // The economy lists that go through the same entries (getnewmodels here) report
+    // the local copy too, so their pinned filter matches it.
+    UniValue filters(UniValue::VOBJ);
+    filters.pushKV("pinned", true);
+    UniValue nq(UniValue::VOBJ);
+    nq.pushKV("scope", "LOCAL");
+    nq.pushKV("filters", filters);
+    UniValue np(UniValue::VARR);
+    np.push_back(nq);
+    UniValue fresh;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getnewmodels", np, fresh, code, err), code << " " << err);
+    bool fresh_listed{false};
+    for (const UniValue& card : fresh["results"].getValues()) {
+        if (card["model_id"].get_str() != model.model_id.Hex()) continue;
+        fresh_listed = true;
+        BOOST_CHECK_EQUAL(card["local"].write(), from_search.write());
+    }
+    BOOST_CHECK_MESSAGE(fresh_listed, "getnewmodels with pinned does not list the local model");
+}
+
 // A publisher may re-sign its search record for the same model with a higher
 // sequence and a new release_id. The index takes each one (same model, so no
 // new slot and no publisher quota). The campaign learned from the older record
