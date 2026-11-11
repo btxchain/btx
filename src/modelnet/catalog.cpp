@@ -852,31 +852,62 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     const Digest48 artifact_id = ArtifactCoreId(aenc);
     if (!m_store.RenameArtifact(staging, artifact_id, err)) {
         if (err != "destination artifact exists") return false;
-        std::string ignored;
-        (void)m_store.RemoveArtifact(staging, ignored);
-        DropPieceTreeCache(staging);
-        commit_staging = true;
         for (auto& m : m_models) {
-            if (m.artifact_id == artifact_id) {
-                if (pin && !m.pinned) {
-                    // Pin the catalog entry itself: eviction ranks by it.
-                    std::string pin_err;
-                    m_store.Pin(model_id, pin_err);
-                    m_store.Pin(artifact_id, pin_err);
-                    m.pinned = true;
-                    m.admission = AdmissionLevel::PINNED;
-                    m.bytes_verified = true;
-                    out = m;
-                    return PersistLocked(err);
+            if (m.artifact_id != artifact_id) continue;
+            if (pin && !m.pinned) {
+                const auto previous_admission = m.admission;
+                const bool previous_verification = m.bytes_verified;
+                m.pinned = true;
+                m.admission = AdmissionLevel::PINNED;
+                m.bytes_verified = true;
+                if (!PersistLocked(err)) {
+                    m.pinned = false;
+                    m.admission = previous_admission;
+                    m.bytes_verified = previous_verification;
+                    return false;
                 }
-                out = m;
-                return true;
+                std::string pin_err;
+                m_store.Pin(model_id, pin_err);
+                m_store.Pin(artifact_id, pin_err);
+            }
+            err.clear();
+            out = m;
+            return true;
+        }
+
+        // A prior import can leave complete pieces after a failed catalog save.
+        // Verify them against this import before adding the missing entry.
+        for (uint32_t i = 0; i < cores.size(); ++i) {
+            PieceIndex staged_index, existing_index;
+            try {
+                if (!m_store.LoadPieceIndex(staging, i, staged_index, err) ||
+                    !m_store.LoadPieceIndex(artifact_id, i, existing_index, err) ||
+                    staged_index.file_size != existing_index.file_size ||
+                    staged_index.pieces_root != existing_index.pieces_root ||
+                    staged_index.leaves != existing_index.leaves) {
+                    err = "existing artifact index does not match import";
+                    return false;
+                }
+            } catch (const std::runtime_error&) {
+                err = "invalid existing artifact index";
+                return false;
+            }
+            const uint64_t pieces = cores[i].size / PIECE_SIZE + (cores[i].size % PIECE_SIZE != 0);
+            std::vector<unsigned char> staged_piece, existing_piece;
+            for (uint64_t j = 0; j < pieces; ++j) {
+                const auto index = static_cast<uint32_t>(j);
+                if (!m_store.GetPiece(staging, i, index, staged_piece, err) ||
+                    !m_store.GetPiece(artifact_id, i, index, existing_piece, err) ||
+                    staged_piece != existing_piece) {
+                    err = "existing artifact bytes do not match import";
+                    return false;
+                }
             }
         }
-        err = "destination artifact exists";
-        return false;
+        err.clear();
+    } else {
+        commit_staging = true;
     }
-    commit_staging = true;
     DropPieceTreeCache(staging);
 
     out = {};
@@ -895,14 +926,26 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     out.completed_at = out.imported_at;
     out.last_access_at = out.imported_at;
     out.incomplete = false;
+    DemandSeedLocked(out);
+    m_models.push_back(out);
+    if (!PersistLocked(err)) {
+        m_models.pop_back();
+        if (commit_staging) {
+            // Only undo a rename performed by this call. If the move back fails,
+            // keep the complete artifact for a later verified retry.
+            std::string rollback_err;
+            if (m_store.RenameArtifact(artifact_id, staging, rollback_err)) {
+                commit_staging = false;
+            }
+        }
+        return false;
+    }
     if (pin) {
         std::string pin_err;
         m_store.Pin(model_id, pin_err);
         m_store.Pin(artifact_id, pin_err);
     }
-    DemandSeedLocked(out);
-    m_models.push_back(out);
-    return PersistLocked(err);
+    return true;
 }
 
 bool ModelCatalog::Seed(const Digest48& model_id, bool on, std::string& err)
