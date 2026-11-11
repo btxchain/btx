@@ -954,9 +954,12 @@ RPCHelpMan importdepositpool()
                 throw JSONRPCError(RPC_WALLET_ERROR, err.original);
             }
             if (rescan) {
-                const int64_t scanned_time = pwallet->RescanFromTime(0, reserver, true);
+                bool interrupted = false;
+                const int64_t scanned_time = pwallet->RescanFromTime(0, reserver, true, &interrupted);
                 if (pwallet->IsAbortingRescan()) {
                     throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted by user.");
+                } else if (interrupted) {
+                    throw JSONRPCError(RPC_MISC_ERROR, "Rescan interrupted by node shutdown.");
                 } else if (scanned_time > 0) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "Rescan was unable to fully rescan the blockchain. Some transactions may be missing.");
                 }
