@@ -897,7 +897,15 @@ std::optional<std::string> ReadHighestAcceptedVersion(const fs::path& datadir, b
     corrupt = false;
     const fs::path path = HighestAcceptedVersionPath(datadir);
     std::ifstream in{path};
-    if (!in.is_open()) return std::nullopt;
+    if (!in.is_open()) {
+        // Only a missing entry means no floor. A dangling link, unreadable
+        // file, or inaccessible parent is an unusable floor.
+        std::error_code ec;
+        const auto status = fs::symlink_status(path, ec);
+        corrupt = status.type() != fs::file_type::not_found ||
+                  (ec && ec != std::errc::no_such_file_or_directory);
+        return std::nullopt;
+    }
     std::string line;
     if (!std::getline(in, line)) {
         corrupt = true;
