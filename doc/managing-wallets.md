@@ -1,7 +1,7 @@
 # Managing the Wallet
 
 Note: BTX operational runbooks usually set explicit `-datadir` / `-conf` paths
-(for example `/var/lib/btx` or `~/.btx/bitcoin.conf`). Default directory paths
+(for example `/var/lib/btx` or `~/.btx/btx.conf`). Default directory paths
 below apply when those options are not provided.
 
 For BTX-native P2MR custody, PQ multisig, timelocked recovery, external-signer
@@ -29,9 +29,11 @@ By default, wallets are created in the `wallets` folder of the data directory, w
 
 | Operating System | Default wallet directory                                    |
 | -----------------|:------------------------------------------------------------|
-| Linux            | `/home/<user>/.bitcoin/wallets`                             |
-| Windows          | `C:\Users\<user>\AppData\Local\Bitcoin\wallets`             |
-| macOS            | `/Users/<user>/Library/Application Support/Bitcoin/wallets` |
+| Linux            | `~/.btx/wallets`                                            |
+| Windows          | `%LOCALAPPDATA%\BTX\wallets`                                |
+| macOS            | `~/Library/Application Support/BTX/wallets`                 |
+
+If the BTX directory does not exist yet, `btxd` reuses a legacy Bitcoin Core data directory only when it already looks like a BTX one (for example it holds `btx.conf`, BTX block files or a BTX `debug.log`); otherwise it uses the BTX directory above.
 
 ### 1.2 Encrypting the Wallet
 
