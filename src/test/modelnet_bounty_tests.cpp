@@ -267,6 +267,55 @@ BOOST_AUTO_TEST_CASE(bounty_records_need_a_known_bounty)
     BOOST_CHECK_MESSAGE(appointment(bounty), err);
 }
 
+BOOST_AUTO_TEST_CASE(bounty_publish_checks_expected_terms_id)
+{
+    // publishbounty takes expected_terms_id, the digest of the terms the user
+    // reviewed (terms_id_preview of the draft). A draft changed after that
+    // review must not be signed and published.
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-expected-terms";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    UniValue create(UniValue::VARR);
+    create.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", create, result, code, err), err);
+    const std::string draft_id = result["draft_id"].get_str();
+    const std::string reviewed = result["terms_id_preview"].get_str();
+
+    UniValue patch(UniValue::VOBJ);
+    patch.pushKV("draft_id", draft_id);
+    patch.pushKV("title", "changed after review");
+    UniValue update(UniValue::VARR);
+    update.push_back(patch);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("updatebountydraft", update, result, code, err), err);
+    const std::string current = result["terms_id_preview"].get_str();
+    BOOST_REQUIRE(current != reviewed);
+
+    const auto publish = [&](const std::string& expected) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("draft_id", draft_id);
+        o.pushKV("expected_terms_id", expected);
+        UniValue p(UniValue::VARR);
+        p.push_back(o);
+        err.clear();
+        code.clear();
+        return store.Dispatch("publishbounty", p, result, code, err);
+    };
+    BOOST_CHECK(!publish(reviewed));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(err.find("expected_terms_id") != std::string::npos);
+    UniValue list(UniValue::VARR);
+    UniValue found;
+    BOOST_REQUIRE(store.Dispatch("searchbounties", list, found, code, err));
+    BOOST_CHECK(found.write().find("changed after review") == std::string::npos);
+
+    BOOST_CHECK_MESSAGE(publish(current), err);
+    BOOST_CHECK(result.exists("bounty_id"));
+}
+
 BOOST_AUTO_TEST_CASE(bounty_auth_001_to_030)
 {
     using namespace modelnet;

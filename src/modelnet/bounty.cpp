@@ -1471,6 +1471,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (!ValidateBountyTerms(it->second, m_network, err)) {
             return fail("INVALID_PARAMETER", err.empty() ? "recipe incomplete" : ("recipe incomplete: " + err));
         }
+        // expected_terms_id names the terms the user reviewed (the draft's
+        // terms_id_preview). A draft changed since must not be signed.
+        if (a.exists("expected_terms_id") &&
+            (!a["expected_terms_id"].isStr() || a["expected_terms_id"].get_str() != TermsIdPreview(it->second))) {
+            return fail("REJECTED", "expected_terms_id does not match the current draft terms");
+        }
         SignedEnvelope env;
         if (!sign_terms(it->second, env)) return fail("REJECTED", err);
         if (!VerifySignedEnvelope(env, m_network, err)) return fail("REJECTED", err);
