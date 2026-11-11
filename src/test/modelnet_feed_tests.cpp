@@ -14,6 +14,8 @@
 #include <boost/test/unit_test.hpp>
 
 #include <fstream>
+#include <set>
+#include <string>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_feed_tests, BasicTestingSetup)
 
@@ -88,6 +90,32 @@ BOOST_AUTO_TEST_CASE(econ_feed_06_pagination)
     const auto p2 = feed.Query(q, 100, next);
     BOOST_CHECK_EQUAL(p2.size(), 10);
     BOOST_CHECK_NE(p1.front().event_id, p2.front().event_id);
+}
+
+BOOST_AUTO_TEST_CASE(econ_feed_cap_drops_only_the_oldest_event)
+{
+    // At the cap, a new event must push out the event first seen longest ago,
+    // not every event observed before the current millisecond.
+    using namespace modelnet;
+    FeedStore feed;
+    feed.SetCap(3);
+    for (int i = 0; i < 4; ++i) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = static_cast<unsigned char>(i + 1);
+        r.display_name = "M" + std::to_string(i);
+        r.canonical_name = r.display_name;
+        r.published_at = 1000 + i;
+        BOOST_REQUIRE(feed.NoteSearchRecord(r, 1000 + i));
+    }
+    BOOST_CHECK_EQUAL(feed.Size(), 3U);
+    FeedQuery q;
+    std::string next;
+    std::set<std::string> names;
+    for (const auto& ev : feed.Query(q, 1004, next)) names.insert(ev.rec.display_name);
+    BOOST_CHECK(!names.count("M0"));
+    BOOST_CHECK(names.count("M1"));
+    BOOST_CHECK(names.count("M2"));
+    BOOST_CHECK(names.count("M3"));
 }
 
 BOOST_AUTO_TEST_CASE(econ_feed_07_coverage_incomplete)
