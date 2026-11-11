@@ -4190,7 +4190,8 @@ static bool AutomaticAcquisitionPermitted(const ModelCatalog& cat)
 static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const std::string& host, uint16_t port,
                                       const Digest48& model_id, std::string& err, std::atomic<bool>* stop,
                                       const fs::path& pinfile, RetrieveProgress* progress,
-                                      const std::vector<std::string>& extra_peers, bool automatic);
+                                      const std::vector<std::string>& extra_peers, bool automatic,
+                                      std::optional<Digest48>* active_artifact);
 
 namespace {
 
@@ -4445,9 +4446,12 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
     // DISC-05: re-read catalog peers after a contact dies. Committed pieces
     // stay on disk; RetrieveFreeFromPeer skips them via GetPiece.
     job->worker = std::thread([job, &cat, model_id]() {
+        std::optional<Digest48> active_artifact;
+        auto end_transfer = [&] {
+            if (active_artifact) cat.EndTransfer(*active_artifact);
+        };
         auto failed = [&](const std::string& e) {
-            CatalogEntry done;
-            if (cat.Find(model_id, done)) cat.EndTransfer(done.artifact_id);
+            end_transfer();
             UniValue r(UniValue::VOBJ);
             r.pushKV("schema_version", 2);
             r.pushKV("status", "failed");
@@ -4468,7 +4472,10 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
         }
         const fs::path pinfile = cat.Store().Root().parent_path() / "tls" / "pins.json";
         CatalogEntry live;
-        if (cat.Find(model_id, live)) cat.BeginTransfer(live.artifact_id);
+        if (cat.Find(model_id, live)) {
+            cat.BeginTransfer(live.artifact_id);
+            active_artifact = live.artifact_id;
+        }
         std::set<std::string> failed_peers;
         std::string last_err;
         int transient_streak = 0;
@@ -4542,7 +4549,7 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                     }
                 }
                 if (RetrieveFreeFromPeerScoped(cat, pq, host, port, model_id, rerr, &job->cancel,
-                                               pinfile, &job->progress, extras, job->automatic)) {
+                                               pinfile, &job->progress, extras, job->automatic, &active_artifact)) {
                     std::string seed_err;
                     DemandSeedIfDownloadable(cat, model_id, seed_err);
                     CatalogEntry got;
@@ -4556,6 +4563,7 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                     r.pushKV("failed_contacts", static_cast<int>(failed_peers.size()) + job->progress.peer_failovers.load());
                     r.pushKV("last_peer", peer);
                     r.pushKV("peer_retries", job->progress.peer_retries.load());
+                    end_transfer();
                     {
                         std::lock_guard<std::mutex> lock(job->mu);
                         job->last_err.clear();
@@ -4563,9 +4571,8 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                         job->status = "done";
                     }
                     CatalogEntry done;
-                    if (cat.Find(model_id, done)) {
-                        cat.EndTransfer(done.artifact_id);
-                        if (job->automatic && done.bytes_verified && !done.incomplete) ++g_native_acquired;
+                    if (job->automatic && cat.Find(model_id, done) && done.bytes_verified && !done.incomplete) {
+                        ++g_native_acquired;
                     }
                     PersistRetrieveJobs();
                     return;
@@ -10526,7 +10533,8 @@ bool LoadPq1Identity(Pq1Context& pq, const fs::path& modeldir, std::string& err)
 static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const std::string& host, uint16_t port,
                                       const Digest48& model_id, std::string& err, std::atomic<bool>* stop,
                                       const fs::path& pinfile, RetrieveProgress* progress,
-                                      const std::vector<std::string>& extra_peers, bool automatic)
+                                      const std::vector<std::string>& extra_peers, bool automatic,
+                                      std::optional<Digest48>* active_artifact)
 {
     {
         std::string admission_code;
@@ -10613,6 +10621,13 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
     VerifiedManifest vm;
     if (!VerifyManifestAgainstRequest(man, model_id, vm, err)) return false;
     const Digest48 artifact = vm.artifact_id;
+    // A fresh worker learns the artifact from its first verified manifest.
+    // Protect its pieces for the whole job, including across a peer switch.
+    if (active_artifact && *active_artifact != artifact) {
+        if (*active_artifact) cat.EndTransfer(**active_artifact);
+        cat.BeginTransfer(artifact);
+        *active_artifact = artifact;
+    }
     if (!cat.EnforceDownloadQuota(vm, err, stop)) return false;
     {
         std::string ierr;
@@ -11470,7 +11485,7 @@ bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& 
                           RetrieveProgress* progress, const std::vector<std::string>& extra_peers)
 {
     return RetrieveFreeFromPeerScoped(cat, pq, host, port, model_id, err, stop, pinfile,
-                                      progress, extra_peers, /*automatic=*/false);
+                                      progress, extra_peers, /*automatic=*/false, /*active_artifact=*/nullptr);
 }
 
 int UnixRpcReplyTimeoutMs(const std::string& method)
