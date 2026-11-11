@@ -12,6 +12,9 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <string>
+#include <tuple>
+#include <utility>
 
 namespace modelnet {
 
@@ -196,23 +199,39 @@ bool FeedStore::NoteUnlock(const Digest48& model_id, const std::string& release_
     return Note(std::move(secret), now_ms);
 }
 
+namespace {
+//! The type and id of the feed event for c's current funding step. Dedupe per
+//! campaign + frozen/secret transition only, not every pledge tick.
+std::pair<FeedEventType, std::string> FundingStep(const ReleaseCampaign& c)
+{
+    if (c.target_atoms > 0 && c.funded_atoms >= c.target_atoms) {
+        return {FeedEventType::RELEASE_FUNDED,
+                MakeFeedEventId(FeedEventType::RELEASE_FUNDED, c.model_id, c.release_id.Hex(), 0, "funded")};
+    }
+    const std::string extra = std::string(c.frozen ? "1" : "0") + (c.secret_disclosed ? "1" : "0") +
+                               std::to_string(c.pledged_atoms / std::max<int64_t>(1, c.target_atoms / 20));
+    return {FeedEventType::RELEASE_FUNDING_CHANGED,
+            MakeFeedEventId(FeedEventType::RELEASE_FUNDING_CHANGED, c.model_id, c.release_id.Hex(), 0, extra)};
+}
+} // namespace
+
+bool FeedStore::NotedFundingEvent(const ReleaseCampaign& c, FeedEvent& out) const
+{
+    const auto it = m_by_id.find(FundingStep(c).second);
+    if (it == m_by_id.end()) return false;
+    out = it->second;
+    return true;
+}
+
 bool FeedStore::NoteFundingChanged(const ReleaseCampaign& c, int64_t now_ms)
 {
     FeedEvent ev;
-    ev.event_type = FeedEventType::RELEASE_FUNDING_CHANGED;
+    std::tie(ev.event_type, ev.event_id) = FundingStep(c);
     ev.model_id = c.model_id;
     ev.release_id = c.release_id.Hex();
     ev.campaign = c;
     ev.has_campaign = true;
     ev.published_at = now_ms;
-    // Dedupe per campaign + frozen/secret transition only, not every pledge tick:
-    const std::string extra = std::string(c.frozen ? "1" : "0") + (c.secret_disclosed ? "1" : "0") +
-                               std::to_string(c.pledged_atoms / std::max<int64_t>(1, c.target_atoms / 20));
-    ev.event_id = MakeFeedEventId(ev.event_type, c.model_id, c.release_id.Hex(), 0, extra);
-    if (c.target_atoms > 0 && c.funded_atoms >= c.target_atoms) {
-        ev.event_type = FeedEventType::RELEASE_FUNDED;
-        ev.event_id = MakeFeedEventId(FeedEventType::RELEASE_FUNDED, c.model_id, c.release_id.Hex(), 0, "funded");
-    }
     return Note(std::move(ev), now_ms);
 }
 

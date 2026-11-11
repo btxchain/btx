@@ -5947,6 +5947,16 @@ void LiveObserveFeed(const FeedEvent& fe)
 
 void LiveObserveCampaign(const ReleaseCampaign& c, FeedEventType t)
 {
+    // A funding change goes to the journal as the event the feed noted for it
+    // (NoteFundingChanged runs first), with that event's type and id, so each
+    // funding step is one journal event and a repeated step is not.
+    if (t == FeedEventType::RELEASE_FUNDING_CHANGED) {
+        FeedEvent noted;
+        if (g_feed.NotedFundingEvent(c, noted)) {
+            LiveObserveFeed(noted);
+            return;
+        }
+    }
     FeedEvent fe;
     fe.event_type = t;
     fe.model_id = c.model_id;
