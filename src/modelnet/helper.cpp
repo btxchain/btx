@@ -1111,6 +1111,9 @@ NegativeResolveCache& NegCache()
     return c;
 }
 
+//! Serializes identity, rule, community and mirror store mutations.
+static std::mutex g_helper_store_mu;
+
 bool LoadOrCreateResearchIdentity(const fs::path& dir, std::vector<unsigned char>& pk, std::vector<unsigned char>& sk,
                                   Digest48& id, std::string& err)
 {
@@ -1204,6 +1207,7 @@ bool LoadPublisherSecret(const fs::path& dir, const std::string& hexid, std::vec
 bool EnsureDefaultPublisherIdentity(const fs::path& dir, std::vector<unsigned char>& pk,
                                        std::vector<unsigned char>& sk, Digest48& publisher_id, std::string& err)
 {
+    std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
     UniValue store;
     ReadJsonFile(dir / "identities.json", store);
     if (store.exists("identities") && store["identities"].isArray() && !store["identities"].getValues().empty()) {
@@ -2367,11 +2371,6 @@ static FeedStore g_feed;
 static CampaignIndex g_campaigns;
 static std::recursive_mutex g_campaign_mu;
 static std::mutex g_receipts_mu;
-//! Held while a helper RPC reads, changes and writes back identities.json,
-//! acl.json, community.json or mirror.json. The helper serves RPCs on more than one worker
-//! (and btxd on many threads), so two calls could read the same file and the
-//! later write would drop the change of the earlier one.
-static std::mutex g_helper_store_mu;
 static std::map<std::string, FundingObservation> g_chain_obs;
 static bool g_feed_loaded{false};
 static fs::path g_econ_dir;
