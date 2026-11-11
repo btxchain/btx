@@ -8250,6 +8250,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 o.pushKV("scope", "NETWORK");
                 o.pushKV("mode", "NEW_RELEASE_CAMPAIGNS");
                 if (Arg(0).isObject() && Arg(0).exists("limit")) o.pushKV("limit", Arg(0)["limit"]);
+                if (Arg(0).isObject() && Arg(0).exists("cursor")) o.pushKV("cursor", Arg(0)["cursor"]);
                 if (Arg(0).isObject() && Arg(0).exists("filters")) o.pushKV("filters", Arg(0)["filters"]);
                 UniValue inner(UniValue::VARR);
                 inner.push_back(o);
@@ -8270,6 +8271,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 o.pushKV("scope", SearchScopeName(scope));
                 o.pushKV("mode", "NEWEST");
                 if (Arg(0).exists("limit")) o.pushKV("limit", Arg(0)["limit"]);
+                if (Arg(0).exists("cursor")) o.pushKV("cursor", Arg(0)["cursor"]);
                 UniValue inner(UniValue::VARR);
                 inner.push_back(o);
                 UniValue req(UniValue::VOBJ);
@@ -10483,6 +10485,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             if (Arg(0).isObject()) {
                 if (Arg(0).exists("limit")) fq.limit = Arg(0)["limit"].getInt<int>();
                 if (Arg(0).exists("since")) fq.since = Arg(0)["since"].getInt<int64_t>();
+                if (Arg(0).exists("cursor")) fq.cursor = Arg(0)["cursor"].get_str();
             }
             std::string next;
             const auto items = g_feed.Query(fq, ConnNowMs(), next);

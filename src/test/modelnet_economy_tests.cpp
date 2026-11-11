@@ -455,6 +455,65 @@ const UniValue* FindReleaseCard(const UniValue& res, const std::string& release_
 
 } // namespace
 
+BOOST_AUTO_TEST_CASE(feed_wrappers_continue_from_their_cursor)
+{
+    // getrecentreleases, getnewmodels and getrecentlyunlockedmodels return
+    // the next_cursor of the feed page they read. Passing it back must give
+    // the next page, not the first one again, or a walk never ends.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "feed-wrapper-cursor";
+    ModelCatalog cat{root, 8 << 20};
+    for (int i = 0; i < 3; ++i) {
+        const fs::path model = root / fs::PathFromString("toy" + std::to_string(i) + ".safetensors.dir");
+        fs::create_directories(model);
+        const std::string header = "{\"__metadata__\":{\"n\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> st(8 + header.size());
+        WriteLE64(st.data(), header.size());
+        std::copy(header.begin(), header.end(), st.begin() + 8);
+        {
+            std::ofstream out(model / "toy.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        UniValue host_params(UniValue::VARR);
+        host_params.push_back(fs::PathToString(model));
+        const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+        BOOST_REQUIRE(hosted.exists("uri"));
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("uri", hosted["uri"].get_str());
+        body.pushKV("secret32_hex", std::string(64, static_cast<char>('a' + i)));
+        body.pushKV("refund_height", 100000);
+        body.pushKV("target_atoms", 5'000'000);
+        body.pushKV("display_name", "Wrapper " + std::to_string(i));
+        UniValue create_params(UniValue::VARR);
+        create_params.push_back(body);
+        const UniValue rel = HelperDispatch(cat, "createmodelrelease", create_params);
+        UniValue claim(UniValue::VARR);
+        claim.push_back(rel["release_id"].get_str());
+        claim.push_back(std::string(64, static_cast<char>('a' + i)));
+        HelperDispatch(cat, "claimmodelrelease", claim);
+    }
+    const auto page = [&](const std::string& method, const std::string& scope, const std::string& cursor) {
+        UniValue o(UniValue::VOBJ);
+        if (!scope.empty()) o.pushKV("scope", scope);
+        o.pushKV("limit", 1);
+        if (!cursor.empty()) o.pushKV("cursor", cursor);
+        UniValue p(UniValue::VARR);
+        p.push_back(o);
+        return HelperDispatch(cat, method, p);
+    };
+    for (const auto& [method, scope] : std::vector<std::pair<std::string, std::string>>{
+             {"getrecentreleases", "NETWORK"}, {"getnewmodels", "NETWORK"}, {"getrecentlyunlockedmodels", ""}}) {
+        const UniValue first = page(method, scope, "");
+        BOOST_REQUIRE_MESSAGE(first["results"].size() == 1, method);
+        const std::string next = first["next_cursor"].get_str();
+        BOOST_REQUIRE_MESSAGE(!next.empty(), method);
+        // The second page starts after the first, so it hands out a new cursor
+        // (or none at the end) instead of the same one again.
+        const UniValue second = page(method, scope, next);
+        BOOST_CHECK_MESSAGE(second["next_cursor"].get_str() != next, method);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(release_card_keeps_display_name_publisher_and_size)
 {
     using namespace modelnet;
