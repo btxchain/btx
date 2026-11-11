@@ -275,16 +275,18 @@ RPCHelpMan importlabels()
     }
 
     LOCK(pwallet->cs_wallet);
+    int imported{0};
     for (const auto& [address, label] : pending) {
-        if (pwallet->IsMine(address)) {
-            pwallet->SetAddressBook(address, label, AddressPurpose::RECEIVE);
-        } else {
-            pwallet->SetAddressBook(address, label, AddressPurpose::SEND);
+        const auto purpose = pwallet->IsMine(address) ? AddressPurpose::RECEIVE : AddressPurpose::SEND;
+        if (!pwallet->SetAddressBook(address, label, purpose)) {
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                               strprintf("Failed to save address label after importing %d labels", imported));
         }
+        ++imported;
     }
 
     UniValue reply(UniValue::VOBJ);
-    reply.pushKV("imported", static_cast<int>(pending.size()));
+    reply.pushKV("imported", imported);
     reply.pushKV("skipped", skipped);
     return reply;
 },

@@ -3677,32 +3677,23 @@ util::Result<void> CWallet::RemoveTxs(WalletBatch& batch, std::vector<uint256>& 
 
 bool CWallet::SetAddressBookWithDB(WalletBatch& batch, const CTxDestination& address, const std::string& strName, const std::optional<AddressPurpose>& new_purpose)
 {
-    bool fUpdated = false;
-    bool is_mine;
-    std::optional<AddressPurpose> purpose;
-    {
-        LOCK(cs_wallet);
-        std::map<CTxDestination, CAddressBookData>::iterator mi = m_address_book.find(address);
-        fUpdated = mi != m_address_book.end() && !mi->second.IsChange();
-
-        CAddressBookData& record = mi != m_address_book.end() ? mi->second : m_address_book[address];
-        record.SetLabel(strName);
-        is_mine = IsMine(address) != ISMINE_NO;
-        if (new_purpose) { /* update purpose only if requested */
-            record.purpose = new_purpose;
-        }
-        purpose = record.purpose;
-    }
-
-    const std::string& encoded_dest = EncodeDestination(address);
-    if (new_purpose && !batch.WritePurpose(encoded_dest, PurposeToString(*new_purpose))) {
-        WalletLogPrintf("Error: fail to write address book 'purpose' entry\n");
+    LOCK(cs_wallet);
+    const std::string encoded_dest = EncodeDestination(address);
+    if (!batch.TxnBegin()) return false;
+    if ((new_purpose && !batch.WritePurpose(encoded_dest, PurposeToString(*new_purpose))) ||
+        !batch.WriteName(encoded_dest, strName) || !batch.TxnCommit()) {
+        batch.TxnAbort();
         return false;
     }
-    if (!batch.WriteName(encoded_dest, strName)) {
-        WalletLogPrintf("Error: fail to write address book 'name' entry\n");
-        return false;
-    }
+
+    // Publish the label and purpose only after both have been committed.
+    auto mi = m_address_book.find(address);
+    const bool fUpdated = mi != m_address_book.end() && !mi->second.IsChange();
+    CAddressBookData& record = m_address_book[address];
+    record.SetLabel(strName);
+    const bool is_mine = IsMine(address) != ISMINE_NO;
+    if (new_purpose) record.purpose = new_purpose;
+    const auto purpose = record.purpose;
 
     // In very old wallets, address purpose may not be recorded so we derive it from IsMine
     NotifyAddressBookChanged(address, strName, is_mine,
