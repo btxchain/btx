@@ -273,6 +273,9 @@ RPCHelpMan importlabels()
         const std::string label = LabelFromValue(rec["label"]);
         pending[DecodeDestination(ref)] = label;
     }
+    if (file.bad() || !file.eof()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to read labels import file");
+    }
 
     LOCK(pwallet->cs_wallet);
     for (const auto& [address, label] : pending) {
