@@ -6263,7 +6263,13 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
                 }
                 keep_watch_id = watch_id;
             } else {
-                (void)BoundModelWatchStore()->RemoveWatch(watch_id);
+                std::string remove_err;
+                (void)BoundModelWatchStore()->RemoveWatch(watch_id, remove_err);
+                if (!remove_err.empty()) {
+                    err_code = "IO_ERROR";
+                    err = "mirror policy saved, but its keep_latest watch was not removed: " + remove_err;
+                    return false;
+                }
             }
         }
         result = MirrorPolicyToJson(stored, prof, policy);

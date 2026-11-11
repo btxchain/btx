@@ -137,7 +137,8 @@ public:
 
     bool PutWatch(ModelWatch& w, std::string& err);
     bool GetWatch(const std::string& watch_id, ModelWatch& out) const;
-    bool RemoveWatch(const std::string& watch_id);
+    /** Returns true if removed. If false, err distinguishes save failure from an absent watch. */
+    bool RemoveWatch(const std::string& watch_id, std::string& err);
     std::vector<ModelWatch> List() const;
     bool Match(const ModelEvent& ev, const ModelWatch& watch) const { return WatchMatchesEvent(watch, ev); }
     void NoteEvent(const ModelEvent& ev);
