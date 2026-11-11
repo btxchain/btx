@@ -377,8 +377,21 @@ BOOST_AUTO_TEST_CASE(unwatch_drops_the_actions_the_watch_queued)
     UniValue un(UniValue::VOBJ);
     un.pushKV("watch_id", dropped.watch_id);
     UniValue result;
+    const fs::path blocked_save = dir / "watches.json.tmp";
+    BOOST_REQUIRE(fs::create_directory(blocked_save));
+    BOOST_CHECK(!DispatchHelperRpc(cat, HelperReq("unwatchmodel", un), result, code, err));
+    BOOST_CHECK_EQUAL(code, "IO_ERROR");
+    ModelWatch stored;
+    BOOST_CHECK(BoundModelWatchStore()->GetWatch(dropped.watch_id, stored));
+    BOOST_CHECK_EQUAL(BoundModelWatchStore()->PeekActions().size(), 2U);
+    BOOST_CHECK(ModelWatchStore{dir}.GetWatch(dropped.watch_id, stored));
+    BOOST_REQUIRE(fs::remove(blocked_save));
+
     BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("unwatchmodel", un), result, code, err), err);
     BOOST_REQUIRE(result["removed"].get_bool());
+    ModelWatchStore reopened(dir);
+    BOOST_CHECK(!reopened.GetWatch(dropped.watch_id, stored));
+    BOOST_CHECK(reopened.GetWatch(kept.watch_id, stored));
 
     const auto queued = BoundModelWatchStore()->PeekActions();
     BOOST_REQUIRE_EQUAL(queued.size(), 1U);

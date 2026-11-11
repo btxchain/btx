@@ -123,7 +123,12 @@ uint64_t CursorField(const UniValue& o, const char* k, uint64_t def = 0)
 
 bool WriteJson(const fs::path& p, const UniValue& o, std::string& err)
 {
-    fs::create_directories(p.parent_path());
+    try {
+        fs::create_directories(p.parent_path());
+    } catch (const fs::filesystem_error& e) {
+        err = e.what();
+        return false;
+    }
     const fs::path tmp = p + ".tmp";
     {
         std::ofstream out(tmp, std::ios::trunc);
@@ -707,17 +712,21 @@ bool ModelWatchStore::GetWatch(const std::string& watch_id, ModelWatch& out) con
     return true;
 }
 
-bool ModelWatchStore::RemoveWatch(const std::string& watch_id)
+bool ModelWatchStore::RemoveWatch(const std::string& watch_id, std::string& err)
 {
     std::lock_guard<std::mutex> lock(m_mu);
-    const bool gone = m_watches.erase(watch_id) > 0;
+    err.clear();
+    auto watch = m_watches.extract(watch_id);
+    if (watch.empty()) return false;
+    if (!PersistWatchesLocked(err)) {
+        m_watches.insert(std::move(watch));
+        return false;
+    }
     // Actions the watch queued before it was removed must not run afterwards.
     m_actions.erase(std::remove_if(m_actions.begin(), m_actions.end(),
                                    [&](const QueuedWatchAction& a) { return a.watch_id == watch_id; }),
                     m_actions.end());
-    std::string err;
-    (void)PersistWatchesLocked(err);
-    return gone;
+    return true;
 }
 
 std::vector<ModelWatch> ModelWatchStore::List() const
@@ -1012,7 +1021,8 @@ bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, Un
     }
     if (method == "unwatchmodel") {
         const std::string id = a.exists("watch_id") ? JsonStr(a, "watch_id") : StrArg(params, 0, "watch_id");
-        const bool removed = watches.RemoveWatch(id);
+        const bool removed = watches.RemoveWatch(id, err);
+        if (!err.empty()) return fail("IO_ERROR", err);
         result.pushKV("watch_id", id);
         result.pushKV("removed", removed);
         return true;
