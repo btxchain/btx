@@ -10,6 +10,7 @@
 #include <modelnet/free_grant.h>
 #include <modelnet/helper.h>
 #include <modelnet/identity.h>
+#include <modelnet/model_watch.h>
 #include <modelnet/resource_uri.h>
 #include <modelnet/search.h>
 #include <random.h>
@@ -187,6 +188,107 @@ int ImportReissuedRecords(modelnet::ModelCatalog& cat, const modelnet::Digest48&
 }
 
 } // namespace
+
+// Funding changes of a release reach the model event journal at the feed's
+// granularity (per 5 % of the target, frozen and disclosed). Every change after
+// the first used to share one dedupe key, so the journal dropped them.
+BOOST_AUTO_TEST_CASE(release_funding_changes_reach_the_event_journal)
+{
+    const fs::path tmp = m_path_root / "release-funding-events";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    modelnet::BindModelEventLayer(tmp / "events", 1000);
+    const auto model = ImportTiny(cat);
+    // A release with a target of 100000 atoms: the feed notes a change every 5000.
+    std::string uri, code, err;
+    BOOST_REQUIRE(modelnet::EncodeResource(modelnet::ResourceKind::MODEL, model.model_id, uri, err));
+    unsigned char secret[32];
+    for (int i = 0; i < 32; ++i) secret[i] = static_cast<unsigned char>(i + 41);
+    UniValue release_params(UniValue::VARR);
+    release_params.push_back(uri);
+    release_params.push_back(HexStr(Span{secret, 32}));
+    release_params.push_back(100000);
+    release_params.push_back(100000);
+    UniValue created;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "createmodelrelease", release_params, created, code, err), code << " " << err);
+    const std::string release = created["release_id"].get_str();
+    const auto changes = [&] {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("cursor", "0");
+        UniValue params(UniValue::VARR);
+        params.push_back(p);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelevents", params, out, code, err), code << " " << err);
+        int n{0};
+        for (const UniValue& ev : out["events"].getValues()) {
+            if (ev["event_type"].get_str() == "RELEASE_FUNDING_CHANGED" && ev.exists("release_id") &&
+                ev["release_id"].get_str() == release) {
+                ++n;
+            }
+        }
+        return n;
+    };
+    const auto pledge = [&](int64_t atoms) {
+        UniValue params(UniValue::VARR);
+        params.push_back(release);
+        params.push_back(atoms);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "pledgemodelrelease", params, out, code, err), code << " " << err);
+    };
+    const int64_t step = 5000;
+    pledge(step);
+    BOOST_CHECK_EQUAL(changes(), 1);
+    pledge(step);
+    BOOST_CHECK_EQUAL(changes(), 2);
+    pledge(1);
+    BOOST_CHECK_EQUAL(changes(), 2);
+    pledge(step - 1);
+    BOOST_CHECK_EQUAL(changes(), 3);
+}
+
+// The journal key of a funding step comes from the feed's id for the step, not
+// from the feed sequence: a restart can hand out a feed sequence again before
+// feed.json is saved. Creating a campaign keeps the key of its published record.
+BOOST_AUTO_TEST_CASE(release_funding_steps_keep_their_journal_key)
+{
+    const fs::path tmp = m_path_root / "release-funding-keys";
+    modelnet::BindModelEventLayer(tmp / "events", 1000);
+    modelnet::Digest48 model;
+    model.data[0] = 0x71;
+    const std::string release = RandHex48();
+    std::string err;
+    const auto step = [&](const std::string& extra, uint64_t feed_sequence) {
+        modelnet::FeedEvent fe;
+        fe.event_type = modelnet::FeedEventType::RELEASE_FUNDING_CHANGED;
+        fe.model_id = model;
+        fe.release_id = release;
+        fe.event_id = modelnet::MakeFeedEventId(fe.event_type, model, release, 0, extra);
+        fe.sequence = feed_sequence;
+        modelnet::ObserveResult r;
+        BOOST_REQUIRE_MESSAGE(modelnet::JournalObserveFeed(fe, r, err), err);
+        return r.duplicate;
+    };
+    // Step 1 under feed sequence 7; after a restart, step 2 gets feed sequence 7 again.
+    BOOST_CHECK(!step("001", 7));
+    BOOST_CHECK_MESSAGE(!step("002", 7), "a new funding step was dropped as a duplicate");
+    // The same step noted again under another feed sequence is a repeat.
+    BOOST_CHECK(step("002", 9));
+
+    // createmodelrelease journals the campaign without a record; publishing its
+    // record (sequence 1) later is the same event.
+    modelnet::FeedEvent created;
+    created.event_type = modelnet::FeedEventType::RELEASE_CAMPAIGN_CREATED;
+    created.model_id = model;
+    created.release_id = release;
+    modelnet::ObserveResult first, second;
+    BOOST_REQUIRE_MESSAGE(modelnet::JournalObserveFeed(created, first, err), err);
+    BOOST_CHECK(!first.duplicate);
+    modelnet::ModelSearchRecord rec;
+    rec.model_id = model;
+    rec.release_id = release;
+    rec.metadata_sequence = 1;
+    BOOST_REQUIRE_MESSAGE(modelnet::JournalObserveSearchRecord(rec, second, err), err);
+    BOOST_CHECK_MESSAGE(second.duplicate, "campaign creation journalled twice");
+}
 
 // W1. A search record from any peer can name a public model's artifact_id as
 // part of a "release campaign". The v0.34.14 gate then refuses to serve that

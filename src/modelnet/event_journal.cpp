@@ -234,6 +234,15 @@ bool ModelEventFromFeed(const FeedEvent& fe, ModelEvent& out)
     FillMatchFromSearch(out.match, fe.rec);
     out.untrusted_text = SanitizeUntrustedEventText(fe.rec.description.empty() ? fe.rec.short_description : fe.rec.description);
     out.object_id = FirstNonEmpty({out.model_id, out.release_id, out.publisher_id, fe.event_id});
+    // A release campaign's funding step carries no search record, so every step
+    // would get the empty record's default sequence and one dedupe key. Key it by
+    // the feed's id for the step instead (one per 5 % of the target, frozen,
+    // disclosed, funded): that id does not depend on the feed sequence, which a
+    // restart can hand out again before feed.json is saved.
+    if (fe.rec.model_id.IsNull() && !fe.event_id.empty() &&
+        (fe.event_type == FeedEventType::RELEASE_FUNDING_CHANGED || fe.event_type == FeedEventType::RELEASE_FUNDED)) {
+        out.dedupe_key = out.object_id + "|" + fe.event_id + "|" + ModelEventTypeName(out.event_type);
+    }
     if (out.event_type == ModelEventType::PUBLISHER_RECORD_UPDATED && !out.publisher_id.empty()) {
         out.object_id = out.publisher_id;
     }

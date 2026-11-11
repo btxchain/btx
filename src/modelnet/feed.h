@@ -119,6 +119,8 @@ public:
     bool NoteCampaign(const ReleaseCampaign& c, int64_t now_ms);
     bool NoteUnlock(const Digest48& model_id, const std::string& release_id, const ModelSearchRecord& r, int64_t now_ms);
     bool NoteFundingChanged(const ReleaseCampaign& c, int64_t now_ms);
+    /** The event NoteFundingChanged noted for c's current funding step, if any. */
+    bool NotedFundingEvent(const ReleaseCampaign& c, FeedEvent& out) const;
 
     std::vector<FeedEvent> Query(const FeedQuery& q, int64_t now_ms, std::string& next_cursor) const;
     UniValue StatusJson(int public_models, int campaigns, int unreleased, int unlocked, const FeedCoverage& cov) const;
