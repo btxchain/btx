@@ -878,6 +878,58 @@ BOOST_AUTO_TEST_CASE(cloud_12d_post_read_save_failure_retains_charge)
 }
 #endif
 
+// A budget file that exists but does not parse is not a fresh budget. Starting
+// from zero would admit reads past a cap that was already used up, and the
+// zeros written at Init would replace the damaged file for good.
+BOOST_AUTO_TEST_CASE(cloud_12e_damaged_budget_state_refuses_init)
+{
+    const ScopedCloudCredentials credentials;
+    const auto creds = m_path_root / "cloud-12e-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    auto cfg = credentials.Config(creds);
+    cfg.budget_gets_per_day = 1;
+    cfg.budget_state_path = m_path_root / "cloud-12e-budget.json";
+    const int64_t now = 86400LL * 20000 + 3600;
+    const auto art = ArtifactFill(0x49);
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(now);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        const auto src = m_path_root / "cloud-12e.bin";
+        { std::ofstream out(src, std::ios::binary); out << "daycap"; }
+        BOOST_REQUIRE(store.PutSourceFile(art, 0, src, 6, 1, err));
+        std::vector<unsigned char> got;
+        BOOST_REQUIRE_MESSAGE(store.GetSourceFile(art, 0, got, err), err);
+        BOOST_CHECK(!store.GetSourceFile(art, 0, got, err));
+    }
+    std::string committed;
+    {
+        std::ifstream in(cfg.budget_state_path, std::ios::binary);
+        committed.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    BOOST_REQUIRE_GT(committed.size(), 2U);
+    const std::string damaged = committed.substr(0, committed.size() / 2);
+    for (const std::string& text : {damaged, std::string{"[]\n"}, std::string{"{\"day_gets\":\"1\"}\n"},
+                                    std::string{"{\"used_gets\":-1}\n"}, std::string{"{\"day_bytes\":1.5}\n"}}) {
+        { std::ofstream out(cfg.budget_state_path, std::ios::binary | std::ios::trunc); out << text; }
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(now);
+        std::string err;
+        BOOST_CHECK(!store.Init(err));
+        BOOST_CHECK_MESSAGE(err.find("budget") != std::string::npos, err);
+        BOOST_CHECK(!store.IsReady());
+        std::ifstream in(cfg.budget_state_path, std::ios::binary);
+        BOOST_CHECK_EQUAL(std::string(std::istreambuf_iterator<char>(in), {}), text);
+    }
+    // A missing file is a fresh budget.
+    fs::remove(cfg.budget_state_path);
+    modelnet::S3PieceStore store{cfg};
+    store.SetClockForTests(now);
+    std::string err;
+    BOOST_CHECK_MESSAGE(store.Init(err), err);
+}
+
 BOOST_AUTO_TEST_CASE(fullcloud_01_102400_pieces_one_source_object)
 {
     const ScopedCloudCredentials credentials;
@@ -1215,6 +1267,70 @@ BOOST_AUTO_TEST_CASE(cloud_rpc_set_hostmodel_events_no_secrets)
     BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, treq, probe, code, err), err);
     BOOST_CHECK(probe["probe_ok"].get_bool());
     NoSecrets(probe, kAccess, kSecret);
+}
+
+BOOST_AUTO_TEST_CASE(cloud_rpc_damaged_budget_reports_init_error)
+{
+    // The helper loads the stored origin at the start of every call. When the
+    // budget file is damaged, the origin must stay off and say why, in
+    // setcloudstorage and in getcloudstorageinfo, and the other calls must
+    // keep working.
+    const ScopedCloudCredentials credentials;
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "cloud-rpc-damaged";
+    fs::create_directories(dir);
+    const fs::path creds = dir / "creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    ModelCatalog cat{dir, 8 << 20};
+    const auto call = [&](const std::string& method, const UniValue& params, UniValue& result) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        std::string code, err;
+        const bool ok = DispatchHelperRpc(cat, req, result, code, err);
+        BOOST_CHECK_MESSAGE(ok, method + " " + code + " " + err);
+        return ok;
+    };
+    UniValue cfg(UniValue::VOBJ);
+    cfg.pushKV("endpoint", "https://acct.r2.cloudflarestorage.com");
+    cfg.pushKV("bucket", "btx-models");
+    cfg.pushKV("prefix", "v1");
+    cfg.pushKV("credential_ref", credentials.RpcRef(creds));
+    cfg.pushKV("use_fake", true);
+    cfg.pushKV("idempotency_key", "cloud-rpc-damaged-1");
+    UniValue params(UniValue::VARR);
+    params.push_back(cfg);
+    UniValue result;
+    BOOST_REQUIRE(call("setcloudstorage", params, result));
+    BOOST_REQUIRE(result["applied"].get_bool());
+
+    fs::path budget;
+    for (const auto& entry : fs::recursive_directory_iterator(dir)) {
+        if (entry.path().filename() == "cloud-budget.json") budget = entry.path();
+    }
+    BOOST_REQUIRE(!budget.empty());
+    {
+        std::ofstream out(budget, std::ios::binary | std::ios::trunc);
+        out << "{\"used_gets\":-1}\n";
+    }
+    cfg.pushKV("idempotency_key", "cloud-rpc-damaged-2");
+    UniValue again(UniValue::VARR);
+    again.push_back(cfg);
+    if (call("setcloudstorage", again, result)) {
+        BOOST_CHECK(!result["applied"].get_bool());
+        BOOST_CHECK(result["init_error"].get_str().find("cloud budget state") != std::string::npos);
+    }
+
+    UniValue info;
+    if (call("getcloudstorageinfo", UniValue(UniValue::VARR), info)) {
+        BOOST_CHECK(!info["configured"].get_bool());
+        BOOST_CHECK(info.exists("init_error") &&
+                    info["init_error"].get_str().find("cloud budget state") != std::string::npos);
+        NoSecrets(info, kAccess, kSecret);
+    }
+    // Every helper call loads the stored origin first: the others keep working.
+    UniValue listed;
+    BOOST_CHECK(call("listmodels", UniValue(UniValue::VARR), listed));
 }
 
 BOOST_AUTO_TEST_CASE(cloud_https_transport_available)

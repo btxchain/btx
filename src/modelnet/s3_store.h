@@ -64,7 +64,7 @@ class S3PieceStore final : public CloudObjectStore
     int64_t NowS() const;
     void RollWindowsLocked(int64_t now_s);
     bool PersistBudgetLocked(std::string& err) const;
-    void LoadBudgetState();
+    bool LoadBudgetState(std::string& err);
     bool ChargeGet(uint64_t bytes, std::string& err);
     bool WouldExceed(uint64_t bytes) const;
     bool BudgetAllowsGet(uint64_t max_bytes, std::string& err);
