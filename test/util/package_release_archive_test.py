@@ -70,7 +70,7 @@ class PackageReleaseArchiveTest(unittest.TestCase):
         self.module.verify_shipped_macos_cli = lambda path: None
         self.module.verify_shipped_helper = lambda path: None
         # Text fixtures do not exercise ELF editing; native loader coverage below does.
-        self.module.set_linux_guard_runpath = lambda path: None
+        self.module.set_linux_bundled_lib_runpath = lambda path: None
 
     def test_linux_archive_includes_binaries_and_helpers(self):
         self._stub_ship_gate()
@@ -154,7 +154,7 @@ class PackageReleaseArchiveTest(unittest.TestCase):
     def test_guard_remains_a_regular_daemon_sibling_after_extraction(self):
         self._stub_ship_gate()
         runpath_targets = []
-        self.module.set_linux_guard_runpath = runpath_targets.append
+        self.module.set_linux_bundled_lib_runpath = runpath_targets.append
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_root = self._build_source_root(root)
@@ -221,10 +221,8 @@ class PackageReleaseArchiveTest(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc") and shutil.which("patchelf"),
                          "native Linux ELF tools required")
     def test_direct_guard_and_qt_keep_shared_and_private_dependencies(self):
-        setter = getattr(self.module, "set_linux_guard_runpath", None)
-        self._stub_ship_gate()
-        if setter is not None:
-            self.module.set_linux_guard_runpath = setter
+        self.module.verify_shipped_btxd = lambda path: None
+        self.module.verify_shipped_cli = lambda path: None
         bundle_path = SCRIPT_PATH.with_name("bundle_qt_gui.py")
         spec = importlib.util.spec_from_file_location("native_bundle_fixture", bundle_path)
         bundle = importlib.util.module_from_spec(spec)
@@ -259,15 +257,26 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                 subprocess.run(["cc", str(c), "-L" + str(buildlib), "-l:" + dep,
                                 "-Wl,-rpath," + (str(buildlib) if name == "btx-qt" else "$ORIGIN/buildlib"), "-Wl,-rpath-link," + str(buildlib),
                                 "-o", str(root / name)], check=True)
+            shared_consumers = ("btx-atlas", "btx-native-qualify", "btx-security")
+            source = root / "shared_consumer.c"
+            source.write_text("extern int shared(void); int main(void) { return shared()==17 ? 0 : 2; }\n")
+            for name in shared_consumers:
+                subprocess.run(["cc", str(source), "-L" + str(buildlib), "-l:libbtxshared.so.1",
+                                "-Wl,-rpath-link," + str(buildlib), "-o", str(root / name)], check=True)
+            original_binaries = {name: (root / name).read_bytes() for name in shared_consumers}
+
             # Text daemon/CLI fixtures have no ELF dependencies. Do not fake the Qt/guard graphs.
             actual_ldd, actual_needed = bundle._ldd_map, getattr(bundle, "_needed", lambda path: set())
             text_fixtures = (btxd, cli, root / "btx-util")
             bundle._needed = lambda path: set() if path in text_fixtures else actual_needed(path)
             bundle._ldd_map = lambda path, *args: {} if path in text_fixtures else actual_ldd(path, *args)
-            staged, _, _ = self.module.stage_release_tree(
-                version="29.2", platform_id="linux-x86_64", btxd_path=btxd, btx_cli_path=cli,
-                btx_util_path=None, matmul_metallib_path=None, oracle_metallib_path=None,
-                metal_lib_dir=None, source_root=source_root, temp_root=root / "staged")
+            # The producer can find its libraries during staging. The extracted
+            # release must find its own libraries without that environment.
+            with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": str(buildlib)}):
+                staged, _, _ = self.module.stage_release_tree(
+                    version="29.2", platform_id="linux-x86_64", btxd_path=btxd, btx_cli_path=cli,
+                    btx_util_path=None, matmul_metallib_path=None, oracle_metallib_path=None,
+                    metal_lib_dir=None, source_root=source_root, temp_root=root / "staged")
             guard = staged / "libexec/btx-guardd"
             self.assertTrue(guard.samefile(staged / "libexec/btx-guardd.real"))
             for name in ("libbtxshared.so.1", "libbtxsharedchild.so.1"):
@@ -287,6 +296,12 @@ class PackageReleaseArchiveTest(unittest.TestCase):
             self.assertFalse(restored.is_symlink())
             self.assertTrue(restored.samefile(restored.with_name("btx-guardd.real")))
             self.assertEqual(subprocess.run([str(restored)], env=clean_env, capture_output=True, timeout=5).returncode, 0)
+            for name in shared_consumers:
+                with self.subTest(binary=name):
+                    self.assertEqual((root / name).read_bytes(), original_binaries[name])
+                    binary = restored.with_name(name + ".real")
+                    result = subprocess.run([str(binary)], env=clean_env, capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
 
     def test_require_model_helpers_rejects_archive_without_them(self):
         self._stub_ship_gate()

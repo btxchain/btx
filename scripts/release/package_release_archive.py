@@ -571,8 +571,8 @@ def _load_qt_bundle():
     return module
 
 
-def set_linux_guard_runpath(path: Path) -> None:
-    """The supervisor executes this ELF directly, without the bin/ wrapper."""
+def set_linux_bundled_lib_runpath(path: Path) -> None:
+    """Point a staged ELF executable at the archive's shared libraries."""
     bundle = _load_qt_bundle()
     if bundle._needed(path):
         bundle._set_rpath(path, "$ORIGIN/../lib")
@@ -662,11 +662,16 @@ def stage_release_tree(
         shutil.copy2(source, real_destination)
         real_destination.chmod(0o755)
         included.append(str(real_destination.relative_to(release_root)))
+        if platform_id.startswith("linux-") and qt_source is not None and dest_name in (
+            "btx-atlas", "btx-native-qualify", "btx-security",
+        ):
+            # The Qt bundle can place libraries needed by these tools in lib/.
+            set_linux_bundled_lib_runpath(real_destination)
         if platform_id.startswith(("linux-", "macos-")) and dest_name == "btx-guardd":
             # Patch before linking: an ELF editor may replace the inode.
             # Both regular names must resolve the packaged libraries directly.
             if platform_id.startswith("linux-"):
-                set_linux_guard_runpath(real_destination)
+                set_linux_bundled_lib_runpath(real_destination)
             # The guard supervisor requires a regular sibling of btxd.real.
             # A hard link preserves that rule without another binary payload.
             sibling = libexec_dir / "btx-guardd"
