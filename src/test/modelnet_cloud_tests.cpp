@@ -47,6 +47,14 @@
 #include <boost/test/unit_test.hpp>
 #include <test/util/environment.h>
 
+#if !defined(_WIN32)
+#include <csignal>
+#include <exception>
+#include <stdexcept>
+#include <sys/resource.h>
+#endif
+#include <iterator>
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -671,6 +679,204 @@ BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
         BOOST_CHECK(err.find("budget") != std::string::npos);
     }
 }
+
+// Insert before fullcloud_01 in modelnet_cloud_tests.cpp. POSIX-only fault fixture.
+// Requires <csignal>, <stdexcept>, <sys/resource.h> on POSIX.
+#if !defined(_WIN32)
+BOOST_AUTO_TEST_CASE(cloud_12c_startup_write_failure_preserves_budget)
+{
+    const ScopedCloudCredentials credentials;
+    const auto creds = m_path_root / "cloud-12c-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    auto cfg = credentials.Config(creds);
+    cfg.budget_gets_per_day = 1;
+    cfg.budget_state_path = m_path_root / "cloud-12c-budget.json";
+    const int64_t day0 = 86400 * 20000 + 3600;
+    const auto art = ArtifactFill(0x46);
+    const auto src = m_path_root / "cloud-12c.bin";
+    { std::ofstream out(src, std::ios::binary); out << "daycap"; }
+    const auto read_budget = [&] {
+        std::ifstream in(cfg.budget_state_path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const auto read_json = [&] {
+        UniValue v;
+        BOOST_REQUIRE(v.read(read_budget()) && v.isObject());
+        return v;
+    };
+    const auto put = [&](modelnet::S3PieceStore& store) {
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.PutSourceFile(art, 0, src, 6, 1, err), err);
+    };
+    const auto refuse = [&](modelnet::S3PieceStore& store) {
+        std::string err;
+        std::vector<unsigned char> got;
+        const bool ok = store.GetSourceFile(art, 0, got, err);
+        BOOST_CHECK_MESSAGE(!ok && err.find("budget") != std::string::npos,
+                            "expected budget refusal; actual ok=" << ok << " err=" << err);
+    };
+    const auto fetch = [&](modelnet::S3PieceStore& store) {
+        std::string err;
+        std::vector<unsigned char> got;
+        BOOST_REQUIRE_MESSAGE(store.GetSourceFile(art, 0, got, err), err);
+        BOOST_CHECK_EQUAL(std::string(got.begin(), got.end()), "daycap");
+    };
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); fetch(store); refuse(store);
+    }
+    const std::string committed = read_budget();
+    BOOST_REQUIRE(committed.size() > 32);
+    const auto seeded = read_json();
+    for (const auto* k : {"day_gets", "month_gets", "used_gets"})
+        BOOST_REQUIRE_EQUAL(seeded[k].getInt<int64_t>(), 1);
+    for (const auto* k : {"day_bytes", "month_bytes", "used_bytes"})
+        BOOST_REQUIRE_EQUAL(seeded[k].getInt<int64_t>(), 6);
+    {
+        // Each Init creates a fresh FakeS3. Re-PUT prevents missing data from
+        // masquerading as a preserved budget on the next GET.
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); refuse(store);
+    }
+    bool init_ok = true, ready = true;
+    std::string startup_error;
+    {
+        // Run only this case in its own test process. The soft limit is restored
+        // before any Boost reporting or observation output. Half the file, not
+        // size-1: dropping only the trailing newline still leaves valid JSON.
+        class ScopedFileLimit {
+            struct rlimit saved{};
+            using Handler = void (*)(int);
+            Handler previous{SIG_ERR};
+        public:
+            explicit ScopedFileLimit(rlim_t bytes) {
+                if (getrlimit(RLIMIT_FSIZE, &saved) != 0)
+                    throw std::runtime_error("getrlimit failed");
+                previous = std::signal(SIGXFSZ, SIG_IGN);
+                if (previous == SIG_ERR) throw std::runtime_error("signal failed");
+                struct rlimit limited = saved;
+                limited.rlim_cur = bytes;
+                if (setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+                    std::signal(SIGXFSZ, previous);
+                    throw std::runtime_error("setrlimit failed");
+                }
+            }
+            ~ScopedFileLimit() {
+                // An unrecoverable restore must not let the remaining test run
+                // under a hidden process-wide limit.
+                if (setrlimit(RLIMIT_FSIZE, &saved) != 0) std::terminate();
+                std::signal(SIGXFSZ, previous);
+            }
+        } limit(committed.size() / 2);
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        init_ok = store.Init(startup_error);
+        ready = store.IsReady();
+    }
+    const auto after_fault = read_budget();
+    BOOST_TEST_MESSAGE("startup result=" << init_ok << " ready=" << ready
+                       << " err=" << startup_error << " old_bytes=" << committed.size()
+                       << " after_bytes=" << after_fault.size());
+    BOOST_CHECK(!init_ok);
+    BOOST_CHECK(!ready);
+    BOOST_CHECK(!startup_error.empty());
+    BOOST_CHECK_EQUAL(after_fault, committed);
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); refuse(store);
+    }
+    const auto reopened = read_json();
+    for (const auto* k : {"day_gets", "month_gets", "used_gets", "day_bytes", "month_bytes", "used_bytes"})
+        BOOST_CHECK_EQUAL(reopened[k].getInt<int64_t>(), seeded[k].getInt<int64_t>());
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0 + 86400);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); fetch(store); refuse(store);
+    }
+    const auto rolled = read_json();
+    BOOST_CHECK_EQUAL(rolled["day_utc"].getInt<int64_t>(), seeded["day_utc"].getInt<int64_t>() + 1);
+    BOOST_CHECK_EQUAL(rolled["month_utc"].getInt<int64_t>(), seeded["month_utc"].getInt<int64_t>());
+    BOOST_CHECK_EQUAL(rolled["day_gets"].getInt<int64_t>(), 1);
+    BOOST_CHECK_EQUAL(rolled["day_bytes"].getInt<int64_t>(), 6);
+    BOOST_CHECK_EQUAL(rolled["month_gets"].getInt<int64_t>(), 2);
+    BOOST_CHECK_EQUAL(rolled["used_gets"].getInt<int64_t>(), 2);
+    BOOST_CHECK_EQUAL(rolled["month_bytes"].getInt<int64_t>(), 12);
+    BOOST_CHECK_EQUAL(rolled["used_bytes"].getInt<int64_t>(), 12);
+    cfg.budget_state_path.clear();
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); fetch(store); refuse(store);
+        store.SetClockForTests(day0 + 86400);
+        fetch(store); refuse(store);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cloud_12d_post_read_save_failure_retains_charge)
+{
+    const ScopedCloudCredentials credentials;
+    const auto creds = m_path_root / "cloud-12d-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    auto cfg = credentials.Config(creds);
+    cfg.budget_gets_per_day = 1;
+    cfg.budget_state_path = m_path_root / "cloud-12d-budget.json";
+    modelnet::S3PieceStore store{cfg};
+    store.SetClockForTests(86400LL * 20000 + 3600);
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+    const auto src = m_path_root / "cloud-12d.bin";
+    { std::ofstream out(src, std::ios::binary); out << "daycap"; }
+    const auto art = ArtifactFill(0x47);
+    BOOST_REQUIRE(store.PutSourceFile(art, 0, src, 6, 1, err));
+    const auto read = [&] {
+        std::ifstream in(cfg.budget_state_path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const auto committed = read();
+    struct rlimit saved{};
+    BOOST_REQUIRE_EQUAL(getrlimit(RLIMIT_FSIZE, &saved), 0);
+    const auto handler = std::signal(SIGXFSZ, SIG_IGN);
+    BOOST_REQUIRE(handler != SIG_ERR);
+    auto limited = saved;
+    limited.rlim_cur = committed.size() / 2;
+    if (setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+        std::signal(SIGXFSZ, handler);
+        BOOST_FAIL("setrlimit failed");
+    }
+    std::vector<unsigned char> got;
+    bool ok;
+    try { ok = store.GetSourceFile(art, 0, got, err); }
+    catch (...) {
+        if (setrlimit(RLIMIT_FSIZE, &saved) != 0) std::terminate();
+        std::signal(SIGXFSZ, handler);
+        throw;
+    }
+    if (setrlimit(RLIMIT_FSIZE, &saved) != 0) std::terminate();
+    std::signal(SIGXFSZ, handler);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK(got.empty());
+    BOOST_CHECK(err.find("budget") != std::string::npos);
+    BOOST_CHECK_EQUAL(read(), committed);
+    const auto health = store.HealthJson();
+    BOOST_CHECK_EQUAL(health["budget_used_gets"].getInt<int64_t>(), 1);
+    BOOST_CHECK_EQUAL(health["origin_bytes"].getInt<int64_t>(), 6);
+    BOOST_CHECK(!store.GetSourceFile(art, 0, got, err));
+    BOOST_CHECK(err.find("budget") != std::string::npos);
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(fullcloud_01_102400_pieces_one_source_object)
 {

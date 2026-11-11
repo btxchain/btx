@@ -3,9 +3,12 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <modelnet/s3_store.h>
+#include <random.h>
+#include <util/fs_helpers.h>
 
 #include <algorithm>
 #include <ctime>
+#include <cstdio>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -84,9 +87,9 @@ void S3PieceStore::RollWindowsLocked(int64_t now_s)
     }
 }
 
-void S3PieceStore::PersistBudgetLocked() const
+bool S3PieceStore::PersistBudgetLocked(std::string& err) const
 {
-    if (m_cfg.budget_state_path.empty()) return;
+    if (m_cfg.budget_state_path.empty()) return true;
     UniValue o(UniValue::VOBJ);
     o.pushKV("day_utc", m_day_utc);
     o.pushKV("month_utc", m_month_utc);
@@ -96,11 +99,34 @@ void S3PieceStore::PersistBudgetLocked() const
     o.pushKV("month_bytes", m_month_bytes);
     o.pushKV("used_gets", m_used_gets);
     o.pushKV("used_bytes", m_used_bytes);
-    const fs::path parent = m_cfg.budget_state_path.parent_path();
-    if (!parent.empty()) fs::create_directories(parent);
-    std::ofstream out{m_cfg.budget_state_path};
-    if (!out) return;
-    out << o.write() << "\n";
+    const fs::path& path = m_cfg.budget_state_path;
+    try {
+        if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
+    } catch (const fs::filesystem_error&) {
+        err = "cloud budget directory creation failed";
+        return false;
+    }
+    // Keep the committed accounting intact until a complete replacement is
+    // flushed and closed. Exclusive creation must not truncate a stale file.
+    const std::string text = o.write() + "\n";
+    FastRandomContext rng;
+    const fs::path tmp = path.parent_path() / fs::PathFromString(
+        fs::PathToString(path.filename()) + ".tmp." + std::to_string(rng.rand64()));
+    FILE* file = fsbridge::fopen(tmp, "wbx");
+    if (!file) {
+        err = "cloud budget temporary file creation failed";
+        return false;
+    }
+    const bool written = std::fwrite(text.data(), 1, text.size(), file) == text.size();
+    const bool committed = written && FileCommit(file);
+    const bool closed = std::fclose(file) == 0;
+    if (!committed || !closed || !RenameOver(tmp, path)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        err = "cloud budget save failed";
+        return false;
+    }
+    return true;
 }
 
 void S3PieceStore::LoadBudgetState()
@@ -153,8 +179,8 @@ bool S3PieceStore::ChargeGet(uint64_t bytes, std::string& err)
     ++m_month_gets;
     m_day_bytes += bytes;
     m_month_bytes += bytes;
-    PersistBudgetLocked();
-    return true;
+    // The origin read already happened: retain its in-memory charge on failure.
+    return PersistBudgetLocked(err);
 }
 
 bool S3PieceStore::Init(std::string& err)
@@ -177,7 +203,7 @@ bool S3PieceStore::Init(std::string& err)
     {
         std::lock_guard<std::mutex> lock(m_mu);
         RollWindowsLocked(NowS());
-        PersistBudgetLocked();
+        if (!PersistBudgetLocked(err)) return false;
     }
     m_ready = true;
     return true;
