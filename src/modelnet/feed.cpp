@@ -117,15 +117,14 @@ bool FeedStore::Note(FeedEvent ev, int64_t now_ms)
         return true;
     }
     if (m_by_id.size() >= m_cap) {
-        Expire(now_ms + m_ttl_ms); // force ttl path
-        if (m_by_id.size() >= m_cap) {
-            // drop oldest first_seen
-            auto oldest = m_by_id.begin();
-            for (auto i = m_by_id.begin(); i != m_by_id.end(); ++i) {
-                if (i->second.first_seen_at < oldest->second.first_seen_at) oldest = i;
-            }
-            if (oldest != m_by_id.end()) m_by_id.erase(oldest);
+        // Expire(now_ms) above already dropped the expired events. Make room
+        // by dropping the event first seen longest ago. (Expiring at
+        // now_ms + m_ttl_ms here dropped every event observed before now.)
+        auto oldest = m_by_id.begin();
+        for (auto i = m_by_id.begin(); i != m_by_id.end(); ++i) {
+            if (i->second.first_seen_at < oldest->second.first_seen_at) oldest = i;
         }
+        if (oldest != m_by_id.end()) m_by_id.erase(oldest);
     }
     if (ev.first_seen_at == 0) ev.first_seen_at = now_ms;
     if (ev.observed_at == 0) ev.observed_at = now_ms;
