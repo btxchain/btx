@@ -10,8 +10,9 @@ Included
 - `btx-035/swarm` through `d522af52`, including the wallet, Windows, jail,
   and ML-KEM review fixes.
 - `btx-035/atlas-native` through `afe27a2b`, the desktop candidate.
-  The Linux archive ships `btx-atlas`. Running it needs WebKitGTK 4.1 and GTK 3
-  (`libwebkit2gtk-4.1-0` and `libgtk-3-0`). Qt stays; Atlas is the additional desktop.
+  The Linux archive ships `btx-atlas`. Running it needs WebKitGTK 4.1, GTK 3,
+  the Ayatana tray library, and zenity (`libwebkit2gtk-4.1-0`, `libgtk-3-0`,
+  `libayatana-appindicator3-1`, and `zenity`). Qt stays; Atlas is the additional desktop.
 - `btx-035/model-security-v2` through `6fd4564e`, the local security guard.
   `btx-security` is the offline administrative CLI. On a running node the same
   guard is `btx-cli modelsecurity`.
@@ -29,8 +30,11 @@ Stop the node with `btx-cli stop`, wait for `btxd` to exit, and back up the
 data directory. Unpack the whole archive and run `bin/btxd` from it: the files
 in `bin/` start `libexec/*.real` with the bundled `lib/`, so a `bin/btxd`
 copied on its own exits with "packaged binary is missing". `btxd` and
-`btx-cli` need glibc 2.38 or newer (Ubuntu 24.04, Debian 13). No `btx.conf`
-option was removed.
+`btx-cli` need glibc 2.38 or newer (Ubuntu 24.04, Debian 13). The `btx-qt`
+in the published Linux archive, and the Qt and GnuTLS libraries packed beside
+it, need GLIBC_2.43, so Ubuntu 24.04 (glibc 2.39) and Debian 13 (glibc 2.41)
+can run `btxd` and `btx-cli` from that file and cannot start `btx-qt`.
+`btx-atlas` in that file needs GLIBC_2.39. No `btx.conf` option was removed.
 
 - A node that syncs from genesis still stops at block 126,978: block 126,979
   fails the unshield velocity cap (#272). This release does not change that.

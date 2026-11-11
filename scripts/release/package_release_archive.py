@@ -186,9 +186,11 @@ if command -v ldd >/dev/null 2>&1; then
     need_glibc_v=${need_glibc#GLIBC_}
     if btx_ver_lt "$host_glibc" "$need_glibc_v"; then
       echo "BTX @BINARY@ requires $need_glibc (this host provides GLIBC_${host_glibc})." >&2
-      echo "Debian 12 (glibc 2.36) and Ubuntu 22.04 (2.35) cannot load this archive; Ubuntu 24.04 / Debian 13 can." >&2
+      echo "Debian 12 (glibc 2.36) and Ubuntu 22.04 (2.35) cannot load a binary that needs GLIBC_2.38." >&2
+      echo "Ubuntu 24.04 is glibc 2.39 and Debian 13 is glibc 2.41. Neither can load a binary that needs GLIBC_2.43." >&2
+      echo "btx-qt and the bundled Qt and GnuTLS in the Linux archive built on a newer host need GLIBC_2.43. A private prefix of Debian 13 libc6 is glibc 2.41, so it does not satisfy that." >&2
       echo "ldd reported no missing .so files because libc is present; the version nodes are not." >&2
-      echo "Build from source on this host, or unpack Debian 13 libc6/libstdc++6/libgcc-s1 into a private prefix and set BTX_GLIBC_PREFIX. See doc/btx-download-and-go.md." >&2
+      echo "Build that binary on a host whose glibc is no newer than the machines that will run it. See doc/btx-download-and-go.md." >&2
       echo "The packaged binary is located at: $REAL" >&2
       exit 127
     fi
