@@ -2569,8 +2569,19 @@ void FillKnownCatalogFields(ModelCatalog& cat, SearchHit& h)
     }
 }
 
-ModelEconomyEntry EconomyForHit(const SearchHit& h, ModelCatalog* cat = nullptr, bool include_wallet_observation = true)
+ModelEconomyEntry EconomyForHit(const SearchHit& hit, ModelCatalog* cat = nullptr, bool include_wallet_observation = true)
 {
+    // Describe the local copy the way searchmodels does, also for callers that pass
+    // the catalog but not a filled-in hit (getmodeldirectory, getmodeldirectoryentry).
+    SearchHit h = hit;
+    CatalogEntry local;
+    if (cat && !h.rec.model_id.IsNull() && cat->Find(h.rec.model_id, local)) {
+        h.local.known = true;
+        h.local.seeded = local.seeded;
+        h.local.pinned = local.pinned;
+        h.local.partial = local.incomplete;
+        h.local.downloaded = local.bytes_verified;
+    }
     std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
     const ReleaseCampaign* c = g_campaigns.GetByModel(h.rec.model_id);
     if (!c && !h.rec.release_id.empty()) c = g_campaigns.GetByReleaseHex(h.rec.release_id);
