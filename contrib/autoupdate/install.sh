@@ -725,6 +725,12 @@ enforce_highest_accepted_version() {
   local version="$1"
   local path highest status
   path="$(highest_accepted_version_file)"
+  # Only a missing entry means no floor. A directory, a dangling link or an
+  # unreadable file is an unusable floor, as ReadHighestAcceptedVersion in
+  # btxd treats it.
+  if [[ -e "$path" || -L "$path" ]] && [[ ! -f "$path" || ! -r "$path" ]]; then
+    die "refusing manifest: highest accepted version state is unreadable"
+  fi
   if [[ -f "$path" ]]; then
     highest="$(tr -d '[:space:]' <"$path" || true)"
     [[ -n "$highest" ]] || die "refusing manifest: highest accepted version state is unreadable"

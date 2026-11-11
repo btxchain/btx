@@ -775,6 +775,31 @@ def test_pinned_manifest_ignores_url_and_version_overrides():
             )
 
 
+def test_unreadable_highest_accepted_version_is_refused():
+    # A floor path that exists but is not a readable file is not a missing
+    # floor: btxd pauses auto-update for it (ReadHighestAcceptedVersion), and
+    # the installer must refuse the manifest too, without replacing the path
+    # or writing into it.
+    for kind in ("directory", "dangling-symlink"):
+        with Scenario(f"floor-{kind}") as scenario:
+            watermark = scenario.target_datadir / "autoupdate" / "highest-accepted-version"
+            watermark.parent.mkdir(parents=True, exist_ok=True)
+            missing = scenario.tmp / "missing-floor"
+            if kind == "directory":
+                watermark.mkdir()
+            else:
+                watermark.symlink_to(missing)
+            result = scenario.run_installer()
+            assert_failure(result)
+            output = result.stdout + result.stderr
+            if "highest accepted version state is unreadable" not in output:
+                raise AssertionError(f"expected an unreadable-floor refusal for the {kind}; got:\n{output}")
+            if kind == "directory" and any(watermark.iterdir()):
+                raise AssertionError("installer wrote into the floor directory")
+            if kind == "dangling-symlink" and (not watermark.is_symlink() or missing.exists()):
+                raise AssertionError("installer replaced or followed the dangling floor link")
+
+
 def test_pinned_manifest_digest_mismatch_aborts():
     with Scenario(
         "pinned-digest",
@@ -903,6 +928,7 @@ def main():
         test_prebuilt_without_sha256_is_not_used,
         test_prebuilt_without_sha256_is_not_downloaded,
         test_pinned_manifest_ignores_url_and_version_overrides,
+        test_unreadable_highest_accepted_version_is_refused,
         test_pinned_manifest_digest_mismatch_aborts,
         test_unpinned_manifest_must_match_verified_version,
         test_python_module_in_working_directory_is_not_imported,
