@@ -479,14 +479,46 @@ bool ModelEventJournal::AppendLineLocked(const ModelEvent& ev, std::string& err)
 {
     if (m_journal_path.empty()) return true;
     fs::create_directories(m_journal_path.parent_path());
-    std::ofstream out(m_journal_path, std::ios::app);
-    if (!out) {
-        err = "journal append";
-        return false;
+    std::error_code ec;
+    uintmax_t before = 0;
+    if (fs::exists(fs::symlink_status(m_journal_path, ec))) {
+        before = fs::file_size(m_journal_path, ec);
+        if (ec) {
+            err = "journal append";
+            return false;
+        }
     }
-    out << ModelEventToJson(ev).write() << "\n";
-    out.flush();
-    return static_cast<bool>(out);
+    // A line cut short earlier (a crash during a write) must not swallow this
+    // one: start on a fresh line when the journal does not end in a newline.
+    bool fresh_line = false;
+    if (before > 0) {
+        std::ifstream in(m_journal_path, std::ios::binary);
+        char last = '\n';
+        in.seekg(-1, std::ios::end);
+        if (!in.get(last)) {
+            err = "journal append";
+            return false;
+        }
+        fresh_line = last != '\n';
+    }
+    bool written = false;
+    {
+        std::ofstream out(m_journal_path, std::ios::app);
+        if (!out) {
+            err = "journal append";
+            return false;
+        }
+        if (fresh_line) out << "\n";
+        out << ModelEventToJson(ev).write() << "\n";
+        out.close();
+        written = !out.fail();
+    }
+    if (written) return true;
+    // A write that failed part way (a full disk) leaves a torn line. Cut the
+    // journal back so neither this line nor a retry of it is half on disk.
+    fs::resize_file(m_journal_path, before, ec);
+    err = ec ? "journal append; the torn line could not be removed" : "journal append";
+    return false;
 }
 
 bool ModelEventJournal::RewriteJournalLocked(std::string& err) const
@@ -648,12 +680,17 @@ bool ModelEventJournal::Observe(ModelEvent ev, ObserveResult& out, std::string& 
             stored = m_events[dit->second];
             duplicate = true;
         } else {
-            ev.local_sequence = ++m_seq;
+            // Write the line before the event enters the live journal. A failed
+            // append must not leave an event that readers are served, that the
+            // retried observation is deduplicated against, and whose sequence
+            // the next start hands out again.
+            ev.local_sequence = m_seq + 1;
+            if (!AppendLineLocked(ev, err)) return false;
+            m_seq = ev.local_sequence;
             stored = ev;
             m_events.push_back(ev);
             m_by_id[ev.event_id] = m_events.size() - 1;
             m_by_dedupe[ev.dedupe_key] = m_events.size() - 1;
-            if (!AppendLineLocked(ev, err)) return false;
             if (!WriteSeqLocked(err)) return false;
             if (!CompactLocked(err)) return false;
             stored = m_events.back();
