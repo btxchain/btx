@@ -831,6 +831,21 @@ BOOST_AUTO_TEST_CASE(unreadable_floor_is_refused_and_logged)
 }
 
 #ifndef WIN32
+BOOST_AUTO_TEST_CASE(dangling_floor_is_refused_and_logged)
+{
+    const auto dir = m_path_root / "autoupdate";
+    fs::create_directories(dir);
+    fs::create_symlink(dir / "missing-floor", dir / "highest-accepted-version");
+    Harness h;
+    h.config.datadir = m_path_root;
+    h.AddManifest();
+    h.AddSignature();
+    h.AddScript();
+    ASSERT_DEBUG_LOG("Auto-update is paused");
+    BOOST_CHECK(h.Run().status == node::AutoUpdateStatus::BAD_MANIFEST);
+    BOOST_CHECK_EQUAL(h.runner.calls, 0);
+}
+
 BOOST_AUTO_TEST_CASE(failed_state_write_is_not_reported_as_written)
 {
     // RLIMIT_FSIZE 0 fails every write that grows a file (EFBIG), the way a
