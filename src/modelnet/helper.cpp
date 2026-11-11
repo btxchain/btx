@@ -2475,6 +2475,8 @@ static std::unique_ptr<S3PieceStore> g_cloud;
 static CloudStoreConfig g_cloud_cfg;
 static DirectSeedAdmissionState g_direct_seed_admit;
 static fs::path g_cloud_dir;
+//! Why the stored cloud origin of g_cloud_dir is not loaded (empty when it is).
+static std::string g_cloud_init_error;
 static std::mutex g_cloud_mu;
 
 void PublishCatalogToCloud(const CatalogEntry& e, UniValue& result);
@@ -5766,6 +5768,7 @@ UniValue CloudPublicJson()
         o.pushKV("auth", false);
         o.pushKV("auth_ok", false);
         o.pushKV("fake", false);
+        if (!g_cloud_init_error.empty()) o.pushKV("init_error", g_cloud_init_error);
         return o;
     }
     UniValue cfg = g_cloud->ConfigJson();
@@ -5793,6 +5796,7 @@ void EnsureCloudLoaded(ModelCatalog& cat)
     g_cloud.reset();
     g_cloud_cfg = CloudStoreConfig{};
     g_cloud_dir = dir;
+    g_cloud_init_error.clear();
     ApplyCloudCapsLocked();
     UniValue stored;
     if (!ReadJsonFile(dir / "cloud.json", stored) || !stored.isObject() || !stored.exists("endpoint")) return;
@@ -5801,7 +5805,12 @@ void EnsureCloudLoaded(ModelCatalog& cat)
     if (!CloudConfigFromJson(stored, cfg, err)) return;
     cfg.budget_state_path = dir / "cloud-budget.json";
     auto store = std::make_unique<S3PieceStore>(cfg);
-    if (!store->Init(err)) return;
+    if (!store->Init(err)) {
+        // Keep the reason for getcloudstorageinfo: a refused origin must not
+        // just disappear after a restart.
+        g_cloud_init_error = err.empty() ? "cloud origin not ready" : err;
+        return;
+    }
     g_cloud_cfg = cfg;
     g_cloud = std::move(store);
     ApplyCloudCapsLocked();
@@ -6006,12 +6015,14 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
         g_cloud.reset();
         g_cloud_cfg = cfg;
         g_cloud_dir = HelperDir(cat);
+        g_cloud_init_error.clear();
         auto store = std::make_unique<S3PieceStore>(cfg);
         std::string ierr;
         const bool ok = store->Init(ierr);
         if (ok) g_cloud = std::move(store);
         ApplyCloudCapsLocked();
         result = CloudPublicJson();
+        if (!ok) g_cloud_init_error = ierr.empty() ? "cloud origin not ready" : ierr;
         result.pushKV("applied", ok);
         result.pushKV("note", ok ? "cloud origin configured locally; credentials stay in the ref"
                                   : (ierr.empty() ? "cloud.json persisted; origin not ready" : ierr));

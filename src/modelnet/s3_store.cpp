@@ -129,20 +129,49 @@ bool S3PieceStore::PersistBudgetLocked(std::string& err) const
     return true;
 }
 
-void S3PieceStore::LoadBudgetState()
+bool S3PieceStore::LoadBudgetState(std::string& err)
 {
-    if (m_cfg.budget_state_path.empty()) return;
-    std::ifstream in{m_cfg.budget_state_path};
-    if (!in) return;
+    if (m_cfg.budget_state_path.empty()) return true;
+    const fs::path& path = m_cfg.budget_state_path;
+    std::error_code ec;
+    if (!fs::exists(fs::symlink_status(path, ec))) return true;
+    // A file that is there but cannot be read as the saved counters is not a
+    // fresh budget: starting from zero would admit reads past a cap that was
+    // already used up, and Init would then overwrite the file with zeros.
+    err = "cloud budget state " + fs::PathToString(path) + " is unreadable; fix or remove it";
+    std::ifstream in{path};
+    if (!in) return false;
     std::ostringstream ss;
     ss << in.rdbuf();
+    if (in.bad()) return false;
     UniValue o;
-    if (!o.read(ss.str()) || !o.isObject()) return;
+    if (!o.read(ss.str()) || !o.isObject()) return false;
+    bool well_formed = true;
     auto i64 = [&](const char* k, int64_t& dst) {
-        if (o.exists(k) && o[k].isNum()) dst = o[k].getInt<int64_t>();
+        if (!o.exists(k)) return;
+        if (!o[k].isNum()) {
+            well_formed = false;
+            return;
+        }
+        try {
+            dst = o[k].getInt<int64_t>();
+        } catch (const std::exception&) {
+            // Negative, fractional or out of range.
+            well_formed = false;
+        }
     };
     auto u64 = [&](const char* k, uint64_t& dst) {
-        if (o.exists(k) && o[k].isNum()) dst = o[k].getInt<uint64_t>();
+        if (!o.exists(k)) return;
+        if (!o[k].isNum()) {
+            well_formed = false;
+            return;
+        }
+        try {
+            dst = o[k].getInt<uint64_t>();
+        } catch (const std::exception&) {
+            // Negative, fractional or out of range.
+            well_formed = false;
+        }
     };
     i64("day_utc", m_day_utc);
     i64("month_utc", m_month_utc);
@@ -152,6 +181,9 @@ void S3PieceStore::LoadBudgetState()
     u64("month_bytes", m_month_bytes);
     u64("used_gets", m_used_gets);
     u64("used_bytes", m_used_bytes);
+    if (!well_formed) return false;
+    err.clear();
+    return true;
 }
 
 bool S3PieceStore::WouldExceed(uint64_t bytes) const
@@ -199,7 +231,7 @@ bool S3PieceStore::Init(std::string& err)
         return false;
     }
     if (!m_client.Init(m_cfg.s3, err)) return false;
-    LoadBudgetState();
+    if (!LoadBudgetState(err)) return false;
     {
         std::lock_guard<std::mutex> lock(m_mu);
         RollWindowsLocked(NowS());
