@@ -10763,24 +10763,7 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
     VerifiedManifest vm;
     if (!VerifyManifestAgainstRequest(man, model_id, vm, err)) return false;
     const Digest48 artifact = vm.artifact_id;
-    if (!man.exists("files") || !man["files"].isArray()) {
-        err = "manifest files";
-        return false;
-    }
-    uint64_t total = 0;
-    for (const auto& f : man["files"].getValues()) {
-        if (!f.isObject() || !f.exists("size")) {
-            err = "manifest file size";
-            return false;
-        }
-        const uint64_t sz = f["size"].getInt<uint64_t>();
-        if (total > std::numeric_limits<uint64_t>::max() - sz) {
-            err = "quota overflow";
-            return false;
-        }
-        total += sz;
-    }
-    if (!cat.EnforceQuota(total, err)) return false;
+    if (!cat.EnforceDownloadQuota(vm, err, stop)) return false;
     {
         std::string ierr;
         if (!cat.InstallFromManifest(man, ierr, /*complete=*/false)) {

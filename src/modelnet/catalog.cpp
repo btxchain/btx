@@ -20,8 +20,11 @@
 #include <atomic>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <sstream>
+#include <stdexcept>
+#include <system_error>
 
 namespace modelnet {
 namespace {
@@ -410,6 +413,77 @@ bool ModelCatalog::EnforceQuota(uint64_t need_bytes, std::string& err)
 {
     std::lock_guard<std::mutex> lock(m_mu);
     m_store.EvictUnpinned();
+    return EnforceQuotaLocked(need_bytes, err);
+}
+
+bool ModelCatalog::EnforceDownloadQuota(const VerifiedManifest& manifest, std::string& err,
+                                        const std::atomic<bool>* stop)
+{
+    const auto cancelled = [&] {
+        if (!stop || !stop->load()) return false;
+        err = "stopped";
+        return true;
+    };
+    if (cancelled()) return false;
+    uint64_t need_bytes = 0;
+    for (const auto& file : manifest.core.files) {
+        if (need_bytes > std::numeric_limits<uint64_t>::max() - file.size) {
+            err = "quota overflow";
+            return false;
+        }
+        need_bytes += file.size;
+    }
+    bool active;
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        active = m_active_artifacts.count(manifest.artifact_id) != 0;
+    }
+    struct Credit { uint32_t file; uint32_t piece; uint64_t bytes; };
+    std::vector<Credit> credits;
+    // Reading and hashing a large cached model must not hold the catalog lock.
+    // Only an active artifact is protected from ordinary quota eviction.
+    if (active) {
+        for (uint32_t fi = 0; fi < manifest.core.files.size(); ++fi) {
+            const auto& file = manifest.core.files[fi];
+            std::vector<uint32_t> pieces;
+            m_store.ListCommittedPieces(manifest.artifact_id, fi, pieces);
+            for (const auto index : pieces) {
+                if (cancelled()) return false;
+                std::vector<unsigned char> bytes;
+                std::vector<Digest48> proof;
+                uint64_t size = 0;
+                Digest48 root;
+                std::string local_err;
+                try {
+                    if (!m_store.LoadPieceProof(manifest.artifact_id, fi, index, size, root, proof, local_err)) continue;
+                } catch (const std::runtime_error&) {
+                    // Wrong-typed local proof fields are not reusable bytes.
+                    continue;
+                }
+                if (size != file.size || root != file.pieces_root ||
+                    !m_store.GetPiece(manifest.artifact_id, fi, index, bytes, local_err) ||
+                    !VerifyPiece(file.pieces_root, file.size, index, bytes, proof)) continue;
+                credits.push_back({fi, index, bytes.size()});
+            }
+        }
+    }
+    if (cancelled()) return false;
+    std::lock_guard<std::mutex> lock(m_mu);
+    m_store.EvictUnpinned();
+    if (active && m_active_artifacts.count(manifest.artifact_id)) {
+        for (const auto& credit : credits) {
+            const fs::path path = m_store.Root() / "artifacts" / manifest.artifact_id.Hex().c_str() /
+                                  std::to_string(credit.file).c_str() / (std::to_string(credit.piece) + ".piece").c_str();
+            std::error_code ec;
+            // Do not credit a piece removed while the lock was released.
+            if (fs::file_size(path, ec) == credit.bytes && !ec) need_bytes -= credit.bytes;
+        }
+    }
+    return EnforceQuotaLocked(need_bytes, err);
+}
+
+bool ModelCatalog::EnforceQuotaLocked(uint64_t need_bytes, std::string& err)
+{
     const uint64_t cap = m_policy.storage_quota_bytes ? std::min(m_policy.storage_quota_bytes, m_store.QuotaBytes()) : m_store.QuotaBytes();
     if (!cap) {
         err = "payload storage is 0 until -modelstorage / -modelcache allocates a quota";
