@@ -10380,8 +10380,24 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 camp.push_back(std::move(e));
             }
             SortEconomyEntries(camp, fq.mode == FeedMode::NEARLY_FUNDED ? SearchSort::NEARLY_FUNDED : SearchSort::NEWEST);
-            if (static_cast<int>(camp.size()) > fq.limit) camp.resize(fq.limit);
-            entries = std::move(camp);
+            // Page like FeedStore::Query: default and maximum page size, and a cursor
+            // that names the last card of the previous page by its release id (a
+            // model can have more than one release campaign).
+            const size_t limit = static_cast<size_t>(fq.limit <= 0 ? FEED_PAGE_DEFAULT : std::min(fq.limit, FEED_PAGE_MAX));
+            size_t start = 0;
+            if (!fq.cursor.empty()) {
+                start = camp.size();
+                for (size_t i = 0; i < camp.size(); ++i) {
+                    if (camp[i].campaign.release_id.Hex() == fq.cursor) {
+                        start = i + 1;
+                        break;
+                    }
+                }
+            }
+            const size_t end = std::min(camp.size(), start + limit);
+            next.clear();
+            if (end < camp.size() && end > start) next = camp[end - 1].campaign.release_id.Hex();
+            entries.assign(std::make_move_iterator(camp.begin() + start), std::make_move_iterator(camp.begin() + end));
             for (const auto& e : entries) {
                 FeedEvent ev;
                 ev.event_type = FeedEventType::RELEASE_CAMPAIGN_CREATED;
