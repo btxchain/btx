@@ -671,6 +671,147 @@ BOOST_AUTO_TEST_CASE(expired_grant_uses_are_pruned)
 
 
 
+// NEARLY_FUNDED and FUNDED_AWAITING_RELEASE build their page from the campaign
+// list. They take limit and cursor like the other feed modes: default 50, at most
+// 100, and a cursor that continues after the last card of the previous page.
+BOOST_AUTO_TEST_CASE(campaign_feed_modes_page_like_the_feed)
+{
+    const fs::path tmp = m_path_root / "campaign-feed-paging";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::string code, err;
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count();
+    std::set<std::string> campaigns;
+    UniValue recs(UniValue::VARR);
+    for (int i = 0; i < 5; ++i) {
+        modelnet::ModelSearchRecord r;
+        r.model_id.data[0] = static_cast<unsigned char>(0x30 + i);
+        r.artifact_id.data[0] = static_cast<unsigned char>(0x38 + i);
+        r.canonical_name = "paged campaign " + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.release_id = RandHex48();
+        r.release_state = "FUNDING";
+        r.release_target_atoms = 1000;
+        r.expires_at = now_ms + 3'600'000;
+        r.pubkey = pk;
+        BOOST_REQUIRE_MESSAGE(modelnet::SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+        recs.push_back(modelnet::SearchRecordToJson(r));
+        campaigns.insert(r.model_id.Hex());
+    }
+    UniValue import(UniValue::VOBJ);
+    import.pushKV("records", recs);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(import);
+    UniValue out;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), code << " " << err);
+
+    const auto page = [&](int limit, const std::string& cursor) {
+        UniValue q(UniValue::VOBJ);
+        q.pushKV("scope", "LOCAL");
+        q.pushKV("mode", "NEARLY_FUNDED");
+        q.pushKV("limit", limit);
+        if (!cursor.empty()) q.pushKV("cursor", cursor);
+        UniValue fp(UniValue::VARR);
+        fp.push_back(q);
+        UniValue feed;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+        return feed;
+    };
+    std::set<std::string> seen;
+    std::string cursor;
+    int pages{0};
+    do {
+        const UniValue feed = page(2, cursor);
+        BOOST_CHECK_LE(feed["items"].size(), 2U);
+        for (const UniValue& item : feed["items"].getValues()) {
+            const std::string id = item["model_id"].get_str();
+            if (campaigns.count(id)) BOOST_CHECK_MESSAGE(seen.insert(id).second, "repeated on a later page: " << id);
+        }
+        cursor = feed["next_cursor"].get_str();
+    } while (!cursor.empty() && ++pages < 10);
+    BOOST_CHECK(seen == campaigns);
+
+    // limit 0 is the default page, not an empty one.
+    std::set<std::string> by_default;
+    const UniValue default_page = page(0, "");
+    for (const UniValue& item : default_page["items"].getValues()) by_default.insert(item["model_id"].get_str());
+    for (const auto& id : campaigns) BOOST_CHECK(by_default.count(id));
+}
+
+// Two releases of one model are two campaigns. The cursor must tell them apart,
+// or a page that ends on the first one is followed by the same page again.
+BOOST_AUTO_TEST_CASE(campaign_feed_cursor_tells_releases_of_one_model_apart)
+{
+    const fs::path tmp = m_path_root / "campaign-feed-releases";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::string code, err;
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    // Model X gets two releases and a second local model W one. These local
+    // campaigns tie on every NEARLY_FUNDED key, so the order falls back to the
+    // model id; W is picked so that it sorts after X and X's releases sit before
+    // another card.
+    const auto x = ImportTiny(cat);
+    modelnet::CatalogEntry w;
+    for (int v = 1; v < 32; ++v) {
+        const fs::path wsrc = tmp.parent_path() / fs::PathFromString("campaign-feed-releases-w" + std::to_string(v));
+        fs::create_directories(wsrc);
+        std::vector<unsigned char> st(10 + v, ' ');
+        WriteLE64(st.data(), 2 + v);
+        st[8] = '{';
+        st.back() = '}';
+        {
+            std::ofstream out(wsrc / "model.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(wsrc), true, w, err), err);
+        if (x.model_id < w.model_id) break;
+    }
+    BOOST_REQUIRE(x.model_id < w.model_id);
+    std::set<std::string> releases;
+    const auto release = [&](const modelnet::Digest48& model, int64_t target, int salt) {
+        std::string uri;
+        BOOST_REQUIRE(modelnet::EncodeResource(modelnet::ResourceKind::MODEL, model, uri, err));
+        unsigned char secret[32];
+        for (int i = 0; i < 32; ++i) secret[i] = static_cast<unsigned char>(i + salt);
+        UniValue params(UniValue::VARR);
+        params.push_back(uri);
+        params.push_back(HexStr(Span{secret, 32}));
+        params.push_back(100000);
+        params.push_back(target);
+        UniValue created;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "createmodelrelease", params, created, code, err), code << " " << err);
+        releases.insert(created["release_id"].get_str());
+    };
+    release(x.model_id, 100000, 7);
+    release(x.model_id, 100000, 47);
+    release(w.model_id, 100000, 87);
+    BOOST_REQUIRE_EQUAL(releases.size(), 3U);
+
+    std::multiset<std::string> seen;
+    std::string cursor;
+    int pages{0};
+    do {
+        UniValue q(UniValue::VOBJ);
+        q.pushKV("scope", "LOCAL");
+        q.pushKV("mode", "NEARLY_FUNDED");
+        q.pushKV("limit", 1);
+        if (!cursor.empty()) q.pushKV("cursor", cursor);
+        UniValue fp(UniValue::VARR);
+        fp.push_back(q);
+        UniValue feed;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+        for (const UniValue& item : feed["items"].getValues()) seen.insert(item["release_id"].get_str());
+        cursor = feed["next_cursor"].get_str();
+    } while (!cursor.empty() && ++pages < 10);
+    BOOST_CHECK_MESSAGE(pages < 10, "paging did not end");
+    for (const auto& r : releases) BOOST_CHECK_EQUAL(seen.count(r), 1U);
+}
+
 // W1 fix, damaged state. The fix keeps the ids of releases this node created
 // in local_releases.json. If that file exists but cannot be parsed, the gate
 // must fail closed (withhold the plaintext of every campaign) rather than load
