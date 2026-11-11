@@ -987,7 +987,12 @@ RPCHelpMan prepareexternalsign()
                 throw JSONRPCError(RPC_WALLET_ERROR, "prepareexternalsign does not sign with wallet keys");
             }
             const UniValue& arg = request.params[0];
-            if (arg.isObject() && (arg.exists("recipients") || arg.exists("outputs"))) {
+            // A BTXPSBT package (what createexchangebatch and createconsolidationtx
+            // return) also carries "outputs" and "recipients". It names a transaction
+            // to prepare, not a payment to fund again with fresh coin selection.
+            const bool is_package = arg.isObject() && (arg.exists("format") || arg.exists("psbt") ||
+                                                       arg.exists("unsigned_tx") || arg.exists("unsigned_tx_hex"));
+            if (arg.isObject() && !is_package && (arg.exists("recipients") || arg.exists("outputs"))) {
                 pwallet->BlockUntilSyncedToCurrentChain();
                 UniValue options = request.params[1].isNull() ? UniValue(UniValue::VOBJ) : request.params[1];
                 if (arg.exists("change_address") && !options.exists("change_address")) {

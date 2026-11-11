@@ -635,6 +635,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_shielded_reorg_recovery.py',
     'feature_shielded_prune_reorg.py',
     'wallet_shielded_anchor_window.py',
+    'wallet_bcp1_prepare_package.py',
     'wallet_shielded_ring_size_policy.py',
     'wallet_bcp1_depositpool_rescan.py --descriptors',
     'wallet_shielded_chunking.py',
