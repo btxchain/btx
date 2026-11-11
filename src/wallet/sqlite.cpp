@@ -725,7 +725,12 @@ bool SQLiteBatch::TxnCommit()
 bool SQLiteBatch::TxnAbort()
 {
     if (!m_database.m_db || !m_txn) return false;
-    Assert(m_database.HasActiveTxn());
+    // SQLite can roll back automatically after a failed statement.
+    if (!m_database.HasActiveTxn()) {
+        m_txn = false;
+        m_database.m_write_semaphore.post();
+        return true;
+    }
     int res = Assert(m_exec_handler)->Exec(m_database, "ROLLBACK TRANSACTION");
     if (res != SQLITE_OK) {
         LogPrintf("SQLiteBatch: Failed to abort the transaction\n");
