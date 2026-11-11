@@ -10664,6 +10664,16 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         lock.lock();
         std::string next;
         auto items = g_feed.Query(fq, ConnNowMs(), next);
+        if (!include_wallet_observation) {
+            // Funding events come only from local pledges and from btxd's join
+            // against the local wallets, as the ext/feed peer route notes. A
+            // caller restricted from that join must not see them either.
+            items.erase(std::remove_if(items.begin(), items.end(), [](const FeedEvent& ev) {
+                            return ev.event_type == FeedEventType::RELEASE_FUNDING_CHANGED ||
+                                   ev.event_type == FeedEventType::RELEASE_FUNDED;
+                        }),
+                        items.end());
+        }
         std::vector<ModelEconomyEntry> entries;
         if (fq.mode == FeedMode::NEARLY_FUNDED || fq.mode == FeedMode::FUNDED_AWAITING_RELEASE) {
             items.clear();
