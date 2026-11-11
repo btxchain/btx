@@ -9,6 +9,7 @@
 
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 
 /** Read full contents of a file and return them in a std::string.
@@ -24,5 +25,8 @@ std::pair<bool,std::string> ReadBinaryFile(const fs::path &filename, size_t maxs
  * @return true on success.
  */
 bool WriteBinaryFile(const fs::path &filename, const std::string &data);
+
+//! Replace a regular file only after the new contents are written and closed.
+bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data);
 
 #endif // BITCOIN_UTIL_READWRITEFILE_H
