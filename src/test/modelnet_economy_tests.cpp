@@ -569,11 +569,13 @@ BOOST_AUTO_TEST_CASE(release_card_keeps_display_name_publisher_and_size)
     BOOST_REQUIRE(FindReleaseCard(still, rid) != nullptr);
 }
 
-BOOST_AUTO_TEST_CASE(peer_feed_omits_local_wallet_observation)
+BOOST_AUTO_TEST_CASE(peer_and_restricted_feeds_omit_local_wallet_observation)
 {
     // btxd joins release cards against the local wallets and ingests the result
     // (ObserveReleaseFunding reads mapWallet). The peer route ext/feed must not
-    // hand that wallet state, or the funding event it causes, to a remote peer.
+    // hand that wallet state, or the funding event it causes, to a remote peer,
+    // and the restricted view btxd uses for a wallet-restricted RPC user must
+    // not show it to that user.
     using namespace modelnet;
     const fs::path root = m_args.GetDataDirBase() / "peer-feed";
     const fs::path model = root / "toy.safetensors.dir";
@@ -630,6 +632,28 @@ BOOST_AUTO_TEST_CASE(peer_feed_omits_local_wallet_observation)
     BOOST_CHECK(resp.body.find("\"refund_available_locally\":true") == std::string::npos);
     BOOST_CHECK(resp.body.find("RELEASE_FUNDING_CHANGED") == std::string::npos);
     BOOST_CHECK(resp.body.find("\"funded_percent\"") == std::string::npos);
+
+    UniValue feed_query(UniValue::VOBJ);
+    feed_query.pushKV("mode", "FUNDING_ACTIVITY");
+    feed_query.pushKV("scope", "LOCAL");
+    UniValue feed_args(UniValue::VARR);
+    feed_args.push_back(feed_query);
+    // The unrestricted local feed lists the funding event of the wallet join...
+    const std::string local_feed = HelperDispatch(cat, "getmodelfeed", feed_args).write();
+    BOOST_CHECK(local_feed.find("RELEASE_FUNDING_CHANGED") != std::string::npos);
+    // ...the restricted view does not.
+    for (const char* feed_method : {"getmodelfeed", "getreleasefeed"}) {
+        UniValue scoped(UniValue::VARR);
+        scoped.push_back(feed_method);
+        scoped.push_back(feed_args);
+        const UniValue restricted = HelperDispatch(cat, "getrestrictedmodelview", scoped);
+        const std::string body = restricted.write();
+        BOOST_CHECK_MESSAGE(body.find("RELEASE_FUNDING_CHANGED") == std::string::npos, feed_method);
+        BOOST_CHECK_MESSAGE(body.find("RELEASE_FUNDED\"") == std::string::npos, feed_method);
+        BOOST_CHECK_MESSAGE(body.find("1234567") == std::string::npos, feed_method);
+        // The public campaign is still listed.
+        BOOST_CHECK_MESSAGE(body.find(rid) != std::string::npos, feed_method);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(verifycomputereceipt_does_not_persist)
