@@ -67,6 +67,7 @@
 #include <netaddress.h>
 #include <netbase.h>
 #include <util/fs.h>
+#include <util/readwritefile.h>
 #include <util/strencodings.h>
 #ifndef _WIN32
 #include <util/subprocess.h>
@@ -7361,18 +7362,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             if (!outp.parent_path().empty()) fs::create_directories(outp.parent_path());
-            std::ofstream f(outp, std::ios::trunc);
-            if (!f) {
-                err_code = "IO";
-                err = "write link file";
-                return false;
-            }
-            f << link.write(2, 0) << "\n";
-            f.close();
-            if (!f) {
-                // A full disk can cut the file short at the write or at the close.
-                std::error_code rm_ec;
-                fs::remove(outp, rm_ec);
+            if (!WriteBinaryFileAtomically(outp, link.write(2, 0) + "\n")) {
                 err_code = "IO";
                 err = "write link file";
                 return false;

@@ -47,6 +47,7 @@
 #include <crypto/hex_base.h>
 #include <span.h>
 #include <util/fs.h>
+#include <util/readwritefile.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
@@ -676,18 +677,8 @@ bool PackageFromObject(const UniValue& o, UniValue& result, std::string& err_cod
             err_code = "SYMLINK_REFUSED";
             return false;
         }
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            err = "package write";
-            err_code = "IO_ERROR";
-            return false;
-        }
-        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        out.close();
-        if (!out) {
-            // A full disk can cut the file short at the write or at the close.
-            std::error_code rm_ec;
-            fs::remove(path, rm_ec);
+        const std::string_view contents{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+        if (!WriteBinaryFileAtomically(path, contents)) {
             err = "package write";
             err_code = "IO_ERROR";
             return false;
