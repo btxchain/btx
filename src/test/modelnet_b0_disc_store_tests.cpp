@@ -695,6 +695,31 @@ BOOST_AUTO_TEST_CASE(store_10_resume_quota_preserves_unrelated_models)
     }
 }
 
+BOOST_AUTO_TEST_CASE(store_10b_shared_artifact_stays_active_until_last_transfer_ends)
+{
+    // Two catalog entries can name one artifact (RemoveModel counts them), and
+    // the retrieve queue removes duplicate jobs only by model ID, so two jobs
+    // can download the same artifact. The first one to end must not drop the
+    // protection the other still relies on.
+    ResumeQuotaFixture f{m_path_root / "store-10b"};
+    f.receiver.BeginTransfer(f.entry.artifact_id); // a second transfer of the same artifact
+    f.receiver.EndTransfer(f.entry.artifact_id);   // the first transfer ends
+    BOOST_CHECK(f.receiver.TransferActive(f.entry.model_id));
+    std::string err;
+    BOOST_CHECK_MESSAGE(f.receiver.EnforceDownloadQuota(f.manifest, err), err);
+    std::vector<unsigned char> kept;
+    BOOST_REQUIRE(f.receiver.Store().GetPiece(f.entry.artifact_id, 0, 0, kept, err));
+    BOOST_CHECK(kept == f.first);
+    modelnet::Digest48 artifact;
+    BOOST_CHECK(!f.receiver.RemoveModel(f.entry.model_id, artifact, err));
+    BOOST_CHECK(err.find("in use") != std::string::npos);
+    f.receiver.EndTransfer(f.entry.artifact_id);
+    BOOST_CHECK(!f.receiver.TransferActive(f.entry.model_id));
+    // An extra EndTransfer is harmless.
+    f.receiver.EndTransfer(f.entry.artifact_id);
+    BOOST_CHECK(!f.receiver.TransferActive(f.entry.model_id));
+}
+
 BOOST_AUTO_TEST_CASE(store_11_resume_quota_refuses_invalid_cached_credit)
 {
     ResumeQuotaFixture f{m_path_root / "store-11"};

@@ -58,7 +58,9 @@ class ModelCatalog {
     std::vector<CatalogEntry> m_models;
     std::vector<std::string> m_peers;
     PreservationPolicy m_policy;
-    std::set<Digest48> m_active_artifacts;
+    //! Running transfers per artifact. Several catalog entries can share one
+    //! artifact, so more than one transfer can protect it at a time.
+    std::map<Digest48, uint32_t> m_active_artifacts;
 
     /** Merkle cache for GetVerifiedPiece. rows[0] is the power-of-two padded leaves.
      *  Keyed by (artifact, file_index); the stored pieces_root must match or the slot is ignored. */
