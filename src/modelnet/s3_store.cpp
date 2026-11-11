@@ -165,22 +165,41 @@ bool S3PieceStore::WouldExceed(uint64_t bytes) const
     return false;
 }
 
+bool S3PieceStore::BudgetAllowsGet(uint64_t max_bytes, std::string& err)
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    RollWindowsLocked(NowS());
+    // A range GET is checked against its requested length. A whole-object
+    // GET learns its size only from the response (max_bytes 0): check the GET
+    // caps and whether a byte cap is already used up.
+    if (WouldExceed(max_bytes)) {
+        err = "cloud origin budget exhausted";
+        return false;
+    }
+    return true;
+}
+
 bool S3PieceStore::ChargeGet(uint64_t bytes, std::string& err)
 {
     std::lock_guard<std::mutex> lock(m_mu);
     RollWindowsLocked(NowS());
-    if (WouldExceed(bytes)) {
-        err = "cloud origin budget exhausted";
-        return false;
-    }
+    // The origin read already happened and was billed, so charge it even when
+    // it crosses a cap. Refusing it uncharged would let the next request pass
+    // the pre-check and pay for the same read again.
+    const bool over = WouldExceed(bytes);
     ++m_used_gets;
     m_used_bytes += bytes;
     ++m_day_gets;
     ++m_month_gets;
     m_day_bytes += bytes;
     m_month_bytes += bytes;
-    // The origin read already happened: retain its in-memory charge on failure.
-    return PersistBudgetLocked(err);
+    // Retain the in-memory charge on a save failure too.
+    if (!PersistBudgetLocked(err)) return false;
+    if (over) {
+        err = "cloud origin budget exhausted";
+        return false;
+    }
+    return true;
 }
 
 bool S3PieceStore::Init(std::string& err)
@@ -216,14 +235,7 @@ bool S3PieceStore::GetObject(const std::string& key, uint64_t offset, uint64_t l
         err = "s3 store not initialized";
         return false;
     }
-    {
-        std::lock_guard<std::mutex> lock(m_mu);
-        RollWindowsLocked(NowS());
-        if (WouldExceed(/*bytes unknown; check GET count first*/ 0)) {
-            err = "cloud origin budget exhausted";
-            return false;
-        }
-    }
+    if (!BudgetAllowsGet(len, err)) return false;
     bool ok = false;
     if (offset == 0 && len == 0) {
         ok = m_client.Get(key, out, err);
@@ -508,6 +520,7 @@ bool S3PieceStore::FetchPresignedGet(const std::string& url, std::vector<unsigne
         err = "s3 store not initialized";
         return false;
     }
+    if (!BudgetAllowsGet(/*max_bytes=*/0, err)) return false;
     if (!m_client.FetchPresignedGet(url, out, err)) return false;
     if (!ChargeGet(out.size(), err)) {
         out.clear();

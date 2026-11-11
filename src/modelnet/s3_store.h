@@ -67,6 +67,7 @@ class S3PieceStore final : public CloudObjectStore
     void LoadBudgetState();
     bool ChargeGet(uint64_t bytes, std::string& err);
     bool WouldExceed(uint64_t bytes) const;
+    bool BudgetAllowsGet(uint64_t max_bytes, std::string& err);
 
 public:
     explicit S3PieceStore(CloudStoreConfig cfg);
