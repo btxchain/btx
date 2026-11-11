@@ -4470,6 +4470,9 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
         CatalogEntry live;
         if (cat.Find(model_id, live)) cat.BeginTransfer(live.artifact_id);
         std::set<std::string> failed_peers;
+        std::set<std::string> transient_failovers;
+        std::string next_peer;
+        bool reconsidered = false;
         std::string last_err;
         int transient_streak = 0;
         uint64_t last_bytes = 0;
@@ -4506,7 +4509,13 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
                 }
             }
             std::string peer;
-            for (const auto& p : current_peers()) {
+            auto peers = current_peers();
+            if (!next_peer.empty()) {
+                const auto it = std::find(peers.begin(), peers.end(), next_peer);
+                if (it != peers.end()) std::iter_swap(peers.begin(), it);
+                next_peer.clear();
+            }
+            for (const auto& p : peers) {
                 if (failed_peers.count(p) == 0) {
                     peer = p;
                     break;
@@ -4594,8 +4603,23 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
             // WAN retry budget only for the last remaining contact.
             if (!last_remaining) {
                 failed_peers.insert(peer);
+                if (!job->automatic && transient && !reconsidered) transient_failovers.insert(peer);
                 transient_streak = 0;
                 continue;
+            }
+            if (transient && transient_streak == 0 &&
+                !transient_failovers.empty() && !reconsidered) {
+                // Give one previously unreachable manual contact a second look
+                // before spending the last contact's long retry budget. Keep the
+                // current contact eligible if the alternate is still offline.
+                for (const auto& alternate : current_peers()) {
+                    if (transient_failovers.count(alternate) == 0) continue;
+                    failed_peers.erase(alternate);
+                    next_peer = alternate;
+                    reconsidered = true;
+                    break;
+                }
+                if (reconsidered) continue;
             }
             if (transient && transient_streak < PQ1_PEER_TRANSIENT_TRIES) {
                 job->progress.peer_retries.fetch_add(1);
