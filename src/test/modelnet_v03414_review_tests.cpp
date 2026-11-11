@@ -7,6 +7,7 @@
 
 #include <crypto/common.h>
 #include <modelnet/catalog.h>
+#include <modelnet/feed.h>
 #include <modelnet/free_grant.h>
 #include <modelnet/helper.h>
 #include <modelnet/identity.h>
@@ -328,6 +329,99 @@ BOOST_AUTO_TEST_CASE(grant_store_growth_measurement)
                            << " bytes): one piece GET took "
                            << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << " ms");
     }
+}
+
+// Every economy and feed RPC feeds the whole search index into the feed again.
+// That is the helper re-reading its own index, not another peer relaying a
+// record, so it must not raise sources_observed (which TRENDING sorts on).
+BOOST_AUTO_TEST_CASE(feed_rereads_do_not_count_as_sources)
+{
+    const fs::path tmp = m_path_root / "feed-rereads";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::string code, err;
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count();
+    UniValue recs(UniValue::VARR);
+    for (int i = 0; i < 3; ++i) {
+        modelnet::ModelSearchRecord r;
+        r.model_id.data[0] = static_cast<unsigned char>(0x50 + i);
+        r.artifact_id.data[0] = static_cast<unsigned char>(0x58 + i);
+        r.canonical_name = "reread " + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.published_at = now_ms - 1000 * (3 - i);
+        r.expires_at = now_ms + 3'600'000;
+        r.pubkey = pk;
+        BOOST_REQUIRE_MESSAGE(modelnet::SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+        recs.push_back(modelnet::SearchRecordToJson(r));
+    }
+    UniValue import(UniValue::VOBJ);
+    import.pushKV("records", recs);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(import);
+    UniValue out;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), code << " " << err);
+
+    UniValue q(UniValue::VOBJ);
+    q.pushKV("scope", "LOCAL");
+    q.pushKV("mode", "TRENDING");
+    UniValue fp(UniValue::VARR);
+    fp.push_back(q);
+    UniValue feed;
+    for (int poll = 0; poll < 5; ++poll) {
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    }
+    int models{0};
+    for (const UniValue& item : feed["items"].getValues()) {
+        if (item["event_type"].get_str() != "MODEL_PUBLISHED") continue;
+        ++models;
+        BOOST_CHECK_EQUAL(item["provenance"]["sources_observed"].getInt<int>(), 1);
+    }
+    BOOST_CHECK_EQUAL(models, 3);
+}
+
+// A re-read keeps a record the feed holds current without counting a source, so
+// a record that stays in the index does not expire from the feed and come back
+// as a new event (new sequence, first_seen_at and sources_observed).
+BOOST_AUTO_TEST_CASE(feed_reread_keeps_a_held_record_current)
+{
+    modelnet::FeedStore feed;
+    feed.SetTtlMs(1000);
+    modelnet::ModelSearchRecord r;
+    r.model_id.data[0] = 0x52;
+    r.canonical_name = "held in the index";
+    BOOST_REQUIRE(feed.NoteSearchRecord(r, 1000));
+    const uint64_t noted = feed.Sequence();
+    BOOST_REQUIRE(feed.RefreshSearchRecord(r, 1900));
+    // More than the TTL after the record was noted, less after it was re-read.
+    feed.Expire(2500);
+    BOOST_CHECK_EQUAL(feed.Size(), 1U);
+    BOOST_REQUIRE(feed.RefreshSearchRecord(r, 2600));
+    BOOST_CHECK_EQUAL(feed.Sequence(), noted);
+}
+
+// A record that is no longer re-read (it left the index, for example through a
+// tombstone) still expires when only the re-read writes to the feed.
+BOOST_AUTO_TEST_CASE(feed_reread_still_expires_records_that_left_the_index)
+{
+    modelnet::FeedStore feed;
+    feed.SetTtlMs(1000);
+    modelnet::ModelSearchRecord gone, held;
+    gone.model_id.data[0] = 0x53;
+    gone.canonical_name = "left the index";
+    held.model_id.data[0] = 0x54;
+    held.canonical_name = "still in the index";
+    BOOST_REQUIRE(feed.NoteSearchRecord(gone, 1000));
+    BOOST_REQUIRE(feed.NoteSearchRecord(held, 1000));
+    const uint64_t noted = feed.Sequence();
+    BOOST_REQUIRE(feed.RefreshSearchRecord(held, 1800));
+    BOOST_REQUIRE(feed.RefreshSearchRecord(held, 2500));
+    BOOST_CHECK_EQUAL(feed.Size(), 1U);
+    BOOST_CHECK_EQUAL(feed.Sequence(), noted);
 }
 
 // W3. The uses of an expired grant are never dropped. An expired grant cannot

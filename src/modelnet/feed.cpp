@@ -131,12 +131,36 @@ bool FeedStore::Note(FeedEvent ev, int64_t now_ms)
     return true;
 }
 
+namespace {
+FeedEventType SearchRecordEventType(const ModelSearchRecord& r)
+{
+    if (!r.release_id.empty() && r.metadata_sequence <= 1) return FeedEventType::RELEASE_CAMPAIGN_CREATED;
+    return r.metadata_sequence > 1 ? FeedEventType::MODEL_METADATA_UPDATED : FeedEventType::MODEL_PUBLISHED;
+}
+} // namespace
+
+bool FeedStore::RefreshSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
+{
+    // Expire first, as Note does: the re-read is often the only feed write on a
+    // quiet node, and records that left the index must still age out.
+    Expire(now_ms);
+    if (r.tombstone || r.model_id.IsNull()) return false;
+    const std::string id = MakeFeedEventId(SearchRecordEventType(r), r.model_id, r.release_id, r.metadata_sequence, "");
+    const auto it = m_by_id.find(id);
+    if (it != m_by_id.end()) {
+        // Still in the index: keep it current (it expires by observed_at), but
+        // do not count the re-read as another source.
+        it->second.observed_at = now_ms;
+        return true;
+    }
+    return NoteSearchRecord(r, now_ms);
+}
+
 bool FeedStore::NoteSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
 {
     if (r.tombstone || r.model_id.IsNull()) return false;
     FeedEvent ev;
-    ev.event_type = r.metadata_sequence > 1 ? FeedEventType::MODEL_METADATA_UPDATED : FeedEventType::MODEL_PUBLISHED;
-    if (!r.release_id.empty() && r.metadata_sequence <= 1) ev.event_type = FeedEventType::RELEASE_CAMPAIGN_CREATED;
+    ev.event_type = SearchRecordEventType(r);
     ev.model_id = r.model_id;
     ev.release_id = r.release_id;
     ev.published_at = r.published_at;

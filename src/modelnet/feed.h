@@ -116,6 +116,9 @@ public:
 
     bool Note(FeedEvent ev, int64_t now_ms);
     bool NoteSearchRecord(const ModelSearchRecord& r, int64_t now_ms);
+    /** NoteSearchRecord for the helper re-reading its own index: a record the store
+     *  already holds is left as it is, so it does not count as another source. */
+    bool RefreshSearchRecord(const ModelSearchRecord& r, int64_t now_ms);
     bool NoteCampaign(const ReleaseCampaign& c, int64_t now_ms);
     bool NoteUnlock(const Digest48& model_id, const std::string& release_id, const ModelSearchRecord& r, int64_t now_ms);
     bool NoteFundingChanged(const ReleaseCampaign& c, int64_t now_ms);
