@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -364,6 +365,54 @@ BOOST_AUTO_TEST_CASE(watch_longpoll_timeout)
     UniValue r2;
     BOOST_REQUIRE(DispatchModelWatchRpc("waitformodelevent", RpcParamsObj(p), r2, code, err, &stop));
     BOOST_CHECK(r2["interrupted"].get_bool());
+}
+
+BOOST_AUTO_TEST_CASE(events_cursor_continues_after_the_last_event_returned)
+{
+    using namespace modelnet;
+    // getmodelevents and waitformodelevent return at most a page of events and a
+    // cursor to continue from (doc/modelnet/events.md). Paging through must reach
+    // every event, also when there are more than a page.
+    const fs::path dir = m_path_root / "events-cursor";
+    BindModelEventLayer(dir, 1000);
+    std::string code, err;
+    for (int i = 0; i < 250; ++i) {
+        ObserveResult observed;
+        BOOST_REQUIRE(JournalObserve(MakeSigned("cursor-publisher", "cursor-model-" + std::to_string(i)), observed, err));
+    }
+    const auto page = [&](const char* method, const std::string& cursor, int limit) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("cursor", cursor);
+        if (limit > 0) p.pushKV("limit", limit);
+        p.pushKV("timeout_ms", 0);
+        UniValue result;
+        BOOST_REQUIRE_MESSAGE(DispatchModelWatchRpc(method, RpcParamsObj(p), result, code, err, nullptr), err);
+        return result;
+    };
+
+    std::set<std::string> seen;
+    std::string cursor = "0";
+    for (int pages = 0; pages < 10; ++pages) {
+        const UniValue r = page("getmodelevents", cursor, 0);
+        if (r["events"].empty()) break;
+        for (const UniValue& ev : r["events"].getValues()) seen.insert(ev["object_id"].get_str());
+        cursor = r["cursor"].get_str();
+    }
+    BOOST_CHECK_EQUAL(seen.size(), 250U);
+    BOOST_CHECK_EQUAL(cursor, "250");
+
+    UniValue first = page("getmodelevents", "0", 0);
+    BOOST_CHECK_EQUAL(first["events"].size(), 100U);
+    BOOST_CHECK_EQUAL(first["cursor"].get_str(), "100");
+    BOOST_CHECK_EQUAL(page("getmodelevents", "0", 10)["cursor"].get_str(), "10");
+    const UniValue waited = page("waitformodelevent", "200", 0);
+    BOOST_CHECK_EQUAL(waited["events"].size(), 50U);
+    BOOST_CHECK_EQUAL(waited["cursor"].get_str(), "250");
+    BOOST_CHECK_EQUAL(page("waitformodelevent", "0", 0)["cursor"].get_str(), "100");
+
+    // An empty page keeps the cursor; one past the journal comes back to it.
+    BOOST_CHECK_EQUAL(page("getmodelevents", "250", 0)["cursor"].get_str(), "250");
+    BOOST_CHECK_EQUAL(page("getmodelevents", "9999", 0)["cursor"].get_str(), "250");
 }
 
 BOOST_AUTO_TEST_CASE(watch_rpc_roundtrip)
