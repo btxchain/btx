@@ -100,6 +100,10 @@ int main(int argc, char* argv[])
     std::vector<std::string> proxies;
     std::vector<std::string> onlynets;
     bool proxy_randomize = true;
+    // -modelseedupondownload is a B0 alias of -modelseed: it only applies when
+    // -modelseed is not given (doc/modelnet/propagation.md), in either order.
+    std::string seed_alias;
+    bool seed_given{false};
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto take = [&](const char* key) -> std::string {
@@ -166,9 +170,12 @@ int main(int argc, char* argv[])
                 std::cerr << "invalid -modelseedupondownload\n";
                 return 1;
             }
-            cfg.seed = modelnet::SeedModeName(mode);
+            seed_alias = modelnet::SeedModeName(mode);
         } else if (auto v = take("-modelseednode"); !v.empty()) cfg.peers.push_back(v);
-        else if (auto v = take("-modelseed"); !v.empty()) cfg.seed = v;
+        else if (auto v = take("-modelseed"); !v.empty()) {
+            cfg.seed = v;
+            seed_given = true;
+        }
         else if (auto v = take("-modelpreserverare"); !v.empty()) {
             cfg.preserve_rare = !(v == "0" || v == "false" || v == "off");
         } else if (auto v = take("-modelfollowpeers"); !v.empty()) {
@@ -207,6 +214,7 @@ int main(int argc, char* argv[])
             return 1;
         }
     }
+    if (!seed_given && !seed_alias.empty()) cfg.seed = seed_alias;
     if (!decode.empty()) {
         modelnet::Resource r;
         std::string err;
