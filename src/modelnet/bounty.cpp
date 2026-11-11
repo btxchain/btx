@@ -2057,21 +2057,32 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         const UniValue a = ObjArg(params, 0);
         const std::string bounty_id = a.exists("bounty_id") ? a["bounty_id"].get_str() : StrArg(params, 0);
         uint64_t since = 0;
-        if (a.exists("cursor") && a["cursor"].isStr() && !a["cursor"].get_str().empty())
-            since = std::stoull(a["cursor"].get_str());
+        if (a.exists("cursor") && a["cursor"].isStr() && !a["cursor"].get_str().empty()) {
+            const auto parsed = ToIntegral<uint64_t>(a["cursor"].get_str());
+            if (!parsed) return fail("INVALID_PARAMETER", "cursor");
+            since = *parsed;
+        }
         int limit = a.exists("limit") ? a["limit"].getInt<int>() : 50;
+        if (limit < 1) return fail("INVALID_PARAMETER", "limit");
         if (limit > BOUNTY_PAGE_MAX) limit = BOUNTY_PAGE_MAX;
         UniValue arr(UniValue::VARR);
+        // A full page continues after its last event; m_seq would skip the
+        // events between the page and the newest one.
+        uint64_t next = m_seq;
         for (const auto& e : m_events) {
-            if (e["seq"].getInt<int64_t>() <= static_cast<int64_t>(since)) continue;
+            const uint64_t seq = static_cast<uint64_t>(e["seq"].getInt<int64_t>());
+            if (seq <= since) continue;
             if (!bounty_id.empty() && e["bounty_id"].get_str() != bounty_id) continue;
             arr.push_back(e);
-            if (static_cast<int>(arr.size()) >= limit) break;
+            if (static_cast<int>(arr.size()) >= limit) {
+                next = seq;
+                break;
+            }
         }
         result.setObject();
         result.pushKV("events", arr);
         result.pushKV("epoch", static_cast<int64_t>(m_epoch));
-        result.pushKV("cursor", std::to_string(m_seq));
+        result.pushKV("cursor", std::to_string(next));
         result.pushKV("gap", false);
         return true;
     }

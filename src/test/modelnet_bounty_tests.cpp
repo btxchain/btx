@@ -596,6 +596,69 @@ BOOST_AUTO_TEST_CASE(bounty_auth_001_to_030)
     }
 }
 
+BOOST_AUTO_TEST_CASE(bounty_events_pages_reach_every_event_once)
+{
+    // getbountyevents pages by cursor. Walking it from the start must return
+    // every event exactly once and then stop, whatever the page size.
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-events-pages";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    for (int i = 0; i < 25; ++i) {
+        UniValue terms = DefaultTerms(ZeroNet());
+        terms.pushKV("title", "draft " + std::to_string(i));
+        UniValue p(UniValue::VARR);
+        p.push_back(terms);
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", p, result, code, err), err);
+    }
+    const auto page = [&](const std::string& cursor, int limit) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("cursor", cursor);
+        o.pushKV("limit", limit);
+        UniValue p(UniValue::VARR);
+        p.push_back(o);
+        UniValue r;
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("getbountyevents", p, r, code, err), err);
+        return r;
+    };
+    std::vector<int64_t> all;
+    const UniValue everything = page("0", 100);
+    for (const auto& e : everything["events"].getValues()) all.push_back(e["seq"].getInt<int64_t>());
+    BOOST_REQUIRE_GE(all.size(), 25U);
+
+    for (const int limit : {1, 7, 10}) {
+        std::vector<int64_t> walked;
+        std::string cursor = "0";
+        for (int guard = 0; guard < 200; ++guard) {
+            const UniValue r = page(cursor, limit);
+            const UniValue& events = r["events"];
+            BOOST_REQUIRE_LE(events.size(), static_cast<size_t>(limit));
+            for (const auto& e : events.getValues()) walked.push_back(e["seq"].getInt<int64_t>());
+            if (events.empty()) break;
+            cursor = r["cursor"].get_str();
+        }
+        BOOST_CHECK_MESSAGE(walked == all, "limit " << limit);
+    }
+
+    // A limit below 1 does not pass for a page of one, and a bad cursor is an
+    // input error.
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("limit", 0);
+    UniValue p(UniValue::VARR);
+    p.push_back(o);
+    BOOST_CHECK(!store.Dispatch("getbountyevents", p, result, code, err));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    UniValue bad(UniValue::VOBJ);
+    bad.pushKV("cursor", "not-a-number");
+    UniValue bp(UniValue::VARR);
+    bp.push_back(bad);
+    BOOST_CHECK(!store.Dispatch("getbountyevents", bp, result, code, err));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+}
+
 BOOST_AUTO_TEST_CASE(bounty_signed_records_survive_a_store_restart)
 {
     // The store saves drafts, bounties, submissions, jobs and awards, but kept
