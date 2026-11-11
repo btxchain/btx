@@ -83,6 +83,9 @@
 #include <wallet/bcp1_watchonly.h>
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
+#include <memory>
 #include <cassert>
 #include <condition_variable>
 #include <exception>
@@ -926,7 +929,8 @@ std::shared_ptr<CWallet> RestoreWallet(WalletContext& context, const fs::path& b
     const fs::path wallet_path = fsbridge::AbsPathJoin(GetWalletDir(), fs::u8path(wallet_name));
     auto wallet_file = wallet_path / "wallet.dat";
     std::shared_ptr<CWallet> wallet;
-    bool wallet_file_copied = false;
+    bool wallet_file_created = false;
+    bool copy_complete = false;
     bool created_parent_dir = false;
 
     try {
@@ -958,24 +962,50 @@ std::shared_ptr<CWallet> RestoreWallet(WalletContext& context, const fs::path& b
             created_parent_dir = true;
         }
 
-        fs::copy_file(backup_file, wallet_file, fs::copy_options::none);
-        wallet_file_copied = true;
+        // Open exclusively so a failed copy can only clean up its own file.
+        // Keep copy_file's regular-file requirement and source permissions.
+        if (!fs::is_regular_file(backup_file)) throw std::runtime_error("Backup is not a regular file");
+        using FilePtr = std::unique_ptr<FILE, decltype(&std::fclose)>;
+        FilePtr input{fsbridge::fopen(backup_file, "rb"), std::fclose};
+        if (!input) throw std::runtime_error("Unable to open wallet backup");
+        {
+            FilePtr output{fsbridge::fopen(wallet_file, "wbx"), std::fclose};
+            if (!output) throw std::runtime_error("Unable to create restored wallet file exclusively");
+            wallet_file_created = true;
+            fs::permissions(wallet_file, fs::status(backup_file).permissions());
+            std::array<unsigned char, 65536> buffer;
+            while (const auto count{std::fread(buffer.data(), 1, buffer.size(), input.get())}) {
+                if (std::fwrite(buffer.data(), 1, count, output.get()) != count) {
+                    throw std::runtime_error("Unable to write restored wallet file");
+                }
+            }
+            if (std::ferror(input.get())) throw std::runtime_error("Unable to read wallet backup");
+            // Buffered writes can fail only when the stream is closed.
+            if (std::fclose(output.release()) != 0) throw std::runtime_error("Unable to close restored wallet file");
+        }
+        copy_complete = true;
 
         if (load_after_restore) {
             wallet = LoadWallet(context, wallet_name, load_on_start, options, status, error, warnings);
         }
     } catch (const std::exception& e) {
         assert(!wallet);
+        status = DatabaseStatus::FAILED_LOAD;
         if (!error.empty()) error += Untranslated("\n");
         error += Untranslated(strprintf("Unexpected exception: %s", e.what()));
     }
 
-    // Remove created wallet path only when loading fails
-    if (load_after_restore && !wallet) {
-        if (wallet_file_copied) fs::remove(wallet_file);
+    // Failed migration rollback copies also need cleanup when no load was requested.
+    if (!copy_complete || (load_after_restore && !wallet)) {
+        std::error_code cleanup_error;
+        if (wallet_file_created) {
+            fs::remove(wallet_file, cleanup_error);
+            if (cleanup_error) error += Untranslated(strprintf("\nUnable to remove incomplete wallet file: %s", cleanup_error.message()));
+        }
+        // Never remove unrelated files or assume the directory is still empty.
         if (created_parent_dir) {
-            Assume(fs::is_empty(wallet_path));
-            fs::remove(wallet_path);
+            fs::remove(wallet_path, cleanup_error);
+            if (cleanup_error) error += Untranslated(strprintf("\nUnable to remove restored wallet directory: %s", cleanup_error.message()));
         }
     }
 
