@@ -690,6 +690,7 @@ BTX_BASE_SCRIPTS = [
     'feature_btx_matmul_consensus.py',
     'feature_shieldedv2dev_datadir_isolation.py',
     'feature_autoupdate_installer.py',
+    'feature_atlas_operation_templates.py --descriptors',
     'feature_torcontrol.py',
     'feature_btx_block_capacity.py --descriptors',
     'feature_btx_subsidy_schedule.py',

@@ -690,14 +690,7 @@ export const OPERATIONS = [
     "method": "getbalancewatch",
     "title": "Watch-only balance",
     "risk": "read",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": false,
-        "default": {}
-      }
-    ],
+    "args": [],
     "notes": "",
     "wallet": true
   },
@@ -1176,22 +1169,10 @@ export const OPERATIONS = [
         "required": true
       },
       {
-        "name": "sign",
-        "kind": "boolean",
-        "required": true,
-        "default": true
-      },
-      {
-        "name": "sighashtype",
-        "kind": "string",
-        "required": true,
-        "default": "ALL"
-      },
-      {
-        "name": "bip32derivs",
-        "kind": "boolean",
-        "required": true,
-        "default": true
+        "name": "options",
+        "kind": "json",
+        "required": false,
+        "default": {}
       }
     ],
     "notes": "",
@@ -1638,9 +1619,12 @@ export const OPERATIONS = [
     "risk": "read",
     "args": [
       {
-        "name": "id",
-        "kind": "string",
-        "required": true
+        "name": "query",
+        "kind": "json",
+        "required": true,
+        "default": {
+          "text": ""
+        }
       }
     ],
     "notes": "",
@@ -1903,6 +1887,11 @@ export const OPERATIONS = [
     "risk": "write",
     "args": [
       {
+        "name": "id",
+        "kind": "string",
+        "required": true
+      },
+      {
         "name": "alias",
         "kind": "string",
         "required": true
@@ -1921,9 +1910,7 @@ export const OPERATIONS = [
         "name": "policy",
         "kind": "json",
         "required": true,
-        "default": {
-          "automatic_spend_atoms": "0"
-        }
+        "default": {}
       }
     ],
     "notes": "",
@@ -2030,8 +2017,8 @@ export const OPERATIONS = [
     "risk": "write",
     "args": [
       {
-        "name": "id",
-        "kind": "string",
+        "name": "index",
+        "kind": "integer",
         "required": true
       }
     ],
@@ -2305,9 +2292,12 @@ export const OPERATIONS = [
     "risk": "write",
     "args": [
       {
-        "name": "id",
-        "kind": "string",
-        "required": true
+        "name": "body",
+        "kind": "json",
+        "required": true,
+        "default": {
+          "target_id": ""
+        }
       }
     ],
     "notes": "",
@@ -2318,14 +2308,7 @@ export const OPERATIONS = [
     "method": "exportmodelcontacts",
     "title": "exportmodelcontacts",
     "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
+    "args": [],
     "notes": "",
     "wallet": false
   },
@@ -2336,10 +2319,10 @@ export const OPERATIONS = [
     "risk": "write",
     "args": [
       {
-        "name": "options",
+        "name": "peers",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": []
       }
     ],
     "notes": "",
@@ -2350,14 +2333,7 @@ export const OPERATIONS = [
     "method": "exportmodelpeers",
     "title": "exportmodelpeers",
     "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
+    "args": [],
     "notes": "",
     "wallet": false
   },
@@ -2368,10 +2344,10 @@ export const OPERATIONS = [
     "risk": "write",
     "args": [
       {
-        "name": "options",
+        "name": "peers",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": []
       }
     ],
     "notes": "",
@@ -2384,10 +2360,10 @@ export const OPERATIONS = [
     "risk": "write",
     "args": [
       {
-        "name": "options",
+        "name": "peers",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": []
       }
     ],
     "notes": "",
@@ -2432,10 +2408,14 @@ export const OPERATIONS = [
     "risk": "write",
     "args": [
       {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
+        "name": "release_id",
+        "kind": "string",
+        "required": true
+      },
+      {
+        "name": "amount_atoms",
+        "kind": "integer",
+        "required": true
       }
     ],
     "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
@@ -2446,14 +2426,7 @@ export const OPERATIONS = [
     "method": "claimmodelrelease",
     "title": "claimmodelrelease",
     "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
+    "args": [],
     "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
     "wallet": false
   },
@@ -2462,14 +2435,7 @@ export const OPERATIONS = [
     "method": "refundmodelrelease",
     "title": "refundmodelrelease",
     "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
+    "args": [],
     "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
     "wallet": false
   },
@@ -2496,6 +2462,11 @@ export const OPERATIONS = [
     "risk": "financial",
     "args": [
       {
+        "name": "hex",
+        "kind": "long",
+        "required": true
+      },
+      {
         "name": "options",
         "kind": "json",
         "required": true,
@@ -2511,6 +2482,11 @@ export const OPERATIONS = [
     "title": "submitmodelfunding",
     "risk": "financial",
     "args": [
+      {
+        "name": "hex",
+        "kind": "long",
+        "required": true
+      },
       {
         "name": "options",
         "kind": "json",
@@ -2576,10 +2552,14 @@ export const OPERATIONS = [
     "risk": "write",
     "args": [
       {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
+        "name": "release_id",
+        "kind": "string",
+        "required": true
+      },
+      {
+        "name": "amount_atoms",
+        "kind": "string",
+        "required": false
       }
     ],
     "notes": "Version-sensitive advanced form. Read the connected node help before use. An unsigned plan is not settlement.",
@@ -2778,166 +2758,6 @@ export const OPERATIONS = [
     "wallet": false
   },
   {
-    "group": "Capabilities",
-    "method": "ensurecapability",
-    "title": "ensurecapability",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Capabilities",
-    "method": "prefetchcapability",
-    "title": "prefetchcapability",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Capabilities",
-    "method": "sleepcapability",
-    "title": "sleepcapability",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Capabilities",
-    "method": "releasecapability",
-    "title": "releasecapability",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Capabilities",
-    "method": "wakecapability",
-    "title": "wakecapability",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Capabilities",
-    "method": "updatecapability",
-    "title": "updatecapability",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Capabilities",
-    "method": "switchcapability",
-    "title": "switchcapability",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Capabilities",
-    "method": "getcapabilityevents",
-    "title": "getcapabilityevents",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Capabilities",
-    "method": "getcapabilityttc",
-    "title": "getcapabilityttc",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Capabilities",
-    "method": "getruntimecapabilities",
-    "title": "getruntimecapabilities",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
     "group": "Compute",
     "method": "createcomputeoffer",
     "title": "createcomputeoffer",
@@ -3003,88 +2823,40 @@ export const OPERATIONS = [
   },
   {
     "group": "Models",
-    "method": "getcloudstorage",
-    "title": "getcloudstorage",
+    "method": "watchmodelpublisher",
+    "title": "Watch publisher",
     "risk": "write",
     "args": [
       {
-        "name": "options",
+        "name": "request",
         "kind": "json",
         "required": true,
         "default": {}
       }
     ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+    "notes": "Local network watch. No spend.",
     "wallet": false
   },
   {
     "group": "Models",
-    "method": "followmodelpublisher",
-    "title": "followmodelpublisher",
+    "method": "unwatchmodel",
+    "title": "Remove network watch",
     "risk": "write",
     "args": [
       {
-        "name": "options",
+        "name": "request",
         "kind": "json",
         "required": true,
         "default": {}
       }
     ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Models",
-    "method": "unfollowmodelpublisher",
-    "title": "unfollowmodelpublisher",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
+    "notes": "Local network watch. No spend.",
     "wallet": false
   },
   {
     "group": "Models",
     "method": "getmodelevents",
     "title": "getmodelevents",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Models",
-    "method": "getmodelcollections",
-    "title": "getmodelcollections",
-    "risk": "write",
-    "args": [
-      {
-        "name": "options",
-        "kind": "json",
-        "required": true,
-        "default": {}
-      }
-    ],
-    "notes": "Discover the exact signature from native help; unavailable methods remain disabled.",
-    "wallet": false
-  },
-  {
-    "group": "Models",
-    "method": "getmodelpreservation",
-    "title": "getmodelpreservation",
     "risk": "write",
     "args": [
       {
