@@ -1105,6 +1105,43 @@ UniValue HintJson(const SignedRecordHint& h)
     return o;
 }
 
+//! doc/modelnet/http.md: /records/get answers with at most 128 KiB of records.
+constexpr size_t RECORDS_GET_MAX_BYTES = 128 * 1024;
+
+//! Records for /records/get and /ext/objects/get: each requested ID once, at most
+//! max_records records, and no record whose JSON would take the total past
+//! max_bytes once one record has been picked. truncated is set when a record
+//! was left out for either bound.
+std::vector<UniValue> PickRecordsForGet(const RouterCache& cache, const UniValue& want, int64_t now,
+                                        size_t max_records, size_t max_bytes, bool& truncated)
+{
+    std::vector<UniValue> out;
+    std::set<Digest48> seen;
+    size_t bytes{0};
+    truncated = false;
+    for (const auto& idv : want.getValues()) {
+        Digest48 id;
+        std::string e;
+        if (!idv.isStr() || !Digest48::FromHex(idv.get_str(), id, e)) continue;
+        if (!seen.insert(id).second) continue;
+        for (const auto& h : cache.LookupExact(id, now)) {
+            if (out.size() >= max_records) {
+                truncated = true;
+                return out;
+            }
+            UniValue rec = HintJson(h);
+            const size_t size = rec.write().size();
+            if (!out.empty() && (bytes >= max_bytes || size > max_bytes - bytes)) {
+                truncated = true;
+                return out;
+            }
+            bytes += size;
+            out.push_back(std::move(rec));
+        }
+    }
+    return out;
+}
+
 NegativeResolveCache& NegCache()
 {
     static NegativeResolveCache c;
@@ -3855,20 +3892,16 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         auto& cache = RecordsFor(cat);
         const int64_t now = static_cast<int64_t>(std::time(nullptr));
         UniValue want = body.exists("ids") ? body["ids"] : UniValue(UniValue::VARR);
-        size_t n = 0;
-        for (const auto& idv : want.getValues()) {
-            if (n >= 16) break;
-            Digest48 id;
-            std::string e;
-            if (!idv.isStr() || !Digest48::FromHex(idv.get_str(), id, e)) continue;
-            for (const auto& h : cache.LookupExact(id, now)) {
-                recs.push_back(HintJson(h));
-                ++n;
-            }
-        }
+        // doc/modelnet/http.md: 16 IDs, 128 KiB aggregate. A repeated ID is served
+        // once, and records stop before they pass the aggregate bound (the first
+        // one is always served, so a single large record stays fetchable).
+        bool truncated{false};
+        auto picked = PickRecordsForGet(cache, want, now, /*max_records=*/16, RECORDS_GET_MAX_BYTES, truncated);
+        for (auto& rec : picked) recs.push_back(std::move(rec));
         UniValue orec(UniValue::VOBJ);
         orec.pushKV("schema_version", 2);
         orec.pushKV("records", recs);
+        if (truncated) orec.pushKV("truncated", true);
         resp.body = orec.write();
         return true;
     }
@@ -3954,18 +3987,10 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         std::lock_guard<std::mutex> lock(g_ext_mu);
         auto& cache = RecordsFor(cat);
         const int64_t now = static_cast<int64_t>(std::time(nullptr));
-        size_t n = 0;
         UniValue want = body.exists("ids") ? body["ids"] : UniValue(UniValue::VARR);
-        for (const auto& idv : want.getValues()) {
-            if (n >= 8) break;
-            Digest48 id;
-            std::string e;
-            if (!idv.isStr() || !Digest48::FromHex(idv.get_str(), id, e)) continue;
-            for (const auto& h : cache.LookupExact(id, now)) {
-                objs.push_back(HintJson(h));
-                ++n;
-            }
-        }
+        bool truncated{false};
+        auto picked = PickRecordsForGet(cache, want, now, /*max_records=*/8, std::numeric_limits<size_t>::max(), truncated);
+        for (auto& rec : picked) objs.push_back(std::move(rec));
         UniValue oobj(UniValue::VOBJ);
         oobj.pushKV("schema_version", 2);
         oobj.pushKV("objects", objs);
