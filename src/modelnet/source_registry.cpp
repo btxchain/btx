@@ -800,6 +800,16 @@ bool MultiOriginByteSource::Pin(std::string& err)
     return last.empty() || last == "ok";
 }
 
+namespace {
+//! The origin a leafless file is locked to: its type and locator, so two
+//! mirrors of the same type (two Hugging Face mirrors, two https hosts) are
+//! still two origins.
+std::string OriginLockKey(const ImportOrigin& o)
+{
+    return o.type + "\n" + o.locator;
+}
+} // namespace
+
 bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned char>& out, uint64_t budget_bytes,
                                 std::string& err)
 {
@@ -808,7 +818,7 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
     m_origin_errors.clear();
     std::string last = "origin unavailable";
     for (const auto& o : m_plan.origins) {
-        if (!m_locked_origin.empty() && o.type != m_locked_origin) continue;
+        if (!m_locked_origin.empty() && OriginLockKey(o) != m_locked_origin) continue;
         std::unique_ptr<ByteSource> src;
         if (o.type == "local") {
             src = std::make_unique<LocalFileByteSource>(fs::PathFromString(o.locator));
@@ -854,8 +864,8 @@ bool MultiOriginByteSource::Read(const ReadExtent& extent, std::vector<unsigned 
         const bool identity_bound = match == IdentityMatch::LEAF || match == IdentityMatch::WHOLE_FILE;
         if (!identity_bound) {
             if (m_locked_origin.empty()) {
-                m_locked_origin = o.type;
-            } else if (m_locked_origin != o.type) {
+                m_locked_origin = OriginLockKey(o);
+            } else if (m_locked_origin != OriginLockKey(o)) {
                 m_mixed_without_identity = true;
                 last = "UNBOUND_ORIGIN_MIX";
                 m_origin_errors.push_back({o.type, last});
