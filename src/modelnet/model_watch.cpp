@@ -324,6 +324,16 @@ bool QueryFiltersMatch(const ModelWatch& w, const EventMatchFields& m, const Mod
     return true;
 }
 
+//! Where the caller of getmodelevents / waitformodelevent continues: after the
+//! last event of this page. The journal's own cursor would skip the events the
+//! page left out, and any that arrived after the page was read. An empty page
+//! keeps the caller's cursor, or the journal's when the caller is past it.
+uint64_t NextEventCursor(const ModelEventJournal& journal, uint64_t cursor, const std::vector<ModelEvent>& page)
+{
+    if (!page.empty()) return page.back().local_sequence;
+    return std::min(cursor, journal.Cursor());
+}
+
 } // namespace
 
 const char* WatchKindName(WatchKind k)
@@ -1009,7 +1019,7 @@ bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, Un
         UniValue arr(UniValue::VARR);
         for (const auto& ev : items) arr.push_back(ModelEventToJson(ev));
         result.pushKV("events", arr);
-        result.pushKV("cursor", std::to_string(journal.Cursor()));
+        result.pushKV("cursor", std::to_string(NextEventCursor(journal, cursor, items)));
         result.pushKV("gap", false);
         result.pushKV("automatic_spend_atoms", 0);
         return true;
@@ -1034,7 +1044,7 @@ bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, Un
         UniValue arr(UniValue::VARR);
         for (const auto& ev : items) arr.push_back(ModelEventToJson(ev));
         result.pushKV("events", arr);
-        result.pushKV("cursor", std::to_string(journal.Cursor()));
+        result.pushKV("cursor", std::to_string(NextEventCursor(journal, cursor, items)));
         result.pushKV("interrupted", interrupted);
         result.pushKV("timeout", items.empty() && !interrupted);
         result.pushKV("automatic_spend_atoms", 0);
