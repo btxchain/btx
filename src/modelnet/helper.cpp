@@ -2690,9 +2690,15 @@ UniValue EconomyCard(const SearchHit& h)
     return EconomySearchCard(EconomyForHit(h));
 }
 
-void AfterIndexPut(const ModelSearchRecord& rec, int64_t now_ms)
+//! new_observation is false when the helper re-reads its own index: the feed then
+//! notes only records it does not hold yet.
+void AfterIndexPut(const ModelSearchRecord& rec, int64_t now_ms, bool new_observation = true)
 {
-    g_feed.NoteSearchRecord(rec, now_ms);
+    if (new_observation) {
+        g_feed.NoteSearchRecord(rec, now_ms);
+    } else {
+        g_feed.RefreshSearchRecord(rec, now_ms);
+    }
     {
         std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
         g_campaigns.IngestFromSearchRecord(rec, [](const ReleaseCampaign& c) { return CampaignIsLocal(c.release_id.Hex()); });
@@ -10165,7 +10171,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         EnsureEconomy(cat);
         std::unique_lock<std::mutex> lock(g_search_mu);
         IngestCatalogIntoSearch(cat);
-        for (const auto& rec : g_search_idx.All()) AfterIndexPut(rec, ConnNowMs());
+        for (const auto& rec : g_search_idx.All()) AfterIndexPut(rec, ConnNowMs(), /*new_observation=*/false);
         auto decorate = [&](SearchHit h) {
             h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, h.rec.model_id));
             CatalogEntry e;
