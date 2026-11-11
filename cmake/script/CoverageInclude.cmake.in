@@ -30,7 +30,12 @@ configure_file(
   @ONLY
 )
 
-function(coverage_prepare_gcovr_workspace)
+# Mirror src/ into the build tree so gcov can resolve source paths recorded
+# relative to a build directory. This runs after the build, when every binary
+# directory already exists. A source directory with its own CMakeLists.txt is
+# never linked: it is, or may become, a binary directory, and a link there
+# would send build output into src/.
+function(coverage_prepare_source_mirror)
   file(GLOB_RECURSE coverage_gcov_files LIST_DIRECTORIES false "${COVERAGE_SCRIPT_ROOT}/*.gcov")
   if(coverage_gcov_files)
     file(REMOVE ${coverage_gcov_files})
@@ -64,6 +69,9 @@ function(coverage_prepare_gcovr_workspace)
       if(coverage_name STREQUAL "CMakeFiles")
         continue()
       endif()
+      if(IS_DIRECTORY "${coverage_entry}" AND EXISTS "${coverage_entry}/CMakeLists.txt")
+        continue()
+      endif()
       list(APPEND coverage_source_names "${coverage_name}")
     endforeach()
 
@@ -81,6 +89,9 @@ function(coverage_prepare_gcovr_workspace)
     foreach(coverage_entry IN LISTS coverage_source_entries)
       get_filename_component(coverage_name "${coverage_entry}" NAME)
       if(coverage_name STREQUAL "CMakeFiles")
+        continue()
+      endif()
+      if(IS_DIRECTORY "${coverage_entry}" AND EXISTS "${coverage_entry}/CMakeLists.txt")
         continue()
       endif()
       set(coverage_destination "${coverage_root}/${coverage_name}")
@@ -123,7 +134,7 @@ function(coverage_reset_gcov_data)
 endfunction()
 
 function(coverage_capture_gcovr_trace output_file)
-  coverage_prepare_gcovr_workspace()
+  coverage_prepare_source_mirror()
   execute_process(
     COMMAND ${GCOVR_COLLECT_COMMAND} --json "${output_file}"
     WORKING_DIRECTORY ${COVERAGE_SCRIPT_ROOT}
@@ -169,6 +180,7 @@ find_program(GENHTML_EXECUTABLE genhtml)
 
 if(LCOV_EXECUTABLE AND GENHTML_EXECUTABLE)
   set(COVERAGE_BACKEND "lcov")
+  coverage_prepare_source_mirror()
 
   separate_arguments(LCOV_OPTS)
   set(LCOV_COMMAND ${LCOV_EXECUTABLE} --gcov-tool ${COVERAGE_SCRIPT_ROOT}/cov_tool_wrapper.sh ${LCOV_OPTS})
@@ -249,5 +261,5 @@ else()
     ${GCOVR_OPTS}
   )
 
-  coverage_prepare_gcovr_workspace()
+  coverage_prepare_source_mirror()
 endif()

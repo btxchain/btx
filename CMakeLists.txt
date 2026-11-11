@@ -665,16 +665,8 @@ endif()
 configure_file(cmake/script/Coverage.cmake Coverage.cmake USE_SOURCE_PERMISSIONS COPYONLY)
 configure_file(cmake/script/CoverageFuzz.cmake CoverageFuzz.cmake USE_SOURCE_PERMISSIONS COPYONLY)
 configure_file(cmake/script/CoverageInclude.cmake.in CoverageInclude.cmake USE_SOURCE_PERMISSIONS @ONLY)
-configure_file(cmake/script/CoverageSanitize.cmake.in CoverageSanitize.cmake USE_SOURCE_PERMISSIONS @ONLY)
 configure_file(cmake/script/cov_tool_wrapper.sh.in cov_tool_wrapper.sh.in USE_SOURCE_PERMISSIONS COPYONLY)
 configure_file(contrib/filter-lcov.py filter-lcov.py USE_SOURCE_PERMISSIONS COPYONLY)
-
-if(CMAKE_BUILD_TYPE STREQUAL "Coverage")
-  execute_process(
-    COMMAND ${CMAKE_COMMAND} -P "${PROJECT_BINARY_DIR}/CoverageSanitize.cmake"
-    COMMAND_ERROR_IS_FATAL ANY
-  )
-endif()
 
 # Don't allow extended (non-ASCII) symbols in identifiers. This is easier for code review.
 try_append_cxx_flags("-fno-extended-identifiers" TARGET core_interface SKIP_LINK)
