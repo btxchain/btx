@@ -24,6 +24,7 @@
 #include <chrono>
 #include <ctime>
 #include <fstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -541,6 +542,71 @@ BOOST_AUTO_TEST_CASE(local_release_survives_reissued_records)
     UniValue gj2;
     BOOST_REQUIRE_EQUAL(Grant(cat, rel, "reissue-local-b", gj2), 200);
     BOOST_CHECK_EQUAL(GetPiece0(cat, rel, gj2), 404);
+}
+
+// A feed filter drops a model's economy entry, but its feed item stayed. The
+// page pairs items and entries by position, so the items after it showed the
+// entry of another model, and the filtered model was still listed.
+BOOST_AUTO_TEST_CASE(filtered_feed_keeps_each_entry_with_its_model)
+{
+    const fs::path tmp = m_path_root / "feed-filter-pairs";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::vector<unsigned char> pk, sk;
+    std::string code, err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count();
+    // Bind the helper's feed and economy state to this catalog before importing.
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    std::set<std::string> funding;
+    UniValue recs(UniValue::VARR);
+    for (int i = 0; i < 6; ++i) {
+        modelnet::ModelSearchRecord r;
+        r.model_id.data[0] = static_cast<unsigned char>(0x60 + i);
+        r.artifact_id.data[0] = static_cast<unsigned char>(0x70 + i);
+        r.canonical_name = "feed filter " + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.metadata_sequence = 1;
+        r.published_at = now_ms - 1000 * (6 - i);
+        if (i % 2 == 0) {
+            // A model still in its funding campaign: not released.
+            r.release_id = RandHex48();
+            r.release_state = "FUNDING";
+            r.release_target_atoms = 1000;
+            funding.insert(r.model_id.Hex());
+        }
+        r.expires_at = now_ms + 3'600'000;
+        r.pubkey = pk;
+        BOOST_REQUIRE_MESSAGE(modelnet::SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+        recs.push_back(modelnet::SearchRecordToJson(r));
+    }
+    UniValue import(UniValue::VOBJ);
+    import.pushKV("records", recs);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(import);
+    UniValue out;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), code << " " << err);
+
+    UniValue filters(UniValue::VOBJ);
+    filters.pushKV("released_only", true);
+    UniValue q(UniValue::VOBJ);
+    q.pushKV("scope", "LOCAL");
+    q.pushKV("mode", "NEWEST");
+    q.pushKV("limit", 50);
+    q.pushKV("filters", filters);
+    UniValue fp(UniValue::VARR);
+    fp.push_back(q);
+    UniValue feed;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+    BOOST_REQUIRE(feed["items"].isArray());
+    BOOST_CHECK(!feed["items"].empty());
+    for (const UniValue& item : feed["items"].getValues()) {
+        const std::string id = item["model_id"].get_str();
+        BOOST_CHECK_MESSAGE(!funding.count(id), "a model the filter excludes is listed: " << id);
+        BOOST_REQUIRE_MESSAGE(item.exists("entry"), "item without its entry: " << id);
+        BOOST_CHECK_EQUAL(item["entry"]["model_id"].get_str(), id);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

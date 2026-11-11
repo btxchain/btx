@@ -10392,6 +10392,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 items.push_back(ev);
             }
         } else {
+            // FeedPageJson pairs items and entries by position: drop an item
+            // together with the entry the filters drop.
+            std::vector<FeedEvent> kept;
+            kept.reserve(items.size());
             for (auto& ev : items) {
                 SearchHit h;
                 h.rec = ev.rec;
@@ -10399,7 +10403,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 auto e = decorate(h);
                 if (!MatchesEconomyFilters(e, fq.filters)) continue;
                 entries.push_back(std::move(e));
+                kept.push_back(std::move(ev));
             }
+            items = std::move(kept);
         }
         result = FeedPageJson(items, entries, fq, cov, g_feed.Sequence(), next);
         PersistEconomyLocked(cat);
