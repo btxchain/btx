@@ -1011,13 +1011,15 @@ void ModelCatalog::SetQuotaBytes(uint64_t bytes)
 void ModelCatalog::BeginTransfer(const Digest48& artifact)
 {
     std::lock_guard<std::mutex> lock(m_mu);
-    m_active_artifacts.insert(artifact);
+    ++m_active_artifacts[artifact];
 }
 
 void ModelCatalog::EndTransfer(const Digest48& artifact)
 {
     std::lock_guard<std::mutex> lock(m_mu);
-    m_active_artifacts.erase(artifact);
+    const auto it = m_active_artifacts.find(artifact);
+    if (it == m_active_artifacts.end()) return;
+    if (--it->second == 0) m_active_artifacts.erase(it);
 }
 
 UniValue ModelCatalog::FileAvailabilityJson(const Digest48& artifact, const ModelCore& core) const
