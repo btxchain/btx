@@ -111,22 +111,22 @@ namespace modelnet::security {
         Require(p.epoch>=ParseUInt(db.Meta("policy_epoch","0")),"SEC_POLICY_ROLLBACK");
         return p;
     }
-    const Principal& Policy::Find(const std::string& id,std::string_view role,Database& db,int64_t now)const {
+    const Principal& Policy::Find(const std::string& key_id,std::string_view role,Database& db,int64_t now)const {
         Require(static_cast<uint64_t>(now)<expires,"SEC_POLICY_EXPIRED");
-        auto i=principals.find(id);
+        auto i=principals.find(key_id);
         Require(i!=principals.end()&&i->second.roles.contains(std::string(role)),"SEC_UNTRUSTED_ROLE");
-        Require(!db.Revoked(id,now),"SEC_SIGNER_REVOKED");
+        Require(!db.Revoked(key_id,now),"SEC_SIGNER_REVOKED");
         return i->second;
     }
     std::vector<std::string> Policy::Check(const Json& e,std::string_view role,Database& db,int64_t now,size_t threshold)const {
         VerifyEach(e);
         std::vector<std::string> counted;
         for(const auto& s:e["signatures"].getValues()) {
-            auto id=KeyId(Unhex(Text(s,"public_key",PK_BYTES*2),PK_BYTES));
-            auto i=principals.find(id);
+            auto key_id=KeyId(Unhex(Text(s,"public_key",PK_BYTES*2),PK_BYTES));
+            auto i=principals.find(key_id);
             if(i==principals.end()||!i->second.roles.contains(std::string(role)))continue;
-            Find(id,role,db,now);
-            counted.push_back(id);
+            Find(key_id,role,db,now);
+            counted.push_back(key_id);
         }
         Require(counted.size()>=threshold,"SEC_SIGNATURE_THRESHOLD");
         return counted;

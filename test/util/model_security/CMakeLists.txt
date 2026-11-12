@@ -41,6 +41,14 @@ if(MSVC)
   target_link_libraries(btx_model_security PUBLIC bcrypt advapi32)
 else()
   target_compile_options(btx_model_security PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  # /W4 above rejects a declaration that hides a local (C4456) or a class member (C4458).
+  # Clang's -Wshadow reports the same declarations in this library. GCC's -Wshadow also
+  # reports constructor parameters that MSVC accepts, so GCC checks local shadowing only.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(btx_model_security PRIVATE -Wshadow)
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(btx_model_security PRIVATE -Wshadow=local)
+  endif()
 endif()
 add_executable(security-tests security_tests.cpp)
 target_link_libraries(security-tests PRIVATE btx_model_security)
