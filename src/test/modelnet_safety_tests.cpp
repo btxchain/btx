@@ -279,6 +279,49 @@ BOOST_AUTO_TEST_CASE(full_record_cache_does_not_stop_pinned_takedown)
     }
 }
 
+BOOST_AUTO_TEST_CASE(full_advisory_list_keeps_operator_reports)
+{
+    // Operator reports and the advisories of pinned publishers share one
+    // bounded list. A pinned publisher that keeps issuing advisories must not
+    // push the operator's own block out, and expired advisories must not hold
+    // places that a new report needs.
+    SafetyReset reset;
+    std::string err;
+    const int64_t now = 1700000000;
+    const std::string operator_block(96, 'e');
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(operator_block, modelnet::SAFETY_TARGET_MODEL,
+                                                       modelnet::SAFETY_MALWARE, "operator", now, err));
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const auto pub = modelnet::ResearchIdentityId(pk);
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub.Hex(), "vendor", err));
+    const auto advisory = [&](uint32_t i, int64_t ingest_at, int64_t expires_at) {
+        unsigned char id[48]{};
+        WriteLE32(id, i);
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("target_id", HexStr(id));
+        body.pushKV("target_kind", modelnet::SAFETY_TARGET_MODEL);
+        body.pushKV("severity", modelnet::SAFETY_MALWARE);
+        body.pushKV("expires_at", expires_at);
+        id[47] = 0xff;
+        bool applied = false;
+        BOOST_REQUIRE_MESSAGE(modelnet::GlobalSafety().IngestSigned(body, pub.Hex(), HexStr(id), ingest_at, applied, err), err);
+    };
+    for (uint32_t i = 0; i < modelnet::MAX_SAFETY_ADVISORIES; ++i) advisory(i, now, now + modelnet::DAY_SECONDS);
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(operator_block));
+
+    // A list of advisories that were valid when they came in and have expired
+    // since still takes a new operator report.
+    SafetyReset again;
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub.Hex(), "vendor", err));
+    const int64_t earlier = now - modelnet::DAY_SECONDS;
+    for (uint32_t i = 0; i < modelnet::MAX_SAFETY_ADVISORIES; ++i) advisory(i, earlier, now - 1);
+    BOOST_REQUIRE_EQUAL(modelnet::GlobalSafety().AdvisoriesJson(earlier)["advisories"].size(), modelnet::MAX_SAFETY_ADVISORIES);
+    BOOST_CHECK_MESSAGE(modelnet::GlobalSafety().LocalReport(operator_block, modelnet::SAFETY_TARGET_MODEL,
+                                                             modelnet::SAFETY_MALWARE, "operator", now, err), err);
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(operator_block));
+}
+
 BOOST_AUTO_TEST_CASE(safety_advisory_rejects_provider_signer_class)
 {
     std::vector<unsigned char> pk, sk;
