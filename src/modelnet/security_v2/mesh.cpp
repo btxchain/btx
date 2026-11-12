@@ -208,7 +208,7 @@ void MeshAccept(Database& db,const Json& response,const std::string& pin,int64_t
     const auto self=KeyId(key.public_key);
     Fields(response["body"],{"realm","policy_epoch","sender","recipient","phase","nonce","issued_ms","expires_ms","request_id","inventory","next_cursor","records"});
     const auto peer=Check(db,p,response,pin,"response",self,now);const auto& b=response["body"];
-    auto id=DigestField(b,"request_id");auto outstanding=db.Query("SELECT peer,expires FROM mesh_pending WHERE id=?",{id});
+    auto request_id=DigestField(b,"request_id");auto outstanding=db.Query("SELECT peer,expires FROM mesh_pending WHERE id=?",{request_id});
     Ensure(outstanding.size()==1&&outstanding[0][0]==peer&&ParseUInt(outstanding[0][1])>static_cast<uint64_t>(now),"SEC_MESH_UNSOLICITED");
     auto inventory=StringArray(b["inventory"],kMaxObjects);
     Ensure(b["next_cursor"].isStr(),"SEC_MESH_CURSOR");
@@ -244,7 +244,7 @@ void MeshAccept(Database& db,const Json& response,const std::string& pin,int64_t
     }
     for(const auto& id:inventory){Ensure(IsHash(id),"SEC_MESH_INVENTORY");Want(db,peer,id);}
     Database::Transaction tx(db);
-    db.Exec("DELETE FROM mesh_pending WHERE id=?",{id});
+    db.Exec("DELETE FROM mesh_pending WHERE id=?",{request_id});
     db.Exec("INSERT INTO mesh_cursors(peer,cursor) VALUES(?,?) ON CONFLICT(peer) DO UPDATE SET cursor=excluded.cursor",{peer,next});
     db.Event("mesh-accepted",peer,Object());tx.Commit();
 }
