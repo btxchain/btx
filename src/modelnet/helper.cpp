@@ -8308,6 +8308,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
                 return g_campaigns.List();
             }();
+            // Like getfundablemodels: the caller's filters, sort and limit apply to
+            // local campaigns too (the NETWORK scope passes them to getmodelfeed).
+            std::vector<ModelEconomyEntry> entries;
             for (const auto& c : camps) {
                 SearchHit h;
                 if (const auto* r = g_search_idx.Get(c.model_id)) h.rec = *r;
@@ -8323,11 +8326,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 if (h.rec.release_id.empty()) h.rec.release_id = c.release_id.Hex();
                 FillKnownCatalogFields(cat, h);
                 auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat, include_wallet_observation));
-                if (Arg(0).isObject() && Arg(0).exists("scope") && ToUpper(Arg(0)["scope"].get_str()) == "LOCAL") {
-                    // keep
-                }
-                arr.push_back(EconomySearchCard(e));
+                if (!MatchesEconomyFilters(e, q.filters)) continue;
+                entries.push_back(std::move(e));
             }
+            SortEconomyEntries(entries, q.sort);
+            if (q.limit > 0 && static_cast<int>(entries.size()) > q.limit) entries.resize(q.limit);
+            for (const auto& e : entries) arr.push_back(EconomySearchCard(e));
         } else {
             auto entries = EconomyHits(hits, q, &cat, include_wallet_observation);
             for (const auto& e : entries) arr.push_back(EconomySearchCard(e));

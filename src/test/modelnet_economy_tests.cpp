@@ -656,6 +656,60 @@ BOOST_AUTO_TEST_CASE(peer_and_restricted_feeds_omit_local_wallet_observation)
     }
 }
 
+BOOST_AUTO_TEST_CASE(recent_releases_local_scope_applies_query)
+{
+    // The NETWORK scope passes limit and filters to getmodelfeed; the LOCAL
+    // scope must apply them to local campaigns too.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "recent-releases-limit";
+    ModelCatalog cat{root, 8 << 20};
+    for (int i = 0; i < 3; ++i) {
+        const fs::path model = root / fs::PathFromString("toy" + std::to_string(i) + ".safetensors.dir");
+        fs::create_directories(model);
+        const std::string header = "{\"__metadata__\":{\"n\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> st(8 + header.size());
+        WriteLE64(st.data(), header.size());
+        std::copy(header.begin(), header.end(), st.begin() + 8);
+        {
+            std::ofstream out(model / "toy.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        UniValue host_params(UniValue::VARR);
+        host_params.push_back(fs::PathToString(model));
+        const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+        BOOST_REQUIRE(hosted.exists("uri"));
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("uri", hosted["uri"].get_str());
+        body.pushKV("secret32_hex", std::string(64, static_cast<char>('a' + i)));
+        body.pushKV("refund_height", 100000);
+        body.pushKV("target_atoms", 5'000'000);
+        UniValue create_params(UniValue::VARR);
+        create_params.push_back(body);
+        HelperDispatch(cat, "createmodelrelease", create_params);
+    }
+    for (const int limit : {1, 2}) {
+        UniValue q(UniValue::VOBJ);
+        q.pushKV("scope", "LOCAL");
+        q.pushKV("limit", limit);
+        UniValue p(UniValue::VARR);
+        p.push_back(q);
+        const UniValue page = HelperDispatch(cat, "getrecentreleases", p);
+        BOOST_CHECK_EQUAL(page["results"].size(), static_cast<size_t>(limit));
+    }
+    UniValue all(UniValue::VOBJ);
+    all.pushKV("scope", "LOCAL");
+    UniValue ap(UniValue::VARR);
+    ap.push_back(all);
+    BOOST_CHECK_EQUAL(HelperDispatch(cat, "getrecentreleases", ap)["results"].size(), 3U);
+    // None of the three campaigns is released yet.
+    UniValue filters(UniValue::VOBJ);
+    filters.pushKV("released_only", true);
+    all.pushKV("filters", filters);
+    UniValue fp(UniValue::VARR);
+    fp.push_back(all);
+    BOOST_CHECK_EQUAL(HelperDispatch(cat, "getrecentreleases", fp)["results"].size(), 0U);
+}
+
 BOOST_AUTO_TEST_CASE(verifycomputereceipt_does_not_persist)
 {
     const std::string profile = pwc::ProfileIdHex(pwc::ToyProfile());
