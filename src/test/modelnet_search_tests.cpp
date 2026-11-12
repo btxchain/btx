@@ -604,6 +604,56 @@ BOOST_AUTO_TEST_CASE(search_unsigned_expiry_quota_and_save)
     BOOST_CHECK(loaded.Get(signed_rec.model_id)->signed_ok);
 }
 
+BOOST_AUTO_TEST_CASE(search_cap_and_local_records)
+{
+    // The index cap limits what peers can add; this node's own records still
+    // get in. A newer version of a record this node signed stays local; a
+    // record from another key that replaces the catalog stub does not.
+    using namespace modelnet;
+    std::string err;
+    SearchIndex idx;
+    idx.SetCap(1);
+    ModelSearchRecord remote;
+    remote.model_id.data[0] = 1;
+    remote.canonical_name = "remote";
+    remote.display_name = "remote";
+    remote.expires_at = 1'000'000'000;
+    BOOST_REQUIRE_MESSAGE(idx.Put(remote, 1, err, "203.0.113.5:29447"), err);
+    ModelSearchRecord second = remote;
+    second.model_id.data[0] = 2;
+    BOOST_CHECK(!idx.Put(second, 1, err, "203.0.113.5:29447"));
+    BOOST_CHECK_EQUAL(err, "index cap");
+    ModelSearchRecord stub;
+    stub.model_id.data[0] = 3;
+    stub.canonical_name = "stub";
+    stub.display_name = "stub";
+    stub.local_catalog = true;
+    BOOST_REQUIRE_MESSAGE(idx.Put(stub, 1, err), err);
+
+    std::vector<unsigned char> peer_pk, peer_sk, own_pk, own_sk;
+    BOOST_REQUIRE(GenerateMlDsa44(peer_pk, peer_sk, err));
+    BOOST_REQUIRE(GenerateMlDsa44(own_pk, own_sk, err));
+    // Another key's record for the stub's model replaces the stub and is not local.
+    const auto peer = MakeRec("peer", peer_pk, peer_sk, 3);
+    BOOST_REQUIRE_MESSAGE(idx.Put(peer, 1, err, "203.0.113.5:29447"), err);
+    BOOST_CHECK(idx.Get(stub.model_id)->signed_ok);
+    BOOST_CHECK(!idx.Get(stub.model_id)->local_catalog);
+
+    // A record this node signed for its own model, then its next version.
+    auto own = MakeRec("own", own_pk, own_sk, 4);
+    own.local_catalog = true;
+    BOOST_REQUIRE_MESSAGE(idx.Put(own, 1, err), err);
+    auto next = own;
+    next.local_catalog = false;
+    next.metadata_sequence = own.metadata_sequence + 1;
+    next.short_description = "next";
+    BOOST_REQUIRE(SignSearchRecord(next, Span<const unsigned char>{own_sk.data(), own_sk.size()}, err));
+    next.signed_ok = true;
+    BOOST_REQUIRE_MESSAGE(idx.Put(next, 1, err), err);
+    BOOST_CHECK_EQUAL(idx.Get(own.model_id)->short_description, "next");
+    BOOST_CHECK(idx.Get(own.model_id)->local_catalog);
+}
+
 BOOST_AUTO_TEST_CASE(search_refreshes_signed_provider_observations)
 {
     using namespace modelnet;

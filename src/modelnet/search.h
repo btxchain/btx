@@ -110,7 +110,8 @@ struct ModelSearchRecord {
     std::string network_id;
     bool signed_ok{false};
     bool tombstone{false};
-    /** Local catalog filename stub. Not accepted from peer JSON. */
+    /** This node's own record: the catalog filename stub, or a record it signed
+     *  for its own model or bounty. Not accepted from peer JSON. */
     bool local_catalog{false};
 };
 

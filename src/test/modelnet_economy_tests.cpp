@@ -866,4 +866,42 @@ BOOST_AUTO_TEST_CASE(verifycomputereceipt_does_not_persist)
     BOOST_CHECK_EQUAL(listed["records"].size(), 1U);
 }
 
+BOOST_AUTO_TEST_CASE(own_models_are_not_held_by_the_publisher_quota)
+{
+    // The search index charges every new record to the key that signed it,
+    // at most 64 per key, so that one peer cannot flood it. This node signs
+    // its own hosted models with its own key, so from the 65th one on
+    // hostmodel answered search_published false ("publisher spam"), and
+    // the count came back with the saved index after a restart.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "own-model-quota";
+    ModelCatalog cat{root, 64 << 20};
+    constexpr int MODELS = 70;
+    for (int i = 0; i < MODELS; ++i) {
+        const fs::path model = root / fs::PathFromString("m" + std::to_string(i) + ".dir");
+        fs::create_directories(model);
+        const std::string header = "{\"__metadata__\":{\"n\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> st(8 + header.size());
+        WriteLE64(st.data(), header.size());
+        std::copy(header.begin(), header.end(), st.begin() + 8);
+        {
+            std::ofstream out(model / "m.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        UniValue params(UniValue::VARR);
+        params.push_back(fs::PathToString(model));
+        const UniValue hosted = HelperDispatch(cat, "hostmodel", params);
+        BOOST_CHECK_MESSAGE(hosted["search_published"].isTrue(),
+                            "model " << i << ": " << (hosted.exists("search_error") ? hosted["search_error"].write() : "?"));
+    }
+    // A restarted helper loads the saved index; every own record must come back.
+    SearchIndex restarted;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(restarted.Load(cat.Store().Root().parent_path() / "search-index.json",
+                                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::system_clock::now().time_since_epoch()).count(),
+                                         err), err);
+    BOOST_CHECK_EQUAL(restarted.All().size(), static_cast<size_t>(MODELS));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
